@@ -1,5 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest, NextResponse } from "next/server";
+// Phase 140 / SEAM-04: the REAL breaker error, taken from the dependency-free
+// leaf. It must NEVER be picked up through `@/lib/analytics-client` — this file
+// mocks that module wholesale (a full factory, no importActual), so the class
+// read through it would be `undefined` and `err instanceof undefined` throws a
+// TypeError from inside the route's own catch block (threat T-140-30). Nothing
+// mocks the leaf, and this file never calls vi.resetModules(), so a static
+// import here is the same class object the route narrows against.
+import { CircuitOpenError } from "@/lib/seam-errors";
 
 /**
  * Tests for POST /api/bridge (G13-004).
@@ -509,6 +517,42 @@ describe("POST /api/bridge", () => {
     expect(res.status).toBe(504);
     const body = await res.json();
     expect(body.error).toMatch(/timed out/i);
+  });
+
+  // Phase 140 / SEAM-04 (SC-5c): a tripped Railway breaker is a distinct
+  // condition from "scoring blew up" — it means no request was even issued and
+  // the caller should come back after a known cooldown. Before this arm existed
+  // it fell through to the generic 500, telling the client to retry immediately
+  // against a service we already know is down.
+  it("TC11 — CircuitOpenError → 503 + Retry-After carrying the breaker's own TTL (SC-5c)", async () => {
+    // 7, deliberately NOT the 30s breaker default: 30 is simultaneously
+    // BREAKER_COOLDOWN_S and DEFAULT_RETRY_AFTER_S, so a route that hardcoded
+    // "30" would pass a 30-second fixture. This one only passes if the route
+    // forwards err.retryAfterS.
+    STATE.findReplacementImpl = async () => {
+      throw new CircuitOpenError(7);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        underperformer_strategy_id: UNDERPERFORMER_ID,
+      }),
+    );
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("7");
+    // M-0889: the breaker arm is a response like any other — no-store holds.
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    const body = await res.json();
+    expect(body.error).toBe(
+      "The analytics service is temporarily unavailable. Please try again in a moment.",
+    );
+    // T-140-17: the client-facing copy names no infrastructure.
+    expect(body.error).not.toMatch(/circuit|breaker|upstash|railway|http/i);
+    // A breaker trip is an infrastructure state shared by every caller, not a
+    // per-request defect: capturing it would emit one Sentry event per request
+    // for the whole cooldown window. The console.error line is the signal.
+    expect(captureSpy).not.toHaveBeenCalled();
   });
 
   it("TC5c — 400 when ids are non-UUID strings (M-0884)", async () => {

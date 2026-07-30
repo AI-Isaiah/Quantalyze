@@ -96,7 +96,41 @@ const eslintConfig = defineConfig([
       //     without failing CI.
       "quantalyze/no-rem-less-clamp": "error",
       "quantalyze/no-raw-font-px": "error",
+      // SEAM-01 (Phase 140) — ban a raw fetch() of the analytics service base
+      // URL outside src/lib/resilient-fetch.ts. The core owns the per-call-site
+      // timeout budget and the shared breaker:railway circuit breaker; a raw
+      // fetch has neither, so it can hold a function slot to the ceiling and
+      // keep hammering a deployment the breaker has already judged down.
+      //
+      // Clean baseline, PROVEN rather than assumed: after waves 1-3 the
+      // whole-repo scan for the env var returns comment-only hits plus the four
+      // allowlisted files below, so "error" costs nothing today and fails CI by
+      // construction on a tenth seam. This is the ONLY mechanism that keeps
+      // SEAM-01 true after the merge — the third seam existed for months
+      // because routing through the client was a convention, not a mechanism.
+      "quantalyze/no-raw-analytics-fetch": "error",
     },
+  },
+  // SEAM-01 allowlist — the CLOSED set of files that may legitimately hold the
+  // analytics base URL and fetch it directly. FOUR paths, and adding a fifth is
+  // the wrong fix for a lint failure: a new violation means a new seam call
+  // site, which belongs in the core (threat T-140-26). Every entry corresponds
+  // to the core itself or to a documented SEAM_EXCLUSIONS row in
+  // src/lib/resilient-fetch.ts, which carries the per-file reasoning.
+  {
+    files: [
+      // The core itself — the only legal home for the base URL.
+      "src/lib/resilient-fetch.ts",
+      // Bespoke SSE/heartbeat route with client-abort propagation the core does
+      // not model. Pins its own maxDuration.
+      "src/app/api/debug-key-flow/**",
+      // Health warmers. These must NOT consume breaker failure budget (a cold
+      // /health probe failing IS the normal case) and must NOT be blocked by an
+      // open breaker, because a successful /health is the recovery signal.
+      "src/app/api/cron/warm-analytics/**",
+      "src/lib/warmup-analytics.ts",
+    ],
+    rules: { "quantalyze/no-raw-analytics-fetch": "off" },
   },
   // DS-04 hard gate on the proven-clean new token/primitive surface. The
   // design-tokens dir has ZERO `text-[NNpx]` / `fontSize:'NNpx'` sites today

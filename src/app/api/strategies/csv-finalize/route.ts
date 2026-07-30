@@ -54,6 +54,20 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
  * code sniffing.
  */
 
+/**
+ * Phase 140 / SEAM-02 — pinned for clarity; asserted against
+ * SEAM_ROUTE_BUDGETS by seam-budgets.invariant.test.
+ *
+ * 300 is the project's VERIFIED effective Vercel default
+ * (`defaultResourceConfig.functionDefaultTimeout: 300`, read from the live
+ * project settings on 2026-07-25), so declaring it here cannot raise this
+ * route's worst-case lambda hold. It exists so the SC-4b headroom invariant
+ * has an in-repo source of truth instead of a dashboard-changeable
+ * assumption: this route spends one `process-key-sync` budget (60s — the CSV
+ * flow runs the full pipeline INLINE), 5× headroom.
+ */
+export const maxDuration = 300;
+
 const ALLOWED_FMTS = new Set(["daily_returns", "daily_nav", "trades"]);
 const MAX_NAME_CHARS = MAGNITUDE_CAPS.MAX_NAME_CHARS;
 

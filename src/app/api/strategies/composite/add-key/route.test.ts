@@ -694,3 +694,76 @@ describe("POST /api/strategies/composite/add-key — mt5 server gate (MT5_ENABLE
     expect(validateKeyMock).toHaveBeenCalled();
   });
 });
+
+/**
+ * Phase 140 / SEAM-04 SC-5b — a circuit-breaker trip on the "+ Add another key"
+ * path.
+ *
+ * This route shares `classifyKeyValidationError` with create-with-key, so the
+ * multi-key path must produce the IDENTICAL honest 503 rather than the terminal
+ * UNKNOWN/500 the substring cascade used to give a breaker trip. Pinning it here
+ * as well as on the single-key route is the same drift guard the KEY_AUTH_FAILED
+ * and KEY_PROBE_FAILED regressions above use: sharing a classifier is not proof
+ * that both call sites actually thread the value it needs.
+ *
+ * `CircuitOpenError` comes from `@/lib/seam-errors` — the dependency-free leaf —
+ * via a dynamic import so it resolves in the same module registry as the route.
+ * The `@/lib/analytics-client` mock at the top of this file is a BARE factory
+ * carrying only validateKey/encryptKey, so reaching the class through that
+ * module would yield `undefined` and make `instanceof` throw inside the catch.
+ */
+describe("POST /api/strategies/composite/add-key — circuit-breaker trip (SEAM-04 SC-5b)", () => {
+  beforeEach(resetHappyMocks);
+
+  it("validateKey tripping the breaker → 503 SERVICE_UNAVAILABLE_RETRY, never UNKNOWN/500", async () => {
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    validateKeyMock.mockRejectedValue(new CircuitOpenError(42));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    expect(res.status).not.toBe(500);
+    const json = await res.json();
+    expect(json.code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(json.code).not.toBe("UNKNOWN");
+    // T-88-13 posture preserved: uniform { code } body, no raw message.
+    expect(Object.keys(json)).toEqual(["code"]);
+    expect(res.headers.get("Retry-After")).toBe("42");
+    // Short-circuit: nothing was encrypted and no key row was minted.
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
+
+  it("encryptKey tripping the breaker → the same 503 envelope (both seam calls covered)", async () => {
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    encryptKeyMock.mockRejectedValue(new CircuitOpenError(7));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(res.headers.get("Retry-After")).toBe("7");
+    expect(rpcMock).not.toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
+
+  it("still classifies non-breaker errors by message (the substring cascade is intact)", async () => {
+    // Negative control — see the create-with-key sibling.
+    validateKeyMock.mockRejectedValue(new Error("connect ETIMEDOUT 10.0.0.1:443"));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe("KEY_NETWORK_TIMEOUT");
+    // Retry-After is breaker-specific — it must NOT appear on other 5xx paths.
+    expect(res.headers.get("Retry-After")).toBeNull();
+    consoleErr.mockRestore();
+  });
+});

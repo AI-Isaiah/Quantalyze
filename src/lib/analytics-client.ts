@@ -10,14 +10,31 @@ import {
   type OptimizeWeightsResponse,
 } from "./analytics-schemas";
 import { SimulatorResponseSchema } from "./api/simulatorSchema";
+import {
+  resilientFetch,
+  SEAM_BUDGETS,
+  type SeamBudgetKey,
+} from "./resilient-fetch";
+import { CircuitOpenError } from "./seam-errors";
 
-const ANALYTICS_URL = process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
 const SERVICE_KEY = process.env.ANALYTICS_SERVICE_KEY ?? "";
 
 /** Client-side API contract version. Sent as X-Api-Version on every request. */
 export const ANALYTICS_API_VERSION = "1";
 
-const DEFAULT_TIMEOUT_MS = 30_000;
+/**
+ * Phase 140 / SEAM-01 — back-compat convenience re-export ONLY.
+ *
+ * ⚠️ The canonical import path for `CircuitOpenError` is `@/lib/seam-errors`,
+ * the dependency-free leaf. Nothing may rely on picking the class up through
+ * THIS module: sixteen route test files `vi.mock("@/lib/analytics-client")`,
+ * and seven of the eight seam-mocking files use a FULL factory with no
+ * `importActual`. Through those mocks this re-export is `undefined`, and
+ * `err instanceof undefined` throws `TypeError` from inside a catch block —
+ * turning a clean 503 into a crash. Production code, route handlers, wizard
+ * error classification and tests all import from the leaf.
+ */
+export { CircuitOpenError };
 
 /** Thrown when the analytics service does not respond within the timeout. */
 export class AnalyticsTimeoutError extends Error {
@@ -57,28 +74,48 @@ export class AnalyticsUpstreamError extends Error {
 /**
  * Core fetch wrapper for the Python analytics service.
  *
+ * Phase 140 / SEAM-01: the transport itself now lives in `resilient-fetch.ts`
+ * — the ONE place that owns the base URL, the wall-clock budget, and the
+ * `breaker:railway` circuit. This function keeps everything that is genuinely
+ * analytics-client policy: header construction, the API-version drift warning,
+ * and the `!ok` → `AnalyticsUpstreamError` translation the core deliberately
+ * does not perform (only the caller knows whether a 404 is an error).
+ *
  * @param path    - URL path (e.g. "/api/compute-analytics")
  * @param body    - JSON body to POST
- * @param options - Optional overrides. `timeoutMs` defaults to 30s.
- *                  `method` defaults to "POST".
+ * @param options - `budgetKey` is REQUIRED: it names this call site's row in
+ *                  `SEAM_BUDGETS`, which is the single owner of its deadline.
+ *                  `timeoutMs` overrides the table for one call — TESTS ONLY
+ *                  since 140-05 removed the last production override (the
+ *                  optimizer route's legacy constant). `method` defaults to
+ *                  "POST".
  */
 async function analyticsRequest(
   path: string,
   body: Record<string, unknown> | null,
-  options?: { timeoutMs?: number; method?: string; correlationId?: string },
+  options: {
+    budgetKey: SeamBudgetKey;
+    timeoutMs?: number;
+    method?: string;
+    correlationId?: string;
+  },
 ) {
-  const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const method = options?.method ?? "POST";
+  // Resolved locally as well as inside the core, because AnalyticsTimeoutError's
+  // message quotes the deadline that actually fired.
+  const timeoutMs = options.timeoutMs ?? SEAM_BUDGETS[options.budgetKey].timeoutMs;
+  const method = options.method ?? "POST";
   // Phase 16 / OBSERV-01: stamp X-Correlation-Id on every outbound fetch.
   // Wrappers (validateKey, encryptKey, ...) intentionally do NOT thread
   // this option through in this plan — Plan 7 wires the SSE endpoint to pass
   // it explicitly. Until then, every request still carries a UUID v4 so the
   // FastAPI side has a stable join key.
-  const correlationId = options?.correlationId ?? crypto.randomUUID();
+  const correlationId = options.correlationId ?? crypto.randomUUID();
 
   let res: Response;
   try {
-    res = await fetch(`${ANALYTICS_URL}${path}`, {
+    // Headers are built HERE and passed through the core byte-for-byte. A
+    // dropped X-Service-Key silently unauthenticates every analytics call.
+    res = await resilientFetch(options.budgetKey, path, {
       method,
       headers: {
         "Content-Type": "application/json",
@@ -87,12 +124,42 @@ async function analyticsRequest(
         ...(SERVICE_KEY && { "X-Service-Key": SERVICE_KEY }),
       },
       ...(body !== null && { body: JSON.stringify(body) }),
-      signal: AbortSignal.timeout(timeoutMs),
+      ...(options.timeoutMs !== undefined && {
+        timeoutMsOverride: options.timeoutMs,
+      }),
     });
   } catch (err) {
-    if (err instanceof DOMException && err.name === "TimeoutError") {
+    // ORDER IS LOAD-BEARING.
+    //
+    // 1. CircuitOpenError rethrown UNWRAPPED and FIRST. Route handlers branch
+    //    on it to emit the SEAM-04 503 + Retry-After envelope; if the generic
+    //    arm below swallowed it, every breaker trip would surface to the user
+    //    as "the analytics service is not reachable" and the entire circuit
+    //    feature would be invisible.
+    if (err instanceof CircuitOpenError) {
+      throw err;
+    }
+    // 2. Deadline exceeded. STRICTLY BROADER than the pre-140 check
+    //    (`err instanceof DOMException && name === "TimeoutError"`): a plain
+    //    Error named "AbortError" is the shape a client-side abort produces,
+    //    and it used to be misreported as a dead service rather than a slow
+    //    one.
+    //
+    //    ⚠️ The shape guard must accept BOTH `Error` and `DOMException`, not
+    //    `Error` alone. Node's DOMException extends Error (production), but
+    //    jsdom's does NOT — and the core's timeout signal rejects with a
+    //    DOMException. An `instanceof Error`-only guard therefore looks
+    //    correct in production while silently reclassifying every timeout as
+    //    "not reachable" in the vitest environment. Pinned by the
+    //    "timeout (DOMException) throws AnalyticsTimeoutError" regression
+    //    test in analytics-client.test.ts.
+    if (
+      (err instanceof Error || err instanceof DOMException) &&
+      (err.name === "AbortError" || err.name === "TimeoutError")
+    ) {
       throw new AnalyticsTimeoutError(path, timeoutMs);
     }
+    // 3. Everything else: the connection never completed.
     throw new Error("Analytics service is not reachable. Please ensure it is running.");
   }
 
@@ -170,22 +237,30 @@ function trimCredential(value: string): string {
 }
 
 export async function validateKey(exchange: string, apiKey: string, apiSecret: string, passphrase?: string) {
-  const data = await analyticsRequest("/api/validate-key", {
-    exchange,
-    api_key: trimCredential(apiKey),
-    api_secret: trimCredential(apiSecret),
-    passphrase: passphrase ?? null,
-  });
+  const data = await analyticsRequest(
+    "/api/validate-key",
+    {
+      exchange,
+      api_key: trimCredential(apiKey),
+      api_secret: trimCredential(apiSecret),
+      passphrase: passphrase ?? null,
+    },
+    { budgetKey: "validate-key" },
+  );
   return parseResponse(ValidateKeyResponseSchema, data, "/api/validate-key");
 }
 
 export async function encryptKey(exchange: string, apiKey: string, apiSecret: string, passphrase?: string) {
-  const data = await analyticsRequest("/api/encrypt-key", {
-    exchange,
-    api_key: trimCredential(apiKey),
-    api_secret: trimCredential(apiSecret),
-    passphrase: passphrase ?? null,
-  });
+  const data = await analyticsRequest(
+    "/api/encrypt-key",
+    {
+      exchange,
+      api_key: trimCredential(apiKey),
+      api_secret: trimCredential(apiSecret),
+      passphrase: passphrase ?? null,
+    },
+    { budgetKey: "encrypt-key" },
+  );
   return parseResponse(EncryptKeyResponseSchema, data, "/api/encrypt-key");
 }
 
@@ -201,7 +276,11 @@ export async function optimizeScenarioWeights(
   series: Record<string, Array<{ date: string; value: number }>>,
   objective: "min_vol" | "max_sharpe",
 ): Promise<OptimizeWeightsResponse> {
-  const data = await analyticsRequest("/api/optimize-weights", { series, objective });
+  const data = await analyticsRequest(
+    "/api/optimize-weights",
+    { series, objective },
+    { budgetKey: "optimize-weights" },
+  );
   return parseResponse(OptimizeWeightsResponseSchema, data, "/api/optimize-weights");
 }
 
@@ -225,22 +304,27 @@ export async function computePortfolioAnalytics(
   portfolioId: string,
   actorId: string,
 ) {
-  const data = await analyticsRequest("/api/portfolio-analytics", {
-    portfolio_id: portfolioId,
-    user_id: actorId,
-  });
+  const data = await analyticsRequest(
+    "/api/portfolio-analytics",
+    {
+      portfolio_id: portfolioId,
+      user_id: actorId,
+    },
+    { budgetKey: "portfolio-analytics" },
+  );
   return parseResponse(PortfolioAnalyticsResponseSchema, data, "/api/portfolio-analytics");
 }
 
-export async function runPortfolioOptimizer(
-  portfolioId: string,
-  actorId: string,
-  timeoutMs?: number,
-) {
+export async function runPortfolioOptimizer(portfolioId: string, actorId: string) {
   const data = await analyticsRequest(
     "/api/portfolio-optimizer",
     { portfolio_id: portfolioId, user_id: actorId },
-    timeoutMs ? { timeoutMs } : undefined,
+    // Phase 140 / SEAM-02: no timeout override. This wrapper carried an
+    // optional `timeoutMs` third parameter purely so the route could keep
+    // passing its legacy `OPTIMIZER_TIMEOUT_MS = 15_000`; 140-05 deleted that
+    // route-local constant (the only caller), so the parameter went with it.
+    // The deadline now has exactly ONE owner: the row below.
+    { budgetKey: "portfolio-optimizer" },
   );
   return parseResponse(PortfolioOptimizerResponseSchema, data, "/api/portfolio-optimizer");
 }
@@ -257,7 +341,7 @@ export async function findReplacementCandidates(
       underperformer_strategy_id: underperformerStrategyId,
       user_id: userId,
     },
-    { timeoutMs: 15_000 },
+    { budgetKey: "bridge" },
   );
   return parseResponse(BridgeResponseSchema, data, "/api/portfolio-bridge");
 }
@@ -265,8 +349,8 @@ export async function findReplacementCandidates(
 /**
  * Sprint 6 Task 6.4 — portfolio impact simulator (ADD scenario).
  *
- * Calls the Python `/api/simulator` endpoint with a 15s timeout (matching
- * the Bridge and mirroring the 15s budget the Next.js route enforces).
+ * Calls the Python `/api/simulator` endpoint under the `simulator` budget
+ * (SEAM_BUDGETS owns the value; it was a 15s literal here before Phase 140).
  * Response is validated against SimulatorResponseSchema — parse failures
  * throw so contract drift is loud.
  */
@@ -282,7 +366,7 @@ export async function simulateAddCandidate(
       candidate_strategy_id: candidateStrategyId,
       user_id: userId,
     },
-    { timeoutMs: 15_000 },
+    { budgetKey: "simulator" },
   );
   return parseResponse(
     SimulatorResponseSchema,
@@ -311,11 +395,15 @@ export async function recomputeMatch(
   // during the production rollout. Once every call site is TS-side
   // (post-this-PR rollout), the Python field can be promoted to
   // required in a follow-up PR.
-  const data = await analyticsRequest("/api/match/recompute", {
-    allocator_id: allocatorId,
-    force,
-    actor_id: actorId,
-  });
+  const data = await analyticsRequest(
+    "/api/match/recompute",
+    {
+      allocator_id: allocatorId,
+      force,
+      actor_id: actorId,
+    },
+    { budgetKey: "match-recompute" },
+  );
   return parseResponse(RecomputeMatchResponseSchema, data, "/api/match/recompute");
 }
 
@@ -328,6 +416,7 @@ export async function evalMatch(params: {
   // evalMatch has no fixed schema — it returns variable evaluation data.
   // Validation can be added when the eval response shape stabilizes.
   return analyticsRequest(`/api/match/eval?${qs.toString()}`, null, {
+    budgetKey: "match-eval",
     method: "GET",
   });
 }

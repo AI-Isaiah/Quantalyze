@@ -15,6 +15,11 @@ import {
   type WizardErrorCode,
 } from "./wizardErrors";
 import type { GateFailureCode } from "./strategyGate";
+// The dependency-free leaf — the SAME module wizardErrors itself imports, so
+// `instanceof` holds by class identity. Never route this through
+// `@/lib/analytics-client` (whose re-export is wholesale-mocked by 16 route
+// test files) nor `@/lib/resilient-fetch`.
+import { CircuitOpenError } from "@/lib/seam-errors";
 
 describe("wizardErrors", () => {
   describe("WIZARD_ERROR_COPY table shape", () => {
@@ -693,5 +698,126 @@ describe("classifyKeyValidationError — shared key-entry error mapping", () => 
     const blob = (copy.title + " " + copy.cause + " " + copy.fix.join(" ")).toLowerCase();
     expect(blob).toContain("investor");
     expect(blob).not.toMatch(/password (was |is )?(wrong|incorrect|invalid)/);
+  });
+});
+
+// ===========================================================================
+// Phase 140 / SEAM-04 — the Class-2 cascade-500.
+//
+// `classifyKeyValidationError` was a pure substring matcher over `err.message`
+// whose terminal branch is `{code:"UNKNOWN", status:500}` — the "something went
+// wrong, our team has been notified" envelope. A `CircuitOpenError` thrown by
+// the shared resilience core during key-connect matched NO branch, so a Railway
+// outage rendered as an unexplained 500 with no retry affordance (the
+// DOGFOOD-3-class failure).
+//
+// The fix is a TYPE check placed BEFORE the substring cascade. These tests pin
+// three separate properties, each of which can regress independently:
+//   1. the type branch exists and yields a retryable 503;
+//   2. it wins over every substring branch (the collision regression);
+//   3. it is a TYPE branch, NOT a `lower.includes("circuit")` branch — research
+//      Pitfall 2 names a substring match here as the warning sign, because the
+//      breaker message is our own static string today but any upstream reword
+//      would silently re-open the cascade.
+// ===========================================================================
+describe("classifyKeyValidationError — Phase 140 CircuitOpenError type branch (SEAM-04)", () => {
+  it("classifies a CircuitOpenError as SERVICE_UNAVAILABLE_RETRY with a retryable 503", () => {
+    expect(classifyKeyValidationError(new CircuitOpenError(30))).toEqual({
+      code: "SERVICE_UNAVAILABLE_RETRY",
+      status: 503,
+    });
+  });
+
+  it("TYPE wins over SUBSTRING: a CircuitOpenError carrying timeout/rate tokens still classifies as SERVICE_UNAVAILABLE_RETRY", () => {
+    // The collision regression. If the instanceof branch is ever moved BELOW
+    // the substring cascade (or replaced by one), a breaker trip whose message
+    // happened to carry "timeout" would be mislabelled KEY_NETWORK_TIMEOUT (502)
+    // and one carrying "rate" would become KEY_RATE_LIMIT — both of which tell
+    // the user to fix the wrong thing. The class message is static today, so
+    // this test forces the tokens in explicitly rather than relying on it.
+    const trippedWithTimeout = new CircuitOpenError(15);
+    trippedWithTimeout.message = "connect ETIMEDOUT — request timeout";
+    expect(classifyKeyValidationError(trippedWithTimeout)).toEqual({
+      code: "SERVICE_UNAVAILABLE_RETRY",
+      status: 503,
+    });
+
+    const trippedWithRate = new CircuitOpenError(15);
+    trippedWithRate.message = "rate limit exceeded 429";
+    expect(classifyKeyValidationError(trippedWithRate)).toEqual({
+      code: "SERVICE_UNAVAILABLE_RETRY",
+      status: 503,
+    });
+
+    // And the signature branch, which is FIRST in the cascade.
+    const trippedWithSignature = new CircuitOpenError(15);
+    trippedWithSignature.message = "invalid signature for request";
+    expect(classifyKeyValidationError(trippedWithSignature).code).toBe(
+      "SERVICE_UNAVAILABLE_RETRY",
+    );
+  });
+
+  it("is a TYPE branch, not a substring branch: the breaker's own message as a plain string does NOT reach SERVICE_UNAVAILABLE_RETRY", () => {
+    // Research Pitfall 2. A `lower.includes("circuit")` branch would pass the
+    // two tests above while silently claiming "the service is down" for any
+    // upstream string that happens to contain the word. Both call sites thread
+    // the error OBJECT, so the string form is unreachable in production — and
+    // asserting it stays UNKNOWN is what proves the implementation is
+    // type-driven rather than text-driven.
+    expect(classifyKeyValidationError("Analytics service circuit is open")).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("classifies a plain Error by its message exactly as the string form does", () => {
+    // The signature widened from `string` to `unknown`; Error objects must
+    // route through the identical cascade so both call sites can pass the
+    // caught value straight through.
+    expect(classifyKeyValidationError(new Error("Rate limit exceeded"))).toEqual(
+      classifyKeyValidationError("Rate limit exceeded"),
+    );
+    expect(
+      classifyKeyValidationError(new Error("connect ETIMEDOUT 10.0.0.1:443")).code,
+    ).toBe("KEY_NETWORK_TIMEOUT");
+  });
+
+  it("falls through to UNKNOWN for a non-Error, non-string throw", () => {
+    // `throw { foo: 1 }` and `throw undefined` are legal JS. Stringifying keeps
+    // the classifier total instead of throwing a second time inside a catch.
+    expect(classifyKeyValidationError({ foo: 1 })).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+    expect(classifyKeyValidationError(undefined)).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("renders real, non-UNKNOWN copy for SERVICE_UNAVAILABLE_RETRY with a retry affordance", () => {
+    expect(Object.keys(WIZARD_ERROR_COPY)).toContain("SERVICE_UNAVAILABLE_RETRY");
+    const copy = formatKeyError("SERVICE_UNAVAILABLE_RETRY");
+    expect(copy.title).not.toBe(WIZARD_ERROR_COPY.UNKNOWN.title);
+    expect(copy.cause).not.toBe(WIZARD_ERROR_COPY.UNKNOWN.cause);
+    // The whole point of the code: a Retry control must render. Without
+    // clear_and_retry the user gets an outage message and no way to act on it.
+    expect(copy.actions).toContain("clear_and_retry");
+    // No un-interpolated placeholder tokens leaked into user-facing copy.
+    expect(copy.title).not.toMatch(/\{.*\}/);
+    expect(copy.cause).not.toMatch(/\{.*\}/);
+  });
+
+  it("copy is honest about the key NOT being saved and leaks no internals (T-140-14)", () => {
+    const copy = formatKeyError("SERVICE_UNAVAILABLE_RETRY");
+    const blob = `${copy.title} ${copy.cause} ${copy.fix.join(" ")}`;
+    // Honest-copy discipline: the breaker short-circuits BEFORE any request is
+    // issued, so nothing was stored. The user must be told that explicitly —
+    // otherwise a retry looks like it risks a duplicate key.
+    expect(blob.toLowerCase()).toMatch(/not (been )?(saved|stored)|nothing was (saved|stored)/);
+    // It must also not blame the user's key for an outage on our side.
+    expect(blob.toLowerCase()).not.toMatch(/your key (is|was) (invalid|wrong|bad)/);
+    // T-140-14: no upstream infrastructure detail reaches the wizard.
+    expect(blob).not.toMatch(/circuit|breaker|upstash|redis|railway|http|localhost/i);
   });
 });

@@ -7,6 +7,7 @@ import {
   AnalyticsUpstreamError,
   AnalyticsTimeoutError,
 } from "@/lib/analytics-client";
+import { CircuitOpenError } from "@/lib/seam-errors";
 import { BridgeRequestSchema } from "@/lib/api/bridgeSchema";
 import { captureToSentry } from "@/lib/sentry-capture";
 import {
@@ -35,6 +36,32 @@ import {
 // underperformer scoring), exactly the cross-tenant-leak surface the policy
 // targets. The 401 picks NO_STORE_HEADERS up from withAuth; every handler
 // return below stamps it explicitly.
+/**
+ * Phase 140 / SEAM-02 — pinned for clarity; declared counterpart of this
+ * route's `SEAM_ROUTE_BUDGETS` row in `src/lib/resilient-fetch.ts`.
+ *
+ * 300 is the project's VERIFIED effective Vercel default
+ * (`defaultResourceConfig.functionDefaultTimeout: 300`, read from the live
+ * project settings on 2026-07-25), so declaring it here cannot RAISE this
+ * route's worst-case lambda hold (threat T-140-29). It exists so the SC-4b
+ * headroom invariant has an in-repo source of truth instead of a
+ * dashboard-changeable assumption: this route spends one `bridge` budget
+ * (15s), i.e. 20× headroom.
+ */
+export const maxDuration = 300;
+
+/**
+ * Phase 140 / SEAM-04 — the static body the breaker arm emits.
+ *
+ * Deliberately byte-identical to `process-key-client`'s
+ * `CIRCUIT_OPEN_HUMAN_MESSAGE` and to the admin/match routes' copy, so a
+ * breaker trip reads the same to a user whichever seam they happen to hit. It
+ * names no infrastructure (threat T-140-17): no circuit, no upstream host, no
+ * cooldown vocabulary beyond the `Retry-After` header itself.
+ */
+const CIRCUIT_OPEN_COPY =
+  "The analytics service is temporarily unavailable. Please try again in a moment.";
+
 export const POST = withAuth(async (req, user) => {
   const supabase = await createClient();
 
@@ -117,6 +144,38 @@ export const POST = withAuth(async (req, user) => {
     );
     return NextResponse.json(result, { headers: NO_STORE_HEADERS });
   } catch (err) {
+    // Phase 140 / SEAM-04 — the breaker arm, FIRST among the typed arms.
+    //
+    // An open circuit means the request was never issued: the correct answer is
+    // 503 + a cooldown, not the generic 500 this used to fall through to (which
+    // invites an immediate retry against a service already known to be down).
+    //
+    // ⚠️ This lives INSIDE the handler, after the `withAuth` gate above, and
+    // must stay there (threat T-140-20). Hoisting any breaker-aware branch above
+    // the gate would turn "is Railway degraded right now?" into an
+    // unauthenticated oracle.
+    //
+    // ⚠️ `CircuitOpenError` comes from the dependency-free leaf
+    // `@/lib/seam-errors`, never through `@/lib/analytics-client`: this route's
+    // test mocks that module wholesale, and a class read through a mocked module
+    // is `undefined` — `err instanceof undefined` throws a TypeError from inside
+    // this very catch block (threat T-140-30).
+    if (err instanceof CircuitOpenError) {
+      console.error(
+        `[bridge] circuit open — short-circuited, retry in ${err.retryAfterS}s`,
+      );
+      return NextResponse.json(
+        { error: CIRCUIT_OPEN_COPY },
+        {
+          status: 503,
+          headers: {
+            ...NO_STORE_HEADERS,
+            // Same pairing as this route's own 429/503 limiter arms above.
+            "Retry-After": String(err.retryAfterS),
+          },
+        },
+      );
+    }
     // H-1061 / H-1063: forward upstream 4xx semantics (400 "no returns data",
     // 404 "portfolio not found", 422) instead of flattening every failure to
     // 500. Mirrors the sister /api/simulator route's 4xx-forwarding contract.

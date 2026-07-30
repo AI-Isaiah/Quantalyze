@@ -960,6 +960,108 @@ describe("POST /api/strategies/create-with-key — idempotency fence (F6 H-0304/
 });
 
 /**
+ * Phase 140 / SEAM-04 SC-5b — a circuit-breaker trip during key-connect.
+ *
+ * When the Vercel→Railway breaker is OPEN, the shared resilience core throws
+ * `CircuitOpenError` WITHOUT issuing a request. Before this phase that error
+ * matched none of `classifyKeyValidationError`'s substring branches and fell
+ * through to `{code:"UNKNOWN", status:500}` — the wizard rendered "something
+ * went wrong, our team has been notified" during an infra outage, with no retry
+ * affordance. These tests pin the honest 503 instead.
+ *
+ * The class is imported from `@/lib/seam-errors` (the dependency-free leaf) via
+ * a DYNAMIC import taken from the same module registry as `importPost()`. The
+ * `@/lib/analytics-client` mock above is a BARE factory — the class is not on
+ * it, so routing `instanceof` through that module would compare against
+ * `undefined` and throw from inside the route's catch block. The dynamic form
+ * additionally survives the `vi.resetModules()` in the describe below, which
+ * would otherwise leave a static import bound to a stale class object.
+ */
+describe("POST /api/strategies/create-with-key — circuit-breaker trip (SEAM-04 SC-5b)", () => {
+  beforeEach(() => {
+    validateKeyMock.mockReset();
+    encryptKeyMock.mockReset();
+    rpcMock.mockReset();
+    assetClassUpdateMock.mockClear();
+
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: true,
+      permissions: ["read"],
+    });
+    encryptKeyMock.mockResolvedValue({
+      api_key_encrypted: "encrypted-blob-base64",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: null,
+      nonce: null,
+      kek_version: 1,
+    });
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+      error: null,
+    });
+  });
+
+  it("validateKey tripping the breaker → 503 SERVICE_UNAVAILABLE_RETRY, never UNKNOWN/500", async () => {
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    validateKeyMock.mockRejectedValue(new CircuitOpenError(42));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    expect(res.status).not.toBe(500);
+    const json = await res.json();
+    expect(json.code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(json.code).not.toBe("UNKNOWN");
+    // H-0305 posture is unchanged: uniform { code } body, no raw message.
+    expect(Object.keys(json)).toEqual(["code"]);
+    // The breaker cooldown is the ONE dynamic value the class exposes, and it is
+    // the same class of information rateLimitDenyJson already publishes.
+    expect(res.headers.get("Retry-After")).toBe("42");
+    // Short-circuit means nothing downstream ran and nothing was stored.
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
+
+  it("encryptKey tripping the breaker → the same 503 envelope (both seam calls covered)", async () => {
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    encryptKeyMock.mockRejectedValue(new CircuitOpenError(7));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(res.headers.get("Retry-After")).toBe("7");
+    // The key was validated but never persisted — the RPC never ran.
+    expect(rpcMock).not.toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
+
+  it("still classifies non-breaker errors by message (the substring cascade is intact)", async () => {
+    // Negative control. If the route ever stopped threading the error object
+    // and started passing something else, the first two tests could pass while
+    // every message-classified path silently collapsed to UNKNOWN.
+    validateKeyMock.mockRejectedValue(new Error("connect ETIMEDOUT 10.0.0.1:443"));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe("KEY_NETWORK_TIMEOUT");
+    // Retry-After is breaker-specific — it must NOT appear on other 5xx paths.
+    expect(res.headers.get("Retry-After")).toBeNull();
+    consoleErr.mockRestore();
+  });
+});
+
+/**
  * H-0306 — auth boundary. The describe blocks above mock @/lib/api/withAuth
  * to bypass auth entirely, so the unauthed branch was never executed in CI.
  * Per Rule 9 the auth boundary is the single most important invariant on a

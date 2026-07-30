@@ -1,6 +1,31 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { afterEach, vi } from "vitest";
+
+// Phase 140 — `next/dist/server/app-render/async-local-storage.js` reads
+// `globalThis.AsyncLocalStorage` EXACTLY ONCE, into a module-scope
+// `maybeGlobalAsyncLocalStorage` const, and substitutes a `FakeAsyncLocalStorage`
+// whose `run()`/`exit()`/`enterWith()` all throw the E504 invariant when it is
+// absent. jsdom does not expose it. Any test that reaches a real Next boundary
+// built on that storage — `unstable_cache` is the one in this repo — therefore
+// depends on the global being installed BEFORE the first `next/*` module in the
+// worker is evaluated.
+//
+// Installing it per-file from an ASYNC `vi.hoisted` block (the original shape in
+// keys/[id]/permissions/route.seam.test.ts) is a RACE, not a fix: the block is
+// hoisted above the imports, but its `await import("node:async_hooks")` resolves
+// on a later microtask, so under worker contention the file's own imports can
+// evaluate first and capture `undefined`. The symptom is nasty because it is
+// silent — `unstable_cache` throws the invariant, the route's catch classifies
+// it as a generic upstream failure, and every case in the file fails with a
+// plausible-looking wrong status instead of an obvious harness error.
+//
+// Setup files are fully awaited before any test module is imported, so a static
+// import here is deterministic for every file in every worker. Idempotent and
+// inert for the ~700 files that never touch a Next async-storage boundary.
+(globalThis as unknown as { AsyncLocalStorage: unknown }).AsyncLocalStorage =
+  AsyncLocalStorage;
 
 // PR #266 red-team — the universal approval gate added to withAuth (and
 // every inline-auth API route) hits `supabase.from("profiles").select(...)

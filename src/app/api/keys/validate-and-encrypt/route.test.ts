@@ -1,5 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
+// Phase 140 / SEAM-04: the REAL breaker error, taken from the dependency-free
+// leaf. It must NEVER be picked up through `@/lib/analytics-client` — this file
+// mocks that module wholesale (a full factory, no importActual), so the class
+// read through it would be `undefined` and `err instanceof undefined` throws a
+// TypeError from inside the route's own catch block (threat T-140-30). Nothing
+// mocks the leaf, and this file never calls vi.resetModules(), so a static
+// import here is the same class object the route narrows against.
+import { CircuitOpenError } from "@/lib/seam-errors";
 
 /**
  * H-0281 — real route coverage for POST /api/keys/validate-and-encrypt.
@@ -243,6 +251,38 @@ describe("POST /api/keys/validate-and-encrypt", () => {
     // A timeout is an expected upstream condition — NOT captured to Sentry
     // (mirrors the 4xx-forward no-Sentry anti-assertion above).
     expect(captureSpy).not.toHaveBeenCalled();
+    expect(mockEncryptKey).not.toHaveBeenCalled();
+  });
+
+  // ── (4d) Breaker open → 503 + Retry-After, no probe, no Sentry ──────
+  // Phase 140 / SEAM-04 (SC-5c). Before this arm a breaker trip fell through
+  // to the generic 500 "Key validation failed. Please try again." — which tells
+  // the user their KEY is at fault when in fact no request ever left Vercel,
+  // and invites an immediate retry against a service known to be down.
+  it("returns 503 + Retry-After when the Railway breaker is open (SC-5c)", async () => {
+    // 5, deliberately NOT the 30s breaker default (which is simultaneously
+    // BREAKER_COOLDOWN_S and DEFAULT_RETRY_AFTER_S): a hardcoded "30" in the
+    // route would pass a 30-second fixture but fails this one.
+    mockValidateKey.mockRejectedValue(new CircuitOpenError(5));
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("5");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    const body = await res.json();
+    expect(body.error).toBe(
+      "The analytics service is temporarily unavailable. Please try again in a moment.",
+    );
+    // T-140-17: the copy names no infrastructure, and must not blame the key.
+    expect(body.error).not.toMatch(/circuit|breaker|upstash|railway|http/i);
+    expect(body.error).not.toMatch(/key validation failed/i);
+    // A breaker trip is a shared infrastructure state, not a per-request
+    // defect: capturing it would emit one Sentry event per request for the
+    // whole cooldown window (mirrors the 4xx-forward / 504 no-Sentry stance).
+    expect(captureSpy).not.toHaveBeenCalled();
+    // Never encrypt a key we could not validate.
     expect(mockEncryptKey).not.toHaveBeenCalled();
   });
 

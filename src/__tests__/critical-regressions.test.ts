@@ -100,18 +100,49 @@ describe("Critical regression guards", () => {
     });
   });
 
-  describe("[SD-CRITICAL-01] analytics-client must have a fetch timeout", () => {
-    it("src/lib/analytics-client.ts must wire a fetch abort signal", () => {
-      const src = readText("src/lib/analytics-client.ts");
+  // The INVARIANT is unchanged since the 2026-04-10 audit: no call to the
+  // Railway analytics service may be unbounded, because a hung worker would
+  // otherwise hold the Vercel lambda until the platform kills it.
+  //
+  // What changed in Phase 140 (SEAM-01) is WHERE the deadline lives. Both seam
+  // clients used to wire their own `AbortSignal.timeout`; they now delegate to
+  // the ONE resilience core, which owns the base URL, the SEAM_BUDGETS
+  // deadline and the circuit breaker. Asserting the old literal in the old
+  // file would now be asserting the drift this phase removed — so the guard
+  // follows the invariant to its new home and additionally pins that neither
+  // client has quietly grown a raw `fetch(` back.
+  describe("[SD-CRITICAL-01] every seam call must be deadline-bounded", () => {
+    it("src/lib/resilient-fetch.ts must wire a fetch abort signal", () => {
+      const src = readText("src/lib/resilient-fetch.ts");
       const hasTimeout =
         /AbortSignal\.timeout/.test(src) ||
         /new\s+AbortController/.test(src) ||
         /signal\s*:/.test(src);
       expect(
         hasTimeout,
-        "analytics-client has no timeout/abort — a hung Railway worker will hang the lambda until platform kill",
+        "the resilience core has no timeout/abort — a hung Railway worker will hang the lambda until platform kill",
       ).toBe(true);
     });
+
+    for (const client of [
+      "src/lib/analytics-client.ts",
+      "src/lib/process-key-client.ts",
+    ]) {
+      it(`${client} must delegate its transport to the core, not call fetch directly`, () => {
+        const src = readText(client);
+        expect(
+          /resilientFetch\s*\(/.test(src),
+          `${client} no longer calls resilientFetch — it has bypassed the ONE core that owns the deadline and the breaker`,
+        ).toBe(true);
+        // `\bfetch(` would also match a `…Fetch(` suffix; require the char
+        // before to be a non-identifier one. `.` IS allowed in that class on
+        // purpose so `globalThis.fetch(` is caught too.
+        expect(
+          /(^|[^a-zA-Z0-9_])fetch\s*\(/m.test(src),
+          `${client} contains a raw fetch( call — every seam request must go through resilientFetch so it inherits a budget and the breaker`,
+        ).toBe(false);
+      });
+    }
   });
 
   describe("[SD-CRITICAL-02] vercel.json must register Vercel Crons", () => {

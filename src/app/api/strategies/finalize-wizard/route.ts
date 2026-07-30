@@ -9,6 +9,8 @@ import { MAGNITUDE_CAPS, isCryptoExchange } from "@/lib/closed-sets";
 import { notifyFounderNewStrategy, resolveManagerName } from "@/lib/email";
 import { isUuid } from "@/lib/utils";
 import { postProcessKey } from "@/lib/process-key-client";
+import { resilientFetch } from "@/lib/resilient-fetch";
+import { CircuitOpenError } from "@/lib/seam-errors";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { logAuditEventAsUser } from "@/lib/audit";
 import type { User } from "@supabase/supabase-js";
@@ -47,8 +49,24 @@ import type { User } from "@supabase/supabase-js";
 
 const STRATEGY_NAME_SET = new Set(STRATEGY_NAMES as readonly string[]);
 
-const ANALYTICS_URL =
-  process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
+/**
+ * Vercel function ceiling for this route. Declared rather than inherited so the
+ * SC-4 headroom invariant has an in-repo source of truth: the seam-budget
+ * invariant test reads this export from disk and fails if it drifts from
+ * `SEAM_ROUTE_BUDGETS` (this route spends TWO budgets — the keys-permissions
+ * probe, then the process-key enqueue). The value matches the platform default
+ * verified against the live project settings in 140-01, so pinning it raises
+ * nothing.
+ */
+export const maxDuration = 300;
+
+/**
+ * User-facing copy for the breaker's 503. STATIC by design (threat T-140-05)
+ * and byte-identical to the other seam routes' copy, so a breaker trip reads
+ * the same wherever a user meets it.
+ */
+const CIRCUIT_OPEN_COPY =
+  "The analytics service is temporarily unavailable. Please try again in a moment.";
 
 interface LivePermissions {
   read: boolean;
@@ -70,6 +88,14 @@ interface LivePermissions {
  * Throws on any non-OK response so the caller can decide between
  * fail-open and fail-closed (we fail-closed: a probe failure blocks
  * finalize, see route handler).
+ *
+ * Phase 140 / SEAM-01: this is the second of the two verbatim copies of the
+ * third Railway seam (the other is /api/keys/[id]/permissions). Both now go
+ * through the shared resilience core, which owns the base URL, the
+ * `keys-permissions` budget and the `breaker:railway` circuit. Unlike its
+ * sibling this probe deliberately bypasses both cache layers, so it crosses the
+ * seam on EVERY submit — which is exactly why it must not be able to hammer a
+ * Railway the breaker has already declared dead.
  */
 async function fetchLivePermissions(
   keyId: string,
@@ -78,8 +104,9 @@ async function fetchLivePermissions(
   if (!internalToken) {
     throw new Error("INTERNAL_API_TOKEN is not configured");
   }
-  const res = await fetch(
-    `${ANALYTICS_URL}/internal/keys/${encodeURIComponent(keyId)}/permissions?force_refresh=true`,
+  const res = await resilientFetch(
+    "keys-permissions",
+    `/internal/keys/${encodeURIComponent(keyId)}/permissions?force_refresh=true`,
     {
       method: "POST",
       headers: {
@@ -90,7 +117,7 @@ async function fetchLivePermissions(
       // fetch-level caching being introduced. The internal route is
       // POST so it shouldn't be cacheable today, but routes can change.
       cache: "no-store",
-      signal: AbortSignal.timeout(15_000),
+      // No signal: the core owns the deadline (SEAM_BUDGETS["keys-permissions"]).
     },
   );
   if (!res.ok) {
@@ -348,6 +375,34 @@ async function runScopeBroadeningProbe(
   try {
     livePerms = await fetchLivePermissions(apiKeyId);
   } catch (probeErr) {
+    // ORDER IS LOAD-BEARING: CircuitOpenError FIRST, and STILL FAIL CLOSED
+    // (T-140-22). A breaker trip means the scope-broadening probe did not run,
+    // so finalize must be BLOCKED exactly as it is for any other probe failure
+    // — a key whose live scopes could not be re-checked must never be promoted
+    // to pending_review. The only thing that changes is the envelope: 503 +
+    // CIRCUIT_OPEN + Retry-After tells the wizard "this will work again in
+    // ~30s", where the generic 502 KEY_NETWORK_TIMEOUT tells it nothing
+    // actionable. The class comes from the never-mocked `@/lib/seam-errors`
+    // leaf, so this `instanceof` holds under every mock shape in the suite.
+    if (probeErr instanceof CircuitOpenError) {
+      console.error(
+        `[strategies/finalize-wizard] live permissions probe short-circuited — ` +
+          `the analytics circuit is open (retry_after_s=${probeErr.retryAfterS})`,
+      );
+      return {
+        ok: false,
+        response: NextResponse.json(
+          { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
+          {
+            status: 503,
+            headers: {
+              ...NO_STORE_HEADERS,
+              "Retry-After": String(probeErr.retryAfterS),
+            },
+          },
+        ),
+      };
+    }
     // audit-2026-05-07 H-0328 + Phase C simplify — log only the safe
     // primitives (name + message) scrubbed of any literal INTERNAL_API_TOKEN
     // occurrence. Some fetch / undici / retry-wrapper stack traces embed

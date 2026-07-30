@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
 
 /**
@@ -19,7 +19,28 @@ import { NextRequest } from "next/server";
  *   3. Unauthenticated → 401 (RFC 7235) before any call to
  *      recomputeMatch.
  *
+ *   4. Phase 140 / SEAM-04 error taxonomy — CircuitOpenError → 503 +
+ *      Retry-After, AnalyticsTimeoutError → 504, everything else → 500 with
+ *      STATIC copy. The generic arm used to echo `err.message` (the
+ *      pre-existing information-disclosure leak T-140-11, already closed on
+ *      bridge as H-1062 and portfolio-optimizer as M-0333); the case below
+ *      pins its ABSENCE.
+ *
  * Mirrors the pattern in kill-switch/route.test.ts.
+ *
+ * ⚠️ Error classes are imported DYNAMICALLY inside each test, from the same
+ * module registry the route is imported from. This file does not currently
+ * call `vi.resetModules()`, so a static import would work TODAY — but the
+ * moment a reset is added, a statically imported `CircuitOpenError` becomes a
+ * DIFFERENT class object from the one the route re-evaluates, the route's
+ * `instanceof` silently misses, and the 503 assertion fails as a 500 with no
+ * obvious cause (measured in 140-01, deviation 3). Same-registry import
+ * removes that trap in advance.
+ *
+ * ⚠️ SCOPE. These are MOCK-based tests: `@/lib/analytics-client` is replaced,
+ * so they prove the ROUTE's error mapping and nothing about the client, the
+ * resilience core, or the breaker. `route.seam.test.ts` is the companion that
+ * runs the REAL client with only `fetch` faked (SC-1b).
  */
 
 vi.mock("server-only", () => ({}));
@@ -59,9 +80,22 @@ const recomputeCalls: Array<{
   actorId?: string;
 }> = [];
 
-vi.mock("@/lib/analytics-client", () => ({
+/** When set, the mocked recomputeMatch rejects with this value. */
+const recomputeState: { throwValue: unknown } = { throwValue: null };
+
+// Phase 140 / T-140-30: PARTIAL mock, not a bare factory. `AnalyticsTimeoutError`
+// genuinely lives in this module and the route branches on it; through a bare
+// factory that binding is `undefined` and `err instanceof undefined` throws
+// `TypeError` from inside the route's catch block. The spread is the only new
+// part — the `recomputeMatch` body below still drives `recomputeCalls` exactly
+// as the pre-140 factory did, so every pre-existing case is untouched.
+vi.mock("@/lib/analytics-client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/analytics-client")>()),
   recomputeMatch: async (allocatorId: string, force: boolean, actorId?: string) => {
     recomputeCalls.push({ allocatorId, force, actorId });
+    if (recomputeState.throwValue !== null) {
+      throw recomputeState.throwValue;
+    }
     return { ok: true, batch_id: "b-test" };
   },
 }));
@@ -70,10 +104,28 @@ vi.mock("@/lib/csrf", () => ({
   assertSameOrigin: () => null,
 }));
 
+/** The three STATIC bodies the route is allowed to emit from its catch block. */
+const CIRCUIT_OPEN_COPY =
+  "The analytics service is temporarily unavailable. Please try again in a moment.";
+const TIMEOUT_COPY = "Match recompute timed out. Please try again.";
+const GENERIC_COPY = "Match recompute failed. Please try again.";
+
+let errorSpy: ReturnType<typeof vi.spyOn>;
+
 beforeEach(() => {
   userState.current = null;
   adminFlag.isAdmin = false;
   recomputeCalls.length = 0;
+  recomputeState.throwValue = null;
+  // Spy rather than silence-and-forget: the leak-closure case asserts the
+  // detail IS still logged, so a static body cannot be achieved by dropping it.
+  errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  // This repo's known CI-only (Node 22) failure cause is a leaked global stub.
+  vi.unstubAllGlobals();
 });
 
 function buildPostRequest(body: unknown) {
@@ -151,6 +203,95 @@ describe("POST /api/admin/match/recompute — actor binding (C-PR5-01)", () => {
     const { POST } = await import("./route");
     const res = await POST(buildPostRequest({ force: false }));
     expect(res.status).toBe(400);
+    expect(recomputeCalls).toHaveLength(0);
+  });
+});
+
+describe("POST /api/admin/match/recompute — SEAM-04 error taxonomy (Phase 140)", () => {
+  async function postAsAdmin() {
+    userState.current = { id: "admin-id" };
+    adminFlag.isAdmin = true;
+    const { POST } = await import("./route");
+    return POST(buildPostRequest({ allocator_id: "alloc-1", force: false }));
+  }
+
+  it("maps CircuitOpenError to 503 with Retry-After and static copy", async () => {
+    // Same-registry import — see the class-identity warning in the file header.
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    recomputeState.throwValue = new CircuitOpenError(30);
+    const res = await postAsAdmin();
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("30");
+    const raw = await res.text();
+    expect(JSON.parse(raw).error).toBe(CIRCUIT_OPEN_COPY);
+    // The breaker is an internal mechanism; its vocabulary must not reach an
+    // HTTP body (threat T-140-05 / T-140-08).
+    expect(raw).not.toMatch(/circuit|breaker|upstash|railway/i);
+  });
+
+  it("forwards the breaker's own cooldown as Retry-After rather than a constant", async () => {
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    recomputeState.throwValue = new CircuitOpenError(11);
+    const res = await postAsAdmin();
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("11");
+  });
+
+  it("maps AnalyticsTimeoutError to 504 with static copy", async () => {
+    // The REAL class, reachable only because the analytics-client mock above is
+    // a spread-importActual partial rather than a bare factory.
+    const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsTimeoutError(
+      "/api/match/recompute",
+      30_000,
+    );
+    const res = await postAsAdmin();
+    expect(res.status).toBe(504);
+    const raw = await res.text();
+    expect(JSON.parse(raw).error).toBe(TIMEOUT_COPY);
+    // AnalyticsTimeoutError's message quotes both the deadline and the upstream
+    // path; neither may reach the client.
+    expect(raw).not.toContain("30000");
+    expect(raw).not.toContain("/api/match/recompute");
+  });
+
+  it("returns 500 with STATIC copy and NEVER echoes the upstream Error message (T-140-11)", async () => {
+    // Deliberately shaped like the two things this arm used to leak: a raw
+    // upstream detail string and the analytics service's base URL.
+    const leaky = new Error("boom with http://localhost:8002 secret detail");
+    recomputeState.throwValue = leaky;
+    const res = await postAsAdmin();
+    expect(res.status).toBe(500);
+    const raw = await res.text();
+    expect(raw).not.toContain("boom");
+    expect(raw).not.toContain("localhost");
+    expect(JSON.parse(raw).error).toBe(GENERIC_COPY);
+    // ...and the detail is not simply discarded — it goes to the server log.
+    expect(errorSpy).toHaveBeenCalledWith(expect.any(String), leaky);
+  });
+
+  it("returns 500 with the same STATIC copy when recomputeMatch throws a non-Error value", async () => {
+    recomputeState.throwValue = "string rejection, not an Error";
+    const res = await postAsAdmin();
+    expect(res.status).toBe(500);
+    const raw = await res.text();
+    expect(raw).not.toContain("string rejection");
+    expect(JSON.parse(raw).error).toBe(GENERIC_COPY);
+  });
+
+  it("keeps the breaker arm BEHIND the admin gate — unauthenticated + CircuitOpenError never yields 503 (T-140-12)", async () => {
+    // The error arms live inside the handler, after auth, so an unauthenticated
+    // caller cannot use the status code as a breaker-state oracle.
+    // recomputeMatch is primed to trip, but the gate must return first.
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    recomputeState.throwValue = new CircuitOpenError(30);
+    userState.current = null;
+    const { POST } = await import("./route");
+    const res = await POST(
+      buildPostRequest({ allocator_id: "alloc-1", force: false }),
+    );
+    expect(res.status).toBe(401);
+    expect(res.headers.get("Retry-After")).toBeNull();
     expect(recomputeCalls).toHaveLength(0);
   });
 });

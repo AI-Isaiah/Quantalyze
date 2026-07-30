@@ -294,6 +294,43 @@ vi.mock("@/lib/process-key-client", () => ({
     },
 }));
 
+/**
+ * Phase 140 / SEAM-01 — control surface over the shared resilience core, which
+ * the force-refresh scope-broadening probe now goes through.
+ *
+ * Partial mock (the 140-03 spread-`importOriginal` pattern): every export stays
+ * REAL, including `resilientFetch`'s base URL, budget and `AbortSignal`, so the
+ * forty-odd existing `globalThis.fetch` spies keep observing the same
+ * round-trip. Only the breaker decision is driven from the test.
+ */
+const RF = vi.hoisted(() => ({
+  breakerOpen: false as boolean,
+  retryAfterS: 30 as number,
+  lastCall: null as
+    | { budgetKey: string; path: string; init: Record<string, unknown> }
+    | null,
+}));
+
+vi.mock("@/lib/resilient-fetch", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/resilient-fetch")>();
+  // The leaf is never mocked, so this is the SAME class identity the route's
+  // `instanceof` branch tests against.
+  const { CircuitOpenError } = await import("@/lib/seam-errors");
+  return {
+    ...actual,
+    resilientFetch: async (
+      budgetKey: Parameters<typeof actual.resilientFetch>[0],
+      path: string,
+      init: Parameters<typeof actual.resilientFetch>[2] = {},
+    ) => {
+      RF.lastCall = { budgetKey, path, init: init as Record<string, unknown> };
+      if (RF.breakerOpen) throw new CircuitOpenError(RF.retryAfterS);
+      return actual.resilientFetch(budgetKey, path, init);
+    },
+  };
+});
+
 vi.mock("@/lib/email", () => ({
   notifyFounderNewStrategy: async (name: unknown, managerName: unknown) => {
     STATE.notifyFounderCalls.push({ name, managerName });
@@ -385,6 +422,9 @@ beforeEach(async () => {
   STATE.processKeyResult = null;
   STATE.runAfterCallback = false;
   STATE.afterPromise = null;
+  RF.breakerOpen = false;
+  RF.retryAfterS = 30;
+  RF.lastCall = null;
   process.env.INTERNAL_API_TOKEN = "test-internal-token";
   process.env.ANALYTICS_SERVICE_URL = "http://analytics.test";
   // Resolve a real allowed name for the body.
@@ -635,6 +675,77 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
       column: "user_id",
       value: USER.id,
     });
+    fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * Phase 140 / SEAM-01 + SEAM-03 — the third Railway seam on the WIZARD side.
+ *
+ * The force-refresh probe deliberately bypasses both cache layers, so unlike
+ * the sibling `/api/keys/[id]/permissions` it crosses the seam on EVERY submit.
+ * Its fail-CLOSED contract is the security property under test (T-140-22): a
+ * probe that cannot run must BLOCK finalize, never wave it through. A breaker
+ * trip is one more way the probe cannot run, so it must land on the blocking
+ * side of that branch — with its own 503/CIRCUIT_OPEN code rather than the
+ * generic 502, because "retry in 30s" is actionable and "probe failed" is not.
+ */
+describe("POST /api/strategies/finalize-wizard — breaker open (SEAM-04 fail-closed)", () => {
+  const CIRCUIT_OPEN_COPY =
+    "The analytics service is temporarily unavailable. Please try again in a moment.";
+
+  it("blocks finalize with 503 CIRCUIT_OPEN + Retry-After when the breaker is open", async () => {
+    RF.breakerOpen = true;
+    // Not 30: 30 is both BREAKER_COOLDOWN_S and DEFAULT_RETRY_AFTER_S, so a
+    // hardcoded value would satisfy a 30-valued assertion while forwarding
+    // nothing from the breaker.
+    RF.retryAfterS = 23;
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("23");
+    const raw = await res.text();
+    const body = JSON.parse(raw);
+    expect(body.code).toBe("CIRCUIT_OPEN");
+    expect(body.error).toBe(CIRCUIT_OPEN_COPY);
+    expect(raw).not.toMatch(/breaker|upstash|railway|analytics service circuit/i);
+
+    // FAIL CLOSED — the whole point. An un-probed key must never be promoted.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+    // And the seam was genuinely not crossed.
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("sends the force-refresh probe through the core with the keys-permissions budget", async () => {
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+
+    expect(RF.lastCall).not.toBeNull();
+    expect(RF.lastCall!.budgetKey).toBe("keys-permissions");
+    expect(RF.lastCall!.path).toBe(
+      `/internal/keys/${API_KEY_ID}/permissions?force_refresh=true`,
+    );
+    expect(RF.lastCall!.init.method).toBe("POST");
+    expect(RF.lastCall!.init.cache).toBe("no-store");
+    expect(RF.lastCall!.init.headers).toMatchObject({
+      "Content-Type": "application/json",
+      "X-Internal-Token": "test-internal-token",
+    });
+    // The core owns the deadline — the caller must not pass its own.
+    expect(RF.lastCall!.init.signal).toBeUndefined();
+
     fetchSpy.mockRestore();
   });
 });

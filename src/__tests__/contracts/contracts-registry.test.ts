@@ -64,7 +64,32 @@ const REPO_WIDE_ERROR_RULES = [
   // frozen-island exemption is asserted via FROZEN_EXEMPT, so neither the
   // repo-wide error nor the frozen off-glob can silently flip.
   "no-raw-font-px",
+  // SEAM-01 (Phase 140) — bans a raw fetch() of the analytics service base URL
+  // outside src/lib/resilient-fetch.ts, which owns the per-call-site timeout
+  // budget and the shared breaker:railway circuit breaker. Wired to "error"
+  // repo-wide on a PROVEN-clean baseline (waves 1-3 routed every live seam call
+  // through the core). Its four documented exemptions are asserted below via
+  // SEAM_ALLOWLIST_EXEMPT, so neither the repo-wide error nor the off-block can
+  // silently flip.
+  "no-raw-analytics-fetch",
 ] as const;
+
+// Phase 140 / SEAM-01 — `no-raw-analytics-fetch` must RESOLVE to a NON-error
+// level on exactly these four files: the core itself (the only legal home for
+// the base URL) and the three documented `SEAM_EXCLUSIONS` rows in
+// src/lib/resilient-fetch.ts (bespoke debug SSE route + the two /health warmers,
+// which must not consume breaker failure budget nor be blocked by an open
+// breaker). This list is FROZEN at four (threat T-140-26): a new lint failure
+// means a new seam call site, and the fix is to route it through the core, never
+// to add a fifth entry here. It doubles as a minimatch check — an off-glob that
+// silently fails to match would resolve to error and fail loud, which is exactly
+// how the `\[id\]` char-class trap was caught in phase 54-05.
+const SEAM_ALLOWLIST_EXEMPT: Array<{ rule: string; file: string }> = [
+  { rule: "no-raw-analytics-fetch", file: "src/lib/resilient-fetch.ts" },
+  { rule: "no-raw-analytics-fetch", file: "src/app/api/debug-key-flow/route.ts" },
+  { rule: "no-raw-analytics-fetch", file: "src/app/api/cron/warm-analytics/route.ts" },
+  { rule: "no-raw-analytics-fetch", file: "src/lib/warmup-analytics.ts" },
+];
 
 // Phase 54 BP-03 — `no-raw-font-px` must RESOLVE to a NON-error level on the
 // documented frozen-chart islands (the off-glob exemption), proving the carve-out
@@ -187,6 +212,31 @@ describe("[B25] eslint-plugin-quantalyze wiring integrity", () => {
         `quantalyze/${rule} must NOT resolve to "error" on the documented frozen-chart ` +
           `island ${frozenFile} (got ${JSON.stringify(onFrozen.entry)}) — editing a FROZEN_ISLANDS ` +
           `file reds the frozen-spine guard, so it must stay off-globbed (BP-03 exemption).`,
+      ).toBe(true);
+    }
+    // Phase 140 SEAM-01 — the seam allowlist is a CLOSED set of four. Assert
+    // both halves: the exemption actually resolves (so the off-glob matches the
+    // on-disk path), and the set has not grown (so a lint failure cannot be
+    // silenced by widening it instead of routing the call through the core).
+    expect(
+      SEAM_ALLOWLIST_EXEMPT.length,
+      "The no-raw-analytics-fetch allowlist is frozen at four paths (T-140-26). " +
+        "A new raw seam fetch means a new call site that belongs in " +
+        "resilientFetch() — widening the allowlist re-opens SEAM-01.",
+    ).toBe(4);
+    for (const { rule, file: allowlisted } of SEAM_ALLOWLIST_EXEMPT) {
+      expect(
+        existsSync(join(ROOT, allowlisted)),
+        `Allowlisted seam file missing: ${allowlisted} — update the allowlist in ` +
+          `eslint.config.mjs and SEAM_EXCLUSIONS in src/lib/resilient-fetch.ts together.`,
+      ).toBe(true);
+      const onAllowlisted = await resolve(allowlisted, rule);
+      expect(
+        !(onAllowlisted.severity === 2 || onAllowlisted.severity === "error"),
+        `quantalyze/${rule} must NOT resolve to "error" on the documented seam ` +
+          `exemption ${allowlisted} (got ${JSON.stringify(onAllowlisted.entry)}) — ` +
+          `this file legitimately holds the analytics base URL, so an off-glob that ` +
+          `stopped matching would red-CI the core itself.`,
       ).toBe(true);
     }
   });
