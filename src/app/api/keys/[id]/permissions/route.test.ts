@@ -673,14 +673,51 @@ describe("GET /api/keys/[id]/permissions — breaker across the unstable_cache b
  */
 describe("[140.3-01 / TS-05] the permissions proxy reads the seam error body through the ONE discriminator", () => {
   it("CONTRACT A — a `service_error` 500 (OBJECT detail): the operator log carries `body.detail.detail`, never '[object Object]'", async () => {
-    // Hand-typed §2 envelope.
+    // §2 envelope, and it is the body the REAL CONSTRUCTOR RETURNS rather than a
+    // hand-typed approximation of one.
+    //
+    // ⚠️ 140.5-06 / WP-14 — WHAT THIS FIXTURE USED TO BE AND WHY IT WAS A LIE.
+    // It carried `{code:"SEAM_DEGRADED", dependency:"supabase", retryable:true}`
+    // at status 500. `services/error_contract._validate` REFUSES to construct
+    // that: its `>=500` arm rejects a truthy `retryable` outright, because a 500
+    // is SERVICE-PERMANENT (contract rule R-1) and a permanent fault that
+    // advertises retryability is the self-sustaining retry loop R-1 exists to
+    // stop. So this suite was vouching for a body no raise site in the service
+    // can emit — a fixture cannot certify a contract it contradicts.
+    //
+    // The replacement is a real, executed raise site on THIS ROUTE'S OWN
+    // UPSTREAM: `routers/internal.py`'s permanent 500 for a key it cannot
+    // decrypt, raised by the very handler behind
+    // `/internal/keys/{id}/permissions`. Its `dependency` is one of OURS, which
+    // the 500 arm permits as MEMBERSHIP (a venue name there would be a 424), and
+    // its sentence says what must happen instead of promising that a retry will
+    // help — consistent with `retryable:false` rather than contradicting it.
+    //
+    // Re-runnable oracle for every literal below:
+    //   cd analytics-service && python3 -c "from services.error_contract import \
+    //     service_error; print(service_error(500,'KEY_UNDECRYPTABLE', \
+    //     dependency='kek', retryable=False, detail='This stored key could not \
+    //     be decrypted. It must be reconnected.').detail)"
+    // and the R-1 refusal itself is pinned in Python by
+    // `tests/test_error_contract_r1_permanent_500.py`, so the rule this fixture
+    // now obeys can fail if it is ever weakened.
+    //
+    // ⚠️ WHY THIS SITE AND NOT `KEK_UNAVAILABLE`, WHICH WAS TRIED FIRST. The
+    // sibling 500 at `internal.py`'s missing-KEK branch reads "Credential
+    // encryption is not configured. …", and the handler's substring cascade
+    // below keys `PROBE_BACKEND_UNAVAILABLE` on `includes("not configured")` —
+    // so that real body answers a DIFFERENT code than this case is about. That
+    // collision is a genuine finding, pinned in its own case further down rather
+    // than avoided silently; this case keeps testing what it exists to test (the
+    // nested read), on a real body whose sentence trips none of the cascade's
+    // needles.
     STATE.upstreamStatus = 500;
     STATE.upstreamPayload = {
       detail: {
-        code: "SEAM_DEGRADED",
-        dependency: "supabase",
-        retryable: true,
-        detail: "The analytics store is not responding. Try again shortly.",
+        code: "KEY_UNDECRYPTABLE",
+        dependency: "kek",
+        retryable: false,
+        detail: "This stored key could not be decrypted. It must be reconnected.",
       },
     };
 
@@ -703,32 +740,97 @@ describe("[140.3-01 / TS-05] the permissions proxy reads the seam error body thr
         "`err.detail ??` read builds `new Error(<object>)`, whose message " +
         "coerces to '[object Object]' — so the operator sees THAT the probe " +
         "failed and never WHY (STATUS_CONTRACT §2.1, obligation O-5).",
-    ).toContain("The analytics store is not responding. Try again shortly.");
+    ).toContain("This stored key could not be decrypted. It must be reconnected.");
     expect(logged).not.toContain("[object Object]");
     // The machine code survives on the thrown error's `cause`, so the TS-34
     // plan can branch on it without re-extracting (and so the operator can see
     // which contract answered).
-    expect(logged).toContain("SEAM_DEGRADED");
+    expect(logged).toContain("KEY_UNDECRYPTABLE");
   });
 
-  it("CONTRACT B — an app-global 429 (SCALAR detail): the logged human string is BYTE-IDENTICAL to its pre-plan value (TS-07 is negative)", async () => {
-    // The app-global `RateLimitExceeded` shape (STATUS_CONTRACT §2.1): scalar
-    // `detail`, machine code at the TOP level. This path needed no TypeScript
-    // change and must not have received one.
+  it("FINDING (140.5-06): an upstream sentence containing 'not configured' is classified as OUR config fault", async () => {
+    // ⚠️ THIS CASE DOCUMENTS A DEFECT. It asserts what the route DOES today, not
+    // what it SHOULD do, and it exists so the behaviour is visible and
+    // falsifiable instead of resting in a SUMMARY nobody re-measures. When the
+    // attribution is fixed, this case must be REWRITTEN, not deleted — its
+    // failure will be the signal that the fix landed.
     //
-    // ⚠️ Note for the TS-34 plan: this route's OWN per-key throttle
-    // (`routers/internal.py` — the `service_error(429, "RATE_LIMITED", …)`
-    // added by PYAPIFIX2-03) is the NESTED shape at a 429 status. Contract A
-    // above is what covers that body structurally.
+    // HOW IT WAS FOUND. It was invisible while the sibling CONTRACT A fixture
+    // carried a hand-typed body the service cannot construct. Replacing that
+    // fixture with a real, executed raise site from `routers/internal.py`
+    // surfaced it on the first run: the missing-KEK 500's real sentence is
+    // "Credential encryption is not configured. This needs an operator, not a
+    // retry.", and the handler's cascade keys
+    //   isConfigError = … || rawMessage.includes("not configured")
+    // → `PROBE_BACKEND_UNAVAILABLE` + "Could not reach the permissions service."
+    //
+    // WHY IT IS WRONG. That needle was written for the route's OWN env-var fault
+    // ("INTERNAL_API_TOKEN is not configured on the Next layer."), a Next-layer
+    // condition. Here the upstream WAS reached and answered precisely — a
+    // permanent, operator-actionable KEK gap — and the user is told we could not
+    // reach the service. The needle matches the UPSTREAM's prose, so any upstream
+    // sentence that happens to contain the phrase is re-attributed to our own
+    // configuration. The machine `code` on `cause` (`KEK_UNAVAILABLE`) is the
+    // discriminator that would make this exact, and it is already carried — the
+    // cascade simply does not consult it.
+    STATE.upstreamStatus = 500;
+    STATE.upstreamPayload = {
+      detail: {
+        code: "KEK_UNAVAILABLE",
+        dependency: "kek",
+        retryable: false,
+        detail:
+          "Credential encryption is not configured. This needs an operator, not a retry.",
+      },
+    };
+
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    const body = await res.json();
+    consoleErr.mockRestore();
+
+    expect(res.status).toBe(502);
+    expect(
+      body.code,
+      "OBSERVED, not endorsed: a real upstream KEK fault is reported as though " +
+        "OUR layer were misconfigured, because the cascade greps the upstream's " +
+        "sentence instead of reading the machine code already on `cause`.",
+    ).toBe("PROBE_BACKEND_UNAVAILABLE");
+    expect(body.error).toBe(
+      "Could not reach the permissions service. Try again shortly.",
+    );
+  });
+
+  it("CONTRACT B — a 429 with a SCALAR `detail`: the scalar passes through the discriminator unchanged (TS-07 is negative)", async () => {
+    // The SCALAR-`detail` shape (STATUS_CONTRACT §2.1's third 429 body:
+    // `{"detail": "<string>"}`). `seamHumanMessage` returns a scalar `detail`
+    // unchanged, and `route.ts` documents that as a NEGATIVE obligation beside
+    // its `seamErrorCode`/`seamHumanMessage` call: this path needed no
+    // TypeScript change and must not have received one.
+    //
+    // ⚠️ 140.5-06 / WP-14 — WHAT THIS FIXTURE USED TO BE AND WHY IT CANNOT
+    // ARRIVE HERE. It carried the FLAT app-global envelope
+    // (`{ok, code, human_message, detail, correlation_id, recoverable,
+    // retry_after_seconds}`), described as "the app-global `RateLimitExceeded`
+    // shape". That handler cannot fire for this route. **Predicate, re-runnable
+    // and measured at 140.5-06 rather than assumed:** the upstream this route
+    // calls is `@router.post("/keys/{key_id}/permissions")` in
+    // `routers/internal.py`, which carries NO `@limiter.limit(...)` decorator,
+    // and the process's single canonical `Limiter` in `services/rate_limit.py`
+    // is constructed as `Limiter(key_func=default_platform_key)` with NO
+    // `default_limits`. slowapi therefore never raises `RateLimitExceeded` on
+    // this path, so `main.py`'s app-global 429 JSONResponse is UNREACHABLE from
+    // here — and its literals never matched the fixture's either.
+    //
+    // Only two 429 bodies can reach this route: our own per-key throttle's
+    // NESTED envelope (CONTRACT C below, which is the shape this file's old note
+    // said was uncovered) and whatever a throttle imposed ABOVE our service
+    // emits. This case is the latter in its JSON form, so the sentence is
+    // deliberately NOT one of our service's own copy strings.
     STATE.upstreamStatus = 429;
     STATE.upstreamPayload = {
-      ok: false,
-      code: "RATE_LIMITED",
-      human_message: "Too many requests.",
-      detail: "Too many probes for this key. Try again in 60 seconds.",
-      correlation_id: "cid-429-permissions",
-      recoverable: true,
-      retry_after_seconds: 60,
+      detail: "Rate limit exceeded for this client.",
     };
 
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -752,11 +854,88 @@ describe("[140.3-01 / TS-05] the permissions proxy reads the seam error body thr
 
     expect(
       logged,
-      "The flat app-global shape was already correct here. If this literal " +
-        "moved, the 429 path was 'fixed' and TS-07's NEGATIVE obligation was " +
-        "violated.",
-    ).toContain("Too many probes for this key. Try again in 60 seconds.");
+      "A scalar `detail` must reach the operator log VERBATIM. If this sentence " +
+        "is transformed, truncated or replaced, the scalar path was 'fixed' and " +
+        "TS-07's NEGATIVE obligation was violated.",
+    ).toContain("Rate limit exceeded for this client.");
     expect(logged).not.toContain("[object Object]");
+  });
+
+  it("CONTRACT C — a `service_error` 429 (OBJECT detail): the route's OWN per-key throttle, at 429 and not 500", async () => {
+    // 140.5-06 / WP-14 — THE BODY NO TEST IN THIS REPO EXERCISED.
+    //
+    // This file used to say, in CONTRACT B's own comment, that the per-key
+    // throttle "is the NESTED shape at a 429 status" and that "Contract A above
+    // is what covers that body structurally". Contract A is at status **500**.
+    // Structural coverage at one status is not coverage at another: the route
+    // branches on the status BEFORE it reads the body (`route.ts`'s
+    // `seamFailure?.status === 429` arm sits above the substring cascade), so
+    // the nested read and the 429 arm had never been exercised together. That
+    // hole is what this case closes.
+    //
+    // Every literal is the REAL constructor's output, not a hand-typed guess:
+    //   cd analytics-service && python3 -c "from services.error_contract import \
+    //     service_error; e = service_error(429,'RATE_LIMITED',retryable=True, \
+    //     retry_after=60, detail='Too many permission probes for this key. Try \
+    //     again in a moment.'); print(e.detail, e.headers)"
+    // → {'code': 'RATE_LIMITED', 'dependency': None, 'retryable': True,
+    //    'detail': 'Too many permission probes for this key. Try again in a
+    //    moment.'}  {'Retry-After': '60'}
+    // which is `routers/internal.py`'s throttle verbatim (its `retry_after` is
+    // `int(_RATE_LIMIT_WINDOW_S)`, and the builder — not the raise site — stamps
+    // the header). `dependency` is null BY CONTRACT: a 429 is a throttle we
+    // imposed ourselves, so naming a dependency would mint a breaker key for
+    // our own limiter.
+    //
+    // The Python side of this pairing is pinned by
+    // `test_status_contract_exchange_internal.py`'s
+    // `test_internal_throttle_429_carries_the_service_envelope`, whose
+    // `_wire_envelope` helper asserts the envelope really is nested at
+    // `body.detail`. That test is the oracle this fixture leans on, and it reds
+    // if the throttle is ever flattened.
+    STATE.upstreamStatus = 429;
+    STATE.upstreamHeaders = { "retry-after": "60" };
+    STATE.upstreamPayload = {
+      detail: {
+        code: "RATE_LIMITED",
+        dependency: null,
+        retryable: true,
+        detail: "Too many permission probes for this key. Try again in a moment.",
+      },
+    };
+
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+
+    expect(res.status).toBe(429);
+    expect((await res.json()).code).toBe("PROBE_RATE_LIMITED");
+    expect(
+      res.headers.get("Retry-After"),
+      "The throttle's own window must be re-published, so the caller waits " +
+        "exactly as long as our limiter asked.",
+    ).toBe("60");
+
+    const logged = consoleErr.mock.calls
+      .map((call) => call.map((arg) => String(arg)).join(" "))
+      .join("\n");
+    consoleErr.mockRestore();
+
+    expect(
+      logged,
+      "The NESTED envelope must be read through `seamHumanMessage` at 429 too. " +
+        "A bare `err.detail ??` read builds `new Error(<object>)`, whose message " +
+        "coerces to '[object Object]' — so the operator sees THAT the probe was " +
+        "throttled and never by WHICH limiter.",
+    ).toContain("Too many permission probes for this key. Try again in a moment.");
+    expect(logged).not.toContain("[object Object]");
+    expect(
+      logged,
+      "The machine code lives at `body.detail.code` on this shape. Reading it " +
+        "from the TOP level — where the unreachable flat envelope kept it — " +
+        "yields nothing and the operator cannot tell OUR throttle from an " +
+        "edge/WAF one.",
+    ).toContain("RATE_LIMITED");
   });
 
   // ===========================================================================
@@ -774,15 +953,21 @@ describe("[140.3-01 / TS-05] the permissions proxy reads the seam error body thr
     it("a /internal 429 carrying `Retry-After: 60` answers 429 with that value — not 502", async () => {
       // THE criterion. Deleting the forward, or restoring the hardcoded 502,
       // must fail this case.
+      // 140.5-06: the NESTED envelope, because `Retry-After: 60` on this route
+      // IS our per-key throttle's signature — `internal.py` advertises
+      // `int(_RATE_LIMIT_WINDOW_S)`, which is 60. See CONTRACT C for the
+      // executed-constructor oracle and for why the flat body this fixture used
+      // to carry cannot arrive on this path at all.
       STATE.upstreamStatus = 429;
       STATE.upstreamHeaders = { "retry-after": "60" };
       STATE.upstreamPayload = {
-        ok: false,
-        code: "RATE_LIMITED",
-        human_message: "Too many requests.",
-        detail: "Too many probes for this key. Try again in 60 seconds.",
-        correlation_id: "cid-throttle",
-        recoverable: true,
+        detail: {
+          code: "RATE_LIMITED",
+          dependency: null,
+          retryable: true,
+          detail:
+            "Too many permission probes for this key. Try again in a moment.",
+        },
       };
 
       const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -815,13 +1000,14 @@ describe("[140.3-01 / TS-05] the permissions proxy reads the seam error body thr
         date: "Wed, 21 Oct 2026 07:28:00 GMT",
         "retry-after": "Wed, 21 Oct 2026 07:30:00 GMT", // +120s
       };
+      // 140.5-06: a proxy that rewrites the header sits ABOVE our service, so
+      // the body is NOT our envelope — the scalar-`detail` shape, with a
+      // sentence that is deliberately none of our copy strings. The flat
+      // `{ok, code, human_message, …}` body this fixture used to carry belongs
+      // to `main.py`'s app-global handler, which cannot fire on this route (the
+      // predicate is in CONTRACT B).
       STATE.upstreamPayload = {
-        ok: false,
-        code: "RATE_LIMITED",
-        human_message: "Too many requests.",
-        detail: "Slow down.",
-        correlation_id: "cid-throttle-date",
-        recoverable: true,
+        detail: "Rate limit exceeded for this client.",
       };
 
       const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -837,15 +1023,17 @@ describe("[140.3-01 / TS-05] the permissions proxy reads the seam error body thr
     it("TRAP-3: a 429 with NO `Retry-After` answers 429 and names NO duration", async () => {
       // Absence must never become a fabricated wait. No header in, no header
       // out — and no sentence claiming a time nobody stated.
+      // 140.5-06: a 429 carrying NO wait cannot be one of OURS — both of this
+      // service's 429 producers stamp the header (`main.py` passes
+      // `headers={"Retry-After": …}`; `internal.py`'s throttle lets
+      // `service_error` stamp it from `retry_after`). So the header-absence case
+      // necessarily models a throttle above our service, and the body is the
+      // scalar-`detail` shape rather than an envelope of ours with its own
+      // header inexplicably missing.
       STATE.upstreamStatus = 429;
       STATE.upstreamHeaders = {};
       STATE.upstreamPayload = {
-        ok: false,
-        code: "RATE_LIMITED",
-        human_message: "Too many requests.",
-        detail: "Slow down.",
-        correlation_id: "cid-throttle-bare",
-        recoverable: true,
+        detail: "Rate limit exceeded for this client.",
       };
 
       const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -885,15 +1073,15 @@ describe("[140.3-01 / TS-05] the permissions proxy reads the seam error body thr
       // Ordering proof. The cascade's `includes("timeout")` branch would claim
       // OUR probe timed out, which is a false statement about whose fault the
       // failure is, and it would lose the wait.
+      // 140.5-06: the scalar-`detail` shape, because the sentence is the point of
+      // this case and NONE of our service's own 429 copy contains the word
+      // "timeout" — a body that does is by definition not ours. A throttle
+      // imposed above our service may word its page however it likes, which is
+      // exactly why the arm must gate on the STATUS and not on the prose.
       STATE.upstreamStatus = 429;
       STATE.upstreamHeaders = { "retry-after": "45" };
       STATE.upstreamPayload = {
-        ok: false,
-        code: "RATE_LIMITED",
-        human_message: "Too many requests.",
-        detail: "Throttled after a timeout storm on this key.",
-        correlation_id: "cid-throttle-collide",
-        recoverable: true,
+        detail: "Throttled after a timeout storm from this client.",
       };
 
       const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -1277,9 +1465,20 @@ describe("[140.3-13a / SEAMUX-08] GET /api/keys/[id]/permissions — Sentry capt
   });
 
   it("NEGATIVE: an upstream 429 throttle is NEVER captured — the limiter working is not a fault", async () => {
+    // 140.5-06: this case names the per-key throttle, so it now carries that
+    // throttle's REAL nested envelope instead of a hybrid that put `code` at the
+    // top level (where nothing reads it on this shape) beside a scalar `detail`.
+    // See CONTRACT C for the executed-constructor oracle.
     STATE.upstreamStatus = 429;
     STATE.upstreamHeaders = { "retry-after": "60" };
-    STATE.upstreamPayload = { detail: "per-key throttle", code: "RATE_LIMITED" };
+    STATE.upstreamPayload = {
+      detail: {
+        code: "RATE_LIMITED",
+        dependency: null,
+        retryable: true,
+        detail: "Too many permission probes for this key. Try again in a moment.",
+      },
+    };
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const { GET } = await import("./route");
     const res = await GET(makeRequest(KEY_ID));

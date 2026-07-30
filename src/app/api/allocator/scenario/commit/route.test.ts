@@ -26,6 +26,8 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
+// 140.5-06: the repo's existing live-DB gate, reused rather than re-invented.
+import { HAS_LIVE_DB } from "@/lib/test-helpers/live-db";
 
 // `import "server-only"` (transitive via @/lib/analytics/onboarding-funnel)
 // throws in jsdom — stub it so route imports resolve under test.
@@ -658,7 +660,14 @@ describe("T_R8 — M7 reuse-or-create (RPC level)", () => {
   // SELECT-or-INSERT branch. It requires a seeded live DB. Skipped offline
   // and FLAGGED for a live-DB integration test (e.g. alongside
   // src/__tests__/update-allocator-mandates-rpc.test.ts).
-  it.skip("[live-DB] second bridge_recommended commit REUSEs the first match_decision_id via the RPC's SELECT-or-INSERT (migration 082) — requires seeded Supabase", () => {
+  // 140.5-06: was an unconditional `it.skip(...)`. Converted to this repo's
+  // EXISTING live-DB convention (`HAS_LIVE_DB` from
+  // `src/lib/test-helpers/live-db.ts`, the same gate ~10 other suites use) —
+  // deliberately reusing that condition rather than minting a new env flag,
+  // because a second name for one fact is the defect this milestone removes.
+  // Offline the behaviour is identical (still skipped); with a seeded live DB
+  // it now RUNS instead of being permanently dead.
+  it.skipIf(!HAS_LIVE_DB)("[live-DB] second bridge_recommended commit REUSEs the first match_decision_id via the RPC's SELECT-or-INSERT (migration 082) — requires seeded Supabase", () => {
     // Intentionally empty — see FLAG note above. The reuse-or-create
     // branch is SQL-side and needs a real Postgres transaction.
   });
