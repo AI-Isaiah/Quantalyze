@@ -501,3 +501,32 @@ export function newWizardSessionId(): string {
   const variant = (8 + Math.floor(Math.random() * 4)).toString(16);
   return `${hex(8)}-${hex(4)}-4${hex(3)}-${variant}${hex(3)}-${hex(12)}`;
 }
+
+/**
+ * CR-01 (140.4-REVIEW) — a content fingerprint of a CSV submission.
+ *
+ * The double-submit fence keys idempotency on `wizard_session_id`, which
+ * identifies a SESSION, not a SUBMISSION: it survives a failed submit
+ * (`clearWizardState` fires only on success / delete-draft / start-fresh). So a
+ * user can follow `CSV_SUBMIT_FAILED`'s instruction, step back, change the name
+ * or upload a DIFFERENT file, and resubmit under the SAME id — and the server's
+ * 23505 arm would resolve that different submission onto the first strategy,
+ * merging the two return series under the first name.
+ *
+ * The durable fix is to make a CHANGED submission a NEW submission by
+ * construction: mint a fresh session id whenever this signature changes after a
+ * failed submit. The signature is over the two fields the CSV wizard both holds
+ * and submits — the strategy name and the daily-return series — so it is
+ * insensitive to array identity (a re-upload of the SAME file yields an
+ * equal-but-new-reference array, which must NOT count as a change) and
+ * sensitive to any real edit of either. `date` and `daily_return` are the only
+ * fields that reach `csv-finalize`, so they are the only fields fingerprinted.
+ */
+export function csvSubmissionSignature(
+  strategyName: string,
+  series: readonly { date: string; daily_return: number }[] | undefined,
+): string {
+  const rows = (series ?? []).map((r) => `${r.date}=${r.daily_return}`).join("|");
+  // NUL separates the two fields so no name/series boundary is ambiguous.
+  return `${strategyName}\u0000${rows}`;
+}

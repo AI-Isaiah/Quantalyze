@@ -92,6 +92,16 @@ export interface CsvSubmitStepProps {
    */
   entryContext?: "manager" | "contribution";
   onSubmitted: (strategyId: string) => void;
+  /**
+   * CR-01 (140.4-REVIEW) — the durable half of the double-submit fence. Fired
+   * once whenever a submit ATTEMPT terminates in an error (either envelope
+   * panel), so WizardClient can burn the current `wizard_session_id`: a
+   * subsequent change to the name or the series then mints a fresh id, making
+   * a changed resubmit a NEW submission by construction rather than a merge
+   * onto the strategy the first attempt created. Not fired on success (that
+   * clears the wizard) nor on the clear-before-submit call.
+   */
+  onSubmitFailed?: () => void;
   onBack: () => void;
 }
 
@@ -174,6 +184,7 @@ export function CsvSubmitStep({
   metadata,
   entryContext = "manager",
   onSubmitted,
+  onSubmitFailed,
   onBack,
 }: CsvSubmitStepProps) {
   const [submitting, setSubmitting] = useState(false);
@@ -193,16 +204,29 @@ export function CsvSubmitStep({
   const [correlationId] = useState<string>(() => getWizardCorrelationId());
 
   /** The ONE writer for the CSV panel; it clears the shared one. */
-  const showCsvEnvelope = useCallback((next: ValidationEnvelope | null) => {
-    setEnvelope(next);
-    setSeamEnvelope(null);
-  }, []);
+  const showCsvEnvelope = useCallback(
+    (next: ValidationEnvelope | null) => {
+      setEnvelope(next);
+      setSeamEnvelope(null);
+      // CR-01: a non-null envelope IS a failed submit (every showCsvEnvelope
+      // call on this step carries a submit error; `null` is only the
+      // clear-before-submit). Signal the parent so the session id is burned.
+      if (next !== null) onSubmitFailed?.();
+    },
+    [onSubmitFailed],
+  );
 
   /** The mirror image. Two accounts of one failure must never co-exist. */
-  const showSeamEnvelope = useCallback((next: ErrorEnvelope) => {
-    setSeamEnvelope(next);
-    setEnvelope(null);
-  }, []);
+  const showSeamEnvelope = useCallback(
+    (next: ErrorEnvelope) => {
+      setSeamEnvelope(next);
+      setEnvelope(null);
+      // CR-01: the seam panel is only ever written on a transport/upstream
+      // failure of the submit — always a failed attempt.
+      onSubmitFailed?.();
+    },
+    [onSubmitFailed],
+  );
 
   const headings =
     entryContext === "contribution"
