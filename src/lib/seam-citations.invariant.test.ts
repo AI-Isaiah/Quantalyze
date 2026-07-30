@@ -11,9 +11,11 @@ import { extractComments, type SourceLang } from "./source-scan";
  * `:66,78`) — the census's variants A/B/C. It names a coordinate in a file, and
  * a coordinate goes stale the instant that file grows or shrinks a line above
  * the target. This milestone was bitten by exactly that eight separate times: a
- * comment that said `analytics_runner.py:2387` pointing at a file that ends at
- * 1726, `route.ts:748` cited three times after the function moved, a
- * `queries.ts:974` that now lands on an unrelated type assertion. The fix is a
+ * comment citing a line deep in `analytics_runner.py` that lands well past the
+ * file's own end, a `route.ts` coordinate cited three times after the function
+ * moved, a `queries.ts` coordinate that now lands on an unrelated type
+ * assertion. (Those forms are described here, not written, because this file is
+ * the LAST place that should plant the exact token it bans.) The fix is a
  * SYMBOL-ANCHORED reference — name the function, the constant, the arm
  * (`assertPortfolioOwnership in queries.ts`, `the 4xx-forward arm in
  * simulator/route.ts`) — which survives line drift because it names the thing,
@@ -187,8 +189,9 @@ function citationsIn(text: string): Array<{ target: string; lines: string }> {
     const ext = m[2];
     const ln = m[3];
     // Un-eat leading delimiters the char class greedily absorbed, so
-    // `(route.ts:172)` reports target `route.ts`, not `(route.ts` — the
-    // paren-eating regression the census fixed once already.
+    // `(route.ts:NN)` reports target `route.ts`, not `(route.ts` — the
+    // paren-eating regression the census fixed once already. (Written with `NN`,
+    // not a digit, so this guard never plants the exact form it bans in a comment.)
     while (base.length && "([".includes(base[0])) {
       const open = base[0];
       const close = open === "(" ? ")" : "]";
