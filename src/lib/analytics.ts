@@ -44,6 +44,10 @@ export type ForQuantsEvent =
   | "wizard_resume"
   | "wizard_delete_draft"
   | "wizard_try_different_key"
+  // CR-01 (140.4-REVIEW) — the CSV wizard minted a fresh session id because the
+  // submission (name or series) changed after a failed submit. Emitted so a
+  // silent re-mint is observable, since the defect it guards was itself silent.
+  | "wizard_csv_session_reminted"
   | "wizard_request_call_click";
 
 // CtaLocation is reused across the landing page CTA and the wizard

@@ -16,19 +16,44 @@ import type { GateFailureCode } from "./strategyGate";
 // `@/lib/resilient-fetch` — either re-export drags `@upstash/redis`,
 // `@upstash/ratelimit` and a top-level `Redis.fromEnv()` singleton into the
 // wizard bundle for every user. (The mirror-image convention is the
-// `import "server-only"` guard at `src/lib/analytics.ts:1`.)
+// `import "server-only"` directive at the top of `src/lib/analytics.ts`.)
 //
-// The leaf path is also the only one that survives the test suite: sixteen
-// route test files `vi.mock("@/lib/analytics-client")` with BARE factories, so
-// a class reached through that re-export would be `undefined` at runtime and
-// the `instanceof` below would throw from inside a catch block. Nothing mocks
-// the leaf.
+// The leaf path is also the only one that survives the test suite: EVERY ROUTE
+// TEST THAT MOCKS A SEAM CLIENT WHOLESALE `vi.mock("@/lib/analytics-client")`
+// with a BARE factory, so a class reached through that re-export would be
+// `undefined` at runtime and the `instanceof` below would throw from inside a
+// catch block. Nothing mocks the leaf.
+//
+// ⚠️ 140.5-02 / SEAMPROSE-04 — THE BARE INTEGER THAT USED TO SIT HERE IS GONE,
+// NOT CORRECTED, and this note is why nobody should put one back. The
+// population it counted measures 26 raw, 23 comment-stripped, 15 restricted to
+// `src/app/api/**` route tests, 16 once the route test living outside that tree
+// is included, and 19 with the csv-finalize suites — five predicates, five
+// answers, and the number that stood here was defensible under exactly one of
+// them. Replacing one bare integer with another is how this file would keep
+// lying with a different number, so the PREDICATE is named instead of a count.
 import { CircuitOpenError } from "@/lib/seam-errors";
 
 export type WizardErrorCode =
   // Key validation (ConnectKeyStep)
   | "KEY_HAS_TRADING_PERMS"
   | "KEY_HAS_WITHDRAW_PERMS"
+  // 140.5-02 / SEAMPROSE-03 — two wire codes that had no honest verdict.
+  //   KEY_MISSING_READ_SCOPE = the exchange authenticated the key and reported
+  //     that a REQUIRED READ scope is absent. Distinct from KEY_NOT_READ_ONLY
+  //     (which is "we could not confirm read-only and observed no write scope")
+  //     and from KEY_HAS_TRADING_PERMS (which is a write grant we DID observe):
+  //     here the key is too NARROW, not too broad, and the remedy is the
+  //     opposite one — grant a scope rather than remove one. It rendered
+  //     UNKNOWN/500 for a plainly fixable Deribit key scope.
+  //   KEY_PERMISSION_DENIED = the exchange refused the request on permission
+  //     grounds and named TWO possible causes in one sentence (scope OR IP
+  //     allowlist). It rendered 502 KEY_IP_ALLOWLIST — a SERVER status for a
+  //     CALLER fault, asserting one of the two causes as if it were observed.
+  //     This member exists so the copy can name both without picking one; that
+  //     is the same DOGFOOD-3 discipline KEY_NOT_READ_ONLY was minted under.
+  | "KEY_MISSING_READ_SCOPE"
+  | "KEY_PERMISSION_DENIED"
   // Phase 110.1 / DOGFOOD-3 FIX 3: honest reasons that do not assert an
   // unobserved scope. KEY_NOT_READ_ONLY = a bare read_only:false with no
   // observed permission scopes (the validator could not confirm read-only,
@@ -301,6 +326,66 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "Paste the new key here.",
     ],
     docsHref: "/security#readonly-key",
+    actions: ["try_another_key", "request_call"],
+  },
+
+  // 140.5-02 / SEAMPROSE-03. Claude-drafted per DESIGN.md §Voice; founder
+  // review owed (CONTEXT §8.1) and named in 140.5-02-SUMMARY.md's `## OPEN`.
+  //
+  // The real wire sentence this replaces reaching the user as UNKNOWN/500 is
+  // `key is missing required scope 'account:read'` — a fact about their key,
+  // rendered as "we could not classify this failure". `actions` are
+  // `try_another_key`-shaped and the polarity was RE-DERIVED, not copied: the
+  // remedy is a DIFFERENT key (or the same key re-scoped and re-pasted), never
+  // a retry of the identical credentials, so `clear_and_retry` is deliberately
+  // absent — it would render a Retry control that re-fails identically.
+  //
+  // ⚠️ The scope NAME is not interpolated. It arrives in the wire `detail`,
+  // which the classifier never returns to the client (only the code crosses),
+  // and inventing a name here would be worse than omitting it.
+  KEY_MISSING_READ_SCOPE: {
+    title: "This key is missing a read permission we need.",
+    cause:
+      "The exchange accepted the key and told us a required read scope is not granted on it. The key is too narrow rather than too broad — nothing about it is unsafe, we simply cannot read the account with it.",
+    fix: [
+      "Open your exchange API Management page and edit this key.",
+      "Enable every Read scope, including account and trade history reads. Leave every trading and withdrawal scope off.",
+      "Save, then paste the key here again — or create a fresh read-only key with all read scopes enabled.",
+    ],
+    docsHref: "/security#readonly-key",
+    actions: ["try_another_key", "request_call"],
+  },
+
+  // 140.5-02 / SEAMPROSE-03. Claude-drafted per DESIGN.md §Voice; founder
+  // review owed (CONTEXT §8.1).
+  //
+  // ⚠️ THIS ENTRY EXISTS TO NAME TWO CAUSES WITHOUT ASSERTING EITHER (TRAP-3).
+  // The wire sentence is "Key denied permission. Confirm the key has read-only
+  // scope and that your IP allowlist includes our service." — the exchange told
+  // us it refused on permission grounds and NOT which of the two it was. Before
+  // this entry the `ip` + `allow` substring branch matched that REMEDY sentence
+  // and answered `KEY_IP_ALLOWLIST`, whose copy states as fact that the user
+  // enabled IP pinning and that our egress is not on their list. On the half of
+  // the population where the real cause is scope, that is a specific claim
+  // about a setting we never observed, and it sends the user to edit a list
+  // that was never the problem.
+  //
+  // The status moves 502 -> 400 with it: a permission refusal is a CALLER
+  // fault, and a 5xx tells every dashboard and SLO consumer that our own
+  // service was at fault.
+  //
+  // The fix list orders the two candidates by base rate — scope first — and
+  // says which is which, rather than presenting one as the diagnosis.
+  KEY_PERMISSION_DENIED: {
+    title: "The exchange refused this key's permissions.",
+    cause:
+      "The exchange rejected the request on permission grounds without telling us which of two settings caused it: the key may be missing a required read scope, or it may be pinned to an IP allowlist that does not include us. We are not guessing between them.",
+    fix: [
+      "First, check the key's scopes: every Read scope on, every trading and withdrawal scope off.",
+      "Then, if the key is pinned to specific IPs, either remove the restriction or add our egress IPs — see the docs link below.",
+      "Save, then paste the key here again.",
+    ],
+    docsHref: "/security#egress-ips",
     actions: ["try_another_key", "request_call"],
   },
 
@@ -814,26 +899,92 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["clear_and_retry"],
   },
 
+  // 140.5-02 / SEAMPROSE-03 — THE BREAKDOWN PROMISE IS GONE, because the
+  // breakdown never renders. Not on the forwarded-upstream arm, and — the part
+  // that makes this a copy fix rather than a routing fix — NOT ON THE GENUINE
+  // VALIDATION ARM EITHER. Three independent reasons, each measured:
+  //   1. KEY MISMATCH. `csv_adapter.py`'s CSV `ValidationResult` puts the row
+  //      errors under `debug_context={"violations": …}`; the panel reads
+  //      `debug_context.pandera_errors`, and `pandera_errors` has ZERO hits
+  //      anywhere in `analytics-service/`.
+  //   2. THE FIELD DIES BEFORE THE WIRE. `process_key.py`'s `_run_validate_only`
+  //      calls `_envelope_error(...)`, which rebuilds `debug_context` from the
+  //      verification id alone and never reads `val.debug_context`.
+  //   3. THE CODE IS A RULE NAME. `csv_adapter.py`'s CSV validation arm sets
+  //      `error_code` from `first_rule.upper()` (e.g. `COLUMN_IN_DATAFRAME`),
+  //      so this entry is reached mainly through `CsvUploadStep`'s
+  //      `data.code ?? "CSV_VALIDATION_FAILED"` fallback.
+  //
+  // ⚠️ ONLY THE COPY HALF IS DONE HERE. Fixing the DATA half means forwarding
+  // `violations`, whose pandera messages embed raw cell values — the PII
+  // surface QA ISSUE-005 is fenced around. Carried forward deliberately, named
+  // in `140.5-02-SUMMARY.md`'s `## OPEN`, NOT silently absorbed.
+  //
+  // The replacement states the limitation WITH what we do report (DESIGN.md
+  // §Voice) instead of promising a list. Claude-drafted; founder review owed.
   CSV_VALIDATION_FAILED: {
-    title: "Validation failed. See per-row breakdown below.",
+    title: "Your file did not pass validation.",
     cause:
-      "One or more rows in your file failed schema or business-rule checks.",
+      "At least one row failed a schema or business-rule check. We report the first rule that failed, not a list of every affected row.",
     fix: [
-      "Expand each rule below to see the row-level breakdown.",
-      "Fix the offending rows and re-upload.",
+      "Check your file against the CSV format reference, then upload it again.",
+      "If the reason above is not specific enough to act on, contact security@quantalyze.com with the reference below.",
     ],
     docsHref: "/security#csv-format",
     actions: ["clear_and_retry"],
   },
 
+  // 140.5-02 / SEAMPROSE-03 (DEF-140.4-C, founder decision §4a) — THE ONE
+  // SENTENCE FOR EVERY UNRECOGNISED-OR-CODELESS UPSTREAM FAILURE ON THE CSV
+  // SURFACE. The strings below are FOUNDER-AUTHORED and are reproduced
+  // VERBATIM; they are not Claude-drafted and are not open to a reword. The
+  // rationale, in the founder's words: the user cannot act differently on a 403
+  // than on a 404 — both mean "not your fault, try again or contact us" — so
+  // per-status copy was rejected as a hand-typed roster.
+  //
+  // ⚠️ SCOPE — READ THIS BEFORE ROUTING ANYTHING NEW HERE (corrected §6c).
+  // This entry's population is the upstream failure carrying NO recognisable
+  // top-level code. It is NOT "every `!res.ok`". The CSV routes emit their own
+  // caller-fault codes with real top-level names — `CSV_FILE_TOO_LARGE`,
+  // `CSV_INVALID_FORMAT`, `CSV_RATE_LIMIT`, `CSV_SESSION_REUSED`,
+  // `CSV_PERSIST_FAIL`, `CSV_FINALIZE_FAIL` — and every one of them keeps its
+  // own copy. Collapsing those onto this entry would tell a user who uploaded
+  // an 11 MB file that the failure is "on our side, not your data", and would
+  // assert "Nothing was saved" where `CSV_PERSIST_FAIL` may make that
+  // affirmatively false. 140.5-05 owns the three-way arm and its negative
+  // controls.
+  //
+  // "NOTHING WAS SAVED" IS VERIFIED, NOT ASSERTED, at the arm this entry serves
+  // (`strategies/csv-validate`). Three layers: the Next route performs zero
+  // writes (no supabase client, no insert/upsert/update, no audit event);
+  // Python's `_run_validate_only` runs `adapter.validate()` only, with no DB
+  // insert, no state-machine transition and no fingerprint/encryption; and the
+  // `strategies` row is created on the CSV path only by `finalize_csv_strategy`
+  // at the FINALIZE step. The 401/403/429 arms short-circuit before any of it.
+  // ⚠️ ONE CAVEAT, recorded so nobody has to rediscover it: a `wizard_error`
+  // PostHog funnel event does fire on this path. That is TELEMETRY, not user
+  // data, and the sentence reads as being about the user's file.
+  //
+  // WHY THIS CODE AND NOT A NEW ONE. `CSV_UPSTREAM_FAIL` already exists,
+  // already means "upstream failure on this surface" and already has emitters
+  // at the csv-validate route. A second code for the same fact is exactly the
+  // two-names-one-fact drift `seam-copy.ts` exists to prevent, so reuse beats
+  // the naming preference against a `CSV_` prefix. Deliberate, recorded.
+  //
+  // The `correlation_id` the copy points at is rendered by
+  // `CsvValidationEnvelope`'s own footer line — it is deliberately NOT
+  // interpolated here, which keeps this entry's dynamic-value count at ONE.
   CSV_UPSTREAM_FAIL: {
-    title: "Validation service returned an unexpected response. Retry shortly.",
-    cause: "Our analytics service returned an envelope without preview data.",
+    title: "We couldn't check your file just now.",
+    cause: "This is on our side, not your data. Nothing was saved.",
     fix: [
-      "Wait 30 seconds and click Retry.",
-      "If it persists, contact security@quantalyze.com.",
+      "Try again in a moment — if it keeps happening, send us this reference.",
     ],
     docsHref: "/security#sync-timing",
+    // `clear_and_retry` is required, not decorative: `envelope.ts` derives
+    // `recoverable` from `actions`, and without it the copy would say "try
+    // again in a moment" beside an envelope that renders no Retry control.
+    // `request_call` is the "send us this reference" affordance.
     actions: ["clear_and_retry", "request_call"],
   },
 
@@ -1288,7 +1439,8 @@ export function formatKeyError(
 
   if (code === "GATE_INSUFFICIENT_DAYS" && context?.days !== undefined) {
     // Floor-round so a sub-7 value never displays as "7.0". The gate
-    // compares strictly `< 7` (see strategyGate.ts:89), but `.toFixed(1)`
+    // compares strictly `< 7` (see `strategyGate.ts`'s
+    // `spanDays < STRATEGY_GATE_MIN_DAYS` check), but `.toFixed(1)`
     // rounds half-up, so a real span of 6.95 was rendered as "7.0" — a
     // user reading "we found 7.0 days" sees a passing-looking number
     // alongside a failure and is justifiably confused. Floor at 1
@@ -1419,7 +1571,7 @@ export function gateFailureToWizardError(code: GateFailureCode): WizardErrorCode
  * The divergence is deliberate, and pinned in the parity test. Do not wire
  * either into an automated retry loop; retry is Phase 141 (rider W-4).
  */
-const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
+export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   string,
   { code: WizardErrorCode; status: number }
 > = new Map([
@@ -1435,7 +1587,104 @@ const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   // meaning.
   ["NETWORK_UNAVAILABLE", { code: "KEY_NETWORK_TIMEOUT", status: 502 }],
   ["DDOS_PROTECTION", { code: "KEY_VENUE_TRANSIENT", status: 503 }],
+  // ── 140.5-02 / SEAMPROSE-03 — the four SCOPE/PERMISSION codes ─────────────
+  //
+  // ⚠️ COVERAGE-LAW ROW 2. This table is a HAND-TYPED ROSTER and adding rows to
+  // it is **PARTIAL BY CONSTRUCTION**, in those words. The row-1 version is a
+  // `WireErrorCode` union this phase does not schedule. What the parity guard
+  // in `seam-venue-vocabulary.invariant.test.ts` adds is NOT row 1 either — it
+  // adds FAIL-LOUD ARRIVAL: its population is derived from the REAL Python
+  // emitters, so a newly-emitted code reddens CI until someone writes its
+  // disposition. A roster that cannot silently miss a new member is still a
+  // roster.
+  //
+  //   MISSING_SCOPE — rendered UNKNOWN/500 ("we could not classify this") for a
+  //     plainly fixable key scope. It matched NO cascade branch: the real
+  //     detail is `key is missing required scope 'account:read'`, and the
+  //     cascade has no needle for it. This is the milestone's signature defect,
+  //     live at HEAD, and the Python side documents that MISSING_SCOPE IS
+  //     reachable and IS permanent.
+  //   PERMISSION_DENIED — rendered KEY_IP_ALLOWLIST/502: a server status for a
+  //     caller fault, asserting ONE of two possible causes. It matched the
+  //     `ip` + `allow` branch on the REMEDY half of its own sentence.
+  //   WITHDRAW_SCOPE — reached KEY_HAS_TRADING_PERMS through the
+  //     `trading|withdraw` branch, so a withdrawal-capable key was told its
+  //     problem was TRADING. The correct member already existed.
+  //   TRADE_SCOPE — correct today only by an ACCIDENT OF SUBSTRING ORDER (the
+  //     same branch, reached by the other half of the same `||`). Listed so the
+  //     verdict is decided by the table rather than by which token appears.
+  //     ⭐ It is included precisely BECAUSE it is already right: a row that
+  //     changes nothing today is what stops the next reword from changing it.
+  ["MISSING_SCOPE", { code: "KEY_MISSING_READ_SCOPE", status: 400 }],
+  ["PERMISSION_DENIED", { code: "KEY_PERMISSION_DENIED", status: 400 }],
+  ["WITHDRAW_SCOPE", { code: "KEY_HAS_WITHDRAW_PERMS", status: 400 }],
+  ["TRADE_SCOPE", { code: "KEY_HAS_TRADING_PERMS", status: 400 }],
 ]);
+
+/**
+ * 140.5-02 / SEAMPROSE-03 — the wire codes `VENUE_WIRE_CODE_TO_VERDICT`
+ * deliberately does NOT answer for, each with the reason, MEASURED.
+ *
+ * Exported for the parity guard in `seam-venue-vocabulary.invariant.test.ts`,
+ * which derives the emitted-code population from the Python sources and
+ * requires every member of it to have a disposition: a row above, or an entry
+ * here. Without this half the guard would demand a verdict row for codes that
+ * correctly have none, and the pressure would be to invent one.
+ *
+ * ⚠️ EVERY REASON BELOW WAS VERIFIED BY REPLAYING THE REAL PYTHON DETAIL STRING
+ * THROUGH `classifyKeyValidationError`, not guessed. The guard's companion unit
+ * tests assert the replayed verdicts, so a reason that stops being true reds.
+ */
+export const VENUE_WIRE_CODES_WITHOUT_VERDICT: ReadonlyMap<string, string> =
+  new Map([
+    [
+      "UNSUPPORTED_EXCHANGE",
+      "Detail: 'Unsupported exchange for permission verification.' Reaches the " +
+        "cascade's terminal UNKNOWN/500, and that is the HONEST answer: it is " +
+        "our own configuration gap (the exchange is absent from EXCHANGE_CLASSES), " +
+        "not a fault in the user's key, and no KEY_* copy would be true of it. " +
+        "A dedicated member is a real improvement and is NOT this plan's.",
+    ],
+    [
+      "VALIDATION_UNEXPECTED",
+      "Detail: 'Key validation failed unexpectedly. Contact support if this " +
+        "persists.' It is BY DEFINITION the unclassified residue of the Python " +
+        "side's own classification, so mapping it to a specific wizard verdict " +
+        "would manufacture a diagnosis the producer explicitly declined to make. " +
+        "UNKNOWN/500 is the correct answer for an unclassified throw.",
+    ],
+    [
+      "MT5_MASTER_PASSWORD",
+      "Already reaches KEY_MT5_MASTER_PASSWORD/400 through the cascade's " +
+        "'master password' branch, whose collision invariant is stated and " +
+        "checked in-file. A table row would be correct but redundant, and the " +
+        "MT5 detail strings are pinned byte-identically against closed_sets.py " +
+        "so a Python reword reds there rather than silently here.",
+    ],
+    [
+      "MT5_WRONG_SERVER",
+      "Same as MT5_MASTER_PASSWORD: reaches KEY_MT5_WRONG_SERVER/400 through " +
+        "the 'broker server' branch, pinned byte-identically.",
+    ],
+    [
+      "CSV_TOO_LARGE",
+      "CSV-surface code. It never reaches classifyKeyValidationError at all — " +
+        "the CSV branch renders through the route's own vocabulary and " +
+        "WIZARD_ERROR_COPY.CSV_FILE_TOO_LARGE, which interpolates the observed " +
+        "size. Disposition is BY FAMILY, not by row.",
+    ],
+    [
+      "CSV_FORMAT_UNSUPPORTED",
+      "CSV-surface code, same family disposition as CSV_TOO_LARGE: rendered by " +
+        "the route vocabulary, never by the key-validation classifier.",
+    ],
+    [
+      "CSV_VALIDATION_FAILED",
+      "CSV-surface code AND the static fallback of the DYNAMIC emitter below. " +
+        "Rendered by CsvValidationEnvelope through WIZARD_ERROR_COPY, never by " +
+        "this classifier.",
+    ],
+  ]);
 
 /**
  * Classify a caught key-validation exception into a stable wizard error code +
@@ -1496,8 +1745,9 @@ export function classifyKeyValidationError(error: unknown): {
   // branch keeps winning, which is exactly how DDOS_PROTECTION was rendering as
   // KEY_IP_ALLOWLIST).
   //
-  // A PLAIN OWN DATA PROPERTY, READ WITH `typeof` — NOT `instanceof`. Sixteen
-  // route test files `vi.mock("@/lib/analytics-client")` wholesale, so
+  // A PLAIN OWN DATA PROPERTY, READ WITH `typeof` — NOT `instanceof`. Every
+  // route test that mocks a seam client wholesale does
+  // `vi.mock("@/lib/analytics-client")`, so
   // `AnalyticsUpstreamError` is `undefined` inside those suites and an
   // `instanceof` here would throw from inside a catch block. `seamCode` is an
   // own property assigned in that class's constructor (140.3-01), so this read
@@ -1513,6 +1763,56 @@ export function classifyKeyValidationError(error: unknown): {
     // venue code minted after this table was written still gets whatever the
     // human string can earn it.
     if (verdict !== undefined) return verdict;
+  }
+
+  // ⚠️ Phase 140.5-02 / SEAMPROSE-03 — B-02. OUR OWN TRANSPORT, READ BEFORE THE
+  // MESSAGE IS SNIFFED, AND FOR THE SAME REASON THE BLOCK ABOVE IS.
+  //
+  // WHAT WAS BROKEN. The cascade below tests `lower.includes("timeout")`, and
+  // the message `analytics-client` actually constructs says **"timed out"**.
+  // `"timed out"` does not contain `"timeout"`. Replayed against the whole
+  // cascade, all three of the client's producible messages answered
+  // `{UNKNOWN, 500}` — the terminal that admits knowing nothing, with no retry
+  // affordance — and the breaker cannot rescue it, because it needs 5 failures
+  // in 30 s while a Railway outage arrives at human retry cadence with the
+  // breaker still CLOSED. The ONE test that appeared to cover that branch
+  // pinned `"connect ETIMEDOUT …"`, a raw undici syscall string this client
+  // wraps before rethrowing, so it could never reach here.
+  //
+  // WHY BY TYPE AND NOT A WIDER NEEDLE. Adding `"timed out"` to the substring
+  // is a per-site edit the next reword re-breaks, and it would still answer
+  // `KEY_NETWORK_TIMEOUT` — copy that blames the EXCHANGE for a failure of our
+  // own hop.
+  //
+  // A PLAIN OWN DATA PROPERTY, READ WITH `typeof` — NOT `instanceof`, for
+  // exactly the mock-survival reason spelled out in the block above, and
+  // resolved through the SHARED wire→wizard table rather than a second private
+  // vocabulary. Both values (`UPSTREAM_TIMEOUT`, `UPSTREAM_NETWORK_ERROR`) are
+  // already rows there, mapping to `SERVICE_UNREACHABLE`.
+  //
+  // WHY IT IS A SEPARATE FIELD FROM `seamCode`, and why the two cannot collide:
+  // `seamCode` is what an UPSTREAM'S BODY declared; this is what OUR TRANSPORT
+  // observed, on a path where no body exists. They are mutually exclusive by
+  // construction, and keeping them apart is a security property — one field
+  // carrying both would let an upstream put `"UPSTREAM_TIMEOUT"` in its
+  // envelope and be handed our transport verdict.
+  //
+  // ⚠️ DO NOT COPY `SERVICE_UNAVAILABLE_RETRY`'s "Nothing was submitted" onto
+  // this path. That claim is knowable for a breaker that DECLINED to send; it
+  // is false-by-construction for a request that WAS issued and never answered.
+  // 140.3-12 fixed that once. `SERVICE_UNREACHABLE`'s copy is the one that
+  // states the uncertainty, which is why this maps there and not one line up.
+  const transportCode = (
+    error as { seamTransportCode?: unknown } | null | undefined
+  )?.seamTransportCode;
+  if (typeof transportCode === "string") {
+    const wizardCode = recogniseSeamErrorCode(transportCode);
+    // No `??` fallback, same as above: an unrecognised marker falls through to
+    // the cascade rather than short-circuiting to UNKNOWN. 502 is the status
+    // the seam already uses for "we could not reach it" (the venue table's
+    // NETWORK_UNAVAILABLE row and the cascade branch this replaces both say
+    // 502), so the wire answer is unchanged; only the code and its copy move.
+    if (wizardCode !== "UNKNOWN") return { code: wizardCode, status: 502 };
   }
 
   // `String(error)` keeps the classifier TOTAL: `throw {…}` / `throw undefined`
@@ -1649,6 +1949,23 @@ const SEAM_CODE_TO_WIZARD_CODE: ReadonlyMap<string, WizardErrorCode> = new Map<
   // admit `SEAM_DEGRADED`, `MT5_GATEWAY_UNREACHABLE` and every venue code too,
   // which is the reason this table is explicit at all.
   ["SEAM_MISCONFIGURED", "SEAM_MISCONFIGURED"],
+  // 140.5-02 / SEAMPROSE-03 — AN ALIAS, in the `CIRCUIT_OPEN` sense rather than
+  // the `SEAM_MISCONFIGURED` one: the CSV surface's LOCAL NAME for a fact
+  // `RATE_LIMITED` already stands for. Both CSV routes answer their own
+  // per-session throttle with `code: "CSV_RATE_LIMIT"` and a stamped
+  // `Retry-After`; that header is the ONE wait the CSV surface actually
+  // advertises, and without this row the code resolves "UNKNOWN" and the wait
+  // is discarded on the way to the envelope.
+  //
+  // ⚠️ IT IS DELIBERATELY NOT A `WizardErrorCode`, AND THE ABSENCE IS
+  // LOAD-BEARING — do not "complete" this by minting a member or adding it to a
+  // `KNOWN_*` roster. 140.5-05's arm tries the already-known-code branch BEFORE
+  // this table; admitting `CSV_RATE_LIMIT` there would keep the route's local
+  // copy and the stamped wait would never reach the shared envelope.
+  //
+  // Listed EXPLICITLY, like every other row: an identity rule would silently
+  // admit every future `CSV_*` name too.
+  ["CSV_RATE_LIMIT", "RATE_LIMITED"],
 ]);
 
 export function recogniseSeamErrorCode(
@@ -1717,8 +2034,8 @@ export const CSV_SUBMIT_STEP_HEADINGS = {
  * Pandera rule labels surfaced by `CsvValidationEnvelope` per-rule
  * `<details>` summaries. Locked verbatim by 15-UI-SPEC §8.8 +
  * 17-UI-SPEC §14.3. Phase 17 relocates them from
- * `CsvValidationEnvelope.tsx:30-37` so wizardErrors.ts owns every
- * user-visible CSV-branch string.
+ * `CsvValidationEnvelope.tsx`'s `CsvValidationEnvelopeProps` so
+ * `wizardErrors.ts` owns every user-visible CSV-branch string.
  */
 export const CSV_RULE_LABELS: Readonly<Record<string, string>> = {
   monotonic_dates: "Dates must be strictly increasing",

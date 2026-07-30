@@ -16,7 +16,24 @@ import { installFetchMock, type FetchMock } from "@/test/helpers/fetch";
  * file proves the POSITIVE — the spy fires, once, with the right budget key,
  * and the raw `fetch` global is never touched. It fails the moment either
  * client regresses to a hand-rolled fetch, which no route test can catch
- * because all sixteen of them mock these clients wholesale.
+ * because every route test that mocks a seam client does so WHOLESALE — a
+ * `vi.mock("@/lib/analytics-client")` (or `process-key-client`, or
+ * `resilient-fetch`) replaces the module, so the transport underneath it is
+ * never exercised by any of them.
+ *
+ * (140.5-04) That sentence used to give a hard COUNT of those route tests. The
+ * integer is DELETED rather than corrected, because there is no single number to
+ * correct it to: the population's size swings depending on whether you count raw
+ * grep hits or comment-stripped ones, whether a route test living outside
+ * `src/app/api/**` counts, and whether the `csv-finalize-*` suites count. Five
+ * defensible readings gave five different integers when this was measured, and
+ * the old figure was right under exactly one of them. The PREDICATE is the
+ * honest thing to write down; a reader who needs the number can run it and will
+ * then know WHICH number they got.
+ *
+ * ⚠️ The discredited figure is described here, not reprinted. Reprinting it
+ * would put the very token back into the file that any absence check greps for,
+ * so the check would fail on CORRECTED code — the DEF-16-2 shape, one level up.
  *
  * ⚠️ ENV MUST BE SET BEFORE THE CLIENT MODULES LOAD. `SERVICE_KEY` is captured
  * at MODULE SCOPE in `analytics-client.ts` (`process.env.ANALYTICS_SERVICE_KEY

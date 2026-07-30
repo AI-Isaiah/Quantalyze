@@ -20,7 +20,7 @@ import { captureToSentry, shouldCaptureNow } from "./sentry-capture";
  * IN-REPO PRECEDENT
  * -----------------
  * Breaker state in a shared store is this project's established pattern, not a
- * new idea: `analytics-service/services/job_worker.py:731 _check_circuit_breaker`
+ * new idea: `analytics-service/services/job_worker.py`'s `_check_circuit_breaker`
  * already runs a Postgres-backed per-exchange breaker with TTL-like cooldown
  * timestamps (`EXCHANGE_COOLDOWNS`, :416). This module is the same shape one
  * tier up, against a different resource (the Railway deployment) and a
@@ -80,9 +80,10 @@ export { CircuitOpenError, SeamBodyReadError };
 // ---------------------------------------------------------------------------
 // Breaker tuning constants
 //
-// Exported as named constants with rationale comments (the `ratelimit.ts:94-214`
-// convention) so retuning is a one-line change reviewable in isolation, rather
-// than a magic number buried in a function body.
+// Exported as named constants with rationale comments (the convention
+// `ratelimit.ts` uses for its `makeLimiter` exports) so retuning is a one-line
+// change reviewable in isolation, rather than a magic number buried in a
+// function body.
 // ---------------------------------------------------------------------------
 
 /**
@@ -349,24 +350,53 @@ export type SeamBudgetKey =
  *     one dependency's trip still suppresses everything. Ledger row M35 is that
  *     mutation, and the isolation case is its falsifier.
  *
- * ⚠️ EVERY ENTRY IS EVIDENCE, NOT INTUITION. Derived 2026-07-27 by enumerating
- * every `dependency=` argument in `analytics-service/routers/**` together with
- * the status it is raised at. Only a `503` counts, so only a `503` can ever open
- * a per-dependency key, and the whole reachable set today is:
+ * ⚠️ EVERY ENTRY IS EVIDENCE, NOT INTUITION. Derived by enumerating every
+ * `dependency=` argument in `analytics-service/routers/**` together with the
+ * status it is raised at. THIRTEEN such arguments exist and all thirteen are
+ * accounted for below — that completeness is the property worth having, because
+ * a MISSING row silently under-declares a real breaker key, which is a worse
+ * failure than a wrong coordinate. Re-derived at HEAD on 2026-07-30 (140.5-07).
  *
- *   | dependency  | status | site                                      | reached by            |
- *   |-------------|--------|-------------------------------------------|-----------------------|
- *   | mt5-gateway | 503    | `exchange.py:314,324` `_validate_mt5_key`  | POST /api/validate-key |
- *   | supabase    | 503    | `portfolio.py:684` `_compute_portfolio_analytics` | /api/portfolio-analytics |
- *   | supabase    | 503    | `match.py:1657,1691` `recompute`          | /api/match/recompute  |
+ * ⚠️ ROWS ARE ANCHORED TO SYMBOLS — FUNCTION AND MACHINE CODE — NOT TO LINE
+ * NUMBERS, and that is a correction, not a style preference. The previous
+ * version of this table cited `exchange.py` coordinates that were ALL FOUR
+ * WRONG, every one of them low by 21 lines, while the five `internal.py` /
+ * `portfolio.py` / `match.py` coordinates beside them were still exact. A reader
+ * checking one of the correct rows would have concluded the table was
+ * trustworthy. Machine codes are unique, greppable, and are themselves the
+ * contract vocabulary `error_contract.py` validates, so they cannot drift with
+ * an unrelated edit above them the way a line number does.
  *
- * Every other `dependency=` site is a `500` (never counts — `internal.py:303,319`
- * and `exchange.py:626` name `kek`, `exchange.py:132` names `egress-proxy`,
- * `exchange.py:276,287` name `mt5-gateway`) or a `424` naming a VENUE
- * (`internal.py:498`, `exchange.py:547`). `breaker:kek` and
- * `breaker:egress-proxy` therefore cannot be opened by ANY site at HEAD, so
- * declaring them anywhere would declare a key that can never be set — noise that
- * reads as protection.
+ * Only a `503` counts, so only a `503` can ever open a per-dependency key, and
+ * the whole COUNTING set today is:
+ *
+ *   | dependency  | site                                                  | reached by               |
+ *   |-------------|-------------------------------------------------------|--------------------------|
+ *   | mt5-gateway | `exchange.py` `_validate_mt5_key` — `MT5_GATEWAY_UNREACHABLE` (×2: connect timeout, connect failure) | POST /api/validate-key |
+ *   | supabase    | `portfolio.py` `_compute_portfolio_analytics` — `ANALYTICS_ROW_NOT_CREATED` | /api/portfolio-analytics |
+ *   | supabase    | `match.py` `recompute` — `ADMIN_CHECK_UNAVAILABLE`, `ROLE_CHECK_UNAVAILABLE` | /api/match/recompute     |
+ *
+ * Every other `dependency=` site is breaker-inert, and each is inert for a
+ * REASON rather than by accident:
+ *   · `500`, never counts (SERVICE-PERMANENT, R-1 — an operator must act, so
+ *     counting it guarantees a self-sustaining outage):
+ *       `kek`         — `internal.py` `get_key_permissions` — `KEK_UNAVAILABLE`,
+ *                       `KEY_UNDECRYPTABLE`; `exchange.py` `encrypt_key` —
+ *                       `KEK_UNAVAILABLE`
+ *       `egress-proxy`— `exchange.py` `_validate_sfox_key` —
+ *                       `EGRESS_PROXY_MISCONFIGURED`
+ *       `mt5-gateway` — `exchange.py` `_validate_mt5_key` —
+ *                       `MT5_GATEWAY_UNCONFIGURED` (×2: absent host/port,
+ *                       malformed port). ⚠️ SAME FUNCTION AND SAME DEPENDENCY as
+ *                       the counting row above; only the STATUS separates them.
+ *   · `424`, never counts, and the name is the CALLER'S VENUE rather than a
+ *     dependency of ours (§4 — it must never become a breaker key):
+ *       `internal.py` `get_key_permissions` — `EXCHANGE_PROBE_FAILED`;
+ *       `exchange.py` `validate_key` — `EXCHANGE_PROBE_FAILED`
+ *
+ * `breaker:kek` and `breaker:egress-proxy` therefore cannot be opened by ANY
+ * site at HEAD, so declaring them anywhere would declare a key that can never be
+ * set — noise that reads as protection.
  *
  * ⚠️ THE TIE-BREAK, STATED. A stale or wrong declaration silently UNDER-protects,
  * and that is the direction chosen deliberately: under-protection is FAIL-OPEN,
@@ -393,10 +423,13 @@ export const SEAM_BUDGETS: Record<
 > = {
   "validate-key": {
     timeoutMs: 30_000,
-    // exchange.py:314,324 raise service_error(503, dependency="mt5-gateway")
-    // from _validate_mt5_key, reached by POST /api/validate-key. The sFOX and
-    // ccxt arms of the same endpoint answer 500 (egress-proxy) or 424 (venue),
-    // neither of which counts, so neither is declared.
+    // `exchange.py`'s `_validate_mt5_key` raises MT5_GATEWAY_UNREACHABLE —
+    // service_error(503, dependency="mt5-gateway") — reached by POST
+    // /api/validate-key. The sFOX and ccxt arms of the same endpoint answer 500
+    // (EGRESS_PROXY_MISCONFIGURED, egress-proxy) or 424 (EXCHANGE_PROBE_FAILED,
+    // venue), neither of which counts, so neither is declared. ⚠️ The SAME
+    // function also raises MT5_GATEWAY_UNCONFIGURED at 500 on the same
+    // dependency; the status is the only thing separating them.
     dependencies: ["mt5-gateway"],
     retries: SEAM_RETRIES,
     notes:
@@ -404,8 +437,9 @@ export const SEAM_BUDGETS: Record<
   },
   "encrypt-key": {
     timeoutMs: 30_000,
-    // exchange.py:626 is a 500 naming `kek` — SERVICE-PERMANENT, never counts,
-    // so `breaker:kek` cannot be open and declaring it would be decorative.
+    // `exchange.py`'s `encrypt_key` raises KEK_UNAVAILABLE at 500 naming `kek` —
+    // SERVICE-PERMANENT, never counts, so `breaker:kek` cannot be open and
+    // declaring it would be decorative.
     dependencies: [],
     retries: SEAM_RETRIES,
     notes:
@@ -416,14 +450,14 @@ export const SEAM_BUDGETS: Record<
     dependencies: [],
     retries: SEAM_RETRIES,
     notes:
-      "Weighted-covariance compute. Was hardcoded at analytics-client.ts:260.",
+      "Weighted-covariance compute. Was hardcoded inside analytics-client's findReplacementCandidates.",
   },
   simulator: {
     timeoutMs: 15_000,
     dependencies: [],
     retries: SEAM_RETRIES,
     notes:
-      "Portfolio impact simulator compute. Was hardcoded at analytics-client.ts:285.",
+      "Portfolio impact simulator compute. Was hardcoded inside analytics-client's simulateAddCandidate.",
   },
   "portfolio-optimizer": {
     timeoutMs: 15_000,
@@ -448,14 +482,16 @@ export const SEAM_BUDGETS: Record<
   },
   "match-recompute": {
     timeoutMs: 30_000,
-    // match.py:1657,1691 raise service_error(503, dependency="supabase").
+    // `match.py`'s `recompute` raises ADMIN_CHECK_UNAVAILABLE and
+    // ROLE_CHECK_UNAVAILABLE — service_error(503, dependency="supabase").
     dependencies: ["supabase"],
     retries: SEAM_RETRIES,
     notes: "Admin match engine, heavy compute. Was the 30s default.",
   },
   "portfolio-analytics": {
     timeoutMs: 30_000,
-    // portfolio.py:684 raises service_error(503, dependency="supabase"). M-5,
+    // `portfolio.py`'s `_compute_portfolio_analytics` raises
+    // ANALYTICS_ROW_NOT_CREATED — service_error(503, dependency="supabase"). M-5,
     // recorded and NOT gated on: this budget's only TypeScript wrapper
     // (computePortfolioAnalytics) has ZERO callers, so the arm is LATENT rather
     // than live. It becomes live the moment anyone calls that wrapper, which is
@@ -463,7 +499,7 @@ export const SEAM_BUDGETS: Record<
     dependencies: ["supabase"],
     retries: SEAM_RETRIES,
     notes:
-      "ZERO CALLERS TODAY — computePortfolioAnalytics (analytics-client.ts:224) is unreachable (research §4.2). Kept rather than deleted: deleting is scope creep and it is a plausible future caller. Phase 141's idempotency audit records 'no callers' for it.",
+      "ZERO CALLERS TODAY — analytics-client's computePortfolioAnalytics is unreachable (research §4.2). Kept rather than deleted: deleting is scope creep and it is a plausible future caller. Phase 141's idempotency audit records 'no callers' for it.",
   },
   "process-key-enqueue": {
     timeoutMs: 15_000,
@@ -511,7 +547,8 @@ export const SEAM_BUDGETS: Record<
   },
   "keys-permissions": {
     timeoutMs: 15_000,
-    // internal.py:303,319 are 500s naming `kek`; internal.py:498 is a 424
+    // `internal.py`'s `get_key_permissions` raises KEK_UNAVAILABLE and
+    // KEY_UNDECRYPTABLE as 500s naming `kek`, and EXCHANGE_PROBE_FAILED as a 424
     // naming a VENUE. No counting 503 exists on this endpoint.
     dependencies: [],
     retries: SEAM_RETRIES,
@@ -523,7 +560,7 @@ export const SEAM_BUDGETS: Record<
     dependencies: [],
     retries: SEAM_RETRIES,
     notes:
-      "The DEAD _unifiedValidateAndEncryptHandler fetch at keys/validate-and-encrypt/route.ts:158, which today has NO timeout at all. Routed through the core so any revival inherits a budget and a breaker rather than re-introducing an unbounded hang.",
+      "The DEAD fetch inside keys/validate-and-encrypt's _unifiedValidateAndEncryptHandler, which today has NO timeout at all. Routed through the core so any revival inherits a budget and a breaker rather than re-introducing an unbounded hang.",
   },
 };
 
@@ -757,11 +794,25 @@ if (!redis) {
  *
  * ⚠️ `ephemeralCache` IS DELIBERATELY LEFT AT ITS DEFAULT, and that default is a
  * LIVE in-memory `Map` — discovered by the real-Redis lane in plan 140.2-01 and
- * previously undocumented here. `@upstash/ratelimit@2.0.8` builds one whenever
- * the option is omitted (`dist/index.mjs:757-761`); on a DENIED `limit()` it
- * calls `ctx.cache.blockUntil(identifier, reset)` (`:1580-1585`) and every later
- * call for that identifier short-circuits IN MEMORY with `reason: "cacheBlock"`,
- * never reaching Redis until the bucket ends (`:1560-1569`).
+ * previously undocumented here.
+ *
+ * OUT-OF-REPO REFERENCE — the coordinates in the next sentence point INTO A
+ * DEPENDENCY, at a pinned version, and are deliberately NOT converted to symbol
+ * anchors (140.5-07; this is the one expected allowlist entry for 140.5-08's
+ * seam citation guard, which otherwise forbids the bare `file:line` form). The
+ * reasoning: `node_modules` is not ours to anchor into, the file is a BUILD
+ * ARTEFACT with no stable symbol names to cite, and the version pin is what
+ * makes the coordinates meaningful — they are reproducible for
+ * `@upstash/ratelimit@2.0.8` specifically and are expected to be wrong for any
+ * other version, which is the opposite of the in-repo rot this phase is
+ * correcting. If the pin moves, RE-READ the artefact; do not "fix" the numbers.
+ *
+ * `@upstash/ratelimit@2.0.8` builds one whenever the option is omitted
+ * (`dist/index.mjs:757-761`); on a DENIED `limit()` it calls
+ * `ctx.cache.blockUntil(identifier, reset)` (same file, lines 1580-1585) and
+ * every later call for that identifier short-circuits IN MEMORY with
+ * `reason: "cacheBlock"`, never reaching Redis until the bucket ends (same file,
+ * lines 1560-1569).
  *
  * Three reasons it stays (140.2-06 decision, recorded rather than inherited):
  *   1. The block is keyed by IDENTIFIER, and identifiers are now per-dependency.
@@ -1606,8 +1657,14 @@ function instrumentBody(
       // aborts is ONE degraded request, not two. Before the shared latch a 503
       // with a stalling body recorded twice — half the failures needed to trip,
       // from the same number of requests.
+      //
+      // NO `&& bodyVerdict.breakerKey !== null` (140.5-07 / WP-13). `counts`
+      // narrows the verdict to its counting member, on which `breakerKey` is
+      // `string`, so that conjunct was dead — and its dead FALSE branch had no
+      // else, i.e. it silently dropped a countable failure. See
+      // `SeamBreakerVerdict`.
       const bodyVerdict = seamBreakerVerdict(null);
-      if (bodyVerdict.counts && bodyVerdict.breakerKey !== null) {
+      if (bodyVerdict.counts) {
         await recordOnce(bodyVerdict.breakerKey);
       }
       // THROWS, and must keep throwing. `keys/[id]/permissions` runs its seam
@@ -1902,8 +1959,11 @@ export async function resilientFetch(
     // No status line at all, so the verdict is TRANSPORT and the key is the
     // residual global one. Asked of the discriminator rather than hardcoded here
     // so there is exactly ONE definition of that mapping.
+    // The null-key conjunct is GONE here too — see the `SeamBreakerVerdict`
+    // union. `counts` is the whole discriminator; a counting verdict always
+    // names a key.
     const transportVerdict = seamBreakerVerdict(null);
-    if (transportVerdict.counts && transportVerdict.breakerKey !== null) {
+    if (transportVerdict.counts) {
       await recordOnce(transportVerdict.breakerKey);
     }
     // Rethrow the ORIGINAL error. Both clients map `err.name` onto their own
@@ -1926,8 +1986,17 @@ export async function resilientFetch(
   // common 5xx, so a classifier that needs a body is undefined exactly there
   // (TRAP-2). The body is consulted ONLY to refine WHICH key a counting verdict
   // names, and only on the 503 arm.
+  //
+  // ⚠️ THE THIRD AND ONLY DYNAMIC ONE. The two arms above ask
+  // `seamBreakerVerdict(null)`, whose verdict is a constant; this is the site
+  // where the status and body actually decide. It carried the same dead
+  // `&& verdict.breakerKey !== null` conjunct, and here it mattered most: a 503
+  // is the one arm that can name a dependency, so this is where a keyless
+  // counting verdict would have been dropped in production. Deleted — `counts`
+  // narrows `breakerKey` to `string`. Pinned at runtime by
+  // `seam-breaker-failopen.regression.test.ts`.
   const verdict = seamBreakerVerdict(res.status, await readDependencyBody(res));
-  if (verdict.counts && verdict.breakerKey !== null) {
+  if (verdict.counts) {
     await recordOnce(verdict.breakerKey);
   }
   // 4xx NEVER records — including the `424` whose body names the caller's VENUE,

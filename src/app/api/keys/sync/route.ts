@@ -170,7 +170,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // a vague error arm is what turns it into a specific lie.
   //
   // The split copies the in-tree template at
-  // `strategies/finalize-wizard/route.ts:624-646` verbatim in shape:
+  // the `wizard_session_id` draft-read split in `strategies/finalize-wizard/route.ts` verbatim in shape:
   // `.maybeSingle()`, then the transport error first (a 500 ABOUT US, with the
   // caught value scrubbed through the shipped `scrubSeamError` — never a
   // hand-rolled scrub), then the genuinely-absent row.
@@ -227,7 +227,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // because the backbone is permanent-on (Phase 106) and the unified arm
   // cannot honestly derive a NULL-api_key composite (it would mis-route to a
   // single-key path). This MIRRORS the Phase-88 finalize-wizard hoist
-  // (finalize-wizard/route.ts:517-621).
+  // (the Phase-88 hoist in finalize-wizard/route.ts).
   //
   // Scoped to api_key_id === null: a composite has strategies.api_key_id NULL
   // (members live in strategy_keys); api_key_id SET is definitively single-key

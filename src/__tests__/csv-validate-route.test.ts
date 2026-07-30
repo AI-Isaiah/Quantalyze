@@ -460,9 +460,16 @@ describe("/api/strategies/csv-validate", () => {
     // arm that is the unclassified residue by construction. Two `toBe`
     // assertions were holding that misattribution in place, which is why the
     // correction has to land here as well as in the route.
-    expect(json.human_message).toBe(
-      "Validation service returned an unexpected response. Retry shortly.",
-    );
+    //
+    // 140.5-02 / SEAMPROSE-03 — THE LITERAL MOVED AGAIN, and again because the
+    // sentence it pinned was replaced rather than because this guard weakened.
+    // The route reads `WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL.title`, and that
+    // entry now carries the FOUNDER-AUTHORED §4a copy: one message for every
+    // non-2xx from the CSV validator that is not row-level validation failure,
+    // on the founder's stated reasoning that a user cannot act differently on a
+    // 403 than on a 404. The NO-ECHO property this case exists for is
+    // untouched — only the static sentence it must equal has changed.
+    expect(json.human_message).toBe("We couldn't check your file just now.");
     expect(json.correlation_id).toBeNull();
   });
 
@@ -496,10 +503,9 @@ describe("/api/strategies/csv-validate", () => {
         JSON.stringify(json),
         "an arbitrary thrown message reached the wizard error panel — the 502 is echoing, not answering statically",
       ).not.toContain("zq7f4e-marker");
-      // 140.4-16 / CR-02 — see the note at the sibling case above.
-      expect(json.human_message).toBe(
-        "Validation service returned an unexpected response. Retry shortly.",
-      );
+      // 140.4-16 / CR-02, re-pointed at 140.5-02 — see the note at the sibling
+      // case above.
+      expect(json.human_message).toBe("We couldn't check your file just now.");
 
       const logged = errorSpy.mock.calls
         .map((call) => call.map((arg) => String(arg)).join(" "))
@@ -548,13 +554,41 @@ describe("/api/strategies/csv-validate", () => {
         "the terminal arm is telling the user their CSV failed validation for " +
           "a fault that is ours by construction — the code's own authored copy " +
           "already says the true thing and is being shadowed",
-      ).toBe("Validation service returned an unexpected response. Retry shortly.");
+      ).toBe("We couldn't check your file just now.");
       // The class, not the instance: no sentence on this arm may name the
-      // user's data as the thing that failed.
+      // user's data as THE THING THAT FAILED.
+      //
+      // ⚠️ 140.5-02 — THE NEEDLE WAS NARROWED, DELIBERATELY, AND HERE IS THE
+      // ARGUMENT. It used to be `/validation failed|your (csv|file|data)/i`,
+      // which bans the mere MENTION of the user's file. The founder-authored
+      // §4a sentence mentions it — "We couldn't check your file just now." —
+      // while asserting the exact opposite of blame, and the entry's cause line
+      // goes on to say "This is on our side, not your data." A needle that
+      // rejects that sentence is measuring the wrong property: the defect is
+      // ATTRIBUTION, not vocabulary. The narrowed form requires the user's
+      // artefact to be the SUBJECT OF A FAILURE VERB.
+      //
+      // Because a narrowed needle is a weakened needle, BOTH POLARITIES are
+      // asserted below, and the negative half is the load-bearing one — a rule
+      // relaxed until it catches nothing would otherwise pass silently.
+      const blamesTheUser = (s: string) =>
+        /validation failed|your (csv|file|data)\b[^.]*\b(failed|invalid|rejected|wrong|bad|broken)\b/i.test(
+          s,
+        );
       expect(
-        /validation failed|your (csv|file|data)/i.test(json.human_message),
+        blamesTheUser(json.human_message),
         "a user-blaming phrase is back on the arm defined as NOT-the-user's-data",
       ).toBe(false);
+      // POSITIVE CONTROL — the needle still fires on the two real sentences
+      // this guard was written against, so the narrowing did not gut it.
+      expect(blamesTheUser("CSV validation failed.")).toBe(true);
+      expect(
+        blamesTheUser("Validation failed. See per-row breakdown below."),
+      ).toBe(true);
+      expect(blamesTheUser("Your file failed our checks.")).toBe(true);
+      // NEGATIVE CONTROL — a sentence that merely mentions the file without
+      // blaming it must pass, which is the whole point of the narrowing.
+      expect(blamesTheUser("We couldn't check your file just now.")).toBe(false);
     } finally {
       errorSpy.mockRestore();
     }

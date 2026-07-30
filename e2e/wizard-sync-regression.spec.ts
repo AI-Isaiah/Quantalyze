@@ -15,8 +15,11 @@ import { test, expect } from "@playwright/test";
  */
 
 test.describe("Wizard SyncPreviewStep — queue flag regression", () => {
+  // 140.5-06: was `test.skip(true, …)` while its own reason named the env var
+  // that should gate it. Absent from every .github/workflows file, so CI
+  // behaviour is unchanged; locally it is now opt-in runnable.
   test.skip(
-    true,
+    !process.env.PLAYWRIGHT_TEST_STRATEGY_ID,
     "Requires authenticated session with a strategy in wizard flow. " +
       "Set PLAYWRIGHT_TEST_STRATEGY_ID to run against a real backend.",
   );

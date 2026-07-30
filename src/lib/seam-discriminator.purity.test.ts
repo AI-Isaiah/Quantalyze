@@ -28,8 +28,8 @@ import * as seamDiscriminator from "./seam-discriminator";
  *     independence that makes the two hand-typed vocabularies falsifiable
  *     against each other.
  *
- *  2. MOCK SURVIVAL. Sixteen route test files replace the seam clients
- *     wholesale, most with a full factory and no `importActual`. A predicate
+ *  2. MOCK SURVIVAL. Every route test that mocks a seam client wholesale does
+ *     so with a full factory and no `importActual`. A predicate
  *     reached THROUGH such a module evaluates to `undefined`, and calling it
  *     throws a TypeError from INSIDE a catch block — converting a clean 503 into
  *     a crash. Nothing mocks this leaf, so it holds under every existing mock
@@ -113,8 +113,8 @@ const PURITY_RATIONALE =
   "Two things break at once. (1) BUNDLE BOUNDARY: plan 140.3-01 applies this " +
   "predicate at a \"use client\" component, so a dependency added here ships to " +
   "the browser — including, for anything seam-adjacent, a Redis client and a " +
-  "module-load side effect. (2) MOCK SURVIVAL: sixteen route tests replace the " +
-  "seam clients wholesale, and a predicate reached through a wholesale mock " +
+  "module-load side effect. (2) MOCK SURVIVAL: every route test that mocks a " +
+  "seam client does it wholesale, and a predicate reached through such a mock " +
   "evaluates to undefined and throws a TypeError from inside a catch block, " +
   "turning a clean 503 into a crash. If this leaf genuinely needs a dependency, " +
   "the predicate has to move — widening this guard is never the fix. In " +
@@ -144,6 +144,48 @@ describe("[SEAMCORE-01 / SC6-a] seam-discriminator.ts is a dependency-free leaf"
       /\brequire\s*\(/.test(LEAF_CODE),
       `${LEAF_PATH} now calls require(). ${PURITY_RATIONALE}`,
     ).toBe(false);
+  });
+
+  it("contains no DYNAMIC import()", () => {
+    // The needle the other three missed. `/^\s*import\s/m` REQUIRES whitespace
+    // after `import`, so `import("x")` matches nothing — measured by execution
+    // at 140.5 planning against all four purity pattern sets, in every
+    // position (top level, indented, awaited). Until this case existed, any of
+    // the four leaves could acquire a dependency with green CI.
+    expect(
+      /\bimport\s*\(/.test(LEAF_CODE),
+      `${LEAF_PATH} now contains a dynamic import(). A lazy import is still a ` +
+        `dependency edge — it just moves the failure from build time to the ` +
+        `first call, which for these predicates is inside a CATCH block on a ` +
+        `client-reachable path. ${PURITY_RATIONALE}`,
+    ).toBe(false);
+  });
+
+  it("the dynamic-import needle catches the shape this repo already uses", () => {
+    // POSITIVE CONTROL, and it is not decorative: a guard asserting an ABSENCE
+    // reads as protection while doing nothing if its needle is wrong, and this
+    // needle was ADDED because the three beside it were wrong for four years of
+    // file history. `src/lib/sentry-capture.ts` uses this exact idiom in-repo
+    // (`import("@sentry/nextjs")`, documented as keeping Sentry out of
+    // bundles), so "lazy-import it so it doesn't ship" is a locally-idiomatic
+    // tidy-up that would have defeated every purity guard in this repo.
+    const smuggled = [
+      "function build() {",
+      '  const m = await import("@upstash/redis");',
+      "  return m;",
+      "}",
+    ].join("\n");
+    const clean = ["function build() {", "  return null;", "}"].join("\n");
+
+    expect(/\bimport\s*\(/.test(smuggled)).toBe(true);
+    // NEGATIVE half — the load-bearing one. A needle that fires on everything
+    // would be "fixed" by weakening it until it caught nothing.
+    expect(/\bimport\s*\(/.test(clean)).toBe(false);
+    // And the measurement that justifies the new case existing at all: the
+    // three pre-existing needles are all BLIND to the smuggled shape.
+    expect(/^\s*import\s/m.test(smuggled)).toBe(false);
+    expect(/^\s*export\s[^\n]*\bfrom\s/m.test(smuggled)).toBe(false);
+    expect(/\brequire\s*\(/.test(smuggled)).toBe(false);
   });
 
   it("reads no environment variable", () => {

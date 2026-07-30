@@ -591,8 +591,10 @@ async def test_cash_conventions_echo_ccxt_override() -> None:
     metrics_basis="active_day") now echoes {simple, active} in the persisted cash
     conventions. Pre-105 the ccxt arm NEVER parsed the override (the parse lived only
     inside ``if venue == "deribit"``), so it echoed the geometric/calendar DEFAULT — the
-    MED-2 bug. Proves the parse is hoisted VENUE-AGNOSTICALLY (analytics_runner.py:2304-2316
-    parity), feeding the SAME single derive with no venue branch inside the derive path.
+    MED-2 bug. Proves the parse is hoisted VENUE-AGNOSTICALLY (parity with the
+    `_denominator_config = parse_returns_denominator_config(...)` block in
+    ``analytics_runner.run_csv_strategy_analytics``), feeding the SAME single derive
+    with no venue branch inside the derive path.
 
     Neuter: re-scope the parse back inside the ``if venue == "deribit"`` branch →
     ``denominator_config`` stays None on the ccxt path → conventions echo

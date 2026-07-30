@@ -78,18 +78,35 @@ const TENANT_CLAIM_TTL_SECONDS = 300;
  * compiler unable to help. A one-field object cannot be confused with a
  * credential, so the mistake becomes a type error instead of a leak.
  *
- * The three wrappers that already carried an identity before this phase
- * (`runPortfolioOptimizer`, `findReplacementCandidates`,
- * `computePortfolioAnalytics`, plus `recomputeMatch` / `simulateAddCandidate`)
- * keep their existing `actorId` / `userId` string parameters — those are
- * pre-existing signatures with no adjacent secret, and churning them would be
- * scope creep.
+ * The wrappers that already carried an identity before this phase keep their
+ * existing `actorId` / `userId` string parameters — enumerated rather than
+ * counted, because the sentence that stood here said "the THREE wrappers" and
+ * then listed FIVE names, which is the defect class 140.5 exists to close
+ * (verified at HEAD, 2026-07-29, each signature read):
+ * `computePortfolioAnalytics`, `runPortfolioOptimizer`,
+ * `findReplacementCandidates`, `simulateAddCandidate`, `recomputeMatch`. Those
+ * are pre-existing signatures with no adjacent secret, and churning them would
+ * be scope creep.
+ *
+ * The wrappers that DO take this type are `validateKey`, `encryptKey`,
+ * `optimizeScenarioWeights` and `evalMatch` — so the interface is applied, not
+ * merely declared. (`140.5-RESEARCH` §11 recorded it as "exists and is NOT
+ * applied"; that was measured against `mintTenantClaim` alone and does not hold
+ * of the file.) As of 140.5-07 `mintTenantClaim` itself takes it too, which is
+ * what makes the transposition uncompilable rather than merely discouraged.
  */
 export interface TenantIdentity {
   /**
    * The authenticated `user.id` from the route's server session — never a
    * value the caller supplied, and never `X-User-Id` (which is unsigned client
    * input the Python limiter deliberately ignores).
+   *
+   * ONE server-side literal is also admitted: `"public"`, the anonymous teaser
+   * bucket. `verify-strategy`'s route passes it through `postProcessKey`'s
+   * `userId` field so all unauthenticated traffic shares a window isolated from
+   * every authenticated tenant. It is a constant in OUR source, not a value that
+   * arrived over the wire, so it satisfies "server-derived" in the sense that
+   * matters here.
    */
   readonly userId: string;
 }
@@ -104,18 +121,49 @@ export class TenantClaimError extends Error {
 /**
  * Mint the `X-Tenant-Claim` the Python limiter buckets on.
  *
- * @param payload - a SERVER-DERIVED tenant identifier: the authenticated
- *   `user.id`, or the literal `"public"` for the anonymous teaser bucket. Never
- *   a caller-supplied value — `tenant_or_platform_key` returns
- *   `<scope>:t:<payload>` with the payload VERBATIM, so a caller who controls it
- *   controls which window they spend.
+ * ⚠️ THE FIRST PARAMETER IS AN OBJECT, AND THAT IS THE WHOLE POINT (140.5-07 /
+ * SEAMPROSE-05, closing WP-13's F5). This function used to read
+ * `mintTenantClaim(payload: string, secret: string)` — two ADJACENT SAME-TYPED
+ * strings, one of which is the platform secret. Transposing them compiled
+ * cleanly and passed all three guards below (`INTERNAL_API_TOKEN` is non-empty
+ * and dot-free, and a `user.id` is a non-empty "secret"), so the mint returned
+ * `<INTERNAL_API_TOKEN>.<exp>.<mac-keyed-by-userId>` and both call sites put
+ * that value into an outbound header. Wrapping the identity in a ONE-FIELD
+ * OBJECT makes the transposition a TYPE ERROR instead: a `string` is not
+ * assignable to `TenantIdentity`, at every call site that exists and every one
+ * that does not yet — the compiler enforces it with no per-site edit.
+ *
+ * ⚠️ LATENT, NOT LIVE, AND DO NOT OVERSTATE IT. Both mint sites pass
+ * server-derived values today (`postProcessKey`'s `args.userId` from `withAuth`,
+ * and `analyticsRequest`'s `options.tenantId`), so no transposition is on the
+ * wire and none ever was. This is a type hazard closed at the signature, not an
+ * exploited path. Recorded at that severity deliberately: RESEARCH §11 measured
+ * it, and inflating it would be the security theatre this programme rejects.
+ *
+ * The reciprocal shape — `mintTenantClaim({ userId: theSecret }, theUserId)` —
+ * still compiles, and no type can prevent it. What the object buys is that the
+ * mistake now has to be WRITTEN OUT rather than committed by getting two bare
+ * arguments in the wrong order. That is the same bound `PostProcessKeyArgs`
+ * accepts for the identical reason.
+ *
+ * @param identity - the SERVER-DERIVED tenant identity. Never a caller-supplied
+ *   value — `tenant_or_platform_key` returns `<scope>:t:<userId>` with the field
+ *   VERBATIM, so a caller who controls it controls which window they spend.
  * @param secret - `INTERNAL_API_TOKEN`, read at CALL time by the caller.
  *
  * @throws {TenantClaimError} on an empty/whitespace-only payload, a payload
  *   containing a `.`, or an absent/empty secret. All three are LOUD on purpose;
  *   see the individual guards.
  */
-export function mintTenantClaim(payload: string, secret: string): string {
+export function mintTenantClaim(identity: TenantIdentity, secret: string): string {
+  // Read through an optional chain rather than a bare `identity.userId`. The
+  // TYPE says this cannot be nullish, and from TypeScript it cannot — but the
+  // three guards below are the fail-loud contract this module is FOR, and a
+  // JavaScript caller (or an `as unknown as` in a test) passing nothing would
+  // otherwise raise a bare TypeError instead of the named TenantClaimError the
+  // callers' catch arms classify on. GUARD 1 absorbs it.
+  const payload: string = identity?.userId;
+
   // GUARD 1 — an empty payload is the worst possible success. It mints a claim
   // that verifies perfectly and buckets EVERY caller to `<scope>:t:`, i.e. one
   // shared window wearing the costume of per-tenant isolation. 140.1's

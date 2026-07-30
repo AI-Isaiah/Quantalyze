@@ -122,7 +122,26 @@ import {
  * on-disk `maxDuration` parity, the SC-4b headroom arithmetic, the SC-4d row
  * contents and — since 140.4-10 — the membership of `SEAM_FILES` over in
  * `seam-log-coverage.test.ts` all read a route only if the table names it. A
- * sixteenth route was previously invisible to ALL of them at once.
+ * route that consumed the seam WITHOUT being added to the table was previously
+ * invisible to ALL of them at once.
+ *
+ * (140.5-04) That sentence used to name the next ORDINAL past the table's
+ * length. ⚠️ It was REWORDED, not deleted-as-a-count — and the distinction is
+ * the whole reason this note exists. The same token appears elsewhere in the
+ * repo as a genuine COUNT of route tests, and the fix for those is to delete the
+ * integer and name the predicate. This one never counted anything: it named a
+ * HYPOTHETICAL route arriving beyond the roster. Deleting the integer as if it
+ * were a count would have left a sentence that is simply FALSE — replacing one
+ * false claim with another, inside the phase whose entire subject is not doing
+ * that. It is now keyed to the PROPERTY (absence from the table), which is what
+ * it always meant and which no roster edit can falsify.
+ *
+ * ⚠️ The token still appears ONCE above, inside the explicitly-quoted paragraph
+ * marked "IS NOW FALSE" — 140.4's record of the reasoning it refuted. That is a
+ * QUOTATION, not a claim, and editing it to satisfy a grep would falsify a
+ * historical record to make a scanner happy. An absence check over this file
+ * must therefore exclude marked quotations or be scoped to live claims; nothing
+ * in this repo does that yet, and 140.5-04's SUMMARY names it as a residual.
  *
  * ⚠️ H-13's PREMISE WAS REFUTED INDEPENDENTLY BY TWO REVIEWERS, and the
  * correction is why this is one assertion rather than a work package. H-13

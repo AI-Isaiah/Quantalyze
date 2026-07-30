@@ -15,12 +15,81 @@ import {
  * §8.8 (per-rule label table). Mirrors the ConnectKeyStep error block.
  *
  * The correlation_id null slot is rendered as a dash in Phase 15. Phase
- * 16 / OBSERV-06 wires real values via analytics-client.ts:66 without
+ * 16 / OBSERV-06 wires real values via the seam client in analytics-client.ts without
  * changing the DOM shape.
  *
  * Phase 17 / DESIGN-05: rule-label map and cause-string templates live
  * in @/lib/wizardErrors as the canonical source of truth.
  */
+
+/**
+ * ⛔ 140.5-05 / SEAMPROSE-07 — CODES WHOSE `WIZARD_ERROR_COPY` CAUSE IS FALSE AT
+ * THE CSV ROUTES' EMISSION SITE, AND MUST THEREFORE NOT BE PASTED UNDER THE
+ * ROUTE'S OWN SENTENCE.
+ *
+ * ── FOUND BY A NEGATIVE CONTROL, ON THE UNTOUCHED TREE ───────────────────────
+ * `human_message` is a claim about THIS EMISSION; the table's `cause` is a claim
+ * about the CODE. When a route corrects its copy for a site where the code's
+ * table entry is false, this panel rendered BOTH and printed a contradiction.
+ * The measured specimen, verbatim from the DOM before this fix:
+ *
+ *   "Our rate limiter is unavailable, so we stopped before checking your file.
+ *    … Nothing was saved and nothing was validated — try again in a minute."
+ *   "A setting on our side is wrong, so we stopped before sending the request.
+ *    Nothing was submitted and nothing was changed. Retrying will not clear it:
+ *    the setting stays wrong until we fix it and redeploy. …"
+ *
+ * Line 1 says try again in a minute; line 2 says retrying will not clear it.
+ * Line 1 is true here; line 2 is false in three separate clauses.
+ *
+ * ── WHY IT IS FALSE, SPECIFICALLY ───────────────────────────────────────────
+ * `WIZARD_ERROR_COPY.SEAM_MISCONFIGURED` was authored (140.3-15 / TS-38) for a
+ * `SeamConfigError` raised BEFORE any store or network I/O — its own docblock
+ * says the "Nothing was submitted" clause is safe there *because* of that
+ * ordering. Both CSV routes emit the same code from `rateLimitDenyJson`'s
+ * misconfigured arm instead, which sits ~50 lines BELOW `req.formData()`: the
+ * user's whole file has already crossed the wire and been buffered. 140.4-16 /
+ * WR-07 corrected the route's sentence for exactly this reason; 140.4-16 /
+ * CR-02 then started rendering the table cause, which silently re-imported the
+ * clause WR-07 had just removed. Neither change was wrong on its own.
+ *
+ * ── WHY NOT FIX THE COPY TABLE INSTEAD ──────────────────────────────────────
+ * The entry is TRUE at its other emitters (`finalize-wizard`, and every
+ * `SeamConfigError` site), and weakening it there to satisfy this surface would
+ * trade a false sentence here for a vaguer one everywhere. Minting a second
+ * code for one fact is the drift the vocabulary exists to prevent, and 140.5-02
+ * refused that shape by name. The honest scope of the problem is the PANEL that
+ * pairs a per-emission sentence with a per-code one.
+ *
+ * ── COVERAGE-LAW ROW, STATED (CONTEXT §2) ───────────────────────────────────
+ * A hand-typed set — **row 2, PARTIAL BY CONSTRUCTION**. It is fail-louded
+ * rather than trusted: `seam-wire-vocabulary.invariant.test.ts` derives the CSV
+ * routes' emitted codes from disk, intersects them with the copy table's
+ * domain, and asserts that intersection is EXACTLY the union of the two sets
+ * below. A newly-emitted code that has table copy therefore cannot arrive
+ * without someone deciding, in that commit, which side it falls on.
+ */
+export const CSV_CAUSE_FALSE_AT_EMISSION: ReadonlySet<string> = new Set<string>([
+  "SEAM_MISCONFIGURED",
+]);
+
+/**
+ * The counterpart, and it is not decoration: without it the partition assertion
+ * in the guard could be satisfied by suppressing everything, which would delete
+ * the panel's second line — the thing CR-02 built.
+ *
+ * Each member is here because its table cause was READ against the route's own
+ * emitter and found true there:
+ *   · `CSV_FILE_TOO_LARGE` — "We cap CSV uploads at 10 MB to keep validation
+ *     fast." True at both `content-length` and `file.size` guards.
+ *   · `CSV_UPSTREAM_FAIL`  — the §4a founder cause. Verified in the copy table's
+ *     own docblock (three layers: no writes in the Next route, `validate()` only
+ *     in Python, `strategies` row created at FINALIZE).
+ */
+export const CSV_CAUSE_TRUE_AT_EMISSION: ReadonlySet<string> = new Set<string>([
+  "CSV_FILE_TOO_LARGE",
+  "CSV_UPSTREAM_FAIL",
+]);
 
 interface CsvValidationEnvelopeProps {
   envelope: {
@@ -56,9 +125,17 @@ export function CsvValidationEnvelope({ envelope }: CsvValidationEnvelopeProps) 
   // `envelope.code` is typed `string` here (this panel is one of the surfaces
   // `ErrorEnvelope`'s `WizardErrorCode` fence never reached), so the lookup is
   // a plain-record read and must tolerate a miss.
-  const authoredCause = (
-    WIZARD_ERROR_COPY as Record<string, { cause: string } | undefined>
-  )[envelope.code]?.cause;
+  //
+  // ⚠️ 140.5-05 — AND IT MUST NOT STATE SOMETHING THE FIRST LINE CONTRADICTS.
+  // CR-02's rule was "the second line must say something the first does not";
+  // the stronger rule this surface needs is that it must not say something the
+  // first says is untrue. See `CSV_CAUSE_FALSE_AT_EMISSION` above for the
+  // measured specimen and why the fix is here rather than in the copy table.
+  const authoredCause = CSV_CAUSE_FALSE_AT_EMISSION.has(envelope.code)
+    ? undefined
+    : (WIZARD_ERROR_COPY as Record<string, { cause: string } | undefined>)[
+        envelope.code
+      ]?.cause;
 
   let causeText: string | null;
   if (ruleCount > 1) {

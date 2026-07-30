@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { SUPPORTED_EXCHANGES, CRYPTO_EXCHANGES } from "@/lib/closed-sets";
 
 /**
@@ -1527,5 +1527,99 @@ describe("[140.3-10] POST /api/keys/sync — a code on every arm, and the TRAP-3
       ).toBe("SYNC_KICKOFF_FAILED");
       expect(body.code).not.toBe("COMPOSITE_MEMBERSHIP_UNKNOWN");
     });
+  });
+});
+
+/**
+ * [140.5-06 / WP-14] 424 — TESTED WHERE IT CAN ACTUALLY ARRIVE.
+ *
+ * ⚠️ THE MEASUREMENT THAT MOTIVATES THIS. A producer/consumer audit of 424
+ * across the service found it raised in exactly three places —
+ * `routers/exchange.py` (`validate_key` and its two private helpers),
+ * `routers/portfolio.py`'s verify-strategy arm, and `routers/process_key.py` —
+ * and in NONE of `routers/match.py`, `routers/simulator.py` or
+ * `routers/optimizer.py` (re-measured at this plan's base: `grep -c 424` → 0, 0,
+ * 0 respectively, against 14 / 1 / 4 for the three real producers).
+ *
+ * Yet four match/optimize suites plus MatchEvalDashboard drive a 424 their
+ * upstream cannot emit, while the five routes whose upstream CAN emit one —
+ * this route, verify-strategy, validate-and-encrypt, create-with-key and
+ * composite/add-key — measured ZERO mentions of it. Coverage pointed away from
+ * where the status lives.
+ *
+ * `/api/keys/sync` reaches `/process-key`, so a 424 is on ITS wire. The body
+ * below is `process_key.py`'s real one: that raise site returns
+ * `_envelope_error(...)`, whose key set is `{ok, code, human_message,
+ * debug_context, correlation_id, recoverable}` — FLAT, and NOT the nested
+ * `service_error` envelope. `recoverable: true` is STATED at that site rather
+ * than derived, because everything reaching the arm is retryable by
+ * construction: that is what selected the arm.
+ *
+ * ⚠️ Note for whoever adds the sibling cases: the OTHER 424 producer emits a
+ * DIFFERENT shape. `/api/validate-key` raises `VenueTransientHTTPException`,
+ * which `main.py`'s dedicated handler serialises FLAT as `{detail: <scalar
+ * str>, code, recoverable}` — a deliberate, documented departure from the
+ * nested rule, recorded in the class docstring so nobody "unifies" it onto
+ * `service_error`. So the three validate-key consumers need that shape, not
+ * this one, and a fixture copied from here to there would be wrong.
+ */
+describe("[140.5-06 / WP-14] POST /api/keys/sync — an upstream 424 is forwarded as 424", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    for (const k of Object.keys(rateLimitByBucket)) delete rateLimitByBucket[k];
+    ownershipResult.data = { id: TEST_STRATEGY_ID, user_id: TEST_USER.id };
+    ownershipResult.error = null;
+    authState.user = { id: TEST_USER.id };
+    sessionState.session = { access_token: "test-user-jwt" };
+    strategyKeysProbe.count = 0;
+    strategyKeysProbe.error = null;
+    analyticsExisting.data = null;
+    analyticsExisting.error = null;
+    mockRpc.mockResolvedValue({ data: TEST_JOB_ID, error: null });
+    mockUpsert.mockReturnValue({ error: null });
+  });
+
+  it("forwards the upstream 424 STATUS and its machine code — the venue's fault stays the venue's fault", async () => {
+    mockPostProcessKey.mockResolvedValue({
+      ok: false,
+      response: NextResponse.json(
+        {
+          ok: false,
+          code: "EXCHANGE_UNAVAILABLE",
+          human_message:
+            "Your exchange did not answer. This is a problem at the venue — try again shortly.",
+          debug_context: {
+            verification_id: "77777777-7777-4777-8777-777777777777",
+          },
+          correlation_id: "11111111-2222-3333-4444-555555555555",
+          recoverable: true,
+        },
+        { status: 424 },
+      ),
+    });
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+    const body = await res.json();
+
+    expect(
+      res.status,
+      "424 is CALLER'S EXCHANGE. Collapsing it to a 5xx would claim OUR service " +
+        "failed, which is false and — because a 4xx is breaker-inert while a 5xx " +
+        "is not — would also let a venue outage trip our own circuit.",
+    ).toBe(424);
+    expect(
+      body.code,
+      "The machine code must survive the hop: it is what the wizard branches on " +
+        "to tell a venue fault from one of ours.",
+    ).toBe("EXCHANGE_UNAVAILABLE");
+    expect(
+      body.recoverable,
+      "A venue may come back, so this arm is retryable. `recoverable: false` " +
+        "here is the dead-end render B-01/B-22 describe.",
+    ).toBe(true);
+    expect(body.human_message).toContain("venue");
   });
 });

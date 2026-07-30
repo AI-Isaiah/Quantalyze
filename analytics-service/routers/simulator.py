@@ -175,7 +175,7 @@ def _records_to_series(raw: list[Any] | None, name: str = "") -> pd.Series | Non
     G15-006 (audit-2026-05-07): the returned Series is `.sort_index()`-ed
     and deduped (keep='last') so storage drift — duplicate-date backfill
     writes or out-of-order imports — cannot silently break the downstream
-    `cumprod()` in `services/simulator_scoring.py:634`. cumprod is path-
+    `cumprod()` in `simulator_scoring._cumulative_curve`. cumprod is path-
     dependent; an unsorted index produces a garbage equity curve, and a
     duplicate index entry inflates the compounded factor for that date.
     These guards exist for storage-drift safety, not for the happy-path.

@@ -42,7 +42,9 @@ import type { User } from "@supabase/supabase-js";
  * Two cache layers stack here:
  *   1. Python in-memory TTL cache — 15 minutes per (api_key_id, exchange_id),
  *      configurable via KEY_PERMISSION_CACHE_TTL.
- *   2. This Next layer — 60 seconds via unstable_cache. Conservative window
+ *   2. This Next layer — the `revalidate` window on the `unstable_cache` call
+ *      in `makeCachedFetcher` below (the ONE place that number lives; see
+ *      the note there for why it is not restated in prose). Conservative
  *      because the Python tier already absorbs the longer cool-down; this
  *      Next layer just collapses concurrent in-flight requests / refresh
  *      bursts so we don't flood the internal endpoint per render pass.
@@ -163,8 +165,19 @@ function readSeamFailureCause(err: unknown): SeamFailureCause | null {
 
 /**
  * Fetch the live permission triple from the Python service. Wrapped in
- * unstable_cache so concurrent callers + repeat hits inside 5 minutes
- * collapse to a single upstream request.
+ * unstable_cache so concurrent callers + repeat hits inside the `revalidate`
+ * window configured on the `unstable_cache` options below collapse to a single
+ * upstream request.
+ *
+ * (140.5-04) This sentence used to name a FIVE-MINUTE window. That was a 5x
+ * overstatement of the `revalidate` value set below — and it contradicted this
+ * file's own header, which describes the same Next layer correctly. One file
+ * disagreeing with itself about one constant is exactly what a derived
+ * reference prevents, so the duration now has a single home (the `revalidate`
+ * option) and this sentence points at it rather than restating it. Restating it
+ * as "60 seconds" would recreate the class on the next tuning edit: never write
+ * an integer or a duration in prose that a reader can derive from the code
+ * beside it.
  *
  * The cache tag/key array includes the keyId so a future invalidation hook
  * (e.g., on key rotation) can call revalidateTag.
@@ -324,7 +337,7 @@ function makeCachedFetcher(keyId: string): {
       //
       // The message is diagnostics-only and deliberately matches NONE of the
       // handler's classifier substrings (`INTERNAL_API_TOKEN`, `Upstream 5`,
-      // `ECONNREFUSED`, `not configured`, `aborted`, `timeout`), so it lands on
+      // `ECONNREFUSED`, `aborted`, `timeout`), so it lands on
       // the route's existing generic `PROBE_FAILED` 502 — the same
       // probe-failure envelope this route already returns. No new copy.
       const parsed = KeyPermissionsPayloadSchema.safeParse(await res.json());
@@ -522,11 +535,21 @@ export const GET = withAuth(
       // verdict comes from the shared typed `CircuitOpenError` and the ONE
       // `CIRCUIT_OPEN_COPY`.
       const rawMessage = err instanceof Error ? err.message : String(err);
+      // 140.5-06 fix — config-detection is scoped to OUR OWN thrown signals, not
+      // a prose-grep over the upstream body. `INTERNAL_API_TOKEN` is this route's
+      // own env-var fault sentinel (thrown above); `Upstream 5` is the
+      // unreadable-5xx fallback WE construct; `ECONNREFUSED` is a transport
+      // rejection. A bare `includes("not configured")` clause used to sit here —
+      // it was redundant (our token message already contains "not configured")
+      // AND over-broad: a reached-and-answered upstream fault whose sentence
+      // happens to contain the phrase (e.g. the missing-KEK 500 "Credential
+      // encryption is not configured…") was mis-reported as OUR layer being
+      // unreachable. Removed: such a fault now falls to the generic reached-but-
+      // failed `PROBE_FAILED` envelope, like every other answered upstream body.
       const isConfigError =
         rawMessage.includes("INTERNAL_API_TOKEN") ||
         rawMessage.startsWith("Upstream 5") ||
-        rawMessage.includes("ECONNREFUSED") ||
-        rawMessage.includes("not configured");
+        rawMessage.includes("ECONNREFUSED");
       const isTimeout =
         rawMessage.includes("aborted") ||
         rawMessage.toLowerCase().includes("timeout");

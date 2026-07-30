@@ -15,6 +15,10 @@ import { buildEnvelope } from "@/lib/envelope";
 // reader for this envelope's fields; a hand-rolled `data.detail?.correlation_id`
 // branch here is the drift class 140.3-01 closed.
 import { seamCorrelationId, seamErrorCode } from "@/lib/seam-discriminator";
+// 140.5-03 / SEAMPROSE-02 — the ONE `Retry-After` parser (HTTP-date safe, never
+// NaN/0/negative). A raw `Number(res.headers.get(...))` is a repo-wide ESLint
+// error by design.
+import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SyncPreviewSnapshot } from "./SyncPreviewStep";
@@ -79,6 +83,22 @@ export function SubmitStep({
   const [upstreamCorrelationId, setUpstreamCorrelationId] = useState<
     string | null
   >(null);
+  /**
+   * 140.5-03 / SEAMPROSE-02 — the wait the failing response ADVERTISED, in
+   * seconds, or `null` when it advertised none.
+   *
+   * `finalize-wizard` stamps `Retry-After` on three arms of its own, and since
+   * the choke-point relay it also forwards the ANALYTICS SERVICE's 429 wait
+   * through `postProcessKey`. Before this the header arrived at the browser and
+   * was discarded.
+   *
+   * PER-FAILURE state, cleared on every fresh attempt beside `errorCode` and
+   * the upstream id (TRAP-3): rendering attempt 1's wait against attempt 2's
+   * failure names a duration nobody advertised.
+   */
+  const [retryAfterSeconds, setRetryAfterSeconds] = useState<number | null>(
+    null,
+  );
 
   const handleSubmit = useCallback(async () => {
     if (submitting) return;
@@ -87,6 +107,9 @@ export function SubmitStep({
     // let a retry render the PREVIOUS failure's id, which is worse than
     // rendering none: it points support at the wrong request.
     setUpstreamCorrelationId(null);
+    // 140.5-03 — same reasoning, same reset point: the wait belongs to the
+    // failure, so it dies with it.
+    setRetryAfterSeconds(null);
     setSubmitting(true);
 
     try {
@@ -246,6 +269,13 @@ export function SubmitStep({
         // shaped. Set beside the code, from the SAME body, so the two can never
         // describe different failures.
         setUpstreamCorrelationId(seamCorrelationId(data));
+        // 140.5-03 / SEAMPROSE-02 — the wait rides the HEADER, read through the
+        // ONE parser, from the SAME response as the code and the id above. The
+        // body also carries `retry_after_seconds` on a relayed Python 429 —
+        // deliberately NOT read: two extraction paths for one fact is the
+        // cascade shape this milestone removes. Absent header ⇒ `null` ⇒ the
+        // envelope names no duration rather than inventing one (TRAP-3).
+        setRetryAfterSeconds(parseRetryAfterSeconds(res.headers));
         trackForQuantsEventClient("wizard_error", {
           wizard_session_id: wizardSessionId,
           step: "submit",
@@ -274,8 +304,23 @@ export function SubmitStep({
 
       onSubmitted(data.strategy_id ?? strategyId);
     } catch (err) {
+      // TRAP-1, restated as a PROPERTY and re-checked at this edit: a caught
+      // transport error must not be logged in a form that can carry credential
+      // material. `wizardFetch` sets exactly one header (`X-Correlation-Id`)
+      // and this route authenticates by COOKIE, so there is no credential value
+      // on the request for a rejection to embed, and this step never holds key
+      // plaintext at all. Nothing to scrub — a measurement, not an assumption,
+      // and the thing to re-check if this call ever gains an auth header.
       console.error("[wizard:SubmitStep] threw:", err);
-      setErrorCode("KEY_NETWORK_TIMEOUT");
+      // 140.5-03 / SEAMPROSE-03 — OUR HOP, NOT THE EXCHANGE'S. The request to
+      // `/api/strategies/finalize-wizard` never completed; the exchange may
+      // never have been contacted. `KEY_NETWORK_TIMEOUT`'s copy ("We could not
+      // reach the exchange") asserted a venue fault for a fault on our own hop
+      // — the rule `wizardErrors.ts` states by name beside that entry.
+      // `SERVICE_UNREACHABLE` is already a member of `KNOWN_FINALIZE_CODES`
+      // above, admitted in 140.3-05 for the wire codes that translate onto it;
+      // this is the same state arriving by the other door.
+      setErrorCode("SERVICE_UNREACHABLE");
       setSubmitting(false);
     }
   }, [submitting, strategyId, metadata, onSubmitted, wizardSessionId, entryContext]);
@@ -288,7 +333,12 @@ export function SubmitStep({
   // one value, and two ids in a diagnostics block is a support ticket asking
   // which one to search.
   const errorEnvelope = errorCode
-    ? buildEnvelope(errorCode, upstreamCorrelationId ?? correlationId)
+    ? buildEnvelope(errorCode, upstreamCorrelationId ?? correlationId, {
+        // 140.3-10's rule, inherited: `?? undefined` because ABSENCE IS NOT
+        // ZERO. `null` would reach the envelope slot, and a `0` there is a wait
+        // we were never told about.
+        retryAfterSeconds: retryAfterSeconds ?? undefined,
+      })
     : null;
 
   const summaryMetrics: FactsheetPreviewMetric[] = snapshot.metrics;

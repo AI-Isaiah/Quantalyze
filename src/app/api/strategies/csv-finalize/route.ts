@@ -524,7 +524,7 @@ async function persistDailyReturnsOrErrorResponse(
   //
   // `persist_csv_daily_returns` is `INSERT … ON CONFLICT (strategy_id, date)
   // DO UPDATE` with NO delete outside the incoming range
-  // (schema/functions/persist_csv_daily_returns.sql:87-93). That is exactly
+  // (the ON CONFLICT DO UPDATE arm of `persist_csv_daily_returns` in schema/functions/persist_csv_daily_returns.sql). That is exactly
   // right for the case it was written for — re-running the SAME payload — and
   // it is a data-fabrication engine the moment `strategyId` can be a strategy
   // some OTHER submission created.
@@ -533,7 +533,7 @@ async function persistDailyReturnsOrErrorResponse(
   // existing strategy at 200 (routers/process_key.py's 23505 arm), which is
   // correct and is the retry `CSV_SUBMIT_FAILED` instructs. But
   // `wizard_session_id` identifies a SESSION, not a SUBMISSION, and it survives
-  // a failed submit (localStorage.ts:390-393). So a user can upload 2024.csv,
+  // a failed submit (the wizard_session_id persistence in src/lib/wizard/localStorage.ts). So a user can upload 2024.csv,
   // fail at this very step, upload 2025.csv, and land on the first strategy —
   // whose series then becomes 2024 ∪ 2025, because the upsert only touches the
   // dates it was handed. Neither file. Reported as success.
@@ -1106,7 +1106,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // that test strategy_name in isolation (no series payload) still
   // see the more specific strategy_name error first.
   //
-  // fmt='trades' currently produces no series (csv_validator.py:541-561)
+  // fmt='trades' currently produces no series (the trades-format branch in csv_validator.py)
   // and is intentionally exempt — that path falls through with the
   // "analytics not generated" copy until a future iteration extends
   // trades-derived analytics.

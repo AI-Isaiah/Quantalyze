@@ -176,7 +176,7 @@ function sanitizeMetricsSnapshot(value: unknown): unknown {
  * CT-3 (army2) — the upstream `/process-key` teaser flow returns
  * `{verification_id, status, trust_tier, metrics_snapshot, fingerprint, ...}`
  * but does NOT mint a public_token. The landing-page <VerificationForm/>
- * (src/components/landing/VerificationForm.tsx:56) requires `data.public_token`
+ * (the `<VerificationForm/>` in src/components/landing/VerificationForm.tsx) requires `data.public_token`
  * and throws "invalid response" otherwise. Without minting+returning here,
  * flipping the unified-backbone flag ON breaks the landing-page teaser flow
  * end-to-end. Mint a 32-byte base64url token, persist to strategy_verifications

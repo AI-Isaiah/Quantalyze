@@ -39,17 +39,58 @@ export const ANALYTICS_API_VERSION = "1";
  *
  * ⚠️ The canonical import path for `CircuitOpenError` is `@/lib/seam-errors`,
  * the dependency-free leaf. Nothing may rely on picking the class up through
- * THIS module: sixteen route test files `vi.mock("@/lib/analytics-client")`,
- * and seven of the eight seam-mocking files use a FULL factory with no
- * `importActual`. Through those mocks this re-export is `undefined`, and
+ * THIS module: EVERY ROUTE TEST THAT MOCKS A SEAM CLIENT WHOLESALE does
+ * `vi.mock("@/lib/analytics-client")`, and most of the seam-mocking files use a
+ * FULL factory with no `importActual`. Through those mocks this re-export is
+ * `undefined`, and
  * `err instanceof undefined` throws `TypeError` from inside a catch block —
  * turning a clean 503 into a crash. Production code, route handlers, wizard
  * error classification and tests all import from the leaf.
  */
 export { CircuitOpenError };
 
+/**
+ * 140.5-02 / SEAMPROSE-03 (B-02) — THE MACHINE MARKER FOR A FAILURE OF **OUR
+ * OWN HOP**, as opposed to something an upstream said.
+ *
+ * WHY IT EXISTS. `classifyKeyValidationError` used to reach these two failures
+ * by sniffing `err.message` for `"timeout"` — and the message this module
+ * produces says **"timed out"**. `"timed out"` does not contain `"timeout"`, so
+ * every deadline miss and every dead connection answered `UNKNOWN`/500 ("we
+ * could not classify this failure"), with no retry affordance, for what is the
+ * commonest Railway outage. Confirmed OPEN by execution, not by reading.
+ *
+ * WHY A MARKER RATHER THAN A WIDER NEEDLE. A substring branch is simultaneously
+ * too narrow — the next reword silently re-opens the hole — and too broad, and
+ * in a cascade it loses to whichever earlier branch the message collides with,
+ * because ORDERING decides, not specificity. The same argument the venue-code
+ * table is built on.
+ *
+ * ⚠️ WHY IT IS A SECOND FIELD AND NOT `seamCode`, which would otherwise be the
+ * obvious reuse. `seamCode` carries what the UPSTREAM'S BODY declared. This
+ * carries what OUR TRANSPORT OBSERVED, on a path where there is no body at all.
+ * Folding them into one field would let an upstream put `"UPSTREAM_TIMEOUT"` in
+ * its envelope and be handed our transport verdict — the same reasoning that
+ * keeps the breaker's own verdict above everything an upstream can set. The
+ * IDIOM is copied exactly (a plain own data property, read with `typeof`, never
+ * `instanceof`, resolved through an EXPLICIT table); only the fact differs.
+ *
+ * The values are the seam's EXISTING wire codes for these two facts, so the
+ * consumer resolves them through the one shared wire→wizard table rather than a
+ * second private vocabulary.
+ */
+const TRANSPORT_TIMEOUT_CODE = "UPSTREAM_TIMEOUT";
+const TRANSPORT_NETWORK_CODE = "UPSTREAM_NETWORK_ERROR";
+
 /** Thrown when the analytics service does not respond within the timeout. */
 export class AnalyticsTimeoutError extends Error {
+  /**
+   * See `TRANSPORT_TIMEOUT_CODE` above. Assigned in the constructor exactly as
+   * `AnalyticsUpstreamError.seamCode` is, so the read survives every mock shape
+   * — route tests that replace this module wholesale would make an
+   * `instanceof` throw from inside a catch block.
+   */
+  readonly seamTransportCode: string = TRANSPORT_TIMEOUT_CODE;
   constructor(path: string, timeoutMs: number) {
     super(`Analytics service timed out after ${timeoutMs}ms on ${path}`);
     this.name = "AnalyticsTimeoutError";
@@ -134,6 +175,27 @@ const NOT_REACHABLE_MESSAGE =
   "Analytics service is not reachable. Please ensure it is running.";
 
 /**
+ * 140.5-02 / SEAMPROSE-03 (B-02) — the not-reachable throw, MARKED.
+ *
+ * ⚠️ IT STAYS A PLAIN `Error`, DELIBERATELY. `mapBodyReadFailure`'s docblock
+ * below fixes the taxonomy the nine wrapper consumers branch on
+ * (`AnalyticsTimeoutError`, `AnalyticsUpstreamError`, `CircuitOpenError`, and
+ * this generic `Error`) and refuses a new type escaping here, because a new
+ * type reaches every caller with no arm for it. A marker is data, not a type,
+ * so it adds the machine-readability without widening the taxonomy — which is
+ * the whole reason the consumer reads an own property rather than a class.
+ *
+ * A factory rather than two `Object.assign` call sites: the transport arm and
+ * the body-read arm both throw this, and an unmarked second thrower is exactly
+ * the drift that made B-02 possible in the first place.
+ */
+function notReachableError(): Error {
+  return Object.assign(new Error(NOT_REACHABLE_MESSAGE), {
+    seamTransportCode: TRANSPORT_NETWORK_CODE,
+  });
+}
+
+/**
  * Phase 140.2-11 / SEAMCORE-11 (A-27) — THE ONE DEFINED OUTCOME for an
  * ambiguous transport. Stated identically here and in
  * `src/lib/process-key-client.ts` so the next reader does not have to diff the
@@ -184,11 +246,16 @@ const UNUSABLE_RESPONSE_STATUS = 502;
  *
  * DUPLICATED, byte-for-byte, in `src/lib/process-key-client.ts`, and guarded by
  * a comment-stripped drift check in `analytics-client.test.ts`. It is duplicated
- * rather than shared because neither client may import from the other (sixteen
- * route test files replace one or the other wholesale with a full factory, under
- * which a cross-client import evaluates to `undefined`), and it cannot move to
- * the dependency-free error leaf either — that leaf's exported surface is pinned
- * to a two-member hand-typed set.
+ * rather than shared because neither client may import from the other (EVERY
+ * ROUTE TEST THAT MOCKS A SEAM CLIENT WHOLESALE replaces one or the other with a
+ * full factory, under which a cross-client import evaluates to `undefined`), and
+ * it cannot move to the dependency-free error leaf either — that leaf's exported
+ * surface is pinned to a two-member hand-typed set.
+ *
+ * ⚠️ 140.5-02 / SEAMPROSE-04 — the bare integer that stood in both places above
+ * is GONE, not corrected: the same population measures 26 / 23 / 15 / 16 / 19
+ * under five different predicates, so ANY single integer here is defensible
+ * under exactly one of them. Name the predicate, never the count.
  *
  * Only the MEDIA TYPE is echoed, lower-cased and length-capped: the raw header
  * is upstream-controlled and its parameters carry nothing an operator needs.
@@ -222,7 +289,7 @@ function mapBodyReadFailure(err: unknown, path: string, timeoutMs: number): neve
     if (err.deadlineExceeded) {
       throw new AnalyticsTimeoutError(path, timeoutMs);
     }
-    throw new Error(NOT_REACHABLE_MESSAGE);
+    throw notReachableError();
   }
   throw err;
 }
@@ -318,8 +385,14 @@ async function analyticsRequest(
    * `verify_tenant_claim` exists precisely because it cannot be trusted to
    * select a bucket.
    */
+  // ⚠️ THE IDENTITY IS WRAPPED, NOT PASSED BARE, and it is the argument ORDER
+  // this defends. `mintTenantClaim`'s first parameter is a `TenantIdentity`, so
+  // `mintTenantClaim(process.env.INTERNAL_API_TOKEN ?? "", options.tenantId)` —
+  // which used to compile and would have put the platform secret into
+  // `X-Tenant-Claim` on all nine routes this wrapper reaches — is now a type
+  // error. See that function's docblock for why the object, not a brand.
   const tenantClaim = mintTenantClaim(
-    options.tenantId,
+    { userId: options.tenantId },
     process.env.INTERNAL_API_TOKEN ?? "",
   );
 
@@ -401,7 +474,7 @@ async function analyticsRequest(
       throw new AnalyticsTimeoutError(path, timeoutMs);
     }
     // 3. Everything else: the connection never completed.
-    throw new Error(NOT_REACHABLE_MESSAGE);
+    throw notReachableError();
   }
 
   // Warn on API version mismatch (don't fail — just surface contract drift).

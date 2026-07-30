@@ -21,6 +21,7 @@ import { WithdrawalWarningStrip } from "./WithdrawalWarningStrip";
 import { WizardIpAllowlistHint } from "./WizardIpAllowlistHint";
 import {
   clearWizardState,
+  csvSubmissionSignature,
   deriveWizardResumeOverrides,
   loadWizardState,
   newWizardSessionId,
@@ -276,6 +277,16 @@ export function WizardClient({
   >(undefined);
   const [csvValidationPassed, setCsvValidationPassed] = useState<boolean>(false);
   const [strategyName, setStrategyName] = useState<string>("");
+  // CR-01 (140.4-REVIEW) — the durable half of the CSV double-submit fence.
+  // Holds the content signature (name + series) captured at the moment a CSV
+  // submit FAILED, or null when the live session has no burned submission. A
+  // later change to the name or the series is then detectable as a DIFFERENT
+  // submission, which must not reuse the session id the failed attempt already
+  // spent — otherwise the server's 23505 idempotency arm resolves it onto the
+  // strategy the first attempt created. A ref (not state) because reading it
+  // must never itself trigger a render, and the mint below is the only writer
+  // of the derived session id.
+  const failedCsvSubmitSigRef = useRef<string | null>(null);
   // QA report 2026-05-21 ISSUE-010: classification metadata captured on
   // the new csv_metadata step. Reused MetadataStep shape — same fields as
   // the API branch's metadataDraft, but populated by the CSV-only user
@@ -448,6 +459,42 @@ export function WizardClient({
     }, NAME_AUTOSAVE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [source, step, hydrated, strategyName, wizardSessionId]);
+
+  // CR-01 (140.4-REVIEW) — the durable double-submit fence. When the CSV
+  // wizard's submission content (name or series) changes AFTER a failed submit,
+  // mint a fresh wizard_session_id so the changed submission is a NEW one by
+  // construction and the server's 23505 idempotency arm can only ever fire for
+  // a genuine repeat. Keyed on the CONTENT signature, not array identity: a
+  // re-upload of the same file yields an equal-but-new-reference series and
+  // must NOT mint (that repeat is exactly what the idempotent 200 arm serves).
+  useEffect(() => {
+    if (source !== "csv") return;
+    const burned = failedCsvSubmitSigRef.current;
+    if (burned === null) return;
+    const current = csvSubmissionSignature(strategyName, csvDailyReturnsSeries);
+    if (current === burned) return;
+    // A material change to a burned submission: retire the spent session id.
+    failedCsvSubmitSigRef.current = null;
+    setWizardSessionId(newWizardSessionId());
+    // The RETIRED session id (the one the failed submit spent) — so an operator
+    // can correlate the re-mint with the earlier wizard_error on that session.
+    trackForQuantsEventClient("wizard_csv_session_reminted", {
+      wizard_session_id: wizardSessionId,
+    });
+    // wizardSessionId is read only for telemetry; the mint sets a NEW one, but
+    // this effect early-returns on the resulting re-run (ref is now null), so
+    // there is no loop.
+  }, [source, strategyName, csvDailyReturnsSeries, wizardSessionId]);
+
+  // CR-01 — record the content the FAILED submit was made with. The next
+  // change past this signature is what the effect above re-mints on. Stable
+  // identity so CsvSubmitStep's submit handler isn't re-created per render.
+  const handleCsvSubmitFailed = useCallback(() => {
+    failedCsvSubmitSigRef.current = csvSubmissionSignature(
+      strategyName,
+      csvDailyReturnsSeries,
+    );
+  }, [strategyName, csvDailyReturnsSeries]);
 
   const persistPointer = useCallback(
     (nextStep: WizardStepKey, id: string | null) => {
@@ -1132,6 +1179,9 @@ export function WizardClient({
                 dailyReturnsSeries={csvDailyReturnsSeries}
                 metadata={csvMetadataDraft}
                 entryContext={entryContext}
+                // CR-01: burn the session id for THIS (name, series) on a
+                // failed submit so a later change re-mints (durable fence).
+                onSubmitFailed={handleCsvSubmitFailed}
                 onBack={() => {
                   // Phase 53 / APPLY-02 — Back from csv_submit returns to the
                   // review recap (the step that now precedes csv_submit).

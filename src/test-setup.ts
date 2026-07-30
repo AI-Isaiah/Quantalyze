@@ -1,7 +1,7 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { afterEach, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, vi } from "vitest";
 
 // Phase 140 — `next/dist/server/app-render/async-local-storage.js` reads
 // `globalThis.AsyncLocalStorage` EXACTLY ONCE, into a module-scope
@@ -41,11 +41,79 @@ vi.mock("@/lib/api/approval-gate", () => ({
   assertProfileApproved: vi.fn().mockResolvedValue(null),
 }));
 
+// Phase 140.5-01 / SEAMPROSE-04 — `process.env` does not travel.
+//
+// `vitest.config.ts` sets `unstubEnvs: true`, and that is NOT this. That option
+// restores only what `vi.stubEnv()` recorded. 54 test files assign
+// `process.env.X = "…"` DIRECTLY and 38 of them never restore; a direct
+// assignment mutates real process state, which nothing in vitest tracks. That
+// is DEF-16-1's other half — the reason a suite can be green on local Node 25
+// and red on CI's Node 22, depending on which file the worker ran first.
+//
+// TWO SCOPES, because there are two leaks and they are not the same leak:
+//
+//   1. TEST → TEST. A write inside a test body must not reach the next test.
+//      Restored against a baseline captured in `beforeEach`.
+//   2. FILE → FILE. A write at module scope or in `beforeAll` must not reach
+//      the next file in the worker. Restored against `INHERITED_ENV` in
+//      `afterAll`.
+//
+// ⚠️ WHY NOT ONE `afterEach` RESTORING STRAIGHT TO `INHERITED_ENV`, which is
+// the simpler shape and the one 140.5-01-PLAN.md specifies: MEASURED, it breaks
+// correct code. It reverts a file's own module-scope and `beforeAll` env after
+// that file's FIRST test, so every later test in the file runs unconfigured.
+// The full suite named 5 such files, and `src/lib/dateday.test.ts` is the
+// argument — it sets `process.env.TZ` in `beforeAll` and restores it in
+// `afterAll`, i.e. it ALREADY does, by hand and correctly, exactly what scope 2
+// does for everyone. Reverting it per-test would have forced a rewrite of
+// correct code to satisfy the harness, and would have closed no leak that the
+// two scopes above do not already close. Recorded as a deviation in
+// 140.5-01-SUMMARY.md.
+//
+// Captured at setup-file scope, which for each test file runs BEFORE that
+// file's own module-scope code — so this is the environment the file was
+// handed, not the environment it made.
+const INHERITED_ENV: NodeJS.ProcessEnv = { ...process.env };
+
+/** The environment as it stood when the current test started. */
+let testBaselineEnv: NodeJS.ProcessEnv = { ...process.env };
+
+/**
+ * Put `process.env` back to `target`: drop keys added since, restore keys that
+ * were changed or deleted. Deliberately mutates the live object rather than
+ * reassigning `process.env` — a reassignment is invisible to anything holding
+ * the reference from module load, which is precisely the population most likely
+ * to read a stale value.
+ */
+function restoreEnv(target: NodeJS.ProcessEnv): void {
+  for (const key of Object.keys(process.env)) {
+    if (!(key in target)) delete process.env[key];
+  }
+  for (const [key, value] of Object.entries(target)) {
+    if (process.env[key] !== value) process.env[key] = value;
+  }
+}
+
+beforeEach(() => {
+  testBaselineEnv = { ...process.env };
+});
+
 // React Testing Library only auto-cleans when the test runner registers
 // `globals: true`, which we don't (vitest.config.ts uses imported helpers).
 // Wire cleanup explicitly so each test starts with an empty DOM.
+//
+// EXTENDED, not duplicated: one `afterEach` for the whole harness. A second
+// registration would run in a hook order nobody states, and the ordering
+// between DOM cleanup and env restore would then be an accident rather than a
+// decision. (It is a decision: cleanup first, because an unmounting effect may
+// still read the env its component was rendered under.)
 afterEach(() => {
   cleanup();
+  restoreEnv(testBaselineEnv);
+});
+
+afterAll(() => {
+  restoreEnv(INHERITED_ENV);
 });
 
 // jsdom does not implement ResizeObserver. lightweight-charts (used by

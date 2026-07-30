@@ -2381,8 +2381,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     smoothed_attempted: bool = False
     try:
         # Phase 105 (BB-02, MED-2): resolve the returns-denominator override HERE at the
-        # branch-outer, VENUE-AGNOSTIC scope — mirroring run_csv_strategy_analytics
-        # (analytics_runner.py:2304-2316), which parses it for EVERY venue. In Phase 104
+        # branch-outer, VENUE-AGNOSTIC scope — mirroring the
+        # `_denominator_config = parse_returns_denominator_config(...)` block in
+        # `analytics_runner.run_csv_strategy_analytics`, which parses it for EVERY
+        # venue (grep `_denominator_config` there). In Phase 104
         # this parse lived ONLY inside the deribit arm, so a ccxt strategy with a
         # simple/active override echoed the geometric/calendar DEFAULT (MED-2) and a
         # malformed ccxt config was silently ignored. Both the post-branch cash-series
@@ -4470,7 +4472,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # STRATEGY-mode only (key-mode returned above). When the second pass produced a
     # series (mtm_returns is not None) compute its seven-scalar headline object with
     # the SAME conventions run_csv_strategy_analytics threads for the cash headline
-    # (analytics_runner.py:2291-2316) so the MTM object is convention-comparable:
+    # (its `_periods_per_year` / `_cumulative_method` / `_day_basis` block) so the
+    # MTM object is convention-comparable:
     # asset-class annualization clock (#597 √365 crypto / √252 traditional) + the
     # allocated-capital cumulative_method/day_basis (geometric+calendar when no
     # override). This is the single-key sibling of the composite MTM compute

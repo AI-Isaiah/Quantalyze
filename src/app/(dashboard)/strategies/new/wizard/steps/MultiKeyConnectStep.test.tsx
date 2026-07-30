@@ -1170,14 +1170,23 @@ describe("[140.3-13a / SEAMUX-08] MultiKeyConnectStep — every error path emits
     ).toHaveAttribute("data-error-code", "UNKNOWN");
   });
 
-  it("a thrown add-key fetch emits KEY_NETWORK_TIMEOUT", async () => {
+  /**
+   * ⚠️ 140.5-03 / SEAMPROSE-03 — RE-POINTED. This case pinned
+   * `KEY_NETWORK_TIMEOUT`, i.e. it pinned the false attribution. A rejected
+   * `wizardFetch` means the POST to our OWN route never completed; that code's
+   * copy says "We could not reach the exchange". Its whole purpose is the
+   * FUNNEL dimension, which makes the wrong code here machine-readable and is
+   * exactly how an operator concludes the venues are flaky when we are.
+   */
+  it("a thrown add-key fetch emits SERVICE_UNREACHABLE — our hop, not the venue's", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
     const panel1 = enterMultiAndFillKey2();
     fireEvent.click(within(panel1).getByTestId("key-1-validate"));
 
     const payload = await onlyWizardError();
-    expect(payload.code).toBe("KEY_NETWORK_TIMEOUT");
+    expect(payload.code).toBe("SERVICE_UNREACHABLE");
+    expect(payload.code).not.toBe("KEY_NETWORK_TIMEOUT");
     expect(payload.step).toBe(STEP);
     errSpy.mockRestore();
   });
@@ -1254,7 +1263,11 @@ describe("[140.3-13a / SEAMUX-08] MultiKeyConnectStep — every error path emits
     trackMock.mockClear();
     fireEvent.click(screen.getByTestId("multi-continue"));
 
-    expect((await onlyWizardError()).code).toBe("KEY_NETWORK_TIMEOUT");
+    // ⚠️ 140.5-03 / SEAMPROSE-03 — RE-POINTED, and this one was the worst of
+    // the five: `set-members` performs NO key validation on any path, so the
+    // old code's "We could not reach the exchange" named a venue that is
+    // provably not involved in a request that only persists date windows.
+    expect((await onlyWizardError()).code).toBe("SERVICE_UNREACHABLE");
     errSpy.mockRestore();
   });
 
@@ -1452,5 +1465,285 @@ describe("[140.4-15 / SEAMRIM-08] MultiKeyConnectStep — a seam WIRE code is tr
       screen.getByTestId("key-panel-1"),
     ).findByTestId("error-envelope");
     expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+});
+
+/**
+ * Phase 140.5-03 / SEAMPROSE-02 + SEAMPROSE-03 — this file holds TWO of the
+ * five transport catches AND two of the four actionable `Retry-After` threads.
+ *
+ * ⚠️ EVERY PRIOR CENSUS MISSED THIS FILE ENTIRELY. `140-SYNTHESIS.md` named
+ * three transport catches — `ConnectKeyStep`, `SubmitStep`, `SyncPreviewStep` —
+ * and the real population is five, the two extra being `validatePanel`'s and
+ * `handleContinue`'s here. That is the instance-not-class shape, occurring
+ * inside the register that exists to catch it, which is why the Falsifiability
+ * Ledger's SC-B02-2 mutation deliberately targets one of THESE two rather than
+ * the first catch an author reads.
+ *
+ * ⚠️ EACH of these catches carried the wrong code TWICE — the state assignment
+ * and the `wizard_error` telemetry payload. A funnel still reporting the
+ * venue-fault code is the same false attribution in machine-readable form, so
+ * both are asserted below.
+ */
+describe("[140.5-03 / SEAMPROSE-03] MultiKeyConnectStep — a transport failure is OUR hop, not the exchange's", () => {
+  function fillPanel1() {
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    const panel1 = screen.getByTestId("key-panel-1");
+    fireEvent.change(within(panel1).getByTestId("key-1-api-key"), {
+      target: { value: "AK_LIVE_key2" },
+    });
+    fireEvent.change(within(panel1).getByTestId("key-1-api-secret"), {
+      target: { value: "SECRET_key2" },
+    });
+    fireEvent.change(within(panel1).getByTestId("key-1-window-start"), {
+      target: { value: "2024-01-01" },
+    });
+    return panel1;
+  }
+
+  function findWizardError(): { code: string } | undefined {
+    const call = trackMock.mock.calls.find(
+      (c) => (c as unknown[])[0] === "wizard_error",
+    ) as unknown[] | undefined;
+    return call ? (call[1] as { code: string }) : undefined;
+  }
+
+  /**
+   * Validate BOTH panels with ADJACENT, non-overlapping windows and click
+   * Continue. The end dates are load-bearing: an open-ended (`stillLive`)
+   * window on both panels overlaps, `keyWindowsSchema` reports a blocking
+   * error, and Continue stays disabled — so the set-members request under test
+   * would never be issued and the case would pass vacuously on any
+   * implementation.
+   */
+  async function validateBothAndContinue() {
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    for (const [idx, start, end] of [
+      [0, "2024-01-01", "2024-06-01"],
+      [1, "2024-06-01", "2024-09-01"],
+    ] as const) {
+      const panel = screen.getByTestId(`key-panel-${idx}`);
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-api-key`), {
+        target: { value: `AK_LIVE_${idx}` },
+      });
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-api-secret`), {
+        target: { value: `SECRET_${idx}` },
+      });
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-window-start`), {
+        target: { value: start },
+      });
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-window-end`), {
+        target: { value: end },
+      });
+      fireEvent.click(within(panel).getByTestId(`key-${idx}-validate`));
+      await waitFor(() =>
+        expect(screen.getByTestId(`key-${idx}-summary`)).toBeInTheDocument(),
+      );
+    }
+    trackMock.mockClear();
+    const cont = screen.getByTestId("multi-continue");
+    // A disabled Continue would make every assertion below vacuous.
+    expect(cont).not.toBeDisabled();
+    fireEvent.click(cont);
+  }
+
+  it("the ADD-KEY catch (4th of five, never counted before) renders SERVICE_UNREACHABLE — state AND telemetry", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+    const panel1 = fillPanel1();
+    fireEvent.click(within(panel1).getByTestId("key-1-validate"));
+
+    const envelope = await within(
+      screen.getByTestId("key-panel-1"),
+    ).findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "SERVICE_UNREACHABLE");
+    expect(envelope).toHaveTextContent("We could not reach our own service.");
+    // The NEGATIVE half — a partial rename passes the positive assertion alone.
+    expect(envelope).not.toHaveTextContent("We could not reach the exchange.");
+
+    // THE TELEMETRY HALF, and it is not decoration: the funnel is what an
+    // operator reads to decide whether the VENUES are flaky or we are.
+    await waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("SERVICE_UNREACHABLE");
+    expect(findWizardError()!.code).not.toBe("KEY_NETWORK_TIMEOUT");
+    errSpy.mockRestore();
+  });
+
+  it("the SET-MEMBERS catch (5th of five) renders SERVICE_UNREACHABLE — a route that never touches an exchange at all", async () => {
+    // ⭐ Doubly wrong before this: `set-members` performs NO key validation on
+    // ANY path (see KNOWN_SET_MEMBERS_CODES — four codes, none of them a venue
+    // verdict). "We could not reach the exchange" named a venue that was
+    // provably not involved, for a request that only persists date windows.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("composite/add-key")) {
+          return jsonResponse(
+            { ok: true, strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID },
+            200,
+          );
+        }
+        if (url.includes("composite/set-members")) {
+          throw new Error("offline");
+        }
+        return jsonResponse({}, 200);
+      },
+    );
+    await validateBothAndContinue();
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "SERVICE_UNREACHABLE");
+    expect(envelope).toHaveTextContent("We could not reach our own service.");
+    expect(envelope).not.toHaveTextContent("We could not reach the exchange.");
+
+    await waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("SERVICE_UNREACHABLE");
+    expect(findWizardError()!.code).not.toBe("KEY_NETWORK_TIMEOUT");
+    errSpy.mockRestore();
+  });
+});
+
+/**
+ * Phase 140.5-03 / SEAMPROSE-02 — `Retry-After` ARRIVES at this surface.
+ *
+ * ⭐ HARD PREREQUISITE FOR PHASE 141. Two of the four actionable threads live
+ * here: the per-panel `add-key` wait (PER-PANEL, because the route is
+ * rate-limited per identity and panel 3 hitting the limiter says nothing about
+ * panel 1) and the step-level `set-members` wait.
+ *
+ * ⚠️ Polarity re-derived: `ErrorEnvelope` renders the wait only when
+ * `showRetry`. `KEY_RATE_LIMIT` is `clear_and_retry` and both surfaces supply
+ * an `onRetry`, so the wait is reachable at both.
+ */
+describe("[140.5-03 / SEAMPROSE-02] MultiKeyConnectStep — the advertised wait reaches both envelopes", () => {
+  function throttled(retryAfter?: string) {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (retryAfter !== undefined) headers["Retry-After"] = retryAfter;
+    return new Response(JSON.stringify({ code: "KEY_RATE_LIMIT" }), {
+      status: 429,
+      headers,
+    });
+  }
+
+  function fillPanel1() {
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    const panel1 = screen.getByTestId("key-panel-1");
+    fireEvent.change(within(panel1).getByTestId("key-1-api-key"), {
+      target: { value: "AK_LIVE_key2" },
+    });
+    fireEvent.change(within(panel1).getByTestId("key-1-api-secret"), {
+      target: { value: "SECRET_key2" },
+    });
+    fireEvent.change(within(panel1).getByTestId("key-1-window-start"), {
+      target: { value: "2024-01-01" },
+    });
+    return panel1;
+  }
+
+  it("add-key: a 429 with `Retry-After: 12` renders the wait in THAT panel", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(throttled("12"));
+    const panel1 = fillPanel1();
+    fireEvent.click(within(panel1).getByTestId("key-1-validate"));
+
+    const wait = await within(screen.getByTestId("key-panel-1")).findByTestId(
+      "error-envelope-wait",
+    );
+    expect(wait).toHaveTextContent("12s");
+  });
+
+  it("add-key: a 429 with NO header renders NO wait — absence is not zero (TRAP-3)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(throttled());
+    const panel1 = fillPanel1();
+    fireEvent.click(within(panel1).getByTestId("key-1-validate"));
+
+    await within(screen.getByTestId("key-panel-1")).findByTestId(
+      "error-envelope",
+    );
+    expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
+  });
+
+  it("add-key: a SECOND failure with no header does NOT render the FIRST one's wait", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(throttled("12"))
+      .mockResolvedValueOnce(throttled());
+    const panel1 = fillPanel1();
+
+    fireEvent.click(within(panel1).getByTestId("key-1-validate"));
+    expect(
+      await within(screen.getByTestId("key-panel-1")).findByTestId(
+        "error-envelope-wait",
+      ),
+    ).toHaveTextContent("12s");
+
+    fireEvent.click(
+      within(screen.getByTestId("key-panel-1")).getByRole("button", {
+        name: "Retry",
+      }),
+    );
+    fireEvent.click(
+      within(screen.getByTestId("key-panel-1")).getByTestId("key-1-validate"),
+    );
+    await within(screen.getByTestId("key-panel-1")).findByTestId(
+      "error-envelope",
+    );
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
+  });
+
+  it("set-members: a 429 with `Retry-After: 90` renders the step-level wait", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("composite/add-key")) {
+          return jsonResponse(
+            { ok: true, strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID },
+            200,
+          );
+        }
+        if (url.includes("composite/set-members")) return throttled("90");
+        return jsonResponse({}, 200);
+      },
+    );
+    // Adjacent, CLOSED windows — an open-ended pair overlaps, which disables
+    // Continue and would make this case pass without ever issuing the request.
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    for (const [idx, start, end] of [
+      [0, "2024-01-01", "2024-06-01"],
+      [1, "2024-06-01", "2024-09-01"],
+    ] as const) {
+      const panel = screen.getByTestId(`key-panel-${idx}`);
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-api-key`), {
+        target: { value: `AK_LIVE_${idx}` },
+      });
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-api-secret`), {
+        target: { value: `SECRET_${idx}` },
+      });
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-window-start`), {
+        target: { value: start },
+      });
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-window-end`), {
+        target: { value: end },
+      });
+      fireEvent.click(within(panel).getByTestId(`key-${idx}-validate`));
+      await waitFor(() =>
+        expect(screen.getByTestId(`key-${idx}-summary`)).toBeInTheDocument(),
+      );
+    }
+
+    const cont = screen.getByTestId("multi-continue");
+    expect(cont).not.toBeDisabled();
+    fireEvent.click(cont);
+
+    const wait = await screen.findByTestId("error-envelope-wait");
+    expect(wait).toHaveTextContent("90s");
   });
 });

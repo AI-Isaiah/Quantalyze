@@ -98,8 +98,39 @@ flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM fact
 - **No branch protection on `main` at all.** GitHub `rulesets: []` and
   `branches/main/protection` → 404 — verified first-hand. There are **no required status checks**,
   so nothing mechanically blocks a merge with red CI. Combined with the next item this is the live
-  risk. **Founder action:** enable branch protection requiring the `frontend`, `python` and
-  `sql-tests` aggregator checks.
+  risk. ~~**Founder action:** enable branch protection requiring the `frontend`, `python` and
+  `sql-tests` aggregator checks.~~
+  → ✅ **DECIDED 2026-07-27 (founder): DEFERRED until there are paying clients.** Raised twice and
+  declined twice; **this is settled — do not re-raise it each phase.** The reasoning is a solo-founder
+  velocity trade, and it is defensible while the only committer is the founder.
+  ⚠️ **The one consequence that must not go invisible:** every CI gate in this repo — including the
+  real-Redis lane 140.2 built and wired strictly into the `frontend` aggregator — is **advisory at
+  merge**. So *"CI is green"* is a statement about a **run**, never about **what landed on `main`**.
+  Any phase-closure or verification wording must say **"the workflow would have caught it"**, never
+  **"the workflow did stop it"**. `140.3-VALIDATION.md` already carries this rule verbatim; keep it
+  in every subsequent phase's validation doc. **Re-open when the first paying client lands** — at
+  that point the merge-time guarantee starts protecting someone other than us.
+
+### v1.16 Phases 141–146 — review-depth policy (DECIDED 2026-07-27, founder-approved)
+
+Not every remaining phase earns the 140.2/140.3 treatment. Depth is set by **blast radius**, not by
+habit. This replaces "run the full pipeline everywhere" for the rest of the milestone.
+
+| Phase | Depth | Why |
+|---|---|---|
+| **141 SEAM (retry)** | **FULL — the deepest of the milestone** | Retry means **double-executing side effects**. Its own SC3 pins that a retried `teaser` mints duplicate `strategy_verifications` rows / `public_token`s / leads. ⚠️ **Mandatory extra:** 141 converts `recoverable` from a *render hint* into an **automated retry input** — TS-35's W-4 rider says the `unknown ⇒ true` polarity **must be RE-DERIVED** at that moment, because the harm asymmetry that justifies `true` does not survive the change of consumer. |
+| **142–145 JOB** | **SPLIT: full on migrations/DDL, light on application code** | Bounded blast radius in app code, but these write **migrations, which auto-apply to PROD on merge to `main`** — and per the decision above that merge is unguarded. Scars to respect: the 106 janitor reaped on the wrong column and was **reverted**; WR-02 (144) is an open call with a prod-outage history. Keep falsifiability ledgers on both halves. |
+| **146 RATE** | **LIGHT — researcher + planner + ledger, no deep review round** | Self-described mechanical: a re-grep artifact and a limiter-value audit. Nothing in it can silently corrupt data or money. |
+
+**Keep everywhere, regardless of depth:** the **Falsifiability Ledger** and the **Oracle Independence**
+checklist. They are cheap and they are what actually caught the breaker firing at 30-instead-of-5, the
+vacuous `status_code=400` grep, and the fake that agreed with itself. The expensive part being cut is
+the multi-round red-team fan-out, **not** the mutation discipline.
+
+**Rejected reasoning, recorded so it isn't re-litigated:** the case for going lighter is NOT *"we've
+found most of it"* — the data refutes that (140.2 found 3 criticals; 140.3's planning gate found 3
+blockers before a line was written). The case is *"this particular phase cannot hurt much,"* which is
+true for 146 and half of 142–145, and **false for 141**.
 - **`sql-tests` will be RED on the v1.16 PR until migration `20260726000225` is hand-applied to
   TEST** (`qmnijlgmdhviwzwfyzlc`), per this repo's standing MCP→TEST-before-merge convention.
   Failure mode: reviewer sees an *expected* red, merges anyway, and **merging auto-applies the
@@ -439,6 +470,27 @@ flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM fact
   programme this coordinate-dense, a cosmetic import merge is not worth invalidating the
   document 140.2/140.3 read. Do it only as part of a change that re-derives those coordinates,
   or after they stop being line-based.
+
+### v1.16 Phase-140.5 (SEAMPROSE) — deferred items (added 2026-07-30)
+
+Full detail: **`.planning/phases/140.5-seamprose-attribution-copy-harness-fidelity-and-prose-citati/140.5-deferred-items.md`** (tracked; the phase's own carry-forward ledger, ~40 sub-items). All items below are **non-blocking** by the founder bar (guard-hygiene, prose/citation, copy, and deferred breadth do not block); logged here so the canonical backlog owns them. The phase's one user-facing defect (**1d**, `permissions/route.ts` KEK "not configured" misattribution) was **FIXED** post-phase at `a89cedbf` and is NOT carried.
+
+- **User-facing standout — the per-row CSV breakdown DATA half never renders + the `'nan'` leak (QA ISSUE-005).** `_envelope_error` discards `debug_context` before the wire; the client reads a `pandera_errors` key Python never emits; and a user reading a validation failure sees the literal `'nan'` where a column name belongs. Only the *copy* half is done (the false "see per-row breakdown" promise was removed). ⚠️ **Fixing the data half forwards raw cell values — a PII surface**; admit only if closeable WITHOUT echoing untrusted cell contents (three things must move together — see ledger §1a). This is a degraded-message gap, not wrong data.
+- **Copy alignments (non-blocking):** `csv-validate` 503 config-missing arm is a bare heading vs the sibling 502's fuller sentence (§1c); `UNSUPPORTED_EXCHANGE` deserves its own wizard member rather than the honest `UNKNOWN`/500 fallback (§1b).
+- **Coverage-law guard widenings (guard-hygiene, §2a–2f):** `.tsx` log-roster class open (two instances scrubbed, roster doesn't cover `.tsx`); wait-threading completeness unguarded; `composite/members` has no `Retry-After` producer (recorded in the guard docblock); docblock-prose rewrites have no guard; purity-needle + wire-vocabulary guards partial-by-construction. Each names its one-line ratchet.
+- **Citation/prose harness residuals (§3a–3f):** D/E/F self-relative citations (`line 55`, `(:1027)`) need a second file-scoped predicate; string-literal citations invisible to the comment-scoped census; a marked-quotation-exclusion guard is unbuilt; two RESEARCH offset/count figures (§3.8 `+72`, WP-13 "3+1") are mis-shaped — re-read, don't inherit.
+- **Type hazard (§4a):** `AnalyticsUpstreamError`'s positional params — same adjacent-same-typed-argument class as `mintTenantClaim`, more call sites; wants its own scoped plan, not a drive-by.
+- **Harness/CI residuals (§5a–5g):** 17 `stripComments` copies unrewired (needs a third string-erasing mode); `ci.yml:1633` left narrow deliberately (subsumed by `spec-disabling.invariant.test.ts`); two PR #108 e2e follow-ups stay skipped; `handleRetrySync` reset is defence for the path 141 adds (unreachable today).
+- **424 arrival breadth (§7, deferred by decision):** 140.5-06 task 2 landed 1 of 5 arrival routes + 0 of 5 re-homes. Owed to a future plan: 424 arrival cases at `keys/validate-and-encrypt`, `strategies/create-with-key`, `strategies/composite/add-key`, `verify-strategy`; and RE-HOMING (not deleting) five cannot-arrive suites onto an emittable status while keeping their forwarding assertions.
+- **Founder-owed (not code — do not plan around, §6):** copy-vs-`DESIGN.md`-§Voice review for the Claude-drafted CSV/KEY copy; **TRAP-4** five-clicks in a real browser (C-4) + **Sentry ingestion** in a preview via an unroutable `ANALYTICS_SERVICE_URL` (C-5); **⛔ D-01 live-Redis lane STILL UNVERIFIED** — `tests/redis/**` needs a live store, registration pins existence not execution.
+  - ⚠️ **C-4/TRAP-4 live five-clicks ATTEMPTED in a real browser 2026-07-30 — blocked on key availability, not a defect.** Reaching a gate render (`GATE_NO_DATA_SOURCE` / `GATE_INSUFFICIENT_TRADES` / `COMPOSITE_MEMBERSHIP_UNKNOWN`) requires a read-only key in a valid-but-no/insufficient-data state; none was available, and entering keys is a Claude-prohibited action regardless. Property remains **code-proven** (mutation M103 RED; unconditional `<Link>` escape at `ErrorEnvelope:1609`). Still owed: a human paints it once in a real browser (or a seeded e2e — the PR #108 follow-up).
+- **Cosmetic (140.5 verifier/reviewer non-blockers, guard-hygiene):** `SEAMPROSE-01..08` IDs are not in `.planning/REQUIREMENTS.md` (inserted-phase convention, same as SEAMRIM/140.4 — all eight accounted for across the 8 plans); the contracts-registry batch label calls `seam-venue-vocabulary` `SEAMPROSE-05` while plan-02 frontmatter lists `-03/-07` (label drift, no functional effect).
+
+### v1.16 ship findings (per-phase PR landing, 2026-07-30)
+
+- **Cross-file test-isolation flake (non-blocking; product is correct).** Full-suite tip run (Node 25 local) surfaced **1 failed / 10264 passed**: `MultiKeyConnectStep.test.tsx > [WIZ-02] State B rehydration (back-nav) > …resubmits secretlessly via set-members`. In isolation the file is **44/44 green**, so it's a leaked mock from an earlier-running file (`set-members` throws `TypeError: Cannot read properties of undefined (reading 'apiKeyId')`, so the mock is never called). **Not a product defect.** It's order/shard-sensitive: CI shards passed on PR2/PR4, `frontend-test (1)` reddened on PR3. Fix the leak when it actually reddens a shard (likely a `vi.stubGlobal`/`vi.mock` not restored — use `vi.spyOn` + `restoreAllMocks`, cf. `reference_ci_node22_vs_local_node25`). The polluter is **outside** `src/app/(dashboard)/strategies/new/wizard/` (that dir is 392/392 together).
+- **⚠️ CORRECTED root cause — the `python` red was NOT a straddle; it was a fastapi 0.139 harness incompatibility (FIXED, commit `b3686767`).** `test_validate_key_venue_transient.py` failed all 14 venue-transient cases in CI ("no `/api/validate-key`/`/api/verify-strategy` route on `main.app`") on EVERY cut, and it did NOT self-resolve at the tip — my earlier "23/23 at the tip" was a false read from running the file **in isolation on a local fastapi 0.135.1** (flat routes). Real cause: fastapi **0.139.0** (deps bump #592) made `include_router()` lazy — multi-route sub-routers become a single `_IncludedRouter` placeholder in `app.routes` (routing still works; TestClient reaches every endpoint), so the harness' FLAT `main.app.routes` scan missed the exchange/portfolio routes. Reproduced authoritatively under the exact CI env (Python 3.12.13, fastapi 0.139.0, starlette 0.46.2 via a `uv` venv). Fix descends through `_IncludedRouter.original_router` (correct on both the pre-0.139 flat and 0.139+ lazy shapes). **Consequence to note honestly:** PR2–PR5 were merged on the belief this was a self-resolving straddle — it was not, so `main`'s `python` CI (and thus the Railway worker deploy, which gates on green CI) stayed red from PR2 until this fix. `sql-tests` DID straddle (red 140.1–140.3, green from 140.4).
+- **Genuinely separate, still-open: the `MultiKeyConnectStep` WIZ-02 frontend test-isolation flake** (44/44 in isolation, order/shard-sensitive) — did NOT hit PR6's `frontend-test` shard; left as tracked test-hygiene, fix if it reddens a future shard.
 
 ---
 

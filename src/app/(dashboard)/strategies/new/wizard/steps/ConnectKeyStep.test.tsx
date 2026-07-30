@@ -86,7 +86,19 @@ describe("[H-0189] ConnectKeyStep — server code → wizard_error mapping", () 
     expect(payload.code).toBe("UNKNOWN");
   });
 
-  it("maps a thrown fetch (network failure) to KEY_NETWORK_TIMEOUT", async () => {
+  /**
+   * ⚠️ 140.5-03 / SEAMPROSE-03 — THIS CASE USED TO PIN `KEY_NETWORK_TIMEOUT`
+   * AND IT PINNED A FALSE ATTRIBUTION. A rejected `wizardFetch` means the
+   * request to OUR OWN route never completed; the exchange may never have been
+   * contacted at all. `KEY_NETWORK_TIMEOUT`'s copy is "We could not reach the
+   * exchange", so the funnel and the screen both blamed the venue for a fault
+   * on our hop — the rule `wizardErrors.ts` states by name beside that entry.
+   *
+   * The NEGATIVE half is the load-bearing one: a rename that left the old code
+   * anywhere in this catch (the state assignment OR the telemetry payload)
+   * satisfies only the positive assertion.
+   */
+  it("maps a thrown fetch (our own hop failing) to SERVICE_UNREACHABLE, never the venue-fault code", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
     render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
@@ -98,8 +110,15 @@ describe("[H-0189] ConnectKeyStep — server code → wizard_error mapping", () 
       (c) => (c as unknown[])[0] === "wizard_error",
     ) as unknown[] | undefined;
     const payload = call![1] as { code: string; step: string };
-    expect(payload.code).toBe("KEY_NETWORK_TIMEOUT");
+    expect(payload.code).toBe("SERVICE_UNREACHABLE");
+    expect(payload.code).not.toBe("KEY_NETWORK_TIMEOUT");
     expect(payload.step).toBe("connect_key");
+
+    // The RENDERED half — the copy the user reads, asserted as a hand-typed
+    // literal rather than by importing the table entry.
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveTextContent("We could not reach our own service.");
+    expect(envelope).not.toHaveTextContent("We could not reach the exchange.");
     errSpy.mockRestore();
   });
 
@@ -868,5 +887,95 @@ describe("[140.4-15 / SEAMRIM-08] ConnectKeyStep — a seam WIRE code is transla
 
     const envelope = await screen.findByTestId("error-envelope");
     expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+});
+
+/**
+ * Phase 140.5-03 / SEAMPROSE-02 — `Retry-After` ARRIVES at this surface.
+ *
+ * ⭐ HARD PREREQUISITE FOR PHASE 141. This is the SECOND of the four actionable
+ * threads, which is why the Falsifiability Ledger's SC-RA-1 mutation targets it
+ * rather than the first one an author checks.
+ *
+ * The wait travels: route (or the analytics service, via the choke-point relay
+ * landed in this same plan) stamps `Retry-After` → `parseRetryAfterSeconds`
+ * reads the HEADER (never the body's `retry_after_seconds`, which would be a
+ * second extraction path for one fact) → component state →
+ * `buildEnvelope({retryAfterSeconds})` → `ErrorEnvelope`'s
+ * `data-testid="error-envelope-wait"`.
+ *
+ * ⚠️ `ErrorEnvelope` renders the wait only when `showRetry` — i.e. the code is
+ * recoverable AND an `onRetry` is supplied. Threading a wait onto a
+ * non-recoverable code reaches nothing, so the polarity is re-derived here:
+ * `KEY_RATE_LIMIT` is `clear_and_retry` and this step always passes `onRetry`.
+ */
+describe("[140.5-03 / SEAMPROSE-02] ConnectKeyStep — the advertised wait reaches the envelope", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function rateLimited(retryAfter?: string) {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (retryAfter !== undefined) headers["Retry-After"] = retryAfter;
+    return new Response(JSON.stringify({ code: "KEY_RATE_LIMIT" }), {
+      status: 429,
+      headers,
+    });
+  }
+
+  async function submit() {
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+    return screen.findByTestId("error-envelope");
+  }
+
+  it("a 429 carrying `Retry-After: 30` renders the wait", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(rateLimited("30"));
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    await submit();
+
+    const wait = await screen.findByTestId("error-envelope-wait");
+    // 30 is the hand-typed literal from the fixture header, not a value read
+    // back out of the component.
+    expect(wait).toHaveTextContent("30s");
+  });
+
+  it("a 429 with NO header renders NO wait — absence is not zero (TRAP-3)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(rateLimited());
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    await submit();
+
+    expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
+  });
+
+  it("a SECOND failure with no header does NOT render the FIRST one's wait", async () => {
+    // ⭐ THE CLEAR-ON-FRESH-ATTEMPT HALF — the one a copy-paste of the working
+    // thread drops. Without the reset, attempt 2's envelope names attempt 1's
+    // duration: a wait nobody advertised, for a failure that never mentioned
+    // one, which is worse than naming none because it is specific.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(rateLimited("30"))
+      .mockResolvedValueOnce(rateLimited());
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+
+    await submit();
+    expect(await screen.findByTestId("error-envelope-wait")).toHaveTextContent(
+      "30s",
+    );
+
+    // Dismiss and re-submit — the same handler, a fresh attempt.
+    fireEvent.click(screen.getByLabelText("Retry"));
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+    await screen.findByTestId("error-envelope");
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
   });
 });

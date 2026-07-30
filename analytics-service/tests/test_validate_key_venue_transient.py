@@ -257,7 +257,27 @@ def _handler_globals(path: str, method: str = "POST") -> dict[str, Any]:
 
     import main
 
-    for route in main.app.routes:
+    # fastapi 0.139.0 (deps bump #592, 0.138.0 -> 0.139.0) made include_router()
+    # LAZY: instead of flattening a sub-router's APIRoutes into app.routes it
+    # leaves a single `_IncludedRouter` placeholder whose `.original_router`
+    # holds the real routes. Routing still works (the TestClient reaches every
+    # endpoint), but a FLAT scan of `main.app.routes` no longer sees
+    # /api/validate-key (exchange) or /api/verify-strategy (portfolio) — the two
+    # MULTI-route routers this file drives — so the pre-0.139 flat loop below
+    # was vacuously "route not registered". Descend through the wrapper so the
+    # lookup holds on BOTH shapes: pre-0.139 flat (route has no `original_router`
+    # -> yielded as-is) and 0.139+ lazy (recurse into `original_router.routes`).
+    # Local dev on an older globally-installed fastapi keeps the flat shape,
+    # which is exactly why this only ever reddened under CI's pinned 0.139.0.
+    def _effective(routes: Any) -> Any:
+        for route in routes:
+            original = getattr(route, "original_router", None)
+            if original is not None:
+                yield from _effective(original.routes)
+            else:
+                yield route
+
+    for route in _effective(main.app.routes):
         if getattr(route, "path", None) != path:
             continue
         if method not in (getattr(route, "methods", None) or set()):

@@ -69,10 +69,14 @@ test.describe("Sync & Analytics Flow", () => {
   // -------------------------------------------------------------------------
 
   test.describe("Sync button triggers data fetch", () => {
+    // 140.5-06: was `test.skip(true, …)`. Gated on the same env var the sibling
+    // suites use for the identical precondition; absent from CI, so CI behaviour
+    // is unchanged and it becomes opt-in runnable locally.
     test.skip(
-      true,
+      !process.env.PLAYWRIGHT_TEST_STRATEGY_ID,
       "Requires authenticated session with a strategy that has a linked API key. " +
-        "The sync button only appears when keys are connected.",
+        "The sync button only appears when keys are connected. " +
+        "Set PLAYWRIGHT_TEST_STRATEGY_ID to run.",
     );
 
     const TEST_STRATEGY_ID = "00000000-0000-0000-0000-000000000000";
@@ -151,10 +155,13 @@ test.describe("Sync & Analytics Flow", () => {
   // -------------------------------------------------------------------------
 
   test.describe("Error state displays when sync fails", () => {
+    // 140.5-06: was `test.skip(true, …)`. Same precondition, same gate as the
+    // sibling describe above.
     test.skip(
-      true,
+      !process.env.PLAYWRIGHT_TEST_STRATEGY_ID,
       "Requires authenticated session with a strategy that has a linked API key. " +
-        "Uses route interception to simulate backend failure.",
+        "Uses route interception to simulate backend failure. " +
+        "Set PLAYWRIGHT_TEST_STRATEGY_ID to run.",
     );
 
     const TEST_STRATEGY_ID = "00000000-0000-0000-0000-000000000000";
@@ -211,8 +218,11 @@ test.describe("Sync & Analytics Flow", () => {
   // -------------------------------------------------------------------------
 
   test.describe("Analytics display shows computed metrics", () => {
+    // 140.5-06: was `test.skip(true, …)` while its own reason named BOTH env
+    // vars — the skip was contradicting its own instructions. Both are read
+    // immediately below, so the gate now matches what the file already does.
     test.skip(
-      true,
+      !process.env.PLAYWRIGHT_TEST_STRATEGY_ID || !process.env.PLAYWRIGHT_TEST_SLUG,
       "Requires authenticated session and a strategy with completed analytics computation. " +
         "Set PLAYWRIGHT_TEST_STRATEGY_ID and PLAYWRIGHT_TEST_SLUG env vars to run.",
     );

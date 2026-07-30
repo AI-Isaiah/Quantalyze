@@ -1334,7 +1334,7 @@ async function runLegacyFinalize(args: {
               );
             }
             // Phase 89 — audit the composite dispatch, mirroring the
-            // keys/sync stitch_composite kickoff (keys/sync/route.ts:220-225):
+            // keys/sync composite-first stitch_composite kickoff (in keys/sync/route.ts):
             // a stitch_composite enqueue is a user-initiated sync.start on the
             // strategy, same class + shape as its keys/sync sibling. Idempotent
             // double-submit is absorbed by the compute_jobs partial unique index.

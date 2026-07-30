@@ -18,6 +18,12 @@ import {
   wizardFetch,
 } from "@/lib/wizard/wizard-correlation";
 import { seamErrorCode } from "@/lib/seam-discriminator";
+// 140.5-03 / SEAMPROSE-02 — the ONE `Retry-After` parser. A raw
+// `Number(res.headers.get(...))` here is a repo-wide ESLint error by design
+// (`quantalyze/no-raw-retry-after-parse`), because `Number("")` is 0 and
+// `Number("Wed, 21 Oct…")` is NaN, and either fed to a wait is the
+// thundering-herd shape this leaf exists to make unrepresentable.
+import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
 
 /**
  * ConnectKeyStep renders the exchange selector, the inline permission
@@ -319,6 +325,23 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
   const [passphrase, setPassphrase] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [errorCode, setErrorCode] = useState<WizardErrorCode | null>(null);
+  /**
+   * 140.5-03 / SEAMPROSE-02 — the wait the failing response ADVERTISED, in
+   * seconds, or `null` when it advertised none.
+   *
+   * `/api/strategies/create-with-key` stamps `Retry-After` on its 429 (its own
+   * `rateLimitDenyJson`), and since the choke-point relay it also carries the
+   * ANALYTICS SERVICE's own 429 wait through `postProcessKey`. Before this the
+   * value arrived at the browser and was dropped on the floor.
+   *
+   * PER-FAILURE state, cleared on every fresh attempt alongside `errorCode`
+   * (TRAP-3): a wait left over from attempt 1 rendered against attempt 2's
+   * failure names a duration nobody advertised, which is worse than naming
+   * none — it turns a vague error into a specific lie.
+   */
+  const [retryAfterSeconds, setRetryAfterSeconds] = useState<number | null>(
+    null,
+  );
   // UX-02: the wizard session correlation id — the SAME id wizardFetch sends
   // on every request below, so the id shown in an error envelope matches the
   // failing request's server logs / Sentry tag / compute_jobs.metadata.
@@ -391,6 +414,9 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
     e.preventDefault();
     if (submitting) return;
     setErrorCode(null);
+    // 140.5-03 — cleared WITH the code it belongs to. This is the half a
+    // copy-paste of the SyncPreviewStep thread drops (TRAP-3).
+    setRetryAfterSeconds(null);
     setSubmitting(true);
 
     try {
@@ -426,8 +452,35 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         // same order `SyncPreviewStep`'s kickoff arm adopted in 140.4-12.
         // `SEAM_CODE_TO_WIZARD_CODE` answers for the seam's WIRE vocabulary
         // (this route's 503 arm emits `SEAM_MISCONFIGURED`); the set below
-        // answers for the wizard codes the route itself mints. The two
-        // vocabularies are disjoint, so neither hop can shadow the other.
+        // answers for the wizard codes the route itself mints.
+        //
+        // ⚠️ 140.5-03 / SEAMPROSE-03 — CORRECTION. This paragraph used to end
+        // "the two vocabularies are disjoint, so neither hop can shadow the
+        // other". THE SENTENCE IS THE WRONG REASON FOR A TRUE CONCLUSION, and
+        // it contradicts this file's own header (search `ORDER IS THE WHOLE
+        // CHANGE`), which already qualifies disjointness as holding HERE and
+        // NOT at every surface.
+        //
+        // THE NECESSARY PROPERTY IS AGREEMENT; DISJOINTNESS IS ONLY SUFFICIENT.
+        // Where the two vocabularies overlap, the table wins by the order
+        // above — harmless precisely because both sides answer the SAME code,
+        // not because they never meet.
+        //
+        // Measured at 140.5-03, predicate stated because a line-based grep gets
+        // this wrong: intersect the KEY SETS (a roster's members / a `Record`'s
+        // keys against `SEAM_CODE_TO_WIZARD_CODE`'s keys), never the values —
+        // `MISSING_STRATEGY_ID: "VALIDATION_FAILED"` is a VALUE and a grep
+        // counts it as a third overlap that does not exist. Under that
+        // predicate: `KNOWN_KICKOFF_CODES` ∩ = {RATE_LIMITED},
+        // `KNOWN_FINALIZE_CODES` ∩ = {SEAM_MISCONFIGURED}, and THIS set,
+        // `KNOWN_ADD_KEY_CODES` and `KNOWN_SET_MEMBERS_CODES` all intersect in
+        // NOTHING. Both real overlaps AGREE at HEAD.
+        //
+        // `seam-ratelimit-posture.invariant.test.ts` derives both sides from
+        // disk and reddens when a shared code gets DIFFERENT answers, so the
+        // property is asserted rather than narrated. Do not restore the
+        // disjointness sentence as the REASON: an empty intersection here is a
+        // fact about today's rosters, and the safety does not depend on it.
         // 140.4-16 / WR-09 — READ THROUGH THE LEAF, not off the top level.
         // The commit that added this hop claimed it "mirrors
         // `SyncPreviewStep`'s kickoff arm exactly". It did not: that arm and
@@ -449,6 +502,12 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
               ? (data.code as WizardErrorCode)
               : "UNKNOWN";
         setErrorCode(code);
+        // 140.5-03 / SEAMPROSE-02 — the wait rides the HEADER, read through the
+        // ONE parser. Set from the SAME response as the code above, so a wait
+        // and a code can never describe different failures. An absent header
+        // yields `null`, which the envelope renders as no wait at all rather
+        // than as a zero we were never told (TRAP-3).
+        setRetryAfterSeconds(parseRetryAfterSeconds(res.headers));
         trackForQuantsEventClient("wizard_error", {
           wizard_session_id: wizardSessionId,
           step: "connect_key",
@@ -464,19 +523,53 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         exchange,
       });
     } catch (err) {
-      setErrorCode("KEY_NETWORK_TIMEOUT");
+      // 140.5-03 / SEAMPROSE-03 — OUR HOP, NOT THE EXCHANGE'S.
+      //
+      // This catch fires when the request to `/api/strategies/create-with-key`
+      // never completed — our own route, one hop from the browser. The
+      // exchange was very possibly never contacted at all.
+      // `KEY_NETWORK_TIMEOUT` stood here and its copy says "We could not reach
+      // the exchange", which asserts a VENUE fault for a fault on our own hop:
+      // `wizardErrors.ts` states that rule by name beside the entry, and this
+      // site was one of the five breaking it. `SERVICE_UNREACHABLE` says what
+      // is actually known — we sent it, no answer came back, and because none
+      // came back we cannot tell whether it was processed.
+      //
+      // ⚠️ BOTH OCCURRENCES, and the telemetry one is not decoration: a funnel
+      // still reporting the venue-fault code is the same false attribution in
+      // machine-readable form, and it is what an operator would use to
+      // conclude the exchanges are flaky when the fault is ours.
+      //
+      // ⚠️ Do NOT reach for `SERVICE_UNAVAILABLE_RETRY` here. Its "Nothing was
+      // submitted" is knowable for a breaker that DECLINED to send and false
+      // for a request that timed out. The two entries are one apart in the
+      // table and 140.3-12 already separated them once.
+      setErrorCode("SERVICE_UNREACHABLE");
       trackForQuantsEventClient("wizard_error", {
         wizard_session_id: wizardSessionId,
         step: "connect_key",
-        code: "KEY_NETWORK_TIMEOUT",
+        code: "SERVICE_UNREACHABLE",
       });
+      // TRAP-1, restated as a PROPERTY and re-checked at this edit: a caught
+      // transport error must not be logged in a form that can carry credential
+      // material. `wizardFetch` sets exactly one header (`X-Correlation-Id`)
+      // and this route authenticates by COOKIE, so no credential value is on
+      // the request for a rejection to embed. The credentials the USER typed
+      // live in React state and are never part of `err`. Nothing to scrub —
+      // which is a measurement, not an assumption, and it is what must be
+      // re-checked if this call ever starts sending an Authorization header.
       console.error("[wizard:ConnectKeyStep] submit threw:", err);
       setSubmitting(false);
     }
   }
 
   const errorEnvelope = errorCode
-    ? buildEnvelope(errorCode, correlationId)
+    ? buildEnvelope(errorCode, correlationId, {
+        // 140.3-10's rule, inherited: `?? undefined` because ABSENCE IS NOT
+        // ZERO. `null` would be carried into the envelope slot and a `0` there
+        // is a wait we were never told about.
+        retryAfterSeconds: retryAfterSeconds ?? undefined,
+      })
     : null;
 
   return (
