@@ -22,6 +22,21 @@ const ruleTester = new RuleTester({
  * binding" is the discriminator: an implementation that looked for a variable
  * called ANALYTICS_URL would pass every other invalid case and still miss the
  * one an author is most likely to write by accident.
+ *
+ * TWO DISCRIMINATORS, one per detection property (140.2-04):
+ *   - "renamed binding" (invalid #3) pins INIT-TRACKING — nothing in it is
+ *     called ANALYTICS_URL, so a name-matcher fails it.
+ *   - "untainted two-hop alias" (valid, last) pins the FIXED POINT's seed. It
+ *     builds `const url = ...` off a DIFFERENT env var, so a fixed-point pass
+ *     that had degraded into "anything called url" would report it. Without
+ *     this one, widening the taint could not be told apart from widening the
+ *     name match.
+ *
+ * The five URL shapes are pinned as separate invalid fixtures because they fail
+ * for different reasons, and two of them (3 and 4) were MISSED until 140.2-04:
+ * they are two hops from the env read, and pass (a) used to run with taint
+ * checking off, so a tainted name never tainted a second binding. Those two are
+ * this file's ledger-row M57 targets — see the marker comments below.
  */
 ruleTester.run("no-raw-analytics-fetch", rule, {
   valid: [
@@ -49,6 +64,15 @@ ruleTester.run("no-raw-analytics-fetch", rule, {
     // Initialized from the env var but never fetched — no seam call, no finding.
     {
       code: "const base = process.env.ANALYTICS_SERVICE_URL;\nconsole.log(base);",
+    },
+    // UNTAINTED TWO-HOP ALIAS — the fixed point's discriminator. Structurally
+    // identical to invalid shape 3 (a `url` built from a base, then fetched),
+    // differing ONLY in which env var seeded it. A fixed-point pass that had
+    // slipped into flagging bindings by name — and `url` is the single most
+    // likely name to collide — reports this. The seed must stay the analytics
+    // env member and nothing else.
+    {
+      code: "const other = process.env.SOME_OTHER_SERVICE_URL;\nconst url = `${other}/health`;\nconst res = await fetch(url);",
     },
   ],
   invalid: [
@@ -94,6 +118,70 @@ ruleTester.run("no-raw-analytics-fetch", rule, {
     // 8. Computed env access.
     {
       code: 'const svc = process.env["ANALYTICS_SERVICE_URL"];\nconst res = await fetch(`${svc}/api/x`);',
+      errors: [{ messageId: "raw" }],
+    },
+    // ---- The four documented URL shapes, one fixture each (140.2-04) --------
+    // 9. SHAPE 1 — the env member read INLINE in the fetch's template literal,
+    //    with no binding at all. The simplest way to write a new seam.
+    {
+      code: "const res = await fetch(`${process.env.ANALYTICS_SERVICE_URL}/api/x`);",
+      errors: [{ messageId: "raw" }],
+    },
+    // 10. SHAPE 2 — one binding, fetched through a template slot. (Invalid #1
+    //     covers this too, via a `??` chain; kept separate because #1's point is
+    //     the fallback chain and this one's point is the shape.)
+    {
+      code: "const base = process.env.ANALYTICS_SERVICE_URL;\nconst res = await fetch(`${base}/api/x`);",
+      errors: [{ messageId: "raw" }],
+    },
+    // 11. SHAPE 3 — the seam URL is built into a SECOND binding and THAT is
+    //     fetched. Two hops from the env read, so the pre-140.2-04 one-hop
+    //     ceiling missed it entirely.
+    //     >>> M57 TARGET #1: reverting the fixed point to one-hop taint must
+    //     >>> turn this fixture RED.
+    {
+      code: "const base = process.env.ANALYTICS_SERVICE_URL;\nconst url = `${base}/api/x`;\nconst res = await fetch(url);",
+      errors: [{ messageId: "raw" }],
+    },
+    // 12. SHAPE 4 — the same two-hop ceiling reached via `new URL(path, base)`.
+    //     >>> M57 TARGET #2: reverting the fixed point to one-hop taint must
+    //     >>> turn this fixture RED.
+    {
+      code: 'const base = process.env.ANALYTICS_SERVICE_URL;\nconst u = new URL("/api/x", base);\nconst res = await fetch(u);',
+      errors: [{ messageId: "raw" }],
+    },
+    // 13. REGRESSION — `new URL()` constructed INLINE as the fetch argument.
+    //     This shape was already caught before 140.2-04 (pass (b) recurses the
+    //     whole NewExpression subtree and finds the tainted base), contrary to
+    //     CONTEXT's claim that it was missed. Pinned so a later refactor of the
+    //     recursion cannot quietly lose it.
+    {
+      code: 'const base = process.env.ANALYTICS_SERVICE_URL;\nconst res = await fetch(new URL("/api/x", base));',
+      errors: [{ messageId: "raw" }],
+    },
+    // 14. DECLARATION ORDER, TWO HOPS — the alias is declared AFTER the fetch
+    //     that uses it. Invalid #5 pins the one-hop version of this; this one
+    //     pins that the FIXED POINT is also resolved at Program:exit, which is
+    //     the property an "iterate as you traverse" implementation would lose
+    //     while keeping every other fixture green.
+    //     >>> ALSO an M57 target, recorded after the fact: reverting the fixed
+    //     >>> point reddens this too, because it is a two-hop case as well. It
+    //     >>> is a SEPARATE fixture rather than a duplicate of shape 3, since
+    //     >>> only this one can fail while shape 3 passes (an implementation
+    //     >>> that iterates during traversal instead of at Program:exit).
+    {
+      code: "async function probe() {\n  return fetch(u);\n}\nconst base = process.env.ANALYTICS_SERVICE_URL;\nconst u = `${base}/health`;",
+      errors: [{ messageId: "raw" }],
+    },
+    // 15. THE WARMERS' EXACT SHAPE — `fetch(`${url.replace(/\/+$/, "")}/health`)`
+    //     with `url` off the env read, as written in src/lib/warmup-analytics.ts
+    //     and src/app/api/cron/warm-analytics/route.ts. Those two files are
+    //     legal only because they are PATH-allowlisted in eslint.config.mjs, so
+    //     the rule's verdict on the shape itself is invisible there. Pinned here
+    //     instead, independent of the allowlist: if the allowlist were ever
+    //     narrowed, this is the behaviour the two warmers would meet.
+    {
+      code: 'const url = process.env.ANALYTICS_SERVICE_URL;\nconst res = await fetch(`${url.replace(/\\/+$/, "")}/health`);',
       errors: [{ messageId: "raw" }],
     },
   ],

@@ -478,8 +478,8 @@ describe("POST /api/strategies/create-with-key — sfox api_secret carve-out (SF
     // Proves 119-01's SUPPORTED_EXCHANGES wiring (not just the constant): had the
     // :47 gate rejected sfox we'd see 400 "Unsupported exchange" here. The absent
     // secret is normalized to "" and passed through the SAME funnel the ccxt path uses.
-    expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
-    expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+    expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
+    expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
   });
 
   it.each([
@@ -494,7 +494,7 @@ describe("POST /api/strategies/create-with-key — sfox api_secret carve-out (SF
     const res = await POST(makeReq(body));
 
     expect(res.status).toBe(200);
-    expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+    expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
   });
 
   // WR-01: mixed-case sfox is handled IDENTICALLY to the validate-and-encrypt
@@ -507,8 +507,8 @@ describe("POST /api/strategies/create-with-key — sfox api_secret carve-out (SF
       const res = await POST(makeReq({ ...SFOX_BODY, exchange }));
 
       expect(res.status).toBe(200);
-      expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
-      expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+      expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
+      expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
       const [, rpcArgs] = rpcMock.mock.calls[0];
       expect((rpcArgs as Record<string, unknown>).p_exchange).toBe("sfox");
     },
@@ -718,6 +718,7 @@ describe("POST /api/strategies/create-with-key — mt5 acceptance (MT5SRC-03)", 
       "500123456",
       "investor-password-123",
       "MetaQuotes-Demo",
+      { userId: MOCK_USER.id },
     );
     const [rpcName, rpcArgs] = rpcMock.mock.calls[0];
     expect(rpcName).toBe("create_wizard_strategy");
@@ -772,6 +773,7 @@ describe("POST /api/strategies/create-with-key — mt5 acceptance (MT5SRC-03)", 
       "500123",
       "investor-password-123",
       "MetaQuotes-Demo",
+      { userId: MOCK_USER.id },
     );
   });
 
@@ -1040,6 +1042,41 @@ describe("POST /api/strategies/create-with-key — circuit-breaker trip (SEAM-04
     expect(res.headers.get("Retry-After")).toBe("7");
     // The key was validated but never persisted — the RPC never ran.
     expect(rpcMock).not.toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
+
+  it("HI-02: the catch scrubs THIS ROUTE's per-request exchange credentials", async () => {
+    // ⚠️ THE WIRING, NOT THE ROSTER. `seam-log-coverage.test.ts` proves this
+    // file is now scanned; this proves the catch actually redacts. Both are
+    // needed: the scan is a source predicate and cannot see runtime bytes.
+    //
+    // This catch wraps validateKey/encryptKey, whose request bodies carry the
+    // raw exchange credentials and whose outgoing headers carry X-Service-Key.
+    // undici embeds those headers in `err.message`. Until HI-02 this site
+    // logged `err.message` raw; the exposure was narrow only because a
+    // DIFFERENT file (analytics-client) happens to replace the undici message
+    // first — a property of that file's catch ordering, not of this route.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    validateKeyMock.mockRejectedValue(
+      new Error(
+        `fetch failed: connect ECONNREFUSED 10.0.0.1:8002 ` +
+          `(x-service-key: svc, body: {"api_secret":"${VALID_BODY.api_secret}",` +
+          `"passphrase":"${VALID_BODY.passphrase}"})`,
+      ),
+    );
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    const logged = consoleErr.mock.calls
+      .map((args) => args.map((a) => String(a)).join(" "))
+      .join("\n");
+    expect(logged).toContain("caught exception");
+    expect(logged).not.toContain(VALID_BODY.api_secret);
+    expect(logged).not.toContain(VALID_BODY.passphrase);
+    // The A-10 half: redacting must not answer by dropping the error. The
+    // syscall token is the most valuable thing in this line.
+    expect(logged).toContain("ECONNREFUSED");
     consoleErr.mockRestore();
   });
 

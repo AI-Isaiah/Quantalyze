@@ -297,6 +297,65 @@ flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM fact
   `services/error_contract.py:6,8` still say "the four classes" in prose — the table has had
   five rows since 140.1.1 plan 01. One-word comment fix, batch it with the above.)*
 
+### v1.16 Phase-140.2 (SEAMCORE) review — findings routed onward (added 2026-07-27)
+
+> From the 140.2 code review (1 Critical, 3 High, 4 Medium, 6 Low) + VERIFICATION W-1..W-4.
+> **Fixed in the review-fix pass:** CR-01, HI-01, HI-02, HI-03, ME-01, ME-02, ME-03, LO-03,
+> LO-04, W-1, W-2 (folded into HI-01). ME-04 was JUDGED and recorded rather than fixed (the
+> containment it needs is a cross-language change to a closed dependency set, and 140.2's fence
+> is zero Python) — it lives in `140.1-TS-OBLIGATIONS.md` as **TS-39** with the HI-01 residual.
+> Copy halves went to 140.3 as **TS-37/TS-38**; branch protection went to ops as **TS-40**.
+> The four below are the ones deliberately left, each with its reason. **Coordinates are
+> SEARCHABLE CODE TEXT, not line numbers — five waves rewrote these files.**
+
+- **LO-01 — `501` and `505` count toward the breaker, re-creating the self-sustaining outage the
+  `500` arm exists to prevent.** `src/lib/seam-discriminator.ts`, the status table: only `500` is
+  `service-permanent`; `501 Not Implemented` and `505 HTTP Version Not Supported` fall into the
+  `other 5xx → SERVICE-TRANSIENT → COUNTS` arm. Both are DETERMINISTIC — retrying cannot help — so
+  five of them in 30 s open the circuit, which then blocks its own recovery probe. That is verbatim
+  the R-1 / A-02 reasoning the `500` arm itself cites. A route deployed against a Python version
+  that does not implement a method would trip the seam for everyone, one cooldown at a time.
+  *Why not fixed now:* it is PRE-PHASE behaviour that 140.2 did not introduce, and the arm is
+  shared with 502/504 (platform edge), where transient IS correct — so the change is a re-derivation
+  of the status table, which is SEAMCORE-01's subject and cross-pinned to
+  `analytics-service/docs/STATUS_CONTRACT.md`. *Fix:* add `501` and `505` to the permanent arm, or
+  state in the table why they are considered transient on this seam. Pair with a discriminator pass.
+
+- **LO-02 — `decodeBreakerLock` accepts a reversed or unbounded span, defeating the A-15 guard
+  downstream.** `src/lib/resilient-fetch.ts`, the `^open:(\d+):(\d+)$` regex: it accepts any digit
+  strings, so `open:0:99999999999999999999` decodes to `expiresAtMs ≈ 1e20`, `isBreakerOpen`
+  returns `retryAfterS ≈ 1e17`, `Number.isInteger` accepts it, and `Retry-After:
+  100000000000000000` goes on the wire — **including to the anonymous teaser**. A reversed pair
+  (`expiresAtMs < armedAtMs`) makes `emitBreakerTransition`'s `cooldownS` negative. The value is
+  only writable by us today, so this is bookkeeping corruption rather than an attack path — but
+  `CircuitOpenError`'s A-15 guard was added specifically to stop implausible values reaching a
+  header, and this is the one remaining path that can produce one that PASSES it. *Fix:* reject a
+  span that is `<= 0` or `> (BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S) * 1000`, returning
+  `null` — corruption reads CLOSED, per locked decision 4. Cheap; belongs with Phase 141's breaker
+  pass (**TS-39**) since it touches the same decode path.
+
+- **LO-05 — `sentryCaptureDeps()` resolves ONE hop and re-arms the trap it disarmed.**
+  `src/__tests__/gdpr-export-coverage-hook.test.ts`. The change correctly stopped hand-listing
+  `sentry-capture.ts`'s deps, but the regex is applied to `sentry-capture.ts` ONLY — it does not
+  recurse into what those deps import. It holds today purely because `seam-redaction.ts` has a
+  purity guard forbidding imports. The moment `sentry-capture` imports a non-leaf, every mutation
+  case in that file fails with `Cannot find module`, for a reason that has nothing to do with what
+  they assert — exactly the trap the function's own docblock says it exists to disarm. *Fix:* make
+  the walk transitive (worklist over discovered files), or assert the one-hop assumption LOUDLY —
+  `expect(depsOf(dep)).toEqual([])` for each discovered dep, with a message naming
+  `seam-redaction`'s purity guard as the reason it holds. Test-infra; no production risk.
+
+- **LO-06 — `scrubSeamError(error.message)` passes a STRING into the error renderer.**
+  `src/app/api/strategies/finalize-wizard/route.ts`, the site logging `"RPC error:"` with
+  `error.code` as a third argument. `scrubSeamString` is the entry point for a string;
+  `scrubSeamError` routes it through `describeThrown`, which takes the `String(err)` fallback.
+  Harmless (both are total and produce the same bytes for a string) and inconsistent with the six
+  sibling sites in the same file. ⚠️ **CR-01 raised its value:** now that `describeThrown` renders a
+  plain object's `code`/`message`/`details`/`hint`, passing `error` WHOLE would give this site the
+  SQLSTATE, details and hint it currently throws away — the same diagnosis CR-01 restored to the
+  other six. *Fix:* `scrubSeamError(error)`, keeping the deliberate raw `error.code` third argument
+  (it is an allowlisted `SAFE_PROPERTY`). One line; batch with any finalize-wizard pass.
+
 ### v1.16 Phase-140.1.2 review — findings routed onward (added 2026-07-26)
 
 > From the 140.1.2 code review (0 Critical, 0 High, 7 Medium, 6 Low). The four in-fence items

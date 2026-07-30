@@ -13,6 +13,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:redis": "vitest run --config vitest.redis.config.ts",
     "test:e2e": "playwright test",
     "verify:phase18": "tsx scripts/verify-phase18-artifacts.ts",
     "check:founder-lp-readiness": "tsx scripts/check-founder-lp-readiness.ts",

@@ -12,6 +12,7 @@ import { postProcessKey } from "@/lib/process-key-client";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { CircuitOpenError } from "@/lib/seam-errors";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { scrubSeamError, scrubSeamString } from "@/lib/seam-redaction";
 import { logAuditEventAsUser } from "@/lib/audit";
 // Phase 140.1.1 / PYAPIFIX-01 — the onboard-reply narrow lives in a
 // dependency-free leaf so the cross-process parity test can exercise THIS
@@ -60,10 +61,19 @@ const STRATEGY_NAME_SET = new Set(STRATEGY_NAMES as readonly string[]);
  * Vercel function ceiling for this route. Declared rather than inherited so the
  * SC-4 headroom invariant has an in-repo source of truth: the seam-budget
  * invariant test reads this export from disk and fails if it drifts from
- * `SEAM_ROUTE_BUDGETS` (this route spends TWO budgets — the keys-permissions
- * probe, then the process-key enqueue). The value matches the platform default
- * verified against the live project settings in 140-01, so pinning it raises
- * nothing.
+ * `SEAM_ROUTE_BUDGETS`.
+ *
+ * ⚠️ WHICH BUDGETS THIS ROUTE SPENDS DEPENDS ON THE BRANCH, and this comment
+ * used to name only one of them ("TWO budgets — the keys-permissions probe,
+ * then the process-key enqueue"), which is the SINGLE-KEY path. The composite
+ * path spends `keys-permissions` once PER MEMBER, up to
+ * `MAX_COMPOSITE_MEMBERS`, and no enqueue at all — it returns through
+ * `runLegacyFinalize`, whose stitch_composite enqueue is a Supabase RPC. That
+ * branch is the one that can reach this ceiling, and the budget row now models
+ * both (plan 140.2-10 / A-29).
+ *
+ * The value matches the platform default verified against the live project
+ * settings in 140-01, so pinning it raises nothing.
  */
 export const maxDuration = 300;
 
@@ -74,6 +84,43 @@ export const maxDuration = 300;
  */
 const CIRCUIT_OPEN_COPY =
   "The analytics service is temporarily unavailable. Please try again in a moment.";
+
+/**
+ * SEAMCORE-10 (A-06 / A-29) — the hard bound on the composite member fan-out.
+ *
+ * WHY A CAP EXISTS AT ALL. The composite branch below re-probes EVERY member
+ * key through the third Railway seam, sequentially, bypassing both cache layers
+ * (`fetchLivePermissions`, `?force_refresh=true`). Each probe costs the
+ * `keys-permissions` budget — 15 000 ms — plus the breaker's own store round
+ * trips. The member read had no `.limit()`, so N was whatever the database
+ * returned and the route's real worst case was N × 15 000 ms against a 300 s
+ * function ceiling. A draft with enough members holds a lambda until Vercel
+ * kills it mid-request, with no typed envelope and no finalize.
+ *
+ * WHY 10, and not a number that merely felt safe. Two independent bounds meet
+ * here and 10 is the smaller-of / larger-of pair that satisfies both:
+ *
+ *   · PRODUCT. Real composites are small — the largest receipted book is a
+ *     three-key venue stitch, and the wizard's multi-key connect step exists to
+ *     combine a handful of accounts, not a portfolio of them. Nine usable
+ *     members (see the fail-loud arm below) is roughly 3x the largest composite
+ *     anyone has built.
+ *   · THE FUNCTION CEILING. In the breaker's FAILING state the invariant charges
+ *     each seam call 15 000 ms of request budget plus three store commands at
+ *     4 250 ms each — 27 750 ms per member. Eleven members is 305 250 ms and
+ *     BREACHES the 300 000 ms ceiling this route declares; ten is 277 500 ms and
+ *     fits. So 10 is the largest cap that keeps SC-4b true in every breaker
+ *     state, and `src/lib/seam-budgets.invariant.test.ts` recomputes exactly
+ *     that arithmetic — raising this constant without lowering a budget reddens
+ *     there rather than being discovered in production.
+ *
+ * DELIBERATELY NOT `export`ed. A Next.js route module's export surface is
+ * validated against the route-segment contract, so an extra export is a build
+ * error, not a style choice. The budget invariant therefore reads this
+ * declaration from DISK — the same idiom it already uses for `maxDuration`, and
+ * a genuine cross-file link rather than a table compared against itself.
+ */
+const MAX_COMPOSITE_MEMBERS = 10;
 
 interface LivePermissions {
   read: boolean;
@@ -130,6 +177,13 @@ async function fetchLivePermissions(
   if (!res.ok) {
     throw new Error(`permissions probe failed: ${res.status}`);
   }
+  // SEAMCORE-02: `res.json()` is the core's INSTRUMENTED read — a body-read
+  // failure records one breaker failure and throws `SeamBodyReadError`. Letting
+  // it propagate is DELIBERATE and needs no new arm here: `runScopeBroadeningProbe`
+  // already catches every probe failure and FAILS CLOSED (T-140-22), which is
+  // the only safe answer — a key whose live scopes could not be re-checked must
+  // never be promoted to pending_review. A body that stalled mid-stream is a
+  // probe that did not run.
   return (await res.json()) as LivePermissions;
 }
 
@@ -141,29 +195,27 @@ function validateStringArray(value: unknown): string[] {
 }
 
 /**
- * Phase B/C simplify — defense-in-depth token scrub. Replaces any literal
- * occurrence of the live INTERNAL_API_TOKEN inside a stringified value
- * with `<redacted>` before it lands in logs / Sentry. Originally added
- * for the H-0328 probe-error path; promoted to module scope so every
- * error-logging site (after()-block side-effect rejections, Sentry
- * `extra` payloads, etc.) gets the same coverage.
+ * ⚠️ THE ROUTE-LOCAL SCRUBBER IS GONE — see `@/lib/seam-redaction`.
+ *
+ * A private token-scrub pair used to live here (the names are deliberately not
+ * spelled out: the acceptance grep proving they are gone would otherwise match
+ * this very comment — the same trap the dormant handler's base-URL note in
+ * keys/validate-and-encrypt records). The IDEA was
+ * right: they were promoted to module scope precisely so every error-logging
+ * site in this route got them. Phase 140.2 / SEAMCORE-06 generalised them
+ * instead of discarding them, because the implementation was too narrow in
+ * three ways that each shipped silently — it knew exactly ONE env secret (so
+ * `X-Service-Key`, the Upstash token and a live user JWT went to the log
+ * verbatim), it was unreachable from the seam core and both clients where
+ * undici actually produces the leak, and it had no minimum-length refusal, so a
+ * short secret would substring-match prose and eat the `ECONNREFUSED` token —
+ * TRAP-1's explicit over-redaction warning.
+ *
+ * Do not re-introduce a local copy. Two enumerations of one concept is the
+ * class-not-instance defect this programme exists to close, and a comment is
+ * not a mechanism: `seam-log-coverage.test.ts` fails on a bare caught
+ * identifier reaching a `console.*` in this file.
  */
-function scrubInternalToken(value: string): string {
-  const token = process.env.INTERNAL_API_TOKEN;
-  if (!token || token.length === 0) return value;
-  return value.split(token).join("<redacted>");
-}
-
-function safeErrorString(err: unknown): string {
-  if (err instanceof Error) {
-    return `${scrubInternalToken(err.name)}: ${scrubInternalToken(err.message)}`;
-  }
-  try {
-    return scrubInternalToken(String(err));
-  } catch {
-    return "unknown";
-  }
-}
 
 /**
  * M-18 — payload validator. Returns either a `{ ok: true, fields }` tuple of
@@ -410,13 +462,14 @@ async function runScopeBroadeningProbe(
         ),
       };
     }
-    // audit-2026-05-07 H-0328 + Phase C simplify — log only the safe
-    // primitives (name + message) scrubbed of any literal INTERNAL_API_TOKEN
-    // occurrence. Some fetch / undici / retry-wrapper stack traces embed
+    // audit-2026-05-07 H-0328, generalised by SEAMCORE-06 — log only the safe
+    // primitives (name + message + cause chain), scrubbed of every secret the
+    // shared leaf knows. Some fetch / undici / retry-wrapper stack traces embed
     // the outgoing X-Internal-Token header in either the message or a
-    // wrapper-error name; both paths are covered by scrubInternalToken.
+    // wrapper-error NAME; the leaf covers both paths, and the syscall token
+    // survives so a refused connection is still distinguishable from a timeout.
     console.error(
-      `[strategies/finalize-wizard] live permissions probe failed: ${safeErrorString(probeErr)}`,
+      `[strategies/finalize-wizard] live permissions probe failed: ${scrubSeamError(probeErr)}`,
     );
     return {
       ok: false,
@@ -463,9 +516,13 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   try {
     body = await req.json();
   } catch (err) {
+    // SEAMCORE-06 — a class member the plan's enumeration did not list: the
+    // caught rejection was passed through raw. `req.json()` collapses transport
+    // read failures and parse errors into one rejection, and a transport
+    // failure's message is undici's, headers included.
     console.warn(
       "[finalize-wizard] body JSON parse failed:",
-      err instanceof Error ? err.message : err,
+      scrubSeamError(err),
     );
   }
 
@@ -533,9 +590,12 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     .maybeSingle();
 
   if (strategyErr) {
+    // SEAMCORE-06 — same class as the five Supabase `.message` reads this route
+    // already scrubbed, and it was the one that was not. Closing the class, not
+    // the instances, is the point.
     console.error(
       "[strategies/finalize-wizard] strategy lookup failed:",
-      strategyErr.message,
+      scrubSeamError(strategyErr),
     );
     return NextResponse.json(
       { error: "Could not load draft" },
@@ -608,7 +668,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       .single();
     if (keyVenueErr) {
       console.warn(
-        `[strategies/finalize-wizard] asset_class venue resolve failed (non-blocking, defaults √252): ${scrubInternalToken(keyVenueErr.message)}`,
+        `[strategies/finalize-wizard] asset_class venue resolve failed (non-blocking, defaults √252): ${scrubSeamError(keyVenueErr)}`,
       );
       captureToSentry(keyVenueErr, {
         tags: { op: "finalize-wizard.asset_class_venue_resolve" },
@@ -651,7 +711,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       .eq("user_id", user.id);
     if (assetClassErr) {
       console.warn(
-        `[strategies/finalize-wizard] asset_class persist failed (non-blocking): ${scrubInternalToken(assetClassErr.message)}`,
+        `[strategies/finalize-wizard] asset_class persist failed (non-blocking): ${scrubSeamError(assetClassErr)}`,
       );
       captureToSentry(assetClassErr, {
         tags: { op: "finalize-wizard.asset_class_persist" },
@@ -703,7 +763,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // unified path's COMPOSITE_MEMBERSHIP_UNKNOWN code so the wizard client
       // maps the same retry copy off `code`.
       console.error(
-        `[strategies/finalize-wizard] composite membership probe failed: ${safeErrorString(err)}`,
+        `[strategies/finalize-wizard] composite membership probe failed: ${scrubSeamError(err)}`,
       );
       captureToSentry(err, {
         tags: {
@@ -731,16 +791,34 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // single-key path returns. Ownership is already established by the
       // owner-scoped strategy lookup above (:427-432); membership ids are not
       // sensitive, so the admin client is used only to enumerate them.
+      //
+      // SEAMCORE-10 — the read is CAPPED, and the cap lives on the QUERY. A
+      // bound applied inside the loop below would still let the database hand
+      // this lambda an arbitrarily long list, and it is the read that the
+      // SEAM_ROUTE_BUDGETS declaration has to be able to trust: that table
+      // declares `keys-permissions × MAX_COMPOSITE_MEMBERS` for this branch,
+      // and the two numbers are pinned to each other cross-file.
       const { data: members, error: membersErr } = await compositeAdmin
         .from("strategy_keys")
         .select("api_key_id")
         .eq("strategy_id", fields.strategy_id)
-        .order("seq", { ascending: true });
+        .order("seq", { ascending: true })
+        // ⚠️ cap + 1, AND THE +1 IS THE WHOLE POINT (ME-02). `.limit(cap)`
+        // cannot distinguish "this composite has exactly cap members" from "it
+        // has more, and you are holding the first cap of them", so the refusal
+        // below had to fire at `>= cap` and the usable maximum was cap - 1 — the
+        // constant was off by one from the thing it names, and a user with a
+        // genuine 10-member draft got a permanent 503 rendered as "please
+        // retry". The extra row is a TRUNCATION DETECTOR and is never probed:
+        // its arrival IS the refusal, which happens before the loop. So the
+        // fan-out stays capped at `MAX_COMPOSITE_MEMBERS` and
+        // `SEAM_ROUTE_BUDGETS`'s `calls: 10` plus SC-4e stay exact.
+        .limit(MAX_COMPOSITE_MEMBERS + 1);
       if (membersErr) {
         // A member-list read error also fails CLOSED — never enqueue a
         // composite whose members we could not enumerate to re-probe.
         console.error(
-          `[strategies/finalize-wizard] composite member list read failed: ${scrubInternalToken(membersErr.message)}`,
+          `[strategies/finalize-wizard] composite member list read failed: ${scrubSeamError(membersErr)}`,
         );
         captureToSentry(membersErr, {
           tags: {
@@ -749,6 +827,71 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           },
           extra: { strategy_id: fields.strategy_id },
         });
+        return NextResponse.json(
+          {
+            error: "Could not load composite members; please retry.",
+            code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+          },
+          { status: 503, headers: NO_STORE_HEADERS },
+        );
+      }
+      // SEAMCORE-10 / ME-02 — OVERFLOWING the cap is a REFUSAL. Sitting AT it
+      // is not.
+      //
+      // The read above asks for `MAX_COMPOSITE_MEMBERS + 1` rows, so the two
+      // readings `.limit(MAX_COMPOSITE_MEMBERS)` could not tell apart are now
+      // distinguishable: exactly `MAX_COMPOSITE_MEMBERS` back means the list is
+      // PROVABLY complete, and `MAX_COMPOSITE_MEMBERS + 1` back is proof the
+      // draft has more members than this route can probe.
+      //
+      // Proceeding on a possibly-truncated list would finalise a composite whose
+      // remaining member keys were never re-probed — the connect→submit
+      // scope-broadening hole the O-1 loop exists to close, reintroduced by a
+      // silently short list. That is still refused. What is no longer refused is
+      // a legitimate MAX_COMPOSITE_MEMBERS-member draft, which used to get a
+      // PERMANENT 503 wearing transient "please retry" copy, with no path
+      // forward — and which made every existing composite at or above the cap
+      // un-finalizable the moment the cap shipped.
+      //
+      // `>` rather than `===` on purpose — if the `.limit()` above were ever
+      // dropped, this arm still refuses an oversized list rather than fanning
+      // out over it.
+      if ((members?.length ?? 0) > MAX_COMPOSITE_MEMBERS) {
+        // No caught value reaches this line — every interpolated term is an
+        // integer or an id this route generated. It goes through the shared
+        // scrubber anyway because it is a seam-route log line and this file
+        // keeps ONE mechanism for all of them (140.2-08); a future edit that
+        // interpolates an error here inherits the redaction instead of
+        // reintroducing a leak.
+        console.error(
+          scrubSeamString(
+            `[strategies/finalize-wizard] composite member list EXCEEDED the ` +
+              `${MAX_COMPOSITE_MEMBERS}-member cap for strategy ` +
+              `${fields.strategy_id} (the cap+1 probe row came back); refusing ` +
+              `rather than finalizing a truncated member list with unprobed keys`,
+          ),
+        );
+        captureToSentry(
+          new Error("composite member list EXCEEDED MAX_COMPOSITE_MEMBERS"),
+          {
+            tags: {
+              surface: "finalize-wizard",
+              step: "composite-member-cap",
+            },
+            extra: {
+              strategy_id: fields.strategy_id,
+              max_composite_members: MAX_COMPOSITE_MEMBERS,
+            },
+          },
+        );
+        // The ENVELOPE is deliberately the existing membership-unknown one,
+        // byte-identical to the member-list-read failure above: a list this
+        // route cannot trust to be complete IS an undetermined membership, and
+        // phase 140.2 authors no user-facing copy (that fence is 140.3's). The
+        // operator-facing half — which is where "cap", not "transient", is the
+        // true word — is the log line and the Sentry step tag above. 140.3
+        // owns giving this arm its own code and copy; the retry affordance the
+        // shared envelope renders is wrong for a permanent condition.
         return NextResponse.json(
           {
             error: "Could not load composite members; please retry.",
@@ -816,7 +959,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       .single();
     if (keyRowErr) {
       console.warn(
-        `[strategies/finalize-wizard] api_keys.exchange lookup failed; falling back to default source: ${scrubInternalToken(keyRowErr.message)}`,
+        `[strategies/finalize-wizard] api_keys.exchange lookup failed; falling back to default source: ${scrubSeamError(keyRowErr)}`,
       );
       // Mirror the H-0322 escalation pattern: console.warn on Vercel is
       // best-effort log capture, not alertable. Without Sentry a transient
@@ -912,9 +1055,13 @@ async function runLegacyFinalize(args: {
   });
 
   if (error) {
+    // SEAMCORE-06 — the message is scrubbed; `error.code` is a five-character
+    // SQLSTATE from a closed set and is deliberately kept intact, because the
+    // branches immediately below key off it and an operator reading the line
+    // needs to see the same value the code did.
     console.error(
       "[strategies/finalize-wizard] RPC error:",
-      error.message,
+      scrubSeamError(error.message),
       error.code,
     );
     if (error.code === "P0002" || error.code === "02000") {
@@ -989,7 +1136,7 @@ async function runLegacyFinalize(args: {
         : fields.name;
     if (keyLinkErr) {
       console.warn(
-        `[strategies/finalize-wizard] api_key_id lookup failed in after(): ${scrubInternalToken(keyLinkErr.message)}`,
+        `[strategies/finalize-wizard] api_key_id lookup failed in after(): ${scrubSeamError(keyLinkErr)}`,
       );
       captureToSentry(keyLinkErr, {
         tags: {
@@ -1146,7 +1293,7 @@ async function runLegacyFinalize(args: {
         // in Vercel logs. Side-effect errors (notably enqueue_compute_job
         // wrappers) may stringify request init into .message.
         console.warn(
-          `[strategies/finalize-wizard] side effect ${label} failed (non-blocking): ${safeErrorString(r.reason)}`,
+          `[strategies/finalize-wizard] side effect ${label} failed (non-blocking): ${scrubSeamError(r.reason)}`,
         );
         captureToSentry(r.reason, {
           tags: {

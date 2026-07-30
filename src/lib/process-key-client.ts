@@ -1,12 +1,15 @@
-import { createHmac } from "node:crypto";
 import { NextResponse } from "next/server";
 import { getCorrelationId } from "@/lib/correlation-id";
 import {
   resilientFetch,
+  SeamConfigError,
   SEAM_BUDGETS,
   type SeamBudgetKey,
+  type SeamResponse,
 } from "@/lib/resilient-fetch";
-import { CircuitOpenError } from "@/lib/seam-errors";
+import { CircuitOpenError, SeamBodyReadError } from "@/lib/seam-errors";
+import { scrubSeamError } from "@/lib/seam-redaction";
+import { mintTenantClaim } from "@/lib/tenant-claim";
 
 /**
  * Phase 19 / M-3 — shared client for the unified `/process-key` upstream.
@@ -74,47 +77,119 @@ const CIRCUIT_OPEN_HUMAN_MESSAGE =
   "The analytics service is temporarily unavailable. Please try again in a moment.";
 
 /**
- * Phase 140.1 / PYAPI-02 — how long a minted `X-Tenant-Claim` stays valid.
+ * User-facing copy for "we never reached the ingestion service", shared by the
+ * transport arm and by the SEAMCORE-11 ambiguous-transport arm below.
  *
- * Short on purpose. The claim is a bearer of tenant identity for the rate
- * limiter, so a value captured from a log line or an intermediary must not be a
- * permanent key to that tenant's window. Five minutes is far longer than the
- * request it accompanies and far shorter than anything worth stealing.
+ * Extracted to a constant when the second user appeared: this plan authors NO
+ * new user-facing copy (140.3 owns the client-facing surface), and a second
+ * hand-copied literal is how "no new copy" quietly becomes two copies that
+ * drift.
  */
-const TENANT_CLAIM_TTL_SECONDS = 300;
+const UPSTREAM_NETWORK_ERROR_HUMAN_MESSAGE =
+  "Could not reach the ingestion service.";
 
 /**
- * Mint the `X-Tenant-Claim` the Python limiter buckets on.
+ * Phase 140.2-11 / SEAMCORE-11 (A-27) — THE ONE DEFINED OUTCOME for an
+ * ambiguous transport. Stated identically here and in
+ * `src/lib/analytics-client.ts` so the next reader does not have to diff the two
+ * files to find out what the seam does with a 204.
  *
- * Wire format `<payload>.<exp>.<hex-hmac-sha256>`, MAC over `"<payload>.<exp>"`,
- * key = `INTERNAL_API_TOKEN`. The verifying half is
- * `analytics-service/services/rate_limit.py:verify_tenant_claim`; the two are
- * pinned together by a copy-pasted fixture literal shared between
- * `process-key-client.test.ts` and `tests/test_process_key.py` (they cannot
- * import each other, so a shared literal is the only real proof they agree).
+ * WHAT IS AMBIGUOUS
+ *   1. A 2xx whose content-type is not JSON. The modal case is a Railway edge
+ *      or maintenance page served as `200 text/html`: the transport succeeded,
+ *      the breaker (correctly) counts nothing, and what came back is not the
+ *      service. This client used to swallow it — `res.json()` rejected, the
+ *      `{}` fallback caught it, and the edge page was reported to the caller as
+ *      a well-formed success.
+ *   2. The three NULL-BODY statuses 204 / 205 / 304, which carry no body at all.
+ *      204 and 205 are `ok`, so they returned `{ ok: true, status, body: {} }`
+ *      while `analytics-client` threw on the identical response; 304 is not
+ *      `ok`, so it reached the status pass-through and CRASHED.
  *
- * WHY THIS EXISTS. `/process-key` used to be throttled by ONE 100/hour bucket
- * keyed on a hash of `INTERNAL_API_TOKEN` — a single shared platform secret, so
- * that was one window for every tenant at once. The landing-page teaser is
- * capped Vercel-side at 10 req/60s per IP = 600/hour, so a single anonymous
- * visitor could drain the entire platform's allowance in about ten minutes.
+ * THE OUTCOME, in both clients
+ *   A typed upstream error carrying the OBSERVED status and content-type, in a
+ *   static operator-facing message that names the SEAM. `analytics-client`
+ *   THROWS it as `AnalyticsUpstreamError`; here the identical message goes to
+ *   the operator log and the outcome is RETURNED as an `{ ok: false, response }`
+ *   502 envelope — never thrown. Plan 140.2-05 widened this function's `try`
+ *   specifically to keep it non-throwing for its five caller routes
+ *   (strategies/csv-validate, strategies/csv-finalize, strategies/finalize-wizard,
+ *   keys/sync, verify-strategy), none of which has a catch for it; closing A-27
+ *   with a throw would undo that in the same file.
  *
- * WHY NOT JUST `X-User-Id` (which is already sent). It is unsigned
- * client-controlled input. Bucketing on it lets any holder of the internal
- * token set a fresh uuid per request and bypass the limiter entirely, or set a
- * victim's uuid and drain their window (the PR#241 red-team finding). The HMAC
- * is what makes the same identifier trustworthy at the limiter.
+ * WHY THE THREE STATUSES ARE DECIDED ON THE STATUS, BEFORE ANY RESPONSE IS
+ * CONSTRUCTED. Verified by execution on Node v25.8.1:
+ * `Response.json(body, { status: 204 | 205 | 304 })` throws
+ * `TypeError: Response constructor: Invalid response status code`. That is
+ * WHATWG-spec behaviour, not a runtime quirk, so CI's Node 22 and local Node 25
+ * agree. The construction ITSELF is the fault, so no arm may reach it — which
+ * is why the check sits ABOVE the `!res.ok` pass-through rather than inside it.
  *
- * WHY NO NEW SECRET. `INTERNAL_API_TOKEN` is already the credential this
- * endpoint authenticates with and is already present on both sides, so the
- * claim adds no new trust surface: an attacker who has it already holds full
- * `/process-key` auth, and the limiter is not the marginal loss.
+ * The 502 is the routable status: the gateway answered, unusably. The user-facing
+ * envelope is the one that ALREADY exists for "we never reached it", because a
+ * maintenance page is not reaching it. Zero new codes, zero new copy.
+ *
+ * The BREAKER VERDICT IS UNCHANGED by all of this (SEAMCORE-01): a 2xx is not a
+ * service fault and a 304 is not either. This is what the CLIENT does with the
+ * response, not what the core counts.
  */
-function mintTenantClaim(payload: string, secret: string): string {
-  const exp = Math.floor(Date.now() / 1000) + TENANT_CLAIM_TTL_SECONDS;
-  const signed = `${payload}.${exp}`;
-  const mac = createHmac("sha256", secret).update(signed).digest("hex");
-  return `${signed}.${mac}`;
+const NULL_BODY_STATUSES: ReadonlySet<number> = new Set([204, 205, 304]);
+
+/** The routable status for the outcome above: the gateway answered, unusably. */
+const UNUSABLE_RESPONSE_STATUS = 502;
+
+/**
+ * The operator-facing message for the outcome above.
+ *
+ * DUPLICATED, byte-for-byte, in `src/lib/analytics-client.ts`, and guarded by a
+ * comment-stripped drift check in `analytics-client.test.ts`. It is duplicated
+ * rather than shared because neither client may import from the other (sixteen
+ * route test files replace one or the other wholesale with a full factory, under
+ * which a cross-client import evaluates to `undefined`), and it cannot move to
+ * the dependency-free error leaf either — that leaf's exported surface is pinned
+ * to a two-member hand-typed set.
+ *
+ * Only the MEDIA TYPE is echoed, lower-cased and length-capped: the raw header
+ * is upstream-controlled and its parameters carry nothing an operator needs.
+ */
+function unusableSeamResponseMessage(
+  status: number,
+  contentType: string | null,
+): string {
+  const mediaType =
+    ((contentType ?? "").split(";")[0] ?? "").trim().toLowerCase().slice(0, 64) ||
+    "absent";
+  return `Analytics seam returned an unusable response (HTTP ${status}, content-type ${mediaType}). The upstream did not answer with the JSON contract.`;
+}
+
+/**
+ * Phase 140.1 / PYAPI-02 — the `X-Tenant-Claim` mint used to live HERE, as a
+ * module-private `mintTenantClaim` + `TENANT_CLAIM_TTL_SECONDS` pair.
+ *
+ * Phase 140.2-09 / TS-04 moved it, ALGORITHM UNCHANGED, to
+ * `src/lib/tenant-claim.ts`, because `analytics-client.ts` now mints the same
+ * header for the six rekeyed Python routes it reaches. Two copies of an HMAC
+ * construction that must also agree with a third implementation in another
+ * language is the drift class this programme exists to close. The "why no new
+ * secret" / "why not just X-User-Id" reasoning moved with it — read it there.
+ *
+ * The wire bytes are unchanged: `process-key-client.test.ts` still pins the same
+ * cross-language literal `analytics-service/tests/test_process_key.py` reads.
+ */
+
+/**
+ * Body-read fallback for the upstream response.
+ *
+ * TWO CASES, conflated before SEAMCORE-02. A genuinely absent or unparseable
+ * body keeps the `{}` fallback — an upstream that answers a non-2xx with an
+ * empty or non-JSON body is real and this client has always tolerated it. An
+ * ABORT does not: the core has already recorded that failure against the
+ * breaker, so turning it into an empty object would report a dying Railway as a
+ * well-formed upstream reply, with the request's own status on the envelope.
+ */
+function emptyBodyUnlessSeamRead(err: unknown): Record<string, never> {
+  if (err instanceof SeamBodyReadError) throw err;
+  return {};
 }
 
 export interface PostProcessKeyArgs {
@@ -189,7 +264,74 @@ export async function postProcessKey(
   const budgetKey = budgetKeyFor(args.flow_type);
   const timeoutMs = SEAM_BUDGETS[budgetKey].timeoutMs;
 
-  let res: Response;
+  /**
+   * Phase 140.2-09 / TS-04 — the claim is minted HERE, OUTSIDE the transport
+   * `try`, and that placement is load-bearing.
+   *
+   * The extraction to `@/lib/tenant-claim` added fail-loud refusals (empty
+   * payload, dotted payload, absent secret) to a call that previously could not
+   * throw. The mint used to sit inline in the headers object below — i.e. INSIDE
+   * the classification window — so a refusal would have been swallowed by the
+   * catch and reported to the caller as `UPSTREAM_NETWORK_ERROR` 502: a
+   * configuration fault on OUR side wearing a dead-Railway costume, which is the
+   * precise silent degradation the refusals exist to prevent.
+   *
+   * It does not THROW out of `postProcessKey` either. This function's declared
+   * type is `Promise<PostProcessKeyResult>` and it has never thrown at any of
+   * its five caller routes, none of which has a catch for it (see the ⚠️ block
+   * on `body` below). A refusal therefore takes the SAME shape as the
+   * missing-token 503 above: loud in the server log, clean envelope on the wire.
+   */
+  let tenantClaim: string;
+  try {
+    tenantClaim = mintTenantClaim(args.userId, internalToken);
+  } catch (err) {
+    const tag = args.routeTag ?? "process-key-client";
+    console.error(
+      `[${tag}] refusing to call /process-key — could not mint X-Tenant-Claim`,
+      {
+        correlation_id: correlationId,
+        // SEAMCORE-06 — through the redaction leaf, not raw. The mint's own
+        // messages name the env variable and never its value, so nothing is
+        // expected to be scrubbed here; the guard in `seam-log-coverage.test.ts`
+        // is a CLASS guard on this file's log sites, and carving out the one
+        // site whose thrown value "looks safe today" is how the class re-opens.
+        reason: scrubSeamError(err),
+      },
+    );
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "Service unavailable" },
+        { status: 503 },
+      ),
+    };
+  }
+
+  // SEAMCORE-02: the core returns a `SeamResponse`, whose `json()` / `text()`
+  // run inside its classification window. Only `ok`, `status` and `json` are
+  // used here, all of which the closed surface carries.
+  let res: SeamResponse;
+  /**
+   * The upstream body.
+   *
+   * ⚠️ THE READ BELOW IS INSIDE THE `try` ON PURPOSE, AND MUST STAY THERE.
+   * This client's `try` used to wrap ONLY the `resilientFetch` call, with both
+   * body reads sitting after the catch — so a `SeamBodyReadError` from either
+   * would have escaped `postProcessKey`, a function whose declared type is
+   * `Promise<PostProcessKeyResult>` and which has NEVER thrown, at all five
+   * caller routes (strategies/csv-validate, strategies/csv-finalize,
+   * strategies/finalize-wizard, keys/sync, verify-strategy), none of which has
+   * a catch for it. That would be five new unhandled-throw paths shipped as a
+   * side effect of a body-read fix. A later refactor that "simplifies" this try
+   * back to wrapping only the fetch re-opens all five.
+   *
+   * The two reads the plan enumerates as sites 4 and 5 were byte-identical
+   * (`await res.json().catch(() => ({}))`) and sat on mutually exclusive
+   * branches, so ONE instrumented read before the branch covers both without
+   * calling `json()` twice.
+   */
+  let body: unknown;
   try {
     // Headers and body pass through the core byte-for-byte. A dropped
     // X-User-Id re-opens the CT-4 cross-tenant rate-limit-bucket defect.
@@ -209,8 +351,10 @@ export async function postProcessKey(
         // is the ONE chokepoint: all five postProcessKey callers share this
         // headers assembly, so minting here is what makes per-tenant throttling
         // live end-to-end. Teaser callers pass userId "public", which mints the
-        // shared anonymous bucket rather than a tenant one.
-        "X-Tenant-Claim": mintTenantClaim(args.userId, internalToken),
+        // shared anonymous bucket rather than a tenant one. Minted ABOVE, not
+        // inline: see the tenantClaim block for why the call must not sit inside
+        // this try.
+        "X-Tenant-Claim": tenantClaim,
         // Phase 19.1 — forward the end user's access token so the unified
         // router can call user-auth SECURITY DEFINER RPCs (finalize_csv_strategy)
         // as the user. Only present for the CSV finalize step.
@@ -225,6 +369,7 @@ export async function postProcessKey(
       }),
       cache: "no-store",
     });
+    body = await res.json().catch(emptyBodyUnlessSeamRead);
   } catch (err) {
     const tag = args.routeTag ?? "process-key-client";
     // ORDER IS LOAD-BEARING: CircuitOpenError FIRST. The generic arms below
@@ -253,9 +398,40 @@ export async function postProcessKey(
         ),
       };
     }
+    // ME-01 — a CONFIG fault on OUR side is NAMED in the operator log before it
+    // takes the generic envelope below.
+    //
+    // `SeamConfigError` is raised above the classification window, so the
+    // breaker correctly hears nothing. What was missing is that nothing
+    // downstream could tell it apart from a dead upstream: it took the
+    // `UPSTREAM_NETWORK_ERROR` 502 arm with human_message "Could not reach the
+    // ingestion service", so a malformed `ANALYTICS_SERVICE_URL` — our own
+    // deployment typo — read to ops as Railway being down.
+    //
+    // ⚠️ THE LOG IS FIXED HERE; THE ENVELOPE IS NOT, DELIBERATELY. This function
+    // is declared never to throw at its five caller routes, so the sibling fix
+    // in `analytics-client` (rethrow unwrapped) is not available. Giving this
+    // fault its own `code` and `human_message` is authoring user-facing copy,
+    // which is 140.3's fence. Recorded as an obligation in
+    // `140.1-TS-OBLIGATIONS.md` rather than half-done here.
+    if (err instanceof SeamConfigError) {
+      console.error(
+        `[${tag}] CONFIG fault reaching /process-key — not an upstream failure, and NOT a reason to blame Railway:`,
+        scrubSeamError(err),
+        { correlation_id: correlationId },
+      );
+    }
+    // A body-read failure maps onto the taxonomy ALREADY here rather than
+    // getting an envelope of its own: `deadlineExceeded` true is the same fact
+    // as a transport abort (the deadline covers the response STREAM, not just
+    // the header exchange), and false is the same fact as a connection that
+    // never completed. Zero new codes, zero new human_message copy — 140.3 owns
+    // the client-facing surface, and both envelopes below already exist.
     const isAbort =
-      (err instanceof Error || err instanceof DOMException) &&
-      (err.name === "AbortError" || err.name === "TimeoutError");
+      err instanceof SeamBodyReadError
+        ? err.deadlineExceeded
+        : (err instanceof Error || err instanceof DOMException) &&
+          (err.name === "AbortError" || err.name === "TimeoutError");
     if (isAbort) {
       console.error(
         // The budget is no longer universally 60s — report the one that fired.
@@ -280,14 +456,24 @@ export async function postProcessKey(
     // Non-timeout network errors surface as 502 so the caller can
     // distinguish "we never reached upstream" from "upstream rejected us".
     const message = err instanceof Error ? err.message : "Network error";
-    console.error(`[${tag}] /process-key upstream fetch threw:`, message);
+    // SEAMCORE-06 / TRAP-1 — THE undici site. This is the one that actually
+    // leaks: undici embeds the outgoing headers in `err.message`, and this
+    // request's headers are `Authorization: Bearer <INTERNAL_API_TOKEN>`,
+    // `X-Tenant-Claim`, and on the CSV finalize flow `X-User-Access-Token` — a
+    // LIVE end-user Supabase JWT. The token comes from the leaf's env list; the
+    // JWT cannot, so it is passed explicitly. The syscall token survives, which
+    // is the whole reason the raw message is not simply dropped.
+    console.error(
+      `[${tag}] /process-key upstream fetch threw:`,
+      scrubSeamError(message, [args.userAccessToken]),
+    );
     return {
       ok: false,
       response: NextResponse.json(
         {
           ok: false,
           code: "UPSTREAM_NETWORK_ERROR",
-          human_message: "Could not reach the ingestion service.",
+          human_message: UPSTREAM_NETWORK_ERROR_HUMAN_MESSAGE,
           correlation_id: correlationId,
           recoverable: true,
         },
@@ -296,14 +482,51 @@ export async function postProcessKey(
     };
   }
 
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
+  // The NextResponse construction stays OUTSIDE the try. Only the fetch and the
+  // body read belong in the classification window; widening it further would
+  // swallow the A-27 null-body-status crash (`NextResponse.json(body, {status:
+  // 304})` throws) rather than fix it — the arm immediately below is the fix,
+  // and it works by never letting that construction be reached.
+
+  // SEAMCORE-11 / A-27 — the ambiguous transports, decided BEFORE any response
+  // is constructed and BEFORE the `!res.ok` fork. Both halves land here so the
+  // three null-body statuses and the non-JSON 2xx get ONE answer: split across
+  // the `ok` fork they would get two, which is the divergence being closed.
+  // See the NULL_BODY_STATUSES block above for the full statement.
+  const contentType = res.headers.get("content-type");
+  const isJsonBody = (contentType ?? "").includes("application/json");
+  if (NULL_BODY_STATUSES.has(res.status) || (res.ok && !isJsonBody)) {
+    const tag = args.routeTag ?? "process-key-client";
+    // The ONLY place the observed status and content-type are recorded: the
+    // envelope below is deliberately generic (140.3's fence). Nothing
+    // error-derived is logged here — the values are this client's own
+    // observations of the response line, so there is nothing for the
+    // SEAMCORE-06 scrub leaf to do.
+    console.error(
+      `[${tag}] ${unusableSeamResponseMessage(res.status, contentType)}`,
+      { correlation_id: correlationId },
+    );
     return {
       ok: false,
-      response: NextResponse.json(err, { status: res.status }),
+      response: NextResponse.json(
+        {
+          ok: false,
+          code: "UPSTREAM_NETWORK_ERROR",
+          human_message: UPSTREAM_NETWORK_ERROR_HUMAN_MESSAGE,
+          correlation_id: correlationId,
+          recoverable: true,
+        },
+        { status: UNUSABLE_RESPONSE_STATUS },
+      ),
     };
   }
 
-  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    return {
+      ok: false,
+      response: NextResponse.json(body, { status: res.status }),
+    };
+  }
+
   return { ok: true, status: res.status, body };
 }

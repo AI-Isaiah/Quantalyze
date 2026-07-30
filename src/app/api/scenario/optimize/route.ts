@@ -146,7 +146,10 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const result = await optimizeScenarioWeights(clean, objective as "min_vol" | "max_sharpe");
+    // TS-04 / SC7 — the sharpest flip: /api/optimize-weights is 20/minute, a
+    // PLATFORM ceiling until this claim appeared, so two allocators running
+    // Scenario Composer could 429 each other. `user.id` is the server session's.
+    const result = await optimizeScenarioWeights(clean, objective as "min_vol" | "max_sharpe", { userId: user.id });
     return NextResponse.json(result, { headers: NO_STORE_HEADERS });
   } catch (err) {
     // Phase 140 / SEAM-04 — the breaker arm, FIRST among the typed arms.

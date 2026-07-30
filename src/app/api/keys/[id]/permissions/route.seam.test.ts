@@ -108,6 +108,17 @@ vi.mock("@upstash/redis", async () => {
             shared.reads += 1;
             return real.get<T>(key);
           },
+          // ⚠️ `mget` MUST be counted too (plan 140.2-06). The open-check is now
+          // ONE `mget` over the row's declared keys plus the global one, so a
+          // counter wired only to `get` records zero breaker reads on a cache
+          // MISS — which would make "a cache HIT consults no breaker key" pass
+          // because NOTHING ever consults one, in either branch. That is the
+          // seeded-key-nobody-reads failure in its other form: a counter nobody
+          // increments.
+          mget: async <T = (string | null)[]>(...keys: string[]) => {
+            shared.reads += 1;
+            return real.mget<T>(...keys);
+          },
         };
       },
     },
@@ -122,8 +133,18 @@ vi.mock("@upstash/ratelimit", async () => {
         return { tokens, window };
       }
       private readonly fake: ReturnType<typeof fakeRatelimitFor>;
-      constructor(opts: { limiter: { tokens: number } }) {
-        this.fake = fakeRatelimitFor(shared.store, opts.limiter.tokens);
+      // `_opts` is deliberately UNREAD. This previously passed the mocked
+      // constructor's own options value straight into the fake as its
+      // threshold — i.e. production's own
+      // `slidingWindow(BREAKER_FAILURE_THRESHOLD, ...)` argument read straight
+      // back out — so the double inherited every mutation to it and could not
+      // disagree with production by construction. The fake now
+      // takes its hand-typed FAKE_THRESHOLD default. The parameter and
+      // `slidingWindow` both stay: the core must still be able to CONSTRUCT
+      // this class with the table's values, and `resilient-fetch.test.ts`
+      // asserts those values as a plumbing pin.
+      constructor(_opts: { limiter: { tokens: number } }) {
+        this.fake = fakeRatelimitFor(shared.store);
       }
       limit(identifier: string) {
         return this.fake.limit(identifier);
@@ -245,7 +266,15 @@ describe("GET /api/keys/[id]/permissions — REAL unstable_cache boundary (SEAM-
   });
 
   it("cache MISS + breaker open → 503 CIRCUIT_OPEN through the real boundary, and NOTHING is cached", async () => {
-    seedBreakerOpen(shared.store, 19);
+    // 140.2-06 per-site decision: THE GLOBAL KEY, and the TTL of 19 is
+    // load-bearing and unchanged. This case exists to prove `retryAfterS`
+    // forwards the OBSERVED lock TTL rather than DEFAULT_RETRY_AFTER_S, so it
+    // must seed a key this route actually reads. `keys-permissions` declares NO
+    // dependencies — `internal.py:303,319` are 500s naming `kek` (never count)
+    // and `internal.py:498` is a 424 naming a VENUE — so the global key is the
+    // ONLY key in this row's check set, and seeding any per-dependency key here
+    // would make the case pass vacuously by never opening anything at all.
+    seedBreakerOpen(shared.store, "breaker:railway", 19);
     const { GET } = await import("./route");
 
     const res = await GET(makeRequest());
@@ -276,6 +305,47 @@ describe("GET /api/keys/[id]/permissions — REAL unstable_cache boundary (SEAM-
     expect(incrementalStore.size).toBe(1);
   });
 
+  it("headers arrive, the body then aborts → NOTHING is cached and the next call re-attempts", async () => {
+    // SEAMCORE-02 / SC1 at the boundary that actually matters. Before the fix
+    // the body read sat OUTSIDE the core's classification window, so this shape
+    // recorded no breaker failure at all; the throw itself is what keeps the
+    // fork from writing an entry, and this Next layer caches for 60s against a
+    // 30s breaker cooldown. A failure converted into a RETURNED value here
+    // would keep answering for half a minute after Railway recovered —
+    // T-140-32, the mitigation becoming the outage.
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      headers: new Headers({ "content-type": "application/json" }),
+      json: () => Promise.reject(new DOMException("aborted", "TimeoutError")),
+      text: () => Promise.reject(new DOMException("aborted", "TimeoutError")),
+    });
+    const { GET } = await import("./route");
+
+    const res = await GET(makeRequest());
+
+    expect(res.status).toBe(502);
+    const raw = await res.text();
+    // No new arm and no new copy: the route's existing generic classification
+    // is the right answer for a body-read failure, and 140.3 owns the surface.
+    expect(JSON.parse(raw).code).toBe("PROBE_FAILED");
+    // The static message carries no transport detail (T-140-05).
+    expect(raw).not.toContain("aborted");
+    expect(raw).not.toMatch(/upstash|railway|DOMException/i);
+
+    // ── THE assertion: the fork wrote NO entry for the rejected callback ────
+    expect(incrementalStore.size).toBe(0);
+
+    // …so the very next call re-attempts for real rather than replaying a
+    // 60s-lived failure.
+    fetchMock.mockResolvedValue(okProbeResponse());
+    const res2 = await GET(makeRequest());
+    expect(res2.status).toBe(200);
+    expect((await res2.json()).read).toBe(true);
+    expect(incrementalStore.size).toBe(1);
+  });
+
   it("cache HIT replays without running the callback — the breaker is never consulted", async () => {
     const { GET } = await import("./route");
 
@@ -287,7 +357,12 @@ describe("GET /api/keys/[id]/permissions — REAL unstable_cache boundary (SEAM-
     expect(readsAfterMiss).toBeGreaterThan(0);
 
     // Open the breaker. A hit must be completely indifferent to it.
-    seedBreakerOpen(shared.store, 30);
+    //
+    // 140.2-06 per-site decision: THE GLOBAL KEY — the only key this row's
+    // check set contains (see the TTL-19 case above for why). The claim is
+    // "a cache hit consults NO breaker key", and seeding the one key that would
+    // otherwise be read is the strongest available form of it.
+    seedBreakerOpen(shared.store, "breaker:railway", 30);
 
     const second = await GET(makeRequest());
     expect(second.status).toBe(200);

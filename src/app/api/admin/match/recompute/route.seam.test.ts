@@ -80,8 +80,18 @@ vi.mock("@upstash/ratelimit", async () => {
         return { tokens, window };
       }
       private readonly fake: ReturnType<typeof fakeRatelimitFor>;
-      constructor(opts: { limiter: { tokens: number } }) {
-        this.fake = fakeRatelimitFor(shared.store, opts.limiter.tokens);
+      // `_opts` is deliberately UNREAD. This previously passed the mocked
+      // constructor's own options value straight into the fake as its
+      // threshold — i.e. production's own
+      // `slidingWindow(BREAKER_FAILURE_THRESHOLD, ...)` argument read straight
+      // back out — so the double inherited every mutation to it and could not
+      // disagree with production by construction. The fake now
+      // takes its hand-typed FAKE_THRESHOLD default. The parameter and
+      // `slidingWindow` both stay: the core must still be able to CONSTRUCT
+      // this class with the table's values, and `resilient-fetch.test.ts`
+      // asserts those values as a plumbing pin.
+      constructor(_opts: { limiter: { tokens: number } }) {
+        this.fake = fakeRatelimitFor(shared.store);
       }
       limit(identifier: string) {
         return this.fake.limit(identifier);
@@ -146,6 +156,12 @@ describe("POST /api/admin/match/recompute — REAL client through the seam (SC-1
     process.env.UPSTASH_REDIS_REST_URL = "https://fake.upstash.invalid";
     process.env.UPSTASH_REDIS_REST_TOKEN = "fake-token";
     process.env.ANALYTICS_SERVICE_URL = ANALYTICS_BASE;
+    // 140.2-09 / TS-04: this file drives the REAL analytics client, which now
+    // mints an X-Tenant-Claim and REFUSES on an absent INTERNAL_API_TOKEN
+    // rather than silently leaving the route on a platform-wide bucket. Without
+    // it every case below 500s at the mint and never reaches the seam arm it
+    // is actually about.
+    process.env.INTERNAL_API_TOKEN = "internal-token-under-test";
     vi.resetModules();
 
     shared.store.clear();
@@ -206,7 +222,16 @@ describe("POST /api/admin/match/recompute — REAL client through the seam (SC-1
   });
 
   it("breaker OPEN → typed 503 + Retry-After, and fetch is NEVER called", async () => {
-    seedBreakerOpen(shared.store, 30);
+    // 140.2-06 per-site decision: this case means "THIS ROUTE'S DECLARED
+    // DEPENDENCY is down", and the literal is the key `match-recompute`'s
+    // SEAM_BUDGETS row declares. Deliberately NOT the global key: the property
+    // asserted below (open ⇒ typed 503 + observed TTL + no seam crossing) is
+    // unchanged, and seeding the per-dependency key additionally proves the
+    // declared set is genuinely consulted at a REAL route rather than only in
+    // the core's own unit test. `match.py:1657,1691` raise
+    // service_error(503, dependency="supabase") on exactly this endpoint, so
+    // this is the key that can actually open in production.
+    seedBreakerOpen(shared.store, "breaker:supabase", 30);
 
     const res = await postAsAdmin();
 
@@ -223,7 +248,12 @@ describe("POST /api/admin/match/recompute — REAL client through the seam (SC-1
   });
 
   it("T-140-12: UNAUTHENTICATED + breaker open → 401, never a breaker-state oracle", async () => {
-    seedBreakerOpen(shared.store, 30);
+    // 140.2-06 per-site decision: THE GLOBAL KEY. This case is about ORDERING —
+    // the auth gate must short-circuit before the breaker is consulted at all —
+    // so the seed must be the key that is checked on EVERY row, or a green here
+    // could mean "the gate ran first" or merely "this route never reads that
+    // key". The global key removes the second reading.
+    seedBreakerOpen(shared.store, "breaker:railway", 30);
     userState.current = null;
     adminFlag.isAdmin = false;
 

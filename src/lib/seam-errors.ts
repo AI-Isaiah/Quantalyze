@@ -52,6 +52,70 @@ export class CircuitOpenError extends Error {
   constructor(retryAfterS: number) {
     super("Analytics service circuit is open");
     this.name = "CircuitOpenError";
+    // Phase 140.2-11 / SEAMCORE-11 (A-15): fail loud on a value this class
+    // cannot honestly publish. `AnalyticsUpstreamError`, sixty lines away in
+    // `analytics-client.ts`, already `RangeError`s on a malformed HTTP status
+    // for exactly this reason — the value is forwarded onto the wire. This one
+    // is forwarded as a `Retry-After` HEADER by both seam clients
+    // (`String(err.retryAfterS)`), to callers including the anonymous
+    // verify-strategy teaser, and it accepted anything: `new
+    // CircuitOpenError(NaN)` put the bytes `Retry-After: NaN` on the wire.
+    //
+    // The shape is the sibling's: `Number.isInteger` (which rejects NaN,
+    // ±Infinity, a fractional value and every non-number without coercing)
+    // plus a range check. `Retry-After` is RFC-7231 delta-seconds, so a
+    // fractional value is as malformed as a NaN.
+    //
+    // NOT A CLAMP, DELIBERATELY. The value comes from a store read
+    // (`isBreakerOpen` → `Math.ceil((lock.expiresAtMs - now) / 1000)`, an
+    // encoded expiry since plan 140.2-07). Substituting 0 or the default
+    // cooldown would publish a plausible header and leave the broken read
+    // looking like a working one, with nothing downstream able to tell the
+    // difference. Every production caller passes a strictly-positive integer.
+    if (!Number.isInteger(retryAfterS) || retryAfterS < 0) {
+      throw new RangeError(
+        `CircuitOpenError: invalid retryAfterS ${String(retryAfterS)} (expected a non-negative integer number of seconds)`,
+      );
+    }
     this.retryAfterS = retryAfterS;
+  }
+}
+
+/**
+ * Phase 140.2 / SEAMCORE-02 — thrown by the shared resilience core when reading
+ * the RESPONSE BODY fails.
+ *
+ * WHY A SECOND CLASS RATHER THAN RETHROWING THE ORIGINAL. `AbortSignal.timeout`
+ * aborts the response STREAM, not just the header exchange, so the modal Railway
+ * degradation — headers fast, body slow — resolves `fetch` and then rejects
+ * later, inside the caller's `res.json()`. Before this class the rejection was a
+ * raw `DOMException` escaping every client's `instanceof` ladder: the deadline
+ * arm had already been passed, so a genuine timeout surfaced as an unclassified
+ * crash and the breaker was never told. The core now reads the body inside its
+ * own classification window and throws THIS, so a body-read failure is as typed
+ * and as attributable as a transport failure.
+ *
+ * The message is STATIC for the same T-140-05 reason as `CircuitOpenError`: the
+ * unauthenticated landing-page teaser reaches this seam, so no upstream URL, no
+ * header name, no traceback and no request detail may appear in it. The
+ * diagnosable half is the server log next to the budget key, plus `cause`, which
+ * is the ORIGINAL rejection and is never rendered.
+ */
+export class SeamBodyReadError extends Error {
+  /**
+   * True when the failure was the wall-clock deadline firing mid-stream
+   * (`AbortError` / `TimeoutError`), false for any other body-read failure.
+   *
+   * Callers map this onto the taxonomy they ALREADY have — the analytics client
+   * onto `AnalyticsTimeoutError` vs "not reachable", the process-key client onto
+   * its existing `UPSTREAM_TIMEOUT` 504 vs `UPSTREAM_NETWORK_ERROR` 502 — so no
+   * new user-facing copy exists for this class anywhere.
+   */
+  readonly deadlineExceeded: boolean;
+
+  constructor(deadlineExceeded: boolean, cause: unknown) {
+    super("Analytics service response body could not be read", { cause });
+    this.name = "SeamBodyReadError";
+    this.deadlineExceeded = deadlineExceeded;
   }
 }

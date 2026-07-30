@@ -331,8 +331,8 @@ describe("POST /api/strategies/composite/add-key — sfox api_secret carve-out (
     // Proves 119-01's SUPPORTED_EXCHANGES wiring: had the :67 gate rejected sfox
     // we'd see 400 "Unsupported exchange". The absent secret is normalized to ""
     // and passed through the SAME funnel the ccxt path uses.
-    expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
-    expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+    expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
+    expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
     const [rpcName, rpcArgs] = rpcMock.mock.calls[0];
     expect(rpcName).toBe("add_wizard_composite_key");
     expect((rpcArgs as Record<string, unknown>).p_exchange).toBe("sfox");
@@ -350,7 +350,7 @@ describe("POST /api/strategies/composite/add-key — sfox api_secret carve-out (
     const res = await POST(makeReq(body));
 
     expect(res.status).toBe(200);
-    expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+    expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
   });
 
   // WR-01: mixed-case sfox is handled IDENTICALLY across all three routes —
@@ -362,8 +362,8 @@ describe("POST /api/strategies/composite/add-key — sfox api_secret carve-out (
       const res = await POST(makeReq({ ...SFOX_BODY, exchange }));
 
       expect(res.status).toBe(200);
-      expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
-      expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+      expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
+      expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
       const [, rpcArgs] = rpcMock.mock.calls[0];
       expect((rpcArgs as Record<string, unknown>).p_exchange).toBe("sfox");
     },
@@ -590,6 +590,7 @@ describe("POST /api/strategies/composite/add-key — mt5 acceptance (MT5SRC-03)"
       "500123456",
       "investor-password-123",
       "MetaQuotes-Demo",
+      { userId: MOCK_USER.id },
     );
     const [rpcName, rpcArgs] = rpcMock.mock.calls[0];
     expect(rpcName).toBe("add_wizard_composite_key");
@@ -625,6 +626,7 @@ describe("POST /api/strategies/composite/add-key — mt5 acceptance (MT5SRC-03)"
       "500123",
       "investor-password-123",
       "MetaQuotes-Demo",
+      { userId: MOCK_USER.id },
     );
   });
 
@@ -764,6 +766,40 @@ describe("POST /api/strategies/composite/add-key — circuit-breaker trip (SEAM-
     expect((await res.json()).code).toBe("KEY_NETWORK_TIMEOUT");
     // Retry-After is breaker-specific — it must NOT appear on other 5xx paths.
     expect(res.headers.get("Retry-After")).toBeNull();
+    consoleErr.mockRestore();
+  });
+});
+
+describe("POST /api/strategies/composite/add-key — HI-02 credential redaction", () => {
+  beforeEach(resetHappyMocks);
+
+  it("the catch scrubs THIS ROUTE's per-request exchange credentials", async () => {
+    // ⚠️ THE WIRING, NOT THE ROSTER, and deliberately the MIRROR of the
+    // create-with-key case. These two routes share
+    // `classifyKeyValidationError` precisely so the single-key and "+ Add
+    // another key" paths cannot drift; their redaction must not drift either,
+    // and a defect present in one and absent from the other is the
+    // instance-not-class shape this programme exists to close.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    validateKeyMock.mockRejectedValue(
+      new Error(
+        `fetch failed: connect ECONNREFUSED 10.0.0.1:8002 ` +
+          `(x-service-key: svc, body: {"api_secret":"${VALID_BODY.api_secret}",` +
+          `"passphrase":"${VALID_BODY.passphrase}"})`,
+      ),
+    );
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    const logged = consoleErr.mock.calls
+      .map((args) => args.map((a) => String(a)).join(" "))
+      .join("\n");
+    expect(logged).toContain("caught exception");
+    expect(logged).not.toContain(VALID_BODY.api_secret);
+    expect(logged).not.toContain(VALID_BODY.passphrase);
+    // The A-10 half: never answer redaction by dropping the error.
+    expect(logged).toContain("ECONNREFUSED");
     consoleErr.mockRestore();
   });
 });

@@ -90,7 +90,17 @@ const STATE = vi.hoisted(() => ({
   // hoist's O-1 per-member scope-broadening loop (select api_key_id ORDER BY
   // seq). A read error fails CLOSED (never enqueue an un-enumerable composite).
   strategyKeysList: [] as Array<{ api_key_id: string | null }> | null,
-  strategyKeysListError: null as { message: string } | null,
+  // CR-01: typed as an open record, not `{ message: string }`. A Supabase error
+  // on the NON-throwing path is a PLAIN parsed-JSON object carrying `code`,
+  // `details` and `hint` as well — the fields the operator actually needs — and
+  // a narrower type here would have made the "[object Object]" defect
+  // unexpressible in a test.
+  strategyKeysListError: null as Record<string, unknown> | null,
+  // Phase 140.2-10 / SEAMCORE-10 — the `.limit(n)` argument the member read
+  // carried, captured so a test can assert the fan-out is bounded AT THE QUERY
+  // rather than only inside the loop. `null` means the route issued the read
+  // with no `.limit()` at all, which is the pre-cap (unbounded) shape.
+  strategyKeysListLimit: null as number | null,
   // F3 / F5(b) — capture strategy_analytics upserts the after() fail-closed
   // branch stamps (terminal 'failed' so the wizard poller reaches a gate; the
   // reconcile cron does NOT re-drive composites) so tests can assert the
@@ -223,9 +233,23 @@ vi.mock("@/lib/supabase/admin", () => ({
         // One chain serves both: it is thenable (count path) AND exposes .order
         // (list path), so `await …eq()` yields the count and `…eq().order()`
         // yields the ordered member rows.
+        //
+        // Phase 140.2-10 / SEAMCORE-10 — `.order()` now returns a chain that is
+        // ITSELF thenable AND exposes `.limit(n)`. Both shapes must resolve:
+        // the capped shape (`…order().limit(n)`) is what production issues, and
+        // the un-capped shape (`await …order()`) must still resolve so that
+        // REMOVING the `.limit()` (ledger row M32) fails an assertion rather
+        // than crashing the route — a mutation that explodes proves nothing
+        // about the property under test.
+        type StrategyKeysListChain = {
+          limit: (n: number) => Promise<{ data: unknown; error: unknown }>;
+          then: (
+            onFulfilled: (v: { data: unknown; error: unknown }) => unknown,
+          ) => Promise<unknown>;
+        };
         type StrategyKeysChain = {
           eq: () => StrategyKeysChain;
-          order: () => Promise<{ data: unknown; error: unknown }>;
+          order: () => StrategyKeysListChain;
           then: (
             onFulfilled: (v: {
               count: number | null;
@@ -234,12 +258,20 @@ vi.mock("@/lib/supabase/admin", () => ({
             }) => unknown,
           ) => Promise<unknown>;
         };
+        const listResult = () => ({
+          data: STATE.strategyKeysListError ? null : STATE.strategyKeysList,
+          error: STATE.strategyKeysListError,
+        });
+        const listChain: StrategyKeysListChain = {
+          limit: async (n: number) => {
+            STATE.strategyKeysListLimit = n;
+            return listResult();
+          },
+          then: (onFulfilled) => Promise.resolve(listResult()).then(onFulfilled),
+        };
         const chain: StrategyKeysChain = {
           eq: () => chain,
-          order: async () => ({
-            data: STATE.strategyKeysListError ? null : STATE.strategyKeysList,
-            error: STATE.strategyKeysListError,
-          }),
+          order: () => listChain,
           then: (onFulfilled) =>
             Promise.resolve({
               count: STATE.strategyKeysCountError
@@ -414,6 +446,7 @@ beforeEach(async () => {
   STATE.strategyKeysCountError = null;
   STATE.strategyKeysList = [];
   STATE.strategyKeysListError = null;
+  STATE.strategyKeysListLimit = null;
   STATE.strategyAnalyticsUpserts = [];
   STATE.adminEnqueueError = null;
   STATE.notifyFounderCalls = [];
@@ -555,6 +588,40 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
     const body = await res.json();
     expect(body.code).toBe("KEY_NETWORK_TIMEOUT");
     // RPC must not have run — fail closed on probe errors.
+    expect(STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"))
+      .toBeUndefined();
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("SEAMCORE-02: a probe whose BODY aborts still fails CLOSED", async () => {
+    // The shape that used to slip through. `AbortSignal.timeout` aborts the
+    // response STREAM, so headers can arrive and the body then stall: `fetch`
+    // RESOLVES, and pre-fix the rejection escaped as a raw DOMException from
+    // `res.json()` after the core's window had closed. The probe MUST still
+    // block finalize — a key whose live scopes could not be re-checked must
+    // never be promoted to pending_review (T-140-22), and a body that stalled
+    // mid-stream is a probe that did not run.
+    const aborted = new DOMException("aborted", "TimeoutError");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      headers: new Headers({ "content-type": "application/json" }),
+      json: () => Promise.reject(aborted),
+      text: () => Promise.reject(aborted),
+    } as unknown as Response);
+    const consoleErr = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.code).toBe("KEY_NETWORK_TIMEOUT");
+    // FAIL CLOSED: the finalize RPC must not have run.
     expect(STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"))
       .toBeUndefined();
 
@@ -1928,6 +1995,271 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
         (p) => p.computation_status === "failed",
       ),
     ).toBeUndefined();
+    fetchSpy.mockRestore();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// Phase 140.2-10 / SEAMCORE-10 (A-06, A-29) — the composite fan-out cap.
+//
+// The composite branch issues ONE cache-bypassing 15 000 ms seam probe PER
+// MEMBER, sequentially, and the member read had no `.limit()`. The route's
+// SEAM_ROUTE_BUDGETS row declared `keys-permissions × 1`, so the budget
+// invariant asserted a fixed figure against the 300 000 ms function ceiling
+// regardless of N — ~20 members reached the ceiling and nothing reddened.
+//
+// TWO independent properties are pinned here, and neither substitutes for the
+// other:
+//   1. the fan-out is bounded AT THE QUERY (`.limit(<cap>)`), not merely by the
+//      loop — a loop bound cannot stop the read itself from returning 10 000
+//      rows, and it is the read the budget table has to be able to trust;
+//   2. a list that arrives AT the cap FAILS LOUD, because the route cannot
+//      distinguish "exactly <cap> members" from "more than <cap>, truncated by
+//      the limit" — and proceeding on a truncated list finalises a composite
+//      whose remaining member keys were never re-probed, which is the
+//      connect→submit scope-broadening hazard wearing a different disguise.
+//
+// EVERY expected number below is hand-typed. Nothing is imported from the
+// route, and nothing is derived from SEAM_ROUTE_BUDGETS: the cross-file binding
+// between the cap and the declared `calls` lives in
+// `src/lib/seam-budgets.invariant.test.ts`, where BOTH sides are read
+// independently (the table from the module, the constant from disk).
+// ══════════════════════════════════════════════════════════════════════════
+describe("POST /api/strategies/finalize-wizard — SEAMCORE-10 composite fan-out cap", () => {
+  function readOnlyResponse(): Response {
+    return new Response(
+      JSON.stringify({
+        read: true,
+        trade: false,
+        withdraw: false,
+        probe_error: false,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  /** `n` distinct member rows, ordered — ids are irrelevant, the COUNT is not. */
+  function membersOfLength(n: number): Array<{ api_key_id: string }> {
+    return Array.from({ length: n }, (_unused, i) => ({
+      api_key_id: `66666666-6666-4666-8666-${String(i).padStart(12, "0")}`,
+    }));
+  }
+
+  it("bounds the member read AT THE QUERY — the read carries .limit(11) = cap + 1", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => readOnlyResponse());
+    STATE.strategyRow = { api_key_id: null }; // composite
+    STATE.strategyKeysCount = 2;
+    STATE.strategyKeysList = membersOfLength(2);
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+
+    // 11, hand-typed = MAX_COMPOSITE_MEMBERS + 1. The route's own constant is
+    // deliberately NOT imported: an expectation read out of the module under
+    // test cannot disagree with it, which is the self-referential oracle this
+    // phase exists to eliminate.
+    //
+    // ⚠️ WHY cap + 1 AND NOT cap (ME-02). `.limit(cap)` cannot distinguish
+    // "this composite has exactly cap members" from "it has more and you are
+    // holding the first cap of them", so the route had to refuse at `>= cap`
+    // and the usable maximum was cap - 1 — the constant was off by one from the
+    // thing it names. The extra row is a TRUNCATION DETECTOR, never probed: the
+    // route refuses before the loop whenever it arrives, so the fan-out this
+    // assertion bounds is still cap, and SEAM_ROUTE_BUDGETS' `calls: 10` and
+    // SC-4e stay exact.
+    expect(
+      STATE.strategyKeysListLimit,
+      "The composite member read issued no .limit(). The fan-out is bounded " +
+        "only by however many rows the database chooses to return, so the " +
+        "declared keys-permissions call count in SEAM_ROUTE_BUDGETS is a " +
+        "statement about nothing (ledger row M32).",
+    ).toBe(11);
+    fetchSpy.mockRestore();
+  });
+
+  it("fails LOUD when the member list OVERFLOWS the cap — no probe, no finalize, no enqueue", async () => {
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => readOnlyResponse());
+    STATE.strategyRow = { api_key_id: null };
+    // 11 = MAX_COMPOSITE_MEMBERS + 1, hand-typed: the read asks for cap + 1
+    // rows, so cap + 1 coming back is PROOF the draft has more members than the
+    // route can probe. That is the only reading on which a refusal is correct.
+    STATE.strategyKeysCount = 11;
+    STATE.strategyKeysList = membersOfLength(11);
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // Fail CLOSED, exactly as an un-enumerable member list does.
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.code).toBe("COMPOSITE_MEMBERSHIP_UNKNOWN");
+
+    // ZERO probes: the refusal happens BEFORE the loop, so a truncated list
+    // never even spends the fan-out it could not bound.
+    expect(fetchSpy).toHaveBeenCalledTimes(0);
+
+    await flushAfter();
+    // Nothing was finalised and nothing was enqueued — a composite with
+    // unprobed members must not reach pending_review or the worker.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+    expect(
+      STATE.adminRpcCalls.find((c) => c.name === "enqueue_compute_job"),
+    ).toBeUndefined();
+
+    // The operator gets a DISTINCT step tag: the user-facing envelope is
+    // deliberately the existing membership-unknown one (this phase authors no
+    // copy — 140.3's fence), so the log/Sentry side is the only place the cap
+    // is nameable.
+    const sentry = STATE.captureToSentryCalls.find(
+      (c) => c.options.tags.step === "composite-member-cap",
+    );
+    expect(
+      sentry,
+      "Reaching the cap produced no Sentry event tagged " +
+        "`composite-member-cap`. A truncation that finalises unprobed keys " +
+        "must be alertable, not merely refused (ledger row M48).",
+    ).toBeDefined();
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("ME-02: a GENUINE 10-member composite finalises — the cap is not off by one", async () => {
+    // ⚠️ THE DEAD END THIS CLOSES. `.limit(10)` plus a refusal at `>= 10` made
+    // the usable maximum NINE, so the constant named MAX_COMPOSITE_MEMBERS = 10
+    // was off by one from the thing it names. A user with a genuine 10-member
+    // draft got a 503 COMPOSITE_MEMBERSHIP_UNKNOWN whose copy says "please
+    // retry" — for a PERMANENT condition. Forever, with no path forward and no
+    // explanation, and every existing >= 10-member composite became
+    // un-finalizable the moment the cap shipped.
+    //
+    // Fetching cap + 1 separates "exactly at the cap" from "possibly
+    // truncated", which `.limit(cap)` structurally cannot.
+    //
+    // The COPY half — this arm still shares the transient membership-unknown
+    // envelope, and a permanent condition should not render a retry affordance
+    // — is 140.3's fence and is recorded in 140.1-TS-OBLIGATIONS.md, not
+    // authored here.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => readOnlyResponse());
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 10;
+    STATE.strategyKeysList = membersOfLength(10);
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+
+    // 10, hand-typed: EVERY member is probed. A cap fix that finalised without
+    // probing the tenth key would be the scope-broadening hole the O-1 loop
+    // exists to close, which is worse than the dead end it replaces.
+    expect(fetchSpy).toHaveBeenCalledTimes(10);
+
+    await flushAfter();
+    const enqueue = STATE.adminRpcCalls.find(
+      (c) => c.name === "enqueue_compute_job",
+    );
+    expect(enqueue).toBeDefined();
+    expect(enqueue!.args.p_kind).toBe("stitch_composite");
+    fetchSpy.mockRestore();
+  });
+
+  it("does NOT fire one member below the cap — 9 members are all probed and the composite finalises", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => readOnlyResponse());
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 9;
+    STATE.strategyKeysList = membersOfLength(9);
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+
+    // 9, hand-typed: the cap arm is an INEQUALITY at exactly one point, and a
+    // guard written `>` instead of `>=` (or `>=` at the wrong number) is
+    // invisible without both sides of the boundary asserted.
+    expect(fetchSpy).toHaveBeenCalledTimes(9);
+
+    await flushAfter();
+    const enqueue = STATE.adminRpcCalls.find(
+      (c) => c.name === "enqueue_compute_job",
+    );
+    expect(enqueue).toBeDefined();
+    expect(enqueue!.args.p_kind).toBe("stitch_composite");
+    fetchSpy.mockRestore();
+  });
+
+  it("CR-01: a member-list read error reaches the OPERATOR LOG with its SQLSTATE, not as [object Object]", async () => {
+    // ⚠️ THE WIRING, NOT THE HELPER. `seam-redaction.test.ts` pins that the leaf
+    // renders a plain object; this pins that the ROUTE actually gets that
+    // rendering. The two are different claims, and this phase converted six
+    // sites in THIS file from `err.message` to `scrubSeamError(err)` — a
+    // conversion that was a strict regression until CR-01 landed, because a
+    // Supabase error on the non-throwing path is a PLAIN object and
+    // `String(plainObject)` is "[object Object]".
+    //
+    // The route fails closed with a 503 the user is told to retry, so this log
+    // line is the ONLY operator artefact for a composite that will not finalise.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 2;
+    STATE.strategyKeysListError = {
+      code: "42501",
+      message: "permission denied for table strategy_keys",
+      details: "RLS policy strategy_keys_owner_select denied the read",
+      hint: "check auth.uid() against owner_id",
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("COMPOSITE_MEMBERSHIP_UNKNOWN");
+
+    const logged = consoleErr.mock.calls
+      .map((args) => args.map((a) => String(a)).join(" "))
+      .find((line) => line.includes("composite member list read failed"));
+
+    expect(
+      logged,
+      "The composite member-list read failure produced no operator log line at all.",
+    ).toBeDefined();
+    // Every expected substring is hand-typed above and asserted here; nothing is
+    // read back out of the route or the leaf.
+    expect(logged).not.toContain("[object Object]");
+    expect(logged).toContain("42501");
+    expect(logged).toContain("permission denied for table strategy_keys");
+    expect(logged).toContain("RLS policy strategy_keys_owner_select denied the read");
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("zero members (api_key_id NULL) never reaches the member read at all", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 0;
+    STATE.strategyKeysList = [];
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    // The CSV / no-member draft falls through to the unified arm without ever
+    // enumerating members, so neither the read nor the cap arm engages.
+    expect(STATE.strategyKeysListLimit).toBeNull();
     fetchSpy.mockRestore();
   });
 });

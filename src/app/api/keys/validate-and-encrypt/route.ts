@@ -5,9 +5,10 @@ import {
   AnalyticsUpstreamError,
   AnalyticsTimeoutError,
 } from "@/lib/analytics-client";
-import { CircuitOpenError } from "@/lib/seam-errors";
+import { CircuitOpenError, SeamBodyReadError } from "@/lib/seam-errors";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { scrubSeamError } from "@/lib/seam-redaction";
 import { withAuth } from "@/lib/api/withAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
@@ -159,7 +160,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // /process-key/encrypt endpoint that returns the same envelope shape as
   // legacy encryptKey), restore the flag-gated unified handler below and
   // route through it. Tracked under the unified-encrypt deferred work item.
-  return await legacyValidateAndEncryptHandler({ exchange: exchangeNormalized, api_key, api_secret: api_secret_normalized, passphrase });
+  // TS-04 / SC7 — `userId` is threaded into the legacy handler (rather than
+  // re-derived inside it) so the tenant identity provably comes from THIS
+  // route's withAuth session and cannot drift to a body field.
+  return await legacyValidateAndEncryptHandler({ exchange: exchangeNormalized, api_key, api_secret: api_secret_normalized, passphrase, userId: user.id });
 });
 
 /**
@@ -215,9 +219,21 @@ async function _unifiedValidateAndEncryptHandler(args: {
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
+    // SEAMCORE-02, same distinction as every other seam body read: an absent or
+    // unparseable body keeps the `{}` fallback; an ABORT does not become a
+    // fabricated body, because the core has already recorded it as a breaker
+    // failure. This handler is dormant (zero callers today) and is fixed anyway
+    // — leaving one member of the class unfixed is the instance-not-class
+    // defect this programme has paid for repeatedly, and whoever revives it
+    // inherits the correct behaviour rather than the 2026 one.
+    const err = await res.json().catch((readErr: unknown) => {
+      if (readErr instanceof SeamBodyReadError) throw readErr;
+      return {};
+    });
     return NextResponse.json(err, { status: res.status, headers: NO_STORE_HEADERS });
   }
+  // The success-arm read propagates its typed failure to this handler's caller,
+  // deliberately: there is no caller to give a softer answer to.
   return NextResponse.json(await res.json(), { headers: NO_STORE_HEADERS });
 }
 
@@ -236,11 +252,17 @@ async function legacyValidateAndEncryptHandler(args: {
   api_key: string;
   api_secret: string;
   passphrase?: string;
+  /**
+   * TS-04 / SC7 — the caller's authenticated `user.id`, taken from the POST
+   * handler's `withAuth` session. Required, so this dormant-but-live path
+   * cannot be the one member of the class that stays on a platform bucket.
+   */
+  userId: string;
 }): Promise<NextResponse> {
-  const { exchange, api_key, api_secret, passphrase } = args;
+  const { exchange, api_key, api_secret, passphrase, userId } = args;
   try {
     // Validate and encrypt atomically to prevent TOCTOU race
-    const validation = await validateKey(exchange, api_key, api_secret, passphrase);
+    const validation = await validateKey(exchange, api_key, api_secret, passphrase, { userId });
     if (!validation.read_only) {
       // DOGFOOD-3: after the Task-1 Python fix, genuine scope rejections and
       // probe failures arrive as curated 4xx details via the F5b forward below
@@ -253,7 +275,7 @@ async function legacyValidateAndEncryptHandler(args: {
       }, { status: 400, headers: NO_STORE_HEADERS });
     }
 
-    const encrypted = await encryptKey(exchange, api_key, api_secret, passphrase);
+    const encrypted = await encryptKey(exchange, api_key, api_secret, passphrase, { userId });
     return NextResponse.json({ ...encrypted, valid: true, read_only: true }, { headers: NO_STORE_HEADERS });
   } catch (err) {
     // Phase 140 / SEAM-04 — the breaker arm, FIRST among the typed arms.
@@ -311,8 +333,21 @@ async function legacyValidateAndEncryptHandler(args: {
         { status: 504, headers: NO_STORE_HEADERS },
       );
     }
-    console.error("[keys/validate-and-encrypt] validation failed:", err);
-    captureToSentry(err, { tags: { route: "api/keys/validate-and-encrypt" } });
+    // SEAMCORE-06 / T-140.2-08-03 — THE credential-bearing path. This route's
+    // request body carries the RAW exchange `api_key`, `api_secret` and
+    // `passphrase`; a wrapper that stringifies the request init into a message,
+    // or an undici error that inlines the outgoing headers, puts them straight
+    // into this line and into Sentry. No module-level env list can know them,
+    // so they are named explicitly at both sinks.
+    const perRequestSecrets = [api_key, api_secret, passphrase];
+    console.error(
+      "[keys/validate-and-encrypt] validation failed:",
+      scrubSeamError(err, perRequestSecrets),
+    );
+    captureToSentry(err, {
+      tags: { route: "api/keys/validate-and-encrypt" },
+      secrets: perRequestSecrets,
+    });
     return NextResponse.json(
       { error: "Key validation failed. Please try again." },
       { status: 500, headers: NO_STORE_HEADERS },

@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { NextRequest } from "next/server";
 // Phase 140 / SEAM-04: the REAL breaker error, taken from the dependency-free
 // leaf. It must NEVER be picked up through `@/lib/analytics-client` — this file
@@ -286,6 +288,65 @@ describe("POST /api/keys/validate-and-encrypt", () => {
     expect(mockEncryptKey).not.toHaveBeenCalled();
   });
 
+  // ── HI-03: a SHORT per-request credential must not reach either sink ──
+  it("HI-03: a short api_key and a 6-char passphrase are redacted from BOTH console.error and Sentry", async () => {
+    // ⚠️ THE WIRING, NOT THE HELPER. The leaf's own test pins that a short
+    // per-request secret is redacted; this pins that THIS route — the one whose
+    // request body carries the raw exchange credentials — actually reaches that
+    // behaviour at both sinks. Sentry is a third party, so the leaf is the last
+    // control before the value leaves our infrastructure.
+    //
+    // Both values are hand-typed and both are BELOW the 12-char env floor.
+    // Neither length is hypothetical: an MT5 `api_key` is the 8-digit account
+    // login number, and an OKX passphrase is user-chosen — this route validates
+    // only `passphrase.trim().length !== 0`. Driven here on the `okx` shape so
+    // the case does not depend on the MT5_ENABLED server gate.
+    const shortApiKey = "26547876";
+    const shortPassphrase = "hunter";
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockValidateKey.mockRejectedValue(
+      new Error(
+        `upstream rejected api_key=${shortApiKey} passphrase=${shortPassphrase} — connect ECONNREFUSED 10.0.0.1:8002`,
+      ),
+    );
+
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeReq({
+        exchange: "okx",
+        api_key: shortApiKey,
+        api_secret: "okx-api-secret-long-enough",
+        passphrase: shortPassphrase,
+      }),
+    );
+    expect(res.status).toBe(500);
+
+    const logged = consoleErr.mock.calls
+      .map((args) => args.map((a) => String(a)).join(" "))
+      .join("\n");
+    expect(logged).toContain("validation failed");
+    expect(logged).not.toContain(shortApiKey);
+    expect(logged).not.toContain(`passphrase=${shortPassphrase}`);
+    // The preserve side on the same line: redacting must not eat the syscall
+    // token, which is the most valuable thing an operator has here.
+    expect(logged).toContain("ECONNREFUSED");
+
+    // The Sentry sink takes the SAME leaf, but it is MOCKED in this file, so
+    // this half asserts the ROUTE's obligation only: that it HANDS both short
+    // values to the sink as `secrets`. Asserting the spy's recorded args do not
+    // CONTAIN them would be backwards — the route is supposed to pass them, so
+    // the sink can redact them.
+    //
+    // The other half ("the sink actually redacts a SHORT per-request secret")
+    // is owned by sentry-capture.test.ts, where the real leaf runs.
+    expect(captureSpy).toHaveBeenCalled();
+    const sentrySecrets = captureSpy.mock.calls[0][1].secrets;
+    expect(sentrySecrets).toContain(shortApiKey);
+    expect(sentrySecrets).toContain(shortPassphrase);
+
+    consoleErr.mockRestore();
+  });
+
   // ── (5) Happy path → 200 with encryptKey payload + valid/read_only ──
   it("returns the encryptKey payload spread with valid:true, read_only:true on success", async () => {
     const { POST } = await import("./route");
@@ -310,8 +371,8 @@ describe("POST /api/keys/validate-and-encrypt", () => {
 
     // validate-then-encrypt ordering: validation runs before encryption
     // (TOCTOU-safe back-to-back) and both received the same credentials.
-    expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp");
-    expect(mockEncryptKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp");
+    expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp", { userId: TEST_USER.id });
+    expect(mockEncryptKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp", { userId: TEST_USER.id });
   });
 });
 
@@ -358,8 +419,8 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     expect(res.status).toBe(200);
     // The absent secret is normalized to "" and flows through the SAME funnel the
     // ccxt path uses — NOT a parallel branch. trimCredential("") === "".
-    expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
-    expect(mockEncryptKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+    expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: TEST_USER.id });
+    expect(mockEncryptKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: TEST_USER.id });
   });
 
   it.each([
@@ -374,7 +435,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     const res = await POST(makeReq(body));
 
     expect(res.status).toBe(200);
-    expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+    expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: TEST_USER.id });
   });
 
   // ── WR-01: mixed-case sfox is handled IDENTICALLY to the sibling routes ──
@@ -390,8 +451,8 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
       // accepted it. The empty secret is admitted AND the value forwarded to the
       // worker + stored in the DB is the canonical lowercase 'sfox' (the DB CHECK
       // admits only lowercase 'sfox'), never the raw mixed-case string.
-      expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
-      expect(mockEncryptKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+      expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: TEST_USER.id });
+      expect(mockEncryptKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: TEST_USER.id });
     },
   );
 
@@ -500,7 +561,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox server gate (F2, SFOX_ENA
     const res = await POST(makeReq(VALID_BODY));
 
     expect(res.status).toBe(200);
-    expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp");
+    expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp", { userId: TEST_USER.id });
   });
 });
 
@@ -566,7 +627,7 @@ describe("POST /api/keys/validate-and-encrypt — mt5 server gate (MT5_ENABLED o
     const res = await POST(makeReq(VALID_BODY));
 
     expect(res.status).toBe(200);
-    expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp");
+    expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp", { userId: TEST_USER.id });
   });
 });
 
@@ -624,12 +685,14 @@ describe("POST /api/keys/validate-and-encrypt — mt5 three-credential defense (
       "5001234",
       "investor-password-123",
       "MetaQuotes-Demo",
+      { userId: TEST_USER.id },
     );
     expect(mockEncryptKey).toHaveBeenCalledWith(
       "mt5",
       "5001234",
       "investor-password-123",
       "MetaQuotes-Demo",
+      { userId: TEST_USER.id },
     );
   });
 
@@ -643,6 +706,55 @@ describe("POST /api/keys/validate-and-encrypt — mt5 three-credential defense (
       "5001234",
       "investor-password-123",
       "MetaQuotes-Demo",
+      { userId: TEST_USER.id },
     );
+  });
+});
+
+/**
+ * B-13 (Phase 140.2 / SEAMCORE-08, ROADMAP SC6 clause c) — the dormant
+ * handler's budget-key pin.
+ *
+ * `_unifiedValidateAndEncryptHandler` is module-private and has ZERO callers:
+ * the exported POST always takes the legacy branch, because `/process-key` has
+ * no encrypt step yet and delegating would write all-NULL ciphertext to
+ * api_keys. So there is no way to DRIVE this binding, and every behavioural pin
+ * in the phase's thirteen is unavailable here. Reading the source is the only
+ * honest oracle left.
+ *
+ * Pinning it anyway is the whole point of routing a dormant call through the
+ * core in the first place: whoever revives this handler inherits a budget and
+ * the breaker automatically. If the key silently drifts while the handler
+ * sleeps, they inherit the WRONG budget instead — 60s of a Vercel concurrency
+ * slot versus 15s — and nothing would have said so.
+ *
+ * ⚠️ This is a DISK read, deliberately, not an assertion through this file's
+ * mocks. Every mock above replaces `@/lib/analytics-client`; a pin that read
+ * the binding through a wholesale mock would prove only that the mock returns
+ * what the mock was told to return.
+ *
+ * The pattern requires the call syntax and both literals adjacent, so an
+ * explanatory comment mentioning either string cannot satisfy it (this repo has
+ * hit prose-defeats-the-guard three times).
+ */
+describe("[SEAMCORE-08 / B-13] the dormant unified handler's budget key", () => {
+  it("binds process-key-unified-dormant to /process-key at the core call", () => {
+    const src = readFileSync(
+      join(process.cwd(), "src/app/api/keys/validate-and-encrypt/route.ts"),
+      "utf8",
+    );
+
+    expect(
+      /resilientFetch\(\s*"process-key-unified-dormant"\s*,\s*"\/process-key"/.test(
+        src,
+      ),
+      "The dormant unified handler no longer binds the " +
+        '"process-key-unified-dormant" budget to "/process-key". This handler ' +
+        "cannot be driven by a test (it is private and has no callers), so this " +
+        "source pin is the ONLY thing standing between a silent key swap and a " +
+        "revived handler running on someone else's deadline. It is also one of " +
+        "the thirteen bindings the roster in " +
+        "src/lib/resilient-fetch.wiring.test.ts keeps closed — update both.",
+    ).toBe(true);
   });
 });

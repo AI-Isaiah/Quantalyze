@@ -89,8 +89,18 @@ vi.mock("@upstash/ratelimit", async () => {
         return { tokens, window };
       }
       private readonly fake: ReturnType<typeof fakeRatelimitFor>;
-      constructor(opts: { limiter: { tokens: number } }) {
-        this.fake = fakeRatelimitFor(shared.store, opts.limiter.tokens);
+      // `_opts` is deliberately UNREAD. This previously passed the mocked
+      // constructor's own options value straight into the fake as its
+      // threshold — i.e. production's own
+      // `slidingWindow(BREAKER_FAILURE_THRESHOLD, ...)` argument read straight
+      // back out — so the double inherited every mutation to it and could not
+      // disagree with production by construction. The fake now
+      // takes its hand-typed FAKE_THRESHOLD default. The parameter and
+      // `slidingWindow` both stay: the core must still be able to CONSTRUCT
+      // this class with the table's values, and `resilient-fetch.test.ts`
+      // asserts those values as a plumbing pin.
+      constructor(_opts: { limiter: { tokens: number } }) {
+        this.fake = fakeRatelimitFor(shared.store);
       }
       limit(identifier: string) {
         return this.fake.limit(identifier);
@@ -268,7 +278,12 @@ describe("POST /api/keys/sync — REAL client through the seam (SC-1a)", () => {
     // Deliberately NOT 30: 30 is simultaneously BREAKER_COOLDOWN_S and
     // DEFAULT_RETRY_AFTER_S, so a hardcoded "30" would satisfy a 30-valued
     // assertion while forwarding nothing from the breaker's actual TTL.
-    seedBreakerOpen(shared.store, 13);
+    //
+    // 140.2-06 per-site decision: THE GLOBAL KEY. `process-key-enqueue` declares
+    // NO dependencies — no /process-key site raises a counting 503 naming one —
+    // so the global key is the only key in this row's check set, and it is what
+    // "the breaker is open for this route" now means here.
+    seedBreakerOpen(shared.store, "breaker:railway", 13);
 
     const res = await postAsUser();
 
@@ -290,7 +305,11 @@ describe("POST /api/keys/sync — REAL client through the seam (SC-1a)", () => {
   });
 
   it("T-140-12: UNAUTHENTICATED + breaker open → 401, never a breaker-state oracle", async () => {
-    seedBreakerOpen(shared.store, 13);
+    // 140.2-06 per-site decision: THE GLOBAL KEY — same reasoning as the case
+    // above, and additionally the ordering argument: the seed must be a key the
+    // route WOULD read, or "the gate ran first" is indistinguishable from "that
+    // key is never consulted here".
+    seedBreakerOpen(shared.store, "breaker:railway", 13);
     authState.user = null;
 
     const res = await postAsUser();
@@ -307,5 +326,42 @@ describe("POST /api/keys/sync — REAL client through the seam (SC-1a)", () => {
 
     // And the gate short-circuits before the seam is even consulted.
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Phase 140.2-11 / SEAMCORE-11 (A-27) — the null-body status, END TO END.
+   *
+   * `src/lib/process-key-client.test.ts` pins the envelope at the client. This
+   * case pins the thing the envelope exists for: that the ROUTE responds at
+   * all. Before the fix, `postProcessKey`'s status pass-through called
+   * `NextResponse.json(body, { status: 304 })`, which throws
+   * `TypeError: Response constructor: Invalid response status code` (verified
+   * by execution on Node; WHATWG-spec, so CI's Node 22 agrees) — and that throw
+   * left a function declared `Promise<PostProcessKeyResult>` whose five caller
+   * routes, this one included, have no catch for it. The client-level assertion
+   * alone could not see that, because the crash was in what the CALLER then did
+   * with the result.
+   */
+  it("SEAMCORE-11 / A-27: a 304 upstream → typed 502 envelope, the route RESPONDS rather than crashing", async () => {
+    // A real null-body response: `new Response(null, { status: 304 })` is
+    // constructible, `Response.json(x, { status: 304 })` is not. That asymmetry
+    // is the whole defect.
+    fetchMock.mockResolvedValue(new Response(null, { status: 304 }));
+
+    const res = await postAsUser();
+
+    expect(res.status).toBe(502);
+    const raw = await res.text();
+    const body = JSON.parse(raw);
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("UPSTREAM_NETWORK_ERROR");
+    expect(body.recoverable).toBe(true);
+    expect(body.correlation_id).toBe(TEST_CORRELATION_ID);
+    // No new user-facing copy — the existing "never reached it" envelope.
+    expect(body.human_message).toBe("Could not reach the ingestion service.");
+    // The seam WAS crossed: this is an upstream answer, not a short-circuit.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // The observed status is an operator fact, not a user-facing one.
+    expect(raw).not.toContain("304");
   });
 });

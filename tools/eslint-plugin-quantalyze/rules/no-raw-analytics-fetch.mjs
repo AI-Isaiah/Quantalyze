@@ -26,7 +26,10 @@
  *       `process.env.ANALYTICS_SERVICE_URL` anywhere — including `??` / `||`
  *       fallback chains, parenthesised expressions and nested calls — binds a
  *       TAINTED name, whatever that name happens to be. Destructuring out of
- *       `process.env` under a new local name is tracked too.
+ *       `process.env` under a new local name is tracked too. That set is then
+ *       closed to a FIXED POINT: a declarator whose initializer references an
+ *       already-tainted NAME is tainted in turn, and the sweep repeats until a
+ *       full sweep adds nothing.
  *   (b) Any `fetch(...)` / `globalThis.fetch(...)` whose FIRST argument
  *       references a tainted name or the env member directly — as a bare
  *       identifier, inside a template-literal slot, or in a `+` concatenation
@@ -39,12 +42,31 @@
  * (`{ base: 1 }`) or a static member name (`obj.base`) that happens to collide
  * with a tainted binding is not a reference to it.
  *
- * CEILING (honest): tainting is ONE hop. `const a = process.env.X; const b = a;`
- * taints `a` but not `b`, so a fetch of `b` is not reported. A fixed-point
- * alias pass would close it; it is not built because the shape has never
- * appeared in this repo and an order-dependent half-measure would be worse
- * than a documented limit. The rule targets the realistic regression — a new
- * seam written directly against the env var — not an adversarial author.
+ * CEILING (honest) — CORRECTED in 140.2-04. This block previously read
+ * "tainting is ONE hop … the shape has never appeared in this repo", and that
+ * self-assessment was wrong on both counts. The ceiling was real, and BOTH
+ * shapes it missed occur here: the two `/health` warmers
+ * (`src/lib/warmup-analytics.ts`, `src/app/api/cron/warm-analytics/route.ts`)
+ * build their URL from a binding taken off the env read, and they are green
+ * only because they are PATH-allowlisted in eslint.config.mjs — not because
+ * the rule cleared them. Taint now propagates TRANSITIVELY through local
+ * declarators, so `const a = process.env.X; const u = new URL("/x", a);
+ * fetch(u)` is reported, and the fixed point is computed at `Program:exit` so
+ * an alias declared AFTER the fetch is caught too.
+ *
+ * What taint still does NOT cross, and the guards that cover it instead:
+ *   - FUNCTION boundaries: a base URL passed in as a parameter or handed back
+ *     by a helper is not tracked.
+ *   - MODULE boundaries: an exported const imported by another file is not
+ *     tracked (each file is linted on its own AST).
+ *   - SCOPES: taint is keyed by NAME for the whole file, not resolved per
+ *     binding, so a shadowing re-declaration of a tainted name stays tainted.
+ *     The direction of that error is a loud false positive, never a silent
+ *     miss, which is the trade this rule wants.
+ * The backstops for that residual class are the `SEAM_EXCLUSIONS` source scan
+ * and the 13-member budget-key binding roster from plan 140.2-03 (both in
+ * `src/lib/seam-budgets.invariant.test.ts` / `resilient-fetch.wiring.test.ts`),
+ * plus code review of any new `resilientFetch` call site.
  *
  * NO IN-FILE ESCAPE HATCH — deliberate, and a departure from the `B<n>
  * sanctioned-exception:` convention the sibling rules use. The legitimate
@@ -95,7 +117,11 @@ function isProcessEnv(node) {
  *
  * Recursion deliberately SKIPS the non-reference positions: the static property
  * of a member expression and the key of an object property. `checkTainted` is
- * false during pass (a), where only the env member itself matters.
+ * true in both passes now; the SEED is still the env member alone, because on
+ * the fixed point's first sweep no alias has been tainted yet. Taint is never
+ * introduced by a name PATTERN — matching on `ANALYTICS_URL` would be simpler
+ * and wrong, since the whole failure mode is a call site that does not look
+ * like the ones already known.
  */
 function referencesSeam(node, taintedNames, checkTainted) {
   if (!node || typeof node !== "object") return false;
@@ -157,6 +183,12 @@ export default {
   create(context) {
     /** Identifier names bound to the analytics base URL, whatever they are called. */
     const tainted = new Set();
+    /**
+     * Every `const x = <expr>` in the file, kept so pass (a) can be closed to a
+     * fixed point at Program:exit rather than decided in traversal order.
+     * @type {Array<{ name: string, init: object }>}
+     */
+    const declarators = [];
     /** Candidate fetch calls, resolved at Program:exit so order does not matter. */
     const fetchCalls = [];
 
@@ -181,11 +213,12 @@ export default {
           return;
         }
 
-        if (
-          node.id.type === "Identifier" &&
-          referencesSeam(node.init, tainted, false)
-        ) {
-          tainted.add(node.id.name);
+        // Collected, not decided here: whether this declarator is tainted can
+        // depend on a name that is not tainted YET (`const u = new URL("/x",
+        // base)` written above `const base = process.env…`). The verdict is
+        // taken at Program:exit, where the whole file is known.
+        if (node.id.type === "Identifier") {
+          declarators.push({ name: node.id.name, init: node.init });
         }
       },
 
@@ -196,6 +229,27 @@ export default {
       },
 
       "Program:exit"() {
+        // Pass (a), closed to a FIXED POINT. The first sweep can only taint a
+        // declarator that reads the env member directly (nothing else is in
+        // `tainted` yet, bar a `process.env` destructure); each later sweep
+        // picks up the declarators that reference a name tainted by an earlier
+        // one. TERMINATION is structural, not a magic iteration cap: a sweep
+        // only repeats when it ADDED a name, `tainted` never shrinks, and it is
+        // bounded by the finite `declarators` list — so at most one sweep per
+        // declarator plus one final sweep that adds nothing can run.
+        let added = true;
+        while (added) {
+          added = false;
+          for (const { name, init } of declarators) {
+            if (tainted.has(name)) continue;
+            if (referencesSeam(init, tainted, true)) {
+              tainted.add(name);
+              added = true;
+            }
+          }
+        }
+
+        // Pass (b).
         for (const node of fetchCalls) {
           if (referencesSeam(node.arguments[0], tainted, true)) {
             context.report({ node, messageId: "raw" });
