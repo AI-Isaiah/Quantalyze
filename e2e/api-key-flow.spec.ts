@@ -71,7 +71,16 @@ test.describe("API Key Connection Flow", () => {
   // -------------------------------------------------------------------------
 
   test.describe("Edit page — API key form rendering", () => {
-    test.skip(true, "Requires authenticated session with a valid strategy ID in the database");
+    // 140.5-06: was an UNCONDITIONAL `test.skip(true, …)`. The reason string
+    // already instructed the reader to supply a strategy id, so the gate is now
+    // the env var itself: CI-behaviour-preserving (the var is absent from every
+    // file in .github/workflows, so exactly the same tests skip there) while
+    // locally it becomes opt-in RUNNABLE instead of dead.
+    test.skip(
+      !process.env.PLAYWRIGHT_TEST_STRATEGY_ID,
+      "Requires authenticated session with a valid strategy ID in the database. " +
+        "Set PLAYWRIGHT_TEST_STRATEGY_ID to run.",
+    );
 
     const TEST_STRATEGY_ID = "00000000-0000-0000-0000-000000000000";
 
@@ -175,8 +184,12 @@ test.describe("API Key Connection Flow", () => {
   // -------------------------------------------------------------------------
 
   test.describe("Key submission and connected keys list", () => {
+    // 140.5-06: was `test.skip(true, …)`. This reason NAMED its own env vars, so
+    // the unconditional form was contradicting its own instructions. Both are
+    // required, hence the disjunction. Absent from CI ⇒ same tests skip there.
     test.skip(
-      true,
+      !process.env.PLAYWRIGHT_TEST_EXCHANGE_KEY ||
+        !process.env.PLAYWRIGHT_TEST_EXCHANGE_SECRET,
       "Requires authenticated session, valid strategy, AND real exchange API credentials. " +
         "Run locally with PLAYWRIGHT_TEST_EXCHANGE_KEY / PLAYWRIGHT_TEST_EXCHANGE_SECRET env vars.",
     );
