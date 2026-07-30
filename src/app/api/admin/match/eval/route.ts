@@ -1,10 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { isAdminUser } from "@/lib/admin";
-import { AnalyticsTimeoutError, evalMatch } from "@/lib/analytics-client";
+import {
+  AnalyticsTimeoutError,
+  AnalyticsUpstreamError,
+  evalMatch,
+} from "@/lib/analytics-client";
 import { CircuitOpenError } from "@/lib/seam-errors";
+import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { assertSameOrigin } from "@/lib/csrf";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+// 140.3-13a / SEAMUX-08 — the ONE lazy-Sentry helper. Scrubbing is folded INTO
+// it (SEAMCORE-06), so the caught value is passed UNMODIFIED: pre-scrubbing
+// here would hand Sentry a string instead of an Error and destroy its grouping
+// and stack, while re-creating the per-caller convention the chokepoint exists
+// to replace. See the CAPTURE POLICY docblock below.
+import { captureToSentry } from "@/lib/sentry-capture";
 
 /**
  * Phase 140 / SEAM-02 — pinned for clarity; asserted against
@@ -31,14 +42,79 @@ export const maxDuration = 300;
  * these two admin/match routes were simply never included in those passes.
  * The diagnosable half stays in `console.error`, server-side only.
  *
- * `CIRCUIT_OPEN_COPY` deliberately matches `process-key-client`'s
- * `CIRCUIT_OPEN_HUMAN_MESSAGE` so a breaker trip reads identically to a user
- * whichever seam mechanism they happen to hit.
+ * The breaker body is NOT declared here. `CIRCUIT_OPEN_COPY` is imported from
+ * `@/lib/seam-copy` — the ONE declaration all ten seam emitters read — so a
+ * breaker trip reads identically to a user whichever seam mechanism they happen
+ * to hit, and no single route can be reworded out of step with the other nine
+ * (SEAMUX-01). It still matches `process-key-client`'s
+ * `CIRCUIT_OPEN_HUMAN_MESSAGE` because both are now aliases of that one leaf.
  */
-const CIRCUIT_OPEN_COPY =
-  "The analytics service is temporarily unavailable. Please try again in a moment.";
 const TIMEOUT_COPY = "Match evaluation timed out. Please try again.";
 const GENERIC_COPY = "Match evaluation failed. Please try again.";
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 140.3-13a / SEAMUX-08 — THE CAPTURE POLICY. ONE RULE, ALL NINE ROUTES.
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Nine of the fifteen seam routes captured NOTHING to Sentry, while
+ * `wizardErrors.ts` copy told users "our team has been notified". `140.3-12`
+ * removed the claim; this is where it becomes true. `140.3-13a` owns four of
+ * the nine (this route, `admin/match/recompute`, `keys/[id]/permissions`,
+ * `verify-strategy`); `140.3-13b` owns the other five and applies THIS RULE
+ * VERBATIM. Two halves inventing two policies is the drift this split exists
+ * to prevent, so it is written down once, here, and cited from the others.
+ *
+ * THE RULE:
+ *
+ *   Capture from a seam route's TERMINAL, UNCLASSIFIED error arm — the arm
+ *   reached when the caught value matched no typed branch — and from any arm
+ *   that detects an UPSTREAM CONTRACT VIOLATION (a 2xx whose body cannot be
+ *   used). Capture from NOTHING ELSE: not a breaker short-circuit
+ *   (`CircuitOpenError`), not an upstream timeout (`AnalyticsTimeoutError`),
+ *   not a forwarded upstream 4xx, and not a CSRF / auth / rate-limit /
+ *   validation rejection the route makes itself. Pass the caught value
+ *   UNMODIFIED to `captureToSentry`, with `tags: { surface, step }` and a
+ *   `secrets: [...]` array naming every per-request credential in scope.
+ *
+ * WHY THE TERMINAL ARM AND ONLY THE TERMINAL ARM. Every typed branch above it
+ * is a condition we already understand, already count and already answer with
+ * a specific status. The terminal arm is by construction the one that means
+ * "we do not know what this is" — which is exactly what a human needs to look
+ * at. This also makes the rule mechanical rather than a judgement call, which
+ * is what lets a second plan apply it to five more routes without
+ * reinterpretation.
+ *
+ * ⚠️ WHY A BREAKER TRIP IS NEVER CAPTURED. A trip is an expected
+ * infrastructure fact, and during the exact correlated incident Sentry exists
+ * to surface, EVERY request to EVERY seam route short-circuits. Capturing them
+ * would emit one issue per short-circuited request across all fifteen routes
+ * at once — burying the one signal that identifies the cause under thousands
+ * of copies of its symptom. The breaker's own state is the correct alerting
+ * source for a trip; this is not it.
+ *
+ * ⚠️ WHY A TIMEOUT IS NEVER CAPTURED. `wizardErrors.ts` documents 60-second
+ * Railway cold starts as normal, so `AnalyticsTimeoutError` is an expected
+ * outcome of a healthy system under a cold start, and a sustained one trips the
+ * breaker — which then takes over. It is already answered with a specific 504.
+ *
+ * ⚠️ WHY A FORWARDED 4xx IS NEVER CAPTURED. `140.3-11` gave this route an
+ * `AnalyticsUpstreamError` 4xx arm precisely so a deliberate upstream refusal
+ * survives with its own status. A refusal the service issued on purpose is not
+ * our defect; capturing it would alert on correct behaviour. A 5xx keeps
+ * falling through to the terminal arm below and IS captured, which is the
+ * "service-permanent outcome" half of the rule.
+ *
+ * ⚠️ WHY THE VALUE IS PASSED UNMODIFIED. `captureToSentry` scrubs at the
+ * chokepoint (`src/lib/sentry-capture.ts`, SEAMCORE-06) because ten sites each
+ * remembering to scrub is the instance-not-class shape this programme has
+ * already paid for. Calling `scrubSeamError(err)` here first would (a) double
+ * scrub, (b) hand Sentry a STRING, losing Error grouping and the stack, and
+ * (c) restore the per-caller convention the chokepoint replaced. TRAP-1's
+ * over-redaction half matters as much as its under-redaction half, and both
+ * are asserted end-to-end in this route's tests through the REAL helper.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
 
 // Audit-2026-05-07 C-0041: same-origin guard runs before auth so a
 // cross-origin probe with a replayed session cookie hits the CSRF wall
@@ -112,6 +188,60 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         { status: 504, headers: NO_STORE_HEADERS },
       );
     }
+    // 140.3-11 / TS-19 — an upstream 4xx SURVIVES this route.
+    //
+    // The same arm as `src/app/api/admin/match/recompute/route.ts`, delivered
+    // here in the SAME commit. These two files have the same shape and had the
+    // same gap (`AnalyticsUpstreamError` appeared 0 times in each before this
+    // plan); fixing one and reporting the class closed is this programme's
+    // signature failure, so both counts are asserted per file.
+    //
+    // THE RANGE SPLIT IS THE POINT, copied from
+    // `src/app/api/simulator/route.ts:201` rather than invented. Only 4xx
+    // forwards: a 4xx `detail` is operator-curated copy, while a 5xx `message`
+    // carries the FastAPI detail, the `parseResponse()` contract-drift string
+    // and this service's base URL — what the STATIC-bodies docblock above
+    // exists to keep off the wire (T-140-11). A 5xx keeps falling through to
+    // the static arm below.
+    //
+    // The status only. No header rides along: `AnalyticsUpstreamError` carries
+    // none, so a forwarded upstream 429 reaches the client WITHOUT its
+    // `Retry-After`, and inventing one would name a wait no upstream stated.
+    if (
+      err instanceof AnalyticsUpstreamError &&
+      err.status >= 400 &&
+      err.status < 500
+    ) {
+      // Status and machine code only — never the message, which is already
+      // going to the client and would double the disclosure surface in the log.
+      console.error(
+        `[api/admin/match/eval] upstream ${err.status} (${err.seamCode ?? "no code"})`,
+      );
+      // 140.3-11 / TS-18 — `dependency` rides along so a 424 can be rendered as
+      // the CALLER'S venue failing rather than as our outage. It is `null` on
+      // every other 4xx and on the flat 424 shape, and a consumer that sees
+      // `null` must say "a venue failed" without naming one.
+      return NextResponse.json(
+        { error: err.message, dependency: err.dependency },
+        { status: err.status, headers: NO_STORE_HEADERS },
+      );
+    }
+    // 140.3-13a / SEAMUX-08 — THE TERMINAL ARM, and the only capture in this
+    // route. Everything above is a condition we already classified; this is the
+    // one that means "we do not know what this is", so it is the one a human
+    // must see. Reached by a transport failure (ECONNREFUSED / ENOTFOUND /
+    // TLS), an upstream 5xx, a `parseResponse()` contract-drift throw, and any
+    // untyped throw from the client.
+    //
+    // The value is passed UNMODIFIED — `captureToSentry` scrubs at the
+    // chokepoint. This route holds NO per-request credential: it forwards no
+    // user JWT and touches no exchange material, so `secrets` is the empty
+    // list and the env-name list in `seam-redaction.ts` is the whole defence.
+    // (`verify-strategy` is the contrast — it names three.)
+    captureToSentry(err, {
+      tags: { surface: "admin-match-eval", step: "upstream-error" },
+      extra: { lookback_days: lookback },
+    });
     console.error("[api/admin/match/eval] upstream error:", err);
     return NextResponse.json(
       { error: GENERIC_COPY },

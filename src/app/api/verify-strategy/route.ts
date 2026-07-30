@@ -6,6 +6,19 @@ import { UI_EXCHANGE_CODES } from "@/lib/utils";
 import { isSfoxEnabledServer, type SupportedExchange } from "@/lib/closed-sets";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { postProcessKey } from "@/lib/process-key-client";
+import { createClient } from "@/lib/supabase/server";
+// 140.3-13a / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
+// capture policy written out in full in `src/app/api/admin/match/eval/route.ts`.
+//
+// ⚠️ THIS ROUTE IS THE SECRET-BEARING ONE OF THIS PLAN'S FOUR. It holds a LIVE
+// user Supabase JWT (`userAccessToken`, forwarded by TS-15) and the caller's
+// RAW exchange `api_key` / `api_secret` from the request body. No module-level
+// env list can know those three values, so every capture below names them in
+// `secrets: [...]` — that argument is the ONLY thing standing between undici's
+// header-inlining (TRAP-1) and a credential leaving our infrastructure for a
+// third party. `140.3-02` closed a live end-user JWT log leak one wave-set ago;
+// adding an observability channel must not re-open it through Sentry instead.
+import { captureToSentry } from "@/lib/sentry-capture";
 
 /**
  * Phase 140 / SEAM-02 — pinned for clarity; asserted against
@@ -176,6 +189,68 @@ async function unifiedVerifyStrategyHandler(
   if (body.passphrase !== undefined) {
     teaserContext.passphrase = body.passphrase;
   }
+
+  /**
+   * Phase 140.3-02 / TS-15 — forward the end user's Supabase access token WHEN,
+   * AND ONLY WHEN, one exists.
+   *
+   * ⚠️ THIS ROUTE IS PUBLIC, AND THAT IS THE WHOLE REASON THE READ IS SHAPED
+   * THIS WAY. The landing-page teaser is unauthenticated by design (CSRF +
+   * per-IP limit + payload validation are its only gates), but nothing stops an
+   * ALREADY SIGNED-IN visitor from submitting it. Those two cases must diverge:
+   *   · a session exists  → forward it, so the unified router can build a
+   *     user-scoped, RLS-enforcing client for this caller.
+   *   · no session        → forward NOTHING. The header is optional by
+   *     construction and a fabricated one would be an elevation-of-privilege
+   *     bug, not a compatibility shim. There is no fallback value here, and
+   *     there must never be one.
+   *
+   * The read is best-effort and TOTAL: `createClient()` reads request cookies,
+   * and a public endpoint must not 500 because a cookie jar was unreadable. A
+   * failure degrades to the anonymous case, which is this route's normal case.
+   *
+   * ⚠️ The value is handed to `postProcessKey` as a VALUE, never assembled into
+   * a header here, so it reaches `scrubSeamError(message, [userAccessToken])` at
+   * the client's transport log site — undici embeds outgoing headers in
+   * `err.message`, and this one is a live user JWT.
+   */
+  let userAccessToken: string | undefined;
+  try {
+    const authClient = await createClient();
+    const {
+      data: { session },
+    } = await authClient.auth.getSession();
+    userAccessToken = session?.access_token;
+  } catch {
+    // Anonymous is the expected case on this route — not worth a log line.
+    userAccessToken = undefined;
+  }
+
+  /**
+   * 140.3-13a / SEAMUX-08 — the per-request credentials every `captureToSentry`
+   * in this handler must name.
+   *
+   * Declared ONCE, here, rather than re-typed at each of the four call sites:
+   * four sites each remembering three values is the instance-not-class shape
+   * this programme has already paid for, and the failure mode is silent — a
+   * capture that forgets one still succeeds, still looks correct in review, and
+   * ships the credential to a third party.
+   *
+   * All three are unknowable to any module-level env list:
+   *   · `userAccessToken` — a LIVE end-user Supabase JWT (TS-15 forwards it, so
+   *     undici can inline it into an outgoing-header error message: TRAP-1);
+   *   · `api_key` / `api_secret` — the caller's RAW exchange credentials, which
+   *     this handler puts in the outgoing request body.
+   *
+   * ⚠️ `undefined` members are harmless — `scrubSeamString` skips non-strings —
+   * so the anonymous case (no session) needs no separate array.
+   */
+  const perRequestSecrets: readonly unknown[] = [
+    userAccessToken,
+    body.api_key,
+    body.api_secret,
+  ];
+
   const result = await postProcessKey({
     flow_type: "teaser",
     source: exchange,
@@ -190,13 +265,84 @@ async function unifiedVerifyStrategyHandler(
     // so the upstream rate limiter buckets all anonymous landing-page
     // traffic to a shared key, isolated from authenticated tenants.
     userId: "public",
+    // TS-15 — present ONLY when a session was readable; see the block above.
+    userAccessToken,
   });
   if (!result.ok) return result.response;
 
   const upstream = (result.body ?? {}) as Record<string, unknown>;
+
+  /**
+   * Phase 140.3-02 / TS-12 + TS-14 — SUCCESS IS DECIDED BY THE ENVELOPE'S OWN
+   * `ok`, NEVER BY SNIFFING A FIELD AND NEVER BY THE STATUS.
+   *
+   * ⚠️ WHY NOT THE STATUS (fold-in M-6 from the 140.1 code review). `validate-only`
+   * answers **200 with `ok:false`** where `_scope_rejected` answers **403**, on the
+   * IDENTICAL `not val.valid` predicate. It was judged a deliberate carve-out, but
+   * it contradicts the contract and `STATUS_CONTRACT.md` records the exception
+   * nowhere. A consumer branching on STATUS is therefore wrong on one of the two
+   * paths no matter which status it picks. Branching on `ok` is correct on both.
+   * Do NOT "simplify" this back to a status check.
+   *
+   * ⚠️ WHY NOT `verification_id`. This used to read
+   * `typeof upstream.verification_id === "string"` and call that success. The
+   * Python terminal-success builder's own docstring names THIS site as the shape
+   * consumers used to SNIFF, and adds `ok: true` + an explicit `code: null` so
+   * they stop. A sniff cannot tell a success carrying an id from a FAILURE
+   * carrying one — and treating the latter as success mints a queryable
+   * public_token and publishes a teaser factsheet for a key the exchange rejected.
+   *
+   * ⚠️ THE SHAPE GUARD BELOW IS NOT DEAD — a FINDING against TS-12's premise,
+   * recorded here rather than silently satisfied. TS-12 called the 502 fallback's
+   * rejection case dead and said to delete the guard. Its REJECTION trigger IS
+   * dead: a rejection now returns at `!result.ok` above and never reaches here.
+   * Its DRIFT trigger is not. A 2xx whose body lost `verification_id` still
+   * arrives, and without the guard this route answers 200 with a public_token
+   * persisted against `.eq("id", null)` — a token queryable against no row. That
+   * is the "silent success on failure" defect this phase exists to close, and the
+   * exact twin of the `isUuid` guard TS-13 explicitly says to KEEP one route over.
+   * So the guard stays; only its RATIONALE narrows, and both halves are named in
+   * the log line so an operator can tell which one fired.
+   */
   const verificationId =
     typeof upstream.verification_id === "string" ? upstream.verification_id : null;
-  if (!verificationId) {
+  if (upstream.ok !== true || !verificationId) {
+    // 140.3-13a / SEAMUX-08 — the CONTRACT-VIOLATION half of the capture policy
+    // (`admin/match/eval/route.ts`). A 2xx we cannot use is not a caller fault
+    // and not an expected infrastructure condition: either the upstream said
+    // `ok:false` on a 2xx, or its terminal-success builder dropped
+    // `verification_id`. Both are drift in a contract only we can fix, and
+    // neither produces any other alert — the caller just sees a 502.
+    //
+    // A SYNTHETIC Error, deliberately: the raw upstream body carries
+    // `encrypted_credentials` and is never handed to Sentry, exactly as the
+    // console line below already refuses to log it.
+    captureToSentry(
+      new Error("verify-strategy: upstream 2xx is not a usable verification"),
+      {
+        tags: { surface: "verify-strategy", step: "upstream-contract" },
+        extra: {
+          ok: String(upstream.ok),
+          upstream_code:
+            typeof upstream.code === "string" ? upstream.code : null,
+          has_verification_id: verificationId !== null,
+        },
+        secrets: perRequestSecrets,
+      },
+    );
+    console.error(
+      "[verify-strategy] upstream 2xx is not a usable verification:",
+      {
+        // Diagnostics only — never the body, which carries encrypted_credentials.
+        ok: upstream.ok,
+        upstream_code: typeof upstream.code === "string" ? upstream.code : null,
+        has_verification_id: verificationId !== null,
+        correlation_id:
+          typeof upstream.correlation_id === "string"
+            ? upstream.correlation_id
+            : null,
+      },
+    );
     return NextResponse.json(
       { error: "Verification service returned an invalid response" },
       { status: 502 },
@@ -219,6 +365,22 @@ async function unifiedVerifyStrategyHandler(
   try {
     admin = createAdminClient();
   } catch (configErr) {
+    // 140.3-13a / SEAMUX-08 — TERMINAL, UNCLASSIFIED. 🔴 The comment above
+    // ALREADY promised this fault would be "loud in logs/Sentry", and until
+    // this line the Sentry half of that sentence was false: `grep -c
+    // captureToSentry` on this file read 0. The claim is now true rather than
+    // removed, because a service-role client that will not construct is a
+    // permanent config fault that takes the whole anonymous teaser down and
+    // nothing else reports it.
+    //
+    // `secrets` names all three per-request credentials: a Supabase client
+    // constructor error can inline the key it was handed, and this handler is
+    // holding the caller's raw exchange material at the same time.
+    captureToSentry(configErr, {
+      tags: { surface: "verify-strategy", step: "admin-client-config" },
+      level: "fatal",
+      secrets: perRequestSecrets,
+    });
     console.error("[verify-strategy] createAdminClient config error:", configErr);
     return NextResponse.json(
       { error: "Verification service misconfigured" },
@@ -250,6 +412,14 @@ async function unifiedVerifyStrategyHandler(
       })
       .eq("id", verificationId);
     if (persistError) {
+      // 140.3-13a / SEAMUX-08 — TERMINAL, UNCLASSIFIED. The verification ran and
+      // succeeded upstream; only OUR write of the public_token failed, so the
+      // user is told "Failed to finalize" for work that already happened. There
+      // is no typed branch above this and no other alert on the path.
+      captureToSentry(persistError, {
+        tags: { surface: "verify-strategy", step: "public-token-persist" },
+        secrets: perRequestSecrets,
+      });
       console.error(
         "[verify-strategy] CT-3 public_token persist failed:",
         persistError,
@@ -260,6 +430,13 @@ async function unifiedVerifyStrategyHandler(
       );
     }
   } catch (err) {
+    // The THROWN twin of the arm above — a transport failure reaching Supabase
+    // rather than a returned PostgrestError. Same policy arm, same secrets, and
+    // separately captured because the two are separately reachable.
+    captureToSentry(err, {
+      tags: { surface: "verify-strategy", step: "public-token-persist-threw" },
+      secrets: perRequestSecrets,
+    });
     console.error("[verify-strategy] CT-3 public_token persist threw:", err);
     return NextResponse.json(
       { error: "Failed to finalize verification" },

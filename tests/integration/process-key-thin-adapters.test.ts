@@ -177,12 +177,19 @@ vi.mock("next/server", async () => {
 // Default response is the "newly queued" envelope shape (queued=true +
 // verification_id) which matches the real Python /process-key contract
 // for the common path; WIZARD_DUPLICATE-specific tests override the
-// body to assert the queued=false branch.
+// body to assert the duplicate branch.
+//
+// ⚠️ 140.3-02 / TS-12+TS-13: `ok: true` added. It is not decoration — PYAPI-10a
+// puts it on EVERY /process-key success builder, and the consumers now read it
+// as the success discriminator instead of sniffing `verification_id` /
+// `strategy_id`. Without it this double contradicted the contract it claims two
+// lines above to match, and an integration test that disagrees with the wire is
+// worse than none.
 let fetchCalls: Array<{ url: string; init: RequestInit }>;
 const mockFetch = vi.fn(async (url: string | URL, init?: RequestInit) => {
   fetchCalls.push({ url: String(url), init: init ?? {} });
   return new Response(
-    JSON.stringify({ verification_id: "v-thin-adapter", queued: true }),
+    JSON.stringify({ ok: true, verification_id: "v-thin-adapter", queued: true }),
     { status: 200, headers: { "content-type": "application/json" } },
   );
 });
@@ -700,10 +707,14 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
   it("strategies/csv-finalize: flow_type=csv (re-routed from /csv/finalize)", async () => {
     // H-1 (red-team): unified handler requires upstream to return a
     // UUID strategy_id or it surfaces 502. Default mock omits it; override here.
+    // 140.3-02 / TS-13: it also requires `ok: true` — the semantic verdict the
+    // service states about its own work, which the real csv-finalize builder
+    // emits alongside the id. Both guards must be satisfied; neither subsumes
+    // the other.
     mockFetch.mockImplementationOnce(async (url: string | URL, init?: RequestInit) => {
       fetchCalls.push({ url: String(url), init: init ?? {} });
       return new Response(
-        JSON.stringify({ strategy_id: TEST_STRATEGY_ID, queued: true }),
+        JSON.stringify({ ok: true, strategy_id: TEST_STRATEGY_ID, queued: true }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     });

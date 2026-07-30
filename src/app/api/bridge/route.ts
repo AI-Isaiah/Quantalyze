@@ -8,6 +8,7 @@ import {
   AnalyticsTimeoutError,
 } from "@/lib/analytics-client";
 import { CircuitOpenError } from "@/lib/seam-errors";
+import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { BridgeRequestSchema } from "@/lib/api/bridgeSchema";
 import { captureToSentry } from "@/lib/sentry-capture";
 import {
@@ -49,18 +50,6 @@ import {
  * (15s), i.e. 20× headroom.
  */
 export const maxDuration = 300;
-
-/**
- * Phase 140 / SEAM-04 — the static body the breaker arm emits.
- *
- * Deliberately byte-identical to `process-key-client`'s
- * `CIRCUIT_OPEN_HUMAN_MESSAGE` and to the admin/match routes' copy, so a
- * breaker trip reads the same to a user whichever seam they happen to hit. It
- * names no infrastructure (threat T-140-17): no circuit, no upstream host, no
- * cooldown vocabulary beyond the `Retry-After` header itself.
- */
-const CIRCUIT_OPEN_COPY =
-  "The analytics service is temporarily unavailable. Please try again in a moment.";
 
 export const POST = withAuth(async (req, user) => {
   const supabase = await createClient();

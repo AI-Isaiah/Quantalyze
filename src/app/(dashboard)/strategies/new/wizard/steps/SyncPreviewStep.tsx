@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { useStrategySyncPoller } from "@/hooks/useStrategySyncPoller";
 import { Button } from "@/components/ui/Button";
@@ -19,6 +20,11 @@ import {
   type WizardErrorCode,
 } from "@/lib/wizardErrors";
 import { buildEnvelope } from "@/lib/envelope";
+// 140.3-15 / TS-20 — the dependency-free leaf, imported directly. It is the ONE
+// reader for this envelope's fields; a hand-rolled `failure.detail?.correlation_id`
+// branch here is the drift class 140.3-01 closed.
+import { seamCorrelationId } from "@/lib/seam-discriminator";
+import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
@@ -111,6 +117,61 @@ const RETRY_THRESHOLD_MS = 900_000;
  * off the poll cadence does not shift the SLOW/WARN/RETRY copy.
  */
 const POLL_BACKOFF_MS = [3000, 3000, 5000, 5000, 10_000] as const;
+
+/**
+ * Phase 140.3-10 / SEAMUX-03 — the kickoff codes this step RECOGNISES.
+ *
+ * `/api/keys/sync` now carries a machine code on every arm. Before this, every
+ * non-2xx — a throttle, an absent draft, a malformed request, an unknowable
+ * composite membership — collapsed onto `SYNC_FAILED`, whose sentence claims
+ * *"We fetched your trades but the analytics computation did not complete"*.
+ * For a 429 that is simply false: nothing was fetched and nothing ran.
+ *
+ * Hand-typed, and deliberately PARTIAL. `SYNC_FAILED` stays the fallback for
+ * anything uncoded or unrecognised — the same reasoning that keeps the
+ * substring cascade alive underneath `classifyKeyValidationError`'s `body.code`
+ * read. A map that pretended to be total would turn an unfamiliar code into a
+ * silent `undefined` error state.
+ *
+ * ⚠️ The two 400 arms (`MISSING_STRATEGY_ID`, `INVALID_STRATEGY_ID`) are
+ * ABSENT ON PURPOSE, and their absence is a decision rather than an oversight.
+ * Both fetch sites in this file post `{ strategy_id: strategyId }` where
+ * `strategyId` is a required uuid prop, so neither arm is reachable from here
+ * except through a bug in our own code. Giving them a wizard error state would
+ * mean authoring a user-facing sentence for "our page sent a malformed
+ * request" — copy this plan does not own (140.3-12 does) — and wiring a branch
+ * no user can reach. They carry codes on the wire, which is what SEAMUX-03
+ * asks for: a machine can discriminate them in a log or a funnel without
+ * matching on prose.
+ */
+const KNOWN_KICKOFF_CODES: Readonly<Record<string, WizardErrorCode>> = {
+  RATE_LIMITED: "RATE_LIMITED",
+  GATE_DRAFT_GONE: "GATE_DRAFT_GONE",
+  COMPOSITE_MEMBERSHIP_UNKNOWN: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+  // 140.3-12 — the two 400 arms 140.3-10 gave wire codes but deliberately left
+  // without wizard copy, closing the residual it recorded for this plan.
+  //
+  // 140.3-10's reason for holding off was correct AT THE TIME: the nearest
+  // member, `VALIDATION_FAILED`, asserted "The analytics service rejected the
+  // shape of the request", which is FALSE for a rejection this app's own route
+  // makes before the analytics service is ever called. Routing them there would
+  // have turned a vague error into a specific lie — TRAP-3, authored to satisfy
+  // an acceptance criterion. 140.3-12 owns that sentence and removed the
+  // producer attribution from it, so the member now states only the fact both
+  // producers share: a request was refused on its shape before any work ran.
+  //
+  // No new union member was minted for this. A second code meaning the same
+  // thing is how a vocabulary starts lying (140.3-05's CIRCUIT_OPEN reasoning),
+  // and the copy table's hand-typed size guard — `EXPECTED_TABLE_SIZE` in
+  // `src/lib/wizardErrors.test.ts` — is therefore not touched by this. That
+  // guard's literal is hand-typed ON PURPOSE (deriving it would re-create the
+  // self-referential `expect(found.length).toBe(discovered.length)` shape both
+  // seam pins forbid by name), so the pointer is the durable statement and the
+  // number is not restated here (140.3-G2 / GC-4: this comment previously
+  // recited a size it did not own, and the size had moved).
+  MISSING_STRATEGY_ID: "VALIDATION_FAILED",
+  INVALID_STRATEGY_ID: "VALIDATION_FAILED",
+};
 
 /**
  * How many CONSECUTIVE poll failures (Supabase `error`, a thrown
@@ -349,6 +410,17 @@ export function SyncPreviewStep({
   const [phase, setPhase] = useState<Phase>("kicking_off");
   const [elapsedMs, setElapsedMs] = useState(0);
   const [errorCode, setErrorCode] = useState<WizardErrorCode | null>(null);
+  // 140.3-10 / SEAMUX-06 — the wait the kickoff ADVERTISED, in seconds, or null
+  // when it advertised none. Never defaulted, never fabricated: the envelope
+  // renders a countdown only when a real upstream stated one (140.3-09's
+  // additive-optional slot).
+  const [retryAfterSeconds, setRetryAfterSeconds] = useState<number | null>(
+    null,
+  );
+  // 140.3-10 / B-22 — bumping this re-runs the kickoff effect, which is what
+  // gives a recoverable error state a REAL retry rather than a control that
+  // renders and does nothing.
+  const [kickoffNonce, setKickoffNonce] = useState(0);
   const [gateResult, setGateResult] = useState<StrategyGateResult | null>(null);
   const [snapshot, setSnapshot] = useState<SyncPreviewSnapshot | null>(null);
   const [computationStatus, setComputationStatus] = useState<string | null>(null);
@@ -382,6 +454,22 @@ export function SyncPreviewStep({
   // UX-02: the wizard session correlation id — the SAME id wizardFetch sends on
   // every sync request, so a copied envelope id matches server logs.
   const [correlationId] = useState<string>(() => getWizardCorrelationId());
+  /**
+   * 140.3-15 / TS-20 — the UPSTREAM correlation id, when the failure carried
+   * one. `/api/keys/sync` does `if (!result.ok) return result.response`, so
+   * `process-key-client`'s envelope — including the id the ANALYTICS SERVICE
+   * logged — reaches this component verbatim. `correlationId` above is minted
+   * in the browser and memoized per PAGE LOAD, so on a seam failure it is the
+   * weaker of the two for support to search on.
+   *
+   * PER-FAILURE state. Only the kickoff arm has a body to read it from; every
+   * other error path in this component sets a code with no upstream id, and the
+   * retry handler clears it, so a stale id can never outlive the failure it
+   * belongs to.
+   */
+  const [upstreamCorrelationId, setUpstreamCorrelationId] = useState<
+    string | null
+  >(null);
   // useRef initializer must be a non-impure value for React Compiler's
   // purity rule. Real start time is set in the mount effect.
   const startedAtRef = useRef<number>(0);
@@ -503,11 +591,41 @@ export function SyncPreviewStep({
           body: JSON.stringify({ strategy_id: strategyId }),
         });
         if (!res.ok) {
-          // A non-2xx kickoff — INCLUDING the 503 the route returns when
-          // composite membership is UNKNOWABLE — fails CLOSED: surface the
-          // recoverable SYNC_FAILED envelope, never silently assume single-key.
+          // A non-2xx kickoff fails CLOSED — we never silently assume
+          // single-key. What changed in 140.3-10 is only WHICH honest state we
+          // fail closed INTO: the route now names the fact on the wire, so a
+          // throttle no longer reads as a failed computation.
+          const failure = (await res.json().catch(() => null)) as {
+            code?: unknown;
+          } | null;
+          const surfaced =
+            (typeof failure?.code === "string" &&
+              KNOWN_KICKOFF_CODES[failure.code]) ||
+            "SYNC_FAILED";
+          // The wait rides the HEADER, read through the ONE parser
+          // (`parseRetryAfterSeconds` — HTTP-date safe, never NaN/0/negative).
+          // Absent header ⇒ no wait, and the envelope then names no duration at
+          // all rather than inventing one (TRAP-3).
+          //
+          // ⚠️ This is NOT the step's patience threshold — the elapsed clock
+          // that surfaces the stuck-job exit affordance. That one serves a
+          // different purpose and is deliberately untouched. Its constant is
+          // NOT NAMED HERE ON PURPOSE: this plan's acceptance check counts
+          // occurrences of that identifier to prove the timer was not
+          // repurposed, and reproducing it in a comment that says "we did not
+          // touch it" is exactly how a check stops discriminating. (Third
+          // occurrence of that trap in this phase — see 140.3-09's FINDING-C.)
+          const advertisedWait = parseRetryAfterSeconds(res.headers);
+          // 140.3-15 / TS-20 — read through the leaf, which handles BOTH wire
+          // shapes (top-level on the flat envelopes, nested inside
+          // `service_error`) and refuses a value that is not correlation-id
+          // shaped. Set from the SAME body as the code above, so the id and the
+          // state can never describe different failures.
+          const upstreamId = seamCorrelationId(failure);
           if (mountedRef.current) {
-            setErrorCode("SYNC_FAILED");
+            setRetryAfterSeconds(advertisedWait);
+            setUpstreamCorrelationId(upstreamId);
+            setErrorCode(surfaced);
             setPhase("gate_failed");
           }
           return;
@@ -538,7 +656,10 @@ export function SyncPreviewStep({
     };
     // cachedSnapshot is stable WizardClient state; the early return keeps any
     // re-run inert (it never re-crawls when a snapshot is already held).
-  }, [strategyId, cachedSnapshot]);
+    // kickoffNonce: B-22's retry re-runs this effect deliberately. The effect
+    // re-arms `mountedRef` on entry (first line), so a re-run behaves exactly
+    // like a fresh mount rather than writing into a torn-down closure.
+  }, [strategyId, cachedSnapshot, kickoffNonce]);
 
   // SF-1 backstop — record when the observed computation_status last advanced.
   // Fires on mount (null) and on every change; a status frozen for the whole
@@ -1147,13 +1268,93 @@ export function SyncPreviewStep({
     }
   }, [retrying, strategyId]);
 
+  // 140.3-15 / TS-20 — ONE id field, the one `ErrorEnvelope` already renders and
+  // `buildDiagBlock` already copies into the QUANTALYZE_DIAG payload. The
+  // upstream id WINS when the wire carried a usable one; today's browser-minted
+  // id remains the fallback, so nothing that previously rendered an id stops
+  // doing so. No second field was added — the render slot expects exactly one
+  // value, and two ids in a diagnostics block is a support ticket asking which
+  // one to search.
   const errorEnvelope = errorCode
-    ? buildEnvelope(errorCode, correlationId, {
+    ? buildEnvelope(errorCode, upstreamCorrelationId ?? correlationId, {
         trades: gateResult?.detail?.trades as number | undefined,
         days: gateResult?.detail?.days as number | undefined,
         computationError: computationError,
+        // 140.3-10 — `?? undefined` because ABSENCE IS NOT ZERO. `null` would
+        // be carried into the envelope slot and a `0` there is a wait we were
+        // never told about.
+        retryAfterSeconds: retryAfterSeconds ?? undefined,
       })
     : null;
+
+  /**
+   * 140.3-10 / B-22 — the retry the shared renderer could never show.
+   *
+   * `ErrorEnvelope` computes `showRetry = envelope.recoverable && Boolean(onRetry)`.
+   * This step passed NO `onRetry`, so `showRetry` was STRUCTURALLY false: a
+   * recoverable seam error rendered with no retry control at all, which is
+   * exactly what SEAMUX-06 forbids. The handler is supplied only where retrying
+   * is genuinely the right thing — `recoverable` already encodes that, since it
+   * is derived from the code's own `actions`. A non-recoverable state
+   * (`GATE_DRAFT_GONE`) gets `undefined` and renders no Retry, because retrying
+   * a draft that is gone re-fails identically and a control that cannot work is
+   * a false affordance.
+   */
+  const handleKickoffRetry = useCallback(() => {
+    setErrorCode(null);
+    setRetryAfterSeconds(null);
+    // 140.3-15 / TS-20 — cleared with the code it belongs to. Leaving it would
+    // let a second failure on a DIFFERENT path render the first one's id, which
+    // is worse than rendering none: it points support at the wrong request.
+    setUpstreamCorrelationId(null);
+    setPhase("kicking_off");
+    setKickoffNonce((n) => n + 1);
+  }, []);
+
+  /**
+   * ⚠️ 140.3-10 / TRAP-4 — the destructive-control guard at this render.
+   *
+   * `onTryAnotherKey` fires `handleDeleteDraft()` in WizardClient: it DESTROYS
+   * the draft and every strategy_keys member under it. That is correct for a
+   * REJECTED key, which is what this button is for, and its intentional-delete
+   * path is pinned in WizardClient's suite.
+   *
+   * It is NOT correct as the SOLE control on `GATE_DRAFT_GONE`. That state is
+   * reachable from `/api/keys/sync`'s 404 arm, and the 404 is deliberately
+   * uniform across "no such draft" AND "a draft you do not own" (P458) — so the
+   * one thing on screen would delete a draft the user may still have. Combined
+   * with a retry affordance above it, that is the five-clicks-of-our-own-copy
+   * path this plan exists to prevent.
+   *
+   * Deleting this flag is the mutation that must redden a test.
+   *
+   * ⚠️ 140.3-12 WIDENED THIS FROM ONE CODE TO A HAND-TYPED SET, and the widening
+   * was FORCED by routing the two 400 arms to a wizard state. Wiring them
+   * without it would have created a fresh TRAP-4 at the site 140.3-10 had just
+   * guarded: `VALIDATION_FAILED` is non-recoverable (its only action is
+   * `request_call`), so no Retry renders, and the SOLE remaining control would
+   * have been "Try another key" — which fires `handleDeleteDraft()`. That means
+   * telling a user "our software sent a request we could not read" and offering
+   * them exactly one button, which DESTROYS their draft. Swapping the user's
+   * key cannot fix a bug in our own page.
+   *
+   * The set is HAND-TYPED and the flag is now about the PROPERTY (states where
+   * a destructive control is the wrong and only way out), not about one code —
+   * an `===` against a single member is the instance-check this programme keeps
+   * finding. Formerly `errorStateIsDraftGone`; the ledger's M66c mutation
+   * applies unchanged to the flag under its new name.
+   */
+  const DESTRUCTIVE_CONTROL_IS_WRONG_FOR: readonly WizardErrorCode[] = [
+    // The draft may be perfectly intact — the 404 is uniform across "no such
+    // draft" and "not yours" (P458).
+    "GATE_DRAFT_GONE",
+    // A fault in our own request shape. Deleting the draft cannot fix it, and
+    // retrying cannot either, so neither control belongs here.
+    "VALIDATION_FAILED",
+  ];
+  const errorStateHidesDestructiveControl =
+    errorCode !== null &&
+    DESTRUCTIVE_CONTROL_IS_WRONG_FOR.includes(errorCode as WizardErrorCode);
 
   // --- Rendering --------------------------------------------------------
 
@@ -1173,16 +1374,35 @@ export function SyncPreviewStep({
               server-scrubbed and already threaded via buildEnvelope → the
               GATE_ANALYTICS_FAILED cause gains "Details: {computation_error}."
               (zero new plumbing). */}
-          <WizardErrorEnvelope envelope={errorEnvelope} />
+          <WizardErrorEnvelope
+            envelope={errorEnvelope}
+            onRetry={
+              errorEnvelope.recoverable ? handleKickoffRetry : undefined
+            }
+          />
         </div>
         <div className="mt-6 flex gap-3">
-          <Button
-            type="button"
-            onClick={isComposite && onReviewKeys ? onReviewKeys : onTryAnotherKey}
-            data-testid="wizard-try-another-key"
-          >
-            {isComposite ? "Review your keys" : "Try another key"}
-          </Button>
+          {errorStateHidesDestructiveControl ? (
+            // Non-destructive, and it is the state's OWN fix line: "Start a new
+            // strategy from the strategies page." Navigating away destroys
+            // nothing, which is the property that matters when the draft may
+            // still exist and simply not be ours to read.
+            <Link href="/strategies" data-testid="wizard-back-to-strategies">
+              <Button type="button" variant="ghost">
+                Back to strategies
+              </Button>
+            </Link>
+          ) : (
+            <Button
+              type="button"
+              onClick={
+                isComposite && onReviewKeys ? onReviewKeys : onTryAnotherKey
+              }
+              data-testid="wizard-try-another-key"
+            >
+              {isComposite ? "Review your keys" : "Try another key"}
+            </Button>
+          )}
         </div>
       </section>
     );

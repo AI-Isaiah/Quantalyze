@@ -878,3 +878,180 @@ describe("[SEAMCORE-11 / A-27] postProcessKey: ONE defined outcome for an ambigu
     await expect(response.json()).resolves.toEqual({ error: "boom" });
   });
 });
+
+/**
+ * Phase 140.3-15 / TS-38 + SEAMUX-04 — A CONFIG FAULT STOPS WEARING THE
+ * UPSTREAM'S ENVELOPE.
+ *
+ * 140.2's review-fix pass gave `SeamConfigError` an operator-facing log that
+ * NAMES it (pinned by the operator-log falsifier above, which these cases must
+ * not disturb — and which is deliberately NOT named by its identifier here,
+ * because an acceptance criterion greps this file's diff for that identifier
+ * and prose about not touching a case would satisfy it. Seventh occurrence of
+ * that trap in this phase). What it
+ * could not do is change the ENVELOPE: giving the fault its own `code` and
+ * `human_message` is authoring user-facing copy, which was 140.2's fence. So a
+ * malformed `ANALYTICS_SERVICE_URL` — OUR deployment typo — still returned
+ * `UPSTREAM_NETWORK_ERROR` 502 / "Could not reach the ingestion service", a
+ * false claim about whose fault it is, and offered a retry that cannot ever
+ * succeed because the condition is permanent until we redeploy.
+ *
+ * ORACLE INDEPENDENCE: the expected sentence is HAND-TYPED here. Reading
+ * `SEAM_MISCONFIGURED_HUMAN_MESSAGE` out of the module under test would assert
+ * only that a string equals itself.
+ *
+ * ⚠️ THE TWO SIBLING ARMS ARE THE ANTI-REGRESSION HALF AND THEY ARE
+ * LOAD-BEARING. The new arm sits between the timeout arm and the transport arm,
+ * and a `SeamConfigError` reaches the catch by the same route they do. An arm
+ * that swallowed either would trade one false attribution for two.
+ */
+describe("[140.3-15 / TS-38] a config fault returns OUR envelope, not the upstream's", () => {
+  const realFetch = global.fetch;
+
+  beforeEach(() => {
+    process.env.INTERNAL_API_TOKEN = "internal-test-token";
+    process.env.ANALYTICS_SERVICE_URL = "http://analytics.test";
+  });
+
+  afterEach(() => {
+    global.fetch = realFetch;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  async function callWithConfigFault() {
+    const { SeamConfigError } = await import("@/lib/resilient-fetch");
+    coreSpy.mockRejectedValue(
+      new SeamConfigError(
+        "[resilient-fetch] ANALYTICS_SERVICE_URL is not a usable base URL",
+      ),
+    );
+    return postProcessKey({
+      flow_type: "resync",
+      source: "keys-sync",
+      context: { key_id: "k1" },
+      userId: "u1",
+      correlationId: "c-ts38",
+      routeTag: "keys/sync",
+    });
+  }
+
+  it("returns SEAM_MISCONFIGURED — NOT the dead-upstream envelope", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const response = failureResponse(await callWithConfigFault());
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(body.code).toBe("SEAM_MISCONFIGURED");
+    // The specific lie being removed, asserted NEGATIVELY as well as
+    // positively: a rename that left the old code in place would satisfy only
+    // one of these.
+    expect(body.code).not.toBe("UPSTREAM_NETWORK_ERROR");
+    expect(body.human_message).not.toBe("Could not reach the ingestion service.");
+  });
+
+  it("names the fault as OURS, in the exact hand-typed sentence", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const response = failureResponse(await callWithConfigFault());
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(body.human_message).toBe(
+      "We could not send this request — our own configuration is wrong. Retrying will not clear it.",
+    );
+  });
+
+  it("answers a status that attributes the fault to US, never 502", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const response = failureResponse(await callWithConfigFault());
+
+    // 500 = the server that produced THIS response is at fault, which is the
+    // literal truth here. 502 asserts the UPSTREAM is bad, which is the claim
+    // this obligation exists to stop; 503/504 both signal transience on a
+    // condition that is permanent until we redeploy.
+    expect(response.status).toBe(500);
+    expect(response.status).not.toBe(502);
+    expect(response.status).not.toBe(503);
+    expect(response.status).not.toBe(504);
+    // A permanent condition must not advertise a wait either.
+    expect(response.headers.get("Retry-After")).toBeNull();
+  });
+
+  it("is NOT recoverable — a retry control here can never succeed", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const response = failureResponse(await callWithConfigFault());
+    const body = (await response.json()) as Record<string, unknown>;
+
+    expect(body.recoverable).toBe(false);
+    expect(body).toEqual({
+      ok: false,
+      code: "SEAM_MISCONFIGURED",
+      human_message: expect.any(String),
+      correlation_id: "c-ts38",
+      recoverable: false,
+    });
+  });
+
+  it("carries NO URL, NO hostname and NO bare status — the teaser renders it verbatim", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const response = failureResponse(await callWithConfigFault());
+    const message = String(
+      ((await response.json()) as Record<string, unknown>).human_message,
+    );
+
+    // Threat T-140.3-15-02 / T-140-08. The anonymous landing-page teaser renders
+    // this string directly, so the same static-copy constraint that governs
+    // CIRCUIT_OPEN_HUMAN_MESSAGE applies.
+    expect(message).not.toMatch(/https?:/i);
+    expect(message).not.toMatch(/railway|upstash|vercel|supabase|localhost|\.com|\.app|\.test/i);
+    expect(message).not.toMatch(/\b\d{3}\b/);
+    expect(message).not.toMatch(/ANALYTICS_SERVICE_URL|INTERNAL_API_TOKEN|env\b/i);
+  });
+
+  it("STILL does not throw — the never-throws contract five caller routes depend on", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    // `.resolves` IS the assertion. None of the five callers has a catch for
+    // this function, so a throw here is five new unhandled paths.
+    await expect(callWithConfigFault()).resolves.toMatchObject({ ok: false });
+  });
+
+  it("ANTI-REGRESSION: a genuine TRANSPORT failure still answers UPSTREAM_NETWORK_ERROR 502", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    coreSpy.mockRejectedValue(new TypeError("fetch failed"));
+
+    const response = failureResponse(
+      await postProcessKey({
+        flow_type: "resync",
+        source: "keys-sync",
+        context: {},
+        userId: "u1",
+        correlationId: "c-net",
+      }),
+    );
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({
+      code: "UPSTREAM_NETWORK_ERROR",
+      human_message: "Could not reach the ingestion service.",
+      recoverable: true,
+    });
+  });
+
+  it("ANTI-REGRESSION: a genuine TIMEOUT still answers UPSTREAM_TIMEOUT 504", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const abort = new DOMException("aborted", "TimeoutError");
+    coreSpy.mockRejectedValue(abort);
+
+    const response = failureResponse(
+      await postProcessKey({
+        flow_type: "resync",
+        source: "keys-sync",
+        context: {},
+        userId: "u1",
+        correlationId: "c-to",
+      }),
+    );
+    expect(response.status).toBe(504);
+    await expect(response.json()).resolves.toMatchObject({
+      code: "UPSTREAM_TIMEOUT",
+      recoverable: true,
+    });
+  });
+});

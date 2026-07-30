@@ -8,8 +8,19 @@ import {
   AnalyticsTimeoutError,
 } from "@/lib/analytics-client";
 import { CircuitOpenError } from "@/lib/seam-errors";
+import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+// 140.3-13b / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
+// capture policy written out IN FULL in `src/app/api/admin/match/eval/route.ts`
+// by `140.3-13a`. Cited, never restated. The caught value is passed UNMODIFIED:
+// `captureToSentry` scrubs at the chokepoint (SEAMCORE-06), and pre-scrubbing
+// here would hand Sentry a string, destroying grouping and the stack.
+//
+// PER-REQUEST SECRETS AT THIS ROUTE: none. The body carries one opaque
+// `portfolio_id` row id; no credential, no user JWT, no exchange material
+// crosses this handler. Stated rather than assumed (M78b).
+import { captureToSentry } from "@/lib/sentry-capture";
 
 /**
  * Phase 140 / SEAM-02 — pinned for clarity; declared counterpart of this
@@ -35,15 +46,6 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
  * hit, where a guard was defeated by prose quoting the token it forbids.)
  */
 export const maxDuration = 300;
-
-/**
- * Phase 140 / SEAM-04 — the static body the breaker arm emits. Byte-identical
- * to `process-key-client`'s `CIRCUIT_OPEN_HUMAN_MESSAGE` and to the sibling
- * seam routes, so a breaker trip reads the same to a user whichever seam they
- * hit, and it names no infrastructure (M-0333 / threat T-140-17).
- */
-const CIRCUIT_OPEN_COPY =
-  "The analytics service is temporarily unavailable. Please try again in a moment.";
 
 export async function POST(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
@@ -215,6 +217,22 @@ export async function POST(req: NextRequest) {
     // bubble internal URLs (http://localhost:8002/...), Python tracebacks,
     // service-key header names, etc. Restore the hard-coded opaque
     // envelope; log the underlying error to console.error for ops.
+    // 140.3-13b / SEAMUX-08 — THE TERMINAL ARM, and the only capture in this
+    // route. The two arms above (breaker short-circuit, upstream timeout) are
+    // conditions we already classified and already answer with their own
+    // status; this arm is by construction the one that means "we do not know
+    // what this is". This route has NO typed upstream-error branch at all, so
+    // an analytics 5xx also lands here and IS captured — the
+    // "service-permanent outcome" half of the policy, reached without needing a
+    // range split.
+    //
+    // `extra` carries the opaque row id only. The body has no other field, and
+    // the raw `err` — which can bubble an internal URL or a Python traceback
+    // (M-0333) — reaches Sentry only through the scrubbing chokepoint.
+    captureToSentry(err, {
+      tags: { surface: "portfolio-optimizer", step: "analytics-unreachable" },
+      extra: { portfolio_id: portfolioId },
+    });
     console.error("[api/portfolio-optimizer] analytics call failed:", err);
     // Audit-2026-05-07 red-team R-0002: refund on the generic 503 path
     // too (analytics service unreachable is also upstream-of-caller).

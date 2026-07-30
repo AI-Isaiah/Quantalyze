@@ -172,6 +172,71 @@ const TRUST_ATOMS: { title: string; body: string }[] = [
   },
 ];
 
+/**
+ * 140.3-13a / SEAMUX-08 — every `WizardErrorCode` that
+ * `POST /api/strategies/create-with-key` can actually put on the wire.
+ *
+ * WHY A SET AND NOT A CAST. This replaces a bare `as WizardErrorCode` cast of
+ * `data.code` — widened with an optional and then defaulted to `"UNKNOWN"` — a
+ * raw cast of NETWORK DATA into a closed union with no membership check at all.
+ * (The removed line is described rather than quoted verbatim: this plan's
+ * acceptance grep for that exact token sequence is a raw repo scan with no
+ * comment exclusion, so a pasted citation would keep reporting the class open.)
+ * A cast is a compile-time assertion; `data.code` is whatever an upstream, a
+ * proxy or an edge/WAF layer happened to put in a JSON body. Before this, any
+ * string at all became a "typed" `WizardErrorCode`, was handed to
+ * `buildEnvelope`, and rendered as `WIZARD_ERROR_COPY[code]` — `undefined` —
+ * while the funnel recorded a code that is not in our vocabulary. The shape
+ * copied here is `SubmitStep.tsx`'s `KNOWN_FINALIZE_CODES`, which is the
+ * CORRECT form of the same problem and is deliberately left where it is.
+ *
+ * WHY IT IS HAND-WRITTEN PER ROUTE, NOT A TOTALITY CHECK OVER THE UNION. A step
+ * should admit the codes ITS route emits, not every code in the vocabulary: a
+ * `CSV_NAV_ZERO` arriving here is drift, not a key-connect failure, and reading
+ * it as one would render CSV copy on the exchange form. That is also why this
+ * set is not shared with `MultiKeyConnectStep` — its two routes emit different
+ * sets, and one shared set would silently admit each route's codes at the other.
+ *
+ * WHY NO WIRE→WIZARD TRANSLATION STEP. `SubmitStep` runs
+ * `recogniseSeamErrorCode` first because `finalize-wizard` answers a breaker
+ * trip with the WIRE code `CIRCUIT_OPEN`. This route does not: measured on
+ * disk, `grep -c 'CIRCUIT_OPEN\|UPSTREAM_TIMEOUT\|UPSTREAM_NETWORK_ERROR'` on
+ * `create-with-key/route.ts` is 0 — it routes every caught value through the
+ * shared `classifyKeyValidationError`, which maps `CircuitOpenError` to
+ * `SERVICE_UNAVAILABLE_RETRY` (a member below) BEFORE answering. Adding a
+ * translation hop here would be machinery no reachable path can exercise. If
+ * that route ever starts emitting a wire code, it falls to `UNKNOWN` here —
+ * which is the safe direction, and is what the unrecognised-code case pins.
+ *
+ * The members, enumerated from the route rather than remembered:
+ *   · emitted directly by `create-with-key/route.ts`
+ *   · returned by the shared `classifyKeyValidationError` at its catch arm
+ */
+const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
+  new Set<WizardErrorCode>([
+    // Emitted directly by the route's own guards.
+    "KEY_INVALID_FORMAT",
+    "KEY_NOT_READ_ONLY",
+    "KEY_HAS_TRADING_PERMS",
+    "KEY_HAS_WITHDRAW_PERMS",
+    "DRAFT_ALREADY_EXISTS",
+    "KEY_RATE_LIMIT",
+    "UNKNOWN",
+    // Returned by `classifyKeyValidationError` (src/lib/wizardErrors.ts) — the
+    // SHARED classifier this route and composite/add-key both call, so this
+    // half of the set is identical at both key-entry steps by construction.
+    "SERVICE_UNAVAILABLE_RETRY",
+    "KEY_INVALID_SIGNATURE",
+    "KEY_AUTH_FAILED",
+    "KEY_MT5_MASTER_PASSWORD",
+    "KEY_MT5_WRONG_SERVER",
+    "KEY_IP_ALLOWLIST",
+    "KEY_NETWORK_TIMEOUT",
+    "KEY_PROBE_FAILED",
+    "KEY_EXCHANGE_UNAVAILABLE",
+    "KEY_VENUE_TRANSIENT",
+  ]);
+
 export interface ConnectKeySuccess {
   strategyId: string;
   apiKeyId: string;
@@ -320,7 +385,13 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
       };
 
       if (!res.ok || !data.strategy_id || !data.api_key_id) {
-        const code = (data.code as WizardErrorCode | undefined) ?? "UNKNOWN";
+        // 140.3-13a / SEAMUX-08 — membership-checked, never cast. See
+        // KNOWN_CREATE_WITH_KEY_CODES above for why the check exists and why
+        // the set is this route's own rather than the whole union.
+        const code: WizardErrorCode =
+          data.code && KNOWN_CREATE_WITH_KEY_CODES.has(data.code as WizardErrorCode)
+            ? (data.code as WizardErrorCode)
+            : "UNKNOWN";
         setErrorCode(code);
         trackForQuantsEventClient("wizard_error", {
           wizard_session_id: wizardSessionId,

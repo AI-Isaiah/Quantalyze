@@ -45,6 +45,38 @@ import { NextRequest } from "next/server";
 
 vi.mock("server-only", () => ({}));
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 140.3-13a / SEAMUX-08 — the Sentry capture, tested through the REAL helper.
+//
+// ⚠️ `@sentry/nextjs` is mocked here and `@/lib/sentry-capture` is DELIBERATELY
+// NOT. The house pattern elsewhere mocks the helper itself, which is fine for
+// "did the call site fire" but makes every payload assertion VACUOUS about
+// scrubbing: the scrub lives INSIDE the helper (SEAMCORE-06), so a mocked
+// helper never runs it and a test asserting "no secret in the payload" would
+// pass with the scrubber deleted. Running the real helper over a faked Sentry
+// transport is what makes both halves of TRAP-1 falsifiable here.
+// ─────────────────────────────────────────────────────────────────────────────
+const sentryState = vi.hoisted(() => ({
+  captured: [] as Array<{
+    err: unknown;
+    options: {
+      tags?: Record<string, string>;
+      extra?: Record<string, unknown>;
+      level?: string;
+    };
+  }>,
+}));
+
+vi.mock("@sentry/nextjs", () => ({
+  captureException: (err: unknown, options: Record<string, unknown>) => {
+    sentryState.captured.push({
+      err,
+      options: options as (typeof sentryState.captured)[number]["options"],
+    });
+  },
+}));
+
+
 const VALID_ORIGIN = { origin: "http://localhost:3000" };
 
 const userState = vi.hoisted<{ current: { id: string } | null }>(() => ({
@@ -293,5 +325,241 @@ describe("POST /api/admin/match/recompute — SEAM-04 error taxonomy (Phase 140)
     expect(res.status).toBe(401);
     expect(res.headers.get("Retry-After")).toBeNull();
     expect(recomputeCalls).toHaveLength(0);
+  });
+});
+
+/**
+ * 140.3-11 / TS-19 — an upstream status SURVIVES this route.
+ *
+ * The flattening this closes is BROADER than the finding that named it. Before
+ * this plan the catch block branched on exactly two types, so every OTHER
+ * upstream status fell to the unconditional terminal arm and became a
+ * `500 {"error":"Match recompute failed. Please try again."}`. Measured on the
+ * untouched tree: `grep -c AnalyticsUpstreamError` was **0** in this route and
+ * **0** in its sibling `eval` — the arm did not exist at all, in either file.
+ *
+ * `analytics-service/routers/match.py` raises 400, 403, 422 and 429 on this
+ * very endpoint (`:1668`, `:1697`, `:1741`, `:1783`), so this was not
+ * hypothetical: a deliberate, immediate refusal from the service was reported
+ * to an admin as OUR server failing, with "Please try again" attached to a
+ * request that would be refused identically every time.
+ *
+ * THE RANGE SPLIT IS LOAD-BEARING, not a simplification. Only 4xx forwards.
+ * A 5xx keeps falling to the static arm, because `AnalyticsUpstreamError.message`
+ * on a 5xx carries the FastAPI `detail`, the `parseResponse()` contract-drift
+ * string and the service's base URL — the exact T-140-11 leak this file's
+ * existing case pins the absence of. The case below re-pins it THROUGH the new
+ * arm, so widening the range later reddens a test rather than shipping a leak.
+ *
+ * Fixtures are hand-typed here. Nothing is imported from the module under test.
+ */
+describe("POST /api/admin/match/recompute — upstream status survives (140.3-11 / TS-19)", () => {
+  async function postAsAdmin() {
+    userState.current = { id: "admin-id" };
+    adminFlag.isAdmin = true;
+    const { POST } = await import("./route");
+    return POST(buildPostRequest({ allocator_id: "alloc-1", force: false }));
+  }
+
+  it("an upstream 424 answers 424 with its sentence intact — NOT a bodyless 500", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError(
+      "Binance is not responding right now. Try again shortly.",
+      424,
+      "EXCHANGE_UNAVAILABLE",
+    );
+    const res = await postAsAdmin();
+
+    // The whole point: the status survives the hop. Without the new arm this
+    // is 500 and the sentence is replaced by GENERIC_COPY.
+    expect(res.status).toBe(424);
+    const body = JSON.parse(await res.text());
+    expect(body.error).toBe(
+      "Binance is not responding right now. Try again shortly.",
+    );
+    expect(body.error).not.toBe(GENERIC_COPY);
+  });
+
+  it("an upstream 4xx that is NOT 424 also survives with its own status", async () => {
+    // 429 rather than 424: a second member of the class, so a fix that special-
+    // cased the one status this plan renders would not satisfy this file.
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError(
+      "Too many recomputes for this allocator.",
+      429,
+      "RATE_LIMITED",
+    );
+    const res = await postAsAdmin();
+    expect(res.status).toBe(429);
+    expect(JSON.parse(await res.text()).error).toBe(
+      "Too many recomputes for this allocator.",
+    );
+  });
+
+  it("a 403 refusal from the service is not reported as OUR 500", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError(
+      "actor is not entitled to recompute this allocator",
+      403,
+    );
+    const res = await postAsAdmin();
+    expect(res.status).toBe(403);
+    expect(res.status).not.toBe(500);
+  });
+
+  it("ANTI-REGRESSION: an upstream 5xx still answers the STATIC 500 and never echoes its message (T-140-11)", async () => {
+    // Shaped like what a FastAPI unhandled exception actually puts in this
+    // field: a traceback fragment and the service's base URL.
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError(
+      'Traceback (most recent call last): File "/app/routers/match.py" http://localhost:8002',
+      502,
+    );
+    const res = await postAsAdmin();
+    expect(res.status).toBe(500);
+    const raw = await res.text();
+    expect(raw).not.toContain("Traceback");
+    expect(raw).not.toContain("localhost");
+    expect(raw).not.toContain("match.py");
+    expect(JSON.parse(raw).error).toBe(GENERIC_COPY);
+  });
+
+  it("ANTI-REGRESSION: the new arm stays BEHIND the admin gate (T-140-12)", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError("venue down", 424);
+    userState.current = null;
+    const { POST } = await import("./route");
+    const res = await POST(
+      buildPostRequest({ allocator_id: "alloc-1", force: false }),
+    );
+    // An anonymous caller must not learn a venue's state from this endpoint
+    // either — the new arm is inside the same catch block, after the gate.
+    expect(res.status).toBe(401);
+    expect(recomputeCalls).toHaveLength(0);
+  });
+});
+
+/**
+ * 140.3-13a / SEAMUX-08 — this route captures to Sentry, under the SAME ONE
+ * policy as its sibling (`admin/match/eval/route.ts`, where it is written out).
+ *
+ * ⚠️ ASSERTED PER FILE, DELIBERATELY. These two routes have the same shape and
+ * had the same gap — each read 0 `captureToSentry` on the untouched tree — and
+ * `140.3-11` recorded the same reasoning when it added the 4xx arm to both:
+ * fixing one and reporting the class closed is this programme's signature
+ * failure. A shared assertion could not tell a two-of-two delivery from a
+ * one-of-two.
+ *
+ * `@sentry/nextjs` is mocked and `@/lib/sentry-capture` is NOT — see the note
+ * at the top of this file. The scrub lives inside the helper, so a mocked
+ * helper would make every payload assertion below vacuous.
+ */
+describe("[140.3-13a / SEAMUX-08] POST /api/admin/match/recompute — Sentry capture policy", () => {
+  const INTERNAL_TOKEN = "int_9f3a1c7e5b2d84a6f0c1e3d5b7a9f2c48e6d0b1a";
+
+  beforeEach(() => {
+    sentryState.captured.length = 0;
+    userState.current = { id: "admin-1" };
+    adminFlag.isAdmin = true;
+    vi.stubEnv("INTERNAL_API_TOKEN", INTERNAL_TOKEN);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  async function nextCapture() {
+    await vi.waitFor(() =>
+      expect(
+        sentryState.captured.length,
+        "nothing was captured — the terminal arm is the only place an unclassified seam failure is ever reported",
+      ).toBeGreaterThan(0),
+    );
+    return sentryState.captured[sentryState.captured.length - 1];
+  }
+
+  async function expectNoCapture() {
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sentryState.captured).toEqual([]);
+  }
+
+  it("POSITIVE: an unclassified transport failure IS captured, with THIS route's tags", async () => {
+    recomputeState.throwValue = new Error(
+      `getaddrinfo ENOTFOUND analytics.invalid (X-Internal-Token: ${INTERNAL_TOKEN})`,
+    );
+    const { POST } = await import("./route");
+    const res = await POST(buildPostRequest({ allocator_id: "a-1" }));
+    expect(res.status).toBe(500);
+
+    const { options } = await nextCapture();
+    // The surface tag is this route's own — a shared literal would let one
+    // route's capture satisfy the other's assertion.
+    expect(options.tags?.surface).toBe("admin-match-recompute");
+    expect(options.tags?.step).toBe("upstream-error");
+  });
+
+  it("TRAP-1 BOTH DIRECTIONS: the captured payload loses the secret and KEEPS the syscall token", async () => {
+    recomputeState.throwValue = new Error(
+      `getaddrinfo ENOTFOUND analytics.invalid (X-Internal-Token: ${INTERNAL_TOKEN})`,
+    );
+    const { POST } = await import("./route");
+    await POST(buildPostRequest({ allocator_id: "a-1" }));
+
+    const message = ((await nextCapture()).err as Error).message;
+    expect(
+      message,
+      "a live INTERNAL_API_TOKEN was dispatched to Sentry — undici inlines outgoing headers into err.message (TRAP-1)",
+    ).not.toContain(INTERNAL_TOKEN);
+    expect(
+      message,
+      "the syscall token was eaten by the redactor — ENOTFOUND is the most valuable thing in a DNS failure line",
+    ).toContain("ENOTFOUND");
+  });
+
+  it("NEGATIVE: a breaker short-circuit is NEVER captured", async () => {
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    recomputeState.throwValue = new CircuitOpenError(30);
+    const { POST } = await import("./route");
+    const res = await POST(buildPostRequest({ allocator_id: "a-1" }));
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("30");
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: an upstream timeout is NEVER captured", async () => {
+    const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsTimeoutError("/api/match/recompute", 30_000);
+    const { POST } = await import("./route");
+    const res = await POST(buildPostRequest({ allocator_id: "a-1" }));
+    expect(res.status).toBe(504);
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: a forwarded upstream 4xx is NEVER captured", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError("bybit is not responding", 424);
+    const { POST } = await import("./route");
+    const res = await POST(buildPostRequest({ allocator_id: "a-1" }));
+    expect(res.status).toBe(424);
+    await expectNoCapture();
+  });
+
+  it("POSITIVE COUNTERPART: an upstream 5xx DOES reach the terminal arm and IS captured", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError("upstream exploded", 500);
+    const { POST } = await import("./route");
+    const res = await POST(buildPostRequest({ allocator_id: "a-1" }));
+    expect(res.status).toBe(500);
+    expect((await nextCapture()).options.tags?.surface).toBe(
+      "admin-match-recompute",
+    );
+  });
+
+  it("NEGATIVE: a caller fault (non-admin) is NEVER captured", async () => {
+    adminFlag.isAdmin = false;
+    const { POST } = await import("./route");
+    const res = await POST(buildPostRequest({ allocator_id: "a-1" }));
+    expect(res.status).toBe(403);
+    await expectNoCapture();
   });
 });

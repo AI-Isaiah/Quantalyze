@@ -19,6 +19,7 @@ import { ModeBadge, ScoreCell } from "@/components/admin/match/ModeBadge";
 import { MatchQueueSkeleton } from "@/components/admin/match/MatchQueueSkeleton";
 import { ShortcutHelpModal } from "@/components/admin/match/ShortcutHelpModal";
 import { ShortlistCard } from "@/components/admin/match/ShortlistCard";
+import { venueOutageMessage } from "@/components/admin/match/venueOutageCopy";
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -176,6 +177,17 @@ export function AllocatorMatchQueue({
   // the current id.
   const loadIdRef = useRef(0);
 
+  // In-flight generation for handleRecompute, copying loadIdRef's idiom rather
+  // than inventing a second one. 0 means "no recompute in flight"; a non-zero
+  // value is the generation of the run that owns the request.
+  //
+  // `recomputing` is React STATE, so two `r` presses inside one frame both
+  // observe `false` and both POST — and `r` is a repeatable keyboard shortcut
+  // pointed at a service that, during an outage, is exactly what an anxious
+  // founder leans on. A ref is written synchronously, so it is the guard that
+  // actually holds.
+  const recomputeIdRef = useRef(0);
+
   const load = useCallback(async () => {
     const thisLoadId = ++loadIdRef.current;
     setLoading(true);
@@ -214,6 +226,8 @@ export function AllocatorMatchQueue({
   const selectedCandidate = data?.candidates[selectedIdx] ?? null;
 
   const handleRecompute = useCallback(async () => {
+    if (recomputeIdRef.current !== 0) return; // A recompute is already in flight
+    const thisRecomputeId = ++recomputeIdRef.current;
     setRecomputing(true);
     try {
       const res = await fetch("/api/admin/match/recompute", {
@@ -221,6 +235,49 @@ export function AllocatorMatchQueue({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ allocator_id: allocatorId, force: true }),
       });
+
+      // 140.3-08 / SEAMUX-05 (B-05 / B-17) — observe the STATUS before touching
+      // the body. This was `const body = await res.json();` with no `res.ok` and
+      // no `res.status`, and `/api/admin/match/recompute` answers a breaker trip
+      // with `{ error: <the breaker sentence> }` at 503. That body has no
+      // `disabled` field, so it fell to the `else` branch and called `load()` —
+      // the queue refetched, re-rendered the batch it already had, and a tripped
+      // breaker read to the founder as a COMPLETED recompute, with the batch's
+      // own "Computed Nh ago" stamp beside it as apparent corroboration.
+      //
+      // The shape is `handleDecision`'s, twenty lines below in this same file:
+      // check `res.ok` first, and never let a failure reach the success path.
+      // The JSON read is guarded because a gateway answers with HTML, and a
+      // SyntaxError thrown here would replace the real failure with a parse error.
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        // 140.3-11 / TS-18 — a 424 is CALLER'S EXCHANGE (STATUS_CONTRACT §1,
+        // obligation O-1): the third party the caller named failed, it is
+        // recoverable, and it never counts against our own health. Collapsed
+        // into the generic arm below it reads as OUR outage — the theme-2 lie —
+        // and the founder re-runs a recompute that will fail identically until
+        // the venue returns.
+        //
+        // `dependency` is read from the ROUTE's flat `{error, dependency}` body,
+        // not from the seam envelope: the route already extracted it through
+        // `seamDependencyName`, which shape-checks the slug and refuses any name
+        // inside OUR closed service set. The `typeof` guard is the second half
+        // of that — this component treats its own route's body as untrusted too.
+        // It is `null` for the FLAT 424 shape, which carries no dependency at
+        // all, and the copy names no venue in that case rather than inventing
+        // one.
+        if (res.status === 424) {
+          const dependency =
+            typeof errBody.dependency === "string" ? errBody.dependency : null;
+          throw new Error(venueOutageMessage(dependency));
+        }
+        throw new Error(
+          typeof errBody.error === "string" && errBody.error
+            ? errBody.error
+            : `Recompute failed (HTTP ${res.status})`,
+        );
+      }
+
       const body = await res.json();
       if (body.disabled) {
         alert("Engine is disabled. Re-enable it from the match queue index.");
@@ -228,9 +285,18 @@ export function AllocatorMatchQueue({
         await load();
       }
     } catch (err) {
-      alert(`Recompute failed: ${err instanceof Error ? err.message : "Unknown error"}`);
+      // Route the failure to this component's OWN error surface rather than to
+      // an alert the founder dismisses while the stale queue stays on screen.
+      // The error-first render guard (`if (error || !data) return`) is why this
+      // component is not a member of 140.3-07's stale-result class; using it
+      // here means a failed recompute cannot be mistaken for a fresh batch, and
+      // its Retry button re-runs `load`, which clears the error.
+      setError(err instanceof Error ? err.message : "Recompute failed");
     } finally {
-      setRecomputing(false);
+      if (recomputeIdRef.current === thisRecomputeId) {
+        recomputeIdRef.current = 0;
+        setRecomputing(false);
+      }
     }
   }, [allocatorId, load]);
 

@@ -362,7 +362,18 @@ class VenueTransientHTTPException(HTTPException):
       an OBJECT, ``message`` becomes ``"[object Object]"``, every branch misses,
       and ``RATE_LIMITED`` / ``PROBE_FAILED`` / ``DDOS_PROTECTION`` regress from
       correct classification to ``UNKNOWN``/500 — a THREE-code regression;
-    * changing the status alone buys nothing, because the status is discarded.
+    * changing the status alone buys nothing *at the wizard's render*, because
+      ``classifyKeyValidationError`` discards the upstream status — still true
+      after 140.3-05, which made it branch on ``body.code``, not on the status.
+
+    ⚠️ **That second bullet is why the flat shape came FIRST, not a reason the
+    status does not matter.** 140.3-06 remapped all seven sites from ``400`` to
+    ``424`` (CALLER'S EXCHANGE, STATUS_CONTRACT.md §5): a ``400`` asserted on the
+    wire that the CALLER'S REQUEST was at fault, which is false at every one of
+    these arms. The status is read by ``src/lib/seam-discriminator.ts``'s
+    ``seamBreakerVerdict`` (``424`` ⇒ ``caller-exchange`` / ``counts:false`` /
+    ``breakerKey:null``), so it is load-bearing for ATTRIBUTABILITY and for
+    breaker accounting even though the wizard's rendered copy is unchanged.
 
     The sanctioned precedent is ``main.py``'s app-global 429 (PYAPI-08), whose
     own rationale block says it carries a scalar ``detail`` beside a machine
@@ -411,8 +422,11 @@ class VenueTransientHTTPException(HTTPException):
         # dependency: a direct R-2 violation that `service_error`'s `_validate`
         # refuses, and one that 140.2's per-dependency breaker (SEAMCORE-01)
         # would mis-key onto the global bucket A-01 shows is false. Nothing else
-        # pins this — the wire tests pin 400 at the seven sites, not the class's
-        # admissible range.
+        # pins this — the wire tests pin 424 at the seven sites (140.3-06
+        # remapped them from 400), not the class's admissible range. The whole
+        # 4xx band stays admissible on purpose: this is a RANGE guard, and
+        # narrowing it to the status the sites happen to emit would duplicate
+        # the wire pins instead of guarding what they cannot.
         if not 400 <= status_code < 500:
             raise ValueError(
                 "VenueTransientHTTPException is a CALLER-class 4xx shape: it "

@@ -125,3 +125,162 @@ describe("WeightOptimizerSection", () => {
     expect(screen.getByText(/most\s+overfit-prone objective/)).toBeInTheDocument();
   });
 });
+
+/**
+ * Phase 140.3 plan 08 / SEAMUX-05 (B-13) — the bare `} catch { setStatus("error"); }`.
+ *
+ * The caught value was discarded and the response outcome was never read, so
+ * FOUR different failures collapsed into one state whose copy reads *"The
+ * optimizer is unavailable right now. Try again shortly."*:
+ *
+ *   - a 5xx / breaker trip      → availability IS the fact. Copy correct.
+ *   - a 4xx                     → the optimizer answered, immediately, refusing.
+ *                                 "Try again shortly" is FALSE, and it steers the
+ *                                 allocator into re-running a request that will
+ *                                 be refused identically every time.
+ *   - a body we cannot parse    → we do not know whether it ran. Claiming it is
+ *                                 unavailable asserts something we cannot see.
+ *   - a rejected fetch          → availability. Copy correct.
+ *
+ * ⚠️ TRAP-8. This file is ALSO the source of the locked `setResult(null)`
+ * invalidate-before-refetch pattern that plan `140.3-07` copied to both live
+ * members of the B-26 class. That line must survive this plan byte-unchanged;
+ * the structural pin at the bottom of this block asserts it, and the plan's
+ * acceptance criterion asserts it again against the diff.
+ */
+describe("WeightOptimizerSection — SEAMUX-05 / B-13: the failure is named", () => {
+  function stubFetch(impl: () => Promise<Response>) {
+    const f = vi.fn().mockImplementation(impl);
+    vi.stubGlobal("fetch", f);
+    return f;
+  }
+
+  function renderAndRun() {
+    render(
+      <WeightOptimizerSection
+        strategies={[strat("a", "A"), strat("b", "B")]}
+        onApply={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Suggest weights/ }));
+  }
+
+  it("a 503 says the optimizer is unavailable (availability IS the fact)", async () => {
+    stubFetch(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ error: "circuit open" }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    renderAndRun();
+    await waitFor(() =>
+      expect(screen.getByText("Couldn't reach the optimizer")).toBeInTheDocument(),
+    );
+  });
+
+  it("a 400 does NOT claim the optimizer is unavailable — it was answered and refused", async () => {
+    stubFetch(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ error: "bad series" }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    renderAndRun();
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("The optimizer refused this request"),
+      ).toBeInTheDocument(),
+    );
+    // THE assertion: the availability claim must NOT be made about a request the
+    // optimizer answered. "Try again shortly" is the steering half of the lie.
+    expect(
+      screen.queryByText("Couldn't reach the optimizer"),
+    ).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/Try again shortly/);
+  });
+
+  it("an unparseable 200 says we couldn't READ the answer, and logs the caught value", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    stubFetch(() =>
+      Promise.resolve(
+        new Response("<html><body>gateway</body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        }),
+      ),
+    );
+    renderAndRun();
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("Couldn't read the optimizer's answer"),
+      ).toBeInTheDocument(),
+    );
+    // We do not know whether it ran, so we must not assert availability …
+    expect(
+      screen.queryByText("Couldn't reach the optimizer"),
+    ).not.toBeInTheDocument();
+    // … the raw caught value never reaches the DOM (140.3-07's B-27 discipline) …
+    expect(document.body.textContent).not.toMatch(/SyntaxError|Unexpected token|JSON/);
+    // … and it DOES reach the operator log, so debuggability was not traded away.
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("a rejected fetch is an availability fact, and its message stays out of the DOM", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    stubFetch(() =>
+      Promise.reject(
+        new TypeError("NetworkError when attempting to fetch resource http://localhost:8002/optimize"),
+      ),
+    );
+    renderAndRun();
+
+    await waitFor(() =>
+      expect(screen.getByText("Couldn't reach the optimizer")).toBeInTheDocument(),
+    );
+    expect(document.body.textContent).not.toMatch(/NetworkError|localhost:8002/);
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  /**
+   * TRAP-8 STRUCTURAL PIN. This file is the source of the locked
+   * invalidate-before-refetch shape `140.3-07` copied to `PortfolioOptimizer`
+   * and `KeyPermissionBadge`. Plan `140.3-08` edits this file for B-13, and the
+   * hazard is that the B-13 edit disturbs the very lines the other plan copied.
+   *
+   * Labelled STRUCTURAL, not behavioural: it reads the source text. It exists
+   * because the invalidation is not observable from this component's DOM (the
+   * loading branch returns first), which is the same asymmetry `140.3-07`
+   * recorded for M72.
+   */
+  it("STRUCTURAL PIN: setResult(null) still precedes the fetch in requestWeights", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const src = readFileSync(
+      resolve(
+        process.cwd(),
+        "src/app/(dashboard)/allocations/components/WeightOptimizerSection.tsx",
+      ),
+      "utf8",
+    );
+    const lines = src.split("\n");
+    const invalidateAt = lines.findIndex((l) => l.includes("setResult(null)"));
+    const fetchAt = lines.findIndex((l) => l.includes("await fetch("));
+    expect(
+      invalidateAt,
+      "WeightOptimizerSection.tsx must still call setResult(null) — it is the locked shape 140.3-07 copied to both live members of the B-26 class",
+    ).toBeGreaterThan(-1);
+    expect(fetchAt).toBeGreaterThan(-1);
+    expect(
+      invalidateAt,
+      "the invalidation must stay ABOVE the fetch; that ordering is the pattern, not an accident",
+    ).toBeLessThan(fetchAt);
+  });
+});

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
 // Phase 140 / SEAM-04: the REAL breaker error, taken from the dependency-free
 // leaf. It must NEVER be picked up through `@/lib/analytics-client` — this file
@@ -27,6 +27,35 @@ import { CircuitOpenError } from "@/lib/seam-errors";
  */
 
 vi.mock("server-only", () => ({}));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 140.3-13b / SEAMUX-08 — the Sentry capture, tested through the REAL helper.
+//
+// ⚠️ `@sentry/nextjs` is mocked here and `@/lib/sentry-capture` is DELIBERATELY
+// NOT. Mocking the helper would answer "did the call site fire" while making
+// every payload assertion VACUOUS about scrubbing — the scrub lives INSIDE the
+// helper (SEAMCORE-06), so a mocked helper never runs it and "no secret in the
+// payload" would pass with the scrubber deleted. Inherited from `140.3-13a`.
+// ─────────────────────────────────────────────────────────────────────────────
+const sentryState = vi.hoisted(() => ({
+  captured: [] as Array<{
+    err: unknown;
+    options: {
+      tags?: Record<string, string>;
+      extra?: Record<string, unknown>;
+      level?: string;
+    };
+  }>,
+}));
+
+vi.mock("@sentry/nextjs", () => ({
+  captureException: (err: unknown, options: Record<string, unknown>) => {
+    sentryState.captured.push({
+      err,
+      options: options as (typeof sentryState.captured)[number]["options"],
+    });
+  },
+}));
 
 const { FakeAnalyticsTimeoutError } = vi.hoisted(() => {
   class FakeAnalyticsTimeoutError extends Error {
@@ -127,6 +156,7 @@ beforeEach(() => {
   });
   STATE.optimizerCalls = [];
   STATE.refundCalls = [];
+  sentryState.captured.length = 0;
 });
 
 describe("POST /api/portfolio-optimizer — audit-2026-05-07 cluster A", () => {
@@ -349,5 +379,131 @@ describe("POST /api/portfolio-optimizer — audit-2026-05-07 cluster A", () => {
     const unauth = await POST(buildRequest({ portfolio_id: "x" }));
     expect(unauth.status).toBe(401);
     expect(unauth.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+});
+
+/**
+ * 140.3-13b / SEAMUX-08 — this route captures to Sentry, under the ONE policy
+ * written out in `src/app/api/admin/match/eval/route.ts`.
+ *
+ * ⚠️ THE BASELINE WAS ZERO, measured on the untouched tree:
+ * `grep -vE '^\s*(//|\*)' route.ts | grep -c captureToSentry` read **0** here.
+ * Nine of the fifteen seam routes read 0, while `wizardErrors.ts` copy told
+ * users "our team has been notified". `140.3-12` removed the claim; `140.3-13a`
+ * (4 routes) and this plan (5) make it true.
+ *
+ * ⚠️ B-26 CONTEXT: this is the route whose invalidated result used to stay on
+ * screen with live "Add to portfolio" links. The failure was money-bearing AND
+ * completely unreported — nobody was ever paged for it.
+ */
+describe("[140.3-13b / SEAMUX-08] POST /api/portfolio-optimizer — Sentry capture policy", () => {
+  /** A 40-char internal token, the shape INTERNAL_API_TOKEN actually carries. */
+  const INTERNAL_TOKEN = "int_9f3a1c7e5b2d84a6f0c1e3d5b7a9f2c48e6d0b1a";
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubEnv("INTERNAL_API_TOKEN", INTERNAL_TOKEN);
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+    vi.unstubAllEnvs();
+  });
+
+  /** Wait for `captureToSentry`'s lazy `import(...).then(...)` chain. */
+  async function nextCapture() {
+    await vi.waitFor(() =>
+      expect(
+        sentryState.captured.length,
+        "nothing was captured — the terminal arm is the only place an unclassified seam failure at this route is ever reported",
+      ).toBeGreaterThan(0),
+    );
+    return sentryState.captured[sentryState.captured.length - 1];
+  }
+
+  /** Assert no capture happened, allowing the lazy chain time to have fired. */
+  async function expectNoCapture() {
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sentryState.captured).toEqual([]);
+  }
+
+  it("POSITIVE: an unclassified transport failure IS captured, with this route's tags", async () => {
+    STATE.optimizerImpl = async () => {
+      throw new Error(
+        `connect ECONNREFUSED 10.0.0.5:8002 (X-Internal-Token: ${INTERNAL_TOKEN})`,
+      );
+    };
+    const res = await POST(buildRequest({ portfolio_id: "pf-77" }));
+    expect(res.status).toBe(503);
+
+    const { err, options } = await nextCapture();
+    expect(options.tags?.surface).toBe("portfolio-optimizer");
+    expect(options.tags?.step).toBe("analytics-unreachable");
+    // The Error TYPE survives — `captureToSentry` rebuilds an Error rather than
+    // stringifying, so Sentry keeps its grouping and stack.
+    expect(err).toBeInstanceOf(Error);
+    expect(options.extra?.portfolio_id).toBe("pf-77");
+  });
+
+  it("TRAP-1 BOTH DIRECTIONS: the captured payload loses the secret and KEEPS the syscall token", async () => {
+    STATE.optimizerImpl = async () => {
+      throw new Error(
+        `connect ECONNREFUSED 10.0.0.5:8002 (X-Internal-Token: ${INTERNAL_TOKEN})`,
+      );
+    };
+    await POST(buildRequest({ portfolio_id: "pf-77" }));
+
+    const message = ((await nextCapture()).err as Error).message;
+    // UNDER-redaction: a credential leaving our infrastructure for a third
+    // party is the whole of T-140.3-13-01.
+    expect(
+      message,
+      "a live INTERNAL_API_TOKEN was dispatched to Sentry — undici inlines outgoing headers into err.message (TRAP-1)",
+    ).not.toContain(INTERNAL_TOKEN);
+    // OVER-redaction: destroying the syscall token replaces one incident with
+    // two, and a one-sided test ships that state green.
+    expect(
+      message,
+      "the syscall token was eaten by the redactor — ECONNREFUSED is the most valuable thing in a transport line",
+    ).toContain("ECONNREFUSED");
+  });
+
+  it("NEGATIVE: a breaker short-circuit is NEVER captured (it fires on every seam route at once)", async () => {
+    STATE.optimizerImpl = async () => {
+      throw new CircuitOpenError(13);
+    };
+    const res = await POST(buildRequest({ portfolio_id: "pf-77" }));
+    // The POSITIVE half: the breaker arm really ran — status, cooldown header
+    // AND the R-0002 refund — so the zero below is about the policy and not
+    // about the request never reaching the catch.
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("13");
+    expect(STATE.refundCalls).toHaveLength(1);
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: an upstream timeout is NEVER captured (expected under a cold start; a sustained one trips the breaker)", async () => {
+    STATE.optimizerImpl = async () => {
+      throw new FakeAnalyticsTimeoutError();
+    };
+    const res = await POST(buildRequest({ portfolio_id: "pf-77" }));
+    expect(res.status).toBe(504);
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: our own 403 ownership refusal is NEVER captured, and never reaches the seam", async () => {
+    STATE.ownershipResult = false;
+    const res = await POST(buildRequest({ portfolio_id: "someone-elses" }));
+    expect(res.status).toBe(403);
+    expect(STATE.optimizerCalls).toHaveLength(0);
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: our own rate-limit rejection is NEVER captured (the limiter working is not a fault)", async () => {
+    STATE.checkLimitResult = { success: false, retryAfter: 42 };
+    const res = await POST(buildRequest({ portfolio_id: "pf-77" }));
+    expect(res.status).toBe(429);
+    await expectNoCapture();
   });
 });

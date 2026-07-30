@@ -6,8 +6,15 @@ import {
   FactsheetPreview,
   type FactsheetPreviewMetric,
 } from "@/components/strategy/FactsheetPreview";
-import { type WizardErrorCode } from "@/lib/wizardErrors";
+import {
+  recogniseSeamErrorCode,
+  type WizardErrorCode,
+} from "@/lib/wizardErrors";
 import { buildEnvelope } from "@/lib/envelope";
+// 140.3-15 / TS-20 — the dependency-free leaf, imported directly. It is the ONE
+// reader for this envelope's fields; a hand-rolled `data.detail?.correlation_id`
+// branch here is the drift class 140.3-01 closed.
+import { seamCorrelationId } from "@/lib/seam-discriminator";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SyncPreviewSnapshot } from "./SyncPreviewStep";
@@ -59,10 +66,27 @@ export function SubmitStep({
   // UX-02: the wizard session correlation id — the SAME id wizardFetch sends on
   // the finalize-wizard request, so a copied envelope id matches server logs.
   const [correlationId] = useState<string>(() => getWizardCorrelationId());
+  /**
+   * 140.3-15 / TS-20 — the UPSTREAM correlation id, when the failure carried
+   * one. `finalize-wizard` forwards the seam envelope verbatim, so the id the
+   * ANALYTICS SERVICE logged arrives here; `correlationId` above is minted in
+   * the browser and memoized per PAGE LOAD, so on a seam failure it is the
+   * weaker of the two for support to search on.
+   *
+   * PER-FAILURE state, reset on every submit alongside `errorCode`, so a second
+   * attempt can never render the first attempt's id.
+   */
+  const [upstreamCorrelationId, setUpstreamCorrelationId] = useState<
+    string | null
+  >(null);
 
   const handleSubmit = useCallback(async () => {
     if (submitting) return;
     setErrorCode(null);
+    // 140.3-15 / TS-20 — cleared with the code it belongs to. Leaving it would
+    // let a retry render the PREVIOUS failure's id, which is worse than
+    // rendering none: it points support at the wrong request.
+    setUpstreamCorrelationId(null);
     setSubmitting(true);
 
     try {
@@ -131,13 +155,68 @@ export function SubmitStep({
             // Recoverable copy renders the Retry affordance rather than
             // degrading to the generic UNKNOWN envelope.
             "COMPOSITE_MEMBERSHIP_UNKNOWN",
+            // Phase 140.3-14 / TS-37 — the composite MEMBER CAP, split off the
+            // code above. It arrives on the SAME 503 from the SAME route, and
+            // it is admitted HERE IN THE SAME COMMIT that the route started
+            // emitting it. Without this line the new code fails the membership
+            // check below, falls through to UNKNOWN, and the user sees the
+            // generic dead end instead of the limit and the remedy — the whole
+            // obligation ships invisible while every route-side test is green.
+            //
+            // ⚠️ Its copy is deliberately NON-recoverable, so unlike every other
+            // member of this set it renders NO Retry control. That is correct:
+            // the draft really does hold more keys than the route can re-probe,
+            // and retrying cannot change the count.
+            "COMPOSITE_TOO_MANY_MEMBERS",
+            // Phase 140.3-05 / SEAMUX-01 + SEAMUX-08 — the two members the
+            // seam's own outage codes translate onto. Before this, a breaker
+            // trip mid-outage rendered "Our team has been notified" AND
+            // reported `wizard_error {code:"UNKNOWN"}`, so the funnel could not
+            // tell an infra outage from a bad draft. Neither of these is
+            // reachable from a raw `data.code` — see the translation below.
+            "SERVICE_UNAVAILABLE_RETRY",
+            "SERVICE_UNREACHABLE",
+            // Phase 140.3-15 / TS-38 — a CONFIGURATION fault on our side, which
+            // `process-key-client` now answers with its own code (500) instead
+            // of the dead-upstream 502. Admitted HERE IN THE SAME COMMIT that
+            // the client starts emitting it: without this line the code fails
+            // the membership check below, falls to UNKNOWN, and the user sees
+            // the generic dead end while every client-side test stays green.
+            // That is `140.3-14`'s M81, one plan ago, on a different code.
+            //
+            // ⚠️ Like COMPOSITE_TOO_MANY_MEMBERS above, its copy is deliberately
+            // NON-recoverable, so it renders no Retry control. Correct: the
+            // setting stays wrong until we fix it and redeploy.
+            "SEAM_MISCONFIGURED",
           ],
         );
+        // 140.3-05 — TRANSLATE THE WIRE CODE FIRST, THEN CHECK MEMBERSHIP. The
+        // wire vocabulary and the wizard vocabulary are not the same set:
+        // finalize-wizard answers a breaker trip with `CIRCUIT_OPEN` (its own
+        // scope-probe arm at :493, and process-key-client's forwarded 503), and
+        // a seam transport failure with `UPSTREAM_TIMEOUT` /
+        // `UPSTREAM_NETWORK_ERROR`. None of the three is a WizardErrorCode, so
+        // all three failed the membership check below and fell to UNKNOWN.
+        //
+        // The mapping lives in `wizardErrors.ts` (`recogniseSeamErrorCode`) —
+        // the ONE wire→wizard table — never in a second copy here. The
+        // membership check is NOT weakened: an unrecognised wire code leaves
+        // `translated` at "UNKNOWN", `candidate` falls back to the raw code, and
+        // a raw code that is not a known finalize code still resolves to
+        // UNKNOWN exactly as before.
+        const translated = recogniseSeamErrorCode(data.code);
+        const candidate = translated === "UNKNOWN" ? data.code : translated;
         const surfaced: WizardErrorCode =
-          data.code && KNOWN_FINALIZE_CODES.has(data.code as WizardErrorCode)
-            ? (data.code as WizardErrorCode)
+          candidate && KNOWN_FINALIZE_CODES.has(candidate as WizardErrorCode)
+            ? (candidate as WizardErrorCode)
             : "UNKNOWN";
         setErrorCode(surfaced);
+        // 140.3-15 / TS-20 — read through the leaf, which handles BOTH wire
+        // shapes (top-level on the flat envelopes, nested inside
+        // `service_error`) and refuses a value that is not correlation-id
+        // shaped. Set beside the code, from the SAME body, so the two can never
+        // describe different failures.
+        setUpstreamCorrelationId(seamCorrelationId(data));
         trackForQuantsEventClient("wizard_error", {
           wizard_session_id: wizardSessionId,
           step: "submit",
@@ -172,8 +251,15 @@ export function SubmitStep({
     }
   }, [submitting, strategyId, metadata, onSubmitted, wizardSessionId, entryContext]);
 
+  // 140.3-15 / TS-20 — ONE id field, the one `ErrorEnvelope` already renders and
+  // `buildDiagBlock` already copies into the QUANTALYZE_DIAG payload. The
+  // upstream id WINS when the wire carried a usable one, and today's browser-
+  // minted id remains the fallback, so nothing that previously rendered an id
+  // stops doing so. No second field was added: the render slot expects exactly
+  // one value, and two ids in a diagnostics block is a support ticket asking
+  // which one to search.
   const errorEnvelope = errorCode
-    ? buildEnvelope(errorCode, correlationId)
+    ? buildEnvelope(errorCode, upstreamCorrelationId ?? correlationId)
     : null;
 
   const summaryMetrics: FactsheetPreviewMetric[] = snapshot.metrics;

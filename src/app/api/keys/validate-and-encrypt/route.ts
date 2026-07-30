@@ -6,6 +6,7 @@ import {
   AnalyticsTimeoutError,
 } from "@/lib/analytics-client";
 import { CircuitOpenError, SeamBodyReadError } from "@/lib/seam-errors";
+import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError } from "@/lib/seam-redaction";
@@ -33,16 +34,11 @@ import { isSfoxEnabledServer, isMt5EnabledServer } from "@/lib/closed-sets";
  */
 export const maxDuration = 300;
 
-/**
- * Phase 140 / SEAM-04 — the static body the breaker arm emits. Byte-identical
- * to `process-key-client`'s `CIRCUIT_OPEN_HUMAN_MESSAGE` and to the sibling
- * seam routes, so a breaker trip reads the same to a user whichever seam they
- * hit. It names no infrastructure (threat T-140-17) and — critically on THIS
- * route — does not blame the user's key for an outage in which no request was
- * ever issued.
- */
-const CIRCUIT_OPEN_COPY =
-  "The analytics service is temporarily unavailable. Please try again in a moment.";
+// Phase 140.3 / SEAMUX-01 — the breaker body is NOT declared here. It is the
+// ONE constant in `@/lib/seam-copy`, imported above, which every seam emitter
+// reads. The leaf's header carries the constraint that matters most on THIS
+// route: the copy must never blame the user's key for an outage in which no
+// request to the exchange was ever issued.
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
   const body = await req.json();

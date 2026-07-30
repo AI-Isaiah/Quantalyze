@@ -8,8 +8,22 @@ import {
   AnalyticsUpstreamError,
 } from "@/lib/analytics-client";
 import { CircuitOpenError } from "@/lib/seam-errors";
+import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+// 140.3-13b / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
+// capture policy written out IN FULL in `src/app/api/admin/match/eval/route.ts`
+// by `140.3-13a`. It is cited, never restated: two copies of a policy is how two
+// policies start. The caught value is passed UNMODIFIED — `captureToSentry`
+// scrubs at the chokepoint (SEAMCORE-06), and pre-scrubbing here would hand
+// Sentry a string instead of an Error, destroying grouping and the stack.
+//
+// PER-REQUEST SECRETS AT THIS ROUTE: none. The body carries only draft-scoped
+// daily-return series and an objective enum — no credential, no user JWT, no
+// exchange material — so `secrets` is omitted and `seam-redaction.ts`'s env-name
+// list is the whole defence. Stated rather than assumed, because M78b showed the
+// env mechanism staying green while a per-request credential shipped verbatim.
+import { captureToSentry } from "@/lib/sentry-capture";
 
 /**
  * Phase 28 (OPT-01/02) — suggest long-only scenario weights.
@@ -42,15 +56,6 @@ const OBJECTIVES = new Set(["min_vol", "max_sharpe"]);
  * budget (30s), i.e. 10× headroom.
  */
 export const maxDuration = 300;
-
-/**
- * Phase 140 / SEAM-04 — the static body the breaker arm emits. Byte-identical
- * to `process-key-client`'s `CIRCUIT_OPEN_HUMAN_MESSAGE` and to the sibling
- * seam routes, so a breaker trip reads the same to a user whichever seam they
- * hit, and it names no infrastructure (threat T-140-17).
- */
-const CIRCUIT_OPEN_COPY =
-  "The analytics service is temporarily unavailable. Please try again in a moment.";
 
 export async function POST(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
@@ -191,11 +196,52 @@ export async function POST(req: NextRequest) {
     if (err instanceof AnalyticsUpstreamError) {
       // Never echo the raw upstream detail (schema/internal leak) — log it, return a clean message.
       console.error("[scenario/optimize] upstream error", { status: err.status });
+      // ⚠️ 140.3-13b / SEAMUX-08 — AMBIGUITY-1 IN THE INHERITED POLICY, and the
+      // reading chosen, recorded here rather than resolved silently.
+      //
+      // The policy's exclusion list names "a forwarded upstream 4xx" and its
+      // inclusion list names the terminal arm plus contract violations. At
+      // `admin/match/eval` those two halves are separated by a RANGE SPLIT in
+      // the arm itself: only 4xx is answered there, and a 5xx keeps falling
+      // through to the terminal arm — which is why `140.3-13a` could write
+      // "a 5xx ... IS captured — that is the policy's service-permanent outcome
+      // half". THIS ROUTE HAS NO RANGE SPLIT: every `AnalyticsUpstreamError`,
+      // 4xx or 5xx, is answered here with a flat 502, so a literal
+      // terminal-arm-only reading would leave an upstream 5xx unreported at
+      // this route while the identical failure IS reported at `eval`. That
+      // asymmetry would be an accident of arm shape, not a decision.
+      //
+      // READING CHOSEN: apply the policy's own STATUS discrimination — the half
+      // it argues explicitly — rather than the file shape it happened to be
+      // written against. 5xx is captured; 4xx is not. Nothing about this
+      // route's status, body or headers changes, and the 4xx exclusion is
+      // pinned by a positive-status case so it cannot go vacuous.
+      //
+      // NOT DONE HERE: adding the range split to the RESPONSE (so a deliberate
+      // upstream refusal survives with its own status, as `140.3-11` gave the
+      // admin/match pair). That is a response-shape change, TS-34's family, and
+      // is deliberately not smuggled into an observability plan.
+      if (err.status >= 500) {
+        captureToSentry(err, {
+          tags: { surface: "scenario-optimize", step: "upstream-5xx" },
+          extra: { upstream_status: err.status, objective, series_count: ids.length },
+        });
+      }
       return NextResponse.json(
         { error: "The optimizer is unavailable right now." },
         { status: 502, headers: NO_STORE_HEADERS },
       );
     }
+    // 140.3-13b / SEAMUX-08 — THE TERMINAL ARM. Everything above is a condition
+    // this route already classified and already answers with its own status;
+    // this is the one that means "we do not know what this is", so it is the one
+    // a human must see. Reached by a transport failure (ECONNREFUSED /
+    // ENOTFOUND / TLS), a `parseResponse()` contract-drift throw, and any untyped
+    // throw from the client.
+    captureToSentry(err, {
+      tags: { surface: "scenario-optimize", step: "unexpected-error" },
+      extra: { objective, series_count: ids.length },
+    });
     console.error("[scenario/optimize] unexpected error", err);
     return NextResponse.json(
       { error: "Could not compute suggested weights." },

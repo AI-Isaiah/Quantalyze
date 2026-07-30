@@ -16,6 +16,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+// 140.3-05 / TS-35 — the REAL classifier, imported directly. Nothing between it
+// and the real thrown error: that gap is where "the helper works but nothing
+// calls it" hides.
+import { classifyKeyValidationError } from "./wizardErrors";
 
 vi.mock("server-only", () => ({}));
 
@@ -1659,5 +1663,221 @@ describe("[SEAMCORE-11 / A-27] analytics-client: ONE defined outcome for an ambi
           `the hand-typed expectations in BOTH client test files, in one commit.`,
       ).toBe(true);
     }
+  });
+});
+
+/**
+ * [140.3-01 / TS-05 + TS-08] Class-5 member 1 of 3 — `analytics-client.ts`.
+ *
+ * ONE LINE, TWO WIRE CONTRACTS. `STATUS_CONTRACT.md` §2 and §2.1:
+ *
+ *   · a deliberate 4xx/5xx from `service_error()` nests the whole envelope at
+ *     `body.detail` — `{code, dependency, retryable, detail}` — so the
+ *     pre-plan `error.detail ?? "…"` read handed an OBJECT to `new
+ *     AnalyticsUpstreamError(message, status)`, which coerced it to the string
+ *     `"[object Object]"`. That is obligation O-5, recorded as a known and
+ *     deliberate consequence of the Python change;
+ *   · the two APP-GLOBAL handlers (`RequestValidationError` 422 and
+ *     `RateLimitExceeded` 429) emit a SCALAR top-level `detail` and put the
+ *     machine code at `body.code`. That path was already CORRECT, and TS-07 is
+ *     an explicitly NEGATIVE obligation: it must not be "fixed".
+ *
+ * ⚠️ TS-08 exists because a verify that exercises ONE of those paths certifies
+ * the wrong half. Both are driven here, per site, with HAND-TYPED bodies — no
+ * shape is imported from the module under test.
+ */
+describe("[140.3-01 / TS-05] analytics-client reads the seam error body through the ONE discriminator", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  async function caughtFrom(fetchMock: ReturnType<typeof vi.fn>) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      fetchMock as unknown as typeof globalThis.fetch,
+    );
+    const mod = await import("./analytics-client");
+    type Internal = {
+      __INTERNAL_analyticsRequest: (
+        path: string,
+        body: Record<string, unknown> | null,
+        options: { budgetKey: string; tenantId: string },
+      ) => Promise<unknown>;
+    };
+    let caught: unknown;
+    try {
+      await (mod as unknown as Internal).__INTERNAL_analyticsRequest(
+        "/test",
+        { ping: 1 },
+        { budgetKey: "validate-key", tenantId: TENANT.userId },
+      );
+    } catch (e) {
+      caught = e;
+    }
+    return { mod, caught };
+  }
+
+  it("CONTRACT A — a `service_error` 500 (OBJECT detail): the human string is `body.detail.detail`, never '[object Object]'", async () => {
+    // Hand-typed §2 envelope. NOT imported from the module under test, and not
+    // built by a helper that shares a shape with it.
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "SEAM_DEGRADED",
+            dependency: "supabase",
+            retryable: true,
+            detail: "The analytics store is not responding. Try again shortly.",
+          },
+        }),
+        { status: 500, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const { mod, caught } = await caughtFrom(fetchMock);
+
+    expect(caught).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    const err = caught as InstanceType<typeof mod.AnalyticsUpstreamError>;
+    expect(err.status).toBe(500);
+    expect(
+      err.message,
+      "The nested `service_error` envelope must be read through " +
+        "`seamHumanMessage`. A bare `error.detail ??` read coerces the object " +
+        "to '[object Object]', which then misses every branch of the wizard's " +
+        "substring cascade and lands the user on UNKNOWN/500 — obligation O-5.",
+    ).toBe("The analytics store is not responding. Try again shortly.");
+    expect(err.message).not.toContain("[object Object]");
+    // The MACHINE code must survive too — it is the discriminator the copy
+    // plan and TS-35 key on, and reading only the human half would close TS-05
+    // while leaving the code unreachable at the chokepoint.
+    expect(err.seamCode).toBe("SEAM_DEGRADED");
+  });
+
+  it("CONTRACT B — an app-global 429 (SCALAR detail): the human string is BYTE-IDENTICAL to its pre-plan value (TS-07 is negative)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          ok: false,
+          code: "RATE_LIMITED",
+          human_message: "Too many requests.",
+          detail: "Too many requests. Try again in 60 seconds.",
+          correlation_id: "cid-429-analytics-client",
+          recoverable: true,
+          retry_after_seconds: 60,
+        }),
+        { status: 429, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const { mod, caught } = await caughtFrom(fetchMock);
+
+    expect(caught).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    const err = caught as InstanceType<typeof mod.AnalyticsUpstreamError>;
+    expect(err.status).toBe(429);
+    expect(
+      err.message,
+      "The flat app-global shape needed NO TypeScript change (TS-07 is an " +
+        "explicitly NEGATIVE obligation). This literal is the pre-plan value; " +
+        "if it moved, the 429 path was 'fixed' and the negative obligation was " +
+        "violated.",
+    ).toBe("Too many requests. Try again in 60 seconds.");
+    // Flat shape: the code is at the TOP level, not under `detail`.
+    expect(err.seamCode).toBe("RATE_LIMITED");
+  });
+
+  it("a body with no `detail` at all still falls back to the pre-plan static copy", async () => {
+    // The fallback is load-bearing: `seamHumanMessage` returns null for a body
+    // carrying no readable human string, and the `??` must still answer the
+    // same sentence it always did rather than `null`.
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ unexpected: "shape" }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const { mod, caught } = await caughtFrom(fetchMock);
+
+    expect(caught).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    expect((caught as Error).message).toBe("Analytics service error");
+    expect(
+      (caught as InstanceType<typeof mod.AnalyticsUpstreamError>).seamCode,
+    ).toBeNull();
+  });
+
+  // ============================================================
+  // [140.3-05 / TS-35] The WIRING, not the helper.
+  //
+  // `classifyKeyValidationError`'s new branch reads a `seamCode` property off
+  // the caught value. A unit test that hands it a hand-built object proves the
+  // branch works; it does NOT prove the seam client actually PUTS that property
+  // on what it throws, which is the half that has silently broken before in
+  // this programme. These two cases drive the REAL client over the REAL
+  // venue-transient wire shape and hand the REAL throwable to the REAL
+  // classifier — no mocked module between them.
+  //
+  // The bodies are byte-identical to
+  // `analytics-service/tests/fixtures/validate_key_venue_transient_contract.json`,
+  // typed here as literals. `status` is NOT asserted as a literal: plan
+  // 140.3-06 remaps 400 -> 424 in the next wave and these cases must survive it.
+  // ============================================================
+
+  it("[140.3-05 / TS-35] a venue-transient body's flat `code` reaches the thrown error, and the classifier reads it", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail:
+            "Exchange blocked the validation request at the edge (DDoS / WAF protection). Check region / IP allowlist.",
+          code: "DDOS_PROTECTION",
+          recoverable: true,
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const { mod, caught } = await caughtFrom(fetchMock);
+
+    expect(caught).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    const err = caught as InstanceType<typeof mod.AnalyticsUpstreamError>;
+    expect(err.seamCode).toBe("DDOS_PROTECTION");
+    // The property must be an OWN data property, readable with `typeof` and
+    // never `instanceof`: sixteen route test files mock this module wholesale,
+    // so the class identity is unavailable inside the catch arms that consume
+    // this value.
+    expect(Object.hasOwn(err, "seamCode")).toBe(true);
+    // …and the real classifier, driven by the real throwable, no longer blames
+    // the user's key for a block at the venue's edge.
+    expect(classifyKeyValidationError(err).code).toBe("KEY_VENUE_TRANSIENT");
+  });
+
+  it("[140.3-05 / TS-35] the headline venue outage survives the whole client→classifier path", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: "Exchange is currently unavailable. Try again in a few minutes.",
+          code: "EXCHANGE_UNAVAILABLE",
+          recoverable: true,
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const { caught } = await caughtFrom(fetchMock);
+
+    expect((caught as { seamCode?: unknown }).seamCode).toBe(
+      "EXCHANGE_UNAVAILABLE",
+    );
+    expect(
+      classifyKeyValidationError(caught).code,
+      "A Binance maintenance window during key-connect rendered as UNKNOWN/500 " +
+        "'something went wrong, our team has been notified' with no retry " +
+        "affordance. The machine code has been on the wire since 140.1.2; " +
+        "nothing read it.",
+    ).toBe("KEY_EXCHANGE_UNAVAILABLE");
   });
 });

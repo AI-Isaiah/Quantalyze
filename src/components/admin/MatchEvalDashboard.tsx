@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ScopedBanner } from "@/components/ui/ScopedBanner";
+import { venueOutageMessage } from "@/components/admin/match/venueOutageCopy";
 
 interface WeeklyRow {
   week_start: string;
@@ -59,6 +60,23 @@ export function MatchEvalDashboard({ partnerTag }: MatchEvalDashboardProps = {})
       const res = await fetch(`/api/admin/match/eval?${params.toString()}`);
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
+        // 140.3-11 / TS-18 — a 424 is CALLER'S EXCHANGE (STATUS_CONTRACT §1,
+        // obligation O-1). The SAME arm as `AllocatorMatchQueue`, delivered in
+        // the SAME commit and reading the SAME sentence from one module: these
+        // two components are the two members of this class, and closing one
+        // while reporting the class done is this programme's signature failure.
+        //
+        // `dependency` comes from the ROUTE's flat `{error, dependency}` body,
+        // which the route extracted through `seamDependencyName` (slug-shaped,
+        // and never one of OUR service dependencies). The `typeof` guard is the
+        // second half of that check. It is `null` for the FLAT 424 shape, which
+        // carries no dependency at all, and the copy then names no venue rather
+        // than inventing one.
+        if (res.status === 424) {
+          const dependency =
+            typeof body.dependency === "string" ? body.dependency : null;
+          throw new Error(venueOutageMessage(dependency));
+        }
         throw new Error(body.error || "Failed to load metrics");
       }
       setMetrics(await res.json());

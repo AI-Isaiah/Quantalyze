@@ -82,7 +82,7 @@ vi.mock("@/lib/process-key-client", () => ({
   postProcessKey: vi.fn(async () => ({
     ok: true,
     status: 200,
-    body: { strategy_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+    body: { ok: true, strategy_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
   })),
 }));
 
@@ -465,10 +465,41 @@ describe("NEW-C14-12: trimmed strategy_name length check", () => {
 
 // ══════════════════════════════════════════════════════════════════════════
 
+/**
+ * NEW-C14-07 — the KEY-ORDER guarantee in `unifiedCsvFinalizeHandler`: on the
+ * success path the route's own `ok: true` is written AFTER the upstream spread,
+ * and upstream `ok`/`error`/`code` are stripped, so a consumer keying on
+ * `body.ok === true` never sees contradictory `code`/`error` keys beside it.
+ *
+ * ⚠️ REWRITTEN BY 140.3-02 / TS-13, AND THE TRADE IS RECORDED RATHER THAN
+ * QUIETLY TAKEN. The original drove this with an upstream body carrying
+ * `ok: false` + a valid `strategy_id`, and asserted the route answered
+ * `ok: true` anyway. TS-13 makes that shape a 502, so the case had to change —
+ * and NOT because the guard was relaxed to make a test pass. The original's
+ * PREMISE ("force ok:true even when the upstream said ok:false") is precisely
+ * the defect TS-13 closes: the route asserting success on a body that said the
+ * opposite. Forcing the discriminator is not defence against a Python bug, it is
+ * concealment of one.
+ *
+ * The MECHANISM the row actually protects is untouched and still asserted, now
+ * against a body that is a genuine SUCCESS while still carrying `code` — the
+ * WIZARD_DUPLICATE reply (`{ok: true, code: "WIZARD_DUPLICATE", ...}`), which is
+ * a shape the service REALLY emits, rather than the synthetic one the original
+ * invented. That makes this strictly the stronger test: same invariant, real
+ * wire shape. The `ok:false` half is kept as its own case, asserting the outcome
+ * TS-13 requires.
+ */
 describe("NEW-C14-07: ok:true not overwritten by upstream spread (unified path)", () => {
-  // This tests the logic in unifiedCsvFinalizeHandler. We verify the
-  // ordering guarantee by checking that a body carrying ok:false from
-  // upstream is correctly overwritten to ok:true in the route's envelope.
+  /** Admin/persist no-ops shared by both cases. */
+  function stubAdminNoOps() {
+    adminFromMock.mockReturnValue({
+      update: () => ({ eq: () => ({ eq: () => ({ error: null }) }) }),
+      upsert: () => ({ error: null }),
+      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }),
+    } as any); // eslint-disable-line @typescript-eslint/no-explicit-any
+    updateMock.mockResolvedValue({ error: null });
+  }
+
   it("strips upstream ok/error/code and sets ok:true last in unified success", async () => {
     // INTERNAL_API_TOKEN is required by unifiedCsvFinalizeHandler — set it
     // for the duration of this test only.
@@ -476,33 +507,30 @@ describe("NEW-C14-07: ok:true not overwritten by upstream spread (unified path)"
     process.env.INTERNAL_API_TOKEN = "test-token-c14-07";
 
     const { postProcessKey } = await import("@/lib/process-key-client");
-    // Simulate upstream returning ok:false (e.g. a Python bug) alongside
-    // a valid strategy_id. Pre-fix: ok:false from the spread would stomp
-    // the route's ok:true → consumers see contradictory HTTP 200 / ok:false.
+    // A GENUINE success that nonetheless carries `code` — the real duplicate
+    // reply. `_wizard_duplicate_reply`'s own docstring states the contract this
+    // exercises: "`code` MUST be a non-empty string when `ok` is false, NOT that
+    // it is absent when `ok` is true". So `code` beside `ok: true` is normal,
+    // and stripping it on the success envelope is what keeps `body.ok` an
+    // unambiguous discriminator for this route's consumers.
     vi.mocked(postProcessKey).mockResolvedValueOnce({
       ok: true,
       status: 200,
       body: {
-        ok: false,
+        ok: true,
+        code: "WIZARD_DUPLICATE",
         error: "upstream error that should be stripped",
-        code: "UPSTREAM_ERROR",
         strategy_id: "dddddddd-dddd-dddd-dddd-dddddddddddd",
         extra_field: "preserved",
       },
     });
 
-    // Admin client for metadata update and persist (return no-ops)
-    adminFromMock.mockReturnValue({
-      update: () => ({ eq: () => ({ eq: () => ({ error: null }) }) }),
-      upsert: () => ({ error: null }),
-      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }),
-    } as any); // eslint-disable-line @typescript-eslint/no-explicit-any
-    updateMock.mockResolvedValue({ error: null });
+    stubAdminNoOps();
 
     const res = await POST(makeRequest(validBody()));
     const body = await res.json();
 
-    // NEW-C14-07: ok must be true (not overwritten by upstream ok:false)
+    // NEW-C14-07: the route's own ok:true is written last and survives.
     expect(body.ok).toBe(true);
     // upstream error/code fields must be stripped on success path
     expect(body.error).toBeUndefined();
@@ -511,6 +539,44 @@ describe("NEW-C14-07: ok:true not overwritten by upstream spread (unified path)"
     expect(body.extra_field).toBe("preserved");
 
     // Restore env
+    if (originalToken === undefined) {
+      delete process.env.INTERNAL_API_TOKEN;
+    } else {
+      process.env.INTERNAL_API_TOKEN = originalToken;
+    }
+  });
+
+  it("140.3-02 / TS-13 — an upstream ok:false NEVER reaches the success envelope at all", async () => {
+    const originalToken = process.env.INTERNAL_API_TOKEN;
+    process.env.INTERNAL_API_TOKEN = "test-token-c14-07";
+
+    const { postProcessKey } = await import("@/lib/process-key-client");
+    // The exact body the ORIGINAL version of this test asserted a 200 for.
+    vi.mocked(postProcessKey).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      body: {
+        ok: false,
+        error: "upstream error",
+        code: "UPSTREAM_ERROR",
+        strategy_id: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+      },
+    });
+
+    stubAdminNoOps();
+
+    const res = await POST(makeRequest(validBody()));
+    const body = await res.json();
+
+    expect(
+      res.status,
+      "Stripping `ok: false` and stamping `ok: true` over it does not defend " +
+        "against an upstream bug — it CONCEALS one, and hands the wizard a " +
+        "success for a finalize that did not happen — TS-13.",
+    ).toBe(502);
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_FINALIZE_FAIL");
+
     if (originalToken === undefined) {
       delete process.env.INTERNAL_API_TOKEN;
     } else {

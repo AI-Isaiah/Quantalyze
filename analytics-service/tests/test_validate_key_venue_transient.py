@@ -30,7 +30,7 @@ this programme 37 scrapped commits):
     C6  routers/exchange.py   the ccxt verdict collapse        (if result["error"]:)
     C7  routers/portfolio.py  the verify-strategy collapse     (if validation.get("error"):)
 
-Each now answers **400** with a FLAT body — `{detail, code, recoverable}` — where
+Each now answers **424** with a FLAT body — `{detail, code, recoverable}` — where
 `detail` is a scalar string **byte-identical to the copy that shipped before**,
 so the substring cascade's INPUT is provably unchanged (zero regression on the
 three codes that classify correctly today), while a machine `code` and a
@@ -57,10 +57,21 @@ implementation's own formula):
   - **`recoverable` pinned in BOTH directions.** A field that is always `True`
     pins nothing. The permanent control (`AUTH_FAILED` ⇒ `False`) and the
     unknown-code control (⇒ `True`) are what give it teeth.
-  - **status stays 400.** The classifier discards the upstream status entirely,
-    so 400 -> 424 would be user-invisible; that remap is owed as ONE unit with
-    TS-05 (ledger row TS-32) and is deliberately not done here. Pinned so it
-    cannot drift in silently either.
+  - **status is 424, remapped from 400 by 140.3-06 (ledger row TS-32).** 424 is
+    CALLER'S EXCHANGE (STATUS_CONTRACT.md §5) — the third party THE CALLER NAMED
+    is at fault. The 400 these sites used to answer said the CALLER'S REQUEST
+    was at fault, which is false on every one of the seven arms: each is a venue
+    failure the router has already classified as such. That is an
+    ATTRIBUTABILITY defect on the wire, and it is what this remap closes.
+    The row's stated `BLOCKED-BY: TS-05` named the WRONG row (CONTEXT
+    correction C-4): the remap is BODY-NEUTRAL, because `main.py`'s handler
+    serialises the flat body independent of status and the class guard already
+    admitted the whole 4xx band. The real blocker was **TS-35** — the TS
+    classifier deriving everything from the message string — and it landed in
+    `140.3-05`, which made `classifyKeyValidationError` read `body.code` first.
+    ⚠️ The wizard's RENDER of a 424 is still owed (TS-18, plan `140.3-11`), and
+    `job_worker.py`'s `_HTTP_TRANSIENT_4XX` deliberately does NOT yet contain
+    424 (TS-10, re-homed to Phase 141). Neither is in scope here.
 
 ORACLE DISCIPLINE (programme non-negotiable #3). Every WIRE expectation below —
 status, key set, `detail`, `code`, `recoverable` — is a **literal typed into
@@ -136,7 +147,10 @@ UNKNOWN_CODE_DETAIL = "A synthetic verdict from a venue code this router has nev
 
 # The contract's own shape. A key ADDED or DROPPED on either side reddens.
 EXPECTED_BODY_KEYS = {"detail", "code", "recoverable"}
-EXPECTED_STATUS = 400
+# 424 = CALLER'S EXCHANGE (STATUS_CONTRACT.md §5). Remapped from 400 by 140.3-06
+# (ledger row TS-32); see `_assert_flat_venue_body` for why the old 400 was a
+# false accusation and why the remap did not move a single byte of the body.
+EXPECTED_STATUS = 424
 
 _SERVICE_KEY = "venue-transient-suite-service-key"
 
@@ -361,10 +375,21 @@ def _assert_flat_venue_body(
     body = response.json()
 
     assert response.status_code == EXPECTED_STATUS, (
-        f"{trigger}: status must stay {EXPECTED_STATUS} — the TS classifier "
-        f"derives BOTH the wizard code and the returned status from the message "
-        f"string and discards the upstream status entirely, so a remap here is "
-        f"user-invisible and is owed as ONE unit with TS-05 (ledger TS-32). "
+        f"{trigger}: status must be {EXPECTED_STATUS} — CALLER'S EXCHANGE "
+        f"(STATUS_CONTRACT.md §5): the third party THE CALLER NAMED is at "
+        f"fault. Every arm in this class is a venue failure, so the 400 this "
+        f"site used to answer told the wire the CALLER sent a bad request — a "
+        f"false accusation at all seven sites, and the attributability defect "
+        f"140.3-06 exists to close. Reverting to 400 re-asserts it. "
+        f"The remap is BODY-NEUTRAL: main.py's handler serialises "
+        f"{{detail, code, recoverable}} from `verdict.status_code` independent "
+        f"of status, and the class guard already admitted any 400 <= s < 500, "
+        f"so the body assertions below are unchanged by it — a status "
+        f"regression can therefore only be seen HERE. "
+        f"424 is also breaker-safe by construction: it is a 4xx, and "
+        f"src/lib/seam-discriminator.ts classifies it caller-exchange / "
+        f"counts:false / breakerKey:null, so a venue outage cannot open OUR "
+        f"breaker. "
         f"got {response.status_code} with {body!r}"
     )
     assert set(body) == EXPECTED_BODY_KEYS, (
@@ -881,12 +906,14 @@ def test_venue_transient_exception_refuses_a_non_4xx_status() -> None:
     `status_code=503` would therefore emit a flat 5xx naming no dependency — a
     direct R-2 violation, refused by `service_error`'s own `_validate`, and one
     that 140.2's per-dependency breaker would mis-key onto the global bucket.
-    The wire tests pin 400 at the seven sites; nothing pinned the class's
+    The wire tests pin 424 at the seven sites; nothing pinned the class's
     ADMISSIBLE RANGE until this guard existed.
 
-    The whole 4xx band is admitted, not just 400: the 400 -> 424 remap is owed
-    as one unit with TS-05 (ledger TS-32), so refusing 424 here would fence out
-    the very move the contract schedules.
+    The whole 4xx band is admitted, not just the status the sites currently
+    emit. 400 stays admissible ON PURPOSE even though no site uses it any more:
+    this guard pins the class's RANGE, and narrowing it to the one value in use
+    would turn a range guard into a duplicate of the wire pins above — and would
+    have fenced out the 140.3-06 remap itself while it was still scheduled.
     """
     from services.error_contract import VenueTransientHTTPException
 

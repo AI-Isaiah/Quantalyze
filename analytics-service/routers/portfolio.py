@@ -2352,7 +2352,7 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
         # applies the SAME rule rather than re-deriving a local one, because a
         # site-local re-derivation is how two sites drift apart.
         raise VenueTransientHTTPException(
-            status_code=400,
+            status_code=424,
             code=validation["error_code"],
             detail=validation["error"],
             recoverable=validation["error_code"] not in PERMANENT_VALIDATION_ERROR_CODES,

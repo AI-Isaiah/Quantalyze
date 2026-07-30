@@ -170,15 +170,53 @@ contract, not an omission.
 
 ### ⚠️ Obligation this creates for 140.2 (mandatory)
 
-`body.detail` is an **object** on every deliberate error, so the three TypeScript sites
-that do `err.detail ?? "..."` (Class 5: `src/lib/analytics-client.ts:179`,
-`src/app/api/keys/[id]/permissions/route.ts:147`,
-`src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.tsx:622`) will render
-`"[object Object]"` for these responses until 140.2 reads `body.detail.detail`.
-`src/components/portfolio/PortfolioImpactPanel.tsx:76-77` already type-checks and is the
-fix-shape template. This is a **known, deliberate, recorded** consequence — not an
-oversight. It is invisible to users before 140.2 lands because the branch
+`body.detail` is an **object** on every deliberate error, so the three TypeScript Class-5
+sites that read it will render `"[object Object]"` — or discard the body entirely — until
+they read `body.detail.detail`. This is a **known, deliberate, recorded** consequence —
+not an oversight. It is invisible to users before the fix lands because the branch
 `feat/v1.16-production-resilience` is never merged mid-programme.
+
+> ⚠️ **CORRECTED IN PLACE ON 2026-07-27 BY PLAN `140.3-01` — this paragraph named the
+> WRONG THIRD SITE and offered the WORST member of the class as the template.** Both
+> claims were verified false first-hand at the 140.3 planning gate (corrections **C-2**
+> and **C-3**). They are corrected here rather than forked into a second note, because
+> this is the document every downstream phase is told to read instead of re-deriving.
+> **The class is still 3; it is a DIFFERENT 3.** The behavioural predicate is *"does this
+> site read a SEAM response body?"* — **not** *"does this site contain the characters
+> `detail ??`"*. The syntax grep is what produced both errors.
+
+**The three Class-5 sites, located by code text** (line numbers are deliberately omitted —
+two of these three files moved during 140.2):
+
+| # | Site | Read |
+|---|---|---|
+| 1 | `src/lib/analytics-client.ts` | `error.detail ?? "Analytics service error"` |
+| 2 | `src/app/api/keys/[id]/permissions/route.ts` | ``err.detail ?? `Upstream ${res.status}` `` |
+| 3 | `src/components/portfolio/PortfolioImpactPanel.tsx` | the body emptied by `const body = parsedError.success ? parsedError.data : {};` |
+
+**NOT a member — `src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.tsx`**
+(this paragraph previously named it, at a path that does not exist). Its `body.detail ??`
+read is gated on `res.status === 409` **AND** `code === "portfolio_fingerprint_stale"`, and
+`src/app/api/allocator/scenario/commit/route.ts` **imports no seam module at all** — it is
+not one of the 15 seam routes. The `detail` it reads is a hand-written scalar that route
+emits itself, and the nested envelope is structurally unreachable there: the branch requires
+`code` at the **top level**, and the nested envelope puts it at `body.detail.code`.
+
+**`src/components/portfolio/PortfolioImpactPanel.tsx` is member 3, and it is the OPPOSITE
+of a template** (this paragraph previously called it *"already type-checks and is the
+fix-shape template"*). It fetches `/api/simulator`, a real seam route.
+`ErrorResponseSchema.safeParse(raw)` runs **two lines above** its
+`typeof body.detail === "string"` check, and `src/lib/api/errorSchema.ts` declares
+`detail: z.string().optional()` — so a nested `service_error` body **fails the parse**,
+collapses to `{}` through `parsedError.success ? parsedError.data : {}`, and `error`,
+`retryAfter` **and** `detail` are all discarded before the `typeof` check is ever reached.
+On the exact envelope this section describes, it threw the whole error body away and
+rendered `HTTP 500`. **Copying its shape propagates the defect.**
+
+**The fix shape is the LEAF, not any in-tree site:** `seamHumanMessage(body)` for the human
+string and `seamErrorCode(body)` for the machine code, from `src/lib/seam-discriminator.ts`,
+applied to the **RAW parsed JSON before any narrowing schema**. ✅ All three landed that way
+in plan `140.3-01` (2026-07-27); `src/lib/api/errorSchema.ts` was deliberately not widened.
 
 Note the distinction from PYAPI-07/PYAPI-08: the **422 and 429** handlers emit a
 **scalar** `detail` at the top level, which is why those need no TypeScript change.
@@ -200,6 +238,14 @@ listed here so 140.3 knows this
 429 joined the object-detail set rather than discovering it from a log. Fixing it is a
 TypeScript edit on the same three-site `err.detail ?? …` pattern already owed above,
 so it is owed **with** them, not separately.
+
+> ✅ **CLOSED 2026-07-27 by plan `140.3-01`** — noted here rather than left reading
+> present-tense. That route's `!res.ok` arm now reads through `seamHumanMessage` /
+> `seamErrorCode`, so the throttled probe logs the human sentence and the machine code,
+> not `Error: [object Object]`. The reply is still `PROBE_FAILED` / 502 and the
+> `Retry-After` is still discarded — answering **429 not 502** and forwarding the header
+> is **TS-34**, deliberately left to 140.3's response-shape plan, because two changes to
+> one block in one pass is TRAP-8.
 
 ---
 

@@ -82,6 +82,29 @@ const SERVICE_DEPENDENCIES: readonly string[] = Object.freeze([
 /** The prefix every breaker key carries. Never interpolated from caller input. */
 const BREAKER_KEY_PREFIX = "breaker:";
 
+/**
+ * The shape a `correlation_id` must have before it may be DISPLAYED.
+ *
+ * ⚠️ HAND-TYPED HERE, DUPLICATING `CORRELATION_ID_SHAPE` in
+ * `src/lib/correlation-id.ts`, and the duplication is forced rather than lazy:
+ * that module opens with `import "server-only"` and `import { headers } from
+ * "next/headers"`, so this leaf can never import it without ending the two
+ * properties its purity test exists to defend. The duplication is also the
+ * falsifier — two independent literals can be compared; one shared literal
+ * cannot disagree with itself.
+ *
+ * ⚠️ IT IS A GUARD, NOT DECORATION. On the app-global handlers the value is
+ * `request.headers.get("x-correlation-id")` (`analytics-service/main.py`) —
+ * CALLER-SUPPLIED and echoed straight back — and a consumer renders it VERBATIM
+ * into the DOM and copies it to the user's clipboard in the `QUANTALYZE_DIAG`
+ * block. The allowlist excludes CR, LF, NUL and every whitespace and control
+ * character, so a hostile value cannot split a log record or smuggle markup;
+ * the 128-char bound exists because a value arriving over the wire has no
+ * length of its own. A UUID (36), a `wizard:<uuid>` (43) and a 32-hex Sentry
+ * trace id all pass cleanly, so the bound is a bound and not a ban.
+ */
+const CORRELATION_ID_SHAPE = /^[A-Za-z0-9._:-]{1,128}$/;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -206,6 +229,113 @@ export function seamHumanMessage(body: unknown): string | null {
 }
 
 /**
+ * The VENUE named by a nested envelope, safe to DISPLAY — never to key on.
+ *
+ * 140.3-11 / TS-18. Distinct from `serviceDependencyOf` above in both direction
+ * and purpose, and the pair must not be collapsed:
+ *
+ *   `serviceDependencyOf` answers "may this become a BREAKER KEY?" and admits
+ *      ONLY the closed service set. It is private, and stays private (T-140-01).
+ *   `seamDependencyName` answers "may this be SHOWN to a human as the third
+ *      party that failed?" and admits only names OUTSIDE that set.
+ *
+ * The two vocabularies are disjoint by CONTRACT, not by hope:
+ * `analytics-service/services/error_contract.py`'s `_validate` requires a
+ * non-empty `dependency` on a 424, refuses one that is a member of
+ * `SERVICE_DEPENDENCIES` ("a 424 names the caller's venue, and a fault in our
+ * own dependency is 500/503"), and refuses a venue name on a 500. Verified at
+ * that source on 2026-07-27 before this reader was written.
+ *
+ * The membership check below is DEFENCE IN DEPTH over that contract, and it is
+ * kept because this value reaches a human as an ATTRIBUTION. A body that named
+ * `supabase` here would tell an admin that the caller's exchange failed when
+ * OUR datastore did — theme 2 in reverse, and the one lie SEAMUX-04 exists to
+ * make impossible. Returning `null` degrades to the un-named venue state, which
+ * is truthful; rendering the name would not be.
+ *
+ * ⚠️ THE VENUE VOCABULARY IS OPEN AND MUST STAY OPEN. There is no allow-list of
+ * exchanges here and there must never be one: every venue we add would have to
+ * be added twice, and the failure mode of forgetting is that a real outage
+ * renders as no outage. The bound is on the SHAPE — a slug — not the value.
+ * That bound is not decoration: the string arrives over the wire, and an
+ * unbounded one would be rendered verbatim into an admin's screen.
+ *
+ * Returns `null` for BOTH flat shapes by construction (§2.1 — a scalar `detail`
+ * carries no dependency), which is the common case: the flat
+ * `VenueTransientHTTPException` 424 that `140.3-06` put on the wire names no
+ * venue at all. A caller that gets `null` has learned "a venue failed and the
+ * wire did not say which", and must render exactly that.
+ */
+export function seamDependencyName(body: unknown): string | null {
+  const detail = nestedDetail(body);
+  if (detail === null) return null;
+  const dependency = detail.dependency;
+  if (typeof dependency !== "string") return null;
+  // A slug: 1–40 chars of lowercase alphanumerics, dot, underscore or hyphen.
+  // Anchored at both ends, so a hostile value cannot smuggle a prefix or a
+  // newline past it. `mt5-gateway`, `binance`, `sfox` and `bybit` all satisfy it.
+  if (!/^[a-z0-9][a-z0-9._-]{0,39}$/.test(dependency)) return null;
+  // Ours, not the caller's — see the defence-in-depth note above.
+  if (SERVICE_DEPENDENCIES.includes(dependency)) return null;
+  return dependency;
+}
+
+/**
+ * The upstream `correlation_id`, safe to DISPLAY — the diagnostic 140.1-04
+ * relocated rather than deleted.
+ *
+ * 140.3-15 / TS-20, and it is the FIFTH member of this leaf's exported surface,
+ * added on EXACTLY the mechanism `140.3-11` recorded for `seamDependencyName`
+ * one plan earlier: ONE narrow, purpose-named extractor over the private
+ * `nestedDetail`, with `EXPECTED_EXPORTS` in `seam-discriminator.purity.test.ts`
+ * edited in the SAME commit. That plan rejected exporting `nestedDetail` itself
+ * (it hands every consumer the whole envelope and makes the next hand-rolled
+ * `body.detail` branch a one-liner) and rejected a generic
+ * `seamDetailField(body, name)` getter (an export set that cannot say WHICH
+ * fields are reachable guards nothing). Reusing its decision is what keeps ONE
+ * reader on record for this leaf instead of two rival ones.
+ *
+ * WHY IT EXISTS. Plan `140.1-04` moved the diagnostic OUT of the seam body — it
+ * had been leaking raw exception text including table names, row payloads and
+ * DSNs — and replaced it with this id. It is the cheapest support channel this
+ * system will ever get, and if nobody renders it the diagnostic was not
+ * relocated, it was deleted.
+ *
+ * ⚠️ IT MIRRORS `seamErrorCode`'s BOTH-SHAPE READ, and that is the whole point:
+ * `correlation_id` is NESTED inside `service_error` envelopes (§2) and
+ * TOP-LEVEL on the flat ones (§2.1 — `main.py`'s 422/429 handlers and
+ * `process_key.py`'s own error envelopes). A nested-only reader would answer
+ * `null` on every body from the other family, and a `null` here is
+ * indistinguishable from a correctly-absent value — which is precisely how
+ * `140.3-11`'s M77c stayed GREEN across 3163 tests.
+ *
+ * ⚠️ IT IS FOR DISPLAY ONLY and is consumed for NO breaker decision (TS-16).
+ * `seamBreakerVerdict` below does not call it, and must not: a breaker key may
+ * only ever come from the closed service set (T-140-01), and this value is
+ * caller-influenceable on the app-global handlers.
+ *
+ * Returns `null` rather than throwing on every malformed shape and on every
+ * value that fails `CORRELATION_ID_SHAPE`: a caller that gets `null` has
+ * learned "the wire named no usable id" and must fall back to its own.
+ */
+export function seamCorrelationId(body: unknown): string | null {
+  const detail = nestedDetail(body);
+  const raw =
+    detail !== null
+      ? detail.correlation_id
+      : isPlainObject(body)
+        ? body.correlation_id
+        : undefined;
+  if (typeof raw !== "string") return null;
+  // NOT trimmed first. `correlation-id.ts` trims because it is normalising an
+  // INBOUND header before re-broadcasting it; here the value is already a body
+  // field and a surrounding space is a sign the id is not what it claims to be,
+  // so the honest answer is to fall back rather than to repair it.
+  if (!CORRELATION_ID_SHAPE.test(raw)) return null;
+  return raw;
+}
+
+/**
  * Does this response count against the analytics service's own health, and if
  * so, against which breaker key?
  *
@@ -265,10 +395,24 @@ export function seamBreakerVerdict(
   }
 
   if (status < 500) {
-    // ⚠️ 424 is NOT "the" venue signal (M-4). The CLASSIFIED venue-failure path —
-    // the one that actually fires — still answers 400 in the flat
-    // `{detail, code, recoverable}` shape. Every 4xx is breaker-inert BY
-    // CONSTRUCTION, so the sub-classes below change only what 140.3 renders.
+    // ⚠️ CORRECTED by 140.3-11. This comment used to read "the CLASSIFIED
+    // venue-failure path — the one that actually fires — still answers 400",
+    // and that stopped being true at commit 1f8ad052: `140.3-06` remapped all
+    // seven `VenueTransientHTTPException` sites from 400 to 424, so the path
+    // that actually fires answers 424 now. That plan's hardest acceptance
+    // criterion was zero `src/` diffs, so it routed the stale sentence here
+    // rather than smuggling the fix in. The verdict below was correct
+    // throughout and is unchanged — only the claim above it had rotted.
+    //
+    // Two 424 SHAPES are now on the wire and a consumer must handle both: the
+    // nested `service_error(424, dependency=<venue>)` envelope, which names the
+    // venue, and the flat `{detail, code, recoverable}` one, which carries no
+    // `dependency` key at all. `seamDependencyName` above returns `null` for
+    // the flat shape, and 140.3-11's consumers degrade to an un-named venue
+    // state rather than inventing one.
+    //
+    // Every 4xx is breaker-inert BY CONSTRUCTION, so the sub-classes below
+    // change only what 140.3 renders — that part was, and remains, correct.
     if (status === 424) {
       return {
         attributability: "caller-exchange",

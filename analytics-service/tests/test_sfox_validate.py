@@ -264,7 +264,12 @@ async def test_sfox_rate_limit_maps_to_rate_limited_detail_not_credentials(excha
     with pytest.raises(HTTPException) as ei:
         await _call(router, _make_req(router))
 
-    assert ei.value.status_code == 400
+    # 424 = CALLER'S EXCHANGE (STATUS_CONTRACT.md §5), remapped from 400 by
+    # 140.3-06 at all seven VenueTransientHTTPException sites (C1 here). The old
+    # 400 said the CALLER'S REQUEST was malformed, which is the same lie in the
+    # status line that this test's `detail` assertions exist to kill in the body:
+    # a venue throttle is not a bad key and not a bad request.
+    assert ei.value.status_code == 424
     assert ei.value.detail == RATE_LIMITED_DETAIL
     # honesty anti-assertions: never a 500, never "check your credentials".
     assert ei.value.status_code != 500
@@ -293,7 +298,8 @@ async def test_sfox_transient_upstream_maps_to_network_detail_not_credentials(
     with pytest.raises(HTTPException) as ei:
         await _call(router, _make_req(router))
 
-    assert ei.value.status_code == 400
+    # 424 = CALLER'S EXCHANGE (C2; see the 429 case above for the full rationale).
+    assert ei.value.status_code == 424
     assert ei.value.detail == NETWORK_ERROR_DETAIL
     # honesty anti-assertions: never a 500, never blame the credentials.
     assert ei.value.status_code != 500

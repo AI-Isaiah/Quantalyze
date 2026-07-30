@@ -7,6 +7,8 @@ import {
   TickJobsResponseSchema,
   BridgeFitLabelSchema,
   BridgeResponseSchema,
+  LivePermissionsSchema,
+  KeyPermissionsPayloadSchema,
 } from "./analytics-schemas";
 
 /**
@@ -506,5 +508,128 @@ describe("BridgeResponseSchema", () => {
     expect(parsed.status).toBe("ok");
     expect(parsed.portfolio_id).toBe("pf-1");
     expect(parsed.underperformer_strategy_id).toBe("strat-z");
+  });
+});
+
+/**
+ * [140.3-03 / SEAMUX-07] LivePermissionsSchema — the PUBLISH GATE's contract.
+ *
+ * This schema is not a display contract. Two call sites turn this body into a
+ * decision about whether a money-bearing key may be published as
+ * read-only-verified, and both used to read it through an unchecked `as` cast
+ * that rejected only on an explicit `=== true`. A 2xx `{}` therefore left every
+ * scope `undefined`, every gate passed, and the draft finalised.
+ *
+ * So the assertions below are about ABSENCE and MISTYPING, not about the happy
+ * path: `read` / `trade` / `withdraw` must be UNPARSEABLE when missing, because
+ * absence is exactly the drift that publishes a write-capable key. Every fixture
+ * is hand-typed here; nothing is imported from a call site.
+ */
+describe("[140.3-03 / SEAMUX-07] LivePermissionsSchema", () => {
+  const WELL_FORMED_READ_ONLY = {
+    read: true,
+    trade: false,
+    withdraw: false,
+    probe_error: false,
+  };
+
+  it("accepts the well-formed read-only triple — the case that must still PUBLISH", () => {
+    const parsed = LivePermissionsSchema.parse(WELL_FORMED_READ_ONLY);
+    expect(parsed.read).toBe(true);
+    expect(parsed.trade).toBe(false);
+    expect(parsed.withdraw).toBe(false);
+    expect(parsed.probe_error).toBe(false);
+  });
+
+  it("accepts a body with probe_error OMITTED — its absence already means 'no probe error'", () => {
+    const parsed = LivePermissionsSchema.parse({
+      read: true,
+      trade: false,
+      withdraw: false,
+    });
+    expect(parsed.probe_error).toBeUndefined();
+  });
+
+  it("REJECTS an empty 2xx object — the shape that published a write-capable key", () => {
+    expect(LivePermissionsSchema.safeParse({}).success).toBe(false);
+  });
+
+  it.each([["read"], ["trade"], ["withdraw"]])(
+    "REJECTS a body missing %s — absence must never read as 'not granted'",
+    (field) => {
+      const body: Record<string, unknown> = { ...WELL_FORMED_READ_ONLY };
+      delete body[field];
+      const result = LivePermissionsSchema.safeParse(body);
+      expect(
+        result.success,
+        `A missing \`${field}\` must fail the parse. If it parses, the gate ` +
+          `reads \`undefined\`, \`undefined === true\` is false, and a key ` +
+          `holding that scope publishes as read-only-verified.`,
+      ).toBe(false);
+    },
+  );
+
+  it("REJECTS a renamed scope field (trade → can_trade) rather than defaulting it", () => {
+    const result = LivePermissionsSchema.safeParse({
+      read: true,
+      can_trade: true,
+      withdraw: false,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it.each([["true"], [1], [null], [{}]])(
+    "REJECTS a non-boolean trade (%p) — no coercion at a security boundary",
+    (value) => {
+      const result = LivePermissionsSchema.safeParse({
+        ...WELL_FORMED_READ_ONLY,
+        trade: value,
+      });
+      expect(result.success).toBe(false);
+    },
+  );
+
+  it("STRIPS unknown extra fields instead of passing them through", () => {
+    const parsed = LivePermissionsSchema.parse({
+      ...WELL_FORMED_READ_ONLY,
+      detected_at: "2026-07-27T00:00:00Z",
+      future_field: "whatever",
+    }) as Record<string, unknown>;
+    expect(parsed.future_field).toBeUndefined();
+    expect(parsed.detected_at).toBeUndefined();
+  });
+});
+
+describe("[140.3-03 / SEAMUX-07] KeyPermissionsPayloadSchema", () => {
+  const WELL_FORMED = {
+    read: true,
+    trade: false,
+    withdraw: false,
+    probe_error: false,
+    detected_at: "2026-07-27T00:00:00Z",
+  };
+
+  it("accepts the badge payload and FORWARDS detected_at", () => {
+    const parsed = KeyPermissionsPayloadSchema.parse(WELL_FORMED);
+    expect(parsed.detected_at).toBe("2026-07-27T00:00:00Z");
+    expect(parsed.read).toBe(true);
+  });
+
+  it("inherits the scope requirement — a body missing `trade` is REJECTED here too", () => {
+    const { trade: _omit, ...withoutTrade } = WELL_FORMED;
+    expect(KeyPermissionsPayloadSchema.safeParse(withoutTrade).success).toBe(
+      false,
+    );
+  });
+
+  it("REJECTS an empty 2xx object", () => {
+    expect(KeyPermissionsPayloadSchema.safeParse({}).success).toBe(false);
+  });
+
+  it("REJECTS a body without detected_at — every emitter arm sets it, so its absence is drift", () => {
+    const { detected_at: _omit, ...withoutStamp } = WELL_FORMED;
+    expect(KeyPermissionsPayloadSchema.safeParse(withoutStamp).success).toBe(
+      false,
+    );
   });
 });

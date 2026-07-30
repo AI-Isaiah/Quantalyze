@@ -1157,3 +1157,443 @@ describe("[94-03/WIZ-05] SyncPreviewStep — cached snapshot + durability skip",
     expect(syncPosts).toHaveLength(1);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════════════
+// Phase 140.3-10 / SEAMUX-03 + SEAMUX-06 + TRAP-4.
+//
+// Before this plan EVERY non-2xx kickoff collapsed onto `SYNC_FAILED`, whose
+// scripted cause is "We fetched your trades but the analytics computation did
+// not complete." For a 429 that sentence is simply false — nothing was fetched
+// and nothing ran. The route now names the fact on the wire; this step reads
+// the name.
+//
+// It also closes B-22: `<WizardErrorEnvelope>` received no `onRetry`, so the
+// shared renderer's `showRetry = recoverable && Boolean(onRetry)` was
+// STRUCTURALLY false and a recoverable seam error rendered with no retry
+// control at all.
+// ══════════════════════════════════════════════════════════════════════════
+describe("[140.3-10] SyncPreviewStep reads the kickoff's machine code", () => {
+  beforeEach(() => {
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: () => Promise.resolve({ data: null, error: null }),
+          }),
+        }),
+      }),
+    });
+    baseProps.onComplete = vi.fn();
+    baseProps.onTryAnotherKey = vi.fn();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    // This repo's known CI-only failure mode (CI Node 22 vs local Node 25) is a
+    // leaked global stub; unstub unconditionally.
+    vi.unstubAllGlobals();
+  });
+
+  it("a 429 renders the THROTTLE state, not SYNC_FAILED's 'we fetched your trades'", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: "Too many requests", code: "RATE_LIMITED" }),
+        { status: 429, headers: { "Retry-After": "60" } },
+      ),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(
+      envelope,
+      "The envelope's data-error-code is the machine-readable half of the " +
+        "render — a copy rewrite in 140.3-12 must not be able to satisfy this.",
+    ).toHaveAttribute("data-error-code", "RATE_LIMITED");
+
+    // ⚠️ RE-POINTED by 140.3-12. This line used to read
+    // `expect(screen.queryByText(/We fetched your trades/i)).toBeNull()`.
+    // 140.3-12 deleted that sentence from the copy table entirely, so the
+    // assertion became VACUOUS — a negative on a string that no longer exists
+    // anywhere passes forever and can never falsify anything. (Same shape as
+    // 140.3-11's M77c: an oracle asserting an absence cannot detect the
+    // mechanism that produces absences.)
+    //
+    // Re-pointed at SYNC_FAILED's CURRENT distinctive phrase, so the guard
+    // still fails if a 429 falls back to the generic sync failure, plus a
+    // POSITIVE assertion that the throttle's own copy actually rendered.
+    expect(screen.queryByText(/which step failed/i)).toBeNull();
+    expect(
+      screen.getByText(/we cap how often this action can run/i),
+      "The positive half. Without it, a state rendering NEITHER copy would " +
+        "satisfy every negative assertion in this case.",
+    ).toBeInTheDocument();
+  });
+
+  it("a 429's advertised wait reaches the envelope — and is never fabricated when absent", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ code: "RATE_LIMITED" }), {
+        status: 429,
+        headers: { "Retry-After": "60" },
+      }),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    // 140.3-09 plumbed the slot; this is the first wizard surface to fill it.
+    const wait = await screen.findByTestId("error-envelope-wait");
+    expect(wait.textContent).toContain("60");
+  });
+
+  it("TRAP-3 — a 429 with NO Retry-After names no duration at all", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ code: "RATE_LIMITED" }), { status: 429 }),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    await screen.findByTestId("error-envelope");
+    expect(
+      screen.queryByTestId("error-envelope-wait"),
+      "No header in ⇒ no wait rendered. Not '0s', not 'shortly'. Inventing a " +
+        "duration nobody stated is how a vague error becomes a specific lie.",
+    ).toBeNull();
+  });
+
+  it("an unknowable composite membership renders its OWN state, not SYNC_FAILED", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: "Could not start sync. Try again in a moment.",
+          code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+        }),
+        { status: 503 },
+      ),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute(
+      "data-error-code",
+      "COMPOSITE_MEMBERSHIP_UNKNOWN",
+    );
+  });
+
+  // ---------------------------------------------------------------------
+  // Phase 140.3-15 / TS-20 — THE SECOND CONSUMER THAT HOLDS A SEAM BODY.
+  //
+  // `/api/keys/sync` does `if (!result.ok) return result.response`, so
+  // `process-key-client`'s envelope — including its `correlation_id`, the id
+  // that appears in OUR server logs — reaches this component verbatim. Until
+  // now the envelope rendered only `getWizardCorrelationId()`, a value minted
+  // in the browser and memoized per PAGE LOAD, which appears in no log
+  // anywhere.
+  //
+  // \u26a0\ufe0f WIRED AT BOTH CONSUMERS, NOT ONE. SubmitStep is the obvious member
+  // and it is the one a plan reading "the render slot" would fix; this file is
+  // the SECOND, and it is where the mutation is aimed for exactly that reason.
+  // POSITIVE identity assertions, per 140.3-11's M77c: a deleted carry and a
+  // correctly-absent value both produce the local id, so each case names the
+  // exact id that must appear AND the local id it must have displaced.
+  // ---------------------------------------------------------------------
+
+  it("[140.3-15 / TS-20] the kickoff failure renders the SERVER's correlation id, not the browser's", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          ok: false,
+          code: "UPSTREAM_NETWORK_ERROR",
+          human_message: "Could not reach the ingestion service.",
+          correlation_id: "srv-5c2e91a4-70bd-4d33-9a18-6e0f2b7c8d55",
+          recoverable: true,
+        }),
+        { status: 502 },
+      ),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    await screen.findByTestId("error-envelope");
+    // POSITIVE: the server's own id is on screen.
+    expect(
+      screen.getByText("srv-5c2e91a4-70bd-4d33-9a18-6e0f2b7c8d55"),
+    ).toBeInTheDocument();
+    // ...and the browser's per-page-load id has been displaced. Without this
+    // half a deleted carry passes: some id would still render.
+    expect(
+      screen.queryByText(/^wizard:[0-9a-f-]{36}$/),
+      "The browser's own correlation id is still on screen. It appears in NO " +
+        "server log, so a user quoting it gives support nothing to search.",
+    ).toBeNull();
+  });
+
+  it("[140.3-15 / TS-20] a NESTED service_error envelope's id renders here too", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "SCORING_FAILED",
+            dependency: null,
+            retryable: false,
+            detail: "Scoring failed.",
+            correlation_id: "srv-nested-1d9f4c07-2b56-4e8a-b311-90ac5d6e7f22",
+          },
+        }),
+        { status: 500 },
+      ),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    await screen.findByTestId("error-envelope");
+    expect(
+      screen.getByText("srv-nested-1d9f4c07-2b56-4e8a-b311-90ac5d6e7f22"),
+    ).toBeInTheDocument();
+  });
+
+  it("[140.3-15 / TS-20] FALLBACK: no id on the wire \u21d2 the browser's id still renders", async () => {
+    // The fallback is what makes the change additive. A body with no
+    // `correlation_id` must render exactly what it rendered before.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "compute failed" }), { status: 500 }),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    await screen.findByTestId("error-envelope");
+    expect(
+      screen.getByText(/^wizard:[0-9a-f-]{36}$/),
+      "The fallback broke: a failure carrying no upstream id now renders no id " +
+        "at all, which is strictly worse than before.",
+    ).toBeInTheDocument();
+    errSpy.mockRestore();
+  });
+
+  it("[140.3-15 / TS-20] a HOSTILE id is refused and the browser's id renders instead", async () => {
+    // On the app-global handlers `correlation_id` is the caller-supplied
+    // `x-correlation-id` header echoed back, and this value is rendered verbatim
+    // into the DOM and copied to the clipboard by "Copy diagnostics".
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          code: "RATE_LIMITED",
+          correlation_id: "evil\r\nX-Forwarded-For: 10.0.0.1",
+        }),
+        { status: 429 },
+      ),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    await screen.findByTestId("error-envelope");
+    expect(screen.getByText(/^wizard:[0-9a-f-]{36}$/)).toBeInTheDocument();
+    expect(screen.queryByText(/X-Forwarded-For/)).toBeNull();
+  });
+
+  it("ANTI-REGRESSION — an UNCODED non-2xx still falls back to SYNC_FAILED", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "compute failed" }), { status: 500 }),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(
+      envelope,
+      "The map is deliberately PARTIAL. An unfamiliar or absent code must " +
+        "reach the fallback, never a silent undefined error state.",
+    ).toHaveAttribute("data-error-code", "SYNC_FAILED");
+    errSpy.mockRestore();
+  });
+
+  it("ANTI-REGRESSION — an unrecognised code ALSO falls back to SYNC_FAILED", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ code: "SOME_FUTURE_ARM" }), { status: 500 }),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "SYNC_FAILED");
+    errSpy.mockRestore();
+  });
+
+  it("B-22 — a RECOVERABLE state now renders an actual Retry control", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "compute failed" }), { status: 500 }),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    await screen.findByTestId("error-envelope");
+    expect(
+      screen.getByRole("button", { name: "Retry" }),
+      "SEAMUX-06: a recoverable seam error always offers a retry. This step " +
+        "passed no onRetry, so the shared renderer's showRetry was " +
+        "structurally false and the control could never appear.",
+    ).toBeInTheDocument();
+    errSpy.mockRestore();
+  });
+
+  it("B-22 — the Retry control actually RE-POSTS the kickoff", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(JSON.stringify({ error: "compute failed" }), {
+          status: 500,
+        }),
+      );
+
+    render(<SyncPreviewStep {...baseProps} />);
+    await screen.findByTestId("error-envelope");
+
+    const postsBefore = fetchSpy.mock.calls.filter((c) =>
+      String(c[0]).includes("/api/keys/sync"),
+    ).length;
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Retry" }).click();
+    });
+
+    await waitFor(() => {
+      const postsAfter = fetchSpy.mock.calls.filter((c) =>
+        String(c[0]).includes("/api/keys/sync"),
+      ).length;
+      expect(
+        postsAfter,
+        "A Retry button that renders and does nothing is worse than none — " +
+          "it tells the user the outcome can change and it cannot.",
+      ).toBe(postsBefore + 1);
+    });
+    errSpy.mockRestore();
+  });
+
+  it("a NON-recoverable state renders NO Retry — waiting cannot change the outcome", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: "Strategy not found", code: "GATE_DRAFT_GONE" }),
+        { status: 404 },
+      ),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "GATE_DRAFT_GONE");
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
+  // ⚠️ THE TRAP-4 FALSIFIER AT THIS RENDER. Deleting `errorStateIsDraftGone`
+  // from SyncPreviewStep must redden this. Observed as M66c.
+  it("TRAP-4 — the draft-gone state does NOT render the destructive control", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: "Strategy not found", code: "GATE_DRAFT_GONE" }),
+        { status: 404 },
+      ),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+    await screen.findByTestId("error-envelope");
+
+    expect(
+      screen.queryByTestId("wizard-try-another-key"),
+      "'Try another key' fires WizardClient's handleDeleteDraft — it DESTROYS " +
+        "the draft and every strategy_keys member under it. That is right for " +
+        "a rejected key. It is not right as the ONLY thing on screen when we " +
+        "have just told the user their draft is gone, because the 404 is " +
+        "deliberately uniform across 'no such draft' and 'not yours' (P458) " +
+        "and the draft may be perfectly intact.",
+    ).toBeNull();
+    // ...and the state is not a dead end either: a non-destructive way out is
+    // present, which is the other half of the property.
+    expect(
+      screen.getByTestId("wizard-back-to-strategies"),
+    ).toBeInTheDocument();
+  });
+
+  // ════════════════════════════════════════════════════════════════════
+  // Phase 140.3-12 — the two 400 arms 140.3-10 left without wizard copy.
+  // ════════════════════════════════════════════════════════════════════
+
+  it.each([
+    ["MISSING_STRATEGY_ID", "Missing strategy_id"],
+    ["INVALID_STRATEGY_ID", "Invalid strategy_id"],
+  ])(
+    "a 400 %s renders VALIDATION_FAILED, not the generic SYNC_FAILED",
+    async (code, error) => {
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(JSON.stringify({ error, code }), { status: 400 }),
+      );
+
+      render(<SyncPreviewStep {...baseProps} />);
+      const envelope = await screen.findByTestId("error-envelope");
+
+      // BOTH 400 arms are asserted separately rather than in one case: they are
+      // two distinct wire codes on the same route, and the "5 of 8" signature
+      // this programme keeps finding is exactly one of a pair being wired.
+      expect(envelope).toHaveAttribute("data-error-code", "VALIDATION_FAILED");
+      // The copy must NOT blame the analytics service — this rejection is made
+      // by our own route before that service is ever called.
+      expect(screen.queryByText(/analytics service rejected/i)).toBeNull();
+      errSpy.mockRestore();
+    },
+  );
+
+  it("TRAP-4 — the request-shape state does NOT render the destructive control", async () => {
+    // ⚠️ THE GUARD THE 400 WIRING FORCED. VALIDATION_FAILED is non-recoverable,
+    // so no Retry renders; without widening the destructive-control set the
+    // SOLE button on screen would be "Try another key", which fires
+    // handleDeleteDraft(). Telling a user our software sent an unreadable
+    // request and offering them one button that destroys their draft is the
+    // trap 140.3-10 closed for GATE_DRAFT_GONE, re-created one code over.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: "Invalid strategy_id",
+          code: "INVALID_STRATEGY_ID",
+        }),
+        { status: 400 },
+      ),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+    await screen.findByTestId("error-envelope");
+
+    expect(
+      screen.queryByTestId("wizard-try-another-key"),
+      "Swapping the user's key cannot fix a bug in our own page, and this " +
+        "control deletes the draft on its way.",
+    ).toBeNull();
+    expect(
+      screen.getByTestId("wizard-back-to-strategies"),
+      "A state with no way out at all is worse than a destructive one.",
+    ).toBeInTheDocument();
+    errSpy.mockRestore();
+  });
+
+  it("ANTI-REGRESSION — every OTHER error state keeps 'Try another key'", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "compute failed" }), { status: 500 }),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+    await screen.findByTestId("error-envelope");
+
+    // The guard is scoped to the one state where the control is wrong. A
+    // blanket removal would have broken the primary recovery affordance for
+    // every key-related failure in the wizard.
+    expect(screen.getByTestId("wizard-try-another-key")).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-back-to-strategies")).toBeNull();
+    errSpy.mockRestore();
+  });
+});

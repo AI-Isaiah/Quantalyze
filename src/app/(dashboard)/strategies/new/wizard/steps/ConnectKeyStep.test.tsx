@@ -621,3 +621,101 @@ describe("Phase 138 — MT5 wizard card (MT5UI-01+02)", () => {
     ).toBeInTheDocument();
   });
 });
+
+/**
+ * 140.3-13a / SEAMUX-08 — the unvalidated `as WizardErrorCode` cast is now a
+ * membership check.
+ *
+ * Before this plan the step cast `data.code` with a bare `as WizardErrorCode`
+ * (widened with an optional, then defaulted to `"UNKNOWN"`) — a
+ * compile-time assertion applied to NETWORK DATA. Any string an upstream, a
+ * proxy or an edge/WAF layer put in `code` became a "typed" `WizardErrorCode`,
+ * was handed to `buildEnvelope`, and rendered `WIZARD_ERROR_COPY[code]` —
+ * `undefined` — while the funnel recorded a code outside our vocabulary.
+ *
+ * ⚠️ The POSITIVE case is the load-bearing one. A guard that rejected
+ * EVERYTHING would satisfy every unrecognised-code assertion below while
+ * silently collapsing the whole funnel to UNKNOWN — which is the defect
+ * SEAMUX-08 exists to close, recreated. Both directions are asserted.
+ */
+describe("[140.3-13a / SEAMUX-08] ConnectKeyStep — data.code is membership-checked, never cast", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function readWizardErrorPayload(): { code: string; step: string } {
+    const call = trackMock.mock.calls.find(
+      (c) => (c as unknown[])[0] === "wizard_error",
+    ) as unknown[] | undefined;
+    expect(
+      call,
+      "no wizard_error event was emitted at all — the funnel cannot tell an outage from nobody trying",
+    ).toBeDefined();
+    return call![1] as { code: string; step: string };
+  }
+
+  it("an UNRECOGNISED code resolves to UNKNOWN rather than being admitted into the union", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "ZZ_NOT_A_WIZARD_CODE" }, 500),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    // Both surfaces, because they are set from the SAME local: an upstream
+    // string reaching either one is the defect.
+    expect(
+      envelope.getAttribute("data-error-code"),
+      "an upstream string was rendered as a wizard error code — WIZARD_ERROR_COPY has no entry for it, so the envelope renders undefined copy",
+    ).toBe("UNKNOWN");
+    await vi.waitFor(() => expect(trackMock).toHaveBeenCalled());
+    expect(readWizardErrorPayload().code).toBe("UNKNOWN");
+  });
+
+  it("POSITIVE: a code from the route's classifier half is emitted UNCHANGED (a reject-everything guard would fail here)", async () => {
+    // SERVICE_UNAVAILABLE_RETRY is what classifyKeyValidationError returns for a
+    // CircuitOpenError, i.e. this is a breaker trip during key connect. It is
+    // the code an outage must be distinguishable BY.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "SERVICE_UNAVAILABLE_RETRY" }, 503),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute(
+      "data-error-code",
+      "SERVICE_UNAVAILABLE_RETRY",
+    );
+    await vi.waitFor(() => expect(trackMock).toHaveBeenCalled());
+    const payload = readWizardErrorPayload();
+    expect(
+      payload.code,
+      "a breaker trip reported as UNKNOWN is indistinguishable from a bad key in the funnel — SEAMUX-08",
+    ).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(payload.step).toBe("connect_key");
+  });
+
+  it("a code belonging to a DIFFERENT route's contract is NOT admitted here", async () => {
+    // MULTI_KEY_WINDOWS_INVALID is a real WizardErrorCode — but it belongs to
+    // composite/set-members, which this step never calls. A totality check over
+    // the whole union would admit it and render "fix your key windows" on the
+    // single-key exchange form.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "MULTI_KEY_WINDOWS_INVALID" }, 400),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+});

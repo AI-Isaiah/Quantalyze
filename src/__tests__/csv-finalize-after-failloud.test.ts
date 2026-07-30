@@ -84,7 +84,7 @@ vi.mock("@/lib/process-key-client", () => ({
   postProcessKey: vi.fn(async () => ({
     ok: true,
     status: 200,
-    body: { strategy_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+    body: { ok: true, strategy_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
   })),
 }));
 

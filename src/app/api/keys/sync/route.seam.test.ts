@@ -64,6 +64,20 @@ const ownership = vi.hoisted(() => ({
 }));
 
 /**
+ * 140.3-02 / TS-15 — the session the route forwards as `X-User-Access-Token`.
+ *
+ * The value's LENGTH is load-bearing for the redaction case: a realistic JWT is
+ * ~200 characters, and it deliberately contains no `SEAM_PRESERVE_TOKENS` member
+ * so it cannot collide with the diagnostic half of that assertion.
+ */
+const TEST_USER_JWT =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.dGhpcy1pcy1hLXRlc3QtdXNlci1hY2Nlc3MtdG9rZW4tdmFsdWU.c2lnbmF0dXJlLWJ5dGVz";
+
+const sessionState = vi.hoisted(() => ({
+  session: { access_token: "" } as { access_token: string } | null,
+}));
+
+/**
  * The "shared Upstash database". MUST be hoisted: `vi.resetModules()` below
  * re-evaluates the resilience core, and only state living OUTSIDE the module
  * graph survives that — which is the whole premise of a cross-instance breaker.
@@ -113,12 +127,23 @@ vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     auth: {
       getUser: async () => ({ data: { user: authState.user }, error: null }),
+      // 140.3-02 / TS-15 — the session whose access_token becomes
+      // `X-User-Access-Token` on the outgoing request.
+      getSession: async () => ({
+        data: { session: sessionState.session },
+        error: null,
+      }),
     },
     from: () => {
       const builder = {
         select: () => builder,
         eq: () => builder,
         single: async () => ownership,
+        // 140.3-10 / TRAP-3 — the ownership read is `.maybeSingle()` so the
+        // route can tell a Supabase transport fault (500 about us) apart from
+        // an absent row (404). The exchange resolver still ends in `.single()`,
+        // so both terminals are served from this one builder.
+        maybeSingle: async () => ownership,
       };
       return builder;
     },
@@ -199,6 +224,7 @@ describe("POST /api/keys/sync — REAL client through the seam (SC-1a)", () => {
 
     shared.store.clear();
     authState.user = { id: TEST_USER_ID };
+    sessionState.session = { access_token: TEST_USER_JWT };
     // api_key_id SET → definitively single-key, so the composite hoist is
     // skipped and the request reaches the unified /process-key dispatch.
     ownership.data = {
@@ -363,5 +389,75 @@ describe("POST /api/keys/sync — REAL client through the seam (SC-1a)", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     // The observed status is an operator fact, not a user-facing one.
     expect(raw).not.toContain("304");
+  });
+
+  /**
+   * Phase 140.3-02 / TS-15 — the token is ON THE WIRE, and a transport error
+   * that embeds it does not put it in a log line.
+   *
+   * These two cases are the reason TS-15 sits AFTER plan 140.2-08 rather than
+   * before it: `X-User-Access-Token` is a LIVE end-user Supabase JWT, undici
+   * embeds outgoing headers in `err.message`, and forwarding before the
+   * scrubber exists ships a window in which a production log carries that JWT.
+   * The coverage is proven BY EXECUTION here, not inferred from the leaf's
+   * existence — which is exactly how the SECOND log site on this path (the
+   * core's own transport arm) was found still leaking.
+   */
+  it("TS-15: the session access token rides the outgoing request as X-User-Access-Token", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, queued: true }), {
+        status: 202,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const res = await postAsUser();
+    expect(res.status).toBe(202);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(
+      (init.headers as Record<string, string>)["X-User-Access-Token"],
+      "Without this header the analytics service cannot build a user-scoped, " +
+        "RLS-enforcing client, so PYAPI-01's explicit Python ownership filter " +
+        "is the only belt rather than the second one — TS-15.",
+    ).toBe(TEST_USER_JWT);
+  });
+
+  it("TS-15 SCRUB COVERAGE: a transport error embedding the JWT leaks neither the JWT nor its syscall token", async () => {
+    fetchMock.mockRejectedValue(
+      new Error(
+        `connect ECONNREFUSED 10.0.0.1:443 (headers: {"Authorization":"Bearer test-internal-token","X-User-Access-Token":"${TEST_USER_JWT}"})`,
+      ),
+    );
+    // The suite's beforeEach already silences console.error; re-spy so THIS
+    // case can read what was written rather than only that it was written.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const res = await postAsUser();
+    expect(res.status).toBe(502);
+    expect(await res.text()).not.toContain(TEST_USER_JWT);
+
+    const logged = errorSpy.mock.calls
+      .map((c) => c.map(String).join(" "))
+      .join("\n");
+    // BOTH log sites on this path are asserted by one read of the spy: the
+    // client's `/process-key upstream fetch threw:` and the core's own
+    // `network failure reaching the analytics service:`. The second one was
+    // uncovered until this plan — see `credentialHeaderValues` in
+    // `resilient-fetch.ts`.
+    expect(
+      logged,
+      "A seam log line carrying a LIVE user Supabase JWT is the exact leak the " +
+        "redaction leaf exists to close — TRAP-1.",
+    ).not.toContain(TEST_USER_JWT);
+    expect(logged).toContain("network failure reaching the analytics service");
+    expect(logged).toContain("/process-key upstream fetch threw");
+    // ⚠️ The other half of TRAP-1: over-redaction destroys the diagnosis, and a
+    // one-sided assertion ships that state green.
+    expect(
+      logged,
+      "ECONNREFUSED is the most valuable thing in a transport line. A redactor " +
+        "that eats it has replaced one incident with two.",
+    ).toContain("ECONNREFUSED");
   });
 });

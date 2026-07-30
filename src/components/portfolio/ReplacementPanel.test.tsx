@@ -1,5 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { ReplacementPanel } from "./ReplacementPanel";
 import type { BridgeCandidate } from "@/lib/types";
 
@@ -41,6 +43,20 @@ function buildCandidate(partial: Partial<BridgeCandidate> = {}): BridgeCandidate
 
 function mockFetch(impl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {
   globalThis.fetch = vi.fn(impl) as unknown as typeof fetch;
+}
+
+/**
+ * Every `.ts`/`.tsx` file under `dir`. Used by the M74 negative pin to
+ * enumerate ReplacementPanel's parents across the WHOLE of `src/` — a pin that
+ * only checked the known parent could not detect the second one being added,
+ * which is the mutation it exists to catch.
+ */
+function listFilesUnder(dir: string): string[] {
+  return readdirSync(dir).flatMap((entry) => {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) return listFilesUnder(full);
+    return /\.tsx?$/.test(entry) ? [full] : [];
+  });
 }
 
 function renderPanel(onClose = vi.fn()) {
@@ -139,16 +155,28 @@ describe("<ReplacementPanel> — H-1077", () => {
     expect(screen.queryByTestId("replacement-card")).toBeNull();
   });
 
-  it("renders an error message when the fetch rejects", async () => {
+  // ⚠️ 140.3-07 / B-27 — this case USED to assert `getByText("network down")`,
+  // i.e. it pinned the defect: the raw caught Error.message rendered to the
+  // user. That is a deliberate behaviour change, not a weakened assertion — the
+  // case still proves a rejected fetch surfaces as the panel's error state, and
+  // it now ALSO proves the raw value does not reach the DOM. The console
+  // breadcrumb assertions below (M-0905) are untouched.
+  it("renders the stable sentence — not the raw caught message — when the fetch rejects", async () => {
     mockFetch(async () => {
-      throw new Error("network down");
+      throw new Error("network down at 10.0.0.4:8002");
     });
 
     renderPanel();
 
     await waitFor(() =>
-      expect(screen.getByText("network down")).toBeInTheDocument(),
+      expect(
+        screen.getByText(
+          "We could not load replacement candidates. Close this panel and open it again to retry.",
+        ),
+      ).toBeInTheDocument(),
     );
+    expect(document.body.textContent).not.toContain("network down");
+    expect(document.body.textContent).not.toContain("10.0.0.4");
   });
 
   // M-0905 (F1 loud-fail discipline): the inline error UI alone leaves
@@ -188,8 +216,16 @@ describe("<ReplacementPanel> — H-1077", () => {
 
     renderPanel();
 
+    // Anchor swapped from the raw message to the stable sentence (140.3-07 /
+    // B-27). The assertion this case exists for — the tagged breadcrumb — is
+    // unchanged, and it is what proves debuggability was NOT traded for the
+    // copy fix: the raw value leaves the DOM but still reaches operators.
     await waitFor(() =>
-      expect(screen.getByText("network down")).toBeInTheDocument(),
+      expect(
+        screen.getByText(
+          "We could not load replacement candidates. Close this panel and open it again to retry.",
+        ),
+      ).toBeInTheDocument(),
     );
 
     const tagged = errorSpy.mock.calls.find(
@@ -291,5 +327,159 @@ describe("<ReplacementPanel> — H-1077", () => {
       ),
     );
     expect(warned).toBe(false);
+  });
+});
+
+/**
+ * [140.3-07 / B-28] A malformed body must surface as the panel's ERROR state,
+ * not as an empty-but-successful panel.
+ *
+ * `setCandidates(data.candidates ?? [])` collapsed every malformed shape to
+ * `[]`, and the empty branch says "No replacement candidates found that would
+ * improve this portfolio" — a claim about the USER'S PORTFOLIO made on the
+ * strength of our own failed parse. That is the second half of SEAMUX-09's own
+ * wording, and it is the reason the guard copies `OutcomesWidget`'s shape
+ * rather than inventing one.
+ */
+describe("[140.3-07 / B-28] a malformed candidates payload is an error, not an empty panel", () => {
+  const EMPTY_STATE_CLAIM = /No replacement candidates found/i;
+  const STABLE_SENTENCE =
+    "We could not load replacement candidates. Close this panel and open it again to retry.";
+
+  it.each([
+    ["the field is absent", {}],
+    ["the field is null", { candidates: null }],
+    ["the field is an object, not an array", { candidates: { "0": "x" } }],
+    ["the field is a string", { candidates: "none" }],
+    ["the whole body is not an object", null],
+  ])("renders the error state when %s", async (_label, body) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mockFetch(async () => new Response(JSON.stringify(body), { status: 200 }));
+
+    renderPanel();
+
+    await waitFor(() =>
+      expect(screen.getByText(STABLE_SENTENCE)).toBeInTheDocument(),
+    );
+    // The load-bearing half: the panel must NOT claim the portfolio has no
+    // candidates when we simply could not read the answer.
+    expect(screen.queryByText(EMPTY_STATE_CLAIM)).toBeNull();
+    expect(screen.queryByTestId("replacement-card")).toBeNull();
+  });
+
+  it("ANTI-REGRESSION: a genuine empty array is still the empty state, not an error", async () => {
+    mockFetch(async () =>
+      new Response(JSON.stringify({ candidates: [] }), { status: 200 }),
+    );
+
+    renderPanel();
+
+    await waitFor(() =>
+      expect(screen.getByText(EMPTY_STATE_CLAIM)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(STABLE_SENTENCE)).toBeNull();
+  });
+
+  it("logs the malformed payload so the parse failure is observable", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockFetch(async () =>
+      new Response(JSON.stringify({ candidates: "none" }), { status: 200 }),
+    );
+
+    renderPanel();
+
+    await waitFor(() =>
+      expect(screen.getByText(STABLE_SENTENCE)).toBeInTheDocument(),
+    );
+    const tagged = errorSpy.mock.calls.find(
+      (call) => typeof call[0] === "string" && call[0].includes("[bridge.fetch]"),
+    );
+    expect(tagged).toBeDefined();
+    expect(tagged?.[1]).toMatchObject({ portfolioId: "p-1", strategyId: "under-1" });
+  });
+});
+
+/**
+ * [140.3-07 / M74] THE NEGATIVE PIN — ReplacementPanel is the LATENT third
+ * member of the B-26 stale-result class, and it must STAY latent.
+ *
+ * Structurally it qualifies: it holds a fetched `candidates` result and an
+ * `error` in independent state, and its render blocks are independent siblings
+ * — exactly `KeyPermissionBadge`'s shape. It is unreachable only because of two
+ * facts, and this pin asserts BOTH:
+ *
+ *   1. its only refetch trigger is a `[portfolioId, strategyId]` dep change on
+ *      a single mount-effect — there is no user-facing re-run control; and
+ *   2. its SOLE parent, `BridgeTrigger.tsx`, mounts it under `{open && …}` from
+ *      one insight, so those two props cannot change while it is mounted.
+ *
+ * ⚠️ It is deliberately NOT fixed. Adding an invalidation here would convert a
+ * pinned-latent member into a live one with no way to exercise the new code —
+ * an untested path is worse than a structurally unreachable one. If a future
+ * change adds a SECOND parent, or lets the props change while mounted, this pin
+ * reddens and THAT is the moment to apply the locked `setCandidates(null)`
+ * shape used at the two live members.
+ */
+describe("[140.3-07 / M74] the latent third member stays structurally unreachable", () => {
+  const SRC = join(process.cwd(), "src", "components", "portfolio");
+  const panelSource = readFileSync(join(SRC, "ReplacementPanel.tsx"), "utf8");
+  const parentSource = readFileSync(join(SRC, "BridgeTrigger.tsx"), "utf8");
+
+  it("has NO invalidation-before-refetch — the latent member is pinned, not fixed", () => {
+    expect(panelSource).not.toMatch(/setCandidates\(null\)/);
+    expect(panelSource).not.toMatch(/setCandidates\(\[\]\)/);
+  });
+
+  it("fetches from a single mount-effect keyed on [portfolioId, strategyId]", () => {
+    // Exactly one effect in this file performs the fetch …
+    const fetchingEffects = panelSource
+      .split("useEffect(")
+      .slice(1)
+      .filter((block) => block.includes("fetch("));
+    expect(fetchingEffects).toHaveLength(1);
+    // … and its dep array is the two props, so nothing else can retrigger it.
+    expect(panelSource).toContain("}, [portfolioId, strategyId]);");
+  });
+
+  it("has exactly ONE parent, and that parent mounts it conditionally", () => {
+    // A second parent is the realistic way this member goes live: another
+    // surface could hold it mounted while swapping strategyId.
+    const parents = listFilesUnder(join(process.cwd(), "src")).filter(
+      (file) =>
+        !file.endsWith(".test.tsx") &&
+        !file.endsWith("ReplacementPanel.tsx") &&
+        readFileSync(file, "utf8").includes("<ReplacementPanel"),
+    );
+    expect(parents.map((p) => p.split("/").pop())).toEqual([
+      "BridgeTrigger.tsx",
+    ]);
+    // The conditional mount is what guarantees a fresh mount per open, so a
+    // new strategyId always arrives with a fresh, empty `candidates`.
+    expect(parentSource).toMatch(/\{open && \(\s*<ReplacementPanel/);
+  });
+
+  it("BEHAVIOURAL: a re-render with unchanged props does not refetch", async () => {
+    const fetchSpy = vi.fn(async () =>
+      new Response(JSON.stringify({ candidates: [] }), { status: 200 }),
+    );
+    mockFetch(fetchSpy);
+
+    const { rerender } = renderPanel();
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <ReplacementPanel
+        portfolioId="p-1"
+        strategyId="under-1"
+        strategyName="Underperformer"
+        insightSentence="Underperformer has trailed the baseline."
+        onClose={vi.fn()}
+      />,
+    );
+
+    // No second request ⇒ no window in which a previous result could coexist
+    // with a new error. This is what "latent" means, measured rather than
+    // asserted from the source alone.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });

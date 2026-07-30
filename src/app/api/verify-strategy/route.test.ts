@@ -235,6 +235,13 @@ describe("NEW-C35-02 — unified path persists trust_tier=self_reported for teas
         ok: true,
         response: null,
         body: {
+          // 140.3-02 / TS-12 — `ok: true` + an explicit `code: null` are what the
+          // real terminal-success builder emits; this double previously omitted
+          // them, i.e. it disagreed with the contract it stands in for. The route
+          // now reads the discriminator, so the FIXTURE is corrected — the
+          // trust_tier assertion below is untouched and just as strong.
+          ok: true,
+          code: null,
           verification_id: "44444444-4444-4444-4444-444444444444",
           status: "published",
           // upstream reports api_verified — the teaser path must override this
@@ -303,6 +310,11 @@ describe("NEW-C35-01 — unified path does not spread encrypted_credentials", ()
         ok: true,
         response: null,
         body: {
+          // 140.3-02 / TS-12 — see the note on the NEW-C35-02 fixture above: the
+          // real terminal-success builder carries `ok: true` + `code: null`.
+          // The leak assertions below are untouched.
+          ok: true,
+          code: null,
           verification_id: "33333333-3333-3333-3333-333333333333",
           status: "published",
           trust_tier: "api_verified",
@@ -339,5 +351,413 @@ describe("NEW-C35-01 — unified path does not spread encrypted_credentials", ()
     expect(body).toHaveProperty("verification_id");
     expect(body).toHaveProperty("public_token");
     expect(body).toHaveProperty("expires_at");
+  });
+});
+
+/**
+ * Phase 140.3-02 / TS-12 + TS-14 — success is decided by the envelope's OWN
+ * `ok` discriminator, never by sniffing a field and never by the status.
+ *
+ * ⚠️ WHY NOT THE STATUS (fold-in M-6 from the 140.1 code review). `validate-only`
+ * answers **200 with `ok:false`** where `_scope_rejected` answers **403**, on the
+ * IDENTICAL `not val.valid` predicate. It was judged a deliberate carve-out, but
+ * `STATUS_CONTRACT.md` records the exception nowhere. A consumer branching on
+ * STATUS is therefore wrong on one of the two paths no matter which status it
+ * picks. Branching on `ok` is correct on both. Do NOT "simplify" this back.
+ *
+ * ⚠️ WHY NOT `verification_id`. The route used to decide success by
+ * `typeof upstream.verification_id === "string"`. The Python terminal-success
+ * builder's own docstring (`process_key.py`, the `flow_type=teaser` return) names
+ * this exact site as the shape consumers used to SNIFF, and adds `ok: true` +
+ * `code: null` precisely so they stop. A sniff cannot tell a success carrying an
+ * id from a FAILURE carrying an id.
+ *
+ * ORACLE INDEPENDENCE: every fixture key and expected value is a hand-typed
+ * literal, taken from the Python builders' key sets, not imported from anything.
+ */
+describe("[140.3-02 / TS-12] POST /api/verify-strategy — success is decided by `ok`, not by sniffing verification_id", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    verificationCount = 0;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("A 200 carrying `ok: false` is NEVER treated as a verification — no public_token is minted", async () => {
+    const updateSpy = vi
+      .fn()
+      .mockReturnValue({ eq: vi.fn().mockResolvedValue({ error: null }) });
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from(table: string) {
+          if (table === "strategy_verifications") return { update: updateSpy };
+          throw new Error(`unexpected: ${table}`);
+        },
+      }),
+    }));
+    // A FAILURE envelope that nonetheless carries a top-level verification_id.
+    // The old `typeof upstream.verification_id === "string"` sniff reads this as
+    // a success and publishes a teaser factsheet for a key that FAILED
+    // validation, complete with a queryable public_token.
+    vi.doMock("@/lib/process-key-client", () => ({
+      postProcessKey: vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        body: {
+          ok: false,
+          code: "AUTH_FAILED",
+          human_message: "Those API credentials were rejected by the exchange.",
+          correlation_id: "11111111-2222-3333-4444-555555555555",
+          recoverable: false,
+          verification_id: "88888888-8888-8888-8888-888888888888",
+        },
+      }),
+    }));
+
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+    const body = await res.json();
+
+    expect(
+      res.status,
+      "A 200 whose envelope says `ok: false` is a FAILURE. Deciding success by " +
+        "the presence of a verification_id mints a public_token for a key the " +
+        "exchange rejected — TS-12.",
+    ).not.toBe(200);
+    expect(body).not.toHaveProperty("public_token");
+    // And nothing was written: no row is stamped with a token for a failure.
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  it("PIN — a 200 carrying `ok: true` but NO verification_id is still refused (the shape guard is DRIFT cover, not rejection cover)", async () => {
+    // ⚠️ FINDING recorded against TS-12's premise. The plan called this guard's
+    // rejection case dead and said to DELETE the guard. Its REJECTION trigger is
+    // indeed dead — a rejection returns at the client's `!result.ok` fork above.
+    // Its DRIFT trigger is NOT: a 2xx whose body lost `verification_id` reaches
+    // here. Deleting the guard would emit 200 + a public_token persisted to
+    // `.eq("id", null)` — a token queryable against no row, which is the
+    // "silent success on failure" defect this phase exists to close, and the
+    // exact twin of the `isUuid` guard TS-13 says to KEEP one route over.
+    // This case is GREEN before and after the change BY DESIGN — that is what
+    // makes it a pin rather than a falsifier.
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from(table: string) {
+          if (table === "strategy_verifications") {
+            return { update: () => ({ eq: async () => ({ error: null }) }) };
+          }
+          throw new Error(`unexpected: ${table}`);
+        },
+      }),
+    }));
+    vi.doMock("@/lib/process-key-client", () => ({
+      postProcessKey: vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        body: { ok: true, code: null, status: "published" },
+      }),
+    }));
+
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body).not.toHaveProperty("public_token");
+  });
+
+  it("the terminal success (`ok: true`, `code: null`, verification_id) still mints and returns a public_token", async () => {
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from(table: string) {
+          if (table === "strategy_verifications") {
+            return { update: () => ({ eq: async () => ({ error: null }) }) };
+          }
+          throw new Error(`unexpected: ${table}`);
+        },
+      }),
+    }));
+    // Hand-typed from the Python terminal-success builder's key set.
+    vi.doMock("@/lib/process-key-client", () => ({
+      postProcessKey: vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        body: {
+          ok: true,
+          code: null,
+          verification_id: "99999999-9999-9999-9999-999999999999",
+          status: "published",
+          trust_tier: "api_verified",
+          metrics_snapshot: { twr: 0.12 },
+        },
+      }),
+    }));
+
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.verification_id).toBe("99999999-9999-9999-9999-999999999999");
+    expect(typeof body.public_token).toBe("string");
+    expect(body.status).toBe("published");
+  });
+});
+
+/**
+ * 140.3-13a / SEAMUX-08 — this route captures to Sentry, under the ONE policy
+ * written out in full in `src/app/api/admin/match/eval/route.ts`.
+ *
+ * ⚠️ SCOPE OF THIS FILE'S ORACLE, STATED SO IT IS NOT OVERSOLD. This file mocks
+ * `@/lib/sentry-capture` wholesale (line ~68, pre-existing), so the scrub —
+ * which lives INSIDE that helper (SEAMCORE-06) — never runs here. These cases
+ * therefore prove the CALL SITE: that the policy's arms fire, that the
+ * non-policy arms do not, and that every capture NAMES its per-request
+ * credentials in `secrets`. That last one is the falsifiable half: drop
+ * `perRequestSecrets` from any arm and these redden.
+ *
+ * The end-to-end proof that a named secret is actually REMOVED — and that the
+ * syscall token SURVIVES — is in `route.seam.test.ts`, which runs the real
+ * helper over a faked Sentry transport. Splitting it is not a convenience: a
+ * "no secret in the payload" assertion written HERE would pass with the
+ * scrubber deleted, which is exactly the vacuous-oracle shape this phase keeps
+ * finding.
+ *
+ * ⚠️ THIS ROUTE IS THE SECRET-BEARING ONE OF THIS PLAN'S FOUR. It holds a LIVE
+ * user Supabase JWT and the caller's RAW exchange credentials at the same time.
+ * `140.3-02` closed a live end-user JWT log leak one wave-set ago; an
+ * observability channel added here must not re-open it through Sentry.
+ */
+describe("[140.3-13a / SEAMUX-08] POST /api/verify-strategy — Sentry capture policy", () => {
+  /** A live-shaped Supabase JWT, long enough to clear the redaction floor. */
+  const LIVE_JWT =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyLTEiLCJyb2xlIjoiYXV0aGVudGljYXRlZCJ9.s3cr3t-s1gnatur3-v4lu3";
+  const RAW_API_KEY = "AK_LIVE_9f3a1c7e5b2d84a6f0c1e3d5";
+  const RAW_API_SECRET = "SEC_kX7pQ2mN9vB4tR8sL1wY6hG3jD5fA0cZ";
+
+  const SECRET_BODY = {
+    email: "test@example.com",
+    exchange: "okx",
+    api_key: RAW_API_KEY,
+    api_secret: RAW_API_SECRET,
+  };
+
+  /** A session IS readable, so the JWT is in scope and must be named. */
+  function mockSessionPresent() {
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () => ({
+        auth: {
+          getSession: async () => ({
+            data: { session: { access_token: LIVE_JWT } },
+            error: null,
+          }),
+        },
+      }),
+    }));
+  }
+
+  function mockAdmin(update: unknown) {
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from: () => ({ update }),
+      }),
+    }));
+  }
+
+  function mockUpstream(body: unknown) {
+    vi.doMock("@/lib/process-key-client", () => ({
+      postProcessKey: vi.fn().mockResolvedValue({ ok: true, status: 200, body }),
+    }));
+  }
+
+  const TERMINAL_SUCCESS = {
+    ok: true,
+    code: null,
+    verification_id: "99999999-9999-4999-8999-999999999999",
+    status: "published",
+  };
+
+  /** The last capture's options, or undefined when nothing was captured. */
+  function lastCapture() {
+    const calls = captureSpy.mock.calls;
+    return calls.length === 0
+      ? undefined
+      : (calls[calls.length - 1] as [
+          unknown,
+          {
+            tags?: Record<string, string>;
+            extra?: Record<string, unknown>;
+            level?: string;
+            secrets?: readonly unknown[];
+          },
+        ]);
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    verificationCount = 0;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("POSITIVE: an upstream 2xx that is not a usable verification IS captured as a contract violation", async () => {
+    mockSessionPresent();
+    mockAdmin(vi.fn());
+    // ok:false on a 2xx — drift in a contract only we can fix, and the caller
+    // just sees a 502, so nothing else on this path alerts.
+    mockUpstream({ ok: false, code: "AUTH_FAILED", verification_id: "x" });
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(SECRET_BODY));
+    expect(res.status).toBe(502);
+
+    const capture = lastCapture();
+    expect(capture, "a contract violation reached nobody").toBeDefined();
+    expect(capture![1].tags?.surface).toBe("verify-strategy");
+    expect(capture![1].tags?.step).toBe("upstream-contract");
+    // The SYNTHETIC error, not the raw body — which carries
+    // `encrypted_credentials` and must never be handed to a third party.
+    expect(capture![0]).toBeInstanceOf(Error);
+  });
+
+  it("🔴 THE SECRETS ARGUMENT: every capture NAMES the live JWT and both raw exchange credentials", async () => {
+    mockSessionPresent();
+    mockAdmin(vi.fn());
+    mockUpstream({ ok: false, code: "AUTH_FAILED" });
+    vi.resetModules();
+    const { POST } = await import("./route");
+    await POST(postReq(SECRET_BODY));
+
+    const secrets = lastCapture()![1].secrets;
+    expect(
+      secrets,
+      "no per-request secrets were named. No module-level env list can know a live user JWT or a caller's raw exchange credentials, so this array is the ONLY thing stopping undici's inlined headers reaching a third party (TRAP-1).",
+    ).toBeDefined();
+    expect(secrets).toContain(LIVE_JWT);
+    expect(secrets).toContain(RAW_API_KEY);
+    expect(secrets).toContain(RAW_API_SECRET);
+  });
+
+  it("POSITIVE: a createAdminClient config fault IS captured, at level fatal, with its secrets", async () => {
+    mockSessionPresent();
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => {
+        throw new Error("SUPABASE_SERVICE_ROLE_KEY is not set");
+      },
+    }));
+    mockUpstream(TERMINAL_SUCCESS);
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(SECRET_BODY));
+    expect(res.status).toBe(500);
+
+    const capture = lastCapture();
+    // The in-file comment on this arm has claimed "loud in logs/Sentry" since
+    // it was written; until 140.3-13a the Sentry half of that was false.
+    expect(capture, "the config arm's own comment promises Sentry").toBeDefined();
+    expect(capture![1].tags?.step).toBe("admin-client-config");
+    expect(capture![1].level).toBe("fatal");
+    expect(capture![1].secrets).toContain(LIVE_JWT);
+  });
+
+  it("POSITIVE: a returned persist error IS captured", async () => {
+    mockSessionPresent();
+    mockAdmin(
+      vi.fn().mockReturnValue({
+        eq: vi.fn().mockResolvedValue({ error: { message: "row not found" } }),
+      }),
+    );
+    mockUpstream(TERMINAL_SUCCESS);
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(SECRET_BODY));
+    expect(res.status).toBe(500);
+
+    const capture = lastCapture();
+    expect(capture).toBeDefined();
+    expect(capture![1].tags?.step).toBe("public-token-persist");
+    expect(capture![1].secrets).toContain(RAW_API_SECRET);
+  });
+
+  it("POSITIVE: a THROWN persist failure is captured SEPARATELY from the returned one", async () => {
+    // Two separately reachable arms, so two separately named steps. A single
+    // shared tag could not tell a transport failure from a returned
+    // PostgrestError in triage.
+    mockSessionPresent();
+    mockAdmin(
+      vi.fn().mockReturnValue({
+        eq: vi.fn().mockRejectedValue(new Error("ECONNREFUSED supabase")),
+      }),
+    );
+    mockUpstream(TERMINAL_SUCCESS);
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(SECRET_BODY));
+    expect(res.status).toBe(500);
+    expect(lastCapture()![1].tags?.step).toBe("public-token-persist-threw");
+  });
+
+  // ── the policy's NEGATIVE half ────────────────────────────────────────────
+
+  it("NEGATIVE: a caller fault (invalid JSON) is NEVER captured", async () => {
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq("{not json", true));
+    expect(res.status).toBe(400);
+    expect(captureSpy).not.toHaveBeenCalled();
+  });
+
+  it("NEGATIVE: a caller fault (unsupported exchange) is NEVER captured", async () => {
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq({ ...SECRET_BODY, exchange: "nasdaq" }));
+    expect(res.status).toBe(400);
+    expect(captureSpy).not.toHaveBeenCalled();
+  });
+
+  it("NEGATIVE: an already-classified seam envelope (a breaker 503) is NEVER captured here", async () => {
+    // `postProcessKey` returns its own classified response for a breaker trip
+    // and the route returns it verbatim at `!result.ok`. That is the expected
+    // infrastructure fact the policy excludes — capturing it would fire on
+    // every seam route at once during one correlated incident.
+    mockSessionPresent();
+    mockAdmin(vi.fn());
+    vi.doMock("@/lib/process-key-client", () => ({
+      postProcessKey: vi.fn().mockResolvedValue({
+        ok: false,
+        response: new Response(JSON.stringify({ ok: false, code: "CIRCUIT_OPEN" }), {
+          status: 503,
+        }),
+      }),
+    }));
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(SECRET_BODY));
+    expect(res.status).toBe(503);
+    expect(captureSpy).not.toHaveBeenCalled();
+  });
+
+  it("ANTI-REGRESSION: a clean terminal success captures NOTHING", async () => {
+    // Without this, a route that captured unconditionally would satisfy every
+    // positive case above while making Sentry useless.
+    mockSessionPresent();
+    mockAdmin(
+      vi.fn().mockReturnValue({ eq: vi.fn().mockResolvedValue({ error: null }) }),
+    );
+    mockUpstream(TERMINAL_SUCCESS);
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(SECRET_BODY));
+    expect(res.status).toBe(200);
+    expect(captureSpy).not.toHaveBeenCalled();
   });
 });

@@ -157,11 +157,32 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
             # byte-unchanged so the TS side needs ZERO change (TS-07 is the
             # negative obligation confirming it), machine `code` beside it so
             # 140.3 can retire the cascade. DO NOT "unify" these seven sites onto
-            # service_error. Status stays 400 — the classifier discards the
-            # upstream status, so the 400->424 remap is user-invisible and is
-            # owed as ONE unit with TS-05 (ledger row TS-32).
+            # service_error.
+            #
+            # ⚠️ STATUS IS 424, REMAPPED FROM 400 BY 140.3-06 (ledger row TS-32).
+            # 424 is CALLER'S EXCHANGE in STATUS_CONTRACT.md §5: the third party
+            # THE CALLER NAMED is at fault. A 400 here said the caller's request
+            # was malformed, which is a false accusation on every one of these
+            # seven arms — the venue failed, not the user.
+            #
+            # The row's stated `BLOCKED-BY: TS-05` named the WRONG row. The remap
+            # is BODY-NEUTRAL: main.py's handler serialises {detail, code,
+            # recoverable} from `verdict.status_code` independent of status, and
+            # the class guard already admits any 400 <= status < 500, so nothing
+            # about the body moves and "[object Object]" is structurally
+            # impossible. The real blocker was TS-35 — `classifyKeyValidationError`
+            # deriving everything from the message string — and it landed in
+            # 140.3-05, which made the wizard read `body.code` first.
+            #
+            # Breaker-safe by construction: 424 is a 4xx, and
+            # src/lib/seam-discriminator.ts classifies it `caller-exchange` /
+            # `counts:false` / `breakerKey:null`, so a Binance outage cannot open
+            # OUR breaker. This flat shape carries no `dependency` — unlike the
+            # nested `service_error(424, …)` form, whose `_validate` arm REQUIRES
+            # a venue slug there — so the two 424 shapes cannot be confused and
+            # the venue vocabulary never collides with SERVICE_DEPENDENCIES.
             raise VenueTransientHTTPException(
-                status_code=400,
+                status_code=424,
                 code="RATE_LIMITED",
                 detail=RATE_LIMITED_DETAIL,
                 recoverable=True,
@@ -176,7 +197,7 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
         # code matches what the copy already says; vocabulary reused, never
         # re-minted.
         raise VenueTransientHTTPException(
-            status_code=400,
+            status_code=424,
             code="NETWORK_UNAVAILABLE",
             detail=NETWORK_ERROR_DETAIL,
             recoverable=True,
@@ -369,7 +390,7 @@ async def _validate_mt5_key(
             # `validate_key_permissions`, so a call-graph enumeration misses all
             # three even though they are structurally identical to C2.
             raise VenueTransientHTTPException(
-                status_code=400,
+                status_code=424,
                 code="NETWORK_UNAVAILABLE",
                 detail=NETWORK_ERROR_DETAIL,
                 recoverable=True,
@@ -385,7 +406,7 @@ async def _validate_mt5_key(
             )
             # PYAPIFIX2-01 (C4) — see the C1 block for the shape rationale.
             raise VenueTransientHTTPException(
-                status_code=400,
+                status_code=424,
                 code="NETWORK_UNAVAILABLE",
                 detail=NETWORK_ERROR_DETAIL,
                 recoverable=True,
@@ -407,7 +428,7 @@ async def _validate_mt5_key(
             )
             # PYAPIFIX2-01 (C5) — see the C1 block for the shape rationale.
             raise VenueTransientHTTPException(
-                status_code=400,
+                status_code=424,
                 code="NETWORK_UNAVAILABLE",
                 detail=NETWORK_ERROR_DETAIL,
                 recoverable=True,
@@ -596,7 +617,7 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
         # for EVERY verdict here, permanent ones included — that is closing the
         # site, not absorbing the separate permanent-only gap.
         raise VenueTransientHTTPException(
-            status_code=400,
+            status_code=424,
             code=result["error_code"],
             detail=result["error"],
             recoverable=result["error_code"] not in PERMANENT_VALIDATION_ERROR_CODES,

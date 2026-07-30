@@ -13,6 +13,20 @@ import {
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { classifyKeyValidationError } from "@/lib/wizardErrors";
 import { scrubSeamError } from "@/lib/seam-redaction";
+// 140.3-13b / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
+// capture policy written out IN FULL in `src/app/api/admin/match/eval/route.ts`
+// by `140.3-13a`. Cited, never restated.
+//
+// ⚠️ SECRET-BEARING, exactly like `create-with-key`, and DIVERGENCE-FREE from it
+// by design: every capture below names the same three per-request values
+// `[api_key, apiSecretNormalized, passphraseOrNull]` at the same four arms. The
+// two routes share `classifyKeyValidationError` precisely so the single-key and
+// "+ Add another key" paths cannot drift; their observability must not drift
+// either, or a multi-key outage becomes invisible while the single-key one is
+// reported. `140.3-13a`'s M78b is the receipt for omitting `secrets`: the
+// env-derived token still redacts, so the obvious assertion stays GREEN while
+// the raw exchange credential ships verbatim.
+import { captureToSentry } from "@/lib/sentry-capture";
 // The dependency-free leaf. `analytics-client` re-exports the class, but this
 // route must not depend on that re-export: it is wholesale-mocked by the route
 // test files, where `instanceof` against an undefined binding throws.
@@ -314,6 +328,21 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // matching DB column nullable to accept this. Only `api_key_encrypted` is
     // required here.
     if (!api_key_encrypted) {
+      // 140.3-13b / SEAMUX-08 — CONTRACT VIOLATION (a 2xx whose body cannot be
+      // used). Byte-for-byte the same disposition as `create-with-key`'s
+      // encrypt arm; only the `surface` tag differs, so the two paths are
+      // distinguishable in Sentry without being governed by two rules.
+      captureToSentry(
+        new Error("composite/add-key: encrypt 2xx returned no api_key_encrypted"),
+        {
+          tags: {
+            surface: "strategies-composite-add-key",
+            step: "encrypt-contract",
+          },
+          extra: { returned_keys: Object.keys(encrypted) },
+          secrets: [api_key, apiSecretNormalized, passphraseOrNull],
+        },
+      );
       console.error(
         "[strategies/composite/add-key] Railway returned unexpected encrypted payload shape",
         Object.keys(encrypted),
@@ -381,6 +410,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           { status: 403, headers: NO_STORE_HEADERS },
         );
       }
+      // 140.3-13b / SEAMUX-08 — THE TERMINAL, UNCLASSIFIED RPC ARM. 23505 and
+      // 42501 above are Postgres conditions we recognise and answer with their
+      // own status; anything else is a fault in a SECURITY DEFINER function
+      // only we can fix. Mirrors `create-with-key`.
+      captureToSentry(error, {
+        tags: {
+          surface: "strategies-composite-add-key",
+          step: "draft-rpc-error",
+        },
+        extra: { pg_code: error.code },
+        secrets: [api_key, apiSecretNormalized, passphraseOrNull],
+      });
       return NextResponse.json(
         { code: "UNKNOWN", error: "Could not add composite key" },
         { status: 500, headers: NO_STORE_HEADERS },
@@ -389,6 +430,26 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
     const row = Array.isArray(data) ? data[0] : data;
     if (!row?.strategy_id || !row?.api_key_id) {
+      // 140.3-13b / SEAMUX-08 — CONTRACT VIOLATION: the RPC reported SUCCESS and
+      // returned a body we cannot use, after the caller already spent both seam
+      // budgets on validate + encrypt. Mirrors `create-with-key`.
+      captureToSentry(
+        new Error(
+          "composite/add-key: add_wizard_composite_key succeeded with no usable row",
+        ),
+        {
+          tags: {
+            surface: "strategies-composite-add-key",
+            step: "draft-rpc-contract",
+          },
+          extra: {
+            row_present: row !== null && row !== undefined,
+            has_strategy_id: Boolean(row?.strategy_id),
+            has_api_key_id: Boolean(row?.api_key_id),
+          },
+          secrets: [api_key, apiSecretNormalized, passphraseOrNull],
+        },
+      );
       return NextResponse.json(
         { code: "UNKNOWN", error: "RPC returned no rows" },
         { status: 500, headers: NO_STORE_HEADERS },
@@ -437,6 +498,28 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // terminal UNKNOWN/500 instead of the retryable 503. DIVERGENCE-FREE: this
     // is byte-identical to the create-with-key catch by design.
     const { code, status } = classifyKeyValidationError(err);
+
+    // 140.3-13b / SEAMUX-08 — THE TERMINAL ARM. The shared classifier IS this
+    // route's ladder of typed branches, so "matched no typed branch" is exactly
+    // its terminal verdict `UNKNOWN`. Everything it DID recognise is excluded
+    // for the policy's own reasons: `SERVICE_UNAVAILABLE_RETRY` is the breaker
+    // short-circuit, `KEY_NETWORK_TIMEOUT` the timeout, and the
+    // signature / auth / MT5 verdicts are caller faults.
+    //
+    // ⚠️ Placement AFTER the classify call and BEFORE the `headers` computation,
+    // identical to `create-with-key`: the caught VALUE still reaches the shared
+    // classifier unmodified, the status still comes from the classifier, and the
+    // conditional `Retry-After` still branches on the same instanceof.
+    if (code === "UNKNOWN") {
+      captureToSentry(err, {
+        tags: {
+          surface: "strategies-composite-add-key",
+          step: "unclassified-key-error",
+        },
+        extra: { exchange: exchangeNormalized },
+        secrets: [api_key, apiSecretNormalized, passphraseOrNull],
+      });
+    }
 
     // Mirror the `Retry-After` the resilience core already publishes on its own
     // 503 envelope. `retryAfterS` is the breaker cooldown TTL — the only dynamic

@@ -1342,6 +1342,87 @@ function isDeadlineError(err: unknown): boolean {
 }
 
 /**
+ * Outgoing header NAMES whose VALUES are credentials, lower-cased for matching.
+ *
+ * Hand-typed, and every member is a header this seam actually sends:
+ *   authorization        `Bearer <INTERNAL_API_TOKEN>` on all three seam paths.
+ *   x-user-access-token  a LIVE end-user Supabase JWT.
+ *   x-tenant-claim       the signed HMAC claim that SELECTS the rate-limit bucket.
+ *   x-service-key        `ANALYTICS_SERVICE_KEY` on the analytics client.
+ *   x-internal-token     the same internal token under its other name.
+ *
+ * `x-user-id` and `x-correlation-id` are deliberately ABSENT: a tenant id and a
+ * trace id are diagnostics, not credentials, and redacting them would cost the
+ * operator the two fields that make a seam line correlatable.
+ */
+const CREDENTIAL_HEADER_NAMES: readonly string[] = [
+  "authorization",
+  "x-user-access-token",
+  "x-tenant-claim",
+  "x-service-key",
+  "x-internal-token",
+];
+
+/**
+ * Phase 140.3-02 / TS-15 — the PER-REQUEST secret values on THIS request.
+ *
+ * ⚠️ WHY THIS EXISTS, AND WHY IT IS DERIVED FROM THE HEADERS RATHER THAN
+ * DECLARED BY THE CALLER. `seam-redaction`'s env list (`SEAM_SECRET_ENV_NAMES`)
+ * covers secrets whose values live in `process.env` — it structurally CANNOT
+ * cover a live end-user Supabase JWT, which is per-request data. So the core's
+ * own transport log scrubbed `Authorization` and left `X-User-Access-Token`
+ * VERBATIM in the line, while the comment two lines below claimed it removed
+ * "every credential undici inlined into the message".
+ *
+ * That was a LIVE leak, not a latent one, and it predates this plan:
+ * `strategies/csv-finalize` has forwarded that JWT through this exact core since
+ * Phase 19.1. The client's own log site was covered by plan 140.2-08 (it passes
+ * `args.userAccessToken` explicitly); THIS site was not, because its enumeration
+ * was of the CLIENT's sites. Found by execution, not by reading, when 140.3-02
+ * drove a token-bearing transport error through the route — recorded in that
+ * plan's SUMMARY as a correction to 140.2-08's count.
+ *
+ * DERIVED, NOT DECLARED, and that is the class fix rather than a point fix: any
+ * credential-bearing header the core is ASKED TO SEND is scrubbed from the
+ * core's own log whichever caller supplied it. A `secrets: []` option on the
+ * call site would be convention — a caller who forgets is silently back to
+ * leaking, which is the failure mode this whole programme exists to close.
+ *
+ * TOTAL BY CONSTRUCTION: it feeds a catch block, so every branch returns and
+ * nothing propagates. All three `HeadersInit` shapes are handled because the
+ * core does not control how a caller spells its headers.
+ */
+function credentialHeaderValues(init: RequestInit | undefined): string[] {
+  const values: string[] = [];
+  try {
+    const headers = init?.headers;
+    if (!headers) return values;
+    const push = (name: string, value: unknown) => {
+      if (
+        typeof value === "string" &&
+        value.length > 0 &&
+        CREDENTIAL_HEADER_NAMES.includes(name.toLowerCase())
+      ) {
+        values.push(value);
+      }
+    };
+    if (headers instanceof Headers) {
+      headers.forEach((value, name) => push(name, value));
+    } else if (Array.isArray(headers)) {
+      for (const pair of headers) push(pair?.[0] ?? "", pair?.[1]);
+    } else {
+      for (const [name, value] of Object.entries(headers)) push(name, value);
+    }
+  } catch {
+    // A hostile or exotic headers object must not replace the caller's real
+    // error with a bookkeeping one. An empty list degrades to the pre-fix
+    // behaviour for THIS line only, which is strictly no worse than throwing.
+    return values;
+  }
+  return values;
+}
+
+/**
  * Wrap a settled `Response` so its body reads run INSIDE the classification
  * window (SEAMCORE-02 / ROADMAP SC1).
  *
@@ -1704,10 +1785,16 @@ export async function resilientFetch(
     // being reported as Railway degradation; merging the two would undo it.
     //
     // The budget key stays; the path, the body and every header value stay OUT.
+    //
+    // ⚠️ Phase 140.3-02 / TS-15 — THE SECOND ARGUMENT IS LOAD-BEARING AND WAS
+    // MISSING. The env list cannot reach a per-request credential, so this line
+    // scrubbed `Authorization` and shipped `X-User-Access-Token` — a LIVE
+    // end-user Supabase JWT — verbatim. See `credentialHeaderValues` for the
+    // full statement; do not drop the argument to "simplify" the call.
     console.error(
       deadlineExceeded
         ? `[resilient-fetch] ${budgetKey}: deadline exceeded after ${timeoutMs}ms`
-        : `[resilient-fetch] ${budgetKey}: network failure reaching the analytics service: ${scrubSeamError(err)}`,
+        : `[resilient-fetch] ${budgetKey}: network failure reaching the analytics service: ${scrubSeamError(err, credentialHeaderValues(requestInit))}`,
     );
     // No status line at all, so the verdict is TRANSPORT and the key is the
     // residual global one. Asked of the discriminator rather than hardcoded here

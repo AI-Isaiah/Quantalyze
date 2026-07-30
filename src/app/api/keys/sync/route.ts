@@ -10,6 +10,7 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { isUuid } from "@/lib/utils";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { scrubSeamError } from "@/lib/seam-redaction";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -58,8 +59,20 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const body = await req.json();
   const { strategy_id } = body;
 
+  // ── Phase 140.3-10 / SEAMUX-03 — a machine code on EVERY arm ──────────
+  // Every non-2xx this route emits now carries a `code`, so a consumer
+  // discriminates on a stable token instead of sniffing the prose. Prose is
+  // 140.3-12's to reword; a client branching on it breaks the day it does.
+  // The codes are chosen so each names the fact that is actually true of its
+  // own arm — a missing id, a malformed id, our own throttle, an unknowable
+  // composite membership, a failed enqueue, a Supabase transport fault and an
+  // absent draft are seven different facts, and collapsing them onto one token
+  // would leave the consumer exactly where it started.
   if (!strategy_id || typeof strategy_id !== "string") {
-    return NextResponse.json({ error: "Missing strategy_id" }, { status: 400, headers: NO_STORE_HEADERS });
+    return NextResponse.json(
+      { error: "Missing strategy_id", code: "MISSING_STRATEGY_ID" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
   }
 
   // F6 (code-review): reject a malformed strategy_id BEFORE it becomes the
@@ -68,7 +81,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // fresh allowance + an ownership SELECT) from arbitrary strings. A
   // valid-but-unowned id still gets the uniform 404 below (P458, no existence leak).
   if (!isUuid(strategy_id)) {
-    return NextResponse.json({ error: "Invalid strategy_id" }, { status: 400, headers: NO_STORE_HEADERS });
+    return NextResponse.json(
+      { error: "Invalid strategy_id", code: "INVALID_STRATEGY_ID" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
   }
 
   // F6 (M-0327/H-0279): two-tier rate limit.
@@ -83,10 +99,24 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // A per-user-ONLY bucket (the pre-F6 `keys-sync:${user.id}`) had the
   // starvation + cross-strategy-burn problem; a per-strategy-ONLY bucket
   // removed the per-user ceiling. Both together close both holes.
+  //
+  // ⚠️ 140.3-10 — THE TWO THROTTLE ARMS BELOW ARE TWO DISTINCT SITES emitting
+  // the same sentence. A grep of the string finds them both, but a "fix the
+  // arm" reading treats them as one and leaves the second codeless. They carry
+  // the SAME code deliberately: to the caller both are the one fact "our own
+  // limiter refused this request, here is how long to wait", and which BUCKET
+  // ran out is our internal accounting, not something the caller can act on
+  // differently. `RATE_LIMITED` is the app-global vocabulary's own name for
+  // exactly that fact (see WizardErrorCode's note: OUR limiter, as opposed to
+  // KEY_RATE_LIMIT which is an EXCHANGE throttle) — reusing it here keeps one
+  // token for one fact across the seam instead of minting a route-local
+  // synonym. Each site is pinned by its own case, driven through its own
+  // bucket key with its own wait, so a code dropped from one does not hide
+  // behind the other's assertion.
   const userRl = await checkLimit(keysSyncUserLimiter, `keys-sync-user:${user.id}`);
   if (!userRl.success) {
     return NextResponse.json(
-      { error: "Too many requests" },
+      { error: "Too many requests", code: "RATE_LIMITED" },
       { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(userRl.retryAfter) } },
     );
   }
@@ -96,7 +126,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   );
   if (!rl.success) {
     return NextResponse.json(
-      { error: "Too many requests" },
+      { error: "Too many requests", code: "RATE_LIMITED" },
       { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
     );
   }
@@ -104,7 +134,21 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // Verify ownership via the user-scoped client so we get a clean
   // 403 before ever reaching the Railway pipeline.
   const supabase = await createClient();
-  const { data: strategy } = await supabase
+  // ⚠️ 140.3-10 / TRAP-3 (LIVE, not hypothetical) — this read used to be
+  // `.single()` destructured as `const { data: strategy } =`, DISCARDING
+  // `error`. `.single()` answers `data: null` for three different facts: no
+  // such row, a row this user does not own, AND a transport/query failure. The
+  // old code folded all three into "Strategy not found" — so a Supabase blip
+  // DURING OUR OWN OUTAGE told the user their draft was gone, and the state
+  // that names is the one whose way forward is to throw the draft away. Naming
+  // a vague error arm is what turns it into a specific lie.
+  //
+  // The split copies the in-tree template at
+  // `strategies/finalize-wizard/route.ts:624-646` verbatim in shape:
+  // `.maybeSingle()`, then the transport error first (a 500 ABOUT US, with the
+  // caught value scrubbed through the shipped `scrubSeamError` — never a
+  // hand-rolled scrub), then the genuinely-absent row.
+  const { data: strategy, error: strategyErr } = await supabase
     .from("strategies")
     // 89-02: api_key_id joins the ownership select so the composite-first
     // branch below can gate on api_key_id === null with ZERO extra queries for
@@ -112,7 +156,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     .select("id, user_id, api_key_id")
     .eq("id", strategy_id)
     .eq("user_id", user.id)
-    .single();
+    .maybeSingle();
+
+  if (strategyErr) {
+    console.error(
+      `[keys/sync] strategy lookup failed for ${strategy_id}:`,
+      scrubSeamError(strategyErr),
+    );
+    return NextResponse.json(
+      { error: "Could not load draft", code: "DRAFT_LOOKUP_FAILED" },
+      { status: 500, headers: NO_STORE_HEADERS },
+    );
+  }
 
   if (!strategy) {
     // P458 (audit-2026-05-07): uniform 404 for both "no such strategy" AND
@@ -121,8 +176,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // 403-unowned from 404-not-found. Now there is no asymmetry: an
     // attacker probing a foreign strategy_id and an attacker probing a
     // random uuid both see the same response shape.
+    //
+    // ⚠️ 140.3-10 — THE SPLIT ABOVE MUST NOT WEAKEN THIS. Both facts still
+    // reach THIS line and produce a byte-identical body, status and header
+    // set; the only thing pulled out is the transport failure, which is a
+    // statement about US and was never a statement about the strategy. Adding
+    // any response difference between not-found and not-owned here re-opens
+    // the enumeration hole. Pinned by a dedicated byte-identity case.
+    //
+    // The code is `GATE_DRAFT_GONE`, the same token `finalize-wizard` already
+    // emits for the same fact — one fact, one token across both routes.
     return NextResponse.json(
-      { error: "Strategy not found" },
+      { error: "Strategy not found", code: "GATE_DRAFT_GONE" },
       { status: 404, headers: NO_STORE_HEADERS },
     );
   }
@@ -156,8 +221,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         `[keys/sync] composite membership probe failed for ${strategy_id}:`,
         err,
       );
+      // 140.3-10 — `COMPOSITE_MEMBERSHIP_UNKNOWN` is the EXISTING wizard code
+      // for precisely this fail-closed: finalize-wizard already emits it from
+      // its mirror of this probe. This route was the straggler emitting the
+      // same 503 codeless, so the identical fact carried a token on one route
+      // and nothing on the other.
       return NextResponse.json(
-        { error: "Could not start sync. Try again in a moment." },
+        {
+          error: "Could not start sync. Try again in a moment.",
+          code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+        },
         { status: 503, headers: NO_STORE_HEADERS },
       );
     }
@@ -218,8 +291,14 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           `[keys/sync] enqueue_compute_job (stitch_composite) RPC failed for ${strategy_id}:`,
           rpcError,
         );
+        // 140.3-10 — a DISTINCT fact from the membership fail-closed above:
+        // membership was known, the enqueue itself failed. Same sentence, same
+        // status, different cause, so a different token.
         return NextResponse.json(
-          { error: "Could not start sync. Try again in a moment." },
+          {
+            error: "Could not start sync. Try again in a moment.",
+            code: "SYNC_KICKOFF_FAILED",
+          },
           { status: 503, headers: NO_STORE_HEADERS },
         );
       }
@@ -274,10 +353,43 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       resolvedSource = keyRow.exchange;
     }
   }
+  // Phase 140.3-02 / TS-15 — forward the END USER's Supabase access token so the
+  // unified router can build a USER-SCOPED (RLS-enforcing) client. Only the CSV
+  // finalize flow forwarded it before, which is why PYAPI-01's second defence
+  // layer had to be an explicit Python `strategies` id+user_id filter rather
+  // than letting RLS do it. With the token forwarded, that filter becomes
+  // belt-and-braces rather than the only belt.
+  //
+  // BEST-EFFORT ON PURPOSE, and the direction is deliberate. `csv-finalize`
+  // fails CLOSED (401) on a missing session because its RPC is SECURITY DEFINER
+  // and CANNOT run without `auth.uid()`. Here the token is an ENHANCEMENT: the
+  // caller is already authenticated (withAuth ran `getUser` above) and ownership
+  // is already proven by the user-scoped select above, so a session read that
+  // hiccups must not fail a resync on the money-onboarding chokepoint. The
+  // header is optional by construction — an absent token simply sends no header.
+  //
+  // ⚠️ This token is a LIVE user JWT and undici embeds outgoing headers in
+  // `err.message`. It is passed to `postProcessKey` as a VALUE (never assembled
+  // into a header here) so it reaches `scrubSeamError(message, [userAccessToken])`
+  // at the client's transport log site. Do not hand-roll a second path.
+  let userAccessToken: string | undefined;
+  try {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    userAccessToken = session?.access_token;
+  } catch (sessionErr) {
+    console.warn(
+      `[keys/sync] could not read the session to forward X-User-Access-Token (non-blocking) for ${strategy_id}:`,
+      sessionErr instanceof Error ? sessionErr.message : String(sessionErr),
+    );
+  }
+
   return await unifiedKeysSyncHandler({
     strategy_id,
     userId: user.id,
     source: resolvedSource,
+    userAccessToken,
   });
 });
 
@@ -408,6 +520,12 @@ async function unifiedKeysSyncHandler(args: {
   strategy_id: string;
   userId: string;
   source: string;
+  /**
+   * TS-15 — the end user's Supabase JWT, when a session was readable. OPTIONAL
+   * by construction: the client emits `X-User-Access-Token` only when this is
+   * present, so an absent value fabricates nothing.
+   */
+  userAccessToken?: string;
 }): Promise<NextResponse> {
   const result = await postProcessKey({
     flow_type: "resync",
@@ -419,6 +537,9 @@ async function unifiedKeysSyncHandler(args: {
     routeTag: "keys/sync",
     // CT-4 (army2) — forward tenant id for cross-tenant rate-limit isolation.
     userId: args.userId,
+    // TS-15 — see the block at the call site for why this is best-effort here
+    // and fail-CLOSED at csv-finalize.
+    userAccessToken: args.userAccessToken,
   });
   if (!result.ok) return result.response;
 
@@ -427,15 +548,33 @@ async function unifiedKeysSyncHandler(args: {
   // `body.strategy_id` keep working. Preserve verification_id + queued as
   // additive fields.
   //
-  // CT-5 (army2) — branch on queued: a real enqueue (`queued===true`)
-  // returns 202 syncing; an idempotent WIZARD_DUPLICATE
-  // (`queued===false && code==='WIZARD_DUPLICATE'`) returns 200 with the
-  // upstream's preserved status (e.g. 'validated' or whatever the
-  // pre-existing row holds), the idempotent flag, and the WIZARD_DUPLICATE
-  // code so the wizardErrors copy can render even on a 200.
+  // CT-5 (army2) — a real enqueue returns 202 syncing; a duplicate returns 200
+  // with the upstream's preserved status (e.g. 'validated' or whatever the
+  // pre-existing row holds), the idempotent flag, and the WIZARD_DUPLICATE code
+  // so the wizardErrors copy can render even on a 200.
+  //
+  // ⚠️ Phase 140.3-02 / TS-02 — THE DUPLICATE BRANCH KEYS ON THE CODE ALONE.
+  // It used to read `queued === false && code === "WIZARD_DUPLICATE"`, and that
+  // conjunct was provably wrong in BOTH directions. `queued` and `code` are
+  // ORTHOGONAL facts on this reply:
+  //   · `queued` / `job_state` is a JOB fact — a compute job is now enqueued or
+  //     running for this verification.
+  //   · `code: "WIZARD_DUPLICATE"` + `idempotent: true` is a SUBMISSION fact —
+  //     this submission was a duplicate; no new verification was created.
+  // Neither implies the other, and `process_key.py:_resume_duplicate_job` exists
+  // precisely to produce the state where BOTH are true: the RESUMED WEDGE — a
+  // duplicate submission whose wedged job we re-enqueued. Both duplicate
+  // emitters share ONE builder (`_wizard_duplicate_reply`) which takes `queued`
+  // as a PARAMETER, so `queued: true` beside the code is the normal reply.
+  // The old conjunct therefore SKIPPED the duplicate branch on exactly the case
+  // that most needs it, and reported a recognised duplicate as a fresh sync.
+  // `SubmitStep.tsx` already branches on `data.code === "WIZARD_DUPLICATE"`
+  // alone on the finalize side; this route was the straggler. (The same false
+  // mutual exclusion was deleted from the onboard predicate by TS-01/TS-03 —
+  // see `src/lib/process-key-onboard-contract.ts`. Do not re-introduce it here.)
   const upstream = (result.body ?? {}) as Record<string, unknown>;
   if (upstream && typeof upstream === "object" && "queued" in upstream) {
-    if (upstream.queued === false && upstream.code === "WIZARD_DUPLICATE") {
+    if (upstream.code === "WIZARD_DUPLICATE") {
       return NextResponse.json(
         {
           // H-0309: uniform `ok: true` success discriminator (alongside the
@@ -445,7 +584,11 @@ async function unifiedKeysSyncHandler(args: {
           strategy_id: args.strategy_id,
           status: typeof upstream.status === "string" ? upstream.status : "syncing",
           verification_id: upstream.verification_id ?? null,
-          queued: false,
+          // TS-02 — FORWARD the job fact rather than asserting it. This was
+          // hardcoded `false`, which on a resumed wedge states the opposite of
+          // what the backbone just did: a job IS enqueued. Re-pointing the
+          // branch without this would have moved the lie instead of removing it.
+          queued: upstream.queued === true,
           code: "WIZARD_DUPLICATE",
           idempotent: true,
           // Unified is a single-key resync path — never a composite.

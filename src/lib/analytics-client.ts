@@ -17,6 +17,14 @@ import {
   type SeamBudgetKey,
   type SeamResponse,
 } from "./resilient-fetch";
+// 140.3-01 / TS-05 — the ONE seam-envelope discriminator (140.2-06). Never
+// hand-roll a second extractor: a second implementation of this predicate is
+// the drift class this programme exists to close.
+import {
+  seamDependencyName,
+  seamErrorCode,
+  seamHumanMessage,
+} from "@/lib/seam-discriminator";
 import { CircuitOpenError, SeamBodyReadError } from "./seam-errors";
 import { scrubSeamString } from "./seam-redaction";
 import { mintTenantClaim, type TenantIdentity } from "./tenant-claim";
@@ -56,7 +64,46 @@ export class AnalyticsTimeoutError extends Error {
  */
 export class AnalyticsUpstreamError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  /**
+   * 140.3-01 / TS-05 — the stable MACHINE code from the seam envelope, or
+   * `null` when the body carried none (a transport-shaped failure, a bodyless
+   * 5xx, or a non-contract body).
+   *
+   * Additive and optional: every pre-existing construction site passes two
+   * arguments and keeps `null`. It exists because closing TS-05 with only the
+   * HUMAN half would leave the discriminator's other output unreachable at the
+   * seam chokepoint — and the code, not the sentence, is what the copy plan and
+   * TS-35 branch on. The sentence is for the user; the code is for us.
+   */
+  readonly seamCode: string | null;
+  /**
+   * 140.3-11 / TS-18 — the VENUE the nested envelope named, or `null`.
+   *
+   * Additive and optional on exactly the contract `seamCode` set one plan
+   * earlier: every pre-existing construction site passes two or three arguments
+   * and keeps `null`, and this is the SAME error type rather than a second one
+   * — the seam has one error vocabulary and adding to it is not this plan's to
+   * do. What is new is only that a field the wire already carried stops being
+   * discarded here.
+   *
+   * It has to be carried HERE because this is where the body dies: the route
+   * handlers downstream see only the thrown error, so a `dependency` not read
+   * at this line is unreachable to every consumer. Sniffing it back out of
+   * `message` later would be the substring cascade that correction C-6 caught
+   * rendering a venue WAF block as the user's own IP-allowlist problem.
+   *
+   * `null` on BOTH flat shapes by construction, which is the common case: the
+   * flat `VenueTransientHTTPException` 424 carries no `dependency` key at all.
+   * `null` means "a venue failed and the wire did not say which" — never
+   * "no venue failed", and never a name to invent.
+   */
+  readonly dependency: string | null;
+  constructor(
+    message: string,
+    status: number,
+    seamCode: string | null = null,
+    dependency: string | null = null,
+  ) {
     super(message);
     this.name = "AnalyticsUpstreamError";
     // H-1144: the documented contract is "preserve the UPSTREAM status so route
@@ -72,6 +119,8 @@ export class AnalyticsUpstreamError extends Error {
       );
     }
     this.status = status;
+    this.seamCode = seamCode;
+    this.dependency = dependency;
   }
 }
 
@@ -391,9 +440,33 @@ async function analyticsRequest(
         }
         return { detail: res.statusText };
       });
+      // 140.3-01 / TS-05 — read BOTH halves through the ONE discriminator.
+      //
+      // ONE LINE, TWO WIRE CONTRACTS (STATUS_CONTRACT.md §2 / §2.1). A
+      // deliberate 4xx/5xx from `service_error()` nests the whole envelope at
+      // `body.detail` — `{code, dependency, retryable, detail}` — so the
+      // previous `error.detail ??` read handed an OBJECT to the constructor and
+      // the message coerced to "[object Object]" (obligation O-5). The two
+      // APP-GLOBAL handlers (422, 429) emit a SCALAR `detail` with the code at
+      // the top level, and that path was already correct — TS-07 is an
+      // explicitly NEGATIVE obligation and it must not be "fixed". The leaf
+      // branches on the TYPE of `body.detail`, which is the only thing a
+      // consumer can decide without knowing which route answered.
+      //
+      // The `??` fallback stays: `seamHumanMessage` returns null for a body
+      // carrying no readable human string, and the static sentence is the
+      // pre-plan answer for that case.
+      //
+      // 140.3-11 / TS-18 adds the THIRD half read through the same leaf. The
+      // nested envelope is the only shape carrying `dependency`, and this is
+      // the last line at which it exists — the route handlers downstream see
+      // only the thrown error. `seamDependencyName` returns null for both flat
+      // shapes and for any name inside OUR closed service set.
       throw new AnalyticsUpstreamError(
-        error.detail ?? "Analytics service error",
+        seamHumanMessage(error) ?? "Analytics service error",
         res.status,
+        seamErrorCode(error),
+        seamDependencyName(error),
       );
     }
     // Non-JSON error (FastAPI unhandled exception returns text/plain).

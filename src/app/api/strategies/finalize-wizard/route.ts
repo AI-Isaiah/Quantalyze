@@ -11,6 +11,7 @@ import { isUuid } from "@/lib/utils";
 import { postProcessKey } from "@/lib/process-key-client";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { CircuitOpenError } from "@/lib/seam-errors";
+import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError, scrubSeamString } from "@/lib/seam-redaction";
 import { logAuditEventAsUser } from "@/lib/audit";
@@ -21,6 +22,12 @@ import { logAuditEventAsUser } from "@/lib/audit";
 // applied here implicitly, by the predicate's `body is` narrowing — importing
 // the name explicitly would be an unused binding.)
 import { isProcessKeyOnboardResponse } from "@/lib/process-key-onboard-contract";
+// 140.3-03 / SEAMUX-07 — the publish gate's contract. ONE schema, shared with
+// the sibling route that reads the same upstream body.
+import {
+  LivePermissionsSchema,
+  type LivePermissions,
+} from "@/lib/analytics-schemas";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -78,14 +85,6 @@ const STRATEGY_NAME_SET = new Set(STRATEGY_NAMES as readonly string[]);
 export const maxDuration = 300;
 
 /**
- * User-facing copy for the breaker's 503. STATIC by design (threat T-140-05)
- * and byte-identical to the other seam routes' copy, so a breaker trip reads
- * the same wherever a user meets it.
- */
-const CIRCUIT_OPEN_COPY =
-  "The analytics service is temporarily unavailable. Please try again in a moment.";
-
-/**
  * SEAMCORE-10 (A-06 / A-29) — the hard bound on the composite member fan-out.
  *
  * WHY A CAP EXISTS AT ALL. The composite branch below re-probes EVERY member
@@ -122,12 +121,26 @@ const CIRCUIT_OPEN_COPY =
  */
 const MAX_COMPOSITE_MEMBERS = 10;
 
-interface LivePermissions {
-  read: boolean;
-  trade: boolean;
-  withdraw: boolean;
-  probe_error?: boolean;
-}
+/**
+ * 140.3-03 / SEAMUX-07 — the value a body the schema could not read resolves
+ * to, and the reason this route no longer declares a `LivePermissions`
+ * interface of its own.
+ *
+ * The shape used to be an `interface` here and the body was cast to it with
+ * `as`, which checks NOTHING at runtime. It is now `z.infer`red from
+ * `LivePermissionsSchema` — one declaration, shared with the sibling route that
+ * reads the same upstream (`keys/[id]/permissions`), so the two members of this
+ * class cannot drift apart again.
+ *
+ * A parse miss resolves to this sentinel rather than throwing or returning a
+ * fabricated triple, so it lands on the EXISTING `probe_error` arm below: a
+ * body that could not be read is a probe that did not run, which is the
+ * fail-CLOSED doctrine this file already states. Carrying no scope fields at
+ * all is deliberate — it makes it structurally impossible for a parse miss to
+ * present a scope verdict, however the gates below are later reordered.
+ */
+const PROBE_PARSE_MISS = { probe_error: true } as const;
+type ProbeParseMiss = typeof PROBE_PARSE_MISS;
 
 /**
  * Force-refresh the live `{read, trade, withdraw}` triple for an
@@ -153,7 +166,7 @@ interface LivePermissions {
  */
 async function fetchLivePermissions(
   keyId: string,
-): Promise<LivePermissions> {
+): Promise<LivePermissions | ProbeParseMiss> {
   const internalToken = process.env.INTERNAL_API_TOKEN;
   if (!internalToken) {
     throw new Error("INTERNAL_API_TOKEN is not configured");
@@ -184,7 +197,33 @@ async function fetchLivePermissions(
   // the only safe answer — a key whose live scopes could not be re-checked must
   // never be promoted to pending_review. A body that stalled mid-stream is a
   // probe that did not run.
-  return (await res.json()) as LivePermissions;
+  //
+  // 140.3-03 / SEAMUX-07 — THE UNCHECKED CAST IS GONE (the type name it
+  // asserted is deliberately not spelled out here: the acceptance grep proving
+  // the cast is gone would otherwise match this very comment — the same trap
+  // the route-local-scrubber note below records). It asserted a shape and
+  // verified none, and the gate below rejects only on an explicit
+  // `=== true`: a 2xx `{}` or one renamed field left both scopes `undefined`,
+  // both gates passed, and a key holding trade/withdraw scope was published as
+  // read-only-verified. `read`/`trade`/`withdraw` are REQUIRED in the schema
+  // precisely because their absence is that drift.
+  //
+  // The fallback direction is INVERTED relative to `src/lib/api/errorSchema.ts`,
+  // which degrades an unparseable body to `{}` — right for error COPY, and the
+  // vulnerability here. A miss fails CLOSED instead, on the same arm as a probe
+  // that did not run.
+  const parsed = LivePermissionsSchema.safeParse(await res.json());
+  if (!parsed.success) {
+    console.error(
+      `[strategies/finalize-wizard] live permissions probe returned an ` +
+        `unreadable body — failing CLOSED (fields: ` +
+        `${parsed.error.issues
+          .map((issue) => `${issue.path.join(".") || "<root>"}:${issue.code}`)
+          .join(", ")})`,
+    );
+    return PROBE_PARSE_MISS;
+  }
+  return parsed.data;
 }
 
 function validateStringArray(value: unknown): string[] {
@@ -430,7 +469,7 @@ function validatePayload(
 async function runScopeBroadeningProbe(
   apiKeyId: string,
 ): Promise<{ ok: true } | { ok: false; response: NextResponse }> {
-  let livePerms: LivePermissions;
+  let livePerms: LivePermissions | ProbeParseMiss;
   try {
     livePerms = await fetchLivePermissions(apiKeyId);
   } catch (probeErr) {
@@ -582,9 +621,30 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // strategy, then (b) read the api_keys.exchange via the admin client.
   // The downstream SECURITY DEFINER RPC re-checks ownership, but the
   // probe + admin-client lookup BOTH fire before that point.
+  // 140.3-14 / TS-33 — `wizard_session_id` is selected here, on the read this
+  // handler ALREADY performs, so the dedupe id costs no extra query.
+  //
+  // ⚠️ IT IS READ FROM THE DRAFT ROW, NOT FROM THE REQUEST BODY, and that is a
+  // deliberate improvement on the CSV path's shape rather than a deviation from
+  // it. The placement it is forwarded in is identical (`postProcessKey`'s
+  // `context.wizard_session_id`); only the SOURCE differs. `create-with-key`
+  // and the composite RPC both persist the client's stable session id onto
+  // `strategies.wizard_session_id` at draft creation (migration
+  // 20260602190000, F6), and this select is already owner-scoped
+  // (`.eq("user_id", user.id)`), so the value cannot be supplied, guessed or
+  // swapped by the caller of THIS request. A body field would have re-opened
+  // exactly the caller-supplied-id surface that migration 20260726000225
+  // (140.1 / PYAPI-01) had to scope the unique index to `(strategy_id,
+  // wizard_session_id)` to contain.
+  //
+  // It is also the only source that is STABLE across the duplicate submissions
+  // this is meant to dedupe: the correlation id in `X-Correlation-Id` is
+  // memoized per PAGE LOAD, so a reload — the single most likely way a user
+  // double-submits — mints a new one and would key the dedupe on a value that
+  // changes per request, which is worse than sending nothing.
   const { data: strategyRow, error: strategyErr } = await supabase
     .from("strategies")
-    .select("api_key_id")
+    .select("api_key_id, wizard_session_id")
     .eq("id", fields.strategy_id)
     .eq("user_id", user.id)
     .maybeSingle();
@@ -608,6 +668,22 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   const apiKeyId =
     typeof strategyRow.api_key_id === "string" ? strategyRow.api_key_id : null;
+
+  // 140.3-14 / TS-33. Narrowed the same way `apiKeyId` is, one line above: the
+  // column is NULLABLE (migration 20260602190000 — "only wizard drafts set
+  // it"), so a draft that predates F6, or one minted by a path that does not
+  // stamp it, yields `null`.
+  //
+  // `null` is forwarded as ABSENCE, never as a synthesised value. Python's
+  // `idempotent_by_session` reads `bool(context.get("wizard_session_id"))` and
+  // mints a fresh uuid4 when it is missing, so absence reproduces today's
+  // behaviour byte for byte — the dedupe is simply off for that request, which
+  // is where it already was. Inventing an id to fill the gap would key the
+  // dedupe on a per-request value and make it worse than absent.
+  const wizardSessionId =
+    typeof strategyRow.wizard_session_id === "string"
+      ? strategyRow.wizard_session_id
+      : null;
 
   // #597 — persist the strategy's asset class onto the draft row. The
   // SECURITY DEFINER `finalize_wizard_strategy` RPC signature does not carry
@@ -884,18 +960,36 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             },
           },
         );
-        // The ENVELOPE is deliberately the existing membership-unknown one,
-        // byte-identical to the member-list-read failure above: a list this
-        // route cannot trust to be complete IS an undetermined membership, and
-        // phase 140.2 authors no user-facing copy (that fence is 140.3's). The
-        // operator-facing half — which is where "cap", not "transient", is the
-        // true word — is the log line and the Sentry step tag above. 140.3
-        // owns giving this arm its own code and copy; the retry affordance the
-        // shared envelope renders is wrong for a permanent condition.
+        // ✅ 140.3-14 / TS-37 — THE HAND-OVER THIS COMMENT USED TO REQUEST IS
+        // DISCHARGED HERE. Until now the envelope was deliberately the existing
+        // membership-unknown one, byte-identical to the member-list-read failure
+        // above, because phase 140.2 authored no user-facing copy (that fence is
+        // 140.3's). The consequence was a PERMANENT condition wearing transient
+        // copy: an oversized draft was told "please retry" and handed a Retry
+        // control that could only ever fail again.
+        //
+        // ⚠️ THIS IS ONE ARM OF FOUR, AND THE OTHER THREE DELIBERATELY KEEP
+        // `COMPOSITE_MEMBERSHIP_UNKNOWN` AND THEIR RETRY. The membership-count
+        // probe (~:817), the member-list read (~:872) and the unified arm's
+        // probe (~:1465) are genuine transient reads — the condition really does
+        // clear on retry there. Re-coding any of them would strip a correct
+        // retry from a real transient fault, which is the inverse of the defect
+        // this arm fixes.
+        //
+        // The operator half was ALREADY distinct and is unchanged: the log line
+        // says "EXCEEDED the …-member cap" and the Sentry event above is tagged
+        // `step: "composite-member-cap"`. Only the USER half was missing.
+        //
+        // The status stays 503, unchanged: this plan owns the code and the copy,
+        // not the wire status. `SubmitStep` maps off `code` alone (never status),
+        // so the permanent/transient distinction is carried entirely by the code.
         return NextResponse.json(
           {
-            error: "Could not load composite members; please retry.",
-            code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+            error:
+              `This draft has more than ${MAX_COMPOSITE_MEMBERS} keys attached; ` +
+              `a multi-key strategy can hold at most ${MAX_COMPOSITE_MEMBERS}. ` +
+              `Remove keys until ${MAX_COMPOSITE_MEMBERS} or fewer remain, then submit again.`,
+            code: "COMPOSITE_TOO_MANY_MEMBERS",
           },
           { status: 503, headers: NO_STORE_HEADERS },
         );
@@ -980,6 +1074,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   return await unifiedFinalizeWizardHandler({
     strategy_id: fields.strategy_id,
     userId: user.id,
+    // 140.3-14 / TS-33 — read off the owner-scoped draft row above.
+    wizardSessionId,
     // NEW-C14-06: forward the validated+normalized `fields` object instead
     // of the raw body. Pre-fix: `payload: body as Record<string,unknown>`
     // bypassed canonicalizeExchangeList + string→number coercion so the
@@ -1398,6 +1494,13 @@ async function compositeMemberCount(
 async function unifiedFinalizeWizardHandler(args: {
   strategy_id: string;
   userId: string;
+  /**
+   * 140.3-14 / TS-33 — the draft's persisted wizard session id, or `null` when
+   * the draft carries none. Forwarded into the `postProcessKey` context, which
+   * is the ONE place `/process-key` reads it from; `null` is forwarded as
+   * absence, never as a synthesised id.
+   */
+  wizardSessionId: string | null;
   payload: Record<string, unknown>;
   apiKeyId: string | null;
   source: string;
@@ -1463,6 +1566,26 @@ async function unifiedFinalizeWizardHandler(args: {
       strategy_id: args.strategy_id,
       user_id: args.userId,
       api_key_id: args.apiKeyId,
+      // 140.3-14 / TS-33 — ONE field, in the SAME place and the SAME shape the
+      // CSV routes already use (`csv-validate` and `csv-finalize` both put
+      // `wizard_session_id` in this context object, and `process_key.py` reads
+      // it from exactly here). Until now `finalize-wizard` sent no id, so
+      // Python's `idempotent_by_session` was FALSE on every onboard/resync and
+      // the dedupe mechanism — which exists and works on the CSV path — was
+      // unreachable from this route. A duplicate submit therefore created a
+      // second verification row and a second job.
+      //
+      // ⚠️ SPREAD ORDER IS LOAD-BEARING. This sits AFTER `...args.payload`, so
+      // it cannot be shadowed by a same-named key arriving from the validated
+      // client fields — the same discipline `strategy_id` / `user_id` above
+      // already rely on.
+      //
+      // Conditional spread, not `wizard_session_id: x ?? undefined`: the key is
+      // ABSENT rather than present-and-undefined when the draft carries no id,
+      // so the JSON body matches the pre-140.3-14 body exactly on that path.
+      ...(args.wizardSessionId !== null
+        ? { wizard_session_id: args.wizardSessionId }
+        : {}),
       step: "finalize",
     },
     routeTag: "strategies/finalize-wizard",

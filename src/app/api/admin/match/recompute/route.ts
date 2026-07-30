@@ -2,10 +2,21 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
-import { AnalyticsTimeoutError, recomputeMatch } from "@/lib/analytics-client";
+import {
+  AnalyticsTimeoutError,
+  AnalyticsUpstreamError,
+  recomputeMatch,
+} from "@/lib/analytics-client";
 import { CircuitOpenError } from "@/lib/seam-errors";
+import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+// 140.3-13a / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
+// capture policy written out in full in `src/app/api/admin/match/eval/route.ts`.
+// That docblock is the source of truth for all nine seam routes and is
+// deliberately NOT duplicated here: two copies of a policy is how two policies
+// start. Read it before adding, moving or removing any capture in this file.
+import { captureToSentry } from "@/lib/sentry-capture";
 
 /**
  * Phase 140 / SEAM-02 — pinned for clarity; asserted against
@@ -33,12 +44,13 @@ export const maxDuration = 300;
  * these two admin/match routes were simply never included in those passes.
  * The diagnosable half stays in `console.error`, server-side only.
  *
- * `CIRCUIT_OPEN_COPY` deliberately matches `process-key-client`'s
- * `CIRCUIT_OPEN_HUMAN_MESSAGE` so a breaker trip reads identically to a user
- * whichever seam mechanism they happen to hit.
+ * The breaker body is NOT declared here. `CIRCUIT_OPEN_COPY` is imported from
+ * `@/lib/seam-copy` — the ONE declaration all ten seam emitters read — so a
+ * breaker trip reads identically to a user whichever seam mechanism they happen
+ * to hit, and no single route can be reworded out of step with the other nine
+ * (SEAMUX-01). It still matches `process-key-client`'s
+ * `CIRCUIT_OPEN_HUMAN_MESSAGE` because both are now aliases of that one leaf.
  */
-const CIRCUIT_OPEN_COPY =
-  "The analytics service is temporarily unavailable. Please try again in a moment.";
 const TIMEOUT_COPY = "Match recompute timed out. Please try again.";
 const GENERIC_COPY = "Match recompute failed. Please try again.";
 
@@ -127,6 +139,65 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         { status: 504, headers: NO_STORE_HEADERS },
       );
     }
+    // 140.3-11 / TS-19 — an upstream 4xx SURVIVES this route.
+    //
+    // Until this arm existed the catch block branched on exactly two types, so
+    // every other upstream status became the unconditional 500 below. That is
+    // two losses at once: the status is gone, and a refusal the service issued
+    // deliberately and immediately is reported to an admin as OUR fault, with
+    // "Please try again" attached to a request that will be refused
+    // identically. `analytics-service/routers/match.py` raises 400, 403, 422
+    // and 429 on this endpoint, so it was the common case, not a corner.
+    //
+    // THE RANGE SPLIT IS THE POINT, and it is copied from
+    // `src/app/api/simulator/route.ts:201` rather than invented. Only 4xx
+    // forwards. A 4xx `detail` is operator-curated copy. A 5xx `message`
+    // carries the FastAPI detail, the `parseResponse()` contract-drift string
+    // and this service's base URL — precisely what the STATIC-bodies docblock
+    // at the top of this file exists to keep off the wire (T-140-11) — so a
+    // 5xx keeps falling through to the static arm below.
+    //
+    // The status only. No header rides along: `AnalyticsUpstreamError` carries
+    // none, so a forwarded upstream 429 reaches the client WITHOUT its
+    // `Retry-After`. Inventing one here would name a wait no upstream stated.
+    // (`create-with-key`'s conditional-headers shape applies to the breaker
+    // arm above, which already uses it.)
+    if (
+      err instanceof AnalyticsUpstreamError &&
+      err.status >= 400 &&
+      err.status < 500
+    ) {
+      // Status and machine code only — never the message, which is already
+      // going to the client and would double the disclosure surface in the log.
+      console.error(
+        `[api/admin/match/recompute] upstream ${err.status} (${err.seamCode ?? "no code"})`,
+      );
+      // 140.3-11 / TS-18 — `dependency` rides along so a 424 can be rendered as
+      // the CALLER'S venue failing rather than as our outage. It is `null` on
+      // every other 4xx and on the flat 424 shape, and a consumer that sees
+      // `null` must say "a venue failed" without naming one.
+      return NextResponse.json(
+        { error: err.message, dependency: err.dependency },
+        { status: err.status, headers: NO_STORE_HEADERS },
+      );
+    }
+    // 140.3-13a / SEAMUX-08 — THE TERMINAL ARM, and the only capture in this
+    // route, under the policy in `admin/match/eval/route.ts`. The breaker,
+    // timeout and forwarded-4xx arms above deliberately capture NOTHING: each
+    // is an expected, self-describing condition, and a breaker trip in
+    // particular fires on every request to every seam route at once.
+    //
+    // Delivered in the SAME commit as the sibling route's, and asserted per
+    // file: these two have the same shape and had the same gap (each read 0
+    // `captureToSentry` on the untouched tree), and fixing one while reporting
+    // the class closed is this programme's signature failure — the same reason
+    // `140.3-11` gave when it added the 4xx arm to both.
+    //
+    // Value passed UNMODIFIED; `captureToSentry` scrubs at the chokepoint. No
+    // per-request credential exists on this route, so `secrets` is empty.
+    captureToSentry(err, {
+      tags: { surface: "admin-match-recompute", step: "upstream-error" },
+    });
     console.error("[api/admin/match/recompute] error:", err);
     return NextResponse.json(
       { error: GENERIC_COPY },

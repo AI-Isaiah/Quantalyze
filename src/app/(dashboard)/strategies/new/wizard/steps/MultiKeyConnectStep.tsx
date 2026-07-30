@@ -15,6 +15,7 @@ import {
   type ConnectKeyDraft,
 } from "./ConnectKeyStep";
 import { type WizardErrorCode } from "@/lib/wizardErrors";
+import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SupportedExchange } from "@/lib/utils";
 import { SFOX_UI_ENABLED } from "@/lib/utils";
 import {
@@ -149,6 +150,76 @@ const TRUST_ATOMS: { title: string; body: string }[] = [
     body: "Questions? security@quantalyze.com responds within one business day.",
   },
 ];
+
+/**
+ * 140.3-13a / SEAMUX-08 — the composite variant's funnel step name.
+ *
+ * DELIBERATELY NOT `"connect_key"`. State A of this component delegates to
+ * `ConnectKeyStep`, which emits `step: "connect_key"` from its own error paths,
+ * so reusing that value here would merge the single-key and multi-key funnels
+ * into one indistinguishable bucket — and the whole reason this component needed
+ * emissions is that the COMPOSITE path was invisible. Before this plan
+ * `grep -c 'trackForQuantsEventClient'` on this file was **0**: every multi-key
+ * failure — an add-key rejection, a set-members rejection, a failed rehydrate —
+ * produced no funnel event at all, so a seam outage during a multi-key connect
+ * was indistinguishable from nobody attempting one.
+ */
+const MULTI_KEY_FUNNEL_STEP = "connect_key_multi";
+
+/**
+ * Every `WizardErrorCode` that `POST /api/strategies/composite/add-key` can put
+ * on the wire.
+ *
+ * Same reasoning as `ConnectKeyStep`'s `KNOWN_CREATE_WITH_KEY_CODES`, which is
+ * the sibling route: this replaces a bare `as WizardErrorCode` cast of
+ * `data.code` — widened with an optional and then defaulted to `"UNKNOWN"` — of
+ * NETWORK DATA into a closed union, copying `SubmitStep.tsx`'s
+ * `KNOWN_FINALIZE_CODES` membership shape. The two routes' `classifyKeyValidationError` halves are
+ * identical by construction — both call the one shared classifier — but the
+ * sets are still written out per route rather than shared, because the direct
+ * emissions differ and a shared set would silently admit one route's codes at
+ * the other.
+ */
+const KNOWN_ADD_KEY_CODES: ReadonlySet<WizardErrorCode> =
+  new Set<WizardErrorCode>([
+    // Emitted directly by `composite/add-key/route.ts`'s own guards.
+    "KEY_INVALID_FORMAT",
+    "KEY_NOT_READ_ONLY",
+    "KEY_HAS_TRADING_PERMS",
+    "KEY_HAS_WITHDRAW_PERMS",
+    "DRAFT_ALREADY_EXISTS",
+    "KEY_RATE_LIMIT",
+    "UNKNOWN",
+    // Returned by the shared `classifyKeyValidationError` at its catch arm.
+    "SERVICE_UNAVAILABLE_RETRY",
+    "KEY_INVALID_SIGNATURE",
+    "KEY_AUTH_FAILED",
+    "KEY_MT5_MASTER_PASSWORD",
+    "KEY_MT5_WRONG_SERVER",
+    "KEY_IP_ALLOWLIST",
+    "KEY_NETWORK_TIMEOUT",
+    "KEY_PROBE_FAILED",
+    "KEY_EXCHANGE_UNAVAILABLE",
+    "KEY_VENUE_TRANSIENT",
+  ]);
+
+/**
+ * Every `WizardErrorCode` that `POST /api/strategies/composite/set-members` can
+ * put on the wire — a SEPARATE, much smaller route contract.
+ *
+ * ⚠️ This is why one shared set per STEP would be wrong. `set-members` performs
+ * no key validation at all: it never calls `classifyKeyValidationError` and
+ * emits exactly four codes. Admitting `KEY_AUTH_FAILED` here would let a drifted
+ * or spoofed body render "the exchange rejected your credentials" on a call that
+ * only ever persisted date windows.
+ */
+const KNOWN_SET_MEMBERS_CODES: ReadonlySet<WizardErrorCode> =
+  new Set<WizardErrorCode>([
+    "MULTI_KEY_WINDOWS_INVALID",
+    "GUARD_BLOCKED",
+    "KEY_RATE_LIMIT",
+    "UNKNOWN",
+  ]);
 
 interface PanelState {
   id: string;
@@ -444,6 +515,18 @@ export function MultiKeyConnectStep({
           // F3 — surface a distinguishable, retryable error rather than
           // degrading silently to the blank State-A form.
           setRehydrateStatus("error");
+          // 140.3-13a / SEAMUX-08 — the THIRD error surface of this step, and
+          // the one no document listed. It renders a real
+          // WIZARD_KEYS_LOAD_FAILED envelope to the user, so leaving it
+          // unreported would have shipped a step that emits on two of three
+          // paths while the count read >= 1 and looked closed. The code is the
+          // one the banner below actually builds — the funnel and the screen
+          // must not be able to disagree.
+          trackForQuantsEventClient("wizard_error", {
+            wizard_session_id: wizardSessionId,
+            step: MULTI_KEY_FUNNEL_STEP,
+            code: "WIZARD_KEYS_LOAD_FAILED",
+          });
           return;
         }
         const data = (await res.json().catch(() => ({}))) as {
@@ -488,12 +571,17 @@ export function MultiKeyConnectStep({
         // Logs only `err`, never member/panel fields (T-94-07).
         console.error("[wizard:MultiKeyConnectStep] members GET threw:", err);
         setRehydrateStatus("error");
+        trackForQuantsEventClient("wizard_error", {
+          wizard_session_id: wizardSessionId,
+          step: MULTI_KEY_FUNNEL_STEP,
+          code: "WIZARD_KEYS_LOAD_FAILED",
+        });
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [draftStrategyId, retryTick]);
+  }, [draftStrategyId, retryTick, wizardSessionId]);
 
   const focusRef = useRef<string | null>(null);
   const cardRefs = useRef<Map<string, HTMLButtonElement | null>>(new Map());
@@ -634,8 +722,17 @@ export function MultiKeyConnectStep({
           code?: string;
         };
         if (!res.ok || !data.ok || !data.strategy_id || !data.api_key_id) {
-          const code = (data.code as WizardErrorCode | undefined) ?? "UNKNOWN";
+          // 140.3-13a / SEAMUX-08 — membership-checked, never cast.
+          const code: WizardErrorCode =
+            data.code && KNOWN_ADD_KEY_CODES.has(data.code as WizardErrorCode)
+              ? (data.code as WizardErrorCode)
+              : "UNKNOWN";
           updatePanel(idx, { status: "editing", errorCode: code });
+          trackForQuantsEventClient("wizard_error", {
+            wizard_session_id: wizardSessionId,
+            step: MULTI_KEY_FUNNEL_STEP,
+            code,
+          });
           return;
         }
         setStrategyId(data.strategy_id);
@@ -660,6 +757,11 @@ export function MultiKeyConnectStep({
         updatePanel(idx, {
           status: "editing",
           errorCode: "KEY_NETWORK_TIMEOUT",
+        });
+        trackForQuantsEventClient("wizard_error", {
+          wizard_session_id: wizardSessionId,
+          step: MULTI_KEY_FUNNEL_STEP,
+          code: "KEY_NETWORK_TIMEOUT",
         });
         // Logs only `err`, never credential fields (T-88-18).
         console.error("[wizard:MultiKeyConnectStep] add-key threw:", err);
@@ -759,7 +861,18 @@ export function MultiKeyConnectStep({
         code?: string;
       };
       if (!res.ok || !data.ok) {
-        setContinueError((data.code as WizardErrorCode | undefined) ?? "UNKNOWN");
+        // 140.3-13a / SEAMUX-08 — membership-checked against set-members' OWN
+        // four-code contract, never cast and never against add-key's set.
+        const code: WizardErrorCode =
+          data.code && KNOWN_SET_MEMBERS_CODES.has(data.code as WizardErrorCode)
+            ? (data.code as WizardErrorCode)
+            : "UNKNOWN";
+        setContinueError(code);
+        trackForQuantsEventClient("wizard_error", {
+          wizard_session_id: wizardSessionId,
+          step: MULTI_KEY_FUNNEL_STEP,
+          code,
+        });
         setContinuing(false);
         return;
       }
@@ -774,10 +887,15 @@ export function MultiKeyConnectStep({
       });
     } catch (err) {
       setContinueError("KEY_NETWORK_TIMEOUT");
+      trackForQuantsEventClient("wizard_error", {
+        wizard_session_id: wizardSessionId,
+        step: MULTI_KEY_FUNNEL_STEP,
+        code: "KEY_NETWORK_TIMEOUT",
+      });
       setContinuing(false);
       console.error("[wizard:MultiKeyConnectStep] set-members threw:", err);
     }
-  }, [continuing, strategyId, onSuccess]);
+  }, [continuing, strategyId, onSuccess, wizardSessionId]);
 
   // ── State A: byte-identical ConnectKeyStep + the ONE ghost affordance ───────
   // The rehydration loading/error affordances (F3) render as NON-form-replacing
