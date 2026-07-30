@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.50.0.0] - 2026-07-30
+### v1.16 Production Resilience — the Vercel→Railway seam (circuit breaker + timeout budgets + honest error attribution)
+The milestone hardens the two chokepoints between the Next.js app and the Railway analytics
+worker so that an upstream fault degrades honestly instead of masquerading as an app bug, and a
+sick venue/worker can no longer wedge the request path. Phase 140 and its sub-phases:
+
+- **140 — shared resilience core (circuit breaker).** An Upstash-backed breaker in front of both
+  seam clients (`analytics-client`, `process-key-client`). It **fails OPEN** (a breaker outage
+  never blocks real traffic) and short-circuits calls to a known-sick upstream, with timeout
+  budgets bounding every hop.
+- **140.1 / .1.1 / .1.2 — python service contract + attributability.** The worker's HTTP error
+  contract carries a machine-readable code and a `recoverable` flag so the client can classify
+  transient-vs-permanent faults deterministically; fixes the H-5 duplicate-reply contract break
+  and closes the venue-transient class on the live key-validate route.
+- **140.2 — seam-core breaker correctness + harness integrity.** Coverage-law guards on the shared
+  chokepoints (100% guard requirement) plus the invariant tests that keep the breaker's
+  fail-open/timeout semantics from silently regressing.
+- **140.3 — client wizard seam error surface.** `recogniseSeamErrorCode` on the wizard connect
+  path so a seam fault renders an accurate, recoverable message instead of a generic failure.
+- **140.4 — close the client rim.** Durable client-mint on connect, `recogniseSeamErrorCode`
+  reachability at `ConnectKeyStep`/`MultiKeyConnectStep`, and the **CSV double-submit fence**
+  (`finalize_csv_strategy` + the source-scoped `strategies_user_wizard_session_source_uniq` unique
+  index) — a repeat CSV finalize for one wizard session now raises 23505 and rolls back both the
+  strategy and its verification row instead of fabricating a merged track record.
+- **140.5 — attribution copy + harness fidelity.** Removes the user-facing misattribution where a
+  reached-and-answered KEK/venue fault containing "not configured" was reported as an
+  our-layer backend-unavailable error (`permissions/route.ts`), plus prose/citation-guard fidelity.
+
+Migrations (auto-applied to prod on merge): `20260726000225` (tenant-scoped
+`strategy_verifications` unique index — closes a cross-tenant leak on caller-supplied
+`wizard_session_id`) and `20260728120000` (the CSV double-submit fence above).
+
 ## [0.49.4.0] - 2026-07-25
 ### Backlog triage — nightly npm-audit gate, MT5 server-time offset, dropped items
 - **Nightly `npm audit` gate: cleared the shipped highs, then scoped to the production tree**
