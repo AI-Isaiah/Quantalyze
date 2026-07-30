@@ -748,31 +748,26 @@ describe("[140.3-01 / TS-05] the permissions proxy reads the seam error body thr
     expect(logged).toContain("KEY_UNDECRYPTABLE");
   });
 
-  it("FINDING (140.5-06): an upstream sentence containing 'not configured' is classified as OUR config fault", async () => {
-    // ⚠️ THIS CASE DOCUMENTS A DEFECT. It asserts what the route DOES today, not
-    // what it SHOULD do, and it exists so the behaviour is visible and
-    // falsifiable instead of resting in a SUMMARY nobody re-measures. When the
-    // attribution is fixed, this case must be REWRITTEN, not deleted — its
-    // failure will be the signal that the fix landed.
-    //
-    // HOW IT WAS FOUND. It was invisible while the sibling CONTRACT A fixture
-    // carried a hand-typed body the service cannot construct. Replacing that
-    // fixture with a real, executed raise site from `routers/internal.py`
-    // surfaced it on the first run: the missing-KEK 500's real sentence is
-    // "Credential encryption is not configured. This needs an operator, not a
-    // retry.", and the handler's cascade keys
+  it("REGRESSION (140.5-06 fix): an upstream KEK sentence containing 'not configured' is NOT misattributed to our layer", async () => {
+    // ⚠️ HISTORY. This case once DOCUMENTED a defect (140.5-06). The missing-KEK
+    // 500's real sentence — "Credential encryption is not configured. This needs
+    // an operator, not a retry." — tripped the handler's
     //   isConfigError = … || rawMessage.includes("not configured")
-    // → `PROBE_BACKEND_UNAVAILABLE` + "Could not reach the permissions service."
+    // needle, so a REACHED-AND-ANSWERED upstream KEK fault was reported as
+    // `PROBE_BACKEND_UNAVAILABLE` ("Could not reach the permissions service") —
+    // as though OUR layer were down. That needle was written for the route's OWN
+    // env-var fault ("INTERNAL_API_TOKEN is not configured on the Next layer."),
+    // which the `INTERNAL_API_TOKEN` needle already matches independently; the
+    // bare "not configured" clause was thus both redundant for our fault AND a
+    // prose-grep over arbitrary upstream bodies.
     //
-    // WHY IT IS WRONG. That needle was written for the route's OWN env-var fault
-    // ("INTERNAL_API_TOKEN is not configured on the Next layer."), a Next-layer
-    // condition. Here the upstream WAS reached and answered precisely — a
-    // permanent, operator-actionable KEK gap — and the user is told we could not
-    // reach the service. The needle matches the UPSTREAM's prose, so any upstream
-    // sentence that happens to contain the phrase is re-attributed to our own
-    // configuration. The machine `code` on `cause` (`KEK_UNAVAILABLE`) is the
-    // discriminator that would make this exact, and it is already carried — the
-    // cascade simply does not consult it.
+    // THE FIX (this plan's phase decision). The "not configured" clause was
+    // removed from `isConfigError`. Our config fault stays classified via its own
+    // sentinel token (`INTERNAL_API_TOKEN`); a reached-and-answered upstream fault
+    // now falls to the route's generic reached-but-failed envelope
+    // (`PROBE_FAILED` / 502) — exactly like its sibling KEY_UNDECRYPTABLE 500
+    // above. This case now LOCKS the fix: it reddens if the prose-grep is ever
+    // reintroduced.
     STATE.upstreamStatus = 500;
     STATE.upstreamPayload = {
       detail: {
@@ -793,13 +788,12 @@ describe("[140.3-01 / TS-05] the permissions proxy reads the seam error body thr
     expect(res.status).toBe(502);
     expect(
       body.code,
-      "OBSERVED, not endorsed: a real upstream KEK fault is reported as though " +
-        "OUR layer were misconfigured, because the cascade greps the upstream's " +
-        "sentence instead of reading the machine code already on `cause`.",
-    ).toBe("PROBE_BACKEND_UNAVAILABLE");
-    expect(body.error).toBe(
-      "Could not reach the permissions service. Try again shortly.",
-    );
+      "A reached-and-answered upstream KEK fault must NOT be re-attributed to " +
+        "our layer. The cascade must not grep the upstream's prose for " +
+        "'not configured' — our own config fault is matched by the " +
+        "`INTERNAL_API_TOKEN` sentinel instead.",
+    ).toBe("PROBE_FAILED");
+    expect(body.error).toBe("Could not check key scopes. Try again.");
   });
 
   it("CONTRACT B — a 429 with a SCALAR `detail`: the scalar passes through the discriminator unchanged (TS-07 is negative)", async () => {

@@ -337,7 +337,7 @@ function makeCachedFetcher(keyId: string): {
       //
       // The message is diagnostics-only and deliberately matches NONE of the
       // handler's classifier substrings (`INTERNAL_API_TOKEN`, `Upstream 5`,
-      // `ECONNREFUSED`, `not configured`, `aborted`, `timeout`), so it lands on
+      // `ECONNREFUSED`, `aborted`, `timeout`), so it lands on
       // the route's existing generic `PROBE_FAILED` 502 — the same
       // probe-failure envelope this route already returns. No new copy.
       const parsed = KeyPermissionsPayloadSchema.safeParse(await res.json());
@@ -535,11 +535,21 @@ export const GET = withAuth(
       // verdict comes from the shared typed `CircuitOpenError` and the ONE
       // `CIRCUIT_OPEN_COPY`.
       const rawMessage = err instanceof Error ? err.message : String(err);
+      // 140.5-06 fix — config-detection is scoped to OUR OWN thrown signals, not
+      // a prose-grep over the upstream body. `INTERNAL_API_TOKEN` is this route's
+      // own env-var fault sentinel (thrown above); `Upstream 5` is the
+      // unreadable-5xx fallback WE construct; `ECONNREFUSED` is a transport
+      // rejection. A bare `includes("not configured")` clause used to sit here —
+      // it was redundant (our token message already contains "not configured")
+      // AND over-broad: a reached-and-answered upstream fault whose sentence
+      // happens to contain the phrase (e.g. the missing-KEK 500 "Credential
+      // encryption is not configured…") was mis-reported as OUR layer being
+      // unreachable. Removed: such a fault now falls to the generic reached-but-
+      // failed `PROBE_FAILED` envelope, like every other answered upstream body.
       const isConfigError =
         rawMessage.includes("INTERNAL_API_TOKEN") ||
         rawMessage.startsWith("Upstream 5") ||
-        rawMessage.includes("ECONNREFUSED") ||
-        rawMessage.includes("not configured");
+        rawMessage.includes("ECONNREFUSED");
       const isTimeout =
         rawMessage.includes("aborted") ||
         rawMessage.toLowerCase().includes("timeout");
