@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.16
 milestone_name: Production Resilience & Reliability
-status: ready_to_plan
-stopped_at: "**v1.16 END-OF-MILESTONE REVIEW COMPLETE. PHASE 140.4 INSERTED, PLANNING IN FLIGHT.** HEAD `a77d607e`, tree clean, suite 9792 | 287, coverage 87.17/85.02/82.04/79.09, mypy clean, pytest 4778. **140.3 SHIPPED**: 19 plans / 63 commits (16 planned + G1/G2 gap closure). Gate returned 8 of 9 and refused to round up — SEAMUX-03 OPEN. ⭐ALL 7 SUCCESS CRITERIA PASS WHILE THE REQUIREMENT IS OPEN (criteria measure breaker behaviour, none measures envelope coverage per arm). **THE REVIEW (16 registers, ~6300 lines, all in `.planning/reviews/`)**: 5 specialists + 7 red teams + 3 adversarial verifiers + 2 mutation samples + `140-SYNTHESIS.md`. ⭐**ANSWER TO -Did 140.1/.2/.3 close Phase 140?- : ALL 94 original findings adjudicated at HEAD = 58 CLOSED / 26 PARTIAL / 8 OPEN / 2 SUPERSEDED.** Cluster A (seam core) ZERO OPEN; cluster B (wizard/client) 10 CLOSED vs 14 PARTIAL + 4 OPEN. **28 mutations in isolated worktrees: 26 RED / 2 GREEN = 93% of sampled CLOSED verdicts GENUINELY GUARDED** (run1 9/10, run2 16/17; cluster B CLOSED held PERFECTLY). ⇒ **well-covered CORE, uncovered RIM.** ⭐**THE COVERAGE LAW (governs 140.4 planning):** shared artefact/chokepoint = 100% · hand-typed roster = 9/37 codes, 8/15 files · per-site edit = 0/32. Coverage follows the MECHANISM not the effort. ⭐**A GREP PROVES A STATE; ONLY A GUARD PROVES IT IS HELD** — the one GREEN in run1 landed on the closure audit-s OWN receipt (a one-time grep); 9 raw `HTTPException(status_code=5xx)` sites bypass `service_error()`-s ban; a 500→502 on the ANONYMOUS TEASER left both suites byte-identical while restoring the global-breaker harm. **VERIFIED SEVERITIES (adversarial, default-to-refuted — moved BOTH ways):** C-2 CRITICAL confirmed (CSV double-submit → 200 OK + duplicate strategies+SV rows; both guards removed in ADJACENT commits `5ad45c22`+`ca9a9235`; pinned green by a passing test; fix = add `wizard_session_id` to `finalize_csv_strategy`-s strategies INSERT; DO NOT REVERT the migration) · C-3 CRITICAL+ re-graded UP (7 unchecked supabase reads; read-failed and empty-account render BYTE-IDENTICAL DOM; ⭐under-pled half: failed earliest/latest reads make `spanDays !== null &&` SKIP the 7-day gate ⇒ **publishes an under-history track record AS VERIFIED** — TOP ITEM) · C-5 confirmed, posture is OUTAGE-MODE-DEPENDENT (HTTP-5xx→closed, hang→open+5s, socket-refused→NON-DETERMINISTIC) · C-4 HIGH re-graded DOWN, count is **1 not 9** (`request_call` renders NO control; only `GATE_NO_DATA_SOURCE` is sole-destructive) · **C-1 CRITICAL→LOW, 3 sub-claims REFUTED by measurement** (no real transport failure inlines the token; `postProcessKey` never rethrows; `captureToSentry` scrubs unconditionally; `grep -c scrubSeamError → 0` is a FALSE SIGNAL). ⚠️⭐**REPLICATION IS NOT EVIDENCE** — C-1 was found by FIVE independent registers and was still substantially wrong: they read the same code and inherited the same premise, so replication counted the PREMISE five times. Weight demonstrations, not agreement. **IN FLIGHT:** `gsd-phase-researcher` + `gsd-pattern-mapper` on 140.4 (concurrent; note the real dependency is MAPPER→RESEARCHER since mechanism choice depends on class size — for 141 run mapper FIRST). Next: gsd-planner (opus) → gsd-plan-checker (opus) → execute → then Phase 141. **140.4 = `.planning/phases/140.4-seamrim-.../140.4-CONTEXT.md`** (locked decisions; synthesis is the requirements source). ROADMAP 399 lines, 140.4 checklist at :36, detail at :242 (the SDK insert anchored on 140 not 140.3 and omitted the checklist line — both corrected by hand). ⚠️**SETTLED, DO NOT RE-RAISE:** branch protection OFF until paying clients ⇒ every CI gate ADVISORY at merge (say -would have caught-, NEVER -did stop-); AND migration auto-apply on merge is fine/working as intended (2026-07-28) — it governs WHEN a migration defect reaches prod, never WHETHER it is a defect. **FOUNDER OWES 3 (none done; the 140.3-16 checkpoint AUTO-APPROVED which is NOT confirmation):** copy vs DESIGN.md §Voice (~12 sentences) · TRAP-4 five clicks in a REAL browser · Sentry ingestion (⚠️tripping the breaker captures NOTHING by design — force a terminal-arm failure). **BLIND SPOT:** the live-Redis lane (D-01, the register-s -single most important closure-) was unrunnable in a worktree — UNVERIFIED by mutation. ⚠️**LESSON:** never authorise mutation on a SHARED tree — one agent reverted another-s in-flight mutants and invalidated a full review round; use `isolation: worktree`. Also: agents must APPEND results to disk per-mutation, never batch (a stalled agent lost ~7 results held only in context)."
-last_updated: "2026-07-27T04:01:29.963Z"
-last_activity: 2026-07-27
+status: executing
+stopped_at: Completed 140.2-09-PLAN.md
+last_updated: "2026-07-30T11:52:16.974Z"
+last_activity: 2026-07-30
 progress:
-  total_phases: 12
-  completed_phases: 4
-  total_plans: 41
-  completed_plans: 38
-  percent: 33
+  total_phases: 14
+  completed_phases: 7
+  total_plans: 80
+  completed_plans: 79
+  percent: 50
 ---
 
 # Project State — Quantalyze
@@ -46,9 +46,9 @@ RATE-01..05 — all mapped, Traceability filled). Roadmap: `.planning/ROADMAP.md
 
 ## Current Position
 
-Phase: 140.2 (seamcore-seam-core-breaker-correctness-harness-integrity) — EXECUTING
-Plan: 12 of 12
-Status: Ready to execute
+Phase: 140.5 (seamprose-attribution-copy-harness-fidelity-and-prose-citations) — EXECUTING
+Plan: 1 of 8
+Status: Executing Phase 140.5
         ---- 140.2-05 (wave 5, 2026-07-27) ----
         **ROADMAP SC1 CLOSED.** The classification window now covers the response-body
         read and excludes caller/config faults. A stalling upstream (headers fast, body
@@ -140,7 +140,7 @@ Status: Ready to execute
         at `finalize-wizard/route.ts:840-851`), now ledger row TS-33; its "strictly
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
-Last activity: 2026-07-27
+Last activity: 2026-07-30 -- Phase 140.5 execution started
 
 Progress: [█████████░] 93%
 
@@ -924,7 +924,7 @@ Load-bearing sequencing (do not reorder):
 
 ## Session Continuity
 
-**Last activity:** 2026-07-27
+**Last activity:** 2026-07-30
 **Stopped at:** Completed 140.2-09-PLAN.md
 **Next step:** run `/gsd:verify-work` on Phase 140.1.1. Nothing is left to execute.
 
