@@ -1619,10 +1619,15 @@ describe("[SEAMCORE-11 / A-27] analytics-client: ONE defined outcome for an ambi
    * The anti-drift guard for "ONE defined outcome ... identical across both
    * clients".
    *
-   * The two clients cannot import the builder from each other: sixteen route
-   * test files replace one or the other wholesale with a full factory, so a
-   * cross-client import evaluates to `undefined` under those mocks (the same
-   * argument that homes `CircuitOpenError` in the dependency-free leaf). And it
+   * The two clients cannot import the builder from each other: every route test
+   * file that mocks one of these clients does so WHOLESALE — a
+   * `vi.mock("@/lib/analytics-client")` (or `process-key-client`) with a full
+   * factory replaces the module — so a cross-client import evaluates to
+   * `undefined` under those mocks (the same argument that homes
+   * `CircuitOpenError` in the dependency-free leaf). The count is deliberately
+   * NOT restated here: it is a property of the suite that moves whenever a route
+   * test is added, and a stale integer in a comment is the defect class 140.5
+   * exists to remove. The predicate above is what to re-run. And it
    * cannot live in that leaf either — the leaf's exported surface is pinned to
    * a two-member hand-typed set in `seam-errors.purity.test.ts`, and this plan
    * adds no member to it. So the builder is duplicated, and the duplication is
@@ -1723,16 +1728,41 @@ describe("[140.3-01 / TS-05] analytics-client reads the seam error body through 
   }
 
   it("CONTRACT A — a `service_error` 500 (OBJECT detail): the human string is `body.detail.detail`, never '[object Object]'", async () => {
-    // Hand-typed §2 envelope. NOT imported from the module under test, and not
-    // built by a helper that shares a shape with it.
+    // §2 envelope. NOT imported from the module under test, and not built by a
+    // helper that shares a shape with it — the literals are the EXECUTED
+    // constructor's output, which is a stronger oracle than a hand-typed guess.
+    //
+    // ⚠️ 140.5-06 / WP-14 — WHAT THIS FIXTURE USED TO BE AND WHY IT WAS A LIE.
+    // It carried `{code:"SEAM_DEGRADED", dependency:"supabase", retryable:true}`
+    // at status 500, byte-identically to two other suites. `error_contract.
+    // _validate` REFUSES to construct it: a 500 is SERVICE-PERMANENT (rule R-1),
+    // so `retryable:true` there is the self-sustaining retry loop R-1 exists to
+    // stop. A fixture cannot certify a contract it contradicts.
+    //
+    // The replacement is a real, executed 500 from `routers/exchange.py` — the
+    // upstream behind this call's `budgetKey: "validate-key"`. Its `dependency`
+    // is one of OURS, which the 500 arm permits as MEMBERSHIP (a venue name
+    // there would be a 424), and its sentence says an operator is needed rather
+    // than promising that a retry will help.
+    //
+    //   cd analytics-service && python3 -c "from services.error_contract import \
+    //     service_error; print(service_error(500,'EGRESS_PROXY_MISCONFIGURED', \
+    //     dependency='egress-proxy', retryable=False, detail=\"The service's \
+    //     outbound proxy is misconfigured. This needs an operator, not a \
+    //     retry.\").detail)"
+    //
+    // The R-1 rule this fixture now obeys is pinned in Python by
+    // `tests/test_error_contract_r1_permanent_500.py`, so it can fail if it is
+    // ever weakened.
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(
         JSON.stringify({
           detail: {
-            code: "SEAM_DEGRADED",
-            dependency: "supabase",
-            retryable: true,
-            detail: "The analytics store is not responding. Try again shortly.",
+            code: "EGRESS_PROXY_MISCONFIGURED",
+            dependency: "egress-proxy",
+            retryable: false,
+            detail:
+              "The service's outbound proxy is misconfigured. This needs an operator, not a retry.",
           },
         }),
         { status: 500, headers: { "content-type": "application/json" } },
@@ -1750,12 +1780,14 @@ describe("[140.3-01 / TS-05] analytics-client reads the seam error body through 
         "`seamHumanMessage`. A bare `error.detail ??` read coerces the object " +
         "to '[object Object]', which then misses every branch of the wizard's " +
         "substring cascade and lands the user on UNKNOWN/500 — obligation O-5.",
-    ).toBe("The analytics store is not responding. Try again shortly.");
+    ).toBe(
+      "The service's outbound proxy is misconfigured. This needs an operator, not a retry.",
+    );
     expect(err.message).not.toContain("[object Object]");
     // The MACHINE code must survive too — it is the discriminator the copy
     // plan and TS-35 key on, and reading only the human half would close TS-05
     // while leaving the code unreachable at the chokepoint.
-    expect(err.seamCode).toBe("SEAM_DEGRADED");
+    expect(err.seamCode).toBe("EGRESS_PROXY_MISCONFIGURED");
   });
 
   it("CONTRACT B — an app-global 429 (SCALAR detail): the human string is BYTE-IDENTICAL to its pre-plan value (TS-07 is negative)", async () => {
@@ -1846,9 +1878,11 @@ describe("[140.3-01 / TS-05] analytics-client reads the seam error body through 
     const err = caught as InstanceType<typeof mod.AnalyticsUpstreamError>;
     expect(err.seamCode).toBe("DDOS_PROTECTION");
     // The property must be an OWN data property, readable with `typeof` and
-    // never `instanceof`: sixteen route test files mock this module wholesale,
-    // so the class identity is unavailable inside the catch arms that consume
-    // this value.
+    // never `instanceof`: every route test file that mocks this module does so
+    // WHOLESALE (`vi.mock("@/lib/analytics-client")` with a factory), which
+    // replaces the class, so the class IDENTITY is unavailable inside the catch
+    // arms that consume this value. The population is derivable from that
+    // predicate and is deliberately not restated as an integer here.
     expect(Object.hasOwn(err, "seamCode")).toBe(true);
     // …and the real classifier, driven by the real throwable, no longer blames
     // the user's key for a block at the venue's edge.
