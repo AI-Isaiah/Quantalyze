@@ -342,7 +342,11 @@ export async function postProcessKey(
    */
   let tenantClaim: string;
   try {
-    tenantClaim = mintTenantClaim(args.userId, internalToken);
+    // The identity is WRAPPED, not passed bare: `mintTenantClaim`'s first
+    // parameter is a `TenantIdentity` so `mintTenantClaim(internalToken,
+    // args.userId)` — the transposition that would ship the platform secret in
+    // an outbound header — cannot compile. See that function's docblock.
+    tenantClaim = mintTenantClaim({ userId: args.userId }, internalToken);
   } catch (err) {
     const tag = args.routeTag ?? "process-key-client";
     console.error(

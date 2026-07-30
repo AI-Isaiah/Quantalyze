@@ -385,8 +385,14 @@ async function analyticsRequest(
    * `verify_tenant_claim` exists precisely because it cannot be trusted to
    * select a bucket.
    */
+  // ⚠️ THE IDENTITY IS WRAPPED, NOT PASSED BARE, and it is the argument ORDER
+  // this defends. `mintTenantClaim`'s first parameter is a `TenantIdentity`, so
+  // `mintTenantClaim(process.env.INTERNAL_API_TOKEN ?? "", options.tenantId)` —
+  // which used to compile and would have put the platform secret into
+  // `X-Tenant-Claim` on all nine routes this wrapper reaches — is now a type
+  // error. See that function's docblock for why the object, not a brand.
   const tenantClaim = mintTenantClaim(
-    options.tenantId,
+    { userId: options.tenantId },
     process.env.INTERNAL_API_TOKEN ?? "",
   );
 
