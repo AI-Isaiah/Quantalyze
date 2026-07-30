@@ -172,87 +172,80 @@ test.describe("DISCO-05 fresh allocator hides examples by default", () => {
       // networkidle can be flaky behind Vercel's edge — non-fatal,
       // the checkbox-interactivity guard below is the real fence.
     });
+    // rowsLocator is used only by the post-toggle diagnostic capture below.
     const rowsLocator = page.locator("table tbody tr");
-    // The test seed (scripts/seed-demo-data.ts) inserts exactly 8 strategies,
-    // all is_example=true (backfilled by migration
-    // 20260429063138_seed_is_example_backfill.sql). With DEFAULTS.hide_examples
-    // =true the fresh allocator's first paint correctly filters all 8 out,
-    // leaving the "No strategies" empty-state row. That IS the proof that
-    // DEFAULTS.hide_examples=true is in effect — so the pre-toggle
-    // assertion now expects the empty-state row, not non-empty rows.
-    //
-    // Prior test design assumed the test project also held non-example
-    // strategies that would render past the filter — but no other seed
-    // path inserts non-example, status='published' rows into the test DB.
-    // Waiting for a non-empty row was therefore a guarantee of timeout.
-    //
-    // Wait specifically for the empty-state to materialise so the next
-    // assertion is deterministic (not racing against the initial paint).
-    await expect
-      .poll(
-        async () => {
-          const txts = await rowsLocator.allTextContents();
-          return txts.some((t) => /no strategies/i.test(t));
-        },
-        {
-          timeout: 10000,
-          message:
-            "discovery table never rendered the 'No strategies' empty " +
-            "state in 10s — the fresh allocator with hide_examples=true " +
-            "default and only is_example=true seeds in the DB should " +
-            "produce that exact empty-state row. If it doesn't, either " +
-            "DEFAULTS.hide_examples regressed (now false), or some other " +
-            "seed inserted a non-example published strategy.",
-        },
-      )
-      .toBe(true);
 
-    // C-0301/C-0302/H-1034 fix: no silent `if (rowCount > 0)` gate.
-    // The seeded allocator + the migration 091 backfill guarantee the
-    // seed strategies exist in the DB. The pre-toggle assertion now
-    // requires that the rendered rows contain ZERO seed-name matches —
-    // a strict contract. If the rows include any seed name on first
-    // paint, the DEFAULTS.hide_examples=true invariant has regressed.
-    // Query the strategy-name anchor inside each row directly. The href
-    // prefix `/factsheet/` filters out unrelated row links (star button,
-    // simulate-impact CTA, etc.), and exact equality against SEED_NAMES
-    // avoids the tbody-textContent concatenation pitfall (a name like
-    // "Vega Volatility Harvester" gets stuck to the next badge text
-    // "delta_neutral", which broke the prior word-boundary regex).
-    const strategyLinkLocator = page.locator(
-      'table tbody tr a[href^="/factsheet/"]',
-    );
-    const preToggleNames = await strategyLinkLocator.allTextContents();
-    const preToggleSeedMatches = preToggleNames.filter((t) =>
-      SEED_NAMES.has(t.trim()),
-    );
-    expect(
-      preToggleSeedMatches,
-      "fresh allocator must see zero example strategies on first paint " +
-        "(DEFAULTS.hide_examples=true must filter seed strategies out)",
-    ).toEqual([]);
-
-    // Now toggle "Hide examples" OFF. Target the <input type="checkbox">
-    // directly — clicking the surrounding <label> has been flaky in CI
-    // (the click occasionally landed before React's controlled checkbox
-    // had committed its initial render, so the synthetic change event
-    // was dropped). The input itself is always interactive once visible.
+    // Settle gate — wait for React hydration to APPLY the hide_examples=true
+    // default, not for a globally-empty table. StrategyTable renders with
+    // showExamples=true (all rows, examples included) on first paint, then the
+    // prefsHydrated effect (StrategyTable.tsx:258-266) flips showExamples=false
+    // per DEFAULTS.hide_examples=true. The "Hide examples" checkbox is bound
+    // `checked={!showExamples}` (StrategyFilters.tsx:329), so it transitions
+    // unchecked→checked in the SAME render that applies the is_example filter
+    // (StrategyTable.tsx:340-341). Waiting for checked=true is therefore an
+    // exact, pollution-immune signal that examples have been filtered out.
     //
-    // C-0301/H-1034 fix: no `if (hideExamplesLabel.count())` silent skip.
-    // The toggle must exist; a UI rename is a real regression we want to
-    // surface, not swallow.
+    // The prior design waited for a "No strategies" empty-state row, which
+    // silently assumed the crypto-sma category held ZERO non-example published
+    // strategies. That breaks in the shared CI test DB, where other specs' seed
+    // data accumulates non-example published rows in the category: a real row
+    // renders past the examples filter, the empty state never appears, and the
+    // poll times out even though hide_examples works perfectly. DISCO-05's
+    // invariant is "zero EXAMPLE strategies visible" — asserted strictly below
+    // against SEED_NAMES — and does NOT require an empty table.
+    //
+    // C-0301/H-1034 fix: no `if (hideExamplesLabel.count())` silent skip. The
+    // toggle must exist; a UI rename is a real regression we want to surface.
     const hideExamplesLabel = page
       .locator('label:has-text("Hide examples")')
       .first();
     await expect(
       hideExamplesLabel,
       "Hide examples toggle must be present (StrategyFilters.tsx)",
-    ).toBeVisible({ timeout: 5000 });
+    ).toBeVisible({ timeout: 15000 });
     const hideExamplesCheckbox = hideExamplesLabel.locator(
       'input[type="checkbox"]',
     );
-    // Initial state: hide_examples=true default → checked=true.
-    await expect(hideExamplesCheckbox).toBeChecked();
+    // hide_examples=true default → checked=true once hydration commits. This is
+    // the deterministic settle signal (it replaces the removed empty-state poll).
+    await expect(hideExamplesCheckbox).toBeChecked({ timeout: 15000 });
+
+    // C-0301/C-0302/H-1034 fix: no silent `if (rowCount > 0)` gate. The seeded
+    // allocator + the migration-091 backfill guarantee the seed strategies exist
+    // in the DB. With the checkbox now checked (examples filtered), the rendered
+    // rows MUST contain ZERO seed-name matches — a strict contract. If any seed
+    // name is visible, DEFAULTS.hide_examples=true has regressed. Query the
+    // strategy-name anchor inside each row directly: the href prefix `/factsheet/`
+    // filters out unrelated row links (star button, simulate-impact CTA, etc.),
+    // and exact equality against SEED_NAMES avoids the tbody-textContent
+    // concatenation pitfall (a name like "Vega Volatility Harvester" gets stuck
+    // to the next badge text "delta_neutral", which broke the prior word-boundary
+    // regex). Polled so a sub-render lag between the checkbox commit and the row
+    // re-render can't false-fail.
+    const strategyLinkLocator = page.locator(
+      'table tbody tr a[href^="/factsheet/"]',
+    );
+    await expect
+      .poll(
+        async () => {
+          const names = await strategyLinkLocator.allTextContents();
+          return names.filter((t) => SEED_NAMES.has(t.trim()));
+        },
+        {
+          timeout: 10000,
+          message:
+            "fresh allocator must see zero example strategies while Hide " +
+            "examples is ON (DEFAULTS.hide_examples=true must filter every " +
+            "seed strategy out); a visible seed name here is a real regression",
+        },
+      )
+      .toEqual([]);
+
+    // Now toggle "Hide examples" OFF. Target the <input type="checkbox">
+    // directly — clicking the surrounding <label> has been flaky in CI
+    // (the click occasionally landed before React's controlled checkbox
+    // had committed its initial render, so the synthetic change event
+    // was dropped). The input itself is always interactive once visible.
     // Toggle via keyboard: focus + Space. Keyboard events go through
     // React's synthetic event system natively (no race with onChange
     // listener registration that a `.click()` on a controlled component
