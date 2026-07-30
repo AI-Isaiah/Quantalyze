@@ -104,8 +104,25 @@ const FROZEN_EXEMPT: Array<{ rule: string; file: string }> = [
   { rule: "no-raw-font-px", file: "src/app/factsheet/[id]/v2/TimeSeriesChart.tsx" },
 ];
 
+// HAND-TYPED, and it must stay that way. Replacing this with
+// `Object.keys(quantalyzePlugin.rules)` would make the wiring assertion below
+// compare the plugin to itself — an assertion that can never fail (Oracle
+// Independence hazard #3, forbidden by 140.3-10 and 140.3-12). Note the
+// asymmetry that makes the split necessary: EXPECTED_RULES is every rule the
+// plugin EXPORTS, while REPO_WIDE_ERROR_RULES is the subset wired to "error"
+// repo-wide. A SCOPED rule belongs in the first list and NOT the second.
 const EXPECTED_RULES = [
   ...REPO_WIDE_ERROR_RULES,
+  // SEAMRIM-11 (Phase 140.4) — bans an awaited PostgREST read destructured for
+  // `data`/`count` without binding `error`, in BOTH the object form and the
+  // `Promise.all` ARRAY form (an object-only predicate returns zero on the
+  // array form, which is how C-3 survived every prior census). SCOPED, not
+  // repo-wide: the baseline is dirty and definition-dependent, so it is wired
+  // to "error" only on the surface a plan has PROVEN clean
+  // (src/app/api/admin/strategy-review/route.ts) and ratchets outward. It is
+  // therefore deliberately absent from REPO_WIDE_ERROR_RULES above — adding it
+  // there would assert repo-wide teeth this rule does not yet have.
+  "no-unchecked-supabase-read",
 ] as const;
 
 interface Guard {
@@ -171,6 +188,35 @@ const CONTRACT_GUARDS: Guard[] = [
   { path: "src/lib/seam-poll-disjointness.pin.test.ts", batch: "140.3-G1", invariant: "SOURCE BACKSTOP for the wizard sync-poll: an INVERTED allow-list of every /api/ URL the three poll modules may name, each entry's seam-ness hand-typed AND independently re-checked against the seam-route set derived from src/app/api by import edge — so the tick's target acquiring a seam import reddens even though no URL literal changed. Plus a fail-loud CALL_EDGE yield bound and a six-slot needle self-test. ⚠️ RE-TIERED at gap closure: this file previously asserted 'ZERO fetch calls exist on the poll path', which was FALSE at file granularity — SyncPreviewStep.tsx makes three real calls, two to the seam route /api/keys/sync, and the guard stayed green because its needle was /\\bfetch\\s*\\(/ while every call is spelled wizardFetch(. Broadening the needle cannot repair that (the file-scoped claim is simply untrue); the tick-scoped property moved to a runtime guard and this file was narrowed to a claim that is checkable. It is KEPT rather than deleted because it covers the two roster modules the runtime guard does not render" },
   { path: "src/lib/seam-ssr-exposure.pin.test.ts", batch: "140.3-G1", invariant: "ZERO server directives under src/ and no server-rendered module outside src/app/api/ imports a seam client — the single reason a breaker trip can never 500 a page: every seam call happens in a route handler or a browser component, so the shell still renders and the failure surfaces as a sentence with a retry. Needles are ASSEMBLED at runtime so the file never contains the directive it forbids (a guard that plants the string it bans makes the repo-wide acceptance grep return 1 forever). Registered at 140.3 gap closure because it was deletable with green CI" },
   { path: "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.poll-disjointness.runtime.test.tsx", batch: "140.3-G1", invariant: "RUNTIME, TICK-SCOPED retry-storm fence, and the load-bearing half of the re-tiering above. Spies on globalThis.fetch — which every wrapper ultimately reaches, since wizardFetch's body calls the UNQUALIFIED global — so it is indirection-proof by construction in a way no source needle can be. Splits the render at a runtime mark: the user-initiated kickoff MAY call the seam (and does, /api/keys/sync), the repeating tick MAY NOT, and tick-ness is a fact about when a callback fires rather than about which file a call site sits in. Seam-route set derived from disk and matched SEGMENT-WISE, so /api/keys/syncing is not /api/keys/sync and the live tick target /api/strategies/[id]/sync-progress stays a near-miss negative. Carries a POSITIVE control (a tick call must fire) because a dead poll and a safe poll both produce 'no seam call' — the M77c shape — falsified by ledger row M86b" },
+  // ─────────────────────────────────────────────────────────────────────────
+  // Phase 140.4 / SEAMRIM — the four guards the end-of-milestone review found
+  // UNREGISTERED, plus every TS-side guard this phase created.
+  //
+  // ⚠️ THE FIRST FOUR ARE A FLOOR, NOT A POPULATION, and this comment is the
+  // honest limit of the claim. The review reached "16 unregistered
+  // guard-shaped files" from a filename census, and TWO of the four below —
+  // `sentry-capture.test.ts` and `validate-key-venue-transient-parity.test.ts`
+  // — match NO naming convention at all. They were found by knowing which file
+  // was a property's sole asserter, which is not a search anyone can repeat
+  // mechanically. So this block closes named instances; it does NOT close the
+  // class, and nothing here should be read as claiming it does.
+  //
+  // ⚠️ AND `analytics-service/tests/test_raw_5xx_census.py` (plan 140.4-04) is
+  // NOT here, deliberately. Every path in this array is TS-side and the runner
+  // is vitest; forcing a Python path in would make `existsSync` pass while no
+  // vitest run ever touches it. Same for plan 140.4-03's
+  // `supabase/tests/test_csv_finalize_double_submit.sql`, which runs in the
+  // psql lane. Both are recorded as residuals in 140.4-10-SUMMARY.md rather
+  // than smuggled into a registry that cannot execute them.
+  // ─────────────────────────────────────────────────────────────────────────
+  { path: "src/lib/seam-copy.purity.test.ts", batch: "140.4-10 / SEAMUX-01", invariant: "src/lib/seam-copy.ts stays a dependency-free leaf AND stays a table of plain string CONSTANTS: comment-stripped, anchored source scan asserting no import, no `export … from` re-export, no require() and no process.env read, plus a hand-typed SET equality over its exported names and an assertion that every export is a string rather than a function. The purity is load-bearing because the copy is value-imported by client components, so a dependency edge here ships a server module to the browser bundle; the string-not-function half is what stops the outage sentence becoming computed at render time, where the seam-copy pin could no longer see it. Registered by 140.4-10 — it was silently deletable with green CI" },
+  { path: "src/lib/sentry-capture.test.ts", batch: "140.4-10 / SEAMCORE-06 + SEAMRIM-04", invariant: "captureToSentry SCRUBS BEFORE IT DISPATCHES, asserted on every channel a secret can ride out of the process on: the error MESSAGE, the error NAME and STACK, an explicitly passed PER-REQUEST secret, a SHORT per-request secret (HI-03 — the redaction leaf REFUSES to substring-replace below MIN_REDACTABLE_SECRET_LENGTH, so the short case has to be pinned separately or a 4-character secret leaves for a third party), the CAUSE chain, string values inside `extra`, and a non-Error thrown value. Plus the 140.4-06 half: the function RETURNS its import chain, so `after(captureToSentry(...))` actually observes the capture instead of detaching it (NEW-C10-03), and it RESOLVES rather than rejects when the SDK throws, when the dynamic import rejects, and when a hostile getter in `extra` explodes — a capture helper that throws runs inside a catch block and would replace the caller's real error with a bookkeeping one. Registered by 140.4-10; it matches no naming convention and was found only by knowing it was the sole asserter" },
+  { path: "tests/redis/seam-breaker.redis.test.ts", batch: "140.4-10 / SEAMCORE-09", invariant: "the breaker's behaviour against a REAL Upstash instance rather than a fake: the counter identity and namespace (`breaker:<key>:failures:<epoch window>`, ONE counter per breaker key), the trip at EXACTLY the threshold (a literal 4 failures leave no lock, the 5th creates it), trip idempotency (a later trip does not ratchet the first writer's expiry), the encoded cooldown being the lock's life with Retry-After agreeing, sliding-window decay with weighted carry-over, and no counter increment on a DENIED limit. ⚠️ REGISTERED WITH ITS LIMIT STATED: this file runs only under `npm run test:redis`, whose `include` is `tests/redis/**` and which needs a live store — it is NOT in the default vitest run, so registration pins its EXISTENCE, not its execution. D-01, the live-Redis lane, is a KNOWN BLIND SPOT carried by phase 140.4 and no plan may claim it closed" },
+  { path: "tests/lib/validate-key-venue-transient-parity.test.ts", batch: "140.4-10 / TS-35", invariant: "the wizard's key-validation classifier agrees with the COMMITTED cross-language venue-transient contract fixture, which reserved this file as its consumer — the assertion that a Python-side classification and a TS-side one cannot drift apart silently. Carries the canonical case roster as a set (no silent shrink), keeps its NEGATIVES (`recoverable` is pinned false somewhere, so it is not a field that is always true — the polarity failure that makes a boolean contract vacuous), asserts every case answers exactly ONE status without asserting WHICH, pins the single permitted divergence as the one that is actually there rather than as a general tolerance, and re-checks that the surviving substring cascade classifies the same bytes when no code rides along. Registered by 140.4-10; it matches no naming convention" },
+  { path: "src/components/ui/LiveRegion.test.tsx", batch: "140.4-05 / SEAMRIM-10", invariant: "the announcement primitive this phase created, pinned in BOTH polarities and for visual inertness. assertive ⇒ `role=alert` + `aria-live=assertive`; non-assertive ⇒ `role=status` + `aria-live=polite`; the message is carried in both; the region renders even when the message is null (a live region that is mounted only when it has something to say is announced by nothing, because the AT has no region to watch). The INERTNESS assertion is the load-bearing one: `className` is EXACTLY `sr-only` in both polarities, because the whole reason this primitive exists rather than a DESIGN.md change is that it closes the a11y class WITHOUT touching a founder-owned visual decision — ledger row M107 adds one utility class to it and the naive `grep -c 'className=\"sr-only\"' → 1` receipt passes under that mutation" },
+  { path: "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.readfailure.runtime.test.tsx", batch: "140.4-02 / SEAMRIM-02", invariant: "RUNTIME proof that a read FAILURE is never rendered as a MEASUREMENT — the C-3 defect, which was re-graded UP because it was demonstrated by rendering: supabase-js RESOLVES rather than throws, so a read-failed account and a genuinely-empty one produced BYTE-IDENTICAL DOM (\"We found only 0 filled trade(s) on this key\"), and the under-pled half was worse — a 2-day strategy correctly blocked as INSUFFICIENT_DAYS became `passed: true` when the timestamp reads failed, publishing an under-history track record as verified. Drives each of the reads independently, INCLUDING the second member (`earliest`) so an instance-fix cannot masquerade as a class-fix, carries the POSITIVE COUNTERPART (a genuinely empty account must still render the measured-zero sentence — without it, deleting the sentence entirely would pass), asserts the PROPERTY rather than an instance (read-failed and empty render DIFFERENT DOM), pins the three-failure escalation to the recoverable SYNC_FAILED surface, pins that a keyless draft still reaches a verdict, and pins that the failed read is LOGGED so the escalation is diagnosable" },
+  { path: "tools/eslint-plugin-quantalyze/tests/no-unchecked-supabase-read.test.ts", batch: "140.4-14 / SEAMRIM-11", invariant: "the RuleTester fixtures pinning WHAT `no-unchecked-supabase-read` catches, as opposed to that it exists and resolves to a level — the same silent-deletability that 140.2-04 found in the sibling fixture file, where moving it away left the whole contracts suite and `npm run lint` green. Covers BOTH destructure forms: the object form (`const { data } = await q()`) and the `Promise.all` ARRAY form. The array half is the load-bearing one — an object-only predicate returns ZERO on the array form, which is exactly how C-3 survived every prior census, and it is the shape ledger row M106 mutates" },
+  { path: "src/lib/seam-ratelimit-posture.invariant.test.ts", batch: "140.4-13", invariant: "A limiter MISCONFIGURATION answers 503 on every seam route, never a 429 that reads as the caller being throttled. Two halves, with different reach and the file says so. STRUCTURAL (all 15 routes, population DERIVED from src/app/api by import edge on every run): partitions the seam into limiter/no-limiter, pins the limiter set against a hand-typed roster so a new seam route fails BY NAME, and asserts chokepoint-routed deny arms >= checkLimit sites PER ROUTE — per ARM, not per file, because keys/sync has TWO and a file-level 'does it mention rateLimitDenyJson' check stays green with the second reverted (this plan's ledger row M105 runs exactly that mutation). The no-limiter set is an EQUALITY against {admin/match/eval} so a future repair must shrink the quarantine in the same commit rather than leave a stale exemption. Comment-stripped before counting, which is load-bearing here and not cosmetic: admin/match/eval and admin/match/recompute BOTH mention rateLimitDenyJson in PROSE, so a line-based grep (DEF-16-2) reads the no-limiter route as adopting the chokepoint and reports the class closed while it is open — self-tested in both polarities including that exact comment shape and the two-arm/one-routed-arm shape. Carries a vacuity fence (>=15 routes, >=12 checkLimit sites) because a scanner that matches nothing reports agreement forever. BEHAVIOURAL (3 of 15, spanning the auth shapes — public verify-strategy, authenticated keys/sync at BOTH arms, admin match/recompute): drives real handlers with vi.spyOn on the REAL ratelimit module, so the deny builder under test is production's and cannot drift from a double, and proves the 503 actually reaches the wire rather than merely appearing in source. A full 15-route behavioural table is deliberately NOT attempted — each route needs its own auth/body/downstream fixture, so fifteen bespoke stacks would each be free to drift; the remaining twelve are covered structurally here and behaviourally in their own route.test.ts files" },
   // Check scripts (run as CI gates, not vitest):
   { path: "scripts/check-admin-route-manifest.ts", batch: "C-0153", invariant: "ADMIN_ROUTE_MANIFEST ↔ admin route files completeness (lint gate)" },
   { path: "scripts/check-route-contract.ts", batch: "NAV-03", invariant: "ROUTE_CONTRACT_MANIFEST ↔ PUBLIC_ROUTES + redirects() lockstep (the #512 class, lint gate)" },
@@ -179,10 +225,38 @@ const CONTRACT_GUARDS: Guard[] = [
 
 describe("[B25] contracts registry — by-construction invariant guards", () => {
   it("registers a non-trivial set (fail-loud on accidental truncation)", () => {
+    // ⚠️ RAISED 20 → 52 BY PLAN 140.4-10, AND THE OLD NUMBER IS WHY. The floor
+    // was 20 against 44 real rows, so TWENTY-FOUR ROWS WERE DELETABLE WITH
+    // GREEN CI — in a file whose entire purpose is that a guard cannot be
+    // deleted with green CI.
+    //
+    // THE COUNT, WITH THE PREDICATE THAT PRODUCED IT (140.4-16 / WR-01 — this
+    // paragraph said "51 … (44 + 7)" while the assertion below said 52, in the
+    // one artefact this phase raised specifically to close numeric slack):
+    //
+    //   $ grep -c '^  { path:' src/__tests__/contracts/contracts-registry.test.ts
+    //   52                                   # at HEAD
+    //   $ git show a77d607e:… | grep -c '^  { path:'
+    //   44                                   # at the phase base
+    //
+    // 44 + 8 = 52. EIGHT rows were added, not seven. Quote the predicate beside
+    // any number you write here — a bare integer is unowned by construction
+    // (Oracle Independence hazard #9), which is exactly how this one drifted.
+    //
+    // ⚠️ THIS CLOSES SLACK, NOT A CLASS. Raising the floor stops rows being
+    // dropped silently; it does nothing about guards that were never
+    // registered, and the registry is a HAND-TYPED ROSTER — coverage-law row 2,
+    // PARTIAL BY CONSTRUCTION.
+    //
+    // ⚠️ AND IT MUST STAY A HAND-TYPED LITERAL. `toBeGreaterThanOrEqual(
+    // CONTRACT_GUARDS.length)` is an assertion that can never fail — Oracle
+    // Independence hazard #3, forbidden by 140.3-10 and 140.3-12. When a guard
+    // is added, bump this number in the same commit; that bump IS the
+    // registration being deliberate.
     expect(
       CONTRACT_GUARDS.length,
       "CONTRACT_GUARDS shrank unexpectedly — did a registry entry get dropped?",
-    ).toBeGreaterThanOrEqual(20);
+    ).toBeGreaterThanOrEqual(52);
   });
 
   it.each(CONTRACT_GUARDS)("guard exists: $path [$batch]", ({ path }) => {

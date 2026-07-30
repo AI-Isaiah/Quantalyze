@@ -857,13 +857,35 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // the user straight back into a resubmit, which is the dead end the reply
   // contract has not yet fixed. The copy now states the uncertainty and puts a
   // non-destructive check FIRST, ahead of any resubmit.
+  //
+  // 140.4-03 / SEAMRIM-03 — RECONCILED with CSV_SUBMIT_NO_STRATEGY_ID, which
+  // said the OPPOSITE. This entry warned that "submitting again would create a
+  // second copy" while that one promised a repeat submit "cannot create a second
+  // strategy". Both were reachable from the same CSV submit step. The
+  // contradiction is resolved in favour of the promise, because the mechanism
+  // now exists and is the same one for both codes: the partial unique index
+  // (user_id, wizard_session_id, source) added by migration 20260728120000, plus
+  // the /process-key 23505 arm that resolves the duplicate to the EXISTING
+  // strategy at 200.
+  //
+  // The uncertainty in the title and cause is KEPT — it is still true and is a
+  // different claim. We genuinely cannot observe whether the save completed. What
+  // changed is only the CONSEQUENCE of retrying, which is now bounded.
+  //
+  // The promise is scoped to "the same wizard session" deliberately: a failed
+  // submit does NOT clear local state (every clearWizardState call site is a
+  // success or an explicit delete-draft, and delete-draft regenerates the id per
+  // NEW-C14-08), so a retry reuses the id and is fenced. Starting a fresh wizard
+  // mints a new id and is a genuinely new submission — which is why the
+  // non-destructive check stays FIRST.
   CSV_SUBMIT_FAILED: {
     title: "We could not confirm whether your strategy was saved.",
     cause:
       "Your file passed validation, then the save step returned an error. The error does not tell us whether the save completed, so we cannot promise it did or that it did not.",
     fix: [
-      "Open /strategies in another tab first. If your strategy is listed, the save did complete and submitting again would create a second copy.",
-      "If it is not listed, submit again.",
+      "Open /strategies in another tab first. If your strategy is listed, the save did complete and you are done.",
+      "If it is not listed, submit the same file again. An unchanged resubmit from this wizard resolves to the strategy you already started instead of creating a second one.",
+      "To upload a different file, or to use a different name, start a new strategy. We refuse a changed resubmit from this wizard rather than mixing it into the one you already started.",
       "If you are unsure, contact security@quantalyze.com with your wizard session id and the diagnostics below.",
     ],
     docsHref: "/security#sync-timing",
@@ -876,13 +898,61 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     cause: "The finalize RPC returned 200 but no strategy_id.",
     // 140.3-12 / SEAMUX-04 — the duplicate-protection promise is SCOPED to the
     // flow that actually has the mechanism, and the internal field name is gone
-    // from the user's screen. The guarantee itself is real HERE and is kept:
-    // this code is CSV-only, and both `csv-validate` and `csv-finalize` send the
-    // wizard session id today. It must NOT be widened to the API path — that
-    // call site sends no id, and a promise made ahead of its mechanism is how
-    // this whole class of copy started.
+    // from the user's screen.
+    //
+    // 140.4-03 / SEAMRIM-03 — ⚠️ THE PROMISE BELOW WAS FALSE WHEN 140.3-12
+    // WROTE IT, AND IS TRUE AGAIN NOW. Recording that, because "the guarantee
+    // itself is real HERE and is kept" is precisely the reasoning that let it
+    // stand unverified. Sending the session id was never sufficient: the
+    // mechanism was a partial unique index predicated on
+    // `wizard_session_id IS NOT NULL`, and `finalize_csv_strategy` did not WRITE
+    // the column, so every CSV row sat outside it. Migration 20260726000225 had
+    // separately removed the only other backstop. Review finding C-2: a CSV
+    // double-submit answered 200 with a duplicate strategies row AND a duplicate
+    // strategy_verifications row, silently.
+    //
+    // What makes it true now, named so the next reader can check it rather than
+    // trust this comment:
+    //   1. migration 20260728120000 — the partial unique index
+    //      `strategies_user_wizard_session_source_uniq` on
+    //      (user_id, wizard_session_id, source), and finalize_csv_strategy
+    //      finally writing the column that puts CSV rows inside it;
+    //   2. routers/process_key.py's 23505 arm, which turns the resulting
+    //      violation into a 200 carrying the EXISTING strategy id, so the retry
+    //      this copy instructs is not a dead end;
+    //   3. the third index column, `source` — without it an abandoned API draft
+    //      sharing the session id would make the user's FIRST legitimate CSV
+    //      submit fail forever, i.e. the promise would hold by making the
+    //      product unusable.
+    // Receipt: supabase/tests/test_csv_finalize_double_submit.sql (Part 4 is the
+    // one a two-column index fails).
+    //
+    // It must STILL NOT be widened to the API path — that call site's guarantee
+    // is a different index scope — and a promise made ahead of its mechanism is
+    // how this whole class of copy started.
+    //
+    // ⚠️ 140.4-16 / CR-01 — THE PROMISE IS NOW SCOPED TO AN *UNCHANGED*
+    // RESUBMIT, AND THAT THIS SENTENCE HAS MOVED A THIRD TIME IS THE LESSON.
+    // The mechanism above is keyed on `wizard_session_id`, which identifies a
+    // SESSION and not a SUBMISSION; `clearWizardState` fires only on success /
+    // delete-draft / start-fresh, so the id survives the very failure this copy
+    // is shown for. A user who followed the old sentence could rename, pick a
+    // DIFFERENT file and submit — and the 23505 arm resolved that to the FIRST
+    // strategy, whose series then became A ∪ B, because
+    // persist_csv_daily_returns is an upsert with no delete outside the
+    // incoming range. The old sentence was instructing the action that
+    // triggered a silent cross-submission merge, reported as success.
+    //
+    // Both halves are refused now — routers/process_key.py's name check, before
+    // any write, and the stale-range fence in csv-finalize/route.ts at the site
+    // of the merge — so the copy owes the user the escape those refusals imply:
+    // START A NEW STRATEGY. `wizardErrors.test.ts` asserts that escape is
+    // present on BOTH resubmit entries, rather than banning a phrase: a
+    // fragment ban is satisfiable by deleting the sentence, which would leave
+    // the user with less information than before, not more.
     fix: [
-      "Submit again. On the CSV path a repeat submit of the same wizard session cannot create a second strategy.",
+      "Submit the same file again. On the CSV path an unchanged resubmit of the same wizard session resolves to the strategy that already exists instead of creating a second one.",
+      "To upload a different file, or to use a different name, start a new strategy. We refuse a changed resubmit rather than mixing it into the first one.",
       "If it persists, contact security@quantalyze.com.",
     ],
     docsHref: "/security#sync-timing",
@@ -895,6 +965,21 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // verification_id with semantically successful status. The wizard UI
   // surfaces this code so the user knows their submission landed and
   // where to find it, rather than seeing a generic "duplicate" error.
+  //
+  // 140.4-03 / SEAMRIM-03 — SCOPE CORRECTION. The paragraph above describes the
+  // API path and only the API path. Read as a statement about "the wizard" it
+  // was wrong twice over on the CSV branch:
+  //   * it was UNREACHABLE there — 140.1 moved the WIZARD_DUPLICATE pre-check
+  //     below the csv-finalize branch (correctly: it was a dead end), and
+  //     csv-finalize posts no strategy_id, so the arm described above never ran;
+  //   * it is STILL not emitted there, by design. The CSV path now has its OWN
+  //     23505 arm (routers/process_key.py), and it deliberately answers with the
+  //     ordinary first-submit envelope — ok/strategy_id/status/step="finalize",
+  //     NO code — because on that path the honest thing to show the user is
+  //     their strategy, not a "duplicate" notice. A user who submits twice on
+  //     the CSV branch sees success, not this entry.
+  // So: this code is API-path vocabulary. Do not wire it into the CSV finalize
+  // reply, and do not "fix" the CSV arm to emit it.
   WIZARD_DUPLICATE: {
     title: "You've already submitted this strategy.",
     cause:

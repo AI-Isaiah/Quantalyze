@@ -4,7 +4,12 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { UI_EXCHANGE_CODES } from "@/lib/utils";
 import { isSfoxEnabledServer, type SupportedExchange } from "@/lib/closed-sets";
-import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
+import {
+  publicIpLimiter,
+  checkLimit,
+  getClientIp,
+  rateLimitDenyJson,
+} from "@/lib/ratelimit";
 import { postProcessKey } from "@/lib/process-key-client";
 import { createClient } from "@/lib/supabase/server";
 // 140.3-13a / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
@@ -19,6 +24,11 @@ import { createClient } from "@/lib/supabase/server";
 // third party. `140.3-02` closed a live end-user JWT log leak one wave-set ago;
 // adding an observability channel must not re-open it through Sentry instead.
 import { captureToSentry } from "@/lib/sentry-capture";
+// 140.4-07 / SEAMRIM-06 — the same three per-request credentials the block above
+// names for Sentry apply verbatim to the CONSOLE. Until this import, they were
+// applied to Sentry ONLY, and the three console sites below logged the caught
+// value raw — on the PUBLIC, anonymous route that declares them.
+import { scrubSeamError } from "@/lib/seam-redaction";
 
 /**
  * Phase 140 / SEAM-02 — pinned for clarity; asserted against
@@ -48,10 +58,17 @@ export async function POST(req: NextRequest) {
   const ip = getClientIp(req.headers);
   const rl = await checkLimit(publicIpLimiter, `verify-strategy:${ip}`);
   if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
-    );
+    // 140.4-13 / SEAMRIM-05 — the 503-vs-429 decision is the CHOKEPOINT'S, not
+    // this route's. Before this, every deny here was a 429, so an Upstash
+    // outage told an anonymous visitor evaluating us for the first time that
+    // THEY were being throttled. `rateLimitDenyJson` answers 503 on
+    // `ratelimit_misconfigured` so the outage reaches the canary instead.
+    //
+    // No options: this route's genuine 429 body and headers ALREADY are the
+    // builder's defaults — `{error: "Too many requests"}` with `Retry-After`
+    // and nothing else (it is the one seam route with no NO_STORE_HEADERS).
+    // Byte-identical by construction rather than by transcription.
+    return rateLimitDenyJson(rl);
   }
 
   let body: Record<string, unknown>;
@@ -381,7 +398,10 @@ async function unifiedVerifyStrategyHandler(
       level: "fatal",
       secrets: perRequestSecrets,
     });
-    console.error("[verify-strategy] createAdminClient config error:", configErr);
+    console.error(
+      "[verify-strategy] createAdminClient config error:",
+      scrubSeamError(configErr, perRequestSecrets),
+    );
     return NextResponse.json(
       { error: "Verification service misconfigured" },
       { status: 500 },
@@ -422,7 +442,7 @@ async function unifiedVerifyStrategyHandler(
       });
       console.error(
         "[verify-strategy] CT-3 public_token persist failed:",
-        persistError,
+        scrubSeamError(persistError, perRequestSecrets),
       );
       return NextResponse.json(
         { error: "Failed to finalize verification" },
@@ -437,7 +457,10 @@ async function unifiedVerifyStrategyHandler(
       tags: { surface: "verify-strategy", step: "public-token-persist-threw" },
       secrets: perRequestSecrets,
     });
-    console.error("[verify-strategy] CT-3 public_token persist threw:", err);
+    console.error(
+      "[verify-strategy] CT-3 public_token persist threw:",
+      scrubSeamError(err, perRequestSecrets),
+    );
     return NextResponse.json(
       { error: "Failed to finalize verification" },
       { status: 500 },

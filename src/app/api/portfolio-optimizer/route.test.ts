@@ -72,9 +72,16 @@ const STATE = vi.hoisted(() => ({
     | { id: string }
     | null,
   csrfResponse: null as null | Response,
+  // 140.4-13 / SEAMRIM-05 — the THIRD outcome. `reason` absent is a genuine
+  // throttle (429); "ratelimit_misconfigured" is OUR store being unreachable
+  // and must answer 503.
   checkLimitResult: { success: true } as
     | { success: true }
-    | { success: false; retryAfter: number },
+    | {
+        success: false;
+        retryAfter: number;
+        reason?: "ratelimit_misconfigured";
+      },
   ownershipResult: true,
   ownershipCalls: [] as Array<{ portfolioId: string; userId: string }>,
   optimizerImpl: (async (_id: string, _actorId: string, _ms?: number) => ({
@@ -107,14 +114,22 @@ vi.mock("@/lib/csrf", () => ({
   assertSameOrigin: () => STATE.csrfResponse,
 }));
 
-vi.mock("@/lib/ratelimit", () => ({
-  userActionLimiter: {
-    resetUsedTokens: async (key: string) => {
-      STATE.refundCalls.push(key);
+// ⚠️ EXTENDED, NOT REPLACED (140.4-13 / SEAMRIM-05). See the note in
+// `src/__tests__/csv-validate-route.test.ts`: the pure helpers come from
+// `importActual` so this mock cannot drift from the real 503-vs-429 decision.
+vi.mock("@/lib/ratelimit", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/ratelimit")>();
+  return {
+    userActionLimiter: {
+      resetUsedTokens: async (key: string) => {
+        STATE.refundCalls.push(key);
+      },
     },
-  },
-  checkLimit: async () => STATE.checkLimitResult,
-}));
+    checkLimit: async () => STATE.checkLimitResult,
+    rateLimitDenyJson: actual.rateLimitDenyJson,
+    isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
+  };
+});
 
 vi.mock("@/lib/queries", () => ({
   assertPortfolioOwnership: async (portfolioId: string, userId: string) => {
@@ -184,6 +199,34 @@ describe("POST /api/portfolio-optimizer — audit-2026-05-07 cluster A", () => {
     const res = await POST(buildRequest({ portfolio_id: "x" }));
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("42");
+    // 140.4-13 / SEAMRIM-05 — the 429 body and headers are byte-unchanged by
+    // the chokepoint adoption. Hand-typed from the pre-adoption source.
+    expect(await res.json()).toEqual({ error: "Too many requests" });
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("[140.4-13 / SEAMRIM-05] ratelimit_misconfigured → 503, not 429", async () => {
+    STATE.checkLimitResult = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    const res = await POST(buildRequest({ portfolio_id: "x" }));
+    expect(
+      res.status,
+      "Our Upstash store being unreachable is OUR outage. A 429 renders it as " +
+        "the allocator over-using the optimizer, and hides it from the canary.",
+    ).toBe(503);
+    expect(await res.json()).toEqual({ error: "Rate limiter unavailable" });
+    expect(res.headers.get("retry-after")).toBe("60");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("[140.4-13 / SEAMRIM-05] success → the deny arm does not fire", async () => {
+    STATE.checkLimitResult = { success: true };
+    const res = await POST(buildRequest({ portfolio_id: "x" }));
+    expect(res.status).not.toBe(429);
+    expect(res.status).not.toBe(503);
   });
 
   it("C-0106 #3 / C-0108: returns 403 when assertPortfolioOwnership=false (cross-tenant)", async () => {

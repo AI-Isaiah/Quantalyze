@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { unstable_cache } from "next/cache";
 import { withAuth } from "@/lib/api/withAuth";
 import { createClient } from "@/lib/supabase/server";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { resilientFetch } from "@/lib/resilient-fetch";
@@ -362,10 +362,10 @@ export const GET = withAuth(
     // able to grind requests through the Next layer.
     const rl = await checkLimit(userActionLimiter, `key-perms:${user.id}`);
     if (!rl.success) {
-      return NextResponse.json(
-        { error: "Too many requests" },
-        { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
-      );
+      // 140.4-13 / SEAMRIM-05 — deny through the chokepoint so a limiter
+      // misconfiguration answers 503. The 429 body is the builder's default,
+      // byte-identical to what was inlined here; NO_STORE_HEADERS is kept.
+      return rateLimitDenyJson(rl, { headers: NO_STORE_HEADERS });
     }
 
     // Ownership check — reads via the user-scoped client so RLS applies.

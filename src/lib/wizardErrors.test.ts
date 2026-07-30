@@ -1522,6 +1522,39 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
     ).toEqual([]);
   });
 
+  it("[140.4-16 / CR-01] the two CSV resubmit instructions name the CHANGED case, not only the repeat", () => {
+    // ⚠️ WHY THIS IS A GUARD AND NOT A STYLE NOTE. These two entries are the
+    // ONLY copy in the product that instructs a resubmit, and the fence they
+    // describe is scoped to a REPEAT. `wizard_session_id` survives a failed
+    // submit (localStorage.ts:390-393), so the very user reading this sentence
+    // can rename, pick a different file and submit — and until CR-01 that was
+    // silently merged into the first strategy and reported as success.
+    //
+    // Both halves are now refused (process_key.py's 23505 name check, and the
+    // stale-range fence in csv-finalize/route.ts). A refusal the user was never
+    // warned about is still a dead end, so the copy owes them the escape: start
+    // a new strategy. Asserting the ESCAPE rather than banning a phrase is
+    // deliberate — a fragment ban is satisfied by deleting the sentence, which
+    // would leave the user with less information, not more.
+    for (const code of ["CSV_SUBMIT_FAILED", "CSV_SUBMIT_NO_STRATEGY_ID"] as const) {
+      const copy = WIZARD_ERROR_COPY[code];
+      const haystack = [copy.title, copy.cause, ...copy.fix]
+        .join("   ")
+        .toLowerCase();
+      expect(
+        haystack.includes("same file"),
+        `${code} instructs a resubmit without saying WHICH file. The fence ` +
+          `only holds for an unchanged one; a changed resubmit is refused.`,
+      ).toBe(true);
+      expect(
+        haystack.includes("start a new strategy"),
+        `${code} tells the user to submit again but never tells them what to ` +
+          `do if the file or the name changed — which is now a refusal, not a ` +
+          `merge. Without the escape they are dead-ended by our own guard.`,
+      ).toBe(true);
+    }
+  });
+
   it("the guard can actually see a fix[] line, not only the title", () => {
     // A receipt for the scan's own reach. Two of the nine strings
     // (GATE_ANALYTICS_FAILED's notification claim and

@@ -73,9 +73,16 @@ const STATE = vi.hoisted(() => ({
     email: "alloc@test.sec",
   } as { id: string; email: string } | null,
   csrfShouldReject: false,
+  // 140.4-13 / SEAMRIM-05 — the THIRD outcome. `reason` absent is a genuine
+  // throttle (429); "ratelimit_misconfigured" is OUR store being unreachable
+  // and must answer 503.
   checkLimitResult: { success: true } as
     | { success: true }
-    | { success: false; retryAfter: number },
+    | {
+        success: false;
+        retryAfter: number;
+        reason?: "ratelimit_misconfigured";
+      },
   // Records every call so the "never reached" negatives below are real
   // assertions about the route's ordering rather than assumptions.
   optimizeCalls: [] as Array<{
@@ -111,10 +118,18 @@ vi.mock("@/lib/csrf", () => ({
       : null,
 }));
 
-vi.mock("@/lib/ratelimit", () => ({
-  userActionLimiter: {},
-  checkLimit: async () => STATE.checkLimitResult,
-}));
+// ⚠️ EXTENDED, NOT REPLACED (140.4-13 / SEAMRIM-05). See the note in
+// `src/__tests__/csv-validate-route.test.ts`: the pure helpers come from
+// `importActual` so this mock cannot drift from the real 503-vs-429 decision.
+vi.mock("@/lib/ratelimit", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/ratelimit")>();
+  return {
+    userActionLimiter: {},
+    checkLimit: async () => STATE.checkLimitResult,
+    rateLimitDenyJson: actual.rateLimitDenyJson,
+    isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
+  };
+});
 
 vi.mock("@/lib/analytics-client", async () => {
   // Hand-written shims — see the MOCK-FACTORY NOTE in the file header. Both
@@ -315,9 +330,18 @@ describe("POST /api/scenario/optimize", () => {
     expect(JSON.stringify(body)).not.toContain("boom-internal-detail");
     // ...but the operator MUST still get it. "Static body" must not be
     // satisfiable by discarding the diagnostic.
+    //
+    // 140.4-08 / SEAMRIM-06 — pinned to the SCRUBBED rendering. `expect.any(Error)`
+    // pinned the raw instance in place, so it failed on correct code once the
+    // site was wrapped. The replacement is strictly stronger: it pins that the
+    // value went through `scrubSeamError` (a string, not the Error) AND that
+    // the diagnosis survived the scrub. That second half is the A-10 non-drop
+    // check, and it is the only mechanism in this tree that reddens if someone
+    // "fixes" a future scrub finding by deleting the value instead — the source
+    // predicate scores a dropped value clean.
     expect(errorSpy).toHaveBeenCalledWith(
       "[scenario/optimize] unexpected error",
-      expect.any(Error),
+      expect.stringContaining("boom-internal-detail"),
     );
   });
 
@@ -337,6 +361,16 @@ describe("POST /api/scenario/optimize", () => {
     const throttled = await POST(makeRequest(validBody()));
     expect(throttled.status).toBe(429);
     expect(STATE.optimizeCalls).toHaveLength(0);
+    // 140.4-13 / SEAMRIM-05 — byte-unchanged by the chokepoint adoption.
+    // Hand-typed from the pre-adoption source, including the BESPOKE sentence
+    // and the ABSENT Retry-After: this is the one seam route whose 429 carries
+    // no such header, and preserving that is why `rateLimitDenyJson` grew a
+    // `retryAfterHeader: "misconfigured-only"` option rather than stamping one.
+    expect(await throttled.json()).toEqual({
+      error: "Too many optimize requests. Try again shortly.",
+    });
+    expect(throttled.headers.get("Retry-After")).toBeNull();
+    expect(throttled.headers.get("Cache-Control")).toBe("private, no-store");
 
     // B15 ordering: a malformed body is rejected as 400 by the validation
     // above the limiter, so it never reaches the (denying) limiter at all.
@@ -345,6 +379,38 @@ describe("POST /api/scenario/optimize", () => {
       makeRequest({ series: SERIES, objective: "max_return" }),
     );
     expect(malformed.status).toBe(400);
+  });
+
+  it("[140.4-13 / SEAMRIM-05] ratelimit_misconfigured → 503, WITH a Retry-After the 429 does not carry", async () => {
+    STATE.checkLimitResult = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+
+    expect(
+      res.status,
+      "Our own limiter's store being unreachable is not the allocator running " +
+        "too many blends. 429 says it is.",
+    ).toBe(503);
+    expect(await res.json()).toEqual({ error: "Rate limiter unavailable" });
+    // The 503 DOES carry Retry-After even though the 429 does not — the canary
+    // that this fail-CLOSED status exists to reach needs to know when to retry.
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(STATE.optimizeCalls).toHaveLength(0);
+  });
+
+  it("[140.4-13 / SEAMRIM-05] success → the deny arm does not fire", async () => {
+    STATE.checkLimitResult = { success: true };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+
+    expect(res.status).not.toBe(429);
+    expect(res.status).not.toBe(503);
+    expect(STATE.optimizeCalls.length).toBeGreaterThan(0);
   });
 
   it("400 on a malformed point — a non-finite value never reaches the solver", async () => {

@@ -23,6 +23,7 @@ DO $$
 DECLARE
   v_col_type   TEXT;
   v_idx_def    TEXT;
+  v_idx_cols   TEXT[];
   v_fn_src     TEXT;
 BEGIN
   -- ----- 1. strategies.wizard_session_id column exists and is uuid ----------
@@ -38,22 +39,45 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED: strategies.wizard_session_id must be uuid, got %', v_col_type;
   END IF;
 
-  -- ----- 2. partial-UNIQUE index on (user_id, wizard_session_id) ------------
+  -- ----- 2. partial-UNIQUE index on (user_id, wizard_session_id, source) ----
+  -- Phase 140.4 / SEAMRIM-03 re-scoped this index by `source` (migration
+  -- 20260728120000). WHY THE THIRD COLUMN: finalize_csv_strategy now writes
+  -- wizard_session_id too, and src/lib/wizard/localStorage.ts:379-381 restores
+  -- that id ACROSS the CSV/API boundary from one shared storage key — so under a
+  -- two-column key an abandoned API draft would make the same user's FIRST
+  -- legitimate CSV submit collide, permanently (every retry reuses the id).
+  -- Scoping by source preserves the API-path guarantee exactly (all API writers
+  -- set source='wizard') and removes the cross-source collision. The behavioural
+  -- receipt, including that cross-source control case, is
+  -- supabase/tests/test_csv_finalize_double_submit.sql.
   SELECT indexdef INTO v_idx_def
     FROM pg_indexes
    WHERE schemaname = 'public'
      AND tablename = 'strategies'
-     AND indexname = 'strategies_user_wizard_session_uniq';
+     AND indexname = 'strategies_user_wizard_session_source_uniq';
   IF v_idx_def IS NULL THEN
-    RAISE EXCEPTION 'TEST FAILED: strategies_user_wizard_session_uniq index is missing';
+    RAISE EXCEPTION 'TEST FAILED: strategies_user_wizard_session_source_uniq index is missing';
   END IF;
   IF v_idx_def NOT ILIKE '%UNIQUE%' THEN
-    RAISE EXCEPTION 'TEST FAILED: strategies_user_wizard_session_uniq must be UNIQUE: %', v_idx_def;
+    RAISE EXCEPTION 'TEST FAILED: strategies_user_wizard_session_source_uniq must be UNIQUE: %', v_idx_def;
   END IF;
-  IF v_idx_def NOT ILIKE '%user_id%' OR v_idx_def NOT ILIKE '%wizard_session_id%' THEN
-    RAISE EXCEPTION 'TEST FAILED: index must cover (user_id, wizard_session_id): %', v_idx_def;
+  -- Assert the indexed column LIST AND ORDER from pg_index rather than
+  -- substring-matching indexdef: an ILIKE for '%source%' also matches the index
+  -- NAME inside its own definition text, so it would report agreement even if the
+  -- column were dropped. user_id must LEAD — wizard_session_id is caller-supplied
+  -- and a non-tenant-leading unique index over it is the C-08 cross-tenant leak.
+  SELECT array_agg(a.attname ORDER BY k.ord) INTO v_idx_cols
+    FROM pg_index i
+    JOIN pg_class c     ON c.oid = i.indexrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+    JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+   WHERE n.nspname = 'public'
+     AND c.relname = 'strategies_user_wizard_session_source_uniq';
+  IF v_idx_cols IS DISTINCT FROM ARRAY['user_id', 'wizard_session_id', 'source']::TEXT[] THEN
+    RAISE EXCEPTION 'TEST FAILED: index must cover exactly (user_id, wizard_session_id, source) in that order, got %', v_idx_cols;
   END IF;
-  -- Must be PARTIAL (WHERE wizard_session_id IS NOT NULL) so legacy/CSV rows
+  -- Must be PARTIAL (WHERE wizard_session_id IS NOT NULL) so legacy/admin rows
   -- (NULL session id) are excluded — otherwise every NULL collides.
   IF v_idx_def NOT ILIKE '%wizard_session_id IS NOT NULL%' THEN
     RAISE EXCEPTION 'TEST FAILED: index must be partial (WHERE wizard_session_id IS NOT NULL): %', v_idx_def;

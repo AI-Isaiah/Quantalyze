@@ -46,7 +46,14 @@ const {
   TEST_USER: { id: "00000000-0000-0000-0000-aaaaaaaaaaaa" },
   mockValidateKey: vi.fn(),
   mockEncryptKey: vi.fn(),
-  rateLimitResult: { success: true as boolean, retryAfter: 0 },
+  // 140.4-13 / SEAMRIM-05 — `reason` is the THIRD outcome: absent is a genuine
+  // throttle (429), "ratelimit_misconfigured" is OUR store being unreachable
+  // and must answer 503.
+  rateLimitResult: {
+    success: true as boolean,
+    retryAfter: 0,
+    reason: undefined as "ratelimit_misconfigured" | undefined,
+  },
 }));
 
 // audit + supabase server modules import "server-only" which throws under
@@ -61,10 +68,18 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
-vi.mock("@/lib/ratelimit", () => ({
-  userActionLimiter: null,
-  checkLimit: async () => rateLimitResult,
-}));
+// ⚠️ EXTENDED, NOT REPLACED (140.4-13 / SEAMRIM-05). See the note in
+// `src/__tests__/csv-validate-route.test.ts`: the pure helpers come from
+// `importActual` so this mock cannot drift from the real 503-vs-429 decision.
+vi.mock("@/lib/ratelimit", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/ratelimit")>();
+  return {
+    userActionLimiter: null,
+    checkLimit: async () => rateLimitResult,
+    rateLimitDenyJson: actual.rateLimitDenyJson,
+    isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
+  };
+});
 
 vi.mock("@/lib/analytics-client", () => {
   // Real-shape error classes so the route's `err instanceof AnalyticsUpstreamError`
@@ -120,6 +135,7 @@ describe("POST /api/keys/validate-and-encrypt", () => {
     vi.clearAllMocks();
     rateLimitResult.success = true;
     rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
     mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
     mockEncryptKey.mockResolvedValue({
       api_key_encrypted: "ct-blob",
@@ -146,6 +162,29 @@ describe("POST /api/keys/validate-and-encrypt", () => {
     // Short-circuited before touching the validation/encryption pipeline.
     expect(mockValidateKey).not.toHaveBeenCalled();
     expect(mockEncryptKey).not.toHaveBeenCalled();
+  });
+
+  // ── (1b) 140.4-13 / SEAMRIM-05 — our own limiter's outage → 503 ──────
+  it("ratelimit_misconfigured → 503, not a 429 that reads as the caller's fault", async () => {
+    rateLimitResult.success = false;
+    rateLimitResult.retryAfter = 60;
+    rateLimitResult.reason = "ratelimit_misconfigured";
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(
+      res.status,
+      "A missing/unreachable Upstash store is OUR misconfiguration. Answering " +
+        "429 tells the user to slow down and hides the outage from the canary.",
+    ).toBe(503);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(await res.json()).toEqual({ error: "Rate limiter unavailable" });
+    expect(mockValidateKey).not.toHaveBeenCalled();
+    expect(mockEncryptKey).not.toHaveBeenCalled();
+
+    rateLimitResult.reason = undefined;
   });
 
   // ── (2) Missing required fields → 400 ───────────────────────────────
@@ -391,6 +430,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     vi.clearAllMocks();
     rateLimitResult.success = true;
     rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
     // F2 (Phase 122): the carve-out only runs when the server go-live flag is
     // ON. These tests exercise the ENABLED path, so pin SFOX_ENABLED=true; the
     // disabled default is covered by the dedicated fail-closed block below.
@@ -519,6 +559,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox server gate (F2, SFOX_ENA
     vi.clearAllMocks();
     rateLimitResult.success = true;
     rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
     delete process.env.SFOX_ENABLED;
     mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
     mockEncryptKey.mockResolvedValue({ api_key_encrypted: "ct-blob" });
@@ -589,6 +630,7 @@ describe("POST /api/keys/validate-and-encrypt — mt5 server gate (MT5_ENABLED o
     vi.clearAllMocks();
     rateLimitResult.success = true;
     rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
     delete process.env.MT5_ENABLED;
     mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
     mockEncryptKey.mockResolvedValue({ api_key_encrypted: "ct-blob" });
@@ -636,6 +678,7 @@ describe("POST /api/keys/validate-and-encrypt — mt5 three-credential defense (
     vi.clearAllMocks();
     rateLimitResult.success = true;
     rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
     process.env.MT5_ENABLED = "true";
     mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
     mockEncryptKey.mockResolvedValue({

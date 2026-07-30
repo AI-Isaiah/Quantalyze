@@ -31,6 +31,27 @@ import { AllocatorMatchQueue } from "./AllocatorMatchQueue";
  * IS expected — that's how the queue loads.
  */
 
+
+/**
+ * [140.4-05 / SEAMRIM-10] A failure sentence now appears TWICE in the error
+ * render: once in the visible card, and once in the sr-only `<LiveRegion>` that
+ * announces it. (This surface renders the SAME error card for a failed initial
+ * load and for a failed recompute — `if (error || !data)` returns early for
+ * both — so every recompute-failure case below sees the announcement too.)
+ *
+ * Strictly STRONGER than the `getByText(…)` it replaces: the exact count pins
+ * the visible copy AND the announcement together, so it fails if either is
+ * dropped. Deleting the announcement is exactly Falsifiability row M96.
+ */
+function visibleAndAnnounced(text: string): HTMLElement[] {
+  const nodes = screen.getAllByText(text);
+  expect(
+    nodes,
+    `"${text}" must appear exactly twice \u2014 the visible card + the sr-only LiveRegion`,
+  ).toHaveLength(2);
+  return nodes;
+}
+
 const ALLOCATOR_ID = "11111111-1111-4111-8111-111111111111";
 
 // jsdom doesn't implement matchMedia. The component uses `useMediaQuery`
@@ -492,7 +513,7 @@ describe("<AllocatorMatchQueue> — SEAMUX-05: handleRecompute observes the outc
 
     // The failure surfaces on the component's own error-first card …
     await waitFor(() => {
-      expect(screen.getByText(BREAKER_SENTENCE)).toBeInTheDocument();
+      expect(visibleAndAnnounced(BREAKER_SENTENCE)[0]).toBeInTheDocument();
     });
     // … and the queue it invalidates nothing about is NOT refetched. A refetch
     // is what made a trip read as a completed recompute.
@@ -728,7 +749,7 @@ describe("<AllocatorMatchQueue> — TS-18: a 424 is the caller's venue, named", 
     fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
 
     await waitFor(() => {
-      expect(screen.getByText(GENERIC_500)).toBeInTheDocument();
+      expect(visibleAndAnnounced(GENERIC_500)[0]).toBeInTheDocument();
     });
     // The 424 arm did not swallow every failure into a venue state.
     expect(document.body.textContent).not.toContain("isn't responding");
@@ -745,11 +766,86 @@ describe("<AllocatorMatchQueue> — TS-18: a 424 is the caller's venue, named", 
     );
     fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
     await waitFor(() => {
-      expect(screen.getByText(BREAKER_SENTENCE)).toBeInTheDocument();
+      expect(visibleAndAnnounced(BREAKER_SENTENCE)[0]).toBeInTheDocument();
     });
   });
 
   function countCalls(mock: ReturnType<typeof vi.fn>, url: string) {
     return mock.mock.calls.filter((c) => c[0] === url).length;
   }
+});
+
+/**
+ * [140.4-05 / SEAMRIM-10] The load failure is ANNOUNCED, not only drawn.
+ *
+ * This surface is the SECOND member of the converted class (the first is
+ * `PortfolioOptimizer`), and it is the member the Falsifiability Ledger row
+ * M96 mutates — mutating the second member is what distinguishes a class fix
+ * from an instance fix.
+ *
+ * Why the announcement is the only channel here: the queue's primary action is
+ * bound to the `r` keyboard shortcut, and this surface regressed from a modal
+ * `alert()` (which assistive tech always announces) to a silent inline card.
+ * The error branch is an early `return` — the loaded tree never mounts — so
+ * there is no focus event either.
+ */
+describe("<AllocatorMatchQueue> — [140.4-05] the load failure is announced", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  /** The message the route hands back, hand-typed so a copy change reddens here. */
+  const ROUTE_MESSAGE = "Match queue is unavailable.";
+
+  it("ANNOUNCES the load failure through role=alert, carrying the card's own message", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: ROUTE_MESSAGE }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(ROUTE_MESSAGE);
+
+    // The visible card is unchanged — the announcement is purely additive.
+    expect(visibleAndAnnounced(ROUTE_MESSAGE)[0]).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
+  });
+
+  it("ANNOUNCES the static fallback when the route sends no message", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response("not json", { status: 500 }),
+    );
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+
+    // `error || "Failed to load"` — the announcement carries whichever of the
+    // two the card is showing, never a third string invented for the region.
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Failed to load match queue");
+  });
+
+  it("NEGATIVE CONTROL: the loaded queue exposes NO role=alert", async () => {
+    // Without this the assertions above are satisfied by a component that
+    // announces unconditionally, which would fire on every successful load.
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(buildPayload()), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+
+    // `findByRole("heading", …)` not `findByText` — the allocator name appears
+    // in BOTH the breadcrumb span and the h1, so a bare text query is ambiguous.
+    expect(
+      await screen.findByRole("heading", { name: /Demo Allocator/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
 });

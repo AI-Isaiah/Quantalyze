@@ -63,16 +63,35 @@ vi.mock("@/lib/email", () => ({
   notifyManagerApproved: async () => undefined,
 }));
 
-vi.mock("@/lib/strategyGate", () => ({
-  checkStrategyGate: () => ({ passed: true }),
-  // Real impl (exchange === "deribit") — the venue-aware re-check predicate
-  // depends on it, and the mockAdminClient `api_keys` route supplies the
-  // exchange, so mocking it faithfully keeps the ledger-vs-perp branch honest.
-  isLedgerBackedExchange: (exchange: string | null | undefined) =>
-    exchange === "deribit",
-  STRATEGY_GATE_MIN_TRADES: 5,
-  STRATEGY_GATE_MIN_CSV_ROWS: 7,
-}));
+/**
+ * The suite's standard gate stub: passes every input, so the tests below
+ * isolate the ROUTE's own reads and re-check logic. Factored out because two
+ * C-3 cases install a THROWING doMock and `vi.doMock` persists for the rest of
+ * the file — the TOCTOU beforeEach re-asserts this one before every test so no
+ * case can inherit a previous case's gate.
+ */
+async function stubbedGateModule() {
+  const actual =
+    await vi.importActual<typeof import("@/lib/strategyGate")>(
+      "@/lib/strategyGate",
+    );
+  return {
+    checkStrategyGate: () => ({ passed: true }),
+    // Real impl (exchange === "deribit") — the venue-aware re-check predicate
+    // depends on it, and the mockAdminClient `api_keys` route supplies the
+    // exchange, so mocking it faithfully keeps the ledger-vs-perp branch honest.
+    isLedgerBackedExchange: (exchange: string | null | undefined) =>
+      exchange === "deribit",
+    STRATEGY_GATE_MIN_TRADES: 5,
+    STRATEGY_GATE_MIN_CSV_ROWS: 7,
+    // C-3: the route narrows its gate-refusal catch with `instanceof`, so this
+    // must be the REAL class — a stub would make the narrowing vacuously false
+    // and the arm untestable.
+    StrategyGateUnevaluableError: actual.StrategyGateUnevaluableError,
+  };
+}
+
+vi.mock("@/lib/strategyGate", () => stubbedGateModule());
 
 import { runAdminPostCsrfRateLimitSuite } from "@/__tests__/helpers/adminPostCsrfRateLimit";
 
@@ -109,6 +128,11 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     // explicit doUnmock, every test below would 429 before reaching the
     // gate logic we want to exercise.
     vi.doUnmock("@/lib/ratelimit");
+    // Re-assert the standard gate stub: the two C-3 gate-refusal cases install
+    // a THROWING doMock, and vi.doMock persists for the remainder of the file.
+    // Without this, the next test in declaration order inherits the throw —
+    // observed, not hypothetical (it reddened SC-4 on the first run).
+    vi.doMock("@/lib/strategyGate", () => stubbedGateModule());
     vi.resetModules();
   });
 
@@ -160,10 +184,43 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     strategyKeysCountError?: boolean;
     /** when true, the compute_jobs stitch-job lookup errors → fail-loud 503. */
     stitchJobLookupError?: boolean;
+    // --- C-3 (140.4-01): read-failure toggles for the SEVEN first-pass /
+    //     re-check reads that participate in the approve decision and had no
+    //     `error` binding. Each must answer 503 about US with NO publish write. ---
+    /** first-pass `strategies` lookup returns a read error. */
+    strategyReadError?: boolean;
+    /** first-pass `trades` head count returns a read error. */
+    tradeCountError?: boolean;
+    /** first-pass `trades` head count returns count:null with NO error. */
+    tradeCountNull?: boolean;
+    /** earliest-trade probe (order ascending) returns a read error. */
+    earliestTradeError?: boolean;
+    /** latest-trade probe (order descending) returns a read error. */
+    latestTradeError?: boolean;
+    /** first-pass `strategy_analytics` read returns a read error. */
+    analyticsReadError?: boolean;
+    /** TOCTOU re-check `trades` head count returns a read error. */
+    recheckTradeCountError?: boolean;
+    /** TOCTOU re-check `trades` head count returns count:null with NO error. */
+    recheckTradeCountNull?: boolean;
+    /** TOCTOU re-check `strategy_analytics` read returns a read error. */
+    recheckAnalyticsError?: boolean;
   };
 
-  /** Tracks whether the route issued the compute_jobs read (SC-4 assertion). */
-  type RecheckTracker = { computeJobsQueried: boolean };
+  /**
+   * Tracks whether the route issued the compute_jobs read (SC-4 assertion) and
+   * whether it issued the `strategies` UPDATE at all. The UPDATE tracker is the
+   * load-bearing half of every 503 case below: a status-only assertion cannot
+   * distinguish "refused before writing" from "wrote, then answered 503".
+   * `tradesHeadCalls` / `analyticsReads` order-discriminate the first-pass read
+   * from its TOCTOU re-check twin (the route issues them in that order).
+   */
+  type RecheckTracker = {
+    computeJobsQueried: boolean;
+    publishUpdateIssued: boolean;
+    tradesHeadCalls: number;
+    analyticsReads: number;
+  };
 
   /**
    * Install an admin-client mock that routes from('trades') and
@@ -172,7 +229,13 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
    * returns `updateAffected` to simulate row-match / no-match.
    */
   function mockAdminClient(opts: RecheckMock): RecheckTracker {
-    const tracker: RecheckTracker = { computeJobsQueried: false };
+    const tracker: RecheckTracker = {
+      computeJobsQueried: false,
+      publishUpdateIssued: false,
+      tradesHeadCalls: 0,
+      analyticsReads: 0,
+    };
+    const READ_ERROR = { message: "boom" };
     vi.doMock("@/lib/supabase/admin", () => ({
       createAdminClient: () => ({
         from: (table: string) => {
@@ -230,7 +293,26 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
               ) => ({
                 eq: () => {
                   if (meta?.head) {
-                    // count probe (used by both first-pass and re-check)
+                    // count probe. The route issues the first-pass count
+                    // before the TOCTOU re-check count, so call order
+                    // discriminates the two.
+                    tracker.tradesHeadCalls += 1;
+                    const firstPass = tracker.tradesHeadCalls === 1;
+                    if (firstPass ? opts.tradeCountError : opts.recheckTradeCountError) {
+                      return Promise.resolve({
+                        count: null,
+                        data: null,
+                        error: READ_ERROR,
+                      });
+                    }
+                    if (firstPass ? opts.tradeCountNull : opts.recheckTradeCountNull) {
+                      // count:null with NO error — equally unrepresentable.
+                      return Promise.resolve({
+                        count: null,
+                        data: null,
+                        error: null,
+                      });
+                    }
                     return Promise.resolve({
                       count: opts.recheckTradeCount,
                       data: null,
@@ -241,13 +323,28 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
                   // the wizard-shape `[0]?.timestamp` access without
                   // tripping the < 7 days branch (matched timestamps =>
                   // span 0; checkStrategyGate is mocked passed:true).
+                  // Sort direction distinguishes earliest (ascending) from
+                  // latest (descending) so each can fail independently.
                   return {
-                    order: () => ({
+                    order: (
+                      _col: string,
+                      orderOpts: { ascending: boolean },
+                    ) => ({
                       limit: () =>
-                        Promise.resolve({
-                          data: [{ timestamp: new Date().toISOString() }],
-                          error: null,
-                        }),
+                        Promise.resolve(
+                          (
+                            orderOpts.ascending
+                              ? opts.earliestTradeError
+                              : opts.latestTradeError
+                          )
+                            ? { data: null, error: READ_ERROR }
+                            : {
+                                data: [
+                                  { timestamp: new Date().toISOString() },
+                                ],
+                                error: null,
+                              },
+                        ),
                     }),
                   };
                 },
@@ -258,16 +355,28 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
             return {
               select: () => ({
                 eq: () => ({
-                  single: async () => ({
-                    data:
-                      opts.recheckStatus === null
-                        ? null
-                        : {
-                            computation_status: opts.recheckStatus,
-                            computation_error: null,
-                          },
-                    error: null,
-                  }),
+                  single: async () => {
+                    // First-pass gate read precedes the TOCTOU re-check read.
+                    tracker.analyticsReads += 1;
+                    const firstPass = tracker.analyticsReads === 1;
+                    if (
+                      firstPass
+                        ? opts.analyticsReadError
+                        : opts.recheckAnalyticsError
+                    ) {
+                      return { data: null, error: READ_ERROR };
+                    }
+                    return {
+                      data:
+                        opts.recheckStatus === null
+                          ? null
+                          : {
+                              computation_status: opts.recheckStatus,
+                              computation_error: null,
+                            },
+                      error: null,
+                    };
+                  },
                 }),
               }),
             };
@@ -307,39 +416,51 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
           return {
             select: () => ({
               eq: () => ({
-                single: async () => ({
-                  data: {
-                    api_key_id:
-                      opts.recheckApiKeyId !== undefined
-                        ? opts.recheckApiKeyId
-                        : "key-1",
-                    name: "Strat 1",
-                    user_id: "user-1",
-                    // M-1152: the post-approve manager-notify reads
-                    // profiles.email (admin.from("profiles").select("email")
-                    // routes through this fallthrough). Present so the notify
-                    // branch is reachable; inert for every other test because
-                    // notifyManagerApproved is a no-op mock by default.
-                    email: "manager-e2e@test.local",
-                  },
-                  error: null,
-                }),
+                single: async () =>
+                  // The strategies read error is scoped to `strategies`; the
+                  // `profiles` notify read routes through this same
+                  // fallthrough and must stay healthy.
+                  opts.strategyReadError && table === "strategies"
+                    ? { data: null, error: READ_ERROR }
+                    : {
+                        data: {
+                          api_key_id:
+                            opts.recheckApiKeyId !== undefined
+                              ? opts.recheckApiKeyId
+                              : "key-1",
+                          name: "Strat 1",
+                          user_id: "user-1",
+                          // M-1152: the post-approve manager-notify reads
+                          // profiles.email (admin.from("profiles").select("email")
+                          // routes through this fallthrough). Present so the notify
+                          // branch is reachable; inert for every other test because
+                          // notifyManagerApproved is a no-op mock by default.
+                          email: "manager-e2e@test.local",
+                        },
+                        error: null,
+                      },
               }),
             }),
-            update: () => ({
-              eq: () => ({
-                // reject path: single .eq('id')
-                then: (resolve: (v: { error: null }) => unknown) =>
-                  resolve({ error: null }),
-                // approve path: .eq('id').eq('status').select('id')
+            update: () => {
+              // C-3: the route issues exactly one `strategies` UPDATE, and it
+              // is the publish write. Recording it here is what lets a 503 case
+              // assert "refused BEFORE writing" rather than merely "answered 503".
+              if (table === "strategies") tracker.publishUpdateIssued = true;
+              return {
                 eq: () => ({
-                  select: async () => ({
-                    data: opts.updateAffected,
-                    error: null,
+                  // reject path: single .eq('id')
+                  then: (resolve: (v: { error: null }) => unknown) =>
+                    resolve({ error: null }),
+                  // approve path: .eq('id').eq('status').select('id')
+                  eq: () => ({
+                    select: async () => ({
+                      data: opts.updateAffected,
+                      error: null,
+                    }),
                   }),
                 }),
-              }),
-            }),
+              };
+            },
           };
         },
       }),
@@ -664,6 +785,197 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect((await res.json()).error).toMatch(/verify strategy data source/i);
   });
 
+  // --- C-3 (140.4-01): every read that participates in the approve decision
+  //     must bind `error` and answer 503 ABOUT US, with NO publish write.
+  //
+  //     On the untouched tree the route destructured six members from the
+  //     first-pass Promise.all and read `.error` on exactly one (csvCountError),
+  //     so a failed read arrived as a VALUE indistinguishable from real data:
+  //     supabase-js 2.110.1 resolves rather than throws. The sharpest instance
+  //     is the earliest/latest pair — a failed timestamp read made the gate's
+  //     span null, `spanDays !== null &&` skipped the entire 7-day check, and
+  //     the route PUBLISHED an under-history track record as verified.
+  //
+  //     Every case asserts BOTH halves: the 503 status AND publishUpdateIssued
+  //     === false. Status alone cannot see a route that writes and then 503s. ---
+
+  const READ_FAILURE_503 = /verify strategy data source/i;
+
+  it("first-pass strategies read error -> 503, no publish UPDATE", async () => {
+    const tracker = mockAdminClient({
+      strategyReadError: true,
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(READ_FAILURE_503);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("first-pass trades COUNT read error -> 503, no publish UPDATE", async () => {
+    const tracker = mockAdminClient({
+      tradeCountError: true,
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(READ_FAILURE_503);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("first-pass trades count of NULL with no error -> 503, no publish UPDATE (`?? 0` is the fabrication)", async () => {
+    // A null count coerced to 0 is a MEASUREMENT the route did not make. It
+    // reaches the gate as "this strategy has zero trades", which is a claim
+    // about the user's account, not about our read.
+    const tracker = mockAdminClient({
+      tradeCountNull: true,
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("EARLIEST-trade read error -> 503, no publish UPDATE (the C-3 publish-side fail-open)", async () => {
+    // Untouched tree: 200 + status published. The failed read made spanDays
+    // null and the 7-day gate was skipped entirely.
+    const tracker = mockAdminClient({
+      earliestTradeError: true,
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(READ_FAILURE_503);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("LATEST-trade read error -> 503, no publish UPDATE (second member of the class)", async () => {
+    const tracker = mockAdminClient({
+      latestTradeError: true,
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(READ_FAILURE_503);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("first-pass strategy_analytics read error -> 503, no publish UPDATE", async () => {
+    const tracker = mockAdminClient({
+      analyticsReadError: true,
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(READ_FAILURE_503);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("TOCTOU re-check trades count read error -> 503 (not a 409 about the strategy), no publish UPDATE", async () => {
+    // Untouched tree answered 409 "trade count fell below threshold during
+    // review" — a claim about the STRATEGY derived from a read that failed.
+    const tracker = mockAdminClient({
+      recheckTradeCountError: true,
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(READ_FAILURE_503);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("TOCTOU re-check trades count of NULL with no error -> 503, no publish UPDATE", async () => {
+    const tracker = mockAdminClient({
+      recheckTradeCountNull: true,
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("TOCTOU re-check strategy_analytics read error -> 503 (not a 409), no publish UPDATE", async () => {
+    const tracker = mockAdminClient({
+      recheckAnalyticsError: true,
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(READ_FAILURE_503);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("checkStrategyGate throwing StrategyGateUnevaluableError -> 503, no publish UPDATE", async () => {
+    // Defence in depth: the guards above should make this unreachable from the
+    // route's own reads. The arm exists so a future caller-side hole, or a
+    // third consumer, cannot turn the gate's refusal into an unhandled 500 —
+    // and so the refusal can never be swallowed into a pass.
+    const tracker = mockAdminClient({
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    vi.doMock("@/lib/strategyGate", async () => {
+      const actual =
+        await vi.importActual<typeof import("@/lib/strategyGate")>(
+          "@/lib/strategyGate",
+        );
+      return {
+        ...actual,
+        checkStrategyGate: () => {
+          // The REAL error class, so the route's `instanceof` narrowing is
+          // exercised rather than a look-alike.
+          throw new actual.StrategyGateUnevaluableError(12);
+        },
+      };
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(READ_FAILURE_503);
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("a non-gate throw from checkStrategyGate is NOT swallowed into a 503", async () => {
+    // Narrowed catch: rethrow anything that is not the gate's refusal.
+    // Swallowing an unknown throw here is how a fail-open comes back.
+    mockAdminClient({
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    vi.doMock("@/lib/strategyGate", async () => {
+      const actual =
+        await vi.importActual<typeof import("@/lib/strategyGate")>(
+          "@/lib/strategyGate",
+        );
+      return {
+        ...actual,
+        checkStrategyGate: () => {
+          throw new TypeError("something else entirely");
+        },
+      };
+    });
+    await expect(postApprove()).rejects.toThrow(/something else entirely/);
+  });
+
   it("SC-4: single-key approve (0 members) never issues the compute_jobs read", async () => {
     // The compute_jobs read is consulted ONLY when strategyKeysCount >= 1. A
     // single-key strategy (0 members, default) must reach 200 WITHOUT the route
@@ -729,7 +1041,19 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
     /** csv_daily_returns row count. Composites (apiKeyId null) source history
      *  here — supply >=7 so the gate reaches the analytics-status arm. */
     csvRowCount?: number;
+    /**
+     * C-3 (140.4-01) anti-over-refusal control. When true the
+     * strategy_analytics `.single()` returns PostgREST's PGRST116 — "the result
+     * contains 0 rows" — which is an ABSENCE, not a read failure: `data` is
+     * null either way and the gate already has a verdict for it
+     * (ANALYTICS_MISSING, 400, fail-CLOSED). A blanket 503 on any bound error
+     * would turn a legitimate "sync your trades first" into an outage message.
+     */
+    analyticsNoRows?: boolean;
   };
+
+  /** Records whether the route reached the `strategies` publish UPDATE. */
+  type GateTracker = { publishUpdateIssued: boolean };
 
   /**
    * Admin client that feeds the route's FIVE first-pass gate queries
@@ -737,7 +1061,8 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
    * strategy_analytics.single). The gate fails before the TOCTOU re-check
    * / UPDATE, so those paths are never reached.
    */
-  function mockGateAdminClient(fx: GateFixture): void {
+  function mockGateAdminClient(fx: GateFixture): GateTracker {
+    const tracker: GateTracker = { publishUpdateIssued: false };
     vi.doMock("@/lib/supabase/admin", () => ({
       createAdminClient: () => ({
         from: (table: string) => {
@@ -783,16 +1108,27 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
             return {
               select: () => ({
                 eq: () => ({
-                  single: async () => ({
-                    data:
-                      fx.computationStatus === null
-                        ? null
-                        : {
-                            computation_status: fx.computationStatus,
-                            computation_error: fx.computationError,
+                  single: async () =>
+                    fx.analyticsNoRows
+                      ? {
+                          data: null,
+                          // PostgREST's own no-rows code from `.single()`.
+                          error: {
+                            code: "PGRST116",
+                            message:
+                              "JSON object requested, multiple (or no) rows returned",
                           },
-                    error: null,
-                  }),
+                        }
+                      : {
+                          data:
+                            fx.computationStatus === null
+                              ? null
+                              : {
+                                  computation_status: fx.computationStatus,
+                                  computation_error: fx.computationError,
+                                },
+                          error: null,
+                        },
                 }),
               }),
             };
@@ -839,10 +1175,29 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
                 }),
               }),
             }),
+            // Present so "did the route reach the publish write?" is observable
+            // rather than a TypeError. Every fixture in this suite must fail the
+            // gate BEFORE it.
+            update: () => {
+              if (table === "strategies") tracker.publishUpdateIssued = true;
+              return {
+                eq: () => ({
+                  eq: () => ({
+                    select: async () => ({
+                      data: [{ id: "strat-1" }],
+                      error: null,
+                    }),
+                  }),
+                  then: (resolve: (v: { error: null }) => unknown) =>
+                    resolve({ error: null }),
+                }),
+              };
+            },
           };
         },
       }),
     }));
+    return tracker;
   }
 
   async function postApprove(): Promise<Response> {
@@ -889,6 +1244,51 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
     expect(body.error).toMatch(/^Cannot approve: /);
     expect(body.error).toContain("Analytics computation failed");
     expect(body.error).not.toContain("ANALYTICS_FAILED");
+  });
+
+  it("C-3 anti-regression: a genuine short span still 400s with the gate's own INSUFFICIENT_DAYS sentence", async () => {
+    // The twin of the fail-open. When the earliest/latest reads SUCCEED and the
+    // span is genuinely 2 days, the answer is a verdict about the STRATEGY
+    // (400), not a 503 about us — and no publish write is issued. If this ever
+    // became a 503, the read-failure guards would have over-refused.
+    const tracker = mockGateAdminClient({
+      apiKeyId: "key-1",
+      tradeCount: 50,
+      earliest: "2026-04-01T00:00:00Z",
+      latest: "2026-04-03T00:00:00Z", // 2.0 days
+      computationStatus: "complete",
+      computationError: null,
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/^Cannot approve: /);
+    expect(body.error).toMatch(/span only 2\.0 day/i);
+    expect(body.error).not.toContain("INSUFFICIENT_DAYS");
+    expect(tracker.publishUpdateIssued).toBe(false);
+  });
+
+  it("C-3 anti-over-refusal: PGRST116 (no analytics row) is an ABSENCE -> 400 ANALYTICS_MISSING, never 503", async () => {
+    // `.single()` reports "0 rows" as an error object. Treating that as a read
+    // FAILURE would answer 503 to every manager who has not synced yet, and
+    // would replace a useful instruction with an outage message. In both
+    // PGRST116 shapes `data` is null, so the gate fails CLOSED (400) — the
+    // carve-out can never produce a publish.
+    const tracker = mockGateAdminClient({
+      apiKeyId: "key-1",
+      tradeCount: 50,
+      earliest: "2026-01-01T00:00:00Z",
+      latest: "2026-03-01T00:00:00Z",
+      computationStatus: "complete",
+      computationError: null,
+      analyticsNoRows: true,
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/^Cannot approve: /);
+    expect(body.error).toMatch(/have not been computed/i);
+    expect(tracker.publishUpdateIssued).toBe(false);
   });
 
   it("PUB-01: a COMPOSITE (api_key_id NULL, csv series) with computation_status='failed' -> 400 blocked at the first-pass gate", async () => {
@@ -954,5 +1354,90 @@ describe("POST /api/admin/strategy-review — B9 M-1143 review_note length cap",
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toMatch(/invalid request/i);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// 140.4-16 / WR-04 — the scrub predicate, applied to a file the CLASS guard is
+// structurally blind to.
+// ══════════════════════════════════════════════════════════════════════════
+
+describe("[140.4-16 / WR-04] no console site passes a caught value unscrubbed", () => {
+  /**
+   * ⚠️ WHY THIS GUARD IS COLOCATED AND NOT A ROSTER ENTRY.
+   *
+   * `seam-log-coverage.test.ts` derives its route roster from the SEAM IMPORT
+   * EDGE — a file joins when it imports `analytics-client`, `resilient-fetch`
+   * or `process-key-client`. This route imports none of them, so
+   * `deriveSeamRouteFiles` cannot reach it and `it.each(SEAM_FILES)` never
+   * inspects it. That derivation is correct and is this phase's flagship; the
+   * honest response is not to smuggle a route into the file's HAND-TYPED **lib
+   * module** half (a category error that would also make the derived-vs-typed
+   * set equality assert something it does not mean), but to run the same
+   * predicate here, where the file lives.
+   *
+   * The exposure is real, not theoretical. Plan 140.4-01 converted six
+   * `Promise.all` members to checked reads — the C-3 fix — and every one of the
+   * seven new `console.error` sites it added passes the raw PostgREST error
+   * object straight into the log. Those objects carry `message` / `details` /
+   * `hint`; a constraint-violation `details` string can contain row values,
+   * which is precisely why `describeThrown`'s plain-object branch exists in
+   * `seam-redaction.ts`. Five credential leaks have already been found in this
+   * milestone.
+   */
+  const ROUTE = "src/app/api/admin/strategy-review/route.ts";
+
+  /** Strip comments so a docblock quoting `console.error(err)` is not counted. */
+  function stripComments(src: string): string {
+    return src
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  }
+
+  it("every console.* argument that is an error binding goes through scrubSeamError", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const src = stripComments(
+      readFileSync(join(process.cwd(), ROUTE), "utf8"),
+    );
+
+    // Every `console.<level>( ... )` call, arguments captured to the closing
+    // paren of the call. Route sites are short and never nest a paren-heavy
+    // expression, so a non-greedy scan to `);` is sufficient here — and the
+    // vacuity fence below proves the scan found them.
+    const calls = [...src.matchAll(/console\.\w+\(([\s\S]*?)\);/g)].map(
+      (m) => m[1],
+    );
+
+    // VACUITY FENCE. A scan that matches nothing reports compliance forever.
+    expect(
+      calls.length,
+      "the console scan found nothing — every assertion below is vacuous",
+    ).toBeGreaterThanOrEqual(13);
+
+    // An "error binding" is any identifier this route binds off a Supabase read
+    // or a catch. Naming the SHAPE rather than the identifiers keeps the guard
+    // from going stale the moment a new read is added.
+    const ERRORISH = /\b([A-Za-z_$][\w$]*(?:[eE]rr|[eE]rror)\w*)\b/;
+    const offenders: string[] = [];
+    for (const args of calls) {
+      const m = ERRORISH.exec(args);
+      if (!m) continue;
+      // `?? "..."` fallbacks and `.code` reads are allowlisted for the same
+      // reason the class guard allowlists them: a five-character SQLSTATE and a
+      // hand-typed string carry nothing.
+      if (!/scrubSeamError\s*\(/.test(args)) {
+        offenders.push(args.trim().replace(/\s+/g, " ").slice(0, 90));
+      }
+    }
+
+    expect(
+      offenders,
+      "a caught value or PostgREST error object reaches console.* unscrubbed. " +
+        "undici embeds OUTGOING HEADERS in err.message, and a PostgREST error " +
+        "carries `details`/`hint` which can contain row values. Wrap it: " +
+        "scrubSeamError(x) from @/lib/seam-redaction. Do NOT answer this by " +
+        "dropping the value — that is the A-10 defect.",
+    ).toEqual([]);
   });
 });

@@ -427,7 +427,15 @@ describe("[89-03] SyncPreviewStep — composite branch", () => {
       }),
     });
 
-    render(<SyncPreviewStep {...baseProps} />);
+    // ⚠️ 140.4-11 — THE FIXTURE WAS UNREPRESENTATIVE AND THE ASSERTION WAS
+    // WEAKER THAN IT READ. `baseProps` omits `onReviewKeys`, which WizardClient
+    // ALWAYS supplies at this call site. Without it the button labelled "Review
+    // your keys" actually fired `onTryAnotherKey` → `handleDeleteDraft()`, so
+    // this case was pinning a DESTRUCTIVE click wearing a non-destructive
+    // label. Supplying the prop makes the fixture match production; the click
+    // assertion below makes the case say what its name claims.
+    const onReviewKeys = vi.fn();
+    render(<SyncPreviewStep {...baseProps} onReviewKeys={onReviewKeys} />);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
@@ -444,6 +452,13 @@ describe("[89-03] SyncPreviewStep — composite branch", () => {
 
     const reviewBtn = screen.getByTestId("wizard-try-another-key");
     expect(reviewBtn).toHaveAccessibleName(/review your keys/i);
+    fireEvent.click(reviewBtn);
+    expect(onReviewKeys).toHaveBeenCalledTimes(1);
+    expect(
+      baseProps.onTryAnotherKey,
+      "WIZ-03: 'Review your keys' is a pure step transition. If it reaches " +
+        "onTryAnotherKey it cascades away every strategy_keys member.",
+    ).not.toHaveBeenCalled();
     errSpy.mockRestore();
   });
 

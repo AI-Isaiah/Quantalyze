@@ -16,16 +16,20 @@ import {
   type StrategyGateResult,
 } from "@/lib/strategyGate";
 import {
+  formatKeyError,
   gateFailureToWizardError,
+  recogniseSeamErrorCode,
+  type WizardErrorAction,
   type WizardErrorCode,
 } from "@/lib/wizardErrors";
 import { buildEnvelope } from "@/lib/envelope";
 // 140.3-15 / TS-20 — the dependency-free leaf, imported directly. It is the ONE
 // reader for this envelope's fields; a hand-rolled `failure.detail?.correlation_id`
 // branch here is the drift class 140.3-01 closed.
-import { seamCorrelationId } from "@/lib/seam-discriminator";
+import { seamCorrelationId, seamErrorCode } from "@/lib/seam-discriminator";
 import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
 import { isComputedAnalytics } from "@/lib/closed-sets";
+import { scrubSeamError } from "@/lib/seam-redaction";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import { cn } from "@/lib/utils";
@@ -518,11 +522,55 @@ export function SyncPreviewStep({
         // already complete+fresh; that path stays byte-neutral for single-key,
         // and a broken composite is still caught by the shared failed-gate
         // fail-safe in the poll effect.
-        const { data: existing } = await supabase
+        // ⚠️ 140.4-12 / SEAMRIM-11 (C-3) — `error` IS BOUND, AND A READ FAILURE
+        // IS NOT THE SAME FACT AS AN ABSENT ROW.
+        //
+        // supabase-js resolves a failed read AS A VALUE, so before this an RLS
+        // denial or a statement timeout arrived here as `{ data: null }` —
+        // byte-identical to the ordinary first-time draft that simply has no
+        // analytics row yet. `.maybeSingle()` answers genuine no-rows with
+        // `{ data: null, error: null }`, so the two ARE distinguishable; they
+        // just were not being distinguished. This was the last unchecked read
+        // in this file: `140.4-02` converted the seven-member `Promise.all`
+        // ~530 lines below and never reached this one.
+        //
+        // WHY THIS LOGS AND FALLS THROUGH RATHER THAN THROWING, unlike the
+        // marker read a few lines down. That one decides COMPOSITE vs
+        // SINGLE-KEY routing, so it fails CLOSED. This one decides only whether
+        // to SKIP a round-trip: on a failed read `data` is null, so the
+        // derivations below already resolve to "not complete, not fresh" and
+        // the effect falls through to the kickoff POST — exactly what a cold
+        // start does. Throwing would end the wizard on a transient blip in an
+        // optimisation, which is the over-refusal `140.4-01` carved PGRST116
+        // out to avoid, on a path where the fail-open direction cannot occur (a
+        // failed read can never produce `isComplete === true`).
+        //
+        // So the defect closed here is SILENCE, not a wrong branch: the failure
+        // is now recorded and is distinguishable from an absence. Both
+        // polarities are pinned in `SyncPreviewStep.render.test.tsx` — a
+        // failure logs exactly once and still kicks off, an absence logs
+        // nothing.
+        const { data: existing, error: existingErr } = await supabase
           .from("strategy_analytics")
           .select("computation_status, computed_at")
           .eq("strategy_id", strategyId)
           .maybeSingle();
+        if (existingErr) {
+          console.error(
+            "[wizard:SyncPreviewStep] resume freshness probe read failed — " +
+              "treating this resume as a COLD START, not as an absent " +
+              "analytics row:",
+            // 140.4-16 / WR-04 — `.message` is THE BANNED SHAPE, not a
+            // mitigation of it: `keys/sync/route.ts:408-412` says so in those
+            // words three files away, in this same phase. A PostgREST error's
+            // `message` is where postgrest inlines what it was handed. This is
+            // a browser console rather than a Vercel log, so the blast radius
+            // is the user's own session — which is a reason it was missed, not
+            // a reason to keep it. `seam-redaction` is dependency-free and
+            // client-safe (zero imports).
+            scrubSeamError(existingErr),
+          );
+        }
         const computedAtMs = existing?.computed_at
           ? Date.parse(existing.computed_at)
           : null;
@@ -598,10 +646,53 @@ export function SyncPreviewStep({
           const failure = (await res.json().catch(() => null)) as {
             code?: unknown;
           } | null;
-          const surfaced =
-            (typeof failure?.code === "string" &&
-              KNOWN_KICKOFF_CODES[failure.code]) ||
-            "SYNC_FAILED";
+          // 140.4-12 / SEAMRIM-08 — TRANSLATE FIRST, THEN MEMBERSHIP-CHECK.
+          //
+          // Until this, the lookup below was the ONLY hop and it indexed the
+          // RAW WIRE STRING. `KNOWN_KICKOFF_CODES` holds wizard codes OUR OWN
+          // route mints, and it carries no member for `CIRCUIT_OPEN`,
+          // `UPSTREAM_TIMEOUT`, `UPSTREAM_NETWORK_ERROR` or
+          // `SEAM_MISCONFIGURED` — so a breaker trip or a dead upstream during
+          // the kickoff rendered SYNC_FAILED, which asks the user which step
+          // failed about a computation that never started.
+          //
+          // ⚠️ 140.4-16 / WR-11 — CORRECTION. This paragraph used to say the
+          // two vocabularies "intersect in EMPTY", listing only four of the
+          // wire table's six keys. Measured, that is FALSE: `RATE_LIMITED` is
+          // in BOTH, so the hop below genuinely shadows this roster for that
+          // code. It is harmless — both answer `RATE_LIMITED`, so the
+          // precedence is invisible — but "they are disjoint" was the wrong
+          // reason to believe it, and the right one is now asserted rather
+          // than narrated. `seam-ratelimit-posture.invariant.test.ts` derives
+          // both sides from disk and fails when a shared code gets DIFFERENT
+          // answers. Do not restore the disjointness sentence.
+          // `SubmitStep` has had the translation hop since 140.3-05; this
+          // sibling arm never did.
+          //
+          // Order matters and is the whole change: `SEAM_CODE_TO_WIZARD_CODE`
+          // (the ONE wire→wizard table, in `wizardErrors.ts`) answers for WIRE
+          // codes, and `KNOWN_KICKOFF_CODES` answers for the route-minted ones
+          // it has always owned. NEITHER LIST GAINED A MEMBER — the roster's
+          // reasoning below (why the two 400 arms map to VALIDATION_FAILED and
+          // why no new union member was minted) is unchanged and still governs
+          // its own domain.
+          //
+          // The fallback is NOT weakened: an unrecognised wire code leaves the
+          // translation at "UNKNOWN" and then misses the roster, so it still
+          // reaches SYNC_FAILED — deliberately, because a map pretending to be
+          // total turns an unfamiliar code into a silent undefined state.
+          //
+          // The code is read through `seamErrorCode`, the same leaf
+          // `seamCorrelationId` below already comes from, so a nested
+          // `service_error` body (`body.detail.code`) is seen rather than read
+          // as a body carrying no code at all.
+          const wireCode = seamErrorCode(failure);
+          const translated = recogniseSeamErrorCode(wireCode);
+          const surfaced: WizardErrorCode =
+            translated !== "UNKNOWN"
+              ? translated
+              : (wireCode !== null && KNOWN_KICKOFF_CODES[wireCode]) ||
+                "SYNC_FAILED";
           // The wait rides the HEADER, read through the ONE parser
           // (`parseRetryAfterSeconds` — HTTP-date safe, never NaN/0/negative).
           // Absent header ⇒ no wait, and the envelope then names no duration at
@@ -696,9 +787,14 @@ export function SyncPreviewStep({
   // re-renders that recreate the onTerminal closure; per the invariant it never
   // needs a reset — every non-throwing heavy outcome (passed / gate-fail) stops
   // the loop, so the only path that repolls is a throw. (A Supabase error
-  // returned AS A VALUE on a heavy read throws below, so it escalates here too;
-  // an RLS denial on `trades` instead drops tradeCount to 0 via `?? 0` and the
-  // gate fails INSUFFICIENT_TRADES — a terminal, loop-stopping outcome.)
+  // returned AS A VALUE on a heavy read throws below — on BOTH arms as of
+  // 140.4-02 — so it escalates here. Previously only the composite arm checked;
+  // an RLS denial on the single-key `trades` read dropped tradeCount to 0 via
+  // `?? 0` and the gate answered INSUFFICIENT_TRADES, telling the user we had
+  // measured zero trades on an account we had failed to read — a terminal,
+  // loop-stopping outcome with no self-recovery. All seven single-key members
+  // now bind `error`, and both head-counts refuse a null count for the same
+  // reason: a count that did not come back is not a count of zero.)
   const heavyFetchErrorsRef = useRef(0);
 
   /**
@@ -1051,12 +1147,12 @@ export function SyncPreviewStep({
           }
 
           const [
-            { data: analytics },
-            { count: tradeCount },
-            { data: earliest },
-            { data: latest },
-            { data: sample },
-            { count: csvRowCount },
+            analyticsRes,
+            tradeCountRes,
+            earliestRes,
+            latestRes,
+            sampleRes,
+            csvRowCountRes,
             keyRowResult,
           ] = await Promise.all([
             supabase
@@ -1113,8 +1209,82 @@ export function SyncPreviewStep({
               : Promise.resolve({ data: null as { exchange?: string } | null }),
           ]);
 
+          // C-3 / SEAMRIM-02 — EVERY member binds `error`, in the same shape the
+          // composite arm 200 lines above already uses. supabase-js resolves a
+          // PostgREST failure AS A VALUE, so an unchecked destructure is
+          // indistinguishable from real data: an RLS denial or a statement
+          // timeout on `trades` used to arrive as `count: null`, become 0 via
+          // `?? 0`, and render "We found only 0 filled trade(s) on this key." —
+          // a measurement we never took, on a product whose whole value is a
+          // trustworthy verified track record. Throwing routes the failure into
+          // the `heavyFetchErrorsRef` escalation below (one transient fault
+          // tolerated, then the recoverable SYNC_FAILED envelope with an exit
+          // affordance) instead of a terminal, loop-stopping gate verdict.
+          if (analyticsRes.error) {
+            throw new Error(
+              `single-key analytics read failed: ${analyticsRes.error.message}`,
+            );
+          }
+          if (tradeCountRes.error) {
+            throw new Error(
+              `single-key trades count read failed: ${tradeCountRes.error.message}`,
+            );
+          }
+          if (earliestRes.error) {
+            throw new Error(
+              `single-key earliest-trade read failed: ${earliestRes.error.message}`,
+            );
+          }
+          if (latestRes.error) {
+            throw new Error(
+              `single-key latest-trade read failed: ${latestRes.error.message}`,
+            );
+          }
+          if (sampleRes.error) {
+            throw new Error(
+              `single-key trade-sample read failed: ${sampleRes.error.message}`,
+            );
+          }
+          if (csvRowCountRes.error) {
+            throw new Error(
+              `single-key csv daily-returns count read failed: ${csvRowCountRes.error.message}`,
+            );
+          }
+          // ⚠️ MEMBER 7 IS A TERNARY AND STAYS ONE. When `apiKeyId` is falsy the
+          // else-branch resolves a SYNTHETIC `{ data: null }` that has no `error`
+          // property at all — a keyless draft, not a read failure. Checking it
+          // unconditionally would turn this fix into an outage for every keyless
+          // draft, so the property's PRESENCE is what gates the check.
+          if ("error" in keyRowResult && keyRowResult.error) {
+            throw new Error(
+              `single-key api_keys read failed: ${keyRowResult.error.message}`,
+            );
+          }
+
+          const analytics = analyticsRes.data;
+          const tradeCount = tradeCountRes.count;
+          const earliest = earliestRes.data;
+          const latest = latestRes.data;
+          const sample = sampleRes.data;
+          const csvRowCount = csvRowCountRes.count;
+
+          // COUNTS ARE PART OF THE CLASS. Both of these are `head: true` exact
+          // counts, so a null count with NO error is as unrepresentable as an
+          // error — and `?? 0` on it is the same fabrication by another route.
+          // Refuse it rather than coercing; the throw lands in the same sink.
+          if (tradeCount === null) {
+            throw new Error(
+              "single-key trades count read returned no count (head:true exact count was null)",
+            );
+          }
+          if (csvRowCount === null) {
+            throw new Error(
+              "single-key csv daily-returns count read returned no count (head:true exact count was null)",
+            );
+          }
+
           const detectedMarkets = deriveDetectedMarkets(
-            (sample ?? []).map((t) => (t as { symbol?: string }).symbol),
+            sample.map((t) => (t as { symbol?: string }).symbol),
           );
 
           const keyRow = keyRowResult.data;
@@ -1123,16 +1293,16 @@ export function SyncPreviewStep({
 
           const gate = checkStrategyGate({
             apiKeyId,
-            tradeCount: tradeCount ?? 0,
-            earliestTradeAt: earliest?.[0]?.timestamp
+            tradeCount,
+            earliestTradeAt: earliest[0]?.timestamp
               ? new Date(earliest[0].timestamp)
               : null,
-            latestTradeAt: latest?.[0]?.timestamp
+            latestTradeAt: latest[0]?.timestamp
               ? new Date(latest[0].timestamp)
               : null,
             computationStatus: nextStatus,
             computationError: nextError,
-            csvRowCount: csvRowCount ?? 0,
+            csvRowCount,
             // P72 — only a ledger-backed (Deribit) keyed strategy may pass on a
             // daily-returns series; a keyed perp with 0 fills must stay on the
             // trade branch (its funding series has no completeness gate).
@@ -1148,7 +1318,7 @@ export function SyncPreviewStep({
               wizard_session_id: wizardSessionId,
               step: "sync_preview",
               code: wizardCode,
-              trade_count: tradeCount ?? 0,
+              trade_count: tradeCount,
             });
             return "done";
           }
@@ -1172,10 +1342,10 @@ export function SyncPreviewStep({
           ];
 
           const nextSnapshot: SyncPreviewSnapshot = {
-            tradeCount: tradeCount ?? 0,
-            csvRowCount: csvRowCount ?? 0,
-            earliestTradeAt: earliest?.[0]?.timestamp ?? null,
-            latestTradeAt: latest?.[0]?.timestamp ?? null,
+            tradeCount,
+            csvRowCount,
+            earliestTradeAt: earliest[0]?.timestamp ?? null,
+            latestTradeAt: latest[0]?.timestamp ?? null,
             detectedMarkets,
             exchange: keyRow?.exchange ?? null,
             metrics,
@@ -1294,11 +1464,16 @@ export function SyncPreviewStep({
    * This step passed NO `onRetry`, so `showRetry` was STRUCTURALLY false: a
    * recoverable seam error rendered with no retry control at all, which is
    * exactly what SEAMUX-06 forbids. The handler is supplied only where retrying
-   * is genuinely the right thing — `recoverable` already encodes that, since it
-   * is derived from the code's own `actions`. A non-recoverable state
-   * (`GATE_DRAFT_GONE`) gets `undefined` and renders no Retry, because retrying
-   * a draft that is gone re-fails identically and a control that cannot work is
-   * a false affordance.
+   * is genuinely the right thing. A non-recoverable state (`GATE_DRAFT_GONE`)
+   * gets `undefined` and renders no Retry, because retrying a draft that is gone
+   * re-fails identically and a control that cannot work is a false affordance.
+   *
+   * ⚠️ 140.4-11 RE-POINTED THE PREDICATE. This block used to say `recoverable`
+   * "already encodes that". It does not: `recoverable` is any of
+   * `clear_and_retry` OR `try_another_key`, and the two history codes earn it
+   * through the latter — a remedy this handler cannot perform. The gate is now
+   * `clear_and_retry` specifically (`kickoffRetryCanChangeTheOutcome`, below).
+   * Every code that rendered a Retry for a `clear_and_retry` reason still does.
    */
   const handleKickoffRetry = useCallback(() => {
     setErrorCode(null);
@@ -1312,49 +1487,102 @@ export function SyncPreviewStep({
   }, []);
 
   /**
-   * ⚠️ 140.3-10 / TRAP-4 — the destructive-control guard at this render.
+   * ⚠️ 140.4-11 / SEAMRIM-07 — TRAP-4, RESTATED AS A PROPERTY.
    *
-   * `onTryAnotherKey` fires `handleDeleteDraft()` in WizardClient: it DESTROYS
-   * the draft and every strategy_keys member under it. That is correct for a
-   * REJECTED key, which is what this button is for, and its intentional-delete
-   * path is pinned in WizardClient's suite.
+   * TRAP-4 is registered against a STALE premise: it pins its hazard to
+   * "`/api/keys/sync` … denies codeless", which `140.3-10` closed. A literal
+   * reading therefore concludes the trap is discharged — and that is exactly
+   * the reasoning that left the members of this render unexamined. The trap
+   * this render is actually held to is:
    *
-   * It is NOT correct as the SOLE control on `GATE_DRAFT_GONE`. That state is
-   * reachable from `/api/keys/sync`'s 404 arm, and the 404 is deliberately
-   * uniform across "no such draft" AND "a draft you do not own" (P458) — so the
-   * one thing on screen would delete a draft the user may still have. Combined
-   * with a retry affordance above it, that is the five-clicks-of-our-own-copy
-   * path this plan exists to prevent.
+   *   A terminal error render must not offer a destructive control as the SOLE
+   *   affordance, nor place a retry beside one. This is a property of the
+   *   RENDER, not of a code list — and `recoverable` is NOT a usable proxy for
+   *   it, because `try_another_key` earns `recoverable` for codes whose only
+   *   "retry" re-evaluates an identical gate.
    *
-   * Deleting this flag is the mutation that must redden a test.
+   * WHAT THIS REPLACED, AND WHY THE REPLACEMENT IS A DIFFERENT MECHANISM.
+   * `140.3-10` shipped a hand-typed EXEMPTION roster (`GATE_DRAFT_GONE`);
+   * `140.3-12` widened it to two (`+ VALIDATION_FAILED`). Eleven distinct codes
+   * reach this render. Of the nine left outside the roster exactly ONE —
+   * `GATE_NO_DATA_SOURCE` — had the destructive control as its SOLE route (the
+   * other eight render `[Retry, destructive]`, a bad pairing but not a forced
+   * choice). The count of genuine sole-control violations was 1, not 9, and
+   * that one code's `actions` are BYTE-IDENTICAL to `GATE_DRAFT_GONE`'s — the
+   * code the roster was written for. It was forgotten anyway, which is what a
+   * roster does: the phase's measured coverage for a hand-typed allow-list is
+   * 9/37 codes · 8/15 files · 2/3 codes. Partial by construction.
    *
-   * ⚠️ 140.3-12 WIDENED THIS FROM ONE CODE TO A HAND-TYPED SET, and the widening
-   * was FORCED by routing the two 400 arms to a wizard state. Wiring them
-   * without it would have created a fresh TRAP-4 at the site 140.3-10 had just
-   * guarded: `VALIDATION_FAILED` is non-recoverable (its only action is
-   * `request_call`), so no Retry renders, and the SOLE remaining control would
-   * have been "Try another key" — which fires `handleDeleteDraft()`. That means
-   * telling a user "our software sent a request we could not read" and offering
-   * them exactly one button, which DESTROYS their draft. Swapping the user's
-   * key cannot fix a bug in our own page.
+   * So the decision is INVERTED rather than widened. The destructive control is
+   * now EARNED by the code's own `actions` — the same source `buildEnvelope`
+   * derives `recoverable` from — and there is no second list to forget to edit.
+   * The earning action is the one that actually means *replace the key*:
+   * `try_another_key`. A code whose actions are `start_fresh` / `request_call` /
+   * `clear_and_retry` has not asked for a control that deletes the draft.
    *
-   * The set is HAND-TYPED and the flag is now about the PROPERTY (states where
-   * a destructive control is the wrong and only way out), not about one code —
-   * an `===` against a single member is the instance-check this programme keeps
-   * finding. Formerly `errorStateIsDraftGone`; the ledger's M66c mutation
-   * applies unchanged to the flag under its new name.
+   * THREE conditions, each load-bearing, each rejecting an easier version:
+   *
+   *   1. `keyReplacementIsEarned` — read off the code table, not off
+   *      `recoverable`. `recoverable` is true for `clear_and_retry` too, so it
+   *      would re-admit `SYNC_FAILED`, `RATE_LIMITED`, `KEY_NETWORK_TIMEOUT`,
+   *      `GATE_ANALYTICS_FAILED`, `UNKNOWN` and `COMPOSITE_MEMBERSHIP_UNKNOWN`
+   *      — the last of which is a code ABOUT COMPOSITES rendering the
+   *      SINGLE-KEY destructive control.
+   *   2. `compositeReviewIsAvailable` — the composite route destroys nothing
+   *      (`onReviewKeys` is a pure step transition, WIZ-03), so it is offered
+   *      unconditionally. It requires the prop to be PRESENT: without it the
+   *      button falls back to `onTryAnotherKey`, i.e. it is destructive while
+   *      wearing the non-destructive label, and gating on `isComposite` alone
+   *      would ship exactly that.
+   *   3. The non-destructive `<Link>` renders ALWAYS, not as an else-branch.
+   *      An either/or leaves `GATE_INSUFFICIENT_TRADES` and
+   *      `GATE_INSUFFICIENT_DAYS` — which legitimately EARN key replacement and
+   *      get no Retry (see below) — rendering the destructive button as their
+   *      sole affordance, re-creating the very violation this closes one code
+   *      over. "Never the sole affordance" is a claim about the whole control
+   *      row, so the safe exit has to be unconditional.
+   *
+   * Referenced by NAME, never by line number: 140.2 comments falsified by
+   * 140.3 commits are a measured class in this programme (7 of 17).
    */
-  const DESTRUCTIVE_CONTROL_IS_WRONG_FOR: readonly WizardErrorCode[] = [
-    // The draft may be perfectly intact — the 404 is uniform across "no such
-    // draft" and "not yours" (P458).
-    "GATE_DRAFT_GONE",
-    // A fault in our own request shape. Deleting the draft cannot fix it, and
-    // retrying cannot either, so neither control belongs here.
-    "VALIDATION_FAILED",
-  ];
-  const errorStateHidesDestructiveControl =
-    errorCode !== null &&
-    DESTRUCTIVE_CONTROL_IS_WRONG_FOR.includes(errorCode as WizardErrorCode);
+  const errorActions: readonly WizardErrorAction[] = errorCode
+    ? formatKeyError(errorCode).actions
+    : [];
+  /**
+   * The composite "Review your keys" route is NON-destructive by construction
+   * (WIZ-03: a pure step transition, no `handleDeleteDraft`, no fresh session),
+   * so it needs no earning. The `Boolean(onReviewKeys)` term is the whole
+   * safety of this line — see condition 2 above.
+   */
+  const compositeReviewIsAvailable = isComposite && Boolean(onReviewKeys);
+  /**
+   * `onTryAnotherKey` fires `handleDeleteDraft()` in WizardClient: it DESTROYS
+   * the draft and every `strategy_keys` member under it. Correct for a REJECTED
+   * key — which is what "this account has too little history, bring a different
+   * one" means — and wrong everywhere else.
+   */
+  const keyReplacementIsEarned = errorActions.includes("try_another_key");
+  const showKeyControl = compositeReviewIsAvailable || keyReplacementIsEarned;
+  /**
+   * ⚠️ `recoverable` SPLIT FROM "a kickoff retry will help" — the mislabel, not
+   * a spurious flag.
+   *
+   * `onRetry` here is `handleKickoffRetry`, which re-runs the kickoff and then
+   * re-evaluates an IDENTICAL gate. `GATE_INSUFFICIENT_TRADES` and
+   * `GATE_INSUFFICIENT_DAYS` are `recoverable` — earned by `try_another_key`,
+   * which is a genuine remedy — but the remedy is a different KEY, not a second
+   * attempt at the same one. A Retry there promises the outcome can change when
+   * nothing about the account has. So the handler is passed only when the code
+   * asks for `clear_and_retry`, i.e. when the failure is transient.
+   *
+   * `ErrorEnvelope`'s `showRetry = recoverable && Boolean(onRetry)` is UNCHANGED
+   * and does the rest — this is a decision about what this step passes, not a
+   * change to a shared artefact. `RECOVERABLE_ACTIONS` and `buildEnvelope` are
+   * deliberately untouched: `recoverable` still means "some action can help",
+   * which is what the envelope's copy and its wait-countdown are keyed off.
+   */
+  const kickoffRetryCanChangeTheOutcome =
+    errorActions.includes("clear_and_retry");
 
   // --- Rendering --------------------------------------------------------
 
@@ -1377,32 +1605,38 @@ export function SyncPreviewStep({
           <WizardErrorEnvelope
             envelope={errorEnvelope}
             onRetry={
-              errorEnvelope.recoverable ? handleKickoffRetry : undefined
+              kickoffRetryCanChangeTheOutcome ? handleKickoffRetry : undefined
             }
           />
         </div>
         <div className="mt-6 flex gap-3">
-          {errorStateHidesDestructiveControl ? (
-            // Non-destructive, and it is the state's OWN fix line: "Start a new
-            // strategy from the strategies page." Navigating away destroys
-            // nothing, which is the property that matters when the draft may
-            // still exist and simply not be ours to read.
-            <Link href="/strategies" data-testid="wizard-back-to-strategies">
-              <Button type="button" variant="ghost">
-                Back to strategies
-              </Button>
-            </Link>
-          ) : (
+          {showKeyControl && (
             <Button
               type="button"
               onClick={
-                isComposite && onReviewKeys ? onReviewKeys : onTryAnotherKey
+                compositeReviewIsAvailable && onReviewKeys
+                  ? onReviewKeys
+                  : onTryAnotherKey
               }
               data-testid="wizard-try-another-key"
             >
-              {isComposite ? "Review your keys" : "Try another key"}
+              {/* The label follows what the button DOES. Keying it off
+                  `isComposite` alone put "Review your keys" on a click that
+                  deletes the draft whenever `onReviewKeys` was absent. */}
+              {compositeReviewIsAvailable ? "Review your keys" : "Try another key"}
             </Button>
           )}
+          {/* UNCONDITIONAL — condition 3 above. Non-destructive, and it is the
+              state's OWN fix line: "Start a new strategy from the strategies
+              page." Navigating away destroys nothing, which is the property
+              that matters both when the draft may still exist and simply not be
+              ours to read, and when the only other control on the row deletes
+              it. */}
+          <Link href="/strategies" data-testid="wizard-back-to-strategies">
+            <Button type="button" variant="ghost">
+              Back to strategies
+            </Button>
+          </Link>
         </div>
       </section>
     );

@@ -1,6 +1,8 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
+import { scrubSeamError } from "./seam-redaction";
+import { captureToSentry, shouldCaptureNow } from "./sentry-capture";
 
 /**
  * Upstash rate-limit helpers for sensitive routes.
@@ -252,43 +254,190 @@ export function isRateLimitMisconfigured(
 /**
  * PR-2 simplify (2026-05-28): canonical deny-response builder for the
  * misconfig-503 / throttled-429 split. Pre-extract, the admin mutator
- * surface inlined an identical 8-line branch per callsite. Routes whose
- * tests vi.mock("@/lib/ratelimit") still inline the branch to keep their
- * existing mocks intact — this helper is for the admin surface where
- * the real ratelimit module loads (withAdminAuth, kill-switch,
- * decisions, preferences, intro-request).
+ * surface inlined an identical 8-line branch per callsite.
+ *
+ * ── 140.4-13 / SEAMRIM-05 — WHY THIS DOCBLOCK WAS REWRITTEN ─────────────────
+ *
+ * ⚠️ IT USED TO SAY: *"Routes whose tests vi.mock("@/lib/ratelimit") still
+ * inline the branch to keep their existing mocks intact — this helper is for
+ * the admin surface where the real ratelimit module loads."*
+ *
+ * That sentence was the FIX'S OWN JUSTIFICATION FOR LEAVING THE CLASS OPEN, and
+ * it is why eleven seam routes — every route that reaches the analytics service —
+ * answered a limiter MISCONFIGURATION with a 429 for two years. A 429 tells the
+ * caller "you are being throttled"; on the key-connect path the wizard renders
+ * that as `KEY_RATE_LIMIT`, whose copy says the throttle is *"a transient,
+ * exchange-side throttle and not a problem with your key"*. During an Upstash
+ * outage that sentence is false for EVERY user on their FIRST click, and it
+ * blames the user's exchange for our own outage.
+ *
+ * Test-mock convenience is not a reason to leave a correctness class open. The
+ * six wholesale `vi.mock("@/lib/ratelimit", …)` factories that motivated the old
+ * sentence were extended with `importActual` for the pure helpers, which costs
+ * six lines and cannot drift from this implementation.
+ *
+ * ── THE DIVISION OF OWNERSHIP, AND WHY IT IS NOT A BLANKET ADOPTION ─────────
+ *
+ * THE ARTEFACT OWNS: the status (`isRateLimitMisconfigured(rl) ? 503 : 429`) and
+ * the `Retry-After` VALUE. Neither is reachable from `options` — see the named
+ * negative cases in `ratelimit.test.ts`. An options bag that let a route pick
+ * its own status would re-open the finding at twelve call sites while still
+ * satisfying a criterion that only checked "the override is honoured".
+ *
+ * THE ROUTE OWNS: its body and its extra headers. Measured on the untouched
+ * tree, converging the seam onto this builder's FIXED body would have regressed
+ * six live 429 contracts — `create-with-key` and `composite/add-key`
+ * (`code: "KEY_RATE_LIMIT"`), `keys/sync` at BOTH arms (`code: "RATE_LIMITED"`),
+ * `csv-validate` and `csv-finalize` (the CSV v0 envelope), and
+ * `scenario/optimize` (a bespoke sentence with NO `Retry-After`) — and dropped
+ * `NO_STORE_HEADERS` from ten of them, re-opening a cache-contract finding.
+ * `bridge/route.ts`'s docblock states that hazard verbatim.
  */
 type DenyResult = { success: false; retryAfter: number; reason?: "ratelimit_misconfigured" };
 
-export function rateLimitDenyJson(rl: DenyResult): NextResponse {
+export type RateLimitDenyOptions = {
+  /**
+   * Extra response headers. Merged UNDERNEATH the artefact's own `Retry-After`,
+   * so a caller cannot clobber the value (asserted).
+   */
+  headers?: Readonly<Record<string, string>>;
+  /** Body for the genuine-throttle (429) branch. Passed through VERBATIM — key order included. */
+  throttledBody?: unknown;
+  /** Body for the limiter-misconfigured (503) branch. Passed through VERBATIM. */
+  misconfiguredBody?: unknown;
+  /**
+   * Where to stamp `Retry-After`. Defaults to `"always"`, which is the
+   * pre-extension behaviour.
+   *
+   * `"misconfigured-only"` exists for exactly one route: `scenario/optimize`'s
+   * 429 carries no `Retry-After` today, and adding one would change a live
+   * response contract this plan is not entitled to change. The 503 branch keeps
+   * its header under BOTH settings, because the canary/health check that the
+   * fail-CLOSED 503 exists to reach needs to know when to look again.
+   */
+  retryAfterHeader?: "always" | "misconfigured-only";
+};
+
+/**
+ * THE status decision, single-sourced. Both builders call this and nothing else
+ * computes it — that is the property the twelve seam adoptions inherit.
+ */
+function denyStatus(rl: DenyResult): 503 | 429 {
+  return isRateLimitMisconfigured(rl) ? 503 : 429;
+}
+
+/**
+ * The header set. The artefact OWNS `Retry-After` in both directions.
+ *
+ * ⚠️ 140.4-16 / WR-08 — THE INVARIANT WAS STATED UNCONDITIONALLY AND HELD
+ * CONDITIONALLY. The options type documents "merged UNDERNEATH the artefact's
+ * own `Retry-After`, so a caller cannot clobber the value (asserted)". That was
+ * true only in the `"always"` mode: under `retryAfterHeader:
+ * "misconfigured-only"` on the **429** branch `stamp` is false, nothing was
+ * spread on top, and a caller-supplied `Retry-After` in `options.headers`
+ * survived verbatim — the exact clobber the sentence promised was impossible.
+ * The asserting test exercised only the default mode.
+ *
+ * Latent rather than live (`scenario/optimize` is the sole consumer of that
+ * mode and passes `NO_STORE_HEADERS` only), and fixed as a DELETION rather than
+ * left as a narrowed docblock: `"misconfigured-only"` exists to say "this 429
+ * carries no wait", so a caller header that puts one back contradicts the mode
+ * it asked for. Stamping and stripping are the same decision, and the artefact
+ * makes it either way.
+ */
+function denyHeaders(
+  rl: DenyResult,
+  options?: RateLimitDenyOptions,
+): Record<string, string> {
+  const stamp =
+    isRateLimitMisconfigured(rl) ||
+    (options?.retryAfterHeader ?? "always") === "always";
+  const merged: Record<string, string> = { ...options?.headers };
+  if (stamp) {
+    merged["Retry-After"] = String(rl.retryAfter);
+  } else {
+    // Case-insensitively, because a header bag is a plain object here and
+    // `retry-after` is as valid on the wire as `Retry-After`.
+    for (const k of Object.keys(merged)) {
+      if (k.toLowerCase() === "retry-after") delete merged[k];
+    }
+  }
+  return merged;
+}
+
+export function rateLimitDenyJson(
+  rl: DenyResult,
+  options?: RateLimitDenyOptions,
+): NextResponse {
   const misconfigured = isRateLimitMisconfigured(rl);
-  return NextResponse.json(
-    { error: misconfigured ? "Rate limiter unavailable" : "Too many requests" },
-    {
-      status: misconfigured ? 503 : 429,
-      headers: { "Retry-After": String(rl.retryAfter) },
-    },
-  );
+  const fallback = {
+    error: misconfigured ? "Rate limiter unavailable" : "Too many requests",
+  };
+  const override = misconfigured
+    ? options?.misconfiguredBody
+    : options?.throttledBody;
+  return NextResponse.json(override ?? fallback, {
+    status: denyStatus(rl),
+    headers: denyHeaders(rl, options),
+  });
 }
 
 /**
  * Plain-text twin of rateLimitDenyJson for routes whose CDN cache contract
  * disallows JSON bodies (PDF + image routes typically). Same status/headers
  * shape; body is a short human-readable string instead of a JSON envelope.
+ *
+ * 140.4-13: deliberately NOT given the options bag. It has ZERO call sites today
+ * (measured: `grep -rnE "rateLimitDeny(Json|Text)\(" src/` finds only its own
+ * definition), so an options argument here would be speculative surface. What it
+ * DOES now share is `denyStatus` / `denyHeaders` — so if the 503-vs-429 decision
+ * ever moves, it moves for both twins at once and cannot drift apart.
  */
 export function rateLimitDenyText(rl: DenyResult): NextResponse {
   const misconfigured = isRateLimitMisconfigured(rl);
   return new NextResponse(
     misconfigured ? "Service temporarily unavailable" : "Rate limit exceeded",
     {
-      status: misconfigured ? 503 : 429,
-      headers: { "Retry-After": String(rl.retryAfter) },
+      status: denyStatus(rl),
+      headers: denyHeaders(rl),
     },
   );
 }
 
 /** Synthetic Retry-After (seconds) for the misconfigured fail-CLOSED path. */
 const MISCONFIGURED_RETRY_AFTER_S = 60;
+
+/**
+ * `@upstash/ratelimit` 2.0.8's FAIL-OPEN timeout sentinel, hand-typed.
+ *
+ * `applyTimeout` races the real verdict against a 5 000 ms timer that resolves
+ * `{ success: true, limit: 0, remaining: 0, reset: 0, reason: "timeout" }` —
+ * the library saying "I could not reach the counter, let the traffic through".
+ *
+ * ⚠️ THE DISCRIMINATOR IS `reason`, NOT `limit === 0`. `"cacheBlock"` is the
+ * OTHER reason the limiter can answer without touching Redis and it is a
+ * GENUINE denial; `"denyList"` likewise. Only `"timeout"` is a fail-open.
+ * `resilient-fetch.ts` reasons identically at its own copy of this branch.
+ */
+const LIMITER_TIMEOUT_REASON = "timeout";
+
+/**
+ * Schedule a capture so it outlives the response, with the non-request-scope
+ * fallback `after()` requires. Same shape as `audit.ts`'s `logAuditEvent` and
+ * `resilient-fetch.ts`'s `scheduleSeamCapture`.
+ */
+function scheduleLimiterCapture(capture: Promise<void>): void {
+  try {
+    after(() => capture.catch(() => {}));
+  } catch {
+    console.warn(
+      "[ratelimit] scheduling capture via queueMicrotask fallback (non-request scope)",
+    );
+    queueMicrotask(() => {
+      void capture.catch(() => {});
+    });
+  }
+}
 
 /**
  * Consume one rate-limit token for the given identifier. Returns success
@@ -299,6 +448,28 @@ const MISCONFIGURED_RETRY_AFTER_S = 60;
  * variant signals route handlers to emit 503 Service Unavailable. Fail-OPEN
  * outside production so local dev / preview deploys without Upstash keep
  * working. See P709 + the module docstring for the full behavior matrix.
+ *
+ * ── SEAMRIM-04: THERE ARE THREE POSTURES HERE, NOT TWO ──────────────────────
+ *
+ * The behaviour matrix above describes two, and the deployed limiter has three.
+ * Which one fires depends on HOW the store is unhealthy, not on whether it is:
+ *
+ *   1. FAIL-CLOSED — an HTTP-5xx (or any rejection) from the store. `@upstash/
+ *      redis` does not retry a non-ok HTTP response, so the rejection arrives
+ *      promptly and production answers `ratelimit_misconfigured` → 503.
+ *   2. FAIL-OPEN, plus up to 5 s of the user's latency — a HANGING store. The
+ *      SDK never rejects; `applyTimeout`'s sentinel wins the race and says
+ *      "let it through". The cap is NOT enforced for that request.
+ *   3. NON-DETERMINISTIC — a REFUSED socket, where the SDK's ~4.29 s retry
+ *      ladder races the 5 s sentinel and either of the two above can win.
+ *
+ * ⚠️ THIS FUNCTION DOES NOT CHANGE ANY OF THEM, AND THAT IS DELIBERATE. What
+ * was wrong is that posture 2 was SILENT: only `{ success, reset }` were
+ * destructured, so a request that passed because the regulatory cap could not
+ * be consulted was byte-indistinguishable from one that passed because it was
+ * under the cap. It is now recorded. Making the limiter fail CLOSED on a
+ * hanging store is a different decision with its own blast radius and is not
+ * taken here.
  */
 export async function checkLimit(
   limiter: Ratelimit | null,
@@ -315,8 +486,40 @@ export async function checkLimit(
     return { success: true };
   }
   try {
-    const { success, reset } = await limiter.limit(identifier);
-    if (success) return { success: true };
+    const { success, reset, reason } = await limiter.limit(identifier);
+    if (success) {
+      if (reason === LIMITER_TIMEOUT_REASON) {
+        // POSTURE 2 — recorded, not changed. The identifier is deliberately
+        // NOT logged or captured: it is a user id or a client IP, and this
+        // event says nothing about WHO was let through, only that the cap went
+        // unenforced.
+        console.warn(
+          "[ratelimit] store timeout — the cap was NOT enforced for this " +
+            "request (fail-OPEN). This is the store being unreachable, not the " +
+            "caller being under the limit.",
+        );
+        // 140.4-16 / WR-06 — EDGE-TRIGGERED. The console.warn above is
+        // UNCONDITIONAL and stays that way: it is how an operator counts how
+        // many requests ran uncapped. The remote capture is throttled, because
+        // a sustained store outage fires this arm on EVERY request and each
+        // capture is an `import("@sentry/nextjs")` held alive by `after()` —
+        // exhausting the quota, and dropping other alerts, during the very
+        // incident this exists to surface. `captureToSentry` is not merely
+        // discarded when suppressed; it is not CALLED.
+        if (shouldCaptureNow("ratelimit:fail_open_timeout")) {
+          scheduleLimiterCapture(
+            captureToSentry(
+              new Error("[ratelimit] store timeout — cap not enforced"),
+              {
+                tags: { surface: "ratelimit", posture: "fail_open_timeout" },
+                level: "warning",
+              },
+            ),
+          );
+        }
+      }
+      return { success: true };
+    }
     const retryAfter = Math.max(1, Math.ceil((reset - Date.now()) / 1000));
     return { success: false, retryAfter };
   } catch (err) {
@@ -324,7 +527,16 @@ export async function checkLimit(
     // production fail-CLOSED so a Redis outage doesn't silently unlock
     // cost-sensitive endpoints; outside production fail-OPEN so a dev
     // without Upstash can still iterate.
-    console.error("[ratelimit] check failed:", err);
+    //
+    // ⚠️ SCRUBBED (SEAMRIM-04 / TRAP-1). The store command carries
+    // `UPSTASH_REDIS_REST_TOKEN` in an Authorization header and undici inlines
+    // the outgoing request into the error it produces, so logging `err` raw
+    // spilled this module's own store credential into the function log.
+    // `resilient-fetch.ts` scrubs both of its store-rejection arms for exactly
+    // this reason; the same store reached through the same SDK was unscrubbed
+    // from here. The syscall detail survives the scrub — a refused store and an
+    // expired certificate are different incidents.
+    console.error("[ratelimit] check failed:", scrubSeamError(err));
     if (isProduction()) {
       return {
         success: false,

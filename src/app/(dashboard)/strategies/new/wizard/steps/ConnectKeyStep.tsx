@@ -4,7 +4,10 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
-import { type WizardErrorCode } from "@/lib/wizardErrors";
+import {
+  recogniseSeamErrorCode,
+  type WizardErrorCode,
+} from "@/lib/wizardErrors";
 import { buildEnvelope } from "@/lib/envelope";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
@@ -14,6 +17,7 @@ import {
   getWizardCorrelationId,
   wizardFetch,
 } from "@/lib/wizard/wizard-correlation";
+import { seamErrorCode } from "@/lib/seam-discriminator";
 
 /**
  * ConnectKeyStep renders the exchange selector, the inline permission
@@ -197,16 +201,45 @@ const TRUST_ATOMS: { title: string; body: string }[] = [
  * set is not shared with `MultiKeyConnectStep` — its two routes emit different
  * sets, and one shared set would silently admit each route's codes at the other.
  *
- * WHY NO WIRE→WIZARD TRANSLATION STEP. `SubmitStep` runs
- * `recogniseSeamErrorCode` first because `finalize-wizard` answers a breaker
- * trip with the WIRE code `CIRCUIT_OPEN`. This route does not: measured on
- * disk, `grep -c 'CIRCUIT_OPEN\|UPSTREAM_TIMEOUT\|UPSTREAM_NETWORK_ERROR'` on
- * `create-with-key/route.ts` is 0 — it routes every caught value through the
- * shared `classifyKeyValidationError`, which maps `CircuitOpenError` to
- * `SERVICE_UNAVAILABLE_RETRY` (a member below) BEFORE answering. Adding a
- * translation hop here would be machinery no reachable path can exercise. If
- * that route ever starts emitting a wire code, it falls to `UNKNOWN` here —
- * which is the safe direction, and is what the unrecognised-code case pins.
+ * ⚠️ THERE IS NOW A WIRE→WIZARD TRANSLATION STEP, AND THIS PARAGRAPH USED TO
+ * ARGUE THERE COULD NEVER BE ONE. Until `140.4-13` the argument held: the route
+ * routed every caught value through the shared `classifyKeyValidationError`
+ * (which maps `CircuitOpenError` to `SERVICE_UNAVAILABLE_RETRY`, a member
+ * below) before answering, so `grep -c 'CIRCUIT_OPEN\|UPSTREAM_TIMEOUT\|
+ * UPSTREAM_NETWORK_ERROR'` on `create-with-key/route.ts` was 0 and a hop would
+ * have been machinery no reachable path could exercise. It then closed with
+ * *"if that route ever starts emitting a wire code, it falls to `UNKNOWN` here
+ * — which is the safe direction"*. **`140.4-13` made the route start emitting
+ * one, and `UNKNOWN` turned out not to be the safe direction.** Its 503
+ * misconfiguration arm now answers `SEAM_MISCONFIGURED` (a WIRE code, from
+ * `rateLimitDenyJson`'s `misconfiguredBody`), replacing the 429 `KEY_RATE_LIMIT`
+ * that told the user our own limiter outage was "a transient, exchange-side
+ * throttle and not a problem with your key". Landing on `UNKNOWN` renders
+ * *"Try the last action again."* — **with a Retry control** — for a fault whose
+ * own copy says *"Retrying will not clear it: the setting stays wrong until we
+ * fix it and redeploy."* The comment above is kept rather than deleted because
+ * the reasoning it records is exactly what went stale, and how.
+ *
+ * THE HOP IS THE ONE SHARED TABLE, NOT A NEW ROSTER MEMBER. Adding
+ * `SEAM_MISCONFIGURED` to the set below would be a hand-typed allow-list edit
+ * (coverage-law row 2) owed again at every surface the next wire code reaches;
+ * `SEAM_CODE_TO_WIZARD_CODE` (in `wizardErrors.ts`, read through
+ * `recogniseSeamErrorCode`) is the single artefact (row 1) and already carried
+ * the entry. This mirrors `SyncPreviewStep.tsx`'s kickoff arm exactly.
+ *
+ * ORDER IS THE WHOLE CHANGE, AND IT IS SAFE BY MEASUREMENT — NOW ASSERTED, NOT
+ * NARRATED (140.4-16 / WR-11). `seam-ratelimit-posture.invariant.test.ts`
+ * derives both vocabularies from disk and fails when a code they SHARE gets
+ * different answers. That is the necessary condition; disjointness below is a
+ * sufficient one that happens to hold HERE and does NOT hold at every surface
+ * (`KNOWN_KICKOFF_CODES` shares `RATE_LIMITED`). The table's key set
+ * (`VALIDATION_FAILED`, `RATE_LIMITED`, `CIRCUIT_OPEN`, `UPSTREAM_TIMEOUT`,
+ * `UPSTREAM_NETWORK_ERROR`, `SEAM_MISCONFIGURED`) and this set intersect in
+ * NOTHING, so translating first cannot change what any existing member renders.
+ * NEITHER LIST GAINED A MEMBER. The fallback is not weakened either — a wire
+ * code with no table entry (`SEAM_DEGRADED`, the venue codes) still leaves the
+ * translation at `UNKNOWN`, misses the set, and lands on `UNKNOWN`, which is
+ * what the unrecognised-code case pins.
  *
  * The members, enumerated from the route rather than remembered:
  *   · emitted directly by `create-with-key/route.ts`
@@ -388,10 +421,33 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         // 140.3-13a / SEAMUX-08 — membership-checked, never cast. See
         // KNOWN_CREATE_WITH_KEY_CODES above for why the check exists and why
         // the set is this route's own rather than the whole union.
+        //
+        // 140.4-15 / SEAMRIM-08 — TRANSLATE FIRST, THEN MEMBERSHIP-CHECK, the
+        // same order `SyncPreviewStep`'s kickoff arm adopted in 140.4-12.
+        // `SEAM_CODE_TO_WIZARD_CODE` answers for the seam's WIRE vocabulary
+        // (this route's 503 arm emits `SEAM_MISCONFIGURED`); the set below
+        // answers for the wizard codes the route itself mints. The two
+        // vocabularies are disjoint, so neither hop can shadow the other.
+        // 140.4-16 / WR-09 — READ THROUGH THE LEAF, not off the top level.
+        // The commit that added this hop claimed it "mirrors
+        // `SyncPreviewStep`'s kickoff arm exactly". It did not: that arm and
+        // `SubmitStep` both read `seamErrorCode(body)`, which handles the
+        // nested `service_error` shape (`body.detail.code`), while this one
+        // read `data.code` and saw only the flat shape. Harmless today —
+        // this route funnels every caught value through
+        // `classifyKeyValidationError` and never forwards a nested
+        // envelope — but an undisclosed divergence under a comment
+        // asserting equivalence is how the next reader inherits a wrong
+        // premise. The leaf exists precisely so a nested envelope is never
+        // read as "a body carrying no code".
+        const translated = recogniseSeamErrorCode(seamErrorCode(data));
         const code: WizardErrorCode =
-          data.code && KNOWN_CREATE_WITH_KEY_CODES.has(data.code as WizardErrorCode)
-            ? (data.code as WizardErrorCode)
-            : "UNKNOWN";
+          translated !== "UNKNOWN"
+            ? translated
+            : data.code &&
+                KNOWN_CREATE_WITH_KEY_CODES.has(data.code as WizardErrorCode)
+              ? (data.code as WizardErrorCode)
+              : "UNKNOWN";
         setErrorCode(code);
         trackForQuantsEventClient("wizard_error", {
           wizard_session_id: wizardSessionId,

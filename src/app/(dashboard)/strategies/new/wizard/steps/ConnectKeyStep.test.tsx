@@ -719,3 +719,154 @@ describe("[140.3-13a / SEAMUX-08] ConnectKeyStep — data.code is membership-che
     expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
   });
 });
+
+/**
+ * 140.4-15 / SEAMRIM-08 — the seam WIRE vocabulary is translated BEFORE the
+ * membership check, at this surface too.
+ *
+ * ⚠️ WHY THIS EXISTS AS A SEPARATE BLOCK, AND WHY IT IS NOT A ROSTER MEMBER.
+ * Plan `140.4-13` made `create-with-key/route.ts` answer a limiter
+ * MISCONFIGURATION with the wire code `SEAM_MISCONFIGURED` instead of the 429
+ * `KEY_RATE_LIMIT` it used to emit — our own outage had been blamed on the
+ * user's exchange. Plan `140.4-12` gave the kickoff arm (`SyncPreviewStep`) a
+ * translation hop so that code reaches its own copy, but the two key-entry
+ * steps never got one: each plan's SUMMARY assigned the edit to the other, and
+ * plan 12's GREEN commit landed BEFORE plan 13's. The code therefore arrived
+ * here, missed `KNOWN_CREATE_WITH_KEY_CODES`, and rendered `UNKNOWN` —
+ * *"Try the last action again."* with a Retry control — for a fault whose own
+ * authored copy says *"Retrying will not clear it."*
+ *
+ * The remedy is the ONE shared table (`SEAM_CODE_TO_WIZARD_CODE`, consulted
+ * through `recogniseSeamErrorCode`), NOT a new roster member: a roster member
+ * is coverage-law row 2 (hand-typed allow-list) and would have to be added
+ * again at every surface the next wire code reaches. The table is row 1.
+ *
+ * ⚠️ THE `recoverable` HALF IS LOAD-BEARING, NOT DECORATION. `recoverable` is
+ * DERIVED in `buildEnvelope` from the code's `actions` — `SEAM_MISCONFIGURED`
+ * carries neither `clear_and_retry` nor `try_another_key`, so it derives
+ * `false` and the Retry control does not render. `UNKNOWN` carries
+ * `clear_and_retry` and DOES render one. Asserting the absence alone would be
+ * satisfied by an envelope that renders no controls at all, so the UNKNOWN
+ * contrast below is the positive counterpart that keeps it discriminating.
+ */
+describe("[140.4-15 / SEAMRIM-08] ConnectKeyStep — a seam WIRE code is translated before the membership check", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("our own configuration fault (SEAM_MISCONFIGURED) reaches its own state and offers NO retry", async () => {
+    // The exact body `rateLimitDenyJson`'s misconfigured arm puts on the wire
+    // at create-with-key/route.ts — hand-typed from the route, not imported.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { code: "SEAM_MISCONFIGURED", error: "Rate limiter unavailable" },
+        503,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(
+      envelope,
+      "the wire code collapsed to UNKNOWN — the user is told to try the last " +
+        "action again for a misconfiguration that retrying cannot clear, and " +
+        "the honest copy this phase authored is unreachable at this surface",
+    ).toHaveAttribute("data-error-code", "SEAM_MISCONFIGURED");
+
+    expect(
+      screen.getByText(
+        "We could not send this request — our own configuration is wrong.",
+      ),
+    ).toBeInTheDocument();
+
+    // The BEHAVIOURAL half: no retry affordance, because retrying is futile.
+    expect(
+      screen.queryByRole("button", { name: "Retry" }),
+      "a Retry control was offered for a fault that stays wrong until we " +
+        "redeploy — the control contradicts the sentence beside it",
+    ).toBeNull();
+
+    // The funnel must see the specific code too: a configuration fault
+    // recorded as UNKNOWN is indistinguishable from a drifted upstream string.
+    await vi.waitFor(() => expect(trackMock).toHaveBeenCalled());
+    const payload = trackMock.mock.calls.find(
+      (c) => (c as unknown[])[0] === "wizard_error",
+    )![1] as { code: string; step: string };
+    expect(payload.code).toBe("SEAM_MISCONFIGURED");
+    expect(payload.step).toBe("connect_key");
+  });
+
+  it("POSITIVE COUNTERPART: an unrecognised code still falls to UNKNOWN, which DOES render Retry", async () => {
+    // Without this the absence assertion above is satisfiable by a component
+    // that renders no controls at all.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "ZZ_NOT_A_WIZARD_CODE" }, 500),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+    expect(
+      screen.getByRole("button", { name: "Retry" }),
+    ).toBeInTheDocument();
+  });
+
+  it("[140.4-16 / WR-09] the NESTED python envelope's code is read here too", async () => {
+    // `body.detail.code` is the shape every `service_error()` answer carries.
+    // A top-level-only reader answers `undefined` on it — byte-identical to a
+    // body that carried no code at all, which is how 21 codes stay invisible.
+    // `SyncPreviewStep` and `SubmitStep` have read through the leaf since
+    // 140.3-05 / 140.4-12; the two key-entry surfaces claimed to "mirror
+    // SyncPreviewStep exactly" while reading `data.code` directly. This case is
+    // what makes the claim true rather than aspirational.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          detail: {
+            code: "SEAM_MISCONFIGURED",
+            dependency: null,
+            retryable: false,
+            detail: "Rate limiter unavailable.",
+            correlation_id: "srv-nested-8b2d1f40-6c93-4a55-b027-1e5f9a3c7d64",
+          },
+        },
+        503,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(
+      envelope,
+      "the nested envelope carried the code and this arm did not see it. The " +
+        "flat and nested shapes must produce the SAME state.",
+    ).toHaveAttribute("data-error-code", "SEAM_MISCONFIGURED");
+  });
+
+  it("the translation hop does not shadow the roster: a wire code with no table entry is still UNKNOWN", async () => {
+    // `SEAM_DEGRADED` is a real seam wire code that is deliberately ABSENT
+    // from SEAM_CODE_TO_WIZARD_CODE — the table is explicit, not an identity
+    // rule. A translation hop written as `code as WizardErrorCode` would
+    // admit it and render undefined copy.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "SEAM_DEGRADED" }, 503),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+});

@@ -121,6 +121,33 @@ function scrubRecord<T extends Record<string, unknown>>(
   }
 }
 
+/**
+ * Capture to Sentry, RETURNING the import chain so the caller can hold the
+ * request alive until it settles.
+ *
+ * ── SEAMRIM-04 (Phase 140.4): NEW-C10-03, RE-CREATED HERE AND NOW FIXED ──────
+ *
+ * `src/lib/audit.ts`'s `reportToSentry` carries the diagnosis verbatim: the
+ * prior implementation used `void import(...).then(...)`, which returns
+ * SYNCHRONOUSLY — the in-flight dynamic-import promise is detached before
+ * `captureException` resolves, so under `after()` on a cold finish the lambda
+ * can be reaped before Sentry flushes and the alert is lost silently. That red
+ * team (audit-2026-05-26) fixed `reportToSentry` by returning the chain. This
+ * helper kept the defective shape until now. Two adjacent modules, one rule.
+ *
+ * ⚠️ SCHEDULING IS THE CALLER'S JOB, AND THAT IS A BUNDLE CONSTRAINT, NOT A
+ * STYLE PREFERENCE. This module is imported by SIX `"use client"` components
+ * (`ForQuantsCtas`, `ScenarioCommitDrawer`, `widget-boundary`, `EquityChart`,
+ * `useMandateAutoSave`, `storage/cross-tab`), so it MUST NOT import
+ * `next/server` — doing so would ship a server-only module into the browser
+ * bundle. It imports exactly one module (`./seam-redaction`) and must keep that
+ * property. `after()` therefore lives at the server-only call sites
+ * (`resilient-fetch.ts`, `ratelimit.ts`), never here.
+ *
+ * SOURCE-COMPATIBLE BY DESIGN: an unused returned promise is legal, so the 100+
+ * existing call sites that discard the return value are unaffected. A site that
+ * needs the capture to survive a cold finish schedules it explicitly.
+ */
 export function captureToSentry(
   err: unknown,
   options: {
@@ -135,13 +162,13 @@ export function captureToSentry(
      */
     secrets?: readonly unknown[];
   },
-): void {
+): Promise<void> {
   try {
     const secrets = options.secrets ?? [];
     const payload = scrubCaptureInput(err, secrets);
     const tags = scrubRecord(options.tags, secrets) ?? {};
     const extra = scrubRecord(options.extra, secrets);
-    void import("@sentry/nextjs")
+    return import("@sentry/nextjs")
       .then((Sentry) => {
         try {
           Sentry.captureException(payload, {
@@ -154,9 +181,66 @@ export function captureToSentry(
         }
       })
       .catch(() => {
-        // Sentry import failed — swallow.
+        // Sentry import failed — swallow. RESOLVING rather than rejecting is
+        // load-bearing now that the chain is returned: a floating rejection
+        // would become an unhandled rejection at every call site.
       });
   } catch {
-    // import() construction failed (extremely unlikely) — swallow.
+    // import() construction failed (extremely unlikely) — swallow, and still
+    // hand the caller a settled promise so `after(captureToSentry(...))` and
+    // `await` are total.
+    return Promise.resolve();
   }
+}
+
+/**
+ * 140.4-16 / WR-06 — EDGE-TRIGGER FOR THE HIGH-VOLUME CAPTURE SITES.
+ *
+ * ⚠️ THE PROBLEM THIS SOLVES IS AN ALERT STORM DURING THE EXACT INCIDENT THE
+ * INSTRUMENTATION EXISTS TO OBSERVE. Three capture sites added by SEAMRIM-04
+ * fire once per REQUEST rather than once per state TRANSITION:
+ *   · `ratelimit.ts`' posture-2 arm — every request that wins the 5 s fail-open
+ *     race, i.e. every request for the whole duration of an Upstash outage;
+ *   · `resilient-fetch`'s `isBreakerOpen` catch — every request whose breaker
+ *     probe rejects;
+ *   · `recordSeamFailure`'s catch — every failure whose bookkeeping write fails.
+ * All three sit on the seam's highest-volume paths, and each capture is an
+ * `import("@sentry/nextjs")` + `captureException` held alive by `after()`. A
+ * sustained store outage therefore burns the Sentry quota and DROPS OTHER
+ * ALERTS during the same incident. `emitBreakerTransition` was already bounded
+ * to open/close edges; these were not.
+ *
+ * WHY A TIME WINDOW AND NOT A TRUE EDGE. An "edge" needs a prior state to
+ * compare against, and these three are stateless catch arms — there is nothing
+ * that says "the store was healthy a moment ago". A coarse window is the honest
+ * approximation: it keeps the FIRST occurrence of a burst, which is the one an
+ * operator needs, and re-arms so a long incident still produces a heartbeat.
+ *
+ * ⚠️ THE LOG LINE MUST STAY UNCONDITIONAL AT EVERY CALL SITE. This suppresses
+ * the REMOTE capture only. Dropping the local `console.warn`/`console.error`
+ * too would make the Vercel trace lie about how many requests were affected,
+ * which is the measurement an operator sizes the incident with.
+ *
+ * In-memory and per-instance by construction: serverless instances do not share
+ * it, so N instances emit up to N captures per window. That is the correct
+ * trade — a cross-instance store would put a network call on the failure path
+ * of the thing whose network call is already failing.
+ */
+const CAPTURE_WINDOW_MS = 60_000;
+const lastCapturedAtMs = new Map<string, number>();
+
+export function shouldCaptureNow(
+  key: string,
+  now: number = Date.now(),
+  windowMs: number = CAPTURE_WINDOW_MS,
+): boolean {
+  const last = lastCapturedAtMs.get(key);
+  if (last !== undefined && now - last < windowMs) return false;
+  lastCapturedAtMs.set(key, now);
+  return true;
+}
+
+/** Test-only reset. Never called from production code. */
+export function __resetCaptureThrottleForTests(): void {
+  lastCapturedAtMs.clear();
 }

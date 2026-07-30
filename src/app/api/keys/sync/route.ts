@@ -2,7 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
-import { userActionLimiter, keysSyncUserLimiter, checkLimit } from "@/lib/ratelimit";
+import {
+  userActionLimiter,
+  keysSyncUserLimiter,
+  checkLimit,
+  rateLimitDenyJson,
+} from "@/lib/ratelimit";
 import { logAuditEventAsUser } from "@/lib/audit";
 import { getCorrelationId } from "@/lib/correlation-id";
 import { postProcessKey } from "@/lib/process-key-client";
@@ -113,22 +118,43 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // synonym. Each site is pinned by its own case, driven through its own
   // bucket key with its own wait, so a code dropped from one does not hide
   // behind the other's assertion.
+  //
+  // ⚠️ 140.4-13 / SEAMRIM-05 — AND THE SAME "TWO DISTINCT SITES" WARNING NOW
+  // APPLIES TO THE 503 SPLIT. Both arms deny through `rateLimitDenyJson`, and
+  // both are pinned by their own case driven through their own bucket. A guard
+  // that only asked "does this FILE mention the builder" would stay green with
+  // the second arm reverted to an inlined 429 — which is exactly the mutation
+  // this plan's ledger row M105 runs.
+  //
+  // The 429 body and headers below are UNCHANGED: `{error, code:"RATE_LIMITED"}`
+  // in that key order, with NO_STORE_HEADERS + Retry-After. The `code` is a live
+  // contract — `SyncPreviewStep`'s KNOWN_KICKOFF_CODES maps `RATE_LIMITED` — so
+  // flattening it onto the builder's default body would have been a regression,
+  // not a simplification.
   const userRl = await checkLimit(keysSyncUserLimiter, `keys-sync-user:${user.id}`);
   if (!userRl.success) {
-    return NextResponse.json(
-      { error: "Too many requests", code: "RATE_LIMITED" },
-      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(userRl.retryAfter) } },
-    );
+    return rateLimitDenyJson(userRl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: { error: "Too many requests", code: "RATE_LIMITED" },
+      misconfiguredBody: {
+        error: "Rate limiter unavailable",
+        code: "SEAM_MISCONFIGURED",
+      },
+    });
   }
   const rl = await checkLimit(
     userActionLimiter,
     `keys-sync:${user.id}:${strategy_id}`,
   );
   if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests", code: "RATE_LIMITED" },
-      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
-    );
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: { error: "Too many requests", code: "RATE_LIMITED" },
+      misconfiguredBody: {
+        error: "Rate limiter unavailable",
+        code: "SEAM_MISCONFIGURED",
+      },
+    });
   }
 
   // Verify ownership via the user-scoped client so we get a clean
@@ -219,7 +245,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     } catch (err) {
       console.error(
         `[keys/sync] composite membership probe failed for ${strategy_id}:`,
-        err,
+        scrubSeamError(err),
       );
       // 140.3-10 — `COMPOSITE_MEMBERSHIP_UNKNOWN` is the EXISTING wizard code
       // for precisely this fail-closed: finalize-wizard already emits it from
@@ -264,7 +290,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       if (assetClassErr) {
         console.warn(
           `[keys/sync] composite asset_class derive failed (non-blocking) for ${strategy_id}:`,
-          assetClassErr,
+          scrubSeamError(assetClassErr),
         );
         // Parity with finalize (:504-507): a persistent write failure would
         // otherwise be invisible in Sentry and surface only as recurring
@@ -289,7 +315,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       if (rpcError) {
         console.error(
           `[keys/sync] enqueue_compute_job (stitch_composite) RPC failed for ${strategy_id}:`,
-          rpcError,
+          scrubSeamError(rpcError),
         );
         // 140.3-10 — a DISTINCT fact from the membership fail-closed above:
         // membership was known, the enqueue itself failed. Same sentence, same
@@ -379,9 +405,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     } = await supabase.auth.getSession();
     userAccessToken = session?.access_token;
   } catch (sessionErr) {
+    // SEAMRIM-06 — the WHOLE caught value goes through the leaf, not `.message`.
+    // `err.message` is exactly where undici puts the outgoing headers, so a
+    // hand-rolled `instanceof Error ? err.message : String(err)` is the banned
+    // shape rather than a mitigation of it. `scrubSeamError` is total and
+    // renders both arms (Error and non-Error), so the ternary buys nothing.
+    // No per-request secret is passed: `userAccessToken` is the value this try
+    // block was ASSIGNING, so it is necessarily still `undefined` here.
     console.warn(
       `[keys/sync] could not read the session to forward X-User-Access-Token (non-blocking) for ${strategy_id}:`,
-      sessionErr instanceof Error ? sessionErr.message : String(sessionErr),
+      scrubSeamError(sessionErr),
     );
   }
 
@@ -439,7 +472,7 @@ async function stampCompositeFailedUnlessComplete(
     console.error(
       `[keys/sync] could not read existing analytics before stamping 'failed' ` +
         `(${logLabel}) for ${strategyId}:`,
-      readErr,
+      scrubSeamError(readErr),
     );
     return;
   }
@@ -453,7 +486,7 @@ async function stampCompositeFailedUnlessComplete(
     // pattern in the POST handler above).
     console.error(
       `[keys/sync] failed to stamp terminal 'failed' (${logLabel}) for ${strategyId}:`,
-      stampErr,
+      scrubSeamError(stampErr),
     );
   }
 }

@@ -65,10 +65,30 @@ vi.mock("@/lib/api/withAuth", () => ({
       h(req, MOCK_USER),
 }));
 
-vi.mock("@/lib/ratelimit", () => ({
-  userActionLimiter: {},
-  checkLimit: vi.fn(async () => ({ success: true })),
+/**
+ * 140.4-13 / SEAMRIM-05 — the limiter verdict this file drives the route with.
+ * Hoisted so the factory closes over it; default is the ALLOW every pre-existing
+ * test was written against, and the SEAMRIM-05 describe restores it.
+ */
+const limiter = vi.hoisted(() => ({
+  result: { success: true } as
+    | { success: true }
+    | { success: false; retryAfter: number; reason?: "ratelimit_misconfigured" },
 }));
+
+// ⚠️ EXTENDED, NOT REPLACED. The pure helpers come from `importActual` so this
+// mock cannot drift from the real 503-vs-429 decision — a hand-written double
+// that always answered 429 would make this file green on the exact bug the
+// plan closes.
+vi.mock("@/lib/ratelimit", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/ratelimit")>();
+  return {
+    userActionLimiter: {},
+    checkLimit: vi.fn(async () => limiter.result),
+    rateLimitDenyJson: actual.rateLimitDenyJson,
+    isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
+  };
+});
 
 const validateKeyMock = vi.fn();
 const encryptKeyMock = vi.fn();
@@ -140,6 +160,89 @@ function makeReq(body: unknown): NextRequest {
     body: JSON.stringify(body),
   });
 }
+
+/**
+ * 140.4-13 / SEAMRIM-05 — the SHARPEST site in the class.
+ *
+ * ⚠️ Before this plan a limiter MISCONFIGURATION answered 429 with
+ * `code: "KEY_RATE_LIMIT"`, whose copy reads *"a transient, exchange-side
+ * throttle and not a problem with your key"*. While Upstash is down that is
+ * false for EVERY user on their FIRST click — our outage, blamed on the user's
+ * exchange, on the step where they hand us a credential.
+ *
+ * The 429 half is the anti-regression: a REAL throttle still answers exactly
+ * what it answered before, key order included.
+ */
+describe("[140.4-13 / SEAMRIM-05] POST /api/strategies/create-with-key — the limiter deny arm", () => {
+  afterEach(() => {
+    limiter.result = { success: true };
+    vi.restoreAllMocks();
+  });
+
+  it("ratelimit_misconfigured → 503 and NOT the exchange-blaming KEY_RATE_LIMIT", async () => {
+    limiter.result = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(
+      body.code,
+      "Our own limiter's store being unreachable must not render as the " +
+        "user's exchange throttling their key.",
+    ).not.toBe("KEY_RATE_LIMIT");
+    expect(body.code).toBe("SEAM_MISCONFIGURED");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+  });
+
+  it("a genuine throttle → 429 with a BYTE-IDENTICAL body and headers", async () => {
+    limiter.result = { success: false, retryAfter: 42 };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(429);
+    // Hand-typed from the pre-adoption source: `{code, error}` in THAT key
+    // order, NO_STORE_HEADERS + Retry-After.
+    // 140.4-16 / WR-03 — byte-wise, because `toEqual` on parsed JSON does NOT
+    // compare key order (measured: a swap left all four receipts green). See
+    // the note in `keys/sync/route.test.ts`.
+    expect(await res.clone().text()).toBe(
+      '{"code":"KEY_RATE_LIMIT","error":"Too many requests"}',
+    );
+    expect(await res.json()).toEqual({
+      code: "KEY_RATE_LIMIT",
+      error: "Too many requests",
+    });
+    expect(res.headers.get("Retry-After")).toBe("42");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(validateKeyMock).not.toHaveBeenCalled();
+  });
+
+  it("success → the deny arm does not fire", async () => {
+    limiter.result = { success: true };
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: true,
+      permissions: ["read"],
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).not.toBe(429);
+    expect(res.status).not.toBe(503);
+    expect(validateKeyMock).toHaveBeenCalled();
+  });
+});
 
 describe("POST /api/strategies/create-with-key — envelope-encryption shape", () => {
   beforeEach(() => {

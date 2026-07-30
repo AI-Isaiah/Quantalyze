@@ -2,8 +2,21 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260716130500_finalize_terminal_status_param.sql
-CREATE FUNCTION public.finalize_csv_strategy(
+-- source migration: 20260728120000_csv_finalize_double_submit_idempotency.sql
+-- ==========================================================================
+-- STEP 3 — finalize_csv_strategy WRITES wizard_session_id
+-- ==========================================================================
+-- Re-based on the LATEST definition: 20260716130500_finalize_terminal_status_param.sql:225-328
+-- (the 5-argument form with p_terminal_status, created after that migration
+-- DROPped the 4-argument signature from 20260501055202:185). Re-basing on the
+-- older 4-arg body would silently delete the CONTRIB-02 terminal-status guard.
+--
+-- EXACTLY ONE change from that body: `wizard_session_id` is added to the
+-- strategies INSERT column list and `p_wizard_session_id` to its VALUES.
+-- Unchanged: the terminal-status guard, both auth-identity guards, the fmt
+-- whitelist, the strategy-name guards, the strategy_verifications INSERT, and
+-- the grants (restated verbatim below).
+CREATE OR REPLACE FUNCTION public.finalize_csv_strategy(
   p_user_id            UUID,
   p_wizard_session_id  UUID,
   p_fmt                TEXT,
@@ -74,13 +87,26 @@ BEGIN
   -- empty because CSV strategies have no broker linkage. strategy_types /
   -- subtypes / markets default empty per Phase 15 v0; Phase 17 metadata
   -- step (deferred) will populate.
+  --
+  -- Phase 140.4 / SEAMRIM-03: wizard_session_id is WRITTEN here. This single
+  -- column write is what makes the partial index
+  -- strategies_user_wizard_session_source_uniq bite — the index predicate is
+  -- `WHERE wizard_session_id IS NOT NULL`, so omitting the column (the
+  -- pre-140.4 body) left every CSV row outside it and a double-submit minted a
+  -- second strategy + a second verification row, silently, at 200 OK. The
+  -- function deliberately has NO `EXCEPTION` block: the resulting 23505 aborts
+  -- the function and rolls BOTH inserts back, and routers/process_key.py's
+  -- csv-finalize arm turns that into an idempotent 200 carrying the EXISTING
+  -- strategy id.
   INSERT INTO strategies (
     user_id, name, status, source,
-    strategy_types, subtypes, markets, supported_exchanges
+    strategy_types, subtypes, markets, supported_exchanges,
+    wizard_session_id
   )
   VALUES (
     p_user_id, p_strategy_name, p_terminal_status, 'csv',
-    '{}', '{}', '{}', '{}'::text[]
+    '{}', '{}', '{}', '{}'::text[],
+    p_wizard_session_id
   )
   RETURNING id INTO v_strategy_id;
 

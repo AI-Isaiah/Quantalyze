@@ -208,19 +208,131 @@ describe("deriveWizardResumeOverrides — pure LS-derivation helper", () => {
     });
   });
 
-  it("always carries the wizardSessionId forward so funnel correlation survives resume", () => {
+  // ⚠️ RE-SCOPED in Phase 140.4 / SEAMRIM-03, and the reason is recorded here
+  // because the old version of this test PINNED THE DEFECT.
+  //
+  // It used to be `"always carries the wizardSessionId forward so funnel
+  // correlation survives resume"` and asserted the carry on BOTH branches from a
+  // single source-less (⇒ 'api') payload. Its api→api half was and is correct.
+  // Its api→csv half asserted exactly the cross-source leak that made review
+  // finding C-2's fix dangerous: an abandoned API draft's idempotency token
+  // being replayed into a CSV submission. Deleting the test would have deleted
+  // the correct half with it, so it is re-scoped — the true assertion stays, the
+  // one that encoded the leak is INVERTED, and the property is named.
+  //
+  // Funnel correlation is not lost: WizardClient seeds wizardSessionId from
+  // newWizardSessionId() on mount, so a declined restore means the CSV wizard
+  // correlates under its own fresh token — which is what a distinct submission
+  // should carry.
+  it("carries the wizardSessionId forward WITHIN a source, and not across one", () => {
     const loaded: WizardLocalState = {
       strategyId: "draft-uuid",
       wizardSessionId: "ls-session-id",
       step: "sync_preview",
       savedAt: 1_700_000_000_000,
     };
+    // Same source (absent ⇒ 'api') — unchanged behaviour, resume still works.
     expect(
       deriveWizardResumeOverrides(loaded, "api", "draft-uuid").wizardSessionId,
     ).toBe("ls-session-id");
+    // Across the boundary — the leak, now closed.
     expect(
       deriveWizardResumeOverrides(loaded, "csv", null).wizardSessionId,
-    ).toBe("ls-session-id");
+    ).toBeUndefined();
+  });
+
+  // ==========================================================================
+  // Phase 140.4 / SEAMRIM-03 — the cross-source session-id gate.
+  //
+  // One shared STORAGE_KEY serves both wizards and clearWizardState fires only
+  // on submit / delete-draft / start-fresh, so an ABANDONED API draft is still
+  // sitting there when the user opens the CSV wizard. Carrying its session id
+  // across is what made the naive C-2 fix — a two-column
+  // (user_id, wizard_session_id) index — break the user's FIRST legitimate CSV
+  // submit, permanently, because every retry reuses the same id.
+  //
+  // This gate is TRIGGER REMOVAL. The guarantee is the three-column index; these
+  // cases pin the client half only.
+  // ==========================================================================
+  describe("cross-source wizardSessionId gate (SEAMRIM-03)", () => {
+    it("does NOT leak an abandoned API draft's session id into a CSV resume", () => {
+      const abandonedApiDraft: WizardLocalState = {
+        strategyId: "draft-uuid",
+        wizardSessionId: "api-session-id",
+        step: "sync_preview",
+        savedAt: 1_700_000_000_000,
+        source: "api",
+      };
+      const out = deriveWizardResumeOverrides(abandonedApiDraft, "csv", null);
+      expect(out.wizardSessionId).toBeUndefined();
+    });
+
+    it("does NOT leak a CSV draft's session id into an API resume", () => {
+      const abandonedCsvDraft: WizardLocalState = {
+        strategyId: "",
+        wizardSessionId: "csv-session-id",
+        step: "csv_upload",
+        savedAt: 1_700_000_000_000,
+        source: "csv",
+        strategyName: "Aurora Capital",
+      };
+      const out = deriveWizardResumeOverrides(
+        abandonedCsvDraft,
+        "api",
+        "draft-uuid",
+      );
+      expect(out.wizardSessionId).toBeUndefined();
+    });
+
+    it("DOES restore a CSV payload's session id on the CSV branch", () => {
+      const csvDraft: WizardLocalState = {
+        strategyId: "",
+        wizardSessionId: "csv-session-id",
+        step: "csv_upload",
+        savedAt: 1_700_000_000_000,
+        source: "csv",
+        strategyName: "Aurora Capital",
+      };
+      const out = deriveWizardResumeOverrides(csvDraft, "csv", null);
+      expect(out.wizardSessionId).toBe("csv-session-id");
+    });
+
+    // `source` is optional and documented as meaning 'api' when absent (v1
+    // payloads predate the CSV branch). A bare `loaded.source === source` gate
+    // would silently stop restoring for every legacy payload on the API branch —
+    // a resume regression with no error message. This is the case that catches
+    // the missing `?? "api"`.
+    it("treats a source-less legacy payload as 'api' and still restores on the API branch", () => {
+      const legacyPayload: WizardLocalState = {
+        strategyId: "draft-uuid",
+        wizardSessionId: "legacy-session-id",
+        step: "sync_preview",
+        savedAt: 1_700_000_000_000,
+      };
+      const out = deriveWizardResumeOverrides(
+        legacyPayload,
+        "api",
+        "draft-uuid",
+      );
+      expect(out.wizardSessionId).toBe("legacy-session-id");
+    });
+
+    // The gate must touch ONLY wizardSessionId. `step` and `strategyName` have
+    // their own independent rules directly below it in the source, and a gate
+    // written one line too high would silently swallow both.
+    it("leaves the existing step and strategyName rules untouched", () => {
+      const csvDraft: WizardLocalState = {
+        strategyId: "",
+        wizardSessionId: "csv-session-id",
+        step: "csv_upload",
+        savedAt: 1_700_000_000_000,
+        source: "csv",
+        strategyName: "Aurora Capital",
+      };
+      const out = deriveWizardResumeOverrides(csvDraft, "csv", null);
+      expect(out.step).toBe("csv_upload");
+      expect(out.strategyName).toBe("Aurora Capital");
+    });
   });
 });
 

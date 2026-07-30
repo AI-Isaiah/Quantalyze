@@ -78,12 +78,24 @@ const checkLimitMock = vi.fn<
   (limiter: unknown, key: string) => Promise<{
     success: boolean;
     retryAfter?: number;
+    // 140.4-13 / SEAMRIM-05 — the THIRD outcome. Absent is a genuine throttle
+    // (429); "ratelimit_misconfigured" is OUR store being unreachable and must
+    // answer 503.
+    reason?: "ratelimit_misconfigured";
   }>
 >();
-vi.mock("@/lib/ratelimit", () => ({
-  userActionLimiter: {},
-  checkLimit: (limiter: unknown, key: string) => checkLimitMock(limiter, key),
-}));
+// ⚠️ EXTENDED, NOT REPLACED (140.4-13 / SEAMRIM-05). See the note in
+// `src/__tests__/csv-validate-route.test.ts`: the pure helpers come from
+// `importActual` so this mock cannot drift from the real 503-vs-429 decision.
+vi.mock("@/lib/ratelimit", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/ratelimit")>();
+  return {
+    userActionLimiter: {},
+    checkLimit: (limiter: unknown, key: string) => checkLimitMock(limiter, key),
+    rateLimitDenyJson: actual.rateLimitDenyJson,
+    isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
+  };
+});
 
 const validateKeyMock = vi.fn();
 const encryptKeyMock = vi.fn();
@@ -550,7 +562,21 @@ describe("POST /api/strategies/composite/add-key — B15 limiter ordering", () =
     const res = await POST(makeReq(VALID_BODY));
 
     expect(res.status).toBe(429);
-    expect((await res.json()).code).toBe("KEY_RATE_LIMIT");
+    // 140.4-13 / SEAMRIM-05 — the FULL body and headers, byte-unchanged by the
+    // chokepoint adoption. Hand-typed from the pre-adoption source: `{code,
+    // error}` in THAT key order, with NO_STORE_HEADERS and Retry-After.
+    // 140.4-16 / WR-03 — byte-wise, because `toEqual` on parsed JSON does NOT
+    // compare key order (measured: a swap left all four receipts green). See
+    // the note in `keys/sync/route.test.ts`.
+    expect(await res.clone().text()).toBe(
+      '{"code":"KEY_RATE_LIMIT","error":"Too many requests"}',
+    );
+    expect(await res.json()).toEqual({
+      code: "KEY_RATE_LIMIT",
+      error: "Too many requests",
+    });
+    expect(res.headers.get("Retry-After")).toBe("42");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     // Route-distinct limiter key so composite adds don't share the single-key
     // bucket.
     const [, limiterKey] = checkLimitMock.mock.calls[0];
@@ -560,6 +586,43 @@ describe("POST /api/strategies/composite/add-key — B15 limiter ordering", () =
     expect(validateKeyMock).not.toHaveBeenCalled();
     expect(encryptKeyMock).not.toHaveBeenCalled();
     expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("[140.4-13 / SEAMRIM-05] ratelimit_misconfigured → 503 and NOT the exchange-blaming KEY_RATE_LIMIT", async () => {
+    checkLimitMock.mockResolvedValue({
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(
+      body.code,
+      "`KEY_RATE_LIMIT`'s copy calls the throttle exchange-side. Emitting it " +
+        "for OUR store being unreachable blames the user's exchange for our " +
+        "outage, on their first click, for as long as Upstash is down.",
+    ).not.toBe("KEY_RATE_LIMIT");
+    expect(body.code).toBe("SEAM_MISCONFIGURED");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("[140.4-13 / SEAMRIM-05] success → the deny arm does not fire", async () => {
+    checkLimitMock.mockResolvedValue({ success: true });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).not.toBe(429);
+    expect(res.status).not.toBe(503);
+    expect(validateKeyMock).toHaveBeenCalled();
   });
 });
 

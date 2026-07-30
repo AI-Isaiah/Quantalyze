@@ -2,6 +2,7 @@
 
 import {
   CSV_RULE_LABELS,
+  WIZARD_ERROR_COPY,
   formatCsvRuleCauseSingle,
   formatColumnInDataframeMessage,
 } from "@/lib/wizardErrors";
@@ -41,7 +42,25 @@ export function CsvValidationEnvelope({ envelope }: CsvValidationEnvelopeProps) 
   const ruleKeys = Object.keys(byRule);
   const ruleCount = ruleKeys.length;
 
-  let causeText: string;
+  // ⚠️ 140.4-16 / CR-02 — THE SECOND LINE MUST SAY SOMETHING THE FIRST DOES
+  // NOT. Until this, the final `else` below was `envelope.human_message` — the
+  // same string the heading falls back to when `errors.length === 0` — so every
+  // failure WITHOUT a per-row breakdown (every upstream fault, every transport
+  // failure, every 401) printed one sentence twice. Reproduced in a browser on
+  // a real founder CSV: qa-report-localhost-2026-07-29, ISSUE-003.
+  //
+  // The replacement reads the code's OWN authored `cause` from the ONE copy
+  // table, and renders NOTHING when there is no entry. Falling back to
+  // `formatKeyError`'s UNKNOWN cause would be worse than the duplication: it
+  // would state a reason we never established, for a code we do not recognise.
+  // `envelope.code` is typed `string` here (this panel is one of the surfaces
+  // `ErrorEnvelope`'s `WizardErrorCode` fence never reached), so the lookup is
+  // a plain-record read and must tolerate a miss.
+  const authoredCause = (
+    WIZARD_ERROR_COPY as Record<string, { cause: string } | undefined>
+  )[envelope.code]?.cause;
+
+  let causeText: string | null;
   if (ruleCount > 1) {
     // Phase 17 / DESIGN-05: "Across {n} rule categories: {labels}." — the keys
     // are humanized via CSV_RULE_LABELS first (this surface joins
@@ -53,7 +72,7 @@ export function CsvValidationEnvelope({ envelope }: CsvValidationEnvelopeProps) 
     const human = CSV_RULE_LABELS[onlyRule] ?? onlyRule;
     causeText = formatCsvRuleCauseSingle(human);
   } else {
-    causeText = envelope.human_message;
+    causeText = authoredCause ?? null;
   }
 
   return (
@@ -68,7 +87,9 @@ export function CsvValidationEnvelope({ envelope }: CsvValidationEnvelopeProps) 
           ? `${errors.length} ${errors.length === 1 ? "row" : "rows"} failed validation`
           : envelope.human_message}
       </p>
-      <p className="mt-1 text-caption text-text-secondary">{causeText}</p>
+      {causeText !== null && (
+        <p className="mt-1 text-caption text-text-secondary">{causeText}</p>
+      )}
       {Object.entries(byRule).map(([rule, list]) => (
         <details key={rule} className="mt-2 text-caption">
           <summary className="cursor-pointer text-text-secondary">

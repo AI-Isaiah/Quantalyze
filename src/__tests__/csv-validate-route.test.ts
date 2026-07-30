@@ -10,10 +10,18 @@
  *   - csv-validate proxy: validateCsv() (analytics-client) is mocked
  *   - csv-finalize proxy: supabase rpc() is mocked
  *
- * Cross-AI revision 2026-04-30: the validateCsv-throws path asserts that
- * the original throw message ("ANALYTICS_SERVICE_URL not configured")
- * surfaces verbatim in the human_message field. The csv-finalize route
- * tests cover strategy_name validation BEFORE the RPC is called.
+ * 140.4-09 / SEAMRIM-06 — SUPERSEDES the Cross-AI revision 2026-04-30, which
+ * asserted that the original throw message ("ANALYTICS_SERVICE_URL not
+ * configured") surfaces VERBATIM in human_message. It does not, and must not:
+ * that assertion pinned the leak green. The 502's human_message is now a STATIC
+ * sentence and the thrown text stays server-side, under the H-1062 rule
+ * `src/app/api/bridge/route.ts:190-193` states verbatim. The two cases below
+ * assert the absence in BOTH directions — the original string, and a
+ * distinctive synthetic one, because an assertion naming a single string is
+ * satisfied by a route that echoes everything except that string.
+ *
+ * The csv-finalize route tests cover strategy_name validation BEFORE the RPC
+ * is called.
  *
  * **Vitest environment override** — these tests must run under the `node`
  * environment, NOT jsdom. jsdom's Request.formData() does not parse
@@ -77,14 +85,34 @@ vi.mock("@/lib/api/withAuth", () => ({
 }));
 
 const checkLimitMock = vi.hoisted(() =>
-  vi.fn(async () => ({ success: true, retryAfter: 0 })),
+  // 140.4-13 / SEAMRIM-05 — `reason` is the THIRD outcome: absent is a genuine
+  // throttle (429), "ratelimit_misconfigured" is OUR store being unreachable
+  // and must answer 503.
+  vi.fn(
+    async (): Promise<{
+      success: boolean;
+      retryAfter: number;
+      reason?: "ratelimit_misconfigured";
+    }> => ({ success: true, retryAfter: 0 }),
+  ),
 );
 
-vi.mock("@/lib/ratelimit", () => ({
-  userActionLimiter: {},
-  csvValidateLimiter: {},
-  checkLimit: checkLimitMock,
-}));
+// ⚠️ EXTENDED, NOT REPLACED (140.4-13 / SEAMRIM-05). The route's deny arm now
+// routes its status decision through `rateLimitDenyJson`; an omitted export is
+// `undefined` at call time. The pure helpers come from `importActual` rather
+// than a hand-written double SO THE MOCK CANNOT DRIFT FROM THE REAL 503-vs-429
+// DECISION — a double that always answered 429 would make this file green on
+// exactly the bug the plan closes.
+vi.mock("@/lib/ratelimit", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/ratelimit")>();
+  return {
+    userActionLimiter: {},
+    csvValidateLimiter: {},
+    checkLimit: checkLimitMock,
+    rateLimitDenyJson: actual.rateLimitDenyJson,
+    isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
+  };
+});
 
 const validateCsvMock = vi.hoisted(() => vi.fn());
 
@@ -126,6 +154,19 @@ vi.mock("@/lib/supabase/server", () => ({
         };
         return eqChain;
       },
+      // CR-01: csv-finalize now probes `csv_daily_returns` for rows OUTSIDE the
+      // incoming payload's date range before persisting (the cross-submission
+      // merge fence). This double reports "nothing already stored", which is
+      // the first-submit state every csv-finalize case in this file models.
+      // The fence's own behaviour is guarded in
+      // csv-finalize-cross-submission-merge.test.ts, not here.
+      select: (_cols: string) => ({
+        eq: (_col: string, _val: string) => ({
+          or: (_filter: string) => ({
+            limit: async (_n: number) => ({ data: [], error: null }),
+          }),
+        }),
+      }),
     }),
   }),
 }));
@@ -379,7 +420,15 @@ describe("/api/strategies/csv-validate", () => {
     expect(validateCsvMock).not.toHaveBeenCalled();
   });
 
-  it("unified validate throws → 502 CSV_UPSTREAM_FAIL with original message in human_message", async () => {
+  it("unified validate throws → 502 CSV_UPSTREAM_FAIL with a STATIC human_message, not the thrown text", async () => {
+    // 140.4-09 / SEAMRIM-06. This case previously asserted
+    // `toContain("ANALYTICS_SERVICE_URL not configured")` — it PINNED THE LEAK
+    // GREEN. The thrown text is internal prose (a config fault, a Python
+    // contract-drift string, a FastAPI 5xx detail) and it is rendered by
+    // `CsvUploadStep` → `CsvValidationEnvelope` as the wizard panel's title and
+    // subtitle. H-1062, stated verbatim at `src/app/api/bridge/route.ts:190-193`:
+    // genuine 5xx / unexpected exceptions return a STATIC message and the detail
+    // stays server-side.
     process.env.INTERNAL_API_TOKEN = "test-token";
     postProcessKeyMock.mockRejectedValue(
       new Error("ANALYTICS_SERVICE_URL not configured"),
@@ -391,9 +440,124 @@ describe("/api/strategies/csv-validate", () => {
     expect(res.status).toBe(502);
     const json = await res.json();
     expect(json.code).toBe("CSV_UPSTREAM_FAIL");
-    // Cross-AI revision 2026-04-30: throw message surfaces verbatim.
-    expect(json.human_message).toContain("ANALYTICS_SERVICE_URL not configured");
+    // THE NEGATIVE FIRST, deliberately: it is the assertion that replaced the
+    // pin, so it is the one that must be seen reddening on the untouched tree.
+    // Ordering it after the sentence pin would let `toBe` short-circuit and the
+    // replacement would never be observed failing.
+    //
+    // The WHOLE serialised body, not just human_message: `debug_context` is a
+    // second channel into the same panel and a human_message-only assertion
+    // would not see a move from one field to the other.
+    expect(
+      JSON.stringify(json),
+      "the thrown text reached the wizard error panel — H-1062 requires a static sentence here",
+    ).not.toContain("ANALYTICS_SERVICE_URL");
+    // Hand-typed literal, never read off the route — the sentence is the oracle.
+    //
+    // 140.4-16 / CR-02 — THE LITERAL MOVED, AND IT MOVED BECAUSE IT WAS WRONG.
+    // This case guards the NO-ECHO property and still does. What changed is the
+    // sentence it pins: "CSV validation failed" blamed the user's file on an
+    // arm that is the unclassified residue by construction. Two `toBe`
+    // assertions were holding that misattribution in place, which is why the
+    // correction has to land here as well as in the route.
+    expect(json.human_message).toBe(
+      "Validation service returned an unexpected response. Retry shortly.",
+    );
     expect(json.correlation_id).toBeNull();
+  });
+
+  it("GENERALISED: no thrown text reaches the 502 body, whatever it says — and the operator still gets it", async () => {
+    // ⚠️ THE CASE ABOVE IS SATISFIABLE BY SPECIAL-CASING ONE STRING. A route
+    // that echoed `err.message` and stripped the literal
+    // "ANALYTICS_SERVICE_URL" would pass it. This drives a DISTINCTIVE
+    // synthetic message that no production code can know about, so only a route
+    // that echoes NOTHING passes.
+    //
+    // The second half is the A-10 anti-regression: answering the finding by
+    // DROPPING the value from the log replaces one defect with another. The
+    // operator must still receive the detail, scrubbed, server-side. Both
+    // directions are asserted here because a one-sided test ships either state
+    // green.
+    const SYNTHETIC =
+      "zq7f4e-marker: relation \"strategy_verifications\" does not exist";
+    process.env.INTERNAL_API_TOKEN = "test-token";
+    postProcessKeyMock.mockRejectedValue(new Error(SYNTHETIC));
+    // DEF-16-1: vi.spyOn + restore, never vi.stubGlobal.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const file = new File(["x"], "x.csv", { type: "text/csv" });
+      const req = makeMultipartRequest(file, "daily_returns");
+      const { POST } = await import("@/app/api/strategies/csv-validate/route");
+      const res = await POST(req);
+      expect(res.status).toBe(502);
+      const json = await res.json();
+      expect(json.code).toBe("CSV_UPSTREAM_FAIL");
+      expect(
+        JSON.stringify(json),
+        "an arbitrary thrown message reached the wizard error panel — the 502 is echoing, not answering statically",
+      ).not.toContain("zq7f4e-marker");
+      // 140.4-16 / CR-02 — see the note at the sibling case above.
+      expect(json.human_message).toBe(
+        "Validation service returned an unexpected response. Retry shortly.",
+      );
+
+      const logged = errorSpy.mock.calls
+        .map((call) => call.map((arg) => String(arg)).join(" "))
+        .join("\n");
+      expect(
+        logged,
+        "the detail was DROPPED from the log instead of being scrubbed — that is the A-10 defect, and it leaves the operator able to see THAT the seam failed and never WHY",
+      ).toContain("zq7f4e-marker");
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("[140.4-16 / CR-02] the 502 arm does not blame the user's FILE for our own outage", async () => {
+    // ⚠️ WHAT THIS ARM IS, BY CONSTRUCTION. `postProcessKey` classifies every
+    // outcome it can into the `!result.ok` envelope, so a THROW reaching the
+    // catch is the unclassified residue — a transport failure, a missing-config
+    // throw, a contract-drift parse throw. The route's own docblock says so.
+    // NONE of those is the user's data. 140.4-09 correctly replaced a leaky
+    // `err.message` echo with a static sentence and then chose the wrong
+    // sentence: "CSV validation failed." — which is the milestone's signature
+    // defect (our fault presented as someone else's) authored by the phase that
+    // exists to remove it, on the wizard's highest-traffic error surface.
+    //
+    // ⚠️ CORROBORATED FROM A REAL BROWSER, not only from reading the code. A QA
+    // pass on localhost drove a well-formed 5-row CSV into an upstream failure
+    // and read back "Validation failed. See per-row breakdown below." with no
+    // breakdown beneath it (qa-report-localhost-2026-07-29, ISSUE-003).
+    //
+    // The oracle is HAND-TYPED here and READ FROM THE TABLE in the route. That
+    // asymmetry is the point: if the route ever drifts back to authoring its
+    // own sentence, this literal is what disagrees with it.
+    process.env.INTERNAL_API_TOKEN = "test-token";
+    postProcessKeyMock.mockRejectedValue(new Error("fetch failed"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const file = new File(["x"], "x.csv", { type: "text/csv" });
+      const req = makeMultipartRequest(file, "daily_returns");
+      const { POST } = await import("@/app/api/strategies/csv-validate/route");
+      const res = await POST(req);
+      expect(res.status).toBe(502);
+      const json = await res.json();
+      expect(json.code).toBe("CSV_UPSTREAM_FAIL");
+      expect(
+        json.human_message,
+        "the terminal arm is telling the user their CSV failed validation for " +
+          "a fault that is ours by construction — the code's own authored copy " +
+          "already says the true thing and is being shadowed",
+      ).toBe("Validation service returned an unexpected response. Retry shortly.");
+      // The class, not the instance: no sentence on this arm may name the
+      // user's data as the thing that failed.
+      expect(
+        /validation failed|your (csv|file|data)/i.test(json.human_message),
+        "a user-blaming phrase is back on the arm defined as NOT-the-user's-data",
+      ).toBe(false);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   // Phase 15 / WR-03: defense-in-depth UUID gate. The Python router
@@ -437,6 +601,74 @@ describe("/api/strategies/csv-validate", () => {
     const json = await res.json();
     expect(json.code).toBe("CSV_RATE_LIMIT");
     expect(json.correlation_id).toBeNull();
+    // 140.4-13 / SEAMRIM-05 — ALL FIVE v0 fields survive the chokepoint
+    // adoption. The deny arm now calls `rateLimitDenyJson` with a body from
+    // `csvErrorBody` — the same builder `csvErrorEnvelope` uses — so this
+    // envelope has ONE definition, not two. Hand-typed here, not read back.
+    expect(json).toEqual({
+      ok: false,
+      code: "CSV_RATE_LIMIT",
+      human_message: "Too many requests. Wait a minute and try again.",
+      debug_context: {},
+      correlation_id: null,
+    });
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("[140.4-13 / SEAMRIM-05] ratelimit_misconfigured → 503 in the SAME v0 envelope", async () => {
+    checkLimitMock.mockResolvedValueOnce({
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    });
+    const file = new File(["x"], "x.csv", { type: "text/csv" });
+    const req = makeMultipartRequest(file, "daily_returns");
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(req);
+
+    expect(
+      res.status,
+      "Our limiter's store being unreachable is not the user uploading too " +
+        "fast. 429 says it is, and hides the outage from the canary.",
+    ).toBe(503);
+    const json = await res.json();
+    // The envelope SHAPE is preserved so `CsvUploadStep` still renders a
+    // sentence off `human_message` and reports `code` to the wizard_error
+    // funnel; `SEAM_MISCONFIGURED` is an EXISTING WizardErrorCode, not a newly
+    // minted one.
+    expect(Object.keys(json).sort()).toEqual([
+      "code",
+      "correlation_id",
+      "debug_context",
+      "human_message",
+      "ok",
+    ]);
+    expect(json.ok).toBe(false);
+    expect(json.code).toBe("SEAM_MISCONFIGURED");
+    expect(json.code).not.toBe("CSV_RATE_LIMIT");
+    expect(json.human_message).toContain("fault on our side");
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(validateCsvMock).not.toHaveBeenCalled();
+  });
+
+  it("[140.4-13 / SEAMRIM-05] success → the deny arm does not fire", async () => {
+    checkLimitMock.mockResolvedValueOnce({ success: true, retryAfter: 0 });
+    const file = new File(["x"], "x.csv", { type: "text/csv" });
+    const req = makeMultipartRequest(file, "daily_returns");
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(req);
+
+    // ⚠️ NOT a status-only oracle. This suite leaves the unified path throwing
+    // a seeded DB error, so the route legitimately answers its OWN 5xx here —
+    // asserting `not.toBe(503)` would pin the wrong fact and have to be
+    // weakened later. The limiter's deny arm is identified by the `Retry-After`
+    // it stamps and by its two codes; neither is present.
+    expect(res.status).not.toBe(429);
+    expect(res.headers.get("Retry-After")).toBeNull();
+    const json = await res.json();
+    expect(json.code).not.toBe("CSV_RATE_LIMIT");
+    expect(json.code).not.toBe("SEAM_MISCONFIGURED");
   });
 });
 

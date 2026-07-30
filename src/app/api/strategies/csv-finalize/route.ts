@@ -3,13 +3,14 @@ import type { User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { withAuth } from "@/lib/api/withAuth";
-import { csvValidateLimiter, checkLimit } from "@/lib/ratelimit";
+import { csvValidateLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { postProcessKey } from "@/lib/process-key-client";
 import { canonicalizeExchangeList } from "@/lib/constants";
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { scrubSeamError } from "@/lib/seam-redaction";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 /**
@@ -518,6 +519,98 @@ async function persistDailyReturnsOrErrorResponse(
   opts: { logPrefix: string; correlationId: string },
 ): Promise<NextResponse | null> {
   if (rows.length === 0) return null;
+
+  // ⚠️ CR-01 — THE STALE-RANGE FENCE. Read this before "simplifying" it away.
+  //
+  // `persist_csv_daily_returns` is `INSERT … ON CONFLICT (strategy_id, date)
+  // DO UPDATE` with NO delete outside the incoming range
+  // (schema/functions/persist_csv_daily_returns.sql:87-93). That is exactly
+  // right for the case it was written for — re-running the SAME payload — and
+  // it is a data-fabrication engine the moment `strategyId` can be a strategy
+  // some OTHER submission created.
+  //
+  // SEAMRIM-03's fence made that reachable: a repeat submit now resolves to the
+  // existing strategy at 200 (routers/process_key.py's 23505 arm), which is
+  // correct and is the retry `CSV_SUBMIT_FAILED` instructs. But
+  // `wizard_session_id` identifies a SESSION, not a SUBMISSION, and it survives
+  // a failed submit (localStorage.ts:390-393). So a user can upload 2024.csv,
+  // fail at this very step, upload 2025.csv, and land on the first strategy —
+  // whose series then becomes 2024 ∪ 2025, because the upsert only touches the
+  // dates it was handed. Neither file. Reported as success.
+  //
+  // THE PREDICATE IS THE FABRICATION ITSELF, not a proxy for it. Rows already
+  // present OUTSIDE [min, max] of this payload are precisely the rows that
+  // would SURVIVE this write and merge into the result. Inside the range the
+  // upsert overwrites, so the outcome is exactly the submitted series — an
+  // overwrite, not a fabrication, and not this fence's business.
+  //   · first submit          → 0 rows       → passes (the common case, one
+  //                                            index probe returning nothing)
+  //   · true repeat / retry   → all in range → passes (the recovery the fence
+  //                                            exists to allow)
+  //   · A then B              → A outside B  → REFUSED
+  //
+  // It is deliberately at the SITE OF THE MERGE rather than at the 23505 arm:
+  // this helper is the ONE call both the legacy and unified paths make, so the
+  // property holds for both without either knowing how it got its strategy id.
+  // The 23505 arm's name check is the other half and neither is sufficient
+  // alone — that one catches a rename before any write, this one catches a
+  // changed FILE under an unchanged name.
+  let minDate = rows[0].date;
+  let maxDate = rows[0].date;
+  for (const r of rows) {
+    if (r.date < minDate) minDate = r.date;
+    if (r.date > maxDate) maxDate = r.date;
+  }
+  // `date` is `YYYY-MM-DD`, regex- AND calendar-validated by
+  // `parseDailyReturnsSeries` before it can reach here, so it is safe in a
+  // PostgREST filter expression. Lexicographic and chronological order coincide
+  // for that format, which is why the min/max scan above is correct.
+  const { data: staleRows, error: staleErr } = await supabase
+    .from("csv_daily_returns")
+    .select("date")
+    .eq("strategy_id", strategyId)
+    .or(`date.lt.${minDate},date.gt.${maxDate}`)
+    .limit(1);
+  if (staleErr) {
+    // FAIL CLOSED. supabase-js RESOLVES on a read failure rather than throwing,
+    // so an unchecked `staleRows` would be `null` here and read as "no stale
+    // rows" — a failed read rendered as a measurement, which is the C-3 defect
+    // this milestone exists to close. We cannot establish the precondition, so
+    // we do not proceed to a write that depends on it.
+    console.error(
+      `${opts.logPrefix} stale-range probe failed [correlation_id=${opts.correlationId}]:`,
+      staleErr.code,
+      scrubSeamError(staleErr),
+    );
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "CSV_PERSIST_FAIL",
+        human_message:
+          "We could not confirm what is already saved for this strategy, so we stopped before writing. Nothing was changed. Try again shortly.",
+        debug_context: { strategy_id: strategyId },
+        correlation_id: opts.correlationId,
+      },
+      { status: 503, headers: NO_STORE_HEADERS },
+    );
+  }
+  if ((staleRows?.length ?? 0) > 0) {
+    console.warn(
+      `${opts.logPrefix} refused a cross-submission merge [correlation_id=${opts.correlationId}] strategy_id=${strategyId}`,
+    );
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "CSV_SESSION_REUSED",
+        human_message:
+          "This strategy already holds a different track record, so we stopped before writing. Nothing was changed. Start a new strategy to upload a different file.",
+        debug_context: { strategy_id: strategyId },
+        correlation_id: opts.correlationId,
+      },
+      { status: 409, headers: NO_STORE_HEADERS },
+    );
+  }
+
   const { error: persistError } = await (
     supabase.rpc as unknown as (
       fn: "persist_csv_daily_returns",
@@ -531,8 +624,12 @@ async function persistDailyReturnsOrErrorResponse(
   if (persistError) {
     console.error(
       `${opts.logPrefix} persist_csv_daily_returns error [correlation_id=${opts.correlationId}]:`,
+      // SEAMRIM-06 — `.code` is the five-character SQLSTATE the branches below
+      // key off, and it is allowlisted by the seam log guard for exactly that
+      // reason, so it stays beside the scrubbed rendering. `.message` does not:
+      // it is where undici and postgrest inline what they were handed.
       persistError.code,
-      persistError.message,
+      scrubSeamError(persistError),
     );
     // NEW-C14-02: write a `failed` strategy_analytics placeholder BEFORE
     // returning the 500 so the SyncProgress poller can break out with a
@@ -630,7 +727,7 @@ async function writeFailedStrategyAnalyticsPlaceholder(
       .maybeSingle();
     if (selectErr) {
       console.warn(
-        `${opts.logPrefix} ${opts.subcontext} placeholder pre-check SELECT failed (non-blocking) [correlation_id=${opts.correlationId}]: ${selectErr.message}`,
+        `${opts.logPrefix} ${opts.subcontext} placeholder pre-check SELECT failed (non-blocking) [correlation_id=${opts.correlationId}]: ${scrubSeamError(selectErr)}`,
       );
       // FINDING-7: capture to Sentry so admin-client SELECT failures
       // (misconfiguration, PostgREST 5xx) are alertable. Without this,
@@ -675,7 +772,7 @@ async function writeFailedStrategyAnalyticsPlaceholder(
       );
     if (placeholderErr) {
       console.warn(
-        `${opts.logPrefix} ${opts.subcontext} strategy_analytics placeholder upsert failed (non-blocking) [correlation_id=${opts.correlationId}]: ${placeholderErr.message}`,
+        `${opts.logPrefix} ${opts.subcontext} strategy_analytics placeholder upsert failed (non-blocking) [correlation_id=${opts.correlationId}]: ${scrubSeamError(placeholderErr)}`,
       );
       // D7 fail-loud (106-04): a silent placeholder-upsert failure leaves the
       // strategy stuck computing with zero trace beyond the warn above. Pair
@@ -686,8 +783,14 @@ async function writeFailedStrategyAnalyticsPlaceholder(
       });
     }
   } catch (placeholderThrow) {
+    // SEAMRIM-06 — the WHOLE ternary is replaced by one leaf call, not just the
+    // `.message` arm. This is the CSV finalize flow, whose outgoing headers
+    // carry `X-User-Access-Token` (a live end-user Supabase JWT), and
+    // `err.message` is precisely where undici puts them. Scrubbing one arm and
+    // leaving `String(placeholderThrow)` — which renders `name: message` — would
+    // be an instance fix of a two-reference site.
     console.warn(
-      `${opts.logPrefix} ${opts.subcontext} strategy_analytics placeholder upsert threw (non-blocking) [correlation_id=${opts.correlationId}]: ${placeholderThrow instanceof Error ? placeholderThrow.message : String(placeholderThrow)}`,
+      `${opts.logPrefix} ${opts.subcontext} strategy_analytics placeholder upsert threw (non-blocking) [correlation_id=${opts.correlationId}]: ${scrubSeamError(placeholderThrow)}`,
     );
     // D7 fail-loud (106-04): the placeholder write threw (admin-client
     // construction / PostgREST fault) — surface it so the stuck-computing
@@ -819,8 +922,10 @@ async function applyCsvMetadataUpdate(
     // category/markets while the user believed everything saved.
     console.error(
       "[strategies/csv-finalize] metadata update non-fatal error:",
+      // `.code` is the allowlisted SQLSTATE (SEAMRIM-06) and stays beside the
+      // scrubbed rendering; `.message` is the shape that carries headers.
       updateError.code,
-      updateError.message,
+      scrubSeamError(updateError),
     );
     captureToSentry(updateError, {
       tags: { surface: "csv-finalize", step: "metadata-update" },
@@ -1053,16 +1158,35 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     `strategies-csv-finalize:${user.id}`,
   );
   if (!rl.success) {
-    return NextResponse.json(
-      {
+    // 140.4-13 / SEAMRIM-05 — deny through the chokepoint so a limiter
+    // misconfiguration answers 503.
+    //
+    // ⚠️ THE 429 STAYS THE CSV v0 ENVELOPE, ALL FIVE FIELDS IN THE SAME ORDER.
+    // `CsvSubmitStep` reads `human_message` off the wire and reports `code` into
+    // the wizard_error funnel; flattening this onto the builder's
+    // `{error: "…"}` default would blank the rendered sentence AND lose the
+    // funnel's discriminator. The 503 keeps the SAME envelope shape — so the
+    // step renders an honest sentence about OUR configuration rather than
+    // falling back to the generic CSV copy — with `SEAM_MISCONFIGURED`, an
+    // existing WizardErrorCode, rather than a newly minted one.
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: {
         ok: false,
         code: "CSV_RATE_LIMIT",
         human_message: "Too many requests. Wait a minute and try again.",
         debug_context: {},
         correlation_id,
       },
-      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
-    );
+      misconfiguredBody: {
+        ok: false,
+        code: "SEAM_MISCONFIGURED",
+        human_message:
+          "Our rate limiter is unavailable, so we stopped before submitting anything. This is a fault on our side, not your file. Nothing was saved — try again in a minute.",
+        debug_context: {},
+        correlation_id,
+      },
+    });
   }
 
   // CONTRIB-02 (Phase 110) — a contribution finalizes to an owner-only
@@ -1364,8 +1488,14 @@ async function contributionCsvFinalizeHandler(args: {
   if (error || !isUuid(newStrategyId)) {
     console.error(
       `[strategies/csv-finalize contribution] finalize_csv_strategy failed [correlation_id=${args.correlationId}]:`,
-      error?.code,
-      error?.message,
+      // SEAMRIM-06 — BOTH references in this one call are wrapped, not one.
+      // `error?.code` was NOT covered by the guard's `code` allowlist: that
+      // allowlist matches a literal `.code`, and OPTIONAL chaining is a
+      // different token, so the pre-state reported this single call TWICE.
+      // `scrubSeamError` renders the SQLSTATE itself (`code=…`), so nothing the
+      // operator had is lost — and `error` may legitimately be null here (the
+      // `!isUuid(newStrategyId)` arm), which the leaf renders totally.
+      scrubSeamError(error),
     );
     // CONTRIB-02 observability — pair the console.error with captureToSentry so
     // a systematic contribution-finalize outage is alertable, mirroring this

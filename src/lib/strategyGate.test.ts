@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   checkStrategyGate,
+  StrategyGateUnevaluableError,
   STRATEGY_GATE_MIN_TRADES,
   STRATEGY_GATE_MIN_DAYS,
   STRATEGY_GATE_MIN_CSV_ROWS,
@@ -331,33 +332,130 @@ describe("checkStrategyGate", () => {
     expect(result.passed).toBe(true);
   });
 
-  it("skips the day-span check when latest < earliest (computeSpanDays returns null on negative delta)", () => {
-    // M-0572: a corrupt trades table where latestTradeAt < earliestTradeAt
-    // yields a negative delta → computeSpanDays returns null → the
-    // `spanDays !== null` guard SKIPS the day check entirely. With analytics
-    // complete + enough trades, the gate currently PASSES (no temporal
-    // validation). This pins the documented current behavior so a future
-    // change (e.g. a new code that rejects corrupt timestamps) is a
-    // deliberate, test-visible decision rather than a silent drift.
-    const result = checkStrategyGate({
-      ...BASE,
-      earliestTradeAt: new Date("2026-04-10T00:00:00Z"),
-      latestTradeAt: new Date("2026-04-01T00:00:00Z"), // earlier than earliest
-    });
-    expect(result.passed).toBe(true);
-    expect(result.code).toBeNull();
+  // --- C-3 (140.4-01): the gate REFUSES to evaluate an unrepresentable span.
+  //
+  //     TRAP-9 swap. Two cases previously pinned the OPPOSITE contract:
+  //       "skips the day-span check when latest < earliest (computeSpanDays
+  //        returns null on negative delta)"  → expected passed:true
+  //       "skips day-span check when trade timestamps are missing"
+  //                                          → expected passed:true
+  //     Both asserted the fall-through this plan closes: with trades present
+  //     and the span unreadable the gate answered PASS, so a read failure on
+  //     the earliest/latest probes published an under-history track record as
+  //     verified. Each is replaced below by the strictly stronger assertion
+  //     that the gate REFUSES (throws) rather than returning a verdict. ---
+
+  it("REFUSES (throws) when trades exist but the timestamps are missing — the C-3 publish-side fail-open", () => {
+    // Replaces "skips day-span check when trade timestamps are missing".
+    // StrategyGateInput's own docstring says earliestTradeAt/latestTradeAt are
+    // "null when no trades exist" — so null HERE, with tradeCount >= the trade
+    // floor, is a contradiction, not an absence. Previously this returned
+    // { passed: true, code: null } and the 7-day gate was skipped entirely.
+    expect(() =>
+      checkStrategyGate({
+        ...BASE,
+        tradeCount: 5,
+        earliestTradeAt: null,
+        latestTradeAt: null,
+      }),
+    ).toThrow(/unreadable/i);
   });
 
-  it("skips day-span check when trade timestamps are missing", () => {
-    // A strategy with >= 5 trades reported by count but no timestamps
-    // should still pass if analytics are complete. This handles the
-    // edge case where the trades count is fetched from a head query
-    // but the timestamp query returned no rows due to an ordering bug.
+  it("REFUSES (throws) when latest < earliest — a corrupt span is unrepresentable, not a pass", () => {
+    // Replaces "skips the day-span check when latest < earliest ...". Same
+    // contradiction: trades demonstrably exist, the span cannot be computed.
+    expect(() =>
+      checkStrategyGate({
+        ...BASE,
+        earliestTradeAt: new Date("2026-04-10T00:00:00Z"),
+        latestTradeAt: new Date("2026-04-01T00:00:00Z"), // earlier than earliest
+      }),
+    ).toThrow(/unreadable/i);
+  });
+
+  it("the refusal is a named error whose message states the contradiction and leaks no user data", () => {
+    let caught: unknown;
+    try {
+      checkStrategyGate({
+        ...BASE,
+        tradeCount: 5,
+        earliestTradeAt: new Date("2026-04-10T00:00:00Z"),
+        latestTradeAt: new Date("2026-04-01T00:00:00Z"),
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    // Exported from the module under test so callers can narrow on it.
+    expect(caught).toBeInstanceOf(StrategyGateUnevaluableError);
+    expect((caught as Error).name).toBe("StrategyGateUnevaluableError");
+    // Names BOTH halves of the contradiction: trades present, span unreadable.
+    expect((caught as Error).message).toMatch(/5 trade/);
+    expect((caught as Error).message).toMatch(/unreadable/i);
+    // No user data: not the timestamps it was handed, not the api key id.
+    expect((caught as Error).message).not.toContain("2026-04-10");
+    expect((caught as Error).message).not.toContain("2026-04-01");
+    expect((caught as Error).message).not.toContain("ak-1");
+  });
+
+  it("does NOT refuse when tradeCount is 0 and the timestamps are null — a genuine absence", () => {
+    // The case that distinguishes this fix from a blanket null-ban: with zero
+    // trades the null timestamps are exactly what the docstring describes, and
+    // the trade-count floor answers first.
     const result = checkStrategyGate({
       ...BASE,
+      tradeCount: 0,
       earliestTradeAt: null,
       latestTradeAt: null,
     });
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("INSUFFICIENT_TRADES");
+  });
+
+  it("does NOT refuse on the daily-returns branch with null timestamps (CSV / ledger-backed)", () => {
+    expect(() =>
+      checkStrategyGate({
+        ...BASE,
+        apiKeyId: null,
+        tradeCount: 0,
+        earliestTradeAt: null,
+        latestTradeAt: null,
+        csvRowCount: 90,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      checkStrategyGate({
+        ...BASE,
+        apiKeyId: "ak-deribit",
+        isLedgerBacked: true,
+        tradeCount: 0,
+        earliestTradeAt: null,
+        latestTradeAt: null,
+        csvRowCount: 30,
+      }),
+    ).not.toThrow();
+  });
+
+  it("a readable 2-day span with 5 trades still returns INSUFFICIENT_DAYS (verdict unchanged)", () => {
+    const result = checkStrategyGate({
+      ...BASE,
+      tradeCount: 5,
+      earliestTradeAt: new Date("2026-04-01T00:00:00Z"),
+      latestTradeAt: new Date("2026-04-03T00:00:00Z"),
+    });
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("INSUFFICIENT_DAYS");
+    expect(result.detail).toEqual({ days: 2, min: 7 });
+  });
+
+  it("a readable 7.0-day span with 5 trades still passes (documented boundary unchanged)", () => {
+    const result = checkStrategyGate({
+      ...BASE,
+      tradeCount: 5,
+      earliestTradeAt: new Date("2026-04-01T00:00:00Z"),
+      latestTradeAt: new Date("2026-04-08T00:00:00Z"),
+    });
     expect(result.passed).toBe(true);
+    expect(result.code).toBeNull();
   });
 });

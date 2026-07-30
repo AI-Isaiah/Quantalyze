@@ -14,7 +14,7 @@ import { buildEnvelope } from "@/lib/envelope";
 // 140.3-15 / TS-20 — the dependency-free leaf, imported directly. It is the ONE
 // reader for this envelope's fields; a hand-rolled `data.detail?.correlation_id`
 // branch here is the drift class 140.3-01 closed.
-import { seamCorrelationId } from "@/lib/seam-discriminator";
+import { seamCorrelationId, seamErrorCode } from "@/lib/seam-discriminator";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SyncPreviewSnapshot } from "./SyncPreviewStep";
@@ -190,26 +190,55 @@ export function SubmitStep({
             "SEAM_MISCONFIGURED",
           ],
         );
-        // 140.3-05 — TRANSLATE THE WIRE CODE FIRST, THEN CHECK MEMBERSHIP. The
-        // wire vocabulary and the wizard vocabulary are not the same set:
-        // finalize-wizard answers a breaker trip with `CIRCUIT_OPEN` (its own
-        // scope-probe arm at :493, and process-key-client's forwarded 503), and
-        // a seam transport failure with `UPSTREAM_TIMEOUT` /
-        // `UPSTREAM_NETWORK_ERROR`. None of the three is a WizardErrorCode, so
-        // all three failed the membership check below and fell to UNKNOWN.
+        // 140.4-12 / SEAMRIM-08 — EACH LIST OWNS ITS OWN VOCABULARY, AND
+        // NEITHER OVERRULES THE OTHER.
         //
-        // The mapping lives in `wizardErrors.ts` (`recogniseSeamErrorCode`) —
-        // the ONE wire→wizard table — never in a second copy here. The
-        // membership check is NOT weakened: an unrecognised wire code leaves
-        // `translated` at "UNKNOWN", `candidate` falls back to the raw code, and
-        // a raw code that is not a known finalize code still resolves to
-        // UNKNOWN exactly as before.
-        const translated = recogniseSeamErrorCode(data.code);
-        const candidate = translated === "UNKNOWN" ? data.code : translated;
+        //   `SEAM_CODE_TO_WIZARD_CODE` (`recogniseSeamErrorCode`) owns the WIRE
+        //   vocabulary — the codes the seam and the analytics service put on
+        //   the wire. It is the ONE wire→wizard table and it is authoritative:
+        //   a code it translates is surfaced as translated.
+        //
+        //   `KNOWN_FINALIZE_CODES` above owns the ROUTE-MINTED WIZARD
+        //   vocabulary — codes `finalize-wizard` mints that are already
+        //   `WizardErrorCode` members (`KEY_SCOPE_BROADENED`,
+        //   `GATE_DRAFT_GONE`, `GUARD_BLOCKED`, …) and therefore never appear
+        //   in a wire→wizard table at all.
+        //
+        // WHAT THIS REPLACED, AND WHY IT IS NOT A ROSTER EDIT. 140.3-05 ran the
+        // translation and then made the RESULT re-qualify through
+        // `KNOWN_FINALIZE_CODES`. Both are typed `WizardErrorCode`, so the
+        // second gate added NO type safety — it added only an obligation to
+        // edit two lists in one commit. That obligation is written down twice
+        // in the set above and was skipped anyway: 140.3-01 added
+        // `VALIDATION_FAILED` and `RATE_LIMITED` to the translation table, the
+        // second list never learned about them, and BOTH collapsed to UNKNOWN.
+        // The honest rate-limit copy — the cap is ours, not the user's exchange
+        // — existed and was unreachable for three commits. Widening the roster
+        // fixes those two codes and leaves the next author the same trap; this
+        // deletes the roster's jurisdiction over wire codes instead, so there
+        // is no second list to forget.
+        //
+        // THE MEMBERSHIP CHECK IS NOT WEAKENED, and this is the part to verify
+        // before "simplifying" it: an unrecognised wire code still resolves to
+        // UNKNOWN by BOTH paths — the table answers "UNKNOWN" for anything it
+        // does not list, and the raw code then still has to be a known finalize
+        // code. No identity rule is created, so `SEAM_DEGRADED` and the venue
+        // codes cannot be cast into this vocabulary (that is the reason the
+        // table in `wizardErrors.ts` is explicit at all).
+        //
+        // THE CODE IS READ THROUGH THE LEAF, not off the top level. Every
+        // `service_error()` answer nests it at `body.detail.code`;
+        // `seamErrorCode` handles BOTH shapes and is the same leaf
+        // `seamCorrelationId` below already comes from, so the id and the code
+        // are read from the same body by the same reader.
+        const wireCode = seamErrorCode(data);
+        const translated = recogniseSeamErrorCode(wireCode);
         const surfaced: WizardErrorCode =
-          candidate && KNOWN_FINALIZE_CODES.has(candidate as WizardErrorCode)
-            ? (candidate as WizardErrorCode)
-            : "UNKNOWN";
+          translated !== "UNKNOWN"
+            ? translated
+            : wireCode && KNOWN_FINALIZE_CODES.has(wireCode as WizardErrorCode)
+              ? (wireCode as WizardErrorCode)
+              : "UNKNOWN";
         setErrorCode(surfaced);
         // 140.3-15 / TS-20 — read through the leaf, which handles BOTH wire
         // shapes (top-level on the flat envelopes, nested inside

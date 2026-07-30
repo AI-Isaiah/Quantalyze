@@ -14,7 +14,10 @@ import {
   type ConnectKeySuccess,
   type ConnectKeyDraft,
 } from "./ConnectKeyStep";
-import { type WizardErrorCode } from "@/lib/wizardErrors";
+import {
+  recogniseSeamErrorCode,
+  type WizardErrorCode,
+} from "@/lib/wizardErrors";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SupportedExchange } from "@/lib/utils";
 import { SFOX_UI_ENABLED } from "@/lib/utils";
@@ -22,6 +25,7 @@ import {
   getWizardCorrelationId,
   wizardFetch,
 } from "@/lib/wizard/wizard-correlation";
+import { seamErrorCode } from "@/lib/seam-discriminator";
 
 /**
  * Phase 88 / ONB-01 — the multi-key ConnectKeyStep.
@@ -179,6 +183,29 @@ const MULTI_KEY_FUNNEL_STEP = "connect_key_multi";
  * sets are still written out per route rather than shared, because the direct
  * emissions differ and a shared set would silently admit one route's codes at
  * the other.
+ *
+ * ⚠️ 140.4-15 / SEAMRIM-08 — THIS SET IS NO LONGER THE ONLY HOP AT THE ADD-KEY
+ * ARM, AND IT DELIBERATELY DID NOT GAIN A MEMBER. `140.4-13` made
+ * `composite/add-key/route.ts`'s 503 arm answer a limiter MISCONFIGURATION with
+ * the WIRE code `SEAM_MISCONFIGURED` (`rateLimitDenyJson`'s
+ * `misconfiguredBody`), replacing the 429 `KEY_RATE_LIMIT` whose copy calls the
+ * throttle "exchange-side" — our own outage, blamed on the user's venue. With
+ * only the set below, that code missed every member and rendered `UNKNOWN`:
+ * *"Try the last action again."*, **with a Retry control**, for a fault whose
+ * own copy says *"Retrying will not clear it: the setting stays wrong until we
+ * fix it and redeploy."* The remedy is the ONE shared table
+ * (`SEAM_CODE_TO_WIZARD_CODE`, read through `recogniseSeamErrorCode`) consulted
+ * FIRST — coverage-law row 1 — not a member here, which would be a hand-typed
+ * allow-list edit owed again at every surface the next wire code reaches. The
+ * table's key set and this set intersect in NOTHING, so the ordering cannot
+ * change what any member below renders — and 140.4-16 / WR-11 turned that
+ * measurement into an assertion in `seam-ratelimit-posture.invariant.test.ts`,
+ * which derives both vocabularies from disk. Note the guard asserts the
+ * NECESSARY condition (a shared code must get the SAME answer) rather than
+ * disjointness: disjointness holds here but NOT at `KNOWN_KICKOFF_CODES`,
+ * which shares `RATE_LIMITED`. See `ConnectKeyStep`'s
+ * `KNOWN_CREATE_WITH_KEY_CODES` docblock for the full reasoning; both key-entry
+ * steps take the change together because both routes emit the code.
  */
 const KNOWN_ADD_KEY_CODES: ReadonlySet<WizardErrorCode> =
   new Set<WizardErrorCode>([
@@ -723,10 +750,30 @@ export function MultiKeyConnectStep({
         };
         if (!res.ok || !data.ok || !data.strategy_id || !data.api_key_id) {
           // 140.3-13a / SEAMUX-08 — membership-checked, never cast.
+          //
+          // 140.4-15 / SEAMRIM-08 — TRANSLATE FIRST, THEN MEMBERSHIP-CHECK, the
+          // same order `SyncPreviewStep`'s kickoff arm adopted in 140.4-12 and
+          // `ConnectKeyStep`'s sibling arm adopts alongside this one. The two
+          // vocabularies are disjoint, so neither hop shadows the other.
+          // 140.4-16 / WR-09 — READ THROUGH THE LEAF, not off the top level.
+          // The commit that added this hop claimed it "mirrors
+          // `SyncPreviewStep`'s kickoff arm exactly". It did not: that arm and
+          // `SubmitStep` both read `seamErrorCode(body)`, which handles the
+          // nested `service_error` shape (`body.detail.code`), while this one
+          // read `data.code` and saw only the flat shape. Harmless today —
+          // this route funnels every caught value through
+          // `classifyKeyValidationError` and never forwards a nested
+          // envelope — but an undisclosed divergence under a comment
+          // asserting equivalence is how the next reader inherits a wrong
+          // premise. The leaf exists precisely so a nested envelope is never
+          // read as "a body carrying no code".
+          const translated = recogniseSeamErrorCode(seamErrorCode(data));
           const code: WizardErrorCode =
-            data.code && KNOWN_ADD_KEY_CODES.has(data.code as WizardErrorCode)
-              ? (data.code as WizardErrorCode)
-              : "UNKNOWN";
+            translated !== "UNKNOWN"
+              ? translated
+              : data.code && KNOWN_ADD_KEY_CODES.has(data.code as WizardErrorCode)
+                ? (data.code as WizardErrorCode)
+                : "UNKNOWN";
           updatePanel(idx, { status: "editing", errorCode: code });
           trackForQuantsEventClient("wizard_error", {
             wizard_session_id: wizardSessionId,

@@ -3,9 +3,73 @@ import {
   checkLimit,
   getClientIp,
   isRateLimitMisconfigured,
+  rateLimitDenyJson,
+  rateLimitDenyText,
   sanitizeInetForDb,
+  type RateLimitDenyOptions,
 } from "./ratelimit";
 import type { Ratelimit } from "@upstash/ratelimit";
+
+/**
+ * SEAMRIM-04 — the scheduling seam and the capture chokepoint, doubled.
+ *
+ * `after()` is partial-mocked so `NextResponse` (which `rateLimitDenyJson` and
+ * `rateLimitDenyText` return) keeps working. The double RUNS the task, as the
+ * platform does once the response has flushed.
+ */
+const seam = vi.hoisted(() => ({
+  captures: [] as Array<{
+    err: unknown;
+    options: { tags?: Record<string, string>; level?: string; extra?: Record<string, unknown> };
+  }>,
+  afterTasks: [] as unknown[],
+  afterSettled: [] as Array<Promise<unknown>>,
+}));
+
+vi.mock("next/server", async () => {
+  const actual = await vi.importActual<typeof import("next/server")>(
+    "next/server",
+  );
+  return {
+    ...actual,
+    after: (task: unknown) => {
+      seam.afterTasks.push(task);
+      const produced =
+        typeof task === "function" ? (task as () => unknown)() : task;
+      seam.afterSettled.push(Promise.resolve(produced));
+    },
+  };
+});
+
+vi.mock("./sentry-capture", async () => {
+  // ⚠️ ORACLE-INDEPENDENCE HAZARD #7, AND IT BIT ONCE ALREADY IN THIS PHASE.
+  // This factory REPLACES the whole module, so anything not listed here
+  // evaluates to `undefined` at the call site and throws from inside a catch
+  // block. 140.4-16 added `shouldCaptureNow` to the leaf; it is re-exported
+  // from the REAL module rather than faked, because the throttle semantics are
+  // the thing under test in the WR-06 cases below — a fake would be testing
+  // the fake.
+  const actual = await vi.importActual<typeof import("./sentry-capture")>(
+    "./sentry-capture",
+  );
+  return {
+    ...actual,
+    // RETURNS A PROMISE, as the real leaf does since plan 140.4-06 task 1: a
+    // double returning `undefined` would make the production `after(() => p…)`
+    // shape throw here and nowhere else.
+    captureToSentry: (err: unknown, options: Record<string, unknown>) => {
+      seam.captures.push({
+        err,
+        options: options as {
+          tags?: Record<string, string>;
+          level?: string;
+          extra?: Record<string, unknown>;
+        },
+      });
+      return Promise.resolve();
+    },
+  };
+});
 
 /**
  * Unit tests for the Upstash rate limit helpers. These do NOT touch a real
@@ -31,8 +95,17 @@ describe("checkLimit", () => {
   const ORIGINAL_VERCEL_ENV = process.env.VERCEL_ENV;
   const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.restoreAllMocks();
+    seam.captures.length = 0;
+    seam.afterTasks.length = 0;
+    seam.afterSettled.length = 0;
+    // 140.4-16 / WR-06 — the capture throttle is MODULE-LEVEL state and would
+    // otherwise leak between cases: the first test to trip posture 2 would arm
+    // it and every later one would silently record zero captures, turning real
+    // guards green for the wrong reason.
+    const { __resetCaptureThrottleForTests } = await import("./sentry-capture");
+    __resetCaptureThrottleForTests();
   });
 
   afterEach(() => {
@@ -103,10 +176,53 @@ describe("checkLimit", () => {
     } as unknown as Ratelimit;
     const result = await checkLimit(mockLimiter, "user:abc");
     expect(result).toEqual({ success: true });
+    // ⚠️ STRENGTHENED, NOT WEAKENED (TRAP-9). This assertion read
+    //   expect(errSpy).toHaveBeenCalledWith("[ratelimit] check failed:", expect.any(Error));
+    // which pinned the raw `Error` OBJECT — i.e. it pinned the leak in place.
+    // The prefix is still asserted; the payload is now asserted to be the
+    // SCRUBBED rendering, and the dedicated leak case below is what fails when
+    // the scrub is removed.
     expect(errSpy).toHaveBeenCalledWith(
       "[ratelimit] check failed:",
-      expect.any(Error),
+      expect.stringContaining("Redis unavailable"),
     );
+  });
+
+  it("SEAMRIM-04 — the limiter's own store credential never reaches the log", async () => {
+    // The store command carries `UPSTASH_REDIS_REST_TOKEN` in an Authorization
+    // header and undici INLINES the outgoing request into the error it
+    // produces. `resilient-fetch.ts` scrubs both of its store-rejection arms
+    // for exactly this reason and names it verbatim; `checkLimit` logged the
+    // raw error object, so the same store, reached through the same SDK,
+    // spilled the same credential from the other module.
+    delete (process.env as Record<string, string | undefined>).VERCEL_ENV;
+    const TOKEN = "AX7zAAIncDEyMzQ1Njc4OTBhYmNkZWY";
+    vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", TOKEN);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mockLimiter = {
+      limit: vi.fn().mockRejectedValue(
+        new Error(
+          "fetch failed\n  request: { headers: { authorization: 'Bearer " +
+            TOKEN +
+            "' } }",
+        ),
+      ),
+    } as unknown as Ratelimit;
+
+    await checkLimit(mockLimiter, "user:abc");
+
+    const logged = errSpy.mock.calls.map((c) => c.map(String).join(" ")).join("\n");
+    expect(
+      logged,
+      "The rate limiter logged its own Upstash bearer token. Anything in a " +
+        "Vercel function log is readable by every operator and by log " +
+        "aggregation — this is a credential disclosure, not a hygiene nit.",
+    ).not.toContain(TOKEN);
+    // Over-redaction is the same failure as under-redaction: the diagnosis has
+    // to survive or the operator has to reproduce the outage to learn what the
+    // log already knew.
+    expect(logged).toContain("fetch failed");
+    vi.unstubAllEnvs();
   });
 
   // ── P709 (audit-2026-05-07) — fail-CLOSED in production ─────────────
@@ -210,6 +326,156 @@ describe("checkLimit", () => {
     expect(errSpy).toHaveBeenCalled();
   });
 
+  // ── SEAMRIM-04 — the THIRD posture becomes observable ────────────────
+  //
+  // `checkLimit` has never had two postures. `@upstash/ratelimit` 2.0.8 races a
+  // 5 000 ms timeout that resolves `{ success: true, limit: 0, remaining: 0,
+  // reset: 0, reason: "timeout" }` — "I could not reach the counter, let the
+  // traffic through". Only `{ success, reset }` were destructured, so that
+  // fail-OPEN was indistinguishable from a genuine allow: a regulatory cap
+  // silently stopped being enforced and nothing anywhere recorded it.
+  //
+  // The posture is NOT changed by these cases. Traffic still passes.
+
+  it("SEAMRIM-04 — the timeout sentinel still ALLOWS the request (posture unchanged)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mockLimiter = {
+      // The library's sentinel, HAND-TYPED. Never imported, so this double
+      // cannot inherit a change to the shape it is standing in for.
+      limit: vi.fn().mockResolvedValue({
+        success: true,
+        limit: 0,
+        remaining: 0,
+        reset: 0,
+        reason: "timeout",
+      }),
+    } as unknown as Ratelimit;
+
+    const result = await checkLimit(mockLimiter, "user:abc");
+
+    expect(
+      result,
+      "The timeout sentinel changed what checkLimit RETURNS. This plan makes " +
+        "the third posture observable; making the limiter fail CLOSED on a " +
+        "hanging store is a different decision with its own blast radius.",
+    ).toEqual({ success: true });
+  });
+
+  it("SEAMRIM-04 — the timeout sentinel is RECORDED, and the capture is scheduled", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mockLimiter = {
+      limit: vi.fn().mockResolvedValue({
+        success: true,
+        limit: 0,
+        remaining: 0,
+        reset: 0,
+        reason: "timeout",
+      }),
+    } as unknown as Ratelimit;
+
+    await checkLimit(mockLimiter, "user:abc");
+    await Promise.all(seam.afterSettled);
+
+    expect(
+      seam.captures,
+      "The limiter's store timed out, the cap was NOT enforced for this " +
+        "request, and nothing recorded it. A limiter whose store is missing " +
+        "silently removes a regulatory cap.",
+    ).toHaveLength(1);
+    expect(seam.captures[0].options.level).toBe("warning");
+    expect(seam.afterTasks).toHaveLength(1);
+    // The operator's local trace survives alongside the capture.
+    expect(
+      warnSpy.mock.calls.map((c) => String(c[0])).join("\n"),
+    ).toContain("[ratelimit]");
+  });
+
+  it("[140.4-16 / WR-06] a SUSTAINED store outage captures ONCE, and logs EVERY time", async () => {
+    // ⚠️ THE FAILURE MODE IS AN ALERT STORM DURING THE EXACT INCIDENT THE
+    // INSTRUMENTATION EXISTS TO OBSERVE. This arm fires on every request that
+    // wins the 5 s fail-open race — i.e. every request, for the whole duration
+    // of an Upstash outage — and each one is an `import("@sentry/nextjs")` +
+    // `captureException` held alive by `after()`. The predictable outcome is
+    // quota exhaustion, which DROPS OTHER ALERTS during the same incident.
+    // `emitBreakerTransition` was already bounded to open/close edges; these
+    // three SEAMRIM-04 sites were not.
+    //
+    // ⚠️ THE SECOND HALF IS WHAT KEEPS THE FIX HONEST. Suppressing the local
+    // `console.warn` too would make the Vercel trace under-report how many
+    // requests ran with the cap unenforced — and that count is how an operator
+    // sizes the incident. The capture is remote and expensive; the log is local
+    // and free. Only the first is throttled.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mockLimiter = {
+      limit: vi.fn().mockResolvedValue({
+        success: true,
+        limit: 0,
+        remaining: 0,
+        reset: 0,
+        reason: "timeout",
+      }),
+    } as unknown as Ratelimit;
+
+    for (let i = 0; i < 25; i++) {
+      await checkLimit(mockLimiter, `user:${i}`);
+    }
+    await Promise.all(seam.afterSettled);
+
+    expect(
+      seam.captures.length,
+      "25 requests during one outage window produced 25 Sentry captures. " +
+        "During a sustained store outage this exhausts the quota and drops " +
+        "OTHER alerts while the incident is live.",
+    ).toBe(1);
+    expect(
+      warnSpy.mock.calls.length,
+      "the local log was throttled too — the Vercel trace now under-reports " +
+        "how many requests ran with the cap unenforced, which is the number an " +
+        "operator sizes the incident with",
+    ).toBe(25);
+  });
+
+  it("SEAMRIM-04 NEGATIVE CONTROL — a genuine allow records NOTHING", async () => {
+    // Without this, "the sentinel is recorded" is satisfied by an
+    // implementation that records on every single request.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mockLimiter = {
+      limit: vi.fn().mockResolvedValue({
+        success: true,
+        limit: 10,
+        remaining: 9,
+        reset: Date.now() + 60_000,
+      }),
+    } as unknown as Ratelimit;
+
+    const result = await checkLimit(mockLimiter, "user:abc");
+
+    expect(result).toEqual({ success: true });
+    expect(seam.captures).toHaveLength(0);
+    expect(seam.afterTasks).toHaveLength(0);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("SEAMRIM-04 NEGATIVE CONTROL — a genuine DENY records nothing either", async () => {
+    // `cacheBlock` and a plain over-limit deny are real denials, not fail-opens.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mockLimiter = {
+      limit: vi.fn().mockResolvedValue({
+        success: false,
+        limit: 10,
+        remaining: 0,
+        reset: Date.now() + 30_000,
+        reason: "cacheBlock",
+      }),
+    } as unknown as Ratelimit;
+
+    const result = await checkLimit(mockLimiter, "user:abc");
+
+    expect(result.success).toBe(false);
+    expect(seam.captures).toHaveLength(0);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
   it("CI regression — VERCEL_ENV=preview fails-OPEN (limiter null)", async () => {
     // Vercel preview deploys should NOT fail-CLOSED on misconfig: they
     // are routinely spun up for PRs that may legitimately ship without
@@ -238,6 +504,235 @@ describe("isRateLimitMisconfigured", () => {
         reason: "ratelimit_misconfigured",
       }),
     ).toBe(true);
+  });
+});
+
+/**
+ * SEAMRIM-05 — the deny chokepoint, EXTENDED so a route can keep its own body
+ * and headers while the artefact keeps the 503-vs-429 decision.
+ *
+ * ⚠️ WHY THE EXTENSION EXISTS RATHER THAN A BLANKET ADOPTION. Measured on the
+ * untouched tree, four seam routes' genuine 429s are NOT interchangeable with
+ * this builder's fixed body: `strategies/create-with-key` and
+ * `strategies/composite/add-key` carry `code: "KEY_RATE_LIMIT"`, `keys/sync`
+ * carries `code: "RATE_LIMITED"` at BOTH of its arms, `strategies/csv-validate`
+ * and `strategies/csv-finalize` carry the CSV v0 envelope, and
+ * `scenario/optimize` carries a bespoke sentence with NO `Retry-After` at all.
+ * Converging them onto the fixed body would drop those `code`s (which the wizard
+ * branches on) and drop `NO_STORE_HEADERS` (re-opening a cache-contract
+ * finding). `bridge/route.ts`'s own docblock says exactly this. So the artefact
+ * owns the DECISION and the route owns its BODY.
+ *
+ * ⚠️ THE NEGATIVE CASES BELOW ARE THE POINT. An options bag that let a caller
+ * pick its own status would re-open the finding at twelve call sites while
+ * looking, to a "the option is honoured" criterion, like a pass.
+ */
+describe("[SEAMRIM-05] rateLimitDenyJson / rateLimitDenyText — the deny chokepoint", () => {
+  const MISCONFIGURED = {
+    success: false as const,
+    retryAfter: 60,
+    reason: "ratelimit_misconfigured" as const,
+  };
+  const THROTTLED = { success: false as const, retryAfter: 42 };
+
+  /** Header names present on a response, lowercased, minus the ones NextResponse stamps itself. */
+  function ownHeaderNames(res: Response): string[] {
+    return [...res.headers.keys()]
+      .map((k) => k.toLowerCase())
+      .filter((k) => k !== "content-type")
+      .sort();
+  }
+
+  describe("no options — byte-identical to the pre-extension contract", () => {
+    it("misconfigured → 503, the fixed body, and Retry-After as its ONLY own header", async () => {
+      const res = rateLimitDenyJson(MISCONFIGURED);
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: "Rate limiter unavailable" });
+      expect(res.headers.get("Retry-After")).toBe("60");
+      expect(ownHeaderNames(res)).toEqual(["retry-after"]);
+    });
+
+    it("throttled → 429, the fixed body, and Retry-After as its ONLY own header", async () => {
+      const res = rateLimitDenyJson(THROTTLED);
+      expect(res.status).toBe(429);
+      expect(await res.json()).toEqual({ error: "Too many requests" });
+      expect(res.headers.get("Retry-After")).toBe("42");
+      expect(ownHeaderNames(res)).toEqual(["retry-after"]);
+    });
+
+    it("[140.4-16 / WR-08] a caller cannot clobber Retry-After in EITHER mode", () => {
+      // ⚠️ THE INVARIANT WAS STATED UNCONDITIONALLY AND HELD CONDITIONALLY.
+      // `RateLimitDenyOptions` documents "merged UNDERNEATH the artefact's own
+      // `Retry-After`, so a caller cannot clobber the value (asserted)" — and
+      // the asserting case exercised only the DEFAULT mode. Under
+      // `retryAfterHeader: "misconfigured-only"` on the 429 branch nothing was
+      // spread on top, so a caller header survived verbatim.
+      //
+      // Both modes are driven here, and both polarities of the mode: this is a
+      // second-member case by construction.
+      const clobber = { "Retry-After": "99999" };
+
+      // Default mode — the artefact's value wins (this half always held).
+      expect(
+        rateLimitDenyJson(THROTTLED, { headers: clobber }).headers.get(
+          "Retry-After",
+        ),
+      ).toBe("42");
+
+      // misconfigured-only, 503 branch — still stamped, still the artefact's.
+      expect(
+        rateLimitDenyJson(MISCONFIGURED, {
+          headers: clobber,
+          retryAfterHeader: "misconfigured-only",
+        }).headers.get("Retry-After"),
+      ).toBe("60");
+
+      // misconfigured-only, 429 branch — THE HOLE. The mode means "this 429
+      // carries no wait"; a caller header that puts one back contradicts the
+      // mode it asked for, so the artefact strips it.
+      expect(
+        rateLimitDenyJson(THROTTLED, {
+          headers: clobber,
+          retryAfterHeader: "misconfigured-only",
+        }).headers.get("Retry-After"),
+        "a caller-supplied Retry-After survived on the one branch the mode " +
+          "exists to keep free of it — the documented invariant is false here",
+      ).toBeNull();
+
+      // …and the caller's OTHER headers are untouched. Without this the strip
+      // is satisfiable by dropping the whole bag.
+      const res = rateLimitDenyJson(THROTTLED, {
+        headers: { ...clobber, "Cache-Control": "private, no-store" },
+        retryAfterHeader: "misconfigured-only",
+      });
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    });
+
+    it("rateLimitDenyText is unchanged on BOTH branches", async () => {
+      const bad = rateLimitDenyText(MISCONFIGURED);
+      expect(bad.status).toBe(503);
+      expect(await bad.text()).toBe("Service temporarily unavailable");
+      expect(bad.headers.get("Retry-After")).toBe("60");
+
+      const busy = rateLimitDenyText(THROTTLED);
+      expect(busy.status).toBe(429);
+      expect(await busy.text()).toBe("Rate limit exceeded");
+      expect(busy.headers.get("Retry-After")).toBe("42");
+    });
+  });
+
+  describe("the route keeps its body and its headers", () => {
+    it("merges caller headers WITHOUT dropping Retry-After", () => {
+      const res = rateLimitDenyJson(THROTTLED, {
+        headers: { "Cache-Control": "private, no-store", Vary: "Cookie" },
+      });
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+      expect(res.headers.get("Vary")).toBe("Cookie");
+      expect(res.headers.get("Retry-After")).toBe("42");
+    });
+
+    it("a caller CANNOT clobber Retry-After through the headers bag", () => {
+      const res = rateLimitDenyJson(THROTTLED, {
+        headers: { "Retry-After": "1" },
+      });
+      expect(res.headers.get("Retry-After")).toBe("42");
+    });
+
+    it("honours the 429 body override, KEY ORDER included", async () => {
+      const res = rateLimitDenyJson(THROTTLED, {
+        throttledBody: { code: "KEY_RATE_LIMIT", error: "Too many requests" },
+      });
+      expect(res.status).toBe(429);
+      const body = await res.json();
+      expect(body).toEqual({ code: "KEY_RATE_LIMIT", error: "Too many requests" });
+      // Byte-identity, not just deep equality: `create-with-key` emits
+      // `{code, error}` and `keys/sync` emits `{error, code}`, and a builder
+      // that rebuilt the object would silently normalise one into the other.
+      expect(JSON.stringify(body)).toBe(
+        '{"code":"KEY_RATE_LIMIT","error":"Too many requests"}',
+      );
+    });
+
+    it("honours the 503 body override", async () => {
+      const res = rateLimitDenyJson(MISCONFIGURED, {
+        misconfiguredBody: { code: "SEAM_MISCONFIGURED", error: "Rate limiter unavailable" },
+      });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({
+        code: "SEAM_MISCONFIGURED",
+        error: "Rate limiter unavailable",
+      });
+    });
+
+    it("uses the 429 override ONLY on the 429 branch, and the 503 override ONLY on the 503 branch", async () => {
+      const opts: RateLimitDenyOptions = {
+        throttledBody: { marker: "throttled" },
+        misconfiguredBody: { marker: "misconfigured" },
+      };
+      expect(await rateLimitDenyJson(THROTTLED, opts).json()).toEqual({
+        marker: "throttled",
+      });
+      expect(await rateLimitDenyJson(MISCONFIGURED, opts).json()).toEqual({
+        marker: "misconfigured",
+      });
+    });
+
+    it("retryAfterHeader:'misconfigured-only' drops Retry-After from the 429 but NEVER from the 503", () => {
+      // `scenario/optimize` is the one seam route whose 429 carries no
+      // Retry-After today. Preserving that is the whole reason this option
+      // exists — and the 503 keeps one regardless, because the canary needs it.
+      const busy = rateLimitDenyJson(THROTTLED, {
+        retryAfterHeader: "misconfigured-only",
+      });
+      expect(busy.status).toBe(429);
+      expect(busy.headers.get("Retry-After")).toBeNull();
+
+      const bad = rateLimitDenyJson(MISCONFIGURED, {
+        retryAfterHeader: "misconfigured-only",
+      });
+      expect(bad.status).toBe(503);
+      expect(bad.headers.get("Retry-After")).toBe("60");
+    });
+  });
+
+  describe("the STATUS is the artefact's, and no option can take it", () => {
+    /**
+     * ⚠️ THIS IS THE CRITERION THAT MATTERS. "The option is honoured" would be
+     * satisfied by an implementation that let a route answer 429 on a limiter
+     * misconfiguration — the exact defect this plan closes at twelve sites. The
+     * casts below are deliberate: they smuggle in every plausible status-shaped
+     * key a future caller might reach for, so the assertion is about the RUNTIME
+     * behaviour and not about the type signature (which a cast defeats anyway).
+     */
+    const STATUS_SHAPED_KEYS = {
+      status: 429,
+      statusCode: 429,
+      code: 429,
+      misconfigured: false,
+      reason: undefined,
+      throttledStatus: 503,
+      misconfiguredStatus: 429,
+    } as unknown as RateLimitDenyOptions;
+
+    it("a misconfiguration answers 503 even when the options bag says otherwise", () => {
+      expect(rateLimitDenyJson(MISCONFIGURED, STATUS_SHAPED_KEYS).status).toBe(503);
+      expect(rateLimitDenyText(MISCONFIGURED).status).toBe(503);
+    });
+
+    it("a genuine throttle answers 429 even when the options bag says otherwise", () => {
+      expect(rateLimitDenyJson(THROTTLED, STATUS_SHAPED_KEYS).status).toBe(429);
+      expect(rateLimitDenyText(THROTTLED).status).toBe(429);
+    });
+
+    it("a body override does not carry a status with it", () => {
+      // A route passing its OWN 429 body must not be able to make the
+      // misconfigured branch render that body at 429.
+      const res = rateLimitDenyJson(MISCONFIGURED, {
+        throttledBody: { error: "Too many requests" },
+        headers: { "Cache-Control": "private, no-store" },
+      });
+      expect(res.status).toBe(503);
+    });
   });
 });
 
