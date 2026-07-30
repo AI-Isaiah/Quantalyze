@@ -122,21 +122,74 @@ export type SeamAttributability =
   | "service-permanent"
   | "transport";
 
-/** The verdict. `breakerKey` is non-null exactly when `counts` is true. */
-export interface SeamBreakerVerdict {
-  readonly attributability: SeamAttributability;
-  /** Does this response count against the analytics service's own health? */
-  readonly counts: boolean;
-  /** The key to record against, or `null` when nothing is recorded. */
-  readonly breakerKey: string | null;
-  /** The service dependency the key was built from, or `null` for the global key. */
-  readonly dependency: string | null;
-}
+/**
+ * The verdict — a DISCRIMINATED UNION on `counts`, so that "`breakerKey` is
+ * non-null exactly when `counts` is true" is a fact the compiler knows rather
+ * than a sentence a reader has to be trusted to have read.
+ *
+ * ⚠️ WHY THIS IS NOT A FLAT INTERFACE ANY MORE (140.5-07 / WP-13). It used to be
+ * `{ counts: boolean; breakerKey: string | null; … }` with the invariant stated
+ * ONLY in the docblock above it. Two costs followed, and both were live:
+ *
+ *  1. THE INVALID STATE WAS REPRESENTABLE. `{ counts: true, breakerKey: null }`
+ *     type-checked. That is a countable infrastructure failure with nowhere to
+ *     record it — the breaker's counter never advances, so it never trips, so the
+ *     outage it exists to contain is invisible to it. Nothing but prose forbade
+ *     constructing one.
+ *  2. EVERY CONSUMER PAID FOR IT WITH A SILENT FAIL-OPEN. Because the state was
+ *     representable, all three recording sites in `resilient-fetch.ts` wrote
+ *     `if (verdict.counts && verdict.breakerKey !== null)`. The second conjunct
+ *     reads as defensive, but its FALSE branch has no else: a counting verdict
+ *     with no key was DROPPED, silently, with no log and no counter. The "safe"
+ *     null-check was the fail-open.
+ *
+ * Under the union, `counts` narrows `breakerKey` to `string`, the second conjunct
+ * is dead, and the three sites record unconditionally. The keyless-counting state
+ * cannot be built, so there is nothing left to drop.
+ *
+ * `dependency` is `null` on every non-counting arm too — measured, not assumed:
+ * only the 503/other-5xx/transport arms ever name one.
+ */
+export type SeamBreakerVerdict =
+  | {
+      readonly attributability: SeamAttributability;
+      /** COUNTS against the analytics service's own health. */
+      readonly counts: true;
+      /**
+       * The key to record against. NON-NULLABLE on this member, which is the
+       * whole point: a counting verdict always names somewhere to record.
+       */
+      readonly breakerKey: string;
+      /** The service dependency the key was built from, or `null` for the global key. */
+      readonly dependency: string | null;
+    }
+  | {
+      readonly attributability: SeamAttributability;
+      /** Does NOT count — a caller fault, a success, or a permanent service fault. */
+      readonly counts: false;
+      /** Nothing is recorded, so there is no key. Not merely absent — impossible. */
+      readonly breakerKey: null;
+      /** No key, therefore no dependency it could have been built from. */
+      readonly dependency: null;
+    };
 
 // ---------------------------------------------------------------------------
-// Internal readers. Not exported: the exported surface stays the three
-// predicates, because everything exported from a leaf is browser-reachable and
-// survives every wholesale seam mock — both are privileges.
+// Internal readers. Not exported, and the bar for exporting one is high:
+// everything exported from a leaf is browser-reachable and survives every
+// wholesale seam mock, and both of those are privileges rather than defaults.
+//
+// ⚠️ THE SENTENCE HERE USED TO SAY "the exported surface stays the THREE
+// predicates". It was false when written and got further from true twice after:
+// `seamDependencyName` (140.3-11) and `seamCorrelationId` (140.3-15) were both
+// added with `EXPECTED_EXPORTS` edited in the same commit, exactly as their plans
+// required — nobody updated this line. The authority on the surface is
+// `EXPECTED_EXPORTS` in `src/lib/seam-discriminator.purity.test.ts`, which is
+// pinned and fails when the surface moves; no integer is written here, because an
+// integer in prose is a second, unpinned answer to a question that already has a
+// falsifiable one (RESEARCH §3.5 — "the file lies about itself in its own body").
+//
+// The union type added by 140.5-07 is a TYPE export and does not widen the
+// runtime surface, which is why `EXPECTED_EXPORTS` did NOT change with it.
 // ---------------------------------------------------------------------------
 
 /** Is this a plain object (and specifically NOT an array or null)? */

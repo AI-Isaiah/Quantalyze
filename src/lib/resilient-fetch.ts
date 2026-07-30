@@ -1606,8 +1606,14 @@ function instrumentBody(
       // aborts is ONE degraded request, not two. Before the shared latch a 503
       // with a stalling body recorded twice — half the failures needed to trip,
       // from the same number of requests.
+      //
+      // NO `&& bodyVerdict.breakerKey !== null` (140.5-07 / WP-13). `counts`
+      // narrows the verdict to its counting member, on which `breakerKey` is
+      // `string`, so that conjunct was dead — and its dead FALSE branch had no
+      // else, i.e. it silently dropped a countable failure. See
+      // `SeamBreakerVerdict`.
       const bodyVerdict = seamBreakerVerdict(null);
-      if (bodyVerdict.counts && bodyVerdict.breakerKey !== null) {
+      if (bodyVerdict.counts) {
         await recordOnce(bodyVerdict.breakerKey);
       }
       // THROWS, and must keep throwing. `keys/[id]/permissions` runs its seam
@@ -1902,8 +1908,11 @@ export async function resilientFetch(
     // No status line at all, so the verdict is TRANSPORT and the key is the
     // residual global one. Asked of the discriminator rather than hardcoded here
     // so there is exactly ONE definition of that mapping.
+    // The null-key conjunct is GONE here too — see the `SeamBreakerVerdict`
+    // union. `counts` is the whole discriminator; a counting verdict always
+    // names a key.
     const transportVerdict = seamBreakerVerdict(null);
-    if (transportVerdict.counts && transportVerdict.breakerKey !== null) {
+    if (transportVerdict.counts) {
       await recordOnce(transportVerdict.breakerKey);
     }
     // Rethrow the ORIGINAL error. Both clients map `err.name` onto their own
@@ -1926,8 +1935,17 @@ export async function resilientFetch(
   // common 5xx, so a classifier that needs a body is undefined exactly there
   // (TRAP-2). The body is consulted ONLY to refine WHICH key a counting verdict
   // names, and only on the 503 arm.
+  //
+  // ⚠️ THE THIRD AND ONLY DYNAMIC ONE. The two arms above ask
+  // `seamBreakerVerdict(null)`, whose verdict is a constant; this is the site
+  // where the status and body actually decide. It carried the same dead
+  // `&& verdict.breakerKey !== null` conjunct, and here it mattered most: a 503
+  // is the one arm that can name a dependency, so this is where a keyless
+  // counting verdict would have been dropped in production. Deleted — `counts`
+  // narrows `breakerKey` to `string`. Pinned at runtime by
+  // `seam-breaker-failopen.regression.test.ts`.
   const verdict = seamBreakerVerdict(res.status, await readDependencyBody(res));
-  if (verdict.counts && verdict.breakerKey !== null) {
+  if (verdict.counts) {
     await recordOnce(verdict.breakerKey);
   }
   // 4xx NEVER records — including the `424` whose body names the caller's VENUE,
