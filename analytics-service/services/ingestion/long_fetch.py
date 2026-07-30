@@ -388,14 +388,54 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
         # adapter itself sets VALIDATION_UNEXPECTED (unexpected exception during
         # validate), the failure MAY be transient (e.g. ccxt.ExchangeNotAvailable
         # not in the typed exception hierarchy) and must remain retryable.
+        #
+        # PYAPIFIX2-02 (Phase 140.1.2): this local set is STRUCTURALLY
+        # UNCOMPLETABLE and must not be grown code-by-code. csv_adapter.py mints
+        # error_code from a pandera rule name (`first_rule.upper()`) — an open
+        # code space no enumeration can close — and MT5 mints MT5_WRONG_SERVER /
+        # MT5_MASTER_PASSWORD, neither of which any list here remembered. Both
+        # are unfixable-by-retry, so both were classified transient and retried
+        # 3x, each attempt serialising through the single MT5 gateway lock.
+        # The correct channel is PROVENANCE: the adapter that minted the code
+        # states `ValidationResult.permanent`, consulted FIRST below. The set
+        # stays byte-unchanged as the fallback for adapters that state no
+        # verdict (permanent=None) — in particular MISSING_SCOPE stays OMITTED,
+        # the deliberate divergence from PERMANENT_VALIDATION_ERROR_CODES
+        # recorded at services/exchange.py (re-pointing it is a production
+        # behaviour change named in no requirement).
         permanent_codes = {
             "AUTH_FAILED", "PERMISSION_DENIED",
             "TRADE_SCOPE", "WITHDRAW_SCOPE",
         }
-        _is_permanent = (
-            _reject_code in permanent_codes
-            or (_reject_code == "VALIDATION_UNEXPECTED" and _is_unexpected_fallback)
-        )
+        if val.permanent is not None:
+            # The adapter that MINTED the code is the only component that knows
+            # whether it can clear, so a STATED verdict is authoritative in BOTH
+            # directions — that is what makes the field tri-state rather than an
+            # extra way to spell "add me to the list".
+            #
+            # An explicit False therefore SUPPRESSES the list, which is the
+            # fail-safe direction: it can only move a rejection permanent ->
+            # transient (retry next attempt), never transient -> permanent
+            # (failed_final, a user locked out of a key that works). That is the
+            # same omission polarity cron.py's CREDENTIAL_REJECTION_CODES has and
+            # the one this programme unifies toward. Cost of a wrong False is
+            # bounded by max_attempts; cost of a wrong permanent is a support
+            # ticket.
+            #
+            # `is not None` (identity, not truthiness) so None — "no verdict",
+            # every adapter but MT5 today — still falls through to the list logic
+            # below completely unchanged. No adapter states False at HEAD, so
+            # this branch is behaviour-identical to `val.permanent is True` for
+            # every code path in production today.
+            _is_permanent = val.permanent
+        else:
+            _is_permanent = (
+                _reject_code in permanent_codes
+                or (
+                    _reject_code == "VALIDATION_UNEXPECTED"
+                    and _is_unexpected_fallback
+                )
+            )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=f"validate failed: {_reject_code}",

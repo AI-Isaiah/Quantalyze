@@ -38,15 +38,73 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import sentry_sdk
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from services.db import get_supabase, one
 from services.encryption import decrypt_credentials, get_kek
+# PYAPI-05 — the status-attributability contract. Every deliberate 5xx/424 in
+# this file goes through service_error. Contract: docs/STATUS_CONTRACT.md.
+from services.error_contract import service_error
 from services.exchange import aclose_exchange, create_exchange
 from services.key_permissions import detect_permissions
 
 router = APIRouter(prefix="/internal", tags=["internal"])
 logger = logging.getLogger("quantalyze.analytics")
+
+
+# ---------------------------------------------------------------------------
+# KEK-misconfiguration operator signal (PYAPI-06 site 4)
+# ---------------------------------------------------------------------------
+
+# A missing/rotated KEK leaves NO operator signal today: internal.py's arm logged
+# nothing at all, and the response was a 4xx-shaped "encryption not configured"
+# that nobody pages on. It gains one — but BOUNDED. A stale KEK fires on EVERY
+# permission probe, and the dashboard renders five badges per page, so an
+# unbounded capture turns the signal into a flood that gets muted, which is
+# indistinguishable from having no signal.
+_KEK_ALERT_WINDOW_S = 300.0
+_last_kek_alert_at: float | None = None
+
+
+def _reset_kek_alert() -> None:
+    """Test-only helper to clear the capture window between cases."""
+    global _last_kek_alert_at
+    _last_kek_alert_at = None
+
+
+def _alert_kek_unavailable() -> None:
+    """Emit at most one Sentry capture per ``_KEK_ALERT_WINDOW_S`` for a KEK
+    misconfiguration, plus a structured log on EVERY occurrence.
+
+    Shape cloned from ``services/audit.py:428-467``: ``set_tag`` before the
+    capture so events are greppable per-cause, and the whole capture wrapped in
+    ``try/except: pass`` because a Sentry transport failure (DSN misconfigured,
+    network down before the SDK connected) must never mask or crash the path it
+    is reporting on.
+
+    Neither the tag nor the message may carry any substring of any secret — an
+    alert that leaks the credential it is complaining about is worse than the
+    outage it reports. Nothing here reads the KEK value or the caller's token.
+    """
+    global _last_kek_alert_at
+    # Logged every time: the RATE of rejection is itself the operator's evidence.
+    logger.error(
+        "KEK unavailable — /internal permission probe rejected; "
+        "operator action required (no retry can clear this)"
+    )
+    now = time.monotonic()
+    if _last_kek_alert_at is not None and (now - _last_kek_alert_at) < _KEK_ALERT_WINDOW_S:
+        return
+    _last_kek_alert_at = now
+    try:
+        sentry_sdk.set_tag("kek_unavailable", "true")
+        sentry_sdk.capture_message(
+            "KEK unavailable: /internal permission probe cannot decrypt credentials",
+            level="error",
+        )
+    except Exception:
+        pass  # never mask the original failure via a Sentry failure
 
 
 # ---------------------------------------------------------------------------
@@ -149,19 +207,48 @@ async def get_key_permissions(
       5. Open a CCXT exchange + call ``detect_permissions`` (TTL-cached).
       6. Return the triple plus a ``detected_at`` ISO timestamp.
 
-    Errors:
+    Errors (PYAPI-05 — see ``docs/STATUS_CONTRACT.md``; the status line alone is
+    decidable, and only a genuine service fault counts against our health):
       403 — bad/missing X-Internal-Token, or INTERNAL_API_TOKEN unconfigured.
       404 — key_id not found.
+      422 — the caller's own api_keys row has no exchange set (S-10).
       429 — per-key rate limit hit.
-      502 — exchange returned an error during the live probe.
+      424 — the caller's EXCHANGE did not answer the permission probe (S-12).
+            Breaker-inert; `dependency` names the venue.
+      500 — KEK unavailable (S-08), the stored key is undecryptable (S-09), or
+            OUR adapter construction failed (S-11 — `create_exchange` does no
+            network I/O, so its non-ValueError escapes are ours, not the
+            venue's; PYAPIFIX-03). All are `retryable:false`: permanent until
+            an operator or a deploy acts, and none names a venue.
     """
     _verify_internal_token(request)
 
     if not _consume_rate_limit(key_id):
-        raise HTTPException(
-            status_code=429,
+        # PYAPIFIX2-03. This throttle answers the service's OWN envelope: the
+        # 429 arm of `error_contract._validate` existed but had zero call sites
+        # — unadopted, not unreachable — so a throttle carried no machine
+        # `code` and read, to a discriminator keying on `body.detail.code`, like
+        # any other 4xx. It is the one CALLER fault an identical retry clears.
+        #
+        # `code` is REUSED from the app-global RateLimitExceeded handler's
+        # vocabulary (`main.py`'s 429 JSONResponse), never re-minted — two
+        # synonyms for one condition is the defect this contract exists to stop.
+        # The explicit `headers={"Retry-After": ...}` kwarg is REPLACED, not
+        # dropped: `service_error` sets the header itself from `retry_after` via
+        # `_retry_after_headers`. `dependency` is omitted (a 429 is ours to
+        # impose, so naming one would mint a breaker key for our own throttle).
+        #
+        # ⚠️ This makes a THIRD 429 body shape coexist in the service: the flat
+        # `main.py` handler body, this nested envelope, and the bare scalar
+        # `{"detail": "<string>"}` still raised at match.py / simulator.py /
+        # portfolio.py. Deliberate. Picking the winner belongs to TS-23's owner
+        # (140.2 / 146) when it migrates those two — not here.
+        raise service_error(
+            429,
+            "RATE_LIMITED",
+            retryable=True,
+            retry_after=int(_RATE_LIMIT_WINDOW_S),
             detail="Too many permission probes for this key. Try again in a moment.",
-            headers={"Retry-After": str(int(_RATE_LIMIT_WINDOW_S))},
         )
 
     supabase = get_supabase()
@@ -205,17 +292,47 @@ async def get_key_permissions(
     try:
         kek = get_kek()
     except RuntimeError:
-        raise HTTPException(status_code=503, detail="Encryption not configured")
+        # S-08 / PYAPI-05 + PYAPI-06 — the same missing/rotated KEK as S-07 on
+        # /api/encrypt-key, on the endpoint the findings doc never listed. It is
+        # permanent until an operator acts, so R-1 makes it 500 retryable:false
+        # and it can never feed the breaker.
+        _alert_kek_unavailable()
+        raise service_error(
+            500,
+            "KEK_UNAVAILABLE",
+            dependency="kek",
+            retryable=False,
+            detail="Credential encryption is not configured. This needs an operator, not a retry.",
+        )
 
     try:
         api_key, api_secret, passphrase = decrypt_credentials(key_data, kek)
     except Exception:
+        # S-09 / PYAPI-05 — A-02. The status was already right; what was missing
+        # is the machine code and the explicit retryable:false. A key that cannot
+        # be decrypted will never decrypt on an identical retry, so counting it
+        # guarantees a self-sustaining outage.
         logger.error("Failed to decrypt API key %s for permission probe", key_id)
-        raise HTTPException(status_code=500, detail="Failed to decrypt credentials")
+        raise service_error(
+            500,
+            "KEY_UNDECRYPTABLE",
+            dependency="kek",
+            retryable=False,
+            detail="This stored key could not be decrypted. It must be reconnected.",
+        )
 
     exchange_name = key_data.get("exchange")
     if not exchange_name:
-        raise HTTPException(status_code=502, detail="API key has no exchange set")
+        # S-10 / PYAPI-05 — the clearest mis-attribution in the file. A NULL
+        # column on the CALLER'S OWN row answered 502, i.e. "our upstream is
+        # broken", which is false under any reading and counted against our
+        # health. It is caller data: CALLER class, 422.
+        raise service_error(
+            422,
+            "KEY_MISSING_EXCHANGE",
+            retryable=False,
+            detail="This API key has no exchange set and cannot be probed.",
+        )
 
     # SFOX-05 (F2): sfox is NOT a ccxt exchange — create_exchange RAISES ValueError
     # for it, which the ccxt path below maps to a misleading 400/502 at the
@@ -323,7 +440,40 @@ async def get_key_permissions(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception:
-        raise HTTPException(status_code=502, detail="Failed to initialise exchange connection")
+        # S-11 / PYAPIFIX-03 (H-2) — the 424 this arm used to raise was wrong,
+        # and deliberately reversed here. `services/exchange.py` create_exchange
+        # is EXCHANGE_CLASSES.get(), a dict build, cls(config) and two attribute
+        # sets: ZERO network I/O. Nothing has been sent to the venue when this
+        # fires, so a non-ValueError escape is a TypeError / AttributeError /
+        # ImportError / OOM in OUR adapter construction — ours, always.
+        #
+        # As a 424 it was breaker-inert AND a 4xx, so an outright bug in our own
+        # code counted nowhere and paged nobody, while the body told the user
+        # their venue was down. R-1 classes it SERVICE-PERMANENT: 500,
+        # retryable:false, no Retry-After (only a deploy can clear it).
+        #
+        # No `dependency`: 140.2 keys its breaker on that field (SEAMCORE-01), so
+        # a venue name on a 500 mints a per-dependency breaker key for something
+        # that is not ours. Plan 140.1.1-01's C3 membership guard now REFUSES it
+        # at construction — this is enforced, not merely intended.
+        #
+        # Code is ADAPTER_INIT_FAILED, not EXCHANGE_INIT_FAILED: the code names
+        # OUR adapter construction. A code that names the exchange contradicts a
+        # SERVICE-PERMANENT attribution in the one field 140.2 discriminates on.
+        #
+        # logger.error, not warning: a 500 is page-worthy, and the sibling arm
+        # 18 lines below (permission detection) already uses error. The raw
+        # exception stays in the log, never in the body.
+        logger.error(
+            "Adapter init failed for key=%s exchange=%s (our fault — create_exchange does no network I/O)",
+            key_id, exchange_name,
+        )
+        raise service_error(
+            500,
+            "ADAPTER_INIT_FAILED",
+            retryable=False,
+            detail="Something went wrong on our side while opening this connection. Nothing is wrong with your key.",
+        )
 
     try:
         perms = await detect_permissions(
@@ -336,7 +486,19 @@ async def get_key_permissions(
             "Permission detection failed for key=%s exchange=%s: %s",
             key_id, exchange_name, exc,
         )
-        raise HTTPException(status_code=502, detail="Exchange permission probe failed")
+        # S-12 / PYAPI-05 — C-12's headline. Binance maintenance, a key revoked
+        # at the venue and an IP-allowlist change ALL land here, uncached, five
+        # badges per dashboard render. As a 502 that was five recorded failures
+        # and a platform-wide trip that then denied Deribit users, the optimizer,
+        # admin match and CSV finalize. As a 424 it is zero recorded failures,
+        # and the user is told which venue is not answering.
+        raise service_error(
+            424,
+            "EXCHANGE_PROBE_FAILED",
+            dependency=str(exchange_name),
+            retryable=True,
+            detail="Your exchange did not answer the permission check. This is a problem at the venue — try again shortly.",
+        )
     finally:
         try:
             await aclose_exchange(exchange)

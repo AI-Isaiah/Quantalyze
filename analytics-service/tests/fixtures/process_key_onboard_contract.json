@@ -1,0 +1,89 @@
+{
+  "contract": "/process-key onboard reply — the WIZARD_DUPLICATE arm. `queued` means 'a non-terminal compute_job exists for this verification at the moment of reply' (PYAPI-09, Phase 140.1); `job_state` names which of the three cases produced it. `code`/`idempotent` are present on BOTH duplicate arms, including queued:true — that combination is the real emitted shape, not a bug.",
+  "notes": "The SINGLE shared spec for the cross-PROCESS onboard reply contract. PYAPIFIX-01's finding is that the Python suite and the TypeScript suite were both green because EACH MOCKED THE OTHER, so neither could see that routers/process_key.py:_wizard_duplicate_reply emits a shape src/lib/process-key-onboard-contract.ts rejects. This file is the one artifact both sides bind to: the Python consumer proves the two positive `body` values equal what the REAL route emits through the REAL middleware stack; the TypeScript consumer runs the REAL guard predicate over all five cases with zero mocks. The fixture is COMMITTED, never generated: the `python` (ci.yml:933) and `frontend-test` (ci.yml:206) jobs are siblings with NO `needs:` edge, so a file written by one is never visible to the other. Do NOT move it, do NOT copy it, do NOT let either consumer derive its expectations from the module under test. Positive cases: the sorted key set and every discriminant value (ok, code, idempotent, queued, job_state) are pinned exactly; the four instance-specific keys (verification_id, correlation_id, status, trust_tier) are pinned by TYPE only, because they carry per-request identifiers. Synthetic identifiers only — no credentials, no real tenant data.",
+  "consumers": [
+    "analytics-service/tests/test_process_key_onboard_contract.py — asserts these positive bodies equal a REAL full-stack TestClient response on both duplicate arms",
+    "tests/lib/process-key-onboard-contract-parity.test.ts — runs src/lib/process-key-onboard-contract.ts's isProcessKeyOnboardResponse over every case and asserts `expect_valid` (added by plan 140.1.1-05)"
+  ],
+  "cases": [
+    {
+      "name": "queued_true_resumed_wedge",
+      "note": "P1 — the C-19 wedge, replayed: the strategy_verifications row is still `draft` and the duplicate path re-ran enqueue_compute_job. This is the shape PYAPI-09 introduced and the TS guard rejects today.",
+      "body": {
+        "ok": true,
+        "code": "WIZARD_DUPLICATE",
+        "idempotent": true,
+        "verification_id": "55555555-1111-4111-8111-000000000001",
+        "status": "draft",
+        "trust_tier": "api_verified",
+        "correlation_id": "11111111-1111-4111-8111-111111111111",
+        "queued": true,
+        "job_state": "enqueued"
+      },
+      "expect_valid": true
+    },
+    {
+      "name": "queued_false_finished_duplicate",
+      "note": "P2 — a duplicate for a verification that already finished (`published`), so no background job applies. `queued:false` alongside code/idempotent was already accepted before PYAPI-09; it must stay accepted.",
+      "body": {
+        "ok": true,
+        "code": "WIZARD_DUPLICATE",
+        "idempotent": true,
+        "verification_id": "55555555-2222-4222-8222-000000000002",
+        "status": "published",
+        "trust_tier": "api_verified",
+        "correlation_id": "11111111-1111-4111-8111-111111111111",
+        "queued": false,
+        "job_state": "not_applicable"
+      },
+      "expect_valid": true
+    },
+    {
+      "name": "queued_absent",
+      "note": "N1 — no `queued` key at all. The read site treats a missing/undefined `queued` as truthy-by-fallback, so the guard must refuse the body outright rather than let it coerce.",
+      "body": {
+        "ok": true,
+        "code": "WIZARD_DUPLICATE",
+        "idempotent": true,
+        "verification_id": "55555555-3333-4333-8333-000000000003",
+        "status": "draft",
+        "trust_tier": "api_verified",
+        "correlation_id": "11111111-1111-4111-8111-111111111111",
+        "job_state": "enqueued"
+      },
+      "expect_valid": false
+    },
+    {
+      "name": "empty_code",
+      "note": "N2 — the queued:false arm with an EMPTY code. `typeof code === 'string'` passes on \"\", so a guard that only type-checks would render an unnamed condition as a named one.",
+      "body": {
+        "ok": true,
+        "code": "",
+        "idempotent": true,
+        "verification_id": "55555555-4444-4444-8444-000000000004",
+        "status": "published",
+        "trust_tier": "api_verified",
+        "correlation_id": "11111111-1111-4111-8111-111111111111",
+        "queued": false,
+        "job_state": "not_applicable"
+      },
+      "expect_valid": false
+    },
+    {
+      "name": "idempotent_without_duplicate_code",
+      "note": "N3 — queued:true carrying code/idempotent for a code that is NOT the duplicate signal. This is what stops the widening from degrading to `() => true`: the mixed envelope is admissible only as the WIZARD_DUPLICATE contract, never as a blanket allowance.",
+      "body": {
+        "ok": true,
+        "code": "OTHER",
+        "idempotent": true,
+        "verification_id": "55555555-5555-4555-8555-000000000005",
+        "status": "draft",
+        "trust_tier": "api_verified",
+        "correlation_id": "11111111-1111-4111-8111-111111111111",
+        "queued": true,
+        "job_state": "enqueued"
+      },
+      "expect_valid": false
+    }
+  ]
+}

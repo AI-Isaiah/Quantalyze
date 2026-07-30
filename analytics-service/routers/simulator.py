@@ -37,6 +37,8 @@ from slowapi.util import get_remote_address
 
 from services.audit import log_audit_event
 from services.db import get_supabase, one, rows
+# PYAPI-05 — the shared status contract (analytics-service/docs/STATUS_CONTRACT.md).
+from services.error_contract import service_error
 from services.portfolio_limits import assert_portfolio_within_cap
 from services.rate_limit import limiter
 from services.simulator_scoring import simulate_add_candidate
@@ -249,6 +251,13 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
                 "Simulator rate limit exceeded "
                 f"({_SIMULATOR_USER_RATE_LIMIT}/hour per user) — please retry later"
             ),
+            # PYAPIFIX2-04 — the wait is the WINDOW, not the LIMIT.
+            # `_SIMULATOR_USER_RATE_LIMIT` (interpolated in the copy above) is a
+            # COUNT of 20; using it here would advertise a 20-second wait for an
+            # hour-long window and invite ~180 rejected retries per throttled
+            # user. Read from the same constant `_check_simulator_user_rate`
+            # enforces.
+            headers={"Retry-After": str(_SIMULATOR_USER_RATE_WINDOW_SEC)},
         )
 
     supabase = get_supabase()
@@ -449,12 +458,17 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
                 audit_exc,
                 exc_info=True,
             )
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "error": "Portfolio impact simulation failed",
-                "correlation_id": correlation_id,
-            },
+        # PYAPI-05 S-18: SERVICE-PERMANENT. This site already carried a dict
+        # detail with the correlation_id — the shape the R-2 envelope
+        # generalises — so the alignment is a rename of `error` to `detail`
+        # plus the machine `code`/`retryable` keys 140.2 discriminates on. The
+        # correlation_id (the point of the dict) is unchanged.
+        raise service_error(
+            500,
+            "SIMULATION_FAILED",
+            retryable=False,
+            detail="Portfolio impact simulation failed",
+            correlation_id=correlation_id,
         )
 
     # Hydrate the response with the human-readable candidate name so the

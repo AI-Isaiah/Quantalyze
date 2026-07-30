@@ -117,4 +117,20 @@ paths = [
   # generic-api-key entropy detector flags the literals on the full scan.
   '''(^|/)analytics-service/tests/test_verify_strategy_redaction\.py$''',
   '''(^|/)analytics-service/tests/test_portfolio_router_audit_2026_05_07\.py$''',
+  # Phase 140.1 (PYAPI-06 / PYAPI-10b) no-echo canary fixtures. Both files
+  # define deliberately WORDLESS, high-entropy literals whose entire purpose is
+  # to be searched for and proven ABSENT from a response body, a Sentry capture,
+  # stdout/stderr and the stdlib log stream:
+  #   - test_secret_misconfig_signal.py:46,47,51 — `_SERVICE_KEY_CANARY`,
+  #     `_INTERNAL_TOKEN_CANARY` and `_WRONG_SERVICE_KEY`. The oracle scans every
+  #     contiguous 6-gram of all four values across four output streams, so the
+  #     literals MUST be wordless (a dictionary word would make the 6-gram scan
+  #     match unrelated prose and the test vacuous). That property is exactly
+  #     what trips the generic-api-key entropy detector.
+  #   - test_process_key_200_discriminator.py:501 — `_CANARY_SECRET`, asserted
+  #     absent from the PYAPI-10b 403 rejection envelope.
+  # Not real credentials, and none is ever read from or written to an env var:
+  # the whole point of both suites is that these values get suppressed.
+  '''(^|/)analytics-service/tests/test_secret_misconfig_signal\.py$''',
+  '''(^|/)analytics-service/tests/test_process_key_200_discriminator\.py$''',
 ]

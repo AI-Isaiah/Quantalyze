@@ -13,6 +13,13 @@ import { resilientFetch } from "@/lib/resilient-fetch";
 import { CircuitOpenError } from "@/lib/seam-errors";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { logAuditEventAsUser } from "@/lib/audit";
+// Phase 140.1.1 / PYAPIFIX-01 — the onboard-reply narrow lives in a
+// dependency-free leaf so the cross-process parity test can exercise THIS
+// predicate with zero mocks. Do not re-inline it here.
+// (The `ProcessKeyOnboardResponse` type is exported alongside it and is
+// applied here implicitly, by the predicate's `body is` narrowing — importing
+// the name explicitly would be an unused binding.)
+import { isProcessKeyOnboardResponse } from "@/lib/process-key-onboard-contract";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -1400,61 +1407,4 @@ async function unifiedFinalizeWizardHandler(args: {
     { error: "Upstream service returned unexpected response" },
     { status: 502, headers: NO_STORE_HEADERS },
   );
-}
-
-/**
- * audit-2026-05-07 H-0327 — local narrow over the /process-key response
- * shape this handler depends on. Avoids the `Record<string, unknown>`
- * cast at the call site so subsequent property accesses are typed.
- *
- * Phase B simplify — `queued` made required so an upstream
- * `{queued: undefined}` cannot silently coerce into `queued: true` via a
- * `?? true` fallback at the read site.
- *
- * Phase C simplify — split into a discriminated union on `queued`. The
- * Python contract (analytics-service/routers/process_key.py) only ever
- * returns one of two shapes:
- *   - `{queued: true,  verification_id: string}` — newly queued.
- *   - `{queued: false, code: string, verification_id?, idempotent?}` —
- *     dedup hit (WIZARD_DUPLICATE).
- * A mixed envelope (e.g., `{queued: true, code: "WIZARD_DUPLICATE"}`) is
- * a backbone bug; the guard rejects it so the unified-response-parse
- * 502+Sentry path fires instead of silently misrouting wizard chrome.
- */
-type ProcessKeyOnboardResponse =
-  | { queued: true; verification_id: string }
-  | {
-      queued: false;
-      code: string;
-      verification_id?: string | null;
-      idempotent?: boolean;
-    };
-
-function isProcessKeyOnboardResponse(
-  body: unknown,
-): body is ProcessKeyOnboardResponse {
-  if (body === null || typeof body !== "object") return false;
-  const r = body as Record<string, unknown>;
-  if (typeof r.queued !== "boolean") return false;
-  if (r.queued) {
-    // queued=true branch: verification_id MUST be a string, and
-    // code/idempotent MUST NOT be present (mixed envelope = bug).
-    if (typeof r.verification_id !== "string") return false;
-    if ("code" in r || "idempotent" in r) return false;
-    return true;
-  }
-  // queued=false branch: code MUST be a string; verification_id and
-  // idempotent are optional but must match types if present.
-  if (typeof r.code !== "string") return false;
-  if (
-    r.verification_id !== undefined &&
-    r.verification_id !== null &&
-    typeof r.verification_id !== "string"
-  ) {
-    return false;
-  }
-  if (r.idempotent !== undefined && typeof r.idempotent !== "boolean") {
-    return false;
-  }
-  return true;
 }

@@ -976,6 +976,53 @@ async def aclose_exchange(exchange: "ccxt.Exchange | Any") -> None:
         )
 
 
+# PYAPIFIX-02 (Phase 140.1.1) — the canonical ALLOW-LIST of PERMANENT
+# ``error_code`` values produced by ``validate_key_permissions`` below.
+#
+# THE RULE IS AN ALLOW-LIST OF PERMANENT, NOT A DENYLIST OF TRANSIENT. Any
+# probe ``error_code`` NOT in this set is a fault at the CALLER'S VENUE and
+# must be treated as retryable. An unknown future code therefore fails SAFE
+# (transient → the caller retries and succeeds) instead of failing terminal
+# (the caller is told to fix credentials that were never broken). A
+# caller-fault code must be NAMED here to become permanent — the reverse
+# default is the exact shape of the H-1 defect this constant closes, where
+# {PROBE_FAILED, DDOS_PROTECTION, RATE_LIMITED, EXCHANGE_UNAVAILABLE,
+# NETWORK_UNAVAILABLE} fell through a transient-denylist into a 403.
+#
+# ``VALIDATION_UNEXPECTED`` is deliberately ABSENT. It is permanent ONLY when
+# it is OUR OWN fallback — i.e. the adapter set no ``error_code`` at all, so a
+# write-capable key was confirmed with no scope code to name it. When the
+# ADAPTER itself sets ``VALIDATION_UNEXPECTED`` (an unexpected exception during
+# validate, e.g. a ccxt subclass outside the typed hierarchy) the failure may
+# be transient and must stay retryable. That distinction is not derivable from
+# the code string, so the CONSUMER carries the check —
+# ``services/ingestion/long_fetch.py``'s ``_is_unexpected_fallback`` is the
+# model, and ``routers/process_key.py`` mirrors it via ``val.error_code is
+# not None``.
+#
+# ``MISSING_SCOPE`` IS reachable and IS permanent: the deribit scope_detail arm
+# at :1043-1059 below sets ``read_only=False`` + ``error_code="MISSING_SCOPE"``
+# and returns WITHOUT ever setting ``valid=True``, so the consumers' scope gate
+# fires with that code. A permanently-missing read scope cannot be fixed by
+# retrying, so omitting it here would mint an infinitely-retried key — a NEW
+# bug of exactly the class this constant closes.
+#
+# DELIBERATE DIVERGENCE (Phase 140.1.1, recorded not overlooked):
+# ``long_fetch.py``'s local ``permanent_codes`` is NOT re-pointed at this set
+# in this phase. It omits ``MISSING_SCOPE``, so re-pointing it would silently
+# flip the worker retry path transient→permanent — a production behaviour
+# change named in no requirement. Unifying the two is a correct follow-up.
+PERMANENT_VALIDATION_ERROR_CODES = frozenset(
+    {
+        "AUTH_FAILED",
+        "PERMISSION_DENIED",
+        "TRADE_SCOPE",
+        "WITHDRAW_SCOPE",
+        "MISSING_SCOPE",
+    }
+)
+
+
 async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
     """Validate that the API key is functional using safe read-only operations.
 

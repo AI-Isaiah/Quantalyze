@@ -1219,3 +1219,390 @@ def test_long_fetch_uses_shared_metrics_encoder() -> None:
     out = long_fetch._metrics_to_jsonb(m)
     assert out["sharpe"] == 1.2
     assert out["trade_count"] == 7
+
+
+# ---------------------------------------------------------------------------
+# PYAPIFIX2-02 (phase 140.1.2) — MT5 permanent credential faults on the LIVE
+# worker path.
+#
+# MT5_ENABLED=true in production. An MT5 credential the user can never fix
+# (wrong broker server; a trade-capable master password we reject on purpose)
+# must not be classified `transient`: transient means the queue retries the job
+# until attempts >= max_attempts (3), and every attempt serialises through the
+# SINGLE MT5 gateway lock — three live RPyC probes burned on a credential that
+# cannot succeed, while every other user's MT5 job waits behind them.
+#
+# Oracle integrity: every expectation below is a literal typed in this file.
+# Nothing is imported from long_fetch / mt5 / closed_sets — importing the code's
+# own constants would make the test agree with any future rewording.
+#
+# The `mt5_enabled_server` patch in the first two tests is LOAD-BEARING: without
+# it the kill-switch at long_fetch's `if source == "mt5" and not
+# mt5_enabled_server():` short-circuits to permanent for the DISABLED reason and
+# both tests would pass while the defect stays live. The third test is the
+# negative control that proves the kill-switch really does produce that
+# permanent-for-the-wrong-reason verdict.
+# ---------------------------------------------------------------------------
+
+
+def _mt5_job(job_id: str, error_tag: str, *, passphrase: str = "SomeBroker-Live 5") -> dict[str, Any]:
+    """An MT5 onboard long-fetch job, credentials inline so the worker's
+    stored-credential resolution branch is not exercised.
+
+    login "123456" matches the fake terminal's account_info().login, so the
+    adapter's concurrency login-bracket passes and the probe reaches the
+    investor-vs-master decision.
+    """
+    return {
+        "id": job_id,
+        "kind": "process_key_long",
+        "strategy_id": f"s-{error_tag}",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": f"v-{error_tag}",
+            "source": "mt5",
+            "flow_type": "onboard",
+            "correlation_id": f"cid-{error_tag}",
+            "context": {
+                "strategy_id": f"s-{error_tag}",
+                "api_key": "123456",
+                "api_secret": "investor-pw",
+                "passphrase": passphrase,
+            },
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_mt5_wrong_server_is_permanent(monkeypatch) -> None:
+    """A wrong broker-server name is a permanent user-credential fault.
+
+    Drives the REAL ``Mt5Adapter`` (blank server → its offline wrong-server
+    rejection, no client constructed) so the whole chain under test is
+    production code: the adapter mints the verdict, the worker classifies it.
+    A hand-built ValidationResult here would prove nothing — it would only
+    restate whatever the test itself decided to put in the object.
+
+    No login attempt can ever match a server that does not exist, so retrying
+    cannot change the outcome; it only burns 3 gateway-serialised probes and
+    delays every queued MT5 job behind the single terminal lock.
+    """
+    from services.ingestion.mt5 import Mt5Adapter
+
+    def _boom(host: str, port: int) -> Any:
+        raise AssertionError(
+            "a blank broker server must be rejected offline — no RPyC client"
+        )
+
+    monkeypatch.setattr("services.ingestion.mt5._build_client", _boom)
+
+    job = _mt5_job("job-mt5-wrong-server", "mt5-wrong-server", passphrase="   ")
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=Mt5Adapter()), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb), \
+         patch("services.ingestion.long_fetch.mt5_enabled_server", return_value=True):
+        result = await run_process_key_long_job(job)
+
+    # The rejection really is the wrong-server one — the worker logged it under
+    # that code, so this verdict is not the MT5 kill-switch (negative control
+    # below) wearing a different hat.
+    assert "MT5_WRONG_SERVER" in (result.error_message or "")
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent", (
+        "A wrong-server MT5 credential can never succeed; classifying it "
+        "transient makes the queue retry it 3x, and every attempt serialises "
+        "through the single MT5 gateway lock — three live RPyC probes burned "
+        "on an unfixable credential, blocking every other user's MT5 job."
+    )
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_mt5_master_password_is_permanent(monkeypatch) -> None:
+    """A trade-capable MT5 master password is a permanent credential fault.
+
+    Drives the REAL ``Mt5Adapter`` against the canonical offline terminal
+    double (a trade-capable account), so the MT5_MASTER_PASSWORD rejection is
+    minted by production code exactly as it is in prod, then classified by the
+    real worker path.
+
+    We refuse a master login by design — it can place trades, and we only ever
+    persist a read-only investor login. No retry turns a master password into
+    an investor one, so a retry re-probes the gateway with a credential we have
+    already decided to refuse.
+    """
+    from services.ingestion.mt5 import Mt5Adapter
+
+    # The canonical MT5 offline transport double (no mt5linux, no network, no
+    # live terminal) — reused rather than re-implemented so this test cannot
+    # drift away from the adapter suite's notion of a trade-capable account.
+    from tests.test_ingestion_mt5 import (
+        _FakeNamedTuple,
+        _INVESTOR_ORDER_CHECK,
+        _install_client,
+    )
+
+    _install_client(
+        monkeypatch,
+        {
+            "account": _FakeNamedTuple(trade_allowed=True, login=123456),
+            "order_check": _INVESTOR_ORDER_CHECK,
+        },
+    )
+
+    job = _mt5_job("job-mt5-master-pw", "mt5-master-pw")
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=Mt5Adapter()), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb), \
+         patch("services.ingestion.long_fetch.mt5_enabled_server", return_value=True):
+        result = await run_process_key_long_job(job)
+
+    assert "MT5_MASTER_PASSWORD" in (result.error_message or "")
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent", (
+        "A trade-capable MT5 master password is refused by design and the "
+        "refusal is deterministic; classifying it transient retries a "
+        "credential we will reject identically every time, burning 3 "
+        "serialised gateway probes before failed_final."
+    )
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_mt5_disabled_gate_is_not_why_permanent() -> None:
+    """Negative control for the two tests above.
+
+    With the MT5 kill-switch OFF, the worker returns permanent for the
+    KILL-SWITCH reason and never consults the adapter at all. That is exactly
+    the false-green the `mt5_enabled_server=True` patch above exists to
+    prevent: an unpatched run would assert "permanent" and pass while
+    MT5_WRONG_SERVER / MT5_MASTER_PASSWORD were still being retried in
+    production.
+
+    The distinguishing substring is typed here as a literal, read once from the
+    disabled-detail copy at source. It is deliberately NOT imported — an import
+    would make this control agree with any future rewording and stop
+    distinguishing the two reasons.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    job = _mt5_job("job-mt5-disabled", "mt5-disabled")
+
+    never_called_adapter = MagicMock()
+    never_called_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=False,
+            read_only=None,
+            error_code="MT5_WRONG_SERVER",
+            human_message="Broker server not found.",
+            debug_context=None,
+        )
+    )
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=never_called_adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb), \
+         patch("services.ingestion.long_fetch.mt5_enabled_server", return_value=False):
+        result = await run_process_key_long_job(job)
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    assert "MT5 integration is not yet available." in (result.error_message or ""), (
+        "The kill-switch path must be distinguishable from a credential "
+        "rejection by its message; if it is not, a 'permanent' assertion in "
+        "the two tests above proves nothing about credential classification."
+    )
+    # The kill-switch fires BEFORE validate — no live RPyC probe when MT5 is off.
+    never_called_adapter.validate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_unknown_code_with_no_adapter_verdict_stays_transient() -> None:
+    """Fail-safe control for the adapter-stated permanence channel.
+
+    An adapter that states NO permanence verdict must classify exactly as it
+    did before that channel existed. The default is the case that matters: a
+    code nobody enumerated (csv_adapter mints error_code from a pandera rule
+    name, an open code space) stays retryable, so a venue hiccup we failed to
+    name never becomes an irrecoverable ban.
+
+    The ValidationResult here omits the field entirely — that is the assertion:
+    the default must be "no verdict", not "permanent".
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    job = {
+        "id": "job-unknown-code",
+        "kind": "process_key_long",
+        "strategy_id": "s-unknown-code",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-unknown-code",
+            "source": "binance",
+            "flow_type": "onboard",
+            "correlation_id": "cid-unknown-code",
+            "context": {"strategy_id": "s-unknown-code", "api_key": "k", "api_secret": "s"},
+        },
+    }
+
+    verdictless = ValidationResult(
+        valid=False,
+        read_only=None,
+        error_code="SOME_FUTURE_CODE",
+        human_message="Something the classifier has never heard of.",
+        debug_context=None,
+    )
+    # The field is not passed above — its default must mean "no verdict".
+    assert verdictless.permanent is None, (
+        "ValidationResult.permanent must default to None. A default of True or "
+        "False would silently restate every existing adapter's retry verdict."
+    )
+
+    unknown_adapter = MagicMock()
+    unknown_adapter.validate = AsyncMock(return_value=verdictless)
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=unknown_adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb):
+        result = await run_process_key_long_job(job)
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient", (
+        "An unenumerated code from an adapter that states no permanence verdict "
+        "must stay retryable. Failing closed here would turn every code we "
+        "forgot to list into a permanent ban on a legitimate key."
+    )
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_explicit_transient_verdict_overrides_the_permanent_list() -> None:
+    """The THIRD state of the tri-state, which had no behaviour until now.
+
+    `permanent` is documented as tri-state, but the consumer read
+    `val.permanent is True or _reject_code in permanent_codes` — an explicit
+    `False` short-circuited nothing and fell straight through to the list. So an
+    adapter that CAN tell a genuine bad key from a venue-side auth blip, and says
+    so, was overruled by a string list that by construction cannot know: the key
+    goes failed_final and the author's explicit statement is dropped on the
+    floor.
+
+    `AUTH_FAILED` is the load-bearing choice — it is a MEMBER of the consumer's
+    `permanent_codes`, so this asserts the stated verdict genuinely wins rather
+    than merely agreeing with the list. Reverting the consumer to
+    `val.permanent is True or …` reddens here and nowhere else.
+
+    The direction is the fail-safe one: a stated `False` can only move a
+    rejection permanent -> transient (retried, bounded by max_attempts), never
+    transient -> permanent (a user locked out of a key that works).
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    job = {
+        "id": "job-explicit-transient",
+        "kind": "process_key_long",
+        "strategy_id": "s-explicit-transient",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-explicit-transient",
+            "source": "binance",
+            "flow_type": "onboard",
+            "correlation_id": "cid-explicit-transient",
+            "context": {
+                "strategy_id": "s-explicit-transient",
+                "api_key": "k",
+                "api_secret": "s",
+            },
+        },
+    }
+
+    blip_adapter = MagicMock()
+    blip_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=False,
+            read_only=None,
+            # Typed as a literal, not imported: this string IS a member of
+            # long_fetch's permanent_codes at HEAD, which is the whole point.
+            error_code="AUTH_FAILED",
+            human_message="The venue rejected the key while its auth tier was "
+                          "resyncing; it accepted the same key a minute later.",
+            debug_context=None,
+            permanent=False,
+        )
+    )
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=blip_adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb):
+        result = await run_process_key_long_job(job)
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient", (
+        "An adapter stated permanent=False — 'retrying may succeed' — on a "
+        "rejection it also tagged AUTH_FAILED for copy reuse. The stated verdict "
+        "must win: only the adapter that minted the code knows whether it can "
+        "clear, and the consumer's list is structurally uncompletable. Ignoring "
+        "the explicit False sends a recoverable key to failed_final."
+    )
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_stated_permanence_still_wins_over_an_unlisted_code() -> None:
+    """The mirror of the test above — the True direction, on an UNLISTED code.
+
+    Together the two pin the field as genuinely tri-state at the consumer:
+    `True` beats an absent list entry, `False` beats a present one, and `None`
+    (the test two above) defers to the list. Any consumer rewrite that collapses
+    the field back to bi-state fails one of the three.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    job = {
+        "id": "job-stated-permanent",
+        "kind": "process_key_long",
+        "strategy_id": "s-stated-permanent",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-stated-permanent",
+            "source": "binance",
+            "flow_type": "onboard",
+            "correlation_id": "cid-stated-permanent",
+            "context": {
+                "strategy_id": "s-stated-permanent",
+                "api_key": "k",
+                "api_secret": "s",
+            },
+        },
+    }
+
+    stating_adapter = MagicMock()
+    stating_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=False,
+            read_only=None,
+            # Deliberately NOT a member of any permanent list — the pandera-minted
+            # open code space this channel exists for.
+            error_code="SOME_FUTURE_UNLISTABLE_CODE",
+            human_message="A rejection only the adapter can classify.",
+            debug_context=None,
+            permanent=True,
+        )
+    )
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=stating_adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb):
+        result = await run_process_key_long_job(job)
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent", (
+        "A stated permanent=True on a code no list contains must be honoured — "
+        "that is the provenance channel's reason to exist, since csv_adapter "
+        "mints error_code from a pandera rule name and no enumeration can close "
+        "that space."
+    )

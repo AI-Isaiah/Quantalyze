@@ -26,6 +26,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from tests.limiter_stub import evict_module, patch_shared_limiter
+
 
 # ---------------------------------------------------------------------------
 # Bootstrap (non-polluting, mirrors test_routers_audit_2026_05_17).
@@ -34,9 +36,13 @@ import pytest
 # replace them in sys.modules with MagicMocks — doing so leaks mock modules
 # into every test file collected after this one (this file sorts before
 # test_cron_router / test_debug_key_flow_router / test_match_router), turning
-# their async route handlers into un-awaitable MagicMocks. We only patch
-# slowapi.Limiter *in place* to a no-op shim (so @limiter.limit decorators are
-# passthroughs without a Starlette Request) and restore it at module teardown.
+# their async route handlers into un-awaitable MagicMocks. We patch
+# slowapi.Limiter *in place* to a no-op shim and restore it at module teardown.
+#
+# PYAPI-03: that swap alone is no longer sufficient — routers.portfolio imports
+# an already-CONSTRUCTED limiter, so the passthrough now comes from the
+# `_noop_shared_limiter` autouse fixture below. The class swap is kept only for
+# any module that still constructs its own.
 # ---------------------------------------------------------------------------
 
 class _NoopLimiter:
@@ -59,6 +65,15 @@ _PATCHED_SLOWAPI: dict[str, object] = {}
 
 
 def _install_router_stubs():
+    # PYAPI-03: import the canonical rate-limit module BEFORE swapping
+    # `slowapi.Limiter` below. routers.portfolio now binds the SINGLETON
+    # (`from services.rate_limit import limiter`) instead of constructing its own,
+    # so importing it under the shim would build the process-wide singleton from
+    # `_NoopLimiter` and leave it that way for every later test file — including
+    # test_limiter_identity.py and test_simulator_router.py's API-5 identity
+    # assertions. Building it here, from the real class, makes the swap below
+    # affect nothing but this file's own reloads.
+    import services.rate_limit  # noqa: F401
     import slowapi
     import slowapi.util as slowapi_util
 
@@ -96,6 +111,23 @@ from routers.portfolio import (  # noqa: E402
 from services.portfolio_optimizer import generate_narrative  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _noop_shared_limiter(monkeypatch):
+    """PYAPI-03: routers.portfolio no longer CONSTRUCTS a Limiter — it imports
+    the singleton from `services.rate_limit`, so rebinding `slowapi.Limiter`
+    above no longer reaches it and the real slowapi wrapper rejects the
+    MagicMock requests the M-002 HTTP-level tests pass.
+
+    Function-scoped and monkeypatch-based rather than installed at module
+    import, for two reasons: monkeypatch reverts it automatically (a
+    module-scoped install leaks the no-op into every later test file in the
+    session), and it resolves `services.rate_limit` at CALL time rather than
+    caching a module object that a sibling's sys.modules surgery can make stale.
+    See tests/limiter_stub.py.
+    """
+    patch_shared_limiter(monkeypatch)
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _restore_router_state_at_module_teardown_c19():
     """At module teardown: restore the real slowapi.Limiter / get_remote_address
@@ -113,8 +145,8 @@ def _restore_router_state_at_module_teardown_c19():
     """
     yield
     _restore_slowapi()
-    sys.modules.pop("routers.portfolio", None)
-    sys.modules.pop("routers.cron", None)
+    evict_module("routers.portfolio")
+    evict_module("routers.cron")
 
 
 # ---------------------------------------------------------------------------
@@ -1024,7 +1056,7 @@ def _reload_portfolio_with_noop_limiter_c19():
     slowapi.Limiter = _NoopLimiter  # type: ignore[attr-defined,assignment]
     slowapi_util.get_remote_address = MagicMock()  # type: ignore[attr-defined,assignment]
 
-    sys.modules.pop("routers.portfolio", None)
+    evict_module("routers.portfolio")
     import routers.portfolio as portfolio_mod  # noqa: F401
     importlib.reload(portfolio_mod)
     return portfolio_mod

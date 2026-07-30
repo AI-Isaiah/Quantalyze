@@ -4,14 +4,13 @@ import hashlib
 import logging
 import time
 import uuid
+from functools import partial
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 from supabase import Client
 
 from models.schemas import (
@@ -27,7 +26,13 @@ from models.schemas import (
 from services.audit import log_audit_event
 from services.benchmark import get_benchmark_returns
 from services.db import chunked_in_query, get_supabase, one, rows
-from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, fetch_usdt_balance, validate_key_permissions
+# PYAPI-05 — the shared status contract (analytics-service/docs/STATUS_CONTRACT.md).
+from services.error_contract import RETRY_AFTER_SECONDS, service_error
+# PYAPIFIX2-01 — the FLAT venue-transient shape. C7 (the verify-strategy verdict
+# collapse) is the seventh member of the class whose other six live in
+# routers/exchange.py; the shape rationale is documented at the C6 raise there.
+from services.error_contract import VenueTransientHTTPException
+from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, fetch_usdt_balance, validate_key_permissions, PERMANENT_VALIDATION_ERROR_CODES
 from services.metrics import (
     _safe_float,
     sanitize_metrics,
@@ -50,6 +55,13 @@ from services.portfolio_limits import (
     MAX_PORTFOLIO_STRATEGIES as _MAX_PORTFOLIO_STRATEGIES,
     assert_portfolio_within_cap as _assert_portfolio_within_cap,
 )
+# PYAPI-03 — the canonical process-wide Limiter. This module used to declare its
+# own ``Limiter(key_func=get_remote_address)``, giving all four of its routes
+# (analytics, optimizer, bridge, verify-strategy) buckets keyed on the Railway
+# EDGE ip (G-10/G-11) — platform-wide, in isolated ``memory://`` storage (G-3)
+# that ``app.state.limiter`` could not see. The L-0045 comment below this import
+# block was the existing in-file record of exactly this defect.
+from services.rate_limit import limiter, tenant_or_platform_key
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
 logger = logging.getLogger("quantalyze.analytics")
@@ -143,13 +155,16 @@ _MATCH_CORRELATION_THRESHOLD = 0.95
 _COMPUTING_ROW_STALE_MINUTES = 30
 
 
-limiter = Limiter(key_func=get_remote_address)
-
-# Per-email sliding-window rate limit for verify_strategy. IP-only limiting
-# (slowapi) is decorative against rotated-IP attackers. We track recent
-# verification attempts in-process so a single email can't burn through the
-# IP-budget by rotating cloud IPs. NOT distributed-safe across workers; the
-# IP-based limiter is still authoritative for the global ceiling.
+# Per-email sliding-window rate limit for verify_strategy.
+#
+# PYAPI-03 (2026-07-26): the slowapi decorator on this route no longer keys on
+# the remote address — it keys on the verified tenant claim, falling back to the
+# documented `platform:/api/verify-strategy` ceiling. The prose here used to say
+# "IP-only limiting is decorative against rotated-IP attackers"; the sharper
+# statement now is that the slowapi tier is a PLATFORM ceiling and cannot
+# distinguish one submitter from another at all. This per-email window is
+# therefore still the only per-submitter dimension. NOT distributed-safe across
+# workers; the slowapi limiter remains authoritative for the global ceiling.
 _VERIFY_STRATEGY_EMAIL_RATE_LIMIT = 5          # max per window
 _VERIFY_STRATEGY_EMAIL_RATE_WINDOW_SEC = 3600  # 1 hour
 # Bound on distinct emails tracked simultaneously. Without a cap an attacker
@@ -162,15 +177,23 @@ _verify_strategy_email_attempts: dict[str, list[float]] = {}
 # Per-user sliding-window rate limit for portfolio-bridge.
 #
 # audit-2026-05-07 L-0045 — slowapi's @limiter.limit("10/hour") on the
-# bridge endpoint uses get_remote_address by default. Behind Next.js
+# bridge endpoint used get_remote_address by default. Behind Next.js
 # Vercel-functions every request arrives from the same egress IP pool,
-# so the 10/hour ceiling collapses to a SINGLE bucket shared across
-# every authenticated user — a noisy or hostile user can starve the
+# so the 10/hour ceiling collapsed to a SINGLE bucket shared across
+# every authenticated user — a noisy or hostile user could starve the
 # bucket for everyone on the same IP. The Next.js per-user
 # `bridge:${user.id}` Upstash limiter (src/app/api/bridge/route.ts:20,
 # 5/min) is the only EFFECTIVE quota today; if that ever degrades
 # (Upstash outage) or is bypassed by a future caller, the Python tier
 # provides no per-user cap.
+#
+# PYAPI-03 (2026-07-26) — the IP key is GONE (see the decorator below), but
+# L-0045's substance is NOT closed: without an `X-Tenant-Claim` on the wire the
+# key falls to `platform:/api/portfolio-bridge`, which is one bucket by design
+# rather than one bucket by accident. `src/lib/analytics-client.ts` minting the
+# claim (a 140.2 obligation) is what turns this into a real per-user cap — at
+# which point THIS in-process window becomes the redundant tier, not the only
+# one. Keep it until then.
 #
 # In-process per-user limit is the defense-in-depth. Same cap+window
 # as the email limiter; bound on distinct users tracked to keep memory
@@ -650,7 +673,19 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         raise
 
     if not insert_result.data:
-        raise HTTPException(status_code=500, detail="Failed to create analytics row")
+        # PYAPI-05 S-19: SERVICE-TRANSIENT. The INSERT did not raise — PostgREST
+        # simply returned no representation. Nothing about the request is wrong
+        # and nothing is permanently broken, so telling the caller "do not
+        # retry" (which is what a 500 means under R-1) is false about a
+        # condition that clears in seconds.
+        raise service_error(
+            503,
+            "ANALYTICS_ROW_NOT_CREATED",
+            dependency="supabase",
+            retryable=True,
+            retry_after=RETRY_AFTER_SECONDS["supabase"],
+            detail="Could not start the analytics computation — please retry.",
+        )
 
     analytics_id = rows(insert_result)[0]["id"]
 
@@ -1160,7 +1195,15 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
                 "be stuck in 'computing'; cron reaper will recover): %s",
                 portfolio_id, fail_exc,
             )
-        raise HTTPException(status_code=500, detail="Portfolio analytics computation failed")
+        # PYAPI-05 S-20: SERVICE-PERMANENT. The row is already marked FAILED
+        # above; an identical retry re-runs the identical pipeline over the
+        # identical rows, so this must never feed the breaker (R-1).
+        raise service_error(
+            500,
+            "PORTFOLIO_ANALYTICS_FAILED",
+            retryable=False,
+            detail="Portfolio analytics computation failed",
+        )
 
 
 def _generate_alerts(
@@ -1529,7 +1572,9 @@ def _generate_rebalance_drift_alert(supabase: Client, portfolio_id: str) -> None
 # ---------------------------------------------------------------------------
 
 @router.post("/portfolio-analytics", response_model=PortfolioAnalyticsResponse)
-@limiter.limit("10/hour")
+@limiter.limit(
+    "10/hour", key_func=partial(tenant_or_platform_key, scope="portfolio_analytics")
+)
 async def portfolio_analytics(request: Request, req: PortfolioAnalyticsRequest) -> dict[str, Any]:
     """Compute full portfolio analytics for a given portfolio."""
     supabase = get_supabase()
@@ -1589,7 +1634,9 @@ _OPTIMIZER_PUBLISHED_LIMIT = 200  # max published strategies pulled per optimize
 
 
 @router.post("/portfolio-optimizer", response_model=PortfolioOptimizerResponse)
-@limiter.limit("10/hour")
+@limiter.limit(
+    "10/hour", key_func=partial(tenant_or_platform_key, scope="portfolio_optimizer")
+)
 async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) -> dict[str, Any]:
     """Find diversification candidates for a portfolio.
 
@@ -1849,7 +1896,9 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
 # ---------------------------------------------------------------------------
 
 @router.post("/portfolio-bridge", response_model=PortfolioBridgeResponse)
-@limiter.limit("10/hour")
+@limiter.limit(
+    "10/hour", key_func=partial(tenant_or_platform_key, scope="portfolio_bridge")
+)
 async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, Any]:
     """Find replacement candidates for an underperforming strategy (Bridge V1).
 
@@ -1914,6 +1963,12 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
         raise HTTPException(
             status_code=429,
             detail="Too many bridge requests for this user. Try again later.",
+            # PYAPIFIX2-04 — advertise the window this cap actually enforces,
+            # read from the SAME constant `_check_bridge_user_rate` uses. Body
+            # shape deliberately unchanged (header-only): migrating it would
+            # mint a fourth 429 body shape, and which shape wins belongs to
+            # TS-23's owner.
+            headers={"Retry-After": str(_BRIDGE_USER_RATE_WINDOW_SEC)},
         )
 
     # Verify the underperformer is actually in this portfolio
@@ -2144,7 +2199,9 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
 # ---------------------------------------------------------------------------
 
 @router.post("/verify-strategy", response_model=VerifyStrategyResponse)
-@limiter.limit("5/hour")
+@limiter.limit(
+    "5/hour", key_func=partial(tenant_or_platform_key, scope="verify_strategy")
+)
 async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[str, Any]:
     """Verify a strategy from exchange API keys (landing page flow).
 
@@ -2197,6 +2254,13 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
         raise HTTPException(
             status_code=429,
             detail="Too many verification attempts for this email. Try again later.",
+            # PYAPIFIX2-04, from the same constant
+            # `_check_verify_strategy_email_rate` uses. ⚠️ This route has NO TS
+            # caller today (0 hits for "verify-strategy" in
+            # src/lib/analytics-client.ts), so the rationale is CLASS INTEGRITY,
+            # not user impact: a class closed at three of its four sites
+            # re-opens the moment the fourth is revived.
+            headers={"Retry-After": str(_VERIFY_STRATEGY_EMAIL_RATE_WINDOW_SEC)},
         )
 
     # Audit H-0592 — Idempotency-Key support. A flaky-client retry on the
@@ -2227,7 +2291,27 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
             "verify_strategy: create_exchange failed (%s): %s",
             type(exc).__name__, _redact_credentials(str(exc), req),
         )
-        raise HTTPException(status_code=400, detail="Failed to initialise exchange connection")
+        # B3 / PYAPIFIX-03 (H-2). create_exchange performs ZERO network I/O, so a
+        # non-ValueError escape here is ours (a ccxt signature change, an
+        # ImportError on a missing extra, an OOM) and never the venue's. The 400
+        # this used to raise blamed the caller for our bug and, being a 4xx,
+        # counted against nothing.
+        #
+        # Read this arm beside the SECOND create_exchange ~50 lines below, whose
+        # handler already answers 500 "Strategy verification failed". One
+        # function, one callee, two verdicts — that divergence is what proved the
+        # class was real, and 500 is the half that was already right.
+        #
+        # SERVICE-PERMANENT (R-1): 500, retryable:false, no dependency (140.2 keys
+        # its breaker on it — SEAMCORE-01), no Retry-After. Same code, same copy
+        # as B1 (routers/internal.py) and B2 (routers/exchange.py). The redacted
+        # diagnostics stay in the logger.exception above, never in the body.
+        raise service_error(
+            500,
+            "ADAPTER_INIT_FAILED",
+            retryable=False,
+            detail="Something went wrong on our side while opening this connection. Nothing is wrong with your key.",
+        )
 
     try:
         validation = await validate_key_permissions(exchange)
@@ -2252,7 +2336,27 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
             )
 
     if validation.get("error"):
-        raise HTTPException(status_code=400, detail=validation["error"])
+        # PYAPIFIX2-01 (C7) — the seventh and last member of the venue-transient
+        # class: byte-equivalent to the C6 collapse in routers/exchange.py, same
+        # producer (`validate_key_permissions`), same discarded discriminator.
+        #
+        # ⚠️ This route is DEAD — `/api/verify-strategy` appears among none of the
+        # nine seam paths in src/lib/analytics-client.ts, and the Next.js route of
+        # the same name calls /process-key, not this handler. It is closed on
+        # CLASS INTEGRITY grounds only, never on a "carries real traffic"
+        # argument, which is false here: a class closed at six of its seven
+        # structurally identical sites re-opens the moment the seventh is revived.
+        #
+        # Shape rationale, the verbatim-code rule and the recoverable derivation
+        # are all documented at the C6 site in routers/exchange.py; this site
+        # applies the SAME rule rather than re-deriving a local one, because a
+        # site-local re-derivation is how two sites drift apart.
+        raise VenueTransientHTTPException(
+            status_code=400,
+            code=validation["error_code"],
+            detail=validation["error"],
+            recoverable=validation["error_code"] not in PERMANENT_VALIDATION_ERROR_CODES,
+        )
 
     verification_id = str(uuid.uuid4())
     supabase = get_supabase()

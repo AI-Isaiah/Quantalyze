@@ -1,13 +1,13 @@
 import asyncio
 import logging
 import os
+from functools import partial
 from datetime import datetime, timezone
 from typing import Any
+import ccxt
 from fastapi import APIRouter, HTTPException, Request
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 from models.schemas import ValidateKeyRequest, FetchTradesRequest
-from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance, AUTH_FAILED_DETAIL, RATE_LIMITED_DETAIL, NETWORK_ERROR_DETAIL
+from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance, AUTH_FAILED_DETAIL, RATE_LIMITED_DETAIL, NETWORK_ERROR_DETAIL, PERMANENT_VALIDATION_ERROR_CODES
 from services.encryption import encrypt_credentials, decrypt_credentials, get_kek, get_kek_version
 from services.sfox_client import SfoxApiError, SFOX_PROD_BASE_URL
 from services.sfox_factory import make_sfox_client
@@ -33,11 +33,26 @@ from services.mt5_validation import (
     parse_mt5_credentials,
 )
 from services.db import get_supabase, db_execute, one, rows
+# PYAPI-05 — the status-attributability contract. Every deliberate 5xx/424 in
+# this file goes through service_error so the four classes cannot drift apart
+# site-by-site. Contract: analytics-service/docs/STATUS_CONTRACT.md.
+from services.error_contract import RETRY_AFTER_SECONDS, service_error
+# PYAPIFIX2-01 — the FLAT venue-transient shape for the SEVEN classified-upstream
+# sites on /api/validate-key. Deliberately NOT service_error: see the C1 raise
+# block below and the class's own docstring for why an object at body.detail
+# regresses three working wizard codes to UNKNOWN/500 on this seam.
+from services.error_contract import VenueTransientHTTPException
+# PYAPI-03 — the canonical process-wide Limiter. This module used to declare its
+# own ``Limiter(key_func=get_remote_address)``, which (a) keyed on the Railway
+# EDGE ip so both 100/hour budgets were platform-wide (G-10/G-11) and (b) got its
+# own isolated ``memory://`` storage (G-3), so its counters were invisible to
+# ``app.state.limiter``. Same repair, same reasoning as the Phase-19/API-5 fix
+# documented in services/rate_limit.py's own docstring.
+from services.rate_limit import limiter, tenant_or_platform_key
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api", tags=["exchange"])
 logger = logging.getLogger("quantalyze.analytics")
-limiter = Limiter(key_func=get_remote_address)
 
 # The event-loop bound for the SYNCHRONOUS Mt5Client probe (login+read+order_check
 # run off the loop via asyncio.to_thread). A margin above the client's own rpyc
@@ -101,11 +116,23 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
         # (WORKER_EGRESS_PROXY_URL malformed) — NOT the user's key. It was thrown
         # OUTSIDE the get_balances try below, so it used to escape as an unhandled
         # 500 + Sentry traceback (and pre-fix carried the proxy token in the
-        # message). Fail as a clean 503 — never a 500, never a misleading
-        # AUTH_FAILED that blames the user's credentials. The factory's ValueError
-        # is already secret-free (sfox_factory.py), but do not log it here either.
+        # message). Never a misleading AUTH_FAILED that blames the user's
+        # credentials. The factory's ValueError is already secret-free
+        # (sfox_factory.py), but do not log it here either.
+        #
+        # S-01 / PYAPI-05: this is SERVICE-PERMANENT, not transient. A malformed
+        # env var stays malformed until an operator edits it, so no retry can
+        # ever clear it — the previous 503 made the platform breaker trip,
+        # expire, re-probe and re-trip forever (A-08/A-25). R-1: 500,
+        # retryable:false. See docs/STATUS_CONTRACT.md.
         logger.error("validate_key: sFOX client construction failed (egress proxy misconfig)")
-        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
+        raise service_error(
+            500,
+            "EGRESS_PROXY_MISCONFIGURED",
+            dependency="egress-proxy",
+            retryable=False,
+            detail="The service's outbound proxy is misconfigured. This needs an operator, not a retry.",
+        )
     try:
         await client.get_balances()
         return {"valid": True, "read_only": True}
@@ -120,14 +147,40 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
             # misleading "check your credentials"). Fails CLOSED (never valid:true);
             # logged at WARNING (not exception) since a throttle is not Sentry-grade.
             logger.warning("validate_key: sFOX rate-limited (status=429)")
-            raise HTTPException(status_code=400, detail=RATE_LIMITED_DETAIL)
+            # PYAPIFIX2-01 (C1). Flat shape, NOT service_error: this reply is
+            # classified by a SUBSTRING CASCADE over body.detail
+            # (wizardErrors.ts:936-1035, reached via analytics-client.ts's
+            # `error.detail ?? …`), so nesting an envelope under `detail` would
+            # stringify to "[object Object]" and regress RATE_LIMITED,
+            # PROBE_FAILED and DDOS_PROTECTION to UNKNOWN/500. Same reasoning,
+            # same shape as main.py's app-global 429 (PYAPI-08): scalar `detail`
+            # byte-unchanged so the TS side needs ZERO change (TS-07 is the
+            # negative obligation confirming it), machine `code` beside it so
+            # 140.3 can retire the cascade. DO NOT "unify" these seven sites onto
+            # service_error. Status stays 400 — the classifier discards the
+            # upstream status, so the 400->424 remap is user-invisible and is
+            # owed as ONE unit with TS-05 (ledger row TS-32).
+            raise VenueTransientHTTPException(
+                status_code=400,
+                code="RATE_LIMITED",
+                detail=RATE_LIMITED_DETAIL,
+                recoverable=True,
+            )
         # 5xx (exchange down) or status==0 (transport/shape blip): an UPSTREAM /
         # transport problem, never the user's key. Same shared NETWORK_ERROR_DETAIL
         # the ccxt NetworkError arm emits so the TS classifier maps it identically.
         # Still fails CLOSED; WARNING-level (mirrors the ccxt transient arms) so a
         # transient blip no longer spams Sentry via logger.exception.
         logger.warning("validate_key: sFOX transient upstream failure (status=%s)", e.status)
-        raise HTTPException(status_code=400, detail=NETWORK_ERROR_DETAIL)
+        # PYAPIFIX2-01 (C2) — see the C1 block above for the shape rationale. The
+        # code matches what the copy already says; vocabulary reused, never
+        # re-minted.
+        raise VenueTransientHTTPException(
+            status_code=400,
+            code="NETWORK_UNAVAILABLE",
+            detail=NETWORK_ERROR_DETAIL,
+            recoverable=True,
+        )
     except ValueError:
         # F5: a token with an embedded control char (\n / \r survive
         # trimCredential, which strips only LEADING/TRAILING whitespace) makes
@@ -205,26 +258,49 @@ async def _validate_mt5_key(
 
     # Gateway config: a missing/malformed MT5_GATEWAY_HOST / MT5_GATEWAY_PORT is a
     # SERVER misconfig, NEVER the user's key — mirror the sfox construction-time
-    # 503 posture. Log secret-free (no login/pw/server values) and fail as a clean
-    # 503, never a 500, never a misleading AUTH_FAILED. (Phase 139 sets these live;
-    # unset now = the server-misconfig path.)
+    # posture. Log secret-free (no login/pw/server values), never a misleading
+    # AUTH_FAILED. (Phase 139 sets these live; unset now = the server-misconfig
+    # path.)
+    #
+    # S-02 / S-03 / PYAPI-05: SERVICE-PERMANENT. Unset env is deterministic — it
+    # is exactly half of A-01, where the 503 tripped the ONE global breaker key
+    # and denied every Deribit user over an MT5 config gap. R-1: 500,
+    # retryable:false. The genuinely transient MT5 arms are S-04/S-05 below.
     host = os.getenv("MT5_GATEWAY_HOST")
     port_raw = os.getenv("MT5_GATEWAY_PORT")
     if not host or not port_raw:
         logger.error("validate_key: MT5 gateway not configured (server misconfig)")
-        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
+        raise service_error(
+            500,
+            "MT5_GATEWAY_UNCONFIGURED",
+            dependency="mt5-gateway",
+            retryable=False,
+            detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
+        )
     try:
         port = int(port_raw)
     except ValueError:
         logger.error("validate_key: MT5 gateway port malformed (server misconfig)")
-        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
+        raise service_error(
+            500,
+            "MT5_GATEWAY_UNCONFIGURED",
+            dependency="mt5-gateway",
+            retryable=False,
+            detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
+        )
 
     # RED-TEAM: Mt5Client.__init__ opens the RPyC socket SYNCHRONOUSLY (a blocking
     # connect). Run construction — and the close in the finally — OFF the event
     # loop under a wait_for ceiling; a hung/unreachable gateway connect on the loop
     # would wedge FastAPI / healthz (the v1.11 WEDGE-01 class), exactly what the
     # probe body already guards. A connect failure is a server/bridge fault, never
-    # the user's key → 503 (mirrors the missing-config 503 above), never a 500.
+    # the user's key.
+    #
+    # S-04 / S-05 / PYAPI-05: these two are the GENUINELY transient MT5 arms — the
+    # gateway restarts on every deploy — so they stay 503. What they gain is the
+    # dependency name (so 140.2 keys the breaker on `mt5-gateway` instead of the
+    # single global `breaker:railway` that made A-01 a platform outage) and an
+    # honest Retry-After from the ONE literal table in services/error_contract.py.
     try:
         client = await asyncio.wait_for(
             asyncio.to_thread(lambda: Mt5Client(host, port)),
@@ -232,10 +308,24 @@ async def _validate_mt5_key(
         )
     except asyncio.TimeoutError:
         logger.warning("validate_key: MT5 gateway connect timed out (bridge hung)")
-        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
+        raise service_error(
+            503,
+            "MT5_GATEWAY_UNREACHABLE",
+            dependency="mt5-gateway",
+            retryable=True,
+            retry_after=RETRY_AFTER_SECONDS["mt5-gateway"],
+            detail="The MetaTrader gateway is not responding. Try again shortly.",
+        )
     except Exception:  # noqa: BLE001 — connect failure is server/bridge, not the key
         logger.warning("validate_key: MT5 gateway connect failed (server/bridge)")
-        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
+        raise service_error(
+            503,
+            "MT5_GATEWAY_UNREACHABLE",
+            dependency="mt5-gateway",
+            retryable=True,
+            retry_after=RETRY_AFTER_SECONDS["mt5-gateway"],
+            detail="The MetaTrader gateway is not responding. Try again shortly.",
+        )
 
     try:
         # Mt5Client is SYNCHRONOUS blocking RPyC. Run the login+read+probe body off
@@ -273,7 +363,17 @@ async def _validate_mt5_key(
             # with the shared NETWORK detail (mirrors the sfox transient arm);
             # WARNING (not exception) so a blip does not spam Sentry.
             logger.warning("validate_key: MT5 probe timed out (upstream bridge hung)")
-            raise HTTPException(status_code=400, detail=NETWORK_ERROR_DETAIL)
+            # PYAPIFIX2-01 (C3) — see the C1 block for the shape rationale. This
+            # arm and the two below were found by the BEHAVIOURAL predicate, not
+            # by the consumer list: `_validate_mt5_key` never calls
+            # `validate_key_permissions`, so a call-graph enumeration misses all
+            # three even though they are structurally identical to C2.
+            raise VenueTransientHTTPException(
+                status_code=400,
+                code="NETWORK_UNAVAILABLE",
+                detail=NETWORK_ERROR_DETAIL,
+                recoverable=True,
+            )
         except Mt5AccountMismatchError:
             # RED-TEAM: a concurrent validate re-logged the shared terminal onto
             # another account mid-probe — an INFRA/concurrency fault, never the
@@ -283,7 +383,13 @@ async def _validate_mt5_key(
                 "validate_key: MT5 terminal account mismatch mid-probe "
                 "(concurrent validate) — failing closed transient"
             )
-            raise HTTPException(status_code=400, detail=NETWORK_ERROR_DETAIL)
+            # PYAPIFIX2-01 (C4) — see the C1 block for the shape rationale.
+            raise VenueTransientHTTPException(
+                status_code=400,
+                code="NETWORK_UNAVAILABLE",
+                detail=NETWORK_ERROR_DETAIL,
+                recoverable=True,
+            )
         except Mt5ClientError as e:
             # Classify via the ONE mt5_validation seam. NEVER log the interpolated
             # remote text (it can carry the scrubbed code only) and never
@@ -299,7 +405,13 @@ async def _validate_mt5_key(
             logger.warning(
                 "validate_key: MT5 transient upstream failure (code=%s)", e.code
             )
-            raise HTTPException(status_code=400, detail=NETWORK_ERROR_DETAIL)
+            # PYAPIFIX2-01 (C5) — see the C1 block for the shape rationale.
+            raise VenueTransientHTTPException(
+                status_code=400,
+                code="NETWORK_UNAVAILABLE",
+                detail=NETWORK_ERROR_DETAIL,
+                recoverable=True,
+            )
 
         if is_trade_capable(info, probe):
             # Master (trade-capable) login REJECTED — never persisted (the TS
@@ -333,7 +445,9 @@ async def _validate_mt5_key(
 
 
 @router.post("/validate-key")
-@limiter.limit("100/hour")
+@limiter.limit(
+    "100/hour", key_func=partial(tenant_or_platform_key, scope="validate_key")
+)
 async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, Any]:
     """Validate that an API key is read-only and functional.
 
@@ -390,10 +504,50 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
             type(e).__name__,
             e,
         )
-        raise HTTPException(status_code=400, detail="Failed to initialize exchange connection")
+        # B2 / PYAPIFIX-03 (H-2). create_exchange is EXCHANGE_CLASSES.get(), a
+        # dict build, cls(config) and two attribute sets — ZERO network I/O — so
+        # nothing has been sent to the venue when this fires. A non-ValueError
+        # escape is a ccxt signature change, an ImportError on a missing extra or
+        # an OOM: OURS. The shipped 400 told the user their REQUEST was malformed
+        # — a lie they cannot act on — and being a 4xx it meant a plain bug in our
+        # code counted against nothing and paged nobody.
+        #
+        # SERVICE-PERMANENT (R-1): 500, retryable:false, no dependency (140.2 keys
+        # its breaker on that field — SEAMCORE-01), no Retry-After. The same code
+        # and the same copy as B1 (routers/internal.py) and B3
+        # (routers/portfolio.py): one class, one verdict, no drift. The raw
+        # exception stays in the logger.exception above, never in the body.
+        raise service_error(
+            500,
+            "ADAPTER_INIT_FAILED",
+            retryable=False,
+            detail="Something went wrong on our side while opening this connection. Nothing is wrong with your key.",
+        )
 
     try:
         result = await validate_key_permissions(exchange)
+    # S-06 / PYAPI-05 — the SPLIT. services/exchange.py:982-1021 already
+    # classifies every known ccxt error into a stable `error_code`, so a ccxt
+    # exception ESCAPING to here is by definition unclassified — but a `ccxt.*`
+    # escape is still attributable to the VENUE, not to us. Answer 424 (CALLER'S
+    # EXCHANGE): a 4xx, therefore breaker-inert by construction, carrying the
+    # venue name so the UI can say which venue. A 5xx here is C-12 verbatim —
+    # five keys on one dashboard render during a Binance maintenance window
+    # becomes five 5xx and a platform-wide trip. This arm MUST stay above the
+    # generic one.
+    except ccxt.BaseError as e:
+        logger.warning(
+            "validate_key: venue-attributable ccxt escape on %s — %s",
+            req.exchange,
+            type(e).__name__,
+        )
+        raise service_error(
+            424,
+            "EXCHANGE_PROBE_FAILED",
+            dependency=req.exchange,
+            retryable=True,
+            detail="Your exchange did not complete the permission check. This is a problem at the venue — try again shortly.",
+        )
     except Exception as e:  # noqa: BLE001
         logger.exception(
             "validate_key: validate_key_permissions raised on %s — %s: %s",
@@ -401,7 +555,17 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
             type(e).__name__,
             e,
         )
-        raise HTTPException(status_code=500, detail="Key validation failed. Please check your credentials.")
+        # C-16: the shipped copy here was "Key validation failed. Please check
+        # your credentials." — an accusation aimed at the user for OUR
+        # unclassified bug, and one they cannot act on. A non-ccxt escape is
+        # SERVICE-PERMANENT: 500, retryable:false, and copy that names no
+        # credential. The raw exception stays in the log above, never in the body.
+        raise service_error(
+            500,
+            "INTERNAL",
+            retryable=False,
+            detail="Something went wrong on our side while checking this key. Nothing is wrong with your key.",
+        )
     finally:
         try:
             await aclose_exchange(exchange)
@@ -409,19 +573,60 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
             pass
 
     if result["error"]:
-        raise HTTPException(status_code=400, detail=result["error"])
+        # PYAPIFIX2-01 (C6) — the LIVE key-connect collapse, and the site the
+        # whole class is named after. `validate_key_permissions` computes a
+        # stable `error_code` discriminator and this raise used to DISCARD it,
+        # leaving the human sentence as the only carrier. See the C1 block for
+        # why the shape is flat and why service_error is forbidden here.
+        #
+        # The code is carried VERBATIM — no fallback, no route-minted default.
+        # A default here would hand the wizard a fabricated code and hide a real
+        # service-layer bug behind a plausible-looking envelope (CLAUDE.md
+        # Rule 12: fail loud). It is safe because the producer's invariant holds:
+        # every branch of `validate_key_permissions` that sets `error` also sets
+        # `error_code` in the same branch — verified branch-by-branch, and
+        # mechanised as a test so a future branch that breaks it reddens at the
+        # PRODUCER rather than raising here. If it is ever broken anyway, the
+        # exception class's own guard raises a loud ValueError.
+        #
+        # `recoverable` derives from PERMANENT_VALIDATION_ERROR_CODES, which is
+        # an ALLOW-LIST OF PERMANENT: non-membership means "not known to be
+        # permanent", which that constant's contract defines as retryable. So an
+        # unrecognised future code fails SAFE (offers a retry). The code rides
+        # for EVERY verdict here, permanent ones included — that is closing the
+        # site, not absorbing the separate permanent-only gap.
+        raise VenueTransientHTTPException(
+            status_code=400,
+            code=result["error_code"],
+            detail=result["error"],
+            recoverable=result["error_code"] not in PERMANENT_VALIDATION_ERROR_CODES,
+        )
 
     return {"valid": result["valid"], "read_only": result["read_only"]}
 
 
 @router.post("/encrypt-key")
-@limiter.limit("100/hour")
+@limiter.limit(
+    "100/hour", key_func=partial(tenant_or_platform_key, scope="encrypt_key")
+)
 async def encrypt_key(request: Request, req: EncryptKeyRequest) -> dict[str, Any]:
     """Encrypt exchange credentials for storage. Returns encrypted fields to store in Supabase."""
     try:
         kek = get_kek()
     except RuntimeError:
-        raise HTTPException(status_code=503, detail="Encryption not configured")
+        # S-07 / PYAPI-05 — C-17 verbatim. A missing or rotated KEK is permanent
+        # until an operator acts, and /api/encrypt-key is the busiest seam
+        # endpoint, so the previous 503 was the self-sustaining-outage shape at
+        # its worst: trip, expire, re-probe, re-trip, forever. R-1: 500,
+        # retryable:false, so it can never feed the breaker.
+        logger.error("encrypt_key: KEK unavailable (encryption not configured)")
+        raise service_error(
+            500,
+            "KEK_UNAVAILABLE",
+            dependency="kek",
+            retryable=False,
+            detail="Credential encryption is not configured. This needs an operator, not a retry.",
+        )
 
     # ==============================================================================
     # MT5 CREDENTIAL-SLOT MAPPING (MT5SRC-02, CONTEXT-locked) — THE ONE CHOKEPOINT
@@ -444,7 +649,9 @@ async def encrypt_key(request: Request, req: EncryptKeyRequest) -> dict[str, Any
 
 
 @router.post("/fetch-trades")
-@limiter.limit("10/hour")
+@limiter.limit(
+    "10/hour", key_func=partial(tenant_or_platform_key, scope="fetch_trades")
+)
 async def fetch_trades(request: Request, req: FetchTradesRequest) -> dict[str, Any]:
     """Fetch trades from exchange for a strategy using stored encrypted API key."""
     try:

@@ -93,6 +93,59 @@ flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM fact
   book channel at a boundary consistent with the anchor) is best validated against real options
   books in the live dogfood, not blind. Watch for it in the /qa + Phoenix acceptance.
 
+### v1.16 branch `feat/v1.16-production-resilience` — merge guards (added 2026-07-26)
+
+- **No branch protection on `main` at all.** GitHub `rulesets: []` and
+  `branches/main/protection` → 404 — verified first-hand. There are **no required status checks**,
+  so nothing mechanically blocks a merge with red CI. Combined with the next item this is the live
+  risk. **Founder action:** enable branch protection requiring the `frontend`, `python` and
+  `sql-tests` aggregator checks.
+- **`sql-tests` will be RED on the v1.16 PR until migration `20260726000225` is hand-applied to
+  TEST** (`qmnijlgmdhviwzwfyzlc`), per this repo's standing MCP→TEST-before-merge convention.
+  Failure mode: reviewer sees an *expected* red, merges anyway, and **merging auto-applies the
+  migration to PROD**. The migration itself was validated hard (real PG15, idempotent, abort-safe,
+  20 PROD rows) so the apply risk is low — the risk is normalising red-check merges on a
+  prod-DB event.
+
+### v1.16 Phase-140.1 review — HOMELESS findings (no owning phase; added 2026-07-26)
+
+> ⚠️ **Why these are here:** they lived only in `.planning/phases/140.1-*/140.1-REVIEW.md` and
+> `140.1-TS-OBLIGATIONS.md`, which are **gitignored and have zero git backup** (`git ls-files
+> .planning` → 5 legacy phase-19 files only), in a repo whose memory records two prior accidental
+> destructions of exactly these ledgers. Full evidence stays in those files while they exist.
+
+- **Tests that run in NO environment (three findings).** (a) `TEST_SUPABASE_DB_URL` is wired into
+  the `sql-tests` CI job only (`ci.yml:810`), never the `python` job (`ci.yml:1030-1033`) — so
+  **31 pytest cases skip in CI exactly as they do locally**. (b) `HAS_PY_ENV` is set in **zero files
+  repo-wide** — the 5 Phase-4-vs-Phase-5 **money-math KPI parity** cases it gates are permanently
+  dormant. (c) 4 `tests/test_repro_key_flow.py` cases skip on missing **binance** cassettes
+  (`tests/cassettes/` holds only `okx/` and `bybit/`). CI wiring; no owning phase.
+- **A tenth IP-keyed route + the test that conceals it.** `analytics-service/routers/simulator.py:92`
+  returns `f"simulator:ip:{get_remote_address(request)}"`; its module docstring still claims it reads
+  `X-User-Id`, which it does not. `test_simulator_router.py::…::test_route_uses_user_keyed_key_func_not_ip`
+  asserts `key_func is not get_remote_address` — which **passes because the key func *wraps* the IP
+  function** rather than being it. Mechanically quarantined by `IP_KEYED_QUARANTINE` with an
+  *equality* assertion, so the exemption cannot grow and goes red when repaired. **PYAPI-03's
+  reconciliation is 9/9 — do not report 10 closed.** Repairing the route must also repair the test's
+  name and docstring.
+- **Nine test modules mount a bare `FastAPI()`**, so they never see the app-global 422/429 handlers
+  and their 422s render in FastAPI's default **leaking** shape. **Negative half: none of them is
+  vacuous today — do NOT schedule a "fix the broken tests" sweep.** Positive half: the credential-safe
+  422 is gated by exactly ONE file (`tests/test_validation_error_contract.py`), and
+  `test_process_key.py` is where a future author would "prove the 422 is safe" and prove nothing.
+  A shared app-factory fixture closes it.
+- **403-vs-422 split unowned.** `_scope_rejected` (`routers/process_key.py:1295-1299`) is a three-arm
+  OR behind one return, so ordinary `not val.valid` failures (incl. a malformed CSV) now answer
+  **403** where 422 would be sharper. The consumer half is tracked as TS-14; the split decision itself
+  has no owner.
+- **Worker raises an HTTP exception.** `analytics_runner.py:1725` raises `HTTPException(500)` from the
+  WORKER — a category error that can never render.
+- **Anonymous teaser bucket 30/hour** (`routers/process_key.py:99`) — deliberate and founder-retunable;
+  wants a saturation alert so exhaustion is visible rather than silent.
+- **Process item (TRAP-9 class B2):** plans enumerate production sites exhaustively but not the TESTS
+  those changes invalidate. Plan-check found 4; plans 06, 07 and 08 each found one *more* the plan did
+  not predict. Fold into the planning template, not a code phase.
+
 ---
 
 ## 🟡 FIX MID-TERM
@@ -216,6 +269,117 @@ flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM fact
   mechanisms to codify + consolidate: multiple auth wrappers, multiple cron mechanisms
   (vercel.json vs `pg_cron`+`pg_net`), multiple admin checks. (17 existing decisions to
   document + 5 open questions per the 2026-04 architecture audit.)
+
+### v1.16 Phase-140.1.2 — routed findings (added 2026-07-26)
+
+> Both are **pre-existing** and were deliberately fenced OUT of Phase 140.1.2, whose scope was
+> four named artifact items and no general sweep. Routed here per that phase's own CONTEXT rule.
+
+- **`analytics-service/tests/test_mt5_validate.py` carries 8 self-referential detail
+  assertions** — `:286`, `:310`, `:328`, `:347`, `:383`, `:404`, `:420`, `:436` are each
+  `assert ei.value.detail == <CONSTANT>` where the constant is imported from the module under
+  test, so the assertion cannot fail when the copy changes. (All 8 re-read at HEAD
+  `2c55ece0`; the file is untouched by 140.1/140.1.1/140.1.2.) 140.1.1's oracle audit found
+  zero self-referential oracles *in the 19 files it added* — this is an older file it never
+  rewrote, so that audit's verdict is not contradicted. **Do not copy this pattern**; fix by
+  typing the expected copy as a literal in the test, the way 140.1.1 fixed the one assertion
+  in this file that it did touch.
+- **`analytics-service/docs/STATUS_CONTRACT.md` not-seam-reachable coordinate drift beyond the
+  item 140.1.2 repaired** — `routers/portfolio.py:2242` is a comment line (`# Audit H-0535 —
+  the credential fields are pydantic.SecretStr…`; the 429 raise is at `:2254-2264`, located by
+  the text `if not _check_verify_strategy_email_rate(` at `:2253`) and `:2446` is a comment
+  line too (`# Vectorized matching: build a DataFrame…`), not a deliberate error arm.
+  **Re-derive both by text before fixing — do not trust these numbers either**; the raise
+  shifts whenever anything above it in a 2500-line router moves. 140.1.2 plan 04 corrected
+  the `exchange.py` and
+  `internal.py` coordinates in that bullet plus the S-11 row and the classes heading, and
+  deliberately stopped there. *(Same file, same class: `routers/exchange.py:37` and
+  `services/error_contract.py:6,8` still say "the four classes" in prose — the table has had
+  five rows since 140.1.1 plan 01. One-word comment fix, batch it with the above.)*
+
+### v1.16 Phase-140.1.2 review — findings routed onward (added 2026-07-26)
+
+> From the 140.1.2 code review (0 Critical, 0 High, 7 Medium, 6 Low). The four in-fence items
+> (M-02, M-04, M-05, M-06) plus L-03/L-04/L-05 and W-02 were fixed in that phase. These are the
+> ones deliberately NOT fixed there, each with the reason and the owner. **Every coordinate
+> below was re-derived at HEAD by locating the code text; re-derive again before acting.**
+
+- **→ 140.3 (TypeScript, out of 140.1.2's Python fence).** `internal.py:246`'s throttle now
+  raises `service_error(429, "RATE_LIMITED", …)`, a NESTED envelope, where it used to answer a
+  bare `{"detail": "<scalar str>"}`. Its consumer
+  `src/app/api/keys/[id]/permissions/route.ts:147` does `throw new Error(err.detail ?? …)`, so
+  `new Error(<object>)` gives `message === "[object Object]"` and the operator log at `:275`
+  reads `Error: [object Object]` instead of the human sentence. **Diagnostics only** — the
+  classifier at `route.ts:254-268` keys on message substrings (`INTERNAL_API_TOKEN`,
+  `Upstream 5`, `ECONNREFUSED`, `not configured`, `aborted`, `timeout`) and the OLD sentence
+  matched none of them either, so the reply is `PROBE_FAILED`/502 before and after. Recorded in
+  `docs/STATUS_CONTRACT.md` §2 as joining the object-detail set. Fix it **with** the three
+  `err.detail ?? …` sites already owed there, not separately — they are one edit.
+- **→ 140.3, schedule WITH TS-05 / TS-35 so the ROUTE closes, not a subset.**
+  `routers/exchange.py:538`'s `except ccxt.BaseError` arm on the LIVE `/api/validate-key` route
+  raises at `:544` `service_error(424, "EXCHANGE_PROBE_FAILED", dependency=req.exchange, retryable=True, …)`
+  — a nested envelope, so `analytics-client.ts:179`'s `error.detail ?? …` yields
+  "[object Object]", `classifyKeyValidationError` misses every branch, and a verdict the site
+  itself marks `retryable=True` renders as `UNKNOWN`/500 "our team has been notified" with no
+  retry affordance. **Same user-visible symptom PYAPIFIX2-01 exists to kill, on the same
+  route.** It is NOT an escape 140.1.2 created or hid: the site IS typed at `body.detail.code`,
+  and the render defect is the pre-existing owned obligation TS-05. But closing TS-05/TS-35
+  without this arm leaves the route half-fixed. (140.1.2-VERIFICATION W-01.)
+- **→ backlog, beside the four-vocabulary unification.** The provenance channel
+  (`ValidationResult.permanent`) has ONE consumer. `routers/process_key.py`'s `_envelope_error`
+  `recoverable` derivation and the sync-arm 424 venue-transient pre-gate both still key on
+  `_ROUTE_TERMINAL_ERROR_CODES` ∪ `PERMANENT_VALIDATION_ERROR_CODES`, neither of which knows
+  `MT5_WRONG_SERVER` / `MT5_MASTER_PASSWORD` or any pandera-minted CSV code. **Unreachable for
+  MT5 today** — `process_key.py` admits `mt5` to `onboard`/`resync` only and `_is_long_fetch`
+  routes both to the worker — so this is latent, not live. It goes live the moment a second
+  adapter states permanence, or `_is_long_fetch` changes: two contradictory verdicts on two
+  paths for one rejection. Plumbing exists (`_envelope_error` already takes an explicit
+  `recoverable: bool | None`). (Review M-03.)
+- **→ backlog. One route, two body shapes for one condition.** After 140.1.2,
+  `POST /api/validate-key` answers 400 with `{detail, code, recoverable}` for a ccxt
+  `AuthenticationError` but bare `{detail}` — byte-identical `detail`, **no `code` at all** —
+  for an sFOX 401 or an MT5 bad password. Same for `MT5_WRONG_SERVER_DETAIL` and
+  `MT5_MASTER_PASSWORD_DETAIL`, which carry no machine code anywhere on the HTTP path even
+  though the WORKER path now knows they are permanent (PYAPIFIX2-02). A 140.3 consumer
+  branching on `body.code` therefore behaves differently per venue for an identical condition.
+  Pre-existing class (the permanent 400 arms were never in PYAPIFIX2-01's venue-transient
+  scope), but the asymmetry is newly VISIBLE. Close it by giving the permanent 400 arms the
+  same flat shape with `recoverable=false`. (Review M-07.)
+- **→ backlog, no behaviour change requested.** `recoverable: true` is advertised for
+  `UNSUPPORTED_EXCHANGE`, which can never clear by retrying, because it is not in
+  `PERMANENT_VALIDATION_ERROR_CODES`. The arm is effectively unreachable (`create_exchange`
+  gates on `EXCHANGE_CLASSES` and raises `ValueError` for unknown ids) and
+  `UNSUPPORTED_EXCHANGE` was explicitly REFUTED and fenced out of 140.1.2, so the
+  classification is inherited; what is new is that the derived boolean is now on the wire.
+  Fold into the four-vocabulary unification. (Review L-06.)
+- **→ backlog, optional.** Three `Retry-After` values advertise the FULL window when the true
+  remainder is known: `routers/simulator.py:260`, `routers/portfolio.py:1971`, `:2263`. All
+  three guards are SLIDING windows keeping a list of timestamps, so the true wait is
+  `bucket[0] + WINDOW - now` — which can be one second, while the header says `3600`. Safe (it
+  never under-advertises) but it can tell a user one second from a free slot to come back in an
+  hour. The service already has the better pattern at `main.py:_retry_after_seconds` (`:461`),
+  which reads the real remainder and falls back to the window only when it cannot. Fix shape:
+  have `_check_*_rate` return `(ok, retry_after)`. (Review L-01.)
+- **→ backlog, adds to the STATUS_CONTRACT coordinate-drift item above.** A mechanical sweep of
+  all 51 `path:line` coordinates in `docs/STATUS_CONTRACT.md` (added while fixing review M-05)
+  found three more pointing at a blank line at HEAD, none of them in M-05's scope:
+  `services/exchange.py:978` (cited as the range start `:978-1021` in R-2), `routers/exchange.py:96`
+  and `routers/exchange.py:215` (the S-02 row). The §7 S-table is a HISTORICAL census — its
+  `Site` column records where each site was when the table was built, alongside a `Today`
+  column describing the pre-migration shape — so a row's coordinate going stale is expected
+  and is not by itself a defect. Prose coordinates outside the table are a different matter.
+  **The durable fix is not another sweep**: cite by searchable code text (or an anchor comment
+  in the source), so a coordinate cannot rot silently. Until then, re-derive before trusting.
+- **⚠️ Declined in 140.1.2, recorded so it is not re-filed.** Review L-02 asked for one
+  `from services.error_contract import …` per module in `routers/exchange.py` and
+  `routers/portfolio.py` (each has two, with a comment block above each). It was applied and
+  then **reverted**: merging the imports adds 5 lines near the top of both files, which shifts
+  every line below and silently invalidated ~16 verified line coordinates in
+  `docs/STATUS_CONTRACT.md` — including the six `fetch_trades` arms
+  (`exchange.py:660,670,685,689,698,760`) a verifier had just checked line-by-line. In a
+  programme this coordinate-dense, a cosmetic import merge is not worth invalidating the
+  document 140.2/140.3 read. Do it only as part of a change that re-derives those coordinates,
+  or after they stop being line-based.
 
 ---
 

@@ -35,13 +35,12 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Annotated, Any
 
-import hashlib
-
 import structlog
 from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationInfo, field_validator, model_validator
 
+from services import exchange as exchange_svc
 from services.basis_series import derive_basis_series
 from services.db import get_supabase, get_user_scoped_supabase, one, rows
 from services.ingestion import get_adapter
@@ -51,7 +50,7 @@ from services.closed_sets import CRYPTO_VENUES as _CRYPTO_VENUES
 from services.closed_sets import sfox_enabled_server
 from services.closed_sets import mt5_enabled_server
 from services.metrics import periods_per_year_for_asset_class
-from services.rate_limit import limiter
+from services.rate_limit import limiter, platform_ceiling_key, tenant_rate_limit_key
 from services.teaser_anchor import TEASER_ANCHOR_STRATEGY_ID
 
 if TYPE_CHECKING:
@@ -72,37 +71,79 @@ log = structlog.get_logger("quantalyze.analytics.process_key")
 _audit_tasks: set[asyncio.Task[None]] = set()
 
 
+# ---------------------------------------------------------------------------
+# Rate limiting (PYAPI-02 — RESEARCH Q1.2, mechanisms (a) + (c) + (d))
+# ---------------------------------------------------------------------------
+#
+# API-5 keyed this route on a hash of the bearer token, which was the strongest
+# identity available at the time: `X-User-Id` is unsigned client-controlled
+# input, so composing it in let a caller mint a fresh bucket per request (the
+# PR#241 bypass). But the bearer is a SINGLE SHARED platform token, so "one
+# bucket per calling service" is in practice ONE 100/hour bucket for the entire
+# platform — and Vercel caps the anonymous teaser at 10 req/60s per IP, i.e.
+# 600/hour, so one anonymous IP drained the whole platform's window in about ten
+# minutes (RESEARCH G-16 / X-3 / C-09).
+#
+# X-Tenant-Claim is the signed identity surface API-5's docstring was waiting
+# for. The verification half lives in services/rate_limit.py so PYAPI-03 can
+# re-key its nine IP-keyed routes onto the same mechanism instead of copying it.
+
+#: Per-tenant window. Unchanged from the pre-fix number — what changes is that
+#: it is now PER TENANT rather than per platform.
+_PROCESS_KEY_TENANT_LIMIT = "100/hour"
+
+#: The public teaser's shared window. Deliberately BELOW a tenant's (OPEN-3's
+#: technical recommendation; founder-retunable): anonymous traffic is the
+#: untrusted half and must not be able to consume a paying tenant's worth of
+#: capacity. It is also the arm with the least recourse — an anonymous visitor
+#: cannot be contacted, rate-limited by account, or billed.
+_PROCESS_KEY_ANON_LIMIT = "30/hour"
+
+#: The stacked backstop, keyed on the credential hash. Post-PYAPI-04 every
+#: admitted caller presents the same INTERNAL_API_TOKEN, so this is one
+#: platform-wide bucket — 5x the 100/hour the whole platform shared before this
+#: phase, and the only thing standing between N tenants each inside their own
+#: window and a collectively buried service.
+_PROCESS_KEY_CEILING_LIMIT = "500/hour"
+
+
 def _process_key_rate_limit_key(request: Request) -> str:
-    """API-5 — rate-limit key for /process-key.
+    """Per-identity limiter key for /process-key. See services/rate_limit.py.
 
-    Pre-fix used ``get_remote_address`` which buckets all Vercel egress
-    behind a single shared NAT into the same window — so one tenant's
-    burst could starve every other tenant. The unified backbone is
-    service-to-service auth via INTERNAL_API_TOKEN; we key on a hash of
-    the bearer token so each calling service gets an isolated 100/hour
-    window.
-
-    Tokens are SHA-256-hashed with a non-cryptographic suffix because
-    the resulting key shows up in slowapi error logs and we don't want
-    raw bearer tokens in observability output. The hash collapses the
-    bearer to a stable 16-char prefix.
-
-    PR #241 red-team: an earlier version composed (token_id, X-User-Id)
-    into the key so multi-user traffic on a single token got isolated
-    buckets. But `X-User-Id` is unsigned client-controlled input — a
-    caller holding the bearer token could set
-    `X-User-Id: <random-uuid-per-request>` and allocate a new bucket
-    per request, bypassing the limiter. The header read is removed
-    until a signed identity surface lands (e.g. mTLS or a JWT body
-    field bound to the token).
+    Returns ``process_key:t:<user_id>`` for a valid tenant claim,
+    ``process_key:anon`` for the public teaser, and
+    ``process_key:unverified:<credential-hash>`` (plus a WARN) when the claim is
+    absent, malformed, expired or forged. NEVER raises — RESEARCH G-8.
     """
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        token = auth[len("Bearer "):]
-    else:
-        token = auth or "unauthenticated"
-    token_id = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
-    return f"process_key:{token_id}"
+    return tenant_rate_limit_key(request, "process_key")
+
+
+def _process_key_ceiling_key(request: Request) -> str:
+    """Stacked platform-ceiling key for /process-key. NEVER raises."""
+    return platform_ceiling_key(request, "process_key")
+
+
+def _process_key_limit_for(key: str) -> str:
+    """Size the per-identity window from the bucket the key function chose.
+
+    slowapi supports a CALLABLE limit provider and passes it the key function's
+    output when the provider declares a parameter named ``key``
+    (``slowapi/wrappers.py`` ``LimitGroup.__iter__``). That is what lets one
+    decorator serve two different sizes: ``exempt_when`` cannot see the request,
+    and a second decorator whose key function returned ``""`` for non-anon
+    traffic would make slowapi log an ERROR on every authenticated call.
+    """
+    return _PROCESS_KEY_ANON_LIMIT if key == "process_key:anon" else _PROCESS_KEY_TENANT_LIMIT
+
+
+def _process_key_ceiling_limit_for(key: str) -> str:
+    """The ceiling, as a callable provider so it is read per-request.
+
+    Same size for every bucket; a provider rather than a literal so the two
+    stacked limits are configured the same way and either can be exercised in a
+    test without a five-hundred-request loop.
+    """
+    return _PROCESS_KEY_CEILING_LIMIT
 
 
 # ---------------------------------------------------------------------------
@@ -283,22 +324,135 @@ def _verify_internal_token(request: Request) -> None:
 # ---------------------------------------------------------------------------
 
 
+# PYAPI-10 (C-22, Phase 140.1) — the ONE discriminator on this route's 200
+# surface. Two rules, and they hold for EVERY 200 `/process-key` can emit:
+#
+#   1. `ok` is present and is a JSON boolean.
+#   2. when `ok` is false, `code` is a non-empty string.
+#
+# Before this, three of the six 200 shapes carried no discriminator at all and
+# consumers classified replies by sniffing which fields happened to be present.
+# The shapes, by behaviour: WIZARD_DUPLICATE (`_wizard_duplicate_reply`, TWO
+# emitters), `queued:true`, validate-only success, csv-finalize success,
+# synchronous success, and this envelope. `job_state` (PYAPI-09) rides the
+# duplicate shape rather than existing as a parallel discriminator.
+#
+# This envelope is the route's OWN vocabulary (Phase 17 DESIGN-05: top-level
+# `ok`/`code`/`human_message`, read directly off the body by the wizard's error
+# renderer). It is deliberately NOT `services/error_contract.py`'s PYAPI-05
+# envelope, which nests under `body.detail` and exists for the 5xx-capable seam
+# routes — `/process-key` has zero explicit 5xx sites (STATUS_CONTRACT.md S-22).
+# One route, one envelope: never a second parallel one.
+# PYAPIFIX-02 (Phase 140.1.1) — the error codes THIS ROUTE mints itself, as
+# opposed to the codes a venue probe produced. They are terminal by
+# construction: no retry of an identical request changes the verdict (a caller
+# does not become the owner of someone else's strategy by asking twice). They
+# are enumerated so the probe-code derivation below cannot reach them.
+#
+# The two universes fail safe in OPPOSITE directions, which is why both are
+# named rather than one blanket default: an unknown VENUE code must default
+# RECOVERABLE (retry and succeed, rather than "go rotate credentials that were
+# never broken"), while an unknown code from OUR OWN vocabulary must default
+# TERMINAL. `_envelope_error` cannot tell the universes apart from the string,
+# so the caller may also STATE the verdict outright — the 424 arm does.
+#
+# "VALIDATION_UNEXPECTED" sits here because the code string alone cannot say
+# whether it was OUR fallback (a confirmed write-capable key with no scope code
+# — permanent) or adapter-set (an unexpected exception during validate — may be
+# transient). Terminal is the safe default; the 424 arm, the only place an
+# adapter-set one can land, passes recoverable=True explicitly.
+_ROUTE_TERMINAL_ERROR_CODES = frozenset(
+    {
+        "UNKNOWN",
+        "CSV_FINALIZE_FAILED",
+        "MISSING_STRATEGY_ID",
+        "STRATEGY_NOT_OWNED",
+        "VALIDATION_UNEXPECTED",
+    }
+)
+
+
 def _envelope_error(
     code: str | None,
     msg: str | None,
     cid: str,
     vid: str | None,
+    recoverable: bool | None = None,
 ) -> dict[str, Any]:
-    """Phase 17 DESIGN-05 envelope. ok=False renders as wizard error UI."""
+    """Phase 17 DESIGN-05 envelope. ok=False renders as wizard error UI.
+
+    ``recoverable`` (PYAPIFIX-02): pass an explicit bool to STATE the verdict.
+    Left as ``None`` it is DERIVED from ``code`` — a probe code that is in
+    neither the shared permanent-code allow-list (``services/exchange.py``) nor
+    this route's own vocabulary is a fault at the caller's VENUE and IS
+    recoverable.
+
+    Pre-140.1.1 the derivation was an allow-list of RECOVERABLE codes
+    (``{RATE_LIMITED, EXCHANGE_UNAVAILABLE, NETWORK_UNAVAILABLE}``). It omitted
+    ``PROBE_FAILED`` and ``DDOS_PROTECTION``, so those shipped ``recoverable:
+    false`` beside the human copy "Try again in a moment." — one reply saying
+    the opposite of itself. That shape fails UNSAFE: a code nobody remembered
+    to list is reported terminal. Inverting it to an allow-list of PERMANENT
+    codes makes the forgetful case retryable instead.
+    """
+    _code = code or "UNKNOWN"
     return {
         "ok": False,
-        "code": code or "UNKNOWN",
+        "code": _code,
         "human_message": msg or "Unknown error",
         "debug_context": {"verification_id": vid} if vid else {},
         "correlation_id": cid,
-        "recoverable": code
-        in {"RATE_LIMITED", "EXCHANGE_UNAVAILABLE", "NETWORK_UNAVAILABLE"},
+        "recoverable": (
+            recoverable
+            if recoverable is not None
+            else (
+                _code not in _ROUTE_TERMINAL_ERROR_CODES
+                and _code not in exchange_svc.PERMANENT_VALIDATION_ERROR_CODES
+            )
+        ),
     }
+
+
+def _caller_owns_strategy(
+    supabase: Any, strategy_id: str, user_id: Any
+) -> bool:
+    """PYAPI-01e / C-08 — does ``user_id`` own ``strategy_id``?
+
+    Scoping the strategy_verifications reads by ``strategy_id`` (PYAPI-01d) is
+    necessary but NOT sufficient, because ``context.strategy_id`` is entirely
+    caller-supplied: a caller that supplies a FOREIGN strategy_id simply gets a
+    read that is consistently foreign. This is the second layer.
+
+    **Fails closed on a missing/blank user_id.** A row cannot be owned by
+    nobody, so "no user_id" is a miss, not a bypass — otherwise the whole gate
+    would be opt-out by omission. Every non-teaser production caller forwards
+    ``context.user_id`` (``keys/sync/route.ts:417``,
+    ``finalize-wizard/route.ts:1310``, ``keys/validate-and-encrypt/route.ts:210``,
+    ``csv-finalize/route.ts:1183``), and the I-SEC2 warning below already flags
+    the absent case — this promotes that warning to a refusal on the one path
+    that then reads ANOTHER table by that caller-supplied id.
+
+    Deliberately uses the service-role client: only the csv flow forwards
+    ``X-User-Access-Token`` today, so a user-scoped (RLS-enforcing) client is
+    not available on onboard/resync and the ownership predicate has to be an
+    explicit filter. Forwarding that header on every authenticated flow is a
+    recorded Phase 140.2 obligation.
+
+    Not wrapped in try/except on purpose: a lookup failure is a service-side
+    fault, and answering 403 to it would blame the caller for our outage. The
+    exception propagates, exactly like the draft INSERT below.
+    """
+    if not user_id or not isinstance(user_id, str):
+        return False
+    owned = one(
+        supabase.table("strategies")
+        .select("id")
+        .eq("id", strategy_id)
+        .eq("user_id", user_id)
+        .maybe_single()
+        .execute()
+    )
+    return owned is not None
 
 
 def _trade_to_dict(t: Trade | dict[str, Any]) -> dict[str, Any]:
@@ -452,6 +606,143 @@ def _is_long_fetch(body: _ProcessKeyBody) -> bool:
     return body.flow_type in {"onboard", "resync"}
 
 
+# PYAPI-09 (Phase 140.1) — the WIZARD_DUPLICATE reply contract.
+#
+# `queued` used to mean "this call reached the enqueue statement", which is
+# unobservable to the caller and was FALSE BY CONSTRUCTION on the duplicate
+# path: that path returns ~170 lines above the enqueue. It now means:
+#
+#     a non-terminal compute_job exists for this verification at the moment
+#     of reply
+#
+# — a predicate the caller can act on, and one this code makes TRUE rather than
+# merely asserting. `job_state` names the three cases the old blanket
+# `queued:false` collapsed into one (140.1-RESEARCH Q4):
+#
+#   "not_applicable" — no background job applies: a synchronous flow, or a
+#                      verification that already finished
+#   "running"        — a compute_job for this strategy is already in flight
+#   "enqueued"       — a compute_job exists because this call put it there
+#
+# strategy_verifications statuses a long-fetch session can still be resumed
+# from. Anything else is a FINISHED session: `_enqueue_compute_job_internal`
+# dedupes only over non-terminal job statuses, so an unguarded re-enqueue there
+# would mint a fresh job on every stray refresh and silently re-sync a
+# verification the user already completed.
+_RESUMABLE_VERIFICATION_STATUSES = frozenset({"draft"})
+
+# compute_jobs statuses that mean "already being worked" rather than "waiting".
+# Mirrors the non-terminal set _enqueue_compute_job_internal dedupes over
+# (migrations/20260716090000...sql:181+) minus 'pending'.
+_IN_FLIGHT_JOB_STATUSES = frozenset({"running", "done_pending_children"})
+
+
+def _resume_duplicate_job(
+    *,
+    supabase: Any,
+    body: _ProcessKeyBody,
+    strategy_id: Any,
+    existing: dict[str, Any],
+    correlation_id: str,
+) -> tuple[bool, str]:
+    """Make an idempotent hit's ``(queued, job_state)`` true, and return it.
+
+    This is the fix for C-19: re-calling ``enqueue_compute_job`` on the
+    duplicate path is safe because the RPC already dedupes on
+    ``(target, kind)`` over non-terminal statuses and returns the existing id
+    instead of inserting — so a live job is not duplicated, and a MISSING job
+    (the wedge: the draft INSERT committed, the enqueue never ran) is created.
+    That behaviour is a shared RPC's, with many other callers, so it is pinned
+    by ``supabase/tests/test_enqueue_compute_job_dedupe_non_terminal.sql``
+    rather than assumed.
+
+    The RPC failure is deliberately NOT swallowed — it propagates exactly as it
+    does on the fresh enqueue below. Reporting ``queued`` for an enqueue that
+    raised would re-create the same lie in a new place.
+    """
+    if not _is_long_fetch(body):
+        return False, "not_applicable"
+    if existing.get("status") not in _RESUMABLE_VERIFICATION_STATUSES:
+        return False, "not_applicable"
+
+    job_id = supabase.rpc(
+        "enqueue_compute_job",
+        {
+            "p_strategy_id": strategy_id,
+            "p_kind": "process_key_long",
+            "p_metadata": {
+                "correlation_id": correlation_id,
+                "verification_id": existing["id"],
+                "flow_type": body.flow_type,
+                "source": body.source,
+            },
+        },
+    ).execute().data
+    log.info(
+        "process_key.duplicate_resumed",
+        verification_id=existing["id"],
+        job_id=str(job_id),
+    )
+
+    # The RPC returns only the job id, so read the state back to label it. This
+    # read is LABEL-ONLY: the RPC returning an id already establishes that a
+    # non-terminal job exists, so a failure here cannot make `queued` wrong —
+    # it can only cost precision between the two true labels. Degrade to
+    # "enqueued" with a WARN rather than failing an otherwise-correct reply.
+    job_state = "enqueued"
+    if job_id:
+        try:
+            job = one(
+                supabase.table("compute_jobs")
+                .select("status")
+                .eq("id", job_id)
+                .maybe_single()
+                .execute()
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "process_key.duplicate_job_state_read_failed",
+                error=str(exc)[:200],
+                job_id=str(job_id),
+            )
+            job = None
+        if job is not None and job.get("status") in _IN_FLIGHT_JOB_STATUSES:
+            job_state = "running"
+    return True, job_state
+
+
+def _wizard_duplicate_reply(
+    *,
+    existing: dict[str, Any],
+    correlation_id: str,
+    queued: bool,
+    job_state: str,
+) -> dict[str, Any]:
+    """The single WIZARD_DUPLICATE body, shared by BOTH emitters.
+
+    There are two of them — the pre-check and the 23505 race-winner arm — and
+    they drifted apart in every prior fix to this contract. One builder means a
+    future change to the shape cannot land on one arm only.
+
+    Status 200 (NOT 409) per the API-7 spec: idempotency is a feature, not a
+    failure — hence `ok: True` (PYAPI-10a). `code` is present alongside it
+    because "this was a duplicate" is a condition worth naming even on a
+    success; the contract is `code` MUST be a non-empty string when `ok` is
+    false, not that it is absent when `ok` is true.
+    """
+    return {
+        "ok": True,
+        "code": "WIZARD_DUPLICATE",
+        "idempotent": True,
+        "verification_id": existing["id"],
+        "status": existing["status"],
+        "trust_tier": existing.get("trust_tier"),
+        "correlation_id": correlation_id,
+        "queued": queued,
+        "job_state": job_state,
+    }
+
+
 async def _run_validate_only(
     *,
     body: "_ProcessKeyBody",
@@ -515,7 +806,16 @@ async def _run_validate_only(
 
 
 @router.post("", response_model=None)
-@limiter.limit("100/hour", key_func=_process_key_rate_limit_key)
+# TWO stacked limits, evaluated in ONE pass (RESEARCH G-9): functools.wraps
+# keeps __module__.__name__ identical, so both land under the same endpoint name
+# and the outermost wrapper evaluates the whole list before setting
+# request.state._rate_limiting_complete. Inner = per-identity (tenant / anon /
+# unverified); outer = the platform ceiling. Both are pinned by live-TestClient
+# tests because RESEARCH read slowapi 0.1.9 while production pins 0.1.10
+# (ASSUMPTION-1) — if a patch bump broke stacking, one limit would silently
+# never evaluate.
+@limiter.limit(_process_key_limit_for, key_func=_process_key_rate_limit_key)
+@limiter.limit(_process_key_ceiling_limit_for, key_func=_process_key_ceiling_key)
 async def process_key(
     request: Request,
     body: Annotated[_ProcessKeyBody, Body()],
@@ -706,53 +1006,30 @@ async def process_key(
         context=body.context,
     )
 
-    # 1) Idempotency check (BACKBONE-08): wizard_session_id UNIQUE INDEX.
-    #
     # strategy_verifications.wizard_session_id is NOT NULL. The wizard-driven
     # flows (onboard/csv finalize) always supply one, but `resync` via
     # /api/keys/sync carries no wizard_session_id (it re-syncs an existing
     # strategy, not a wizard session) -- so the draft insert below 23502'd with
     # a NULL wizard_session_id once resync got past the validator. Mint a fresh
-    # uuid4 when absent (same pattern teaser uses above). resync is then
-    # deliberately not idempotent-by-session (each refresh is its own
-    # verification), which matches teaser's contract; downstream sync_trades
-    # enqueues still dedupe on (strategy_id, kind).
+    # uuid4 when absent (same pattern teaser uses above).
     wizard_session_id = body.context.get("wizard_session_id") or str(uuid.uuid4())
-    if wizard_session_id:
-        existing = one(
-            supabase.table("strategy_verifications")
-            .select("*")
-            .eq("wizard_session_id", wizard_session_id)
-            .maybe_single()
-            .execute()
-        )
-        # `.maybe_single().execute()` returns None (NOT a response object with
-        # data=None) when zero rows match — which is the normal case for a
-        # brand-new upload (no prior strategy_verifications row for this
-        # wizard_session_id). The pre-fix `if existing.data:` therefore raised
-        # `AttributeError: 'NoneType' object has no attribute 'data'` and 500'd
-        # the ENTIRE ingestion for every first-time upload once the
-        # unified-backbone flag was flipped on. Guard the None: absent row →
-        # not idempotent → fall through to the normal insert path below.
-        if existing:
-            log.info(
-                "process_key.idempotent_hit",
-                verification_id=existing["id"],
-            )
-            # API-7 — emit WIZARD_DUPLICATE so the wizard renders the
-            # idempotent-resume affordance. Pre-fix this path returned a
-            # plain happy-shape dict and the wizard had no observable
-            # signal that the row pre-existed. Status 200 (NOT a 409) per
-            # the spec — idempotency is a feature, not a failure.
-            return {
-                "code": "WIZARD_DUPLICATE",
-                "idempotent": True,
-                "verification_id": existing["id"],
-                "status": existing["status"],
-                "trust_tier": existing.get("trust_tier"),
-                "correlation_id": correlation_id,
-                "queued": False,
-            }
+
+    # PYAPI-09d (Phase 140.1) — idempotency-by-session is available ONLY to a
+    # flow that CARRIES a caller-supplied wizard_session_id.
+    #
+    # resync (/api/keys/sync sends `context: {strategy_id, user_id}` only) and
+    # teaser (its session id is overwritten with a fresh uuid4 above) both run
+    # on a SERVER-MINTED id, so their duplicate arm was unreachable by luck — a
+    # fresh uuid4 never matches — rather than by construction. That left
+    # `keys/sync/route.ts:438`'s `WIZARD_DUPLICATE` branch as dead code which
+    # nonetheless documented a reachable state. Make it unreachable by
+    # construction instead: a server-minted session id never consults, and
+    # never emits, the idempotent-hit path. Each resync/teaser submission is
+    # its own verification; downstream sync_trades enqueues still dedupe on
+    # (strategy_id, kind).
+    idempotent_by_session = body.flow_type != "teaser" and bool(
+        body.context.get("wizard_session_id")
+    )
 
     # CR-02 fix (REVIEW.md 2026-05-08): two flag-on entry routes do NOT carry
     # strategy_id because the wizard step runs BEFORE the strategy row exists:
@@ -863,6 +1140,96 @@ async def process_key(
                 None,
             ),
         )
+    # 1) Ownership gate (PYAPI-01e / C-08, Phase 140.1).
+    #
+    # From here down the handler reads and writes rows keyed on the
+    # caller-supplied `strategy_id`. Assert the caller owns it BEFORE the first
+    # such read, so a foreign strategy_id can never produce a row — not even
+    # one the reply then echoes. teaser is exempt: it has no tenant, and its
+    # strategy_id is force-overwritten with TEASER_ANCHOR_STRATEGY_ID above, so
+    # there is nothing caller-supplied left to check.
+    if body.flow_type != "teaser" and not _caller_owns_strategy(
+        supabase, strategy_id, body.context.get("user_id")
+    ):
+        log.warning(
+            "process_key.strategy_not_owned",
+            flow_type=body.flow_type,
+            source=body.source,
+            strategy_id=strategy_id,
+        )
+        return JSONResponse(
+            status_code=403,
+            content=_envelope_error(
+                "STRATEGY_NOT_OWNED",
+                "context.strategy_id is not owned by context.user_id.",
+                correlation_id,
+                None,
+            ),
+        )
+
+    # 2) Idempotency check (BACKBONE-08): the wizard_session_id UNIQUE INDEX.
+    #
+    # POSITION IS LOAD-BEARING (Phase 140.1, C-19/C-20 + PYAPI-01d). This block
+    # used to run ~150 lines earlier, above the `strategy_id is None` branch,
+    # which caused two distinct defects:
+    #   (a) there was no strategy_id in scope yet, so the read could only
+    #       filter on the caller-supplied wizard_session_id — a platform-global
+    #       key — and returned another tenant's row on any collision;
+    #   (b) it short-circuited EVERY flow, including csv-finalize. Once
+    #       finalize_csv_strategy had written an SV row carrying that session
+    #       id, every later csv call for the session hit this return instead of
+    #       the finalize branch — a plain double-submit, no timeout needed.
+    # Running it here fixes both: `strategy_id` exists (so the read key equals
+    # the DB's `UNIQUE (strategy_id, wizard_session_id)` key), and the arms that
+    # write no SV row at all — validate-only and the csv-finalize delegate —
+    # have already returned above.
+    if idempotent_by_session:
+        existing = one(
+            supabase.table("strategy_verifications")
+            .select("*")
+            .eq("strategy_id", strategy_id)
+            .eq("wizard_session_id", wizard_session_id)
+            .maybe_single()
+            .execute()
+        )
+        # `.maybe_single().execute()` returns None (NOT a response object with
+        # data=None) when zero rows match — which is the normal case for a
+        # brand-new upload (no prior strategy_verifications row for this
+        # wizard_session_id). The pre-fix `if existing.data:` therefore raised
+        # `AttributeError: 'NoneType' object has no attribute 'data'` and 500'd
+        # the ENTIRE ingestion for every first-time upload once the
+        # unified-backbone flag was flipped on. Guard the None: absent row →
+        # not idempotent → fall through to the normal insert path below.
+        if existing:
+            log.info(
+                "process_key.idempotent_hit",
+                verification_id=existing["id"],
+            )
+            # API-7 — emit WIZARD_DUPLICATE so the wizard renders the
+            # idempotent-resume affordance. Pre-fix this path returned a
+            # plain happy-shape dict and the wizard had no observable
+            # signal that the row pre-existed.
+            #
+            # PYAPI-09a: it also returned a hardcoded `queued: False` without
+            # ever reaching the enqueue below, so a session whose draft INSERT
+            # committed but whose enqueue never ran was told "duplicate, not
+            # queued" on every subsequent retry — forever, with no state from
+            # which it could recover. Resume the job first, then report what is
+            # actually true.
+            _queued, _job_state = _resume_duplicate_job(
+                supabase=supabase,
+                body=body,
+                strategy_id=strategy_id,
+                existing=existing,
+                correlation_id=correlation_id,
+            )
+            return _wizard_duplicate_reply(
+                existing=existing,
+                correlation_id=correlation_id,
+                queued=_queued,
+                job_state=_job_state,
+            )
+
     trust_tier = "csv_uploaded" if body.source == "csv" else "api_verified"
     try:
         draft_insert = (
@@ -887,6 +1254,20 @@ async def process_key(
         # 23505 and return the row that actually won the race.
         msg = str(exc)
         if "23505" in msg or "duplicate key" in msg.lower():
+            # PYAPI-09d — a server-minted session id has no idempotent identity
+            # (see `idempotent_by_session` above), so a 23505 on such a request
+            # is NOT a wizard duplicate: it is a real constraint violation from
+            # some other index, and returning someone's row for it would be a
+            # fabricated success. Surface the original error.
+            if not idempotent_by_session:
+                raise
+            # PYAPI-01d — the SECOND read site of the cross-tenant class, and
+            # the more reachable one: with `UNIQUE (strategy_id,
+            # wizard_session_id)` live, this is the arm a genuine collision
+            # takes. It MUST carry the same tenant scope as the pre-check —
+            # filtering on wizard_session_id alone would re-fetch, and echo,
+            # another strategy's row.
+            #
             # Re-fetch the row that won the race. Use maybe_single (returns
             # None on zero rows) rather than single (raises PGRST116): if a
             # TOCTOU delete / RLS hide between the failed insert and this
@@ -895,6 +1276,7 @@ async def process_key(
             race_winner = one(
                 supabase.table("strategy_verifications")
                 .select("*")
+                .eq("strategy_id", strategy_id)
                 .eq("wizard_session_id", wizard_session_id)
                 .maybe_single()
                 .execute()
@@ -906,16 +1288,24 @@ async def process_key(
                 verification_id=race_winner["id"],
             )
             # API-7 — race-resolved idempotent hit emits WIZARD_DUPLICATE
-            # for the same reason as the SELECT-pre-check path above.
-            return {
-                "code": "WIZARD_DUPLICATE",
-                "idempotent": True,
-                "verification_id": race_winner["id"],
-                "status": race_winner["status"],
-                "trust_tier": race_winner.get("trust_tier"),
-                "correlation_id": correlation_id,
-                "queued": False,
-            }
+            # for the same reason as the SELECT-pre-check path above, and is
+            # enqueue-aware for the same reason (PYAPI-09a): losing the insert
+            # race says nothing about whether the winner's job was ever
+            # enqueued, so this arm must resume it too. Both emitters go
+            # through one builder so the contract cannot drift between them.
+            _queued, _job_state = _resume_duplicate_job(
+                supabase=supabase,
+                body=body,
+                strategy_id=strategy_id,
+                existing=race_winner,
+                correlation_id=correlation_id,
+            )
+            return _wizard_duplicate_reply(
+                existing=race_winner,
+                correlation_id=correlation_id,
+                queued=_queued,
+                job_state=_job_state,
+            )
         raise
 
     # 3) Long-fetch dispatch (BACKBONE-09) — onboard/resync go to worker dyno.
@@ -935,6 +1325,8 @@ async def process_key(
         ).execute()
         log.info("process_key.queued", verification_id=verification_id)
         return {
+            # PYAPI-10a — accepting the session for the worker is a success.
+            "ok": True,
             "queued": True,
             "verification_id": verification_id,
             "correlation_id": correlation_id,
@@ -1001,8 +1393,82 @@ async def process_key(
                 correlation_id=correlation_id,
                 error=str(_rpc_err),
             )
-        return _envelope_error(
-            _reject_code, val.human_message, correlation_id, verification_id
+        # PYAPIFIX-02 (H-1, Phase 140.1.1) — VENUE-TRANSIENT PRE-GATE. This
+        # MUST precede the 403 return below, mirroring long_fetch.py:296-319
+        # where the transient escape comes first and the scope verdict second.
+        #
+        # The gate above fires on `read_only is False`, and
+        # services/exchange.py derives read_only=False from the fail-CLOSED
+        # {read:T, trade:T, withdraw:T} default whenever the permission probe
+        # hit a network / WAF / exchange-5xx failure (DOGFOOD-3) — those scopes
+        # are NOT evidence. Delivering that as 403 tells the caller their
+        # credentials are at fault and that an identical retry cannot succeed,
+        # when the truth is that their exchange blipped and a retry WOULD
+        # succeed. 424 FAILED_DEPENDENCY is the UPSTREAM-TRANSIENT class
+        # (STATUS_CONTRACT R-1): not the caller's fault, retry can succeed,
+        # still 4xx and therefore breaker-inert.
+        #
+        # The condition is an ALLOW-LIST of PERMANENT codes defaulting to
+        # transient, never a denylist of transient ones. A denylist fails
+        # UNSAFE — a venue code nobody remembered to list becomes a permanent
+        # credential accusation — and is literally the shape of the defect
+        # being closed here. A caller-fault code must be NAMED in the shared
+        # allow-list (services/exchange.py) to stay on the 403 path.
+        #
+        # `val.error_code is not None` keeps OUR OWN VALIDATION_UNEXPECTED
+        # fallback on the permanent path: no error_code at all means the
+        # adapter confirmed a write-capable key and had no scope code to name
+        # it, which is a caller fault. An ADAPTER-set VALIDATION_UNEXPECTED may
+        # be a transient exchange error and does escape here — the same
+        # distinction long_fetch draws with `_is_unexpected_fallback`.
+        if (
+            val.error_code is not None
+            and val.error_code
+            not in exchange_svc.PERMANENT_VALIDATION_ERROR_CODES
+        ):
+            log.warning(
+                "process_key.venue_transient_validation",
+                reject_code=_reject_code,
+                read_only=val.read_only,
+                verification_id=verification_id,
+                correlation_id=correlation_id,
+            )
+            # recoverable is STATED, not derived: everything reaching this arm
+            # is retryable by construction — that is what selected the arm.
+            # The envelope key set is identical to the 403 return below.
+            return JSONResponse(
+                status_code=424,
+                content=_envelope_error(
+                    _reject_code,
+                    val.human_message,
+                    correlation_id,
+                    verification_id,
+                    recoverable=True,
+                ),
+            )
+
+        # PYAPI-10b (C-22, Phase 140.1) — this is a VERDICT about the caller's
+        # credentials, and it used to be delivered as HTTP 200 with ok:false. A
+        # consumer that branches on the status line alone — which TRAP-2 says it
+        # may have to, since an unhandled fault is a bodyless 500 — read that as
+        # "your write-capable key was accepted". 403 per PYAPI-05's CALLER class:
+        # the caller's credentials are at fault, nothing of ours failed, an
+        # identical retry cannot succeed, and a 4xx is breaker-inert.
+        #
+        # The gate above is deliberately unified, so this covers ordinary
+        # validation failures (`not val.valid` — AUTH_FAILED, PERMISSION_DENIED,
+        # a malformed CSV) as well as the two scope arms. They are all
+        # caller-credential/input faults, and one return site means the security
+        # arm cannot drift back to a success status while the others move.
+        #
+        # The body is unchanged: the route's own top-level DESIGN-05 envelope,
+        # not error_contract's `body.detail` one. Same envelope as the 401/422
+        # arms above, wrapped the same way.
+        return JSONResponse(
+            status_code=403,
+            content=_envelope_error(
+                _reject_code, val.human_message, correlation_id, verification_id
+            ),
         )
 
     supabase.rpc(
@@ -1196,6 +1662,14 @@ async def process_key(
     )
 
     return {
+        # PYAPI-10a — the shape consumers used to SNIFF (they keyed on
+        # `verification_id` being present: verify-strategy/route.ts:197-198,
+        # csv-finalize/route.ts:1213-1214). `code` is an explicit null rather
+        # than an absent key: this terminal success names no sub-condition, and
+        # making the absence explicit means a consumer reading `body.code` on
+        # the one shape it used to sniff never gets `undefined`.
+        "ok": True,
+        "code": None,
         "verification_id": verification_id,
         "status": "published",
         "trust_tier": trust_tier,

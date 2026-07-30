@@ -219,7 +219,9 @@ class PaginatedSelectTruncated(RuntimeError):
     UUIDs (e.g. ``"position_snapshots strategy_id=<uuid>"``) when the
     query is per-strategy and the operator value of having the UUID
     in the error outweighs log cardinality. The hint flows into the
-    client-visible 503 detail in `routers/match.py`, so callers must
+    client-visible detail in `routers/match.py` — a **400**
+    ``EVAL_WINDOW_TOO_LARGE`` since PYAPI-05 (it is the caller's window
+    that is too large, not an outage), formerly a 503 — so callers must
     not embed multi-tenant or PII payloads.
     """
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as _dt
+import re
 from typing import Any
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -1388,6 +1389,41 @@ class TestForceRecomputeThrottle:
         )
         assert "throttled" in r.json()["detail"].lower()
 
+        # PYAPIFIX2-04 — the throttle must ADVERTISE the wait it is enforcing.
+        # Without Retry-After the caller either gives up on a condition that
+        # clears in seconds, or hammers immediately and forever: the retry storm
+        # the 30s floor exists to prevent, aimed at the floor itself.
+        retry_after = r.headers.get("Retry-After")
+        assert retry_after is not None, (
+            "a 429 is the one CALLER fault an identical retry clears — the "
+            "header is the only thing that says WHEN"
+        )
+
+        # (a) CONSISTENCY: the body already promises a number ("retry after Ns").
+        # The header must be that same number. A header that disagrees with the
+        # sentence beside it is worse than either alone — the caller cannot tell
+        # which to believe. This is also why the value is NOT clamped with
+        # max(1, ...): near window expiry int() truncation yields 0, and
+        # "Retry-After: 0" (retry now) is both RFC-valid and exactly what the
+        # body says.
+        promised = re.search(r"retry after (\d+)s", r.json()["detail"])
+        assert promised is not None, (
+            "the throttle copy interpolates the wait; if that changed, this "
+            "consistency pin must be re-derived, not deleted"
+        )
+        assert retry_after == promised.group(1)
+
+        # (b) VALUE: a tight band, not a bare inequality. Survivor #5
+        # (140.1.1-REVIEW) proved `0 < x <= window` has no teeth — it passes for
+        # any window, so widening 30s to an hour ships green under it. The bucket
+        # was stamped microseconds ago, so the wait must be within a whisker of
+        # the full 30-second interval. `30` is a LITERAL typed here, never
+        # imported from routers.match.
+        assert 27 < int(retry_after) <= 30, (
+            f"a freshly-stamped bucket must advertise nearly the whole 30s "
+            f"interval; got {retry_after!r}"
+        )
+
     def test_force_true_allowed_after_interval_clears(
         self, client, monkeypatch
     ):
@@ -2604,7 +2640,14 @@ class TestIsAllocatorProfileErrorHandling:
         _is_allocator_profile signals a transient DB error via None.
 
         A real allocator must never see "allocator_id is not an allocator
-        profile" during a Supabase connection blip."""
+        profile" during a Supabase connection blip.
+
+        PYAPI-05 (S-14): the 503 now carries the R-2 envelope at
+        ``body.detail`` — ``dependency:"supabase"`` so 140.2 keys the breaker
+        on Supabase alone instead of globally, plus a ``Retry-After``. The
+        human copy survives as a SCALAR string at ``body.detail.detail``; the
+        original "is it legible as transient?" assertion is kept, moved to
+        where the string now lives."""
         from routers import match as match_mod
 
         alloc_id = str(uuid4())
@@ -2618,8 +2661,23 @@ class TestIsAllocatorProfileErrorHandling:
         assert r.status_code == 503, (
             "transient _is_allocator_profile error must return 503, not 422"
         )
-        body = r.json()
-        assert "retry" in body.get("detail", "").lower() or "temporarily" in body.get("detail", "").lower(), (
+        envelope = r.json()["detail"]
+        assert envelope["dependency"] == "supabase", (
+            "a SERVICE-TRANSIENT 503 must name WHICH dependency failed so the "
+            "breaker is keyed per-dependency, never globally (O-2)"
+        )
+        assert envelope["retryable"] is True
+        retry_after = r.headers.get("Retry-After")
+        assert retry_after is not None, "a SERVICE-TRANSIENT 503 must carry Retry-After"
+        # Literal, NOT imported from RETRY_AFTER_SECONDS — this pins the wire value.
+        # A bare `> 0` inequality was survivor #6: 15 -> 900 shipped green, and 900s
+        # is a fifteen-minute wait advertised for a Supabase blip.
+        assert retry_after == "15"
+        human = envelope["detail"]
+        assert isinstance(human, str), (
+            "body.detail.detail is always a scalar human string (contract §2)"
+        )
+        assert "retry" in human.lower() or "temporarily" in human.lower(), (
             "503 response must hint that the error is transient"
         )
 

@@ -1,0 +1,655 @@
+"""PYAPI-05 — the status-attributability contract at S-13..S-20 and S-23.
+
+The contract itself lives at ``analytics-service/docs/STATUS_CONTRACT.md``; its
+executable half is ``services/error_contract.py``. Plan 140.1-03 pinned
+S-01..S-12 in ``tests/test_status_contract_exchange_internal.py``; this suite
+pins the remaining nine explicit sites: ``routers/match.py`` S-13..S-17,
+``routers/simulator.py`` S-18, ``routers/portfolio.py`` S-19/S-20 and
+``main.py`` S-23.
+
+Why each case matters (Rule 9 — these encode ECONOMICS, not the
+implementation's own formula):
+
+  - **A caller's oversized eval window answering ``503`` (S-16) is a lie about
+    our uptime.** The service is healthy; the request asked for more rows than
+    the paginator will drain. Under 140.2 a ``503`` counts toward the breaker,
+    so an admin hammering ``lookback_days=365`` would trip a platform-wide
+    outage for everybody else. The truthful answer is ``400`` — *narrow your
+    window* — and a 4xx is breaker-inert by construction.
+  - **A raw exception interpolated into ``detail`` (S-15/S-17) ships our
+    internals to the caller.** ``f"Scoring failed: {err}"`` renders whatever a
+    pandas/Supabase exception happens to carry — table names, row payloads,
+    connection strings. The two canary tests raise an exception whose message
+    contains ``CANARY_ERR`` and assert **zero** occurrences anywhere in the
+    serialized response; they turn RED the moment anyone restores the
+    interpolation. The diagnostic is not lost — it moves to a structured
+    server-side log carrying a ``correlation_id`` that IS in the body.
+  - **``SERVICE_KEY`` unset answering ``503`` (S-23) is the permanent-503 flap
+    shape.** Every request to every guarded route answers ``503`` until an
+    operator sets an env var, so the breaker trips, expires, re-probes, trips
+    again, forever — and no retry can ever clear it (A-08/A-25/C-17). R-1 says
+    an operator-only fault is ``500`` with ``retryable:false``.
+  - **A Supabase insert that returns no row (S-19) is a transient blip, not a
+    bug.** Answering ``500`` marks it non-retryable, so the caller gives up on
+    a condition that clears in seconds.
+  - **``/health``'s ``503`` (S-24) is CORRECT and must survive this plan
+    untouched** — routing the health warmer through the seam would let the
+    breaker block its own recovery probe (O-7). It is pinned here precisely so
+    a future edit cannot quietly "unify" it with S-23.
+
+ORACLE DISCIPLINE (programme non-negotiable #3): every expected status int and
+every expected code string below is a **literal typed into this file**. Nothing
+is imported from ``services.error_contract`` — an oracle that reads its
+expectation back out of the thing under test cannot fail. Ten simultaneous
+semantic mutations to the Phase-140 seam core once produced a byte-identical
+``8859 passed`` for exactly that reason.
+"""
+from __future__ import annotations
+
+from unittest.mock import MagicMock
+from uuid import uuid4
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+
+# --------------------------------------------------------------------------- #
+# routers/match.py — S-13..S-17
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture()
+def match_client() -> TestClient:
+    """Bare FastAPI app with ``routers.match`` mounted — no middleware.
+
+    Cloned from ``tests/test_match_router.py``'s fixture (Rule 11 — match the
+    existing idiom rather than inventing a second one).
+    """
+    from routers.match import router
+
+    app = FastAPI()
+    app.include_router(router)
+    return TestClient(app)
+
+
+def _arrange_recompute(monkeypatch, scorer) -> None:
+    """Walk POST /api/match/recompute up to the scoring call with ``scorer``."""
+    from routers import match as match_mod
+
+    monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
+    monkeypatch.setattr(match_mod, "_engine_is_enabled", lambda: True)
+
+    async def _no_skip(allocator_id, force):
+        return False
+
+    monkeypatch.setattr(match_mod, "_should_skip_allocator", _no_skip)
+    monkeypatch.setattr(
+        match_mod,
+        "_load_candidate_universe",
+        lambda *_: {"strategies_by_id": {"s1": {}}, "returns_by_id": {}},
+    )
+    monkeypatch.setattr(match_mod, "_score_one_allocator", scorer)
+
+
+def test_s13_actor_admin_check_transient_is_503_naming_supabase(
+    match_client, monkeypatch
+) -> None:
+    """S-13 — ``_is_admin_profile`` returned its transient ``None`` sentinel.
+
+    Supabase is genuinely unavailable, so this one IS ours and IS transient:
+    503, ``dependency:"supabase"`` so 140.2 keys the breaker on Supabase alone
+    rather than globally (O-2), and a ``Retry-After`` so 140.3 can name the
+    real wait instead of guessing (O-6).
+    """
+    from routers import match as match_mod
+
+    monkeypatch.setattr(match_mod, "_is_admin_profile", lambda *_: None)
+    monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: True)
+
+    resp = match_client.post(
+        "/api/match/recompute",
+        json={
+            "allocator_id": str(uuid4()),
+            "actor_id": str(uuid4()),
+            "force": False,
+        },
+    )
+
+    assert resp.status_code == 503
+    envelope = resp.json()["detail"]
+    assert envelope["code"] == "ADMIN_CHECK_UNAVAILABLE"
+    assert envelope["dependency"] == "supabase"
+    assert envelope["retryable"] is True
+    assert isinstance(envelope["detail"], str)
+    retry_after = resp.headers.get("Retry-After")
+    assert retry_after is not None, "a SERVICE-TRANSIENT 503 must carry Retry-After"
+    # Literal, NOT imported from RETRY_AFTER_SECONDS — this pins the wire value.
+    # A bare `> 0` inequality was survivor #6: 15 -> 900 shipped green, and 900s
+    # is a fifteen-minute wait advertised for a Supabase blip.
+    assert retry_after == "15"
+
+
+def test_s14_profile_role_check_transient_is_503_naming_supabase(
+    match_client, monkeypatch
+) -> None:
+    """S-14 — ``_is_allocator_profile`` returned its transient ``None``.
+
+    M-2's original reasoning still holds (a real allocator must not be told
+    "you are not an allocator" during a DB blip); this adds the attribution.
+    """
+    from routers import match as match_mod
+
+    monkeypatch.setattr(match_mod, "_is_allocator_profile", lambda *_: None)
+
+    resp = match_client.post(
+        "/api/match/recompute",
+        json={"allocator_id": str(uuid4()), "force": False},
+    )
+
+    assert resp.status_code == 503
+    envelope = resp.json()["detail"]
+    assert envelope["code"] == "ROLE_CHECK_UNAVAILABLE"
+    assert envelope["dependency"] == "supabase"
+    assert envelope["retryable"] is True
+    retry_after = resp.headers.get("Retry-After")
+    assert retry_after is not None, "a SERVICE-TRANSIENT 503 must carry Retry-After"
+    # Literal, NOT imported from RETRY_AFTER_SECONDS — this pins the wire value.
+    # A bare `> 0` inequality was survivor #6: 15 -> 900 shipped green, and 900s
+    # is a fifteen-minute wait advertised for a Supabase blip.
+    assert retry_after == "15"
+
+
+def test_s15_scoring_failure_is_permanent_500(match_client, monkeypatch) -> None:
+    """S-15 — a crash inside ``_score_one_allocator`` is OUR bug.
+
+    500 ``retryable:false``: an identical retry re-runs the identical scoring
+    and crashes identically, so counting it toward the breaker (or inviting a
+    retry) buys nothing.
+    """
+
+    async def _boom(allocator_id, universe):
+        raise RuntimeError("synthetic scoring crash")
+
+    _arrange_recompute(monkeypatch, _boom)
+
+    resp = match_client.post(
+        "/api/match/recompute",
+        json={"allocator_id": str(uuid4()), "force": False},
+    )
+
+    assert resp.status_code == 500
+    envelope = resp.json()["detail"]
+    assert envelope["code"] == "SCORING_FAILED"
+    assert envelope["retryable"] is False
+    assert envelope["dependency"] is None
+    assert isinstance(envelope["detail"], str)
+    assert "Retry-After" not in resp.headers
+
+
+def test_s15_scoring_failure_leaks_no_exception_text(
+    match_client, monkeypatch, caplog
+) -> None:
+    """S-15 canary — the exception message must not reach the caller.
+
+    ``f"Scoring failed: {err}"`` shipped whatever the exception carried. This
+    fails the moment the interpolation is restored, and separately proves the
+    diagnostic still reaches the operator's log.
+    """
+
+    async def _boom(allocator_id, universe):
+        raise RuntimeError("CANARY_ERR internal table row payload")
+
+    _arrange_recompute(monkeypatch, _boom)
+
+    with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+        resp = match_client.post(
+            "/api/match/recompute",
+            json={"allocator_id": str(uuid4()), "force": False},
+        )
+
+    assert resp.status_code == 500
+    assert resp.text.count("CANARY_ERR") == 0, (
+        "the exception message must not be interpolated into the response body"
+    )
+    # The diagnostic moved server-side, it was not deleted.
+    logged = " ".join(rec.getMessage() for rec in caplog.records)
+    assert "CANARY_ERR" in logged, (
+        "stripping {err} from the body must not destroy the operator's diagnostic"
+    )
+    # ...and the body carries the id that joins the two.
+    correlation_id = resp.json()["detail"]["correlation_id"]
+    assert correlation_id
+    assert correlation_id in logged
+
+
+def test_s16_eval_window_too_large_is_caller_400(match_client, monkeypatch) -> None:
+    """S-16 — ``PaginatedSelectTruncated`` means the CALLER asked for too much.
+
+    The paginator hit its hard cap draining the caller's ``lookback_days``
+    window. Nothing of ours is down, so there is no dependency to name and no
+    wait to advertise — and, crucially, no breaker input.
+    """
+    from routers import match as match_mod
+    from services.db import PaginatedSelectTruncated
+
+    def _truncated(lookback_days, partner_tag):
+        raise PaginatedSelectTruncated(
+            page_count=1000, page_size=1000, hint="compute_hit_rate n_allocators=42"
+        )
+
+    monkeypatch.setattr(match_mod, "compute_hit_rate_metrics", _truncated)
+
+    resp = match_client.get("/api/match/eval?lookback_days=365")
+
+    assert resp.status_code == 400
+    envelope = resp.json()["detail"]
+    assert envelope["code"] == "EVAL_WINDOW_TOO_LARGE"
+    assert envelope["dependency"] is None
+    assert envelope["retryable"] is False
+    assert "Retry-After" not in resp.headers
+    # The copy must tell the caller what to DO. "We are down" was the old lie.
+    assert "lookback_days" in envelope["detail"]
+
+
+def test_s17_eval_failure_is_permanent_500(match_client, monkeypatch) -> None:
+    """S-17 — any other crash in the eval aggregation is OUR bug."""
+    from routers import match as match_mod
+
+    def _boom(lookback_days, partner_tag):
+        raise ValueError("synthetic eval crash")
+
+    monkeypatch.setattr(match_mod, "compute_hit_rate_metrics", _boom)
+
+    resp = match_client.get("/api/match/eval")
+
+    assert resp.status_code == 500
+    envelope = resp.json()["detail"]
+    assert envelope["code"] == "EVAL_FAILED"
+    assert envelope["retryable"] is False
+    assert envelope["dependency"] is None
+    assert "Retry-After" not in resp.headers
+
+
+def test_s17_eval_failure_leaks_no_exception_text(
+    match_client, monkeypatch, caplog
+) -> None:
+    """S-17 canary — same discipline as S-15."""
+    from routers import match as match_mod
+
+    def _boom(lookback_days, partner_tag):
+        raise ValueError("CANARY_ERR connection dsn=postgres://u:p@h/db")
+
+    monkeypatch.setattr(match_mod, "compute_hit_rate_metrics", _boom)
+
+    with caplog.at_level("ERROR", logger="quantalyze.analytics"):
+        resp = match_client.get("/api/match/eval")
+
+    assert resp.status_code == 500
+    assert resp.text.count("CANARY_ERR") == 0, (
+        "the exception message must not be interpolated into the response body"
+    )
+    logged = " ".join(rec.getMessage() for rec in caplog.records)
+    assert "CANARY_ERR" in logged
+    correlation_id = resp.json()["detail"]["correlation_id"]
+    assert correlation_id
+    assert correlation_id in logged
+
+
+# --------------------------------------------------------------------------- #
+# routers/simulator.py — S-18
+# --------------------------------------------------------------------------- #
+
+
+def test_s18_simulation_failure_is_permanent_500_keeping_correlation_id(
+    monkeypatch,
+) -> None:
+    """S-18 — a numpy/pandas blow-up inside the sim is OUR bug, permanently.
+
+    This site was already the closest thing to the R-2 envelope in the service
+    (``{error, correlation_id}``); PYAPI-05 aligns it to the shared helper so
+    140.2 reads ONE shape. The correlation_id that G15-007 added — the whole
+    point of the dict detail — must survive the alignment.
+    """
+    from routers import simulator as simulator_router
+    from tests.test_simulator_router import _build_returns_records, _table_router
+
+    supabase_mock = MagicMock()
+    monkeypatch.setattr(simulator_router, "get_supabase", lambda: supabase_mock)
+    monkeypatch.setattr(simulator_router, "log_audit_event", MagicMock(return_value=None))
+    _table_router(
+        supabase_mock,
+        portfolio_data={"id": "p-1"},
+        candidate_data={"id": "c-1", "name": "Candidate Alpha", "status": "published"},
+        portfolio_strategies_data=[{"strategy_id": "s-1", "current_weight": 1.0}],
+        sa_portfolio_data=[
+            {"strategy_id": "s-1", "returns_series": _build_returns_records(60)},
+        ],
+        sa_candidate_data={
+            "strategy_id": "c-1",
+            "returns_series": _build_returns_records(60),
+        },
+    )
+
+    def _boom(**kwargs):
+        raise ValueError("synthetic simulator crash")
+
+    monkeypatch.setattr(simulator_router, "simulate_add_candidate", _boom)
+
+    app = FastAPI()
+    app.state.limiter = simulator_router.limiter
+    app.include_router(simulator_router.router)
+    client = TestClient(app)
+
+    correlation_id = "corr-id-s18"
+    resp = client.post(
+        "/api/simulator",
+        headers={"X-Correlation-Id": correlation_id},
+        json={"portfolio_id": "p-1", "candidate_strategy_id": "c-1", "user_id": "u-1"},
+    )
+
+    assert resp.status_code == 500
+    envelope = resp.json()["detail"]
+    assert envelope["code"] == "SIMULATION_FAILED"
+    assert envelope["retryable"] is False
+    assert envelope["dependency"] is None
+    assert envelope["correlation_id"] == correlation_id
+    assert isinstance(envelope["detail"], str)
+    assert "Retry-After" not in resp.headers
+
+
+# --------------------------------------------------------------------------- #
+# routers/portfolio.py — S-19, S-20
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_s19_analytics_insert_returning_no_row_is_transient_503() -> None:
+    """S-19 — the ``computing`` INSERT succeeded but PostgREST returned no row.
+
+    Nothing about the request is wrong and nothing is permanently broken: this
+    is the Supabase-blip shape, and an identical retry is exactly what should
+    happen. As a 500 the caller was told "do not retry" about a condition that
+    clears in seconds.
+    """
+    from fastapi import HTTPException
+
+    from routers import portfolio as portfolio_mod
+    from tests.test_portfolio_compute_integration import _make_supabase_for_compute
+
+    sb, tables = _make_supabase_for_compute(portfolio_strategies=[], analytics_rows=[])
+    # The INSERT itself does not raise — it comes back with an empty payload.
+    tables["portfolio_analytics"].insert.return_value.execute.return_value = MagicMock(
+        data=[]
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(portfolio_mod, "get_supabase", lambda: sb)
+        with pytest.raises(HTTPException) as excinfo:
+            await portfolio_mod._compute_portfolio_analytics("portfolio-1")
+
+    exc = excinfo.value
+    assert exc.status_code == 503
+    envelope = exc.detail
+    assert envelope["code"] == "ANALYTICS_ROW_NOT_CREATED"
+    assert envelope["dependency"] == "supabase"
+    assert envelope["retryable"] is True
+    assert isinstance(envelope["detail"], str)
+    retry_after = (exc.headers or {}).get("Retry-After")
+    assert retry_after is not None, "a SERVICE-TRANSIENT 503 must carry Retry-After"
+    # Literal, NOT imported from RETRY_AFTER_SECONDS — this pins the wire value.
+    # A bare `> 0` inequality was survivor #6: 15 -> 900 shipped green, and 900s
+    # is a fifteen-minute wait advertised for a Supabase blip.
+    assert retry_after == "15"
+
+
+@pytest.mark.asyncio
+async def test_s20_analytics_computation_failure_is_permanent_500() -> None:
+    """S-20 — the compute pipeline itself raised.
+
+    The row is marked FAILED and the caller is told, permanently. An identical
+    retry re-runs the identical pipeline over the identical rows.
+    """
+    from fastapi import HTTPException
+
+    from routers import portfolio as portfolio_mod
+    from tests.test_portfolio_compute_integration import _make_supabase_for_compute
+
+    sb, tables = _make_supabase_for_compute(portfolio_strategies=[], analytics_rows=[])
+    tables["portfolio_strategies"].select.return_value.eq.return_value.execute.side_effect = (
+        RuntimeError("synthetic compute crash")
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(portfolio_mod, "get_supabase", lambda: sb)
+        with pytest.raises(HTTPException) as excinfo:
+            await portfolio_mod._compute_portfolio_analytics("portfolio-1")
+
+    exc = excinfo.value
+    assert exc.status_code == 500
+    envelope = exc.detail
+    assert envelope["code"] == "PORTFOLIO_ANALYTICS_FAILED"
+    assert envelope["retryable"] is False
+    assert envelope["dependency"] is None
+    assert not (exc.headers or {}).get("Retry-After")
+
+
+# --------------------------------------------------------------------------- #
+# main.py — S-23 (and S-24, pinned as UNCHANGED)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_s23_unconfigured_service_key_is_permanent_500(monkeypatch) -> None:
+    """S-23 — ``SERVICE_KEY`` unset is an operator-only fault, forever.
+
+    As a 503 this was the permanent-flap shape at its worst: EVERY request to
+    EVERY guarded route answers 503 until a human sets an env var, so under
+    140.2 the breaker trips, expires, re-probes, trips again, indefinitely —
+    and no retry can ever clear it. R-1: 500, ``retryable:false``.
+
+    The response must still be RETURNED, never raised: this middleware sits
+    above the ExceptionMiddleware, so a raise escapes to ServerErrorMiddleware,
+    which renders a 500 AND re-raises into Sentry (QUANTALYZE-4). A
+    well-formed JSON body is the proof the return path was taken — the raise
+    path yields ``text/plain`` "Internal Server Error" with no JSON at all.
+    """
+    import httpx
+
+    import main
+
+    monkeypatch.setattr(main, "SERVICE_KEY", None)
+
+    transport = httpx.ASGITransport(app=main.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/cron-sync", headers={"X-Service-Key": "anything"})
+
+    assert resp.status_code == 500
+    body = resp.json()  # raises if the raise-path text/plain body was produced
+    envelope = body["detail"]
+    assert envelope["code"] == "SERVICE_KEY_UNCONFIGURED"
+    assert envelope["retryable"] is False
+    assert envelope["dependency"] is None
+    assert isinstance(envelope["detail"], str)
+    assert "Retry-After" not in resp.headers
+
+
+@pytest.mark.asyncio
+async def test_s24_health_stale_response_is_unchanged(monkeypatch) -> None:
+    """S-24 — ``/health``'s stale 503 is CORRECT and this plan must not touch it.
+
+    ``/health`` is outside the seam by design (O-7): routing the warmer through
+    the seam core lets a cold probe feed ``recordSeamFailure``, after which the
+    breaker blocks its own recovery probe. Pinned here — with the pre-contract
+    top-level body shape, NOT the envelope — so a later "let's unify main.py's
+    two 503s" edit turns this red instead of shipping.
+    """
+    import time as _time
+
+    import httpx
+
+    import main
+
+    monkeypatch.setattr(main, "SERVICE_KEY", "the-configured-key")
+    # Age both the process start and the worker tick past the stale threshold.
+    monkeypatch.setattr(main, "_PROCESS_START_AT", _time.time() - 10_000)
+    monkeypatch.setattr(main, "WORKER_LAST_TICK_AT", _time.time() - 10_000)
+
+    transport = httpx.ASGITransport(app=main.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/health")
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["status"] == "stale"
+    # The envelope must NOT have leaked into /health.
+    assert "detail" not in body
+    assert "retryable" not in body
+
+
+# --------------------------------------------------------------------------- #
+# PYAPIFIX2-04 — every user-facing 429 advertises the wait it is enforcing
+# --------------------------------------------------------------------------- #
+#
+# A 429 is the one CALLER fault an identical retry DOES clear, and the only
+# thing that tells the caller WHEN is ``Retry-After``. Without it a client
+# either gives up on a condition that expires, or retries immediately and
+# forever — the retry storm the throttle existed to prevent, aimed at the
+# throttle itself. These three sites enforce a ONE HOUR window and advertised
+# nothing at all.
+#
+# ``"3600"`` is a string LITERAL typed here, never imported from the routers.
+# Survivor #5 (140.1.1-REVIEW) proved a `0 < x <= window` inequality is not
+# teeth: widening the window ships green under it. The value is the wire
+# contract, so the wire value is what is pinned.
+#
+# ⚠️ Header-only by design. The bodies of these three stay the bare scalar
+# ``{"detail": "<string>"}`` — migrating them would mint a FOURTH 429 body shape
+# in the same phase that deliberately minted a third (PYAPIFIX2-03 at
+# routers/internal.py). Which shape wins is TS-23's owner's call (140.2 / 146).
+# The body assertions below therefore pin the scalar shape as UNCHANGED.
+_EXPECTED_HOURLY_RETRY_AFTER = "3600"
+
+
+def test_simulator_per_user_quota_429_advertises_its_window(monkeypatch) -> None:
+    """``POST /api/simulator``'s per-user hourly quota now carries Retry-After.
+
+    ⚠️ The wait is the WINDOW (``_SIMULATOR_USER_RATE_WINDOW_SEC`` = 1 hour),
+    not the LIMIT (``_SIMULATOR_USER_RATE_LIMIT`` = 20, a COUNT — and the number
+    the human copy interpolates). Sourcing the header from the count would
+    advertise a 20-second wait for an hour-long window and invite 180 rejected
+    retries per throttled user. That confusion is exactly why this is pinned to
+    3600 and why the body copy is asserted separately.
+    """
+    from routers import simulator as simulator_router
+
+    monkeypatch.setattr(simulator_router, "_check_simulator_user_rate", lambda _uid: False)
+
+    app = FastAPI()
+    app.state.limiter = simulator_router.limiter
+    app.include_router(simulator_router.router)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/simulator",
+        json={"portfolio_id": "p-1", "candidate_strategy_id": "c-1", "user_id": "u-1"},
+    )
+
+    assert resp.status_code == 429
+    assert resp.headers["Retry-After"] == _EXPECTED_HOURLY_RETRY_AFTER, (
+        "the per-user simulator quota must advertise its own window; sourcing "
+        "the header from the 20/hour COUNT instead would promise a 20-second wait"
+    )
+    # Body shape UNCHANGED — a bare scalar detail, not an envelope (see above).
+    assert isinstance(resp.json()["detail"], str)
+    assert "Simulator rate limit exceeded" in resp.json()["detail"]
+
+
+@pytest.fixture()
+def portfolio_client() -> TestClient:
+    """Bare FastAPI app with ``routers.portfolio`` mounted.
+
+    ``app.state.limiter`` is wired and the shared limiter is RESET, because
+    PYAPI-03 made every router share ONE ``memory://`` store: without the reset
+    a sibling module's earlier requests can push these routes past their slowapi
+    ceiling, and a slowapi 429 would masquerade as the handler 429 under test.
+    The body assertions below are the second, independent guard against that
+    false green — slowapi's body is a different shape entirely.
+    """
+    from routers import portfolio as portfolio_mod
+
+    _reset = getattr(portfolio_mod.limiter, "reset", None)
+    if callable(_reset):
+        _reset()
+    app = FastAPI()
+    app.state.limiter = portfolio_mod.limiter
+    app.include_router(portfolio_mod.router)
+    return TestClient(app)
+
+
+def test_bridge_per_user_cap_429_advertises_its_window(
+    portfolio_client, monkeypatch
+) -> None:
+    """``POST /api/portfolio-bridge``'s per-user hourly cap now carries Retry-After.
+
+    This is the live seam path (``src/lib/analytics-client.ts`` calls it), so a
+    throttled allocator is a real user staring at an error with no idea whether
+    to wait a second or an hour.
+
+    The ownership SELECT runs BEFORE the cap by design (an attacker-supplied
+    user_id must not be able to spend a bucket slot), so the supabase double has
+    to answer it — a bare ``MagicMock`` chain does, its ``.data`` being truthy.
+    """
+    from routers import portfolio as portfolio_mod
+
+    monkeypatch.setattr(portfolio_mod, "get_supabase", lambda: MagicMock())
+    monkeypatch.setattr(portfolio_mod, "_check_bridge_user_rate", lambda _uid: False)
+
+    resp = portfolio_client.post(
+        "/api/portfolio-bridge",
+        json={
+            "portfolio_id": str(uuid4()),
+            "underperformer_strategy_id": str(uuid4()),
+            "user_id": str(uuid4()),
+        },
+    )
+
+    assert resp.status_code == 429
+    assert resp.headers["Retry-After"] == _EXPECTED_HOURLY_RETRY_AFTER
+    assert isinstance(resp.json()["detail"], str)
+    assert "Too many bridge requests for this user." in resp.json()["detail"]
+
+
+def test_verify_strategy_per_email_cap_429_advertises_its_window(
+    portfolio_client, monkeypatch
+) -> None:
+    """``POST /api/verify-strategy``'s per-email cap now carries Retry-After.
+
+    ⚠️ **DEAD ROUTE — included for CLASS INTEGRITY, not user impact.**
+    ``grep -n "verify-strategy" src/lib/analytics-client.ts`` returns **zero**
+    hits (re-run at execution time, 2026-07-26): no seam path reaches this
+    handler today. It is pinned anyway because a class closed at three of four
+    sites is a class that re-opens the moment the fourth is revived — the
+    partial-closure defect this whole programme exists to stop. The cost is one
+    ``headers=`` kwarg and this test.
+    """
+    from routers import portfolio as portfolio_mod
+
+    monkeypatch.setattr(
+        portfolio_mod, "_check_verify_strategy_email_rate", lambda _email: False
+    )
+
+    resp = portfolio_client.post(
+        "/api/verify-strategy",
+        json={
+            "email": "trader@example.com",
+            "exchange": "binance",
+            "api_key": "AKIDLIVE0123456789abcdef",
+            "api_secret": "s" * 24,
+        },
+    )
+
+    assert resp.status_code == 429
+    assert resp.headers["Retry-After"] == _EXPECTED_HOURLY_RETRY_AFTER
+    assert isinstance(resp.json()["detail"], str)
+    assert "Too many verification attempts for this email." in resp.json()["detail"]

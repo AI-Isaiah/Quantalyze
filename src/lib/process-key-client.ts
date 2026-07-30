@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { NextResponse } from "next/server";
 import { getCorrelationId } from "@/lib/correlation-id";
 import {
@@ -71,6 +72,50 @@ function budgetKeyFor(flowType: FlowType): SeamBudgetKey {
  */
 const CIRCUIT_OPEN_HUMAN_MESSAGE =
   "The analytics service is temporarily unavailable. Please try again in a moment.";
+
+/**
+ * Phase 140.1 / PYAPI-02 — how long a minted `X-Tenant-Claim` stays valid.
+ *
+ * Short on purpose. The claim is a bearer of tenant identity for the rate
+ * limiter, so a value captured from a log line or an intermediary must not be a
+ * permanent key to that tenant's window. Five minutes is far longer than the
+ * request it accompanies and far shorter than anything worth stealing.
+ */
+const TENANT_CLAIM_TTL_SECONDS = 300;
+
+/**
+ * Mint the `X-Tenant-Claim` the Python limiter buckets on.
+ *
+ * Wire format `<payload>.<exp>.<hex-hmac-sha256>`, MAC over `"<payload>.<exp>"`,
+ * key = `INTERNAL_API_TOKEN`. The verifying half is
+ * `analytics-service/services/rate_limit.py:verify_tenant_claim`; the two are
+ * pinned together by a copy-pasted fixture literal shared between
+ * `process-key-client.test.ts` and `tests/test_process_key.py` (they cannot
+ * import each other, so a shared literal is the only real proof they agree).
+ *
+ * WHY THIS EXISTS. `/process-key` used to be throttled by ONE 100/hour bucket
+ * keyed on a hash of `INTERNAL_API_TOKEN` — a single shared platform secret, so
+ * that was one window for every tenant at once. The landing-page teaser is
+ * capped Vercel-side at 10 req/60s per IP = 600/hour, so a single anonymous
+ * visitor could drain the entire platform's allowance in about ten minutes.
+ *
+ * WHY NOT JUST `X-User-Id` (which is already sent). It is unsigned
+ * client-controlled input. Bucketing on it lets any holder of the internal
+ * token set a fresh uuid per request and bypass the limiter entirely, or set a
+ * victim's uuid and drain their window (the PR#241 red-team finding). The HMAC
+ * is what makes the same identifier trustworthy at the limiter.
+ *
+ * WHY NO NEW SECRET. `INTERNAL_API_TOKEN` is already the credential this
+ * endpoint authenticates with and is already present on both sides, so the
+ * claim adds no new trust surface: an attacker who has it already holds full
+ * `/process-key` auth, and the limiter is not the marginal loss.
+ */
+function mintTenantClaim(payload: string, secret: string): string {
+  const exp = Math.floor(Date.now() / 1000) + TENANT_CLAIM_TTL_SECONDS;
+  const signed = `${payload}.${exp}`;
+  const mac = createHmac("sha256", secret).update(signed).digest("hex");
+  return `${signed}.${mac}`;
+}
 
 export interface PostProcessKeyArgs {
   flow_type: FlowType;
@@ -156,7 +201,16 @@ export async function postProcessKey(
         "X-Correlation-Id": correlationId,
         // CT-4 (army2) — forward tenant id for cross-tenant rate-limit
         // isolation. See PostProcessKeyArgs.userId for the contract.
+        // NOTE: this header is UNSIGNED and the Python limiter deliberately
+        // ignores it for bucketing. It survives for logging/diagnostics; the
+        // signed X-Tenant-Claim below is what actually selects the bucket.
         "X-User-Id": args.userId,
+        // Phase 140.1 / PYAPI-02 — the signed half of the same identity. This
+        // is the ONE chokepoint: all five postProcessKey callers share this
+        // headers assembly, so minting here is what makes per-tenant throttling
+        // live end-to-end. Teaser callers pass userId "public", which mints the
+        // shared anonymous bucket rather than a tenant one.
+        "X-Tenant-Claim": mintTenantClaim(args.userId, internalToken),
         // Phase 19.1 — forward the end user's access token so the unified
         // router can call user-auth SECURITY DEFINER RPCs (finalize_csv_strategy)
         // as the user. Only present for the CSV finalize step.

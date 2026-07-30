@@ -28,6 +28,7 @@ from services.closed_sets import MT5_WRONG_SERVER_DETAIL
 from services.exchange import AUTH_FAILED_DETAIL
 from services.ingestion.adapter import KeySubmissionRequest
 from services.ingestion.mt5 import Mt5Adapter
+from tests.limiter_stub import evict_module, patch_shared_limiter
 
 
 @pytest.fixture()
@@ -53,11 +54,18 @@ def exchange_module(monkeypatch):
     monkeypatch.setitem(sys.modules, "slowapi", slowapi_stub)
     monkeypatch.setitem(sys.modules, "slowapi.util", slowapi_util_stub)
 
-    sys.modules.pop("routers.exchange", None)
+    # PYAPI-03: the routers no longer CONSTRUCT a Limiter, they import the
+    # singleton from services.rate_limit — so rebinding `slowapi.Limiter` above
+    # no longer reaches them and the REAL slowapi wrapper would reject the
+    # MagicMock request this suite passes. Stub the INSTANCE too; must run
+    # before the router is re-imported below. See tests/limiter_stub.py.
+    patch_shared_limiter(monkeypatch)
+
+    evict_module("routers.exchange")
     from routers import exchange
 
     yield exchange
-    sys.modules.pop("routers.exchange", None)
+    evict_module("routers.exchange")
 
 
 def _adapter_req(*, api_key, api_secret, passphrase):
