@@ -318,7 +318,13 @@ Plans:
   2. Under an injected single transient failure, an allowlisted call (e.g. `flow_type: resync`) succeeds on retry with exactly ONE server-side effect — proven against the real `compute_jobs` partial-unique-index + `WIZARD_DUPLICATE` contract.
   3. `flow_type: teaser` is provably never retried, and a regression test pins the contract (two identical teaser calls → TWO `strategy_verifications` rows) so a future refactor can't quietly start retrying it and minting duplicate verifications/`public_token`s/leads.
   4. With the breaker open, zero retry attempts fire — no bypass path exists, so retries cannot amplify an outage.
-**Plans**: TBD
+**Plans:** 4 plans in 3 waves
+
+Plans:
+- [ ] **W1** · 141-01-PLAN.md — Python resync draft-SV dedup + DB proofs (SQL compute_jobs/SV-index gate, teaser two-rows pytest pin) ⭐ *the LOCKED precondition for allowlisting resync*
+- [ ] **W1** · 141-02-PLAN.md — retry loop + `retriesOverride` in `resilientFetch` (dormant: all rows stay 0), dual breaker gates, SC-4 mutation observed
+- [ ] **W2** · 141-03-PLAN.md — `seam-retry-registry.ts` leaf: the SC1 audit = the runtime allowlist (13 evidenced verdicts, absence ⇒ no-retry), SC-1 mutation observed
+- [ ] **W3** · 141-04-PLAN.md — wire both clients (flow_type-keyed, explicit `?? 0` belt), flip 5 rows + edit pins SAME commit, SC-4b charges backoff+jitterMax, SC-2/SC-3 mutations + phase gate
 
 ### Phase 142: JOB — strategy_analytics stuck-computing reaper + computing_started_at DDL
 **Goal**: A mid-job worker crash can no longer strand a `strategy_analytics` row on `computing` forever — a wizard poll or page refresh sees a real terminal outcome
