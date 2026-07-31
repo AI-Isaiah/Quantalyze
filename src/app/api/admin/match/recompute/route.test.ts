@@ -290,7 +290,12 @@ describe("[140.4-13 / SEAMRIM-05] POST /api/admin/match/recompute — the limite
     const res = await postAsAdmin();
 
     expect(res.status).toBe(503);
-    expect(await res.json()).toEqual({ error: "Rate limiter unavailable" });
+    // 140.3-G8 / SEAMUX-03 — the sentence is BYTE-KEPT and a machine code now
+    // rides beside it. SEAM_MISCONFIGURED is the limiter-unavailable token.
+    expect(await res.json()).toEqual({
+      error: "Rate limiter unavailable",
+      code: "SEAM_MISCONFIGURED",
+    });
     expect(res.headers.get("Retry-After")).toBe("60");
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(recomputeCalls).toHaveLength(0);
@@ -302,7 +307,12 @@ describe("[140.4-13 / SEAMRIM-05] POST /api/admin/match/recompute — the limite
 
     expect(res.status).toBe(429);
     // Hand-typed from the pre-adoption source, not read back off the builder.
-    expect(await res.json()).toEqual({ error: "Too many requests" });
+    // 140.3-G8 / SEAMUX-03 — sentence BYTE-KEPT, RATE_LIMITED code beside it
+    // (OUR limiter's token, not the exchange-family KEY_RATE_LIMIT).
+    expect(await res.json()).toEqual({
+      error: "Too many requests",
+      code: "RATE_LIMITED",
+    });
     expect(res.headers.get("Retry-After")).toBe("42");
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(recomputeCalls).toHaveLength(0);
@@ -334,10 +344,14 @@ describe("POST /api/admin/match/recompute — SEAM-04 error taxonomy (Phase 140)
     expect(res.status).toBe(503);
     expect(res.headers.get("Retry-After")).toBe("30");
     const raw = await res.text();
-    expect(JSON.parse(raw).error).toBe(CIRCUIT_OPEN_COPY);
-    // The breaker is an internal mechanism; its vocabulary must not reach an
-    // HTTP body (threat T-140-05 / T-140-08).
-    expect(raw).not.toMatch(/circuit|breaker|upstash|railway/i);
+    const parsed = JSON.parse(raw);
+    expect(parsed.error).toBe(CIRCUIT_OPEN_COPY);
+    // The breaker is an internal mechanism; its vocabulary must not reach the
+    // human-facing COPY (threat T-140-05 / T-140-08). Scoped to `.error`, not
+    // the raw body: 140.3-G8 puts a deliberate machine `code: "CIRCUIT_OPEN"`
+    // on `.code` as a stable discriminator (an established seam WIRE token —
+    // the same exemption the sibling scenario/optimize route's test makes).
+    expect(parsed.error).not.toMatch(/circuit|breaker|upstash|railway/i);
   });
 
   it("forwards the breaker's own cooldown as Retry-After rather than a constant", async () => {
@@ -648,5 +662,117 @@ describe("[140.3-13a / SEAMUX-08] POST /api/admin/match/recompute — Sentry cap
     const res = await POST(buildPostRequest({ allocator_id: "a-1" }));
     expect(res.status).toBe(403);
     await expectNoCapture();
+  });
+});
+
+/**
+ * 140.3-G8 / SEAMUX-03 — a machine `code` on every arm THIS route owns.
+ *
+ * REQUIREMENTS.md names "the admin match routes" verbatim. Each arm is pinned
+ * individually so a `code` dropped from one is not hidden behind another's
+ * assertion. MISSING_ALLOCATOR_ID is the named-id-param token (the keys/sync
+ * MISSING_STRATEGY_ID precedent), deliberately DISTINCT from VALIDATION_FAILED
+ * which this plan set reserves for the structural unparseable-JSON rejection —
+ * a case below drives BOTH so a collapse of one onto the other reddens. The two
+ * deny bodies are asserted in the SEAMRIM-05 block above (byte-kept sentence +
+ * code); the 4xx-forward seamCode survival is the load-bearing case here.
+ */
+describe("[140.3-G8 / SEAMUX-03] POST /api/admin/match/recompute — machine code per arm", () => {
+  async function postAsAdmin(body: unknown = { allocator_id: "alloc-1", force: false }) {
+    userState.current = { id: "admin-id" };
+    adminFlag.isAdmin = true;
+    const { POST } = await import("./route");
+    return POST(buildPostRequest(body));
+  }
+
+  it("401 answers code UNAUTHENTICATED", async () => {
+    userState.current = null;
+    const { POST } = await import("./route");
+    const res = await POST(buildPostRequest({ allocator_id: "alloc-1" }));
+    expect(res.status).toBe(401);
+    expect((await res.json()).code).toBe("UNAUTHENTICATED");
+  });
+
+  it("403 answers code FORBIDDEN", async () => {
+    userState.current = { id: "user-1" };
+    adminFlag.isAdmin = false;
+    const { POST } = await import("./route");
+    const res = await POST(buildPostRequest({ allocator_id: "alloc-1" }));
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("FORBIDDEN");
+  });
+
+  it("an unparseable body answers 400 code VALIDATION_FAILED (structural rejection)", async () => {
+    userState.current = { id: "admin-id" };
+    adminFlag.isAdmin = true;
+    const { POST } = await import("./route");
+    const req = new NextRequest("http://localhost:3000/api/admin/match/recompute", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...VALID_ORIGIN },
+      body: "{ not json",
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("a missing allocator_id answers 400 code MISSING_ALLOCATOR_ID — NOT VALIDATION_FAILED", async () => {
+    const res = await postAsAdmin({ force: false });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    // The named-id fact is distinct from the structural VALIDATION_FAILED above.
+    expect(body.code).toBe("MISSING_ALLOCATOR_ID");
+    expect(body.code).not.toBe("VALIDATION_FAILED");
+  });
+
+  it("the breaker 503 answers code CIRCUIT_OPEN", async () => {
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    recomputeState.throwValue = new CircuitOpenError(30);
+    const res = await postAsAdmin();
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("CIRCUIT_OPEN");
+  });
+
+  it("the timeout 504 answers code UPSTREAM_TIMEOUT", async () => {
+    const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsTimeoutError("/api/match/recompute", 30_000);
+    const res = await postAsAdmin();
+    expect(res.status).toBe(504);
+    expect((await res.json()).code).toBe("UPSTREAM_TIMEOUT");
+  });
+
+  it("the 4xx forward carries the upstream's OWN seamCode AND keeps error + dependency (TS-18/TS-19)", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError(
+      "Binance is not responding right now. Try again shortly.",
+      424,
+      "EXCHANGE_UNAVAILABLE",
+      "binance",
+    );
+    const res = await postAsAdmin();
+    expect(res.status).toBe(424);
+    const body = await res.json();
+    expect(body.code).toBe("EXCHANGE_UNAVAILABLE");
+    expect(body.error).toBe(
+      "Binance is not responding right now. Try again shortly.",
+    );
+    expect(body.dependency).toBe("binance");
+  });
+
+  it("a 4xx forward whose upstream carried NO code falls back to UNKNOWN, dependency still null", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError("venue down", 429);
+    const res = await postAsAdmin();
+    expect(res.status).toBe(429);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.dependency).toBeNull();
+  });
+
+  it("the terminal 500 answers code UNKNOWN", async () => {
+    recomputeState.throwValue = new Error("boom");
+    const res = await postAsAdmin();
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
   });
 });

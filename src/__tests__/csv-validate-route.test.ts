@@ -1751,3 +1751,232 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     delete process.env.INTERNAL_API_TOKEN;
   });
 });
+
+// ---------------------------------------------------------------------
+// 140.3-G7 / SEAMUX-03 — arm-agnostic fences for /api/strategies/csv-validate.
+//
+// ⚠️ THESE TWO FENCES ARE NEW; EVERYTHING ABOVE STAYS UNTOUCHED. The per-arm
+// `json.code` assertions (CSV_FILE_TOO_LARGE :395, CSV_INVALID_FORMAT
+// :406/:418/:608/:621, CSV_UPSTREAM_FAIL :442/:501/:551, CSV_RATE_LIMIT :636,
+// SEAM_MISCONFIGURED :681) and the whole-serialised-body static-message guard
+// (:454/:503/:552) already exist and already pin the arms that ship TODAY. This
+// block adds only what they cannot express:
+//
+//   1. an ARM-AGNOSTIC sweep — the fence that reddens when a FUTURE arm ships a
+//      bare `{ ok:false }` with no top-level `code`, which no per-arm case pins;
+//   2. a planted-SENTINEL PII guard — the ISSUE-005 leak class, extending the
+//      file's existing whole-body discipline from "no thrown text" to "no
+//      planted cell value" across three arms.
+//
+// WHY THIS MATTERS (Rule 9), stated so a future reader cannot mistake either for
+// cosmetic: a codeless arm is a CLIENT-DISCRIMINATION regression — CsvUploadStep
+// and the PostHog `wizard_error` funnel branch on `code`, so a missing one
+// collapses distinct failures into one undiscriminable bucket. A cell-value echo
+// is the ISSUE-005 leak class — this route is the Vercel seam, and its OWN error
+// arms must never be the place a raw uploaded cell crosses to the wire.
+//
+// MEASUREMENT NOTE: the receipt is the PARSED response body, never a grep for
+// the `code:"` spelling. This route carries `code` positionally through
+// `csvErrorBody`, which the 140.3-VERIFICATION receipt command
+// (`grep -cE 'code:\s*"'`) reads as 0 on this file — a false negative. This
+// block is the correct receipt for the route's per-arm code coverage.
+// ---------------------------------------------------------------------
+
+describe("[140.3-G7 / SEAMUX-03] csv-validate — arm-agnostic fences", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    postProcessKeyMock.mockResolvedValue({ ok: true, body: { ok: true } });
+    process.env.INTERNAL_API_TOKEN = "test-token";
+  });
+
+  const validReq = () =>
+    makeMultipartRequest(
+      new File(["x"], "x.csv", { type: "text/csv" }),
+      "daily_returns",
+    );
+
+  it("EVERY reachable error arm carries a non-empty top-level json.code on the wire", async () => {
+    // The arm-agnostic fence. Per-arm cases above pin the codes that exist now;
+    // this drives every reachable error arm and asserts only the arm-agnostic
+    // invariant — a non-2xx response MUST carry a non-empty string `code`. A
+    // future arm returning a bare `{ ok:false }` reddens HERE even though no
+    // per-arm case names it.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    try {
+      const scenarios: Array<{
+        arm: string;
+        arrange: () => void;
+        request: () => NextRequest;
+      }> = [
+        {
+          arm: "missing file → CSV_INVALID_FORMAT",
+          arrange: () => {},
+          request: () => makeMultipartRequest(null, "daily_returns"),
+        },
+        {
+          arm: "bad fmt → CSV_INVALID_FORMAT",
+          arrange: () => {},
+          request: () =>
+            makeMultipartRequest(
+              new File(["x"], "x.csv", { type: "text/csv" }),
+              "not_a_format",
+            ),
+        },
+        {
+          arm: "missing wizard_session_id → CSV_INVALID_FORMAT",
+          arrange: () => {},
+          request: () =>
+            makeMultipartRequest(
+              new File(["x"], "x.csv", { type: "text/csv" }),
+              "daily_returns",
+              null,
+            ),
+        },
+        {
+          arm: "oversize file → CSV_FILE_TOO_LARGE",
+          arrange: () => {},
+          request: () =>
+            makeMultipartRequest(
+              new File([new Uint8Array(11 * 1024 * 1024)], "x.csv", {
+                type: "text/csv",
+              }),
+              "daily_returns",
+            ),
+        },
+        {
+          arm: "rate-limit throttle → CSV_RATE_LIMIT",
+          arrange: () =>
+            checkLimitMock.mockResolvedValueOnce({
+              success: false,
+              retryAfter: 30,
+            }),
+          request: validReq,
+        },
+        {
+          arm: "rate-limit misconfigured → SEAM_MISCONFIGURED",
+          arrange: () =>
+            checkLimitMock.mockResolvedValueOnce({
+              success: false,
+              retryAfter: 60,
+              reason: "ratelimit_misconfigured",
+            }),
+          request: validReq,
+        },
+        {
+          arm: "INTERNAL_API_TOKEN missing → CSV_UPSTREAM_FAIL 503",
+          arrange: () => {
+            delete process.env.INTERNAL_API_TOKEN;
+          },
+          request: validReq,
+        },
+        {
+          arm: "terminal throw → CSV_UPSTREAM_FAIL 502",
+          arrange: () =>
+            postProcessKeyMock.mockRejectedValueOnce(new Error("fetch failed")),
+          request: validReq,
+        },
+        {
+          arm: "already-classified passthrough → upstream-supplied code",
+          arrange: () =>
+            postProcessKeyMock.mockResolvedValueOnce({
+              ok: false,
+              response: NextResponse.json(
+                { ok: false, code: "CIRCUIT_OPEN", human_message: "..." },
+                { status: 503 },
+              ),
+            }),
+          request: validReq,
+        },
+      ];
+
+      for (const { arm, arrange, request } of scenarios) {
+        // Fresh world each iteration; `arrange` applies the single override that
+        // steers this scenario to its error arm.
+        checkLimitMock.mockReset();
+        checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+        postProcessKeyMock.mockReset();
+        postProcessKeyMock.mockResolvedValue({ ok: true, body: { ok: true } });
+        process.env.INTERNAL_API_TOKEN = "test-token";
+        arrange();
+
+        const res = await POST(request());
+        // The sweep must actually REACH an error arm, or it proves nothing.
+        expect(
+          res.status,
+          `arm "${arm}" did not reach an error arm (answered ${res.status})`,
+        ).toBeGreaterThanOrEqual(400);
+        const json = await res.json();
+        expect(
+          typeof json.code === "string" && json.code.length > 0,
+          `arm "${arm}" answered ${res.status} with no non-empty top-level string code — the client cannot discriminate this failure`,
+        ).toBe(true);
+      }
+    } finally {
+      errorSpy.mockRestore();
+      process.env.INTERNAL_API_TOKEN = "test-token";
+    }
+  });
+
+  it("ISSUE-005 sentinel: no raw uploaded cell value appears in any route-emitted error body", async () => {
+    // The planted-sentinel PII guard. An uploaded CSV carries a sentinel cell
+    // value; the route's OWN error bodies (whole serialised) must not echo it.
+    // Three arms — the too-large 400, the bad-fmt 400, and the terminal-throw
+    // 502 — because ISSUE-005 is a CLASS, not one endpoint. debug_context on
+    // these arms carries only metadata (content_length / size_bytes /
+    // fmt_received), never a cell.
+    const SENTINEL_PII = "SENTINEL_PII_9241";
+    const sentinelCsv = () =>
+      new File(
+        [`date,daily_return\n2026-01-01,${SENTINEL_PII}`],
+        "x.csv",
+        { type: "text/csv" },
+      );
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    try {
+      // Arm 1 — oversize. The sentinel rides in a >10 MB upload so the size arm
+      // fires with the sentinel present in the received bytes.
+      {
+        const padding = "a".repeat(11 * 1024 * 1024);
+        const big = new File(
+          [`date,daily_return\n2026-01-01,${SENTINEL_PII}\n${padding}`],
+          "x.csv",
+          { type: "text/csv" },
+        );
+        const res = await POST(makeMultipartRequest(big, "daily_returns"));
+        expect(res.status).toBe(400);
+        expect(
+          JSON.stringify(await res.json()),
+          "a raw uploaded cell value reached the too-large error body (ISSUE-005 leak class)",
+        ).not.toContain(SENTINEL_PII);
+      }
+      // Arm 2 — bad fmt. The uploaded file carries the sentinel; the 400 body
+      // (debug_context.fmt_received is the fmt, not a cell) must not.
+      {
+        const res = await POST(makeMultipartRequest(sentinelCsv(), "not_a_format"));
+        expect(res.status).toBe(400);
+        expect(
+          JSON.stringify(await res.json()),
+          "a raw uploaded cell value reached the bad-fmt error body (ISSUE-005 leak class)",
+        ).not.toContain(SENTINEL_PII);
+      }
+      // Arm 3 — terminal throw. postProcessKey throws AFTER the bytes are read;
+      // the 502 body is static and must not echo the sentinel.
+      {
+        postProcessKeyMock.mockReset();
+        postProcessKeyMock.mockRejectedValueOnce(new Error("fetch failed"));
+        const res = await POST(makeMultipartRequest(sentinelCsv(), "daily_returns"));
+        expect(res.status).toBe(502);
+        expect(
+          JSON.stringify(await res.json()),
+          "a raw uploaded cell value reached the terminal-throw error body (ISSUE-005 leak class)",
+        ).not.toContain(SENTINEL_PII);
+      }
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});

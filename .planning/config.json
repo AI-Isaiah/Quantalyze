@@ -48,6 +48,7 @@
   "claude_md_path": "./CLAUDE.md",
   "model_overrides": {
     "gsd-planner": "fable",
+    "gsd-roadmapper": "fable",
     "gsd-ui-researcher": "opus",
     "gsd-advisor-researcher": "fable",
     "gsd-assumptions-analyzer": "fable",

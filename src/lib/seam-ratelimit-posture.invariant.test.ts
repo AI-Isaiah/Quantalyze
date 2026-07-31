@@ -797,7 +797,14 @@ describe("[140.4-13 / SEAMRIM-05] behavioural — the 503 reaches the wire, acro
       const res = await POST(recomputeReq());
 
       expect(res.status).toBe(503);
-      expect(await res.json()).toEqual({ error: "Rate limiter unavailable" });
+      // 140.3-G8 / SEAMUX-03 — recompute's deny bodies carry a machine `code`
+      // (SEAM_MISCONFIGURED / RATE_LIMITED), matching the keys/sync template.
+      // The posture invariant is status + error string + headers; the code is
+      // additive and the byte-kept sentence is unchanged.
+      expect(await res.json()).toEqual({
+        error: "Rate limiter unavailable",
+        code: "SEAM_MISCONFIGURED",
+      });
       expect(res.headers.get("Retry-After")).toBe("60");
       expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     });
@@ -812,7 +819,10 @@ describe("[140.4-13 / SEAMRIM-05] behavioural — the 503 reaches the wire, acro
       const res = await POST(recomputeReq());
 
       expect(res.status).toBe(429);
-      expect(await res.json()).toEqual({ error: "Too many requests" });
+      expect(await res.json()).toEqual({
+        error: "Too many requests",
+        code: "RATE_LIMITED",
+      });
       expect(res.headers.get("Retry-After")).toBe("42");
       expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     });

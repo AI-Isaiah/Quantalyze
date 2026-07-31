@@ -258,10 +258,14 @@ describe("GET /api/admin/match/eval (M-0277)", () => {
     expect(res.status).toBe(503);
     expect(res.headers.get("Retry-After")).toBe("30");
     const raw = await res.text();
-    expect(JSON.parse(raw).error).toBe(CIRCUIT_OPEN_COPY);
-    // The breaker is an internal mechanism; its vocabulary must not reach an
-    // HTTP body (threat T-140-05 / T-140-08).
-    expect(raw).not.toMatch(/circuit|breaker|upstash|railway/i);
+    const parsed = JSON.parse(raw);
+    expect(parsed.error).toBe(CIRCUIT_OPEN_COPY);
+    // The breaker is an internal mechanism; its vocabulary must not reach the
+    // human-facing COPY (threat T-140-05 / T-140-08). Scoped to `.error`, not
+    // the raw body: 140.3-G8 puts a deliberate machine `code: "CIRCUIT_OPEN"`
+    // on `.code` as a stable discriminator (an established seam WIRE token — the
+    // same exemption the sibling scenario/optimize route's test already makes).
+    expect(parsed.error).not.toMatch(/circuit|breaker|upstash|railway/i);
   });
 
   it("forwards the breaker's own cooldown as Retry-After rather than a constant", async () => {
@@ -555,5 +559,115 @@ describe("[140.3-13a / SEAMUX-08] GET /api/admin/match/eval — Sentry capture p
     await GET(makeReq());
     await nextCapture();
     expect(errorSpy).toHaveBeenCalled();
+  });
+});
+
+/**
+ * 140.3-G8 / SEAMUX-03 — a machine `code` on every arm THIS route owns.
+ *
+ * REQUIREMENTS.md names "the admin match routes" verbatim: a consumer must be
+ * able to discriminate on a stable token instead of the prose (140.3-12's to
+ * reword). Each arm is pinned individually so a `code` dropped from one is not
+ * hidden behind another's assertion — this programme's signature failure.
+ *
+ * The 4xx-forward arm is the load-bearing one: it must carry the UPSTREAM'S own
+ * `seamCode` (the thread TS-19 started) AND keep `error` + `dependency` intact,
+ * so the case below drives an `AnalyticsUpstreamError` bearing all three and
+ * asserts all three survive together. UNAUTHENTICATED / FORBIDDEN are inline
+ * gate codes, not WizardErrorCode members, so an admin arm never forces wizard
+ * copy — the same non-union choice the keys/sync template ships.
+ */
+describe("[140.3-G8 / SEAMUX-03] GET /api/admin/match/eval — machine code per arm", () => {
+  beforeEach(() => {
+    userState.current = { id: "admin-1" };
+    adminFlag.isAdmin = true;
+    evalState.lastArgs = null;
+    evalState.throwValue = null;
+    evalState.result = { rows: [] };
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("401 answers code UNAUTHENTICATED", async () => {
+    userState.current = null;
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(401);
+    expect((await res.json()).code).toBe("UNAUTHENTICATED");
+  });
+
+  it("403 answers code FORBIDDEN", async () => {
+    userState.current = { id: "user-1" };
+    adminFlag.isAdmin = false;
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("FORBIDDEN");
+  });
+
+  it("the breaker 503 answers code CIRCUIT_OPEN", async () => {
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    evalState.throwValue = new CircuitOpenError(30);
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("CIRCUIT_OPEN");
+  });
+
+  it("the timeout 504 answers code UPSTREAM_TIMEOUT", async () => {
+    const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+    evalState.throwValue = new AnalyticsTimeoutError("/api/match/eval", 30_000);
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(504);
+    expect((await res.json()).code).toBe("UPSTREAM_TIMEOUT");
+  });
+
+  it("the 4xx forward carries the upstream's OWN seamCode AND keeps error + dependency (TS-18/TS-19)", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    // All three fields present on the wire: seamCode is the Python token, the
+    // dependency names the caller's venue on the nested 424 shape.
+    evalState.throwValue = new AnalyticsUpstreamError(
+      "Binance is not responding right now. Try again shortly.",
+      424,
+      "EXCHANGE_UNAVAILABLE",
+      "binance",
+    );
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(424);
+    const body = await res.json();
+    // The code is the UPSTREAM'S, not a route-local synonym…
+    expect(body.code).toBe("EXCHANGE_UNAVAILABLE");
+    // …and it did not eat either of the two fields beside it.
+    expect(body.error).toBe(
+      "Binance is not responding right now. Try again shortly.",
+    );
+    expect(body.dependency).toBe("binance");
+  });
+
+  it("a 4xx forward whose upstream carried NO code falls back to UNKNOWN, dependency still null", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    // seamCode omitted → null; the flat 424 shape carries no dependency either.
+    evalState.throwValue = new AnalyticsUpstreamError("venue down", 424);
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(424);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.dependency).toBeNull();
+  });
+
+  it("the terminal 500 answers code UNKNOWN", async () => {
+    evalState.throwValue = new Error("boom");
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
   });
 });

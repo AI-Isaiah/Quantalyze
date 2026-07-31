@@ -238,8 +238,12 @@ describe("POST /api/admin/match/recompute — REAL client through the seam (SC-1
     expect(res.status).toBe(503);
     expect(res.headers.get("Retry-After")).toBe("30");
     const raw = await res.text();
-    expect(JSON.parse(raw).error).toBe(CIRCUIT_OPEN_COPY);
-    expect(raw).not.toMatch(/circuit|breaker|upstash|railway/i);
+    const parsed = JSON.parse(raw);
+    expect(parsed.error).toBe(CIRCUIT_OPEN_COPY);
+    // 140.3-G8 / SEAMUX-03 — scoped to `.error` (the human COPY), not the raw
+    // body: the breaker arm now also carries a deliberate machine
+    // `code: "CIRCUIT_OPEN"` on `.code` as a stable discriminator.
+    expect(parsed.error).not.toMatch(/circuit|breaker|upstash|railway/i);
 
     // The load-bearing assertion: an open circuit means the seam is not
     // crossed. A 503 emitted AFTER a doomed round-trip would still pass the

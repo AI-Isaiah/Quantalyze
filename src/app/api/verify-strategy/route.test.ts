@@ -855,3 +855,201 @@ describe("[140.3-13a / SEAMUX-08] POST /api/verify-strategy — Sentry capture p
     expect(captureSpy).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Phase 140.3-G4 / SEAMUX-03 — a machine `code` on every error arm this PUBLIC
+ * teaser route emits, so a client discriminates the fault on a stable token
+ * instead of sniffing prose. Mirrors 140.3-10's arm-by-arm pass on `keys/sync`.
+ *
+ * The requirement text names `/api/verify-strategy` explicitly. At HEAD this
+ * route emitted ZERO coded arms (140.3-VERIFICATION §3.1: 0/11).
+ *
+ * ⚠️ PUBLIC UNAUTHENTICATED ROUTE — every token asserted here is a closed-set
+ * clean token that names no env var, hostname, or internal service.
+ *
+ * ORACLE INDEPENDENCE: every expected code is a hand-typed literal, not imported
+ * from the route or any copy table. At least one case asserts the exact
+ * `{ error, code }` pair, so a dropped code reddens (not just a changed value).
+ */
+describe("[140.3-G4 / SEAMUX-03] POST /api/verify-strategy — a machine code on every arm", () => {
+  function mockSessionPresent() {
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () => ({
+        auth: {
+          getSession: async () => ({
+            data: { session: { access_token: "jwt" } },
+            error: null,
+          }),
+        },
+      }),
+    }));
+  }
+
+  function mockUpstream(body: unknown) {
+    vi.doMock("@/lib/process-key-client", () => ({
+      postProcessKey: vi.fn().mockResolvedValue({ ok: true, status: 200, body }),
+    }));
+  }
+
+  const TERMINAL_SUCCESS = {
+    ok: true,
+    code: null,
+    verification_id: "99999999-9999-4999-8999-999999999999",
+    status: "published",
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    verificationCount = 0;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  // ── the 400 input arms: KEY_INVALID_FORMAT (create-with-key's own token) ──
+
+  it("400 invalid JSON carries the EXACT { error, code: KEY_INVALID_FORMAT } pair", async () => {
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq("{not json", true));
+    expect(res.status).toBe(400);
+    // The exact-pair case: a dropped code reddens here, not just a changed value.
+    expect(await res.json()).toEqual({
+      error: "Invalid JSON body",
+      code: "KEY_INVALID_FORMAT",
+    });
+  });
+
+  it("400 missing required fields → code KEY_INVALID_FORMAT", async () => {
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(
+      postReq({ email: "test@example.com", exchange: "okx", api_key: "k" }),
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("KEY_INVALID_FORMAT");
+  });
+
+  it("400 invalid email → code KEY_INVALID_FORMAT", async () => {
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq({ ...VALID_BODY, email: "not-an-email" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("KEY_INVALID_FORMAT");
+  });
+
+  it("400 unsupported exchange → code KEY_INVALID_FORMAT", async () => {
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq({ ...VALID_BODY, exchange: "kraken" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("KEY_INVALID_FORMAT");
+  });
+
+  it("400 sfox-disabled (half-state) → code KEY_INVALID_FORMAT", async () => {
+    vi.resetModules();
+    vi.doMock("@/lib/utils", async () => {
+      const actual = (await vi.importActual("@/lib/utils")) as Record<string, unknown>;
+      const codes = actual.UI_EXCHANGE_CODES as string[];
+      return { ...actual, UI_EXCHANGE_CODES: [...codes, "sfox"] };
+    });
+    vi.doMock("@/lib/closed-sets", async () => {
+      const actual = (await vi.importActual("@/lib/closed-sets")) as Record<string, unknown>;
+      return { ...actual, isSfoxEnabledServer: () => false };
+    });
+    try {
+      const { POST } = await import("./route");
+      const res = await POST(postReq({ ...VALID_BODY, exchange: "sfox" }));
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toContain("not yet available");
+      expect(body.code).toBe("KEY_INVALID_FORMAT");
+    } finally {
+      vi.doUnmock("@/lib/utils");
+      vi.doUnmock("@/lib/closed-sets");
+      vi.resetModules();
+    }
+  });
+
+  // ── the 502 drift arm: a 2xx whose body we could not recognise ──
+
+  it("502 unrecognised upstream response → code UNKNOWN (an answer arrived; not UNREACHABLE)", async () => {
+    mockSessionPresent();
+    // ok:true but no verification_id — the DRIFT trigger of the shape guard.
+    mockUpstream({ ok: true, code: null, status: "published" });
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.error).toBe("Verification service returned an invalid response");
+    expect(body.code).toBe("UNKNOWN");
+  });
+
+  // ── the 500 config arm: OUR misconfiguration ──
+
+  it("500 createAdminClient config fault → code SEAM_MISCONFIGURED", async () => {
+    mockSessionPresent();
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => {
+        throw new Error("SUPABASE_SERVICE_ROLE_KEY is not set");
+      },
+    }));
+    mockUpstream(TERMINAL_SUCCESS);
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toBe("Verification service misconfigured");
+    expect(body.code).toBe("SEAM_MISCONFIGURED");
+  });
+
+  // ── both persist-failure 500 arms answer the SAME token ──
+
+  it("500 persist error (returned) → code VERIFY_PERSIST_FAILED", async () => {
+    mockSessionPresent();
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from: () => ({
+          update: vi.fn().mockReturnValue({
+            eq: vi.fn().mockResolvedValue({ error: { message: "row not found" } }),
+          }),
+        }),
+      }),
+    }));
+    mockUpstream(TERMINAL_SUCCESS);
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toBe("Failed to finalize verification");
+    expect(body.code).toBe("VERIFY_PERSIST_FAILED");
+  });
+
+  it("500 persist failure (THROWN twin) → the SAME code VERIFY_PERSIST_FAILED", async () => {
+    mockSessionPresent();
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from: () => ({
+          update: vi.fn().mockReturnValue({
+            eq: vi.fn().mockRejectedValue(new Error("ECONNREFUSED supabase")),
+          }),
+        }),
+      }),
+    }));
+    mockUpstream(TERMINAL_SUCCESS);
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toBe("Failed to finalize verification");
+    // Same fact ⇒ same token on both arms (the keys/sync two-throttle-arms doctrine).
+    expect(body.code).toBe("VERIFY_PERSIST_FAILED");
+  });
+});

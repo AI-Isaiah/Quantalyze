@@ -62,7 +62,7 @@ export const POST = withAuth(async (req, user) => {
     rawBody = await req.json();
   } catch {
     return NextResponse.json(
-      { error: "Invalid JSON" },
+      { error: "Invalid JSON", code: "VALIDATION_FAILED" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -75,6 +75,13 @@ export const POST = withAuth(async (req, user) => {
       {
         error:
           "portfolio_id and underperformer_strategy_id are required and must be valid UUIDs",
+        // ── 140.3-G6 / SEAMUX-03 — a machine `code` on EVERY route-emitted arm ──
+        // A consumer discriminates the fault on a stable token instead of
+        // sniffing the prose (140.3-12's to reword). Both 400 input arms answer
+        // VALIDATION_FAILED — a structural body rejection, the same token the
+        // sibling scenario/optimize + simulator arms use. The `withAuth` 401 is
+        // helper-owned and stays codeless (excluded, like keys/sync's).
+        code: "VALIDATION_FAILED",
       },
       { status: 400, headers: NO_STORE_HEADERS },
     );
@@ -90,7 +97,7 @@ export const POST = withAuth(async (req, user) => {
     // catch the outage instead of treating users as throttled.
     if (isRateLimitMisconfigured(rl)) {
       return NextResponse.json(
-        { error: "Rate limiter unavailable" },
+        { error: "Rate limiter unavailable", code: "SEAM_MISCONFIGURED" },
         {
           status: 503,
           headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
@@ -105,6 +112,10 @@ export const POST = withAuth(async (req, user) => {
       {
         error: "Too many requests. Bridge scoring is compute-intensive.",
         retryAfter: rl.retryAfter,
+        // OUR limiter refused this request — RATE_LIMITED is the app-global
+        // token for exactly that (as opposed to KEY_RATE_LIMIT, an EXCHANGE
+        // throttle). The retryAfter body field is byte-kept beside it.
+        code: "RATE_LIMITED",
       },
       {
         status: 429,
@@ -123,7 +134,8 @@ export const POST = withAuth(async (req, user) => {
 
   if (!portfolio) {
     return NextResponse.json(
-      { error: "Portfolio not found" },
+      // Same spelling as G5's simulator 404 — one fact, one token across routes.
+      { error: "Portfolio not found", code: "PORTFOLIO_NOT_FOUND" },
       { status: 404, headers: NO_STORE_HEADERS },
     );
   }
@@ -157,7 +169,7 @@ export const POST = withAuth(async (req, user) => {
         `[bridge] circuit open — short-circuited, retry in ${err.retryAfterS}s`,
       );
       return NextResponse.json(
-        { error: CIRCUIT_OPEN_COPY },
+        { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
         {
           status: 503,
           headers: {
@@ -179,14 +191,18 @@ export const POST = withAuth(async (req, user) => {
       err.status < 500
     ) {
       return NextResponse.json(
-        { error: err.message },
+        // Preserve the UPSTREAM's own machine code (AnalyticsUpstreamError.
+        // seamCode); UNKNOWN only when the body carried none. Never a transport
+        // token here — the upstream ANSWERED, so a "network error" would claim a
+        // fault not observed. Mirrors scenario/optimize's forwarded-4xx arm.
+        { error: err.message, code: err.seamCode ?? "UNKNOWN" },
         { status: err.status, headers: NO_STORE_HEADERS },
       );
     }
     // A timed-out Python round-trip is a gateway timeout, not a client error.
     if (err instanceof AnalyticsTimeoutError) {
       return NextResponse.json(
-        { error: "Bridge scoring timed out. Please try again." },
+        { error: "Bridge scoring timed out. Please try again.", code: "UPSTREAM_TIMEOUT" },
         { status: 504, headers: NO_STORE_HEADERS },
       );
     }
@@ -199,7 +215,8 @@ export const POST = withAuth(async (req, user) => {
       tags: { route: "api/bridge", op: "findReplacementCandidates" },
     });
     return NextResponse.json(
-      { error: "Bridge scoring failed. Please try again." },
+      // The terminal arm — by construction "we do not know what this is".
+      { error: "Bridge scoring failed. Please try again.", code: "UNKNOWN" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }

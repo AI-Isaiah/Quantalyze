@@ -66,23 +66,34 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
 
+  // ── 140.3-G8 / SEAMUX-03 — a machine `code` on every arm THIS route owns ──
+  // A consumer discriminates on a stable token instead of the prose. The gate
+  // codes UNAUTHENTICATED / FORBIDDEN and the named-id code MISSING_ALLOCATOR_ID
+  // are inline, NOT WizardErrorCode members — an admin arm must never force
+  // wizard copy (the keys/sync template ships the same non-union tokens, incl.
+  // the MISSING_STRATEGY_ID precedent this MISSING_ALLOCATOR_ID mirrors).
+  // MISSING_ALLOCATOR_ID names the named-id-param fact, distinct from
+  // VALIDATION_FAILED which this plan set reserves for STRUCTURAL rejections
+  // (the unparseable-JSON arm). ⚠️ The gate arms carry ONLY the auth verdict —
+  // no seam state — because they precede any breaker-aware branch (T-140-12).
+  //
   // P444 (audit-2026-05-07) — RFC 7235: 401 unauthenticated, 403 forbidden.
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: NO_STORE_HEADERS });
+    return NextResponse.json({ error: "Unauthorized", code: "UNAUTHENTICATED" }, { status: 401, headers: NO_STORE_HEADERS });
   }
   if (!(await isAdminUser(supabase, user))) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403, headers: NO_STORE_HEADERS });
+    return NextResponse.json({ error: "Forbidden", code: "FORBIDDEN" }, { status: 403, headers: NO_STORE_HEADERS });
   }
 
   let body: { allocator_id?: string; force?: boolean };
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400, headers: NO_STORE_HEADERS });
+    return NextResponse.json({ error: "Invalid request body", code: "VALIDATION_FAILED" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
   if (!body.allocator_id || typeof body.allocator_id !== "string") {
-    return NextResponse.json({ error: "allocator_id is required" }, { status: 400, headers: NO_STORE_HEADERS });
+    return NextResponse.json({ error: "allocator_id is required", code: "MISSING_ALLOCATOR_ID" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
   // B15b (audit-2026-05-07): rate-limit AFTER validating allocator_id so an
@@ -90,10 +101,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const rl = await checkLimit(adminActionLimiter, `match-recompute:${user!.id}`);
   if (!rl.success) {
     // 140.4-13 / SEAMRIM-05 — the ADMIN auth shape. The 503-vs-429 decision is
-    // the chokepoint's; this route keeps only NO_STORE_HEADERS. The 429 body
-    // stays the builder's default, which is byte-identical to what was inlined
-    // here.
-    return rateLimitDenyJson(rl, { headers: NO_STORE_HEADERS });
+    // the chokepoint's; this route keeps only NO_STORE_HEADERS.
+    //
+    // 140.3-G8 / SEAMUX-03 — the builder's default deny bodies are CODELESS
+    // (ratelimit.ts), so both are overridden to carry a machine `code` while
+    // the builder-default SENTENCES stay BYTE-KEPT (keys/sync template). The
+    // builder still decides 429-vs-503; the code names which the caller got.
+    // RATE_LIMITED is OUR limiter's token (not KEY_RATE_LIMIT, the exchange
+    // family); SEAM_MISCONFIGURED is the limiter-unavailable token.
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: { error: "Too many requests", code: "RATE_LIMITED" },
+      misconfiguredBody: {
+        error: "Rate limiter unavailable",
+        code: "SEAM_MISCONFIGURED",
+      },
+    });
   }
 
   try {
@@ -126,7 +149,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         `[api/admin/match/recompute] circuit open — short-circuited, retry in ${err.retryAfterS}s`,
       );
       return NextResponse.json(
-        { error: CIRCUIT_OPEN_COPY },
+        { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
         {
           status: 503,
           headers: {
@@ -144,7 +167,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         scrubSeamError(err),
       );
       return NextResponse.json(
-        { error: TIMEOUT_COPY },
+        { error: TIMEOUT_COPY, code: "UPSTREAM_TIMEOUT" },
         { status: 504, headers: NO_STORE_HEADERS },
       );
     }
@@ -190,8 +213,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // the CALLER'S venue failing rather than as our outage. It is `null` on
       // every other 4xx and on the flat 424 shape, and a consumer that sees
       // `null` must say "a venue failed" without naming one.
+      //
+      // 140.3-G8 / SEAMUX-03 — `code` carries the UPSTREAM'S OWN machine token
+      // (`AnalyticsUpstreamError.seamCode`, the Python code TS-19 preserved),
+      // `?? "UNKNOWN"` when the body carried none. `error` and `dependency`
+      // BYTE-UNCHANGED beside it.
       return NextResponse.json(
-        { error: err.message, dependency: err.dependency },
+        { error: err.message, dependency: err.dependency, code: err.seamCode ?? "UNKNOWN" },
         { status: err.status, headers: NO_STORE_HEADERS },
       );
     }
@@ -217,7 +245,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       scrubSeamError(err),
     );
     return NextResponse.json(
-      { error: GENERIC_COPY },
+      { error: GENERIC_COPY, code: "UNKNOWN" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }

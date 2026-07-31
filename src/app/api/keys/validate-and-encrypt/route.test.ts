@@ -86,10 +86,16 @@ vi.mock("@/lib/analytics-client", () => {
   // narrowing resolves against the same constructor identity (F5b R8).
   class AnalyticsUpstreamError extends Error {
     readonly status: number;
-    constructor(message: string, status: number) {
+    // 140.3-G4 / SEAMUX-03 — the stable machine code the seam envelope carried,
+    // or null. Additive + optional so every 2-arg construction site keeps null,
+    // exactly like the real class (analytics-client.ts:119). The route's
+    // 4xx-forward arm reads it (`code: err.seamCode ?? "UNKNOWN"`).
+    readonly seamCode: string | null;
+    constructor(message: string, status: number, seamCode: string | null = null) {
       super(message);
       this.name = "AnalyticsUpstreamError";
       this.status = status;
+      this.seamCode = seamCode;
     }
   }
   class AnalyticsTimeoutError extends Error {
@@ -180,7 +186,13 @@ describe("POST /api/keys/validate-and-encrypt", () => {
     ).toBe(503);
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(res.headers.get("Retry-After")).toBe("60");
-    expect(await res.json()).toEqual({ error: "Rate limiter unavailable" });
+    // 140.3-G4 / SEAMUX-03: the misconfigured deny body carries the same code
+    // keys/sync uses — SEAM_MISCONFIGURED — with the builder's default sentence
+    // byte-kept. The exact-match oracle reddens if the code is dropped.
+    expect(await res.json()).toEqual({
+      error: "Rate limiter unavailable",
+      code: "SEAM_MISCONFIGURED",
+    });
     expect(mockValidateKey).not.toHaveBeenCalled();
     expect(mockEncryptKey).not.toHaveBeenCalled();
 
@@ -799,5 +811,129 @@ describe("[SEAMCORE-08 / B-13] the dormant unified handler's budget key", () => 
         "the thirteen bindings the roster in " +
         "src/lib/resilient-fetch.wiring.test.ts keeps closed — update both.",
     ).toBe(true);
+  });
+});
+
+/**
+ * Phase 140.3-G4 / SEAMUX-03 — a machine `code` on every error arm THIS route
+ * itself emits, so a client discriminates the fault on a stable token instead
+ * of sniffing prose. At HEAD this route emitted ZERO coded arms
+ * (140.3-VERIFICATION §3.1: 0/10). Mirrors 140.3-10's pass on keys/sync and the
+ * sibling create-with-key's deny-body precedent (KEY_RATE_LIMIT + SEAM_MISCONFIGURED).
+ *
+ * ⚠️ This route's request body carries RAW key material (SEAMCORE-06); these
+ * assertions read RESPONSE bodies only.
+ *
+ * ORACLE INDEPENDENCE: every expected code is a hand-typed literal.
+ */
+describe("[140.3-G4 / SEAMUX-03] POST /api/keys/validate-and-encrypt — a machine code on every arm", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    rateLimitResult.reason = undefined;
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+    mockEncryptKey.mockResolvedValue({ api_key_encrypted: "ct-blob" });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // ── the input 400 arm ──
+  it("400 missing required fields → code KEY_INVALID_FORMAT", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ exchange: "okx", api_key: "k" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("KEY_INVALID_FORMAT");
+  });
+
+  // ── the deny arm: two bodies, two tokens ──
+  it("429 throttle carries the EXACT { error, code: KEY_RATE_LIMIT } pair", async () => {
+    rateLimitResult.success = false;
+    rateLimitResult.retryAfter = 12;
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(429);
+    // KEY_RATE_LIMIT (not RATE_LIMITED): this is the key-connect family and its
+    // two already-coded siblings both chose KEY_RATE_LIMIT.
+    expect(await res.json()).toEqual({
+      error: "Too many requests",
+      code: "KEY_RATE_LIMIT",
+    });
+  });
+
+  // (the misconfigured deny body → SEAM_MISCONFIGURED is pinned by the
+  //  exact-match assertion in the SEAMRIM-05 case above.)
+
+  // ── the read-only rejection ──
+  it("400 could-not-verify-read-only → code KEY_NOT_READ_ONLY", async () => {
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: false });
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("KEY_NOT_READ_ONLY");
+  });
+
+  // ── the breaker 503 ──
+  it("503 breaker open → code CIRCUIT_OPEN (the wire token process-key-client emits)", async () => {
+    mockValidateKey.mockRejectedValue(new CircuitOpenError(5));
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.code).toBe("CIRCUIT_OPEN");
+    // The breaker copy and Retry-After stay byte-unchanged.
+    expect(res.headers.get("Retry-After")).toBe("5");
+  });
+
+  // ── the 4xx forward: preserve the upstream's own code ──
+  it("4xx forward PRESERVES the upstream's own seamCode when it carried one", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("Invalid API credentials", 400, "KEY_AUTH_FAILED"),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    // Never overwrite an upstream-carried code.
+    expect(body.code).toBe("KEY_AUTH_FAILED");
+    expect(body.error).toBe("Invalid API credentials");
+  });
+
+  it("4xx forward falls back to UNKNOWN only when the upstream carried NO code", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError("Key has IP restrictions", 403),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("UNKNOWN");
+  });
+
+  // ── the timeout 504 ──
+  it("504 timeout → code UPSTREAM_TIMEOUT (OUR analytics hop, not the exchange)", async () => {
+    const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsTimeoutError("/api/validate-key", 30000),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(504);
+    expect((await res.json()).code).toBe("UPSTREAM_TIMEOUT");
+  });
+
+  // ── the terminal 500 ──
+  it("500 terminal unclassified → code UNKNOWN", async () => {
+    mockValidateKey.mockRejectedValue(new Error("crypto: internal failure"));
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toBe("Key validation failed. Please try again.");
+    expect(body.code).toBe("UNKNOWN");
   });
 });
