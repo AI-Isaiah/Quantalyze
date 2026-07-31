@@ -241,6 +241,50 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
+/**
+ * A REAL `Response` carrying a JSON body AND the upstream's own contractual
+ * wait hint — the shape `error_contract.service_error` puts on the wire for every
+ * SERVICE-TRANSIENT 503 (15s supabase / 30s mt5-gateway, from its
+ * `RETRY_AFTER_SECONDS` table, which `_validate` refuses to let a 503 omit).
+ *
+ * A REAL `Response` is load-bearing here and the bare `{ ok, status }` doubles
+ * above cannot stand in: D-01 reads `res.headers.get`, and the whole point of the
+ * capability guard is that those doubles have no `headers` at all.
+ */
+function retryAfterResponse(
+  status: number,
+  seconds: number,
+  body: unknown,
+): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "content-type": "application/json",
+      "retry-after": String(seconds),
+    },
+  });
+}
+
+/**
+ * A fetch that answers a FRESH `Retry-After`-bearing response of `status` on
+ * EVERY call — a dependency that is still down when the retry would have fired.
+ *
+ * Fresh per call rather than one shared object, so a regressed loop that DOES
+ * retry gets a readable second body instead of a spent stream, and the failure
+ * it produces is the honest one (two attempts, two recorded failures).
+ */
+function retryAfterAlwaysFetch(
+  status: number,
+  seconds: number,
+  body: unknown,
+): FetchMock {
+  const mock = installFetchMock();
+  mock.mockImplementation(() =>
+    Promise.resolve(retryAfterResponse(status, seconds, body)),
+  );
+  return mock;
+}
+
 /** REJECTS once, then answers a real 200 JSON `Response` on every later call. */
 function throwThenJsonOk(rejection: unknown, body: unknown): FetchMock {
   const mock = installFetchMock();
@@ -336,6 +380,11 @@ describe("[SEAM-06 / SC2] the bounded retry loop", () => {
   });
 
   it("retriesOverride:1 + a counting 503 then 200 → exactly TWO fetch attempts, the 200 returned", async () => {
+    // ALSO the D-01 anti-regression (SC-C′) for the CAPABILITY GUARD: this
+    // double is a bare `{ ok, status }` literal with no `headers` at all, so
+    // `hasContractualWait` must degrade to false — never throw inside the
+    // classification window — and the 503 retry arm must stay armed. Do not
+    // convert this fixture to a real `Response`; the bare shape IS the case.
     vi.spyOn(Math, "random").mockReturnValue(0);
     const fetchMock = statusSequenceFetch(503, 200);
     const mod = await import("./resilient-fetch");
@@ -382,6 +431,103 @@ describe("[SEAM-06 / SC2] the bounded retry loop", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     // The single attempt's transient failure still counts once.
     expect(shared.counters.limitCalls).toBe(1);
+  });
+});
+
+describe("[SEAM-06 / D-01] a 503 that names its own wait FAILS FAST", () => {
+  it("SC-C — a 503 carrying Retry-After → exactly ONE fetch, body intact, ONE breaker failure, and no backoff sleep", async () => {
+    // The no-sleep oracle. `Math.random` is read at EXACTLY one site in the
+    // core — the jitter term of the retry backoff — so "never called" is the
+    // direct falsifier for "did not sleep", and it fails on the assertion
+    // rather than by hanging a fake-timer clock.
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    // Still down when the retry would have fired: the honest upstream state,
+    // and what makes the recorded-failure count a real oracle (a regressed
+    // loop would record TWO).
+    const fetchMock = retryAfterAlwaysFetch(503, 15, {
+      dependency: "supabase",
+      human_message: "The analytics service is briefly unavailable.",
+    });
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    // Hand-typed literals, never derived from the module under test.
+    expect(
+      fetchMock,
+      "A 503 that advertised a 15s wait was retried anyway. Retrying inside " +
+        "the backoff is near-certain to fail and buys nothing but a second " +
+        "breaker failure and billed lambda wall-clock.",
+    ).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(503);
+    // Attempt 1's response is SURFACED, not discarded — the client contract
+    // reads this body to name the dependency and render its own copy.
+    expect(await res.json()).toMatchObject({ dependency: "supabase" });
+    // ONE failure recorded, not two: the 503 happened and is counted once;
+    // "does not spend a second breaker failure" is satisfied by not looping.
+    expect(
+      shared.counters.limitCalls,
+      "The fail-fast path recorded a different number of breaker failures " +
+        "than the one attempt it made.",
+    ).toBe(1);
+    expect(
+      randomSpy,
+      "The backoff jitter was read, so the loop slept before giving up — a " +
+        "fail-fast must not spend wall clock it has already been told is futile.",
+    ).not.toHaveBeenCalled();
+  });
+
+  it("SC-C′ — a REAL 503 Response with NO Retry-After still retries (TWO fetches)", async () => {
+    // Distinct from the bare-literal case above: `headers` EXISTS here and
+    // `get` answers null. A 503 from Railway's edge or Vercel's proxy never
+    // passed through the Python contract, so it names no wait and the retry
+    // arm must stay armed for it.
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const fetchMock = installFetchMock();
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(503, { detail: "upstream down" }))
+      .mockResolvedValue(jsonResponse(200, { ok: true }));
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    expect(
+      fetchMock,
+      "D-01 disabled the whole 503 retry arm. It may only short-circuit a 503 " +
+        "that CARRIES the upstream's wait hint.",
+    ).toHaveBeenCalledTimes(2);
+    expect(res.status).toBe(200);
+  });
+
+  it("a counting 502 carrying a STRAY Retry-After still retries (TWO fetches) — the rule is 503-only", async () => {
+    // 502/504 come from the platform EDGE, which is outside the contract that
+    // makes the header meaningful (`error_contract` mandates it on 503 and
+    // nowhere else). A header arriving on one of those is not our upstream
+    // telling us to wait, so it must not gate the retry.
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const fetchMock = installFetchMock();
+    fetchMock
+      .mockResolvedValueOnce(retryAfterResponse(502, 15, { detail: "bad gateway" }))
+      .mockResolvedValue(jsonResponse(200, { ok: true }));
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    expect(
+      fetchMock,
+      "The fail-fast widened past 503. Only a 503 is contractually obliged to " +
+        "carry a wait it means, so only a 503 may be believed.",
+    ).toHaveBeenCalledTimes(2);
+    expect(res.status).toBe(200);
   });
 });
 
