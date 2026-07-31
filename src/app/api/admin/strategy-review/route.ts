@@ -58,13 +58,27 @@ export async function POST(req: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
+  // ── 140.3-G9 / SEAMUX-03 — a machine `code` on EVERY arm this route emits ──
+  // The tenth seam-importing production route (the one the 140.3-VERIFICATION
+  // nine-route list MISSED): its only seam import is `scrubSeamError` and it
+  // makes no analytics-service call, so it is in the class by the class
+  // definition (seam-importing route), and every arm below is admin-reachable.
+  // A consumer discriminates on a stable token instead of sniffing the prose
+  // (140.3-12's to reword). ONE-FACT-ONE-TOKEN (keys/sync:108-120 doctrine):
+  // all thirteen byte-identical "Cannot verify strategy data source" 503 arms
+  // carry the SAME `REVIEW_SOURCE_READ_FAILED` — WHICH read failed is our
+  // internal accounting (the console.error names it), off the wire; and every
+  // 409 re-check arm carries the SAME `REVIEW_RECHECK_FAILED`. UNAUTHENTICATED
+  // / FORBIDDEN are inline gate codes, NOT WizardErrorCode members: admin-only
+  // arms must never force wizard copy. Additive only — no status, sentence or
+  // header changed, and the byte-identical-sibling-bodies property survives.
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json({ error: "Unauthorized", code: "UNAUTHENTICATED" }, { status: 401 });
   }
   // 403 body says "Forbidden" (distinct from 401 "Unauthorized") so callers
   // can branch on the failure mode.
   if (!(await isAdminUser(supabase, user))) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return NextResponse.json({ error: "Forbidden", code: "FORBIDDEN" }, { status: 403 });
   }
 
   let body: Record<string, unknown>;
@@ -72,13 +86,13 @@ export async function POST(req: NextRequest) {
     const parsed = await req.json();
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return NextResponse.json(
-        { error: "Request body must be a JSON object" },
+        { error: "Request body must be a JSON object", code: "VALIDATION_FAILED" },
         { status: 400 },
       );
     }
     body = parsed as Record<string, unknown>;
   } catch {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+    return NextResponse.json({ error: "Invalid request body", code: "VALIDATION_FAILED" }, { status: 400 });
   }
 
   // B9 boundary-validation parity (M-1143): validate the admin POST body with a
@@ -99,7 +113,7 @@ export async function POST(req: NextRequest) {
     })
     .safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json({ error: "Invalid request" }, { status: 400 });
+    return NextResponse.json({ error: "Invalid request", code: "VALIDATION_FAILED" }, { status: 400 });
   }
   const { id, action, review_note } = parsed.data;
 
@@ -112,7 +126,7 @@ export async function POST(req: NextRequest) {
   );
   if (!rl.success) {
     return NextResponse.json(
-      { error: "Too many requests" },
+      { error: "Too many requests", code: "RATE_LIMITED" },
       {
         status: 429,
         headers: { "Retry-After": String(rl.retryAfter) },
@@ -157,7 +171,7 @@ export async function POST(req: NextRequest) {
     if (csvCountError) {
       console.error("[admin/strategy-review] csv_daily_returns count failed:", scrubSeamError(csvCountError));
       return NextResponse.json(
-        { error: "Cannot verify strategy data source. Please try again." },
+        { error: "Cannot verify strategy data source. Please try again.", code: "REVIEW_SOURCE_READ_FAILED" },
         { status: 503 },
       );
     }
@@ -170,7 +184,7 @@ export async function POST(req: NextRequest) {
     if (isReadFailure(strategyError)) {
       console.error("[admin/strategy-review] strategies read failed:", scrubSeamError(strategyError));
       return NextResponse.json(
-        { error: "Cannot verify strategy data source. Please try again." },
+        { error: "Cannot verify strategy data source. Please try again.", code: "REVIEW_SOURCE_READ_FAILED" },
         { status: 503 },
       );
     }
@@ -181,7 +195,7 @@ export async function POST(req: NextRequest) {
     if (isReadFailure(tradeCountError) || tradeCount === null) {
       console.error("[admin/strategy-review] trades count read failed:", tradeCountError ? scrubSeamError(tradeCountError) : "count was null with no error");
       return NextResponse.json(
-        { error: "Cannot verify strategy data source. Please try again." },
+        { error: "Cannot verify strategy data source. Please try again.", code: "REVIEW_SOURCE_READ_FAILED" },
         { status: 503 },
       );
     }
@@ -192,14 +206,14 @@ export async function POST(req: NextRequest) {
     if (isReadFailure(earliestTradeError)) {
       console.error("[admin/strategy-review] earliest trade read failed:", scrubSeamError(earliestTradeError));
       return NextResponse.json(
-        { error: "Cannot verify strategy data source. Please try again." },
+        { error: "Cannot verify strategy data source. Please try again.", code: "REVIEW_SOURCE_READ_FAILED" },
         { status: 503 },
       );
     }
     if (isReadFailure(latestTradeError)) {
       console.error("[admin/strategy-review] latest trade read failed:", scrubSeamError(latestTradeError));
       return NextResponse.json(
-        { error: "Cannot verify strategy data source. Please try again." },
+        { error: "Cannot verify strategy data source. Please try again.", code: "REVIEW_SOURCE_READ_FAILED" },
         { status: 503 },
       );
     }
@@ -209,7 +223,7 @@ export async function POST(req: NextRequest) {
     if (isReadFailure(analyticsError)) {
       console.error("[admin/strategy-review] strategy_analytics read failed:", scrubSeamError(analyticsError));
       return NextResponse.json(
-        { error: "Cannot verify strategy data source. Please try again." },
+        { error: "Cannot verify strategy data source. Please try again.", code: "REVIEW_SOURCE_READ_FAILED" },
         { status: 503 },
       );
     }
@@ -234,7 +248,7 @@ export async function POST(req: NextRequest) {
       if (keyRowError) {
         console.error("[admin/strategy-review] api_keys exchange lookup failed:", scrubSeamError(keyRowError));
         return NextResponse.json(
-          { error: "Cannot verify strategy data source. Please try again." },
+          { error: "Cannot verify strategy data source. Please try again.", code: "REVIEW_SOURCE_READ_FAILED" },
           { status: 503 },
         );
       }
@@ -264,13 +278,13 @@ export async function POST(req: NextRequest) {
       if (!(err instanceof StrategyGateUnevaluableError)) throw err;
       console.error("[admin/strategy-review] gate refused to evaluate:", scrubSeamError(err));
       return NextResponse.json(
-        { error: "Cannot verify strategy data source. Please try again." },
+        { error: "Cannot verify strategy data source. Please try again.", code: "REVIEW_SOURCE_READ_FAILED" },
         { status: 503 },
       );
     }
 
     if (!gate.passed) {
-      return NextResponse.json({ error: `Cannot approve: ${gate.reason}` }, { status: 400 });
+      return NextResponse.json({ error: `Cannot approve: ${gate.reason}`, code: "GUARD_BLOCKED" }, { status: 400 });
     }
 
     strategyData = strategy as typeof strategyData;
@@ -330,7 +344,7 @@ export async function POST(req: NextRequest) {
     if (recheckCsvError) {
       console.error("[admin/strategy-review] csv_daily_returns re-check count failed:", scrubSeamError(recheckCsvError));
       return NextResponse.json(
-        { error: "Cannot verify strategy data source. Please try again." },
+        { error: "Cannot verify strategy data source. Please try again.", code: "REVIEW_SOURCE_READ_FAILED" },
         { status: 503 },
       );
     }
@@ -341,14 +355,14 @@ export async function POST(req: NextRequest) {
     if (isReadFailure(recheckTradeCountError) || recheckTradeCount === null) {
       console.error("[admin/strategy-review] trades re-check count failed:", recheckTradeCountError ? scrubSeamError(recheckTradeCountError) : "count was null with no error");
       return NextResponse.json(
-        { error: "Cannot verify strategy data source. Please try again." },
+        { error: "Cannot verify strategy data source. Please try again.", code: "REVIEW_SOURCE_READ_FAILED" },
         { status: 503 },
       );
     }
     if (isReadFailure(recheckAnalyticsError)) {
       console.error("[admin/strategy-review] strategy_analytics re-check read failed:", scrubSeamError(recheckAnalyticsError));
       return NextResponse.json(
-        { error: "Cannot verify strategy data source. Please try again." },
+        { error: "Cannot verify strategy data source. Please try again.", code: "REVIEW_SOURCE_READ_FAILED" },
         { status: 503 },
       );
     }
@@ -367,13 +381,13 @@ export async function POST(req: NextRequest) {
     if (isDailyReturnsSourced) {
       if ((recheckCsvCount ?? 0) < STRATEGY_GATE_MIN_CSV_ROWS) {
         return NextResponse.json(
-          { error: "Cannot approve: CSV history fell below threshold during review." },
+          { error: "Cannot approve: CSV history fell below threshold during review.", code: "REVIEW_RECHECK_FAILED" },
           { status: 409 },
         );
       }
     } else if (recheckTradeCount < STRATEGY_GATE_MIN_TRADES) {
       return NextResponse.json(
-        { error: "Cannot approve: trade count fell below threshold during review." },
+        { error: "Cannot approve: trade count fell below threshold during review.", code: "REVIEW_RECHECK_FAILED" },
         { status: 409 },
       );
     }
@@ -382,7 +396,7 @@ export async function POST(req: NextRequest) {
     // strategy passes the gate then 409s here — un-approvable (mig 20260707120000).
     if (!isComputedAnalytics(recheckAnalytics?.computation_status)) {
       return NextResponse.json(
-        { error: "Cannot approve: analytics no longer complete." },
+        { error: "Cannot approve: analytics no longer complete.", code: "REVIEW_RECHECK_FAILED" },
         { status: 409 },
       );
     }
@@ -410,7 +424,7 @@ export async function POST(req: NextRequest) {
     if (memberCountError) {
       console.error("[admin/strategy-review] strategy_keys count failed:", scrubSeamError(memberCountError));
       return NextResponse.json(
-        { error: "Cannot verify strategy data source. Please try again." },
+        { error: "Cannot verify strategy data source. Please try again.", code: "REVIEW_SOURCE_READ_FAILED" },
         { status: 503 },
       );
     }
@@ -429,7 +443,7 @@ export async function POST(req: NextRequest) {
       if (stitchJobError) {
         console.error("[admin/strategy-review] compute_jobs stitch lookup failed:", scrubSeamError(stitchJobError));
         return NextResponse.json(
-          { error: "Cannot verify strategy data source. Please try again." },
+          { error: "Cannot verify strategy data source. Please try again.", code: "REVIEW_SOURCE_READ_FAILED" },
           { status: 503 },
         );
       }
@@ -438,7 +452,7 @@ export async function POST(req: NextRequest) {
       // 409s above.
       if (latestStitchJob?.status !== "done") {
         return NextResponse.json(
-          { error: "Cannot approve: composite computation is not complete." },
+          { error: "Cannot approve: composite computation is not complete.", code: "REVIEW_RECHECK_FAILED" },
           { status: 409 },
         );
       }
@@ -457,15 +471,22 @@ export async function POST(req: NextRequest) {
       .select("id");
 
     if (error) {
-      return NextResponse.json({ error: "Update failed" }, { status: 500 });
+      // Beyond the plan's floor: a write fault, not a source read. It is the
+      // publish UPDATE failing, so neither REVIEW_SOURCE_READ_FAILED (a read we
+      // depend on) nor REVIEW_RECHECK_FAILED (state moved during review) fits —
+      // it is a server fault we did not classify. UNKNOWN, the union's own
+      // terminal-server-fault token (the eval sibling's 500 uses it).
+      return NextResponse.json({ error: "Update failed", code: "UNKNOWN" }, { status: 500 });
     }
     if (!updated || updated.length === 0) {
       // No row matched (id+status). Either the strategy left
       // `pending_review` between the gate check and the UPDATE, or it was
       // never in review. Return 409 so the admin retries instead of
-      // assuming success.
+      // assuming success. Beyond the plan's four listed 409s — but the SAME
+      // re-check fact class (state changed during review; publish refused), so
+      // the SAME token.
       return NextResponse.json(
-        { error: "Strategy is no longer awaiting review." },
+        { error: "Strategy is no longer awaiting review.", code: "REVIEW_RECHECK_FAILED" },
         { status: 409 },
       );
     }
@@ -475,7 +496,9 @@ export async function POST(req: NextRequest) {
     const { error } = await admin.from("strategies").update(update).eq("id", id);
 
     if (error) {
-      return NextResponse.json({ error: "Update failed" }, { status: 500 });
+      // Beyond the plan's floor (reject-path write fault) — same rationale as
+      // the approve-path 500 above: an unclassified server fault → UNKNOWN.
+      return NextResponse.json({ error: "Update failed", code: "UNKNOWN" }, { status: 500 });
     }
   }
 
