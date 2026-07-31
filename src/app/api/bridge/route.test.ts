@@ -123,10 +123,16 @@ vi.mock("@/lib/ratelimit", () => ({
 vi.mock("@/lib/analytics-client", async () => {
   class AnalyticsUpstreamError extends Error {
     readonly status: number;
-    constructor(message: string, status: number) {
+    // 140.3-G6 / SEAMUX-03 — the stable MACHINE code the real class carries
+    // (analytics-client.ts:119). Additive + optional: every pre-existing
+    // construction here passes two args and keeps `null`, so the route's
+    // `code: err.seamCode ?? "UNKNOWN"` forward can be driven both ways.
+    readonly seamCode: string | null;
+    constructor(message: string, status: number, seamCode: string | null = null) {
       super(message);
       this.name = "AnalyticsUpstreamError";
       this.status = status;
+      this.seamCode = seamCode;
     }
   }
   class AnalyticsTimeoutError extends Error {
@@ -567,5 +573,114 @@ describe("POST /api/bridge", () => {
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toMatch(/required/i);
+  });
+
+  // ── 140.3-G6 / SEAMUX-03 — every ROUTE-EMITTED arm carries a machine `code` ──
+  // A client discriminates the fault on a stable token instead of sniffing the
+  // prose (which 140.3-12 owns and may reword). The `withAuth` 401 is
+  // helper-owned and excluded — the verifier accepted keys/sync the same way.
+  // Each arm is driven independently so a code dropped from ONE reddens here and
+  // does not hide behind another arm's assertion.
+  const okBody = () => ({
+    portfolio_id: PORTFOLIO_ID,
+    underperformer_strategy_id: UNDERPERFORMER_ID,
+  });
+
+  it("G6 — 400 invalid JSON carries code VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(null, { rawBody: "{not json" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("G6 — 400 invalid body shape carries code VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ portfolio_id: PORTFOLIO_ID }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("G6 — 503 limiter-misconfigured carries code SEAM_MISCONFIGURED", async () => {
+    STATE.checkLimitResult = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SEAM_MISCONFIGURED");
+  });
+
+  it("G6 — 429 real throttle carries code RATE_LIMITED (retryAfter body field kept)", async () => {
+    STATE.checkLimitResult = { success: false, retryAfter: 30 };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(429);
+    const body = await res.json();
+    expect(body.code).toBe("RATE_LIMITED");
+    // Additive: the pre-existing retryAfter body field must survive alongside.
+    expect(body.retryAfter).toBe(30);
+  });
+
+  it("G6 — 404 carries code PORTFOLIO_NOT_FOUND", async () => {
+    STATE.portfolioFound = false;
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(404);
+    expect((await res.json()).code).toBe("PORTFOLIO_NOT_FOUND");
+  });
+
+  it("G6 — breaker 503 carries code CIRCUIT_OPEN", async () => {
+    STATE.findReplacementImpl = async () => {
+      throw new CircuitOpenError(7);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("CIRCUIT_OPEN");
+  });
+
+  it("G6 — forwarded upstream 4xx PRESERVES err.seamCode", async () => {
+    STATE.findReplacementImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("no returns data", 400, "NO_RETURNS_DATA");
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("NO_RETURNS_DATA");
+  });
+
+  it("G6 — forwarded upstream 4xx with NO seamCode falls back to UNKNOWN", async () => {
+    STATE.findReplacementImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("unprocessable", 422);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(422);
+    expect((await res.json()).code).toBe("UNKNOWN");
+  });
+
+  it("G6 — 504 timeout carries code UPSTREAM_TIMEOUT", async () => {
+    STATE.findReplacementImpl = async () => {
+      const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+      throw new AnalyticsTimeoutError("/api/portfolio-bridge", 15000);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(504);
+    expect((await res.json()).code).toBe("UPSTREAM_TIMEOUT");
+  });
+
+  it("G6 — terminal 500 carries code UNKNOWN", async () => {
+    STATE.findReplacementImpl = async () => {
+      throw new Error("Zod contract drift at scoring.py:188");
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(okBody()));
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
   });
 });
