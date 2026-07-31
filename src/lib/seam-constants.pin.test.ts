@@ -394,8 +394,32 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
       BREAKER_FAILURE_THRESHOLD,
       "The breaker's trip threshold changed. Raising it delays protection " +
         "during a real Railway outage; lowering it lets one unlucky pod " +
-        "restart take the seam down.",
+        "restart take the seam down. Since Phase 141 the unit is an ATTEMPT, " +
+        "not a request, so raising it delays containment for retried traffic " +
+        "TWICE as much as the number suggests — see the derived ⌈threshold/2⌉ " +
+        "assertion below and the ratified tradeoff on the constant itself.",
     ).toBe(5);
+  });
+
+  it("D-02: a doubly-failing RETRIED request trips the circuit in 3 user requests", () => {
+    // Both sides literal, and the left one is DERIVED rather than restated: the
+    // per-attempt latch means a retried call whose two attempts both fail
+    // records TWO failures, so the user-visible trip point on the five
+    // retry-enabled rows is ⌈threshold/2⌉ requests, not `threshold`. That is
+    // the whole of the tradeoff ratified on BREAKER_FAILURE_THRESHOLD: the
+    // constant did not move, the UNIT under it did. This assertion is where
+    // moving the constant without re-reading that reasoning reddens.
+    expect(
+      Math.ceil(BREAKER_FAILURE_THRESHOLD / 2),
+      "The number of user requests a sustained outage needs to trip the seam " +
+        "breaker on a retry-enabled row has changed. Raising it is not a " +
+        "tuning knob: the trip gates ALL fifteen routes through the global " +
+        "key, including the anonymous teaser, and every extra request spent " +
+        "reaching it is a request served by a service already known to be " +
+        "down. Widening this to make a flaky test pass is forbidden — change " +
+        "the constant deliberately, and rewrite its ratified docblock in the " +
+        "same commit.",
+    ).toBe(3);
   });
 
   it("BREAKER_WINDOW is the literal '30 s'", () => {
