@@ -540,6 +540,168 @@ describe("[SEAM-06 / D-01] a 503 that names its own wait FAILS FAST", () => {
   });
 });
 
+/**
+ * Phase 141.1 / D-17 — THE TWO SILENT ARMS.
+ *
+ * Before this plan the counting-5xx retry arm did `recordOnce` then `continue`
+ * with no log at all, and the pre-attempt-2 `CircuitOpenError` threw away
+ * attempt 1's status without naming it. Pre-threshold degradation was therefore
+ * materially QUIETER after the retry loop landed than before it: the transport
+ * arm logs, the counting arm did not, and a caller who used to receive attempt
+ * 1's 503 body now receives a `CircuitOpenError` that mentions no status.
+ *
+ * ⚠️ THE SECURITY HALF IS NOT DECORATION. This seam carries raw exchange API
+ * secrets, `INTERNAL_API_TOKEN` and a live end-user Supabase JWT
+ * (`X-User-Access-Token`). The transport arm's own comment records that omitting
+ * `scrubSeamError`'s second argument ONCE SHIPPED that JWT to the logs verbatim.
+ * So the positive assertions below are paired with a NEGATIVE one driven by
+ * sentinels, and the sentinel case is the one that must never be deleted: a log
+ * line that names the budget key is worth little, and a log line that names a
+ * credential is worth less than nothing.
+ */
+describe("[SEAM-06 / D-17] the two silent arms now have a voice", () => {
+  /** Every string this run handed `console.error`, in call order. */
+  function loggedStrings(spy: { mock: { calls: unknown[][] } }): string[] {
+    return spy.mock.calls.map((call) => call.map(String).join(" "));
+  }
+
+  it("SC-M — a counting 503 on attempt 1 logs ONCE, naming the budget key, the status and the attempt index", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const fetchMock = statusSequenceFetch(503, 200);
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(res.status).toBe(200);
+
+    const lines = loggedStrings(errSpy);
+    expect(
+      lines,
+      "The counting-5xx retry arm discarded attempt 1's diagnosis in silence. " +
+        "A 503 that is retried and then succeeds is the ONLY signal that a " +
+        "dependency is degrading below the breaker threshold, and with no log " +
+        "line an operator cannot see the degradation at all.",
+    ).toHaveLength(1);
+    // Hand-typed: the budget key, the numeric status, the attempt index.
+    expect(lines[0]).toContain("bridge");
+    expect(lines[0]).toContain("503");
+    expect(lines[0]).toMatch(/attempt 1\b/);
+  });
+
+  it("SC-M (arm 2) — when attempt 1's failure is the threshold-th, the CircuitOpenError log NAMES the discarded status", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const mod = await import("./resilient-fetch");
+
+    // Same skeleton as SC4b: walk the counter to THRESHOLD-1 so the breaker is
+    // still CLOSED at entry and attempt 1's own failure is the one that arms it.
+    await driveFailures(mod, mod.BREAKER_FAILURE_THRESHOLD - 1);
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+    // The drive calls are setup, not subject — only the call below is measured.
+    errSpy.mockClear();
+
+    vi.unstubAllGlobals();
+    const fetchMock = statusSequenceFetch(503, 200);
+
+    const thrown = await mod
+      .resilientFetch("bridge", BRIDGE_PATH, {
+        method: "POST",
+        retriesOverride: 1,
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+    expect(thrown).toBeInstanceOf(mod.CircuitOpenError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const lines = loggedStrings(errSpy);
+    const discardLine = lines.find((l) => l.includes("between attempts"));
+    expect(
+      discardLine,
+      "The pre-attempt-2 CircuitOpenError threw away attempt 1's response " +
+        "without naming its status. That response carried the freshest " +
+        "diagnosis available — the `dependency` and `human_message` the caller " +
+        "USED to receive pre-141 — and the caller now receives a breaker error " +
+        "instead. If the log does not name the discarded status the diagnosis " +
+        "is gone from every surface at once.",
+    ).toBeDefined();
+    expect(discardLine).toContain("bridge");
+    expect(discardLine).toContain("503");
+  });
+
+  it("SC-M′ (NEGATIVE, security-critical) — no logged string carries the request body, the path, or ANY credential header value", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    // Every sentinel is a value a REAL caller puts on this seam: the internal
+    // token, the analytics service key, and a live end-user Supabase JWT.
+    const SENTINELS = [
+      "SENTINEL_BODY_XYZ",
+      "SENTINEL_AUTHORIZATION_XYZ",
+      "SENTINEL_SERVICE_KEY_XYZ",
+      "SENTINEL_USER_ACCESS_TOKEN_XYZ",
+      "SENTINEL_PATH_XYZ",
+    ];
+    const init = {
+      method: "POST" as const,
+      headers: {
+        Authorization: "Bearer SENTINEL_AUTHORIZATION_XYZ",
+        "X-Service-Key": "SENTINEL_SERVICE_KEY_XYZ",
+        "X-User-Access-Token": "SENTINEL_USER_ACCESS_TOKEN_XYZ",
+      },
+      body: JSON.stringify({ secret: "SENTINEL_BODY_XYZ" }),
+    };
+    const SENTINEL_PATH = "/api/portfolio-bridge/SENTINEL_PATH_XYZ";
+
+    const mod = await import("./resilient-fetch");
+
+    // Arm 1 — the counting-5xx arm this plan adds a log to.
+    statusSequenceFetch(503, 200);
+    await mod.resilientFetch("bridge", SENTINEL_PATH, {
+      ...init,
+      retriesOverride: 1,
+    });
+
+    // Arm 2 — the pre-existing transport arm, driven with the same sentinels so
+    // this case also stands as the anti-regression for `scrubSeamError`'s
+    // second argument (the omission that once shipped a live JWT).
+    vi.unstubAllGlobals();
+    throwAlways(new TypeError("fetch failed"));
+    await expect(
+      mod.resilientFetch("bridge", SENTINEL_PATH, {
+        ...init,
+        retriesOverride: 1,
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+
+    const lines = loggedStrings(errSpy);
+    // Proof the oracle is not vacuous: something WAS logged to inspect.
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      for (const sentinel of SENTINELS) {
+        expect(
+          line,
+          `A seam log line leaked \`${sentinel}\`. This module's logs may name ` +
+            "the BUDGET KEY and the STATUS and nothing else — the path is " +
+            "caller input and the headers and body carry raw exchange API " +
+            "secrets, INTERNAL_API_TOKEN and a live end-user Supabase JWT. " +
+            "Rendering `requestInit`, the path, or an unscrubbed error into a " +
+            "log line ships those to every log sink at once.",
+        ).not.toContain(sentinel);
+      }
+    }
+  });
+});
+
 describe("[SEAM-06 / SC2] fixed backoff + jitter bounds", () => {
   it("with jitter at its floor (Math.random → 0) the retry fires at exactly 250ms, not before", async () => {
     // 250 is a LITERAL typed here, never SEAM_RETRY_BACKOFF_MS imported.
