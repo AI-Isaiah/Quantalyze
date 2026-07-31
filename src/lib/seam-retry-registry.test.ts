@@ -142,6 +142,156 @@ describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
     });
   });
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // 141.1 CONTENT PINS — the re-derived evidence is pinned CLAIM BY CLAIM.
+  //
+  // WHY A CONTENT PIN AND NOT A KEY PIN. The key-set pins above prove WHICH
+  // rows are allowlisted; they are blind to WHY. But the registry's premise is
+  // "the evidence IS the entry" — a future engineer extending the allowlist
+  // reasons from this prose, so prose that says something false is a defective
+  // deliverable even while every verdict is right. The 141.1 re-derivation
+  // found exactly that: three of the four analytics YES entries claimed "no
+  // persisted server-side write" and all three DO write. These pins make the
+  // corrected claims load-bearing, so a revert to the false text reddens
+  // instead of silently restoring the reasoning that would authorise a wrong
+  // YES.
+  //
+  // ⚠️ ORACLE INDEPENDENCE HOLDS HERE TOO: every key list below is hand-typed.
+  // Deriving them from `Object.keys` of the map under test would make these
+  // pins green for any table, including one whose evidence had been emptied.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** The three analytics YES entries that DO write (D-04). `optimize-weights` is excluded. */
+  const EXPECTED_WRITING_ANALYTICS_KEYS = [
+    "bridge",
+    "portfolio-optimizer",
+    "simulator",
+  ] as const;
+
+  /** The banned claim — true of `optimize-weights` alone (D-04). */
+  const BANNED_WRITELESS_CLAIM = "no persisted server-side write";
+
+  describe("[D-04] the writeless claim belongs to optimize-weights ALONE", () => {
+    it.each(EXPECTED_WRITING_ANALYTICS_KEYS)(
+      "%s evidence does NOT claim to be writeless",
+      (key) => {
+        expect(
+          RETRY_SAFE_ANALYTICS[key]?.evidence,
+          `${key} carries the claim "${BANNED_WRITELESS_CLAIM}", which the 141.1 ` +
+            `re-derivation DISPROVED for it (bridge and simulator append audit ` +
+            `rows; portfolio-optimizer additionally UPDATEs ` +
+            `portfolio_analytics.optimizer_suggestions). This is not a wording ` +
+            `nit: the next engineer extending the allowlist reads this prose as ` +
+            `the audit, and "writeless" is the single fact that would make a new ` +
+            `YES look free. State the ACTUAL writes and why the retry is safe ` +
+            `given them — never re-assert writelessness here.`,
+        ).not.toContain(BANNED_WRITELESS_CLAIM);
+      },
+    );
+
+    it("optimize-weights DOES still carry it (the pin is not vacuous)", () => {
+      // Without this, deleting the claim everywhere would leave the pin above
+      // green — a ban that bans nothing because the string no longer exists.
+      expect(RETRY_SAFE_ANALYTICS["optimize-weights"]?.evidence).toContain(
+        BANNED_WRITELESS_CLAIM,
+      );
+    });
+  });
+
+  describe("[D-03] every analytics YES entry records the doubled-compute cost", () => {
+    // ⚠️ WHY THIS PIN NAMES THE MECHANISM AND NOT A LOOSE ALTERNATION. The first
+    // draft of this pin was `/concurrent|is_disconnected|doubled/i`. Measured
+    // against the real mutation (delete the COST sentence from `simulator`) it
+    // stayed GREEN: simulator's evidence separately says the failure-path row
+    // "cannot be doubled by a seam retry", so the alternation was satisfied by a
+    // sentence about something else entirely. That is this phase's own thesis
+    // turned on the guard — a scanner that matches something incidental reports
+    // agreement forever. Both halves below are load-bearing and appear ONLY in
+    // the COST sentence, so deleting that sentence reddens for all four keys.
+    // NEVER relax these to an alternation that some other sentence can satisfy.
+    it.each(EXPECTED_SAFE_ANALYTICS_KEYS)(
+      "%s evidence records the second concurrent compute AND names the mechanism",
+      (key) => {
+        const evidence =
+          RETRY_SAFE_ANALYTICS[key as keyof typeof RETRY_SAFE_ANALYTICS]?.evidence;
+        const message =
+          `${key} no longer records the D-03 cost. A retry on this budget adds a ` +
+          `SECOND concurrent full compute while attempt 1 still burns CPU, ` +
+          `because nothing on the FastAPI side awaits request.is_disconnected(). ` +
+          `That is an ACCEPTED consequence of this phase, not an absent one — ` +
+          `deleting it lets the cost be inherited silently by whoever reads this ` +
+          `entry as precedent, and server-side cancellation is deferred to its ` +
+          `own phase precisely BECAUSE the cost is recorded here.`;
+        expect(evidence, message).toMatch(/second concurrent full compute/);
+        expect(evidence, message).toMatch(/request\.is_disconnected\(\)/);
+      },
+    );
+  });
+
+  describe("[D-05] the flow evidence states its residuals and its qualification", () => {
+    it("resync does NOT claim the SEQUENTIAL class is closed", () => {
+      expect(
+        RETRY_SAFE_FLOW_TYPES.resync?.evidence,
+        `resync's evidence has re-acquired a "class is closed" claim. It is NOT ` +
+          `closed: the plan-01 pre-check filters status='draft', and the worker's ` +
+          `30s tick advances SV#1 out of draft, so a transition landing inside the ` +
+          `blip window lets a SECOND draft row through. The residual is bounded ` +
+          `and recorded — overstating it as closed is what a future reader would ` +
+          `rely on when deciding a NEW flow needs no dedup.`,
+      ).not.toMatch(/class is closed/i);
+    });
+
+    it.each(EXPECTED_SAFE_FLOW_KEYS)(
+      "%s qualifies 'exactly one job' to the three INDEXED statuses",
+      (key) => {
+        expect(
+          RETRY_SAFE_FLOW_TYPES[key as keyof typeof RETRY_SAFE_FLOW_TYPES]?.evidence,
+          `${key} no longer names the three statuses the partial unique index ` +
+            `compute_jobs_one_inflight_per_kind_strategy actually admits ` +
+            `(pending, running, done_pending_children). Unqualified, "exactly one ` +
+            `job" reads as an absolute — but failed_retry sits OUTSIDE the index ` +
+            `predicate, so the guarantee lapses exactly where a retry story cares.`,
+        ).toMatch(/pending.*running.*done_pending_children/s);
+      },
+    );
+
+    it("onboard records the PROVENANCE of the wizard_session_id guarantee", () => {
+      // The pre-141.1 text stated the non-NULL guarantee as a bare fact. A fact
+      // cannot be falsified by a future producer; a recorded provenance can.
+      const evidence = RETRY_SAFE_FLOW_TYPES.onboard?.evidence;
+      const message =
+        "onboard's evidence has lost part of the provenance chain that makes its " +
+        "non-NULL wizard_session_id guarantee FALSIFIABLE rather than merely " +
+        "asserted: the isUuid 400 gate in create-with-key, the 7-day " +
+        "cleanup_abandoned_wizard_drafts purge, and the SV dedup index " +
+        "strategy_verifications_strategy_wizard_session_uniq. Restore the link " +
+        "that was deleted — a future producer emitting a NULL session id must " +
+        "visibly trip this reasoning, not silently invalidate it.";
+      expect(evidence, message).toMatch(/isUuid/);
+      expect(evidence, message).toMatch(/cleanup_abandoned_wizard_drafts/);
+      expect(evidence, message).toMatch(
+        /strategy_verifications_strategy_wizard_session_uniq/,
+      );
+    });
+
+    it("onboard names BOTH of its producers", () => {
+      // Evidence derived from ONE member of a class of two is the
+      // instance-not-class shape this phase exists to repair: `onboard` is
+      // emitted by strategies/finalize-wizard AND by keys/validate-and-encrypt,
+      // and the provenance argument above holds for only the first.
+      const evidence = RETRY_SAFE_FLOW_TYPES.onboard?.evidence;
+      const message =
+        "onboard's evidence no longer names both emitters of flow_type=onboard. " +
+        "The wizard path (strategies/finalize-wizard) is where the provenance " +
+        "argument was derived; keys/validate-and-encrypt sends NO " +
+        "wizard_session_id at all and is retry-safe for a DIFFERENT reason (its " +
+        "budget row is pinned at zero retries). Dropping either producer leaves " +
+        "the verdict resting on evidence that covers only half its own class.";
+      expect(evidence, message).toMatch(/finalize-wizard/);
+      expect(evidence, message).toMatch(/validate-and-encrypt/);
+    });
+  });
+
   describe("purity — the leaf imports nothing by VALUE", () => {
     // Same mechanism as seam-discriminator.purity.test.ts: read the source from
     // disk, strip comments, and assert every import statement is `import type`.
