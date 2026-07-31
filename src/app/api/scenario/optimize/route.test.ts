@@ -136,10 +136,16 @@ vi.mock("@/lib/analytics-client", async () => {
   // classes must exist as real constructors or the route's catch throws.
   class AnalyticsUpstreamError extends Error {
     readonly status: number;
-    constructor(message: string, status: number) {
+    // 140.3-G5 / SEAMUX-03 — additive third arg mirroring the real class
+    // (`analytics-client.ts:119`, `seamCode: string | null = null`), so the
+    // 502 arm's `err.seamCode ?? "UNKNOWN"` forwarding is falsifiable here.
+    // Every pre-existing 2-arg construction keeps `seamCode = null`.
+    readonly seamCode: string | null;
+    constructor(message: string, status: number, seamCode: string | null = null) {
       super(message);
       this.name = "AnalyticsUpstreamError";
       this.status = status;
+      this.seamCode = seamCode;
     }
   }
   class AnalyticsTimeoutError extends Error {
@@ -601,5 +607,134 @@ describe("[140.3-13b / SEAMUX-08] POST /api/scenario/optimize — Sentry capture
     const res = await POST(makeRequest(validBody()));
     expect(res.status).toBe(429);
     await expectNoCapture();
+  });
+});
+
+/**
+ * 140.3-G5 / SEAMUX-03 — a machine `code` on EVERY error arm this route itself
+ * emits, so a client discriminates the fault on a stable token rather than
+ * sniffing the human sentence. Baseline was ZERO coded arms here.
+ *
+ * OUT OF SCOPE (helper-emitted, not the route's own arm): the approval-gate
+ * 403 (`assertProfileApproved`) and the limiter 429/503 (`rateLimitDenyJson`)
+ * — the same class the verifier accepted keys/sync as complete without touching
+ * (withAuth's 401). Their bodies are the helpers' to code, not this plan's.
+ */
+describe("[140.3-G5 / SEAMUX-03] POST /api/scenario/optimize — a machine code on every arm", () => {
+  it("401 (no session) → UNAUTHENTICATED", async () => {
+    STATE.authUser = null;
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(401);
+    expect((await res.json()).code).toBe("UNAUTHENTICATED");
+  });
+
+  it("400 invalid JSON → VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(null, { rawBody: "{not json" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("400 bad objective → VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ series: SERIES, objective: "max_return" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("400 series is not an object → VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ series: [], objective: "min_vol" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("400 series count out of range → VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ series: {}, objective: "min_vol" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("400 per-series not an array → VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({ series: { "strategy-a": "nope" }, objective: "min_vol" }),
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("400 malformed point → VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        series: { "strategy-a": [{ date: "2026-01-01", value: "0.01" }] },
+        objective: "min_vol",
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("503 breaker → CIRCUIT_OPEN, sentence + Retry-After byte-unchanged", async () => {
+    STATE.optimizeImpl = async () => {
+      throw new CircuitOpenError(13);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("13");
+    const body = await res.json();
+    expect(body.code).toBe("CIRCUIT_OPEN");
+    // The SEAMUX-01 one-source-of-truth copy leaf is untouched.
+    expect(body.error).toBe(
+      "The analytics service is temporarily unavailable. Please try again in a moment.",
+    );
+  });
+
+  it("504 timeout → UPSTREAM_TIMEOUT", async () => {
+    STATE.optimizeImpl = async () => {
+      const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+      throw new AnalyticsTimeoutError("/api/optimize-weights", 30000);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(504);
+    expect((await res.json()).code).toBe("UPSTREAM_TIMEOUT");
+  });
+
+  it("502 upstream forwards err.seamCode VERBATIM", async () => {
+    STATE.optimizeImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("solver failed", 500, "SOLVER_DIVERGED");
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(502);
+    // The upstream's own machine code survives, not our fallback.
+    expect((await res.json()).code).toBe("SOLVER_DIVERGED");
+  });
+
+  it("502 upstream with a null seamCode → UNKNOWN fallback", async () => {
+    STATE.optimizeImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("optimizer down", 502);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe("UNKNOWN");
+  });
+
+  it("500 terminal/unclassified → UNKNOWN", async () => {
+    STATE.optimizeImpl = async () => {
+      throw new Error("boom-internal-detail");
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
   });
 });
