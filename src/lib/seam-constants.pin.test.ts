@@ -7,6 +7,8 @@ import {
   BREAKER_COOLDOWN_S,
   DEFAULT_RETRY_AFTER_S,
   SEAM_RETRIES,
+  SEAM_RETRY_BACKOFF_MS,
+  SEAM_RETRY_JITTER_MAX_MS,
   BREAKER_STORE_TIMEOUT_MS,
   BREAKER_STORE_RETRIES,
   BREAKER_STORE_BACKOFF_MS,
@@ -19,6 +21,8 @@ import { seamBreakerVerdict } from "./seam-discriminator";
 import {
   RETRY_SAFE_ANALYTICS,
   RETRY_SAFE_FLOW_TYPES,
+  RETRY_AUDIT_NO_ANALYTICS,
+  RETRY_AUDIT_NO_FLOW_TYPES,
 } from "./seam-retry-registry";
 import {
   FAKE_BREAKER_KEY,
@@ -378,6 +382,56 @@ describe("SEAM_BUDGETS — every timeout pinned to a hand-typed literal", () => 
     // hazard is now closed by construction, and these pins are what stop the
     // remaining accounting half.
 
+    it("the four registry maps have their hand-typed sizes (D-14a anti-vacuity)", () => {
+      // ⚠️ THIS FENCE GUARDS THE `it.each` DIRECTLY BELOW, WHICH ITERATES THE MAP
+      // UNDER TEST. That is the one shape this file's own :86-92 docblock warns
+      // against — `EXPECTED_TIMEOUT_MS` exists precisely so `it.each` iterates a
+      // HAND-TYPED map, because "iterating the table would silently produce a
+      // shorter — and still green — case list". The registry `it.each` below was
+      // written the other way and inherited exactly that hole.
+      //
+      // ⭐ MEASURED, not theorised. Plan 141.1-04 deleted the `bridge` entry from
+      // RETRY_SAFE_ANALYTICS and recorded the result: the suite went from 78 to
+      // 77 tests with the `it.each` NOT failing — it merely SHED a case. The one
+      // failure came from the OQ-3 pin added in that same plan, which happens to
+      // hand-type the same four keys. Take that pin away and deleting an audited
+      // retry verdict is invisible here. A map emptied outright would yield ZERO
+      // cases and a fully green file: BLIND, not satisfied.
+      //
+      // The four numbers are the counts the SEAM-05 idempotency audit produced,
+      // hand-typed here and never `Object.keys(...).length` of anything else. If
+      // a verdict is legitimately added or withdrawn, change the literal in the
+      // same commit as the entry — never to make a diff pass.
+      expect(
+        Object.keys(RETRY_SAFE_ANALYTICS).length,
+        "RETRY_SAFE_ANALYTICS no longer holds exactly 4 audited retry verdicts " +
+          "(bridge, simulator, portfolio-optimizer, optimize-weights). A FIFTH " +
+          "is a wrapper granted a replay without an idempotency audit; a THIRD " +
+          "means an authorised retry was withdrawn while SC-4b still charges " +
+          "for it — and the case list below would shrink to match, silently.",
+      ).toBe(4);
+      expect(
+        Object.keys(RETRY_SAFE_FLOW_TYPES).length,
+        "RETRY_SAFE_FLOW_TYPES no longer holds exactly 2 audited flows " +
+          "(onboard, resync). Adding teaser or csv here is the SC3 landmine: a " +
+          "replayed teaser double-mints its verification/public_token/lead.",
+      ).toBe(2);
+      expect(
+        Object.keys(RETRY_AUDIT_NO_FLOW_TYPES).length,
+        "RETRY_AUDIT_NO_FLOW_TYPES no longer holds exactly 2 refusals " +
+          "(teaser, csv). A refusal that disappears is an audit verdict lost, " +
+          "not a flow made safe.",
+      ).toBe(2);
+      expect(
+        Object.keys(RETRY_AUDIT_NO_ANALYTICS).length,
+        "RETRY_AUDIT_NO_ANALYTICS no longer holds exactly 5 refusals " +
+          "(validate-key, encrypt-key, match-recompute, portfolio-analytics, " +
+          "match-eval). Together with the 4 above this is the whole 9-wrapper " +
+          "analytics surface: a wrapper in NEITHER map has no audit verdict at " +
+          "all.",
+      ).toBe(5);
+    });
+
     it.each(Object.keys(RETRY_SAFE_ANALYTICS))(
       "every allowlisted analytics wrapper (%s) has its SEAM_BUDGETS row at retries 1",
       (key) => {
@@ -550,6 +604,53 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
         "idempotency audit — and every route's worst-case lambda hold scales " +
         "with (1 + SEAM_RETRIES).",
     ).toBe(0);
+  });
+
+  it("SEAM_RETRY_BACKOFF_MS is the literal 250 (D-14b)", () => {
+    // Phase 141 shipped this constant with no pin at all, unlike every sibling
+    // in this describe. It is the FIXED half of the wait between a failed
+    // attempt and its one retry.
+    expect(
+      SEAM_RETRY_BACKOFF_MS,
+      "SEAM_RETRY_BACKOFF_MS moved. RAISING it lengthens every retried route's " +
+        "worst-case lambda hold, which SC-4b charges at the MAX of backoff + " +
+        "jitter — the finalize-wizard composite has 22 500 ms of headroom, so " +
+        "this is not free. LOWERING it retries into an upstream that has had " +
+        "less time to recover and spends a second breaker failure learning " +
+        "that. Change it deliberately and re-read SC-4b's arithmetic in " +
+        "seam-budgets.invariant.test.ts in the same commit.",
+    ).toBe(250);
+  });
+
+  it("SEAM_RETRY_JITTER_MAX_MS is the literal 250 (D-14b)", () => {
+    // The RANDOM half. Added, never subtracted — see the constant's docblock —
+    // so it only ever moves the interval upward, which is why the sum below is
+    // the number SC-4b must charge.
+    expect(
+      SEAM_RETRY_JITTER_MAX_MS,
+      "SEAM_RETRY_JITTER_MAX_MS moved. Jitter exists to decorrelate concurrent " +
+        "callers that all failed at the same instant; dropping it to 0 makes " +
+        "every retried caller re-hit a sick upstream in the same millisecond, " +
+        "and raising it widens the worst case SC-4b charges.",
+    ).toBe(250);
+  });
+
+  it("the worst-case retry interval is 500ms — the sum SC-4b charges (D-14b)", () => {
+    // DERIVED on the left, hand-typed on the right, exactly like the
+    // ⌈threshold/2⌉ assertion above. This is the number that actually enters
+    // SC-4b's headroom arithmetic: the jitter is added and never subtracted, so
+    // the MAX interval is the sum, not the mean. Pinning the two constants
+    // individually would not catch a compensating edit (300 + 200), and it is
+    // the SUM, not either part, that the budget arithmetic spends.
+    expect(
+      SEAM_RETRY_BACKOFF_MS + SEAM_RETRY_JITTER_MAX_MS,
+      "The worst-case wait between a failed seam attempt and its retry is no " +
+        "longer 500ms. SC-4b charges this MAX once per retried leg; if this " +
+        "sum grows, every retried route's worst-case lambda hold grows with it " +
+        "and the tightest route's headroom shrinks. Update the SC-4b arithmetic " +
+        "and its hand-typed worst cases in the same commit — never widen the " +
+        "ceiling to absorb it.",
+    ).toBe(500);
   });
 
   it("BREAKER_LOCK_TOMBSTONE_S is the literal 60", () => {

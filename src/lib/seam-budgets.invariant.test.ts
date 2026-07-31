@@ -814,6 +814,35 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
       ).toEqual([...EXPECTED_EXCLUSION_PATHS].sort());
     });
 
+    it("SEAM_EXCLUSIONS holds exactly 3 rows — the fence for both it.each blocks (D-14a)", () => {
+      // CLASS-γ CLOSURE. Both `it.each(Object.keys(SEAM_EXCLUSIONS))` blocks in
+      // this describe iterate the map UNDER TEST, so shrinking the table shrinks
+      // the case list instead of failing it, and emptying it yields zero cases
+      // and a green file: BLIND, not satisfied. Plan 141.1-04 measured that exact
+      // shape on the sibling registry `it.each` — deleting one entry took the
+      // suite from 78 tests to 77 with no failure from the `it.each` itself.
+      //
+      // ⚠️ HONEST SCOPE, so nobody over-credits this line. Unlike that sibling,
+      // these two blocks were NOT actually exposed: the set equality at
+      // "excludes exactly the three hand-typed paths" already reds on a shrink,
+      // a swap OR a growth, and is strictly stronger than any count. What this
+      // adds is EXACTNESS where only a `>= 3` floor sat, and CO-LOCATION — the
+      // guard beside the `it.each` no longer depends on a sibling `it` surviving
+      // a future edit. It is the third member of the enumerated class, fenced
+      // for the same reason the other two are: the class is closed by
+      // enumeration, not by fixing the one instance someone happened to name.
+      expect(
+        Object.keys(SEAM_EXCLUSIONS).length,
+        "SEAM_EXCLUSIONS no longer holds exactly 3 rows. An exclusion is a " +
+          "decision that a Railway call site deliberately gets no budget and no " +
+          "breaker — adding one silently is how the third, unbudgeted seam " +
+          "survived for months, and REMOVING one silently drops that path out " +
+          "of both source scans below, which is the A-12 guard's entire reach. " +
+          "Change this literal in the same commit as the row and its roster " +
+          "entry; never to make a diff pass.",
+      ).toBe(3);
+    });
+
     it.each(Object.keys(SEAM_EXCLUSIONS))(
       "excluded path %s still exists on disk",
       (excludedPath) => {
