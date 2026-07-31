@@ -318,7 +318,7 @@ Plans:
   2. Under an injected single transient failure, an allowlisted call (e.g. `flow_type: resync`) succeeds on retry with exactly ONE server-side effect — proven against the real `compute_jobs` partial-unique-index + `WIZARD_DUPLICATE` contract.
   3. `flow_type: teaser` is provably never retried, and a regression test pins the contract (two identical teaser calls → TWO `strategy_verifications` rows) so a future refactor can't quietly start retrying it and minting duplicate verifications/`public_token`s/leads.
   4. With the breaker open, zero retry attempts fire — no bypass path exists, so retries cannot amplify an outage.
-**Plans:** 4 plans in 3 waves
+**Plans:** 2/4 plans executed
 
 Plans:
 - [ ] **W1** · 141-01-PLAN.md — Python resync draft-SV dedup + DB proofs (SQL compute_jobs/SV-index gate, teaser two-rows pytest pin) ⭐ *the LOCKED precondition for allowlisting resync*
@@ -390,7 +390,7 @@ Plans:
 | 140. SEAM core + breaker | 7/7 | Complete   | 2026-07-25 |
 | 140.1. PYAPI contract/status/limiter (INSERTED) | 9/9 | Complete | 2026-07-26 |
 | 140.1.1. PYAPI-FIX (INSERTED) | 7/7 | Complete    | 2026-07-26 |
-| 141. SEAM retry (audit-gated) | 0/? | Not started | - |
+| 141. SEAM retry (audit-gated) | 2/4 | In Progress|  |
 | 142. JOB reaper + DDL | 0/? | Not started | - |
 | 143. JOB dropped-enqueue sweep | 0/? | Not started | - |
 | 144. JOB WR-02 terminal UPDATE | 0/? | Not started | - |
