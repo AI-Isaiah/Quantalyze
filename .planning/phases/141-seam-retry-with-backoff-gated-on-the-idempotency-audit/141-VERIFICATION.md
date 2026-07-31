@@ -1,8 +1,9 @@
 ---
 phase: 141-seam-retry-with-backoff-gated-on-the-idempotency-audit
 verified: 2026-07-31T14:00:00Z
-status: human_needed
+status: passed
 score: 4/4 must-haves verified
+human_verification_resolved: 2026-07-31 — both CI-only lanes executed locally and PASSED (see 141-HUMAN-UAT.md). SQL gate ran against TEST qmnijlgmdhviwzwfyzlc with a negative-control falsifiability proof and zero pollution; real-Redis lane 7/7 green.
 overrides_applied: 0
 re_verification:
   previous_status: none
