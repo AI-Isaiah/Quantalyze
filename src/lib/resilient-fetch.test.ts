@@ -645,6 +645,7 @@ describe("isBreakerOpen", () => {
       });
       await expect(
         mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+          retriesOverride: 0,
           method: "POST",
         }),
       ).resolves.toBeDefined();
@@ -673,7 +674,10 @@ describe("isBreakerOpen", () => {
     // or merely "nothing was open".
     seedBreakerOpen(shared.store);
     await expect(
-      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      }),
     ).resolves.toBeDefined();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -698,7 +702,10 @@ describe("isBreakerOpen", () => {
 
     // Production is asserted above; the seam call still reaches Railway.
     await expect(
-      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      }),
     ).resolves.toBeDefined();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -1189,7 +1196,10 @@ describe("resilientFetch breaker short-circuit", () => {
     const b = await import("./resilient-fetch");
 
     await expect(
-      b.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+      b.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      }),
     // Same-registry class object — see the CLASS IDENTITY note in the header.
     ).rejects.toBeInstanceOf(b.CircuitOpenError);
     // THE assertion that proves "without touching Railway".
@@ -1203,7 +1213,10 @@ describe("resilientFetch breaker short-circuit", () => {
     const mod = await import("./resilient-fetch");
 
     await expect(
-      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      }),
     ).rejects.toMatchObject({
       name: "CircuitOpenError",
       retryAfterS: 12,
@@ -1232,7 +1245,10 @@ describe("resilientFetch breaker short-circuit", () => {
     const b = await import("./resilient-fetch");
 
     await expect(
-      b.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+      b.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      }),
     ).resolves.toBeDefined();
     expect(fetchB).toHaveBeenCalledTimes(1);
   });
@@ -1268,6 +1284,7 @@ describe("resilientFetch failure classification", () => {
 
     const before = fetchMock.mock.calls.length;
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     expect(fetchMock.mock.calls.length).toBe(before + 1);
@@ -1310,7 +1327,10 @@ describe("resilientFetch failure classification", () => {
     const mod = await import("./resilient-fetch");
 
     await expect(
-      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      }),
     ).rejects.toBe(original);
   });
 });
@@ -1329,6 +1349,7 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
     const mod = await import("./resilient-fetch");
 
     const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     // Nothing recorded yet — proof the transport arm genuinely did not fire and
@@ -1370,6 +1391,7 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
       vi.unstubAllGlobals();
       bodyRejectingFetch(new DOMException("aborted", "TimeoutError"));
       const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        retriesOverride: 0,
         method: "POST",
       });
       await expect(res.json()).rejects.toBeInstanceOf(mod.SeamBodyReadError);
@@ -1386,6 +1408,7 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
     const mod = await import("./resilient-fetch");
 
     const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     const thrown = await res.text().then(
@@ -1412,6 +1435,7 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
     const mod = await import("./resilient-fetch");
 
     const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     await expect(res.json()).resolves.toEqual({ ok: true });
@@ -1471,6 +1495,7 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
     const mod = await import("./resilient-fetch");
 
     const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     expect(res.ok).toBe(false);
@@ -1496,6 +1521,7 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
     vi.unstubAllGlobals();
     okFetch(400);
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     expect(shared.counters.limitCalls).toBe(1);
@@ -1506,6 +1532,7 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
     vi.unstubAllGlobals();
     okFetch(500);
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     expect(shared.counters.limitCalls).toBe(1);
@@ -1531,6 +1558,7 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
       });
 
       const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        retriesOverride: 0,
         method: "POST",
       });
       expect(res.status).toBe(status);
@@ -1578,6 +1606,7 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
       vi.unstubAllGlobals();
       jsonFetch(429, body);
       await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        retriesOverride: 0,
         method: "POST",
       });
     }
@@ -1599,6 +1628,7 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
         },
       });
       await mod.resilientFetch("validate-key", "/api/validate-key", {
+        retriesOverride: 0,
         method: "POST",
       });
     }
@@ -1627,6 +1657,7 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
       },
     });
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     expect(shared.counters.limitCalls).toBe(0);
@@ -1636,6 +1667,7 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
     vi.unstubAllGlobals();
     textFetch(500, "Internal Server Error");
     const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     expect(res.status).toBe(500);
@@ -1665,6 +1697,7 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
     // A hand-typed 5 — production's threshold is not read here.
     for (let i = 0; i < 5; i++) {
       await mod.resilientFetch("match-recompute", "/api/match/recompute", {
+        retriesOverride: 0,
         method: "POST",
       });
     }
@@ -1736,6 +1769,7 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
 
     await expect(
       mod.resilientFetch("match-recompute", "/api/match/recompute", {
+        retriesOverride: 0,
         method: "POST",
       }),
     ).rejects.toBeInstanceOf(TypeError);
@@ -1803,6 +1837,7 @@ describe("[OB-8] one dependency's open circuit does not suppress unrelated calls
 
     await expect(
       mod.resilientFetch("match-recompute", "/api/match/recompute", {
+        retriesOverride: 0,
         method: "POST",
       }),
     ).resolves.toBeDefined();
@@ -1824,6 +1859,7 @@ describe("[OB-8] one dependency's open circuit does not suppress unrelated calls
 
     await expect(
       mod.resilientFetch("validate-key", "/api/validate-key", {
+        retriesOverride: 0,
         method: "POST",
       }),
     ).rejects.toBeInstanceOf(mod.CircuitOpenError);
@@ -1837,6 +1873,7 @@ describe("[OB-8] one dependency's open circuit does not suppress unrelated calls
 
     await expect(
       mod.resilientFetch("match-recompute", "/api/match/recompute", {
+        retriesOverride: 0,
         method: "POST",
       }),
     ).rejects.toMatchObject({
@@ -1856,10 +1893,14 @@ describe("[OB-8] one dependency's open circuit does not suppress unrelated calls
     const mod = await import("./resilient-fetch");
 
     await expect(
-      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      }),
     ).rejects.toBeInstanceOf(mod.CircuitOpenError);
     await expect(
       mod.resilientFetch("match-recompute", "/api/match/recompute", {
+        retriesOverride: 0,
         method: "POST",
       }),
     ).rejects.toBeInstanceOf(mod.CircuitOpenError);
@@ -1878,6 +1919,7 @@ describe("[SEAMCORE-11 / A-23] the seam refuses redirects", () => {
     const mod = await import("./resilient-fetch");
 
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
 
@@ -1893,6 +1935,7 @@ describe("[SEAMCORE-11 / A-23] the seam refuses redirects", () => {
     const mod = await import("./resilient-fetch");
 
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
       redirect: "follow",
     });
@@ -1928,6 +1971,7 @@ describe("[SEAMCORE-11 / A-22 + A-28] caller and config faults are NOT Railway d
 
       const thrown = await mod
         .resilientFetch("bridge", "/api/portfolio-bridge", {
+          retriesOverride: 0,
           method: "POST",
           timeoutMsOverride: value as number,
         })
@@ -1971,6 +2015,7 @@ describe("[SEAMCORE-11 / A-22 + A-28] caller and config faults are NOT Railway d
     const mod = await import("./resilient-fetch");
 
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
       timeoutMsOverride: undefined,
     });
@@ -1995,6 +2040,7 @@ describe("[SEAMCORE-11 / A-22 + A-28] caller and config faults are NOT Railway d
 
     await mod
       .resilientFetch("bridge", "/api/portfolio-bridge", {
+        retriesOverride: 0,
         method: "POST",
         timeoutMsOverride: -1,
       })
@@ -2017,6 +2063,7 @@ describe("[SEAMCORE-11 / A-22 + A-28] caller and config faults are NOT Railway d
     const mod = await import("./resilient-fetch");
 
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
       timeoutMsOverride: 7_000,
     });
@@ -2045,7 +2092,10 @@ describe("[SEAMCORE-11 / A-22 + A-28] caller and config faults are NOT Railway d
     const mod = await import("./resilient-fetch");
 
     const thrown = await mod
-      .resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" })
+      .resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      })
       .then(
         () => null,
         (e: unknown) => e,
@@ -2078,7 +2128,10 @@ describe("[SEAMCORE-11 / A-22 + A-28] caller and config faults are NOT Railway d
     const mod = await import("./resilient-fetch");
 
     await expect(
-      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      }),
     ).rejects.toBeInstanceOf(mod.SeamConfigError);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(shared.counters.limitCalls).toBe(0);
@@ -2094,6 +2147,7 @@ describe("resilientFetch budget wiring", () => {
     const mod = await import("./resilient-fetch");
 
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     expect(timeoutSpy).toHaveBeenCalledWith(mod.SEAM_BUDGETS.bridge.timeoutMs);
@@ -2105,6 +2159,7 @@ describe("resilientFetch budget wiring", () => {
     const mod = await import("./resilient-fetch");
 
     await mod.resilientFetch("process-key-sync", "/process-key", {
+      retriesOverride: 0,
       method: "POST",
     });
     expect(timeoutSpy).toHaveBeenCalledWith(
@@ -2118,6 +2173,7 @@ describe("resilientFetch budget wiring", () => {
     const mod = await import("./resilient-fetch");
 
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
       timeoutMsOverride: 7_000,
     });
@@ -2139,6 +2195,7 @@ describe("resilientFetch budget wiring", () => {
     };
 
     await mod.resilientFetch("process-key-enqueue", "/process-key", {
+      retriesOverride: 0,
       method: "POST",
       headers,
       body: JSON.stringify({ flow_type: "resync" }),
@@ -2155,6 +2212,7 @@ describe("resilientFetch budget wiring", () => {
     const fetchMock = okFetch();
     const mod = await import("./resilient-fetch");
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     expect(String(fetchMock.mock.calls[0][0])).toBe(
@@ -2855,5 +2913,56 @@ describe("[SEAMRIM-04] the breaker's transitions and store failures reach the ca
 
     expect(shared.captures).toHaveLength(0);
     expect(shared.afterTasks).toHaveLength(0);
+  });
+});
+
+/**
+ * [141.1 / D-08 / SC-E] THE REGISTRY-BYPASS AXIS IS CLOSED AT COMPILE TIME.
+ *
+ * ⚠️ THE COMPILER IS THE ASSERTION HERE — there is no runtime expectation that
+ * can fail, and none is wanted. Bucket C1: while `retriesOverride` was optional
+ * and `resilientFetch` fell back to `SEAM_BUDGETS[budgetKey].retries`, the call
+ * below inherited `retries: 1` from the `process-key-enqueue` row — with the
+ * SEAM-06 retry-safety registry never consulted — and it TYPECHECKED. The body
+ * is the aggravating detail rather than decoration: `flow_type: "teaser"` is the
+ * one flow deliberately excluded from `RETRY_SAFE_FLOW_TYPES` (a teaser compute
+ * is not idempotent), and hand-picking a budget key beside a hand-written
+ * `flow_type` is not hypothetical — `keys/validate-and-encrypt/route.ts` is a
+ * live instance of that shape.
+ *
+ * The directive below is load-bearing in BOTH directions. Today it absorbs a
+ * real TS2345 ("`retriesOverride` is missing … but required"). If anyone ever
+ * makes the field optional again, or restores the row fallback in a way that
+ * softens the type, the error disappears and `tsc --noEmit` fails instead with
+ * "Unused '@ts-expect-error' directive". That tsc failure IS this test.
+ *
+ * Following the house form of `src/__tests__/seed-demo-data-types.test.ts`: all
+ * type-level assertions live in a function that is NEVER invoked, so nothing
+ * here issues a fetch or touches the breaker; vitest still type-checks the file.
+ */
+function _d08TypeAssertions(rf: typeof import("./resilient-fetch")): void {
+  // The C1 shape: a budget key picked by hand, a flow_type written by hand, and
+  // no retry verdict anywhere. It must not compile.
+  // @ts-expect-error - retriesOverride is REQUIRED (D-08): a call site cannot acquire a retry without stating a verdict
+  void rf.resilientFetch("process-key-enqueue", "/process-key", {
+    method: "POST",
+    body: JSON.stringify({ flow_type: "teaser" }),
+  });
+
+  // The same call WITH a verdict compiles — the negative control, without which
+  // the directive above could be satisfied by any unrelated type error.
+  void rf.resilientFetch("process-key-enqueue", "/process-key", {
+    method: "POST",
+    body: JSON.stringify({ flow_type: "teaser" }),
+    retriesOverride: 0,
+  });
+}
+
+describe("[141.1 / D-08 / SC-E] a call site cannot acquire a retry by inheritance", () => {
+  it("compiles this file at all — the @ts-expect-error fixture above is the real assertion", () => {
+    // The one runtime line: proves the fixture still references the symbol it
+    // claims to (a rename of `resilientFetch` would otherwise leave the type
+    // fixture asserting nothing while this file stayed green).
+    expect(typeof _d08TypeAssertions).toBe("function");
   });
 });

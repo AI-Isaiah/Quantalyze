@@ -382,9 +382,12 @@ vi.mock("@/lib/resilient-fetch", async (importOriginal) => {
     resilientFetch: async (
       budgetKey: Parameters<typeof actual.resilientFetch>[0],
       path: string,
-      init: Parameters<typeof actual.resilientFetch>[2] = {},
+      // No `= {}` default: D-08 made `init` (and its `retriesOverride`)
+      // REQUIRED on the real signature, and a double that still defaulted would
+      // be the one call shape production can no longer express.
+      init: Parameters<typeof actual.resilientFetch>[2],
     ) => {
-      RF.lastCall = { budgetKey, path, init: init as Record<string, unknown> };
+      RF.lastCall ={ budgetKey, path, init: init as Record<string, unknown> };
       if (RF.breakerOpen) throw new CircuitOpenError(RF.retryAfterS);
       return actual.resilientFetch(budgetKey, path, init);
     },

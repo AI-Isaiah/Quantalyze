@@ -16,7 +16,10 @@ import {
   decodeBreakerLock,
 } from "./resilient-fetch";
 import { seamBreakerVerdict } from "./seam-discriminator";
-import { RETRY_SAFE_ANALYTICS } from "./seam-retry-registry";
+import {
+  RETRY_SAFE_ANALYTICS,
+  RETRY_SAFE_FLOW_TYPES,
+} from "./seam-retry-registry";
 import {
   FAKE_BREAKER_KEY,
   FAKE_THRESHOLD,
@@ -329,12 +332,51 @@ describe("SEAM_BUDGETS — every timeout pinned to a hand-typed literal", () => 
     },
   );
 
+  it("exactly 5 rows carry retries 1 — the count itself, hand-typed (D-07)", () => {
+    // ⚠️ THIS PIN EXISTS TO CONTRADICT PROSE. Three comments in the module under
+    // test claimed, long after it stopped being true, that "every row today"
+    // carries `retries: 0`. Five do not. The per-key oracle above pins each row
+    // individually, but it cannot fail on the CLAIM — a reader (or a reviewer,
+    // or the next phase's planner) who believed the sentence would find nothing
+    // red. This does: the sentence is now contradicted by a test, not only by a
+    // reader who happens to count.
+    //
+    // The 5 is hand-typed and is NOT `Object.keys(...).length` of anything in
+    // the module under test; it is the count the SEAM-05 audit authorised. If a
+    // sixth row is legitimately flipped, change this literal in the same commit
+    // as the row, its registry verdict, and any prose that states the number.
+    const rowsAtOne = Object.values(BUDGET_TABLE).filter(
+      (row) => row?.retries === 1,
+    ).length;
+
+    expect(
+      rowsAtOne,
+      `${rowsAtOne} budget rows carry retries 1; the SEAM-05 audit authorised ` +
+        `exactly 5 (bridge, simulator, portfolio-optimizer, optimize-weights, ` +
+        `process-key-enqueue). A sixth means a row was flipped without a ` +
+        `verdict; a fourth means an authorised retry was silently un-charged ` +
+        `from SC-4b's arithmetic. Either way, do not adjust this number to make ` +
+        `a diff pass — adjust it because the audit changed.`,
+    ).toBe(5);
+  });
+
   describe("registry ↔ rows consistency (SEAM-05 anti-drift)", () => {
-    // The audit-and-allowlist artifact (seam-retry-registry) and the SEAM_BUDGETS
-    // rows are two hand-typed statements of the SAME fact. If they drift, a call
-    // is retried on a row that no longer matches its audit verdict (or the reverse
-    // — an audited-safe wrapper stops retrying). These pins tie them so neither
-    // can move alone.
+    // ⚠️ WHAT EACH SIDE IS, AFTER D-08. These two hand-typed statements are NOT
+    // peers any more. The registry (seam-retry-registry) is the GATE: its verdict
+    // is what the two client chokepoints pass as the now-REQUIRED
+    // `retriesOverride`, and it is the only thing that turns a retry on. The
+    // SEAM_BUDGETS row is ACCOUNTING: `resilientFetch` no longer falls back to it,
+    // and its readers are SC-4b's headroom arithmetic and the retries oracle
+    // above.
+    //
+    // That asymmetry is exactly why they must still agree. A row that drifts BELOW
+    // its verdict under-charges SC-4b — the route's worst-case lambda hold is
+    // computed for one attempt while production performs two — and a row that
+    // drifts ABOVE its verdict charges for a retry nobody performs. Neither is
+    // visible in behaviour, which is what makes the pin the only detector. Before
+    // D-08 a drifting row could also silently change BEHAVIOUR; that half of the
+    // hazard is now closed by construction, and these pins are what stop the
+    // remaining accounting half.
 
     it.each(Object.keys(RETRY_SAFE_ANALYTICS))(
       "every allowlisted analytics wrapper (%s) has its SEAM_BUDGETS row at retries 1",
@@ -353,6 +395,66 @@ describe("SEAM_BUDGETS — every timeout pinned to a hand-typed literal", () => 
       // The process-key seam is audited at flow_type grain, but its ENQUEUE budget
       // row must carry the literal SC-4b reads for onboard/resync.
       expect(BUDGET_TABLE["process-key-enqueue"]?.retries).toBe(1);
+    });
+
+    it("all five flipped rows AGREE with the registry verdict that gates them (OQ-3)", () => {
+      // ⚠️ THE ACCOUNTING CANNOT SILENTLY DIVERGE FROM THE GATE. Both sides are
+      // hand-typed here — the five keys, and the 1 each is expected to carry —
+      // so this is not "the module agrees with itself". The pair is asserted
+      // TOGETHER, per key: a row at 1 whose registry entry has been deleted, or
+      // a registry entry at 1 whose row was set back to 0, fails on the key that
+      // moved rather than somewhere downstream in SC-4b's arithmetic.
+      //
+      // The four analytics keys carry their verdict at BUDGET-KEY grain
+      // (RETRY_SAFE_ANALYTICS is 1:1 with the row). `process-key-enqueue` does
+      // not: the process-key seam is audited at FLOW_TYPE grain, and this one row
+      // serves both audited flows — so its counterpart is the pair
+      // {onboard, resync}, checked below rather than through a lookup that would
+      // hide the many-to-one.
+      const FLIPPED_ANALYTICS_ROWS = [
+        "bridge",
+        "simulator",
+        "portfolio-optimizer",
+        "optimize-weights",
+      ] as const;
+
+      for (const key of FLIPPED_ANALYTICS_ROWS) {
+        expect(
+          RETRY_SAFE_ANALYTICS[key]?.retries,
+          `"${key}" carries retries in its budget row but has NO retry-safe ` +
+            `registry entry (or its entry no longer says 1). After D-08 the ` +
+            `registry is the GATE: without the entry the wrapper stops retrying ` +
+            `entirely while SC-4b keeps charging for the second attempt. Delete ` +
+            `the verdict and the row flip together, or neither.`,
+        ).toBe(1);
+        expect(
+          BUDGET_TABLE[key]?.retries,
+          `"${key}" is retry-safe in the registry, so its budget row must ` +
+            `declare 1 for SC-4b's headroom arithmetic to charge the retried ` +
+            `leg. A row at ${BUDGET_TABLE[key]?.retries} under-charges a route ` +
+            `that really does perform two attempts.`,
+        ).toBe(1);
+      }
+
+      // The many-to-one row: BOTH audited flows must still be allowlisted at 1,
+      // because the single row is the only accounting statement covering them.
+      expect(
+        RETRY_SAFE_FLOW_TYPES.onboard?.retries,
+        "onboard lost its retry-safe verdict while process-key-enqueue's row " +
+          "still declares a retry. The row is accounting for a retry the client " +
+          "no longer performs.",
+      ).toBe(1);
+      expect(
+        RETRY_SAFE_FLOW_TYPES.resync?.retries,
+        "resync lost its retry-safe verdict while process-key-enqueue's row " +
+          "still declares a retry. The row is accounting for a retry the client " +
+          "no longer performs.",
+      ).toBe(1);
+      expect(
+        BUDGET_TABLE["process-key-enqueue"]?.retries,
+        "onboard and resync are both retry-safe in the registry, so the enqueue " +
+          "row must declare 1 for SC-4b.",
+      ).toBe(1);
     });
 
     it("the SC3 belt and the Pitfall-2 fence stay at retries 0 at the row grain", () => {

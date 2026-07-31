@@ -238,6 +238,13 @@ async function _unifiedValidateAndEncryptHandler(args: {
       },
     }),
     cache: "no-store",
+    // No retry, stated explicitly (D-08). This handler is the shape bucket C1
+    // named: a HAND-PICKED budget key alongside a HAND-WRITTEN `flow_type`. The
+    // audited retry verdict for a flow lives in `RETRY_SAFE_FLOW_TYPES` and is
+    // read by `postProcessKey`, which this dormant handler bypasses — so it may
+    // not claim that flow's retry, and now it cannot acquire one by accident
+    // either.
+    retriesOverride: 0,
   });
 
   if (!res.ok) {

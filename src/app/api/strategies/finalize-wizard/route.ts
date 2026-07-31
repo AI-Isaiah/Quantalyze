@@ -185,6 +185,9 @@ async function fetchLivePermissions(
       // POST so it shouldn't be cacheable today, but routes can change.
       cache: "no-store",
       // No signal: the core owns the deadline (SEAM_BUDGETS["keys-permissions"]).
+      // No retry: this probe has no entry in the SEAM-06 retry-safety registry,
+      // and D-08 makes stating that verdict mandatory rather than implicit.
+      retriesOverride: 0,
     },
   );
   if (!res.ok) {
