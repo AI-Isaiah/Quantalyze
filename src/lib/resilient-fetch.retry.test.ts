@@ -760,6 +760,284 @@ describe("[SEAM-06 / SC2] fixed backoff + jitter bounds", () => {
   });
 });
 
+/**
+ * Phase 141.1 / D-12 + D-13 — the two SILENT-SEVERE mutations.
+ *
+ * Both of these were MEASURED green before this plan, and both are the kind of
+ * regression that leaves a suite entirely happy:
+ *
+ *  · Hoisting `const deadline = AbortSignal.timeout(timeoutMs)` above the loop
+ *    left **125 tests green** while making the retry a NO-OP for the dominant
+ *    failure class. A shared deadline means attempt 2 inherits attempt 1's
+ *    already-fired signal, so every TIMEOUT retry dies instantly — and a
+ *    timeout is precisely the Railway blip the retry exists for. The
+ *    attempt-COUNT oracles every other test in this file uses cannot see it:
+ *    the second fetch really is issued, it just cannot succeed.
+ *  · Swapping `sleep(...)` and the pre-attempt-2 `isBreakerOpen` re-check left
+ *    **21/21 green**. Re-checking BEFORE the wait means the read that gates the
+ *    retry is 250-500 ms stale, so a breaker that opened during the backoff —
+ *    including one this call's own attempt 1 armed via a concurrent caller — is
+ *    not seen, and the retry amplifies the outage the breaker exists to contain.
+ *
+ * Neither is a subtle behaviour. Both were simply unobserved.
+ */
+describe("[SEAM-06 / D-12] each attempt gets its OWN deadline and an IDENTICAL request", () => {
+  /**
+   * Attempt 1's init minus the one field that is SUPPOSED to differ.
+   *
+   * Hand-rolled rather than a lodash-style `omit`: the whole assertion is
+   * "everything except `signal` is the same", so the exception has to be
+   * spelled out in the test rather than parameterised by a dependency.
+   */
+  function withoutSignal(init: RequestInit): Record<string, unknown> {
+    const { signal: _signal, ...rest } = init;
+    return rest as Record<string, unknown>;
+  }
+
+  it("SC-B — attempt 2 fires with a FRESH abort signal, never attempt 1's", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const fetchMock = statusSequenceFetch(503, 200);
+    const mod = await import("./resilient-fetch");
+
+    await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    const calls = fetchMock.mock.calls;
+    expect(calls).toHaveLength(2);
+    const first = (calls[0][1] as RequestInit).signal;
+    const second = (calls[1][1] as RequestInit).signal;
+    expect(first).toBeInstanceOf(AbortSignal);
+    expect(second).toBeInstanceOf(AbortSignal);
+    expect(
+      second,
+      "Both attempts were handed the SAME AbortSignal, so the deadline is " +
+        "shared rather than per-attempt. Attempt 2 then inherits whatever is " +
+        "left of attempt 1's budget — and on the timeout class, which is the " +
+        "dominant Railway failure and the reason the retry exists at all, " +
+        "there is nothing left: the signal has already fired, so attempt 2 " +
+        "aborts before it can reach the network. The retry becomes a no-op " +
+        "that still costs a breaker failure, and every attempt-count oracle in " +
+        "this file keeps passing because the fetch IS issued.",
+    ).not.toBe(first);
+  });
+
+  it("SC-B (D7) — attempt 2's URL and init are IDENTICAL to attempt 1's, minus the signal", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const fetchMock = statusSequenceFetch(503, 200);
+    const mod = await import("./resilient-fetch");
+
+    // The four things a dropped header actually costs, named at the call site:
+    // Authorization → a 401 the breaker then counts as Railway degradation;
+    // X-Service-Key → every analytics call silently unauthenticated;
+    // X-Tenant-Claim → the signed value the Python limiter buckets on;
+    // the body → the request means something else entirely.
+    const HEADERS = {
+      Authorization: "Bearer internal-token",
+      "X-Service-Key": "service-test-key",
+      "X-User-Id": "user-123",
+      "X-Tenant-Claim": "signed-tenant-claim",
+      "X-Correlation-Id": "corr-abc",
+    };
+    const BODY = JSON.stringify({ flow_type: "resync", key_id: "k1" });
+
+    await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+      headers: HEADERS,
+      body: BODY,
+      cache: "no-store",
+    });
+
+    const calls = fetchMock.mock.calls;
+    expect(calls).toHaveLength(2);
+
+    expect(
+      String(calls[1][0]),
+      "The retry went to a DIFFERENT URL than the attempt it is retrying.",
+    ).toBe(String(calls[0][0]));
+    expect(
+      withoutSignal(calls[1][1] as RequestInit),
+      "Attempt 2's RequestInit is not attempt 1's. A retry that rebuilds its " +
+        "request is not a retry — it is a second, different call, and the " +
+        "difference is invisible in an attempt-count assertion.",
+    ).toEqual(withoutSignal(calls[0][1] as RequestInit));
+
+    // ⚠️ THE EQUALITY ABOVE IS NOT ENOUGH ON ITS OWN. Two attempts that BOTH
+    // dropped `Authorization` would still deep-equal each other, so the
+    // credential-bearing fields are also asserted POSITIVELY on attempt 2.
+    const second = calls[1][1] as RequestInit;
+    expect(second.headers).toEqual(HEADERS);
+    expect(second.body).toBe(BODY);
+    expect(second.method).toBe("POST");
+  });
+
+  it("SC-B — after the backoff, attempt 2 runs on a FULL fresh budget, not the remains of attempt 1's", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    // ⚠️ `AbortSignal.timeout` IS NOT DRIVEN BY VITEST'S FAKE TIMERS, and this
+    // case cannot be written without confronting that. MEASURED on vitest
+    // 4.1.10: install fake timers, create `AbortSignal.timeout(1000)`, advance
+    // 1500 ms — the signal does NOT abort. It is a platform primitive backed by
+    // an internal Node timer the clock does not patch. (That is also why the
+    // jitter-bounds cases above pass `timeoutMsOverride: 300_000`: they are
+    // keeping a REAL deadline from firing during a fake-timer test, not
+    // asserting anything about it.)
+    //
+    // So the deadline is re-expressed on `setTimeout`, which IS patched. The
+    // substitution preserves exactly the property under test and nothing else:
+    // ONE signal per call, aborting `ms` of virtual time after that call. A
+    // hoisted deadline still yields one shared signal, which is what must red.
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+      const controller = new AbortController();
+      setTimeout(
+        () =>
+          controller.abort(
+            new DOMException("The operation timed out", "TimeoutError"),
+          ),
+        ms,
+      );
+      return controller.signal;
+    });
+
+    // A fetch that HONOURS its signal and otherwise never settles — the only
+    // shape that can express "attempt 1 timed out". `statusSequenceFetch` and
+    // the throw-based doubles answer immediately and so cannot model a deadline.
+    let aborts = 0;
+    const fetchMock = installFetchMock();
+    fetchMock.mockImplementation((_input, init) => {
+      const signal = (init as RequestInit).signal as AbortSignal;
+      return new Promise<Response>((_resolve, reject) => {
+        const onAbort = (): void => {
+          aborts += 1;
+          reject(new DOMException("The operation was aborted", "TimeoutError"));
+        };
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener("abort", onAbort);
+      });
+    });
+
+    const mod = await import("./resilient-fetch");
+    vi.useFakeTimers();
+
+    // 1 000 (per-attempt budget) and 250 (backoff floor) are LITERALS typed
+    // here, never read back out of the module under test.
+    const settled = mod
+      .resilientFetch("bridge", BRIDGE_PATH, {
+        method: "POST",
+        retriesOverride: 1,
+        timeoutMsOverride: 1_000,
+      })
+      .then(
+        () => "resolved",
+        () => "rejected",
+      );
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(aborts, "Attempt 1 aborted BEFORE its own budget expired.").toBe(0);
+
+    await vi.advanceTimersByTimeAsync(1); // t = 1000 — attempt 1's deadline
+    expect(aborts).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(250); // t = 1250 — backoff elapsed
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      aborts,
+      "Attempt 2 aborted the instant it was issued. That is the signature of " +
+        "a SHARED deadline: attempt 1's signal had already fired at t=1000, so " +
+        "attempt 2 was handed a spent budget and died before reaching the " +
+        "network. The retry is a no-op for the entire timeout class — the " +
+        "dominant Railway blip — while still spending a second breaker failure.",
+    ).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(999); // t = 2249 — 999 into attempt 2
+    expect(
+      aborts,
+      "Attempt 2 died short of a FULL fresh budget, so its deadline is not " +
+        "its own.",
+    ).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1); // t = 2250 — attempt 2's OWN deadline
+    expect(
+      aborts,
+      "Attempt 2 outlived a full fresh budget — its deadline is longer than " +
+        "the one attempt 1 was given, so the per-attempt budget is not being " +
+        "applied at all.",
+    ).toBe(2);
+
+    await expect(settled).resolves.toBe("rejected");
+    vi.useRealTimers();
+  });
+});
+
+describe("[SEAM-06 / D-13] the sleep→re-check ORDER is load-bearing", () => {
+  it("SC-D — a breaker that opens DURING the backoff aborts attempt 2 (exactly ONE fetch)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const fetchMock = statusSequenceFetch(503, 200);
+    const mod = await import("./resilient-fetch");
+
+    vi.useFakeTimers();
+
+    // The interleaving IS the subject. The breaker is CLOSED at entry and still
+    // closed at the instant attempt 1 returns its 503; a CONCURRENT caller (or
+    // this call's own recorded failure landing on a shared counter) trips it
+    // 100 ms into the 250 ms backoff. Only a re-check performed AFTER the sleep
+    // can see that. Scheduled with `setTimeout` on the same fake clock the
+    // backoff runs on, so the ordering is deterministic rather than raced.
+    setTimeout(() => {
+      seedBreakerOpen(shared.store, "breaker:railway", 30);
+    }, 100);
+
+    // 300_000 keeps the REAL `AbortSignal.timeout` (unpatched by fake timers)
+    // from firing during this case — the same reason the jitter-bounds cases
+    // above use it.
+    const thrown = mod
+      .resilientFetch("bridge", BRIDGE_PATH, {
+        method: "POST",
+        retriesOverride: 1,
+        timeoutMsOverride: 300_000,
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+    // Attempt 1 has run and failed, and the circuit is still CLOSED — so a
+    // re-check taken at this instant would wave the retry through.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(
+      shared.store.get(mod.BREAKER_KEY),
+      "The breaker was already open before the backoff began, so this case " +
+        "would pass under EITHER ordering and discriminates nothing.",
+    ).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(
+      await thrown,
+      "The retry fired against an OPEN circuit. The backoff has to come " +
+        "BEFORE the re-check, so that the read gating the retry is the " +
+        "freshest one available — a breaker that opened during the 250-500 ms " +
+        "wait is invisible to a check taken before it, and the retry then " +
+        "amplifies the exact outage the breaker exists to contain.",
+    ).toBeInstanceOf(mod.CircuitOpenError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    vi.useRealTimers();
+  });
+});
+
 describe("[SEAM-06 / SC4] breaker-open guarantees", () => {
   it("SC4a — breaker seeded OPEN at entry + retriesOverride:1 → CircuitOpenError, ZERO fetch attempts", async () => {
     seedBreakerOpen(shared.store, "breaker:railway", 30);
