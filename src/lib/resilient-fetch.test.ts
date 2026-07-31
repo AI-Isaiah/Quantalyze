@@ -653,6 +653,96 @@ describe("isBreakerOpen", () => {
     },
   );
 
+  /**
+   * Phase 141.1 / D-19 (G2) — the LO-02 / TS-39 obligation, discharged.
+   *
+   * The `^open:(\d+):(\d+)$` shape accepts ANY pair of digit strings, so
+   * `open:0:100000000000000000` used to decode to a lock ~1e17 ms in the future.
+   * `isBreakerOpen` then derived `retryAfterS ≈ 1e14`, `CircuitOpenError`'s A-15
+   * guard accepted it (`Number.isInteger` is true of it), and
+   * `Retry-After: 100000000000000` went ON THE WIRE — including to the anonymous
+   * teaser. A reversed pair made `emitBreakerTransition`'s `cooldownS` negative.
+   *
+   * The value is only writable by us today, so this is bookkeeping corruption
+   * rather than an attack path — but A-15 exists precisely to stop implausible
+   * values reaching a header, and the decoder was the one remaining path that
+   * could mint one which PASSED it.
+   *
+   * The rejection direction is `null`, i.e. CLOSED, which is LOCKED DECISION 4's
+   * fail-forward doctrine unchanged: a corrupt byte in a store shared with
+   * fifteen production limiters must not be able to deny the whole seam.
+   */
+  it("G2 — a lock whose span is nonsensical decodes to null and reads CLOSED (LO-02 / TS-39)", async () => {
+    const mod = await import("./resilient-fetch");
+
+    // 90 000 ms, hand-typed here: the 30 s cooldown plus the 60 s tombstone,
+    // never `(BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S) * 1000` read back
+    // out of the module under test. A legitimate lock cannot outlive the window
+    // in which its own key survives.
+    const ARMED_AT = 1_700_000_000_000;
+
+    // A span at the ceiling still decodes — the bound rejects the implausible,
+    // not the merely long.
+    expect(
+      mod.decodeBreakerLock(`open:${ARMED_AT}:${ARMED_AT + 90_000}`),
+      "The span bound rejected a lock at exactly the cooldown+tombstone " +
+        "ceiling. That is a REAL state (a lock armed and read at the far edge " +
+        "of its own tombstone), and rejecting it would silently disarm the " +
+        "breaker at exactly the moment it is doing its job.",
+    ).toEqual({ armedAtMs: ARMED_AT, expiresAtMs: ARMED_AT + 90_000 });
+    // And the ordinary 30 s cooldown, the case every other test in this file
+    // depends on.
+    expect(
+      mod.decodeBreakerLock(`open:${ARMED_AT}:${ARMED_AT + 30_000}`),
+    ).toEqual({ armedAtMs: ARMED_AT, expiresAtMs: ARMED_AT + 30_000 });
+
+    // The LO-02 headline: an unbounded span.
+    expect(
+      mod.decodeBreakerLock("open:0:100000000000000000"),
+      "A lock span of ~1e17 ms decoded to a LOCK. `isBreakerOpen` turns that " +
+        "into retryAfterS ≈ 1e14, A-15's Number.isInteger guard accepts it, " +
+        "and `Retry-After: 100000000000000` goes on the wire — to the " +
+        "anonymous teaser among others.",
+    ).toBeNull();
+    // One millisecond past the ceiling — the bound is a real edge, not a
+    // gesture at a large number.
+    expect(
+      mod.decodeBreakerLock(`open:${ARMED_AT}:${ARMED_AT + 90_001}`),
+    ).toBeNull();
+    // A REVERSED pair: `expiresAtMs < armedAtMs` makes the emitted
+    // `cooldownS` negative.
+    expect(
+      mod.decodeBreakerLock(`open:${ARMED_AT}:${ARMED_AT - 30_000}`),
+      "A reversed lock span decoded to a lock. `emitBreakerTransition` then " +
+        "reports a NEGATIVE cooldownS to the operator reading the incident.",
+    ).toBeNull();
+    // A zero span is not a lock either: it is already expired at the instant it
+    // was armed, and `<= 0` is the bound TODOS.md's LO-02 prescribes.
+    expect(mod.decodeBreakerLock(`open:${ARMED_AT}:${ARMED_AT}`)).toBeNull();
+
+    // END TO END — the harm LO-02 actually names. Without the bound this store
+    // value makes `isBreakerOpen` report OPEN with an absurd hint; with it, the
+    // corruption reads CLOSED and the seam call proceeds.
+    shared.store.set(FAKE_BREAKER_KEY, {
+      value: "open:0:100000000000000000",
+      expiresAt: Date.now() + 30_000,
+    } satisfies FakeUpstashEntry);
+    const fetchMock = okFetch();
+
+    await expect(
+      mod.isBreakerOpen("bridge"),
+      "A corrupt lock span minted a caller-visible Retry-After instead of " +
+        "reading CLOSED.",
+    ).resolves.toEqual({ open: false });
+    await expect(
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        retriesOverride: 0,
+        method: "POST",
+      }),
+    ).resolves.toBeDefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("fails OPEN when Redis errors", async () => {
     // SC-3a. A store outage must never become the outage: every exit path out
     // of the check resolves, none throws, and the seam call still goes out.

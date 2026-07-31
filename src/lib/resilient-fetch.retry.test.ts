@@ -540,6 +540,168 @@ describe("[SEAM-06 / D-01] a 503 that names its own wait FAILS FAST", () => {
   });
 });
 
+/**
+ * Phase 141.1 / D-17 — THE TWO SILENT ARMS.
+ *
+ * Before this plan the counting-5xx retry arm did `recordOnce` then `continue`
+ * with no log at all, and the pre-attempt-2 `CircuitOpenError` threw away
+ * attempt 1's status without naming it. Pre-threshold degradation was therefore
+ * materially QUIETER after the retry loop landed than before it: the transport
+ * arm logs, the counting arm did not, and a caller who used to receive attempt
+ * 1's 503 body now receives a `CircuitOpenError` that mentions no status.
+ *
+ * ⚠️ THE SECURITY HALF IS NOT DECORATION. This seam carries raw exchange API
+ * secrets, `INTERNAL_API_TOKEN` and a live end-user Supabase JWT
+ * (`X-User-Access-Token`). The transport arm's own comment records that omitting
+ * `scrubSeamError`'s second argument ONCE SHIPPED that JWT to the logs verbatim.
+ * So the positive assertions below are paired with a NEGATIVE one driven by
+ * sentinels, and the sentinel case is the one that must never be deleted: a log
+ * line that names the budget key is worth little, and a log line that names a
+ * credential is worth less than nothing.
+ */
+describe("[SEAM-06 / D-17] the two silent arms now have a voice", () => {
+  /** Every string this run handed `console.error`, in call order. */
+  function loggedStrings(spy: { mock: { calls: unknown[][] } }): string[] {
+    return spy.mock.calls.map((call) => call.map(String).join(" "));
+  }
+
+  it("SC-M — a counting 503 on attempt 1 logs ONCE, naming the budget key, the status and the attempt index", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const fetchMock = statusSequenceFetch(503, 200);
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(res.status).toBe(200);
+
+    const lines = loggedStrings(errSpy);
+    expect(
+      lines,
+      "The counting-5xx retry arm discarded attempt 1's diagnosis in silence. " +
+        "A 503 that is retried and then succeeds is the ONLY signal that a " +
+        "dependency is degrading below the breaker threshold, and with no log " +
+        "line an operator cannot see the degradation at all.",
+    ).toHaveLength(1);
+    // Hand-typed: the budget key, the numeric status, the attempt index.
+    expect(lines[0]).toContain("bridge");
+    expect(lines[0]).toContain("503");
+    expect(lines[0]).toMatch(/attempt 1\b/);
+  });
+
+  it("SC-M (arm 2) — when attempt 1's failure is the threshold-th, the CircuitOpenError log NAMES the discarded status", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const mod = await import("./resilient-fetch");
+
+    // Same skeleton as SC4b: walk the counter to THRESHOLD-1 so the breaker is
+    // still CLOSED at entry and attempt 1's own failure is the one that arms it.
+    await driveFailures(mod, mod.BREAKER_FAILURE_THRESHOLD - 1);
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+    // The drive calls are setup, not subject — only the call below is measured.
+    errSpy.mockClear();
+
+    vi.unstubAllGlobals();
+    const fetchMock = statusSequenceFetch(503, 200);
+
+    const thrown = await mod
+      .resilientFetch("bridge", BRIDGE_PATH, {
+        method: "POST",
+        retriesOverride: 1,
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+    expect(thrown).toBeInstanceOf(mod.CircuitOpenError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const lines = loggedStrings(errSpy);
+    const discardLine = lines.find((l) => l.includes("between attempts"));
+    expect(
+      discardLine,
+      "The pre-attempt-2 CircuitOpenError threw away attempt 1's response " +
+        "without naming its status. That response carried the freshest " +
+        "diagnosis available — the `dependency` and `human_message` the caller " +
+        "USED to receive pre-141 — and the caller now receives a breaker error " +
+        "instead. If the log does not name the discarded status the diagnosis " +
+        "is gone from every surface at once.",
+    ).toBeDefined();
+    expect(discardLine).toContain("bridge");
+    expect(discardLine).toContain("503");
+  });
+
+  it("SC-M′ (NEGATIVE, security-critical) — no logged string carries the request body, the path, or ANY credential header value", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    // Every sentinel is a value a REAL caller puts on this seam: the internal
+    // token, the analytics service key, and a live end-user Supabase JWT.
+    const SENTINELS = [
+      "SENTINEL_BODY_XYZ",
+      "SENTINEL_AUTHORIZATION_XYZ",
+      "SENTINEL_SERVICE_KEY_XYZ",
+      "SENTINEL_USER_ACCESS_TOKEN_XYZ",
+      "SENTINEL_PATH_XYZ",
+    ];
+    const init = {
+      method: "POST" as const,
+      headers: {
+        Authorization: "Bearer SENTINEL_AUTHORIZATION_XYZ",
+        "X-Service-Key": "SENTINEL_SERVICE_KEY_XYZ",
+        "X-User-Access-Token": "SENTINEL_USER_ACCESS_TOKEN_XYZ",
+      },
+      body: JSON.stringify({ secret: "SENTINEL_BODY_XYZ" }),
+    };
+    const SENTINEL_PATH = "/api/portfolio-bridge/SENTINEL_PATH_XYZ";
+
+    const mod = await import("./resilient-fetch");
+
+    // Arm 1 — the counting-5xx arm this plan adds a log to.
+    statusSequenceFetch(503, 200);
+    await mod.resilientFetch("bridge", SENTINEL_PATH, {
+      ...init,
+      retriesOverride: 1,
+    });
+
+    // Arm 2 — the pre-existing transport arm, driven with the same sentinels so
+    // this case also stands as the anti-regression for `scrubSeamError`'s
+    // second argument (the omission that once shipped a live JWT).
+    vi.unstubAllGlobals();
+    throwAlways(new TypeError("fetch failed"));
+    await expect(
+      mod.resilientFetch("bridge", SENTINEL_PATH, {
+        ...init,
+        retriesOverride: 1,
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+
+    const lines = loggedStrings(errSpy);
+    // Proof the oracle is not vacuous: something WAS logged to inspect.
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      for (const sentinel of SENTINELS) {
+        expect(
+          line,
+          `A seam log line leaked \`${sentinel}\`. This module's logs may name ` +
+            "the BUDGET KEY and the STATUS and nothing else — the path is " +
+            "caller input and the headers and body carry raw exchange API " +
+            "secrets, INTERNAL_API_TOKEN and a live end-user Supabase JWT. " +
+            "Rendering `requestInit`, the path, or an unscrubbed error into a " +
+            "log line ships those to every log sink at once.",
+        ).not.toContain(sentinel);
+      }
+    }
+  });
+});
+
 describe("[SEAM-06 / SC2] fixed backoff + jitter bounds", () => {
   it("with jitter at its floor (Math.random → 0) the retry fires at exactly 250ms, not before", async () => {
     // 250 is a LITERAL typed here, never SEAM_RETRY_BACKOFF_MS imported.
@@ -594,6 +756,284 @@ describe("[SEAM-06 / SC2] fixed backoff + jitter bounds", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
     await p;
+    vi.useRealTimers();
+  });
+});
+
+/**
+ * Phase 141.1 / D-12 + D-13 — the two SILENT-SEVERE mutations.
+ *
+ * Both of these were MEASURED green before this plan, and both are the kind of
+ * regression that leaves a suite entirely happy:
+ *
+ *  · Hoisting `const deadline = AbortSignal.timeout(timeoutMs)` above the loop
+ *    left **125 tests green** while making the retry a NO-OP for the dominant
+ *    failure class. A shared deadline means attempt 2 inherits attempt 1's
+ *    already-fired signal, so every TIMEOUT retry dies instantly — and a
+ *    timeout is precisely the Railway blip the retry exists for. The
+ *    attempt-COUNT oracles every other test in this file uses cannot see it:
+ *    the second fetch really is issued, it just cannot succeed.
+ *  · Swapping `sleep(...)` and the pre-attempt-2 `isBreakerOpen` re-check left
+ *    **21/21 green**. Re-checking BEFORE the wait means the read that gates the
+ *    retry is 250-500 ms stale, so a breaker that opened during the backoff —
+ *    including one this call's own attempt 1 armed via a concurrent caller — is
+ *    not seen, and the retry amplifies the outage the breaker exists to contain.
+ *
+ * Neither is a subtle behaviour. Both were simply unobserved.
+ */
+describe("[SEAM-06 / D-12] each attempt gets its OWN deadline and an IDENTICAL request", () => {
+  /**
+   * Attempt 1's init minus the one field that is SUPPOSED to differ.
+   *
+   * Hand-rolled rather than a lodash-style `omit`: the whole assertion is
+   * "everything except `signal` is the same", so the exception has to be
+   * spelled out in the test rather than parameterised by a dependency.
+   */
+  function withoutSignal(init: RequestInit): Record<string, unknown> {
+    const { signal: _signal, ...rest } = init;
+    return rest as Record<string, unknown>;
+  }
+
+  it("SC-B — attempt 2 fires with a FRESH abort signal, never attempt 1's", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const fetchMock = statusSequenceFetch(503, 200);
+    const mod = await import("./resilient-fetch");
+
+    await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    const calls = fetchMock.mock.calls;
+    expect(calls).toHaveLength(2);
+    const first = (calls[0][1] as RequestInit).signal;
+    const second = (calls[1][1] as RequestInit).signal;
+    expect(first).toBeInstanceOf(AbortSignal);
+    expect(second).toBeInstanceOf(AbortSignal);
+    expect(
+      second,
+      "Both attempts were handed the SAME AbortSignal, so the deadline is " +
+        "shared rather than per-attempt. Attempt 2 then inherits whatever is " +
+        "left of attempt 1's budget — and on the timeout class, which is the " +
+        "dominant Railway failure and the reason the retry exists at all, " +
+        "there is nothing left: the signal has already fired, so attempt 2 " +
+        "aborts before it can reach the network. The retry becomes a no-op " +
+        "that still costs a breaker failure, and every attempt-count oracle in " +
+        "this file keeps passing because the fetch IS issued.",
+    ).not.toBe(first);
+  });
+
+  it("SC-B (D7) — attempt 2's URL and init are IDENTICAL to attempt 1's, minus the signal", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const fetchMock = statusSequenceFetch(503, 200);
+    const mod = await import("./resilient-fetch");
+
+    // The four things a dropped header actually costs, named at the call site:
+    // Authorization → a 401 the breaker then counts as Railway degradation;
+    // X-Service-Key → every analytics call silently unauthenticated;
+    // X-Tenant-Claim → the signed value the Python limiter buckets on;
+    // the body → the request means something else entirely.
+    const HEADERS = {
+      Authorization: "Bearer internal-token",
+      "X-Service-Key": "service-test-key",
+      "X-User-Id": "user-123",
+      "X-Tenant-Claim": "signed-tenant-claim",
+      "X-Correlation-Id": "corr-abc",
+    };
+    const BODY = JSON.stringify({ flow_type: "resync", key_id: "k1" });
+
+    await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+      headers: HEADERS,
+      body: BODY,
+      cache: "no-store",
+    });
+
+    const calls = fetchMock.mock.calls;
+    expect(calls).toHaveLength(2);
+
+    expect(
+      String(calls[1][0]),
+      "The retry went to a DIFFERENT URL than the attempt it is retrying.",
+    ).toBe(String(calls[0][0]));
+    expect(
+      withoutSignal(calls[1][1] as RequestInit),
+      "Attempt 2's RequestInit is not attempt 1's. A retry that rebuilds its " +
+        "request is not a retry — it is a second, different call, and the " +
+        "difference is invisible in an attempt-count assertion.",
+    ).toEqual(withoutSignal(calls[0][1] as RequestInit));
+
+    // ⚠️ THE EQUALITY ABOVE IS NOT ENOUGH ON ITS OWN. Two attempts that BOTH
+    // dropped `Authorization` would still deep-equal each other, so the
+    // credential-bearing fields are also asserted POSITIVELY on attempt 2.
+    const second = calls[1][1] as RequestInit;
+    expect(second.headers).toEqual(HEADERS);
+    expect(second.body).toBe(BODY);
+    expect(second.method).toBe("POST");
+  });
+
+  it("SC-B — after the backoff, attempt 2 runs on a FULL fresh budget, not the remains of attempt 1's", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    // ⚠️ `AbortSignal.timeout` IS NOT DRIVEN BY VITEST'S FAKE TIMERS, and this
+    // case cannot be written without confronting that. MEASURED on vitest
+    // 4.1.10: install fake timers, create `AbortSignal.timeout(1000)`, advance
+    // 1500 ms — the signal does NOT abort. It is a platform primitive backed by
+    // an internal Node timer the clock does not patch. (That is also why the
+    // jitter-bounds cases above pass `timeoutMsOverride: 300_000`: they are
+    // keeping a REAL deadline from firing during a fake-timer test, not
+    // asserting anything about it.)
+    //
+    // So the deadline is re-expressed on `setTimeout`, which IS patched. The
+    // substitution preserves exactly the property under test and nothing else:
+    // ONE signal per call, aborting `ms` of virtual time after that call. A
+    // hoisted deadline still yields one shared signal, which is what must red.
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+      const controller = new AbortController();
+      setTimeout(
+        () =>
+          controller.abort(
+            new DOMException("The operation timed out", "TimeoutError"),
+          ),
+        ms,
+      );
+      return controller.signal;
+    });
+
+    // A fetch that HONOURS its signal and otherwise never settles — the only
+    // shape that can express "attempt 1 timed out". `statusSequenceFetch` and
+    // the throw-based doubles answer immediately and so cannot model a deadline.
+    let aborts = 0;
+    const fetchMock = installFetchMock();
+    fetchMock.mockImplementation((_input, init) => {
+      const signal = (init as RequestInit).signal as AbortSignal;
+      return new Promise<Response>((_resolve, reject) => {
+        const onAbort = (): void => {
+          aborts += 1;
+          reject(new DOMException("The operation was aborted", "TimeoutError"));
+        };
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener("abort", onAbort);
+      });
+    });
+
+    const mod = await import("./resilient-fetch");
+    vi.useFakeTimers();
+
+    // 1 000 (per-attempt budget) and 250 (backoff floor) are LITERALS typed
+    // here, never read back out of the module under test.
+    const settled = mod
+      .resilientFetch("bridge", BRIDGE_PATH, {
+        method: "POST",
+        retriesOverride: 1,
+        timeoutMsOverride: 1_000,
+      })
+      .then(
+        () => "resolved",
+        () => "rejected",
+      );
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(aborts, "Attempt 1 aborted BEFORE its own budget expired.").toBe(0);
+
+    await vi.advanceTimersByTimeAsync(1); // t = 1000 — attempt 1's deadline
+    expect(aborts).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(250); // t = 1250 — backoff elapsed
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      aborts,
+      "Attempt 2 aborted the instant it was issued. That is the signature of " +
+        "a SHARED deadline: attempt 1's signal had already fired at t=1000, so " +
+        "attempt 2 was handed a spent budget and died before reaching the " +
+        "network. The retry is a no-op for the entire timeout class — the " +
+        "dominant Railway blip — while still spending a second breaker failure.",
+    ).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(999); // t = 2249 — 999 into attempt 2
+    expect(
+      aborts,
+      "Attempt 2 died short of a FULL fresh budget, so its deadline is not " +
+        "its own.",
+    ).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1); // t = 2250 — attempt 2's OWN deadline
+    expect(
+      aborts,
+      "Attempt 2 outlived a full fresh budget — its deadline is longer than " +
+        "the one attempt 1 was given, so the per-attempt budget is not being " +
+        "applied at all.",
+    ).toBe(2);
+
+    await expect(settled).resolves.toBe("rejected");
+    vi.useRealTimers();
+  });
+});
+
+describe("[SEAM-06 / D-13] the sleep→re-check ORDER is load-bearing", () => {
+  it("SC-D — a breaker that opens DURING the backoff aborts attempt 2 (exactly ONE fetch)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const fetchMock = statusSequenceFetch(503, 200);
+    const mod = await import("./resilient-fetch");
+
+    vi.useFakeTimers();
+
+    // The interleaving IS the subject. The breaker is CLOSED at entry and still
+    // closed at the instant attempt 1 returns its 503; a CONCURRENT caller (or
+    // this call's own recorded failure landing on a shared counter) trips it
+    // 100 ms into the 250 ms backoff. Only a re-check performed AFTER the sleep
+    // can see that. Scheduled with `setTimeout` on the same fake clock the
+    // backoff runs on, so the ordering is deterministic rather than raced.
+    setTimeout(() => {
+      seedBreakerOpen(shared.store, "breaker:railway", 30);
+    }, 100);
+
+    // 300_000 keeps the REAL `AbortSignal.timeout` (unpatched by fake timers)
+    // from firing during this case — the same reason the jitter-bounds cases
+    // above use it.
+    const thrown = mod
+      .resilientFetch("bridge", BRIDGE_PATH, {
+        method: "POST",
+        retriesOverride: 1,
+        timeoutMsOverride: 300_000,
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+    // Attempt 1 has run and failed, and the circuit is still CLOSED — so a
+    // re-check taken at this instant would wave the retry through.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(
+      shared.store.get(mod.BREAKER_KEY),
+      "The breaker was already open before the backoff began, so this case " +
+        "would pass under EITHER ordering and discriminates nothing.",
+    ).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(
+      await thrown,
+      "The retry fired against an OPEN circuit. The backoff has to come " +
+        "BEFORE the re-check, so that the read gating the retry is the " +
+        "freshest one available — a breaker that opened during the 250-500 ms " +
+        "wait is invisible to a check taken before it, and the retry then " +
+        "amplifies the exact outage the breaker exists to contain.",
+    ).toBeInstanceOf(mod.CircuitOpenError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
     vi.useRealTimers();
   });
 });
@@ -709,6 +1149,18 @@ describe("[SEAM-06] retriesOverride validation (config faults raised ABOVE the c
     ["above the one-retry cap", 2],
     ["a non-integer", 1.5],
     ["NaN", Number.NaN],
+    // ⚠️ Phase 141.1 / D-10 — THE CASE THAT MAKES A DEAD MUTATION PROVABLY
+    // DEAD. Plan 04 recorded that re-adding `?? SEAM_BUDGETS[budgetKey].retries`
+    // to the retries assignment passes tsc and leaves 254 tests green, and
+    // booked that as an OPEN runtime hole owed to this plan. It is not a hole:
+    // `??` fires only on null/undefined, and this case is the proof that
+    // undefined never reaches the assignment — the validator above rejects it
+    // first, so a restored fallback is UNREACHABLE rather than unpinned.
+    //
+    // That makes the validator's `typeof !== "number"` conjunct load-bearing in
+    // a way nothing asserted before: delete THAT and restore the fallback, and
+    // the registry-bypass axis re-opens for real. Both halves now red.
+    ["an ABSENT override, i.e. what a JS caller hands the core", undefined],
   ])(
     "%s → SeamConfigError, ZERO fetch attempts, ZERO breaker records",
     async (_label, value) => {
@@ -771,6 +1223,78 @@ describe("[SEAM-06 / SC2+SC3] client wiring — the REAL clients thread retriesO
   function pinFloorBackoff(): void {
     vi.spyOn(Math, "random").mockReturnValue(0);
   }
+
+  /**
+   * Set by the SC-A case below, run unconditionally in this describe's own
+   * `afterEach`. `vi.resetModules()` already bounds the leak — the mutated
+   * `SEAM_BUDGETS` belongs to a module instance the next test discards — but a
+   * test that edits shared production state and relies on a teardown it does not
+   * own is one refactor away from poisoning its neighbours silently.
+   */
+  let restoreSyncRowRetries: (() => void) | null = null;
+
+  afterEach(() => {
+    restoreSyncRowRetries?.();
+    restoreSyncRowRetries = null;
+  });
+
+  it("SC-A — row and registry in FORCED DISAGREEMENT: teaser is STILL single-fetch", async () => {
+    // ⚠️ THE HEADLINE OF THIS PLAN, AND THE MEASURED FACT IT KILLS. Deleting
+    // BOTH clients' `retriesOverride` lines left 558 tests green across 11
+    // files, because every budget row MIRRORED its registry verdict — so an
+    // oracle reading either one could not tell which one the code consulted.
+    // This case reads them from DIFFERENT SOURCES BY CONSTRUCTION: the row is
+    // forced to 1 and the registry still says no. That conflict IS the test.
+    //
+    // ⚠️ WRITTEN AGAINST THE POST-D-08 WORLD. Since plan 04 `retriesOverride` is
+    // a required `0 | 1` with no row fallback, so the row cannot turn retry on
+    // even in principle — which makes this the BELT rather than the mechanism.
+    // It is exactly the belt that was owed: plan 04 MEASURED that re-adding
+    // `?? SEAM_BUDGETS[budgetKey].retries` to the core passes tsc AND leaves 254
+    // tests green. Nothing else in the repo reddens on that restoration. This
+    // does. Do not delete it as redundant with the type — the type closes the
+    // CALL SITE, this closes the CORE.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    pinFloorBackoff();
+    configureSeamClients();
+    const fetchMock = throwAlways(new TypeError("fetch failed"));
+    const mod = await import("./resilient-fetch");
+
+    // The conflict has to be REAL, so the starting value is asserted rather
+    // than assumed — a row that already said 1 would make this case vacuous.
+    // Hand-typed 0, never derived.
+    expect(
+      mod.SEAM_BUDGETS["process-key-sync"].retries,
+      "The process-key-sync row no longer starts at 0, so forcing it to 1 " +
+        "creates no disagreement and this case proves nothing.",
+    ).toBe(0);
+    mod.SEAM_BUDGETS["process-key-sync"].retries = 1;
+    restoreSyncRowRetries = () => {
+      mod.SEAM_BUDGETS["process-key-sync"].retries = 0;
+    };
+
+    const { postProcessKey } = await import("./process-key-client");
+    const result = await postProcessKey({
+      flow_type: "teaser",
+      source: "teaser",
+      context: {},
+      userId: "public",
+      correlationId: "c-teaser-disagreement",
+    });
+
+    expect(
+      fetchMock,
+      "The anonymous teaser RETRIED. Its budget row was made to say 1 and the " +
+        "retry-safety registry still says no — so the retry verdict was taken " +
+        "from the ROW, not from the audited registry. That is the registry " +
+        "bypass D-08 closed at the call site being re-opened inside the core: " +
+        "a row edit, or a restored `?? SEAM_BUDGETS[budgetKey].retries` " +
+        "fallback, can once again buy a retry that no audit ever granted. " +
+        "teaser is unauthenticated and rate-limited on the Python side; " +
+        "doubling its traffic is the amplification the registry exists to stop.",
+    ).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(false);
+  });
 
   it("SC3 — postProcessKey teaser + a persistent transient → exactly ONE fetch (never retried)", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -852,7 +1376,20 @@ describe("[SEAM-06 / SC2+SC3] client wiring — the REAL clients thread retriesO
     expect(result.ok).toBe(true);
   });
 
-  it("SC2 — findReplacementCandidates (bridge) + a single transient then 200 → exactly TWO fetches, resolves", async () => {
+  it("SC2 / SC-O — findReplacementCandidates (bridge) at PRODUCTION CONFIGURATION + a single transient then 200 → exactly TWO fetches, resolves", async () => {
+    // Phase 141.1 / D-14d. This is the `bridge` case at production
+    // configuration: the retry verdict is not hand-typed by the test, it is
+    // read by the REAL `analyticsRequest` chokepoint out of
+    // `RETRY_SAFE_ANALYTICS`. Only `fetch` is doubled — never the client — so
+    // deleting the `bridge` registry entry has to change what this observes.
+    //
+    // ⚠️ THE SETTLE-CAPTURE IS NOT STYLE. With the registry entry removed the
+    // wrapper makes ONE attempt, the transient propagates, and
+    // `findReplacementCandidates` THROWS — so a bare `await` would abort this
+    // case before the fetch-count assertion ran, and the CI failure would read
+    // "Analytics service is not reachable", naming neither the registry nor the
+    // retry. Capturing the settlement first makes the COUNT the thing that
+    // reddens, with a message that says what actually broke.
     vi.spyOn(console, "error").mockImplementation(() => {});
     pinFloorBackoff();
     const fetchMock = throwThenJsonOk(new TypeError("fetch failed"), {
@@ -861,10 +1398,22 @@ describe("[SEAM-06 / SC2+SC3] client wiring — the REAL clients thread retriesO
     configureSeamClients();
     const { findReplacementCandidates } = await import("./analytics-client");
 
-    const result = await findReplacementCandidates("p1", "under-1", "u1");
+    const outcome = await findReplacementCandidates("p1", "under-1", "u1").then(
+      (value) => ({ resolved: true as const, value }),
+      (error: unknown) => ({ resolved: false as const, error }),
+    );
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(result).toEqual({ candidates: [] });
+    expect(
+      fetchMock,
+      "`bridge` stopped retrying at production configuration. The count here " +
+        "is not hand-typed into the call — it comes from the wrapper reading " +
+        "its own `RETRY_SAFE_ANALYTICS` verdict through the real " +
+        "`analyticsRequest` chokepoint, so this reddens when that entry is " +
+        "deleted, when the chokepoint stops consulting the registry, or when " +
+        "the row and the verdict drift apart. A one-fetch bridge means an " +
+        "audited, paid-for retry silently stopped happening.",
+    ).toHaveBeenCalledTimes(2);
+    expect(outcome).toEqual({ resolved: true, value: { candidates: [] } });
   });
 
   it("validateKey + a single transient → exactly ONE fetch (registry-absent wrapper inherits no-retry through the chokepoint)", async () => {
