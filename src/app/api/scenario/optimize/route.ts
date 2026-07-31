@@ -73,7 +73,7 @@ export async function POST(req: NextRequest) {
   } = await supabase.auth.getUser();
   if (!user) {
     return NextResponse.json(
-      { error: "Unauthorized" },
+      { error: "Unauthorized", code: "UNAUTHENTICATED" },
       { status: 401, headers: NO_STORE_HEADERS },
     );
   }
@@ -89,7 +89,7 @@ export async function POST(req: NextRequest) {
     body = await req.json();
   } catch {
     return NextResponse.json(
-      { error: "Invalid JSON body" },
+      { error: "Invalid JSON body", code: "VALIDATION_FAILED" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -97,7 +97,7 @@ export async function POST(req: NextRequest) {
   const objective = body.objective ?? "min_vol";
   if (typeof objective !== "string" || !OBJECTIVES.has(objective)) {
     return NextResponse.json(
-      { error: "objective must be 'min_vol' or 'max_sharpe'" },
+      { error: "objective must be 'min_vol' or 'max_sharpe'", code: "VALIDATION_FAILED" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -105,14 +105,14 @@ export async function POST(req: NextRequest) {
   const series = body.series;
   if (series === null || typeof series !== "object" || Array.isArray(series)) {
     return NextResponse.json(
-      { error: "series must be an object of { strategyId: [{date, value}] }" },
+      { error: "series must be an object of { strategyId: [{date, value}] }", code: "VALIDATION_FAILED" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   const ids = Object.keys(series);
   if (ids.length === 0 || ids.length > MAX_STRATEGIES) {
     return NextResponse.json(
-      { error: `series must contain 1..${MAX_STRATEGIES} strategies` },
+      { error: `series must contain 1..${MAX_STRATEGIES} strategies`, code: "VALIDATION_FAILED" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -123,7 +123,7 @@ export async function POST(req: NextRequest) {
     const pts = series[id];
     if (!Array.isArray(pts) || pts.length > MAX_POINTS_PER_SERIES) {
       return NextResponse.json(
-        { error: `series['${id}'] must be an array of <= ${MAX_POINTS_PER_SERIES} points` },
+        { error: `series['${id}'] must be an array of <= ${MAX_POINTS_PER_SERIES} points`, code: "VALIDATION_FAILED" },
         { status: 400, headers: NO_STORE_HEADERS },
       );
     }
@@ -137,7 +137,7 @@ export async function POST(req: NextRequest) {
         !Number.isFinite(p.value)
       ) {
         return NextResponse.json(
-          { error: `series['${id}'] has a malformed point (need { date: string, value: finite number })` },
+          { error: `series['${id}'] has a malformed point (need { date: string, value: finite number })`, code: "VALIDATION_FAILED" },
           { status: 400, headers: NO_STORE_HEADERS },
         );
       }
@@ -194,7 +194,7 @@ export async function POST(req: NextRequest) {
         `[scenario/optimize] circuit open — short-circuited, retry in ${err.retryAfterS}s`,
       );
       return NextResponse.json(
-        { error: CIRCUIT_OPEN_COPY },
+        { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
         {
           status: 503,
           headers: {
@@ -206,7 +206,7 @@ export async function POST(req: NextRequest) {
     }
     if (err instanceof AnalyticsTimeoutError) {
       return NextResponse.json(
-        { error: "The optimizer timed out. Try again shortly." },
+        { error: "The optimizer timed out. Try again shortly.", code: "UPSTREAM_TIMEOUT" },
         { status: 504, headers: NO_STORE_HEADERS },
       );
     }
@@ -257,7 +257,11 @@ export async function POST(req: NextRequest) {
         });
       }
       return NextResponse.json(
-        { error: "The optimizer is unavailable right now." },
+        // SEAMUX-03 — preserve the UPSTREAM'S own machine code
+        // (`AnalyticsUpstreamError.seamCode`); UNKNOWN only when the body
+        // carried none. Never assert a transport code here — the upstream
+        // ANSWERED, so UPSTREAM_NETWORK_ERROR would claim a fault not observed.
+        { error: "The optimizer is unavailable right now.", code: err.seamCode ?? "UNKNOWN" },
         { status: 502, headers: NO_STORE_HEADERS },
       );
     }
@@ -273,7 +277,7 @@ export async function POST(req: NextRequest) {
     });
     console.error("[scenario/optimize] unexpected error", scrubSeamError(err));
     return NextResponse.json(
-      { error: "Could not compute suggested weights." },
+      { error: "Could not compute suggested weights.", code: "UNKNOWN" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }
