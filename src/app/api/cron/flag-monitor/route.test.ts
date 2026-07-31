@@ -62,6 +62,9 @@ interface FlagMonitorRecorders {
   upserts: Array<Record<string, unknown>>;
   // Seeds:
   denominator: number; // audit_log rows, each with a DISTINCT correlation_id
+  // Explicit audit_log rows, overriding `denominator`. Lets a test seed
+  // REPEATED correlation_ids (i.e. retries of one request) to exercise dedup.
+  auditRows: Array<{ correlation_id: unknown }> | null;
   streakValue: string | null; // feature_flags zero-denom streak row value
 }
 
@@ -69,6 +72,7 @@ function makeFlagMonitorRecorders(): FlagMonitorRecorders {
   return {
     upserts: [],
     denominator: 0,
+    auditRows: null,
     streakValue: null,
   };
 }
@@ -88,9 +92,11 @@ function createSupabaseMock(rec: FlagMonitorRecorders) {
         chain.eq = () => chain;
         chain.gte = () =>
           Promise.resolve({
-            data: Array.from({ length: rec.denominator }, (_, i) => ({
-              correlation_id: `cid-${i}`,
-            })),
+            data:
+              rec.auditRows ??
+              Array.from({ length: rec.denominator }, (_, i) => ({
+                correlation_id: `cid-${i}`,
+              })),
             error: null,
           });
         return chain;
@@ -226,6 +232,57 @@ describe.each([["GET"], ["POST"]] as const)(
       const res = await handler(authedReq());
       const body = await res.json();
       expect(body.errorCount).toBe(0);
+    });
+
+    // --- (1d) D-16 denominator: distinct REQUESTS, not audit rows ----------
+
+    it("(1d) 3 audit rows across 2 correlation_ids → denominator 2 (a retry must not inflate the denominator)", async () => {
+      // WHY 2 and not 3: in the Python service the `process_key.entry` audit
+      // emit fires BEFORE both the onboard and the resync duplicate
+      // pre-checks, so a retried call writes a second `process_key` audit row
+      // even when it short-circuits as a duplicate and does no work. The
+      // retry reuses the correlation_id minted once per client call. Counting
+      // rows would therefore inflate the denominator by exactly the retry
+      // volume and bias errorRate DOWNWARD — the monitor would get QUIETER
+      // precisely when the seam is retrying more, which is the failure mode
+      // this alert exists to catch.
+      rec.auditRows = [
+        { correlation_id: "cid-A" }, // request A, attempt 1
+        { correlation_id: "cid-A" }, // request A, attempt 2 (the retry)
+        { correlation_id: "cid-B" }, // request B
+      ];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          sentryResponse({ ok: true, json: { data: [{ "count()": 0 }] } }),
+        ),
+      );
+      const handler = await getHandler();
+      const res = await handler(authedReq());
+      const body = await res.json();
+      expect(body.total).toBe(2); // hand-typed: 2 user requests, not 3 rows
+    });
+
+    it("(1e) a row with no usable correlation_id counts as its own request (never dropped, never thrown on)", async () => {
+      // An unattributable row cannot be collapsed with other unattributable
+      // rows — that would UNDER-count requests and bias errorRate upward into
+      // false alerts. Each stands alone.
+      rec.auditRows = [
+        { correlation_id: "cid-A" },
+        { correlation_id: "cid-A" },
+        { correlation_id: null },
+        { correlation_id: undefined },
+      ];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          sentryResponse({ ok: true, json: { data: [{ "count()": 0 }] } }),
+        ),
+      );
+      const handler = await getHandler();
+      const res = await handler(authedReq());
+      const body = await res.json();
+      expect(body.total).toBe(3); // 1 distinct id + 2 unattributable singletons
     });
 
     // --- (3) rate-limit vs outage distinction ------------------------------

@@ -302,6 +302,167 @@ describe("/api/cron/flag-monitor", () => {
   });
 
   // -------------------------------------------------------------------------
+  // 7b. SC-N (D-16) — the numerator query is built from INDEXED fields only.
+  //
+  // WHY this matters, not just what it does: `path` is written into Sentry
+  // `extra` by src/instrumentation.ts's onRequestError, never into `tags`.
+  // `extra` is metadata — it is not indexed and not searchable. A `path:` term
+  // in a Sentry query therefore matches NOTHING, and the alert goes silent
+  // without any signal that it has. That is exactly what happened between
+  // Phase 19 and Phase 141.1: `path:/api/process-key` returned 0 events for
+  // the monitor's entire lifetime and the founder was never paged.
+  // -------------------------------------------------------------------------
+  async function captureSentryQuery(): Promise<string> {
+    mockSentry(0);
+    const admin = makeAdminMock({ auditLogTotal: 100 });
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => admin,
+    }));
+    const handler = await loadHandler();
+    await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+    expect(fetchSpy).toHaveBeenCalled();
+    const url = fetchSpy.mock.calls[0][0] as string;
+    // URLSearchParams decodes `+` back to a space; decodeURIComponent does not.
+    const query = new URL(url).searchParams.get("query");
+    expect(query).not.toBeNull();
+    return query as string;
+  }
+
+  it("SC-N negative: the outbound Sentry query contains NO `path:` term (any path: term is dead — the field is unindexed by construction)", async () => {
+    const query = await captureSentryQuery();
+    expect(query).not.toContain("path:");
+  });
+
+  it("SC-N positive: the outbound Sentry query is exactly the indexed-field query (hand-typed oracle — any drift reddens)", async () => {
+    const query = await captureSentryQuery();
+    // Hand-typed literal, NOT rebuilt from the route's own constants: an
+    // oracle derived from the implementation cannot falsify the
+    // implementation. `transaction:` is the indexed scoping term that replaced
+    // the dead `path:` filter — dropping it would let the 682/694
+    // cron-recompute errors swamp the process-key ratio into false alerts.
+    expect(query).toBe(
+      "level:error transaction:/process-key correlation_id:* environment:production",
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // 7c. SC-N recurrence guard.
+  //
+  // Scope honesty: the dead-`path:` class is currently of size ONE — this is
+  // RECURRENCE PREVENTION, not the closing of a second live instance. The
+  // historical sibling (src/app/api/cron/phase19-error-rollup/route.ts, which
+  // carried the same query) was retired in Phase 106 Stage B (ce32afbd).
+  // Exhaustive greps at the time of writing: `path:/api/process-key` → 1 hit
+  // in src/; `level:error` in non-test src/ → the same single line.
+  // -------------------------------------------------------------------------
+  it("SC-N recurrence guard: no Sentry query string anywhere in src/ filters on `path:`", () => {
+    // Hand-typed. APPEND new Sentry-query call sites here (and bump the length
+    // pin) so a new one is at least visible at review.
+    const SENTRY_QUERY_FILES = ["src/app/api/cron/flag-monitor/route.ts"];
+    expect(SENTRY_QUERY_FILES.length).toBe(1);
+
+    const repoRoot = resolve(__dirname, "..", "..");
+    for (const rel of SENTRY_QUERY_FILES) {
+      const abs = resolve(repoRoot, rel);
+      expect(existsSync(abs)).toBe(true);
+      const src = readFileSync(abs, "utf8");
+
+      // Extract every `query: "..."` literal — the Sentry query strings
+      // themselves, NOT prose comments (which legitimately name the removed
+      // `path:` term to explain why it must never come back).
+      const literals = [...src.matchAll(/\bquery:\s*"([^"]*)"/g)].map(
+        (m) => m[1],
+      );
+      // Fail loud if the extractor stops matching: a guard that silently finds
+      // nothing to check is a guard that has stopped guarding.
+      expect(
+        literals.length,
+        `${rel}: found no \`query: "..."\` literal to inspect. Either the Sentry ` +
+          `query moved/was reformatted (update this extractor) or the file no ` +
+          `longer builds a Sentry query (remove it from SENTRY_QUERY_FILES).`,
+      ).toBeGreaterThan(0);
+
+      for (const literal of literals) {
+        expect(
+          literal.includes("path:"),
+          `${rel}: Sentry query "${literal}" filters on \`path:\`. On this repo's ` +
+            `instrumentation, path is written to Sentry \`extra\` and NEVER to \`tags\` ` +
+            `— extra is unindexed, so a \`path:\` filter matches nothing and the alert ` +
+            `goes permanently silent with no signal. This is how the flag-monitor ` +
+            `numerator sat at 0 from Phase 19 to Phase 141.1. Scope on indexed fields ` +
+            `instead: transaction / routePath / correlation_id / level / environment.`,
+        ).toBe(false);
+      }
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // 7d. SC-N end-to-end — the repaired numerator actually DRIVES the alert.
+  //
+  // Every other test here mocks Sentry with a URL-blind fetch that returns the
+  // same count whatever is asked, so they stay green even against a query that
+  // matches nothing in production. That is precisely the failure this phase
+  // exists to close, so it cannot be the only evidence.
+  //
+  // The double below is an INDEX SIMULATOR: it answers the query the way the
+  // real Sentry backend does, given this repo's instrumentation.
+  //   - a `path:` term matches nothing (onRequestError writes path into
+  //     `extra`, never `tags`; extra is unindexed) → count 0, alert silent.
+  //     This reproduces the observed production reality: 0 events for the
+  //     monitor's entire Phase 19 → 141.1 lifetime.
+  //   - the repaired indexed-field query matches the 10 process-key errors.
+  //   - an UNSCOPED query (scoping term dropped) matches the whole error
+  //     population — 682 cron-recompute events — which is why the plan forbids
+  //     that "fix": the ratio would swamp into permanent false alerts.
+  // Asserting errorCount === 10 separates all three arms.
+  // -------------------------------------------------------------------------
+  it("SC-N end-to-end: 10 indexed /process-key errors over 1000 requests reach the 0.5% threshold and PAGE the founder (a dead `path:` query returns 0 and stays silent)", async () => {
+    const PROCESS_KEY_ERRORS = 10; // matched only by the repaired query
+    const WHOLE_ERROR_POPULATION = 682; // cron-recompute; matched if unscoped
+    fetchSpy.mockImplementation((async (url: string) => {
+      const query = new URL(url).searchParams.get("query") ?? "";
+      const count = query.includes("path:")
+        ? 0 // dead term — matches no event, ever
+        : query.includes("transaction:/process-key")
+          ? PROCESS_KEY_ERRORS
+          : WHOLE_ERROR_POPULATION;
+      return new Response(JSON.stringify({ data: [{ "count()": count }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch);
+
+    const admin = makeAdminMock({ auditLogTotal: 1000 });
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => admin,
+    }));
+    const handler = await loadHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+    const body = await res.json();
+
+    // The numerator counted the real error events...
+    expect(body.errorCount).toBe(10);
+    expect(body.total).toBe(1000);
+    // ...the ratio crossed ALERT_THRESHOLD (0.5%) with total >= MIN_SAMPLE...
+    expect(body.errorRate).toBeCloseTo(0.01, 5);
+    expect(body.action).toBe("alerted");
+    // ...and the founder was actually paged. An alert that computes a rate but
+    // sends no email is the same silence in a different costume.
+    expect(sendMock).toHaveBeenCalledTimes(1);
+    const email = sendMock.mock.calls[0][0] as {
+      subject: string;
+      to: string;
+    };
+    expect(email.subject).toMatch(/\[ALERT\]/);
+    expect(email.subject).toContain("1.00%");
+    expect(email.to).toBe("founder@example.com");
+  });
+
+  // -------------------------------------------------------------------------
   // 8. H-2 — zero-denominator streak escalates after 3 windows
   // -------------------------------------------------------------------------
   it("test_zero_denominator_alert_after_3_windows: streak=3 sends SEV-2 email", async () => {
