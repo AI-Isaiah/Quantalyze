@@ -16,9 +16,10 @@ Transient Railway blips on the Vercel→Railway seam self-heal via a bounded ret
 <decisions>
 ## Implementation Decisions
 
-### Retry policy (LOCKED — discuss 2026-07-31)
+### Retry policy (LOCKED — discuss 2026-07-31; deadline CORRECTED post-research)
 - **Exactly ONE retry**, **fixed backoff + jitter** (jitter to avoid synchronized retry storms across concurrent callers).
-- Must fit **inside the existing seam-budget reservation** (the seam-budget constants already reserve ~4.3s of retry backoff — see `src/lib/seam-budgets.invariant.test.ts` / `seam-constants.pin.test.ts`). **Do NOT widen the timeout budget** — the retry loop consumes the already-reserved backoff, it does not add to the deadline.
+- **Deadline: Design A — widen the retried call's total deadline.** Research CORRECTED my earlier premise: the seam constants do NOT reserve retry backoff (the ~4250ms is the breaker STORE's worst case, not a retry line — no retry-time reservation exists). A retried call therefore gets a full second attempt + backoff, extending its total time. Enabled **ONLY for allowlisted proven-safe calls on routes with headroom** (e.g. `resync` on keys/sync fits ~42.75k vs the 300k ceiling); **never** the finalize-wizard composite branch or keys-permissions (they would breach). Both attempts get the full per-attempt timeout.
+- **Re-check the breaker before attempt 2** — a retry must not fire (and amplify an outage) if the breaker opened between attempts (SC4).
 - The retry respects the Phase-140 breaker and the unified per-flow budgets.
 
 ### Allowlist / audit mechanism (LOCKED — discuss 2026-07-31)
@@ -29,13 +30,24 @@ Transient Railway blips on the Vercel→Railway seam self-heal via a bounded ret
 ### Locked by success criteria + research (NOT re-litigated)
 - **Default posture:** unproven → no-retry (SC1).
 - **`teaser` is provably never retried** (SC3). A regression test pins it: two identical `teaser` calls → TWO `strategy_verifications` rows, so a future refactor can't silently start retrying it and mint duplicate verifications / `public_token`s / leads. `teaser` is deliberately NON-idempotent (per research SUMMARY).
-- **`resync` (allowlisted) retries with exactly ONE server-side effect** under an injected single transient failure (SC2) — proven against the real `compute_jobs` partial-unique-index + the `WIZARD_DUPLICATE` idempotency contract (`src/lib/process-key-onboard-contract.ts`).
+- **`resync` (allowlisted ONLY AFTER a dedup fix) retries with ZERO duplicate rows** (SC2; discuss 2026-07-31). Research found resync's compute_job is already idempotent (`compute_jobs_one_inflight_per_kind_strategy`), BUT a retry currently mints a duplicate DRAFT `strategy_verifications` row (resync mints its own session id — `process_key.py:1018` — so it lacks onboard's `wizard_session_id` dedup). **This phase MUST make resync's draft SV write idempotent** (dedup on resync's own key) so a retried resync yields exactly ONE compute_job AND ZERO duplicate SV rows. SC2 asserts both, against the real `compute_jobs` index + the deduped SV write. resync is added to the allowlist only after this dedup lands.
 - **Breaker open → zero retry attempts** (SC4) — no bypass path; retries cannot amplify an outage.
 
 ### Audit coverage (the registry MUST classify all of these)
 - The `/process-key` flow types: `teaser`, `onboard`, `resync`, `csv` (`src/lib/process-key-client.ts:51`).
 - The analytics seam functions, including the previously-unaudited set the ROADMAP names: `recomputeMatch`, `computePortfolioAnalytics`, the optimizer, the simulator, the bridge.
 - **`_get_recompute_lock` is PROCESS-LOCAL** (`analytics-service/routers/match.py:120` — `dict[str, asyncio.Lock]`, in-memory per worker process), NOT distributed. The audit must record this as evidence (a process-local lock does not serialize retries across worker instances; combined with the single-instance worker deployment it bounds — but does not by itself prove — recompute idempotency). Resolve each recompute-path verdict on the compute_jobs contract, not the lock alone.
+
+### Registry verdicts (research 2026-07-31 — planner confirms + traces each with evidence)
+- `teaser` → **NO** (mints a fresh `uuid4()` session + SV row / `public_token` / lead every call — `process_key.py:936`).
+- `onboard` → **YES** (caller `wizard_session_id` → duplicate pre-check + `_resume_duplicate_job`, deduped by two unique indexes).
+- `resync` → **YES, but only after the draft-SV dedup above lands**.
+- `csv` → planner/research finalize (classify with evidence; default no-retry if unproven).
+- `recomputeMatch` → **NO** (`_get_recompute_lock` process-local; no unique index on `match_batches`, H-0562 open) — unproven → no-retry.
+- `computePortfolioAnalytics` → **no callers** — record as such (nothing to retry).
+- optimizer / simulator / bridge → **YES** (pure compute, no persisted server-side write).
+- validate / encryptKey → **NO / out-of-scope** (credential writes).
+- **Registry keying (critical):** `budgetKeyFor` is many-to-one — `process-key-sync` serves teaser+csv, `process-key-enqueue` serves onboard+resync. The retry decision for the process-key seam MUST key on **`flow_type`** (via a `retriesOverride` `postProcessKey` passes into `resilientFetch`), NEVER on `budgetKey` (keying on budgetKey would retry `teaser`). The analytics seam keys on its 1:1 `budgetKey`.
 </decisions>
 
 <canonical_refs>
