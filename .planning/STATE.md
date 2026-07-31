@@ -4,13 +4,13 @@ milestone: v1.16
 milestone_name: Production Resilience & Reliability
 status: executing
 stopped_at: Completed 140.3-G4-PLAN.md (SEAMUX-03 coded arms on verify-strategy + validate-and-encrypt)
-last_updated: "2026-07-31T16:05:09.537Z"
+last_updated: "2026-07-31T16:09:49.059Z"
 last_activity: 2026-07-31
 progress:
   total_phases: 15
   completed_phases: 9
   total_plans: 99
-  completed_plans: 90
+  completed_plans: 94
   percent: 60
 ---
 
@@ -46,9 +46,16 @@ RATE-01..05 — all mapped, Traceability filled). Roadmap: `.planning/ROADMAP.md
 
 ## Current Position
 
-Phase: 141.1
-Plan: Not started
-Status: Ready to execute
+Phase: 141.1 (seambackoff-retry-after-aware-backoff-breaker-recalibration-) — EXECUTING
+Plan: 4 of 9 complete (Wave 1 merged)
+Status: Executing Phase 141.1 — Wave 1 (01, 02, 03, 08) merged to
+        `feat/v1.16-141-jobs-rate-retry`; post-merge gate GREEN (tsc clean, vitest
+        176 files / 3412 passed, pytest 111 passed). Next: Wave 2 (04, 05).
+        ⚠️ Wave 1 was interrupted by a host restart on 2026-07-31 and resumed in the
+        original worktrees. Lesson recorded in `141.1-WAVE-MANIFEST.md`: an
+        uncommitted diff left by a killed executor may be an acceptance MUTATION
+        mid-probe, not progress — 141.1-08's orphaned `route.ts` diff was exactly
+        that (it re-added the dead `path:` term) and was correctly discarded.
         ---- 140.2-05 (wave 5, 2026-07-27) ----
         **ROADMAP SC1 CLOSED.** The classification window now covers the response-body
         read and excludes caller/config faults. A stalling upstream (headers fast, body
@@ -140,7 +147,7 @@ Status: Ready to execute
         at `finalize-wizard/route.ts:840-851`), now ledger row TS-33; its "strictly
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
-Last activity: 2026-07-31 -- Phase 141.1 planning complete
+Last activity: 2026-07-31 -- Phase 141.1 Wave 1 merged (4/9 plans)
 
 Progress: [██████████] 95%
 

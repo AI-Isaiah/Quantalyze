@@ -30,6 +30,13 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    are out of the pipeline as of 2026-07-25 — the `alert-digest` cron was removed; alerts
    surface in-app + engineering failures via Sentry. This item is now only about the
    founder-LP report + transactional email.)
+   **Widened 2026-07-31 (phase 141.1-08):** the flag-monitor error-rate alert now also
+   depends on this key. `sendErrorRateAlert` only emails when `resend && founderEmail` are
+   truthy; otherwise it returns `action: "alerted"`, logs, and sends nothing — founder-facing
+   silence one layer *below* the numerator 141.1-08 just repaired. Test `I-T6` pins the
+   soft-skip as intended code behaviour, but the operational gap is unverified. **Founder
+   action:** confirm `RESEND_API_KEY` *and* `FOUNDER_LP_REPORT_TO` in Vercel prod before
+   treating this alert as live.
 2. **Deribit / Zavara mandate reconciliation (go-live).** Performance reconstructs from the
    API alone (green: cum 62.66% / maxDD −4.13%). The reported capital **4M/10M/1M/2M is
    custodied at Matrixport (keys 1&2) / LiquidityTech (key3), NOT in the Deribit keys** —
