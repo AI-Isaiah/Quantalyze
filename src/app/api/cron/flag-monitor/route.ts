@@ -1,9 +1,9 @@
 /**
  * Phase 19 / BACKBONE-05 — error-rate monitor cron (ALERT-ONLY since Phase 106).
  *
- * Polls Sentry events API every 15 minutes for /api/process-key error events.
- * Computes error envelope rate (errors / total /process-key calls in same
- * tumbling window). Threshold: errorRate > 0.5% with total >= 20 → sends a
+ * Polls Sentry events API every 15 minutes for /process-key error events.
+ * Computes error envelope rate (errors / distinct /process-key requests in the
+ * same tumbling window). Threshold: errorRate > 0.5% with total >= 20 → sends a
  * Resend [ALERT] email to the founder. Sub-threshold (errorRate > 0.25%) sends
  * a WARN email.
  *
@@ -89,10 +89,45 @@ async function getNumerator(args: {
   orgSlug: string;
   sentryToken: string;
 }): Promise<SentryFetchResult> {
+  // D-16 / SC-N — REPAIRED NUMERATOR. Read this before touching the query.
+  //
+  // Until Phase 141.1 this query carried a `path:/api/process-key` term and
+  // matched ZERO events since Phase 19 — the alert has never fired once. Two
+  // independent, separately-sufficient causes, both confirmed by a read-only
+  // 90d probe of the production Sentry project:
+  //
+  //   1. `path` is UNINDEXED on this repo's instrumentation. `onRequestError`
+  //      in src/instrumentation.ts writes `path` into Sentry `extra` (metadata
+  //      only, not searchable) while `correlation_id`, `routePath`, `routeType`
+  //      and `routerKind` go into `tags`. Nothing anywhere calls setTag("path").
+  //      Empirically 694/694 production error events report `path` as "".
+  //   2. Even promoted to a tag, the VALUE was wrong. There is no
+  //      `src/app/api/process-key` route — the endpoint is served by the
+  //      FastAPI router in analytics-service (`APIRouter(prefix="/process-key")`
+  //      in routers/process_key.py, mounted bare via include_router in main.py),
+  //      so the transaction path is `/process-key`; the `/api` prefix is wrong
+  //      even against the service that actually serves it.
+  //
+  // The 2026-05-27 region-URL fix (see SENTRY_BASE above) addressed only ONE of
+  // the two causes that kept this monitor silent — the numerator stayed at 0.
+  //
+  // NEVER reintroduce a `path:` term here: it is unindexed by construction and
+  // filters everything out silently. Scope on INDEXED fields only —
+  // `transaction`, `routePath`, `correlation_id`, `level`, `environment`.
+  //
+  // ⚠️ SCOPE HONESTY: `transaction:/process-key` is DERIVED from the FastAPI
+  // router prefix + bare mount, not observed. The 90d probe grouped by
+  // `transaction` saw only `/api/match/cron-recompute` (682) and "" (12) —
+  // no process-key-origin error has ever been indexed in this project, so
+  // there was nothing to confirm the form against. This query CAN fire; it is
+  // not yet PROVEN to fire. Confirming the transaction form of the first real
+  // process-key event is booked forward in TODOS.md. Do NOT "fix" this by
+  // dropping the scoping term: 682/694 current production errors are
+  // cron-recompute and would swamp the process-key ratio into false alerts.
   const params = new URLSearchParams({
     statsPeriod: "15m",
     query:
-      "level:error path:/api/process-key correlation_id:* environment:production",
+      "level:error transaction:/process-key correlation_id:* environment:production",
     field: "count()",
   });
   const sentryUrl = `${SENTRY_BASE}/${args.orgSlug}/events/?${params}`;
@@ -153,16 +188,57 @@ async function getNumerator(args: {
   return { kind: "ok", errorCount: parseSentryCount(sentryData) };
 }
 
+/**
+ * D-16 — DISTINCT-REQUEST denominator (was: raw `audit_log` row count).
+ *
+ * WHY distinct correlation_id and not rows: in the Python service the
+ * `process_key.entry` audit emit fires BEFORE both the onboard and the resync
+ * duplicate pre-checks (see `_write_audit_sync` in
+ * analytics-service/routers/process_key.py — the create_task call precedes both
+ * pre-check sites). A retried onboard/resync therefore writes a SECOND
+ * `entity_type='process_key'` row deterministically, even when it immediately
+ * short-circuits as a duplicate and does no work. Counting rows inflates the
+ * denominator by exactly the retry volume and biases `errorRate` DOWNWARD —
+ * i.e. the monitor gets quieter precisely when the seam is retrying more.
+ *
+ * `correlation_id` is minted once per client `postProcessKey` call, above the
+ * retry loop, so a retried call reuses it. Distinct correlation_id therefore
+ * counts USER REQUESTS — the semantic the errors/requests ratio needs.
+ *
+ * Dedup is client-side (a Set) rather than a `DISTINCT` count: PostgREST's
+ * `count: "exact"` cannot express DISTINCT, and an RPC would need DDL, which
+ * this phase does not write. The 15-minute window bounds the row count, so
+ * materialising the ids is cheap.
+ */
 async function getDenominator(args: {
   admin: ReturnType<typeof createAdminClient>;
   windowStart: Date;
 }): Promise<number> {
-  const { count: totalCount } = await args.admin
+  const { data, error } = await args.admin
     .from("audit_log")
-    .select("id", { count: "exact", head: true })
+    // Aliased so the returned key is `correlation_id` regardless of how
+    // PostgREST names a bare `metadata->>correlation_id` projection.
+    .select("correlation_id:metadata->>correlation_id")
     .eq("entity_type", "process_key")
     .gte("created_at", args.windowStart.toISOString());
-  return totalCount ?? 0;
+
+  if (error || !Array.isArray(data)) {
+    console.warn("[cron/flag-monitor] denominator read failed:", error);
+    return 0;
+  }
+
+  // A row whose metadata carries no usable correlation_id cannot be attributed
+  // to a request group, so it counts as its own singleton request — never
+  // collapsed together with other unattributable rows (that would under-count
+  // the denominator and bias the rate UPWARD), and never thrown on.
+  const distinct = new Set<string>();
+  let unattributable = 0;
+  for (const row of data) {
+    const cid = (row as { correlation_id?: unknown } | null)?.correlation_id;
+    if (typeof cid === "string" && cid.length > 0) distinct.add(cid);
+    else unattributable += 1;
+  }
+  return distinct.size + unattributable;
 }
 
 async function handleZeroDenominator(args: {
@@ -264,19 +340,21 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   const windowStart = new Date(now.getTime() - 15 * 60 * 1000);
   const resend = resendKey ? new Resend(resendKey) : null;
 
-  // 1) Numerator — Sentry error event count for /api/process-key in the last
-  //    15 minutes. Pitfall 8: environment:production filter prevents
-  //    dev/preview events (CI cassette runs) from triggering rollback.
+  // 1) Numerator — Sentry error event count for /process-key in the last
+  //    15 minutes, scoped on INDEXED fields only (D-16). Pitfall 8: the
+  //    environment:production filter prevents dev/preview events (CI cassette
+  //    runs) from triggering a spurious production alert.
   const numerator = await getNumerator({ orgSlug, sentryToken });
   if (numerator.kind === "terminal") return numerator.res;
   const errorCount = numerator.errorCount;
 
-  // 2) Denominator — Supabase audit_log /process-key entries in same window.
-  //    P4 (analytics-service/routers/process_key.py) writes audit_log row at
-  //    /process-key entry; this is the load-bearing source.
+  // 2) Denominator — distinct /process-key REQUESTS in the same window, from
+  //    Supabase audit_log. P4 (analytics-service/routers/process_key.py)
+  //    writes the audit row at /process-key entry; this is the load-bearing
+  //    source. See getDenominator for why rows are deduped by correlation_id.
   const total = await getDenominator({ admin, windowStart });
 
-  // 3) H-2 — denominator streak guard. If audit_log row count stays at 0 for
+  // 3) H-2 — denominator streak guard. If the distinct-request count stays 0 for
   //    >2 consecutive 15-min windows the denominator is silently broken and
   //    the cron is a no-op. Fail-open by sending a SEV-2 alert.
   if (total === 0) {
