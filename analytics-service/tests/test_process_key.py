@@ -4261,23 +4261,29 @@ def test_seamrim03_csv_finalize_residual_error_message_is_static(client):
     )
 
 
-def test_pyapi_09d_resync_can_never_emit_wizard_duplicate(client):
-    """PYAPI-09d (C-21) — /api/keys/sync sends `context:{strategy_id, user_id}`
-    and no wizard_session_id, so the route mints a fresh uuid4 for it.
+def test_seam06_resync_dedups_on_strategy_scoped_draft_key(client):
+    """SEAM-06 (Phase 141) SUPERSEDES PYAPI-09d (C-21) for resync.
 
-    Idempotency-by-session therefore has no meaning for resync, and
-    keys/sync/route.ts:438's WIZARD_DUPLICATE branch was dead code that
-    nonetheless documented a reachable state. This asserts the BRANCH IS ABSENT
-    for the flow — no SV read is issued at all — rather than asserting that a
-    uuid4 happened not to collide.
+    Phase 140.1's PYAPI-09d asserted resync issued NO strategy_verifications
+    read and could NEVER emit WIZARD_DUPLICATE — because idempotency-by-SESSION
+    has no meaning for a server-minted session id. Phase 141 adds a bounded seam
+    retry and allowlists resync for it, which REQUIRES resync's draft SV write to
+    be idempotent for the sequential-retry class. So resync now DOES consult a
+    dedup pre-check — but the security core PYAPI-09d protected is preserved and
+    tightened here: the read is scoped by the strategy-owned draft key
+    (strategy_id + flow_type='resync' + status='draft'), NEVER by a
+    caller-supplied wizard_session_id (which could echo a foreign tenant's row).
+
+    This pins the FRESH path (no prior draft → misses → queues, no code) and the
+    exact filter shape. The retry HIT path (existing draft → WIZARD_DUPLICATE) is
+    pinned in tests/test_resync_draft_dedup.py.
     """
     sb = _RecordingSupabase(
         responses={
             ("strategies", "select"): [{"id": _OWNED_STRATEGY_ID}],
-            # Would short-circuit into WIZARD_DUPLICATE if ever consulted.
-            ("strategy_verifications", "select"): [
-                {"id": "ver-someone", "status": "draft", "trust_tier": "api_verified"}
-            ],
+            # Fresh resync: no existing draft, so the pre-check MISSES and the
+            # flow falls through to a normal queued insert.
+            ("strategy_verifications", "select"): [None],
             ("strategy_verifications", "insert"): [[{"id": "ver-resync"}]],
         },
         rpc_responses={"enqueue_compute_job": ["job-resync-1"]},
@@ -4299,14 +4305,27 @@ def test_pyapi_09d_resync_can_never_emit_wizard_duplicate(client):
     assert r.status_code == 200, r.text
     payload = r.json()
     assert "code" not in payload, (
-        "resync has no caller-supplied session identity, so it must never be "
-        f"told its submission was a duplicate; got {payload}"
+        "a FRESH resync (no prior draft) must not be told it is a duplicate; "
+        f"got {payload}"
     )
     assert payload["queued"] is True
     assert payload["verification_id"] == "ver-resync"
-    assert sb.selects("strategy_verifications") == [], (
-        "a server-minted session id must not consult the idempotency pre-check"
+
+    sv_selects = sb.selects("strategy_verifications")
+    assert len(sv_selects) == 1, (
+        "resync issues EXACTLY ONE strategy_verifications read — the Phase-141 "
+        f"strategy-scoped draft dedup pre-check; got {len(sv_selects)}"
     )
+    assert sv_selects[0].filters == {
+        "strategy_id": _OWNED_STRATEGY_ID,
+        "flow_type": "resync",
+        "status": "draft",
+    }, (
+        "the resync dedup read MUST key on the strategy-owned draft window and "
+        "NEVER on a caller-supplied wizard_session_id (PYAPI-01d / the security "
+        f"core PYAPI-09d protected); got filters {sv_selects[0].filters}"
+    )
+    assert "wizard_session_id" not in sv_selects[0].filters
 
 
 # ---------------------------------------------------------------------------
