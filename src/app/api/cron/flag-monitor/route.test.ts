@@ -47,8 +47,11 @@ vi.mock("resend", () => ({
 //       → current zero-denominator streak (handleZeroDenominator)
 //     - .upsert({...}, {onConflict}) → streak reset / streak bump / kill-switch
 //   audit_log:
-//     - .select("id",{count:"exact",head:true}).eq(...).gte(...)
-//       → denominator (process_key audit rows in the window)
+//     - .select("correlation_id:metadata->>correlation_id").eq(...).gte(...)
+//       → denominator rows. D-16: the route now dedupes by correlation_id
+//         client-side (a retried call reuses its correlation_id and would
+//         otherwise be double-counted), so the double returns ROWS, not a
+//         count. `rec.denominator` synthesises that many DISTINCT ids.
 //
 // Recorders capture every upsert payload so we can assert that the kill-switch
 // row (flag_key === KILL_SWITCH_KEY) is NEVER written — the auto-rollback was
@@ -58,7 +61,7 @@ vi.mock("resend", () => ({
 interface FlagMonitorRecorders {
   upserts: Array<Record<string, unknown>>;
   // Seeds:
-  denominator: number; // audit_log count
+  denominator: number; // audit_log rows, each with a DISTINCT correlation_id
   streakValue: string | null; // feature_flags zero-denom streak row value
 }
 
@@ -79,12 +82,17 @@ function createSupabaseMock(rec: FlagMonitorRecorders) {
       const chain: Record<string, unknown> = {};
 
       if (table === "audit_log") {
-        // count query: select(...).eq(...).gte(...) — terminal thenable
-        // resolving { count }.
+        // rows query: select(...).eq(...).gte(...) — terminal thenable
+        // resolving { data }.
         chain.select = () => chain;
         chain.eq = () => chain;
         chain.gte = () =>
-          Promise.resolve({ count: rec.denominator, error: null });
+          Promise.resolve({
+            data: Array.from({ length: rec.denominator }, (_, i) => ({
+              correlation_id: `cid-${i}`,
+            })),
+            error: null,
+          });
         return chain;
       }
 

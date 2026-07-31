@@ -49,10 +49,13 @@ function makeReq(headers: Record<string, string> = {}): NextRequest {
  * Build a Supabase admin client mock with two collaborating tables:
  *   - feature_flags: select(value).eq("flag_key", X).maybeSingle()
  *                    upsert({...}, { onConflict })
- *   - audit_log: select("id", {count:"exact", head:true}).eq(...).gte(...)
+ *   - audit_log: select("correlation_id:metadata->>correlation_id").eq(...).gte(...)
+ *                → { data: rows } (D-16: the route deduplicates by
+ *                  correlation_id client-side; it no longer asks for a count)
  *
- * `featureFlagsRows` is a dict keyed by flag_key. `auditLogTotal` controls
- * the denominator.
+ * `featureFlagsRows` is a dict keyed by flag_key. `auditLogTotal` controls the
+ * denominator by synthesising that many rows with DISTINCT correlation_ids, so
+ * every existing rate expectation keeps its meaning under the new call shape.
  */
 function makeAdminMock(opts: {
   featureFlagsRows?: Record<string, { value: string }>;
@@ -77,11 +80,13 @@ function makeAdminMock(opts: {
       };
     }
     if (table === "audit_log") {
+      const rows = Array.from({ length: auditLogTotal }, (_, i) => ({
+        correlation_id: `cid-${i}`,
+      }));
       return {
-        select: (_cols: string, _opts: { count: string; head: boolean }) => ({
+        select: (_cols: string) => ({
           eq: () => ({
-            gte: () =>
-              Promise.resolve({ count: auditLogTotal, error: null }),
+            gte: () => Promise.resolve({ data: rows, error: null }),
           }),
         }),
       };
