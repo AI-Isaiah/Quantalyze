@@ -199,9 +199,13 @@ describe("POST /api/portfolio-optimizer — audit-2026-05-07 cluster A", () => {
     const res = await POST(buildRequest({ portfolio_id: "x" }));
     expect(res.status).toBe(429);
     expect(res.headers.get("retry-after")).toBe("42");
-    // 140.4-13 / SEAMRIM-05 — the 429 body and headers are byte-unchanged by
-    // the chokepoint adoption. Hand-typed from the pre-adoption source.
-    expect(await res.json()).toEqual({ error: "Too many requests" });
+    // 140.4-13 / SEAMRIM-05 — the 429 SENTENCE is byte-unchanged from the
+    // pre-adoption source; 140.3-G6 / SEAMUX-03 adds the machine `code` beside
+    // it via the throttledBody override (the builder default is codeless).
+    expect(await res.json()).toEqual({
+      error: "Too many requests",
+      code: "RATE_LIMITED",
+    });
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
@@ -217,7 +221,10 @@ describe("POST /api/portfolio-optimizer — audit-2026-05-07 cluster A", () => {
       "Our Upstash store being unreachable is OUR outage. A 429 renders it as " +
         "the allocator over-using the optimizer, and hides it from the canary.",
     ).toBe(503);
-    expect(await res.json()).toEqual({ error: "Rate limiter unavailable" });
+    expect(await res.json()).toEqual({
+      error: "Rate limiter unavailable",
+      code: "SEAM_MISCONFIGURED",
+    });
     expect(res.headers.get("retry-after")).toBe("60");
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
@@ -363,12 +370,16 @@ describe("POST /api/portfolio-optimizer — audit-2026-05-07 cluster A", () => {
     expect(res.headers.get("Retry-After")).toBe("9");
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     const body = await res.json();
-    // The route's own envelope shape is preserved on the new arm.
+    // The route's own B-26 envelope shape is preserved on the new arm.
     expect(body.status).toBe("failed");
     expect(body.suggestions).toBeNull();
     expect(body.error).toBe(
       "The analytics service is temporarily unavailable. Please try again in a moment.",
     );
+    // 140.3-G6 / SEAMUX-03 — the machine code is additive BESIDE the money-
+    // bearing shape: a shape regression (status/suggestions) and a dropped code
+    // both redden this one case.
+    expect(body.code).toBe("CIRCUIT_OPEN");
     // M-0333 / T-140-17: the copy names no infrastructure.
     expect(body.error).not.toMatch(/circuit|breaker|upstash|railway|http/i);
   });
@@ -401,6 +412,70 @@ describe("POST /api/portfolio-optimizer — audit-2026-05-07 cluster A", () => {
     expect(res.status).toBe(200);
     expect(STATE.optimizerCalls).toHaveLength(1);
     expect(STATE.optimizerCalls[0].ms).toBeUndefined();
+  });
+
+  // ── 140.3-G6 / SEAMUX-03 — a machine `code` on every ROUTE-EMITTED arm ──────
+  // The consumer discriminates the fault on a stable token, not the prose. The
+  // CSRF 403 (assertSameOrigin) and the approval-gate 403 (assertProfileApproved)
+  // are HELPER-emitted across the whole API surface and stay codeless — excluded
+  // exactly as the verifier accepted for keys/sync's withAuth 401. Each arm is
+  // driven on its own so a dropped code reddens here and cannot hide.
+  it("G6 — 401 carries code UNAUTHENTICATED", async () => {
+    STATE.authUser = null;
+    const res = await POST(buildRequest({ portfolio_id: "x" }));
+    expect(res.status).toBe(401);
+    expect((await res.json()).code).toBe("UNAUTHENTICATED");
+  });
+
+  it("G6 — 400 invalid JSON carries code VALIDATION_FAILED", async () => {
+    const res = await POST(buildRequest("not json"));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("G6 — 400 missing portfolio_id carries code MISSING_PORTFOLIO_ID", async () => {
+    // The named-id-param fact (keys/sync MISSING_STRATEGY_ID precedent) — NOT
+    // VALIDATION_FAILED, which this set reserves for structural body rejections.
+    const res = await POST(buildRequest({}));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("MISSING_PORTFOLIO_ID");
+  });
+
+  it("G6 — 403 ownership refusal carries code FORBIDDEN", async () => {
+    STATE.ownershipResult = false;
+    const res = await POST(
+      buildRequest({ portfolio_id: "00000000-0000-0000-0000-000000000999" }),
+    );
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("FORBIDDEN");
+  });
+
+  it("G6 — 504 timeout carries code UPSTREAM_TIMEOUT beside the B-26 shape", async () => {
+    STATE.optimizerImpl = async () => {
+      throw new FakeAnalyticsTimeoutError();
+    };
+    const res = await POST(buildRequest({ portfolio_id: "x" }));
+    expect(res.status).toBe(504);
+    const body = await res.json();
+    expect(body.status).toBe("failed");
+    expect(body.suggestions).toBeNull();
+    expect(body.error).toBe("Optimizer timed out");
+    expect(body.code).toBe("UPSTREAM_TIMEOUT");
+  });
+
+  it("G6 — 503 unreachable carries code UPSTREAM_NETWORK_ERROR beside the B-26 shape", async () => {
+    STATE.optimizerImpl = async () => {
+      throw new Error("connection refused");
+    };
+    const res = await POST(buildRequest({ portfolio_id: "x" }));
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    // B-26: PortfolioOptimizer discards suggestions off this shape — a shape
+    // regression AND a dropped code both redden this case.
+    expect(body.status).toBe("failed");
+    expect(body.suggestions).toBeNull();
+    expect(body.error).toBe("Analytics service unreachable");
+    expect(body.code).toBe("UPSTREAM_NETWORK_ERROR");
   });
 
   it("F5b: every response carries Cache-Control: private, no-store", async () => {
