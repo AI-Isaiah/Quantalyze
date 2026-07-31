@@ -10,7 +10,7 @@ progress:
   total_phases: 15
   completed_phases: 9
   total_plans: 99
-  completed_plans: 94
+  completed_plans: 96
   percent: 60
 ---
 
@@ -47,10 +47,16 @@ RATE-01..05 — all mapped, Traceability filled). Roadmap: `.planning/ROADMAP.md
 ## Current Position
 
 Phase: 141.1 (seambackoff-retry-after-aware-backoff-breaker-recalibration-) — EXECUTING
-Plan: 4 of 9 complete (Wave 1 merged)
-Status: Executing Phase 141.1 — Wave 1 (01, 02, 03, 08) merged to
-        `feat/v1.16-141-jobs-rate-retry`; post-merge gate GREEN (tsc clean, vitest
-        176 files / 3412 passed, pytest 111 passed). Next: Wave 2 (04, 05).
+Plan: 6 of 9 complete (Waves 1–2 merged)
+Status: Executing Phase 141.1 — Wave 1 (01, 02, 03, 08) and Wave 2 (04, 05) merged to
+        `feat/v1.16-141-jobs-rate-retry`. Post-merge gate after Wave 2 GREEN: tsc clean,
+        FULL vitest 735 files / 10432 passed / 287 skipped. Next: Wave 3 (06, 07).
+        ⚠️ OPEN until 141.1-06 lands: the RUNTIME half of SC-E. 141.1-04 measured it —
+        re-adding the `?? SEAM_BUDGETS[budgetKey].retries` row fallback today passes tsc
+        AND 254 tests. Nothing catches it. 06 owes that pin.
+        ⚠️ `isolation: "worktree"` spawned BOTH Wave-2 worktrees ~56 commits stale (no
+        Wave 1). Both executors caught it and fast-forwarded themselves. Verify
+        `git merge-base --is-ancestor <dep-sha> HEAD` on every new worktree.
         ⚠️ Wave 1 was interrupted by a host restart on 2026-07-31 and resumed in the
         original worktrees. Lesson recorded in `141.1-WAVE-MANIFEST.md`: an
         uncommitted diff left by a killed executor may be an acceptance MUTATION
@@ -147,7 +153,7 @@ Status: Executing Phase 141.1 — Wave 1 (01, 02, 03, 08) merged to
         at `finalize-wizard/route.ts:840-851`), now ledger row TS-33; its "strictly
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
-Last activity: 2026-07-31 -- Phase 141.1 Wave 1 merged (4/9 plans)
+Last activity: 2026-07-31 -- Phase 141.1 Wave 2 merged (6/9 plans)
 
 Progress: [██████████] 95%
 
