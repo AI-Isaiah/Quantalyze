@@ -133,11 +133,19 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   // P444 (audit-2026-05-07) — RFC 7235: 401 unauthenticated, 403 forbidden.
+  // ── 140.3-G8 / SEAMUX-03 — a machine `code` on every arm THIS route owns ──
+  // A consumer discriminates on a stable token instead of sniffing the prose
+  // (140.3-12's to reword). UNAUTHENTICATED / FORBIDDEN are inline gate codes,
+  // NOT WizardErrorCode members: admin-only arms must never force wizard copy
+  // (the keys/sync template ships the same non-union tokens). ⚠️ These two gate
+  // arms carry ONLY the auth verdict — no seam state — because they run BEFORE
+  // any breaker-aware branch (threat T-140-12): a code naming Railway health
+  // here would be an unauthenticated oracle.
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: NO_STORE_HEADERS });
+    return NextResponse.json({ error: "Unauthorized", code: "UNAUTHENTICATED" }, { status: 401, headers: NO_STORE_HEADERS });
   }
   if (!(await isAdminUser(supabase, user))) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403, headers: NO_STORE_HEADERS });
+    return NextResponse.json({ error: "Forbidden", code: "FORBIDDEN" }, { status: 403, headers: NO_STORE_HEADERS });
   }
 
   const url = new URL(req.url);
@@ -175,7 +183,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         `[api/admin/match/eval] circuit open — short-circuited, retry in ${err.retryAfterS}s`,
       );
       return NextResponse.json(
-        { error: CIRCUIT_OPEN_COPY },
+        { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
         {
           status: 503,
           headers: {
@@ -193,7 +201,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         scrubSeamError(err),
       );
       return NextResponse.json(
-        { error: TIMEOUT_COPY },
+        { error: TIMEOUT_COPY, code: "UPSTREAM_TIMEOUT" },
         { status: 504, headers: NO_STORE_HEADERS },
       );
     }
@@ -242,8 +250,14 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       // the CALLER'S venue failing rather than as our outage. It is `null` on
       // every other 4xx and on the flat 424 shape, and a consumer that sees
       // `null` must say "a venue failed" without naming one.
+      //
+      // 140.3-G8 / SEAMUX-03 — `code` carries the UPSTREAM'S OWN machine token,
+      // completing the thread TS-19 started: `AnalyticsUpstreamError.seamCode`
+      // holds the Python code (e.g. the flat-424 venue-transient codes) for
+      // exactly this read. `?? "UNKNOWN"` when the upstream body carried none.
+      // `error` and `dependency` are BYTE-UNCHANGED beside it (TS-18/TS-19).
       return NextResponse.json(
-        { error: err.message, dependency: err.dependency },
+        { error: err.message, dependency: err.dependency, code: err.seamCode ?? "UNKNOWN" },
         { status: err.status, headers: NO_STORE_HEADERS },
       );
     }
@@ -268,7 +282,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       scrubSeamError(err),
     );
     return NextResponse.json(
-      { error: GENERIC_COPY },
+      { error: GENERIC_COPY, code: "UNKNOWN" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }
