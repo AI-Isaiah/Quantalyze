@@ -31,10 +31,12 @@
  *
  * ── ABSENCE ⇒ NO-RETRY, BY CONSTRUCTION ──────────────────────────────────────
  *
- * The YES maps are `Partial<Record<…>>`. The wrapper reads
- * `RETRY_SAFE_*[key]?.retries ?? 0` (plan 04), so a flow_type or wrapper with no
- * entry simply gets zero retries. There is no separate "default no-retry" rule
- * to forget — everything unproven is no-retry because the map has no row for it.
+ * The YES maps are `Readonly<Partial<Record<…>>>` — PARTIAL is the load-bearing
+ * half here, and it is why the annotation is not `as const`'s narrow key type
+ * (see IMMUTABLE, below). The wrapper reads `RETRY_SAFE_*[key]?.retries ?? 0`
+ * (plan 04), so a flow_type or wrapper with no entry simply gets zero retries.
+ * There is no separate "default no-retry" rule to forget — everything unproven
+ * is no-retry because the map has no row for it.
  *
  * ── WHAT ACTUALLY FORCES A VERDICT (141.1 / D-11) ────────────────────────────
  *
@@ -104,6 +106,13 @@
  * `keys-permissions` is protected by its `SEAM_BUDGETS` row staying `retries: 0`
  * (pinned in plan 04). Listing them here would be auditing the same seam twice at
  * two grains — the exclusion is by design, not an oversight.
+ *
+ * 141.1 / D-11 — THIS EXCLUSION LIST IS NOW ENFORCED, not merely described.
+ * `seam-retry-registry.test.ts` types the same four keys as `RouteBudgetKey` and
+ * subtracts them from `SeamBudgetKey` before asserting analytics coverage, so a
+ * FOURTEENTH budget key must be classified as an analytics wrapper (→ a verdict
+ * here) or as a route budget (→ that list) before `npm run typecheck` passes.
+ * Doing neither is no longer a silent exclusion. Edit the two together.
  */
 
 import type { FlowType } from "./process-key-client";
