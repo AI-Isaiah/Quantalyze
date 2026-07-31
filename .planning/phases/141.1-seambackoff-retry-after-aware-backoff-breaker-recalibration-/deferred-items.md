@@ -68,3 +68,40 @@ surface), so it cannot authorise a wrong retry.
 **Blast radius:** audit prose only. Verdict unaffected — teaser stays NO on the
 uncontested first item (a fresh uuid4 session per submission ⇒ a new SV row per
 retry).
+
+---
+
+## DEF-141.1-09-A — two runbooks exist on disk but are absent from the index
+
+**Found during:** 141.1-09 Task 1, while adding `seam-breaker.md` to
+`docs/runbooks/README.md`.
+
+**What:** `docs/runbooks/` holds 26 runbooks plus `README.md` (27 files). Two of
+them are indexed nowhere in that README:
+
+- `sfox-go-live.md`
+- `flipretry-derived-equity-go-live.md`
+
+Both are go-live procedures — the class most likely to be needed under time
+pressure by someone who does not already know the filename. The README presents
+itself as the entry point ("Start with **Incident response**…"), so a reader who
+trusts it will not find them.
+
+**Related measurement correction:** `141.1-RESEARCH.md` states "25 runbooks" in
+one place and "26 entries including README" in another. Neither matches disk
+(26 runbooks + README = 27). This is why the new `seam-breaker.md` deliberately
+states **no runbook count** — a count in a runbook rots on the next file added,
+and the phase's own citation discipline prefers a symbol over a number.
+
+**Why not fixed here:** this plan's Task 1 is scoped to adding ONE index row for
+the file it creates, and its acceptance criteria fence `compute-queue.md` to a
+1–3 line change. Indexing two unrelated runbooks is a different (small) change
+with its own placement decision — `sfox-go-live` and `flipretry-…` are go-live
+procedures, and the README has no "Go-live" section, so it needs a category
+call, not just a row.
+
+**Suggested owner:** any future docs pass. One-line fix each once the section
+question is answered.
+
+**Blast radius:** documentation discoverability only. No behaviour change. Not
+user-facing.

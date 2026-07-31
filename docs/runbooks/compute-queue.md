@@ -159,6 +159,9 @@ minutes');` to force a reclaim with a tighter window.
 
 ## Running the circuit breaker
 
+> ⚠️ This is the **Python per-API-key 429 cooldown**, not the Vercel→Railway seam
+> circuit breaker — for that different mechanism see [seam-breaker.md](./seam-breaker.md).
+
 When an exchange returns 429 the Python runner calls
 `update_api_key_rate_limit(api_key_id)` which stamps
 `api_keys.last_429_at = now()`. The per-exchange cooldown windows are the
