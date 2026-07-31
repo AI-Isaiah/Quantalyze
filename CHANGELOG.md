@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.50.1.0] - 2026-07-31
+### 140.3 SEAMUX-03 — a machine-readable `code` on every seam-route error arm
+Completes the v1.16 error-surface class the milestone opened: every error response emitted by the
+ten API routes that import a seam client (`analytics-client` / `process-key-client` / `seam-*`) now
+carries a typed `{ error, code }` envelope, so a caller can branch on `code` deterministically
+instead of string-matching prose. Additive — the existing `error` field is unchanged, so current
+consumers keep working.
+
+- **Ten routes hardened:** `verify-strategy`, `keys/validate-and-encrypt`, `scenario/optimize`,
+  `simulator`, `bridge`, `portfolio-optimizer`, `admin/match/eval`, `admin/match/recompute`,
+  `admin/strategy-review`, and an audit pass on `strategies/csv-validate` (already coded).
+- **Per-arm test coverage:** each route's test asserts a non-empty machine `code` on every error
+  arm it can emit (378 targeted assertions), so a future arm added without a `code` fails CI.
+- Closes the instance-not-class gap the earlier verification missed (the 10th route,
+  `admin/strategy-review`, was outside the originally-named nine). Verified by `gsd-verifier`
+  across all 16 seam-importing routes, full suite green.
+
 ## [0.50.0.0] - 2026-07-30
 ### v1.16 Production Resilience — the Vercel→Railway seam (circuit breaker + timeout budgets + honest error attribution)
 The milestone hardens the two chokepoints between the Next.js app and the Railway analytics
