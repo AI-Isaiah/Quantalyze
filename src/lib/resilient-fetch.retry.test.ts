@@ -413,11 +413,17 @@ describe("[SEAM-06 / SC2] the bounded retry loop", () => {
     expect(shared.counters.limitCalls).toBe(0);
   });
 
-  it("no override + a row that STAYS retries 0 (validate-key) + a transient rejection → exactly ONE fetch, error thrown (no retry by row default)", async () => {
-    // Plan 04 flipped FIVE rows to retries:1; validate-key is deliberately NOT
-    // one of them (a live-exchange probe is non-idempotent). This proves a
-    // non-allowlisted row inherits the single-attempt path with no override —
-    // the row default, not the escape hatch, gates it.
+  it("retriesOverride:0 on a non-allowlisted row (validate-key) + a transient rejection → exactly ONE fetch, error thrown", async () => {
+    // ⚠️ THIS CASE USED TO SAY "no override". After D-08 that sentence is not
+    // expressible: `retriesOverride` is a required `0 | 1`, so a call with no
+    // override does not COMPILE, and the row's `retries` no longer feeds the
+    // loop at all. What "production configuration" means for this seam is now
+    // "the client passes the registry's verdict" — and `validate-key` has no
+    // entry in `RETRY_SAFE_ANALYTICS` (a live-exchange probe is non-idempotent),
+    // so its verdict is 0. The end-to-end version of that sentence — the client
+    // deriving 0 from the registry rather than a test hand-typing it — is
+    // exercised through `findReplacementCandidates` in the analytics-client
+    // tests; here the subject is the CORE honouring an explicit 0.
     vi.spyOn(console, "error").mockImplementation(() => {});
     const original = new TypeError("fetch failed");
     const fetchMock = installFetchMock();
@@ -425,7 +431,10 @@ describe("[SEAM-06 / SC2] the bounded retry loop", () => {
     const mod = await import("./resilient-fetch");
 
     await expect(
-      mod.resilientFetch("validate-key", "/api/validate-key", { method: "POST" }),
+      mod.resilientFetch("validate-key", "/api/validate-key", {
+        method: "POST",
+        retriesOverride: 0,
+      }),
     ).rejects.toBe(original);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -710,7 +719,13 @@ describe("[SEAM-06] retriesOverride validation (config faults raised ABOVE the c
       await expect(
         mod.resilientFetch("bridge", BRIDGE_PATH, {
           method: "POST",
-          retriesOverride: value,
+          // ⚠️ THE CAST IS THE SUBJECT, NOT A CONVENIENCE. D-08 narrowed the
+          // field to `0 | 1`, which erases at runtime; this cast reproduces
+          // exactly what a JS caller or an `as any` hands the core, and it is
+          // the only way to reach the runtime validator from TypeScript. Delete
+          // the cast and this whole describe stops testing anything — the
+          // validator would be unreachable, not proven redundant.
+          retriesOverride: value as 0 | 1,
         }),
       ).rejects.toBeInstanceOf(mod.SeamConfigError);
 

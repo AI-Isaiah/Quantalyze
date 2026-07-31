@@ -488,7 +488,21 @@ export const SEAM_BUDGETS: Record<
     timeoutMs: number;
     /** Service dependencies whose open breaker may block THIS call site. */
     dependencies: readonly SeamServiceDependency[];
-    /** Retries this call site performs. Phase 141 flips these, one row at a time. */
+    /**
+     * ACCOUNTING ONLY — this number does NOT turn retry on (D-08).
+     *
+     * It declares how many retries this call site is EXPECTED to perform, and
+     * exactly two readers consume it: SC-4b's headroom arithmetic in
+     * `seam-budgets.invariant.test.ts` (which must charge the retried leg's
+     * wall-clock and store round trips against the route's Vercel ceiling), and
+     * the `EXPECTED_RETRIES` literal pin in `seam-constants.pin.test.ts`.
+     *
+     * What actually gates a retry is `ResilientFetchInit.retriesOverride`, a
+     * REQUIRED `0 | 1` fed by `RETRY_SAFE_FLOW_TYPES` / `RETRY_SAFE_ANALYTICS`
+     * at the two client chokepoints. Editing this literal changes the BILL, not
+     * the behaviour; editing it without the matching registry entry is caught by
+     * the row↔registry agreement assertion in `seam-constants.pin.test.ts`.
+     */
     retries: number;
     notes: string;
   }
@@ -1510,22 +1524,31 @@ export type ResilientFetchInit = Omit<RequestInit, "signal"> & {
    */
   timeoutMsOverride?: number;
   /**
-   * Override the row's `retries` for this ONE call — SEAM-06's escape hatch.
+   * How many retries THIS call performs — SEAM-06's only retry input.
    *
-   * ⚠️ THE OVERRIDE, NOT THE ROW, IS HOW RETRY ACTIVATES IN PHASE 141. Every
-   * `SEAM_BUDGETS` row still carries `retries: 0`, so the loop below is DORMANT
-   * for every caller that does not pass this. `postProcessKey` passes it per
-   * `flow_type` (never per `budgetKey`, which is many-to-one and would retry the
-   * deliberately non-idempotent `teaser` — CONTEXT registry-keying note); the
-   * analytics seam passes it per its 1:1 `budgetKey`. Plan 141-04 wires the
-   * callers; until then nothing passes it and production behaviour is unchanged.
+   * ⚠️ REQUIRED, AND THE ONLY THING THAT TURNS RETRY ON. There is no fallback to
+   * `SEAM_BUDGETS[budgetKey].retries`: five rows carry `retries: 1`, but the row
+   * is an ACCOUNTING declaration (see the field's docblock on `SEAM_BUDGETS`),
+   * never a gate. Being required is the mechanism, not a style choice — while it
+   * was optional, a new call site could pick a budget key whose row happened to
+   * be `1` and inherit a retry with the retry-safety registry never consulted,
+   * and it typechecked (Phase 141.1 / D-08, bucket C1). Now absence does not
+   * compile: every call site states a verdict.
    *
-   * Validated to an integer 0 or 1 ABOVE the classification window, exactly like
-   * `timeoutMsOverride`: a bad value is a caller fault, never Railway
-   * degradation, and one retry is the whole locked policy (CONTEXT — "exactly
-   * ONE retry"). An explicit `0` is a legal, meaningful "no retry".
+   * Where the verdict comes from: `postProcessKey` reads `RETRY_SAFE_FLOW_TYPES`
+   * by `flow_type` (never by `budgetKey`, which is many-to-one and would retry
+   * the deliberately non-idempotent `teaser` — CONTEXT registry-keying note);
+   * the analytics seam reads `RETRY_SAFE_ANALYTICS` by its 1:1 `budgetKey`. A
+   * caller outside those two chokepoints passes `0` unless it can cite an audit
+   * entry.
+   *
+   * `0 | 1` is compile-time only, so the value is ALSO validated to the integer
+   * 0 or 1 ABOVE the classification window, exactly like `timeoutMsOverride`: a
+   * JS caller or an `as any` still needs the throw, a bad value is a caller
+   * fault and never Railway degradation, and one retry is the whole locked
+   * policy (CONTEXT — "exactly ONE retry").
    */
-  retriesOverride?: number;
+  retriesOverride: 0 | 1;
 };
 
 /**
@@ -1916,7 +1939,7 @@ function sleep(ms: number): Promise<void> {
 export async function resilientFetch(
   budgetKey: SeamBudgetKey,
   path: string,
-  init: ResilientFetchInit = {},
+  init: ResilientFetchInit,
 ): Promise<SeamResponse> {
   const { timeoutMsOverride, retriesOverride, ...requestInit } = init;
 
@@ -1961,31 +1984,32 @@ export async function resilientFetch(
   }
   const timeoutMs = timeoutMsOverride ?? SEAM_BUDGETS[budgetKey].timeoutMs;
 
-  // SEAM-06. The retry count is validated on the SAME ME-03 VALUE-check rule as
-  // `timeoutMsOverride` above (a VALUE check, never `"retriesOverride" in init`
-  // — an explicit `undefined` must take the row's declared budget, exactly as
-  // omitting the property does). One retry is the whole locked policy, so the
-  // only legal overrides are 0 and 1; anything else is a caller bug and is
-  // raised HERE, above the classification window, so it can never be recorded as
-  // Railway degradation.
-  if (retriesOverride !== undefined) {
-    if (
-      typeof retriesOverride !== "number" ||
-      !Number.isInteger(retriesOverride) ||
-      retriesOverride < 0 ||
-      retriesOverride > 1
-    ) {
-      console.error(
-        `[resilient-fetch] ${budgetKey}: CONFIG fault — invalid retriesOverride ${String(retriesOverride)}. This is a caller misconfiguration, NOT an analytics-service failure; the only legal values are 0 and 1.`,
-      );
-      throw new SeamConfigError(
-        `[resilient-fetch] ${budgetKey}: invalid retriesOverride ${String(retriesOverride)} — expected the integer 0 or 1`,
-      );
-    }
+  // SEAM-06 / D-08. `retriesOverride` is a REQUIRED `0 | 1`, so there is no
+  // `!== undefined` guard to write and no ME-03 present-vs-absent question to
+  // answer: absence does not compile. The check below is not redundant with the
+  // type — `0 | 1` erases at runtime, and a JS caller or an `as any` can still
+  // hand this function a `2`, a NaN or a string. One retry is the whole locked
+  // policy, so the only legal values are 0 and 1; anything else is a caller bug
+  // and is raised HERE, above the classification window, so a config typo can
+  // never be recorded as Railway degradation (the reason `SeamConfigError`
+  // exists — see its docblock).
+  if (
+    typeof retriesOverride !== "number" ||
+    !Number.isInteger(retriesOverride) ||
+    retriesOverride < 0 ||
+    retriesOverride > 1
+  ) {
+    console.error(
+      `[resilient-fetch] ${budgetKey}: CONFIG fault — invalid retriesOverride ${String(retriesOverride)}. This is a caller misconfiguration, NOT an analytics-service failure; the only legal values are 0 and 1.`,
+    );
+    throw new SeamConfigError(
+      `[resilient-fetch] ${budgetKey}: invalid retriesOverride ${String(retriesOverride)} — expected the integer 0 or 1`,
+    );
   }
-  // The override, or the row's seeded value (0 for every row today, so the loop
-  // below is dormant unless a caller opts in).
-  const retries = retriesOverride ?? SEAM_BUDGETS[budgetKey].retries;
+  // The caller's verdict, and nothing else. The row fallback that used to sit
+  // here is gone (D-08): it let a hand-picked budget key inherit a retry with
+  // the retry-safety registry never consulted.
+  const retries = retriesOverride;
 
   // A-22. Hoisting the template alone is NOT sufficient: a malformed base URL
   // does not throw here, it makes `fetch` REJECT — landing in the transport

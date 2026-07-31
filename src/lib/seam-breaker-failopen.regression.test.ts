@@ -180,6 +180,7 @@ describe("[140.5-07 / SC-TYPE-2] a counting verdict never proceeds without a key
 
     const mod = await import("./resilient-fetch");
     await mod.resilientFetch("validate-key", "/api/validate-key", {
+      retriesOverride: 0,
       method: "POST",
     });
 
@@ -206,6 +207,7 @@ describe("[140.5-07 / SC-TYPE-2] a counting verdict never proceeds without a key
 
     const mod = await import("./resilient-fetch");
     await mod.resilientFetch("validate-key", "/api/validate-key", {
+      retriesOverride: 0,
       method: "POST",
     });
 
@@ -224,6 +226,7 @@ describe("[140.5-07 / SC-TYPE-2] a counting verdict never proceeds without a key
     const mod = await import("./resilient-fetch");
     await expect(
       mod.resilientFetch("validate-key", "/api/validate-key", {
+        retriesOverride: 0,
         method: "POST",
       }),
     ).rejects.toThrow(/network unreachable/);
@@ -250,6 +253,7 @@ describe("[140.5-07 / SC-TYPE-2] a counting verdict never proceeds without a key
     );
     const mod = await import("./resilient-fetch");
     await mod.resilientFetch("validate-key", "/api/validate-key", {
+      retriesOverride: 0,
       method: "POST",
     });
 
@@ -298,6 +302,7 @@ describe("[140.5-07 / SC-TYPE-2] a counting verdict never proceeds without a key
 
     const mod = await import("./resilient-fetch");
     await mod.resilientFetch("validate-key", "/api/validate-key", {
+      retriesOverride: 0,
       method: "POST",
     });
 
