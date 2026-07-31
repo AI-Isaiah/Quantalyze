@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { extractComments, type SourceLang } from "./source-scan";
+import { citationsIn, CONVERSION_PROTOCOL } from "./seam-citations-needle";
 
 /**
  * Phase 140.5 / SEAMPROSE-01 — no bare `file:line` citation on the seam surface.
@@ -22,8 +23,10 @@ import { extractComments, type SourceLang } from "./source-scan";
  * not its address.
  *
  * ⚠️ COVERAGE-LAW ROW 1 *ON THE SEAM SURFACE*, AND EXPLICITLY NOT A REPO-WIDE
- * CLOSURE (founder decision §4b, said in those words). The population is the 34
- * ratified seam files below; widening the guard to the rest of the repo is a
+ * CLOSURE (founder decision §4b, said in those words). The population is the 35
+ * ratified seam files below — the 34 from 140.5 plus `seam-retry-registry.ts`,
+ * appended by 141.1 because that file is an AUDIT ARTIFACT whose prose a future
+ * allowlist extension reasons from; widening the guard to the rest of the repo is a
  * one-line change — append to `SEAM_CITATION_SURFACE` — but is a DECISION with
  * prerequisites, enumerated under WIDENING below. The 881-citation repo-wide
  * corpus is deliberately out of scope for this phase.
@@ -31,8 +34,8 @@ import { extractComments, type SourceLang } from "./source-scan";
  * ⚠️ WHY THE MECHANISM IS A FORM-BAN AND NOT A PAST-EOF CHECK — THE VACUITY
  * FINDING THAT DECIDED IT. The literal §4b scope ("correct known-bad citations")
  * suggests a guard that resolves each citation and flags the ones whose line is
- * past end-of-file. Measured on this exact 34-file surface (`MODE=full` over
- * `140.5-seam-surface.txt`): **51 citations, ZERO past-EOF**, while 9 were
+ * past end-of-file. Measured on the 34-file surface as it stood at 140.5
+ * (`MODE=full` over `140.5-seam-surface.txt`): **51 citations, ZERO past-EOF**, while 9 were
  * provably wrong but IN RANGE. A past-EOF guard scoped here is GREEN FOREVER —
  * the "scanner that matches nothing reports agreement forever" failure in its
  * type-checking form. So this guard does not resolve citations at all: it FORBIDS
@@ -86,12 +89,13 @@ import { extractComments, type SourceLang } from "./source-scan";
 const ROOT = process.cwd();
 
 /**
- * THE POPULATION — the 34 ratified seam files, hand-typed. This is the roster
- * `140.5-seam-surface.txt` ratified (A6): the 19-file `seam-log-coverage`
+ * THE POPULATION — the 35 ratified seam files, hand-typed. The first 34 are the
+ * roster `140.5-seam-surface.txt` ratified (A6): the 19-file `seam-log-coverage`
  * derived roster + the seam leaves (`seam-copy`, `seam-errors`,
  * `seam-redaction`, `seam-discriminator`, `sentry-capture`) + `envelope.ts`,
  * `wizardErrors.ts` + the 6 wizard steps + `CsvValidationEnvelope.tsx` +
- * `ErrorEnvelope.tsx`.
+ * `ErrorEnvelope.tsx`. The 35th, `seam-retry-registry.ts`, was appended by
+ * Phase 141.1 (see the comment on that entry).
  *
  * ⚠️ WIDENING IS APPENDING TO THIS ONE ARRAY — §4b's one-line-ratchet
  * requirement, satisfied literally. It is hand-typed rather than derived because
@@ -139,6 +143,18 @@ export const SEAM_CITATION_SURFACE: readonly string[] = [
   "src/app/(dashboard)/strategies/new/wizard/steps/CsvSubmitStep.tsx",
   "src/app/(dashboard)/strategies/new/wizard/steps/CsvValidationEnvelope.tsx",
   "src/components/error/ErrorEnvelope.tsx",
+  // Appended by Phase 141.1 / D-06. The retry registry is the SC1 idempotency
+  // AUDIT as well as the runtime allowlist, so its comments are reasoning a
+  // future engineer extends an allowlist from — the same "prose a reader
+  // trusts" property that put the other 34 here. It joined carrying REAL rot:
+  // a wrong migration id and several coordinate citations, since converted.
+  //
+  // ⚠️ THIS HALF GUARDS COMMENTS ONLY, AND IN THIS FILE THAT IS THE MINOR HALF.
+  // The registry's load-bearing prose lives in its evidence STRING LITERALS,
+  // which `extractComments` deliberately does not see (the `-1` self-test
+  // below pins exactly that). The string-literal half is guarded separately by
+  // the registry-local guard in `seam-retry-registry.test.ts`.
+  "src/lib/seam-retry-registry.ts",
 ];
 
 /**
@@ -172,38 +188,14 @@ const CITATION_ALLOWLIST: ReadonlyArray<{
 ];
 
 /**
- * THE NEEDLE — variants A/B/C, ported from `140.5-citation-census.mjs`, which
- * already survived paren-eating and docstring dedup. Any `<name>.<ext>:<digits>`
- * with an optional range/list tail is a citation.
+ * THE NEEDLE now lives in `seam-citations-needle.ts` (Phase 141.1 / D-06). It
+ * was hoisted out of this file, unchanged, so the registry-local evidence guard
+ * in `seam-retry-registry.test.ts` could share it rather than grow a second
+ * regex. Importing THIS file from that one was measured and rejected: vitest
+ * re-registers an imported test file's suites into the importer, which double-
+ * counted this file's whole suite. The self-tests below still exercise the
+ * needle end-to-end through `extractComments`, so the hoist is covered here.
  */
-const CITE =
-  /([A-Za-z0-9_./[\]()@-]*[A-Za-z0-9_\])])\.(ts|tsx|py|mjs|cjs|js|jsx|sql|yml|yaml|md|json)\s*:\s*(\d+(?:\s*[-–,]\s*\d+)*)/g;
-
-/** Every citation token inside one line of comment text. */
-function citationsIn(text: string): Array<{ target: string; lines: string }> {
-  const out: Array<{ target: string; lines: string }> = [];
-  CITE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = CITE.exec(text)) !== null) {
-    let base = m[1];
-    const ext = m[2];
-    const ln = m[3];
-    // Un-eat leading delimiters the char class greedily absorbed, so
-    // `(route.ts:NN)` reports target `route.ts`, not `(route.ts` — the
-    // paren-eating regression the census fixed once already. (Written with `NN`,
-    // not a digit, so this guard never plants the exact form it bans in a comment.)
-    while (base.length && "([".includes(base[0])) {
-      const open = base[0];
-      const close = open === "(" ? ")" : "]";
-      const nOpen = base.split(open).length - 1;
-      const nClose = base.split(close).length - 1;
-      if (nOpen > nClose) base = base.slice(1);
-      else break;
-    }
-    out.push({ target: `${base}.${ext}`, lines: ln.replace(/\s+/g, "") });
-  }
-  return out;
-}
 
 interface Offence {
   file: string;
@@ -239,28 +231,18 @@ function scanFile(file: string): Offence[] {
   return offences;
 }
 
-const CONVERSION_PROTOCOL =
-  "A bare `file.ext:NN` citation names a coordinate that goes stale the instant " +
-  "the target file grows or shrinks a line above it — this milestone was bitten " +
-  "by that eight times. Convert it to a SYMBOL-ANCHORED reference: name the " +
-  "function, constant or arm (e.g. `assertPortfolioOwnership in queries.ts`, " +
-  "`the 4xx-forward arm in simulator/route.ts`), which survives line drift " +
-  "because it names the thing, not its address. An OUT-OF-REPO reference with no " +
-  "in-repo symbol to anchor to (a pinned third-party dist file) gets an " +
-  "allowlist row WITH A REASON — never a bare integer that is unowned by " +
-  "construction.";
-
 describe("[SEAMPROSE-01] no bare file:line citation on the seam surface", () => {
-  it("the surface roster is exactly 34 files and every one exists on disk (fail-loud on drift)", () => {
+  it("the surface roster is exactly 35 files and every one exists on disk (fail-loud on drift)", () => {
     // A vacuity fence on the POPULATION: `it.each([])` is zero cases, which is a
     // passing suite. If a file was renamed and its entry not updated, this reds
     // rather than silently scanning 33 files.
     expect(
       SEAM_CITATION_SURFACE.length,
-      "the ratified seam surface is 34 files (140.5-seam-surface.txt). Widening " +
-        "is APPENDING to SEAM_CITATION_SURFACE and bumping this pin in the same " +
-        "commit — never lower it to match a shrunken roster.",
-    ).toBe(34);
+      "the ratified seam surface is 35 files (140.5-seam-surface.txt, plus " +
+        "seam-retry-registry.ts appended by 141.1). Widening is APPENDING to " +
+        "SEAM_CITATION_SURFACE and bumping this pin in the same commit — never " +
+        "lower it to match a shrunken roster.",
+    ).toBe(35);
     const missing = SEAM_CITATION_SURFACE.filter(
       (f) => !existsSync(join(ROOT, f)),
     );
@@ -278,9 +260,12 @@ describe("[SEAMPROSE-01] no bare file:line citation on the seam surface", () => 
     // here now fails SILENT (fewer comment lines extracted) rather than loud.
     // If `extractComments` broke, it would return few or no lines and every
     // file would scan CLEAN forever — protection that inspects nothing. Measured
-    // 2026-07-30: 10863 comment lines across the 34 files; the floor is ~60% of
-    // that. The extractor is BLIND, not satisfied, if this reds; fix the
-    // extractor, NEVER lower the floor.
+    // 2026-07-30: 10863 comment lines across the then-34 files. Re-measured
+    // 2026-07-31 after 141.1 appended the retry registry: 11255 across 35. The
+    // floor stays 6500 — it is a FLOOR, not a tracker, and raising it in
+    // lockstep with the roster would make every append a two-line edit for no
+    // added detection. The extractor is BLIND, not satisfied, if this reds; fix
+    // the extractor, NEVER lower the floor.
     let commentLines = 0;
     for (const file of SEAM_CITATION_SURFACE) {
       const source = readFileSync(join(ROOT, file), "utf8");
