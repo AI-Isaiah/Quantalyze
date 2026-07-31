@@ -7,6 +7,9 @@ import {
 } from "@/lib/analytics-client";
 import { CircuitOpenError, SeamBodyReadError } from "@/lib/seam-errors";
 import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
+// 140.3-G4 / SEAMUX-03 — reads the upstream's own machine code off a forwarded
+// body so the legacy-forward arm preserves it rather than overwriting.
+import { seamErrorCode } from "@/lib/seam-discriminator";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError } from "@/lib/seam-redaction";
@@ -82,9 +85,15 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // server-side. Return a clean, honest 4xx BEFORE the rate-limit and the live
   // validate/encrypt round-trip — never a crash, never a false KEY_AUTH_FAILED,
   // never a live probe. ccxt exchanges are entirely unaffected (isSfox is false).
+  // ── Phase 140.3-G4 / SEAMUX-03 — a machine code on EVERY error arm this
+  // route emits, so a client discriminates the fault on a stable token instead
+  // of sniffing prose. The four request-shape rejections all answer
+  // KEY_INVALID_FORMAT (create-with-key's exact token for the same facts, two
+  // of them byte-identical sentences). Response bodies only — this route's
+  // request body carries RAW key material (SEAMCORE-06).
   if (isSfox && !isSfoxEnabledServer()) {
     return NextResponse.json(
-      { error: "sFOX integration is not yet available." },
+      { error: "sFOX integration is not yet available.", code: "KEY_INVALID_FORMAT" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -99,7 +108,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // ccxt/sfox exchanges are unaffected (isMt5 is false).
   if (isMt5 && !isMt5EnabledServer()) {
     return NextResponse.json(
-      { error: "MT5 integration is not yet available." },
+      { error: "MT5 integration is not yet available.", code: "KEY_INVALID_FORMAT" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -122,13 +131,13 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       passphrase.trim().length === 0)
   ) {
     return NextResponse.json(
-      { error: "Missing required fields" },
+      { error: "Missing required fields", code: "KEY_INVALID_FORMAT" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
   if (!exchange || !api_key || (!isSfox && !api_secret)) {
-    return NextResponse.json({ error: "Missing required fields" }, { status: 400, headers: NO_STORE_HEADERS });
+    return NextResponse.json({ error: "Missing required fields", code: "KEY_INVALID_FORMAT" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
   const rl = await checkLimit(userActionLimiter, `keys-validate-encrypt:${user.id}`);
@@ -136,7 +145,21 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // 140.4-13 / SEAMRIM-05 — deny through the chokepoint so a limiter
     // misconfiguration answers 503. The 429 body is the builder's default,
     // byte-identical to what was inlined here; NO_STORE_HEADERS is kept.
-    return rateLimitDenyJson(rl, { headers: NO_STORE_HEADERS });
+    //
+    // 140.3-G4 / SEAMUX-03 — the builder's DEFAULT deny bodies are codeless, so
+    // pass overrides carrying the byte-identical sentence PLUS a code (exactly
+    // keys/sync:136-158 / create-with-key:240-243). KEY_RATE_LIMIT (not
+    // RATE_LIMITED) because this is the key-connect family and its two
+    // already-coded siblings both chose it — one fact, one token within the
+    // family. SEAM_MISCONFIGURED on the 503 outage arm.
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: { error: "Too many requests", code: "KEY_RATE_LIMIT" },
+      misconfiguredBody: {
+        error: "Rate limiter unavailable",
+        code: "SEAM_MISCONFIGURED",
+      },
+    });
   }
 
   // Phase 19 / API-2 — DO NOT delegate to /process-key for validate-and-encrypt.
@@ -177,7 +200,10 @@ async function _unifiedValidateAndEncryptHandler(args: {
   const internalToken = process.env.INTERNAL_API_TOKEN;
   if (!internalToken) {
     console.error("[keys/validate-and-encrypt] INTERNAL_API_TOKEN not configured");
-    return NextResponse.json({ error: "Service unavailable" }, { status: 503, headers: NO_STORE_HEADERS });
+    // 140.3-G4 / SEAMUX-03 — a missing internal token is OUR config fault
+    // (SEAM_MISCONFIGURED). This handler is DORMANT (zero callers); coded anyway
+    // so a reviver inherits the correct behaviour, not the 2026 codeless one.
+    return NextResponse.json({ error: "Service unavailable", code: "SEAM_MISCONFIGURED" }, { status: 503, headers: NO_STORE_HEADERS });
   }
 
   const correlationId = await getCorrelationId();
@@ -226,7 +252,22 @@ async function _unifiedValidateAndEncryptHandler(args: {
       if (readErr instanceof SeamBodyReadError) throw readErr;
       return {};
     });
-    return NextResponse.json(err, { status: res.status, headers: NO_STORE_HEADERS });
+    // 140.3-G4 / SEAMUX-03 — forward the upstream body but ensure it carries a
+    // TOP-LEVEL code: preserve the upstream's own (`body.code`, else
+    // `seamErrorCode(body)`), falling back to UNKNOWN only when it genuinely
+    // carried none. NEVER overwrite an upstream-carried code. (Dormant handler.)
+    const forwardBody =
+      typeof err === "object" && err !== null
+        ? (err as Record<string, unknown>)
+        : {};
+    const forwardCode =
+      (typeof forwardBody.code === "string" && forwardBody.code) ||
+      seamErrorCode(forwardBody) ||
+      "UNKNOWN";
+    return NextResponse.json(
+      { ...forwardBody, code: forwardCode },
+      { status: res.status, headers: NO_STORE_HEADERS },
+    );
   }
   // The success-arm read propagates its typed failure to this handler's caller,
   // deliberately: there is no caller to give a softer answer to.
@@ -266,8 +307,11 @@ async function legacyValidateAndEncryptHandler(args: {
       // 200 that carried no error, so it must NOT assert trade/withdraw scopes
       // it never observed — the key is still rejected, only the reason stays
       // honest.
+      // 140.3-G4 / SEAMUX-03 — KEY_NOT_READ_ONLY (union member; its docblock
+      // describes this exact fact: read-only unconfirmed, no write scope observed).
       return NextResponse.json({
         error: "This key could not be verified as read-only. Only read-only keys are accepted.",
+        code: "KEY_NOT_READ_ONLY",
       }, { status: 400, headers: NO_STORE_HEADERS });
     }
 
@@ -299,8 +343,11 @@ async function legacyValidateAndEncryptHandler(args: {
       console.error(
         `[keys/validate-and-encrypt] circuit open — short-circuited, retry in ${err.retryAfterS}s`,
       );
+      // 140.3-G4 / SEAMUX-03 — CIRCUIT_OPEN, the wire token process-key-client
+      // emits for this fact and the client-side map already recognises. The
+      // CIRCUIT_OPEN_COPY sentence and Retry-After header stay byte-unchanged.
       return NextResponse.json(
-        { error: CIRCUIT_OPEN_COPY },
+        { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
         {
           status: 503,
           headers: {
@@ -321,11 +368,20 @@ async function legacyValidateAndEncryptHandler(args: {
       err.status >= 400 &&
       err.status < 500
     ) {
-      return NextResponse.json({ error: err.message }, { status: err.status, headers: NO_STORE_HEADERS });
+      // 140.3-G4 / SEAMUX-03 — preserve the upstream's own machine code
+      // (`err.seamCode`, analytics-client.ts:119), UNKNOWN only when it carried
+      // none. Never overwrite an upstream-carried code.
+      return NextResponse.json(
+        { error: err.message, code: err.seamCode ?? "UNKNOWN" },
+        { status: err.status, headers: NO_STORE_HEADERS },
+      );
     }
     if (err instanceof AnalyticsTimeoutError) {
+      // 140.3-G4 / SEAMUX-03 — UPSTREAM_TIMEOUT (the wire token for OUR analytics
+      // hop timing out; NOT KEY_NETWORK_TIMEOUT, which asserts the EXCHANGE was
+      // unreachable — a fact not observed here).
       return NextResponse.json(
-        { error: "Key validation timed out. Please try again." },
+        { error: "Key validation timed out. Please try again.", code: "UPSTREAM_TIMEOUT" },
         { status: 504, headers: NO_STORE_HEADERS },
       );
     }
@@ -344,8 +400,10 @@ async function legacyValidateAndEncryptHandler(args: {
       tags: { route: "api/keys/validate-and-encrypt" },
       secrets: perRequestSecrets,
     });
+    // 140.3-G4 / SEAMUX-03 — UNKNOWN, the repo's terminal/unclassified fallback
+    // (create-with-key's terminal precedent).
     return NextResponse.json(
-      { error: "Key validation failed. Please try again." },
+      { error: "Key validation failed. Please try again.", code: "UNKNOWN" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }
