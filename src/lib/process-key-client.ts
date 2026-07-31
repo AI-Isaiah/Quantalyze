@@ -75,11 +75,60 @@ export type FlowType = "teaser" | "onboard" | "resync" | "csv";
  * the `resilientFetch` init below reads `RETRY_SAFE_FLOW_TYPES[args.flow_type]`,
  * with an EXPLICIT `?? 0`: absence never delegates to the budget row, so a future
  * flip of the `process-key-sync` row can never retry teaser/csv. This is the belt.
+ *
+ * ⚠️ Phase 141.1 / D-11 — WHY THIS IS A `never`-DEFAULTED SWITCH AND NOT THE
+ * TERNARY IT USED TO BE. The ternary read
+ * `flowType === "teaser" || flowType === "csv" ? "process-key-sync" :
+ * "process-key-enqueue"`, so EVERY flow that was not one of those two fell
+ * through to the enqueue budget. The RETRY consequence of that fall-through is
+ * already covered — the `?? 0` belt above gives an unaudited flow zero retries
+ * whatever budget key it lands on. The BUDGET consequence is not, and it is the
+ * reason this switch exists:
+ *
+ *   `process-key-enqueue` is 15 000 ms; `process-key-sync` is 60 000 ms
+ *   (`SEAM_BUDGETS`). A flow that runs INLINE but falls through to the enqueue
+ *   key gets a quarter of the wall clock it needs and reports a healthy Railway
+ *   as `UPSTREAM_TIMEOUT` 504.
+ *
+ * ⭐ THE FIFTH FLOW IS NOT HYPOTHETICAL. The server's own vocabulary is already
+ * WIDER than this union: `FlowType` in
+ * `analytics-service/services/ingestion/adapter.py` is
+ * `Literal["teaser", "onboard", "internal_report", "csv", "resync"]`, and
+ * `internal_report` has a live source whitelist, its own return-based scalar
+ * path and its own branch through the synchronous pipeline. `_is_long_fetch`
+ * returns False for it, so it runs INLINE and belongs on the 60 000 ms sync
+ * budget. It has ZERO TypeScript emitters today, which is the only reason the
+ * fall-through never shipped as a defect. The moment anyone widens the union
+ * below to reach it, the old ternary would have handed an inline flow the 15 000
+ * ms enqueue budget silently; the `default` arm now makes that a COMPILE error
+ * and forces the author to choose an arm. Keep this function in lockstep with
+ * `_is_long_fetch`, in BOTH directions.
  */
 function budgetKeyFor(flowType: FlowType): SeamBudgetKey {
-  return flowType === "teaser" || flowType === "csv"
-    ? "process-key-sync"
-    : "process-key-enqueue";
+  switch (flowType) {
+    // INLINE on the server (`_is_long_fetch` false): the full 5-method pipeline
+    // runs before the response, so the caller waits for the whole thing.
+    case "teaser":
+    case "csv":
+      return "process-key-sync";
+    // ENQUEUED (`_is_long_fetch` true): the server hands the work to the worker
+    // dyno and answers 202, so 15s here means Railway is sick, not busy.
+    case "onboard":
+    case "resync":
+      return "process-key-enqueue";
+    default: {
+      // Fail loud per Rule 12 — the same shape as `pickAuditDiffFields`'s
+      // schema-drift arm. There is no correct silent answer here: guessing
+      // `process-key-enqueue` is the 15s-vs-60s defect above, and guessing
+      // `process-key-sync` would hold a Vercel concurrency slot 45s longer than
+      // an enqueue needs. Unreachable while `FlowType` has four members, which
+      // is precisely what the `never` assignment asserts.
+      const _exhaustive: never = flowType;
+      throw new Error(
+        `budgetKeyFor: unhandled flow_type — FlowType grew without a budget arm? got=${JSON.stringify(_exhaustive)}`,
+      );
+    }
+  }
 }
 
 // User-facing copy for the SEAM-04 503, bound above as an alias of the ONE

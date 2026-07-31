@@ -5,6 +5,12 @@ import { join } from "node:path";
 // leaf so there is ONE regex, not two. (Importing the sibling TEST file was
 // measured and rejected: vitest re-registered its 46 tests into this file.)
 import { citationsIn, CONVERSION_PROTOCOL } from "./seam-citations-needle";
+// TYPE-ONLY, and load-bearing: these two unions are what the exhaustiveness
+// assertions below are checked AGAINST, so the pins fail on a union edit rather
+// than only on a map edit. `import type` erases, so no runtime edge is added to
+// a test that also reads the leaf's own purity from disk.
+import type { FlowType } from "./process-key-client";
+import type { SeamBudgetKey } from "./resilient-fetch";
 import {
   RETRY_SAFE_FLOW_TYPES,
   RETRY_AUDIT_NO_FLOW_TYPES,
@@ -43,8 +49,67 @@ const EXPECTED_SAFE_ANALYTICS_KEYS = [
   "simulator",
 ];
 
-/** All four `/process-key` flow_types (process-key-client.ts:51). */
-const EXPECTED_ALL_FLOW_KEYS = ["csv", "onboard", "resync", "teaser"];
+// ─────────────────────────────────────────────────────────────────────────────
+// [D-11] SC-I — REAL EXHAUSTIVENESS. Read this before touching the two lists.
+//
+// THE DEFECT THESE THREE ASSERTIONS REPAIR. The runtime pins below compare
+// `YES ∪ NO` against `EXPECTED_ALL_FLOW_KEYS` / `EXPECTED_ALL_ANALYTICS_KEYS` —
+// and BOTH SIDES WERE HAND-TYPED TO THE SAME LIST. They agreed by copy-paste.
+// Adding a 5th member to `FlowType` reddened NOTHING, while the registry
+// docblock claimed the opposite ("forcing a verdict before it can ship").
+//
+// HOW IT IS REAL NOW — a CHAIN, not a single check, and the chain is the point:
+//   1. `as const satisfies readonly FlowType[]` — every entry must BE a member
+//      (catches a typo'd key, which a bare `string[]` swallowed).
+//   2. The `Exclude`-to-`never` assertion — every MEMBER must be in the list.
+//      A new union member makes `_MissingFlowVerdict` non-`never`, the
+//      conditional resolves to `never`, and `npm run typecheck` fails HERE
+//      without anyone having touched a list. This is the `for-quants-lead`
+//      house form, which has fired twice on real PRs.
+//   3. Adding the member to the list to clear (2) is exactly what then REDDENS
+//      the runtime pin, because `YES ∪ NO` no longer equals the list. The only
+//      way back to green is a real verdict in a YES or a NO map.
+//
+// Step 2 alone forces a LIST EDIT, not a verdict; step 3 alone is the pre-141.1
+// vacuous pin. Do not delete either half believing the other covers it.
+//
+// ⚠️ ORACLE INDEPENDENCE IS UNDISTURBED. These lists are still hand-typed
+// literals — the TYPE, not the map under test, is what they are now checked
+// against. Deriving them from `Object.keys(RETRY_SAFE_*)` would make every pin
+// below green for any table, which is the failure this file's header forbids.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** All four `/process-key` flow_types — the `FlowType` union in `process-key-client`. */
+const EXPECTED_ALL_FLOW_KEYS = [
+  "csv",
+  "onboard",
+  "resync",
+  "teaser",
+] as const satisfies readonly FlowType[];
+
+type _MissingFlowVerdict = Exclude<
+  FlowType,
+  (typeof EXPECTED_ALL_FLOW_KEYS)[number]
+>;
+const _flowVerdictExhaustiveness: _MissingFlowVerdict extends never
+  ? true
+  : never = true;
+// Reference the binding so `noUnusedLocals` cannot strip the assertion.
+void _flowVerdictExhaustiveness;
+
+/**
+ * The FOUR `SeamBudgetKey`s that are ROUTE budgets, not analytics-seam-function
+ * verdicts, and are therefore DELIBERATELY absent from the analytics maps —
+ * registry §(c). Hand-typed here so the `Exclude` below cannot quietly absorb a
+ * new key: a 14th `SeamBudgetKey` must be classified as an analytics wrapper
+ * (→ a verdict) or as a route budget (→ this list), and doing NEITHER is a
+ * compile error rather than a silent exclusion.
+ */
+type RouteBudgetKey =
+  | "keys-permissions"
+  | "process-key-enqueue"
+  | "process-key-sync"
+  | "process-key-unified-dormant";
 
 /** The nine analytics-seam wrapper budget keys (Class E, PATTERNS). */
 const EXPECTED_ALL_ANALYTICS_KEYS = [
@@ -57,7 +122,16 @@ const EXPECTED_ALL_ANALYTICS_KEYS = [
   "portfolio-optimizer",
   "simulator",
   "validate-key",
-];
+] as const satisfies readonly SeamBudgetKey[];
+
+type _MissingAnalyticsVerdict = Exclude<
+  SeamBudgetKey,
+  (typeof EXPECTED_ALL_ANALYTICS_KEYS)[number] | RouteBudgetKey
+>;
+const _analyticsVerdictExhaustiveness: _MissingAnalyticsVerdict extends never
+  ? true
+  : never = true;
+void _analyticsVerdictExhaustiveness;
 
 const LEAF_PATH = "src/lib/seam-retry-registry.ts";
 
