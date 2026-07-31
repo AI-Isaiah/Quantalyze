@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.16
 milestone_name: Production Resilience & Reliability
-status: ready_to_plan
-stopped_at: Phase 141 complete (4/4) — ready to discuss Phase 142
-last_updated: 2026-07-31T12:15:19.808Z
+status: planning
+stopped_at: Completed 140.3-G4-PLAN.md (SEAMUX-03 coded arms on verify-strategy + validate-and-encrypt)
+last_updated: "2026-07-31T13:47:32.212Z"
 last_activity: 2026-07-31
 progress:
-  total_phases: 14
-  completed_phases: 8
+  total_phases: 15
+  completed_phases: 9
   total_plans: 90
-  completed_plans: 124
-  percent: 57
+  completed_plans: 90
+  percent: 60
 ---
 
 # Project State — Quantalyze
@@ -46,7 +46,7 @@ RATE-01..05 — all mapped, Traceability filled). Roadmap: `.planning/ROADMAP.md
 
 ## Current Position
 
-Phase: 142
+Phase: 141.1
 Plan: Not started
 Status: Ready to plan
         ---- 140.2-05 (wave 5, 2026-07-27) ----
@@ -233,6 +233,7 @@ Load-bearing sequencing (do not reorder):
 - Phase 140.1 inserted after Phase 140: PYAPI — Python service contract, status attributability & limiter identity (URGENT)
 - Phase 140.2 inserted after Phase 140: SEAMCORE — Seam core & breaker correctness + harness integrity (URGENT)
 - Phase 140.3 inserted after Phase 140: SEAMUX — Client & wizard seam error surface (URGENT)
+- Phase 141.1 inserted after Phase 141: 8-agent review campaign: Retry-After built by 140.5 never consumed; breaker threshold uncalibrated for per-attempt counting; SEAM-05 evidence wrong in 4 places. Zero user-facing/data-integrity defects. (URGENT)
 
 ### Decisions (requirements-time, from research Open Decisions 1–8)
 
