@@ -1,0 +1,533 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { installFetchMock, type FetchMock } from "@/test/helpers/fetch";
+import { seedBreakerOpen } from "@/test/helpers/upstash-breaker";
+
+/**
+ * Phase 141 / SEAM-06 — the bounded retry loop inside `resilientFetch`.
+ *
+ * This file OWNS SC2's mechanics (retriesOverride drives eligibility, one retry,
+ * fixed-backoff+jitter, per-attempt breaker latch) and SC4's breaker-open
+ * guarantee (zero attempts when open at entry; a re-check before attempt 2 that
+ * throws `CircuitOpenError` and is never swallowed). Plan 141-02.
+ *
+ * ⚠️ HARNESS COPIED VERBATIM from `resilient-fetch.test.ts` (the vi.hoisted
+ * store, the four vi.mock factories, the beforeEach flag reset, the afterEach
+ * unstub). The two mechanics differences that file documents apply here too:
+ *  1. `vi.mock` factories do NOT re-run on `vi.resetModules()` (vitest 4.1.10),
+ *     so per-context state hangs off `Redis.fromEnv()` via `beginContext()`.
+ *  2. Global-fetch stubbing is this repo's Node-22 CI-only flake cause; it is
+ *     confined to the `installFetchMock` helper and unstubbed in `afterEach`.
+ *     This file installs the fetch double ONLY through that helper and never
+ *     stubs the global directly (the acceptance grep for the stub call is 0).
+ *
+ * ORACLE INDEPENDENCE: the backoff bounds (250 floor, 500 ceiling) are LITERALS
+ * typed here, never `SEAM_RETRY_BACKOFF_MS`/`SEAM_RETRY_JITTER_MAX_MS` imported
+ * from the module under test. `Math.random` is spied to its extremes (0 → floor,
+ * 1 → ceiling) so the interval is pinned at both ends by hand.
+ */
+
+const shared = vi.hoisted(() => {
+  const store = new Map<string, { value: string; expiresAt: number }>();
+  const mode = {
+    sharedStore: true,
+    throwOnGet: false,
+    throwOnLimit: false,
+    sentinelOnLimit: false,
+    staleReadOnce: null as { value: string | null } | null,
+    nullOnBreakerSet: false,
+    throwOnAfter: false,
+  };
+  const ctx = { store };
+  const constructed: Array<{ tokens: number; window: string }> = [];
+  const counters = {
+    /**
+     * How many times the core ATTEMPTED to record a seam failure, counted at the
+     * double's `limit()` entry. This is the direct oracle for the per-attempt
+     * latch: two failing transient attempts must reach here TWICE, one attempt
+     * whose status and body both fail must reach here ONCE.
+     */
+    limitCalls: 0,
+    storeCommands: 0,
+  };
+  const redisConfigs: Array<Record<string, unknown> | undefined> = [];
+  const captures: Array<{
+    err: unknown;
+    options: {
+      tags?: Record<string, string>;
+      extra?: Record<string, unknown>;
+      level?: string;
+    };
+  }> = [];
+  const afterTasks: unknown[] = [];
+  const afterSettled: Array<Promise<unknown>> = [];
+  return {
+    store,
+    mode,
+    ctx,
+    constructed,
+    counters,
+    redisConfigs,
+    captures,
+    afterTasks,
+    afterSettled,
+    beginContext() {
+      ctx.store = mode.sharedStore
+        ? store
+        : new Map<string, { value: string; expiresAt: number }>();
+      return ctx.store;
+    },
+  };
+});
+
+vi.mock("next/server", async () => {
+  const actual = await vi.importActual<typeof import("next/server")>(
+    "next/server",
+  );
+  return {
+    ...actual,
+    after: (task: unknown) => {
+      if (shared.mode.throwOnAfter) {
+        throw new Error("`after()` was called outside a request scope");
+      }
+      shared.afterTasks.push(task);
+      const produced =
+        typeof task === "function" ? (task as () => unknown)() : task;
+      shared.afterSettled.push(Promise.resolve(produced));
+    },
+  };
+});
+
+vi.mock("./sentry-capture", async () => {
+  const actual = await vi.importActual<typeof import("./sentry-capture")>(
+    "./sentry-capture",
+  );
+  return {
+    ...actual,
+    captureToSentry: (err: unknown, options: Record<string, unknown>) => {
+      shared.captures.push({
+        err,
+        options: options as {
+          tags?: Record<string, string>;
+          extra?: Record<string, unknown>;
+          level?: string;
+        },
+      });
+      return Promise.resolve();
+    },
+  };
+});
+
+vi.mock("@upstash/redis", async () => {
+  const { fakeRedisFor } = await import("@/test/helpers/upstash-breaker");
+  return {
+    Redis: {
+      fromEnv: (config?: Record<string, unknown>) => {
+        shared.redisConfigs.push(config);
+        const base = fakeRedisFor(shared.beginContext());
+        return {
+          get: async (key: string) => {
+            shared.counters.storeCommands += 1;
+            if (shared.mode.throwOnGet) {
+              throw new Error("upstash: connection reset");
+            }
+            if (shared.mode.staleReadOnce && key.startsWith("breaker:")) {
+              const stale = shared.mode.staleReadOnce.value;
+              shared.mode.staleReadOnce = null;
+              return stale;
+            }
+            return base.get(key);
+          },
+          mget: async (...keys: string[]) => {
+            shared.counters.storeCommands += 1;
+            if (shared.mode.throwOnGet) {
+              throw new Error("upstash: connection reset");
+            }
+            return base.mget(...keys);
+          },
+          ttl: async (key: string) => {
+            shared.counters.storeCommands += 1;
+            return base.ttl(key);
+          },
+          set: async (
+            key: string,
+            value: string,
+            opts?: { ex?: number; nx?: boolean },
+          ) => {
+            shared.counters.storeCommands += 1;
+            if (shared.mode.nullOnBreakerSet && key.startsWith("breaker:")) {
+              return null;
+            }
+            return base.set(key, value, opts);
+          },
+        };
+      },
+    },
+  };
+});
+
+vi.mock("@upstash/ratelimit", async () => {
+  const { fakeRatelimitFor } = await import("@/test/helpers/upstash-breaker");
+  return {
+    Ratelimit: class {
+      static slidingWindow(tokens: number, window: string) {
+        return { tokens, window };
+      }
+      private readonly fake: { limit: (id: string) => Promise<unknown> };
+      constructor(opts: { limiter: { tokens: number; window: string } }) {
+        const { tokens, window } = opts.limiter;
+        shared.constructed.push({ tokens, window });
+        this.fake = fakeRatelimitFor(shared.ctx.store);
+      }
+      limit(identifier: string) {
+        shared.counters.limitCalls += 1;
+        if (shared.mode.throwOnLimit) {
+          return Promise.reject(new Error("upstash: limiter unavailable"));
+        }
+        if (shared.mode.sentinelOnLimit) {
+          return Promise.resolve({
+            success: true,
+            limit: 0,
+            remaining: 0,
+            reset: 0,
+            reason: "timeout",
+          });
+        }
+        return this.fake.limit(identifier);
+      }
+    },
+  };
+});
+
+const ORIGINAL_ENV = { ...process.env };
+const BRIDGE_PATH = "/api/portfolio-bridge";
+
+/** A bare-stub fetch that answers a FIXED sequence of statuses (last repeats). */
+function statusSequenceFetch(...statuses: number[]): FetchMock {
+  const mock = installFetchMock();
+  let i = 0;
+  mock.mockImplementation(() => {
+    const status = statuses[Math.min(i, statuses.length - 1)];
+    i += 1;
+    return Promise.resolve({ ok: status < 400, status } as Response);
+  });
+  return mock;
+}
+
+/** A fetch that REJECTS on the first call then answers 200 on every later one. */
+function throwThenOkFetch(rejection: unknown): FetchMock {
+  const mock = installFetchMock();
+  mock
+    .mockRejectedValueOnce(rejection)
+    .mockResolvedValue({ ok: true, status: 200 } as Response);
+  return mock;
+}
+
+function configureUpstash(): void {
+  process.env.UPSTASH_REDIS_REST_URL = "https://fake.upstash.invalid";
+  process.env.UPSTASH_REDIS_REST_TOKEN = "fake-token";
+}
+
+/** Drive `n` counting-503 single-attempt calls to advance the failure counter. */
+async function driveFailures(
+  mod: typeof import("./resilient-fetch"),
+  n: number,
+): Promise<void> {
+  for (let i = 0; i < n; i++) {
+    vi.unstubAllGlobals();
+    statusSequenceFetch(503);
+    await mod.resilientFetch("bridge", BRIDGE_PATH, { method: "POST" });
+  }
+}
+
+beforeEach(async () => {
+  vi.resetModules();
+  const { __resetCaptureThrottleForTests } = await import("./sentry-capture");
+  __resetCaptureThrottleForTests();
+  shared.store.clear();
+  shared.ctx.store = shared.store;
+  shared.mode.sharedStore = true;
+  shared.mode.throwOnGet = false;
+  shared.mode.throwOnLimit = false;
+  shared.mode.sentinelOnLimit = false;
+  shared.mode.staleReadOnce = null;
+  shared.mode.nullOnBreakerSet = false;
+  shared.mode.throwOnAfter = false;
+  shared.captures.length = 0;
+  shared.afterTasks.length = 0;
+  shared.afterSettled.length = 0;
+  shared.constructed.length = 0;
+  shared.redisConfigs.length = 0;
+  shared.counters.limitCalls = 0;
+  shared.counters.storeCommands = 0;
+  configureUpstash();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+  process.env = { ...ORIGINAL_ENV };
+});
+
+describe("[SEAM-06 / SC2] the bounded retry loop", () => {
+  it("retriesOverride:1 + a single transient rejection then 200 → exactly TWO fetch attempts, the 200 returned", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    // Fixed backoff floor, no jitter, so the real-timer wait is a deterministic
+    // 250ms rather than up to 500ms.
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const fetchMock = throwThenOkFetch(new TypeError("fetch failed"));
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(res.status).toBe(200);
+  });
+
+  it("retriesOverride:1 + a counting 503 then 200 → exactly TWO fetch attempts, the 200 returned", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const fetchMock = statusSequenceFetch(503, 200);
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(res.status).toBe(200);
+  });
+
+  it("retriesOverride:1 + a 400 → exactly ONE fetch, the 400 returned (4xx is never retried)", async () => {
+    const fetchMock = statusSequenceFetch(400);
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(400);
+    // A 4xx does not count, so nothing was recorded either.
+    expect(shared.counters.limitCalls).toBe(0);
+  });
+
+  it("no override + all budget rows retries 0 + a transient rejection → exactly ONE fetch, error thrown (loop DORMANT)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const original = new TypeError("fetch failed");
+    const fetchMock = installFetchMock();
+    fetchMock.mockRejectedValue(original);
+    const mod = await import("./resilient-fetch");
+
+    await expect(
+      mod.resilientFetch("bridge", BRIDGE_PATH, { method: "POST" }),
+    ).rejects.toBe(original);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // The single attempt's transient failure still counts once.
+    expect(shared.counters.limitCalls).toBe(1);
+  });
+});
+
+describe("[SEAM-06 / SC2] fixed backoff + jitter bounds", () => {
+  it("with jitter at its floor (Math.random → 0) the retry fires at exactly 250ms, not before", async () => {
+    // 250 is a LITERAL typed here, never SEAM_RETRY_BACKOFF_MS imported.
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const mod = await import("./resilient-fetch");
+    const fetchMock = statusSequenceFetch(503, 200);
+
+    vi.useFakeTimers();
+    const p = mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+      timeoutMsOverride: 300_000,
+    });
+
+    // Attempt 1 runs and fails.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // 1ms short of the backoff floor: still no retry.
+    await vi.advanceTimersByTimeAsync(249);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // At exactly 250ms the second attempt fires.
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await p;
+    vi.useRealTimers();
+  });
+
+  it("with jitter at its ceiling (Math.random → 1) the retry fires by 500ms, not before", async () => {
+    // 500 = 250 backoff + 250 jitter-max, both LITERALS typed here.
+    vi.spyOn(Math, "random").mockReturnValue(1);
+    const mod = await import("./resilient-fetch");
+    const fetchMock = statusSequenceFetch(503, 200);
+
+    vi.useFakeTimers();
+    const p = mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+      timeoutMsOverride: 300_000,
+    });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // 1ms short of the ceiling: still no retry.
+    await vi.advanceTimersByTimeAsync(499);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await p;
+    vi.useRealTimers();
+  });
+});
+
+describe("[SEAM-06 / SC4] breaker-open guarantees", () => {
+  it("SC4a — breaker seeded OPEN at entry + retriesOverride:1 → CircuitOpenError, ZERO fetch attempts", async () => {
+    seedBreakerOpen(shared.store, "breaker:railway", 30);
+    const fetchMock = installFetchMock();
+    const mod = await import("./resilient-fetch");
+
+    await expect(
+      mod.resilientFetch("bridge", BRIDGE_PATH, {
+        method: "POST",
+        retriesOverride: 1,
+      }),
+    ).rejects.toBeInstanceOf(mod.CircuitOpenError);
+
+    expect(fetchMock).toHaveBeenCalledTimes(0);
+    expect(shared.counters.limitCalls).toBe(0);
+  });
+
+  it("SC4b — breaker CLOSED at entry, attempt 1's failure TRIPS it, the re-check throws CircuitOpenError and no second fetch fires", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const mod = await import("./resilient-fetch");
+
+    // Advance the failure counter to THRESHOLD-1 without tripping (breaker still
+    // closed at entry). BREAKER_FAILURE_THRESHOLD is 5 — 4 failures leave it
+    // closed; attempt 1 of the retry call below records the 5th and arms it.
+    await driveFailures(mod, mod.BREAKER_FAILURE_THRESHOLD - 1);
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+
+    vi.unstubAllGlobals();
+    const fetchMock = statusSequenceFetch(503, 200);
+
+    const thrown = await mod
+      .resilientFetch("bridge", BRIDGE_PATH, {
+        method: "POST",
+        retriesOverride: 1,
+      })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+    // The re-check threw — and the loop did NOT catch/swallow it.
+    expect(thrown).toBeInstanceOf(mod.CircuitOpenError);
+    // Exactly ONE attempt: attempt 1 fired, tripped the breaker, and the
+    // pre-attempt-2 re-check aborted the retry.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // The lock the re-check read is really armed.
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeDefined();
+  });
+});
+
+describe("[SEAM-06] the per-attempt breaker latch", () => {
+  it("both attempts fail transient → the store records EXACTLY 2 failures (latch resets per attempt)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    // Both attempts answer a counting 503; threshold is 5 so neither trips.
+    const fetchMock = statusSequenceFetch(503, 503);
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // The last attempt's counting 503 is RETURNED, not thrown.
+    expect(res.status).toBe(503);
+    // One failure recorded PER attempt — the whole point of resetting the latch.
+    expect(shared.counters.limitCalls).toBe(2);
+  });
+
+  it("a single attempt whose 503 is followed by a body-read failure records EXACTLY 1 (no double-count within one attempt)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    // A REAL Response so the 503 dependency peek and the caller body read both
+    // run; its body rejects on read.
+    const mock = installFetchMock();
+    mock.mockResolvedValue({
+      ok: false,
+      status: 503,
+      statusText: "Service Unavailable",
+      headers: new Headers({ "content-type": "application/json" }),
+      json: () => Promise.reject(new DOMException("aborted", "TimeoutError")),
+      text: () => Promise.reject(new DOMException("aborted", "TimeoutError")),
+      clone: () => ({
+        json: () => Promise.reject(new DOMException("aborted", "TimeoutError")),
+      }),
+    } as unknown as Response);
+    const mod = await import("./resilient-fetch");
+
+    // No override: single attempt. The 503 status arm records once.
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+    });
+    expect(shared.counters.limitCalls).toBe(1);
+
+    // The caller reading the body then fails — the body arm must NOT record a
+    // second time within the same attempt (the within-attempt latch holds).
+    await expect(res.json()).rejects.toBeInstanceOf(mod.SeamBodyReadError);
+    expect(shared.counters.limitCalls).toBe(1);
+  });
+});
+
+describe("[SEAM-06] retriesOverride validation (config faults raised ABOVE the classification window)", () => {
+  it.each([
+    ["a negative value", -1],
+    ["above the one-retry cap", 2],
+    ["a non-integer", 1.5],
+    ["NaN", Number.NaN],
+  ])(
+    "%s → SeamConfigError, ZERO fetch attempts, ZERO breaker records",
+    async (_label, value) => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const fetchMock = installFetchMock();
+      const mod = await import("./resilient-fetch");
+
+      await expect(
+        mod.resilientFetch("bridge", BRIDGE_PATH, {
+          method: "POST",
+          retriesOverride: value,
+        }),
+      ).rejects.toBeInstanceOf(mod.SeamConfigError);
+
+      expect(fetchMock).toHaveBeenCalledTimes(0);
+      expect(shared.counters.limitCalls).toBe(0);
+    },
+  );
+
+  it("retriesOverride:0 is a VALID explicit no-retry — one fetch, no SeamConfigError", async () => {
+    const fetchMock = statusSequenceFetch(200);
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 0,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(200);
+  });
+});

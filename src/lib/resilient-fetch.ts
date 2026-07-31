@@ -309,6 +309,44 @@ export const BREAKER_STORE_RETRIES = 1;
 export const BREAKER_STORE_BACKOFF_MS = 250;
 
 // ---------------------------------------------------------------------------
+// SEAM-06 — the retry loop's backoff (Phase 141)
+//
+// Declared beside the breaker-store constants because they are the same KIND of
+// value — a term in the SC-4b worst case, declared rather than defaulted so the
+// headroom arithmetic can read it. The retry loop lives in `resilientFetch`; the
+// wait BETWEEN a failed attempt and its one retry is `SEAM_RETRY_BACKOFF_MS +
+// Math.random() × SEAM_RETRY_JITTER_MAX_MS`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Fixed pause before the single retry.
+ *
+ * FIXED, not exponential, and that is not a contradiction of SEAM-06's
+ * "exponential + jitter" wording: with EXACTLY ONE retry there is a single
+ * interval, and a single interval has no growth to be exponential ABOUT — the
+ * first (and only) exponential term `base × 2⁰` is just `base`. So "fixed +
+ * jitter" and "exponential + jitter" coincide here, and the fixed form is the
+ * one the SC-4b headroom arithmetic can state as one number (the lesson
+ * `BREAKER_STORE_BACKOFF_MS` above records verbatim). If a future policy widens
+ * to N>1 retries this becomes the exponential base and plan 04's invariant
+ * updates with it.
+ */
+export const SEAM_RETRY_BACKOFF_MS = 250;
+
+/**
+ * Upper bound on the random jitter added to `SEAM_RETRY_BACKOFF_MS`.
+ *
+ * Jitter DECORRELATES the retries of concurrent callers that all failed on the
+ * same Railway blip — without it, N lambdas retry in lock-step and re-create the
+ * synchronised storm the breaker exists to damp (T-141-04). The jitter is
+ * `Math.random() × this`, i.e. unbounded-BELOW-only: it can only ADD to the
+ * backoff, never subtract, so the worst-case interval is `SEAM_RETRY_BACKOFF_MS
+ * + SEAM_RETRY_JITTER_MAX_MS` = 500ms. SC-4b (plan 04) must charge that MAX, not
+ * the mean, because the headroom assertion has to hold for the slowest draw.
+ */
+export const SEAM_RETRY_JITTER_MAX_MS = 250;
+
+// ---------------------------------------------------------------------------
 // SEAM-02 — the ONE timeout budget table
 // ---------------------------------------------------------------------------
 
@@ -1423,6 +1461,23 @@ export type ResilientFetchInit = Omit<RequestInit, "signal"> & {
    * SEAM-02 exists to end.
    */
   timeoutMsOverride?: number;
+  /**
+   * Override the row's `retries` for this ONE call — SEAM-06's escape hatch.
+   *
+   * ⚠️ THE OVERRIDE, NOT THE ROW, IS HOW RETRY ACTIVATES IN PHASE 141. Every
+   * `SEAM_BUDGETS` row still carries `retries: 0`, so the loop below is DORMANT
+   * for every caller that does not pass this. `postProcessKey` passes it per
+   * `flow_type` (never per `budgetKey`, which is many-to-one and would retry the
+   * deliberately non-idempotent `teaser` — CONTEXT registry-keying note); the
+   * analytics seam passes it per its 1:1 `budgetKey`. Plan 141-04 wires the
+   * callers; until then nothing passes it and production behaviour is unchanged.
+   *
+   * Validated to an integer 0 or 1 ABOVE the classification window, exactly like
+   * `timeoutMsOverride`: a bad value is a caller fault, never Railway
+   * degradation, and one retry is the whole locked policy (CONTEXT — "exactly
+   * ONE retry"). An explicit `0` is a legal, meaningful "no retry".
+   */
+  retriesOverride?: number;
 };
 
 /**
@@ -1772,12 +1827,17 @@ async function readDependencyBody(res: Response): Promise<unknown> {
  * not thrown — status interpretation is the caller's contract, and only the
  * caller knows whether a 404 is an error or an expected empty result.
  */
+/** Resolve after `ms` milliseconds — the retry backoff, extracted to one line. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function resilientFetch(
   budgetKey: SeamBudgetKey,
   path: string,
   init: ResilientFetchInit = {},
 ): Promise<SeamResponse> {
-  const { timeoutMsOverride, ...requestInit } = init;
+  const { timeoutMsOverride, retriesOverride, ...requestInit } = init;
 
   // ── ABOVE THE WINDOW ────────────────────────────────────────────────────
   // Everything from here to the `try` is a CALLER or CONFIG fault if it fails,
@@ -1819,6 +1879,32 @@ export async function resilientFetch(
     }
   }
   const timeoutMs = timeoutMsOverride ?? SEAM_BUDGETS[budgetKey].timeoutMs;
+
+  // SEAM-06. The retry count is validated on the SAME ME-03 VALUE-check rule as
+  // `timeoutMsOverride` above (a VALUE check, never `"retriesOverride" in init`
+  // — an explicit `undefined` must take the row's declared budget, exactly as
+  // omitting the property does). One retry is the whole locked policy, so the
+  // only legal overrides are 0 and 1; anything else is a caller bug and is
+  // raised HERE, above the classification window, so it can never be recorded as
+  // Railway degradation.
+  if (retriesOverride !== undefined) {
+    if (
+      typeof retriesOverride !== "number" ||
+      !Number.isInteger(retriesOverride) ||
+      retriesOverride < 0 ||
+      retriesOverride > 1
+    ) {
+      console.error(
+        `[resilient-fetch] ${budgetKey}: CONFIG fault — invalid retriesOverride ${String(retriesOverride)}. This is a caller misconfiguration, NOT an analytics-service failure; the only legal values are 0 and 1.`,
+      );
+      throw new SeamConfigError(
+        `[resilient-fetch] ${budgetKey}: invalid retriesOverride ${String(retriesOverride)} — expected the integer 0 or 1`,
+      );
+    }
+  }
+  // The override, or the row's seeded value (0 for every row today, so the loop
+  // below is dormant unless a caller opts in).
+  const retries = retriesOverride ?? SEAM_BUDGETS[budgetKey].retries;
 
   // A-22. Hoisting the template alone is NOT sufficient: a malformed base URL
   // does not throw here, it makes `fetch` REJECT — landing in the transport
@@ -1867,17 +1953,27 @@ export async function resilientFetch(
   const admittedAtMs = Date.now();
 
   /**
-   * ONE request records AT MOST ONE failure, whichever arm classifies it.
+   * ONE ATTEMPT records AT MOST ONE failure, whichever arm classifies it.
    *
    * Wave 5 moved the body read inside the classification window and left this
-   * interaction open deliberately, because this plan replaces the status branch:
-   * a counting status AND a body that then aborts are two arms observing ONE
-   * degraded request. Recording both halves the failures needed to trip, so five
-   * genuinely-distinct incidents' worth of protection would fire after two or
-   * three — a breaker that opens early is still an outage it created itself.
+   * interaction open deliberately: a counting status AND a body that then aborts
+   * are two arms observing ONE degraded request. Recording both halves the
+   * failures needed to trip, so five genuinely-distinct incidents' worth of
+   * protection would fire after two or three — a breaker that opens early is
+   * still an outage it created itself.
    *
    * A latch rather than an ordering rule: the arms cannot be ordered, since the
    * body read happens whenever the CALLER chooses to read it, arbitrarily later.
+   *
+   * ⚠️ SEAM-06 Class D — THE LATCH IS PER-ATTEMPT, RESET AT THE TOP OF EACH LOOP
+   * ITERATION. Within one attempt the status+body dedup above still holds, but a
+   * RETRIED attempt is a distinct request as far as the breaker is concerned:
+   * two failing transient attempts must advance the counter TWICE, or a retried
+   * outage would take twice as many requests to trip. `recordOnce` closes over
+   * `recorded`, so resetting `recorded` below re-arms the same closure — and the
+   * closure handed to `instrumentBody` after the loop therefore carries the LAST
+   * attempt's latch, which is correct: a post-return body-read failure belongs
+   * to the attempt that produced the response.
    */
   let recorded = false;
   async function recordOnce(breakerKey: string): Promise<void> {
@@ -1886,13 +1982,53 @@ export async function resilientFetch(
     await recordSeamFailure(breakerKey, admittedAtMs);
   }
 
-  // Constructed after the breaker check so the budget covers the REQUEST, not
-  // the store round-trip that decides whether to make one.
-  const deadline = AbortSignal.timeout(timeoutMs);
+  // ── THE RETRY LOOP (SEAM-06) ────────────────────────────────────────────
+  // Bounded by `1 + retries`, with `retries ∈ {0, 1}` (validated above). At
+  // retries=0 — every row today, and every caller that passes no override —
+  // this runs exactly once and is behaviourally byte-equivalent to the
+  // pre-141 single-attempt path. Retry-eligible outcomes are ONLY the
+  // counting/transient classes: a transport throw (what `seamBreakerVerdict(null)`
+  // counts) and a response whose `verdict.counts` is true (503/other-5xx). A
+  // 2xx or a 4xx returns immediately. `SeamConfigError` was raised above the
+  // loop; `CircuitOpenError` from the pre-attempt re-check is thrown from ABOVE
+  // the fetch `try`, so nothing in the loop can catch or swallow it (SC4 /
+  // T-141-03).
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const lastAttempt = attempt === retries;
 
-  // ── THE CLASSIFICATION WINDOW ───────────────────────────────────────────
-  let res: Response;
-  try {
+    if (attempt > 0) {
+      // Fixed backoff + jitter, THEN re-check. Jitter (`Math.random() ×
+      // SEAM_RETRY_JITTER_MAX_MS`) decorrelates concurrent callers that all
+      // failed on the same blip so they do not retry in lock-step (T-141-04).
+      // Waiting before the re-check means the read that gates the retry is the
+      // freshest one — the breaker may have opened DURING the backoff.
+      await sleep(SEAM_RETRY_BACKOFF_MS + Math.random() * SEAM_RETRY_JITTER_MAX_MS);
+
+      // SC4 — the EXACT entry gate (:1934-1937), re-run before attempt 2. The
+      // breaker may have opened from attempt 1's OWN recorded failure or from a
+      // concurrent caller; a retry that fired anyway would amplify the very
+      // outage the breaker exists to contain. Thrown here, above the fetch try.
+      const reBreaker = await isBreakerOpen(budgetKey);
+      if (reBreaker.open) {
+        throw new CircuitOpenError(
+          reBreaker.retryAfterS ?? DEFAULT_RETRY_AFTER_S,
+        );
+      }
+    }
+
+    // Per-attempt latch reset (Class D).
+    recorded = false;
+
+    // Design A: each attempt gets its OWN fresh per-attempt deadline. Total
+    // worst case is `timeoutMs × (1 + retries) + backoff`; restricting the
+    // override to headroom-safe routes is plan 04's job (SC-4b). Constructed
+    // after the breaker check so the budget covers the REQUEST, not the store
+    // round-trip that decides whether to make one.
+    const deadline = AbortSignal.timeout(timeoutMs);
+
+    // ── THE CLASSIFICATION WINDOW ─────────────────────────────────────────
+    let res: Response;
+    try {
     // Headers, body, and cache pass through byte-for-byte. A dropped
     // `Authorization` turns a working call into a 401 the breaker would then
     // count as degradation, and a dropped `X-Service-Key` silently
@@ -1966,10 +2102,16 @@ export async function resilientFetch(
     if (transportVerdict.counts) {
       await recordOnce(transportVerdict.breakerKey);
     }
-    // Rethrow the ORIGINAL error. Both clients map `err.name` onto their own
-    // typed errors (AnalyticsTimeoutError / UPSTREAM_TIMEOUT); wrapping here
-    // would silently reclassify every timeout in the codebase.
-    throw err;
+    // A transport failure IS retry-eligible. On the last attempt, rethrow the
+    // ORIGINAL error UNWRAPPED, exactly as the single-attempt path always has —
+    // both clients map `err.name` onto their own typed errors
+    // (AnalyticsTimeoutError / UPSTREAM_TIMEOUT), and wrapping here would
+    // silently reclassify every timeout in the codebase. Otherwise loop for the
+    // one retry; the pre-attempt-2 breaker re-check runs at the top.
+    if (lastAttempt) {
+      throw err;
+    }
+    continue;
   }
 
   // ── ATTRIBUTABILITY (SEAMCORE-01 / ROADMAP SC2) ─────────────────────────
@@ -1995,10 +2137,16 @@ export async function resilientFetch(
   // counting verdict would have been dropped in production. Deleted — `counts`
   // narrows `breakerKey` to `string`. Pinned at runtime by
   // `seam-breaker-failopen.regression.test.ts`.
-  const verdict = seamBreakerVerdict(res.status, await readDependencyBody(res));
-  if (verdict.counts) {
-    await recordOnce(verdict.breakerKey);
-  }
+    const verdict = seamBreakerVerdict(res.status, await readDependencyBody(res));
+    if (verdict.counts) {
+      await recordOnce(verdict.breakerKey);
+      // A counting status is retry-eligible too. Not the last attempt → discard
+      // this response and loop for the one retry; last attempt → fall through
+      // and RETURN it, so a caller still sees the 503 body its contract reads.
+      if (!lastAttempt) {
+        continue;
+      }
+    }
   // 4xx NEVER records — including the `424` whose body names the caller's VENUE,
   // whose slug must never become a breaker key (STATUS_CONTRACT §4). A user's bad
   // API key returning 400 is Railway working CORRECTLY; `create-with-key` and
@@ -2011,5 +2159,13 @@ export async function resilientFetch(
   // The window does not close here. `instrumentBody` keeps `json()` and
   // `text()` inside it, which is what makes the docblock's "classified failure
   // recording" true for a stalling upstream (SEAMCORE-02 / SC1).
-  return instrumentBody(res, budgetKey, timeoutMs, recordOnce);
+    return instrumentBody(res, budgetKey, timeoutMs, recordOnce);
+  }
+
+  // Unreachable: every path inside the loop returns or throws. Present so the
+  // function's control flow is total for the type checker without a non-null
+  // assertion or a mutable `res` hoisted out of the loop.
+  throw new Error(
+    "[resilient-fetch] retry loop exited without returning — unreachable",
+  );
 }
