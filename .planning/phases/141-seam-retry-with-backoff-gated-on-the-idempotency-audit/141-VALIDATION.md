@@ -75,7 +75,7 @@ created: 2026-07-31
 | SC-1 | flip one registry entry from no-retry → retry (e.g. `teaser: {retries: 1}`) | the audit/registry-shape test | ⬜ pending | asserted — NOT observed |
 | SC-2 | in the retry wrapper, drop the flow_type gate so it keys on `budgetKey` instead of `flow_type` | the resync single-effect test (exactly ONE compute_job + ZERO duplicate draft SV rows) | ⬜ pending | asserted — NOT observed |
 | SC-3 | add `teaser` to the allowlist (retries: 1) | the teaser regression test (two identical calls → TWO `strategy_verifications` rows) | ⬜ pending | asserted — NOT observed |
-| SC-4 | remove the breaker re-check before attempt 2 | the breaker-open zero-retry test | ⬜ pending | asserted — NOT observed |
+| SC-4 | remove the pre-attempt-2 `isBreakerOpen` re-check from `resilientFetch`'s retry loop | the SC4b breaker-trips-between-attempts test (`resilient-fetch.retry.test.ts`) | ✅ observed (141-02) | RED first-hand: `AssertionError: expected null to be an instance of CircuitOpenError` at `resilient-fetch.retry.test.ts:436` — with the re-check deleted, attempt 1 trips the breaker but the retry fires anyway, resolving 200 instead of throwing. Adjacent probe (invert the ENTRY gate `if (breaker.open)` → `if (!breaker.open)`) reddens SC4a: `expected "vi.fn()" to be called 0 times, but got 1 times`. Both restored via `git checkout --`; `grep -rn MUTANT src/` → 0; 15/15 green. |
 
 *Rules: Observed means run — paste the failing assertion. A skipped mutation is recorded skipped, never caught. Prefer the second member of a class (mutate a site the author did not have in mind).*
 
