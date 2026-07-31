@@ -486,28 +486,36 @@ export const SEAM_BUDGETS: Record<
   bridge: {
     timeoutMs: 15_000,
     dependencies: [],
-    retries: SEAM_RETRIES,
+    // Phase 141 / SEAM-06 — retry-safe. Registry entry: RETRY_SAFE_ANALYTICS.bridge
+    // (findReplacementCandidates — pure compute, no persisted write on the path).
+    retries: 1,
     notes:
       "Weighted-covariance compute. Was hardcoded inside analytics-client's findReplacementCandidates.",
   },
   simulator: {
     timeoutMs: 15_000,
     dependencies: [],
-    retries: SEAM_RETRIES,
+    // Phase 141 / SEAM-06 — retry-safe. Registry entry: RETRY_SAFE_ANALYTICS.simulator
+    // (simulateAddCandidate — pure compute, no persisted write on the path).
+    retries: 1,
     notes:
       "Portfolio impact simulator compute. Was hardcoded inside analytics-client's simulateAddCandidate.",
   },
   "portfolio-optimizer": {
     timeoutMs: 15_000,
     dependencies: [],
-    retries: SEAM_RETRIES,
+    // Phase 141 / SEAM-06 — retry-safe. Registry entry:
+    // RETRY_SAFE_ANALYTICS["portfolio-optimizer"] (runPortfolioOptimizer — pure compute).
+    retries: 1,
     notes:
       "Heavy compute. Was OPTIMIZER_TIMEOUT_MS declared inside the route rather than the client — the budget-ownership split this table exists to end.",
   },
   "optimize-weights": {
     timeoutMs: 30_000,
     dependencies: [],
-    retries: SEAM_RETRIES,
+    // Phase 141 / SEAM-06 — retry-safe. Registry entry:
+    // RETRY_SAFE_ANALYTICS["optimize-weights"] (optimizeScenarioWeights — pure compute).
+    retries: 1,
     notes: "Scenario composer optimizer. Was the analytics-client 30s default.",
   },
   "match-eval": {
@@ -542,7 +550,13 @@ export const SEAM_BUDGETS: Record<
   "process-key-enqueue": {
     timeoutMs: 15_000,
     dependencies: [],
-    retries: SEAM_RETRIES,
+    // Phase 141 / SEAM-06 — retry-safe at the ROW grain, but the row is NOT the
+    // retry gate for this seam. This budget serves BOTH onboard AND resync
+    // (budgetKeyFor is many-to-one), and both are allowlisted in
+    // RETRY_SAFE_FLOW_TYPES; the process-key client threads its retriesOverride on
+    // flow_type, so this literal is what SC-4b's arithmetic reads (an honest row),
+    // NOT what turns retry on. Teaser/csv live on process-key-sync (retries: 0).
+    retries: 1,
     notes:
       "flow_type in {resync, onboard}: the server merely enqueues onto the worker dyno and returns 202 (verified in analytics-service/routers/process_key.py:_is_long_fetch). An enqueue that takes 15s means Railway is sick. Tightened from the blanket 60s; nothing observes these two budgets (research §6.4).",
   },

@@ -16,6 +16,7 @@ import {
   decodeBreakerLock,
 } from "./resilient-fetch";
 import { seamBreakerVerdict } from "./seam-discriminator";
+import { RETRY_SAFE_ANALYTICS } from "./seam-retry-registry";
 import {
   FAKE_BREAKER_KEY,
   FAKE_THRESHOLD,
@@ -163,6 +164,34 @@ const EXPECTED_DEPENDENCIES: Record<string, string[]> = {
 };
 
 /**
+ * Phase 141 / SEAM-05+06 — the per-row retry oracle, HAND-TYPED literals (never
+ * read out of the module under test). Five rows carry `1` after the SEAM-05
+ * idempotency audit allowlisted them; every other row stays `0`.
+ *
+ * The five 1s are the same set the retry-safety registry lists as YES: bridge,
+ * simulator, portfolio-optimizer, optimize-weights (the four compute analytics
+ * wrappers) plus process-key-enqueue (the onboard+resync budget). The registry↔
+ * rows consistency pin below re-checks that these two hand-typed statements — the
+ * registry's and this row table's — cannot drift apart. Raising any 0 here is out
+ * of fence unless its audit verdict and its row flip land together.
+ */
+const EXPECTED_RETRIES: Record<string, number> = {
+  "validate-key": 0,
+  "encrypt-key": 0,
+  bridge: 1,
+  simulator: 1,
+  "portfolio-optimizer": 1,
+  "optimize-weights": 1,
+  "match-eval": 0,
+  "match-recompute": 0,
+  "portfolio-analytics": 0,
+  "process-key-enqueue": 1,
+  "process-key-sync": 0,
+  "keys-permissions": 0,
+  "process-key-unified-dormant": 0,
+};
+
+/**
  * The closed SERVICE-dependency vocabulary, typed HERE as literals
  * (`STATUS_CONTRACT.md` §4). The only values that may become a breaker key.
  *
@@ -280,20 +309,68 @@ describe("SEAM_BUDGETS — every timeout pinned to a hand-typed literal", () => 
     },
   );
 
-  it.each(Object.keys(EXPECTED_DEPENDENCIES))(
-    "%s.retries is 0 — the per-row NEGATIVE pin",
-    (key) => {
-      // Phase 141 flips these one row at a time, and every route's worst-case
-      // lambda hold scales with (1 + retries). Raising one here is out of fence.
+  it.each(Object.entries(EXPECTED_RETRIES))(
+    "%s.retries is the pinned literal (5 rows at 1 post-audit, the rest 0)",
+    (key, expectedRetries) => {
+      // Phase 141 flipped exactly five rows to 1 after the SEAM-05 audit, and
+      // every route's worst-case lambda hold scales with (1 + retries). Both
+      // DIRECTIONS are pinned here: flipping a 0 to 1 without an audit verdict
+      // reddens, AND flipping one of the five back to 0 reddens (the retry the
+      // audit authorized would silently vanish). Change a value HERE, in the same
+      // commit as the row and its registry verdict.
       expect(
         BUDGET_TABLE[key]?.retries,
-        `"${key}" now performs retries. Retry is Phase 141's, gated on the ` +
-          `SEAM-05 idempotency audit — replaying a non-idempotent /process-key ` +
+        `"${key}" now performs ${BUDGET_TABLE[key]?.retries} retries; this oracle ` +
+          `pins ${expectedRetries}. Retry is Phase 141's, gated on the SEAM-05 ` +
+          `idempotency audit — replaying a non-idempotent /process-key ` +
           `double-enqueues a sync — and raising it silently multiplies this ` +
           `route's SC-4b worst case.`,
-      ).toBe(0);
+      ).toBe(expectedRetries);
     },
   );
+
+  describe("registry ↔ rows consistency (SEAM-05 anti-drift)", () => {
+    // The audit-and-allowlist artifact (seam-retry-registry) and the SEAM_BUDGETS
+    // rows are two hand-typed statements of the SAME fact. If they drift, a call
+    // is retried on a row that no longer matches its audit verdict (or the reverse
+    // — an audited-safe wrapper stops retrying). These pins tie them so neither
+    // can move alone.
+
+    it.each(Object.keys(RETRY_SAFE_ANALYTICS))(
+      "every allowlisted analytics wrapper (%s) has its SEAM_BUDGETS row at retries 1",
+      (key) => {
+        expect(
+          BUDGET_TABLE[key]?.retries,
+          `"${key}" is retry-safe in the registry but its budget row is ` +
+            `${BUDGET_TABLE[key]?.retries}. SC-4b reads the ROW, so a row still at 0 ` +
+            `means the audited retry silently never happens. Flip the row in the ` +
+            `same commit as the verdict.`,
+        ).toBe(1);
+      },
+    );
+
+    it("process-key-enqueue (the onboard+resync grain) is at retries 1", () => {
+      // The process-key seam is audited at flow_type grain, but its ENQUEUE budget
+      // row must carry the literal SC-4b reads for onboard/resync.
+      expect(BUDGET_TABLE["process-key-enqueue"]?.retries).toBe(1);
+    });
+
+    it("the SC3 belt and the Pitfall-2 fence stay at retries 0 at the row grain", () => {
+      // process-key-sync carries teaser+csv: it must NEVER retry (double-mints a
+      // lead). keys-permissions is the fan-out route whose retry would breach the
+      // finalize-wizard composite's lambda ceiling (T-141-09). Hand-typed 0s.
+      expect(
+        BUDGET_TABLE["process-key-sync"]?.retries,
+        "process-key-sync retries flipped off 0 — the teaser shares this row and a " +
+          "retry double-mints its verification/public_token/lead (SC3).",
+      ).toBe(0);
+      expect(
+        BUDGET_TABLE["keys-permissions"]?.retries,
+        "keys-permissions retries flipped off 0 — the finalize-wizard composite " +
+          "would breach the 300k lambda ceiling mid-outage (T-141-09).",
+      ).toBe(0);
+    });
+  });
 
   it("uses exactly three magnitudes — 15s, 30s and 60s — spelled out", () => {
     // A human-readable anchor for the three tiers, one representative each, so

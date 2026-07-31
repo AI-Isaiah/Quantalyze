@@ -277,7 +277,13 @@ async function driveFailures(
   for (let i = 0; i < n; i++) {
     vi.unstubAllGlobals();
     statusSequenceFetch(503);
-    await mod.resilientFetch("bridge", BRIDGE_PATH, { method: "POST" });
+    // retriesOverride:0 keeps each drive call SINGLE-ATTEMPT. The bridge row is
+    // retries:1 since plan 04, so a bare call would retry and load the counter
+    // twice as fast — tripping the breaker mid-drive.
+    await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 0,
+    });
   }
 }
 
@@ -358,7 +364,11 @@ describe("[SEAM-06 / SC2] the bounded retry loop", () => {
     expect(shared.counters.limitCalls).toBe(0);
   });
 
-  it("no override + all budget rows retries 0 + a transient rejection → exactly ONE fetch, error thrown (loop DORMANT)", async () => {
+  it("no override + a row that STAYS retries 0 (validate-key) + a transient rejection → exactly ONE fetch, error thrown (no retry by row default)", async () => {
+    // Plan 04 flipped FIVE rows to retries:1; validate-key is deliberately NOT
+    // one of them (a live-exchange probe is non-idempotent). This proves a
+    // non-allowlisted row inherits the single-attempt path with no override —
+    // the row default, not the escape hatch, gates it.
     vi.spyOn(console, "error").mockImplementation(() => {});
     const original = new TypeError("fetch failed");
     const fetchMock = installFetchMock();
@@ -366,7 +376,7 @@ describe("[SEAM-06 / SC2] the bounded retry loop", () => {
     const mod = await import("./resilient-fetch");
 
     await expect(
-      mod.resilientFetch("bridge", BRIDGE_PATH, { method: "POST" }),
+      mod.resilientFetch("validate-key", "/api/validate-key", { method: "POST" }),
     ).rejects.toBe(original);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -522,9 +532,12 @@ describe("[SEAM-06] the per-attempt breaker latch", () => {
     } as unknown as Response);
     const mod = await import("./resilient-fetch");
 
-    // No override: single attempt. The 503 status arm records once.
+    // retriesOverride:0 → single attempt. The 503 status arm records once. (The
+    // bridge row is retries:1 since plan 04, so the override is what pins the
+    // one-attempt path this within-attempt-latch case depends on.)
     const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
       method: "POST",
+      retriesOverride: 0,
     });
     expect(shared.counters.limitCalls).toBe(1);
 

@@ -274,7 +274,14 @@ describe("POST /api/keys/sync — REAL client through the seam (SC-1a)", () => {
     // the core-owned base URL, the client's path, a deadline signal, and the
     // CT-4 tenant header. Under the wholesale mock in route.test.ts none of
     // this is observable.
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    //
+    // TWICE, since Phase 141 / SEAM-06: resync is retry-safe (draft-SV dedup,
+    // RETRY_SAFE_FLOW_TYPES.resync), so a timed-out enqueue retries ONCE before
+    // surfacing the 504. Both attempts time out here; the retry is bounded by the
+    // process-key-enqueue budget (15s×2 + max backoff) which SC-4b proves clears
+    // the route ceiling. The 504 outcome and the lambda-release guarantee below
+    // are unchanged.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe(`${ANALYTICS_BASE}/process-key`);
     expect(init.signal).toBeInstanceOf(AbortSignal);
