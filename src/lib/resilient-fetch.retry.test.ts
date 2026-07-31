@@ -1149,6 +1149,18 @@ describe("[SEAM-06] retriesOverride validation (config faults raised ABOVE the c
     ["above the one-retry cap", 2],
     ["a non-integer", 1.5],
     ["NaN", Number.NaN],
+    // ⚠️ Phase 141.1 / D-10 — THE CASE THAT MAKES A DEAD MUTATION PROVABLY
+    // DEAD. Plan 04 recorded that re-adding `?? SEAM_BUDGETS[budgetKey].retries`
+    // to the retries assignment passes tsc and leaves 254 tests green, and
+    // booked that as an OPEN runtime hole owed to this plan. It is not a hole:
+    // `??` fires only on null/undefined, and this case is the proof that
+    // undefined never reaches the assignment — the validator above rejects it
+    // first, so a restored fallback is UNREACHABLE rather than unpinned.
+    //
+    // That makes the validator's `typeof !== "number"` conjunct load-bearing in
+    // a way nothing asserted before: delete THAT and restore the fallback, and
+    // the registry-bypass axis re-opens for real. Both halves now red.
+    ["an ABSENT override, i.e. what a JS caller hands the core", undefined],
   ])(
     "%s → SeamConfigError, ZERO fetch attempts, ZERO breaker records",
     async (_label, value) => {
@@ -1211,6 +1223,78 @@ describe("[SEAM-06 / SC2+SC3] client wiring — the REAL clients thread retriesO
   function pinFloorBackoff(): void {
     vi.spyOn(Math, "random").mockReturnValue(0);
   }
+
+  /**
+   * Set by the SC-A case below, run unconditionally in this describe's own
+   * `afterEach`. `vi.resetModules()` already bounds the leak — the mutated
+   * `SEAM_BUDGETS` belongs to a module instance the next test discards — but a
+   * test that edits shared production state and relies on a teardown it does not
+   * own is one refactor away from poisoning its neighbours silently.
+   */
+  let restoreSyncRowRetries: (() => void) | null = null;
+
+  afterEach(() => {
+    restoreSyncRowRetries?.();
+    restoreSyncRowRetries = null;
+  });
+
+  it("SC-A — row and registry in FORCED DISAGREEMENT: teaser is STILL single-fetch", async () => {
+    // ⚠️ THE HEADLINE OF THIS PLAN, AND THE MEASURED FACT IT KILLS. Deleting
+    // BOTH clients' `retriesOverride` lines left 558 tests green across 11
+    // files, because every budget row MIRRORED its registry verdict — so an
+    // oracle reading either one could not tell which one the code consulted.
+    // This case reads them from DIFFERENT SOURCES BY CONSTRUCTION: the row is
+    // forced to 1 and the registry still says no. That conflict IS the test.
+    //
+    // ⚠️ WRITTEN AGAINST THE POST-D-08 WORLD. Since plan 04 `retriesOverride` is
+    // a required `0 | 1` with no row fallback, so the row cannot turn retry on
+    // even in principle — which makes this the BELT rather than the mechanism.
+    // It is exactly the belt that was owed: plan 04 MEASURED that re-adding
+    // `?? SEAM_BUDGETS[budgetKey].retries` to the core passes tsc AND leaves 254
+    // tests green. Nothing else in the repo reddens on that restoration. This
+    // does. Do not delete it as redundant with the type — the type closes the
+    // CALL SITE, this closes the CORE.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    pinFloorBackoff();
+    configureSeamClients();
+    const fetchMock = throwAlways(new TypeError("fetch failed"));
+    const mod = await import("./resilient-fetch");
+
+    // The conflict has to be REAL, so the starting value is asserted rather
+    // than assumed — a row that already said 1 would make this case vacuous.
+    // Hand-typed 0, never derived.
+    expect(
+      mod.SEAM_BUDGETS["process-key-sync"].retries,
+      "The process-key-sync row no longer starts at 0, so forcing it to 1 " +
+        "creates no disagreement and this case proves nothing.",
+    ).toBe(0);
+    mod.SEAM_BUDGETS["process-key-sync"].retries = 1;
+    restoreSyncRowRetries = () => {
+      mod.SEAM_BUDGETS["process-key-sync"].retries = 0;
+    };
+
+    const { postProcessKey } = await import("./process-key-client");
+    const result = await postProcessKey({
+      flow_type: "teaser",
+      source: "teaser",
+      context: {},
+      userId: "public",
+      correlationId: "c-teaser-disagreement",
+    });
+
+    expect(
+      fetchMock,
+      "The anonymous teaser RETRIED. Its budget row was made to say 1 and the " +
+        "retry-safety registry still says no — so the retry verdict was taken " +
+        "from the ROW, not from the audited registry. That is the registry " +
+        "bypass D-08 closed at the call site being re-opened inside the core: " +
+        "a row edit, or a restored `?? SEAM_BUDGETS[budgetKey].retries` " +
+        "fallback, can once again buy a retry that no audit ever granted. " +
+        "teaser is unauthenticated and rate-limited on the Python side; " +
+        "doubling its traffic is the amplification the registry exists to stop.",
+    ).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(false);
+  });
 
   it("SC3 — postProcessKey teaser + a persistent transient → exactly ONE fetch (never retried)", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -1292,7 +1376,20 @@ describe("[SEAM-06 / SC2+SC3] client wiring — the REAL clients thread retriesO
     expect(result.ok).toBe(true);
   });
 
-  it("SC2 — findReplacementCandidates (bridge) + a single transient then 200 → exactly TWO fetches, resolves", async () => {
+  it("SC2 / SC-O — findReplacementCandidates (bridge) at PRODUCTION CONFIGURATION + a single transient then 200 → exactly TWO fetches, resolves", async () => {
+    // Phase 141.1 / D-14d. This is the `bridge` case at production
+    // configuration: the retry verdict is not hand-typed by the test, it is
+    // read by the REAL `analyticsRequest` chokepoint out of
+    // `RETRY_SAFE_ANALYTICS`. Only `fetch` is doubled — never the client — so
+    // deleting the `bridge` registry entry has to change what this observes.
+    //
+    // ⚠️ THE SETTLE-CAPTURE IS NOT STYLE. With the registry entry removed the
+    // wrapper makes ONE attempt, the transient propagates, and
+    // `findReplacementCandidates` THROWS — so a bare `await` would abort this
+    // case before the fetch-count assertion ran, and the CI failure would read
+    // "Analytics service is not reachable", naming neither the registry nor the
+    // retry. Capturing the settlement first makes the COUNT the thing that
+    // reddens, with a message that says what actually broke.
     vi.spyOn(console, "error").mockImplementation(() => {});
     pinFloorBackoff();
     const fetchMock = throwThenJsonOk(new TypeError("fetch failed"), {
@@ -1301,10 +1398,22 @@ describe("[SEAM-06 / SC2+SC3] client wiring — the REAL clients thread retriesO
     configureSeamClients();
     const { findReplacementCandidates } = await import("./analytics-client");
 
-    const result = await findReplacementCandidates("p1", "under-1", "u1");
+    const outcome = await findReplacementCandidates("p1", "under-1", "u1").then(
+      (value) => ({ resolved: true as const, value }),
+      (error: unknown) => ({ resolved: false as const, error }),
+    );
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(result).toEqual({ candidates: [] });
+    expect(
+      fetchMock,
+      "`bridge` stopped retrying at production configuration. The count here " +
+        "is not hand-typed into the call — it comes from the wrapper reading " +
+        "its own `RETRY_SAFE_ANALYTICS` verdict through the real " +
+        "`analyticsRequest` chokepoint, so this reddens when that entry is " +
+        "deleted, when the chokepoint stops consulting the registry, or when " +
+        "the row and the verdict drift apart. A one-fetch bridge means an " +
+        "audited, paid-for retry silently stopped happening.",
+    ).toHaveBeenCalledTimes(2);
+    expect(outcome).toEqual({ resolved: true, value: { candidates: [] } });
   });
 
   it("validateKey + a single transient → exactly ONE fetch (registry-absent wrapper inherits no-retry through the chokepoint)", async () => {
