@@ -28,6 +28,11 @@ import {
 import { CircuitOpenError, SeamBodyReadError } from "./seam-errors";
 import { scrubSeamString } from "./seam-redaction";
 import { mintTenantClaim, type TenantIdentity } from "./tenant-claim";
+// Phase 141 / SEAM-05+06 — the retry-safety registry. The analytics seam is
+// keyed by `budgetKey`, which is 1:1 with the wrapper function, so the budget key
+// IS the seam-function identity. A VALUE import of a dependency-free leaf (see
+// its header); it survives the wholesale seam mocks.
+import { RETRY_SAFE_ANALYTICS } from "./seam-retry-registry";
 
 const SERVICE_KEY = process.env.ANALYTICS_SERVICE_KEY ?? "";
 
@@ -418,6 +423,15 @@ async function analyticsRequest(
       ...(options.timeoutMs !== undefined && {
         timeoutMsOverride: options.timeoutMs,
       }),
+      // Phase 141 / SEAM-06 — the retry gate, decided at the ONE chokepoint all
+      // nine wrappers (and any tenth) inherit, exactly like the tenantId minting
+      // above. Per-wrapper consultation would be the instance-not-class defect
+      // this centralization exists to close. The EXPLICIT `?? 0` means a wrapper
+      // absent from the registry gets no retry from the client side — bridge,
+      // simulator, portfolio-optimizer, optimize-weights are the four allowlisted;
+      // everything else (validate-key, encrypt-key, match-*, portfolio-analytics)
+      // resolves to 0 by absence.
+      retriesOverride: RETRY_SAFE_ANALYTICS[options.budgetKey]?.retries ?? 0,
     });
   } catch (err) {
     // ORDER IS LOAD-BEARING.
