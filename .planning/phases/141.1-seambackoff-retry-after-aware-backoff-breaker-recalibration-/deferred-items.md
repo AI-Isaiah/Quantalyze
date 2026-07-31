@@ -105,3 +105,26 @@ question is answered.
 
 **Blast radius:** documentation discoverability only. No behaviour change. Not
 user-facing.
+
+## DEF-141.1-06-A — the counting arm's FALL-THROUGH exit is still unlogged
+
+**Found during:** 141.1-06 (recorded in `141.1-06-SUMMARY.md`; added to this file
+retroactively at phase verification, which found the two ledgers disagreed —
+`TODOS.md` cited this item as a carry-forward "from deferred-items.md" while the
+item lived only in the SUMMARY).
+
+**What:** 141.1-06 gave the counting arm's `continue` (retry) exit a voice, worded
+"retrying" so it can never be misread as a surrender. The **fall-through** exit
+covers two different operator facts — the D-01 `Retry-After` fail-fast and a
+last-attempt surrender — and neither is logged, so in production they are
+**mutually indistinguishable**.
+
+**Why not fixed here:** not a regression (the arm was silent before too). Left
+rather than half-done: one sentence covering both exits would report neither
+accurately, which is the over-claim class this phase existed to remove. Closing it
+needs two distinct sentences, and the fail-fast one arguably belongs with the D-01
+surface.
+
+**Blast radius:** operator diagnosis only, no behaviour change. Recorded in
+`docs/runbooks/seam-breaker.md` as a known gap so on-call is not misled by the
+absence of a line.

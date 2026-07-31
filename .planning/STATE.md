@@ -54,12 +54,17 @@ Status: Executing Phase 141.1 — Wave 1 (01, 02, 03, 08) and Wave 2 (04, 05) me
         Wave 4 (09) merged. FINAL GATE GREEN: tsc clean, lint 0 errors, vitest
         735 files / 10450 passed / 287 skipped, pytest 4824 passed / 96 skipped.
         VERSION+package.json bumped in lockstep to 0.51.0.0. Awaiting phase verification.
-        ⭐ SC-E RESOLVED, and 141.1-04's framing of it was WRONG: the
-        `?? SEAM_BUDGETS[budgetKey].retries` fallback is UNREACHABLE dead code — the
-        validator above it rejects `undefined` with SeamConfigError first, so that
-        mutation is a no-op by construction, not an open hole. 141.1-06 closed the axis
-        at three independent points via the semantically live form and corrected 04's
-        ledger entry. Plan 09 must NOT carry forward 04's SC-E sentence.
+        ⭐ SC-E RESOLVED. Precise history (corrected at verification — the earlier
+        wording here was itself an over-claim): PRE-D-08 the row fallback WAS
+        reachable (the validator was wrapped in `!== undefined`), so 141.1-04's D-08
+        change closed a REAL hole. What was wrong was only 04's follow-up
+        MEASUREMENT — having closed it, 04 re-added `?? SEAM_BUDGETS[budgetKey].retries`
+        as a mutation, saw green, and booked its own already-closed hole as still
+        open. Post-D-08 the validator is unguarded, so `undefined` throws
+        SeamConfigError first and that mutation is a no-op by construction. 141.1-06
+        established this and closed the axis at three independent points via the
+        semantically live form. Verified: 04's false framing did NOT propagate into
+        the runbook, CHANGELOG, or TODOS.
         ⚠️ ORCHESTRATOR ERROR: `isolation:"worktree"` forks from the DEFAULT BRANCH
         (#2015) — 3/3 spawns came up on `origin/main` 56–67 commits stale, missing
         their `depends_on` commits. GSD prevents this via the `EXPECTED_BASE` +

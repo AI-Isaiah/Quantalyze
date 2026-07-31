@@ -2163,7 +2163,8 @@ export async function resilientFetch(
       // freshest one — the breaker may have opened DURING the backoff.
       await sleep(SEAM_RETRY_BACKOFF_MS + Math.random() * SEAM_RETRY_JITTER_MAX_MS);
 
-      // SC4 — the EXACT entry gate (:1934-1937), re-run before attempt 2. The
+      // SC4 — the EXACT entry gate (the `isBreakerOpen` + `CircuitOpenError`
+      // throw above this retry loop), re-run before attempt 2. The
       // breaker may have opened from attempt 1's OWN recorded failure or from a
       // concurrent caller; a retry that fired anyway would amplify the very
       // outage the breaker exists to contain. Thrown here, above the fetch try.
