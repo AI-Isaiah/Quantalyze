@@ -1,0 +1,109 @@
+---
+phase: 141
+slug: seam-retry-with-backoff-gated-on-the-idempotency-audit
+status: draft
+nyquist_compliant: false
+wave_0_complete: false
+created: 2026-07-31
+---
+
+# Phase 141 — Validation Strategy
+
+> Per-phase validation contract for feedback sampling during execution.
+
+---
+
+## Test Infrastructure
+
+| Property | Value |
+|----------|-------|
+| **Framework** | vitest 4.x (TypeScript seam clients + registry); pytest 8.x for any live idempotency proof |
+| **Config file** | `vitest.config.ts` |
+| **Quick run command** | `npx vitest run --no-file-parallelism src/lib/<changed>.test.ts` |
+| **Full suite command** | `npx vitest run --no-file-parallelism` |
+| **Estimated runtime** | ~90s (quick) / ~4min (full TS suite) |
+
+---
+
+## Sampling Rate
+
+- **After every task commit:** Run the quick command on the changed seam-lib test file(s)
+- **After every plan wave:** Run the full vitest suite
+- **Before `/gsd:verify-work`:** Full suite green + SC2's idempotency proof exercised against the real `compute_jobs` index
+- **Max feedback latency:** ~90 seconds
+
+---
+
+## Per-Task Verification Map
+
+*Populated by the planner / gsd-nyquist-auditor once PLAN.md tasks exist.*
+
+| Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
+|---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
+| TBD | — | — | SEAM-05/06 | — | retry only fires for allowlisted proven-safe calls | unit | `npx vitest run …` | ❌ W0 | ⬜ pending |
+
+*Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
+
+---
+
+## Wave 0 Requirements
+
+- [ ] The typed retry-safety registry module + its test file (SC1)
+- [ ] The retry wrapper (`withSeamRetry` or equivalent) + its test file (SC2/SC3/SC4)
+
+*Existing seam infrastructure (breaker, budgets, discriminator, errors) covers the rest.*
+
+---
+
+## Manual-Only Verifications
+
+*All phase behaviors have automated verification.*
+
+| Behavior | Requirement | Why Manual | Test Instructions |
+|----------|-------------|------------|-------------------|
+| (none) | — | — | — |
+
+---
+
+## Falsifiability Ledger
+
+> **Coverage answers "is it verified?". This section answers "CAN the verification FAIL?"**
+> One row per success criterion. Mutation = a *semantic* change to production code. Complete Observed at execution.
+
+| SC | Mutation (exact edit to production source) | Must turn RED | Observed? | Evidence |
+|----|-------------------------------------------|---------------|-----------|----------|
+| SC-1 | flip one registry entry from no-retry → retry (e.g. `teaser: {retries: 1}`) | the audit/registry-shape test | ⬜ pending | asserted — NOT observed |
+| SC-2 | in the retry wrapper, drop the flow_type gate so it keys on `budgetKey` instead of `flow_type` | the resync single-effect test (exactly ONE compute_job + ZERO duplicate draft SV rows) | ⬜ pending | asserted — NOT observed |
+| SC-3 | add `teaser` to the allowlist (retries: 1) | the teaser regression test (two identical calls → TWO `strategy_verifications` rows) | ⬜ pending | asserted — NOT observed |
+| SC-4 | remove the breaker re-check before attempt 2 | the breaker-open zero-retry test | ⬜ pending | asserted — NOT observed |
+
+*Rules: Observed means run — paste the failing assertion. A skipped mutation is recorded skipped, never caught. Prefer the second member of a class (mutate a site the author did not have in mind).*
+
+---
+
+## Oracle Independence
+
+> The failure this catches: assertions that read their expected value out of the module under test.
+
+- [ ] No test imports a **constant** from the module it tests — expected values are **literals** in the test (esp. the registry verdicts: the test must not assert `registry.teaser === registry.teaser`)
+- [ ] No assertion compares a value to itself via a re-export, fixture, or table under test
+- [ ] Registry size is pinned to a **literal count** of audited flows, not `len(REGISTRY)`
+- [ ] SC2/SC3 idempotency proofs assert row COUNTS against the real DB contract, not a stubbed idempotency flag
+
+*If a self-referential oracle is deliberate, name it here:* none — the teaser/resync proofs must pin ECONOMICS (row counts, `public_token`/lead minting) not the impl's own retry decision. See memory `feedback_economic_invariant_oracles_not_self_referential`.
+
+---
+
+## Validation Sign-Off
+
+- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
+- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
+- [ ] Wave 0 covers all MISSING references
+- [ ] No watch-mode flags
+- [ ] Feedback latency < 90s
+- [ ] **Every success criterion has a Falsifiability Ledger row**
+- [ ] **Every ledger row is `Observed ✅` with pasted evidence, or explicitly marked skipped-with-reason**
+- [ ] **Oracle Independence checklist complete**
+- [ ] `nyquist_compliant: true` set in frontmatter
+
+**Approval:** pending
