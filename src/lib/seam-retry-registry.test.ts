@@ -396,6 +396,93 @@ describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
     });
   });
 
+  // ───────────────────────────────────────────────────────────────────────────
+  // [D-11] SC-I — IMMUTABILITY, AT BOTH LEVELS.
+  //
+  // The registry docblock claimed the maps were immutable while they were
+  // exported with a widening TYPE ANNOTATION and nothing else: both
+  // `RETRY_SAFE_FLOW_TYPES.teaser = { retries: 1, evidence: "" }` and
+  // `delete RETRY_SAFE_FLOW_TYPES.onboard` typechecked clean AND took at
+  // runtime. A pushed row is a legitimate retry verdict from that moment on, and
+  // for `teaser` that verdict double-mints the verification, the public_token
+  // and the lead — the exact anti-feature the SC3 belt above exists to prevent,
+  // reached by writing to the belt instead of around it.
+  //
+  // TWO MECHANISMS, PINNED SEPARATELY, BECAUSE THEY FAIL SEPARATELY. The
+  // `@ts-expect-error` fixtures pin the COMPILE half (delete a comment and
+  // `npm run typecheck` reds on that line); the throw assertions pin the RUNTIME
+  // half, which is the one that survives the type erasure at build. Neither
+  // implies the other: `as const` alone is erased, and `Object.freeze` alone
+  // leaves the mutation compiling and failing loudly only in production.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  describe("[D-11 / SC-I] the four verdict maps are immutable", () => {
+    it.each([
+      ["RETRY_SAFE_FLOW_TYPES", RETRY_SAFE_FLOW_TYPES],
+      ["RETRY_AUDIT_NO_FLOW_TYPES", RETRY_AUDIT_NO_FLOW_TYPES],
+      ["RETRY_SAFE_ANALYTICS", RETRY_SAFE_ANALYTICS],
+      ["RETRY_AUDIT_NO_ANALYTICS", RETRY_AUDIT_NO_ANALYTICS],
+    ] as const)("%s is frozen at runtime", (name, map) => {
+      expect(
+        Object.isFrozen(map),
+        `${name} is not frozen — a consumer push can ADD a verdict row, and an ` +
+          `added row is indistinguishable from an audited one at the gate.`,
+      ).toBe(true);
+    });
+
+    it.each([
+      ["RETRY_SAFE_FLOW_TYPES.onboard", RETRY_SAFE_FLOW_TYPES.onboard],
+      ["RETRY_SAFE_FLOW_TYPES.resync", RETRY_SAFE_FLOW_TYPES.resync],
+      ["RETRY_SAFE_ANALYTICS.bridge", RETRY_SAFE_ANALYTICS.bridge],
+      ["RETRY_SAFE_ANALYTICS.simulator", RETRY_SAFE_ANALYTICS.simulator],
+      [
+        "RETRY_SAFE_ANALYTICS.portfolio-optimizer",
+        RETRY_SAFE_ANALYTICS["portfolio-optimizer"],
+      ],
+      [
+        "RETRY_SAFE_ANALYTICS.optimize-weights",
+        RETRY_SAFE_ANALYTICS["optimize-weights"],
+      ],
+    ] as const)("%s (the ENTRY, not just the map) is frozen", (name, entry) => {
+      // A shallow freeze closes the ADD vector and leaves the REPOINT vector
+      // open. `RETRY_SAFE_ANALYTICS.bridge.retries = 5` reaches the gate through
+      // a row that is already a legal YES, so no key-set pin above would see it,
+      // and five retries on a handler that appends an audit row per attempt is
+      // the elevation T-141.1-11 names.
+      expect(
+        Object.isFrozen(entry),
+        `${name} is reachable for mutation — freezing the map but not its ` +
+          `entries makes the docblock's "immutable" claim half true, which is ` +
+          `the over-claim class this phase exists to remove.`,
+      ).toBe(true);
+    });
+
+    it("pushing a `teaser` YES row does not compile AND throws at runtime", () => {
+      expect(() => {
+        // C4 / D-11 — this line used to TYPECHECK CLEAN. The @ts-expect-error is
+        // the pin: remove it and `npm run typecheck` reds here (TS2540, assignment
+        // to a read-only property), which is the proof the compile half is real.
+        // @ts-expect-error — pinned as a COMPILE error; see above.
+        RETRY_SAFE_FLOW_TYPES.teaser = { retries: 1, evidence: "" };
+      }).toThrow(TypeError);
+      // …and the push left no residue. Belt for the assertion above: a runtime
+      // that silently ignored the write instead of throwing would still be safe,
+      // but this registry would not know which of the two it got.
+      expect(RETRY_SAFE_FLOW_TYPES.teaser).toBeUndefined();
+    });
+
+    it("deleting the `onboard` YES row does not compile AND throws at runtime", () => {
+      expect(() => {
+        // C4 / D-11 — likewise clean before the freeze. Remove the next line and
+        // typecheck reds with TS2704 (the operand of a `delete` operator cannot
+        // be a read-only property).
+        // @ts-expect-error — pinned as a COMPILE error; see above.
+        delete RETRY_SAFE_FLOW_TYPES.onboard;
+      }).toThrow(TypeError);
+      expect(RETRY_SAFE_FLOW_TYPES.onboard?.retries).toBe(1);
+    });
+  });
+
   describe("purity — the leaf imports nothing by VALUE", () => {
     // Same mechanism as seam-discriminator.purity.test.ts: read the source from
     // disk, strip comments, and assert every import statement is `import type`.
