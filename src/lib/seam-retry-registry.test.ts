@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+// The SAME needle the seam-surface comment guard uses, hoisted to a non-test
+// leaf so there is ONE regex, not two. (Importing the sibling TEST file was
+// measured and rejected: vitest re-registered its 46 tests into this file.)
+import { citationsIn, CONVERSION_PROTOCOL } from "./seam-citations-needle";
 import {
   RETRY_SAFE_FLOW_TYPES,
   RETRY_AUDIT_NO_FLOW_TYPES,
@@ -251,7 +255,10 @@ describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
             `(pending, running, done_pending_children). Unqualified, "exactly one ` +
             `job" reads as an absolute — but failed_retry sits OUTSIDE the index ` +
             `predicate, so the guarantee lapses exactly where a retry story cares.`,
-        ).toMatch(/pending.*running.*done_pending_children/s);
+          // `[\s\S]*` rather than `.*` with the `s` flag: the dotAll flag needs
+          // an es2018+ target and this repo's tsconfig is lower (TS1501). The
+          // two are equivalent here and this form compiles everywhere.
+        ).toMatch(/pending[\s\S]*running[\s\S]*done_pending_children/);
       },
     );
 
@@ -289,6 +296,103 @@ describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
         "the verdict resting on evidence that covers only half its own class.";
       expect(evidence, message).toMatch(/finalize-wizard/);
       expect(evidence, message).toMatch(/validate-and-encrypt/);
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // [D-06] SC-H — THE REGISTRY-LOCAL CITATION GUARD, over the evidence STRING
+  // LITERALS. This is the half that catches today's rot.
+  //
+  // WHY THE SIBLING GUARD IS NOT ENOUGH. `seam-citations.invariant.test.ts` now
+  // lists this registry on its surface, but that guard EXTRACTS COMMENTS and
+  // feeds only those to the needle. Its own `-1` self-test pins the fact that a
+  // coordinate inside a STRING LITERAL is invisible to it. In this one file the
+  // string literals ARE the prose — the registry's premise is "the evidence IS
+  // the entry" — so the comment half finds zero offences here while the rot that
+  // actually shipped lived in the evidence strings. Both halves, or neither
+  // works.
+  //
+  // ⚠️ TWO VALUE SHAPES, HANDLED EXPLICITLY. The two YES maps hold
+  // `RetrySafeEntry` OBJECTS (the prose is `entry.evidence`); the two NO maps are
+  // `Partial<Record<K, string>>` where the VALUE **is** the prose. A naive
+  // `.evidence` access across all four yields `undefined` for 7 of the 13
+  // strings, and `citationsIn(undefined)` would throw or silently pass — a guard
+  // half-vacuous on exactly the half where the load-bearing rot lived.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Hand-typed per map (2 + 4 + 2 + 5), never derived from the maps. Emptying a
+   * map must REDDEN rather than shrink the scanned population to zero and pass —
+   * the "scanner that matches nothing reports agreement forever" fence.
+   */
+  const EXPECTED_EVIDENCE_STRING_COUNT = 2 + 4 + 2 + 5;
+
+  /** Every evidence string across ALL FOUR maps, each shape read correctly. */
+  function allEvidenceStrings(): Array<{ where: string; text: string }> {
+    const out: Array<{ where: string; text: string }> = [];
+    // Shape 1 — YES maps: the prose hangs off `.evidence`.
+    for (const [key, entry] of Object.entries(RETRY_SAFE_FLOW_TYPES)) {
+      if (entry) out.push({ where: `RETRY_SAFE_FLOW_TYPES.${key}`, text: entry.evidence });
+    }
+    for (const [key, entry] of Object.entries(RETRY_SAFE_ANALYTICS)) {
+      if (entry) out.push({ where: `RETRY_SAFE_ANALYTICS.${key}`, text: entry.evidence });
+    }
+    // Shape 2 — NO maps: the VALUE is the prose.
+    for (const [key, text] of Object.entries(RETRY_AUDIT_NO_FLOW_TYPES)) {
+      if (text) out.push({ where: `RETRY_AUDIT_NO_FLOW_TYPES.${key}`, text });
+    }
+    for (const [key, text] of Object.entries(RETRY_AUDIT_NO_ANALYTICS)) {
+      if (text) out.push({ where: `RETRY_AUDIT_NO_ANALYTICS.${key}`, text });
+    }
+    return out;
+  }
+
+  describe("[D-06 / SC-H] no coordinate citation in any evidence STRING", () => {
+    it("scans exactly 13 non-empty evidence strings (anti-vacuity fence)", () => {
+      const scanned = allEvidenceStrings().filter(
+        (e) => typeof e.text === "string" && e.text.length > 0,
+      );
+      expect(
+        scanned.length,
+        `the evidence-string population is ${scanned.length}, not ` +
+          `${EXPECTED_EVIDENCE_STRING_COUNT} (2 flow YES + 4 analytics YES + 2 ` +
+          `flow NO + 5 analytics NO). If a verdict was legitimately added or ` +
+          `removed, bump this hand-typed literal IN THE SAME COMMIT. If it was ` +
+          `not, a map has been emptied and the citation guard below is now ` +
+          `inspecting nothing while still reporting green.`,
+      ).toBe(EXPECTED_EVIDENCE_STRING_COUNT);
+    });
+
+    it("every evidence string is free of `file.ext:NN` coordinates", () => {
+      const offences: string[] = [];
+      for (const { where, text } of allEvidenceStrings()) {
+        for (const c of citationsIn(text)) {
+          offences.push(`${where} cites \`${c.target}:${c.lines}\``);
+        }
+      }
+      expect(
+        offences,
+        `a coordinate citation in evidence prose rots silently — anchor the ` +
+          `symbol, not the address. ${offences.join("; ")}. ${CONVERSION_PROTOCOL} ` +
+          `Note that the sibling comment guard in seam-citations.invariant.test.ts ` +
+          `CANNOT see these: it extracts comments, and this rot lives in string ` +
+          `literals.`,
+      ).toEqual([]);
+    });
+
+    // BOTH POLARITIES on evidence-shaped text. Without the +1 the guard could be
+    // a needle that never matches; without the -1 it could ban the conversion
+    // target it is supposed to reward.
+    it("+1: the needle catches a planted coordinate in evidence-shaped text", () => {
+      expect(citationsIn("planted foo.ts:12 rot")).toHaveLength(1);
+    });
+
+    it("-1: a SYMBOL-anchored evidence sentence produces no offence", () => {
+      expect(
+        citationsIn(
+          "resolved by _resume_duplicate_job in process_key.py — no coordinate",
+        ),
+      ).toEqual([]);
     });
   });
 
