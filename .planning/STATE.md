@@ -47,7 +47,7 @@ RATE-01..05 — all mapped, Traceability filled). Roadmap: `.planning/ROADMAP.md
 ## Current Position
 
 Phase: v1.16 SEAM + error-surface COMPLETE — phases 140 → 140.5 all shipped to main (@ `4f45dcab`); the analytics worker is deployed (`git_sha 4f45dcab`, `/health` ok, ticking). **Next: Phase 141 (SEAM retry-with-backoff, gated on the idempotency audit) via `/gsd-autonomous --from 141`.**
-Status: 140.1.2 + 140.5 VERIFICATION **passed**. 140.3 + 140.4 shipped with named residuals (VERIFICATION `gaps_found`) accepted as tracked tech-debt — 2 are user-facing (SEAMUX-03 typed-envelope on 9 routes; SEAM_MISCONFIGURED→UNKNOWN on 2 wizard clients), 2 are test/doc-hygiene. See TODOS "v1.16 carried-forward residuals". Decide at 141 kickoff whether to fold the two user-facing gaps into a 140.3/140.4 gap-closure pass first.
+Status: 140.1.2 + 140.5 VERIFICATION **passed**. 140.3 + 140.4 shipped `gaps_found`. Re-verified against current code 2026-07-31: **140.4's user-facing gap (SEAM_MISCONFIGURED→UNKNOWN) is already RESOLVED** — the `recogniseSeamErrorCode` translate hop is present at ConnectKeyStep.tsx:496 + MultiKeyConnectStep.tsx:829 (VERIFICATION.md was stale). **140.3 SEAMUX-03 genuinely PERSISTS** — 9 seam-importing routes still emit bare `{error}` with 0 `code:` arms. Founder chose to CLOSE SEAMUX-03 now (typed `{code}` envelope pass over the 9 routes) BEFORE Phase 141. Remaining residuals (poll-disjointness pin, analytics-client ledger row) are non-blocking test/doc-hygiene in TODOS.
         ---- 140.2-05 (wave 5, 2026-07-27) ----
         **ROADMAP SC1 CLOSED.** The classification window now covers the response-body
         read and excludes caller/config faults. A stalling upstream (headers fast, body
