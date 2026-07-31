@@ -71,11 +71,21 @@ export async function POST(req: NextRequest) {
     return rateLimitDenyJson(rl);
   }
 
+  // ── Phase 140.3-G4 / SEAMUX-03 — a machine code on EVERY arm this PUBLIC
+  // teaser route emits, so a client discriminates the fault on a stable token
+  // instead of sniffing prose. Mirrors 140.3-10's arm-by-arm pass on keys/sync
+  // and the sibling create-with-key, which codes all five of these request-shape
+  // rejections `KEY_INVALID_FORMAT` (incl. the byte-identical sfox sentence).
+  // This is an UNAUTHENTICATED route: every token below is a closed-set clean
+  // token — it never names an env var, hostname, or internal service.
   let body: Record<string, unknown>;
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    return NextResponse.json(
+      { error: "Invalid JSON body", code: "KEY_INVALID_FORMAT" },
+      { status: 400 },
+    );
   }
 
   const { email, exchange, api_key, api_secret } = body as {
@@ -87,13 +97,19 @@ export async function POST(req: NextRequest) {
 
   if (!email || !exchange || !api_key || !api_secret) {
     return NextResponse.json(
-      { error: "Missing required fields: email, exchange, api_key, api_secret" },
+      {
+        error: "Missing required fields: email, exchange, api_key, api_secret",
+        code: "KEY_INVALID_FORMAT",
+      },
       { status: 400 },
     );
   }
 
   if (!isValidEmail(email)) {
-    return NextResponse.json({ error: "Invalid email address" }, { status: 400 });
+    return NextResponse.json(
+      { error: "Invalid email address", code: "KEY_INVALID_FORMAT" },
+      { status: 400 },
+    );
   }
 
   // F3 (Phase 122): gate this PUBLIC/unauthenticated teaser verify on the
@@ -107,7 +123,10 @@ export async function POST(req: NextRequest) {
   // until SFOX_ENABLED flips the offer on. The disclosed enum tracks the offer.
   if (!UI_EXCHANGE_CODES.includes(exchange as SupportedExchange)) {
     return NextResponse.json(
-      { error: `Unsupported exchange. Supported: ${UI_EXCHANGE_CODES.join(", ")}` },
+      {
+        error: `Unsupported exchange. Supported: ${UI_EXCHANGE_CODES.join(", ")}`,
+        code: "KEY_INVALID_FORMAT",
+      },
       { status: 400 },
     );
   }
@@ -119,7 +138,7 @@ export async function POST(req: NextRequest) {
   // public teaser cannot forward a live sfox key-process before go-live either.
   if (exchange.toLowerCase() === "sfox" && !isSfoxEnabledServer()) {
     return NextResponse.json(
-      { error: "sFOX integration is not yet available." },
+      { error: "sFOX integration is not yet available.", code: "KEY_INVALID_FORMAT" },
       { status: 400 },
     );
   }
@@ -360,8 +379,12 @@ async function unifiedVerifyStrategyHandler(
             : null,
       },
     );
+    // SEAMUX-03: an answer ARRIVED (a 2xx) that we could not recognise —
+    // UNKNOWN, the repo's terminal/unclassified fallback. NOT SERVICE_UNREACHABLE
+    // ("we sent it and never got an answer" — false here) nor
+    // UPSTREAM_NETWORK_ERROR (no transport fault occurred).
     return NextResponse.json(
-      { error: "Verification service returned an invalid response" },
+      { error: "Verification service returned an invalid response", code: "UNKNOWN" },
       { status: 502 },
     );
   }
@@ -402,8 +425,10 @@ async function unifiedVerifyStrategyHandler(
       "[verify-strategy] createAdminClient config error:",
       scrubSeamError(configErr, perRequestSecrets),
     );
+    // SEAMUX-03: OUR configuration fault (a service-role client that will not
+    // construct), nothing the caller did — SEAM_MISCONFIGURED (union member).
     return NextResponse.json(
-      { error: "Verification service misconfigured" },
+      { error: "Verification service misconfigured", code: "SEAM_MISCONFIGURED" },
       { status: 500 },
     );
   }
@@ -444,8 +469,12 @@ async function unifiedVerifyStrategyHandler(
         "[verify-strategy] CT-3 public_token persist failed:",
         scrubSeamError(persistError, perRequestSecrets),
       );
+      // SEAMUX-03: a Supabase write about US failed (the verification succeeded
+      // upstream; only our public_token write did not) — VERIFY_PERSIST_FAILED,
+      // a new route token on the keys/sync DRAFT_LOOKUP_FAILED precedent. The
+      // thrown twin below carries the SAME token (same fact ⇒ same token).
       return NextResponse.json(
-        { error: "Failed to finalize verification" },
+        { error: "Failed to finalize verification", code: "VERIFY_PERSIST_FAILED" },
         { status: 500 },
       );
     }
@@ -461,8 +490,10 @@ async function unifiedVerifyStrategyHandler(
       "[verify-strategy] CT-3 public_token persist threw:",
       scrubSeamError(err, perRequestSecrets),
     );
+    // SEAMUX-03: the THROWN twin of the returned-error arm above — same fact
+    // (our persist write failed), same token.
     return NextResponse.json(
-      { error: "Failed to finalize verification" },
+      { error: "Failed to finalize verification", code: "VERIFY_PERSIST_FAILED" },
       { status: 500 },
     );
   }
