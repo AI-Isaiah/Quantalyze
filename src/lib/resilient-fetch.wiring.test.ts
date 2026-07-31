@@ -595,16 +595,42 @@ function discoverAnalyticsWrappers(): DiscoveredBinding[] {
 /**
  * Family (ii) — the arms of `budgetKeyFor` in `process-key-client.ts`.
  *
- * The flow-type comparisons are removed first, so the only literals left in the
- * function body are the budget keys it can return. The upstream path is the
- * literal at that module's single core call.
+ * The extraction is stated as "the budget keys the function can RETURN", which
+ * is what the census recipe at the top of this file measures ("-> 2 returned key
+ * literals"). Two steps get there:
+ *
+ *   1. Strip the flow-type TESTS. `budgetKeyFor` has worn TWO syntactic forms
+ *      and this discovery must not be coupled to either: the pre-141.1 ternary
+ *      spelled its tests `flowType === "teaser"`, and the 141.1 / D-11
+ *      `never`-defaulted switch spells them `case "teaser":`. Handling only the
+ *      first is what made this guard red on the D-11 conversion — it reported
+ *      `teaser` / `csv` / `onboard` / `resync` as four phantom BUDGET KEYS while
+ *      the function's actual returns were unchanged.
+ *   2. Keep only RETURN statements. Stripping the tests and then scanning the
+ *      whole body was always one double-quoted string away from a phantom: the
+ *      switch's `default` arm throws a fail-loud message, and a message with a
+ *      `"` in it is prose, not a binding. Return position is the property the
+ *      roster is actually about.
+ *
+ * ⚠️ NEITHER STEP WIDENS THE GUARD. A genuinely NEW arm returning a NEW budget
+ * key is still discovered and still fails against the roster; a third syntactic
+ * form that this extractor cannot read yields FEWER bindings than the roster
+ * lists, which fails too. Both directions stay loud — that is the invariant to
+ * preserve if this ever needs touching again.
+ *
+ * The upstream path is the literal at that module's single core call.
  */
 function discoverBudgetKeyForArms(): DiscoveredBinding[] {
   const code = readCode(PROCESS_KEY_CLIENT);
   const start = code.indexOf("function budgetKeyFor(");
   if (start < 0) return [];
   const body = code.slice(start, code.indexOf("\n}", start));
-  const returned = body.replace(/===\s*"[^"]*"/g, "");
+  const withoutFlowTests = body
+    .replace(/===\s*"[^"]*"/g, "")
+    .replace(/\bcase\s+"[^"]*"\s*:/g, "");
+  const returned = [...withoutFlowTests.matchAll(/\breturn\b[^;]*;/g)]
+    .map((m) => m[0])
+    .join("\n");
 
   const callMatch = /resilientFetch\(\s*\w+\s*,\s*/.exec(code);
   const path = callMatch

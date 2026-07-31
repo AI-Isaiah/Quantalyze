@@ -5,6 +5,12 @@ import { join } from "node:path";
 // leaf so there is ONE regex, not two. (Importing the sibling TEST file was
 // measured and rejected: vitest re-registered its 46 tests into this file.)
 import { citationsIn, CONVERSION_PROTOCOL } from "./seam-citations-needle";
+// TYPE-ONLY, and load-bearing: these two unions are what the exhaustiveness
+// assertions below are checked AGAINST, so the pins fail on a union edit rather
+// than only on a map edit. `import type` erases, so no runtime edge is added to
+// a test that also reads the leaf's own purity from disk.
+import type { FlowType } from "./process-key-client";
+import type { SeamBudgetKey } from "./resilient-fetch";
 import {
   RETRY_SAFE_FLOW_TYPES,
   RETRY_AUDIT_NO_FLOW_TYPES,
@@ -43,8 +49,67 @@ const EXPECTED_SAFE_ANALYTICS_KEYS = [
   "simulator",
 ];
 
-/** All four `/process-key` flow_types (process-key-client.ts:51). */
-const EXPECTED_ALL_FLOW_KEYS = ["csv", "onboard", "resync", "teaser"];
+// ─────────────────────────────────────────────────────────────────────────────
+// [D-11] SC-I — REAL EXHAUSTIVENESS. Read this before touching the two lists.
+//
+// THE DEFECT THESE THREE ASSERTIONS REPAIR. The runtime pins below compare
+// `YES ∪ NO` against `EXPECTED_ALL_FLOW_KEYS` / `EXPECTED_ALL_ANALYTICS_KEYS` —
+// and BOTH SIDES WERE HAND-TYPED TO THE SAME LIST. They agreed by copy-paste.
+// Adding a 5th member to `FlowType` reddened NOTHING, while the registry
+// docblock claimed the opposite ("forcing a verdict before it can ship").
+//
+// HOW IT IS REAL NOW — a CHAIN, not a single check, and the chain is the point:
+//   1. `as const satisfies readonly FlowType[]` — every entry must BE a member
+//      (catches a typo'd key, which a bare `string[]` swallowed).
+//   2. The `Exclude`-to-`never` assertion — every MEMBER must be in the list.
+//      A new union member makes `_MissingFlowVerdict` non-`never`, the
+//      conditional resolves to `never`, and `npm run typecheck` fails HERE
+//      without anyone having touched a list. This is the `for-quants-lead`
+//      house form, which has fired twice on real PRs.
+//   3. Adding the member to the list to clear (2) is exactly what then REDDENS
+//      the runtime pin, because `YES ∪ NO` no longer equals the list. The only
+//      way back to green is a real verdict in a YES or a NO map.
+//
+// Step 2 alone forces a LIST EDIT, not a verdict; step 3 alone is the pre-141.1
+// vacuous pin. Do not delete either half believing the other covers it.
+//
+// ⚠️ ORACLE INDEPENDENCE IS UNDISTURBED. These lists are still hand-typed
+// literals — the TYPE, not the map under test, is what they are now checked
+// against. Deriving them from `Object.keys(RETRY_SAFE_*)` would make every pin
+// below green for any table, which is the failure this file's header forbids.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** All four `/process-key` flow_types — the `FlowType` union in `process-key-client`. */
+const EXPECTED_ALL_FLOW_KEYS = [
+  "csv",
+  "onboard",
+  "resync",
+  "teaser",
+] as const satisfies readonly FlowType[];
+
+type _MissingFlowVerdict = Exclude<
+  FlowType,
+  (typeof EXPECTED_ALL_FLOW_KEYS)[number]
+>;
+const _flowVerdictExhaustiveness: _MissingFlowVerdict extends never
+  ? true
+  : never = true;
+// Reference the binding so `noUnusedLocals` cannot strip the assertion.
+void _flowVerdictExhaustiveness;
+
+/**
+ * The FOUR `SeamBudgetKey`s that are ROUTE budgets, not analytics-seam-function
+ * verdicts, and are therefore DELIBERATELY absent from the analytics maps —
+ * registry §(c). Hand-typed here so the `Exclude` below cannot quietly absorb a
+ * new key: a 14th `SeamBudgetKey` must be classified as an analytics wrapper
+ * (→ a verdict) or as a route budget (→ this list), and doing NEITHER is a
+ * compile error rather than a silent exclusion.
+ */
+type RouteBudgetKey =
+  | "keys-permissions"
+  | "process-key-enqueue"
+  | "process-key-sync"
+  | "process-key-unified-dormant";
 
 /** The nine analytics-seam wrapper budget keys (Class E, PATTERNS). */
 const EXPECTED_ALL_ANALYTICS_KEYS = [
@@ -57,7 +122,16 @@ const EXPECTED_ALL_ANALYTICS_KEYS = [
   "portfolio-optimizer",
   "simulator",
   "validate-key",
-];
+] as const satisfies readonly SeamBudgetKey[];
+
+type _MissingAnalyticsVerdict = Exclude<
+  SeamBudgetKey,
+  (typeof EXPECTED_ALL_ANALYTICS_KEYS)[number] | RouteBudgetKey
+>;
+const _analyticsVerdictExhaustiveness: _MissingAnalyticsVerdict extends never
+  ? true
+  : never = true;
+void _analyticsVerdictExhaustiveness;
 
 const LEAF_PATH = "src/lib/seam-retry-registry.ts";
 
@@ -393,6 +467,93 @@ describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
           "resolved by _resume_duplicate_job in process_key.py — no coordinate",
         ),
       ).toEqual([]);
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // [D-11] SC-I — IMMUTABILITY, AT BOTH LEVELS.
+  //
+  // The registry docblock claimed the maps were immutable while they were
+  // exported with a widening TYPE ANNOTATION and nothing else: both
+  // `RETRY_SAFE_FLOW_TYPES.teaser = { retries: 1, evidence: "" }` and
+  // `delete RETRY_SAFE_FLOW_TYPES.onboard` typechecked clean AND took at
+  // runtime. A pushed row is a legitimate retry verdict from that moment on, and
+  // for `teaser` that verdict double-mints the verification, the public_token
+  // and the lead — the exact anti-feature the SC3 belt above exists to prevent,
+  // reached by writing to the belt instead of around it.
+  //
+  // TWO MECHANISMS, PINNED SEPARATELY, BECAUSE THEY FAIL SEPARATELY. The
+  // `@ts-expect-error` fixtures pin the COMPILE half (delete a comment and
+  // `npm run typecheck` reds on that line); the throw assertions pin the RUNTIME
+  // half, which is the one that survives the type erasure at build. Neither
+  // implies the other: `as const` alone is erased, and `Object.freeze` alone
+  // leaves the mutation compiling and failing loudly only in production.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  describe("[D-11 / SC-I] the four verdict maps are immutable", () => {
+    it.each([
+      ["RETRY_SAFE_FLOW_TYPES", RETRY_SAFE_FLOW_TYPES],
+      ["RETRY_AUDIT_NO_FLOW_TYPES", RETRY_AUDIT_NO_FLOW_TYPES],
+      ["RETRY_SAFE_ANALYTICS", RETRY_SAFE_ANALYTICS],
+      ["RETRY_AUDIT_NO_ANALYTICS", RETRY_AUDIT_NO_ANALYTICS],
+    ] as const)("%s is frozen at runtime", (name, map) => {
+      expect(
+        Object.isFrozen(map),
+        `${name} is not frozen — a consumer push can ADD a verdict row, and an ` +
+          `added row is indistinguishable from an audited one at the gate.`,
+      ).toBe(true);
+    });
+
+    it.each([
+      ["RETRY_SAFE_FLOW_TYPES.onboard", RETRY_SAFE_FLOW_TYPES.onboard],
+      ["RETRY_SAFE_FLOW_TYPES.resync", RETRY_SAFE_FLOW_TYPES.resync],
+      ["RETRY_SAFE_ANALYTICS.bridge", RETRY_SAFE_ANALYTICS.bridge],
+      ["RETRY_SAFE_ANALYTICS.simulator", RETRY_SAFE_ANALYTICS.simulator],
+      [
+        "RETRY_SAFE_ANALYTICS.portfolio-optimizer",
+        RETRY_SAFE_ANALYTICS["portfolio-optimizer"],
+      ],
+      [
+        "RETRY_SAFE_ANALYTICS.optimize-weights",
+        RETRY_SAFE_ANALYTICS["optimize-weights"],
+      ],
+    ] as const)("%s (the ENTRY, not just the map) is frozen", (name, entry) => {
+      // A shallow freeze closes the ADD vector and leaves the REPOINT vector
+      // open. `RETRY_SAFE_ANALYTICS.bridge.retries = 5` reaches the gate through
+      // a row that is already a legal YES, so no key-set pin above would see it,
+      // and five retries on a handler that appends an audit row per attempt is
+      // the elevation T-141.1-11 names.
+      expect(
+        Object.isFrozen(entry),
+        `${name} is reachable for mutation — freezing the map but not its ` +
+          `entries makes the docblock's "immutable" claim half true, which is ` +
+          `the over-claim class this phase exists to remove.`,
+      ).toBe(true);
+    });
+
+    it("pushing a `teaser` YES row does not compile AND throws at runtime", () => {
+      expect(() => {
+        // C4 / D-11 — this line used to TYPECHECK CLEAN. The @ts-expect-error is
+        // the pin: remove it and `npm run typecheck` reds here (TS2540, assignment
+        // to a read-only property), which is the proof the compile half is real.
+        // @ts-expect-error — pinned as a COMPILE error; see above.
+        RETRY_SAFE_FLOW_TYPES.teaser = { retries: 1, evidence: "" };
+      }).toThrow(TypeError);
+      // …and the push left no residue. Belt for the assertion above: a runtime
+      // that silently ignored the write instead of throwing would still be safe,
+      // but this registry would not know which of the two it got.
+      expect(RETRY_SAFE_FLOW_TYPES.teaser).toBeUndefined();
+    });
+
+    it("deleting the `onboard` YES row does not compile AND throws at runtime", () => {
+      expect(() => {
+        // C4 / D-11 — likewise clean before the freeze. Remove the next line and
+        // typecheck reds with TS2704 (the operand of a `delete` operator cannot
+        // be a read-only property).
+        // @ts-expect-error — pinned as a COMPILE error; see above.
+        delete RETRY_SAFE_FLOW_TYPES.onboard;
+      }).toThrow(TypeError);
+      expect(RETRY_SAFE_FLOW_TYPES.onboard?.retries).toBe(1);
     });
   });
 

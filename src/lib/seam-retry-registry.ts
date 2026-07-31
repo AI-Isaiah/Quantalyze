@@ -31,12 +31,58 @@
  *
  * ── ABSENCE ⇒ NO-RETRY, BY CONSTRUCTION ──────────────────────────────────────
  *
- * The YES maps are `Partial<Record<…>>`. The wrapper reads
- * `RETRY_SAFE_*[key]?.retries ?? 0` (plan 04), so a flow_type or wrapper with no
- * entry simply gets zero retries. There is no separate "default no-retry" rule
- * to forget — everything unproven is no-retry because the map has no row for it.
- * A new flow_type or wrapper added without an audit verdict reddens the
- * exhaustiveness pin in the test, forcing a verdict before it can ship.
+ * The YES maps are `Readonly<Partial<Record<…>>>` — PARTIAL is the load-bearing
+ * half here, and it is why the annotation is not `as const`'s narrow key type
+ * (see IMMUTABLE, below). The wrapper reads `RETRY_SAFE_*[key]?.retries ?? 0`
+ * (plan 04), so a flow_type or wrapper with no entry simply gets zero retries.
+ * There is no separate "default no-retry" rule to forget — everything unproven
+ * is no-retry because the map has no row for it.
+ *
+ * ── WHAT ACTUALLY FORCES A VERDICT (141.1 / D-11) ────────────────────────────
+ *
+ * The sentence that used to stand here claimed that "a new flow_type or wrapper
+ * added without an audit verdict reddens the exhaustiveness pin in the test,
+ * forcing a verdict before it can ship". That was PARTLY FALSE on the day it was
+ * written: the pin compared YES∪NO against a HAND-TYPED list, so both sides
+ * agreed by copy-paste and a 5th `FlowType` reddened NOTHING. The claim is now
+ * true — and it is true in TWO STEPS, which is worth stating because step 1
+ * alone looks like the whole mechanism and does not by itself force a verdict:
+ *
+ *   1. COMPILE. `seam-retry-registry.test.ts` carries the house
+ *      `Exclude`-to-`never` assertions (the `for-quants-lead` form): the
+ *      hand-typed `EXPECTED_ALL_FLOW_KEYS` / `EXPECTED_ALL_ANALYTICS_KEYS` must
+ *      COVER `FlowType` / `SeamBudgetKey`, so a new union member breaks
+ *      `npm run typecheck` until the list names it. `budgetKeyFor` in
+ *      `process-key-client.ts` breaks in the same pass, on its `never`-defaulted
+ *      switch arm.
+ *   2. RUN. Naming the new member in that list is exactly what then REDDENS the
+ *      runtime exhaustiveness pin, because YES∪NO no longer equals the list. The
+ *      only route back to green is an actual verdict in a YES or a NO map.
+ *
+ * Neither step alone forces the verdict. The chain does.
+ *
+ * ── IMMUTABLE AT BOTH LEVELS (141.1 / D-11, threat T-141.1-11) ───────────────
+ *
+ * The four maps used to be exported with a widening TYPE ANNOTATION and nothing
+ * else, so `RETRY_SAFE_FLOW_TYPES.teaser = { retries: 1, evidence: "" }` and
+ * `delete RETRY_SAFE_FLOW_TYPES.onboard` both typechecked clean and both took at
+ * runtime. A pushed row is a legitimate retry verdict from that moment on — for
+ * `teaser` that is the double-minted verification/public_token/lead this whole
+ * registry exists to prevent. Both levels are now closed:
+ *
+ *   · COMPILE — `as const satisfies Partial<Record<…>>` at each literal (the
+ *     `audit.ts` house form), read back out through a `Readonly<…>` annotation.
+ *     `satisfies` keeps the key/value validity check at the literal, where the
+ *     error points at the offending row; the `Readonly<…>` annotation is what
+ *     makes the assignment and the `delete` compile ERRORS while KEEPING the
+ *     widened `Partial<Record<FlowType, …>>` index the consumers need — both
+ *     `process-key-client` and `analytics-client` index these maps with the FULL
+ *     union and rely on a miss yielding `undefined`. Both former mutation
+ *     vectors are pinned as `@ts-expect-error` fixtures in the test.
+ *   · RUNTIME — `freezeVerdicts` below freezes the map AND its entries. A
+ *     type-level `readonly` is erased at build; a pushed row from plain JS or
+ *     from behind an `as any` is not, and that is the vector the docblock's
+ *     "immutable" claim has to cover to be worth making.
  *
  * ── (b) WHY TWO GRAINS ────────────────────────────────────────────────────────
  *
@@ -60,6 +106,13 @@
  * `keys-permissions` is protected by its `SEAM_BUDGETS` row staying `retries: 0`
  * (pinned in plan 04). Listing them here would be auditing the same seam twice at
  * two grains — the exclusion is by design, not an oversight.
+ *
+ * 141.1 / D-11 — THIS EXCLUSION LIST IS NOW ENFORCED, not merely described.
+ * `seam-retry-registry.test.ts` types the same four keys as `RouteBudgetKey` and
+ * subtracts them from `SeamBudgetKey` before asserting analytics coverage, so a
+ * FOURTEENTH budget key must be classified as an analytics wrapper (→ a verdict
+ * here) or as a route budget (→ that list) before `npm run typecheck` passes.
+ * Doing neither is no longer a silent exclusion. Edit the two together.
  */
 
 import type { FlowType } from "./process-key-client";
@@ -77,11 +130,40 @@ export interface RetrySafeEntry {
 }
 
 /**
+ * Freeze a verdict map AND the entries inside it (141.1 / D-11).
+ *
+ * ⚠️ THE ENTRY LEVEL IS NOT DECORATION. A SHALLOW `Object.freeze` closes the
+ * ADD vector (`RETRY_SAFE_FLOW_TYPES.teaser = …`) but leaves the REPOINT vector
+ * open: `RETRY_SAFE_ANALYTICS.bridge.retries = 5` would still take, and five
+ * retries on a handler that appends an audit row per attempt is the same
+ * elevation T-141.1-11 names — reached through a row that is already a legal
+ * YES, so no key-set pin would see it. Freezing one level and calling the result
+ * "immutable" is the shape of over-claim this phase exists to remove, so both
+ * levels are frozen and both are asserted in `seam-retry-registry.test.ts`.
+ *
+ * The `typeof … === "object"` arm is what lets ONE helper serve BOTH map shapes:
+ * the YES maps hold `RetrySafeEntry` objects, the NO maps hold bare strings
+ * (primitives are already immutable and `Object.freeze` on one is a no-op, but
+ * skipping them keeps the intent explicit rather than incidental).
+ *
+ * `Object.freeze` is a global — no import, so the leaf-purity constraint at the
+ * top of this file survives it (`seam-retry-registry.test.ts` pins that).
+ */
+function freezeVerdicts<T extends object>(map: T): Readonly<T> {
+  for (const entry of Object.values(map)) {
+    if (typeof entry === "object" && entry !== null) Object.freeze(entry);
+  }
+  return Object.freeze(map);
+}
+
+/**
  * `/process-key` flow_types that ARE retry-safe. PRESENT ⇒ retry once; ABSENT ⇒
  * no-retry by construction. Exactly TWO entries — `teaser` and `csv` are proven
  * NO and live in `RETRY_AUDIT_NO_FLOW_TYPES`.
  */
-export const RETRY_SAFE_FLOW_TYPES: Partial<Record<FlowType, RetrySafeEntry>> = {
+export const RETRY_SAFE_FLOW_TYPES: Readonly<
+  Partial<Record<FlowType, RetrySafeEntry>>
+> = freezeVerdicts({
   onboard: {
     retries: 1,
     evidence:
@@ -144,7 +226,7 @@ export const RETRY_SAFE_FLOW_TYPES: Partial<Record<FlowType, RetrySafeEntry>> = 
       "out-of-scope residual. Allowlisted ONLY AFTER that plan-01 dedup landed " +
       "(wave ordering).",
   },
-};
+} as const satisfies Partial<Record<FlowType, RetrySafeEntry>>);
 
 /**
  * `/process-key` flow_types that are NOT retry-safe — evidence-only NO verdicts.
@@ -152,7 +234,9 @@ export const RETRY_SAFE_FLOW_TYPES: Partial<Record<FlowType, RetrySafeEntry>> = 
  * from the YES map) is what the exhaustiveness pin checks, so removing a NO
  * verdict without adding a YES one reddens.
  */
-export const RETRY_AUDIT_NO_FLOW_TYPES: Partial<Record<FlowType, string>> = {
+export const RETRY_AUDIT_NO_FLOW_TYPES: Readonly<
+  Partial<Record<FlowType, string>>
+> = freezeVerdicts({
   teaser:
     "Deliberately NON-idempotent. Every teaser submission unconditionally mints a " +
     "fresh uuid4 wizard_session_id at the teaser uuid4 mint in process_key.py, so " +
@@ -167,7 +251,7 @@ export const RETRY_AUDIT_NO_FLOW_TYPES: Partial<Record<FlowType, string>> = {
     "allowlisted at flow_type grain — but csv shares the process-key-sync budget " +
     "row with teaser, so the blast radius of a mistake outweighs the marginal " +
     "value (RESEARCH A5). Default no-retry for this phase.",
-};
+} as const satisfies Partial<Record<FlowType, string>>);
 
 /**
  * Analytics-seam wrapper functions that ARE retry-safe, keyed by their 1:1
@@ -189,7 +273,9 @@ export const RETRY_AUDIT_NO_FLOW_TYPES: Partial<Record<FlowType, string>> = {
  * its own phase with its own soak — and it is recorded per entry so it cannot be
  * inherited silently.
  */
-export const RETRY_SAFE_ANALYTICS: Partial<Record<SeamBudgetKey, RetrySafeEntry>> = {
+export const RETRY_SAFE_ANALYTICS: Readonly<
+  Partial<Record<SeamBudgetKey, RetrySafeEntry>>
+> = freezeVerdicts({
   bridge: {
     retries: 1,
     evidence:
@@ -277,14 +363,16 @@ export const RETRY_SAFE_ANALYTICS: Partial<Record<SeamBudgetKey, RetrySafeEntry>
       "FastAPI side awaits request.is_disconnected() — accepted, cancellation " +
       "deferred.",
   },
-};
+} as const satisfies Partial<Record<SeamBudgetKey, RetrySafeEntry>>);
 
 /**
  * Analytics-seam wrapper functions that are NOT retry-safe — evidence-only NO
  * verdicts. Exactly FIVE entries; together with the four YES entries they cover
  * all nine analytics wrappers (the exhaustiveness pin).
  */
-export const RETRY_AUDIT_NO_ANALYTICS: Partial<Record<SeamBudgetKey, string>> = {
+export const RETRY_AUDIT_NO_ANALYTICS: Readonly<
+  Partial<Record<SeamBudgetKey, string>>
+> = freezeVerdicts({
   "validate-key":
     "validateKey — runs a live exchange probe against caller credentials; " +
     "non-idempotent by construction, REQUIREMENTS Out of Scope. A retry re-probes " +
@@ -307,4 +395,4 @@ export const RETRY_AUDIT_NO_ANALYTICS: Partial<Record<SeamBudgetKey, string>> = 
   "match-eval":
     "evalMatch — read-only admin sweep, likely safe but low value; default " +
     "no-retry (RESEARCH discretion).",
-};
+} as const satisfies Partial<Record<SeamBudgetKey, string>>);
