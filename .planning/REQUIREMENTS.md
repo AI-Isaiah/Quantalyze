@@ -43,8 +43,8 @@ investor factsheet on a spinner that never resolves.
 - [x] **SEAM-02**: Every seam call site has a documented, exported timeout budget re-derived against its route's `maxDuration`, replacing the two divergent ad-hoc budgets (30s vs hardcoded 60s); a test asserts `timeout × (1 + retries) < maxDuration` per route.
 - [x] **SEAM-03**: A circuit breaker backed by the existing Upstash store (NOT in-memory) trips on repeated Railway failures and is observed consistently across concurrent Fluid Compute instances; it fails **OPEN** (attempts the real call) when Redis itself errors, so a broken breaker can never become the outage.
 - [x] **SEAM-04**: When the breaker is open or the seam fails, the caller receives a clean typed `503 CIRCUIT_OPEN` envelope with a human message — no raw error escapes a route handler as a cascade-500.
-- [ ] **SEAM-05**: A committed retry-safety audit artifact maps every seam function and `/process-key` `flow_type` to retry-safe yes/no with traced evidence of server-side side effects, including the currently-unaudited `recomputeMatch` / `computePortfolioAnalytics` / optimizer / simulator / bridge set, and resolves whether `_get_recompute_lock` is distributed or process-local.
-- [ ] **SEAM-06**: Bounded retry with exponential backoff + full jitter (2–3 attempts) is enabled ONLY for allowlisted entries from SEAM-05, respects the open breaker with no bypass, and provably NEVER retries `flow_type: teaser` (a retry there mints a duplicate verification + `public_token` + lead).
+- [x] **SEAM-05**: A committed retry-safety audit artifact maps every seam function and `/process-key` `flow_type` to retry-safe yes/no with traced evidence of server-side side effects, including the currently-unaudited `recomputeMatch` / `computePortfolioAnalytics` / optimizer / simulator / bridge set, and resolves whether `_get_recompute_lock` is distributed or process-local.
+- [x] **SEAM-06**: Bounded retry with exponential backoff + full jitter (2–3 attempts) is enabled ONLY for allowlisted entries from SEAM-05, respects the open breaker with no bypass, and provably NEVER retries `flow_type: teaser` (a retry there mints a duplicate verification + `public_token` + lead).
 
 ### JOB — Job-state integrity (no forever-spinners)
 
@@ -263,8 +263,8 @@ Populated during roadmap creation.
 | SEAM-02 | Phase 140 | Complete |
 | SEAM-03 | Phase 140 | Complete |
 | SEAM-04 | Phase 140 | Complete |
-| SEAM-05 | Phase 141 | Pending |
-| SEAM-06 | Phase 141 | Pending |
+| SEAM-05 | Phase 141 | Complete |
+| SEAM-06 | Phase 141 | Complete |
 | JOB-01 | Phase 142 | Pending |
 | JOB-02 | Phase 142 | Pending |
 | JOB-03 | Phase 142 | Pending |

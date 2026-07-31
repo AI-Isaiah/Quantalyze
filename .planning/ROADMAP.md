@@ -390,7 +390,7 @@ Plans:
 | 140. SEAM core + breaker | 7/7 | Complete   | 2026-07-25 |
 | 140.1. PYAPI contract/status/limiter (INSERTED) | 9/9 | Complete | 2026-07-26 |
 | 140.1.1. PYAPI-FIX (INSERTED) | 7/7 | Complete    | 2026-07-26 |
-| 141. SEAM retry (audit-gated) | 4/4 | Complete   | 2026-07-31 |
+| 141. SEAM retry (audit-gated) | 4/4 | Complete    | 2026-07-31 |
 | 142. JOB reaper + DDL | 0/? | Not started | - |
 | 143. JOB dropped-enqueue sweep | 0/? | Not started | - |
 | 144. JOB WR-02 terminal UPDATE | 0/? | Not started | - |
