@@ -1,5 +1,65 @@
 # Changelog
 
+## [0.51.0.0] - 2026-07-31
+### 141 SEAM + 141.1 SEAMBACKOFF — audited bounded retry on the Vercel→Railway seam
+Turns retry ON for the first time on the seam between the Vercel routes and the Railway analytics
+service — but only where a written idempotency audit says a replay is safe. Both phases ship as one
+release: 141 added the retry, 141.1 repaired the evidence, guards and observability around it.
+
+- **Bounded retry, gated on an audit, not on a config row.** Up to **two attempts** (one retry) with
+  a jittered 250–500 ms backoff. Eligibility is a **required** `retriesOverride` argument fed from
+  the committed registry in `seam-retry-registry.ts` — four analytics wrappers (`bridge`,
+  `simulator`, `portfolio-optimizer`, `optimize-weights`) and two `/process-key` flow types
+  (`onboard`, `resync`). A new seam call site cannot compile without stating a retry verdict.
+- **The anonymous public teaser is provably never retried.** It is deliberately non-idempotent — a
+  retry would double-mint `strategy_verifications` rows and public tokens — so it carries an
+  evidence-backed NO verdict, and a test forces the budget row and the registry into disagreement to
+  prove the verdict is taken from the audit rather than the row.
+- **`Retry-After` fail-fast (141.1).** Every SERVICE-TRANSIENT `503` the analytics service emits
+  carries a mandatory `Retry-After`, which is longer than the backoff — so retrying inside it was
+  near-certain to fail *and* spent a second breaker failure on billed lambda wall clock. A 503 that
+  names its own wait is now surfaced immediately with its body intact, spending one breaker failure
+  instead of two. The backoff is unchanged for the transport/timeout class, which carries no
+  response at all.
+- **Breaker threshold ratified, not retuned.** Because the breaker counts **attempts**, a retried
+  call that fails twice records two failures — so sustained degradation trips the circuit in ~3 user
+  requests instead of 5. Reviewed and **accepted** (faster containment of a real outage, bought
+  against a fail-open breaker with a 30 s cooldown), with the arithmetic written into the constant's
+  docblock and pinned so neither half can move silently.
+- **Registry-bypass axis closed at three independent points:** the call-site type, the core's row
+  delegation, and the validator's rejection of an absent override. A row edit can no longer buy a
+  retry that no audit granted.
+- **SEAM-05 evidence re-derived against the handlers.** The pre-existing audit text claimed all four
+  analytics wrappers were writeless; tracing found audit appends on three and an in-place UPDATE on
+  one. **No verdict changed** — each entry now states its actual traced writes and why the retry is
+  safe given them. The `resync` entry also records, plainly, the residual its pre-check does *not*
+  close.
+- **Known accepted cost:** a retry on a heavy analytics budget adds a **second concurrent full
+  compute** while attempt 1 still burns Railway CPU, because nothing on the FastAPI side awaits
+  `request.is_disconnected()`. Server-side cancellation is deferred to its own phase; the cost is
+  recorded per registry entry, in `TODOS.md`, and in the new runbook.
+- **The seam's two silent arms now log.** The counting-5xx retry arm and the pre-attempt-2
+  `CircuitOpenError` both emit a line naming the budget key and status — credential-clean, proven by
+  a mutation that shipped sentinel credentials verbatim. `decodeBreakerLock` also gained span
+  bounds, so a `Retry-After` of 1e17 can no longer be minted.
+- **Flag-monitor error-rate alert repaired — it had never fired once since Phase 19.** Its Sentry
+  numerator filtered on `path:`, and **this repo writes `path` to Sentry `extra`, never to `tags`**;
+  `extra` is unindexed, so the query matched nothing and the alert was structurally silent. The
+  numerator is now built from indexed fields only, and the denominator counts **distinct requests**
+  (by correlation id) instead of `audit_log` rows, removing a retry-driven downward bias.
+  ⚠️ **Corrected two-cause diagnosis, recorded forward:** the 2026-05-27 region-URL fix
+  (`8904b204`) addressed only **one of two independent, separately-sufficient causes** — the second
+  is the unindexed-`path` fault above, which made the term unsearchable regardless of its value (and
+  the value was wrong too: `/api/process-key` vs the FastAPI `/process-key`). The historical
+  `[0.24.x]` entries are **deliberately not rewritten** — a changelog records what was believed at
+  release time, and the partial diagnosis is itself the useful evidence.
+- **New runbook: `docs/runbooks/seam-breaker.md`.** The seam breaker had no ops surface, and the
+  only "circuit breaker" in the runbooks was a *different* mechanism (the Python per-API-key 429
+  cooldown), so on-call got the wrong mental model. Covers fail-open doctrine, the Upstash keys and
+  which two can never open, the constants, the measured `[30 s, 60 s]` recovery band, the
+  `seam.breaker.*` signals, and the things that look like fixes and are not. Indexed under incident
+  response and cross-linked both ways with the compute-queue runbook.
+
 ## [0.50.1.0] - 2026-07-31
 ### 140.3 SEAMUX-03 — a machine-readable `code` on every seam-route error arm
 Completes the v1.16 error-surface class the milestone opened: every error response emitted by the
