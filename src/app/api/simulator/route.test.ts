@@ -105,10 +105,16 @@ vi.mock("@/lib/ratelimit", () => ({
 vi.mock("@/lib/analytics-client", async () => {
   class AnalyticsUpstreamError extends Error {
     readonly status: number;
-    constructor(message: string, status: number) {
+    // 140.3-G5 / SEAMUX-03 — additive third arg mirroring the real class
+    // (`analytics-client.ts:119`, `seamCode: string | null = null`), so the
+    // 4xx-forward arm's `err.seamCode ?? "UNKNOWN"` is falsifiable here.
+    // Every pre-existing 2-arg construction keeps `seamCode = null`.
+    readonly seamCode: string | null;
+    constructor(message: string, status: number, seamCode: string | null = null) {
       super(message);
       this.name = "AnalyticsUpstreamError";
       this.status = status;
+      this.seamCode = seamCode;
     }
   }
   class AnalyticsTimeoutError extends Error {
@@ -530,5 +536,151 @@ describe("POST /api/simulator", () => {
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.error).toBe("Portfolio not found");
+  });
+});
+
+/**
+ * 140.3-G5 / SEAMUX-03 — a machine `code` on EVERY error arm this route itself
+ * emits, so a client discriminates the fault on a stable token rather than
+ * sniffing the human sentence. Baseline was ZERO coded arms here.
+ *
+ * OUT OF SCOPE (helper-emitted, not the route's own arm): the approval-gate
+ * 403 (`assertProfileApproved`) — the same class the verifier accepted keys/sync
+ * as complete without touching (withAuth's 401). Its body is the helper's to
+ * code, not this plan's. Every arm below is emitted inline by route.ts — INCLUDING
+ * the 429 and the limiter-misconfigured 503, which this route builds by hand.
+ */
+describe("[140.3-G5 / SEAMUX-03] POST /api/simulator — a machine code on every arm", () => {
+  const req = () =>
+    makeRequest({
+      portfolio_id: PORTFOLIO_ID,
+      candidate_strategy_id: CANDIDATE_ID,
+    });
+
+  it("401 (no session) → UNAUTHENTICATED", async () => {
+    STATE.authUser = null;
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(401);
+    expect((await res.json()).code).toBe("UNAUTHENTICATED");
+  });
+
+  it("400 invalid JSON → VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(null, { rawBody: "{not json" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("400 schema parse failure → VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ portfolio_id: PORTFOLIO_ID }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("503 limiter-misconfigured → SEAM_MISCONFIGURED, Retry-After kept", async () => {
+    STATE.checkLimitResult = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect((await res.json()).code).toBe("SEAM_MISCONFIGURED");
+  });
+
+  it("429 genuine throttle → RATE_LIMITED, retryAfter body field byte-unchanged", async () => {
+    STATE.checkLimitResult = { success: false, retryAfter: 42 };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(429);
+    const body = await res.json();
+    expect(body.code).toBe("RATE_LIMITED");
+    // The retryAfter body field the client disables its button on is untouched.
+    expect(body.retryAfter).toBe(42);
+    expect(res.headers.get("Retry-After")).toBe("42");
+  });
+
+  it("404 portfolio not found → PORTFOLIO_NOT_FOUND", async () => {
+    STATE.portfolioFound = false;
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(404);
+    expect((await res.json()).code).toBe("PORTFOLIO_NOT_FOUND");
+  });
+
+  it("503 breaker → CIRCUIT_OPEN, sentence + Retry-After byte-unchanged", async () => {
+    STATE.simulateImpl = async () => {
+      throw new CircuitOpenError(11);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("11");
+    const body = await res.json();
+    expect(body.code).toBe("CIRCUIT_OPEN");
+    expect(body.error).toBe(
+      "The analytics service is temporarily unavailable. Please try again in a moment.",
+    );
+  });
+
+  it("4xx forward preserves err.seamCode VERBATIM", async () => {
+    STATE.simulateImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("already in portfolio", 400, "ALREADY_IN_PORTFOLIO");
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    // The forwarded message is unchanged and the upstream's code survives.
+    expect(body.error).toBe("already in portfolio");
+    expect(body.code).toBe("ALREADY_IN_PORTFOLIO");
+  });
+
+  it("4xx forward with a null seamCode → UNKNOWN fallback", async () => {
+    STATE.simulateImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("bad request upstream", 422);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(422);
+    expect((await res.json()).code).toBe("UNKNOWN");
+  });
+
+  it("504 timeout → UPSTREAM_TIMEOUT", async () => {
+    STATE.simulateImpl = async () => {
+      const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+      throw new AnalyticsTimeoutError("/api/simulator", 15000);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(504);
+    expect((await res.json()).code).toBe("UPSTREAM_TIMEOUT");
+  });
+
+  it("500 terminal (5xx upstream) → UNKNOWN", async () => {
+    STATE.simulateImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("upstream traceback", 502);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
+  });
+
+  it("500 terminal (generic throw) → UNKNOWN", async () => {
+    STATE.simulateImpl = async () => {
+      throw new Error("contract drift");
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
   });
 });
