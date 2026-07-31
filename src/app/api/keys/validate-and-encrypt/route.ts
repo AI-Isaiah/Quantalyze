@@ -369,8 +369,8 @@ async function legacyValidateAndEncryptHandler(args: {
       err.status < 500
     ) {
       // 140.3-G4 / SEAMUX-03 — preserve the upstream's own machine code
-      // (`err.seamCode`, analytics-client.ts:119), UNKNOWN only when it carried
-      // none. Never overwrite an upstream-carried code.
+      // (`err.seamCode`, set by `AnalyticsUpstreamError`), UNKNOWN only when it
+      // carried none. Never overwrite an upstream-carried code.
       return NextResponse.json(
         { error: err.message, code: err.seamCode ?? "UNKNOWN" },
         { status: err.status, headers: NO_STORE_HEADERS },
