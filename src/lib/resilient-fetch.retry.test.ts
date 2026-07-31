@@ -79,6 +79,11 @@ const shared = vi.hoisted(() => {
   };
 });
 
+// The REAL `postProcessKey` (client wiring tests below) transitively pulls in a
+// `server-only`-guarded module; stub it so the client loads under vitest. The
+// transport-level tests above do not reach it, so the stub is inert for them.
+vi.mock("server-only", () => ({}));
+
 vi.mock("next/server", async () => {
   const actual = await vi.importActual<typeof import("next/server")>(
     "next/server",
@@ -222,6 +227,43 @@ function throwThenOkFetch(rejection: unknown): FetchMock {
   return mock;
 }
 
+/**
+ * A REAL 200 `Response` carrying a JSON body — the shape the client wiring tests
+ * below need. The bare `{ ok, status }` doubles above are enough for the
+ * transport-level tests (they only read `.status`), but the REAL clients call
+ * `res.json()` / `res.headers.get("content-type")`, so those tests must return a
+ * genuine `Response`.
+ */
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/** REJECTS once, then answers a real 200 JSON `Response` on every later call. */
+function throwThenJsonOk(rejection: unknown, body: unknown): FetchMock {
+  const mock = installFetchMock();
+  mock
+    .mockRejectedValueOnce(rejection)
+    .mockResolvedValue(jsonResponse(200, body));
+  return mock;
+}
+
+/** REJECTS transient on EVERY call (a persistent single-blip that never clears). */
+function throwAlways(rejection: unknown): FetchMock {
+  const mock = installFetchMock();
+  mock.mockRejectedValue(rejection);
+  return mock;
+}
+
+/** Wire the env the two REAL clients read (token, service URL, service key). */
+function configureSeamClients(): void {
+  process.env.INTERNAL_API_TOKEN = "internal-test-token";
+  process.env.ANALYTICS_SERVICE_URL = "http://analytics.test";
+  process.env.ANALYTICS_SERVICE_KEY = "service-test-key";
+}
+
 function configureUpstash(): void {
   process.env.UPSTASH_REDIS_REST_URL = "https://fake.upstash.invalid";
   process.env.UPSTASH_REDIS_REST_TOKEN = "fake-token";
@@ -235,7 +277,13 @@ async function driveFailures(
   for (let i = 0; i < n; i++) {
     vi.unstubAllGlobals();
     statusSequenceFetch(503);
-    await mod.resilientFetch("bridge", BRIDGE_PATH, { method: "POST" });
+    // retriesOverride:0 keeps each drive call SINGLE-ATTEMPT. The bridge row is
+    // retries:1 since plan 04, so a bare call would retry and load the counter
+    // twice as fast — tripping the breaker mid-drive.
+    await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 0,
+    });
   }
 }
 
@@ -316,7 +364,11 @@ describe("[SEAM-06 / SC2] the bounded retry loop", () => {
     expect(shared.counters.limitCalls).toBe(0);
   });
 
-  it("no override + all budget rows retries 0 + a transient rejection → exactly ONE fetch, error thrown (loop DORMANT)", async () => {
+  it("no override + a row that STAYS retries 0 (validate-key) + a transient rejection → exactly ONE fetch, error thrown (no retry by row default)", async () => {
+    // Plan 04 flipped FIVE rows to retries:1; validate-key is deliberately NOT
+    // one of them (a live-exchange probe is non-idempotent). This proves a
+    // non-allowlisted row inherits the single-attempt path with no override —
+    // the row default, not the escape hatch, gates it.
     vi.spyOn(console, "error").mockImplementation(() => {});
     const original = new TypeError("fetch failed");
     const fetchMock = installFetchMock();
@@ -324,7 +376,7 @@ describe("[SEAM-06 / SC2] the bounded retry loop", () => {
     const mod = await import("./resilient-fetch");
 
     await expect(
-      mod.resilientFetch("bridge", BRIDGE_PATH, { method: "POST" }),
+      mod.resilientFetch("validate-key", "/api/validate-key", { method: "POST" }),
     ).rejects.toBe(original);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -480,9 +532,12 @@ describe("[SEAM-06] the per-attempt breaker latch", () => {
     } as unknown as Response);
     const mod = await import("./resilient-fetch");
 
-    // No override: single attempt. The 503 status arm records once.
+    // retriesOverride:0 → single attempt. The 503 status arm records once. (The
+    // bridge row is retries:1 since plan 04, so the override is what pins the
+    // one-attempt path this within-attempt-latch case depends on.)
     const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
       method: "POST",
+      retriesOverride: 0,
     });
     expect(shared.counters.limitCalls).toBe(1);
 
@@ -529,5 +584,138 @@ describe("[SEAM-06] retriesOverride validation (config faults raised ABOVE the c
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(res.status).toBe(200);
+  });
+});
+
+/**
+ * Phase 141 / SEAM-05+06 (plan 04) — the CLIENT WIRING.
+ *
+ * These tests drive the REAL `postProcessKey` and the REAL analytics wrappers
+ * with only `fetch` mocked — they test the WIRING (does the client thread a
+ * `retriesOverride` keyed on the registry into the shared transport?), not a
+ * helper. The proof-of-necessity is ASYMMETRIC: before the wiring lands,
+ * teaser/csv/validateKey already single-fetch (nothing retries) but
+ * resync/onboard/bridge FAIL — one fetch where two are expected — because the
+ * registry is consulted nowhere. That asymmetric RED is the wiring's reason to
+ * exist.
+ *
+ * Grain matters (the SC3 landmine): the process-key seam is keyed on `flow_type`
+ * because `budgetKeyFor` is MANY-TO-ONE (teaser+csv → process-key-sync). Keying
+ * the retry on the budgetKey would retry teaser the moment csv were allowed onto
+ * the sync budget. So teaser/csv (absent from the YES map) get exactly ONE fetch
+ * while resync/onboard (present) get two — under the SAME budget grain.
+ */
+describe("[SEAM-06 / SC2+SC3] client wiring — the REAL clients thread retriesOverride", () => {
+  // Math.random → 0 pins the backoff at its 250ms floor (real-timer wait).
+  function pinFloorBackoff(): void {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+  }
+
+  it("SC3 — postProcessKey teaser + a persistent transient → exactly ONE fetch (never retried)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    configureSeamClients();
+    const fetchMock = throwAlways(new TypeError("fetch failed"));
+    const { postProcessKey } = await import("./process-key-client");
+
+    const result = await postProcessKey({
+      flow_type: "teaser",
+      source: "teaser",
+      context: {},
+      userId: "public",
+      correlationId: "c-teaser",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(false);
+  });
+
+  it("SC3 — postProcessKey csv + a persistent transient → exactly ONE fetch (shares the sync budget with teaser, still no retry)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    configureSeamClients();
+    const fetchMock = throwAlways(new TypeError("fetch failed"));
+    const { postProcessKey } = await import("./process-key-client");
+
+    const result = await postProcessKey({
+      flow_type: "csv",
+      source: "csv",
+      context: { step: "validate" },
+      userId: "u1",
+      correlationId: "c-csv",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(false);
+  });
+
+  it("SC2 — postProcessKey resync + a single transient then 200 → exactly TWO fetches, resolves ok", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    pinFloorBackoff();
+    const fetchMock = throwThenJsonOk(new TypeError("fetch failed"), {
+      ok: true,
+      strategy_id: "s1",
+    });
+    configureSeamClients();
+    const { postProcessKey } = await import("./process-key-client");
+
+    const result = await postProcessKey({
+      flow_type: "resync",
+      source: "resync",
+      context: {},
+      userId: "u1",
+      correlationId: "c-resync",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.ok).toBe(true);
+  });
+
+  it("SC2 — postProcessKey onboard + a single transient then 200 → exactly TWO fetches, resolves ok", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    pinFloorBackoff();
+    const fetchMock = throwThenJsonOk(new TypeError("fetch failed"), {
+      ok: true,
+      strategy_id: "s1",
+    });
+    configureSeamClients();
+    const { postProcessKey } = await import("./process-key-client");
+
+    const result = await postProcessKey({
+      flow_type: "onboard",
+      source: "onboard",
+      context: {},
+      userId: "u1",
+      correlationId: "c-onboard",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.ok).toBe(true);
+  });
+
+  it("SC2 — findReplacementCandidates (bridge) + a single transient then 200 → exactly TWO fetches, resolves", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    pinFloorBackoff();
+    const fetchMock = throwThenJsonOk(new TypeError("fetch failed"), {
+      candidates: [],
+    });
+    configureSeamClients();
+    const { findReplacementCandidates } = await import("./analytics-client");
+
+    const result = await findReplacementCandidates("p1", "under-1", "u1");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({ candidates: [] });
+  });
+
+  it("validateKey + a single transient → exactly ONE fetch (registry-absent wrapper inherits no-retry through the chokepoint)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    configureSeamClients();
+    const fetchMock = throwAlways(new TypeError("fetch failed"));
+    const { validateKey } = await import("./analytics-client");
+
+    await expect(
+      validateKey("deribit", "k", "s", undefined, { userId: "u1" }),
+    ).rejects.toBeTruthy();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

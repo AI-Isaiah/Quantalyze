@@ -868,10 +868,14 @@ describe("[SEAMCORE-05 / A-25] a doomed in-flight failure cannot re-arm an expir
     const mod = await import("./resilient-fetch");
 
     // Four fast 503s load the counter to one below the fake's hand-typed 5.
+    // retriesOverride:0 pins single-attempt (the bridge row is retries:1 since
+    // Phase 141), so each call records exactly one — the counter arithmetic here
+    // depends on it.
     okFetch(503);
     for (let i = 0; i < 4; i++) {
       await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
         method: "POST",
+        retriesOverride: 0,
       });
     }
     expect(storedLock(shared.store.get("breaker:railway"))).toBeNull();
@@ -895,6 +899,10 @@ describe("[SEAMCORE-05 / A-25] a doomed in-flight failure cannot re-arm an expir
 
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
       method: "POST",
+      // Single-attempt: a retry would arm the breaker on attempt 1, then the
+      // pre-attempt-2 re-check would throw, and this test proves the ADMISSION
+      // instant of ONE straddling request.
+      retriesOverride: 0,
     });
     // The request really did straddle the tombstone's armedAt.
     expect(Date.now()).toBeGreaterThan(admittedAt + 250);
@@ -1153,8 +1161,14 @@ describe("resilientFetch breaker short-circuit", () => {
     n: number,
   ): Promise<void> {
     for (let i = 0; i < n; i++) {
+      // retriesOverride:0 pins the SINGLE-ATTEMPT path: since Phase 141 flipped
+      // the bridge ROW to retries:1, a bare call would now retry and this
+      // breaker-loading loop would trip mid-drive. The retry loop has its own
+      // file (resilient-fetch.retry.test.ts); these breaker tests isolate the
+      // one-attempt classification mechanics.
       await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
         method: "POST",
+        retriesOverride: 0,
       });
     }
   }
@@ -1231,8 +1245,12 @@ describe("resilientFetch failure classification", () => {
     expectThrow: boolean,
   ): Promise<void> {
     for (let i = 0; i < n; i++) {
+      // retriesOverride:0 — single-attempt path. The bridge ROW is retries:1
+      // since Phase 141; without this pin these classification tests would retry
+      // and trip the breaker mid-drive (retry is covered in the retry test file).
       const call = mod.resilientFetch("bridge", "/api/portfolio-bridge", {
         method: "POST",
+        retriesOverride: 0,
       });
       if (expectThrow) await expect(call).rejects.toBeDefined();
       else await call;
@@ -1426,6 +1444,9 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
 
     const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
       method: "POST",
+      // Single-attempt (bridge row is retries:1 since Phase 141): the counter
+      // assertion below pins ONE record for the 503 status arm.
+      retriesOverride: 0,
     });
     const thrown = await res.json().then(
       () => null,
@@ -1466,6 +1487,9 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
     okFetch(503);
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
       method: "POST",
+      // Single-attempt: the bridge row retries since Phase 141, but this arm
+      // pins that ONE 503 records exactly ONE breaker failure.
+      retriesOverride: 0,
     });
     expect(shared.counters.limitCalls).toBe(1);
 
@@ -1665,6 +1689,9 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
 
     const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
       method: "POST",
+      // Single-attempt: pins ONE record for the text/plain 503 (bridge retries
+      // since Phase 141; retry mechanics live in the retry test file).
+      retriesOverride: 0,
     });
     expect(res.status).toBe(503);
     await expect(res.text()).resolves.toBe("Service Unavailable");
@@ -1689,6 +1716,9 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
     for (let i = 0; i < 5; i++) {
       await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
         method: "POST",
+        // Single-attempt: five distinct 503s load the counter to the threshold;
+        // a retry would trip mid-loop and the pre-attempt-2 re-check would throw.
+        retriesOverride: 0,
       });
     }
 
@@ -1744,6 +1774,9 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
 
     const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
       method: "POST",
+      // Single-attempt: this pins that ONE degraded request records ONCE (status
+      // arm + body-read arm within the same attempt do not double-count).
+      retriesOverride: 0,
     });
     // The status arm has already recorded once.
     expect(shared.counters.limitCalls).toBe(1);
@@ -2542,7 +2575,12 @@ describe("[SEAMCORE-06 / A-10] the network-failure line is diagnostic AND safe",
     fetchMock.mockRejectedValue(rejection);
     const mod = await import("./resilient-fetch");
     await mod
-      .resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" })
+      // Single-attempt: the bridge row retries since Phase 141, but the "records
+      // exactly ONE" assertion downstream pins the one-attempt transport arm.
+      .resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      })
       .catch(() => undefined);
     return errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
   }

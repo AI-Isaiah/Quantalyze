@@ -11,6 +11,11 @@ import { CircuitOpenError, SeamBodyReadError } from "@/lib/seam-errors";
 import { CIRCUIT_OPEN_COPY as CIRCUIT_OPEN_HUMAN_MESSAGE } from "@/lib/seam-copy";
 import { scrubSeamError } from "@/lib/seam-redaction";
 import { mintTenantClaim } from "@/lib/tenant-claim";
+// Phase 141 / SEAM-05+06 — the retry-safety registry, consulted at THIS
+// chokepoint (the belt). A VALUE import of a dependency-free leaf: it carries
+// no runtime edge and survives the wholesale seam mocks (see that file's
+// header), so importing it here does not change what the teaser bundle drags in.
+import { RETRY_SAFE_FLOW_TYPES } from "@/lib/seam-retry-registry";
 
 /**
  * Phase 19 / M-3 — shared client for the unified `/process-key` upstream.
@@ -60,6 +65,16 @@ export type FlowType = "teaser" | "onboard" | "resync" | "csv";
  * INLINE. The pre-140 client spent a blanket 60s on all four, so a sick
  * Railway held a Vercel concurrency slot 45s longer than necessary on the two
  * enqueue paths. Keep this function in lockstep with `_is_long_fetch`.
+ *
+ * ⚠️ Phase 141 / SEAM-06 — THE RETRY DECISION IS KEYED ON `flow_type`, NOT ON
+ * THIS BUDGET KEY, FOR THE SAME MANY-TO-ONE REASON THIS FUNCTION EXISTS. Because
+ * `process-key-sync` serves BOTH teaser and csv, and `process-key-enqueue` serves
+ * BOTH onboard and resync, keying the retry on `budgetKey` would retry teaser the
+ * moment csv were allowed onto the sync budget — the SC3 landmine (a retry
+ * double-mints the teaser's verification/public_token/lead). So the retry gate at
+ * the `resilientFetch` init below reads `RETRY_SAFE_FLOW_TYPES[args.flow_type]`,
+ * with an EXPLICIT `?? 0`: absence never delegates to the budget row, so a future
+ * flip of the `process-key-sync` row can never retry teaser/csv. This is the belt.
  */
 function budgetKeyFor(flowType: FlowType): SeamBudgetKey {
   return flowType === "teaser" || flowType === "csv"
@@ -430,6 +445,12 @@ export async function postProcessKey(
         context: args.context,
       }),
       cache: "no-store",
+      // Phase 141 / SEAM-06 — the retry gate, decided HERE on flow_type. See the
+      // budgetKeyFor docblock: the EXPLICIT `?? 0` is load-bearing (the belt),
+      // NOT a default fall-through to the budget row. onboard/resync are the two
+      // allowlisted flows (RETRY_SAFE_FLOW_TYPES); teaser/csv resolve to 0 by
+      // registry absence and can never be flipped on by a row edit.
+      retriesOverride: RETRY_SAFE_FLOW_TYPES[args.flow_type]?.retries ?? 0,
     });
     body = await res.json().catch(emptyBodyUnlessSeamRead);
   } catch (err) {

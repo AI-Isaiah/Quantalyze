@@ -14,6 +14,13 @@ import {
   BREAKER_STORE_TIMEOUT_MS,
   BREAKER_STORE_RETRIES,
   BREAKER_STORE_BACKOFF_MS,
+  // Phase 141 / SEAM-06 — the retry backoff constants. These ARE production
+  // values (the sum a retried leg actually waits between attempts), so SC-4b
+  // charges them rather than hand-typing the interval; the route CEILINGS stay
+  // hand-typed / disk-read. Charge the MAX jitter (PATTERNS "No Analog": jitter
+  // must remain stateable — bound it and charge the bound).
+  SEAM_RETRY_BACKOFF_MS,
+  SEAM_RETRY_JITTER_MAX_MS,
 } from "./resilient-fetch";
 
 /**
@@ -626,9 +633,17 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
             ? branch.legs.reduce(
                 (acc, b) =>
                   acc +
+                  // The attempts: each retry re-spends the whole per-attempt
+                  // deadline (Design A — timeoutMs x (1 + retries)).
                   SEAM_BUDGETS[b.key].timeoutMs *
                     b.calls *
-                    (1 + SEAM_BUDGETS[b.key].retries),
+                    (1 + SEAM_BUDGETS[b.key].retries) +
+                  // Phase 141 / SEAM-06 — the backoff BETWEEN attempts, charged at
+                  // its MAX (fixed backoff + max jitter). Zero when retries=0, so
+                  // every non-flipped row's term vanishes exactly as before.
+                  SEAM_BUDGETS[b.key].retries *
+                    b.calls *
+                    (SEAM_RETRY_BACKOFF_MS + SEAM_RETRY_JITTER_MAX_MS),
                 0,
               )
             : 0;
@@ -644,7 +659,8 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
             .map(
               (b) =>
                 `${b.key}x${b.calls}@${SEAM_BUDGETS[b.key].timeoutMs}ms` +
-                `x(1+${SEAM_BUDGETS[b.key].retries})`,
+                `x(1+${SEAM_BUDGETS[b.key].retries})` +
+                `+${SEAM_BUDGETS[b.key].retries}x${b.calls}x${SEAM_RETRY_BACKOFF_MS + SEAM_RETRY_JITTER_MAX_MS}ms backoff`,
             )
             .join(" + ");
           return {
