@@ -332,6 +332,34 @@ describe("SEAM_BUDGETS — every timeout pinned to a hand-typed literal", () => 
     },
   );
 
+  it("exactly 5 rows carry retries 1 — the count itself, hand-typed (D-07)", () => {
+    // ⚠️ THIS PIN EXISTS TO CONTRADICT PROSE. Three comments in the module under
+    // test claimed, long after it stopped being true, that "every row today"
+    // carries `retries: 0`. Five do not. The per-key oracle above pins each row
+    // individually, but it cannot fail on the CLAIM — a reader (or a reviewer,
+    // or the next phase's planner) who believed the sentence would find nothing
+    // red. This does: the sentence is now contradicted by a test, not only by a
+    // reader who happens to count.
+    //
+    // The 5 is hand-typed and is NOT `Object.keys(...).length` of anything in
+    // the module under test; it is the count the SEAM-05 audit authorised. If a
+    // sixth row is legitimately flipped, change this literal in the same commit
+    // as the row, its registry verdict, and any prose that states the number.
+    const rowsAtOne = Object.values(BUDGET_TABLE).filter(
+      (row) => row?.retries === 1,
+    ).length;
+
+    expect(
+      rowsAtOne,
+      `${rowsAtOne} budget rows carry retries 1; the SEAM-05 audit authorised ` +
+        `exactly 5 (bridge, simulator, portfolio-optimizer, optimize-weights, ` +
+        `process-key-enqueue). A sixth means a row was flipped without a ` +
+        `verdict; a fourth means an authorised retry was silently un-charged ` +
+        `from SC-4b's arithmetic. Either way, do not adjust this number to make ` +
+        `a diff pass — adjust it because the audit changed.`,
+    ).toBe(5);
+  });
+
   describe("registry ↔ rows consistency (SEAM-05 anti-drift)", () => {
     // ⚠️ WHAT EACH SIDE IS, AFTER D-08. These two hand-typed statements are NOT
     // peers any more. The registry (seam-retry-registry) is the GATE: its verdict

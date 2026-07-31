@@ -37,9 +37,14 @@
 -- NOT installed (CLAUDE.md). Under `psql -v ON_ERROR_STOP=1` (what
 -- .github/workflows/ci.yml `sql-tests` runs) a failed assertion exits non-zero
 -- and fails the job. The `test_*.sql` filename is auto-discovered by that job.
--- All fixture work runs inside BEGIN ... ROLLBACK, so the shared test DB is
--- never polluted. Expected values are literals (1, 2); nothing is read back out
--- of the RPC/index under test and re-asserted against itself.
+-- All ASSERTION work runs inside BEGIN ... ROLLBACK; the defensive pre-clean
+-- below deliberately runs OUTSIDE it and commits, so a prior aborted run's
+-- synthetic rows are removed. Both scopes touch only this file's literal
+-- fixture ids, so the shared test DB is never polluted (the two-scope split is
+-- the point: a pre-clean inside the transaction would be rolled back with
+-- everything else and could never recover an aborted run). Expected values are
+-- literals (1, 2); nothing is read back out of the RPC/index under test and
+-- re-asserted against itself.
 --
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \

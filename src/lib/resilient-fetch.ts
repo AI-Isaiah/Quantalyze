@@ -598,12 +598,17 @@ export const SEAM_BUDGETS: Record<
   "process-key-enqueue": {
     timeoutMs: 15_000,
     dependencies: [],
-    // Phase 141 / SEAM-06 — retry-safe at the ROW grain, but the row is NOT the
-    // retry gate for this seam. This budget serves BOTH onboard AND resync
-    // (budgetKeyFor is many-to-one), and both are allowlisted in
-    // RETRY_SAFE_FLOW_TYPES; the process-key client threads its retriesOverride on
-    // flow_type, so this literal is what SC-4b's arithmetic reads (an honest row),
-    // NOT what turns retry on. Teaser/csv live on process-key-sync (retries: 0).
+    // Phase 141 / SEAM-06 — retry-safe at the ROW grain, and the row is NOT the
+    // retry gate for ANY seam: since D-08 the gate is the required
+    // `retriesOverride`, fed by RETRY_SAFE_FLOW_TYPES / RETRY_SAFE_ANALYTICS at
+    // the two client chokepoints, and `resilientFetch` no longer reads this
+    // literal at all. What it IS: the accounting statement SC-4b's headroom
+    // arithmetic reads (an honest row — this budget really does perform two
+    // attempts in production, and the route's lambda ceiling must be charged for
+    // both). ⚠️ The row is at the WRONG GRAIN to be a gate here even in
+    // principle: it serves BOTH onboard AND resync (budgetKeyFor is
+    // many-to-one), while the audit that authorises the retry is per flow_type.
+    // Teaser/csv live on process-key-sync (retries: 0) for the same reason.
     retries: 1,
     notes:
       "flow_type in {resync, onboard}: the server merely enqueues onto the worker dyno and returns 202 (verified in analytics-service/routers/process_key.py:_is_long_fetch). An enqueue that takes 15s means Railway is sick. Tightened from the blanket 60s; nothing observes these two budgets (research §6.4).",
@@ -2089,9 +2094,10 @@ export async function resilientFetch(
 
   // ── THE RETRY LOOP (SEAM-06) ────────────────────────────────────────────
   // Bounded by `1 + retries`, with `retries ∈ {0, 1}` (validated above). At
-  // retries=0 — every row today, and every caller that passes no override —
-  // this runs exactly once and is behaviourally byte-equivalent to the
-  // pre-141 single-attempt path. Retry-eligible outcomes are ONLY the
+  // retries=0 — every caller whose registry verdict is 0, which is every call
+  // site outside the audited allowlist — this runs exactly once and is
+  // behaviourally byte-equivalent to the pre-141 single-attempt path.
+  // Retry-eligible outcomes are ONLY the
   // counting/transient classes: a transport throw (what `seamBreakerVerdict(null)`
   // counts) and a response whose `verdict.counts` is true (503/other-5xx). A
   // 2xx or a 4xx returns immediately. `SeamConfigError` was raised above the
