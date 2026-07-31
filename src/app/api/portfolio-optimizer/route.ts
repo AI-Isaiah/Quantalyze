@@ -61,8 +61,13 @@ export async function POST(req: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) {
+    // ── 140.3-G6 / SEAMUX-03 — a machine `code` on EVERY route-emitted arm ──
+    // A consumer discriminates the fault on a stable token instead of sniffing
+    // the prose. The CSRF 403 (assertSameOrigin) and the approval-gate 403
+    // (assertProfileApproved) are HELPER-emitted across the whole API surface
+    // and stay codeless — excluded exactly as keys/sync's withAuth 401 was.
     return NextResponse.json(
-      { error: "Unauthorized" },
+      { error: "Unauthorized", code: "UNAUTHENTICATED" },
       { status: 401, headers: NO_STORE_HEADERS },
     );
   }
@@ -79,7 +84,7 @@ export async function POST(req: NextRequest) {
     body = await req.json();
   } catch {
     return NextResponse.json(
-      { error: "Invalid JSON body" },
+      { error: "Invalid JSON body", code: "VALIDATION_FAILED" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -87,7 +92,9 @@ export async function POST(req: NextRequest) {
   const portfolioId = body.portfolio_id;
   if (!portfolioId) {
     return NextResponse.json(
-      { error: "portfolio_id is required" },
+      // The named-id-param fact (keys/sync MISSING_STRATEGY_ID precedent) — NOT
+      // VALIDATION_FAILED, which this set reserves for structural body rejection.
+      { error: "portfolio_id is required", code: "MISSING_PORTFOLIO_ID" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -106,9 +113,19 @@ export async function POST(req: NextRequest) {
   const rl = await checkLimit(userActionLimiter, rateLimitKey);
   if (!rl.success) {
     // 140.4-13 / SEAMRIM-05 — deny through the chokepoint so a limiter
-    // misconfiguration answers 503. The 429 body is the builder's default,
-    // byte-identical to what was inlined here; NO_STORE_HEADERS is kept.
-    return rateLimitDenyJson(rl, { headers: NO_STORE_HEADERS });
+    // misconfiguration answers 503. 140.3-G6 / SEAMUX-03 — the builder's default
+    // bodies are CODELESS, so pass the keys/sync-shape overrides: the default
+    // SENTENCES are byte-kept, the machine `code` added beside each. RATE_LIMITED
+    // (not KEY_RATE_LIMIT: OUR limiter, not an exchange throttle); the
+    // misconfigured branch answers SEAM_MISCONFIGURED. NO_STORE_HEADERS kept.
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: { error: "Too many requests", code: "RATE_LIMITED" },
+      misconfiguredBody: {
+        error: "Rate limiter unavailable",
+        code: "SEAM_MISCONFIGURED",
+      },
+    });
   }
 
   // Audit-2026-05-07 red-team R-0002 (HIGH c7): symmetric token refund on
@@ -146,7 +163,7 @@ export async function POST(req: NextRequest) {
   // CSRF-amplification-via-CSRF chain.
   if (!(await assertPortfolioOwnership(portfolioId, user.id))) {
     return NextResponse.json(
-      { error: "Forbidden" },
+      { error: "Forbidden", code: "FORBIDDEN" },
       { status: 403, headers: NO_STORE_HEADERS },
     );
   }
@@ -200,7 +217,11 @@ export async function POST(req: NextRequest) {
       );
       await refundRateLimitToken("circuit_open");
       return NextResponse.json(
-        { status: "failed", suggestions: null, error: CIRCUIT_OPEN_COPY },
+        // 140.3-G6 / SEAMUX-03 — `code` added BESIDE the B-26 money-bearing
+        // shape. Every existing key and value is byte-unchanged: PortfolioOptimizer
+        // discards stale suggestions off `{ status, suggestions, error }`, and
+        // changing it re-opens the stale-money-data defect this phase fixed.
+        { status: "failed", suggestions: null, error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
         {
           status: 503,
           headers: {
@@ -216,7 +237,8 @@ export async function POST(req: NextRequest) {
       // analytics-side timeout (the failure is upstream of the caller).
       await refundRateLimitToken("analytics_timeout");
       return NextResponse.json(
-        { status: "failed", suggestions: null, error: "Optimizer timed out" },
+        // B-26 shape byte-preserved, `code` added beside it.
+        { status: "failed", suggestions: null, error: "Optimizer timed out", code: "UPSTREAM_TIMEOUT" },
         { status: 504, headers: NO_STORE_HEADERS },
       );
     }
@@ -253,6 +275,10 @@ export async function POST(req: NextRequest) {
         status: "failed",
         suggestions: null,
         error: "Analytics service unreachable",
+        // Here "unreachable" IS the transport fact (ECONNREFUSED / ENOTFOUND /
+        // TLS), so UPSTREAM_NETWORK_ERROR is honest — the request never got an
+        // answer. B-26 shape byte-preserved, `code` added beside it.
+        code: "UPSTREAM_NETWORK_ERROR",
       },
       { status: 503, headers: NO_STORE_HEADERS },
     );
