@@ -1808,6 +1808,39 @@ async function readDependencyBody(res: Response): Promise<unknown> {
 }
 
 /**
+ * Does this response carry the upstream's OWN contractual wait hint?
+ *
+ * Phase 141.1 / D-01. `error_contract.service_error` makes `Retry-After`
+ * MANDATORY on every SERVICE-TRANSIENT 503 it emits — its `_validate` refuses to
+ * raise one without it — drawn from a table of 15s (supabase) / 30s
+ * (mt5-gateway). A 503 that names a wait is the upstream saying "not yet", and
+ * the retry backoff is three orders of magnitude shorter than the shortest wait
+ * it advertises.
+ *
+ * WHY ONLY 503, mirroring `readDependencyBody`'s discipline exactly: 503 is the
+ * ONE status the contract obliges to carry the header. The other counting 5xx
+ * (502/504) come from the platform EDGE, outside that contract, so a header
+ * arriving on one of those is not our upstream telling us anything and must not
+ * gate the retry.
+ *
+ * ⚠️ CAPABILITY-CHECKED, for the same reason `readDependencyBody` checks
+ * `clone`: `SeamResponse` is deliberately structural so route tests can stub the
+ * core with a `Response`-shaped object, and several existing fixtures are bare
+ * `{ ok, status }` literals with no `headers` at all. A missing `headers.get`
+ * must degrade to "no hint", never throw — a throw here lands inside the
+ * classification window and would replace the real upstream error with a
+ * bookkeeping one.
+ *
+ * The VALUE is never parsed and never slept on. Only presence is tested, so a
+ * malformed or hostile value cannot influence timing or logs.
+ */
+function hasContractualWait(res: Response): boolean {
+  if (res.status !== 503) return false;
+  if (typeof res.headers?.get !== "function") return false;
+  return res.headers.get("Retry-After") !== null;
+}
+
+/**
  * The ONE way to call the Railway analytics service.
  *
  * Sequence: caller/config validation → breaker check → budgeted fetch →
@@ -2157,7 +2190,21 @@ export async function resilientFetch(
       // A counting status is retry-eligible too. Not the last attempt → discard
       // this response and loop for the one retry; last attempt → fall through
       // and RETURN it, so a caller still sees the 503 body its contract reads.
-      if (!lastAttempt) {
+      //
+      // ⚠️ Phase 141.1 / D-01 — HONOUR THE UPSTREAM'S OWN CONTRACT. Every
+      // SERVICE-TRANSIENT 503 this service emits carries a mandatory
+      // `Retry-After` (see `hasContractualWait`). Retrying inside the backoff is
+      // near-certain to fail AND spends a second breaker failure learning that,
+      // on billed lambda wall clock. So a 503 that NAMES a wait fails fast: fall
+      // through and RETURN attempt 1's response with its body intact. Attempt
+      // 1's own failure is still recorded — `recordOnce` above runs first,
+      // because the 503 did happen; what is not spent is the SECOND one.
+      //
+      // The jittered backoff above is UNCHANGED for the transport/timeout
+      // class, which is the dominant Railway-blip class and carries no response
+      // at all, let alone a header to honour. A 429 never reaches this arm —
+      // `seamBreakerVerdict` classifies it `counts: false`.
+      if (!lastAttempt && !hasContractualWait(res)) {
         continue;
       }
     }
