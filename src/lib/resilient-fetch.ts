@@ -998,6 +998,21 @@ export function encodeBreakerLock(
 }
 
 /**
+ * The widest span a LEGITIMATE lock can encode: its own cooldown plus the
+ * tombstone the KEY outlives the lock by. A span longer than that describes no
+ * state this module can produce — see `decodeBreakerLock`.
+ *
+ * DERIVED from the two constants rather than hand-typed, deliberately. The bound
+ * means "as long as a lock can possibly be", not "90 000 ms", so retuning either
+ * constant has to move it. It cannot drift in silence in either direction:
+ * `seam-constants.pin.test.ts` pins both constants literal-against-literal, and
+ * the G2 case in `resilient-fetch.test.ts` pins this ceiling against its own
+ * hand-typed 90 000 from the outside.
+ */
+const MAX_BREAKER_LOCK_SPAN_MS =
+  (BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S) * 1_000;
+
+/**
  * Parse a stored breaker lock, or `null` if the value is not one.
  *
  * ⚠️ AN UNPARSEABLE VALUE IS `null`, AND `null` READS CLOSED. That is the
@@ -1008,6 +1023,21 @@ export function encodeBreakerLock(
  * `"open"`, which new instances ignore. That is at most one cooldown of
  * under-protection at a deploy boundary, in the direction this module always
  * errs.
+ *
+ * ⚠️ PARSEABLE IS NOT THE SAME AS PLAUSIBLE — LO-02 / TS-39, discharged here.
+ * The shape above accepts any two digit strings, so `open:0:100000000000000000`
+ * used to decode to a lock ~1e17 ms in the future. `isBreakerOpen` derived
+ * `retryAfterS ≈ 1e14` from it, `CircuitOpenError`'s A-15 guard accepted that
+ * (`Number.isInteger` is true of it), and the value went ON THE WIRE as a
+ * `Retry-After` — including to the anonymous teaser. A REVERSED pair
+ * (`expiresAtMs < armedAtMs`) separately made `emitBreakerTransition`'s
+ * `cooldownS` negative. A-15 exists precisely to keep implausible values out of
+ * that header, and this decoder was the one remaining path that could mint one
+ * which PASSED it.
+ *
+ * The span bound is therefore part of the parse, not a caller's duty. The
+ * rejection direction is `null` — i.e. CLOSED — so corruption still fails
+ * forward, unchanged.
  */
 export function decodeBreakerLock(
   value: unknown,
@@ -1015,7 +1045,13 @@ export function decodeBreakerLock(
   if (typeof value !== "string") return null;
   const parsed = /^open:(\d+):(\d+)$/.exec(value);
   if (!parsed) return null;
-  return { armedAtMs: Number(parsed[1]), expiresAtMs: Number(parsed[2]) };
+  const armedAtMs = Number(parsed[1]);
+  const expiresAtMs = Number(parsed[2]);
+  // `<= 0` covers the reversed pair AND the zero-length lock, which is already
+  // expired at the instant it was armed and so is not an open circuit either.
+  const spanMs = expiresAtMs - armedAtMs;
+  if (spanMs <= 0 || spanMs > MAX_BREAKER_LOCK_SPAN_MS) return null;
+  return { armedAtMs, expiresAtMs };
 }
 
 // ---------------------------------------------------------------------------
@@ -2104,6 +2140,18 @@ export async function resilientFetch(
   // loop; `CircuitOpenError` from the pre-attempt re-check is thrown from ABOVE
   // the fetch `try`, so nothing in the loop can catch or swallow it (SC4 /
   // T-141-03).
+  //
+  // ⚠️ Phase 141.1 / D-17 — WHY A STATUS IS CARRIED ACROSS ITERATIONS. `res` is
+  // declared INSIDE the loop body and is out of scope at the pre-attempt-2
+  // re-check, so the `CircuitOpenError` arm below could not name the response it
+  // was discarding. This is the minimal carry: the STATUS NUMBER only.
+  //
+  // ⚠️ DO NOT "SIMPLIFY" THIS BY HOISTING `res` ITSELF. A `Response` hoisted out
+  // of the loop keeps a body stream — and the credentials any error rendered
+  // from it could inline — alive across the backoff and into the next attempt,
+  // which is exactly the leak lifetime the H2 class names. A number cannot leak.
+  let lastCountingStatus: number | undefined;
+
   for (let attempt = 0; attempt <= retries; attempt++) {
     const lastAttempt = attempt === retries;
 
@@ -2121,6 +2169,25 @@ export async function resilientFetch(
       // outage the breaker exists to contain. Thrown here, above the fetch try.
       const reBreaker = await isBreakerOpen(budgetKey);
       if (reBreaker.open) {
+        // ⚠️ Phase 141.1 / D-17 — THE DIAGNOSIS DIES HERE OTHERWISE. The caller
+        // is about to receive a `CircuitOpenError` instead of attempt 1's
+        // response, and that response carried the freshest fact available: the
+        // status, and on a 503 the `dependency` and `human_message` the caller
+        // USED to receive on this path pre-141. The response itself cannot be
+        // surfaced (the breaker is open; the point is not to serve it), so the
+        // status is logged rather than silently dropped.
+        //
+        // Same discipline as the transport arm below: the budget key is a
+        // module-derived value from a closed set, and the status is a number.
+        // The path, the body and every header value stay OUT.
+        console.error(
+          `[resilient-fetch] ${budgetKey}: breaker opened between attempts — ` +
+            `discarding attempt ${attempt}'s ` +
+            (lastCountingStatus === undefined
+              ? "transport failure (no status line)"
+              : `${lastCountingStatus} response`) +
+            " and returning a circuit error instead",
+        );
         throw new CircuitOpenError(
           reBreaker.retryAfterS ?? DEFAULT_RETRY_AFTER_S,
         );
@@ -2268,7 +2335,38 @@ export async function resilientFetch(
       // class, which is the dominant Railway-blip class and carries no response
       // at all, let alone a header to honour. A 429 never reaches this arm —
       // `seamBreakerVerdict` classifies it `counts: false`.
+      lastCountingStatus = res.status;
       if (!lastAttempt && !hasContractualWait(res)) {
+        // ⚠️ Phase 141.1 / D-17 — THIS ARM USED TO BE SILENT, AND IT IS THE ONE
+        // ARM THAT SHOULD NOT BE. A 503 that is retried and then succeeds is
+        // invisible to the caller by design, and it is also the ONLY signal that
+        // a dependency is degrading BELOW the breaker threshold. With no line
+        // here the retry loop made the seam quieter than the single-attempt path
+        // it replaced: the transport arm below logs, this one did not.
+        //
+        // ⚠️ THE SENTENCE SAYS "RETRYING", AND THAT IS LOAD-BEARING. Since D-01
+        // this arm has TWO exits — this `continue`, and a fall-through that is
+        // either the D-01 fail-fast (the 503 named its own wait) or the last
+        // attempt surrendering. Only the RETRY is logged, and it says so, so a
+        // line here can never be misread as a surrender. Do not generalise this
+        // message to cover the fall-through without splitting it in two: a
+        // fail-fast and a last-attempt surrender are different operator facts,
+        // and one sentence covering both would report neither.
+        //
+        // Log discipline, verbatim from the transport arm: the BUDGET KEY (a
+        // module-derived value from a frozen closed set) and the STATUS (a
+        // number). Never the path — that is caller input — and never
+        // `requestInit`, whose headers and body carry raw exchange API secrets,
+        // `INTERNAL_API_TOKEN` and a live end-user Supabase JWT. If an error
+        // object is ever rendered into this line it goes through
+        // `scrubSeamError(err, credentialHeaderValues(requestInit))` with BOTH
+        // arguments; see the TS-15 incident note on the transport arm for what
+        // dropping the second one shipped. Pinned from the outside by the
+        // sentinel case SC-M′.
+        console.error(
+          `[resilient-fetch] ${budgetKey}: attempt ${attempt + 1} of ` +
+            `${retries + 1} returned ${res.status} — retrying after backoff`,
+        );
         continue;
       }
     }
