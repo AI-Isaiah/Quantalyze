@@ -35,6 +35,11 @@ bound as "closes the sequential class EXCEPT the 15s-timeout sub-case where the
 worker tick advances SV#1 out of draft mid-blip", and point at the registry
 entry.
 
+**Still open after 141.1-05 (2026-07-31).** Plan 05 checked: its
+`files_modified` is `seam-retry-registry.ts` / `.test.ts` /
+`process-key-client.ts` — TypeScript only, no `analytics-service/` path — so it
+could not take this either. Carried forward unchanged.
+
 **Blast radius:** documentation only. No behaviour change. Not user-facing.
 
 ---
