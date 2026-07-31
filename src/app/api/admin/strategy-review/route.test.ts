@@ -491,6 +491,8 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.error).toMatch(/analytics no longer complete/i);
+    // 140.3-G9 / SEAMUX-03 — one token for the whole 409 re-check fact class.
+    expect(body.code).toBe("REVIEW_RECHECK_FAILED");
   });
 
   it("returns 409 when re-check finds trade count fell below 5", async () => {
@@ -506,6 +508,7 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.error).toMatch(/trade count fell below threshold/i);
+    expect(body.code).toBe("REVIEW_RECHECK_FAILED");
   });
 
   it("returns 200 when re-check sees complete analytics + >=5 trades", async () => {
@@ -588,6 +591,9 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.error).toMatch(/no longer awaiting review/i);
+    // 140.3-G9 — this 409 was BEYOND the plan's four-arm floor; it is the same
+    // re-check fact class (state changed during review), so the same token.
+    expect(body.code).toBe("REVIEW_RECHECK_FAILED");
   });
 
   // --- CSV-sourced re-check branch (no key, 0 trades, history in
@@ -705,7 +711,10 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     });
     const res = await postApprove();
     expect(res.status).toBe(503);
-    expect((await res.json()).error).toMatch(/verify strategy data source/i);
+    const body = await res.json();
+    expect(body.error).toMatch(/verify strategy data source/i);
+    // 140.3-G9 / SEAMUX-03 — one token for the whole source-read 503 fact class.
+    expect(body.code).toBe("REVIEW_SOURCE_READ_FAILED");
   });
 
   // --- PUB-01 (Phase 87) composite gate: OQ-1 defense-in-depth pure READ. A
@@ -810,7 +819,10 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     });
     const res = await postApprove();
     expect(res.status).toBe(503);
-    expect((await res.json()).error).toMatch(READ_FAILURE_503);
+    const body = await res.json();
+    expect(body.error).toMatch(READ_FAILURE_503);
+    // 140.3-G9 / SEAMUX-03 — the source-read 503 token, on a first-pass read.
+    expect(body.code).toBe("REVIEW_SOURCE_READ_FAILED");
     expect(tracker.publishUpdateIssued).toBe(false);
   });
 
@@ -1227,6 +1239,12 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
     expect(body.error).toMatch(/only 3 trade/i);
     // Regression guard: the stable CODE must NOT leak in place of the reason.
     expect(body.error).not.toContain("INSUFFICIENT_TRADES");
+    // 140.3-G9 / SEAMUX-03 — the gate refusal carries GUARD_BLOCKED (the union
+    // member finalize-wizard stamps a publish-gate refusal with). The
+    // machine `code` lives ALONGSIDE the human reason, never in place of it —
+    // the reason stays the founder-facing prose (M-0285), the code is the
+    // client discriminator.
+    expect(body.code).toBe("GUARD_BLOCKED");
   });
 
   it("returns 400 with the ANALYTICS_FAILED reason string when computation_status='failed'", async () => {
@@ -1354,6 +1372,8 @@ describe("POST /api/admin/strategy-review — B9 M-1143 review_note length cap",
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toMatch(/invalid request/i);
+    // 140.3-G9 / SEAMUX-03 — a boundary-shape rejection carries VALIDATION_FAILED.
+    expect(body.code).toBe("VALIDATION_FAILED");
   });
 });
 
@@ -1438,6 +1458,167 @@ describe("[140.4-16 / WR-04] no console site passes a caught value unscrubbed", 
         "carries `details`/`hint` which can contain row values. Wrap it: " +
         "scrubSeamError(x) from @/lib/seam-redaction. Do NOT answer this by " +
         "dropping the value — that is the A-10 defect.",
+    ).toEqual([]);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// 140.3-G9 / SEAMUX-03 — the machine `code` on every arm this route emits.
+// ══════════════════════════════════════════════════════════════════════════
+
+/**
+ * WHY (Rule 9). This route is the TENTH seam-importing production route — the
+ * one the 140.3-VERIFICATION nine-route list MISSED (instance-not-class hazard).
+ * A dropped `code` is a client-discrimination regression on the admin review
+ * surface: 140.3-12 reserves the right to reword the human prose, so a consumer
+ * that branches on the sentence breaks the day it does. These assertions run
+ * against the PARSED RESPONSE BODY of the invoked handler — the wiring, not a
+ * helper — so a code removed from an arm reddens here.
+ *
+ * The auth/throttle arms (401/403/429) are code-asserted ONLY here: the shared
+ * `runAdminPostCsrfRateLimitSuite` above drives them but predates SEAMUX-03 and
+ * asserts status only. The 503 / 409 / GUARD_BLOCKED / VALIDATION_FAILED classes
+ * gain their `body.code` expectations in the suites where their fixtures already
+ * live (C-0060, M-0285, B9). The arm-agnostic fence at the bottom is the
+ * every-arm guarantee: it reads the route source and fails if ANY non-2xx arm
+ * ships without a `code` — the check that survives a new arm being added.
+ */
+/**
+ * Auth/throttle baseline driven by ONE hoisted state object per module, not by
+ * competing per-test doMocks. vitest keeps doMock registrations across
+ * resetModules and a second doMock for the same path does not reliably override
+ * the first within a generation, so the null-user / non-admin / deny-limiter
+ * cases are expressed as MUTATIONS of `g9` that a single stable factory reads at
+ * import time. beforeEach resets `g9`, so no case leaks into the next.
+ */
+const g9 = vi.hoisted(() => ({
+  user: null as unknown,
+  isAdmin: true,
+  denyLimiter: false,
+}));
+
+describe("POST /api/admin/strategy-review — 140.3-G9 SEAMUX-03 machine codes", () => {
+  const url = "http://localhost:3000/api/admin/strategy-review";
+
+  beforeEach(() => {
+    vi.resetModules();
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    // Authed-admin, healthy-limiter baseline. Tests mutate g9 before post().
+    g9.user = TEST_USER;
+    g9.isAdmin = true;
+    g9.denyLimiter = false;
+    // One factory per module, reading the live g9 fields. A doMock overrides the
+    // top-of-file vi.mock; reverting via doUnmock would hit the real
+    // supabase/server and read the request-scoped cookie store outside a request.
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () => ({
+        auth: {
+          getUser: async () => ({ data: { user: g9.user }, error: null }),
+        },
+      }),
+    }));
+    vi.doMock("@/lib/admin", () => ({ isAdminUser: async () => g9.isAdmin }));
+    vi.doMock("@/lib/ratelimit", () => ({
+      adminActionLimiter: {},
+      checkLimit: async () =>
+        g9.denyLimiter
+          ? { success: false, retryAfter: 7 }
+          : { success: true, retryAfter: 0 },
+    }));
+    vi.doMock("@/lib/strategyGate", () => stubbedGateModule());
+  });
+
+  async function post(body: unknown): Promise<Response> {
+    const mod = await import("./route");
+    const req = new NextRequest(url, {
+      method: "POST",
+      headers: { origin: "http://localhost:3000" },
+      body: JSON.stringify(body),
+    });
+    return (mod.POST as (req: NextRequest) => Promise<Response>)(req);
+  }
+
+  it("401 unauthenticated → code UNAUTHENTICATED (auth verdict only, no seam state)", async () => {
+    g9.user = null;
+    const res = await post({ id: "abc", action: "approve" });
+    expect(res.status).toBe(401);
+    const b = await res.json();
+    expect(b.error).toBe("Unauthorized");
+    expect(b.code).toBe("UNAUTHENTICATED");
+  });
+
+  it("403 forbidden → code FORBIDDEN (a non-admin learns nothing beyond the status)", async () => {
+    g9.isAdmin = false;
+    const res = await post({ id: "abc", action: "approve" });
+    expect(res.status).toBe(403);
+    const b = await res.json();
+    expect(b.error).toBe("Forbidden");
+    expect(b.code).toBe("FORBIDDEN");
+  });
+
+  it("429 our-limiter refusal → code RATE_LIMITED", async () => {
+    g9.denyLimiter = true;
+    const res = await post({ id: "abc", action: "approve" });
+    expect(res.status).toBe(429);
+    const b = await res.json();
+    expect(b.error).toBe("Too many requests");
+    expect(b.code).toBe("RATE_LIMITED");
+    // Additive-only: the Retry-After header the arm already carried survives.
+    expect(res.headers.get("Retry-After")).toBe("7");
+  });
+
+  it("400 malformed action → code VALIDATION_FAILED (zod boundary, before the limiter)", async () => {
+    const res = await post({ id: "abc", action: "bogus" });
+    expect(res.status).toBe(400);
+    const b = await res.json();
+    expect(b.error).toMatch(/invalid request/i);
+    expect(b.code).toBe("VALIDATION_FAILED");
+  });
+
+  it("400 non-object body → code VALIDATION_FAILED", async () => {
+    const res = await post([1, 2, 3]);
+    expect(res.status).toBe(400);
+    const b = await res.json();
+    expect(b.code).toBe("VALIDATION_FAILED");
+  });
+
+  it("ARM-AGNOSTIC FENCE: every non-2xx NextResponse.json arm carries a string `code`", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const src = readFileSync(
+      join(process.cwd(), "src/app/api/admin/strategy-review/route.ts"),
+      "utf8",
+    );
+    // Capture each NextResponse.json(body, { status: NNN ... }): the body object
+    // (non-greedy to the `}, { status:` boundary — which correctly steps past the
+    // `${gate.reason}` brace in the interpolated 400 arm) and its 3-digit status.
+    // The lone 200 arm `NextResponse.json({ success: true })` has no status arg
+    // and is excluded by construction.
+    const arms = [
+      ...src.matchAll(
+        /NextResponse\.json\(\s*(\{[\s\S]*?\}),\s*\{\s*status:\s*(\d{3})/g,
+      ),
+    ];
+    // VACUITY FENCE — a scan that matches nothing reports compliance forever.
+    expect(
+      arms.length,
+      "the arm scan found nothing — the fence is vacuous",
+    ).toBeGreaterThanOrEqual(25);
+
+    const offenders: string[] = [];
+    for (const [, bodyLiteral, status] of arms) {
+      if (Number(status) < 300) continue; // 2xx arms need no code
+      if (!/\bcode:\s*"/.test(bodyLiteral)) {
+        offenders.push(
+          `status ${status}: ${bodyLiteral.replace(/\s+/g, " ").slice(0, 80)}`,
+        );
+      }
+    }
+    expect(
+      offenders,
+      "a non-2xx arm reaches the client with no machine `code` — the SEAMUX-03 " +
+        "client-discrimination regression this route was the 10th to close.",
     ).toEqual([]);
   });
 });
