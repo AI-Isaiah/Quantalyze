@@ -145,6 +145,40 @@ export function breakerKeyFor(dependency: SeamServiceDependency): string {
  * circuit trips. 5 is low enough to react inside a single user's retry
  * patience and high enough that one unlucky request, or a single pod restart
  * mid-deploy, does not take the seam down.
+ *
+ * ⚠️ THE UNIT IS AN ATTEMPT, NOT A REQUEST, AND THIS DOCBLOCK USED TO REASON AS
+ * IF THEY WERE THE SAME THING. The sentence above predates the retry loop: it
+ * argued only from the under-trip direction, and it was written when one
+ * `resilientFetch` call could contribute at most ONE failure. Phase 141's
+ * per-attempt latch (see `recordOnce` and the Class D note at its reset) changed
+ * that deliberately — a retried attempt is a distinct request as far as the
+ * breaker is concerned, so a doubly-failing retried call now records TWO.
+ *
+ * THE ARITHMETIC, stated so this is a number rather than a wish:
+ *
+ *   | traffic shape                        | failures per user request | requests to trip |
+ *   |--------------------------------------|---------------------------|------------------|
+ *   | no retry (every row before 141)      | 1                         | 5                |
+ *   | retried, both attempts failing       | 2                         | ⌈5/2⌉ = 3        |
+ *
+ * So on the five retry-enabled rows, sustained degradation trips the circuit in
+ * **3 user requests instead of 5**. The trip is also WIDE: `breakerKeysFor`
+ * appends the global `BREAKER_KEY` to every call site's check, so an open global
+ * circuit gates all fifteen routes — including the anonymous public teaser
+ * (the exposure recorded and accepted at the `process-key-sync` row).
+ *
+ * ACCEPTED, decided 2026-07-31 (Phase 141.1 / D-02), and the direction is the
+ * point: a Railway blip that reaches five COUNTED failures inside 30 s is a real
+ * outage, not noise, and containing it two requests sooner is the behaviour we
+ * want from a breaker. Faster containment is bought with a fail-open breaker
+ * whose cooldown is 30 s, so the cost of an early trip is bounded and the cost
+ * of a late one is not.
+ *
+ * Raising this number is therefore TWO decisions, not one: it delays protection
+ * during a real outage AND it delays it further still for retried traffic, by a
+ * factor this docblock's table makes explicit. `seam-constants.pin.test.ts` pins
+ * both the literal and the derived ⌈threshold/2⌉, so neither half can move in
+ * silence.
  */
 export const BREAKER_FAILURE_THRESHOLD = 5;
 
