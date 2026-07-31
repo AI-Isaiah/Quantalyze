@@ -72,7 +72,7 @@ export async function POST(req: NextRequest) {
 
   if (!user) {
     return NextResponse.json(
-      { error: "Unauthorized" },
+      { error: "Unauthorized", code: "UNAUTHENTICATED" },
       { status: 401, headers: NO_STORE_HEADERS },
     );
   }
@@ -89,7 +89,7 @@ export async function POST(req: NextRequest) {
     rawBody = await req.json();
   } catch {
     return NextResponse.json(
-      { error: "Invalid JSON" },
+      { error: "Invalid JSON", code: "VALIDATION_FAILED" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -100,6 +100,7 @@ export async function POST(req: NextRequest) {
       {
         error:
           "portfolio_id and candidate_strategy_id are required and must be valid UUIDs",
+        code: "VALIDATION_FAILED",
       },
       { status: 400, headers: NO_STORE_HEADERS },
     );
@@ -115,7 +116,7 @@ export async function POST(req: NextRequest) {
     // user-side throttling.
     if (isRateLimitMisconfigured(rl)) {
       return NextResponse.json(
-        { error: "Rate limiter unavailable" },
+        { error: "Rate limiter unavailable", code: "SEAM_MISCONFIGURED" },
         {
           status: 503,
           headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
@@ -129,6 +130,7 @@ export async function POST(req: NextRequest) {
       {
         error:
           "Too many simulations. The portfolio impact simulator is capped at 20 runs per hour.",
+        code: "RATE_LIMITED",
         retryAfter: rl.retryAfter,
       },
       {
@@ -153,7 +155,7 @@ export async function POST(req: NextRequest) {
 
   if (!portfolio) {
     return NextResponse.json(
-      { error: "Portfolio not found" },
+      { error: "Portfolio not found", code: "PORTFOLIO_NOT_FOUND" },
       { status: 404, headers: NO_STORE_HEADERS },
     );
   }
@@ -186,7 +188,7 @@ export async function POST(req: NextRequest) {
         `[simulator] circuit open — short-circuited, retry in ${err.retryAfterS}s`,
       );
       return NextResponse.json(
-        { error: CIRCUIT_OPEN_COPY },
+        { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
         {
           status: 503,
           headers: {
@@ -202,15 +204,18 @@ export async function POST(req: NextRequest) {
     // upstream error to 500. AnalyticsUpstreamError.message carries the Python
     // `detail` (operator-curated copy) — safe to forward on the 4xx path.
     if (err instanceof AnalyticsUpstreamError && err.status >= 400 && err.status < 500) {
+      // SEAMUX-03 — preserve the UPSTREAM'S own machine code
+      // (`AnalyticsUpstreamError.seamCode`); UNKNOWN only when the body carried
+      // none. Message and status forwarding are unchanged.
       return NextResponse.json(
-        { error: err.message },
+        { error: err.message, code: err.seamCode ?? "UNKNOWN" },
         { status: err.status, headers: NO_STORE_HEADERS },
       );
     }
     // M-0959/M-0963/L-0055: a timed-out Python round-trip is a gateway timeout.
     if (err instanceof AnalyticsTimeoutError) {
       return NextResponse.json(
-        { error: "The simulator is taking longer than expected. Please try again." },
+        { error: "The simulator is taking longer than expected. Please try again.", code: "UPSTREAM_TIMEOUT" },
         { status: 504, headers: NO_STORE_HEADERS },
       );
     }
@@ -224,7 +229,7 @@ export async function POST(req: NextRequest) {
       tags: { route: "api/simulator", op: "simulateAddCandidate" },
     });
     return NextResponse.json(
-      { error: "Portfolio impact simulation failed." },
+      { error: "Portfolio impact simulation failed.", code: "UNKNOWN" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }
