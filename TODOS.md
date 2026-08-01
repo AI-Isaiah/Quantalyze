@@ -359,14 +359,28 @@ true for 146 and half of 142–145, and **false for 141**.
   `analytics-service/docs/STATUS_CONTRACT.md`. *Fix:* add `501` and `505` to the permanent arm, or
   state in the table why they are considered transient on this seam. Pair with a discriminator pass.
 
-- **✅ RESOLVED / DISCHARGED 2026-07-31 (141.1-06, commit `f308b460`) — LO-02 / TS-39 `decodeBreakerLock`
-  accepted a reversed or unbounded span, defeating the A-15 guard downstream.** The prescribed fix
-  landed exactly as written below: `decodeBreakerLock` now rejects a span that is `<= 0` or
-  `> MAX_BREAKER_LOCK_SPAN_MS` (derived, not hand-typed, as
-  `(BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S) * 1000` = 90 000 ms), returning `null` so
-  corruption reads CLOSED per locked decision 4. Regression-tested at 1e17, at the ceiling, one past
-  the ceiling, reversed, and zero-span; the bound is pinned from the outside against a hand-typed
-  90 000, and removing it was observed RED. A `Retry-After` of 1e17 can no longer be minted.
+- **⛔ RE-OPENED 2026-08-01 — the 141.1-06 fix is a REGRESSION, and the discharge below was
+  false. Owned by phase 141.2 (findings 10 + 11), TOP priority.** The xhigh review of 141.1
+  found two defects in `f308b460` itself, and `git log -S "MAX_BREAKER_LOCK_SPAN_MS"` confirms
+  that commit is the sole origin — this is ours, not pre-existing:
+  1. **The breaker can now fail to arm at all.** A corrupt value that is still PRESENT in Redis
+     decodes to `null` under the new span bound, which routes `recordSeamFailure`'s trip path
+     into the `nx: true` branch — and `SET NX` cannot overwrite an existing key. So the write is
+     refused, no lock is stored, and `emitBreakerTransition` never fires. **For that key's full
+     TTL the circuit cannot open on any of the fifteen seam routes, silently.** Before
+     `f308b460` the same value decoded to a lock and took the `get: true` overwrite branch,
+     which armed correctly. Strictly worse than what it replaced.
+  2. **The claim "a `Retry-After` of 1e17 can no longer be minted" is false.** The bound is
+     span-only — it never compares either timestamp to `Date.now()` — so
+     `open:100000000000000000:100000000000030000` has a legal 30 000 ms span, decodes fine, and
+     still puts `Retry-After: 100000000000000` on the wire, including to the anonymous teaser.
+     The reachable production variant is a clock-skewed writer telling every reader to retry in
+     ~3 600 s instead of 30.
+  The regression test cited below exercised only `isBreakerOpen`; it never drove
+  `recordSeamFailure` with the corrupt value present, which is why it stayed green.
+  *Original (now-false) discharge text kept for provenance:* "The prescribed fix landed exactly
+  as written below: `decodeBreakerLock` now rejects a span that is `<= 0` or
+  `> MAX_BREAKER_LOCK_SPAN_MS` … A `Retry-After` of 1e17 can no longer be minted."
   Original text kept for provenance: `src/lib/resilient-fetch.ts`, the `^open:(\d+):(\d+)$` regex: it accepts any digit
   strings, so `open:0:99999999999999999999` decodes to `expiresAtMs ≈ 1e20`, `isBreakerOpen`
   returns `retryAfterS ≈ 1e17`, `Number.isInteger` accepts it, and `Retry-After:
