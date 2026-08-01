@@ -167,15 +167,35 @@ across them — `process-key-enqueue` serves both `onboard` and `resync`, becaus
 
 If you are asked "did this route retry?", read the registry, not the budget row.
 
-### The `Retry-After` fail-fast (Phase 141.1 / D-01)
+### The `Retry-After` fail-fast (Phase 141.1 / D-01, parse semantics since 141.2 / D-06)
 
-**A 503 that carries a `Retry-After` header is NOT retried.** Every
-SERVICE-TRANSIENT 503 the analytics service emits carries a mandatory
-`Retry-After` (`error_contract.service_error`), and that wait is longer than the
-250–500 ms backoff — so retrying inside the backoff is near-certain to fail AND
-spends a second breaker failure learning that, on billed lambda wall clock.
-`hasContractualWait` detects the header and the loop falls through, returning
-attempt 1's response with its body intact.
+**A 503 that NAMES A POSITIVE WAIT is not retried.** Every SERVICE-TRANSIENT 503
+the analytics service emits carries a mandatory `Retry-After`
+(`error_contract.service_error`), and that wait is orders of magnitude longer
+than the jittered backoff — so retrying inside the backoff is near-certain to
+fail AND spends a second breaker failure learning that, on billed lambda wall
+clock. `hasContractualWait` gates the fall-through, and the loop returns attempt
+1's response with its body intact.
+
+**Naming a wait means PARSING to one, not merely carrying the header.** Until
+141.2 the gate was a presence test, so a `Retry-After: 0` — which RFC 9110
+§10.2.3 defines as "retry now" — and an empty or garbage value all suppressed the
+retry. The gate now delegates to `parseRetryAfterSeconds`, the single shared
+`Retry-After` parser: **strictly positive seconds, or nothing.** Operationally:
+
+| header value on a 503 | behaviour |
+|---|---|
+| a positive delta-seconds (what our own contract emits) | fails fast |
+| an HTTP-date, WITH the response's own `Date` header | fails fast — a date-form wait is still a wait |
+| an HTTP-date, with NO `Date` header to resolve it against | retries (the delta is not knowable from the server's clock) |
+| `0`, empty, negative, or unparseable | retries |
+| absent | retries |
+
+So **"the response had a `Retry-After`" is not enough to explain a single-attempt
+503 in the logs** — read the value. The parsed number is used for nothing else:
+it never reaches a sleep, a timer or a log line, so a hostile header still cannot
+influence timing. The only 503 emitter we control cannot produce a non-positive
+value (`_validate` rejects it); whether the platform edge can is unverified.
 
 Attempt 1's own failure **is** still recorded — the 503 did happen. What is not
 spent is the second one.

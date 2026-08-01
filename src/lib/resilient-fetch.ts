@@ -5,6 +5,7 @@ import { CircuitOpenError, SeamBodyReadError } from "./seam-errors";
 import { seamBreakerVerdict } from "./seam-discriminator";
 import { scrubSeamError } from "./seam-redaction";
 import { captureToSentry, shouldCaptureNow } from "./sentry-capture";
+import { parseRetryAfterSeconds } from "./retry/retry-after";
 
 /**
  * Phase 140 / SEAM-02 + SEAM-03 — the ONE shared resilience core for the
@@ -1988,15 +1989,44 @@ async function readDependencyBody(res: Response): Promise<unknown> {
  * `{ ok, status }` literals with no `headers` at all. A missing `headers.get`
  * must degrade to "no hint", never throw — a throw here lands inside the
  * classification window and would replace the real upstream error with a
- * bookkeeping one.
+ * bookkeeping one. `parseRetryAfterSeconds` defends the same way, so the local
+ * check is the belt in front of its braces, not a duplicate of it: it also
+ * rejects a `get` that is present but not callable.
  *
- * The VALUE is never parsed and never slept on. Only presence is tested, so a
- * malformed or hostile value cannot influence timing or logs.
+ * ⚠️ THE VALUE IS PARSED (Phase 141.2 / D-06, finding 9). This used to read
+ * `headers.get("Retry-After") !== null` and its docblock said *"Only presence is
+ * tested, so a malformed or hostile value cannot influence timing or logs"*.
+ * That was unsound: presence asserts the EMITTER'S contract without verifying
+ * the responder is bound by it. A `Retry-After: 0` means "retry now" (RFC 9110
+ * §10.2.3), and an empty or garbage value names no wait at all — yet all three
+ * suppressed the retry and handed the caller attempt 1's 503, for exactly the
+ * transient blip the retry exists to absorb.
+ *
+ * The predicate now DELEGATES to `parseRetryAfterSeconds` (B20 — the ONE
+ * `Retry-After` parser in this repo, enforced by the `no-raw-retry-after-parse`
+ * contract). Its contract IS this gate's predicate: strictly positive seconds,
+ * or `null` for absent / empty / zero / negative / unparseable. It covers BOTH
+ * RFC 9110 forms — delta-seconds, and an HTTP-date resolved against the
+ * response's OWN `Date` header, so a skewed client clock cannot distort the
+ * delta (no `Date` header ⇒ not reliably knowable ⇒ `null`). A date-form wait is
+ * a contractual wait like any other and fails fast; there is no deliberate gap
+ * here to work around. Do not hand-roll a second parse of this header.
+ *
+ * THE SAFETY PROPERTY SURVIVES VERBATIM: the parsed seconds are DISCARDED at the
+ * `!== null`. No `Retry-After` value reaches a sleep, a log or a timer — only the
+ * boolean changed.
+ *
+ * Scope, honestly: `error_contract.service_error` raises on a non-positive
+ * `retry_after` and refuses to emit a 503 without the header, so the only
+ * contract-bound emitter we own CANNOT produce the values above. Whether the
+ * platform edge can is UNVERIFIED — no such response has been captured. This is
+ * a repair to a check that was unsound by construction, not a fix for an
+ * observed production trace.
  */
 function hasContractualWait(res: Response): boolean {
   if (res.status !== 503) return false;
   if (typeof res.headers?.get !== "function") return false;
-  return res.headers.get("Retry-After") !== null;
+  return parseRetryAfterSeconds(res.headers) !== null;
 }
 
 /**
