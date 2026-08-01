@@ -787,13 +787,27 @@ function discoverLiteralCallSites(): DiscoveredBinding[] {
  * Named constants rather than repeated string literals only because nine and
  * two roster rows share them respectively; they are hand-typed oracles like
  * every other value in this roster, never imported or derived from the modules
- * they describe. The `?? 0` half is the load-bearing part: it is what makes a
- * seam function ABSENT from the SEAM-06 registry resolve to no retry instead of
- * inheriting one, so a drift to `?? 1` is a silent grant of retry to every
- * unaudited wrapper — and reddens here.
+ * they describe. On the ANALYTICS row the `?? 0` half is the load-bearing part:
+ * it is what makes a seam function ABSENT from the SEAM-06 registry resolve to no
+ * retry instead of inheriting one, so a drift to `?? 1` is a silent grant of
+ * retry to every unaudited wrapper — and reddens here.
+ *
+ * ⚠️ 141.2 / D-01 — THE PROCESS-KEY ROW NOW SHOWS A NAME, NOT ARITHMETIC, AND
+ * THAT IS THE ACCEPTED TRADEOFF. Its expression used to spell the whole verdict
+ * out (`RETRY_SAFE_FLOW_TYPES[args.flow_type]?.retries ?? 0`); the verdict now
+ * also depends on idempotency-key presence, which cannot be written inline
+ * without either a multi-line expression (which this roster's line-scoped
+ * extractor captures PARTIALLY and reddens on) or a ~200-character single-line
+ * ternary (worse to read than a name). So the belt moved INSIDE `retriesForFlow`
+ * in the registry leaf — the artifact whose whole purpose is to be the single
+ * readable verdict — and it carries its own direct unit pins there plus
+ * behavioural pins through the real client in `process-key-client.test.ts`. What
+ * this roster still guarantees is the property it was built for: that the
+ * chokepoint's retry decision is the one named here and did not drift.
+ * DO NOT widen the extractor to accommodate a multi-line expression.
  */
 const ANALYTICS_RETRY = "RETRY_SAFE_ANALYTICS[options.budgetKey]?.retries ?? 0";
-const PROCESS_KEY_RETRY = "RETRY_SAFE_FLOW_TYPES[args.flow_type]?.retries ?? 0";
+const PROCESS_KEY_RETRY = "retriesForFlow(args.flow_type, args.context)";
 
 /**
  * The 13 bindings, typed HERE as literals — the whole class, one entry per

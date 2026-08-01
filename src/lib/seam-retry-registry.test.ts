@@ -16,6 +16,7 @@ import {
   RETRY_AUDIT_NO_FLOW_TYPES,
   RETRY_SAFE_ANALYTICS,
   RETRY_AUDIT_NO_ANALYTICS,
+  retriesForFlow,
 } from "./seam-retry-registry";
 
 /**
@@ -653,6 +654,109 @@ describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
         RETRY_AUDIT_NO_FLOW_TYPES.resync = "safe now, trust me";
       }).toThrow(TypeError);
       expect(RETRY_AUDIT_NO_FLOW_TYPES.resync).toMatch(/WITHDRAWN GRANT/);
+    });
+  });
+
+  /**
+   * Phase 141.2 / D-01 (finding 1) — `retriesForFlow`, the gate that decides
+   * BOTH halves of the verdict.
+   *
+   * The behavioural half of this fix is pinned where it actually acts, at the
+   * five-caller chokepoint in `process-key-client.test.ts` (driving the REAL
+   * `postProcessKey` and reading `retriesOverride` off the captured init). These
+   * cases are the UNIT half: the branch table of the helper itself, including
+   * the one arm the chokepoint cannot reach.
+   *
+   * ⚠️ ORACLE INDEPENDENCE. Every expectation below is a hand-typed literal.
+   * Deriving them from the maps (`RETRY_SAFE_FLOW_TYPES[k]?.retries ?? 0`) would
+   * restate the implementation and be green for any table.
+   */
+  describe("[141.2 / D-01] retriesForFlow — flow verdict AND key presence", () => {
+    const SESSION_ID = "33333333-3333-4333-8333-333333333333";
+
+    it("fails CLOSED when the context is undefined — the runtime belt (SC-L)", () => {
+      // ⚠️ WHY THIS PIN LIVES HERE AND NOT AT THE CALL SITE. Fail-closed is
+      // enforced at TWO layers and this pin covers the second one only.
+      //   1. COMPILE — `PostProcessKeyArgs.context` is a REQUIRED field, so a
+      //      caller that states no context does not compile. That is the
+      //      stronger guarantee and 141.2 / plan 05 records the decision to KEEP
+      //      it; the field is deliberately not optional.
+      //   2. RUNTIME — this arm. The type system is erased at build, so a JS
+      //      caller, an `as any` cast, or a future refactor that widens the
+      //      field can still arrive here with nothing. A flow must not inherit a
+      //      retry it has not earned through any of those doors.
+      // Because of (1) the omission is NOT type-expressible through
+      // `postProcessKey`, so it is pinned at the helper rather than faked with a
+      // cast through the chokepoint — a cast would be testing TypeScript, not
+      // the belt.
+      expect(
+        retriesForFlow("onboard", undefined),
+        "the helper granted a retry to a caller that supplied no context at " +
+          "all. Absent context cannot evidence an idempotency key, and " +
+          "unproven ⇒ no-retry is this registry's whole construction. The " +
+          "default must be 0.",
+      ).toBe(0);
+    });
+
+    it("grants onboard exactly one retry when a truthy wizard_session_id is present", () => {
+      expect(
+        retriesForFlow("onboard", { wizard_session_id: SESSION_ID }),
+        "onboard's YES verdict stopped producing a retry even with its own " +
+          "antecedent satisfied. If the grant is being withdrawn outright, the " +
+          "verdict belongs in RETRY_AUDIT_NO_FLOW_TYPES with written evidence, " +
+          "not silently in this helper.",
+      ).toBe(1);
+    });
+
+    it.each([
+      ["an absent key", {} as Record<string, unknown>],
+      ["an EMPTY-STRING key", { wizard_session_id: "" }],
+      ["a null key", { wizard_session_id: null }],
+    ])("refuses onboard a retry for %s", (_label, context) => {
+      // The empty string is the discriminating case: Python gates on
+      // `bool(context.get("wizard_session_id"))` at the flow-type gate in
+      // process_key.py, so "" is FALSE there. An implementation written as
+      // `!== null` passes the absent and null cases and DIVERGES here — the two
+      // sides of the seam running different predicates while appearing to
+      // agree. Write it as a truthiness test.
+      expect(
+        retriesForFlow("onboard", context),
+        "onboard was granted a retry on a key the SERVER will not dedupe on. " +
+          "The server mints a fresh session per attempt in that state, so the " +
+          "unique index cannot collide and attempt 2 inserts a second " +
+          "verification row.",
+      ).toBe(0);
+    });
+
+    it.each(["teaser", "csv", "resync"] as const)(
+      "refuses %s a retry even when a wizard_session_id IS present — the NO verdict dominates",
+      (flowType) => {
+        // Order of operations, pinned: the flow verdict is consulted FIRST. A
+        // helper that checked key presence first would hand `teaser` a retry
+        // the moment a caller happened to include a session id in its context —
+        // and a teaser retry double-mints the verification, the public_token
+        // and the lead, which is the SC3 anti-feature the belt above exists to
+        // prevent, reached through the new argument rather than around it.
+        expect(
+          retriesForFlow(flowType, { wizard_session_id: SESSION_ID }),
+          `${flowType} was granted a retry because a session id happened to be ` +
+            `in its context. Key presence NARROWS a YES verdict; it can never ` +
+            `create one. Absence from the YES map means no-retry, full stop.`,
+        ).toBe(0);
+      },
+    );
+
+    it("refuses every non-onboard flow a retry with an empty context too (both polarities of the dominance rule)", () => {
+      // Without this the case above could be passing for the wrong reason — a
+      // helper that returned 0 for everything would satisfy it.
+      for (const flowType of ["teaser", "csv", "resync"] as const) {
+        expect(retriesForFlow(flowType, {})).toBe(0);
+      }
+      // …and the discriminating positive, restated locally so this case cannot
+      // be green against a helper that has stopped granting anything at all.
+      expect(retriesForFlow("onboard", { wizard_session_id: SESSION_ID })).toBe(
+        1,
+      );
     });
   });
 

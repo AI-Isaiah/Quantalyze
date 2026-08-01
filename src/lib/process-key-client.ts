@@ -15,7 +15,7 @@ import { mintTenantClaim } from "@/lib/tenant-claim";
 // chokepoint (the belt). A VALUE import of a dependency-free leaf: it carries
 // no runtime edge and survives the wholesale seam mocks (see that file's
 // header), so importing it here does not change what the teaser bundle drags in.
-import { RETRY_SAFE_FLOW_TYPES } from "@/lib/seam-retry-registry";
+import { retriesForFlow } from "@/lib/seam-retry-registry";
 
 /**
  * Phase 19 / M-3 — shared client for the unified `/process-key` upstream.
@@ -72,17 +72,21 @@ export type FlowType = "teaser" | "onboard" | "resync" | "csv";
  * BOTH onboard and resync, keying the retry on `budgetKey` would retry teaser the
  * moment csv were allowed onto the sync budget — the SC3 landmine (a retry
  * double-mints the teaser's verification/public_token/lead). So the retry gate at
- * the `resilientFetch` init below reads `RETRY_SAFE_FLOW_TYPES[args.flow_type]`,
- * with an EXPLICIT `?? 0`: absence never delegates to the budget row, so a future
- * flip of the `process-key-sync` row can never retry teaser/csv. This is the belt.
+ * the `resilientFetch` init below calls `retriesForFlow` with `args.flow_type`,
+ * and that helper resolves absence from the YES map to zero WITHOUT delegating to
+ * the budget row — a future flip of the `process-key-sync` row can never retry
+ * teaser/csv. That is the belt; 141.2 / D-01 moved it inside the helper (which
+ * also narrows onboard's grant to calls carrying an idempotency key) rather than
+ * leaving it as an inline `?? 0` here, so the gate and the audited evidence it
+ * enforces sit in one place.
  *
  * ⚠️ Phase 141.1 / D-11 — WHY THIS IS A `never`-DEFAULTED SWITCH AND NOT THE
  * TERNARY IT USED TO BE. The ternary read
  * `flowType === "teaser" || flowType === "csv" ? "process-key-sync" :
  * "process-key-enqueue"`, so EVERY flow that was not one of those two fell
  * through to the enqueue budget. The RETRY consequence of that fall-through is
- * already covered — the `?? 0` belt above gives an unaudited flow zero retries
- * whatever budget key it lands on. The BUDGET consequence is not, and it is the
+ * already covered — the belt above gives an unaudited flow zero retries whatever
+ * budget key it lands on, by registry absence. The BUDGET consequence is not, and it is the
  * reason this switch exists:
  *
  *   `process-key-enqueue` is 15 000 ms; `process-key-sync` is 60 000 ms
@@ -494,12 +498,33 @@ export async function postProcessKey(
         context: args.context,
       }),
       cache: "no-store",
-      // Phase 141 / SEAM-06 — the retry gate, decided HERE on flow_type. See the
-      // budgetKeyFor docblock: the EXPLICIT `?? 0` is load-bearing (the belt),
-      // NOT a default fall-through to the budget row. onboard/resync are the two
-      // allowlisted flows (RETRY_SAFE_FLOW_TYPES); teaser/csv resolve to 0 by
-      // registry absence and can never be flipped on by a row edit.
-      retriesOverride: RETRY_SAFE_FLOW_TYPES[args.flow_type]?.retries ?? 0,
+      // Phase 141 / SEAM-06, narrowed by 141.2 / D-01 — the retry gate. ONE
+      // function decides BOTH halves of the verdict: the flow's audited verdict
+      // AND the idempotency-key antecedent that verdict rests on. `retriesForFlow`
+      // lives in the registry, beside the evidence it enforces; the belt that
+      // used to be an explicit `?? 0` here now lives inside it, unchanged in
+      // meaning — absence from the YES map never delegates to the budget row, so
+      // a future flip of the `process-key-sync` row can never retry teaser/csv.
+      //
+      // ⚠️ `onboard` IS THE ONLY ALLOWLISTED FLOW, and its grant is CONDITIONAL.
+      // (The sentence that stood here named onboard AND resync; 141.2 / D-03
+      // withdrew resync's grant, and D-01 then made onboard's contingent on a
+      // truthy `wizard_session_id` in the context — because the server has
+      // nothing to dedupe on without one and mints a fresh session per attempt.)
+      // teaser/csv resolve to 0 by registry absence.
+      //
+      // ⚠️ FAIL-CLOSED AT TWO LAYERS. `PostProcessKeyArgs.context` is REQUIRED,
+      // so a caller that states no context does not compile — that is the
+      // stronger guarantee and it is kept deliberately; do not add a `?`.
+      // `retriesForFlow`'s undefined arm is the runtime belt behind it, for the
+      // access paths types cannot reach (JS callers, casts, future refactors).
+      //
+      // ⚠️ KEEP THIS EXPRESSION ON ONE PHYSICAL LINE. The wiring guard extracts
+      // the `retriesOverride` SOURCE and compares it to a hand-typed roster; its
+      // extractor is line-scoped, so a wrapped or multi-line expression is
+      // captured partially and reddens. Update the roster in the SAME commit as
+      // any change here — that pairing is the guard, not an inconvenience.
+      retriesOverride: retriesForFlow(args.flow_type, args.context),
     });
     body = await res.json().catch(emptyBodyUnlessSeamRead);
   } catch (err) {
