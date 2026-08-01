@@ -349,15 +349,21 @@ Plans:
 **Goal:** Close the 13 verified findings from the xhigh code review of 141.1 (30 agents, 25 findings deduped to 13). Two are the priority. **(A) A duplicate WRITE on the money path:** `onboard`'s retry grant rests on `idempotent_by_session`, but `finalize-wizard` omits `wizard_session_id` when `strategies.wizard_session_id` is NULL — nullable by design — so the Python side mints a fresh `uuid4()` per attempt, the unique constraint cannot collide, and ONE user submit inserts TWO `strategy_verifications` rows on a flow the registry marks retry-safe. **(B) The D-16 flag-monitor denominator rewrite shipped three monitoring-integrity regressions in one change** — an unbounded `.select()` PostgREST silently truncates at `max_rows=1000` (HTTP 200, `error: null`); dedup keyed on the attacker-controllable inbound `X-Correlation-Id` reachable via the UNAUTHENTICATED `/api/verify-strategy`; and a dedup that collapses nothing on the only two retry-eligible flows, because the service re-mints a uuid4 whenever the inbound id is not a bare UUID and `wizardFetch` sends `wizard:<uuid>`. 141.1 repaired an alert that never fired and replaced it with one that can be silenced, saturated, or falsely triggered.
 **Requirements**: SEAM-05, SEAM-06 (defect closure — the audit's retry verdicts and the alert that watches them; ⚠️ unlike 141.1, this phase DOES change a retry verdict or add a guard, see findings 1 and 6)
 **Depends on:** Phase 141.1
-**Plans:** 0 plans (run `/gsd-plan-phase 141.2`)
+**Plans:** 6 plans
 
 ⚠️ **Evidence:** `141.2-FINDINGS.md` in the phase dir holds all 13 with per-finding
-failure scenarios (inputs → wrong outcome). Findings 9–11 are flagged **PRE-EXISTING**,
-not introduced by 141.1 — confirm before scoping them in. Findings 12–13 are non-blocking
-under the standing stopping rule and belong in `TODOS.md`, not in code.
+failure scenarios (inputs → wrong outcome). Two scoping notes there are SUPERSEDED:
+research proved findings 10–11 were INTRODUCED by 141.1 (`f308b460`, single-commit
+`git log -S`) — finding 10 is the phase's top priority — and the founder ordered all
+13 fixed in code, including 12–13 (`141.2-CONTEXT.md` D-05 + ⚠️ RESEARCH CORRECTIONS).
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 141.2 to break down)
+- [ ] 141.2-01-PLAN.md — breaker cluster: corrupt-lock write path arms (f10, REGRESSION), absolute epoch bound (f11), per-attempt admission (f5)
+- [ ] 141.2-02-PLAN.md — resync verdict map move to NO (f6) + pin surgery + Python comment-only DEF-141.1-02-A
+- [ ] 141.2-03-PLAN.md — flag-monitor denominator: counting form, attempt grain, fail-loud read error (f2,f3,f4,f7,f12)
+- [ ] 141.2-04-PLAN.md — Retry-After parsed, not presence-tested (f9)
+- [ ] 141.2-05-PLAN.md — onboard retry conditional on idempotency-key presence at the chokepoint (f1)
+- [ ] 141.2-06-PLAN.md — delete the unfalsifiable pin (f13), runbook rewritten once, D-07 recorded, D-08 changelog corrected
 
 ### Phase 142: JOB — strategy_analytics stuck-computing reaper + computing_started_at DDL
 **Goal**: A mid-job worker crash can no longer strand a `strategy_analytics` row on `computing` forever — a wizard poll or page refresh sees a real terminal outcome
