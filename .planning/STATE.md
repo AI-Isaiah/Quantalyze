@@ -2,12 +2,12 @@
 gsd_state_version: 1.0
 milestone: v1.16
 milestone_name: Production Resilience & Reliability
-status: phase-complete
-stopped_at: Completed phase 141.1 (all 9 plans merged + verified, v0.51.0.0)
-last_updated: "2026-07-31T16:09:49.059Z"
-last_activity: 2026-07-31
+status: planning
+stopped_at: Inserted phase 141.2 (seamfix) — 13 code-review findings to close; needs planning
+last_updated: "2026-08-01T06:56:25.640Z"
+last_activity: 2026-08-01
 progress:
-  total_phases: 15
+  total_phases: 16
   completed_phases: 9
   total_plans: 99
   completed_plans: 99
@@ -46,9 +46,21 @@ RATE-01..05 — all mapped, Traceability filled). Roadmap: `.planning/ROADMAP.md
 
 ## Current Position
 
-Phase: 141.1 (seambackoff-retry-after-aware-backoff-breaker-recalibration-) — EXECUTING
+Phase: 141.2 (seamfix) — INSERTED, needs planning. Next: `/gsd-plan-phase 141.2`
+        ⛔ DO NOT SHIP 141.1 AS-IS. The xhigh code review (30 agents, 25 findings
+        deduped to 13) found a DATA-INTEGRITY defect on the money path: `onboard`'s
+        retry can insert TWO `strategy_verifications` rows for one user submit when
+        `strategies.wizard_session_id` is NULL, because the retry-safety grant rests
+        on an `idempotent_by_session` that is false in exactly that case. Also: the
+        D-16 flag-monitor denominator rewrite shipped three monitoring-integrity
+        regressions — a silently-truncating unbounded `.select()`, dedup on an
+        attacker-controllable header reachable unauthenticated, and a dedup that
+        collapses nothing on the only two retry-eligible flows. Evidence with
+        per-finding failure scenarios: `141.2-FINDINGS.md`.
+
+Prior phase: 141.1 (seambackoff-…) — COMPLETE and verified, merged, NOT pushed
 Plan: 9 of 9 complete — VERIFIED, phase closed
-Status: Executing Phase 141.1 — Wave 1 (01, 02, 03, 08) and Wave 2 (04, 05) merged to
+Status: Phase 141.1 — Wave 1 (01, 02, 03, 08) and Wave 2 (04, 05) merged to
         `feat/v1.16-141-jobs-rate-retry`. Post-merge gate after Wave 2 GREEN: tsc clean,
         FULL vitest 735 files / 10450 passed / 287 skipped, tsc + lint clean.
         Wave 4 (09) merged. FINAL GATE GREEN: tsc clean, lint 0 errors, vitest
@@ -179,7 +191,7 @@ Status: Executing Phase 141.1 — Wave 1 (01, 02, 03, 08) and Wave 2 (04, 05) me
         at `finalize-wizard/route.ts:840-851`), now ledger row TS-33; its "strictly
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
-Last activity: 2026-07-31 -- Phase 141.1 COMPLETE (9/9 verified, 0 blockers)
+Last activity: 2026-08-01 -- Phase 141.2 inserted (13 review findings, 1 data-integrity blocker)
 
 Progress: [██████████] 95%
 
