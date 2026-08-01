@@ -1743,6 +1743,19 @@ describe("[SEAM-06 / SC2+SC3] client wiring — the REAL clients thread retriesO
     // verdict reddens this case, and it reddens on the COUNT — the transient
     // now propagates, so `postProcessKey` takes its 502 arm instead of the
     // 200. Both halves are asserted so a re-grant cannot hide behind either.
+    //
+    // ⚠️ THE `wizard_session_id` BELOW IS LOAD-BEARING AND DELIBERATELY
+    // SYNTHETIC. The ship-review coverage audit MEASURED the claim above and
+    // found it false as originally written: with `context: {}` this case
+    // survives a re-grant, because D-01's key gate returns 0 for a keyless
+    // context whichever map `resync` sits in — so the assertion was pinning
+    // the key gate, not the withdrawal, while its own comment claimed the
+    // opposite. That is finding 13's shape (a pin that cannot fail for the
+    // reason it states) one file over. Supplying the key satisfies the gate so
+    // that map membership is the ONLY remaining input, and a re-grant reddens
+    // the count for real. No production `resync` carries this field —
+    // `keys/sync` sends `{strategy_id, user_id}` — which is exactly why the
+    // fixture has to construct it: a realistic context cannot isolate the map.
     vi.spyOn(console, "error").mockImplementation(() => {});
     pinFloorBackoff();
     const fetchMock = throwThenJsonOk(new TypeError("fetch failed"), {
@@ -1755,7 +1768,7 @@ describe("[SEAM-06 / SC2+SC3] client wiring — the REAL clients thread retriesO
     const result = await postProcessKey({
       flow_type: "resync",
       source: "resync",
-      context: {},
+      context: { wizard_session_id: "ws-resync-synthetic" },
       userId: "u1",
       correlationId: "c-resync",
     });

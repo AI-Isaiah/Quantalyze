@@ -350,7 +350,18 @@ describe("postProcessKey — the retry verdict reaching the transport (D-03)", (
 
   it("resync sends retriesOverride 0 — its verdict is NO", async () => {
     expect(
-      await retriesOverrideFor("resync"),
+      // 141.2 ship review — the context below is SYNTHETIC and load-bearing for
+      // the same reason the onboard control's is. Measured: with a keyless
+      // context this pin survives re-granting `resync`, because D-01's key gate
+      // returns 0 whichever map the flow sits in — so it was pinning the gate
+      // while its message below talks about the verdict. Supplying a key leaves
+      // map membership as the only input, which is what the message claims. No
+      // production resync carries this field (`keys/sync` sends
+      // `{strategy_id, user_id}`); that is precisely why a realistic context
+      // cannot isolate the verdict here.
+      await retriesOverrideFor("resync", {
+        wizard_session_id: "ws-resync-synthetic",
+      }),
       "a resync request left this client authorised to replay. D-03 withdrew " +
         "that grant: `resync` carries a NO verdict in RETRY_AUDIT_NO_FLOW_TYPES " +
         "because the strategy-scoped `status='draft'` pre-check does NOT close " +
