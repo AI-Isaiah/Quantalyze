@@ -2156,8 +2156,11 @@ export async function resilientFetch(
    * instant and not `Date.now()` at recording time: by construction a request
    * records after it was admitted, and the gap between the two is the entire
    * subject of the guard.
+   *
+   * ⚠️ A `let`, REASSIGNED PER ATTEMPT — see the per-attempt-state note below and
+   * the recapture inside the loop's `attempt > 0` block.
    */
-  const admittedAtMs = Date.now();
+  let admittedAtMs = Date.now();
 
   /**
    * ONE ATTEMPT records AT MOST ONE failure, whichever arm classifies it.
@@ -2181,6 +2184,23 @@ export async function resilientFetch(
    * closure handed to `instrumentBody` after the loop therefore carries the LAST
    * attempt's latch, which is correct: a post-return body-read failure belongs
    * to the attempt that produced the response.
+   *
+   * ⚠️ THE LATCH IS NOT THE ONLY PER-ATTEMPT STATE — `admittedAtMs` IS THE OTHER
+   * (141.2 / finding 5, D-09), and it was missed when the loop was introduced.
+   * A-25's predicate, stated in `recordSeamFailure`, is "was this request
+   * already IN FLIGHT when that lock was armed" — and "in flight" is a property
+   * of an ATTEMPT, not of the logical request: attempt 2 is admitted separately,
+   * past its own re-check of a by-then-expired lock, so its failure is evidence
+   * gathered entirely AFTER the arming and must be allowed to re-arm the
+   * circuit. Captured once above the loop, that timestamp made every retried
+   * wave's evidence look stale — on the 30 s `optimize-weights` budget the
+   * breaker could never re-arm from a retried call at all, so allocators waited
+   * 60 s+ per click instead of receiving an immediate circuit error. Reassigned
+   * below, immediately after the pre-attempt re-check passes, for the same
+   * reason `recorded` is reset there: `recordOnce` closes over the binding, so
+   * the recording arms and the post-return `instrumentBody` closure all carry
+   * the LAST admitted attempt's instant — the attempt that produced what they
+   * are recording.
    */
   let recorded = false;
   async function recordOnce(breakerKey: string): Promise<void> {
@@ -2254,6 +2274,15 @@ export async function resilientFetch(
           reBreaker.retryAfterS ?? DEFAULT_RETRY_AFTER_S,
         );
       }
+
+      // ── PER-ATTEMPT ADMISSION RECAPTURE (141.2 / finding 5, D-09) ──────────
+      // This attempt has just been admitted past a circuit re-checked HERE, and
+      // this is the instant it happened. It has to be taken AFTER the throw
+      // above, not before the re-check: an attempt the breaker refuses is never
+      // admitted at all, and stamping it as though it were would hand A-25 an
+      // admission that no request ever had. See the per-attempt-state note above
+      // `recorded` for why the guard's predicate is per attempt.
+      admittedAtMs = Date.now();
     }
 
     // Per-attempt latch reset (Class D).

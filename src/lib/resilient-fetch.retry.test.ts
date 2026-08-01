@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { installFetchMock, type FetchMock } from "@/test/helpers/fetch";
-import { seedBreakerOpen } from "@/test/helpers/upstash-breaker";
+import {
+  seedBreakerOpen,
+  encodeFakeBreakerLock,
+  FAKE_LOCK_TOMBSTONE_MS,
+} from "@/test/helpers/upstash-breaker";
 
 /**
  * Phase 141 / SEAM-06 — the bounded retry loop inside `resilientFetch`.
@@ -1140,6 +1144,183 @@ describe("[SEAM-06] the per-attempt breaker latch", () => {
     // second time within the same attempt (the within-attempt latch holds).
     await expect(res.json()).rejects.toBeInstanceOf(mod.SeamBodyReadError);
     expect(shared.counters.limitCalls).toBe(1);
+  });
+});
+
+describe("[SEAM-06 / D-09] the ADMISSION INSTANT is per-attempt state too", () => {
+  /**
+   * Phase 141.2 / finding 5. The sibling of the per-attempt latch above, and it
+   * shipped green in 141.1 for a reason worth naming: the defect is the
+   * RELATIONSHIP between the retry loop and `recordSeamFailure`'s A-25 guard, so
+   * no helper-level test can see it. Both cases below drive `resilientFetch`
+   * itself, through the real loop.
+   *
+   * The window, exactly: a request is admitted past a closed circuit at t=0. A
+   * CONCURRENT caller arms a lock at t≈0.2s. Attempt 1 was already in flight
+   * when that lock was armed, so A-25 rightly suppresses its failure. Attempt 2
+   * is a SEPARATE admission past a re-checked, by-then-expired lock — its
+   * failure is evidence gathered entirely after the arming, and it must be able
+   * to re-arm the circuit. With one admission instant captured above the loop it
+   * never could, so a retried wave on the 30s `optimize-weights` budget left the
+   * breaker shut and allocators waited 60s+ per click.
+   */
+
+  /** Epoch the frozen clock starts at — an ordinary ms epoch, hand-typed. */
+  const CLOCK_BASE_MS = 1_700_000_000_000;
+
+  /**
+   * Span of the lock a concurrent caller arms mid-flight.
+   *
+   * COMPRESSED FROM PRODUCTION'S 30s COOLDOWN ON PURPOSE, and not a value that
+   * can be raised freely: the fake limiter's counting window is 30 000 ms
+   * (`FAKE_WINDOW_MS`), so a timeline that advanced the frozen clock past it
+   * would roll the failure counter over mid-case and the trip path — the only
+   * path A-25 lives on — would stop being reached at all. Nothing here depends
+   * on the span's magnitude; what the cases turn on is the ORDER of admission,
+   * arming and expiry.
+   */
+  const MID_FLIGHT_LOCK_SPAN_MS = 10_000;
+
+  /**
+   * Decode `open:<armedAt>:<expiresAt>` BY HAND, never via the module's own
+   * `decodeBreakerLock`.
+   *
+   * Same rule as the backoff literals at the top of this file: an assertion that
+   * parses with production's parser cannot contradict production's parser. The
+   * harness-side ENCODER (`encodeFakeBreakerLock`) is shared deliberately — it
+   * is pinned literal-against-literal in `seam-constants.pin.test.ts` — but the
+   * oracle that reads the result back is typed here.
+   */
+  function parseLockValue(value: string | undefined): {
+    armedAtMs: number;
+    expiresAtMs: number;
+  } {
+    expect(value).toBeDefined();
+    const [tag, armedAtMs, expiresAtMs] = String(value).split(":");
+    expect(tag).toBe("open");
+    return { armedAtMs: Number(armedAtMs), expiresAtMs: Number(expiresAtMs) };
+  }
+
+  it("a lock armed BETWEEN admissions no longer suppresses attempt 2 — the retried wave re-arms with a provably FRESH lock", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    // A FROZEN, hand-advanced clock. `Date.now` is the single time source read
+    // by the admission timestamp, the A-25 comparison, the lock's encoded
+    // expiry and the fake store's TTL eviction, so freezing it makes this
+    // window exact rather than a race against wall time. Real timers stay real:
+    // the backoff still awaits a genuine `setTimeout`, it just does not move
+    // the clock.
+    let clock = CLOCK_BASE_MS;
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
+    const mod = await import("./resilient-fetch");
+
+    // Load the failure counter to THRESHOLD-1 so that the FIRST failure the
+    // call below records reaches the trip path — which is the only path the
+    // A-25 guard is on.
+    await driveFailures(mod, mod.BREAKER_FAILURE_THRESHOLD - 1);
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+
+    vi.unstubAllGlobals();
+    const admittedAtMs = clock;
+    let midFlightLock: { armedAtMs: number; expiresAtMs: number } | null = null;
+    const fetchMock = installFetchMock();
+    let attempt = 0;
+    fetchMock.mockImplementation(() => {
+      attempt += 1;
+      if (attempt === 1) {
+        // t ≈ 0.2s — a concurrent caller trips the circuit while attempt 1 is
+        // still in flight.
+        clock = admittedAtMs + 200;
+        const armedAtMs = clock;
+        const expiresAtMs = armedAtMs + MID_FLIGHT_LOCK_SPAN_MS;
+        midFlightLock = { armedAtMs, expiresAtMs };
+        shared.store.set(mod.BREAKER_KEY, {
+          value: encodeFakeBreakerLock(armedAtMs, expiresAtMs),
+          // The KEY outlives the LOCK — the tombstone is what lets
+          // `recordSeamFailure` still see WHEN the lock was armed.
+          expiresAt: expiresAtMs + FAKE_LOCK_TOMBSTONE_MS,
+        });
+        // …and attempt 1 grinds on past that lock's expiry before failing.
+        clock = armedAtMs + MID_FLIGHT_LOCK_SPAN_MS + 800;
+      } else {
+        clock += 500;
+      }
+      return Promise.resolve({ ok: false, status: 503 } as Response);
+    });
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    // The retry really fired: the pre-attempt re-check read a TOMBSTONE (the
+    // mid-flight lock had expired) and let attempt 2 through.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(res.status).toBe(503);
+    expect(midFlightLock).not.toBeNull();
+
+    // ⚠️ IDENTITY, NOT PRESENCE. `expect(store.get(KEY)).toBeDefined()` passes
+    // under the EXACT suppression this case exists to catch — at this point the
+    // store already holds the expired mid-flight lock, so a presence assertion
+    // is green whether or not attempt 2's evidence was allowed to re-arm
+    // anything. Finding 10 is what that class of pin costs; the oracle here is
+    // that the stored lock is a DIFFERENT, LATER lock.
+    const stored = parseLockValue(shared.store.get(mod.BREAKER_KEY)?.value);
+    const mid = midFlightLock as unknown as {
+      armedAtMs: number;
+      expiresAtMs: number;
+    };
+    expect(stored.armedAtMs).toBeGreaterThan(mid.armedAtMs);
+    expect(stored.expiresAtMs).toBeGreaterThan(mid.expiresAtMs);
+    // Both attempts were judged on their own merits: two recording attempts,
+    // and the second one's was not thrown away.
+    expect(shared.counters.limitCalls).toBe(
+      mod.BREAKER_FAILURE_THRESHOLD - 1 + 2,
+    );
+  });
+
+  it("a failure from an attempt that WAS in flight when the lock armed is still suppressed — A-25's predicate holds per attempt", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let clock = CLOCK_BASE_MS;
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
+    const mod = await import("./resilient-fetch");
+
+    await driveFailures(mod, mod.BREAKER_FAILURE_THRESHOLD - 1);
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+
+    vi.unstubAllGlobals();
+    const admittedAtMs = clock;
+    let midFlightLock: { armedAtMs: number; expiresAtMs: number } | null = null;
+    const fetchMock = installFetchMock();
+    fetchMock.mockImplementation(() => {
+      clock = admittedAtMs + 200;
+      const armedAtMs = clock;
+      const expiresAtMs = armedAtMs + MID_FLIGHT_LOCK_SPAN_MS;
+      midFlightLock = { armedAtMs, expiresAtMs };
+      shared.store.set(mod.BREAKER_KEY, {
+        value: encodeFakeBreakerLock(armedAtMs, expiresAtMs),
+        expiresAt: expiresAtMs + FAKE_LOCK_TOMBSTONE_MS,
+      });
+      clock = armedAtMs + MID_FLIGHT_LOCK_SPAN_MS + 800;
+      return Promise.resolve({ ok: false, status: 503 } as Response);
+    });
+
+    // retriesOverride:0 — ONE attempt, so there is no second admission and
+    // nothing to recapture. This request was already in flight when the lock
+    // was armed, and its failure is therefore stale evidence.
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 0,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(503);
+    expect(midFlightLock).not.toBeNull();
+    // The concurrent caller's lock stands EXACTLY as armed: no re-arm, no
+    // ratcheted cooldown, no second `seam.breaker.open` for one trip.
+    expect(parseLockValue(shared.store.get(mod.BREAKER_KEY)?.value)).toEqual(
+      midFlightLock,
+    );
   });
 });
 
