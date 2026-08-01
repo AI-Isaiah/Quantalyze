@@ -162,8 +162,29 @@ export function breakerKeyFor(dependency: SeamServiceDependency): string {
  *   | no retry (every row before 141)      | 1                         | 5                |
  *   | retried, both attempts failing       | 2                         | ⌈5/2⌉ = 3        |
  *
- * So on the five retry-enabled rows, sustained degradation trips the circuit in
- * **3 user requests instead of 5**. The trip is also WIDE: `breakerKeysFor`
+ * ⚠️ "**3 user requests instead of 5**" WAS STATED HERE UNCONDITIONALLY, and it
+ * is no longer unconditional. It is kept, named, and qualified rather than
+ * quietly deleted, because it is still the right summary for the traffic shape
+ * it describes — and because two 141.2 decisions narrowed that shape from both
+ * ends:
+ *
+ *   · D-06 narrowed the FAILURE class. The second row above presupposes a
+ *     second attempt happened at all. A 503 that names a POSITIVE wait now
+ *     fails fast (`hasContractualWait` parses the header via
+ *     `parseRetryAfterSeconds` instead of testing its presence), so it records
+ *     ONE failure and trips at the ordinary five. Every SERVICE-TRANSIENT 503
+ *     the analytics service emits carries such a header by contract — so for
+ *     that status class, which is the mandatory one, the top row applies.
+ *     Two-per-request is the transport/timeout class: throws, deadlines and
+ *     header-less edge 5xx.
+ *   · D-01 and D-03 narrowed the CALLER set. A retry-enabled budget row no
+ *     longer implies a retried call: the `/process-key` verdict is taken from
+ *     `retriesForFlow` in `seam-retry-registry.ts`, which grants a retry only
+ *     to `onboard`, and only when the call carries a usable idempotency key.
+ *
+ * So: sustained degradation trips in three user requests where a call actually
+ * retries AND its failures carry no contractual wait, and in five otherwise.
+ * The trip is also WIDE: `breakerKeysFor`
  * appends the global `BREAKER_KEY` to every call site's check, so an open global
  * circuit gates all fifteen routes — including the anonymous public teaser
  * (the exposure recorded and accepted at the `process-key-sync` row).
@@ -177,9 +198,14 @@ export function breakerKeyFor(dependency: SeamServiceDependency): string {
  *
  * Raising this number is therefore TWO decisions, not one: it delays protection
  * during a real outage AND it delays it further still for retried traffic, by a
- * factor this docblock's table makes explicit. `seam-constants.pin.test.ts` pins
- * both the literal and the derived ⌈threshold/2⌉, so neither half can move in
- * silence.
+ * factor this docblock's table makes explicit. The two halves are pinned in two
+ * different places, on purpose: `seam-constants.pin.test.ts` pins the LITERAL,
+ * and the per-attempt-latch case in `resilient-fetch.retry.test.ts` pins the
+ * per-attempt BEHAVIOUR the table's second row rests on, by driving the real
+ * loop and counting the recordings. This docblock used to claim the pin file
+ * held both — it held the literal and an arithmetic restatement of it, which
+ * 141.2 / D-05 deleted for being unable to fail (finding 13). Neither half can
+ * move in silence now; before, only the literal could not.
  */
 export const BREAKER_FAILURE_THRESHOLD = 5;
 

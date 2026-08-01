@@ -1,6 +1,6 @@
 # Runbook — The Vercel→Railway seam circuit breaker
 
-Phases 140 / 140.2 / 141 / 141.1. Every call from a Vercel route to the Railway
+Phases 140 / 140.2 / 141 / 141.1 / 141.2. Every call from a Vercel route to the Railway
 analytics service goes through the ONE seam core, `src/lib/resilient-fetch.ts`.
 That core carries a circuit breaker backed by Upstash Redis. This covers "is a
 circuit open right now?", "why did it trip", "when does it close", and the
@@ -98,21 +98,52 @@ outside this module wrote it. That is a finding, not a normal state.
 | `BREAKER_LOCK_TOMBSTONE_S` | 60 | How much longer the KEY survives than the lock it carries |
 | `BREAKER_STORE_TIMEOUT_MS` | 2 000 | Per-command deadline on the breaker's OWN Upstash calls |
 
-**⚠️ THE UNIT IS AN ATTEMPT, NOT A REQUEST.** Since Phase 141 a retried call that
-fails both times records **two** failures, not one:
+**⚠️ THE UNIT IS AN ATTEMPT, NOT A REQUEST.** Since Phase 141 the per-attempt
+latch in `resilientFetch` is reset at the top of every loop iteration, so a
+retried call whose attempts both fail records **two** failures against
+`BREAKER_FAILURE_THRESHOLD`, not one — and reaches the trip in half as many user
+requests.
 
-| traffic shape | failures per user request | requests to trip |
+⚠️ **This runbook used to say, flatly, that sustained degradation trips "in 3
+user requests instead of 5". That is no longer unconditional**, and the old claim
+is named rather than quietly deleted because it is still correct for the traffic
+shape it describes. Three conditions have to hold together, and phase 141.2
+narrowed two of them:
+
+| condition | who decides it | since |
 |---|---|---|
-| no retry (every row before 141) | 1 | 5 |
-| retried, both attempts failing | 2 | ⌈5/2⌉ = 3 |
+| the call is retry-eligible at all | `retriesForFlow` + the registry maps, **not** the `SEAM_BUDGETS` row | 141.2 / D-01, D-03 |
+| the failures carry **no** contractual wait | `hasContractualWait` — a 503 naming a positive `Retry-After` fails fast and records ONE | 141.2 / D-06 |
+| both attempts actually fail a **counting** class | `seamBreakerVerdict` — only a counting 503 or a transport failure advances the counter | 141 |
 
-On the retry-enabled budgets, sustained degradation therefore trips the circuit
-in **3 user requests instead of 5**. This is accepted and deliberate (Phase 141.1
-/ D-02): a Railway blip reaching five counted failures inside 30 s is a real
-outage, and containing it two requests sooner is what a breaker is for. Do not
-"fix" a fast trip by raising the threshold — that is two decisions, not one (it
-delays protection during a real outage, and delays it further still for retried
+Because every SERVICE-TRANSIENT 503 the analytics service emits carries a
+mandatory `Retry-After`, the halved trip point is **not** the mandatory-503 case
+— it is the transport/timeout class (throws, deadlines, header-less platform-edge
+5xx), which is also the dominant Railway-blip class. For everything else the trip
+point is `BREAKER_FAILURE_THRESHOLD` counted failures, unchanged since 140.
+
+The exact numbers are deliberately not reprinted here: they live in
+`seam-constants.pin.test.ts`, pinned literal-against-literal, and the per-attempt
+doubling is pinned as BEHAVIOUR by the per-attempt-latch case in
+`resilient-fetch.retry.test.ts` (delete the latch reset and that case reddens).
+Phase 141.2 deleted the pin that asserted the trip count as arithmetic over the
+threshold — it could not fail, which is why this paragraph had drifted from the
+code without anything going red.
+
+The halved trip point is accepted and deliberate (Phase 141.1 / D-02): a Railway
+blip reaching the threshold in counted failures inside `BREAKER_WINDOW` is a real
+outage, and containing it sooner is what a breaker is for. Do not "fix" a fast
+trip by raising the threshold — that is two decisions, not one (it delays
+protection during a real outage, and delays it further still for retried
 traffic).
+
+**⚠️ Blind spot worth knowing during a rate-limit incident:** an attempt the
+Python limiter refuses answers `429`, which `seamBreakerVerdict` classifies
+non-counting, AND is refused **above** the `/process-key` audit write — so a
+platform-ceiling drain advances neither the breaker nor the flag-monitor's
+denominator. Both instruments read "quiet" while every caller is being refused.
+The `429`s themselves are the only signal; look at the Railway logs, not at this
+surface.
 
 ## When does it close — the recovery band
 
@@ -152,20 +183,35 @@ The gate is **not** the `SEAM_BUDGETS` row. It is a required `retriesOverride`
 argument fed from the committed idempotency audit in
 `src/lib/seam-retry-registry.ts`:
 
-- `RETRY_SAFE_ANALYTICS` — exactly four entries: `bridge`, `simulator`,
-  `portfolio-optimizer`, `optimize-weights`.
-- `RETRY_SAFE_FLOW_TYPES` — exactly two `/process-key` flow types: `onboard` and
-  `resync`. Both land on the `process-key-enqueue` budget.
-- `RETRY_AUDIT_NO_FLOW_TYPES` — the proven-NO half: `teaser` and `csv`. **The
-  anonymous public teaser is never retried**, by construction; it is deliberately
-  non-idempotent (every submission mints a fresh session), and it shares the
-  `process-key-sync` budget with `csv`.
+- `RETRY_SAFE_ANALYTICS` — the analytics-seam YES verdicts, keyed by budget key:
+  `bridge`, `simulator`, `portfolio-optimizer`, `optimize-weights`.
+- `RETRY_SAFE_FLOW_TYPES` — the `/process-key` YES half. **`onboard` alone**, and
+  its grant is CONDITIONAL: `retriesForFlow` (same module) refuses the retry
+  unless the call's context carries a truthy `wizard_session_id`, because that is
+  the antecedent the entry's own evidence rests on and the same truthiness
+  predicate the Python flow-type gate applies. It is consulted at the shared
+  `postProcessKey` chokepoint, and **a caller that states nothing gets no
+  retry** — the default is the safe one, so a future call site cannot inherit a
+  retry it has not earned.
+- `RETRY_AUDIT_NO_FLOW_TYPES` — the proven-NO half: `teaser`, `csv`, and — since
+  141.2 / D-03 — **`resync`**, whose grant was WITHDRAWN. It had been allowlisted
+  on the strength of a sentence that a later re-derivation found false and
+  deleted, leaving the grant standing; `resync` mints its session server-side, so
+  it has no durable key to dedup on and a replay can insert a second draft
+  verification row. The re-enable condition is written into its entry. **The
+  anonymous public teaser is never retried** either, by construction — it is
+  deliberately non-idempotent (every submission mints a fresh session), and it
+  shares the `process-key-sync` budget with `csv`.
 
-That is five `SEAM_BUDGETS` rows carrying `retries: 1` and six audited verdicts
-across them — `process-key-enqueue` serves both `onboard` and `resync`, because
-`budgetKeyFor` is many-to-one while the audit is per flow type.
+**Read the counts out of the pins, not out of this page.** `seam-constants.pin.test.ts`
+pins which `SEAM_BUDGETS` rows carry a retry, and `seam-retry-registry.test.ts`
+pins each map's population against a hand-typed fence. A budget row carrying a
+retry does **not** mean calls on it retry: `budgetKeyFor` is many-to-one, so
+`process-key-enqueue` serves both `onboard` and `resync` while the audit — and
+therefore the actual behaviour — is per flow type, and now per key as well.
 
-If you are asked "did this route retry?", read the registry, not the budget row.
+If you are asked "did this route retry?", read the registry and `retriesForFlow`,
+not the budget row.
 
 ### The `Retry-After` fail-fast (Phase 141.1 / D-01, parse semantics since 141.2 / D-06)
 

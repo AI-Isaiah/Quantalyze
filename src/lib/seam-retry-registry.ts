@@ -342,6 +342,39 @@ export const RETRY_AUDIT_NO_FLOW_TYPES: Readonly<
  * the SC3 anti-feature (a doubled verification, public_token and lead), reached
  * through the new argument instead of around it.
  *
+ * ── ⚠️ THE COST A GRANTED RETRY SPENDS — DISPOSITIONED, NOT FIXED (D-07) ─────
+ *
+ * A retry is a second full HTTP request, so it spends a second token of BOTH
+ * `/process-key` limiters: the per-identity window, and the platform-wide
+ * ceiling that is ONE bucket for every caller by construction (post-PYAPI-04
+ * every admitted caller presents the same internal token). Draining the ceiling
+ * refuses flows that never retry at all — the anonymous public teaser and the
+ * CSV path — and the breaker structurally cannot contain it, because
+ * `seamBreakerVerdict` classifies a 429 caller-throttled and non-counting.
+ *
+ * ⚠️ THAT AMPLIFICATION IS STILL LIVE IN THIS CODE. It is DISPOSITIONED, not
+ * remediated (141.2 / D-07, finding 8): no limiter-aware retry path was built,
+ * no limiter constant moved, and nothing here refuses a retry to protect the
+ * ceiling. Reading this note as "closed" would be exactly the over-claim the
+ * rest of this file exists to remove.
+ *
+ * What changed is the EXPOSURE, not the mechanism, and it changed enough to make
+ * acceptance the right call rather than a deferral. The re-measure D-07 asked
+ * for, run after D-01 and D-03 landed: the retry-eligible `/process-key`
+ * population is now `onboard`-carrying-a-key and nothing else. D-03 withdrew
+ * `resync`, which on the production audit history read on 2026-08-01 was just
+ * under half of all `/process-key` traffic ever recorded and an order of
+ * magnitude more of it than `onboard`; D-01's predicate removes the key-less
+ * onboard producers. The worst case that finding 8 arithmetic'd against the
+ * ceiling therefore applies to an order of magnitude less traffic on that shape.
+ *
+ * DECISION: accepted, documented here and booked in `TODOS.md`; RE-RAISE if the
+ * surface re-expands — a new YES flow verdict, a re-grant to `resync`, or a
+ * widening of `RetrySafeEntry.retries` past one all put it back on the table.
+ * Re-raise deliberately rather than expect to be paged: a 429 is refused ABOVE
+ * the `/process-key` audit write, so a ceiling drain advances neither the
+ * breaker nor the flag-monitor's denominator and both instruments read quiet.
+ *
  * ── RECORDED FOLLOW-UP ───────────────────────────────────────────────────────
  *
  * A CLIENT-MINTED stable idempotency key would be the better end state: it would
