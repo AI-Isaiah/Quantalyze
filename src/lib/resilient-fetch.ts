@@ -1035,12 +1035,48 @@ const MAX_BREAKER_LOCK_SPAN_MS =
  * that header, and this decoder was the one remaining path that could mint one
  * which PASSED it.
  *
- * The span bound is therefore part of the parse, not a caller's duty. The
- * rejection direction is `null` — i.e. CLOSED — so corruption still fails
- * forward, unchanged.
+ * The span bound is therefore part of the parse, not a caller's duty.
+ *
+ * ⚠️ TWO SENTENCES THAT USED TO STAND HERE WERE WRONG, AND BOTH ARE NAMED
+ * RATHER THAN QUIETLY DELETED (phase 141.2, findings 10 and 11 — the review of
+ * the very change that added the span bound).
+ *
+ *  1. "The rejection direction is `null` — i.e. CLOSED — so corruption still
+ *     fails forward, UNCHANGED." True of the read side; the opposite of true of
+ *     the write side, and the write side is where it mattered. `null` conflated
+ *     two different store states — "key absent" and "key present but
+ *     undecodable" — and `recordSeamFailure`'s trip path branched its WRITE
+ *     decision on that conflation, so a corrupt-but-present value was routed
+ *     into `SET NX`, which cannot overwrite an existing key. Nothing was
+ *     written, no transition was emitted, and the circuit could not open for
+ *     the rest of that key's TTL. What is true now: the READ side still fails
+ *     forward to CLOSED, unchanged; the WRITE side distinguishes RAW presence
+ *     from a failed decode, so a corrupt value is DISPLACED and the store
+ *     self-heals on the next recorded failure. See the trip path's own branch.
+ *
+ *  2. "PARSEABLE IS NOT THE SAME AS PLAUSIBLE … discharged here", of a bound
+ *     that was purely RELATIVE. A span bound cannot see an absurd PLACE on the
+ *     timeline: every lock this module writes has span exactly
+ *     `BREAKER_COOLDOWN_S` seconds, so ANY pair sharing that delta passed —
+ *     `open:100000000000000000:100000000000030000` decoded cleanly and still
+ *     minted the ~1e14 `Retry-After` the paragraph above claims it closed. The
+ *     absolute bound below is what discharges LO-02 / TS-39 for real.
+ *
+ * ⚠️ THE ABSOLUTE BOUND IS ONE-SIDED, DELIBERATELY. A lock in the FUTURE beyond
+ * its own maximum span describes no state this module can produce. A lock in the
+ * PAST is a TOMBSTONE, and `isBreakerOpen` depends on decoding tombstones to
+ * announce the close — locked decision 3 makes TTL expiry the half-open
+ * transition, so that read is the only moment "the circuit is usable again"
+ * becomes observable. A past-side bound would report CLOSED for the right reason
+ * by the wrong mechanism, and take the close event with it.
+ *
+ * `nowMs` is a PARAMETER with a `Date.now()` default rather than a bare call, so
+ * the bound stays deterministically testable without coupling every existing
+ * case to the wall clock or to a fake timer. Existing callers are unchanged.
  */
 export function decodeBreakerLock(
   value: unknown,
+  nowMs: number = Date.now(),
 ): { armedAtMs: number; expiresAtMs: number } | null {
   if (typeof value !== "string") return null;
   const parsed = /^open:(\d+):(\d+)$/.exec(value);
@@ -1051,6 +1087,9 @@ export function decodeBreakerLock(
   // expired at the instant it was armed and so is not an open circuit either.
   const spanMs = expiresAtMs - armedAtMs;
   if (spanMs <= 0 || spanMs > MAX_BREAKER_LOCK_SPAN_MS) return null;
+  // ABSOLUTE plausibility, future side only — see the one-sidedness note above.
+  // A live lock cannot expire further out than its own widest legitimate span.
+  if (expiresAtMs > nowMs + MAX_BREAKER_LOCK_SPAN_MS) return null;
   return { armedAtMs, expiresAtMs };
 }
 
@@ -1404,7 +1443,17 @@ export async function recordSeamFailure(
     // failure would change the deployed breaker's timing behaviour during
     // precisely the correlated incident it exists for.
     const now = Date.now();
-    const existing = decodeBreakerLock(await redis.get<string>(breakerKey));
+    // ⚠️ THE RAW VALUE IS KEPT, AND THAT IS THE WHOLE OF FINDING 10 (141.2).
+    // `decodeBreakerLock` answers `null` for TWO different store states — the
+    // key is ABSENT, and the key is PRESENT but undecodable — and only the first
+    // of them justifies the `nx` write below. Deciding the write from `existing`
+    // alone therefore sent a corrupt-but-present value into `SET NX`, which
+    // cannot overwrite an existing key: no lock stored, no transition emitted,
+    // and the circuit unable to open for the rest of that key's TTL across every
+    // seam route. The GUARDS below still read `existing` — they are questions
+    // about a lock, and a value that is not a lock cannot answer them.
+    const rawLock = await redis.get<string>(breakerKey);
+    const existing = decodeBreakerLock(rawLock);
     if (existing) {
       // Already open. Return without writing, so the FIRST writer's expiry
       // stands and a second instance tripping 200ms later cannot ratchet the
@@ -1433,7 +1482,10 @@ export async function recordSeamFailure(
     const value = encodeBreakerLock(now, expiresAtMs);
     const ttlS = BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S;
     let written: unknown;
-    if (existing === null) {
+    if (rawLock === null) {
+      // The key is GENUINELY ABSENT — the raw read, not the decode, is what says
+      // so (finding 10; see the note at the read above).
+      //
       // `nx: true` makes CONCURRENT trips idempotent — two instances tripping
       // milliseconds apart, neither of which saw the other's write.
       //
@@ -1445,12 +1497,21 @@ export async function recordSeamFailure(
       // RATCHET a live lock", which reddens under `nx: false`.
       written = await redis.set(breakerKey, value, { ex: ttlS, nx: true });
     } else {
-      // ── OVERWRITING A TOMBSTONE — THE BRANCH THAT ACTUALLY RACES (HI-01) ──
+      // ── OVERWRITING A PRESENT VALUE — THE BRANCH THAT ACTUALLY RACES (HI-01) ──
       //
-      // Reaching here means the previous lock has expired AND this failure is
-      // new evidence gathered after it was armed, so a fresh cooldown is right.
-      // `nx` cannot express that: the key still EXISTS as a tombstone, so `nx`
-      // would refuse every re-arm for the whole tombstone window.
+      // Reaching here means the key HOLDS something: an expired lock whose
+      // evidence this failure post-dates, or — since 141.2 / finding 10 — a
+      // value this module's decoder rejects. In the tombstone case a fresh
+      // cooldown is right because the previous lock has expired AND this failure
+      // is new evidence gathered after it was armed. In the CORRUPT case there
+      // is no lock at all, so there is nothing to preserve and displacing it is
+      // how the store self-heals: the value decodes to `null`, `written` is
+      // therefore true, and the transition that follows is truthful — this call
+      // DID arm the circuit.
+      //
+      // `nx` cannot express either: the key still EXISTS, so `nx` would refuse
+      // every re-arm for the whole tombstone window, and would refuse the
+      // corrupt key for its entire remaining TTL.
       //
       // This used to be a BLIND write returning a truthy `"OK"` unconditionally,
       // and that made it the one door the idempotency story above does not
@@ -2095,8 +2156,11 @@ export async function resilientFetch(
    * instant and not `Date.now()` at recording time: by construction a request
    * records after it was admitted, and the gap between the two is the entire
    * subject of the guard.
+   *
+   * ⚠️ A `let`, REASSIGNED PER ATTEMPT — see the per-attempt-state note below and
+   * the recapture inside the loop's `attempt > 0` block.
    */
-  const admittedAtMs = Date.now();
+  let admittedAtMs = Date.now();
 
   /**
    * ONE ATTEMPT records AT MOST ONE failure, whichever arm classifies it.
@@ -2120,6 +2184,23 @@ export async function resilientFetch(
    * closure handed to `instrumentBody` after the loop therefore carries the LAST
    * attempt's latch, which is correct: a post-return body-read failure belongs
    * to the attempt that produced the response.
+   *
+   * ⚠️ THE LATCH IS NOT THE ONLY PER-ATTEMPT STATE — `admittedAtMs` IS THE OTHER
+   * (141.2 / finding 5, D-09), and it was missed when the loop was introduced.
+   * A-25's predicate, stated in `recordSeamFailure`, is "was this request
+   * already IN FLIGHT when that lock was armed" — and "in flight" is a property
+   * of an ATTEMPT, not of the logical request: attempt 2 is admitted separately,
+   * past its own re-check of a by-then-expired lock, so its failure is evidence
+   * gathered entirely AFTER the arming and must be allowed to re-arm the
+   * circuit. Captured once above the loop, that timestamp made every retried
+   * wave's evidence look stale — on the 30 s `optimize-weights` budget the
+   * breaker could never re-arm from a retried call at all, so allocators waited
+   * 60 s+ per click instead of receiving an immediate circuit error. Reassigned
+   * below, immediately after the pre-attempt re-check passes, for the same
+   * reason `recorded` is reset there: `recordOnce` closes over the binding, so
+   * the recording arms and the post-return `instrumentBody` closure all carry
+   * the LAST admitted attempt's instant — the attempt that produced what they
+   * are recording.
    */
   let recorded = false;
   async function recordOnce(breakerKey: string): Promise<void> {
@@ -2193,6 +2274,15 @@ export async function resilientFetch(
           reBreaker.retryAfterS ?? DEFAULT_RETRY_AFTER_S,
         );
       }
+
+      // ── PER-ATTEMPT ADMISSION RECAPTURE (141.2 / finding 5, D-09) ──────────
+      // This attempt has just been admitted past a circuit re-checked HERE, and
+      // this is the instant it happened. It has to be taken AFTER the throw
+      // above, not before the re-check: an attempt the breaker refuses is never
+      // admitted at all, and stamping it as though it were would hand A-25 an
+      // admission that no request ever had. See the per-attempt-state note above
+      // `recorded` for why the guard's predicate is per attempt.
+      admittedAtMs = Date.now();
     }
 
     // Per-attempt latch reset (Class D).
