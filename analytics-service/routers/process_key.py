@@ -1395,10 +1395,21 @@ async def process_key(
                 job_state=_job_state,
             )
 
-    # 2b) SEAM-06 (Phase 141) — resync draft-SV dedup for the SEQUENTIAL retry
-    # class. Phase 141 adds a bounded Vercel->Railway seam retry, and resync is
-    # allowlisted for it ONLY because this pre-check exists (141-CONTEXT locked
-    # decision).
+    # 2b) SEAM-06 (Phase 141) — resync draft-SV dedup against a duplicate submit.
+    #
+    # ⚠️ WHAT THIS GUARD IS FOR HAS BEEN CORRECTED TWICE; READ THE CORRECTION
+    # BEFORE REASONING FROM IT (141.2 / D-03). It was introduced as the thing
+    # that made resync safe to REPLAY: Phase 141 added a bounded Vercel->Railway
+    # seam retry and allowlisted resync for it ONLY on the strength of this
+    # pre-check. Phase 141.1 re-derived that claim and found it false. Phase
+    # 141.2 acted on the finding and WITHDREW the retry: the TypeScript seam
+    # registry now carries a NO verdict for resync, so no resync retry is issued
+    # at all, and the sentence below that used to say this "closes the
+    # SEQUENTIAL retry class" is gone rather than merely softened.
+    #
+    # This guard still earns its place — it is defense-in-depth against a
+    # DUPLICATE SUBMIT (a user or client re-issuing the sync) — but it is not an
+    # idempotency key and must never again be cited as one.
     #
     # resync runs on a SERVER-MINTED wizard_session_id (:1018), so it is
     # `idempotent_by_session == False` by construction — the :1351 block above
@@ -1420,11 +1431,18 @@ async def process_key(
     # (140.1-02). Scoping this read by strategy_id therefore carries the tenant
     # scope — no wizard_session_id / user_id echo of a foreign row is possible.
     #
-    # SCOPE BOUND (documented residual): this closes the SEQUENTIAL retry class
-    # only — a seam retry re-crossing after the first attempt already committed
-    # its draft. A CONCURRENT two-tab race (both SELECTs pass before either
-    # INSERT; distinct server-minted uuid4s, so neither 23505s on the session
-    # index) can still mint two drafts. That is OUT of 141's scope: no new
+    # SCOPE BOUND (documented residual, restated 141.2 / D-03): this guard does
+    # NOT make a resync replay safe, and the original text here claiming it
+    # closed the SEQUENTIAL retry class was the over-claim that kept a retry
+    # grant alive after the evidence for it had been withdrawn. The filter is
+    # status='draft', and the compute worker's tick advances the first draft
+    # verification OUT of draft — so a second attempt arriving after that
+    # transition matches nothing here and inserts a second draft row. What the
+    # guard does close is the case where the first attempt's draft is still IN
+    # draft when a duplicate submit arrives. A CONCURRENT two-tab race (both
+    # SELECTs pass before either INSERT; distinct server-minted uuid4s, so
+    # neither 23505s on the session index) can still mint two drafts. Both
+    # residuals are OUT of scope here: no new
     # migration and no new unique index (PATTERNS records the migration path as
     # the scope decision deliberately NOT taken); this is an application-level
     # SELECT-then-guarded-INSERT. `.limit(1)` keeps `.maybe_single()` from
