@@ -237,11 +237,22 @@ async function getNumerator(args: {
  * WHAT SURVIVES FROM D-16 — and is now the load-bearing half of the rationale:
  * in the Python service the `process_key.entry` audit emit fires BEFORE both
  * the onboard and the resync duplicate pre-checks (the `create_task` call for
- * `_write_audit_sync` precedes both pre-check sites), so a retried
- * onboard/resync writes a SECOND `entity_type='process_key'` row
- * deterministically, even when it short-circuits as a duplicate and does no
- * work. D-16 read that as a reason to dedup. It is better read as the grain
- * statement it actually is: ONE AUDIT ROW PER HTTP ATTEMPT. `getNumerator`
+ * `_write_audit_sync` precedes both pre-check sites), so a SECOND HTTP attempt
+ * writes a SECOND `entity_type='process_key'` row deterministically, even when
+ * it short-circuits as a duplicate and does no work. D-16 read that as a reason
+ * to dedup. It is better read as the grain statement it actually is: ONE AUDIT
+ * ROW PER HTTP ATTEMPT.
+ *
+ * ⚠️ THAT SENTENCE USED TO SAY "a retried onboard/resync", AND THE SHIPPED
+ * RETRY SURFACE IS NARROWER THAN THAT (141.2 / D-01 + D-03). `resync` no longer
+ * retries at all — its grant was withdrawn — and `onboard` retries only when the
+ * call carries a usable idempotency key, decided by `retriesForFlow` at the
+ * `postProcessKey` chokepoint. The MECHANISM above is unaffected, because it is
+ * a property of the Python handler's emit ORDER and holds for any second
+ * attempt whatever produced it; what changed is how much traffic can produce
+ * one. It is corrected here rather than left standing because a reader
+ * calibrating the downward bias below off "onboard/resync retry" would
+ * over-estimate it. `getNumerator`
  * counts Sentry EVENTS, which are also per attempt. Attempt over attempt is
  * internally consistent and needs no dedup at all — which is what removes the
  * truncation and the wire-controllable key in the same move.
