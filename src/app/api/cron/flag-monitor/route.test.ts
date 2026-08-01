@@ -420,6 +420,67 @@ describe.each([["GET"], ["POST"]] as const)(
       expect(body.total).toBe(200); // hand-typed: rows, not distinct ids
     });
 
+    it("(D5/SC-H) the RATE is attempt-grained on BOTH sides: 2 events over 20 ATTEMPT rows = 10%, even though those 20 attempts are only 19 user requests", async () => {
+      // ONE attempt-level scenario drives BOTH sides of the ratio, which is
+      // what makes this a GRAIN pin rather than arithmetic over a fixture:
+      //
+      //   19 user requests, ONE of which retried  → 20 HTTP ATTEMPTS
+      //   that retried request failed both times  →  2 Sentry EVENTS
+      //
+      // Sentry events are per-attempt. Audit rows are per-attempt too:
+      // `_write_audit_sync` fires at /process-key entry BEFORE both the onboard
+      // and the resync duplicate pre-checks, so every retried HTTP attempt
+      // re-enters the endpoint and writes its own row. Attempt over attempt is
+      // therefore internally consistent, and it is the ONLY pairing that is.
+      //
+      // (D3/SC-F) and (D4/SC-G) pin the denominator's magnitude and its
+      // independence from the wire. Neither can see a GRAIN mismatch, because
+      // neither involves the numerator. This one does, and it reds for a
+      // mismatch introduced on EITHER side.
+      const USER_REQUESTS = 19;
+      const ATTEMPT_ROWS = 20; // one of those requests retried once
+      rec.auditCount = ATTEMPT_ROWS;
+      // The row path serves the retried request's two rows under ONE shared
+      // correlation_id, so a reintroduced dedup has something real to collapse.
+      // A pin whose fixture cannot express the mutation cannot redden for it —
+      // that is finding 10's lesson applied to the denominator.
+      rec.auditRows = [
+        { correlation_id: "req-retried" }, // attempt 1
+        { correlation_id: "req-retried" }, // attempt 2 — the retry
+        ...Array.from({ length: USER_REQUESTS - 1 }, (_, i) => ({
+          correlation_id: `req-${i}`,
+        })),
+      ];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          sentryResponse({ ok: true, json: { data: [{ "count()": 2 }] } }),
+        ),
+      );
+      const handler = await getHandler();
+      const res = await handler(authedReq());
+      const body = await res.json();
+
+      // THE RATIO IS THE ASSERTION. It is deliberately checked BEFORE the
+      // component values: a `total` assertion would short-circuit this one and
+      // reduce the pin to a restatement of what the double returned, which is
+      // already (D3/SC-F)'s and (D4/SC-G)'s job. The grain contract only lives
+      // in the quotient, so the quotient is what has to fail first.
+      expect(
+        body.errorRate,
+        "GRAIN CONTRACT: the numerator counts Sentry EVENTS per ATTEMPT and the " +
+          "denominator counts audit ROWS per ATTEMPT. This scenario is 19 user " +
+          "requests / 20 attempts / 2 events, so the only attempt-grained answer " +
+          "is 2/20 = 0.1. Getting 2/19 means the DENOMINATOR was collapsed to " +
+          "request grain; getting 1/20 means the NUMERATOR was. Either side " +
+          "reddens this pin, which is the point — the two sides must agree on " +
+          "the unit, and no single-sided test can check that.",
+      ).toBe(0.1);
+      // Component values, for diagnosis once the ratio has already spoken.
+      expect(body.errorCount).toBe(2);
+      expect(body.total).toBe(20); // ATTEMPTS, not user requests
+    });
+
     // --- (1d)/(1e) DELETED with the D-16 dedup they described --------------
     //
     // (1d) asserted "3 audit rows across 2 correlation_ids → denominator 2" and
