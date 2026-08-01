@@ -295,6 +295,83 @@ describe("postProcessKey — enqueue vs sync budget selection", () => {
 });
 
 /**
+ * Phase 141.2 / D-03 (finding 6) — the retry VERDICT, read off the wire at the
+ * chokepoint the verdict actually reaches.
+ *
+ * ⚠️ WHY THIS PIN LIVES HERE AND NOT IN `seam-retry-registry.test.ts`. The
+ * registry file can only prove which map a key sits in. The defect class this
+ * pin fences is SEAM-CROSSING: 141.1-02 rewrote `resync`'s evidence to ADMIT the
+ * SEQUENTIAL-retry class is open (the compute worker's tick advances the draft
+ * verification out of draft status inside the backoff window, so the second
+ * attempt's `status='draft'` pre-check matches nothing and a second row is
+ * inserted) and left the retry grant that had been issued on the strength of the
+ * deleted sentence. A registry-shaped assertion agrees with the registry by
+ * construction; only driving the REAL `postProcessKey` shows what the transport
+ * is actually told. Read `retriesOverride` off `coreSpy`'s captured init, which
+ * is the exact value `resilientFetch` consumes.
+ *
+ * BOTH POLARITIES, deliberately. Without the `onboard` case a registry emptied
+ * outright would satisfy the `resync` case forever — a fence that passes because
+ * it is inspecting nothing. `onboard` keeps its verdict in this plan.
+ */
+describe("postProcessKey — the retry verdict reaching the transport (D-03)", () => {
+  beforeEach(() => {
+    process.env.INTERNAL_API_TOKEN = "internal-test-token";
+    coreSpy.mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Drive the REAL client and return the `retriesOverride` it handed the core. */
+  async function retriesOverrideFor(
+    flowType: "onboard" | "resync" | "teaser" | "csv",
+  ): Promise<unknown> {
+    await postProcessKey({
+      flow_type: flowType,
+      source: "test",
+      context: {},
+      userId: "u1",
+      correlationId: "c1",
+    });
+    expect(coreSpy).toHaveBeenCalledTimes(1);
+    // resilientFetch(budgetKey, path, init) — the init is the third argument.
+    return (coreSpy.mock.calls[0][2] as { retriesOverride?: unknown })
+      .retriesOverride;
+  }
+
+  it("resync sends retriesOverride 0 — its verdict is NO", async () => {
+    expect(
+      await retriesOverrideFor("resync"),
+      "a resync request left this client authorised to replay. D-03 withdrew " +
+        "that grant: `resync` carries a NO verdict in RETRY_AUDIT_NO_FLOW_TYPES " +
+        "because the strategy-scoped `status='draft'` pre-check does NOT close " +
+        "the SEQUENTIAL-retry class — the worker tick can advance the draft " +
+        "between attempts, and the second attempt then inserts a second draft " +
+        "verification row. Re-granting the retry requires a durable idempotency " +
+        "key for resync, which does not exist.",
+    ).toBe(0);
+  });
+
+  it("onboard still sends retriesOverride 1 (the pin is not vacuous)", async () => {
+    expect(
+      await retriesOverrideFor("onboard"),
+      "onboard's retry disappeared. This plan withdrew resync's verdict ONLY — " +
+        "if onboard's grant is being narrowed, the narrowing belongs with the " +
+        "change that makes it (D-01's key-presence condition), and this pin must " +
+        "move in that same commit rather than silently agreeing.",
+    ).toBe(1);
+  });
+});
+
+/**
  * Phase 140.1 / PYAPI-02 — the `X-Tenant-Claim` mint.
  *
  * The Python limiter buckets `/process-key` on an HMAC-verified tenant claim

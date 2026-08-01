@@ -349,6 +349,15 @@ describe("SEAM_BUDGETS — every timeout pinned to a hand-typed literal", () => 
     // the module under test; it is the count the SEAM-05 audit authorised. If a
     // sixth row is legitimately flipped, change this literal in the same commit
     // as the row, its registry verdict, and any prose that states the number.
+    //
+    // ⚠️ 141.2 / D-03 CHECKED THIS AND LEFT IT AT 5 — deliberately, not by
+    // omission. Withdrawing resync's retry verdict removes a registry ENTRY, not
+    // a budget ROW: `SEAM_BUDGETS[*].retries` is pure ACCOUNTING post-D-08 (the
+    // registry is the gate; `resilientFetch` no longer falls back to the row),
+    // and `process-key-enqueue` is MANY-TO-ONE over {onboard, resync}. `onboard`
+    // is still a YES flow and still lands on that row, so the row still funds a
+    // real second attempt and SC-4b must still charge for it. The number would
+    // move only if the LAST retrying member of a row lost its verdict.
     const rowsAtOne = Object.values(BUDGET_TABLE).filter(
       (row) => row?.retries === 1,
     ).length;
@@ -412,16 +421,18 @@ describe("SEAM_BUDGETS — every timeout pinned to a hand-typed literal", () => 
       ).toBe(4);
       expect(
         Object.keys(RETRY_SAFE_FLOW_TYPES).length,
-        "RETRY_SAFE_FLOW_TYPES no longer holds exactly 2 audited flows " +
-          "(onboard, resync). Adding teaser or csv here is the SC3 landmine: a " +
-          "replayed teaser double-mints its verification/public_token/lead.",
-      ).toBe(2);
+        "RETRY_SAFE_FLOW_TYPES no longer holds exactly 1 audited flow " +
+          "(onboard). 141.2 / D-03 withdrew resync's grant — it was issued on a " +
+          "sentence 141.1-02 deleted as false. Adding teaser or csv here is the " +
+          "SC3 landmine: a replayed teaser double-mints its " +
+          "verification/public_token/lead.",
+      ).toBe(1);
       expect(
         Object.keys(RETRY_AUDIT_NO_FLOW_TYPES).length,
-        "RETRY_AUDIT_NO_FLOW_TYPES no longer holds exactly 2 refusals " +
-          "(teaser, csv). A refusal that disappears is an audit verdict lost, " +
-          "not a flow made safe.",
-      ).toBe(2);
+        "RETRY_AUDIT_NO_FLOW_TYPES no longer holds exactly 3 refusals " +
+          "(teaser, csv, resync). A refusal that disappears is an audit verdict " +
+          "lost, not a flow made safe.",
+      ).toBe(3);
       expect(
         Object.keys(RETRY_AUDIT_NO_ANALYTICS).length,
         "RETRY_AUDIT_NO_ANALYTICS no longer holds exactly 5 refusals " +
@@ -490,24 +501,41 @@ describe("SEAM_BUDGETS — every timeout pinned to a hand-typed literal", () => 
         ).toBe(1);
       }
 
-      // The many-to-one row: BOTH audited flows must still be allowlisted at 1,
-      // because the single row is the only accounting statement covering them.
+      // The many-to-one row, AFTER 141.2 / D-03. `process-key-enqueue` serves
+      // {onboard, resync}, and the pair is no longer symmetric: onboard keeps
+      // its verdict, resync's was WITHDRAWN (its grant rested on a sentence
+      // 141.1-02 deleted as false). The row stays at 1 because ONE of the two
+      // flows it serves still retries — a many-to-one row is charged for the
+      // maximum over its members, not for each. Both halves are asserted, in
+      // opposite directions, so neither drift is silent: re-granting resync
+      // without an audit reddens here, and dropping onboard's grant while the
+      // row still declares a retry reddens here too.
       expect(
         RETRY_SAFE_FLOW_TYPES.onboard?.retries,
         "onboard lost its retry-safe verdict while process-key-enqueue's row " +
-          "still declares a retry. The row is accounting for a retry the client " +
-          "no longer performs.",
+          "still declares a retry. After D-03 withdrew resync, onboard is the " +
+          "ONLY member of this row still carrying a grant — so the row is now " +
+          "accounting for a retry no flow performs.",
       ).toBe(1);
       expect(
-        RETRY_SAFE_FLOW_TYPES.resync?.retries,
-        "resync lost its retry-safe verdict while process-key-enqueue's row " +
-          "still declares a retry. The row is accounting for a retry the client " +
-          "no longer performs.",
-      ).toBe(1);
+        RETRY_SAFE_FLOW_TYPES.resync,
+        "resync is back in RETRY_SAFE_FLOW_TYPES. 141.2 / D-03 withdrew that " +
+          "grant: the strategy-scoped status='draft' pre-check does not make a " +
+          "replay safe (the worker tick can advance the draft between attempts), " +
+          "and re-granting requires a DURABLE idempotency key for resync, which " +
+          "does not exist. Do not restore this to make a diff pass.",
+      ).toBeUndefined();
+      expect(
+        RETRY_AUDIT_NO_FLOW_TYPES.resync,
+        "resync's NO verdict left RETRY_AUDIT_NO_FLOW_TYPES. Absence from the " +
+          "YES map already yields no-retry, so this would not change behaviour — " +
+          "it would delete the AUDIT, leaving the next reader with no record of " +
+          "why the retry was withdrawn.",
+      ).toBeDefined();
       expect(
         BUDGET_TABLE["process-key-enqueue"]?.retries,
-        "onboard and resync are both retry-safe in the registry, so the enqueue " +
-          "row must declare 1 for SC-4b.",
+        "onboard is still retry-safe in the registry, so the enqueue row must " +
+          "declare 1 for SC-4b's headroom arithmetic.",
       ).toBe(1);
     });
 

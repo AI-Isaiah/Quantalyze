@@ -41,7 +41,11 @@ import {
 
 // ── Hand-typed EXPECTED literals (never read from the module under test) ──────
 
-const EXPECTED_SAFE_FLOW_KEYS = ["onboard", "resync"];
+// 141.2 / D-03 — `resync` LEFT this set. It was allowlisted on a sentence
+// 141.1-02 later deleted as false, and the grant outlived its own evidence.
+// Its verdict now lives in RETRY_AUDIT_NO_FLOW_TYPES. If a future change puts
+// it back, the entry has to argue against the written finding there.
+const EXPECTED_SAFE_FLOW_KEYS = ["onboard"];
 const EXPECTED_SAFE_ANALYTICS_KEYS = [
   "bridge",
   "optimize-weights",
@@ -307,16 +311,30 @@ describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
   });
 
   describe("[D-05] the flow evidence states its residuals and its qualification", () => {
-    it("resync does NOT claim the SEQUENTIAL class is closed", () => {
-      expect(
-        RETRY_SAFE_FLOW_TYPES.resync?.evidence,
-        `resync's evidence has re-acquired a "class is closed" claim. It is NOT ` +
-          `closed: the plan-01 pre-check filters status='draft', and the worker's ` +
-          `30s tick advances SV#1 out of draft, so a transition landing inside the ` +
-          `blip window lets a SECOND draft row through. The residual is bounded ` +
-          `and recorded — overstating it as closed is what a future reader would ` +
-          `rely on when deciding a NEW flow needs no dedup.`,
-      ).not.toMatch(/class is closed/i);
+    // ⚠️ THIS PIN READS THE **NO** MAP, AND THAT IS THE POINT (141.2 / D-03).
+    // It used to read `RETRY_SAFE_FLOW_TYPES.resync?.evidence`. After the move
+    // that expression is `undefined`, and `expect(undefined).not.toMatch(...)`
+    // is a MATCHER ERROR, not a clean failure — the pin would have THROWN while
+    // appearing to guard something. Re-pointed at the map the verdict actually
+    // lives in, and given BOTH polarities: a guard that only bans a phrase goes
+    // vacuous the moment the prose is emptied, so the second half requires the
+    // entry to positively state the residual it is refusing to overstate.
+    it("resync's NO evidence refuses the closure claim AND states the open window", () => {
+      const evidence = RETRY_AUDIT_NO_FLOW_TYPES.resync;
+      const message =
+        `resync's NO evidence no longer describes the residual that WITHDREW ` +
+        `its retry. The strategy-scoped pre-check filters status='draft'; the ` +
+        `compute worker's tick advances the first draft verification out of ` +
+        `draft, so a transition landing inside the backoff lets a SECOND draft ` +
+        `row through. Restating that window as settled is exactly the over-claim ` +
+        `141.1-02 deleted and 141.2 acted on — and it is what a future reader ` +
+        `would rely on when deciding a NEW flow needs no dedup.`;
+      // It IS a string — asserted before the matchers, so an emptied or moved
+      // entry fails HERE with a readable message instead of throwing inside a
+      // matcher handed `undefined`.
+      expect(typeof evidence, message).toBe("string");
+      expect(evidence, message).not.toMatch(/class is closed/i);
+      expect(evidence, message).toMatch(/window is OPEN/);
     });
 
     it.each(EXPECTED_SAFE_FLOW_KEYS)(
@@ -395,11 +413,34 @@ describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
   // ───────────────────────────────────────────────────────────────────────────
 
   /**
-   * Hand-typed per map (2 + 4 + 2 + 5), never derived from the maps. Emptying a
-   * map must REDDEN rather than shrink the scanned population to zero and pass —
-   * the "scanner that matches nothing reports agreement forever" fence.
+   * Hand-typed PER MAP, never derived from the maps, and asserted PER MAP
+   * against its own population before the total is checked.
+   *
+   * ⚠️ WHY THE BREAKDOWN IS FOUR SEPARATE LITERALS AND NOT ONE SUM (141.2 /
+   * D-03, SC-E). This fence used to be the single expression `2 + 4 + 2 + 5`,
+   * compared against the flattened population with a message that spelled the
+   * breakdown out in prose. Moving `resync` from the YES flow map to the NO flow
+   * map takes the populations from 2/4/2/5 to 1/4/3/5 — **and both sum to 13**.
+   * The pin stayed GREEN while its own failure message ("2 flow YES … 2 flow
+   * NO") became false: a fence reporting agreement about numbers it was no
+   * longer checking. That is this phase's whole thesis applied to the phase's
+   * own guard, so the total is now DERIVED from four literals that are each
+   * pinned to their own map. A move in EITHER direction reddens the map it left
+   * and the map it joined, and no arithmetic coincidence can absorb both.
+   *
+   * Emptying a map still reddens rather than shrinking the scanned population to
+   * zero and passing — the "scanner that matches nothing reports agreement
+   * forever" fence, which is why these are literals and never `Object.keys`.
    */
-  const EXPECTED_EVIDENCE_STRING_COUNT = 2 + 4 + 2 + 5;
+  const EXPECTED_FLOW_YES_EVIDENCE = 1; // onboard (resync withdrawn, 141.2/D-03)
+  const EXPECTED_ANALYTICS_YES_EVIDENCE = 4; // bridge, simulator, portfolio-optimizer, optimize-weights
+  const EXPECTED_FLOW_NO_EVIDENCE = 3; // teaser, csv, resync
+  const EXPECTED_ANALYTICS_NO_EVIDENCE = 5; // validate-key, encrypt-key, match-recompute, portfolio-analytics, match-eval
+  const EXPECTED_EVIDENCE_STRING_COUNT =
+    EXPECTED_FLOW_YES_EVIDENCE +
+    EXPECTED_ANALYTICS_YES_EVIDENCE +
+    EXPECTED_FLOW_NO_EVIDENCE +
+    EXPECTED_ANALYTICS_NO_EVIDENCE;
 
   /** Every evidence string across ALL FOUR maps, each shape read correctly. */
   function allEvidenceStrings(): Array<{ where: string; text: string }> {
@@ -422,18 +463,55 @@ describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
   }
 
   describe("[D-06 / SC-H] no coordinate citation in any evidence STRING", () => {
-    it("scans exactly 13 non-empty evidence strings (anti-vacuity fence)", () => {
+    /** Non-empty scanned strings whose `where` names the given map. */
+    function scannedIn(mapName: string): number {
+      return allEvidenceStrings().filter(
+        (e) =>
+          e.where.startsWith(`${mapName}.`) &&
+          typeof e.text === "string" &&
+          e.text.length > 0,
+      ).length;
+    }
+
+    it.each([
+      ["RETRY_SAFE_FLOW_TYPES", EXPECTED_FLOW_YES_EVIDENCE],
+      ["RETRY_SAFE_ANALYTICS", EXPECTED_ANALYTICS_YES_EVIDENCE],
+      ["RETRY_AUDIT_NO_FLOW_TYPES", EXPECTED_FLOW_NO_EVIDENCE],
+      ["RETRY_AUDIT_NO_ANALYTICS", EXPECTED_ANALYTICS_NO_EVIDENCE],
+    ] as const)(
+      "%s contributes exactly %i non-empty evidence strings (per-map anti-vacuity fence)",
+      (mapName, expected) => {
+        expect(
+          scannedIn(mapName),
+          `${mapName} contributes ${scannedIn(mapName)} non-empty evidence ` +
+            `strings, not ${expected}. THE BREAKDOWN IS CHECKED PER MAP ON ` +
+            `PURPOSE: a verdict MOVED between two maps leaves the total ` +
+            `unchanged, so a total-only fence stays green while its own stated ` +
+            `breakdown goes false — measured on exactly that move when resync ` +
+            `went from the YES flow map to the NO one (2+4+2+5 and 1+4+3+5 are ` +
+            `both 13). If a verdict was legitimately added, removed or moved, ` +
+            `change the per-map literal IN THE SAME COMMIT as the entry. If it ` +
+            `was not, a map has been emptied and the citation guard below is now ` +
+            `inspecting less than it claims while still reporting green.`,
+        ).toBe(expected);
+      },
+    );
+
+    it("scans 13 non-empty evidence strings in total (the four maps, summed)", () => {
+      // The total is DERIVED from the four per-map literals above, so it cannot
+      // disagree with them; it is kept because it is the number the citation
+      // guard below actually inspects, and a shape the flattener mishandles
+      // (a fifth map added and not wired into `allEvidenceStrings`) shows up
+      // here rather than nowhere.
       const scanned = allEvidenceStrings().filter(
         (e) => typeof e.text === "string" && e.text.length > 0,
       );
       expect(
         scanned.length,
-        `the evidence-string population is ${scanned.length}, not ` +
-          `${EXPECTED_EVIDENCE_STRING_COUNT} (2 flow YES + 4 analytics YES + 2 ` +
-          `flow NO + 5 analytics NO). If a verdict was legitimately added or ` +
-          `removed, bump this hand-typed literal IN THE SAME COMMIT. If it was ` +
-          `not, a map has been emptied and the citation guard below is now ` +
-          `inspecting nothing while still reporting green.`,
+        `the flattened evidence-string population is ${scanned.length}, not ` +
+          `${EXPECTED_EVIDENCE_STRING_COUNT}. The per-map fences above localise ` +
+          `WHICH map moved; this one catches a map that is not being flattened ` +
+          `at all.`,
       ).toBe(EXPECTED_EVIDENCE_STRING_COUNT);
     });
 
@@ -504,9 +582,14 @@ describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
       ).toBe(true);
     });
 
+    // 141.2 / D-03 — `RETRY_SAFE_FLOW_TYPES.resync` left this list with the
+    // entry itself. `Object.freeze(undefined)` would have made the case pass
+    // vacuously rather than red, so the row is not merely deleted: the freeze
+    // obligation follows the verdict to the NO map in the case below, where the
+    // value is a STRING (primitives are frozen by nature — the assertion there
+    // is that the CONTAINER is frozen, which is what closes the push vector).
     it.each([
       ["RETRY_SAFE_FLOW_TYPES.onboard", RETRY_SAFE_FLOW_TYPES.onboard],
-      ["RETRY_SAFE_FLOW_TYPES.resync", RETRY_SAFE_FLOW_TYPES.resync],
       ["RETRY_SAFE_ANALYTICS.bridge", RETRY_SAFE_ANALYTICS.bridge],
       ["RETRY_SAFE_ANALYTICS.simulator", RETRY_SAFE_ANALYTICS.simulator],
       [
@@ -554,6 +637,22 @@ describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
         delete RETRY_SAFE_FLOW_TYPES.onboard;
       }).toThrow(TypeError);
       expect(RETRY_SAFE_FLOW_TYPES.onboard?.retries).toBe(1);
+    });
+
+    it("overwriting the `resync` NO verdict does not compile AND throws at runtime", () => {
+      // 141.2 / D-03 — the freeze obligation that used to sit on
+      // `RETRY_SAFE_FLOW_TYPES.resync`, following the verdict to its new map.
+      // The vector is different in shape and identical in effect: a NO entry is
+      // a STRING, so there is no inner object to repoint, and the re-grant is
+      // performed by REPLACING the refusal text (or deleting the row, which
+      // reddens the exhaustiveness pin). Overwriting it silently would leave a
+      // registry that reads as an audit while carrying prose nobody audited.
+      expect(() => {
+        // @ts-expect-error — pinned as a COMPILE error; the `Readonly<…>`
+        // annotation makes this TS2540 (assignment to a read-only property).
+        RETRY_AUDIT_NO_FLOW_TYPES.resync = "safe now, trust me";
+      }).toThrow(TypeError);
+      expect(RETRY_AUDIT_NO_FLOW_TYPES.resync).toMatch(/WITHDRAWN GRANT/);
     });
   });
 
