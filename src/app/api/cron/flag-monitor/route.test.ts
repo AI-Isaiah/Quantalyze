@@ -420,56 +420,16 @@ describe.each([["GET"], ["POST"]] as const)(
       expect(body.total).toBe(200); // hand-typed: rows, not distinct ids
     });
 
-    // --- (1d) D-16 denominator: distinct REQUESTS, not audit rows ----------
-
-    it("(1d) 3 audit rows across 2 correlation_ids → denominator 2 (a retry must not inflate the denominator)", async () => {
-      // WHY 2 and not 3: in the Python service the `process_key.entry` audit
-      // emit fires BEFORE both the onboard and the resync duplicate
-      // pre-checks, so a retried call writes a second `process_key` audit row
-      // even when it short-circuits as a duplicate and does no work. The
-      // retry reuses the correlation_id minted once per client call. Counting
-      // rows would therefore inflate the denominator by exactly the retry
-      // volume and bias errorRate DOWNWARD — the monitor would get QUIETER
-      // precisely when the seam is retrying more, which is the failure mode
-      // this alert exists to catch.
-      rec.auditRows = [
-        { correlation_id: "cid-A" }, // request A, attempt 1
-        { correlation_id: "cid-A" }, // request A, attempt 2 (the retry)
-        { correlation_id: "cid-B" }, // request B
-      ];
-      vi.stubGlobal(
-        "fetch",
-        vi.fn(async () =>
-          sentryResponse({ ok: true, json: { data: [{ "count()": 0 }] } }),
-        ),
-      );
-      const handler = await getHandler();
-      const res = await handler(authedReq());
-      const body = await res.json();
-      expect(body.total).toBe(2); // hand-typed: 2 user requests, not 3 rows
-    });
-
-    it("(1e) a row with no usable correlation_id counts as its own request (never dropped, never thrown on)", async () => {
-      // An unattributable row cannot be collapsed with other unattributable
-      // rows — that would UNDER-count requests and bias errorRate upward into
-      // false alerts. Each stands alone.
-      rec.auditRows = [
-        { correlation_id: "cid-A" },
-        { correlation_id: "cid-A" },
-        { correlation_id: null },
-        { correlation_id: undefined },
-      ];
-      vi.stubGlobal(
-        "fetch",
-        vi.fn(async () =>
-          sentryResponse({ ok: true, json: { data: [{ "count()": 0 }] } }),
-        ),
-      );
-      const handler = await getHandler();
-      const res = await handler(authedReq());
-      const body = await res.json();
-      expect(body.total).toBe(3); // 1 distinct id + 2 unattributable singletons
-    });
+    // --- (1d)/(1e) DELETED with the D-16 dedup they described --------------
+    //
+    // (1d) asserted "3 audit rows across 2 correlation_ids → denominator 2" and
+    // (1e) asserted that an unattributable row counts as its own singleton.
+    // Both encoded the dedup, and both are false under D-02: the denominator is
+    // now ROWS, so (1d)'s scenario answers 3 and (1e)'s answers 4. They are
+    // deleted rather than re-pointed because their SUBJECT is gone — the
+    // singleton branch existed only to stop unattributable rows collapsing
+    // together, which a raw count does by construction. (D3/SC-F) and
+    // (D4/SC-G) above cover the properties that replaced them.
 
     // --- (3) rate-limit vs outage distinction ------------------------------
 
