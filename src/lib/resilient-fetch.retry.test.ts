@@ -1560,7 +1560,60 @@ describe("[SEAM-06 / SC2+SC3] client wiring — the REAL clients thread retriesO
     expect(result.ok).toBe(false);
   });
 
-  it("SC2 — postProcessKey onboard + a single transient then 200 → exactly TWO fetches, resolves ok", async () => {
+  it("SC2 — postProcessKey onboard WITH an idempotency key + a single transient then 200 → exactly TWO fetches, resolves ok", async () => {
+    // ⚠️ THE FIXTURE GAINED A `wizard_session_id` IN 141.2 / D-01, AND THAT IS
+    // NOT COSMETIC. onboard's retry is no longer granted on flow_type alone: it
+    // is granted only when the context carries a key the SERVER can dedupe on,
+    // because without one Python mints a fresh session per attempt and the
+    // second attempt inserts a second verification row. `context: {}` was
+    // therefore describing a call that must NOT retry, while asserting two
+    // fetches. The mirror case below pins the other side of that same split.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    pinFloorBackoff();
+    const fetchMock = throwThenJsonOk(new TypeError("fetch failed"), {
+      ok: true,
+      strategy_id: "s1",
+    });
+    configureSeamClients();
+    const { postProcessKey } = await import("./process-key-client");
+
+    const result = await postProcessKey({
+      flow_type: "onboard",
+      source: "onboard",
+      context: { wizard_session_id: "33333333-3333-4333-8333-333333333333" },
+      userId: "u1",
+      correlationId: "c-onboard",
+    });
+
+    expect(
+      fetchMock,
+      "onboard stopped retrying even WITH its antecedent satisfied. D-01 made " +
+        "the grant CONDITIONAL on key presence; it did not withdraw it. If the " +
+        "verdict is being withdrawn outright, that belongs in " +
+        "RETRY_AUDIT_NO_FLOW_TYPES with written evidence, not here.",
+    ).toHaveBeenCalledTimes(2);
+    expect(result.ok).toBe(true);
+  });
+
+  it("SC2 / D-01 — postProcessKey onboard with NO idempotency key + a single transient → exactly ONE fetch, the failure surfaces", async () => {
+    // ⚠️ THE TRANSPORT-LEVEL HALF OF D-01, and the reason it is worth a case of
+    // its own rather than leaning on the chokepoint pin in
+    // `process-key-client.test.ts`. That pin reads the `retriesOverride` VALUE
+    // off a spied core — it proves the client computed 0. This one mocks only
+    // `fetch` and counts ACTUAL wire attempts through the REAL transport, so it
+    // also covers the half no init-value assertion can: that the 0 is honoured
+    // downstream. A regression in either place reddens exactly one of the two,
+    // which is what makes them worth having separately.
+    //
+    // The `finalize-wizard` route reaches this state legitimately: the draft's
+    // `wizard_session_id` column is nullable and the route forwards absence AS
+    // absence rather than synthesising an id (pinned in that route's TS-33
+    // cases). Before D-01 this call retried, and the replay inserted a second
+    // `strategy_verifications` row on the money path.
+    //
+    // Both halves asserted, as on the resync case above: the count AND the
+    // outcome. Re-granting an unconditional onboard retry flips the count to 2
+    // and the arm from the 502 back to the 200, so it cannot hide behind either.
     vi.spyOn(console, "error").mockImplementation(() => {});
     pinFloorBackoff();
     const fetchMock = throwThenJsonOk(new TypeError("fetch failed"), {
@@ -1575,11 +1628,18 @@ describe("[SEAM-06 / SC2+SC3] client wiring — the REAL clients thread retriesO
       source: "onboard",
       context: {},
       userId: "u1",
-      correlationId: "c-onboard",
+      correlationId: "c-onboard-nokey",
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(result.ok).toBe(true);
+    expect(
+      fetchMock,
+      "an onboard call carrying NO wizard_session_id re-attempted on the wire. " +
+        "The server has nothing to dedupe on in that state — it mints a fresh " +
+        "session per attempt — so attempt 2 inserts a SECOND verification row. " +
+        "The retry verdict must be decided from flow_type AND key presence " +
+        "together, at the shared chokepoint.",
+    ).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(false);
   });
 
   it("SC2 / SC-O — findReplacementCandidates (bridge) at PRODUCTION CONFIGURATION + a single transient then 200 → exactly TWO fetches, resolves", async () => {
