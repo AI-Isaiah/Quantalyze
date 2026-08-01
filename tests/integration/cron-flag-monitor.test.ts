@@ -45,23 +45,38 @@ function makeReq(headers: Record<string, string> = {}): NextRequest {
   } as unknown as NextRequest;
 }
 
+/** PostgREST's server-side row cap. Hand-typed: this is the DEPLOYED
+ *  platform's behaviour (measured against production — audit_log held 7350
+ *  rows, an unbounded `.select()` returned exactly 1000 with HTTP 200 and
+ *  `error: null`), not a constant this repo owns. */
+const POSTGREST_MAX_ROWS = 1000;
+
 /**
  * Build a Supabase admin client mock with two collaborating tables:
  *   - feature_flags: select(value).eq("flag_key", X).maybeSingle()
  *                    upsert({...}, { onConflict })
- *   - audit_log: select("correlation_id:metadata->>correlation_id").eq(...).gte(...)
- *                → { data: rows } (D-16: the route deduplicates by
- *                  correlation_id client-side; it no longer asks for a count)
+ *   - audit_log: select("id", { count: "exact", head: true }).eq(...).gte(...)
+ *                → { count } — a SERVER-SIDE COUNT of the /process-key HTTP
+ *                  ATTEMPT rows in the window (D-02, Phase 141.2). The route no
+ *                  longer materialises rows to dedup them by correlation_id.
  *
- * `featureFlagsRows` is a dict keyed by flag_key. `auditLogTotal` controls the
- * denominator by synthesising that many rows with DISTINCT correlation_ids, so
- * every existing rate expectation keeps its meaning under the new call shape.
+ * SHAPE-DISTINGUISHING, same discipline as the unit double: the COUNT chain and
+ * a row-materialising select get DIFFERENT answers, so this suite can disagree
+ * with a query that has silently stopped working. A shape-blind double is how
+ * the dead `path:` numerator survived from Phase 19 to 141.1 — see 7d below,
+ * which makes exactly that point about the Sentry side.
+ *
+ * `featureFlagsRows` is a dict keyed by flag_key. `auditLogTotal` is the true
+ * attempt-row count, answered uncapped to the COUNT chain. `auditLogRows`
+ * overrides the row-materialising answer per test; by default it is a
+ * max_rows-capped page, exactly what deployed PostgREST would return.
  */
 function makeAdminMock(opts: {
   featureFlagsRows?: Record<string, { value: string }>;
   auditLogTotal: number;
+  auditLogRows?: Array<{ correlation_id: unknown }>;
 }) {
-  const { featureFlagsRows = {}, auditLogTotal } = opts;
+  const { featureFlagsRows = {}, auditLogTotal, auditLogRows } = opts;
   const upsertCalls: Array<{ table: string; row: Record<string, unknown> }> = [];
 
   function fromTable(table: string) {
@@ -80,15 +95,29 @@ function makeAdminMock(opts: {
       };
     }
     if (table === "audit_log") {
-      const rows = Array.from({ length: auditLogTotal }, (_, i) => ({
-        correlation_id: `cid-${i}`,
-      }));
+      const rows =
+        auditLogRows ??
+        Array.from(
+          { length: Math.min(auditLogTotal, POSTGREST_MAX_ROWS) },
+          (_, i) => ({ correlation_id: `cid-${i}` }),
+        );
       return {
-        select: (_cols: string) => ({
-          eq: () => ({
-            gte: () => Promise.resolve({ data: rows, error: null }),
-          }),
-        }),
+        select: (
+          _cols: string,
+          selectOpts?: { count?: string; head?: boolean },
+        ) => {
+          const answer =
+            selectOpts?.head === true
+              ? // Server-side COUNT: no rows cross the wire, no cap.
+                { data: null, count: auditLogTotal, error: null }
+              : // Row materialisation: capped, with no truncation signal.
+                { data: rows, count: null, error: null };
+          return {
+            eq: () => ({
+              gte: () => Promise.resolve(answer),
+            }),
+          };
+        },
       };
     }
     throw new Error(`unmocked table: ${table}`);

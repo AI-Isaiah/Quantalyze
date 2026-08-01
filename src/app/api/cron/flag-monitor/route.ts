@@ -2,10 +2,12 @@
  * Phase 19 / BACKBONE-05 — error-rate monitor cron (ALERT-ONLY since Phase 106).
  *
  * Polls Sentry events API every 15 minutes for /process-key error events.
- * Computes error envelope rate (errors / distinct /process-key requests in the
- * same tumbling window). Threshold: errorRate > 0.5% with total >= 20 → sends a
- * Resend [ALERT] email to the founder. Sub-threshold (errorRate > 0.25%) sends
- * a WARN email.
+ * Computes error envelope rate — Sentry error EVENTS over /process-key HTTP
+ * ATTEMPTS in the same tumbling window. Both sides are ATTEMPT-grained (D-02,
+ * Phase 141.2; see getDenominator for why, and for the downward bias that
+ * grain carries under retry). Threshold: errorRate > 0.5% with total >= 20 →
+ * sends a Resend [ALERT] email to the founder. Sub-threshold (errorRate >
+ * 0.25%) sends a WARN email.
  *
  * Phase 106 (Stage B) RETIRED the auto-rollback. The unified backbone is now
  * the only path — the feature_flags kill-switch row (`process_key_unified_backbone`)
@@ -189,56 +191,116 @@ async function getNumerator(args: {
 }
 
 /**
- * D-16 — DISTINCT-REQUEST denominator (was: raw `audit_log` row count).
+ * D-02 (Phase 141.2) — ATTEMPT-grained denominator: a server-side COUNT of the
+ * `process_key` audit rows in the window. This REPLACES the D-16 (141.1)
+ * distinct-`correlation_id` denominator.
  *
- * WHY distinct correlation_id and not rows: in the Python service the
- * `process_key.entry` audit emit fires BEFORE both the onboard and the resync
- * duplicate pre-checks (see `_write_audit_sync` in
- * analytics-service/routers/process_key.py — the create_task call precedes both
- * pre-check sites). A retried onboard/resync therefore writes a SECOND
- * `entity_type='process_key'` row deterministically, even when it immediately
- * short-circuits as a duplicate and does no work. Counting rows inflates the
- * denominator by exactly the retry volume and biases `errorRate` DOWNWARD —
- * i.e. the monitor gets quieter precisely when the seam is retrying more.
+ * ⚠️ THE SENTENCE THAT USED TO STAND HERE WAS FALSE AT THE SEAM, and it is
+ * named rather than quietly deleted because it is the whole reason this
+ * function was ever written the other way. D-16 asserted: "`correlation_id` is
+ * minted once per client `postProcessKey` call, above the retry loop, so a
+ * retried call reuses it" — and concluded that distinct `correlation_id` counts
+ * USER REQUESTS. That is TRUE on the TypeScript side (`process-key-client.ts`
+ * does mint it once, above the loop) and FALSE end-to-end, which is the only
+ * place it had to be true:
  *
- * `correlation_id` is minted once per client `postProcessKey` call, above the
- * retry loop, so a retried call reuses it. Distinct correlation_id therefore
- * counts USER REQUESTS — the semantic the errors/requests ratio needs.
+ *   - `wizardFetch` sends `X-Correlation-Id: wizard:<uuid>` unconditionally
+ *     (src/lib/wizard/wizard-correlation.ts), on BOTH retry-eligible flows.
+ *   - the Python handler parses the inbound value as a bare UUID and falls back
+ *     to a FRESH `uuid.uuid4()` on any parse failure
+ *     (analytics-service/routers/process_key.py), so a prefixed id is re-minted
+ *     per attempt — and it is the SERVER value that lands in
+ *     `metadata.correlation_id`.
+ *   - measured on production over every `entity_type='process_key'` row:
+ *     42/42 carry bare server-minted UUIDs, 0/42 carry a `wizard:` prefix, and
+ *     the distinct-id count equals the row count EXACTLY.
  *
- * Dedup is client-side (a Set) rather than a `DISTINCT` count: PostgREST's
- * `count: "exact"` cannot express DISTINCT, and an RPC would need DDL, which
- * this phase does not write. The 15-minute window bounds the row count, so
- * materialising the ids is cheap.
+ * So the dedup collapsed nothing on real traffic, while costing two properties
+ * a plain count has for free. Each cost was a live defect:
+ *
+ *   1. TRUNCATION. It had to materialise rows, and an unbounded PostgREST
+ *      `.select()` is capped at `max_rows` (1000) with HTTP 200 and
+ *      `error: null`. Measured on production: audit_log holds 7350 rows and the
+ *      unbounded select returned exactly 1000. Nothing in the response
+ *      distinguishes a full page from a truncated one, so above 1000 the
+ *      denominator was silently fabricated — deflating it, inflating errorRate,
+ *      and paging the founder for nothing. A COUNT has no row cap at any
+ *      volume; `src/lib/observability.ts` is the in-repo shape.
+ *   2. WIRE CONTROL. It keyed the denominator on `metadata.correlation_id`,
+ *      which originates as the inbound `X-Correlation-Id` header.
+ *      `/api/verify-strategy` reaches `postProcessKey` UNAUTHENTICATED and
+ *      without supplying one, so the wire chooses the key. Pinning a window's
+ *      traffic to a single id collapses the denominator toward 1 —
+ *      attacker-chosen paging in one direction, attacker-chosen silence in the
+ *      other. A COUNT reads no caller-supplied value at all.
+ *
+ * WHAT SURVIVES FROM D-16 — and is now the load-bearing half of the rationale:
+ * in the Python service the `process_key.entry` audit emit fires BEFORE both
+ * the onboard and the resync duplicate pre-checks (the `create_task` call for
+ * `_write_audit_sync` precedes both pre-check sites), so a retried
+ * onboard/resync writes a SECOND `entity_type='process_key'` row
+ * deterministically, even when it short-circuits as a duplicate and does no
+ * work. D-16 read that as a reason to dedup. It is better read as the grain
+ * statement it actually is: ONE AUDIT ROW PER HTTP ATTEMPT. `getNumerator`
+ * counts Sentry EVENTS, which are also per attempt. Attempt over attempt is
+ * internally consistent and needs no dedup at all — which is what removes the
+ * truncation and the wire-controllable key in the same move.
+ *
+ * KNOWN LIMITATION, stated rather than engineered around: retries inflate the
+ * denominator, so `errorRate` biases DOWNWARD — the monitor gets quieter
+ * precisely when the seam is retrying. That bias is real and it is why D-16 was
+ * attempted. It is also the SAFE direction compared with what the dedup bought:
+ * a fabricated denominator that pages falsely, and a wire-controlled one that
+ * can be silenced on demand. A true per-request rate needs a SERVER-minted
+ * request id that a retry reuses; that is a cross-seam contract change and is
+ * deferred, not solved here.
+ *
+ * Two further honest caveats about what "per attempt" can actually see:
+ *   - attempts refused ABOVE the audit write — the two `@limiter.limit`
+ *     decorators and `_verify_internal_token` all run before it — write no row,
+ *     so 429/401 attempts are invisible to this denominator.
+ *   - the write is fire-and-forget and swallows its own failure, so a lost row
+ *     under-counts and biases the rate UPWARD. Also the safe direction.
+ *
+ * The D-16 `unattributable` singleton branch goes with the dedup and nothing is
+ * lost: it existed so rows with no usable `correlation_id` would not collapse
+ * together, and a raw count already counts every row exactly once regardless of
+ * metadata shape — the same answer that branch was engineering toward.
+ *
+ * FAIL LOUD (finding 12 / D-05): a read error returns a DISTINCT terminal
+ * outcome, never 0. `0` is `handleZeroDenominator`'s meaning, and its email
+ * asserts a specific diagnosis ("no traffic OR the audit-write is failing")
+ * that is false for a failed read and sends the operator to the wrong system.
+ * "An empty result and a query error are distinct states; never collapse an
+ * error into `[]`" — src/lib/portfolio-exposure.ts, plus global Rule 12. Note
+ * this is deliberately NOT a revert to the pre-141.1 body: that one destructured
+ * only `count` and returned `?? 0`, i.e. it had finding 12 SILENTLY.
  */
+type DenominatorResult =
+  | { kind: "ok"; total: number }
+  | { kind: "terminal"; res: NextResponse };
+
 async function getDenominator(args: {
   admin: ReturnType<typeof createAdminClient>;
   windowStart: Date;
-}): Promise<number> {
-  const { data, error } = await args.admin
+}): Promise<DenominatorResult> {
+  const { count, error } = await args.admin
     .from("audit_log")
-    // Aliased so the returned key is `correlation_id` regardless of how
-    // PostgREST names a bare `metadata->>correlation_id` projection.
-    .select("correlation_id:metadata->>correlation_id")
+    // Server-side COUNT. `head: true` materialises NO rows, so PostgREST's
+    // max_rows cap cannot truncate this at any volume.
+    .select("id", { count: "exact", head: true })
     .eq("entity_type", "process_key")
     .gte("created_at", args.windowStart.toISOString());
 
-  if (error || !Array.isArray(data)) {
+  if (error) {
     console.warn("[cron/flag-monitor] denominator read failed:", error);
-    return 0;
+    return {
+      kind: "terminal",
+      res: NextResponse.json({ ok: false, reason: "denominator_read_failed" }),
+    };
   }
 
-  // A row whose metadata carries no usable correlation_id cannot be attributed
-  // to a request group, so it counts as its own singleton request — never
-  // collapsed together with other unattributable rows (that would under-count
-  // the denominator and bias the rate UPWARD), and never thrown on.
-  const distinct = new Set<string>();
-  let unattributable = 0;
-  for (const row of data) {
-    const cid = (row as { correlation_id?: unknown } | null)?.correlation_id;
-    if (typeof cid === "string" && cid.length > 0) distinct.add(cid);
-    else unattributable += 1;
-  }
-  return distinct.size + unattributable;
+  return { kind: "ok", total: count ?? 0 };
 }
 
 async function handleZeroDenominator(args: {
@@ -348,15 +410,21 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   if (numerator.kind === "terminal") return numerator.res;
   const errorCount = numerator.errorCount;
 
-  // 2) Denominator — distinct /process-key REQUESTS in the same window, from
-  //    Supabase audit_log. P4 (analytics-service/routers/process_key.py)
-  //    writes the audit row at /process-key entry; this is the load-bearing
-  //    source. See getDenominator for why rows are deduped by correlation_id.
-  const total = await getDenominator({ admin, windowStart });
+  // 2) Denominator — /process-key HTTP ATTEMPTS in the same window, counted
+  //    server-side from Supabase audit_log. P4
+  //    (analytics-service/routers/process_key.py) writes one audit row per
+  //    attempt at /process-key entry; this is the load-bearing source. See
+  //    getDenominator for why this is a raw COUNT rather than a distinct-
+  //    request dedup, and why a failed read is NOT reported as zero traffic.
+  const denominator = await getDenominator({ admin, windowStart });
+  if (denominator.kind === "terminal") return denominator.res;
+  const total = denominator.total;
 
-  // 3) H-2 — denominator streak guard. If the distinct-request count stays 0 for
+  // 3) H-2 — denominator streak guard. If the attempt count stays 0 for
   //    >2 consecutive 15-min windows the denominator is silently broken and
-  //    the cron is a no-op. Fail-open by sending a SEV-2 alert.
+  //    the cron is a no-op. Fail-open by sending a SEV-2 alert. A FAILED READ
+  //    never reaches here — it terminated above with its own reason, so this
+  //    branch keeps meaning exactly one thing.
   if (total === 0) {
     return await handleZeroDenominator({ admin, now, resend, founderEmail });
   }

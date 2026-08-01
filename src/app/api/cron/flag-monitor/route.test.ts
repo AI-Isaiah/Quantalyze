@@ -45,40 +45,90 @@ vi.mock("resend", () => ({
 //   feature_flags:
 //     - .select("value").eq("flag_key", ZERO_DENOM_STREAK_KEY).maybeSingle()
 //       → current zero-denominator streak (handleZeroDenominator)
-//     - .upsert({...}, {onConflict}) → streak reset / streak bump / kill-switch
+//     - .upsert({...}, {onConflict}) → streak reset / streak bump
 //   audit_log:
-//     - .select("correlation_id:metadata->>correlation_id").eq(...).gte(...)
-//       → denominator rows. D-16: the route now dedupes by correlation_id
-//         client-side (a retried call reuses its correlation_id and would
-//         otherwise be double-counted), so the double returns ROWS, not a
-//         count. `rec.denominator` synthesises that many DISTINCT ids.
+//     - .select("id", { count: "exact", head: true }).eq(...).gte(...)
+//       → the denominator, as a SERVER-SIDE COUNT. No rows are materialised.
+//
+// ⚠️ THE audit_log DOUBLE IS SHAPE-DISTINGUISHING, ON PURPOSE.
+//
+// Every flag-monitor fetch double in this file before 141.2 was shape-BLIND: it
+// answered whatever it was asked with the same payload, so the suite stayed
+// green against a query that could not do its job in production. That is how
+// the dead `path:` numerator survived from Phase 19 to 141.1, and how the
+// truncating denominator shipped in 141.1. A double that cannot disagree with
+// production is not evidence.
+//
+// So this double inspects the select it receives and answers the two shapes
+// DIFFERENTLY:
+//   - the COUNT chain (`{ head: true }`) resolves `{ count: rec.auditCount }` —
+//     the scenario's TRUE total, uncapped, because a server-side count is not
+//     subject to PostgREST's max_rows.
+//   - any ROW-MATERIALISING select resolves `{ data: <row payload> }`, and that
+//     payload is PER-TEST CONFIGURABLE via `rec.auditRows`.
+//
+// The per-test row payload is load-bearing, not a convenience. The two
+// mutations this suite must redden need DIFFERENT row payloads:
+//   - SC-F (restore the unbounded `.select()`) is caught only by a row payload
+//     that models PostgREST's max_rows cap while the true total is HIGHER.
+//   - SC-G (reintroduce the correlation_id dedup) is caught only by a row
+//     payload whose ids REPEAT.
+// One hardcoded row payload would redden one of those two and lie for the other.
+//
+// `rec.auditError` drives the read-failure path: a failed read must be reported
+// DISTINCTLY from zero traffic, never collapsed into 0 (finding 12).
 //
 // Recorders capture every upsert payload so we can assert that the kill-switch
 // row (flag_key === KILL_SWITCH_KEY) is NEVER written — the auto-rollback was
 // retired in Phase 106 (Stage B). Only the ZERO_DENOM_STREAK_KEY row is ever
 // upserted, on the zero-denominator path.
 // ---------------------------------------------------------------------------
+
+/**
+ * PostgREST's server-side row cap. Hand-typed, NOT imported from anywhere: this
+ * is the DEPLOYED platform's behaviour, measured against production (audit_log
+ * held 7350 rows; an unbounded `.select()` returned exactly 1000 with HTTP 200
+ * and `error: null`), not a constant this repo owns and could change.
+ */
+const POSTGREST_MAX_ROWS = 1000;
+
 interface FlagMonitorRecorders {
   upserts: Array<Record<string, unknown>>;
   // Seeds:
-  denominator: number; // audit_log rows, each with a DISTINCT correlation_id
-  // Explicit audit_log rows, overriding `denominator`. Lets a test seed
-  // REPEATED correlation_ids (i.e. retries of one request) to exercise dedup.
+  /** The audit_log COUNT the server returns — the scenario's true ATTEMPT-row
+   *  total in the window. Answered to the `{ count: "exact", head: true }`
+   *  chain, uncapped. */
+  auditCount: number;
+  /** PostgREST error for the audit_log read. Non-null → the denominator read
+   *  FAILED, which is a different state from "the window was empty". */
+  auditError: { message: string } | null;
+  /** Explicit row payload for a ROW-MATERIALISING audit_log select. `null` →
+   *  synthesise `auditCount` rows with DISTINCT ids, capped at
+   *  POSTGREST_MAX_ROWS so even the default models the real platform. */
   auditRows: Array<{ correlation_id: unknown }> | null;
+  /** Every audit_log select shape the route actually asked for. Lets a test
+   *  assert that NO row materialisation happened — the property a grep cannot
+   *  check on a file whose docblock is required to name the removed construct. */
+  auditSelects: Array<{ columns: string; head: boolean }>;
   streakValue: string | null; // feature_flags zero-denom streak row value
 }
 
 function makeFlagMonitorRecorders(): FlagMonitorRecorders {
   return {
     upserts: [],
-    denominator: 0,
+    auditCount: 0,
+    auditError: null,
     auditRows: null,
+    auditSelects: [],
     streakValue: null,
   };
 }
 
 // The retired kill-switch row key. The monitor must NEVER upsert it now.
 const KILL_SWITCH_KEY = "process_key_unified_backbone";
+// The H-2 zero-denominator streak row. This one IS written — but only on a
+// genuinely empty window, never on a failed read.
+const ZERO_DENOM_STREAK_KEY = "flag_monitor_zero_denominator_streak";
 
 function createSupabaseMock(rec: FlagMonitorRecorders) {
   return {
@@ -86,19 +136,35 @@ function createSupabaseMock(rec: FlagMonitorRecorders) {
       const chain: Record<string, unknown> = {};
 
       if (table === "audit_log") {
-        // rows query: select(...).eq(...).gte(...) — terminal thenable
-        // resolving { data }.
-        chain.select = () => chain;
+        let head = false;
+        chain.select = (
+          columns: string,
+          opts?: { count?: string; head?: boolean },
+        ) => {
+          head = opts?.head === true;
+          rec.auditSelects.push({ columns, head });
+          return chain;
+        };
         chain.eq = () => chain;
         chain.gte = () =>
-          Promise.resolve({
-            data:
-              rec.auditRows ??
-              Array.from({ length: rec.denominator }, (_, i) => ({
-                correlation_id: `cid-${i}`,
-              })),
-            error: null,
-          });
+          Promise.resolve(
+            head
+              ? // Server-side COUNT: no rows cross the wire, no max_rows cap.
+                { data: null, count: rec.auditCount, error: rec.auditError }
+              : // Row materialisation: whatever this test configured, defaulting
+                // to a max_rows-capped page — exactly what deployed PostgREST
+                // returns, with HTTP 200 and no truncation signal.
+                {
+                  data:
+                    rec.auditRows ??
+                    Array.from(
+                      { length: Math.min(rec.auditCount, POSTGREST_MAX_ROWS) },
+                      (_, i) => ({ correlation_id: `cid-${i}` }),
+                    ),
+                  count: null,
+                  error: rec.auditError,
+                },
+          );
         return chain;
       }
 
@@ -191,7 +257,7 @@ describe.each([["GET"], ["POST"]] as const)(
     // --- (1) parseSentryCount shape rotation -------------------------------
 
     it("(1a) parses the Sentry `count()` shape into the numerator", async () => {
-      rec.denominator = 1000; // big denom → low rate → ok, no rollback
+      rec.auditCount = 1000; // big denom → low rate → ok, no rollback
       vi.stubGlobal(
         "fetch",
         vi.fn(async () =>
@@ -207,7 +273,7 @@ describe.each([["GET"], ["POST"]] as const)(
     });
 
     it("(1b) parses the alternate `count` shape into the numerator", async () => {
-      rec.denominator = 1000;
+      rec.auditCount = 1000;
       vi.stubGlobal(
         "fetch",
         vi.fn(async () =>
@@ -221,7 +287,7 @@ describe.each([["GET"], ["POST"]] as const)(
     });
 
     it("(1c) malformed Sentry payload → errorCount 0 (safe default)", async () => {
-      rec.denominator = 1000;
+      rec.auditCount = 1000;
       vi.stubGlobal(
         "fetch",
         vi.fn(async () =>
@@ -234,23 +300,21 @@ describe.each([["GET"], ["POST"]] as const)(
       expect(body.errorCount).toBe(0);
     });
 
-    // --- (1d) D-16 denominator: distinct REQUESTS, not audit rows ----------
+    // --- D-02 / D-05 denominator: counted, fail-loud, wire-proof -----------
+    //
+    // These four replace the D-16 (141.1) distinct-correlation_id denominator.
+    // Findings 2, 3, 4, 7 and 12 are ONE rewrite, so they are pinned together.
 
-    it("(1d) 3 audit rows across 2 correlation_ids → denominator 2 (a retry must not inflate the denominator)", async () => {
-      // WHY 2 and not 3: in the Python service the `process_key.entry` audit
-      // emit fires BEFORE both the onboard and the resync duplicate
-      // pre-checks, so a retried call writes a second `process_key` audit row
-      // even when it short-circuits as a duplicate and does no work. The
-      // retry reuses the correlation_id minted once per client call. Counting
-      // rows would therefore inflate the denominator by exactly the retry
-      // volume and bias errorRate DOWNWARD — the monitor would get QUIETER
-      // precisely when the seam is retrying more, which is the failure mode
-      // this alert exists to catch.
-      rec.auditRows = [
-        { correlation_id: "cid-A" }, // request A, attempt 1
-        { correlation_id: "cid-A" }, // request A, attempt 2 (the retry)
-        { correlation_id: "cid-B" }, // request B
-      ];
+    it("(D1/SC-I) a PostgREST read error is reported as denominator_read_failed — NEVER as zero traffic", async () => {
+      // Finding 12. `handleZeroDenominator`'s email asserts ONE diagnosis:
+      // "either no traffic is reaching /process-key OR the audit-write at
+      // /process-key entry is failing". A failed READ is a third state and
+      // belongs to neither, so collapsing it into 0 sends the operator to the
+      // Python audit path for a fault that lives in this query. An empty result
+      // and a query error are distinct states — src/lib/portfolio-exposure.ts
+      // states that rule for this repo, and global Rule 12 is fail loud.
+      rec.auditCount = 5000; // irrelevant: the read never succeeds
+      rec.auditError = { message: "PGRST301: JWT expired" };
       vi.stubGlobal(
         "fetch",
         vi.fn(async () =>
@@ -260,19 +324,27 @@ describe.each([["GET"], ["POST"]] as const)(
       const handler = await getHandler();
       const res = await handler(authedReq());
       const body = await res.json();
-      expect(body.total).toBe(2); // hand-typed: 2 user requests, not 3 rows
+      expect(body.ok).toBe(false);
+      expect(body.reason).toBe("denominator_read_failed");
+      // The zero-traffic diagnosis must be unreachable from a read failure...
+      expect(body.reason).not.toBe("zero_denominator");
+      // ...the H-2 streak must NOT advance (a failed read is not a zero
+      // window; advancing it would eventually page with the wrong story)...
+      const streakWrites = rec.upserts.filter(
+        (u) => u.flag_key === ZERO_DENOM_STREAK_KEY,
+      );
+      expect(streakWrites).toHaveLength(0);
+      // ...and no email fires for a fault we cannot yet diagnose.
+      expect(sendEmailSpy).not.toHaveBeenCalled();
     });
 
-    it("(1e) a row with no usable correlation_id counts as its own request (never dropped, never thrown on)", async () => {
-      // An unattributable row cannot be collapsed with other unattributable
-      // rows — that would UNDER-count requests and bias errorRate upward into
-      // false alerts. Each stands alone.
-      rec.auditRows = [
-        { correlation_id: "cid-A" },
-        { correlation_id: "cid-A" },
-        { correlation_id: null },
-        { correlation_id: undefined },
-      ];
+    it("(D2/SC-I control) a genuinely EMPTY window still routes to the zero-denominator streak", async () => {
+      // The positive control for (D1): the two states must stay distinct in
+      // BOTH directions. A fix that reported everything as denominator_read_
+      // failed would satisfy (D1) alone while destroying the H-2 guard.
+      rec.auditCount = 0;
+      rec.auditError = null;
+      rec.streakValue = "0";
       vi.stubGlobal(
         "fetch",
         vi.fn(async () =>
@@ -282,8 +354,143 @@ describe.each([["GET"], ["POST"]] as const)(
       const handler = await getHandler();
       const res = await handler(authedReq());
       const body = await res.json();
-      expect(body.total).toBe(3); // 1 distinct id + 2 unattributable singletons
+      expect(body.reason).toBe("zero_denominator");
+      expect(body.reason).not.toBe("denominator_read_failed");
+      expect(body.streak).toBe(1);
+      const streakWrites = rec.upserts.filter(
+        (u) => u.flag_key === ZERO_DENOM_STREAK_KEY,
+      );
+      expect(streakWrites).toHaveLength(1);
     });
+
+    it("(D3/SC-F) the denominator is a server-side COUNT: 3000 attempt rows count as 3000, not truncated at PostgREST's 1000-row cap", async () => {
+      rec.auditCount = 3000;
+      // The row payload is configured EXPLICITLY here rather than left to the
+      // default, so the thing this test turns on is visible at review: a full
+      // max_rows page is ALL a row-materialising select can ever see. Measured
+      // against production — audit_log holds 7350 rows and an unbounded
+      // `.select()` returned exactly 1000, HTTP 200, `error: null`. Nothing in
+      // that response distinguishes a full page from a truncated one, which is
+      // why the 141.1 form could not detect its own truncation and fabricated
+      // a denominator: errorRate inflated, founder paged for nothing.
+      rec.auditRows = Array.from({ length: POSTGREST_MAX_ROWS }, (_, i) => ({
+        correlation_id: `cid-${i}`,
+      }));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          sentryResponse({ ok: true, json: { data: [{ "count()": 0 }] } }),
+        ),
+      );
+      const handler = await getHandler();
+      const res = await handler(authedReq());
+      const body = await res.json();
+      expect(body.total).toBe(3000); // hand-typed, above the cap
+      // And prove it got there WITHOUT materialising rows. This is the
+      // assertion that stands in for an absence grep: `grep -c` cannot check
+      // this file, whose docblock is REQUIRED to name the removed constructs.
+      expect(rec.auditSelects.filter((s) => !s.head)).toHaveLength(0);
+    });
+
+    it("(D4/SC-G) a wire-supplied X-Correlation-Id cannot move the denominator: 200 attempt rows sharing ONE id count as 200", async () => {
+      rec.auditCount = 200;
+      // 200 rows carrying the SAME correlation_id. `getCorrelationId` returns
+      // the inbound X-Correlation-Id verbatim when it matches its charset, and
+      // the UNAUTHENTICATED /api/verify-strategy reaches postProcessKey without
+      // supplying one — so an anonymous caller can put a value of its choosing
+      // into that field. Under a denominator keyed on it, pinning a window's
+      // traffic to one id collapses the denominator toward 1, and then any
+      // single error clears the 0.5% threshold: attacker-chosen paging in one
+      // direction, attacker-chosen silence in the other.
+      //
+      // The count contract is what makes that unreachable — the count reflects
+      // ROWS, regardless of what any metadata field contains.
+      rec.auditRows = Array.from({ length: 200 }, () => ({
+        correlation_id: "wire-supplied-shared-id",
+      }));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          sentryResponse({ ok: true, json: { data: [{ "count()": 0 }] } }),
+        ),
+      );
+      const handler = await getHandler();
+      const res = await handler(authedReq());
+      const body = await res.json();
+      expect(body.total).toBe(200); // hand-typed: rows, not distinct ids
+    });
+
+    it("(D5/SC-H) the RATE is attempt-grained on BOTH sides: 2 events over 20 ATTEMPT rows = 10%, even though those 20 attempts are only 19 user requests", async () => {
+      // ONE attempt-level scenario drives BOTH sides of the ratio, which is
+      // what makes this a GRAIN pin rather than arithmetic over a fixture:
+      //
+      //   19 user requests, ONE of which retried  → 20 HTTP ATTEMPTS
+      //   that retried request failed both times  →  2 Sentry EVENTS
+      //
+      // Sentry events are per-attempt. Audit rows are per-attempt too:
+      // `_write_audit_sync` fires at /process-key entry BEFORE both the onboard
+      // and the resync duplicate pre-checks, so every retried HTTP attempt
+      // re-enters the endpoint and writes its own row. Attempt over attempt is
+      // therefore internally consistent, and it is the ONLY pairing that is.
+      //
+      // (D3/SC-F) and (D4/SC-G) pin the denominator's magnitude and its
+      // independence from the wire. Neither can see a GRAIN mismatch, because
+      // neither involves the numerator. This one does, and it reds for a
+      // mismatch introduced on EITHER side.
+      const USER_REQUESTS = 19;
+      const ATTEMPT_ROWS = 20; // one of those requests retried once
+      rec.auditCount = ATTEMPT_ROWS;
+      // The row path serves the retried request's two rows under ONE shared
+      // correlation_id, so a reintroduced dedup has something real to collapse.
+      // A pin whose fixture cannot express the mutation cannot redden for it —
+      // that is finding 10's lesson applied to the denominator.
+      rec.auditRows = [
+        { correlation_id: "req-retried" }, // attempt 1
+        { correlation_id: "req-retried" }, // attempt 2 — the retry
+        ...Array.from({ length: USER_REQUESTS - 1 }, (_, i) => ({
+          correlation_id: `req-${i}`,
+        })),
+      ];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          sentryResponse({ ok: true, json: { data: [{ "count()": 2 }] } }),
+        ),
+      );
+      const handler = await getHandler();
+      const res = await handler(authedReq());
+      const body = await res.json();
+
+      // THE RATIO IS THE ASSERTION. It is deliberately checked BEFORE the
+      // component values: a `total` assertion would short-circuit this one and
+      // reduce the pin to a restatement of what the double returned, which is
+      // already (D3/SC-F)'s and (D4/SC-G)'s job. The grain contract only lives
+      // in the quotient, so the quotient is what has to fail first.
+      expect(
+        body.errorRate,
+        "GRAIN CONTRACT: the numerator counts Sentry EVENTS per ATTEMPT and the " +
+          "denominator counts audit ROWS per ATTEMPT. This scenario is 19 user " +
+          "requests / 20 attempts / 2 events, so the only attempt-grained answer " +
+          "is 2/20 = 0.1. Getting 2/19 means the DENOMINATOR was collapsed to " +
+          "request grain; getting 1/20 means the NUMERATOR was. Either side " +
+          "reddens this pin, which is the point — the two sides must agree on " +
+          "the unit, and no single-sided test can check that.",
+      ).toBe(0.1);
+      // Component values, for diagnosis once the ratio has already spoken.
+      expect(body.errorCount).toBe(2);
+      expect(body.total).toBe(20); // ATTEMPTS, not user requests
+    });
+
+    // --- (1d)/(1e) DELETED with the D-16 dedup they described --------------
+    //
+    // (1d) asserted "3 audit rows across 2 correlation_ids → denominator 2" and
+    // (1e) asserted that an unattributable row counts as its own singleton.
+    // Both encoded the dedup, and both are false under D-02: the denominator is
+    // now ROWS, so (1d)'s scenario answers 3 and (1e)'s answers 4. They are
+    // deleted rather than re-pointed because their SUBJECT is gone — the
+    // singleton branch existed only to stop unattributable rows collapsing
+    // together, which a raw count does by construction. (D3/SC-F) and
+    // (D4/SC-G) above cover the properties that replaced them.
 
     // --- (3) rate-limit vs outage distinction ------------------------------
 
@@ -320,7 +527,7 @@ describe.each([["GET"], ["POST"]] as const)(
 
     it("(4a) zero denominator with streak=2 bumps to 3 and DOES alert (boundary)", async () => {
       // ZERO_DENOMINATOR_ALERT_AFTER = 2 → alert when newStreak > 2 (i.e. 3).
-      rec.denominator = 0;
+      rec.auditCount = 0;
       rec.streakValue = "2"; // current streak; route bumps to 3.
       vi.stubGlobal(
         "fetch",
@@ -339,7 +546,7 @@ describe.each([["GET"], ["POST"]] as const)(
     });
 
     it("(4b) zero denominator with streak=1 bumps to 2 and STAYS SILENT (boundary)", async () => {
-      rec.denominator = 0;
+      rec.auditCount = 0;
       rec.streakValue = "1"; // bumps to 2 — not yet > 2, no alert.
       vi.stubGlobal(
         "fetch",
@@ -360,7 +567,7 @@ describe.each([["GET"], ["POST"]] as const)(
 
     it("(6) WARN threshold sends an email but never touches the kill-switch", async () => {
       // total=1000, errorCount=4 → rate=0.4% > WARN(0.25%) but < ALERT(0.5%).
-      rec.denominator = 1000;
+      rec.auditCount = 1000;
       vi.stubGlobal(
         "fetch",
         vi.fn(async () =>
@@ -387,7 +594,7 @@ describe.each([["GET"], ["POST"]] as const)(
       // total=1000, errorCount=10 → 1.0% > ALERT(0.5%), total >= MIN_SAMPLE.
       // Pre-106 this flipped the kill-switch to "off". Phase 106 retired the
       // auto-rollback: the monitor alerts but can never write the row.
-      rec.denominator = 1000;
+      rec.auditCount = 1000;
       vi.stubGlobal(
         "fetch",
         vi.fn(async () =>
@@ -422,7 +629,7 @@ describe.each([["GET"], ["POST"]] as const)(
       // data. Auto-rollback path was effectively disabled for the entire
       // post-deploy window. Fix is env-driven SENTRY_API_BASE.
       process.env.SENTRY_API_BASE = "https://de.sentry.io/api/0/organizations";
-      rec.denominator = 1000;
+      rec.auditCount = 1000;
       const fetchFn = vi.fn(async () =>
         sentryResponse({ ok: true, json: { data: [{ "count()": 1 }] } }),
       );
@@ -437,7 +644,7 @@ describe.each([["GET"], ["POST"]] as const)(
 
     it("(3b) defaults to https://sentry.io when SENTRY_API_BASE is unset (back-compat)", async () => {
       delete process.env.SENTRY_API_BASE;
-      rec.denominator = 1000;
+      rec.auditCount = 1000;
       const fetchFn = vi.fn(async () =>
         sentryResponse({ ok: true, json: { data: [{ "count()": 0 }] } }),
       );
