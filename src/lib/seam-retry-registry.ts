@@ -158,8 +158,16 @@ function freezeVerdicts<T extends object>(map: T): Readonly<T> {
 
 /**
  * `/process-key` flow_types that ARE retry-safe. PRESENT ⇒ retry once; ABSENT ⇒
- * no-retry by construction. Exactly TWO entries — `teaser` and `csv` are proven
- * NO and live in `RETRY_AUDIT_NO_FLOW_TYPES`.
+ * no-retry by construction. Exactly ONE entry — `teaser`, `csv` and (since
+ * 141.2 / D-03) `resync` are proven NO and live in `RETRY_AUDIT_NO_FLOW_TYPES`.
+ *
+ * ⚠️ THIS MAP SHRANK BY A VERDICT, NOT BY A REFACTOR (141.2 / D-03). The text
+ * that used to stand here said "exactly TWO entries", the second being `resync`.
+ * That grant was issued on the strength of a sentence 141.1-02 then DELETED —
+ * "the SEQUENTIAL-retry class is closed" — while leaving the `retries: 1` it had
+ * justified. The verdict now follows its own evidence; the reasoning is recorded
+ * in full on the resync entry in the NO map, so a future re-grant has to argue
+ * against a written finding rather than against an absence.
  */
 export const RETRY_SAFE_FLOW_TYPES: Readonly<
   Partial<Record<FlowType, RetrySafeEntry>>
@@ -203,29 +211,6 @@ export const RETRY_SAFE_FLOW_TYPES: Readonly<
       "retriesOverride of 0 in this same change. If either anchor moves, this " +
       "producer must be re-audited before onboard keeps its YES.",
   },
-  resync: {
-    retries: 1,
-    evidence:
-      "resync mints a SERVER-side uuid4 session in the resync branch of " +
-      "process_key.py, so it lacks onboard's wizard_session_id dedup. WHAT HOLDS: " +
-      "the compute job is deduped on (strategy_id, kind) by the partial unique " +
-      "index compute_jobs_one_inflight_per_kind_strategy, so a retried resync " +
-      "yields exactly ONE job — qualified, as on onboard, to the three statuses " +
-      "its predicate admits (pending, running, done_pending_children); " +
-      "failed_retry is outside it. Phase-141 plan-01 added a strategy-scoped " +
-      "draft-SV pre-check keyed on (strategy_id, flow_type='resync', " +
-      "status='draft') → duplicate path. RESIDUAL, STATED PLAINLY: that pre-check " +
-      "does NOT close the SEQUENTIAL-retry class for the 15s-timeout sub-case. " +
-      "The filter is status='draft', and the worker's 30s tick advances SV#1 out " +
-      "of draft; when that transition lands inside the blip window the pre-check " +
-      "matches nothing and a SECOND draft SV row is inserted. The blast radius is " +
-      "bounded and recorded: still exactly one compute job (the partial index " +
-      "holds — both attempts carry the same (strategy_id, kind)), not " +
-      "user-visible, and it self-heals on the next resync. The concurrent-tab " +
-      "race (two SELECTs pass before either INSERT) remains a documented " +
-      "out-of-scope residual. Allowlisted ONLY AFTER that plan-01 dedup landed " +
-      "(wave ordering).",
-  },
 } as const satisfies Partial<Record<FlowType, RetrySafeEntry>>);
 
 /**
@@ -244,6 +229,35 @@ export const RETRY_AUDIT_NO_FLOW_TYPES: Readonly<
     "writes a NEW strategy_verifications row plus a NEW public_token and a NEW " +
     "lead. A retry double-mints all three — the anti-feature named in " +
     "REQUIREMENTS Out of Scope. SC3 pins the YES-map ABSENCE of this key.",
+  resync:
+    "WITHDRAWN GRANT, 141.2 / D-03 — recorded as a correction rather than as a " +
+    "fresh verdict, because the interesting fact is WHY it stood. Phase 141 " +
+    "allowlisted resync at one retry on the strength of a single sentence " +
+    "asserting that the SEQUENTIAL-retry class no longer admitted a duplicate. " +
+    "141.1-02 re-derived the evidence, found that sentence false, and DELETED " +
+    "it — but left the grant it had justified standing. This entry removes the " +
+    "gap: the grant is gone, and the finding that removed it is written down " +
+    "here. WHAT IS ACTUALLY TRUE: resync mints a " +
+    "SERVER-side uuid4 session in the resync branch of process_key.py, so it has " +
+    "no wizard_session_id to dedup on and idempotent_by_session is false for it " +
+    "by construction. The strategy-scoped pre-check added by Phase-141 plan-01 " +
+    "filters on status='draft' and routes a hit through _resume_duplicate_job — " +
+    "genuine defense-in-depth against a duplicate SUBMIT, but it does NOT make a " +
+    "replay safe. The window is OPEN, not theoretical: the compute worker's " +
+    "30-second tick advances the first draft verification OUT of draft status, " +
+    "and when that transition lands inside the seam's backoff the second " +
+    "attempt's pre-check matches nothing and inserts a SECOND draft " +
+    "strategy_verifications row. WHAT STILL HOLDS, and why this is a withdrawal " +
+    "rather than an alarm: the compute job remains deduped on (strategy_id, kind) " +
+    "by the partial unique index compute_jobs_one_inflight_per_kind_strategy — " +
+    "qualified, as on onboard, to the three statuses its predicate admits " +
+    "(pending, running, done_pending_children), with failed_retry outside it — so " +
+    "the duplicate is one extra SV row, not a doubled sync. RE-ENABLE CONDITION, " +
+    "stated so this is falsifiable rather than permanent: a DURABLE idempotency " +
+    "key for resync that the retried attempt reuses, which does not exist today. " +
+    "A client-minted stable key would supply one, and it changes the cross-seam " +
+    "contract and the SV uniqueness semantics — a deliberate piece of work, not " +
+    "something to infer from this entry. Until then, unproven ⇒ no-retry.",
   csv:
     "validate is side-effect-free and finalize is 23505-fenced by the composite " +
     "unique index strategies_user_wizard_session_source_uniq (a duplicate submit " +

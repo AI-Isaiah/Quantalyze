@@ -1389,7 +1389,7 @@ describe("[SEAM-06] retriesOverride validation (config faults raised ABOVE the c
  * `retriesOverride` keyed on the registry into the shared transport?), not a
  * helper. The proof-of-necessity is ASYMMETRIC: before the wiring lands,
  * teaser/csv/validateKey already single-fetch (nothing retries) but
- * resync/onboard/bridge FAIL — one fetch where two are expected — because the
+ * onboard/bridge FAIL — one fetch where two are expected — because the
  * registry is consulted nowhere. That asymmetric RED is the wiring's reason to
  * exist.
  *
@@ -1397,7 +1397,13 @@ describe("[SEAM-06] retriesOverride validation (config faults raised ABOVE the c
  * because `budgetKeyFor` is MANY-TO-ONE (teaser+csv → process-key-sync). Keying
  * the retry on the budgetKey would retry teaser the moment csv were allowed onto
  * the sync budget. So teaser/csv (absent from the YES map) get exactly ONE fetch
- * while resync/onboard (present) get two — under the SAME budget grain.
+ * while onboard (present) gets two — under the SAME budget grain.
+ *
+ * ⚠️ 141.2 / D-03 — `resync` MOVED SIDES, and the many-to-one grain is now
+ * doing visible work. It shares the `process-key-enqueue` budget with `onboard`,
+ * and it single-fetches while `onboard` retries: proof that the verdict is read
+ * at FLOW_TYPE grain and not off the shared budget row. Had the retry been keyed
+ * on the budgetKey, withdrawing resync's verdict would have been unexpressible.
  */
 describe("[SEAM-06 / SC2+SC3] client wiring — the REAL clients thread retriesOverride", () => {
   // Math.random → 0 pins the backoff at its 250ms floor (real-timer wait).
@@ -1513,7 +1519,21 @@ describe("[SEAM-06 / SC2+SC3] client wiring — the REAL clients thread retriesO
     expect(result.ok).toBe(false);
   });
 
-  it("SC2 — postProcessKey resync + a single transient then 200 → exactly TWO fetches, resolves ok", async () => {
+  it("SC2 / D-03 — postProcessKey resync + a single transient → exactly ONE fetch, the failure surfaces", async () => {
+    // ⚠️ THIS CASE INVERTED IN 141.2 / D-03, AND THE INVERSION IS THE PIN. It
+    // used to assert TWO fetches: resync was allowlisted for a retry on the
+    // strength of a sentence — "the SEQUENTIAL-retry class is closed" — that
+    // 141.1-02 re-derived, found false, and deleted, WITHOUT withdrawing the
+    // grant it had justified. The window is real: the compute worker's tick
+    // advances the first draft verification out of draft status inside the
+    // backoff, so the second attempt's `status='draft'` pre-check matches
+    // nothing and inserts a SECOND draft row.
+    //
+    // Asserting ONE fetch here is what makes the withdrawal observable at the
+    // REAL client rather than only in the registry's key set. Re-granting the
+    // verdict reddens this case, and it reddens on the COUNT — the transient
+    // now propagates, so `postProcessKey` takes its 502 arm instead of the
+    // 200. Both halves are asserted so a re-grant cannot hide behind either.
     vi.spyOn(console, "error").mockImplementation(() => {});
     pinFloorBackoff();
     const fetchMock = throwThenJsonOk(new TypeError("fetch failed"), {
@@ -1531,8 +1551,13 @@ describe("[SEAM-06 / SC2+SC3] client wiring — the REAL clients thread retriesO
       correlationId: "c-resync",
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(result.ok).toBe(true);
+    expect(
+      fetchMock,
+      "resync re-attempted. D-03 withdrew its retry verdict: a replay can " +
+        "insert a second draft strategy_verifications row, and re-granting " +
+        "requires a durable idempotency key for resync, which does not exist.",
+    ).toHaveBeenCalledTimes(1);
+    expect(result.ok).toBe(false);
   });
 
   it("SC2 — postProcessKey onboard + a single transient then 200 → exactly TWO fetches, resolves ok", async () => {
