@@ -47,10 +47,24 @@ Answer decode — `{"result":[...]}`, one slot per key, in request order:
     TTL says. **Do not read key presence as an open circuit** — that is the
     single most likely misdiagnosis on this surface.
 
-A span that is nonsensical (`<= 0`, or wider than
-`(BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S) × 1000` = 90 000 ms) decodes to
-`null` and reads CLOSED — `decodeBreakerLock` rejects it rather than deriving a
-`Retry-After` from it.
+A value `decodeBreakerLock` rejects reads CLOSED rather than yielding a
+`Retry-After`. It rejects a nonsensical SPAN (`<= 0`, or wider than
+`(BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S) × 1000` = 90 000 ms) and, since
+phase 141.2, an implausible ABSOLUTE expiry — one further into the future than
+that same widest span. The absolute check is **one-sided on purpose**: a lock in
+the past is the tombstone the close event is derived from.
+
+⚠️ **That is only the READ side, and the sentence that used to stand here stated
+it as though it were the whole story** ("decodes to `null` and reads CLOSED").
+On the WRITE side a rejected value used to be strictly worse than a corrupt one:
+`recordSeamFailure` decided its write from the DECODE, so a corrupt-but-present
+value looked "absent", took the `SET NX` arm, and Redis refused it because the
+key exists — no lock stored, no transition emitted, and the circuit unable to
+open for the rest of that key's TTL on every seam route. Phase 141.2 branches
+that write on the RAW value's presence instead, so a corrupt value is
+**displaced** by the next recorded failure and the store self-heals. When
+triaging, the two halves now read: corruption reads CLOSED, and corruption is
+cleaned up by the next trip rather than jamming it.
 
 ## What can be open, and what cannot
 

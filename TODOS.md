@@ -359,6 +359,38 @@ true for 146 and half of 142–145, and **false for 141**.
   `analytics-service/docs/STATUS_CONTRACT.md`. *Fix:* add `501` and `505` to the permanent arm, or
   state in the table why they are considered transient on this seam. Pair with a discriminator pass.
 
+- **✅ CLOSED 2026-08-01 by phase 141.2 plan 01 (findings 10 + 11) — after being RE-OPENED the
+  same day.** Both halves are fixed and both were observed to fail before they were:
+  - **Half 1 (arming).** `recordSeamFailure`'s trip path now decides its write from the RAW
+    store value's presence, not from the decode, so a corrupt-but-present value is DISPLACED by
+    the existing `SET … GET` and the circuit arms with a truthful transition event. The absent
+    key keeps the `nx` arm, so concurrent-trip idempotency is unchanged, and the displacement
+    arm's ownership rule still refuses a racer that displaced a live lock. Zero extra store
+    round trips, which the SC-4b headroom ceiling requires.
+  - **Half 2 (the bound).** `decodeBreakerLock` gained a ONE-SIDED absolute plausibility bound:
+    an expiry further into the future than the widest legitimate span is rejected.
+    ⚠️ **State plainly what this does NOT close.** The PAST side is deliberately unbounded —
+    `isBreakerOpen` must decode expired locks to announce the close, so a symmetric bound would
+    delete the close event. And the bound rejects implausible values; it does not authenticate
+    them. The store remains writable only by us.
+  - **Evidence, not assertion.** Three new pins drive `recordSeamFailure`'s WRITE path with the
+    corrupt value present (the half 141.1 never drove), plus a decoder case and a separate
+    one-sidedness case. Both ledger mutations were applied to production source and observed
+    RED, then restored GREEN. Repairing this also exposed a THIRD instance of the same shape:
+    the A-25 production-wiring pin was seeded with a REVERSED pair, which decodes to `null`, so
+    it had been satisfied by a refused `SET NX` rather than by the guard it is named for. Its
+    fixture is now a real tombstone armed mid-flight, and it was shown to redden under its own
+    mutation.
+  - **Was it live?** A read-only probe of the production Upstash store on 2026-08-01 found all
+    five breaker keys ABSENT, so no corrupt value was resident at that instant: this landed as
+    hardening, not as incident remediation. The defect itself was live on every seam call for
+    the whole period, and a probe is a point-in-time observation, not a history.
+  - Advisory-gate language discipline: the new pins **would have caught** this regression at
+    141.1; nothing in CI *did* stop it, because they did not exist.
+
+  *The RE-OPENED write-up is kept below in full, unedited, because it is the record of what was
+  believed when the defect was found:*
+
 - **⛔ RE-OPENED 2026-08-01 — the 141.1-06 fix is a REGRESSION, and the discharge below was
   false. Owned by phase 141.2 (findings 10 + 11), TOP priority.** The xhigh review of 141.1
   found two defects in `f308b460` itself, and `git log -S "MAX_BREAKER_LOCK_SPAN_MS"` confirms
