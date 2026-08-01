@@ -178,10 +178,18 @@ export const RETRY_SAFE_FLOW_TYPES: Readonly<
       "A non-NULL wizard_session_id makes idempotent_by_session true at the " +
       "flow-type gate in process_key.py, and the idempotent_by_session pre-check " +
       "there routes a hit to _resume_duplicate_job, which returns the shared " +
-      "WIZARD_DUPLICATE reply. PROVENANCE OF THAT ANTECEDENT — recorded here " +
-      "rather than stated as a fact, so a future producer able to emit a " +
-      "NULL/non-uuid session id visibly trips this reasoning instead of silently " +
-      "invalidating it: (a) the isUuid 400 gate in create-with-key rejects a " +
+      "WIZARD_DUPLICATE reply. THAT ANTECEDENT IS NOW ENFORCED, NOT ASSERTED " +
+      "(141.2 / D-01, finding 1): retriesForFlow in this same module is the gate " +
+      "postProcessKey consults, and it returns 0 for an onboard call whose " +
+      "context carries no truthy wizard_session_id — using Boolean(), the same " +
+      "truthiness predicate the Python gate uses, so the empty string agrees on " +
+      "both sides of the seam. This entry therefore no longer grants a retry to " +
+      "a call that cannot satisfy its own condition; a producer that stops " +
+      "sending the id loses the retry automatically instead of silently " +
+      "invalidating the reasoning below. PROVENANCE OF THAT ANTECEDENT — kept " +
+      "because it is what makes the retry USEFUL rather than merely safe (a " +
+      "producer that lost the id would now be correctly refused, but would also " +
+      "quietly stop benefiting): (a) the isUuid 400 gate in create-with-key rejects a " +
       "non-uuid session id BEFORE the RPC; (b) the two stamping RPCs (composite " +
       "and CSV creation) stamp strategies.wizard_session_id at creation " +
       "[established, RULED OUT row 1]; (c) cleanup_abandoned_wizard_drafts " +
@@ -202,14 +210,16 @@ export const RETRY_SAFE_FLOW_TYPES: Readonly<
       "on the process-key-enqueue budget). (2) keys/validate-and-encrypt emits a " +
       "hand-written onboard body through the seam core on the " +
       "process-key-unified-dormant budget and sends NO wizard_session_id at all, " +
-      "so idempotent_by_session would be FALSE there. That producer is " +
-      "nonetheless retry-safe because no retry can reach it: its budget row is " +
-      "pinned at zero retries by the EXPECTED_RETRIES table in " +
-      "seam-constants.pin.test.ts, and its handler is dormant " +
-      "(zero callers as of 2026-07-31 — a dated, falsifiable claim, anchored to " +
-      "that pin so a flip reddens rather than rots). D-08 gives that call site an explicit " +
-      "retriesOverride of 0 in this same change. If either anchor moves, this " +
-      "producer must be re-audited before onboard keeps its YES.",
+      "so idempotent_by_session would be FALSE there. AS OF 141.2 / D-01 THAT " +
+      "PRODUCER IS SAFE BY THE PREDICATE ITSELF — retriesForFlow refuses it a " +
+      "retry precisely because it sends no key, so the argument no longer rests " +
+      "on either of the two anchors it used to need: its zero-retry budget row " +
+      "in the EXPECTED_RETRIES table of seam-constants.pin.test.ts, and the " +
+      "dated dormancy claim (zero callers as of 2026-07-31). Both remain true " +
+      "and both remain useful as defence in depth, but neither is load-bearing " +
+      "for this verdict any more: that producer waking up, or its budget row " +
+      "being flipped, can no longer grant it a retry it has not earned. D-08 " +
+      "also gives that call site an explicit retriesOverride of 0.",
   },
 } as const satisfies Partial<Record<FlowType, RetrySafeEntry>>);
 
@@ -266,6 +276,94 @@ export const RETRY_AUDIT_NO_FLOW_TYPES: Readonly<
     "row with teaser, so the blast radius of a mistake outweighs the marginal " +
     "value (RESEARCH A5). Default no-retry for this phase.",
 } as const satisfies Partial<Record<FlowType, string>>);
+
+/**
+ * THE `/process-key` RETRY VERDICT — flow verdict AND idempotency-key presence,
+ * in ONE gate (141.2 / D-01, finding 1).
+ *
+ * ── WHY THIS FUNCTION EXISTS AT ALL ──────────────────────────────────────────
+ *
+ * `onboard`'s YES verdict above does not stand on its own: it stands on an
+ * ANTECEDENT, stated in its own evidence — *a non-NULL wizard_session_id makes
+ * `idempotent_by_session` true*. Until 141.2 that antecedent was ASSERTED and
+ * never CHECKED. The `finalize-wizard` route reads the draft's
+ * `wizard_session_id`, and the column is nullable by design, so the route
+ * correctly forwards absence AS absence — at which point the Python side skips
+ * its duplicate pre-check and mints a fresh server-side session per attempt. The
+ * unique index then cannot collide, and a retried submit inserts a SECOND
+ * `strategy_verifications` row. The evidence was true; the gate simply never
+ * required it to be.
+ *
+ * This helper closes that gap by making the antecedent the predicate. It is
+ * placed HERE, in the registry leaf, for three reasons that a route-local guard
+ * would not satisfy:
+ *
+ *   1. IT IS WHERE THE EVIDENCE LIVES. The sentence being enforced is a few
+ *      lines up in `RETRY_SAFE_FLOW_TYPES.onboard`. A guard beside its own
+ *      evidence enforces it; a guard in one route asserts it for one instance.
+ *   2. IT COVERS THE CLASS. `onboard` has TWO producers, and the second —
+ *      `keys/validate-and-encrypt` — sends no session id at all. It was safe
+ *      only by a zero-retry budget row plus a DATED dormancy claim. This gate
+ *      makes that argument unnecessary rather than load-bearing: the second
+ *      producer is now refused a retry by the same predicate that refuses the
+ *      first, whatever its budget row says and whether or not it wakes up.
+ *   3. THE PREDICATE CAN BE WRITTEN IDENTICALLY ON BOTH SIDES OF THE SEAM.
+ *
+ * ── ⚠️ `Boolean(...)`, NEVER `!== null` ──────────────────────────────────────
+ *
+ * Python evaluates `bool(body.context.get("wizard_session_id"))` at the
+ * flow-type gate in `process_key.py` — TRUTHINESS, not a null check. A guard
+ * written as `!== null` (or `!== undefined`) would grant a retry on the EMPTY
+ * STRING that the server would then refuse to dedupe: two sides of a seam
+ * running different predicates while appearing to agree, which is the exact
+ * defect shape this phase exists to remove. `seam-retry-registry.test.ts` pins
+ * the empty-string case for that reason, and the chokepoint pins in
+ * `process-key-client.test.ts` pin it again through the real client.
+ *
+ * ── ⚠️ FAIL-CLOSED AT TWO LAYERS, AND THE SPLIT IS DELIBERATE ────────────────
+ *
+ * The `undefined` context arm returns 0. That is a BELT, not the primary
+ * mechanism, and the distinction matters because someone will eventually be
+ * tempted to "simplify" one of the two away:
+ *
+ *   · COMPILE — `PostProcessKeyArgs.context` is a REQUIRED field, so a caller
+ *     that states nothing does not compile. This is the stronger guarantee and
+ *     it is kept deliberately (141.2 / plan 05 records the decision): making the
+ *     field optional would let a future call site compile silently while leaning
+ *     on the runtime default.
+ *   · RUNTIME — this arm. Types are erased at build, so a JS caller, an `as any`
+ *     cast, or a refactor that widens the field can still arrive with nothing.
+ *
+ * ── ORDER OF OPERATIONS IS LOAD-BEARING ──────────────────────────────────────
+ *
+ * The flow verdict is consulted FIRST. Key presence can NARROW a YES verdict; it
+ * can never create one. A helper that tested the key first would hand `teaser` a
+ * retry the moment a caller happened to include a session id in its context —
+ * the SC3 anti-feature (a doubled verification, public_token and lead), reached
+ * through the new argument instead of around it.
+ *
+ * ── RECORDED FOLLOW-UP ───────────────────────────────────────────────────────
+ *
+ * A CLIENT-MINTED stable idempotency key would be the better end state: it would
+ * make the antecedent unconditionally true instead of conditionally checked, and
+ * it is the same key `resync` would need to earn its grant back. It changes the
+ * cross-seam contract and the verification-uniqueness semantics, so it is
+ * deliberate work, out of scope here, and recorded rather than inferred.
+ *
+ * ── PURITY ───────────────────────────────────────────────────────────────────
+ *
+ * Leaf-pure: reads only its arguments and the frozen map above, no I/O, no value
+ * imports. The leaf-purity pin at the top of this file still holds with it here.
+ */
+export function retriesForFlow(
+  flowType: FlowType,
+  context: Record<string, unknown> | undefined,
+): 0 | 1 {
+  // Absence from the YES map (or a NO verdict) is a full stop — no context can
+  // argue it back open.
+  if ((RETRY_SAFE_FLOW_TYPES[flowType]?.retries ?? 0) === 0) return 0;
+  return Boolean(context?.wizard_session_id) ? 1 : 0;
+}
 
 /**
  * Analytics-seam wrapper functions that ARE retry-safe, keyed by their 1:1
