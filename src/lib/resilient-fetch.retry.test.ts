@@ -270,6 +270,58 @@ function retryAfterResponse(
 }
 
 /**
+ * A REAL `Response` carrying a RAW, HAND-WRITTEN `Retry-After` value.
+ *
+ * `retryAfterResponse` above takes a `number` and stringifies it, so it can only
+ * ever express a well-formed delta-seconds header. The finding-9 cases are
+ * exactly the values it cannot type: the empty string, garbage, a negative, and
+ * the RFC 9110 HTTP-date form. `extraHeaders` carries the response's OWN `Date`,
+ * which is what the shared parser resolves an HTTP-date against — its presence
+ * or absence is the whole polarity of the date pair below.
+ */
+function rawRetryAfterResponse(
+  status: number,
+  rawRetryAfter: string,
+  body: unknown,
+  extraHeaders: Record<string, string> = {},
+): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "content-type": "application/json",
+      "retry-after": rawRetryAfter,
+      ...extraHeaders,
+    },
+  });
+}
+
+/**
+ * A raw-`Retry-After` response of `status` on the FIRST call, then a real 200 on
+ * every later one — the transient blip the retry exists to absorb. A loop that
+ * fails fast makes ONE call and surfaces the failure; a loop that retries makes
+ * TWO and surfaces the 200, so the two outcomes are distinguishable by BOTH the
+ * call count and the returned status.
+ */
+function rawRetryAfterThenOkFetch(
+  status: number,
+  rawRetryAfter: string,
+  extraHeaders: Record<string, string> = {},
+): FetchMock {
+  const mock = installFetchMock();
+  mock
+    .mockResolvedValueOnce(
+      rawRetryAfterResponse(
+        status,
+        rawRetryAfter,
+        { dependency: "supabase", detail: "upstream down" },
+        extraHeaders,
+      ),
+    )
+    .mockResolvedValue(jsonResponse(200, { ok: true }));
+  return mock;
+}
+
+/**
  * A fetch that answers a FRESH `Retry-After`-bearing response of `status` on
  * EVERY call — a dependency that is still down when the retry would have fired.
  *
@@ -539,6 +591,163 @@ describe("[SEAM-06 / D-01] a 503 that names its own wait FAILS FAST", () => {
       fetchMock,
       "The fail-fast widened past 503. Only a 503 is contractually obliged to " +
         "carry a wait it means, so only a 503 may be believed.",
+    ).toHaveBeenCalledTimes(2);
+    expect(res.status).toBe(200);
+  });
+});
+
+/**
+ * Phase 141.2 / finding 9 (D-06) — THE GATE PARSES THE VALUE; IT DOES NOT COUNT
+ * HEADERS.
+ *
+ * D-01 shipped `hasContractualWait` as a PRESENCE test, which asserts a contract
+ * it never verifies the responder is bound by. A `Retry-After: 0` means "retry
+ * now" (RFC 9110 §10.2.3); an empty value and a garbage value name no wait at
+ * all. All three disabled the retry and returned attempt 1's 503 to the user —
+ * for exactly the transient blip the retry was added to absorb.
+ *
+ * ⚠️ THESE CASES DRIVE `resilientFetch` ITSELF, not the predicate. The defect is
+ * the RELATIONSHIP between the header value and the loop's fail-fast exit, so a
+ * predicate-level assertion could be green while the loop still short-circuits.
+ * The oracle is the FETCH COUNT — the user-visible fact of whether the blip was
+ * absorbed — with the returned status as its second, independent witness.
+ *
+ * The safety property from D-01 is UNCHANGED and this file still pins it: the
+ * parsed seconds are discarded, so no header value reaches a sleep. The backoff
+ * bounds cases below `[SEAM-06 / SC2] fixed backoff + jitter bounds` remain the
+ * oracle for that — they read `Math.random` at its extremes, and a value-driven
+ * sleep would have to bypass the jitter term they own.
+ *
+ * HONESTY NOTE, deliberate: the repo's only contract-bound 503 emitter
+ * (`error_contract.service_error`) raises on a non-positive `retry_after` and
+ * refuses to emit a 503 without the header, so it CANNOT produce the bad values
+ * below. Whether the platform edge can is UNVERIFIED. These cases pin a code
+ * shape that is unsound by construction, not an observed production trace.
+ */
+describe("[SEAM-06 / D-06] a 503's Retry-After is PARSED, not merely present", () => {
+  /**
+   * Every value that names NO positive wait. One row per RFC-relevant shape:
+   * the explicit "retry now" zero, the empty value a proxy can inject, garbage,
+   * and a negative. All four must fall through to the normal backoff.
+   */
+  it.each([
+    ["0", 'the explicit RFC 9110 "retry now"'],
+    ["", "an empty value injected by a proxy"],
+    ["0abc", "unparseable garbage"],
+    ["-30", "a negative delta-seconds"],
+  ])(
+    "a 503 carrying Retry-After: %j (%s) still RETRIES — TWO fetches, the 200 returned",
+    async (rawValue, _shape) => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(Math, "random").mockReturnValue(0);
+      const fetchMock = rawRetryAfterThenOkFetch(503, rawValue);
+      const mod = await import("./resilient-fetch");
+
+      const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+        method: "POST",
+        retriesOverride: 1,
+      });
+
+      expect(
+        fetchMock,
+        `A 503 whose Retry-After was ${JSON.stringify(rawValue)} suppressed the ` +
+          "retry. That value names no wait, so there is no upstream contract to " +
+          "honour — the blip the retry exists to absorb was handed to the user " +
+          "as a 503 instead.",
+      ).toHaveBeenCalledTimes(2);
+      expect(res.status).toBe(200);
+      // Attempt 1's 503 is still counted once; attempt 2 succeeded and counts
+      // nothing. The fix widens WHICH values retry, never how many failures a
+      // given attempt records.
+      expect(shared.counters.limitCalls).toBe(1);
+    },
+  );
+
+  it("POSITIVE CONTROL — a 503 carrying Retry-After: 30 still FAILS FAST (ONE fetch, ONE recorded failure)", async () => {
+    // Runs through the SAME raw-header fixture as the four rows above, which is
+    // what makes those rows non-vacuous: if the fixture failed to put the header
+    // on the wire at all, they would pass for the wrong reason and this case
+    // would go red.
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    const fetchMock = rawRetryAfterThenOkFetch(503, "30");
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    expect(
+      fetchMock,
+      "The parse-not-presence fix disabled the D-01 fail-fast for a WELL-FORMED " +
+        "wait. A 503 that advertises 30s must still short-circuit.",
+    ).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ dependency: "supabase" });
+    expect(shared.counters.limitCalls).toBe(1);
+    expect(
+      randomSpy,
+      "The backoff jitter was read, so the fail-fast slept before giving up.",
+    ).not.toHaveBeenCalled();
+  });
+
+  /**
+   * The RFC 9110 HTTP-date form, both polarities. The shared parser resolves it
+   * against the response's OWN `Date` header so a skewed client clock cannot
+   * distort the delta; with no `Date` header the delta is not reliably knowable
+   * and the value is treated as unparseable.
+   *
+   * ⚠️ The (a) arm is green on the PRE-FIX tree too, for the wrong reason —
+   * presence. Its value is as a pin against the FIXED tree: it is the case that
+   * would go red if the delegation were narrowed to delta-seconds only, which is
+   * exactly the shape the rejected hand-rolled `Number()` parse would have had.
+   */
+  it("an HTTP-date Retry-After WITH the response's own Date header FAILS FAST — a date-form wait is still a contractual wait", async () => {
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    // Hand-typed pair, one minute apart. Never derived from `Date.now()`, so the
+    // delta cannot drift with the wall clock the suite happens to run at.
+    const fetchMock = rawRetryAfterThenOkFetch(
+      503,
+      "Wed, 21 Oct 2026 07:28:00 GMT",
+      { date: "Wed, 21 Oct 2026 07:27:00 GMT" },
+    );
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    expect(
+      fetchMock,
+      "A 503 naming an absolute retry time a minute out was retried inside a " +
+        "250-500ms backoff. RFC 9110 permits BOTH forms and both mean the same " +
+        "thing to the upstream.",
+    ).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(503);
+    expect(randomSpy).not.toHaveBeenCalled();
+  });
+
+  it("the SAME HTTP-date WITHOUT a Date header RETRIES — an unresolvable delta names no wait", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const fetchMock = rawRetryAfterThenOkFetch(
+      503,
+      "Wed, 21 Oct 2026 07:28:00 GMT",
+    );
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", BRIDGE_PATH, {
+      method: "POST",
+      retriesOverride: 1,
+    });
+
+    expect(
+      fetchMock,
+      "An HTTP-date with no `Date` header to resolve it against was believed " +
+        "anyway. The delta is unknowable without the server's own clock — " +
+        "resolving it against the CLIENT clock is the skew bug the shared parser " +
+        "exists to prevent, and guessing is worse than falling back to backoff.",
     ).toHaveBeenCalledTimes(2);
     expect(res.status).toBe(200);
   });
