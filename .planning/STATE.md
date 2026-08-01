@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.16
 milestone_name: Production Resilience & Reliability
 status: planning
-stopped_at: Inserted phase 141.2 (seamfix) — 13 code-review findings to close; needs planning
+stopped_at: Phase 141.2 (seamfix) EXECUTED and VERIFIED — 6 plans, 3 waves, all merged; ready to ship
 last_updated: "2026-08-01T06:56:25.640Z"
 last_activity: 2026-08-01
 progress:
@@ -46,7 +46,12 @@ RATE-01..05 — all mapped, Traceability filled). Roadmap: `.planning/ROADMAP.md
 
 ## Current Position
 
-Phase: 141.2 (seamfix) — INSERTED, needs planning. Next: `/gsd-plan-phase 141.2`
+Phase: 141.2 (seamfix) — ✅ EXECUTED + VERIFIED (17/17 must-haves, 0 review blockers).
+        Six plans across three waves, each wave gated at its boundary; final suite
+        10 487 vitest + 4 824 pytest green, typecheck clean, coverage above ratchet.
+        13 findings CLOSED PER THEIR DISPOSITIONS — twelve remediated, finding 8
+        DISPOSITIONED (retry→limiter amplification still live, booked in TODOS.md).
+        Next: VERSION bump → `/ship` → `/land-and-deploy`.
         ⛔ DO NOT SHIP 141.1 AS-IS. The xhigh code review (30 agents, 25 findings
         deduped to 13) found a DATA-INTEGRITY defect on the money path: `onboard`'s
         retry can insert TWO `strategy_verifications` rows for one user submit when
@@ -191,7 +196,7 @@ Status: Phase 141.1 — Wave 1 (01, 02, 03, 08) and Wave 2 (04, 05) merged to
         at `finalize-wizard/route.ts:840-851`), now ledger row TS-33; its "strictly
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
-Last activity: 2026-08-01 -- Phase 141.2 inserted (13 review findings, 1 data-integrity blocker)
+Last activity: 2026-08-01 -- Phase 141.2 executed, merged and verified (twelve findings remediated, one dispositioned)
 
 Progress: [██████████] 95%
 

@@ -357,6 +357,12 @@ research proved findings 10–11 were INTRODUCED by 141.1 (`f308b460`, single-co
 `git log -S`) — finding 10 is the phase's top priority — and the founder ordered all
 13 fixed in code, including 12–13 (`141.2-CONTEXT.md` D-05 + ⚠️ RESEARCH CORRECTIONS).
 
+⚠️ **That sentence records the INSTRUCTION, not the outcome.** As shipped: **twelve
+remediated, one dispositioned.** Finding 8 (retry → limiter amplification) was accepted
+rather than fixed — no limiter code changed, and the amplification is still live; the
+re-raise conditions are on `retriesForFlow` and in `TODOS.md`. Do not restate this phase
+as "all 13 fixed in code".
+
 Plans:
 - [ ] 141.2-01-PLAN.md — breaker cluster: corrupt-lock write path arms (f10, REGRESSION), absolute epoch bound (f11), per-attempt admission (f5)
 - [ ] 141.2-02-PLAN.md — resync verdict map move to NO (f6) + pin surgery + Python comment-only DEF-141.1-02-A

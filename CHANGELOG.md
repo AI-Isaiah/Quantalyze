@@ -107,6 +107,12 @@ evidence supported.
   denominator, so the rate biases **downward** — the safe direction, versus a fabricated denominator
   that pages falsely and a wire-controlled one that can be silenced on demand. A failed read is now
   its own outcome (`denominator_read_failed`) instead of a literal `0` that read as "no traffic".
+  The phase's own review round then found that closure was **partial**: a null `error` does not mean
+  a usable count, and `count ?? 0` sent PostgREST's two other unusable shapes down the zero-traffic
+  branch anyway (`count: null` when the `content-range` header is absent, `NaN` when it reads `*/*`).
+  NaN was the worse of the two — not `=== 0`, so the zero-streak guard missed it as well, and
+  `errorCount / NaN` sits below both alert thresholds, so that window answered `ok` with alerting
+  silently disarmed. Anything that is not a non-negative integer is now a read we could not complete.
   ⚠️ **Corrected two-cause diagnosis, recorded forward:** the 2026-05-27 region-URL fix
   (`8904b204`) addressed only **one of two independent, separately-sufficient causes** — the second
   is the unindexed-`path` fault above, which made the term unsearchable regardless of its value (and
