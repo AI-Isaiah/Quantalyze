@@ -311,7 +311,24 @@ async function getDenominator(args: {
     };
   }
 
-  return { kind: "ok", total: count ?? 0 };
+  // A null `error` does not mean a usable count. postgrest-js only sets `count`
+  // when the `content-range` header parses: an absent header leaves it null, and
+  // a `*/*` range makes it NaN. `?? 0` catches only the first — and turns it
+  // into the zero-traffic diagnosis this function exists to keep distinct, which
+  // is finding 12 surviving on a narrower path than the one it was found on.
+  // NaN is worse: it is not `=== 0`, so the streak guard misses it as well, and
+  // `errorCount / NaN` is NaN, which is below BOTH thresholds — the handler
+  // would answer ok with alerting silently disarmed for the window. Anything
+  // that is not a non-negative integer is a read we could not complete.
+  if (!Number.isInteger(count) || (count as number) < 0) {
+    console.warn("[cron/flag-monitor] denominator count unusable:", count);
+    return {
+      kind: "terminal",
+      res: NextResponse.json({ ok: false, reason: "denominator_read_failed" }),
+    };
+  }
+
+  return { kind: "ok", total: count as number };
 }
 
 async function handleZeroDenominator(args: {

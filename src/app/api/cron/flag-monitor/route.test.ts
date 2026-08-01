@@ -98,7 +98,10 @@ interface FlagMonitorRecorders {
   /** The audit_log COUNT the server returns — the scenario's true ATTEMPT-row
    *  total in the window. Answered to the `{ count: "exact", head: true }`
    *  chain, uncapped. */
-  auditCount: number;
+  // `number | null` because PostgREST itself can resolve a COUNT chain with
+  // `count: null` (no `content-range` header) or `count: NaN` (`*/*`), and both
+  // are states the handler has to survive — see the (D1b/D1c) cases.
+  auditCount: number | null;
   /** PostgREST error for the audit_log read. Non-null → the denominator read
    *  FAILED, which is a different state from "the window was empty". */
   auditError: { message: string } | null;
@@ -158,7 +161,12 @@ function createSupabaseMock(rec: FlagMonitorRecorders) {
                   data:
                     rec.auditRows ??
                     Array.from(
-                      { length: Math.min(rec.auditCount, POSTGREST_MAX_ROWS) },
+                      {
+                        length: Math.min(
+                          rec.auditCount ?? 0,
+                          POSTGREST_MAX_ROWS,
+                        ),
+                      },
                       (_, i) => ({ correlation_id: `cid-${i}` }),
                     ),
                   count: null,
@@ -335,6 +343,57 @@ describe.each([["GET"], ["POST"]] as const)(
       );
       expect(streakWrites).toHaveLength(0);
       // ...and no email fires for a fault we cannot yet diagnose.
+      expect(sendEmailSpy).not.toHaveBeenCalled();
+    });
+
+    it("(D1b/SC-I) an ABSENT count with NO error is a failed read too — not zero traffic", async () => {
+      // The narrower half of finding 12, left live by the first remedy. PostgREST
+      // resolves `count: null` when the `content-range` header does not parse,
+      // and `error` is null on that path — so `count ?? 0` restores the exact
+      // conflation the docblock above `getDenominator` disclaims: a monitor that
+      // cannot read its denominator emails "no traffic OR the audit-write is
+      // failing" and sends the operator to the Python audit path for a fault
+      // that lives in this query.
+      rec.auditCount = null;
+      rec.auditError = null;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          sentryResponse({ ok: true, json: { data: [{ "count()": 0 }] } }),
+        ),
+      );
+      const handler = await getHandler();
+      const res = await handler(authedReq());
+      const body = await res.json();
+      expect(body.reason).toBe("denominator_read_failed");
+      expect(body.reason).not.toBe("zero_denominator");
+      expect(
+        rec.upserts.filter((u) => u.flag_key === ZERO_DENOM_STREAK_KEY),
+      ).toHaveLength(0);
+      expect(sendEmailSpy).not.toHaveBeenCalled();
+    });
+
+    it("(D1c/SC-I) a NaN count answers ok:false — it must NOT pass through as a rate", async () => {
+      // Worse than the null case and invisible to `?? 0`: postgrest-js derives
+      // the count with `parseInt` over the `content-range` tail, so a `*/*`
+      // range yields NaN. NaN fails `total === 0`, so the zero-denominator guard
+      // does not catch it either; `errorCount / NaN` is NaN, and NaN is below
+      // every threshold. The handler would answer `ok: true` with BOTH alert
+      // arms silently disarmed for that window — the failure mode a monitor
+      // exists to prevent, in the monitor itself.
+      rec.auditCount = Number.NaN;
+      rec.auditError = null;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async () =>
+          sentryResponse({ ok: true, json: { data: [{ "count()": 9999 }] } }),
+        ),
+      );
+      const handler = await getHandler();
+      const res = await handler(authedReq());
+      const body = await res.json();
+      expect(body.ok).toBe(false);
+      expect(body.reason).toBe("denominator_read_failed");
       expect(sendEmailSpy).not.toHaveBeenCalled();
     });
 
