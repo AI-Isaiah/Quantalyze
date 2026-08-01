@@ -3,15 +3,19 @@ gsd_state_version: 1.0
 milestone: v1.16
 milestone_name: Production Resilience & Reliability
 status: planning
-stopped_at: Phase 141.2 (seamfix) EXECUTED and VERIFIED — 6 plans, 3 waves, all merged; ready to ship
-last_updated: "2026-08-01T06:56:25.640Z"
+stopped_at: >-
+  SEAM group (140 → 141.2) CLOSED OUT 2026-08-01. All 11 phases now read
+  roadmap_complete; next is Phase 142 (JOB group), which has no directory yet.
+  ⏳ ONE thing is outstanding and is NOT mine: PR #656 (`feat/v1.16-141-jobs-rate-retry`,
+  131 commits, MERGEABLE) is still OPEN — 141/141.1/141.2 are verified but unshipped.
+last_updated: "2026-08-01T20:05:00.000Z"
 last_activity: 2026-08-01
 progress:
   total_phases: 16
-  completed_phases: 9
-  total_plans: 99
-  completed_plans: 99
-  percent: 60
+  completed_phases: 11
+  total_plans: 105
+  completed_plans: 105
+  percent: 69
 ---
 
 # Project State — Quantalyze
@@ -971,6 +975,9 @@ Load-bearing sequencing (do not reorder):
 
 ### Blockers / Concerns
 
+- **⏳ PR #656 is OPEN and unmerged** (`feat/v1.16-141-jobs-rate-retry`, 131 commits ahead of `origin/main`, MERGEABLE). 141 / 141.1 / 141.2 are all verified `passed` but NOT shipped. Founder call — everything else in the SEAM group is closed.
+- **⚠️ Phase 140's `human_verification` item was never dispositioned — still owed as live ops.** "Watch Sentry during the next real Railway degradation window: confirm `CIRCUIT_OPEN` 503 envelopes appear and that no cascade-500s occur in the same window." It cannot be closed from the repo (no live Upstash in CI/local — 20+ test files delete the env vars — and no controllable Railway failure injection); it was declared manual-only in `140-VALIDATION.md`. `140-VERIFICATION.md` still reads `human_needed` for this one reason. Mirrored into TODOS.md.
+- **📋 Close-out lesson (2026-08-01):** the SEAM group's phase-close bookkeeping went un-run because the phases were hand-driven per-phase rather than under `/gsd-autonomous`, so nothing owned **autonomous step 3d (post-execution routing)**. Consequences found and fixed in one pass: 141.1 sat at `gaps_found` for a day after all three of its gaps were closed in the tree (`22332e34` + the ledger reconciliation) simply because the VERIFICATION was never re-run; 141.2 sat at `human_needed` with four probes nobody had been asked to run (three were dischargeable read-only in minutes); 141.1/141.2 had **no milestone-list entry at all**; and 41 plan checkboxes across 140.4, 140.5, 141, 141.1 and 141.2 were never ticked, plus 8 missing G-series rows under 140.3. See memory `feedback_hand_driving_gsd_skips_orchestrator_gates`. **If a phase is hand-driven, run the close-out explicitly — the verifier flags these as "orchestrator-owned" and then nothing owns them.**
 - **SEAM-05 audit is the Phase 141 long pole** — retry-safety of `recomputeMatch` / `computePortfolioAnalytics` / optimizer / simulator / bridge is UNAUDITED; `_get_recompute_lock` may be process-local, not distributed. Default everything unproven to no-retry.
 - **Phase 143 needs a short design pass** — "what counts as orphaned" per strategy source (csv vs wizard vs resync) before it becomes one migration.
 - **⚠️ OPS (140.2-09 / SC7) — confirm `INTERNAL_API_TOKEN` in the Vercel PRODUCTION env, and that it MATCHES the analytics service's value.** RESEARCH A3 could not verify it, and 140.2-09 changed the consequence: an ABSENT token now 500s every `analytics-client` route and 503s `/process-key` (intended fail-loud, better than an invisible platform bucket). A **MISMATCHED** token is the one state that still degrades silently — every claim fails `compare_digest` and every route sits on `platform:<path>` with no error anywhere. Likely present (`process-key-client` and `keys/[id]/permissions` already read it and `/process-key` works in prod), but unverified. `vercel env ls production | grep INTERNAL_API_TOKEN`.
