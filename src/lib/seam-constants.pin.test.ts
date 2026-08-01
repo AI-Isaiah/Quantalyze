@@ -580,31 +580,35 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
         "during a real Railway outage; lowering it lets one unlucky pod " +
         "restart take the seam down. Since Phase 141 the unit is an ATTEMPT, " +
         "not a request, so raising it delays containment for retried traffic " +
-        "TWICE as much as the number suggests — see the derived ⌈threshold/2⌉ " +
-        "assertion below and the ratified tradeoff on the constant itself.",
+        "TWICE as much as the number suggests — see the ratified tradeoff on " +
+        "the constant itself, and the per-attempt-latch case in " +
+        "resilient-fetch.retry.test.ts, which is where that doubling is " +
+        "pinned as BEHAVIOUR rather than as arithmetic.",
     ).toBe(5);
   });
 
-  it("D-02: a doubly-failing RETRIED request trips the circuit in 3 user requests", () => {
-    // Both sides literal, and the left one is DERIVED rather than restated: the
-    // per-attempt latch means a retried call whose two attempts both fail
-    // records TWO failures, so the user-visible trip point on the five
-    // retry-enabled rows is ⌈threshold/2⌉ requests, not `threshold`. That is
-    // the whole of the tradeoff ratified on BREAKER_FAILURE_THRESHOLD: the
-    // constant did not move, the UNIT under it did. This assertion is where
-    // moving the constant without re-reading that reasoning reddens.
-    expect(
-      Math.ceil(BREAKER_FAILURE_THRESHOLD / 2),
-      "The number of user requests a sustained outage needs to trip the seam " +
-        "breaker on a retry-enabled row has changed. Raising it is not a " +
-        "tuning knob: the trip gates ALL fifteen routes through the global " +
-        "key, including the anonymous teaser, and every extra request spent " +
-        "reaching it is a request served by a service already known to be " +
-        "down. Widening this to make a flaky test pass is forbidden — change " +
-        "the constant deliberately, and rewrite its ratified docblock in the " +
-        "same commit.",
-    ).toBe(3);
-  });
+  // ── THE TRIP-COUNT ASSERTION THAT USED TO STAND HERE IS DELETED ────────────
+  // (141.2 / D-05, finding 13.) It read
+  // `expect(Math.ceil(BREAKER_FAILURE_THRESHOLD / 2)).toBe(3)` — arithmetic
+  // over a constant the test above already pins to a literal, so it was true by
+  // construction and could not fail for ANY change to the behaviour its own
+  // message described. That is this file's own stated law broken inside the
+  // file that states it: never derive the oracle from the module under test.
+  //
+  // MEASURED, not asserted. With the per-attempt latch reset deleted from
+  // `resilientFetch` — the exact behaviour the deleted message named — that
+  // assertion stayed GREEN while the per-attempt-latch case in
+  // `resilient-fetch.retry.test.ts` went RED (it drives the real loop through a
+  // 503-503 double and counts the recordings). So the CLAIM has coverage and
+  // the deleted pin was not it.
+  //
+  // DELETED, NOT REPLACED, deliberately: a replacement would be a second copy
+  // of a test that already exists, and any replacement phrased as "N user
+  // requests" would be WRONG after 141.2 / D-06 for the status class the
+  // upstream contract makes mandatory — a 503 carrying a positive `Retry-After`
+  // now fails fast and records ONE failure, not two. The trip-count CLAIM lives
+  // in `docs/runbooks/seam-breaker.md`; the trip-count BEHAVIOUR is pinned by
+  // that latch case. This file pins CONSTANTS, not arithmetic over its own pins.
 
   it("BREAKER_WINDOW is the literal '30 s'", () => {
     // The exact string, not just its millisecond value: "30000 ms" would parse
@@ -664,12 +668,16 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
   });
 
   it("the worst-case retry interval is 500ms — the sum SC-4b charges (D-14b)", () => {
-    // DERIVED on the left, hand-typed on the right, exactly like the
-    // ⌈threshold/2⌉ assertion above. This is the number that actually enters
-    // SC-4b's headroom arithmetic: the jitter is added and never subtracted, so
-    // the MAX interval is the sum, not the mean. Pinning the two constants
-    // individually would not catch a compensating edit (300 + 200), and it is
-    // the SUM, not either part, that the budget arithmetic spends.
+    // DERIVED on the left, hand-typed on the right — and unlike the ⌈threshold/2⌉
+    // assertion 141.2 / D-05 deleted from this file, this one CAN fail. That one
+    // was arithmetic over a SINGLE constant the file already pinned, so the two
+    // sides could never disagree; this one composes TWO independently-pinned
+    // constants, so a compensating edit (300 + 200) reddens it while leaving both
+    // individual pins green. That difference is the whole test of whether a
+    // derived left-hand side is legitimate here. This is also the number that
+    // actually enters SC-4b's headroom arithmetic: the jitter is added and never
+    // subtracted, so the MAX interval is the sum, not the mean, and it is the SUM,
+    // not either part, that the budget arithmetic spends.
     expect(
       SEAM_RETRY_BACKOFF_MS + SEAM_RETRY_JITTER_MAX_MS,
       "The worst-case wait between a failed seam attempt and its retry is no " +
