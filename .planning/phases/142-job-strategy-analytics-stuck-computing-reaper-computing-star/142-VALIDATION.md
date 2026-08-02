@@ -118,13 +118,17 @@ created: 2026-08-02
 | SC-3 | The Python reaper-threshold constant: divide by 10 (below the chain-inclusive ceiling) | `pytest tests/test_main_worker.py -k Reaper` — the headroom invariant | ⬜ pending | |
 | SC-3b | Change the threshold literal embedded in the migration so it no longer equals the Python constant | The SQL↔Python drift gate | ⬜ pending | |
 | SC-4 | Wire the reaper identifier into `dispatch_tick` (or inject a loop-blocking call on the shared event loop) | `test_job07_reaper_off_worker_loop.py` — structural gate **and** the positive control's 503 | ⬜ pending | |
+| SC-5 | `analytics_runner.py` `_mark_computing` (~:1227): delete the `computing_started_at` stamp key from the entry upsert dict (plan 142-03 m1) | `pytest tests/test_computing_started_at_stamp.py` — entry rule: literal `"computing"` ⇒ stamp present and ≠ None | ⬜ pending | |
+| SC-5b | `job_worker.py` composite success write: delete the `computing_started_at: None` clear from the `headline_payload` dict literal (~:6635, consumed by the NESTED `_write_headline_and_by_basis` upsert at ~:6744 — plan 142-03 m2) | same file — exit-clear rule reached via the ast.Name payload-resolution arm; this RED doubles as the Name-arm liveness proof | ⬜ pending | |
+| SC-5c | `src/app/api/keys/sync/route.ts:532`: delete `computing_started_at: null` from the failed-placeholder payload (plan 142-03 m3) | same file — TS object-literal half (the payload is built in `compositeMemberCount` and passed as an argument; only the object-literal anchor can see it) | ⬜ pending | |
 
 *Rules:*
 - **Observed means run.** "The test covers it" is not evidence. Paste the failing assertion.
 - **A mutation that is skipped** (ambiguous anchor, unreachable) is recorded as skipped, **never as caught**.
 - **Prefer the second member of a class.** The stamp rule is enforced at two writers and cleared at
-  14 exit sites — mutate an exit site the author did *not* have in mind. That is what detects an
-  instance-fix masquerading as a class-fix.
+  17 exit sites (11 Python + 2 SQL + 4 TS — RESEARCH §Writer Census B, denominator corrected from
+  the original "14" during plan revision) — mutate an exit site the author did *not* have in mind.
+  That is what detects an instance-fix masquerading as a class-fix.
 
 ---
 
@@ -145,7 +149,19 @@ created: 2026-08-02
       A gate that re-implements the predicate passes when the deployed predicate is wrong.
 
 *If a self-referential oracle is deliberate, name it here and say what independently covers it:*
-none
+1. **Plan 142-01 T2** (`TestReaperThresholdInvariant`) imports `JOB_CHAIN_FOLLOW_ON` and
+   `TIMEOUT_PER_KIND` from `services.job_worker` — the module under test. Compensating coverage:
+   plan 01 Task 1 rewired the three production enqueue sites to READ `JOB_CHAIN_FOLLOW_ON`, so a
+   wrong map changes real enqueue behavior and reddens the existing job-flow suites
+   (`test_main_worker.py`, `test_job_worker_csv_kind.py`) run in the same plan's verify; the
+   batch/retry inputs stay local literals (P-8); and the 6–24 h ceiling sanity band plus the
+   topology-coverage asserts (keys ⊆ TIMEOUT_PER_KIND; chain ceiling ≥ all-kinds single-hop
+   ceiling) guard a zeroed or under-covering map.
+2. **Plan 142-04 T3** (`TestReaperThresholdDriftGate`) imports `STRATEGY_ANALYTICS_REAP_THRESHOLD`
+   from `services.job_worker` — deliberate: the Python constant is DECLARED canonical and the test
+   pins SQL↔Python equality, not value correctness. Compensating coverage: VALUE-correctness is
+   owned by `TestReaperThresholdInvariant`'s literal-pinned chain-inclusive ceiling (SC-3), which
+   does not trust the constant.
 
 ---
 

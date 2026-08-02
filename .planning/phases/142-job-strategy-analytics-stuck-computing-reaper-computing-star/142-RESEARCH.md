@@ -157,7 +157,7 @@ it as a pg_cron job with a hardcoded literal threshold and no caller-controlled 
 |------------|--------------|----------------|-----------|
 | Detect & terminalize a stranded `computing` row | **Database (pg_cron + plpgsql)** | — | Structurally immune to WEDGE-01; independent of the worker liveness it backstops. Requirements "Out of Scope" table forbids worker-loop and Vercel-cron placement outright. |
 | Stamp `computing_started_at` on entry to `computing` | **Database (SQL bridge branch a)** + **Python worker (`analytics_runner`)** | — | Two writers, two runtimes. Both must stamp; neither can stamp on the other's behalf. |
-| Clear `computing_started_at` on exit from `computing` | **Database (bridge branches b/c)** + **Python worker** + **Next.js API (3 `failed` placeholder writers)** | — | 14 exit sites across three runtimes (§Writer Census). |
+| Clear `computing_started_at` on exit from `computing` | **Database (bridge branches b/c)** + **Python worker** + **Next.js API (4 `failed` placeholder write sites in 3 routes)** | — | 17 exit sites across three runtimes (§Writer Census; corrected from "14" during plan revision). |
 | Threshold source of truth | **Python (`analytics-service`)** | Database (derived literal + a drift test) | CONTEXT.md locks Python as canonical; the SQL carries the literal + a comment naming its source. |
 | Render the terminal state to the user | **Next.js client (`SyncPreviewStep` / `useStrategySyncPoller`)** | — | Already built. This phase writes into the column those already read; **no frontend work is required**. |
 | Threshold / stamp CI invariants | **pytest (`analytics-service/tests/`)** | — | Mirrors `test_every_kind_has_watchdog_headroom`. |
@@ -373,7 +373,10 @@ Stage B 106-07/08/09 and is grep-gated by `tests/test_dark_path_deleted.py` (`an
 docstring). ⇒ **a W1-written `computing` row always has a live `compute_jobs` row in `running`.**
 **[VERIFIED]**
 
-### B. Writers that transition **out of** `computing` (must clear the stamp) — 14 sites
+### B. Writers that transition **out of** `computing` (must clear the stamp) — 17 sites
+> (11 Python + 2 SQL + 4 TypeScript, per the tables below — the heading originally said "14",
+> corrected during plan revision; the plans cover all 17: plan 142-03 owns 11 Py + 4 TS,
+> plan 142-04 owns the 2 SQL branches.)
 
 **Python — `analytics-service/services/analytics_runner.py`:**
 | Line | Status written | Notes |
@@ -1281,7 +1284,11 @@ If planning later reaches for a package, the gate applies in full.
 
 ## Open Questions
 
-1. **Does the reaper's threshold need to be hours at all?**
+1. **Does the reaper's threshold need to be hours at all?** *(RESOLVED — plan 142-01 context:
+   the deployed interval MUST exceed the chain-inclusive ceiling; smallest whole 4-hour multiple
+   ≥ 1.25 × ceiling, expected '16 hours'. The NOT EXISTS conjunct carries safety; the interval is
+   debounce. Consequence for prose: the */15 cadence is post-threshold DETECTION latency, not a
+   bound on user-visible spinner time — migration header must say so.)*
    - *Known:* JOB-03 mandates a batch-tail-derived threshold and a CI invariant proving headroom.
    - *Unclear:* with the `NOT EXISTS (active job)` conjunct carrying the safety, a large interval buys
      nothing but latency (the user stares at the spinner longer). CONTEXT.md's 15-minute cadence
@@ -1292,7 +1299,10 @@ If planning later reaches for a package, the gate applies in full.
      let a large "safe" interval be chosen by default when the safety comes from elsewhere. This is
      a decision the planner should make explicitly, not inherit.
 
-2. **Is the migration-time backfill from `computed_at` safe on PROD right now?**
+2. **Is the migration-time backfill from `computed_at` safe on PROD right now?** *(RESOLVED —
+   plan 142-04 Task 1 step 3: read-only census on TEST via MCP before authoring; PROD census if
+   reachable, else recorded as a pre-merge operator step. The migration header states the real
+   number, never a hypothetical.)*
    - *Known:* `computed_at` is `now()`-fresh on bridge-written `computing` rows and stale on
      runner-written ones (C-2).
    - *Unclear:* how many rows currently sit at `computing` in PROD and which writer produced each.
@@ -1303,6 +1313,9 @@ If planning later reaches for a package, the gate applies in full.
      real number rather than a hypothetical.
 
 3. **Should the reaper report skip counts / emit the Sentry warning CONTEXT.md requires?**
+   *(RESOLVED — CONTEXT's post-research correction locks NO Sentry claim: the reaper stays a
+   single bounded UPDATE with no skip-count reporting; plan 142-04's migration header documents
+   the operator query against `cron.job_run_details` instead. No plan asserts a Sentry path.)*
    - *Known:* CONTEXT.md locks "NULL stamp ⇒ skip + Sentry warning". pg_cron has no Sentry client.
    - *Unclear:* the mechanism. Options: a `RAISE WARNING` into Postgres logs (not Sentry); a
      `cron.job_run_details` row an operator reads; or a small counter table the API service reads.
@@ -1311,7 +1324,10 @@ If planning later reaches for a package, the gate applies in full.
      that is exactly the "copy asserts a team was notified when nothing was" defect class SEAMUX-08
      closed. Flag this to `discuss-phase` if the founder wants real Sentry delivery.
 
-4. **`src/lib/types.ts` + `database.types.ts` drift** — add the column to the hand-maintained
+4. **`src/lib/types.ts` + `database.types.ts` drift** *(RESOLVED — plan 142-03 option (b):
+   one-line `computing_started_at: string | null;` addition to `src/lib/types.ts` only;
+   `database.types.ts` untouched; the pre-existing 2-column drift is logged to TODOS.md.)* —
+   add the column to the hand-maintained
    interface, regenerate the whole types file, or neither? No CI gate forces the answer.
    *Recommendation:* one-line addition to `src/lib/types.ts:288`; leave `database.types.ts` alone and
    note the pre-existing 2-column drift in TODOS.md rather than expanding scope.
