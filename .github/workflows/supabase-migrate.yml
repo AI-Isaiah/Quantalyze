@@ -132,13 +132,38 @@ jobs:
           SUPABASE_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_REF }}
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+          # Phase 142.1 D-02/R1. This workflow's push trigger is
+          # `branches: [main]` + `paths: supabase/migrations/**`, so a push run
+          # means migrations GENUINELY MERGED. On that path there is no
+          # legitimate unconfigured state: reporting success having applied
+          # nothing is exactly how a freshly-deployed worker meets an OLD PROD
+          # schema (PGRST204 — and the catch-all recovery write carries the same
+          # unknown column, so the job cannot even stamp 'failed') while every
+          # dashboard stays green. A manual workflow_dispatch on an
+          # unconfigured clone keeps the tolerant skip.
+          IS_PUSH: ${{ github.event_name == 'push' }}
         run: |
-          if [ -z "$SUPABASE_PROJECT_REF" ] || [ -z "$SUPABASE_ACCESS_TOKEN" ] || [ -z "$SUPABASE_DB_PASSWORD" ]; then
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Supabase Migrate skipped — secrets not configured. Set SUPABASE_PROJECT_REF (var), SUPABASE_ACCESS_TOKEN and SUPABASE_DB_PASSWORD (secrets) to enable auto-migration."
-          else
+          set -euo pipefail
+          MISSING=""
+          if [ -z "$SUPABASE_PROJECT_REF" ]; then MISSING="$MISSING SUPABASE_PROJECT_REF(var)"; fi
+          if [ -z "$SUPABASE_ACCESS_TOKEN" ]; then MISSING="$MISSING SUPABASE_ACCESS_TOKEN(secret)"; fi
+          if [ -z "$SUPABASE_DB_PASSWORD" ]; then MISSING="$MISSING SUPABASE_DB_PASSWORD(secret)"; fi
+
+          if [ -z "$MISSING" ]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          if [ "$IS_PUSH" = "true" ]; then
+            for name in $MISSING; do
+              echo "::error::Supabase Migrate cannot run: $name is not configured."
+            done
+            echo "::error::This run was triggered by a push to main touching supabase/migrations/**, so migrations MERGED and PROD must be migrated. A green no-op here is a SILENT schema/code divergence (PGRST204), not a skip. Configure the values above and re-run this workflow."
+            exit 1
+          fi
+
+          echo "configured=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::Supabase Migrate skipped — secrets not configured. Set SUPABASE_PROJECT_REF (var), SUPABASE_ACCESS_TOKEN and SUPABASE_DB_PASSWORD (secrets) to enable auto-migration. (Tolerated for workflow_dispatch only; a push to main fails loud.)"
       - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
         if: steps.check.outputs.configured == 'true'
         with:

@@ -1065,6 +1065,67 @@ describe("Critical regression guards", () => {
       });
     });
 
+    // Phase 142.1 D-02/R1: supabase-migrate is the ONLY automatic applier of
+    // DDL to PROD, and its push trigger is `branches: [main]` +
+    // `paths: supabase/migrations/**` — a push run means migrations MERGED.
+    // Pre-fix, unset secrets took a `configured=false` + `::notice::` branch and
+    // every downstream step skipped, so the workflow reported SUCCESS having
+    // applied nothing. That is the reachable, silent producer of PGRST204: a
+    // redeployed worker meets an old PROD schema, and because the catch-all
+    // recovery write carries the same unknown column, the job cannot even stamp
+    // 'failed'. The fix must stay PUSH-GATED — a manual workflow_dispatch on an
+    // unconfigured clone is still legitimately tolerable.
+    describe("supabase-migrate fails loud on unset secrets (D-02/R1)", () => {
+      // Slice the check step out of the plan job: from its `- name:` line to
+      // the next step at the same 6-space indent.
+      function checkStep(): string {
+        const src = readText(".github/workflows/supabase-migrate.yml");
+        return findOrFail(
+          src,
+          /^ {6}- name: Check secrets are configured\n([\s\S]*?)(?=\n {6}- )/m,
+          "supabase-migrate.yml: 'Check secrets are configured' step not found",
+        );
+      }
+
+      it("the unset-secrets branch is gated on a push event", () => {
+        expectMatch(
+          checkStep(),
+          /github\.event_name\s*==\s*'push'/,
+          "supabase-migrate.yml lost the `github.event_name == 'push'` gate on its secrets check — either the hard failure now fires on workflow_dispatch too (an unconfigured clone can no longer be dispatched), or the push path lost its fail-loud entirely and silent-green migrate skips are back (D-02/R1)",
+        );
+      });
+
+      it("the push path emits ::error:: and exits non-zero", () => {
+        expectMatch(
+          checkStep(),
+          /IS_PUSH[\s\S]*?::error::[\s\S]*?exit 1/,
+          "supabase-migrate.yml's unset-secrets branch no longer fails loud on push — a push to main touching supabase/migrations/** means migrations MERGED, so applying nothing must be a hard error, not a green no-op (D-02/R1, PGRST204 producer 1)",
+        );
+      });
+
+      it("the tolerant ::notice:: path is unreachable on the push path", () => {
+        // A whole-file `grep -c '::notice::' == 0` cannot express "zero on the
+        // PUSH path" — the notice legitimately survives for workflow_dispatch.
+        // Assert it STRUCTURALLY instead: the tolerant notice must sit AFTER
+        // the push-gated `exit 1`, so a push run can never reach it.
+        const step = checkStep();
+        const pushExitIdx = step.search(/IS_PUSH[\s\S]*?::error::[\s\S]*?exit 1/);
+        const noticeIdx = step.indexOf("::notice::");
+        expect(
+          pushExitIdx,
+          "supabase-migrate.yml: push-gated fail-loud branch not found",
+        ).toBeGreaterThanOrEqual(0);
+        expect(
+          noticeIdx,
+          "supabase-migrate.yml: tolerant ::notice:: path not found — workflow_dispatch on an unconfigured clone should still be tolerable",
+        ).toBeGreaterThanOrEqual(0);
+        expect(
+          noticeIdx,
+          "supabase-migrate.yml's tolerant ::notice:: skip is reachable BEFORE the push-gated exit 1 — a push to main with unset secrets could still report green having applied nothing (D-02/R1)",
+        ).toBeGreaterThan(pushExitIdx);
+      });
+    });
+
     // Phase 142.1 D-05: the `sql-tests` job runs supabase/tests/*.sql against
     // the ONE shared Supabase test project. test_strategy_analytics_stuck_
     // computing_reaper.sql EXECUTEs the real deployed cron body, whose reap
