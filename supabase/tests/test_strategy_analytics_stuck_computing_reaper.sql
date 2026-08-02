@@ -60,25 +60,44 @@
 -- SHARED test project. Both analogs are per-part only
 -- (test_retention_orphaned_running.sql:54/191;
 -- test_sync_status_supersede_failed_per_kind.sql:98/149, 162/203, 214/268).
--- The `SET LOCAL lock_timeout` bounds the row locks the neutralization UPDATE
--- (below) takes on pre-existing 'computing' rows, so two concurrent PR gate runs
--- against the shared TEST project fail loud instead of serializing on an
--- unbounded wait.
+-- The `SET LOCAL lock_timeout` bounds the row locks the EXECUTEd DEPLOYED BODY
+-- itself takes: its reap statement is FOR UPDATE SKIP LOCKED and can briefly
+-- hold locks on up to 25 foreign candidate rows inside the part's transaction,
+-- until the ROLLBACK. SKIP LOCKED means this gate never BLOCKS on another
+-- tenant's row locks, and the `sql-tests` CI job now carries the repo-wide
+-- `shared-test-db` concurrency group (ci.yml), so two gate runs cannot overlap
+-- at all. The 5 s bound stays as the fail-loud backstop for anything else that
+-- contends.
 --
--- SHARED-TEST-DB ISOLATION (why the neutralization UPDATE exists)
--- --------------------------------------------------------------
+-- SHARED-TEST-DB ISOLATION (isolation by construction)
+-- ---------------------------------------------------
 -- The deployed command is a GLOBAL `ORDER BY computing_started_at ASC LIMIT 25`
 -- over the whole table, and the migration's one-shot backfill stamps every
--- pre-existing 'computing' row from computed_at. Those rows carry OLD stamps
--- that sort AHEAD of these seeds and could crowd them out of the 25-row budget,
--- which would fail the arm-A and LIMIT assertions for a reason that has nothing
--- to do with the reaper. So INSIDE the rollback and BEFORE EACH
--- `EXECUTE v_command`, every non-seeded 'computing' row has its stamp NULLed.
--- NULL-stamp rows are skipped by the deployed predicate itself (the writer-bug
--- skip rule), so the neutralization uses the reaper's OWN semantics -- it
--- introduces no new mechanism -- and the ROLLBACK guarantees it never persists.
--- Every reap count below is SCOPED to the seeded strategy_id set. A global count
--- would be broken deterministically by a single pre-existing stranded row.
+-- pre-existing 'computing' row from computed_at. Those FOREIGN rows compete with
+-- these seeds for the 25-row budget.
+--
+-- This file does NOT neutralize them. It used to: three
+-- `UPDATE public.strategy_analytics SET computing_started_at = NULL
+--  WHERE computation_status = 'computing' AND strategy_id <> ALL (v_seeded)`
+-- statements wrote across every OTHER tenant's rows on the shared project.
+-- Those three statements are DELETED (Phase 142.1, D-05 / D-18) -- not narrowed,
+-- not re-targeted. Isolation is now BY CONSTRUCTION: every row this file needs
+-- the reaper to reap is seeded at `now() - interval '100 years'`, which sorts
+-- ahead of any plausible foreign row under the deployed ORDER BY, so the seeds
+-- win the budget without touching a single row they do not own. Every count and
+-- every status read below is SCOPED to this block's own seeded strategy_id set
+-- (`= ANY (v_seeded)`, or an identity comparison against one seeded id) -- never
+-- a global count and never a global empty state. That is this project's own
+-- recorded lesson from the e2e-seeded shared-DB pollution fix: assert your OWN
+-- seed invariant.
+--
+-- RESIDUAL ASSUMPTION, stated honestly (D-18): correctness of the reap-arm
+-- assertions now rests on no foreign row on the shared TEST project carrying a
+-- computing_started_at older than the seed epoch (a century back). If enough
+-- such rows ever existed to consume the 25-row budget, the arm-A and LIMIT
+-- assertions would redden for a reason unrelated to the reaper. That is a loud,
+-- diagnosable failure -- unlike the cross-tenant writes it replaces, whose cost
+-- (mutating other PRs' rows mid-run) was silent by design.
 --
 -- FROZEN-CLOCK TRAP (why the SC-2b arm uses a sentinel)
 -- ----------------------------------------------------
@@ -309,11 +328,15 @@ BEGIN
     VALUES (v_user, 'sa-reaper-arm-d') RETURNING id INTO v_d;
   v_seeded := ARRAY[v_a, v_b, v_c, v_d];
 
-  -- arm A: stranded 100 days, warned marker SET (this is what makes the SI-02
-  -- launder block observable), computed_at FRESH (SC#2 direction 1).
+  -- arm A: stranded A CENTURY (isolation by construction -- see the header: this
+  -- epoch is what makes the seed outrank any plausible foreign row for the
+  -- deployed `ORDER BY computing_started_at ASC LIMIT 25` budget, replacing the
+  -- deleted cross-tenant neutralizing UPDATE). warned marker SET (this is what
+  -- makes the SI-02 launder block observable), computed_at FRESH (SC#2
+  -- direction 1).
   INSERT INTO public.strategy_analytics
     (strategy_id, computation_status, computation_warned, computing_started_at, computed_at)
-  VALUES (v_a, 'computing', TRUE, v_fresh - interval '100 days', v_fresh);
+  VALUES (v_a, 'computing', TRUE, v_fresh - interval '100 years', v_fresh);
 
   -- arm B: stamp FRESH, computed_at 100 days OLD (SC#2 direction 2).
   INSERT INTO public.strategy_analytics
@@ -335,14 +358,9 @@ BEGIN
     (strategy_id, computation_status, computation_warned, computing_started_at, computed_at)
   VALUES (v_d, 'computing', FALSE, NULL, v_fresh - interval '100 days');
 
-  -- Shared-TEST-DB isolation (see the header). Uses the reaper's own NULL-stamp
-  -- skip rule; the ROLLBACK guarantees it never persists.
-  UPDATE public.strategy_analytics
-     SET computing_started_at = NULL
-   WHERE computation_status = 'computing'
-     AND strategy_id <> ALL (v_seeded);
-
   -- ----- THE ORACLE: run the REAL deployed body -------------------------
+  -- No cross-tenant neutralization happens here. Arm A's century-old stamp wins
+  -- the LIMIT-25 budget by construction (header, "isolation by construction").
   EXECUTE v_command;
 
   -- arm A: all FOUR columns of the reap outcome.
@@ -396,22 +414,33 @@ $$;
 ROLLBACK;
 
 -- ==========================================================================
--- Part 3 -- arm E, the LIMIT bound. 26 stranded rows, oracle run TWICE:
--- tick 1 must reap exactly 25 of the 26 SEEDED rows (bounded), tick 2 must reap
--- the remaining seeded 1 (progressing). Counts are SCOPED to the seeded
--- strategy_id set -- a global count would be broken by a single pre-existing
--- stranded row on the shared project. Rolls back unconditionally.
+-- Part 3 -- arm E, the LIMIT bound. 26 stranded rows, oracle run TWICE.
+-- The assertions are IDENTITY-SCOPED, not shape-scoped (D-18): the 26 seeds are
+-- staggered a century back, so under the deployed `ORDER BY
+-- computing_started_at ASC LIMIT 25` the 25 OLDEST seeds are exactly the ones a
+-- correct tick must take, and v_youngest (the i=1 seed, least old) is exactly
+-- the one it must leave. So:
+--   tick 1  -> my 25 oldest seeds are ALL 'failed' (fewer => not draining, or a
+--              foreign row crowded a seed out of the budget) AND v_youngest is
+--              still 'computing' (if the LIMIT were gone it would have gone too)
+--   tick 2  -> v_youngest is 'failed' and all 26 seeds are terminal (progressing)
+-- This replaces the old "exactly 25 of 26" global-shape count. Naming WHICH rows
+-- must move is strictly stronger than counting HOW MANY moved, and it is the
+-- project's recorded e2e-seeded lesson: assert your OWN seed invariant.
+-- Rolls back unconditionally.
 -- ==========================================================================
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 DO $$
 DECLARE
-  v_user    uuid := gen_random_uuid();
-  v_strat   uuid;
-  v_seeded  uuid[] := ARRAY[]::uuid[];
-  v_command TEXT;
-  v_cnt     INTEGER;
-  v_fresh   TIMESTAMPTZ := now();
+  v_user     uuid := gen_random_uuid();
+  v_strat    uuid;
+  v_seeded   uuid[] := ARRAY[]::uuid[];
+  v_youngest uuid;   -- the i=1 seed: LEAST old, so the one tick 1 must NOT take
+  v_command  TEXT;
+  v_cnt      INTEGER;
+  v_status   TEXT;
+  v_fresh    TIMESTAMPTZ := now();
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
     RAISE NOTICE 'SKIP Part 3: pg_cron not installed here; the deployed-body oracle is unavailable (local dev only).';
@@ -429,7 +458,11 @@ BEGIN
   INSERT INTO public.profiles (id, display_name)
     VALUES (v_user, 'sa-reaper-limit') ON CONFLICT (id) DO NOTHING;
 
-  -- LIMIT + 1 stranded rows, staggered so the ordering is deterministic.
+  -- LIMIT + 1 stranded rows, staggered so the ordering is deterministic, and
+  -- seeded A CENTURY back so all 26 outrank any plausible foreign candidate row
+  -- for the deployed LIMIT-25 budget (isolation by construction -- see the
+  -- header; this is what replaces the deleted cross-tenant neutralizing UPDATEs).
+  -- i=26 is the OLDEST seed, i=1 the youngest.
   FOR i IN 1..26 LOOP
     INSERT INTO public.strategies (user_id, name)
       VALUES (v_user, 'sa-reaper-limit-' || i::text) RETURNING id INTO v_strat;
@@ -437,47 +470,51 @@ BEGIN
     INSERT INTO public.strategy_analytics
       (strategy_id, computation_status, computation_warned, computing_started_at, computed_at)
     VALUES (v_strat, 'computing', FALSE,
-            v_fresh - interval '100 days' - (i * interval '1 minute'), v_fresh);
+            v_fresh - interval '100 years' - (i * interval '1 minute'), v_fresh);
   END LOOP;
 
-  UPDATE public.strategy_analytics
-     SET computing_started_at = NULL
-   WHERE computation_status = 'computing'
-     AND strategy_id <> ALL (v_seeded);
+  -- The i=1 seed: LEAST old of the 26, so it is the single row a correctly
+  -- bounded tick must leave behind. Asserting on THIS id -- not on a count --
+  -- is what makes the bound falsifiable without reading foreign rows.
+  v_youngest := v_seeded[1];
 
   -- ----- tick 1: BOUNDED -------------------------------------------------
   EXECUTE v_command;
 
   SELECT count(*) INTO v_cnt
     FROM public.strategy_analytics
-   WHERE strategy_id = ANY (v_seeded) AND computation_status = 'failed';
+   WHERE strategy_id = ANY (v_seeded)
+     AND strategy_id <> v_youngest
+     AND computation_status = 'failed';
   IF v_cnt <> 25 THEN
-    RAISE EXCEPTION 'TEST FAILED (3/arm E/JOB-02): one tick reaped % of the 26 seeded stranded rows, expected exactly 25. Fewer means the run is not draining; more means the LIMIT bound is gone and a backlog could hold locks across the table for an unbounded window.', v_cnt;
+    RAISE EXCEPTION 'TEST FAILED (3/arm E/JOB-02): after one tick only % of MY 25 oldest seeded stranded rows are failed, expected all 25. Either the run is not draining, or a foreign row older than the century-old seed epoch crowded a seed out of the LIMIT-25 budget (see the header RESIDUAL ASSUMPTION).', v_cnt;
   END IF;
 
-  SELECT count(*) INTO v_cnt
-    FROM public.strategy_analytics
-   WHERE strategy_id = ANY (v_seeded) AND computation_status = 'computing';
-  IF v_cnt <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (3/arm E): expected exactly 1 seeded row left computing after tick 1, got %.', v_cnt;
+  SELECT computation_status INTO v_status
+    FROM public.strategy_analytics WHERE strategy_id = v_youngest;
+  IF v_status IS DISTINCT FROM 'computing' THEN
+    RAISE EXCEPTION 'TEST FAILED (3/arm E/JOB-02): my YOUNGEST seeded stranded row (the 26th, outside a 25-row budget) was reaped on tick 1 (got %). The LIMIT bound is gone, so a backlog could hold locks across the table for an unbounded window.', v_status;
   END IF;
 
   -- ----- tick 2: PROGRESSING --------------------------------------------
-  UPDATE public.strategy_analytics
-     SET computing_started_at = NULL
-   WHERE computation_status = 'computing'
-     AND strategy_id <> ALL (v_seeded);
-
+  -- No neutralizing UPDATE here either: the previous tick terminalized 25 of the
+  -- seeds, so v_youngest is now the oldest remaining candidate this block owns.
   EXECUTE v_command;
+
+  SELECT computation_status INTO v_status
+    FROM public.strategy_analytics WHERE strategy_id = v_youngest;
+  IF v_status IS DISTINCT FROM 'failed' THEN
+    RAISE EXCEPTION 'TEST FAILED (3/arm E/JOB-02): my youngest seeded stranded row is still % after a SECOND tick, expected failed. The reaper is bounded but not progressing, so a backlog would never drain.', v_status;
+  END IF;
 
   SELECT count(*) INTO v_cnt
     FROM public.strategy_analytics
    WHERE strategy_id = ANY (v_seeded) AND computation_status = 'failed';
   IF v_cnt <> 26 THEN
-    RAISE EXCEPTION 'TEST FAILED (3/arm E/JOB-02): after a second tick % of 26 seeded stranded rows are terminal, expected 26. The reaper is bounded but not progressing, so a backlog would never drain.', v_cnt;
+    RAISE EXCEPTION 'TEST FAILED (3/arm E/JOB-02): after a second tick % of my 26 seeded stranded rows are terminal, expected all 26.', v_cnt;
   END IF;
 
-  RAISE NOTICE 'Part 3 OK: LIMIT bound holds -- 25 of 26 seeded stranded rows reaped on tick 1, the remaining 1 on tick 2 (bounded AND progressing).';
+  RAISE NOTICE 'Part 3 OK: LIMIT bound holds -- my 25 oldest seeds reaped on tick 1 with my youngest left computing, and my youngest reaped on tick 2 (bounded AND progressing).';
 
   DELETE FROM auth.users WHERE id = v_user;
 END
