@@ -200,6 +200,100 @@ def apply_static_leverage(unit_returns: pd.Series, leverage: float) -> LeveredTr
     )
 
 
+def apply_monthly_notional(
+    unit_returns: pd.Series,
+    base_leverage: float,
+    max_leverage: float | None = None,
+) -> LeveredTrack:
+    """The live mechanism: notional is FIXED within a calendar month.
+
+    Founder clarification (2026-07-29): the strategy compounds monthly, not
+    per-trade. Notional is struck at each month open from that month's opening
+    equity and then held flat all month — a -36% day does not shrink the
+    position, and a +36% day does not grow it. Only at the next month open does
+    notional re-strike off the realised P&L.
+
+    So within month m, equity evolves LINEARLY in the running sum of unit
+    returns::
+
+        E_t = E_open,m * (1 + L_m * C_t),   C_t = sum of unit returns month-to-date
+
+    which makes the month's return exactly ``L_m * (arithmetic sum of daily
+    unit returns)`` — no intra-month volatility drag, because there is no
+    intra-month compounding. Across months the E_open chain compounds
+    geometrically.
+
+    The daily series returned is the true time-weighted daily return,
+    ``L*r_t / (1 + L*C_{t-1})``, whose product reproduces the month-end equity
+    exactly. Note its percentage magnitude DECAYS as equity rises within a
+    month (fixed notional over a larger base) — that is the mechanism, not an
+    artefact.
+
+    If ``max_leverage`` is set, the drawdown lever-up rides on the same monthly
+    clock: leverage is re-struck at each month open as
+    ``min(max_leverage, base * HWM / E_open)`` and held for the month.
+
+    Intra-month insolvency is checked at every step: once ``1 + L*C_t <= 0``
+    the account is gone mid-month regardless of how the month would have ended.
+    """
+    idx = unit_returns.index
+    periods = idx.to_period("M")
+
+    equity = 1.0
+    hwm = 1.0
+    lev_path: list[float] = []
+    eq_path: list[float] = []
+    ret_path: list[float] = []
+    notional_path: list[float] = []
+    ruined = False
+
+    for month in periods.unique():
+        mask = periods == month
+        month_returns = unit_returns[mask].to_numpy(dtype=float)
+
+        open_equity = equity
+        if max_leverage is None:
+            lev = base_leverage
+        else:
+            lev = min(max_leverage, base_leverage * hwm / open_equity)
+        notional = lev * open_equity  # struck once, held all month
+
+        running = 0.0
+        prev_equity = open_equity
+        for r in month_returns:
+            running += r
+            new_equity = open_equity * (1.0 + lev * running)
+            lev_path.append(notional / prev_equity if prev_equity > 0 else 0.0)
+            notional_path.append(notional)
+            if new_equity <= 0.0:
+                # Margin call mid-month: fixed notional cannot de-risk into it.
+                ruined = True
+                ret_path.append(-1.0)
+                eq_path.append(0.0)
+                remaining = len(unit_returns) - len(eq_path)
+                lev_path.extend([0.0] * remaining)
+                ret_path.extend([0.0] * remaining)
+                notional_path.extend([0.0] * remaining)
+                eq_path.extend([0.0] * remaining)
+                break
+            ret_path.append(new_equity / prev_equity - 1.0)
+            eq_path.append(new_equity)
+            prev_equity = new_equity
+
+        if ruined:
+            break
+        equity = prev_equity
+        hwm = max(hwm, equity)
+
+    return LeveredTrack(
+        returns=pd.Series(ret_path, index=idx, name="returns"),
+        leverage=pd.Series(lev_path, index=idx, name="leverage"),
+        equity=pd.Series(eq_path, index=idx, name="equity"),
+        notional=pd.Series(notional_path, index=idx, name="notional"),
+        ruined=ruined,
+    )
+
+
 # --------------------------------------------------------------------------
 # Reporting
 # --------------------------------------------------------------------------
@@ -244,6 +338,30 @@ def main() -> int:
         ),
     )
     ap.add_argument("--title", default="FX Daily — Dynamic Leverage", help="tearsheet title")
+    ap.add_argument(
+        "--mechanism",
+        choices=("monthly", "daily"),
+        default="monthly",
+        help=(
+            "how notional re-strikes. 'monthly' (the live mechanism): notional is "
+            "fixed within a calendar month and re-struck at each month open. "
+            "'daily': notional tracks equity every day (continuous compounding)."
+        ),
+    )
+    ap.add_argument(
+        "--sweep",
+        type=float,
+        nargs="*",
+        default=[10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 75.0, 100.0],
+        help="leverage levels to tabulate alongside the headline run",
+    )
+    ap.add_argument("--no-dynamic", action="store_true", help="skip the drawdown lever-up variant")
+    ap.add_argument(
+        "--benchmark-leverage",
+        type=float,
+        default=30.0,
+        help="leverage of the static comparator shown as the tearsheet benchmark",
+    )
     args = ap.parse_args()
 
     args.outdir.mkdir(parents=True, exist_ok=True)
@@ -257,17 +375,88 @@ def main() -> int:
     print(f"Starting NAV ${seed:,.2f} -> ending NAV ${nav.iloc[-1]:,.2f} "
           f"({nav.iloc[-1] / seed - 1:+.2%} as reported)")
 
-    dynamic = apply_dynamic_leverage(unit_returns, args.base_leverage, args.max_leverage)
-    static = apply_static_leverage(unit_returns, args.base_leverage)
-    unlevered = apply_static_leverage(unit_returns, 1.0)
+    # Month-by-month arithmetic sums drive everything under the monthly
+    # mechanism: month return == leverage x sum, so the worst monthly sum sets
+    # the wipeout leverage and the worst intra-month running sum sets the
+    # margin-call leverage (which is the binding one).
+    by_month = unit_returns.groupby(unit_returns.index.to_period("M"))
+    monthly = pd.DataFrame(
+        {
+            "sum_unit_return": by_month.sum(),
+            "worst_intramonth_cum": by_month.apply(lambda s: s.cumsum().min()),
+            "days": by_month.size(),
+        }
+    )
+    monthly.to_csv(args.outdir / "monthly_unit_returns.csv")
+    worst_month = float(monthly["sum_unit_return"].min())
+    worst_intramonth = float(monthly["worst_intramonth_cum"].min())
 
-    rows = [
-        summarise(f"Dynamic {args.base_leverage:g}x->{args.max_leverage:g}x", dynamic, seed),
-        summarise(f"Static {args.base_leverage:g}x", static, seed),
-        summarise("Unlevered (1x)", unlevered, seed),
-    ]
+    shown = monthly.copy()
+    shown["sum_unit_return"] = (shown["sum_unit_return"] * 100).round(4)
+    shown["worst_intramonth_cum"] = (shown["worst_intramonth_cum"] * 100).round(4)
+    print("\nMonthly arithmetic sum of unit returns (the fixed-notional month return per 1x, %):")
+    print(shown.to_string())
+
+    # The binding constraint is the worst INTRA-month running loss, not the
+    # worst month-end sum: fixed notional cannot de-risk into a mid-month hole,
+    # so the account is called there even if the month would have closed green.
+    print(f"\n  worst full month          : {worst_month:+.4%}", end="")
+    print(f"  -> month-end wipeout at {abs(1 / worst_month):,.0f}x" if worst_month < 0
+          else "  (no losing month in sample)")
+    print(f"  worst intra-month drawdown: {worst_intramonth:+.4%}"
+          f"  -> MARGIN CALL at {abs(1 / worst_intramonth):,.0f}x  <-- binding constraint")
+
+    # Identity check: under a fixed monthly notional the month return must be
+    # exactly leverage x the arithmetic sum. Verifies the integrator.
+    _probe = apply_monthly_notional(unit_returns, 10.0, None)
+    _probe_monthly = _probe.equity.groupby(_probe.equity.index.to_period("M")).last()
+    _probe_open = _probe_monthly.shift(1).fillna(1.0)
+    _identity = (_probe_monthly / _probe_open - 1.0) - 10.0 * monthly["sum_unit_return"]
+    assert _identity.abs().max() < 1e-9, f"monthly identity violated: {_identity.abs().max()}"
+
+    if args.mechanism == "monthly":
+        run_static = lambda lev: apply_monthly_notional(unit_returns, lev, None)  # noqa: E731
+        run_dynamic = lambda: apply_monthly_notional(  # noqa: E731
+            unit_returns, args.base_leverage, args.max_leverage
+        )
+    else:
+        run_static = lambda lev: apply_static_leverage(unit_returns, lev)  # noqa: E731
+        run_dynamic = lambda: apply_dynamic_leverage(  # noqa: E731
+            unit_returns, args.base_leverage, args.max_leverage
+        )
+
+    static = run_static(args.base_leverage)
+    unlevered = run_static(1.0)
+
+    rows = [summarise(f"Static {args.base_leverage:g}x", static, seed)]
+    if not args.no_dynamic:
+        dynamic = run_dynamic()
+        rows.insert(
+            0, summarise(f"Dynamic {args.base_leverage:g}x->{args.max_leverage:g}x", dynamic, seed)
+        )
+    else:
+        dynamic = static
+    rows.append(summarise("Unlevered (1x)", unlevered, seed))
     summary = pd.DataFrame(rows).set_index("strategy")
     summary.to_csv(args.outdir / "leverage_summary.csv")
+
+    # Leverage sweep: where the mechanism stops being survivable.
+    sweep_rows = []
+    for lev in sorted(set(args.sweep) | {args.base_leverage}):
+        sweep_rows.append(summarise(f"{lev:g}x", run_static(lev), seed))
+    sweep = pd.DataFrame(sweep_rows).set_index("strategy")
+    sweep.to_csv(args.outdir / "leverage_sweep.csv")
+    print("\nLeverage sweep (" + args.mechanism + " notional):")
+    print(
+        sweep[["total_return", "max_drawdown", "worst_day", "sharpe", "ruined"]]
+        .assign(
+            total_return=lambda d: (d.total_return * 100).map("{:,.1f}%".format),
+            max_drawdown=lambda d: (d.max_drawdown * 100).map("{:.1f}%".format),
+            worst_day=lambda d: (d.worst_day * 100).map("{:.1f}%".format),
+            sharpe=lambda d: d.sharpe.round(2),
+        )
+        .to_string()
+    )
 
     daily = pd.DataFrame(
         {
@@ -278,6 +467,11 @@ def main() -> int:
             "equity_dynamic": dynamic.equity * seed,
             "notional_dynamic": dynamic.notional * seed,
             "return_static": static.returns,
+            # EFFECTIVE leverage = notional / CURRENT equity. Under the monthly
+            # mechanism this drifts away from the nominal figure all month:
+            # UP as equity falls (the position does not shrink into a loss) and
+            # DOWN as equity rises. Nominal leverage is only exact at month open.
+            "leverage_static_effective": static.leverage,
             "equity_static": static.equity * seed,
             "notional_static": static.notional * seed,
         }
@@ -289,13 +483,19 @@ def main() -> int:
     with pd.option_context("display.width", 200, "display.max_columns", 50):
         print("\n" + summary.to_string(float_format=lambda v: f"{v:,.4f}"))
 
-    # Tearsheet: the dynamic rule benchmarked against flat 30x, so every
-    # QuantStats comparison column is exactly the "what did levering up in the
-    # drawdown buy me" question.
-    dyn_r = dynamic.returns.copy()
-    bench_r = static.returns.copy()
-    dyn_r.name = f"Dynamic {args.base_leverage:g}x->{args.max_leverage:g}x"
-    bench_r.name = f"Static {args.base_leverage:g}x"
+    # Tearsheet: headline track vs the comparison leverage, so every QuantStats
+    # comparison column answers "what did the extra leverage actually buy me".
+    if args.no_dynamic:
+        headline, headline_name = static, f"Static {args.base_leverage:g}x"
+    else:
+        headline = dynamic
+        headline_name = f"Dynamic {args.base_leverage:g}x->{args.max_leverage:g}x"
+    bench_track = run_static(args.benchmark_leverage)
+
+    dyn_r = headline.returns.copy()
+    bench_r = bench_track.returns.copy()
+    dyn_r.name = headline_name
+    bench_r.name = f"Static {args.benchmark_leverage:g}x"
 
     out_html = args.outdir / "quantstats_dynamic_leverage.html"
     qs.reports.html(
