@@ -7,6 +7,16 @@
 -- sync_strategy_analytics_status branch (a), the branch (b)/(c) exit clears, and
 -- the recurring pg_cron job reap_strategy_analytics_stuck_computing.
 --
+-- Part 2 arm D and the trigger-sentinel part at the END of this file
+-- additionally guard the Phase 142.1 delta migration
+-- 20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql:
+-- the table-level stamp trigger (D-17/D-01) and the non-destructive clock-start
+-- companion cron arm (D-11). BOTH migrations must be applied before this file is
+-- run, or those parts redden -- deliberately, per the ANTI-GREEN-SKIP CONTRACT
+-- below. That part is named descriptively here rather than by its number,
+-- because its acceptance gate is an `awk` range anchored on that number and a
+-- header mention would silently widen the range over the whole file.
+--
 -- Why the reaper exists (Rule 9 -- the WHY, not just the WHAT)
 -- -----------------------------------------------------------
 -- A strategy_analytics row can be stranded at computation_status='computing'
@@ -127,7 +137,8 @@
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql
 --
--- Run order: AFTER migration 20260802120000 is applied to the project.
+-- Run order: AFTER migrations 20260802120000 AND 20260803120000 are applied to
+-- the project.
 
 -- ==========================================================================
 -- Part 1 -- STRUCTURAL, UNGATED, ZERO SIDE EFFECTS. This is the part that must
@@ -733,6 +744,180 @@ BEGIN
   END IF;
 
   RAISE NOTICE 'Part 5 OK: branch (b) terminal failure clears computing_started_at.';
+
+  DELETE FROM auth.users WHERE id = v_user;
+END
+$$;
+ROLLBACK;
+
+-- ==========================================================================
+-- Part 6 -- G1, the STAMP TRIGGER sentinel. Oracle for migration
+-- 20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql:
+-- function strategy_analytics_stamp_computing_started, trigger
+-- strategy_analytics_stamp_computing_started_trigger. Rolls back
+-- unconditionally.
+--
+-- WHY THIS PART EXISTS (Rule 9 -- the WHY, not just the WHAT)
+-- ----------------------------------------------------------
+-- That trigger COERCES SILENTLY and never raises. Raising would kill the live
+-- analytics_runner _mark_computing call, burn its three retries and strand the
+-- strategy, so silence is the deliberate, bounded cost of moving the stamp
+-- invariant off every individual writer and onto the TABLE (D-17). It is
+-- accepted ONLY because this part makes the coercion observable: without Part 6
+-- the trigger predicate would be UNFALSIFIABLE -- a gate that cannot fail, which
+-- is the exact class Phase 142.1 exists to kill. Each arm reddens under the
+-- deletion of exactly ONE trigger arm:
+--   6a  a Python-writer-shaped write cannot ADVANCE a seeded sentinel  (arm (a))
+--   6b  a write that leaves a computing row unclocked gets it clocked  (arm (b))
+--   6c  a terminal transition CLEARS the clock the writer supplied     (arm (d))
+--
+-- UNGATED, like Part 4 and for the same reason. This part needs only the trigger
+-- -- no pg_cron, no bridge RPC -- so an unapplied 20260803120000 must be a RED
+-- here, never a skip. There is deliberately NO early-exit arm anywhere in this
+-- block: Parts 2 and 3, which depend on the deployed cron body, are the only
+-- legitimate skips in this file (see the ANTI-GREEN-SKIP CONTRACT in the header).
+--
+-- STATE IS ESTABLISHED AT INSERT, NEVER BY UPDATE-ING A COMPUTING ROW -- the
+-- same D-18 part 2 discipline Part 4 was retrofitted to (see its header). The
+-- trigger is bound BEFORE UPDATE only, so both seeds below land verbatim; an
+-- UPDATE could install neither of them. In particular 6b's (computing, no clock)
+-- state is seeded DIRECTLY. The transition-out-then-back-in dance an earlier
+-- draft carried is SUPERSEDED and must not be restored: it existed only to reach
+-- a state that the superseded insert-firing trigger sketch made unreachable.
+--
+-- FROZEN CLOCK (see the FROZEN-CLOCK TRAP note in the file header). now() is
+-- CONSTANT for the whole transaction, so "write now() and compare the result to
+-- now()" CANNOT FAIL. The three-hour-old sentinel is the entire falsifiability
+-- of 6a. The offset literal is written TWICE on purpose -- once in row A's seed
+-- and once in v_sentinel -- so the S-2 seed-integrity control compares two
+-- INDEPENDENTLY WRITTEN expressions rather than a value against itself; they are
+-- exactly equal only because now() is frozen, and a divergence reddens loudly.
+--
+-- ⛔ This part drives the trigger with DIRECT writes. It must never route through
+-- mark_compute_job_done / the status bridge -- Part 4 already owns that oracle,
+-- and a bridge-driven Part 6 would prove the two mechanisms together rather than
+-- the trigger alone, which is precisely the double-mutation weakness the Part 4
+-- header warns about.
+-- ==========================================================================
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+DO $$
+DECLARE
+  v_user     uuid := gen_random_uuid();
+  v_strat_a  uuid;   -- seeded (computing, sentinel) -> 6a never-advance, 6c exit-clear
+  v_strat_b  uuid;   -- seeded (computing, no clock) -> 6b clock-start closure
+  v_status   TEXT;
+  v_stamp    TIMESTAMPTZ;
+  v_sentinel TIMESTAMPTZ := now() - interval '3 hours';
+BEGIN
+  -- FK chain: strategy_analytics.strategy_id -> strategies.id -> profiles.id ->
+  -- auth.users.id, as in Parts 2/3/4/5.
+  INSERT INTO auth.users (id, email)
+    VALUES (v_user, 'sa-stamp-trigger-' || v_user || '@invalid.local');
+  INSERT INTO public.profiles (id, display_name)
+    VALUES (v_user, 'sa-stamp-trigger') ON CONFLICT (id) DO NOTHING;
+
+  -- TWO strategies: strategy_analytics is one row per strategy, and 6a's row must
+  -- KEEP its sentinel for the whole part while 6b's must start with no clock at
+  -- all. One row cannot hold both states.
+  INSERT INTO public.strategies (user_id, name)
+    VALUES (v_user, 'sa-stamp-trigger-a') RETURNING id INTO v_strat_a;
+  INSERT INTO public.strategies (user_id, name)
+    VALUES (v_user, 'sa-stamp-trigger-b') RETURNING id INTO v_strat_b;
+
+  -- Row A: already computing, clocked three hours back. Seeded at INSERT, where
+  -- the trigger by design does not fire, so the sentinel lands verbatim.
+  INSERT INTO public.strategy_analytics
+    (strategy_id, computation_status, computation_warned, computing_started_at)
+  VALUES (v_strat_a, 'computing', FALSE, now() - interval '3 hours');
+
+  -- Row B: computing with NO clock -- the state the UPDATE-path half of D-11 is
+  -- about. Seeded DIRECTLY at INSERT (D-18 part 2); no dance, no setup UPDATE.
+  INSERT INTO public.strategy_analytics
+    (strategy_id, computation_status, computation_warned, computing_started_at)
+  VALUES (v_strat_b, 'computing', FALSE, NULL);
+
+  -- ----- S-2 seed-integrity controls, BEFORE any driver ---------------------
+  -- A broken seed must not green this part vacuously. These run first precisely
+  -- because every assertion below is a comparison against the seeded state.
+  SELECT computation_status, computing_started_at INTO v_status, v_stamp
+    FROM public.strategy_analytics WHERE strategy_id = v_strat_a;
+  IF v_status IS DISTINCT FROM 'computing' OR v_stamp IS DISTINCT FROM v_sentinel THEN
+    RAISE EXCEPTION 'TEST FAILED (6/seed A/D-18): row A did not land at computing with the three-hour-old sentinel (got status %, stamp %, expected sentinel %). The trigger fires on UPDATE only, so this INSERT must land verbatim; if it did not, 6a and 6c below would be vacuous. This is a broken fixture, not a finding about the trigger.', v_status, v_stamp, v_sentinel;
+  END IF;
+
+  SELECT computation_status, computing_started_at INTO v_status, v_stamp
+    FROM public.strategy_analytics WHERE strategy_id = v_strat_b;
+  IF v_status IS DISTINCT FROM 'computing' OR v_stamp IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (6/seed B/D-18): row B did not land at computing with no clock (got status %, stamp %). That state must be reachable at INSERT -- it is the whole reason the trigger is bound to UPDATE only -- or 6b below proves nothing.', v_status, v_stamp;
+  END IF;
+
+  -- ----- 6a: NEVER ADVANCE (trigger arm (a); D-01; ledger row SC-17/01) -----
+  -- Shaped like the Python writer's upsert conflict path: it names the status the
+  -- row is already at AND supplies its own clock. Arm (a) discards the supplied
+  -- value and restores the original start time. Falsifiability lives entirely in
+  -- the three-hour offset -- against a row seeded at the frozen now(), a driver
+  -- writing that same frozen now() could never be caught.
+  UPDATE public.strategy_analytics
+     SET computation_status = 'computing',
+         computing_started_at = now()
+   WHERE strategy_id = v_strat_a;
+
+  SELECT computation_status, computing_started_at INTO v_status, v_stamp
+    FROM public.strategy_analytics WHERE strategy_id = v_strat_a;
+  IF v_status IS DISTINCT FROM 'computing' THEN
+    RAISE EXCEPTION 'TEST FAILED (6a/G1): row A left computing under a driver that named computing (got %); the never-advance assertion below would be vacuous.', v_status;
+  END IF;
+  IF v_stamp IS DISTINCT FROM v_sentinel THEN
+    RAISE EXCEPTION 'TEST FAILED (6a/G1/D-01/SC-17-01): a direct write ADVANCED computing_started_at on a row that was ALREADY computing and ALREADY clocked (expected the sentinel %, got %). The clock must measure the WHOLE job chain, not its last hop: otherwise every hop pushes it forward, the reaper can never fire, and the worst-case stranded spinner runs about 1.75x the advertised bound. No per-writer rule can hold this -- it binds a writer only if it lives on the table.', v_sentinel, v_stamp;
+  END IF;
+
+  -- ----- 6b: CLOCK-START CLOSURE (trigger arm (b); the UPDATE-path half of D-11)
+  -- The driver supplies no clock key and the row carries no clock, so it enters
+  -- the trigger unclocked. Arm (b) is what stops a computing row from sitting
+  -- unclocked after a write: such a row is invisible to the reap arm forever, and
+  -- no STATIC gate can ever see it, because a source scan cannot see rows.
+  -- ⚠️ This closes the UPDATE path ONLY. Rows that ALREADY sit unclocked, or that
+  -- arrive on the insert path the trigger does not see, are the companion cron
+  -- arm's job (Part 2 arm D). The trigger subsumes NONE of D-11 (correction C-1)
+  -- -- do not let this arm's green be read as covering that population.
+  UPDATE public.strategy_analytics
+     SET computation_status = 'computing'
+   WHERE strategy_id = v_strat_b;
+
+  SELECT computation_status, computing_started_at INTO v_status, v_stamp
+    FROM public.strategy_analytics WHERE strategy_id = v_strat_b;
+  IF v_status IS DISTINCT FROM 'computing' THEN
+    RAISE EXCEPTION 'TEST FAILED (6b/G1): row B left computing under a driver that named computing (got %); the clock-start assertion below would be vacuous.', v_status;
+  END IF;
+  IF v_stamp IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (6b/G1/D-11): a write left a computing row with NO computing_started_at and the trigger did not start its clock. That row is invisible to the reap arm forever AND to every static gate, so its spinner is permanent and silent -- the exact population this phase exists to make detectable.';
+  END IF;
+  IF v_stamp < now() THEN
+    RAISE EXCEPTION 'TEST FAILED (6b/G1/D-11): the trigger started the clock in the PAST (got %, transaction now() is %). A back-dated start time is WORSE than none: the staleness threshold can already be exceeded the instant the clock starts, so the next reaper tick terminalizes a healthy in-flight chain.', v_stamp, now();
+  END IF;
+
+  -- ----- 6c: EXIT CLEAR (trigger arm (d)) -----------------------------------
+  -- The driver deliberately does the wrong thing: it supplies a non-NULL clock on
+  -- a TERMINAL transition. Arm (d) clears unconditionally, so no writer can leave
+  -- a stale start time on a terminal row -- which is exactly what the reaper
+  -- could later re-fire on. Row A is reused: it is still carrying its sentinel,
+  -- which makes the clear visible against a real prior value.
+  UPDATE public.strategy_analytics
+     SET computation_status = 'failed',
+         computing_started_at = now() - interval '1 hour'
+   WHERE strategy_id = v_strat_a;
+
+  SELECT computation_status, computing_started_at INTO v_status, v_stamp
+    FROM public.strategy_analytics WHERE strategy_id = v_strat_a;
+  IF v_status IS DISTINCT FROM 'failed' THEN
+    RAISE EXCEPTION 'TEST FAILED (6c/G1): the terminal driver did not land on row A (got %); the exit-clear assertion below would be vacuous.', v_status;
+  END IF;
+  IF v_stamp IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (6c/G1/JOB-01): a row LEAVING computing kept the computing_started_at its writer supplied (got %). Every exit must clear the reaper key at the table, or the reaper re-fires on a row it already terminalized -- and a writer that supplies a stale clock on the way out is the one case no per-writer rule can cover.', v_stamp;
+  END IF;
+
+  RAISE NOTICE 'Part 6 OK: the stamp trigger never advances the clock on an already-clocked computing row (6a), starts the clock when a write leaves a computing row unclocked (6b), and clears it on exit even when the writer supplies one (6c).';
 
   DELETE FROM auth.users WHERE id = v_user;
 END
