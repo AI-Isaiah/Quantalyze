@@ -129,6 +129,7 @@ from tests._scan_helpers import (
 _TABLE: Final[str] = "strategy_analytics"
 _STATUS_KEY: Final[str] = "computation_status"
 _STAMP_KEY: Final[str] = "computing_started_at"
+_WARNED_KEY: Final[str] = "computation_warned"
 
 # Only these three PostgREST verbs mutate. Read verbs (.select/.eq/.in_/…) are NOT
 # write sites and are ignored — that is the portfolio.py false-positive exclusion.
@@ -797,6 +798,7 @@ _TS_BENIGN_FILES: Final[dict[str, int]] = {
 class _TsHit(NamedTuple):
     path: Path
     lineno: int
+    value: str  # the value token exactly as written: '"failed"', 'null', …
 
 
 def _ts_scan_files() -> list[Path]:
@@ -890,12 +892,30 @@ def _scan_typescript() -> list[_TsHit]:
             match = _TS_KEY_RE.search(line)
             if match is None:
                 continue
-            if _TS_VALUE_RE.match(line, match.end()) is None:
+            value = _TS_VALUE_RE.match(line, match.end())
+            if value is None:
                 # A type member, not a payload key. See mechanism 1 in the module
                 # docstring.
                 continue
-            hits.append(_TsHit(path, index + 1))
+            hits.append(_TsHit(path, index + 1, value.group().strip()))
     return hits
+
+
+def _ts_terminal_status(hit: _TsHit) -> str | None:
+    """The TERMINAL ``computation_status`` literal ``hit`` writes, or ``None``.
+
+    Ports the Python half's terminal-status concept across the language boundary.
+    It reuses the SAME :data:`_TERMINAL_STATUSES` frozenset rather than declaring a
+    parallel TS-side copy: two hand-maintained copies of one closed set is the exact
+    divergence D-10 was raised about, and the set is a property of the DB column, not
+    of either language.
+    """
+    token = hit.value
+    if len(token) >= 2 and token[0] in "\"'`" and token[-1] == token[0]:
+        inner = token[1:-1]
+        if inner in _TERMINAL_STATUSES:
+            return inner
+    return None
 
 
 def _ts_payload_hits(hits: list[_TsHit]) -> list[_TsHit]:
@@ -942,6 +962,56 @@ def test_typescript_route_payloads_clear_the_stamp() -> None:
         f"{_STATUS_KEY} without clearing {_STAMP_KEY} in the same object literal. "
         "They are exit writers from 'computing'; a stale stamp on a terminal row can "
         "re-trigger the pg_cron reaper:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_typescript_terminal_writers_carry_computation_warned() -> None:
+    """D-03. Every TS ``strategy_analytics`` literal writing a TERMINAL status must
+    carry ``computation_warned`` in the SAME literal.
+
+    This is a MONEY-SURFACE rule, not hygiene. ``computation_warned`` is a marker the
+    runner owns; a terminal write that leaves the previous run's ``true`` in place
+    lets the bridge's branch (a) resolve the row back to ``complete_with_warnings``,
+    and the factsheet then renders GREEN off the prior run's stale ``metrics_json``.
+    A failed import that displays as a successful one is the worst failure this
+    surface has.
+
+    The Python half has enforced the same class since 142 (``_TERMINAL_STATUSES``
+    applied in ``test_python_status_writers_stamp_and_clear``); this ports the concept
+    across the language boundary, which is what left ``csv-finalize/route.ts`` as the
+    lone defective writer of 17 across three languages with NO observable.
+
+    Mutation to confirm this rule is live: delete ``computation_warned`` from the
+    csv-finalize terminal-failed upsert and this test names that file.
+    """
+    # Anti-vacuity (PATTERNS S-2). All four TS payload sites are terminal-'failed'
+    # writers today. A rule that matched zero literals would pass vacuously, so pin
+    # the population the rule actually ran against.
+    EXPECTED_TERMINAL_SITES = 4
+
+    hits = _ts_payload_hits(_scan_typescript())
+    terminal = [h for h in hits if _ts_terminal_status(h) is not None]
+
+    assert len(terminal) == EXPECTED_TERMINAL_SITES, (
+        f"expected exactly {EXPECTED_TERMINAL_SITES} TS payload literals writing a "
+        f"terminal {_STATUS_KEY}, found {len(terminal)}:\n  "
+        + "\n  ".join(f"{_rel(h.path)}:{h.lineno} → {h.value}" for h in terminal)
+        + "\nIf this drops, the parity rule below is passing over an empty set."
+    )
+
+    offenders: list[str] = []
+    for hit in terminal:
+        where, literal = _ts_literal_at(hit)
+        if _WARNED_KEY not in literal:
+            offenders.append(f"{where}: terminal {hit.value}")
+
+    assert not offenders, (
+        f"D-03: these TS {_TABLE} payloads write a terminal {_STATUS_KEY} without "
+        f"{_WARNED_KEY} in the same object literal. The stale marker from the prior "
+        "run survives, branch (a) of the status bridge resolves the row back to "
+        "'complete_with_warnings', and the factsheet renders a GREEN surface from "
+        "the previous run's metrics_json — a failed import shown as a successful "
+        "one:\n  " + "\n  ".join(offenders)
     )
 
 
