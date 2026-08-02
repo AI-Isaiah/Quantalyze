@@ -54,7 +54,7 @@ try:
     from postgrest.exceptions import APIError
 except ImportError:  # pragma: no cover — only when postgrest isn't on path
     class APIError(Exception):  # type: ignore[no-redef]
-        def __init__(self, error: dict) -> None:
+        def __init__(self, error: dict[str, Any]) -> None:
             super().__init__(error.get("message", ""))
             self.code = error.get("code")
             self.message = error.get("message")
