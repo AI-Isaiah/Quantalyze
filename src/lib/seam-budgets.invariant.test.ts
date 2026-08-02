@@ -14,6 +14,13 @@ import {
   BREAKER_STORE_TIMEOUT_MS,
   BREAKER_STORE_RETRIES,
   BREAKER_STORE_BACKOFF_MS,
+  // Phase 141 / SEAM-06 — the retry backoff constants. These ARE production
+  // values (the sum a retried leg actually waits between attempts), so SC-4b
+  // charges them rather than hand-typing the interval; the route CEILINGS stay
+  // hand-typed / disk-read. Charge the MAX jitter (PATTERNS "No Analog": jitter
+  // must remain stateable — bound it and charge the bound).
+  SEAM_RETRY_BACKOFF_MS,
+  SEAM_RETRY_JITTER_MAX_MS,
 } from "./resilient-fetch";
 
 /**
@@ -52,9 +59,13 @@ import {
  *   worstCaseMs(state) = MAX over the row's BRANCHES of (
  *                          Σ over that branch's budgets of
  *                            ( timeoutMs × calls × (1 + row.retries) )
- *                        + storeCommands(state) × STORE_COMMAND_WORST_CASE_MS
- *                            × (that branch's total seam calls)
+ *                        + Σ over that branch's budgets of
+ *                            ( storeCommands(state) × (1 + row.retries)
+ *                              × STORE_COMMAND_WORST_CASE_MS × calls )
  *                        )
+ *
+ * ⚠️ BOTH terms are summed PER LEG and both carry `(1 + row.retries)`. The store
+ * term was flat until 141.1 / D-15 — see `STORE_COMMANDS_PER_SEAM_CALL`.
  *
  * asserted separately in the CLOSED, OPEN and FAILING states, each against the
  * route's own on-disk `maxDuration`.
@@ -71,16 +82,31 @@ import {
  * rows are. Unlabelled legs on a LABELLED row are shared and charged to every
  * branch.
  *
- * Where that leaves the numbers today, with every row at `retries: 0` and one
- * store command costing 4 250 ms:
+ * Where that leaves the numbers today, with one store command costing 4 250 ms.
  *
- *   | state   | validate-and-encrypt (3 calls) | finalize-wizard (composite, 10) |
- *   |---------|--------------------------------|---------------------------------|
- *   | closed  | 120 000 + 12 750 = 132 750 ms  | 150 000 + 42 500 = 192 500 ms   |
- *   | open    |          0 + 12 750 = 12 750   |          0 + 42 500 =  42 500   |
- *   | failing | 120 000 + 38 250 = 158 250 ms  | 150 000 + 127 500 = 277 500 ms  |
+ * ⚠️ NOT every row is at `retries: 0` — that premise was true when this table
+ * was written and stopped being true in Phase 141, which flipped FIVE rows to 1
+ * (bridge, simulator, portfolio-optimizer, optimize-weights,
+ * process-key-enqueue). The first two columns below are all-`retries: 0` routes
+ * and are unchanged; `keys/sync` is added as the RETRIED case, so a reader sees
+ * a number that actually exercises the (1 + retries) factors:
  *
- * against a 300 000 ms ceiling. The tightest case in the whole table is now
+ *   | state   | validate-and-encrypt (3 calls) | finalize-wizard (composite, 10) | keys/sync (1 call, retries 1) |
+ *   |---------|--------------------------------|---------------------------------|-------------------------------|
+ *   | closed  | 120 000 + 12 750 = 132 750 ms  | 150 000 + 42 500 = 192 500 ms   |  30 500 +  8 500 =  39 000 ms |
+ *   | open    |          0 + 12 750 = 12 750   |          0 + 42 500 =  42 500   |       0 +  4 250 =   4 250    |
+ *   | failing | 120 000 + 38 250 = 158 250 ms  | 150 000 + 127 500 = 277 500 ms  |  30 500 + 25 500 =  56 000 ms |
+ *
+ * against a 300 000 ms ceiling.
+ *
+ * The retried column is where 141.1 / D-15's correction shows: `keys/sync`'s
+ * FAILING store term is 3 commands × (1+1) rounds × 4 250 × 1 call = 25 500,
+ * where this file used to charge a flat 12 750. Both ends of the correction are
+ * pinned to hand-typed literals beside the anti-vacuity fence below — 56 000
+ * for the retried worst case, and 277 500 for the composite, which the
+ * correction must NOT move because every leg on that branch is `retries: 0`.
+ *
+ * The tightest case in the whole table is still
  * `finalize-wizard` FAILING at 277 500 ms — **22 500 ms of headroom**, where
  * before this plan the same route declared 55 500 ms and was modelling a branch
  * it does not take when it fans out. Its single-key branch is unchanged
@@ -90,9 +116,13 @@ import {
  * So this is no longer a comfortable guard for one route, and that is the point:
  * `MAX_COMPOSITE_MEMBERS` is 10 because 11 members would put the failing state
  * at 305 250 ms — a real breach, discovered here rather than in a killed lambda.
- * Its four real jobs are (a) to hold automatically when Phase 141 raises a row's
- * retries — at retries=1 finalize-wizard's composite branch is already at
- * 427 500 ms failing and BREACHES, which is a fact Phase 141 must plan around;
+ * Its four real jobs are (a) to hold automatically when a row's retries is
+ * raised — flipping `keys-permissions` to retries=1 would put finalize-wizard's
+ * composite branch at 560 000 ms failing (305 000 request + 255 000 store) and
+ * BREACH by a factor approaching two. That figure grew under 141.1 / D-15: the
+ * old flat store term put the same hypothetical at 432 500 ms, so the
+ * correction did not merely re-price today's table, it doubled the cost of the
+ * row flip this clause exists to deter;
  * (b) to fail if a future budget is raised without the ceiling moving with it;
  * (c) to fail if the store's own bounding is loosened, which previously changed
  * a route's real worst case while changing nothing this file could see; and
@@ -273,8 +303,9 @@ const STORE_COMMAND_WORST_CASE_MS =
   BREAKER_STORE_RETRIES * BREAKER_STORE_BACKOFF_MS;
 
 /**
- * Store commands ONE seam call issues, per breaker state. Hand-counted from
- * `resilient-fetch.ts`, and each number is a claim about a specific code path:
+ * Store commands ONE seam call issues PER ATTEMPT, per breaker state.
+ * Hand-counted from `resilient-fetch.ts`, and each number is a claim about a
+ * specific code path:
  *
  *   closed  — the pre-fetch `mget` in `isBreakerOpen`, and nothing else. ONE
  *             since plan 140.2-07 collapsed the `ttl` follow-up into the value.
@@ -282,6 +313,24 @@ const STORE_COMMAND_WORST_CASE_MS =
  *             and never reaches `fetch`, so no REQUEST budget is spent at all.
  *   failing — that `mget`, plus the trip path's `get` (the A-25 guard reading
  *             when the last lock was armed) and its `set`.
+ *
+ * ⚠️ PER ATTEMPT, NOT PER CALL — 141.1 / D-15, AND THIS IS THE RETURN VISIT THE
+ * WARNING BELOW ASKED FOR. The note further down says "a future edit that adds a
+ * store round trip to the failing path has to come back here". PHASE 141 WAS
+ * THAT EDIT: it gave five budget rows `retries: 1`, and a retried call issues the
+ * whole store round a SECOND time — the pre-attempt-2 `isBreakerOpen` mget, plus
+ * attempt 2's own trip `get`/`set` when it also fails. So a retried FAILING leg
+ * really does cost six commands. 141 did not come back here, and SC-4b
+ * under-charged every retried leg by 12 750 ms in the unsafe direction for a
+ * whole phase.
+ *
+ * ⚠️ THE FIX IS THE `(1 + retries)` FACTOR IN THE PER-LEG STORE TERM, NOT A 6
+ * HERE. Raising `failing` to 6 would double-charge every leg that does NOT
+ * retry: finalize-wizard's composite branch (10 legs, all `retries: 0`) would
+ * compute 405 000 ms against a 300 000 ms ceiling and RED on a route that never
+ * performs a second attempt. Keep these three PER-ATTEMPT; the retry term
+ * belongs on the leg, because `retries` is a property of a leg's budget row.
+ * A hand-typed 277 500 ms pin fences exactly that mistake.
  *
  * ⚠️ THREE IS A CEILING THIS ARITHMETIC ENFORCES, NOT AN OBSERVATION. HI-01
  * closed the tombstone-branch race, and the FIRST shape of that fix — claim a
@@ -534,6 +583,96 @@ function branchesOf<T extends { calls: number; branch?: string }>(
   }));
 }
 
+/**
+ * SC-4b's arithmetic for one route, per mutually exclusive branch.
+ *
+ * Extracted from the `it.each` below so the hand-typed worst-case oracles can
+ * exercise THE SAME code path the ceiling assertion does. The oracles compare
+ * its output against literals typed by hand; nothing here derives an expected
+ * value from anything, which is the distinction that keeps them honest
+ * (a money-math oracle that recomputes the implementation's own formula pins
+ * nothing — this repo has paid for that three times).
+ */
+function branchWorstCases(
+  entry: (typeof SEAM_ROUTE_BUDGETS)[string],
+  state: string,
+) {
+  return branchesOf(entry.budgets).map((branch) => {
+    const requestMs = STATE_SPENDS_REQUEST_BUDGET[state]
+      ? branch.legs.reduce(
+          (acc, b) =>
+            acc +
+            // The attempts: each retry re-spends the whole per-attempt
+            // deadline (Design A — timeoutMs x (1 + retries)).
+            SEAM_BUDGETS[b.key].timeoutMs *
+              b.calls *
+              (1 + SEAM_BUDGETS[b.key].retries) +
+            // Phase 141 / SEAM-06 — the backoff BETWEEN attempts, charged at
+            // its MAX (fixed backoff + max jitter). Zero when retries=0, so
+            // every non-flipped row's term vanishes exactly as before.
+            SEAM_BUDGETS[b.key].retries *
+              b.calls *
+              (SEAM_RETRY_BACKOFF_MS + SEAM_RETRY_JITTER_MAX_MS),
+          0,
+        )
+      : 0;
+    // The breaker is consulted once per SEAM CALL, so the store cost
+    // scales with the number of calls THIS BRANCH makes and not with the
+    // number of distinct budget rows the route declares.
+    const seamCalls = branch.legs.reduce((acc, b) => acc + b.calls, 0);
+    // Phase 141.1 / D-15 — CHARGED PER LEG, inside the same reduce as the
+    // request term, because `retries` is a property of a LEG's budget row and a
+    // multi-leg branch has no single value a route-level multiplier could use.
+    // A RETRIED leg issues the store round a SECOND time: the pre-attempt-2
+    // `isBreakerOpen` mget, plus attempt 2's own trip get/set when it also
+    // fails. Zero-extra when retries=0, so every non-flipped leg's term is
+    // exactly what it was before — which is why finalize-wizard's composite
+    // branch does not move.
+    //
+    // The STATE_SPENDS_REQUEST_BUDGET conjunct is load-bearing: in the `open`
+    // state the call throws CircuitOpenError before `fetch`, so there is no
+    // second attempt and no second store round to charge.
+    const storeMs = branch.legs.reduce(
+      (acc, b) =>
+        acc +
+        STORE_COMMANDS_PER_SEAM_CALL[state] *
+          (1 +
+            (STATE_SPENDS_REQUEST_BUDGET[state]
+              ? SEAM_BUDGETS[b.key].retries
+              : 0)) *
+          STORE_COMMAND_WORST_CASE_MS *
+          b.calls,
+      0,
+    );
+    const spent = branch.legs
+      .map(
+        (b) =>
+          `${b.key}x${b.calls}@${SEAM_BUDGETS[b.key].timeoutMs}ms` +
+          `x(1+${SEAM_BUDGETS[b.key].retries})` +
+          `+${SEAM_BUDGETS[b.key].retries}x${b.calls}x${SEAM_RETRY_BACKOFF_MS + SEAM_RETRY_JITTER_MAX_MS}ms backoff`,
+      )
+      .join(" + ");
+    return {
+      label: branch.label,
+      requestMs,
+      seamCalls,
+      storeMs,
+      worstCaseMs: requestMs + storeMs,
+      spent,
+    };
+  });
+}
+
+/** The worst branch of a route in a given state — what SC-4b actually charges. */
+function worstBranch(
+  entry: (typeof SEAM_ROUTE_BUDGETS)[string],
+  state: string,
+) {
+  return branchWorstCases(entry, state).reduce((a, b) =>
+    b.worstCaseMs > a.worstCaseMs ? b : a,
+  );
+}
+
 /** The declared ceiling as the DEPLOYMENT ADAPTER would read it, from disk. */
 function readMaxDurationFromDisk(routePath: string): number {
   const abs = join(REPO, routePath);
@@ -621,45 +760,7 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
         // finalize-wizard's composite and single-key branches are mutually
         // exclusive, and charging one request for both describes a path no
         // request takes (plan 140.2-10 / A-29).
-        const perBranch = branchesOf(entry.budgets).map((branch) => {
-          const requestMs = STATE_SPENDS_REQUEST_BUDGET[state]
-            ? branch.legs.reduce(
-                (acc, b) =>
-                  acc +
-                  SEAM_BUDGETS[b.key].timeoutMs *
-                    b.calls *
-                    (1 + SEAM_BUDGETS[b.key].retries),
-                0,
-              )
-            : 0;
-          // The breaker is consulted once per SEAM CALL, so the store cost
-          // scales with the number of calls THIS BRANCH makes and not with the
-          // number of distinct budget rows the route declares.
-          const seamCalls = branch.legs.reduce((acc, b) => acc + b.calls, 0);
-          const storeMs =
-            STORE_COMMANDS_PER_SEAM_CALL[state] *
-            STORE_COMMAND_WORST_CASE_MS *
-            seamCalls;
-          const spent = branch.legs
-            .map(
-              (b) =>
-                `${b.key}x${b.calls}@${SEAM_BUDGETS[b.key].timeoutMs}ms` +
-                `x(1+${SEAM_BUDGETS[b.key].retries})`,
-            )
-            .join(" + ");
-          return {
-            label: branch.label,
-            requestMs,
-            seamCalls,
-            storeMs,
-            worstCaseMs: requestMs + storeMs,
-            spent,
-          };
-        });
-
-        const worst = perBranch.reduce((a, b) =>
-          b.worstCaseMs > a.worstCaseMs ? b : a,
-        );
+        const worst = worstBranch(entry, state);
         const worstCaseMs = worst.worstCaseMs;
 
         expect(
@@ -668,8 +769,8 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
             `its worst branch [${worst.label}] ` +
             `(request: ${worst.requestMs}ms = ${worst.spent}; store: ` +
             `${worst.storeMs}ms = ${STORE_COMMANDS_PER_SEAM_CALL[state]} ` +
-            `command(s) x ${STORE_COMMAND_WORST_CASE_MS}ms x ` +
-            `${worst.seamCalls} seam call(s)) ` +
+            `command(s)/attempt x ${STORE_COMMAND_WORST_CASE_MS}ms x ` +
+            `${worst.seamCalls} seam call(s), charged per leg at (1+retries)) ` +
             `against a ${ceilingMs}ms function ceiling. The lambda would be killed ` +
             `mid-request with no typed envelope. Lower a budget in SEAM_BUDGETS, ` +
             `LOWER A FAN-OUT CAP, TIGHTEN THE BREAKER STORE CONSTANTS, or raise ` +
@@ -698,6 +799,76 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
       expect(STORE_COMMANDS_PER_SEAM_CALL.failing).toBeGreaterThan(
         STORE_COMMANDS_PER_SEAM_CALL.closed,
       );
+    });
+
+    it("D-15: the RETRIED worst case is 56 000ms — keys/sync, failing, hand-typed", () => {
+      // ⭐ THE ORACLE IS A LITERAL, NOT THE FORMULA. 56 000 is hand-computed from
+      // the tables and typed here: 15 000ms x 1 call x (1+1 retry) = 30 000, plus
+      // one 500ms max backoff = 30 500 request, plus 3 commands x (1+1) rounds x
+      // 4 250ms x 1 call = 25 500 store. Deriving it from the arithmetic under
+      // test would pin nothing at all — this repo has shipped three money-math
+      // bugs through six review passes on self-referential oracles.
+      //
+      // WHAT IT CATCHES. Before 141.1 the store term was NOT multiplied by
+      // (1 + retries) though the request term was, so a retried leg's SECOND
+      // breaker-store round — the pre-attempt-2 `isBreakerOpen` mget, plus
+      // attempt 2's own trip get/set — was never charged. That is a 12 750ms
+      // under-charge per retried leg in the UNSAFE direction, and this route is
+      // where it is largest. Delete the (1 + retries) factor and this computes
+      // 43 250.
+      const worst = worstBranch(
+        SEAM_ROUTE_BUDGETS["src/app/api/keys/sync/route.ts"],
+        "failing",
+      );
+      expect(
+        worst.worstCaseMs,
+        `keys/sync's failing-state worst case is now ${worst.worstCaseMs}ms; ` +
+          `the hand-computed figure is 56 000ms (30 500 request + 25 500 store). ` +
+          `A LOWER number means the retried leg's second store round stopped ` +
+          `being charged and SC-4b is certifying headroom the route does not ` +
+          `have. A HIGHER one means a budget, a retry count or a store constant ` +
+          `moved. Recompute by hand from SEAM_BUDGETS and the store constants, ` +
+          `and change this literal only because the inputs changed — never to ` +
+          `make a diff pass.`,
+      ).toBe(56_000);
+    });
+
+    it("D-15: finalize-wizard's composite is UNCHANGED at 277 500ms — the anti-shortcut pin", () => {
+      // ⚠️ THIS IS THE FENCE AROUND THE TWO WRONG FIXES, and it is the reason a
+      // second oracle exists at all. Every leg on this branch is retries: 0, so
+      // the correction must leave it exactly where it was:
+      //
+      //   15 000ms x 10 calls x (1+0) = 150 000 request
+      //   3 commands x (1+0) rounds x 4 250ms x 10 calls = 127 500 store
+      //
+      //   WRONG FIX A — raise STORE_COMMANDS_PER_SEAM_CALL.failing from 3 to 6
+      //   ("a retried failing call issues six commands"). True per RETRIED call,
+      //   but it double-charges every NON-retried leg: this branch would compute
+      //   405 000ms and RED against a 300 000ms ceiling — a phantom breach on a
+      //   route that never retries. The (1 + retries) factor is where the retry
+      //   term belongs; the 3 stays 3 and is documented PER-ATTEMPT.
+      //
+      //   WRONG FIX B — a flat route-level (1 + retries) multiplier. `retries` is
+      //   a property of a LEG's budget row, so a multi-leg branch has no single
+      //   value to use, and picking one manufactures a breach here too.
+      //
+      // The tightest route in the whole table is this one at 22 500ms of
+      // headroom, so a phantom breach here is not a harmless over-estimate — it
+      // is the assertion that would be "fixed" by raising a ceiling.
+      const worst = branchWorstCases(
+        SEAM_ROUTE_BUDGETS[FINALIZE_WIZARD_ROUTE],
+        "failing",
+      ).find((b) => b.label === "composite");
+      expect(
+        worst?.worstCaseMs,
+        `finalize-wizard's COMPOSITE branch now costs ${worst?.worstCaseMs}ms ` +
+          `in the failing state; it must stay 277 500ms. Every leg on this ` +
+          `branch is retries: 0, so D-15's correction cannot move it. 405 000 ` +
+          `means the store's per-attempt count was raised instead of the retry ` +
+          `factor being applied per leg, which double-charges legs that never ` +
+          `retry. This route has 22 500ms of headroom — do NOT raise its ` +
+          `maxDuration to absorb an arithmetic error.`,
+      ).toBe(277_500);
     });
   });
 
@@ -796,6 +967,35 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
           "survived for months. Pin the new path here in the same commit, with " +
           "its reason in the table.",
       ).toEqual([...EXPECTED_EXCLUSION_PATHS].sort());
+    });
+
+    it("SEAM_EXCLUSIONS holds exactly 3 rows — the fence for both it.each blocks (D-14a)", () => {
+      // CLASS-γ CLOSURE. Both `it.each(Object.keys(SEAM_EXCLUSIONS))` blocks in
+      // this describe iterate the map UNDER TEST, so shrinking the table shrinks
+      // the case list instead of failing it, and emptying it yields zero cases
+      // and a green file: BLIND, not satisfied. Plan 141.1-04 measured that exact
+      // shape on the sibling registry `it.each` — deleting one entry took the
+      // suite from 78 tests to 77 with no failure from the `it.each` itself.
+      //
+      // ⚠️ HONEST SCOPE, so nobody over-credits this line. Unlike that sibling,
+      // these two blocks were NOT actually exposed: the set equality at
+      // "excludes exactly the three hand-typed paths" already reds on a shrink,
+      // a swap OR a growth, and is strictly stronger than any count. What this
+      // adds is EXACTNESS where only a `>= 3` floor sat, and CO-LOCATION — the
+      // guard beside the `it.each` no longer depends on a sibling `it` surviving
+      // a future edit. It is the third member of the enumerated class, fenced
+      // for the same reason the other two are: the class is closed by
+      // enumeration, not by fixing the one instance someone happened to name.
+      expect(
+        Object.keys(SEAM_EXCLUSIONS).length,
+        "SEAM_EXCLUSIONS no longer holds exactly 3 rows. An exclusion is a " +
+          "decision that a Railway call site deliberately gets no budget and no " +
+          "breaker — adding one silently is how the third, unbudgeted seam " +
+          "survived for months, and REMOVING one silently drops that path out " +
+          "of both source scans below, which is the A-12 guard's entire reach. " +
+          "Change this literal in the same commit as the row and its roster " +
+          "entry; never to make a diff pass.",
+      ).toBe(3);
     });
 
     it.each(Object.keys(SEAM_EXCLUSIONS))(

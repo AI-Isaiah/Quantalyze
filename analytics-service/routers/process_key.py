@@ -1395,6 +1395,88 @@ async def process_key(
                 job_state=_job_state,
             )
 
+    # 2b) SEAM-06 (Phase 141) — resync draft-SV dedup against a duplicate submit.
+    #
+    # ⚠️ WHAT THIS GUARD IS FOR HAS BEEN CORRECTED TWICE; READ THE CORRECTION
+    # BEFORE REASONING FROM IT (141.2 / D-03). It was introduced as the thing
+    # that made resync safe to REPLAY: Phase 141 added a bounded Vercel->Railway
+    # seam retry and allowlisted resync for it ONLY on the strength of this
+    # pre-check. Phase 141.1 re-derived that claim and found it false. Phase
+    # 141.2 acted on the finding and WITHDREW the retry: the TypeScript seam
+    # registry now carries a NO verdict for resync, so no resync retry is issued
+    # at all, and the sentence below that used to say this "closes the
+    # SEQUENTIAL retry class" is gone rather than merely softened.
+    #
+    # This guard still earns its place — it is defense-in-depth against a
+    # DUPLICATE SUBMIT (a user or client re-issuing the sync) — but it is not an
+    # idempotency key and must never again be cited as one.
+    #
+    # resync runs on a SERVER-MINTED wizard_session_id (:1018), so it is
+    # `idempotent_by_session == False` by construction — the :1351 block above
+    # never fires for it. Without this guard a seam retry that re-reaches the
+    # handler mints a SECOND draft strategy_verifications row for the same
+    # strategy (the compute_job is already deduped by
+    # compute_jobs_one_inflight_per_kind_strategy; this closes the SV-row half).
+    #
+    # Structurally MIRRORS the :1351 idempotent-by-session block: SELECT the
+    # existing draft resync row, and on a hit resume its compute_job and return
+    # the SAME WIZARD_DUPLICATE body both onboard emitters use — one builder, so
+    # the cross-process contract (keys/sync/route.ts:563-599 already translates
+    # WIZARD_DUPLICATE + queued) cannot drift. The draft window mirrors the
+    # compute_jobs dedup's non-terminal restriction: a FINISHED (non-draft)
+    # resync verification is a genuinely new sync, not a retry.
+    #
+    # TENANT SCOPE (PYAPI-01d): this runs strictly AFTER the :1316 ownership
+    # gate, so `strategy_id` has already passed the strategies id+user_id check
+    # (140.1-02). Scoping this read by strategy_id therefore carries the tenant
+    # scope — no wizard_session_id / user_id echo of a foreign row is possible.
+    #
+    # SCOPE BOUND (documented residual, restated 141.2 / D-03): this guard does
+    # NOT make a resync replay safe, and the original text here claiming it
+    # closed the SEQUENTIAL retry class was the over-claim that kept a retry
+    # grant alive after the evidence for it had been withdrawn. The filter is
+    # status='draft', and the compute worker's tick advances the first draft
+    # verification OUT of draft — so a second attempt arriving after that
+    # transition matches nothing here and inserts a second draft row. What the
+    # guard does close is the case where the first attempt's draft is still IN
+    # draft when a duplicate submit arrives. A CONCURRENT two-tab race (both
+    # SELECTs pass before either INSERT; distinct server-minted uuid4s, so
+    # neither 23505s on the session index) can still mint two drafts. Both
+    # residuals are OUT of scope here: no new
+    # migration and no new unique index (PATTERNS records the migration path as
+    # the scope decision deliberately NOT taken); this is an application-level
+    # SELECT-then-guarded-INSERT. `.limit(1)` keeps `.maybe_single()` from
+    # raising on that rare two-draft residual rather than papering over it.
+    if body.flow_type == "resync":
+        existing_resync = one(
+            supabase.table("strategy_verifications")
+            .select("*")
+            .eq("strategy_id", strategy_id)
+            .eq("flow_type", "resync")
+            .eq("status", "draft")
+            .limit(1)
+            .maybe_single()
+            .execute()
+        )
+        if existing_resync:
+            log.info(
+                "process_key.resync_draft_dedup_hit",
+                verification_id=existing_resync["id"],
+            )
+            _queued, _job_state = _resume_duplicate_job(
+                supabase=supabase,
+                body=body,
+                strategy_id=strategy_id,
+                existing=existing_resync,
+                correlation_id=correlation_id,
+            )
+            return _wizard_duplicate_reply(
+                existing=existing_resync,
+                correlation_id=correlation_id,
+                queued=_queued,
+                job_state=_job_state,
+            )
+
     trust_tier = "csv_uploaded" if body.source == "csv" else "api_verified"
     try:
         draft_insert = (

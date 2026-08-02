@@ -1456,6 +1456,29 @@ jobs:
     # fork-PR runs while secrets are withheld, so the vars gate alone would
     # start the job on a fork and die at the seed step with empty secrets.
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true' }}
+    # v1.16 close-out (2026-08-01): join the SAME repo-wide `shared-test-db`
+    # group the `python` job carries. Both jobs drive the ONE shared Supabase
+    # test project (`secrets.TEST_SUPABASE_URL`), and `claim_compute_jobs_with_priority`
+    # claims a GLOBAL batch of 50 ready rows — it cannot be scoped to a caller.
+    # So while this job drives the wizard and enqueues `compute_jobs`, a
+    # concurrent `python` fencing test that seeds a pending row and then claims
+    # it gets its row swept into THIS job's traffic (or vice versa), and
+    # `_claim_one(..., want_job_id=...)` correctly returns None rather than a
+    # foreign row — reddening 10 fencing/drain tests with `assert None is not None`
+    # and `assert 'pending' == 'running'`.
+    #
+    # The group already on `python` (see its comment) was added for CROSS-PR
+    # contention and explicitly reasons about "two different PRs' python jobs";
+    # it never covered two jobs INSIDE one run. `e2e` (the smoke batch) does not
+    # need the group — it builds against `https://placeholder.supabase.co` and
+    # never reaches the shared project.
+    #
+    # Costs wall-clock: this job now queues behind `python` (~7m) instead of
+    # overlapping it. That is the price of the tests being trustworthy; the
+    # alternative is a suite that reds on interleaving rather than on defects.
+    concurrency:
+      group: shared-test-db
+      cancel-in-progress: false
     needs:
       - frontend-typecheck
     steps:

@@ -239,6 +239,10 @@ function makeCachedFetcher(keyId: string): {
           },
           // No body needed — key_id is in the path. No signal either: the core
           // owns the deadline (SEAM_BUDGETS["keys-permissions"]).
+          // No retry: this probe has no entry in the SEAM-06 retry-safety
+          // registry, and D-08 makes stating that verdict mandatory rather than
+          // implicit.
+          retriesOverride: 0,
         },
       );
 

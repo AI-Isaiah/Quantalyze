@@ -549,15 +549,93 @@ interface DiscoveredBinding {
   path: string;
   /** `file` for a literal call site, `file::symbol` for the two clients. */
   site: string;
+  /**
+   * Phase 141.1 / D-09 — THE SECOND CLASSIFICATION AXIS, censused here so a new
+   * call site cannot be discovered by nothing on the RETRY dimension.
+   *
+   * The normalised source expression this site passes as `retriesOverride`, or
+   * the sentinel `"<ABSENT>"` when it passes none. Phase 141 added retry as a
+   * per-call-site verdict and shipped it with no census at all — the budget-key
+   * axis below had one from the day it existed, and the retry axis is the same
+   * shape of decision made at the same call sites. Extending this roster with a
+   * FIELD rather than adding a second census file is deliberate: a parallel
+   * census would duplicate the walk and the comment-stripping (the repo already
+   * carries 17 unrewired copies of the latter) and could drift from the roster
+   * it is supposed to agree with.
+   */
+  retry: string;
 }
 
 const encodeBinding = (b: DiscoveredBinding) =>
-  `${b.family} | ${b.key} | ${b.path} | ${b.site}`;
+  `${b.family} | ${b.key} | ${b.path} | ${b.site} | ${b.retry}`;
 
 /** A first-argument-position string or template literal, or a loud sentinel. */
 function firstLiteralArg(rest: string): string {
   const m = /^\s*(["`])([^"`]*)\1/.exec(rest);
   return m ? normalisePath(m[2]) : "<NON-LITERAL PATH>";
+}
+
+/**
+ * Normalise a captured `retriesOverride` expression to something hand-typable.
+ *
+ * `readCode` has already removed whole-line comments, but a TRAILING `//`
+ * comment survives by design (see `stripComments`), so it is stripped here —
+ * otherwise re-wording a trailing note beside an unchanged expression would red
+ * this guard for no reason. The trailing property comma goes for the same
+ * reason: it is punctuation of the object literal, not of the verdict.
+ */
+function normaliseRetryExpr(raw: string): string {
+  return raw
+    .replace(/\/\/.*$/, "")
+    .trim()
+    .replace(/,$/, "")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+/**
+ * The `retriesOverride` expression governing the core call that begins at
+ * `callIndex`, or a loud sentinel.
+ *
+ * SCAN WINDOW. From this call to the NEXT core call in the same file (or EOF).
+ * That bound is exact rather than approximate: `retriesOverride` is a member of
+ * `ResilientFetchInit`, so after D-08 made it REQUIRED it cannot legally appear
+ * anywhere but inside one of these inits — every occurrence between call N and
+ * call N+1 belongs to call N.
+ *
+ * ⚠️ THE SENTINELS FAIL IN THE SAFE DIRECTION. `"<ABSENT>"` and
+ * `"<AMBIGUOUS RETRY>"` are values that no roster entry may legally hold, so
+ * both redden the set equality below. A multi-line expression would likewise be
+ * captured partially and mismatch the roster. Every failure mode of this
+ * extractor is therefore a RED, never a silent pass — which is the only
+ * property that matters in a guard whose whole job is to notice an omission.
+ */
+function retryExprFor(code: string, callIndex: number): string {
+  const nextCall = [...code.matchAll(/resilientFetch\s*\(/g)]
+    .map((m) => m.index)
+    .find((i) => i > callIndex);
+  const window = code.slice(callIndex, nextCall ?? code.length);
+  const hits = [...window.matchAll(/retriesOverride:\s*([^\n]*)/g)];
+  if (hits.length === 0) return "<ABSENT>";
+  if (hits.length > 1) return "<AMBIGUOUS RETRY>";
+  return normaliseRetryExpr(hits[0][1]);
+}
+
+/**
+ * The retry expression at a client module's SINGLE core chokepoint.
+ *
+ * Both clients funnel every binding they own through exactly one
+ * `resilientFetch` call, so ONE expression governs all of them — the same
+ * property `discoverBudgetKeyForArms` already relies on to give both its arms
+ * one upstream path. Requiring exactly one call is itself the fence: a SECOND
+ * chokepoint in either client would mean its bindings no longer share a retry
+ * verdict, and the sentinel makes that a RED rather than a half-truth silently
+ * attributed to every binding in the family.
+ */
+function chokepointRetry(code: string): string {
+  const calls = [...code.matchAll(/resilientFetch\s*\(/g)];
+  if (calls.length !== 1) return "<NOT A SINGLE CHOKEPOINT>";
+  return retryExprFor(code, calls[0].index);
 }
 
 /**
@@ -567,6 +645,9 @@ function firstLiteralArg(rest: string): string {
  */
 function discoverAnalyticsWrappers(): DiscoveredBinding[] {
   const code = readCode(ANALYTICS_CLIENT);
+  // D-09: every wrapper in this family reaches the core through `analyticsRequest`,
+  // so the retry verdict is that one chokepoint's expression, shared by all nine.
+  const retry = chokepointRetry(code);
   const starts: Array<{ name: string; index: number }> = [];
   for (const m of code.matchAll(/^export async function (\w+)\s*\(/gm)) {
     starts.push({ name: m[1], index: m.index });
@@ -586,6 +667,7 @@ function discoverAnalyticsWrappers(): DiscoveredBinding[] {
         key: keyMatch[1],
         path: preceding?.path ?? "<NO REQUEST PATH FOUND>",
         site: `${ANALYTICS_CLIENT}::${fn.name}`,
+        retry,
       });
     }
   });
@@ -595,27 +677,58 @@ function discoverAnalyticsWrappers(): DiscoveredBinding[] {
 /**
  * Family (ii) — the arms of `budgetKeyFor` in `process-key-client.ts`.
  *
- * The flow-type comparisons are removed first, so the only literals left in the
- * function body are the budget keys it can return. The upstream path is the
- * literal at that module's single core call.
+ * The extraction is stated as "the budget keys the function can RETURN", which
+ * is what the census recipe at the top of this file measures ("-> 2 returned key
+ * literals"). Two steps get there:
+ *
+ *   1. Strip the flow-type TESTS. `budgetKeyFor` has worn TWO syntactic forms
+ *      and this discovery must not be coupled to either: the pre-141.1 ternary
+ *      spelled its tests `flowType === "teaser"`, and the 141.1 / D-11
+ *      `never`-defaulted switch spells them `case "teaser":`. Handling only the
+ *      first is what made this guard red on the D-11 conversion — it reported
+ *      `teaser` / `csv` / `onboard` / `resync` as four phantom BUDGET KEYS while
+ *      the function's actual returns were unchanged.
+ *   2. Keep only RETURN statements. Stripping the tests and then scanning the
+ *      whole body was always one double-quoted string away from a phantom: the
+ *      switch's `default` arm throws a fail-loud message, and a message with a
+ *      `"` in it is prose, not a binding. Return position is the property the
+ *      roster is actually about.
+ *
+ * ⚠️ NEITHER STEP WIDENS THE GUARD. A genuinely NEW arm returning a NEW budget
+ * key is still discovered and still fails against the roster; a third syntactic
+ * form that this extractor cannot read yields FEWER bindings than the roster
+ * lists, which fails too. Both directions stay loud — that is the invariant to
+ * preserve if this ever needs touching again.
+ *
+ * The upstream path is the literal at that module's single core call.
  */
 function discoverBudgetKeyForArms(): DiscoveredBinding[] {
   const code = readCode(PROCESS_KEY_CLIENT);
   const start = code.indexOf("function budgetKeyFor(");
   if (start < 0) return [];
   const body = code.slice(start, code.indexOf("\n}", start));
-  const returned = body.replace(/===\s*"[^"]*"/g, "");
+  const withoutFlowTests = body
+    .replace(/===\s*"[^"]*"/g, "")
+    .replace(/\bcase\s+"[^"]*"\s*:/g, "");
+  const returned = [...withoutFlowTests.matchAll(/\breturn\b[^;]*;/g)]
+    .map((m) => m[0])
+    .join("\n");
 
   const callMatch = /resilientFetch\(\s*\w+\s*,\s*/.exec(code);
   const path = callMatch
     ? firstLiteralArg(code.slice(callMatch.index + callMatch[0].length))
     : "<NO CORE CALL FOUND>";
 
+  // D-09: both arms reach the core through `postProcessKey`'s single call, so
+  // one retry expression governs them — exactly as one `path` already does.
+  const retry = chokepointRetry(code);
+
   return [...returned.matchAll(/"([^"]+)"/g)].map((m) => ({
     family: "ii" as const,
     key: m[1],
     path,
     site: `${PROCESS_KEY_CLIENT}::budgetKeyFor`,
+    retry,
   }));
 }
 
@@ -658,11 +771,43 @@ function discoverLiteralCallSites(): DiscoveredBinding[] {
         key: m[1],
         path: firstLiteralArg(code.slice(m.index + m[0].length)),
         site: rel,
+        // D-09: unlike the two clients, each literal call site states its own
+        // retry verdict inline, so it is read at the site.
+        retry: retryExprFor(code, m.index),
       });
     }
   }
   return out;
 }
+
+/**
+ * Phase 141.1 / D-09 — the two client chokepoints' retry expressions, typed
+ * here as source text.
+ *
+ * Named constants rather than repeated string literals only because nine and
+ * two roster rows share them respectively; they are hand-typed oracles like
+ * every other value in this roster, never imported or derived from the modules
+ * they describe. On the ANALYTICS row the `?? 0` half is the load-bearing part:
+ * it is what makes a seam function ABSENT from the SEAM-06 registry resolve to no
+ * retry instead of inheriting one, so a drift to `?? 1` is a silent grant of
+ * retry to every unaudited wrapper — and reddens here.
+ *
+ * ⚠️ 141.2 / D-01 — THE PROCESS-KEY ROW NOW SHOWS A NAME, NOT ARITHMETIC, AND
+ * THAT IS THE ACCEPTED TRADEOFF. Its expression used to spell the whole verdict
+ * out (`RETRY_SAFE_FLOW_TYPES[args.flow_type]?.retries ?? 0`); the verdict now
+ * also depends on idempotency-key presence, which cannot be written inline
+ * without either a multi-line expression (which this roster's line-scoped
+ * extractor captures PARTIALLY and reddens on) or a ~200-character single-line
+ * ternary (worse to read than a name). So the belt moved INSIDE `retriesForFlow`
+ * in the registry leaf — the artifact whose whole purpose is to be the single
+ * readable verdict — and it carries its own direct unit pins there plus
+ * behavioural pins through the real client in `process-key-client.test.ts`. What
+ * this roster still guarantees is the property it was built for: that the
+ * chokepoint's retry decision is the one named here and did not drift.
+ * DO NOT widen the extractor to accommodate a multi-line expression.
+ */
+const ANALYTICS_RETRY = "RETRY_SAFE_ANALYTICS[options.budgetKey]?.retries ?? 0";
+const PROCESS_KEY_RETRY = "retriesForFlow(args.flow_type, args.context)";
 
 /**
  * The 13 bindings, typed HERE as literals — the whole class, one entry per
@@ -674,42 +819,49 @@ function discoverLiteralCallSites(): DiscoveredBinding[] {
  * Listing the sites rather than collapsing them means a THIRD copy of that seam
  * — a new file reusing the same key and path — is an unlisted site and fails
  * too, which key-level deduplication would have hidden.
+ *
+ * Phase 141.1 / D-09 — EVERY SITE ALSO CARRIES ITS RETRY EXPRESSION, hand-typed
+ * here as a literal exactly as its path is. The two clients resolve their
+ * verdict from the SEAM-06 registry at one chokepoint each; the three route
+ * sites state a bare `0` because none of them appears in that registry. Both
+ * shapes are pinned as source text, so deleting an override, or drifting one
+ * from `?? 0` to `?? 1`, changes a value on this roster's other side.
  */
 const EXPECTED_BINDINGS: ReadonlyArray<{
   id: string;
   family: "i" | "ii" | "iii";
   key: string;
-  sites: ReadonlyArray<{ site: string; path: string }>;
+  sites: ReadonlyArray<{ site: string; path: string; retry: string }>;
 }> = [
   { id: "B-01", family: "i", key: "validate-key",
-    sites: [{ site: `${ANALYTICS_CLIENT}::validateKey`, path: "/api/validate-key" }] },
+    sites: [{ site: `${ANALYTICS_CLIENT}::validateKey`, path: "/api/validate-key", retry: ANALYTICS_RETRY }] },
   { id: "B-02", family: "i", key: "encrypt-key",
-    sites: [{ site: `${ANALYTICS_CLIENT}::encryptKey`, path: "/api/encrypt-key" }] },
+    sites: [{ site: `${ANALYTICS_CLIENT}::encryptKey`, path: "/api/encrypt-key", retry: ANALYTICS_RETRY }] },
   { id: "B-03", family: "i", key: "optimize-weights",
-    sites: [{ site: `${ANALYTICS_CLIENT}::optimizeScenarioWeights`, path: "/api/optimize-weights" }] },
+    sites: [{ site: `${ANALYTICS_CLIENT}::optimizeScenarioWeights`, path: "/api/optimize-weights", retry: ANALYTICS_RETRY }] },
   { id: "B-04", family: "i", key: "portfolio-analytics",
-    sites: [{ site: `${ANALYTICS_CLIENT}::computePortfolioAnalytics`, path: "/api/portfolio-analytics" }] },
+    sites: [{ site: `${ANALYTICS_CLIENT}::computePortfolioAnalytics`, path: "/api/portfolio-analytics", retry: ANALYTICS_RETRY }] },
   { id: "B-05", family: "i", key: "portfolio-optimizer",
-    sites: [{ site: `${ANALYTICS_CLIENT}::runPortfolioOptimizer`, path: "/api/portfolio-optimizer" }] },
+    sites: [{ site: `${ANALYTICS_CLIENT}::runPortfolioOptimizer`, path: "/api/portfolio-optimizer", retry: ANALYTICS_RETRY }] },
   { id: "B-06", family: "i", key: "bridge",
-    sites: [{ site: `${ANALYTICS_CLIENT}::findReplacementCandidates`, path: "/api/portfolio-bridge" }] },
+    sites: [{ site: `${ANALYTICS_CLIENT}::findReplacementCandidates`, path: "/api/portfolio-bridge", retry: ANALYTICS_RETRY }] },
   { id: "B-07", family: "i", key: "simulator",
-    sites: [{ site: `${ANALYTICS_CLIENT}::simulateAddCandidate`, path: "/api/simulator" }] },
+    sites: [{ site: `${ANALYTICS_CLIENT}::simulateAddCandidate`, path: "/api/simulator", retry: ANALYTICS_RETRY }] },
   { id: "B-08", family: "i", key: "match-recompute",
-    sites: [{ site: `${ANALYTICS_CLIENT}::recomputeMatch`, path: "/api/match/recompute" }] },
+    sites: [{ site: `${ANALYTICS_CLIENT}::recomputeMatch`, path: "/api/match/recompute", retry: ANALYTICS_RETRY }] },
   { id: "B-09", family: "i", key: "match-eval",
-    sites: [{ site: `${ANALYTICS_CLIENT}::evalMatch`, path: "/api/match/eval?{}" }] },
+    sites: [{ site: `${ANALYTICS_CLIENT}::evalMatch`, path: "/api/match/eval?{}", retry: ANALYTICS_RETRY }] },
   { id: "B-10", family: "ii", key: "process-key-sync",
-    sites: [{ site: `${PROCESS_KEY_CLIENT}::budgetKeyFor`, path: "/process-key" }] },
+    sites: [{ site: `${PROCESS_KEY_CLIENT}::budgetKeyFor`, path: "/process-key", retry: PROCESS_KEY_RETRY }] },
   { id: "B-11", family: "ii", key: "process-key-enqueue",
-    sites: [{ site: `${PROCESS_KEY_CLIENT}::budgetKeyFor`, path: "/process-key" }] },
+    sites: [{ site: `${PROCESS_KEY_CLIENT}::budgetKeyFor`, path: "/process-key", retry: PROCESS_KEY_RETRY }] },
   { id: "B-12", family: "iii", key: "keys-permissions",
     sites: [
-      { site: "src/app/api/keys/[id]/permissions/route.ts", path: "/internal/keys/{}/permissions" },
-      { site: "src/app/api/strategies/finalize-wizard/route.ts", path: "/internal/keys/{}/permissions?force_refresh=true" },
+      { site: "src/app/api/keys/[id]/permissions/route.ts", path: "/internal/keys/{}/permissions", retry: "0" },
+      { site: "src/app/api/strategies/finalize-wizard/route.ts", path: "/internal/keys/{}/permissions?force_refresh=true", retry: "0" },
     ] },
   { id: "B-13", family: "iii", key: "process-key-unified-dormant",
-    sites: [{ site: "src/app/api/keys/validate-and-encrypt/route.ts", path: "/process-key" }] },
+    sites: [{ site: "src/app/api/keys/validate-and-encrypt/route.ts", path: "/process-key", retry: "0" }] },
 ];
 
 /**
@@ -769,7 +921,13 @@ describe("SC6 / SEAMCORE-08 — the budget-key binding class stays closed", () =
   it("every discovered binding is classified in the roster (a 14th binding FAILS)", () => {
     const expectedSites = EXPECTED_BINDINGS.flatMap((b) =>
       b.sites.map((s) =>
-        encodeBinding({ family: b.family, key: b.key, path: s.path, site: s.site }),
+        encodeBinding({
+          family: b.family,
+          key: b.key,
+          path: s.path,
+          site: s.site,
+          retry: s.retry,
+        }),
       ),
     ).sort();
     const actualSites = discovered.map(encodeBinding).sort();
@@ -784,8 +942,34 @@ describe("SC6 / SEAMCORE-08 — the budget-key binding class stays closed", () =
         "that a new binding REUSING an existing budget key breaks no individual " +
         "pin above and fails only here. The correct response is to pin the new " +
         "binding and add it to the roster — a conscious decision. Never widen " +
-        "this assertion to make a diff pass.",
+        "this assertion to make a diff pass. Since 141.1/D-09 each entry also " +
+        "carries its `retriesOverride` SOURCE EXPRESSION, so a call site that " +
+        "drops its override, or drifts one from `?? 0` to `?? 1`, differs on " +
+        "this roster's other side and lands here too.",
     ).toEqual(expectedSites);
+  });
+
+  it("no discovered site is missing its retry verdict (D-09)", () => {
+    const absent = discovered
+      .filter((b) => b.retry === "<ABSENT>")
+      .map((b) => `${b.site} (${b.key})`);
+
+    expect(
+      absent,
+      "A seam call site passes NO `retriesOverride`. The roster docblock below " +
+        "states why the file-level fence exists — a new call site that belongs " +
+        "to no family 'would be discovered by nothing'. That was true of the " +
+        "RETRY axis for the whole of phase 141: retry is a per-site verdict " +
+        "about whether replaying this request can duplicate a side effect, and " +
+        "a site that never states one is an UNAUDITED replay, not a safe " +
+        "default. Since D-08 made the field required, `tsc` catches this first " +
+        "— this assertion is the belt that survives an `as any`, a JS caller, " +
+        "or the field being relaxed back to optional, exactly as the runtime " +
+        "validator survives beside the compile-time union. The remedy is to " +
+        "decide the verdict: add the seam function to the SEAM-06 retry-safety " +
+        "registry, or state `retriesOverride: 0` at the site and say why. " +
+        "Never widen this assertion to make a diff pass.",
+    ).toEqual([]);
   });
 
   it("the roster covers exactly the 13 budget keys (no orphan key, no unbound key)", () => {

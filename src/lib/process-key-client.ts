@@ -11,6 +11,11 @@ import { CircuitOpenError, SeamBodyReadError } from "@/lib/seam-errors";
 import { CIRCUIT_OPEN_COPY as CIRCUIT_OPEN_HUMAN_MESSAGE } from "@/lib/seam-copy";
 import { scrubSeamError } from "@/lib/seam-redaction";
 import { mintTenantClaim } from "@/lib/tenant-claim";
+// Phase 141 / SEAM-05+06 — the retry-safety registry, consulted at THIS
+// chokepoint (the belt). A VALUE import of a dependency-free leaf: it carries
+// no runtime edge and survives the wholesale seam mocks (see that file's
+// header), so importing it here does not change what the teaser bundle drags in.
+import { retriesForFlow } from "@/lib/seam-retry-registry";
 
 /**
  * Phase 19 / M-3 — shared client for the unified `/process-key` upstream.
@@ -60,11 +65,74 @@ export type FlowType = "teaser" | "onboard" | "resync" | "csv";
  * INLINE. The pre-140 client spent a blanket 60s on all four, so a sick
  * Railway held a Vercel concurrency slot 45s longer than necessary on the two
  * enqueue paths. Keep this function in lockstep with `_is_long_fetch`.
+ *
+ * ⚠️ Phase 141 / SEAM-06 — THE RETRY DECISION IS KEYED ON `flow_type`, NOT ON
+ * THIS BUDGET KEY, FOR THE SAME MANY-TO-ONE REASON THIS FUNCTION EXISTS. Because
+ * `process-key-sync` serves BOTH teaser and csv, and `process-key-enqueue` serves
+ * BOTH onboard and resync, keying the retry on `budgetKey` would retry teaser the
+ * moment csv were allowed onto the sync budget — the SC3 landmine (a retry
+ * double-mints the teaser's verification/public_token/lead). So the retry gate at
+ * the `resilientFetch` init below calls `retriesForFlow` with `args.flow_type`,
+ * and that helper resolves absence from the YES map to zero WITHOUT delegating to
+ * the budget row — a future flip of the `process-key-sync` row can never retry
+ * teaser/csv. That is the belt; 141.2 / D-01 moved it inside the helper (which
+ * also narrows onboard's grant to calls carrying an idempotency key) rather than
+ * leaving it as an inline `?? 0` here, so the gate and the audited evidence it
+ * enforces sit in one place.
+ *
+ * ⚠️ Phase 141.1 / D-11 — WHY THIS IS A `never`-DEFAULTED SWITCH AND NOT THE
+ * TERNARY IT USED TO BE. The ternary read
+ * `flowType === "teaser" || flowType === "csv" ? "process-key-sync" :
+ * "process-key-enqueue"`, so EVERY flow that was not one of those two fell
+ * through to the enqueue budget. The RETRY consequence of that fall-through is
+ * already covered — the belt above gives an unaudited flow zero retries whatever
+ * budget key it lands on, by registry absence. The BUDGET consequence is not, and it is the
+ * reason this switch exists:
+ *
+ *   `process-key-enqueue` is 15 000 ms; `process-key-sync` is 60 000 ms
+ *   (`SEAM_BUDGETS`). A flow that runs INLINE but falls through to the enqueue
+ *   key gets a quarter of the wall clock it needs and reports a healthy Railway
+ *   as `UPSTREAM_TIMEOUT` 504.
+ *
+ * ⭐ THE FIFTH FLOW IS NOT HYPOTHETICAL. The server's own vocabulary is already
+ * WIDER than this union: `FlowType` in
+ * `analytics-service/services/ingestion/adapter.py` is
+ * `Literal["teaser", "onboard", "internal_report", "csv", "resync"]`, and
+ * `internal_report` has a live source whitelist, its own return-based scalar
+ * path and its own branch through the synchronous pipeline. `_is_long_fetch`
+ * returns False for it, so it runs INLINE and belongs on the 60 000 ms sync
+ * budget. It has ZERO TypeScript emitters today, which is the only reason the
+ * fall-through never shipped as a defect. The moment anyone widens the union
+ * below to reach it, the old ternary would have handed an inline flow the 15 000
+ * ms enqueue budget silently; the `default` arm now makes that a COMPILE error
+ * and forces the author to choose an arm. Keep this function in lockstep with
+ * `_is_long_fetch`, in BOTH directions.
  */
 function budgetKeyFor(flowType: FlowType): SeamBudgetKey {
-  return flowType === "teaser" || flowType === "csv"
-    ? "process-key-sync"
-    : "process-key-enqueue";
+  switch (flowType) {
+    // INLINE on the server (`_is_long_fetch` false): the full 5-method pipeline
+    // runs before the response, so the caller waits for the whole thing.
+    case "teaser":
+    case "csv":
+      return "process-key-sync";
+    // ENQUEUED (`_is_long_fetch` true): the server hands the work to the worker
+    // dyno and answers 202, so 15s here means Railway is sick, not busy.
+    case "onboard":
+    case "resync":
+      return "process-key-enqueue";
+    default: {
+      // Fail loud per Rule 12 — the same shape as `pickAuditDiffFields`'s
+      // schema-drift arm. There is no correct silent answer here: guessing
+      // `process-key-enqueue` is the 15s-vs-60s defect above, and guessing
+      // `process-key-sync` would hold a Vercel concurrency slot 45s longer than
+      // an enqueue needs. Unreachable while `FlowType` has four members, which
+      // is precisely what the `never` assignment asserts.
+      const _exhaustive: never = flowType;
+      throw new Error(
+        `budgetKeyFor: unhandled flow_type — FlowType grew without a budget arm? got=${JSON.stringify(_exhaustive)}`,
+      );
+    }
+  }
 }
 
 // User-facing copy for the SEAM-04 503, bound above as an alias of the ONE
@@ -430,6 +498,33 @@ export async function postProcessKey(
         context: args.context,
       }),
       cache: "no-store",
+      // Phase 141 / SEAM-06, narrowed by 141.2 / D-01 — the retry gate. ONE
+      // function decides BOTH halves of the verdict: the flow's audited verdict
+      // AND the idempotency-key antecedent that verdict rests on. `retriesForFlow`
+      // lives in the registry, beside the evidence it enforces; the belt that
+      // used to be an explicit `?? 0` here now lives inside it, unchanged in
+      // meaning — absence from the YES map never delegates to the budget row, so
+      // a future flip of the `process-key-sync` row can never retry teaser/csv.
+      //
+      // ⚠️ `onboard` IS THE ONLY ALLOWLISTED FLOW, and its grant is CONDITIONAL.
+      // (The sentence that stood here named onboard AND resync; 141.2 / D-03
+      // withdrew resync's grant, and D-01 then made onboard's contingent on a
+      // truthy `wizard_session_id` in the context — because the server has
+      // nothing to dedupe on without one and mints a fresh session per attempt.)
+      // teaser/csv resolve to 0 by registry absence.
+      //
+      // ⚠️ FAIL-CLOSED AT TWO LAYERS. `PostProcessKeyArgs.context` is REQUIRED,
+      // so a caller that states no context does not compile — that is the
+      // stronger guarantee and it is kept deliberately; do not add a `?`.
+      // `retriesForFlow`'s undefined arm is the runtime belt behind it, for the
+      // access paths types cannot reach (JS callers, casts, future refactors).
+      //
+      // ⚠️ KEEP THIS EXPRESSION ON ONE PHYSICAL LINE. The wiring guard extracts
+      // the `retriesOverride` SOURCE and compares it to a hand-typed roster; its
+      // extractor is line-scoped, so a wrapped or multi-line expression is
+      // captured partially and reddens. Update the roster in the SAME commit as
+      // any change here — that pairing is the guard, not an inconvenience.
+      retriesOverride: retriesForFlow(args.flow_type, args.context),
     });
     body = await res.json().catch(emptyBodyUnlessSeamRead);
   } catch (err) {

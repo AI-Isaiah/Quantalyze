@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -4261,23 +4262,29 @@ def test_seamrim03_csv_finalize_residual_error_message_is_static(client):
     )
 
 
-def test_pyapi_09d_resync_can_never_emit_wizard_duplicate(client):
-    """PYAPI-09d (C-21) — /api/keys/sync sends `context:{strategy_id, user_id}`
-    and no wizard_session_id, so the route mints a fresh uuid4 for it.
+def test_seam06_resync_dedups_on_strategy_scoped_draft_key(client):
+    """SEAM-06 (Phase 141) SUPERSEDES PYAPI-09d (C-21) for resync.
 
-    Idempotency-by-session therefore has no meaning for resync, and
-    keys/sync/route.ts:438's WIZARD_DUPLICATE branch was dead code that
-    nonetheless documented a reachable state. This asserts the BRANCH IS ABSENT
-    for the flow — no SV read is issued at all — rather than asserting that a
-    uuid4 happened not to collide.
+    Phase 140.1's PYAPI-09d asserted resync issued NO strategy_verifications
+    read and could NEVER emit WIZARD_DUPLICATE — because idempotency-by-SESSION
+    has no meaning for a server-minted session id. Phase 141 adds a bounded seam
+    retry and allowlists resync for it, which REQUIRES resync's draft SV write to
+    be idempotent for the sequential-retry class. So resync now DOES consult a
+    dedup pre-check — but the security core PYAPI-09d protected is preserved and
+    tightened here: the read is scoped by the strategy-owned draft key
+    (strategy_id + flow_type='resync' + status='draft'), NEVER by a
+    caller-supplied wizard_session_id (which could echo a foreign tenant's row).
+
+    This pins the FRESH path (no prior draft → misses → queues, no code) and the
+    exact filter shape. The retry HIT path (existing draft → WIZARD_DUPLICATE) is
+    pinned in tests/test_resync_draft_dedup.py.
     """
     sb = _RecordingSupabase(
         responses={
             ("strategies", "select"): [{"id": _OWNED_STRATEGY_ID}],
-            # Would short-circuit into WIZARD_DUPLICATE if ever consulted.
-            ("strategy_verifications", "select"): [
-                {"id": "ver-someone", "status": "draft", "trust_tier": "api_verified"}
-            ],
+            # Fresh resync: no existing draft, so the pre-check MISSES and the
+            # flow falls through to a normal queued insert.
+            ("strategy_verifications", "select"): [None],
             ("strategy_verifications", "insert"): [[{"id": "ver-resync"}]],
         },
         rpc_responses={"enqueue_compute_job": ["job-resync-1"]},
@@ -4299,13 +4306,174 @@ def test_pyapi_09d_resync_can_never_emit_wizard_duplicate(client):
     assert r.status_code == 200, r.text
     payload = r.json()
     assert "code" not in payload, (
-        "resync has no caller-supplied session identity, so it must never be "
-        f"told its submission was a duplicate; got {payload}"
+        "a FRESH resync (no prior draft) must not be told it is a duplicate; "
+        f"got {payload}"
     )
     assert payload["queued"] is True
     assert payload["verification_id"] == "ver-resync"
-    assert sb.selects("strategy_verifications") == [], (
-        "a server-minted session id must not consult the idempotency pre-check"
+
+    sv_selects = sb.selects("strategy_verifications")
+    assert len(sv_selects) == 1, (
+        "resync issues EXACTLY ONE strategy_verifications read — the Phase-141 "
+        f"strategy-scoped draft dedup pre-check; got {len(sv_selects)}"
+    )
+    assert sv_selects[0].filters == {
+        "strategy_id": _OWNED_STRATEGY_ID,
+        "flow_type": "resync",
+        "status": "draft",
+    }, (
+        "the resync dedup read MUST key on the strategy-owned draft window and "
+        "NEVER on a caller-supplied wizard_session_id (PYAPI-01d / the security "
+        f"core PYAPI-09d protected); got filters {sv_selects[0].filters}"
+    )
+    assert "wizard_session_id" not in sv_selects[0].filters
+
+
+# ---------------------------------------------------------------------------
+# SEAM-06 / D-14c (Phase 141.1) — the `status='draft'` half of the resync dedup
+# key needs a BEHAVIOUR pin, not just the filter-SHAPE pin above.
+#
+# `test_seam06_resync_dedups_on_strategy_scoped_draft_key` asserts the pre-check
+# SELECTs with `status='draft'` among its filters. That is a shape assertion
+# against a scripted double: it proves the filter is SENT, not that it MATTERS.
+# Delete `.eq("status", "draft")` from routers/process_key.py and the shape pin
+# is the only thing that reddens — meanwhile the real user-facing behaviour
+# silently inverts: ANY historical resync verification (`completed`, `failed`,
+# …) starts matching the pre-check, so every genuinely new resync of a strategy
+# that has ever synced once is answered WIZARD_DUPLICATE and never queues.
+#
+# The two tests below are a controlled experiment on that one filter. They are
+# byte-identical except for the seeded row's `status`, and they run through the
+# FULL `main.app` stack against the STATEFUL supabase double from
+# `tests/test_resync_draft_dedup.py` (imported, never re-implemented) — a double
+# that really honours `.eq()`, so the filter is exercised rather than recorded.
+# ---------------------------------------------------------------------------
+
+from tests.test_resync_draft_dedup import (  # noqa: E402
+    _STRATEGY_A as _SEAM06_STRATEGY,
+    _StatefulSupabase,
+    _post as _seam06_post,
+    _resync_body as _seam06_resync_body,
+    full_stack_client,  # noqa: F401  (pytest fixture, resolved by module name)
+    make_supabase as _seam06_make_supabase,
+)
+
+
+def _seed_prior_resync_verification(
+    sb: _StatefulSupabase, strategy_id: str, status: str
+) -> dict[str, Any]:
+    """Put ONE pre-existing resync strategy_verifications row in the store.
+
+    Every column is hand-typed here rather than produced by the route, so the
+    seed is an independent oracle. `status` is the ONLY parameter: the two tests
+    below differ in nothing else, which is what makes them a controlled
+    experiment on `.eq("status", "draft")` alone.
+    """
+    row: dict[str, Any] = {
+        "id": f"ver-prior-{status}",
+        "strategy_id": strategy_id,
+        "wizard_session_id": "cccccccc-0000-4000-8000-00000000000c",
+        "status": status,
+        "trust_tier": "api_verified",
+        "flow_type": "resync",
+        "source": "binance",
+        "correlation_id": "22222222-2222-4222-8222-222222222222",
+    }
+    sb.store["strategy_verifications"].append(row)
+    return row
+
+
+def _sv_rows(sb: _StatefulSupabase, strategy_id: str) -> list[dict[str, Any]]:
+    return [
+        r
+        for r in sb.store["strategy_verifications"]
+        if r.get("strategy_id") == strategy_id
+    ]
+
+
+def test_resync_completed_prior_verification_does_not_block_new_resync(
+    full_stack_client,
+):
+    """SC-P / D-14c: a prior resync verification that has FINISHED must not make
+    the next resync a duplicate.
+
+    MUTATION THIS TEST EXISTS TO CATCH: dropping `.eq("status", "draft")` from
+    the resync dedup pre-check (routers/process_key.py, the `flow_type ==
+    "resync"` block). Without that filter the pre-check matches on
+    (strategy_id + flow_type) alone, so the `completed` row seeded below is
+    treated as an in-flight retry: the caller is answered WIZARD_DUPLICATE,
+    handed the id of a verification that finished long ago, and — because a
+    `completed` row is not in `_RESUMABLE_VERIFICATION_STATUSES` — is not even
+    re-enqueued (`queued: false`). The user's resync silently never runs. The
+    draft window is precisely what separates "this is a seam retry of the sync
+    I just asked for" from "this strategy has synced before".
+    """
+    sb = _seam06_make_supabase(_SEAM06_STRATEGY)
+    prior = _seed_prior_resync_verification(sb, _SEAM06_STRATEGY, "completed")
+
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = _seam06_post(full_stack_client, _seam06_resync_body(_SEAM06_STRATEGY))
+
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload.get("code") != "WIZARD_DUPLICATE", (
+        "a resync whose ONLY prior verification is status='completed' is a "
+        "genuinely NEW sync, not a seam retry — it must queue, not be refused "
+        f"as a duplicate; got {payload}"
+    )
+    assert payload["queued"] is True, (
+        f"the new resync must actually be enqueued; got {payload}"
+    )
+
+    rows = _sv_rows(sb, _SEAM06_STRATEGY)
+    assert len(rows) == 2, (
+        "the seeded completed row plus ONE newly minted draft = 2 "
+        f"strategy_verifications rows for {_SEAM06_STRATEGY}; got {len(rows)}: "
+        f"{[(x['id'], x['status']) for x in rows]}"
+    )
+    drafts = [x for x in rows if x["status"] == "draft" and x["flow_type"] == "resync"]
+    assert len(drafts) == 1, (
+        f"expected exactly 1 new draft resync row; got {len(drafts)}"
+    )
+    assert payload["verification_id"] == drafts[0]["id"], (
+        "the reply must identify the NEW draft verification, not the finished "
+        f"one ({prior['id']}); got verification_id={payload['verification_id']!r}"
+    )
+    assert prior["status"] == "completed", (
+        "the seeded finished verification must be left untouched"
+    )
+
+
+def test_resync_draft_prior_verification_does_block_new_resync(full_stack_client):
+    """Positive control for the test above — identical in every respect except
+    the seeded row's `status`, which is `draft` here.
+
+    Without this, the `completed` test could pass VACUOUSLY: a seed row the
+    pre-check never sees at all (wrong column name, wrong table, a patch that
+    did not take) would also produce "not a duplicate". Here the same seeding
+    path DOES short-circuit the request, which proves the seeded row is visible
+    to the pre-check and that the difference in the test above is attributable
+    to `status` and nothing else.
+    """
+    sb = _seam06_make_supabase(_SEAM06_STRATEGY)
+    prior = _seed_prior_resync_verification(sb, _SEAM06_STRATEGY, "draft")
+
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = _seam06_post(full_stack_client, _seam06_resync_body(_SEAM06_STRATEGY))
+
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload.get("code") == "WIZARD_DUPLICATE", (
+        "a seeded status='draft' resync row IS an in-flight session — the "
+        f"pre-check must short-circuit on it; got {payload}"
+    )
+    assert payload["verification_id"] == prior["id"], (
+        "the duplicate reply must hand back the seeded draft's id, proving the "
+        f"pre-check really read the seeded row; got {payload['verification_id']!r}"
+    )
+    assert len(_sv_rows(sb, _SEAM06_STRATEGY)) == 1, (
+        "the duplicate path must mint NO second draft row; got "
+        f"{[(x['id'], x['status']) for x in _sv_rows(sb, _SEAM06_STRATEGY)]}"
     )
 
 

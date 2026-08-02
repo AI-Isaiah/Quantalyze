@@ -35,7 +35,9 @@ factsheet on a spinner that never resolves.
 - [x] **Phase 140.3: SEAMUX — Client & wizard seam error surface** (INSERTED) - One source of truth for codes/copy, observe every HTTP outcome, never blame the user for our outage, non-destructive retry (shipped 2026-07-30, PR #651; VERIFICATION **gaps_found** 15/16 — 2 named residuals accepted as tracked tech-debt: **SEAMUX-03** (9 of 15 seam-importing routes still emit bare `{error}` not the typed `{code}` envelope — ⚠️user-facing error attribution) + poll-disjointness pin blind to `wizardFetch` (test-hygiene). See TODOS "v1.16 carried-forward residuals". ⏳ **G4–G8 gap-closure series is coding these arms route-by-route; G7 (2026-07-31) wire-audited `/api/strategies/csv-validate` and found per-arm machine codes ALREADY on the wire — 0 codeless arms — the VERIFICATION `grep -cE 'code:\s*"'` counted 0 only because this route carries `code` positionally through `csvErrorBody`; receipt is the extended `src/__tests__/csv-validate-route.test.ts` (arm-agnostic `json.code` sweep + SENTINEL_PII guard). G8 (2026-07-31) coded both admin match routes — `admin/match/eval` 0→6 coded arms, `admin/match/recompute` 0→10 incl. 2 coded deny bodies; TS-19 4xx forwards now carry `err.seamCode` with `dependency` intact; T-140-12 ordering preserved. G9 (2026-07-31) coded the TENTH route the VERIFICATION nine-route list MISSED — `/api/admin/strategy-review`, 0→27 coded arms (13 `REVIEW_SOURCE_READ_FAILED` byte-identical 503s, 5 `REVIEW_RECHECK_FAILED` 409s incl. a plan-missed status-pin 409, 2 `UNKNOWN` write-fault 500s, plus the auth/validation/gate tokens); arm-agnostic source-scan fence added; RED-on-neutering observed. Its only seam import is `scrubSeamError` (in-class by definition, no analytics call). **✅ SEAMUX-03 aggregate CLOSED 2026-07-31** — opus verifier PASSED (16/16 seam routes carry typed `{code}` on every reachable route-emitted arm; 817/817 tests; RED-on-neuter confirmed on 4 routes); `140.3-VERIFICATION.md` SEAMUX-03 → `resolved`. Non-blocking residuals → TODOS: 2 codeless `rateLimitDenyJson` deny bodies (SEAMRIM-05-pinned, rate-limiter boundary) + poll-disjointness pin (test-hygiene) + SC2 `COMPOSITE_UNSUPPORTED_UNIFIED` residual.**)
 - [x] **Phase 140.4: SEAMRIM — close the wizard/client rim the core fix left open** (INSERTED) - Fabricated observations, destructive controls, our-fault-rendered-as-theirs, and the guards that cannot fail (shipped 2026-07-30, PR #652 + CR-01; VERIFICATION was `gaps_found` 39/43 but its user-facing gap is **STALE/RESOLVED** — verified 2026-07-31 that the `SEAM_MISCONFIGURED`→`UNKNOWN` translate hop IS present in current code at `ConnectKeyStep.tsx:496` + `MultiKeyConnectStep.tsx:829` (`recogniseSeamErrorCode`); the fix landed after the VERIFICATION was written. Only a non-blocking `analytics-client` scrub-test ledger-row residual (doc-hygiene) remains. See TODOS)
 - [x] **Phase 140.5: SEAMPROSE — attribution copy, harness fidelity, and prose/citation truth** (INSERTED) - What the codebase says about itself is true; ⭐carries `Retry-After` travels, a HARD PREREQUISITE for 141 (completed 2026-07-30)
-- [ ] **Phase 141: SEAM — Retry-with-backoff, gated on the idempotency audit** - Committed retry-safety audit, then bounded retry ONLY for allowlisted calls; teaser provably never retried
+- [x] **Phase 141: SEAM — Retry-with-backoff, gated on the idempotency audit** - Committed retry-safety audit, then bounded retry ONLY for allowlisted calls; teaser provably never retried (completed 2026-07-31)
+- [x] **Phase 141.1: SEAMBACKOFF — Retry-After-aware backoff, breaker recalibration, and SEAM-05 evidence re-derivation** (INSERTED) - Scope from the 8-agent review campaign over 141; **zero user-facing and zero data-integrity defects found**, so no retry verdict changed and no budget row was un-flipped. 9/9 plans (completed 2026-07-31). VERIFICATION was `gaps_found` 19/20 and is now **passed** 20/20 on re-verification 2026-08-01 — all three gaps had been closed in the tree by post-verification work and the file was simply never re-run: D-06's last stale coordinate became a symbol anchor at `22332e34` (the whole self-relative-citation class is now absent from `resilient-fetch.ts`), the two deferred ledgers were reconciled so TODOS.md and `deferred-items.md` both carry all four `DEF-141.1-*` ids, and the Falsifiability Ledger closed at 20/20 observed with `nyquist_compliant: true`
+- [x] **Phase 141.2: SEAMFIX — close the 141.1 code-review findings: duplicate onboard verification write, flag-monitor denominator integrity, breaker re-arm** (INSERTED) - 25 findings from the xhigh review (30 agents) deduped to 13; outcome is **twelve remediated, one dispositioned** — finding 8's retry↔limiter amplification is ACCEPTED, not fixed, and is stated as STILL LIVE everywhere it is summarised. Closes the duplicate `strategy_verifications` write on the money path (onboard's retry is now refused unless the call carries a truthy `wizard_session_id`, decided at the single chokepoint) and the three monitoring-integrity regressions D-16 shipped (unbounded `.select()` → `head: true` count, attacker-movable dedup deleted outright, read error now a distinct `denominator_read_failed` outcome rather than zero traffic). 6/6 plans (completed 2026-08-01). VERIFICATION was `human_needed` 17/17 and is now **passed** — three of its four production probes were discharged read-only on 2026-08-01 (42 rows / 42 distinct `correlation_id` / 0 `wizard:` prefix, flow_type resync 20 · csv 20 · onboard 2; unbounded `.select()` returned exactly 1000 rows at HTTP 200 with `error: null` against 7351 total, reproducing the silent truncation; all five breaker keys ABSENT, keeping finding 10 framed as hardening). The fourth — a real Railway-edge 503 carrying a malformed `Retry-After` — stays **Manual-Only and is not a gap**: it cannot be induced, and the only contract-bound 503 emitter we own structurally cannot emit one. ⏳ On PR #656, **not yet merged**
 - [ ] **Phase 142: JOB — strategy_analytics stuck-computing reaper + computing_started_at DDL** - Writer-stamped transition timestamp + pg_cron reaper to terminal `failed` + threshold-math CI invariant + WEDGE-01 regression test
 - [ ] **Phase 143: JOB — Dropped-enqueue reconciliation sweep** - pg_cron sweep finds strategies with data but NO compute-job row (the "`after()` never ran" hole) and idempotently re-enqueues + alerts
 - [ ] **Phase 144: JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence** - New migration layered on 20260720120000: terminal `failed` instead of bare DELETE, tightened cadence, 4h threshold unchanged
@@ -241,6 +243,16 @@ Plans:
 - [x] 140.3-15-PLAN.md — TS-38 (`SEAM_MISCONFIGURED` stops wearing the upstream's envelope) + TS-20 (`correlation_id` reaches the render slot) — SEAMUX-03/04
 - [x] 140.3-16-PLAN.md — **phase gate**: negative pins on the four already-strong properties; all 26 ledger rows re-run at the FINAL tree; 7 criteria / 9 requirements / 19 obligations adjudicated. Has a blocking human checkpoint (copy vs DESIGN.md; the destructive path proven in a real flow).
 
+**Gap-closure series** *(added post-VERIFICATION, `gap_closure: true`; these 8 plans were executed and summarised but had no rows here until the 2026-08-01 close-out — the work itself is described in this phase's milestone-list entry above. There is no G3.)*
+- [x] 140.3-G1-PLAN.md — poll-disjointness re-tiering + guard registration
+- [x] 140.3-G2-PLAN.md — SC2 residual adjudication + the stale-count class
+- [x] 140.3-G4-PLAN.md — SEAMUX-03 coded arms on the key-verification route surface
+- [x] 140.3-G5-PLAN.md — SEAMUX-03 coded arms on `scenario/optimize` + simulator
+- [x] 140.3-G6-PLAN.md — `/api/bridge` (9 arms) + `/api/portfolio-optimizer` (9 `code:` sites), incl. the B-26 money-bearing arm
+- [x] 140.3-G7-PLAN.md — `/api/strategies/csv-validate` **wire audit**: found ZERO codeless arms (already coded positionally via `csvErrorBody`) — measurement, not a rewrite
+- [x] 140.3-G8-PLAN.md — both admin match routes: `admin/match/eval` 0→6 coded arms, `admin/match/recompute` 0→10 incl. 2 coded deny bodies
+- [x] 140.3-G9-PLAN.md — `/api/admin/strategy-review`, the TENTH route the VERIFICATION's nine-route list MISSED (instance-not-class): 0→27 coded arms
+
 ### Phase 140.4: SEAMRIM — close the wizard/client rim the core fix left open (INSERTED)
 
 **Goal**: The surfaces stop asserting things we did not measure, stop offering a destructive control as the way forward, and stop attributing our own faults to the user or their venue — and the guards that claim these classes are closed can actually fail.
@@ -260,20 +272,20 @@ Any remedy landing in row 2 or 3 is **partial by construction** and must say so.
 **Plans:** 14 plans in 4 waves
 
 Plans:
-- [ ] 140.4-01-PLAN.md — C-3a: `strategyGate` refuses an unrepresentable span (row 1, both consumers) + the admin publish route's 7 unchecked reads — SEAMRIM-01 *(wave 1)*
-- [ ] 140.4-03-PLAN.md — C-2: the CSV double-submit — a `(user_id, wizard_session_id, source)` partial index, the CSV writer, the SQL receipt with its cross-source control, the 23505 arm, the copy — SEAMRIM-03 *(wave 1)*
-- [ ] 140.4-04-PLAN.md — the raw-5xx `ast` census (12 sites / 9 triples) against a multiplicity-preserving quarantine; re-runs the mutation that was GREEN — SEAMRIM-09 *(wave 1)*
-- [ ] 140.4-05-PLAN.md — a visually-inert `<LiveRegion>` primitive + the 3 measured-regressing surfaces (3 of 27, partial by construction) — SEAMRIM-10 *(wave 1)*
-- [ ] 140.4-02-PLAN.md — C-3b: the wizard's 7 unchecked gate reads + a runtime receipt that read-failed ≠ genuinely-empty — SEAMRIM-02 *(wave 2)*
-- [ ] 140.4-06-PLAN.md — C-5a: `captureToSentry` returns its promise (copy `audit.ts`), `after()` at the breaker's three sinks, the limiter's timeout sentinel recorded — SEAMRIM-04 *(wave 2)*
-- [ ] 140.4-07-PLAN.md — scrub tail A: `keys/sync` (6), `csv-finalize` (6), `verify-strategy` (3) = 15 sites — SEAMRIM-06 *(wave 2)*
-- [ ] 140.4-08-PLAN.md — scrub tail B: the remaining 6 import-edge routes (12 sites) + `ratelimit.ts`'s Upstash-token log — SEAMRIM-06 *(wave 3)*
-- [ ] 140.4-09-PLAN.md — C-1 (LOW): `csv-validate`'s static 502 + the text-carrying-channel alias rule + the thrown twin — SEAMRIM-06 *(wave 3)*
-- [ ] 140.4-11-PLAN.md — C-4: the destructive control must be EARNED — invert the roster into a property (verified count is 1, not 9) — SEAMRIM-07 *(wave 3)*
-- [ ] 140.4-14-PLAN.md — the `no-unchecked-supabase-read` ESLint ratchet, scoped to the proven-clean glob — SEAMRIM-11 *(wave 3)*
-- [ ] 140.4-10-PLAN.md — derive `SEAM_FILES` from the IMPORT EDGE + `derived == SEAM_ROUTE_BUDGETS` + registry rows and floor — SEAMRIM-06 *(wave 4)*
-- [ ] 140.4-12-PLAN.md — the wire↔render vocabulary: translation becomes authoritative; the nested envelope is read — SEAMRIM-08 *(wave 4)*
-- [ ] 140.4-13-PLAN.md — C-5b: adopt `rateLimitDenyJson` at the 12 seam call sites + a derived-population posture guard — SEAMRIM-05 *(wave 4)*
+- [x] 140.4-01-PLAN.md — C-3a: `strategyGate` refuses an unrepresentable span (row 1, both consumers) + the admin publish route's 7 unchecked reads — SEAMRIM-01 *(wave 1)*
+- [x] 140.4-03-PLAN.md — C-2: the CSV double-submit — a `(user_id, wizard_session_id, source)` partial index, the CSV writer, the SQL receipt with its cross-source control, the 23505 arm, the copy — SEAMRIM-03 *(wave 1)*
+- [x] 140.4-04-PLAN.md — the raw-5xx `ast` census (12 sites / 9 triples) against a multiplicity-preserving quarantine; re-runs the mutation that was GREEN — SEAMRIM-09 *(wave 1)*
+- [x] 140.4-05-PLAN.md — a visually-inert `<LiveRegion>` primitive + the 3 measured-regressing surfaces (3 of 27, partial by construction) — SEAMRIM-10 *(wave 1)*
+- [x] 140.4-02-PLAN.md — C-3b: the wizard's 7 unchecked gate reads + a runtime receipt that read-failed ≠ genuinely-empty — SEAMRIM-02 *(wave 2)*
+- [x] 140.4-06-PLAN.md — C-5a: `captureToSentry` returns its promise (copy `audit.ts`), `after()` at the breaker's three sinks, the limiter's timeout sentinel recorded — SEAMRIM-04 *(wave 2)*
+- [x] 140.4-07-PLAN.md — scrub tail A: `keys/sync` (6), `csv-finalize` (6), `verify-strategy` (3) = 15 sites — SEAMRIM-06 *(wave 2)*
+- [x] 140.4-08-PLAN.md — scrub tail B: the remaining 6 import-edge routes (12 sites) + `ratelimit.ts`'s Upstash-token log — SEAMRIM-06 *(wave 3)*
+- [x] 140.4-09-PLAN.md — C-1 (LOW): `csv-validate`'s static 502 + the text-carrying-channel alias rule + the thrown twin — SEAMRIM-06 *(wave 3)*
+- [x] 140.4-11-PLAN.md — C-4: the destructive control must be EARNED — invert the roster into a property (verified count is 1, not 9) — SEAMRIM-07 *(wave 3)*
+- [x] 140.4-14-PLAN.md — the `no-unchecked-supabase-read` ESLint ratchet, scoped to the proven-clean glob — SEAMRIM-11 *(wave 3)*
+- [x] 140.4-10-PLAN.md — derive `SEAM_FILES` from the IMPORT EDGE + `derived == SEAM_ROUTE_BUDGETS` + registry rows and floor — SEAMRIM-06 *(wave 4)*
+- [x] 140.4-12-PLAN.md — the wire↔render vocabulary: translation becomes authoritative; the nested envelope is read — SEAMRIM-08 *(wave 4)*
+- [x] 140.4-13-PLAN.md — C-5b: adopt `rateLimitDenyJson` at the 12 seam call sites + a derived-population posture guard — SEAMRIM-05 *(wave 4)*
 
 ### Phase 140.5: SEAMPROSE — attribution copy, harness fidelity, and prose/citation truth (INSERTED)
 
@@ -300,14 +312,14 @@ Plans:
 **Plans:** 8/8 plans complete
 
 Plans:
-- [ ] **W1** · 01 — harness fidelity flip + `source-scan.ts` + purity needles *(lands ALONE: the leak closure is TRAP-8 sequence-sensitive, and it creates the comment-handling module every later guard imports)*
-- [ ] **W2** · 02 — `wizardErrors` vocabulary owner + B-02 + venue codes *(publishes the §4a interface plan 05 consumes)*
-- [ ] **W2** · 03 — `Retry-After` travels + `SERVICE_UNREACHABLE` at all five transport catches ⭐ *HARD PREREQUISITE FOR 141*
-- [ ] **W2** · 04 — citation/prose corrections, repo-wide
-- [ ] **W3** · 05 — the CSV class fix ⭐ *DEF-140.4-C and the §6 hand-off hole closed as ONE defect at row 1*
-- [ ] **W3** · 06 — test fidelity + spec-disabling guard
-- [ ] **W3** · 07 — type invariants
-- [ ] **W4** · 08 — seam-surface conversion remainder + the citation guard + ALL guard registrations + phase gate *(guard lands AFTER conversions — "fix before guard"; single owner of `contracts-registry.test.ts`, which kills the same-wave floor-bump conflict that made plans 10 and 13 collide in 140.4)*
+- [x] **W1** · 01 — harness fidelity flip + `source-scan.ts` + purity needles *(lands ALONE: the leak closure is TRAP-8 sequence-sensitive, and it creates the comment-handling module every later guard imports)*
+- [x] **W2** · 02 — `wizardErrors` vocabulary owner + B-02 + venue codes *(publishes the §4a interface plan 05 consumes)*
+- [x] **W2** · 03 — `Retry-After` travels + `SERVICE_UNREACHABLE` at all five transport catches ⭐ *HARD PREREQUISITE FOR 141*
+- [x] **W2** · 04 — citation/prose corrections, repo-wide
+- [x] **W3** · 05 — the CSV class fix ⭐ *DEF-140.4-C and the §6 hand-off hole closed as ONE defect at row 1*
+- [x] **W3** · 06 — test fidelity + spec-disabling guard
+- [x] **W3** · 07 — type invariants
+- [x] **W4** · 08 — seam-surface conversion remainder + the citation guard + ALL guard registrations + phase gate *(guard lands AFTER conversions — "fix before guard"; single owner of `contracts-registry.test.ts`, which kills the same-wave floor-bump conflict that made plans 10 and 13 collide in 140.4)*
 
 ### Phase 141: SEAM — Retry-with-backoff, gated on the idempotency audit
 **Goal**: Transient Railway blips self-heal — but ONLY for calls with a traced idempotency proof, so a retry can never double-execute a side effect
@@ -318,7 +330,58 @@ Plans:
   2. Under an injected single transient failure, an allowlisted call (e.g. `flow_type: resync`) succeeds on retry with exactly ONE server-side effect — proven against the real `compute_jobs` partial-unique-index + `WIZARD_DUPLICATE` contract.
   3. `flow_type: teaser` is provably never retried, and a regression test pins the contract (two identical teaser calls → TWO `strategy_verifications` rows) so a future refactor can't quietly start retrying it and minting duplicate verifications/`public_token`s/leads.
   4. With the breaker open, zero retry attempts fire — no bypass path exists, so retries cannot amplify an outage.
-**Plans**: TBD
+**Plans:** 4/4 plans complete
+
+Plans:
+- [x] **W1** · 141-01-PLAN.md — Python resync draft-SV dedup + DB proofs (SQL compute_jobs/SV-index gate, teaser two-rows pytest pin) ⭐ *the LOCKED precondition for allowlisting resync*
+- [x] **W1** · 141-02-PLAN.md — retry loop + `retriesOverride` in `resilientFetch` (dormant: all rows stay 0), dual breaker gates, SC-4 mutation observed
+- [x] **W2** · 141-03-PLAN.md — `seam-retry-registry.ts` leaf: the SC1 audit = the runtime allowlist (13 evidenced verdicts, absence ⇒ no-retry), SC-1 mutation observed
+- [x] **W3** · 141-04-PLAN.md — wire both clients (flow_type-keyed, explicit `?? 0` belt), flip 5 rows + edit pins SAME commit, SC-4b charges backoff+jitterMax, SC-2/SC-3 mutations + phase gate
+
+### Phase 141.1: SEAMBACKOFF — Retry-After-aware backoff, breaker recalibration, and SEAM-05 evidence re-derivation (INSERTED)
+
+**Goal:** The retry honours the upstream's own `Retry-After` contract (built by 140.5, never consumed), the breaker threshold is a decided number under per-attempt counting, and the SEAM-05 audit artifact's evidence is re-derived from traced source so the documented audit and the runtime allowlist cannot drift. Scope from the 8-agent review campaign over 141 — see `141-REVIEW-CONSOLIDATED.md`. **Zero user-facing and zero data-integrity defects were found; no retry verdict changes and no budget row is un-flipped.**
+**Requirements**: SEAM-05, SEAM-06 (evidence + guard repair; coverage tracked by decision ID D-01…D-20 from 141.1-CONTEXT.md)
+**Depends on:** Phase 141
+**Plans:** 9 plans
+
+Plans:
+- [x] **W1** · 141.1-01-PLAN.md — D-01 `Retry-After` fail-fast (SC-C/SC-C′) + D-02 threshold ratified (docblock + derived pin)
+- [x] **W1** · 141.1-02-PLAN.md — D-03/D-04/D-05 evidence re-derived from traced source + D-06 both citation guards (SC-G/G′/H/H′, roster 34→35)
+- [x] **W1** · 141.1-03-PLAN.md — D-14c `status='draft'` behaviour pin in Python tests (SC-P; OQ-2 decided: tests outside the fence)
+- [x] **W2** · 141.1-04-PLAN.md — D-08 required `retriesOverride: 0 | 1`, fallback dropped (SC-E) + D-07 false prose corrected post-D-08
+- [x] **W2** · 141.1-05-PLAN.md — D-11 frozen `as const satisfies` maps + real exhaustiveness + never-defaulted `budgetKeyFor` (SC-I)
+- [x] **W3** · 141.1-06-PLAN.md — D-17 logging both silent arms (SC-M/M′ credential-negative) + G2 decodeBreakerLock bounds + D-12/D-13/D-10/D-14d headline mutations (SC-A/B/D/O)
+- [x] **W3** · 141.1-07-PLAN.md — D-09 census retry axis (SC-F) + D-14a/b class-γ 3/3 + pins (SC-J/K) + D-15 per-leg SC-4b recharge (SC-L, 56,000ms)
+- [x] **W1** · 141.1-08-PLAN.md — D-16 flag-monitor repair: numerator was structurally DEAD (OQ-1 resolved by probe) — rebuild on indexed fields + distinct-correlation_id denominator + anti-`path:` recurrence guard (SC-N strengthened)
+- [x] **W4** · 141.1-09-PLAN.md — D-18 seam-breaker runbook + D-19 TODOS ledger (G1–G4 explicit, H1–H7) + D-20 ship-time 0.51.0.0 bump
+
+### Phase 141.2: SEAMFIX — close the 141.1 code-review findings: duplicate onboard verification write, flag-monitor denominator integrity, breaker re-arm (INSERTED)
+
+**Goal:** Close the 13 verified findings from the xhigh code review of 141.1 (30 agents, 25 findings deduped to 13). Two are the priority. **(A) A duplicate WRITE on the money path:** `onboard`'s retry grant rests on `idempotent_by_session`, but `finalize-wizard` omits `wizard_session_id` when `strategies.wizard_session_id` is NULL — nullable by design — so the Python side mints a fresh `uuid4()` per attempt, the unique constraint cannot collide, and ONE user submit inserts TWO `strategy_verifications` rows on a flow the registry marks retry-safe. **(B) The D-16 flag-monitor denominator rewrite shipped three monitoring-integrity regressions in one change** — an unbounded `.select()` PostgREST silently truncates at `max_rows=1000` (HTTP 200, `error: null`); dedup keyed on the attacker-controllable inbound `X-Correlation-Id` reachable via the UNAUTHENTICATED `/api/verify-strategy`; and a dedup that collapses nothing on the only two retry-eligible flows, because the service re-mints a uuid4 whenever the inbound id is not a bare UUID and `wizardFetch` sends `wizard:<uuid>`. 141.1 repaired an alert that never fired and replaced it with one that can be silenced, saturated, or falsely triggered.
+**Requirements**: SEAM-05, SEAM-06 (defect closure — the audit's retry verdicts and the alert that watches them; ⚠️ unlike 141.1, this phase DOES change a retry verdict or add a guard, see findings 1 and 6)
+**Depends on:** Phase 141.1
+**Plans:** 6 plans
+
+⚠️ **Evidence:** `141.2-FINDINGS.md` in the phase dir holds all 13 with per-finding
+failure scenarios (inputs → wrong outcome). Two scoping notes there are SUPERSEDED:
+research proved findings 10–11 were INTRODUCED by 141.1 (`f308b460`, single-commit
+`git log -S`) — finding 10 is the phase's top priority — and the founder ordered all
+13 fixed in code, including 12–13 (`141.2-CONTEXT.md` D-05 + ⚠️ RESEARCH CORRECTIONS).
+
+⚠️ **That sentence records the INSTRUCTION, not the outcome.** As shipped: **twelve
+remediated, one dispositioned.** Finding 8 (retry → limiter amplification) was accepted
+rather than fixed — no limiter code changed, and the amplification is still live; the
+re-raise conditions are on `retriesForFlow` and in `TODOS.md`. Do not restate this phase
+as "all 13 fixed in code".
+
+Plans:
+- [x] 141.2-01-PLAN.md — breaker cluster: corrupt-lock write path arms (f10, REGRESSION), absolute epoch bound (f11), per-attempt admission (f5)
+- [x] 141.2-02-PLAN.md — resync verdict map move to NO (f6) + pin surgery + Python comment-only DEF-141.1-02-A
+- [x] 141.2-03-PLAN.md — flag-monitor denominator: counting form, attempt grain, fail-loud read error (f2,f3,f4,f7,f12)
+- [x] 141.2-04-PLAN.md — Retry-After parsed, not presence-tested (f9)
+- [x] 141.2-05-PLAN.md — onboard retry conditional on idempotency-key presence at the chokepoint (f1)
+- [x] 141.2-06-PLAN.md — delete the unfalsifiable pin (f13), runbook rewritten once, D-07 recorded, D-08 changelog corrected
 
 ### Phase 142: JOB — strategy_analytics stuck-computing reaper + computing_started_at DDL
 **Goal**: A mid-job worker crash can no longer strand a `strategy_analytics` row on `computing` forever — a wizard poll or page refresh sees a real terminal outcome
@@ -384,7 +447,7 @@ Plans:
 | 140. SEAM core + breaker | 7/7 | Complete   | 2026-07-25 |
 | 140.1. PYAPI contract/status/limiter (INSERTED) | 9/9 | Complete | 2026-07-26 |
 | 140.1.1. PYAPI-FIX (INSERTED) | 7/7 | Complete    | 2026-07-26 |
-| 141. SEAM retry (audit-gated) | 0/? | Not started | - |
+| 141. SEAM retry (audit-gated) | 4/4 | Complete    | 2026-07-31 |
 | 142. JOB reaper + DDL | 0/? | Not started | - |
 | 143. JOB dropped-enqueue sweep | 0/? | Not started | - |
 | 144. JOB WR-02 terminal UPDATE | 0/? | Not started | - |

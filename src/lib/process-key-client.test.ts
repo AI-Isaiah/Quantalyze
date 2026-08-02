@@ -295,6 +295,217 @@ describe("postProcessKey — enqueue vs sync budget selection", () => {
 });
 
 /**
+ * Phase 141.2 / D-03 (finding 6) — the retry VERDICT, read off the wire at the
+ * chokepoint the verdict actually reaches.
+ *
+ * ⚠️ WHY THIS PIN LIVES HERE AND NOT IN `seam-retry-registry.test.ts`. The
+ * registry file can only prove which map a key sits in. The defect class this
+ * pin fences is SEAM-CROSSING: 141.1-02 rewrote `resync`'s evidence to ADMIT the
+ * SEQUENTIAL-retry class is open (the compute worker's tick advances the draft
+ * verification out of draft status inside the backoff window, so the second
+ * attempt's `status='draft'` pre-check matches nothing and a second row is
+ * inserted) and left the retry grant that had been issued on the strength of the
+ * deleted sentence. A registry-shaped assertion agrees with the registry by
+ * construction; only driving the REAL `postProcessKey` shows what the transport
+ * is actually told. Read `retriesOverride` off `coreSpy`'s captured init, which
+ * is the exact value `resilientFetch` consumes.
+ *
+ * BOTH POLARITIES, deliberately. Without the `onboard` case a registry emptied
+ * outright would satisfy the `resync` case forever — a fence that passes because
+ * it is inspecting nothing. `onboard` keeps its verdict in this plan.
+ */
+describe("postProcessKey — the retry verdict reaching the transport (D-03)", () => {
+  beforeEach(() => {
+    process.env.INTERNAL_API_TOKEN = "internal-test-token";
+    coreSpy.mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Drive the REAL client and return the `retriesOverride` it handed the core. */
+  async function retriesOverrideFor(
+    flowType: "onboard" | "resync" | "teaser" | "csv",
+    context: Record<string, unknown> = {},
+  ): Promise<unknown> {
+    await postProcessKey({
+      flow_type: flowType,
+      source: "test",
+      context,
+      userId: "u1",
+      correlationId: "c1",
+    });
+    expect(coreSpy).toHaveBeenCalledTimes(1);
+    // resilientFetch(budgetKey, path, init) — the init is the third argument.
+    return (coreSpy.mock.calls[0][2] as { retriesOverride?: unknown })
+      .retriesOverride;
+  }
+
+  it("resync sends retriesOverride 0 — its verdict is NO", async () => {
+    expect(
+      // 141.2 ship review — the context below is SYNTHETIC and load-bearing for
+      // the same reason the onboard control's is. Measured: with a keyless
+      // context this pin survives re-granting `resync`, because D-01's key gate
+      // returns 0 whichever map the flow sits in — so it was pinning the gate
+      // while its message below talks about the verdict. Supplying a key leaves
+      // map membership as the only input, which is what the message claims. No
+      // production resync carries this field (`keys/sync` sends
+      // `{strategy_id, user_id}`); that is precisely why a realistic context
+      // cannot isolate the verdict here.
+      await retriesOverrideFor("resync", {
+        wizard_session_id: "ws-resync-synthetic",
+      }),
+      "a resync request left this client authorised to replay. D-03 withdrew " +
+        "that grant: `resync` carries a NO verdict in RETRY_AUDIT_NO_FLOW_TYPES " +
+        "because the strategy-scoped `status='draft'` pre-check does NOT close " +
+        "the SEQUENTIAL-retry class — the worker tick can advance the draft " +
+        "between attempts, and the second attempt then inserts a second draft " +
+        "verification row. Re-granting the retry requires a durable idempotency " +
+        "key for resync, which does not exist.",
+    ).toBe(0);
+  });
+
+  it("onboard still sends retriesOverride 1 (the pin is not vacuous)", async () => {
+    expect(
+      // 141.2 / D-01 — this control now supplies a wizard_session_id. The
+      // narrowing D-03's message anticipated ("if onboard's grant is being
+      // narrowed, this pin must move in that same commit rather than silently
+      // agreeing") HAS landed: `retriesForFlow` makes the grant conditional on a
+      // usable idempotency key, so a keyless context would make this control
+      // read 0 and stop discriminating a live registry from an emptied one.
+      await retriesOverrideFor("onboard", {
+        wizard_session_id: "33333333-3333-4333-8333-333333333333",
+      }),
+      "onboard's retry disappeared even WITH an idempotency key present. This " +
+        "plan withdrew resync's verdict ONLY; D-01 conditioned onboard's grant " +
+        "on key presence, it did not revoke it. With the registry emptied this " +
+        "pin is the only thing standing between the resync case above and a " +
+        "fence that inspects nothing.",
+    ).toBe(1);
+  });
+});
+
+/**
+ * Phase 141.2 / D-01 (finding 1), SC-K — THE KEY-PRESENCE ANTECEDENT IS
+ * ENFORCED, not merely asserted, and it is enforced HERE.
+ *
+ * ⚠️ WHY THESE PINS DRIVE THE REAL CLIENT. `onboard`'s YES verdict rests on one
+ * antecedent: *a non-NULL wizard_session_id makes `idempotent_by_session` true*.
+ * `finalize-wizard` forwards NO `wizard_session_id` when the draft's column is
+ * NULL (the column is nullable by design and the route correctly forwards
+ * absence AS absence), and the Python side then skips its duplicate pre-check and
+ * mints a fresh server-side session per attempt — so the unique index cannot
+ * collide and a retried submit inserts a SECOND verification row. That defect
+ * lives ACROSS the seam: no helper-level assertion about which map `onboard`
+ * sits in can see it, which is exactly how the grant shipped green. Only the
+ * value `resilientFetch` is actually handed can. Read it off `coreSpy`'s
+ * captured init.
+ *
+ * ⚠️ THE PREDICATE IS TRUTHINESS, NOT NULL-CHECKING. Python evaluates
+ * `bool(context.get("wizard_session_id"))` at the flow-type gate in
+ * `process_key.py`, so the empty string is FALSE there. A TypeScript guard
+ * written as `!== null` would grant a retry on `""` that the server would then
+ * refuse to dedupe — the two sides would be running different predicates while
+ * appearing to agree. The empty-string case below is what makes that divergence
+ * a RED rather than a latent disagreement.
+ *
+ * ⚠️ BOTH POLARITIES, per the oracle-shape law. A client that suppressed the
+ * retry unconditionally would satisfy the two absence cases forever; the
+ * with-key case is what forbids it.
+ *
+ * SCOPE, stated honestly: the production census for this phase found every
+ * post-F6 producer stamping the id and zero surviving NULL-carrying drafts, so
+ * this is CLASS CLOSURE — it converts an asserted antecedent into an enforced
+ * predicate at the shared chokepoint. It is not a reduction in live retry
+ * volume, and no evidence here should be read as claiming one.
+ */
+describe("postProcessKey — onboard's retry is conditional on a usable idempotency key (D-01)", () => {
+  beforeEach(() => {
+    process.env.INTERNAL_API_TOKEN = "internal-test-token";
+    coreSpy.mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * Drive the REAL `postProcessKey` for `onboard` with the given context and
+   * return the `retriesOverride` it handed the core. Deliberately NOT a call to
+   * `retriesForFlow`: the helper agreeing with itself is not the property under
+   * test — the CHOKEPOINT consulting the helper is.
+   */
+  async function onboardRetriesWithContext(
+    context: Record<string, unknown>,
+  ): Promise<unknown> {
+    await postProcessKey({
+      flow_type: "onboard",
+      source: "test",
+      context,
+      userId: "u1",
+      correlationId: "c1",
+    });
+    expect(
+      coreSpy,
+      "the client never reached the transport, so the captured init below is " +
+        "vacuous.",
+    ).toHaveBeenCalledTimes(1);
+    // resilientFetch(budgetKey, path, init) — the init is the third argument.
+    return (coreSpy.mock.calls[0][2] as { retriesOverride?: unknown })
+      .retriesOverride;
+  }
+
+  it("an onboard context with NO wizard_session_id sends retriesOverride 0", async () => {
+    expect(
+      await onboardRetriesWithContext({}),
+      "an onboard request carrying no idempotency key left this client " +
+        "authorised to replay. The server has nothing to dedupe on in that " +
+        "state — it mints a fresh session per attempt — so attempt 2 inserts a " +
+        "SECOND strategy_verifications row on the money path. The verdict must " +
+        "be decided from flow_type AND key presence together, at the shared " +
+        "chokepoint, not from flow_type alone.",
+    ).toBe(0);
+  });
+
+  it("an EMPTY-STRING wizard_session_id sends retriesOverride 0 — truthiness, matching Python", async () => {
+    expect(
+      await onboardRetriesWithContext({ wizard_session_id: "" }),
+      "the empty string was treated as a usable idempotency key. Python gates " +
+        "on bool(context.get('wizard_session_id')), for which '' is FALSE, so " +
+        "the server would run with the dedupe OFF while this client believed " +
+        "the retry was safe. This is the signature of a `!== null` or " +
+        "`!== undefined` implementation: the two sides of the seam are running " +
+        "different predicates. Write the predicate as a truthiness test.",
+    ).toBe(0);
+  });
+
+  it("an onboard context WITH a wizard_session_id still sends retriesOverride 1", async () => {
+    expect(
+      await onboardRetriesWithContext({
+        wizard_session_id: "33333333-3333-4333-8333-333333333333",
+      }),
+      "onboard lost its retry even with the antecedent satisfied. D-01 makes " +
+        "the grant CONDITIONAL; a client that suppresses the retry " +
+        "unconditionally would satisfy both absence cases above while pinning " +
+        "nothing, which is why this polarity is asserted alongside them.",
+    ).toBe(1);
+  });
+});
+
+/**
  * Phase 140.1 / PYAPI-02 — the `X-Tenant-Claim` mint.
  *
  * The Python limiter buckets `/process-key` on an HMAC-verified tenant claim

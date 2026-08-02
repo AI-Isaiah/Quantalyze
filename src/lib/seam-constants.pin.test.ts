@@ -7,6 +7,8 @@ import {
   BREAKER_COOLDOWN_S,
   DEFAULT_RETRY_AFTER_S,
   SEAM_RETRIES,
+  SEAM_RETRY_BACKOFF_MS,
+  SEAM_RETRY_JITTER_MAX_MS,
   BREAKER_STORE_TIMEOUT_MS,
   BREAKER_STORE_RETRIES,
   BREAKER_STORE_BACKOFF_MS,
@@ -16,6 +18,12 @@ import {
   decodeBreakerLock,
 } from "./resilient-fetch";
 import { seamBreakerVerdict } from "./seam-discriminator";
+import {
+  RETRY_SAFE_ANALYTICS,
+  RETRY_SAFE_FLOW_TYPES,
+  RETRY_AUDIT_NO_ANALYTICS,
+  RETRY_AUDIT_NO_FLOW_TYPES,
+} from "./seam-retry-registry";
 import {
   FAKE_BREAKER_KEY,
   FAKE_THRESHOLD,
@@ -163,6 +171,34 @@ const EXPECTED_DEPENDENCIES: Record<string, string[]> = {
 };
 
 /**
+ * Phase 141 / SEAM-05+06 — the per-row retry oracle, HAND-TYPED literals (never
+ * read out of the module under test). Five rows carry `1` after the SEAM-05
+ * idempotency audit allowlisted them; every other row stays `0`.
+ *
+ * The five 1s are the same set the retry-safety registry lists as YES: bridge,
+ * simulator, portfolio-optimizer, optimize-weights (the four compute analytics
+ * wrappers) plus process-key-enqueue (the onboard+resync budget). The registry↔
+ * rows consistency pin below re-checks that these two hand-typed statements — the
+ * registry's and this row table's — cannot drift apart. Raising any 0 here is out
+ * of fence unless its audit verdict and its row flip land together.
+ */
+const EXPECTED_RETRIES: Record<string, number> = {
+  "validate-key": 0,
+  "encrypt-key": 0,
+  bridge: 1,
+  simulator: 1,
+  "portfolio-optimizer": 1,
+  "optimize-weights": 1,
+  "match-eval": 0,
+  "match-recompute": 0,
+  "portfolio-analytics": 0,
+  "process-key-enqueue": 1,
+  "process-key-sync": 0,
+  "keys-permissions": 0,
+  "process-key-unified-dormant": 0,
+};
+
+/**
  * The closed SERVICE-dependency vocabulary, typed HERE as literals
  * (`STATUS_CONTRACT.md` §4). The only values that may become a breaker key.
  *
@@ -280,20 +316,245 @@ describe("SEAM_BUDGETS — every timeout pinned to a hand-typed literal", () => 
     },
   );
 
-  it.each(Object.keys(EXPECTED_DEPENDENCIES))(
-    "%s.retries is 0 — the per-row NEGATIVE pin",
-    (key) => {
-      // Phase 141 flips these one row at a time, and every route's worst-case
-      // lambda hold scales with (1 + retries). Raising one here is out of fence.
+  it.each(Object.entries(EXPECTED_RETRIES))(
+    "%s.retries is the pinned literal (5 rows at 1 post-audit, the rest 0)",
+    (key, expectedRetries) => {
+      // Phase 141 flipped exactly five rows to 1 after the SEAM-05 audit, and
+      // every route's worst-case lambda hold scales with (1 + retries). Both
+      // DIRECTIONS are pinned here: flipping a 0 to 1 without an audit verdict
+      // reddens, AND flipping one of the five back to 0 reddens (the retry the
+      // audit authorized would silently vanish). Change a value HERE, in the same
+      // commit as the row and its registry verdict.
       expect(
         BUDGET_TABLE[key]?.retries,
-        `"${key}" now performs retries. Retry is Phase 141's, gated on the ` +
-          `SEAM-05 idempotency audit — replaying a non-idempotent /process-key ` +
+        `"${key}" now performs ${BUDGET_TABLE[key]?.retries} retries; this oracle ` +
+          `pins ${expectedRetries}. Retry is Phase 141's, gated on the SEAM-05 ` +
+          `idempotency audit — replaying a non-idempotent /process-key ` +
           `double-enqueues a sync — and raising it silently multiplies this ` +
           `route's SC-4b worst case.`,
-      ).toBe(0);
+      ).toBe(expectedRetries);
     },
   );
+
+  it("exactly 5 rows carry retries 1 — the count itself, hand-typed (D-07)", () => {
+    // ⚠️ THIS PIN EXISTS TO CONTRADICT PROSE. Three comments in the module under
+    // test claimed, long after it stopped being true, that "every row today"
+    // carries `retries: 0`. Five do not. The per-key oracle above pins each row
+    // individually, but it cannot fail on the CLAIM — a reader (or a reviewer,
+    // or the next phase's planner) who believed the sentence would find nothing
+    // red. This does: the sentence is now contradicted by a test, not only by a
+    // reader who happens to count.
+    //
+    // The 5 is hand-typed and is NOT `Object.keys(...).length` of anything in
+    // the module under test; it is the count the SEAM-05 audit authorised. If a
+    // sixth row is legitimately flipped, change this literal in the same commit
+    // as the row, its registry verdict, and any prose that states the number.
+    //
+    // ⚠️ 141.2 / D-03 CHECKED THIS AND LEFT IT AT 5 — deliberately, not by
+    // omission. Withdrawing resync's retry verdict removes a registry ENTRY, not
+    // a budget ROW: `SEAM_BUDGETS[*].retries` is pure ACCOUNTING post-D-08 (the
+    // registry is the gate; `resilientFetch` no longer falls back to the row),
+    // and `process-key-enqueue` is MANY-TO-ONE over {onboard, resync}. `onboard`
+    // is still a YES flow and still lands on that row, so the row still funds a
+    // real second attempt and SC-4b must still charge for it. The number would
+    // move only if the LAST retrying member of a row lost its verdict.
+    const rowsAtOne = Object.values(BUDGET_TABLE).filter(
+      (row) => row?.retries === 1,
+    ).length;
+
+    expect(
+      rowsAtOne,
+      `${rowsAtOne} budget rows carry retries 1; the SEAM-05 audit authorised ` +
+        `exactly 5 (bridge, simulator, portfolio-optimizer, optimize-weights, ` +
+        `process-key-enqueue). A sixth means a row was flipped without a ` +
+        `verdict; a fourth means an authorised retry was silently un-charged ` +
+        `from SC-4b's arithmetic. Either way, do not adjust this number to make ` +
+        `a diff pass — adjust it because the audit changed.`,
+    ).toBe(5);
+  });
+
+  describe("registry ↔ rows consistency (SEAM-05 anti-drift)", () => {
+    // ⚠️ WHAT EACH SIDE IS, AFTER D-08. These two hand-typed statements are NOT
+    // peers any more. The registry (seam-retry-registry) is the GATE: its verdict
+    // is what the two client chokepoints pass as the now-REQUIRED
+    // `retriesOverride`, and it is the only thing that turns a retry on. The
+    // SEAM_BUDGETS row is ACCOUNTING: `resilientFetch` no longer falls back to it,
+    // and its readers are SC-4b's headroom arithmetic and the retries oracle
+    // above.
+    //
+    // That asymmetry is exactly why they must still agree. A row that drifts BELOW
+    // its verdict under-charges SC-4b — the route's worst-case lambda hold is
+    // computed for one attempt while production performs two — and a row that
+    // drifts ABOVE its verdict charges for a retry nobody performs. Neither is
+    // visible in behaviour, which is what makes the pin the only detector. Before
+    // D-08 a drifting row could also silently change BEHAVIOUR; that half of the
+    // hazard is now closed by construction, and these pins are what stop the
+    // remaining accounting half.
+
+    it("the four registry maps have their hand-typed sizes (D-14a anti-vacuity)", () => {
+      // ⚠️ THIS FENCE GUARDS THE `it.each` DIRECTLY BELOW, WHICH ITERATES THE MAP
+      // UNDER TEST. That is the one shape this file's own :86-92 docblock warns
+      // against — `EXPECTED_TIMEOUT_MS` exists precisely so `it.each` iterates a
+      // HAND-TYPED map, because "iterating the table would silently produce a
+      // shorter — and still green — case list". The registry `it.each` below was
+      // written the other way and inherited exactly that hole.
+      //
+      // ⭐ MEASURED, not theorised. Plan 141.1-04 deleted the `bridge` entry from
+      // RETRY_SAFE_ANALYTICS and recorded the result: the suite went from 78 to
+      // 77 tests with the `it.each` NOT failing — it merely SHED a case. The one
+      // failure came from the OQ-3 pin added in that same plan, which happens to
+      // hand-type the same four keys. Take that pin away and deleting an audited
+      // retry verdict is invisible here. A map emptied outright would yield ZERO
+      // cases and a fully green file: BLIND, not satisfied.
+      //
+      // The four numbers are the counts the SEAM-05 idempotency audit produced,
+      // hand-typed here and never `Object.keys(...).length` of anything else. If
+      // a verdict is legitimately added or withdrawn, change the literal in the
+      // same commit as the entry — never to make a diff pass.
+      expect(
+        Object.keys(RETRY_SAFE_ANALYTICS).length,
+        "RETRY_SAFE_ANALYTICS no longer holds exactly 4 audited retry verdicts " +
+          "(bridge, simulator, portfolio-optimizer, optimize-weights). A FIFTH " +
+          "is a wrapper granted a replay without an idempotency audit; a THIRD " +
+          "means an authorised retry was withdrawn while SC-4b still charges " +
+          "for it — and the case list below would shrink to match, silently.",
+      ).toBe(4);
+      expect(
+        Object.keys(RETRY_SAFE_FLOW_TYPES).length,
+        "RETRY_SAFE_FLOW_TYPES no longer holds exactly 1 audited flow " +
+          "(onboard). 141.2 / D-03 withdrew resync's grant — it was issued on a " +
+          "sentence 141.1-02 deleted as false. Adding teaser or csv here is the " +
+          "SC3 landmine: a replayed teaser double-mints its " +
+          "verification/public_token/lead.",
+      ).toBe(1);
+      expect(
+        Object.keys(RETRY_AUDIT_NO_FLOW_TYPES).length,
+        "RETRY_AUDIT_NO_FLOW_TYPES no longer holds exactly 3 refusals " +
+          "(teaser, csv, resync). A refusal that disappears is an audit verdict " +
+          "lost, not a flow made safe.",
+      ).toBe(3);
+      expect(
+        Object.keys(RETRY_AUDIT_NO_ANALYTICS).length,
+        "RETRY_AUDIT_NO_ANALYTICS no longer holds exactly 5 refusals " +
+          "(validate-key, encrypt-key, match-recompute, portfolio-analytics, " +
+          "match-eval). Together with the 4 above this is the whole 9-wrapper " +
+          "analytics surface: a wrapper in NEITHER map has no audit verdict at " +
+          "all.",
+      ).toBe(5);
+    });
+
+    it.each(Object.keys(RETRY_SAFE_ANALYTICS))(
+      "every allowlisted analytics wrapper (%s) has its SEAM_BUDGETS row at retries 1",
+      (key) => {
+        expect(
+          BUDGET_TABLE[key]?.retries,
+          `"${key}" is retry-safe in the registry but its budget row is ` +
+            `${BUDGET_TABLE[key]?.retries}. SC-4b reads the ROW, so a row still at 0 ` +
+            `means the audited retry silently never happens. Flip the row in the ` +
+            `same commit as the verdict.`,
+        ).toBe(1);
+      },
+    );
+
+    it("process-key-enqueue (the onboard+resync grain) is at retries 1", () => {
+      // The process-key seam is audited at flow_type grain, but its ENQUEUE budget
+      // row must carry the literal SC-4b reads for onboard/resync.
+      expect(BUDGET_TABLE["process-key-enqueue"]?.retries).toBe(1);
+    });
+
+    it("all five flipped rows AGREE with the registry verdict that gates them (OQ-3)", () => {
+      // ⚠️ THE ACCOUNTING CANNOT SILENTLY DIVERGE FROM THE GATE. Both sides are
+      // hand-typed here — the five keys, and the 1 each is expected to carry —
+      // so this is not "the module agrees with itself". The pair is asserted
+      // TOGETHER, per key: a row at 1 whose registry entry has been deleted, or
+      // a registry entry at 1 whose row was set back to 0, fails on the key that
+      // moved rather than somewhere downstream in SC-4b's arithmetic.
+      //
+      // The four analytics keys carry their verdict at BUDGET-KEY grain
+      // (RETRY_SAFE_ANALYTICS is 1:1 with the row). `process-key-enqueue` does
+      // not: the process-key seam is audited at FLOW_TYPE grain, and this one row
+      // serves both audited flows — so its counterpart is the pair
+      // {onboard, resync}, checked below rather than through a lookup that would
+      // hide the many-to-one.
+      const FLIPPED_ANALYTICS_ROWS = [
+        "bridge",
+        "simulator",
+        "portfolio-optimizer",
+        "optimize-weights",
+      ] as const;
+
+      for (const key of FLIPPED_ANALYTICS_ROWS) {
+        expect(
+          RETRY_SAFE_ANALYTICS[key]?.retries,
+          `"${key}" carries retries in its budget row but has NO retry-safe ` +
+            `registry entry (or its entry no longer says 1). After D-08 the ` +
+            `registry is the GATE: without the entry the wrapper stops retrying ` +
+            `entirely while SC-4b keeps charging for the second attempt. Delete ` +
+            `the verdict and the row flip together, or neither.`,
+        ).toBe(1);
+        expect(
+          BUDGET_TABLE[key]?.retries,
+          `"${key}" is retry-safe in the registry, so its budget row must ` +
+            `declare 1 for SC-4b's headroom arithmetic to charge the retried ` +
+            `leg. A row at ${BUDGET_TABLE[key]?.retries} under-charges a route ` +
+            `that really does perform two attempts.`,
+        ).toBe(1);
+      }
+
+      // The many-to-one row, AFTER 141.2 / D-03. `process-key-enqueue` serves
+      // {onboard, resync}, and the pair is no longer symmetric: onboard keeps
+      // its verdict, resync's was WITHDRAWN (its grant rested on a sentence
+      // 141.1-02 deleted as false). The row stays at 1 because ONE of the two
+      // flows it serves still retries — a many-to-one row is charged for the
+      // maximum over its members, not for each. Both halves are asserted, in
+      // opposite directions, so neither drift is silent: re-granting resync
+      // without an audit reddens here, and dropping onboard's grant while the
+      // row still declares a retry reddens here too.
+      expect(
+        RETRY_SAFE_FLOW_TYPES.onboard?.retries,
+        "onboard lost its retry-safe verdict while process-key-enqueue's row " +
+          "still declares a retry. After D-03 withdrew resync, onboard is the " +
+          "ONLY member of this row still carrying a grant — so the row is now " +
+          "accounting for a retry no flow performs.",
+      ).toBe(1);
+      expect(
+        RETRY_SAFE_FLOW_TYPES.resync,
+        "resync is back in RETRY_SAFE_FLOW_TYPES. 141.2 / D-03 withdrew that " +
+          "grant: the strategy-scoped status='draft' pre-check does not make a " +
+          "replay safe (the worker tick can advance the draft between attempts), " +
+          "and re-granting requires a DURABLE idempotency key for resync, which " +
+          "does not exist. Do not restore this to make a diff pass.",
+      ).toBeUndefined();
+      expect(
+        RETRY_AUDIT_NO_FLOW_TYPES.resync,
+        "resync's NO verdict left RETRY_AUDIT_NO_FLOW_TYPES. Absence from the " +
+          "YES map already yields no-retry, so this would not change behaviour — " +
+          "it would delete the AUDIT, leaving the next reader with no record of " +
+          "why the retry was withdrawn.",
+      ).toBeDefined();
+      expect(
+        BUDGET_TABLE["process-key-enqueue"]?.retries,
+        "onboard is still retry-safe in the registry, so the enqueue row must " +
+          "declare 1 for SC-4b's headroom arithmetic.",
+      ).toBe(1);
+    });
+
+    it("the SC3 belt and the Pitfall-2 fence stay at retries 0 at the row grain", () => {
+      // process-key-sync carries teaser+csv: it must NEVER retry (double-mints a
+      // lead). keys-permissions is the fan-out route whose retry would breach the
+      // finalize-wizard composite's lambda ceiling (T-141-09). Hand-typed 0s.
+      expect(
+        BUDGET_TABLE["process-key-sync"]?.retries,
+        "process-key-sync retries flipped off 0 — the teaser shares this row and a " +
+          "retry double-mints its verification/public_token/lead (SC3).",
+      ).toBe(0);
+      expect(
+        BUDGET_TABLE["keys-permissions"]?.retries,
+        "keys-permissions retries flipped off 0 — the finalize-wizard composite " +
+          "would breach the 300k lambda ceiling mid-outage (T-141-09).",
+      ).toBe(0);
+    });
+  });
 
   it("uses exactly three magnitudes — 15s, 30s and 60s — spelled out", () => {
     // A human-readable anchor for the three tiers, one representative each, so
@@ -317,9 +578,37 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
       BREAKER_FAILURE_THRESHOLD,
       "The breaker's trip threshold changed. Raising it delays protection " +
         "during a real Railway outage; lowering it lets one unlucky pod " +
-        "restart take the seam down.",
+        "restart take the seam down. Since Phase 141 the unit is an ATTEMPT, " +
+        "not a request, so raising it delays containment for retried traffic " +
+        "TWICE as much as the number suggests — see the ratified tradeoff on " +
+        "the constant itself, and the per-attempt-latch case in " +
+        "resilient-fetch.retry.test.ts, which is where that doubling is " +
+        "pinned as BEHAVIOUR rather than as arithmetic.",
     ).toBe(5);
   });
+
+  // ── THE TRIP-COUNT ASSERTION THAT USED TO STAND HERE IS DELETED ────────────
+  // (141.2 / D-05, finding 13.) It read
+  // `expect(Math.ceil(BREAKER_FAILURE_THRESHOLD / 2)).toBe(3)` — arithmetic
+  // over a constant the test above already pins to a literal, so it was true by
+  // construction and could not fail for ANY change to the behaviour its own
+  // message described. That is this file's own stated law broken inside the
+  // file that states it: never derive the oracle from the module under test.
+  //
+  // MEASURED, not asserted. With the per-attempt latch reset deleted from
+  // `resilientFetch` — the exact behaviour the deleted message named — that
+  // assertion stayed GREEN while the per-attempt-latch case in
+  // `resilient-fetch.retry.test.ts` went RED (it drives the real loop through a
+  // 503-503 double and counts the recordings). So the CLAIM has coverage and
+  // the deleted pin was not it.
+  //
+  // DELETED, NOT REPLACED, deliberately: a replacement would be a second copy
+  // of a test that already exists, and any replacement phrased as "N user
+  // requests" would be WRONG after 141.2 / D-06 for the status class the
+  // upstream contract makes mandatory — a 503 carrying a positive `Retry-After`
+  // now fails fast and records ONE failure, not two. The trip-count CLAIM lives
+  // in `docs/runbooks/seam-breaker.md`; the trip-count BEHAVIOUR is pinned by
+  // that latch case. This file pins CONSTANTS, not arithmetic over its own pins.
 
   it("BREAKER_WINDOW is the literal '30 s'", () => {
     // The exact string, not just its millisecond value: "30000 ms" would parse
@@ -347,6 +636,57 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
         "idempotency audit — and every route's worst-case lambda hold scales " +
         "with (1 + SEAM_RETRIES).",
     ).toBe(0);
+  });
+
+  it("SEAM_RETRY_BACKOFF_MS is the literal 250 (D-14b)", () => {
+    // Phase 141 shipped this constant with no pin at all, unlike every sibling
+    // in this describe. It is the FIXED half of the wait between a failed
+    // attempt and its one retry.
+    expect(
+      SEAM_RETRY_BACKOFF_MS,
+      "SEAM_RETRY_BACKOFF_MS moved. RAISING it lengthens every retried route's " +
+        "worst-case lambda hold, which SC-4b charges at the MAX of backoff + " +
+        "jitter — the finalize-wizard composite has 22 500 ms of headroom, so " +
+        "this is not free. LOWERING it retries into an upstream that has had " +
+        "less time to recover and spends a second breaker failure learning " +
+        "that. Change it deliberately and re-read SC-4b's arithmetic in " +
+        "seam-budgets.invariant.test.ts in the same commit.",
+    ).toBe(250);
+  });
+
+  it("SEAM_RETRY_JITTER_MAX_MS is the literal 250 (D-14b)", () => {
+    // The RANDOM half. Added, never subtracted — see the constant's docblock —
+    // so it only ever moves the interval upward, which is why the sum below is
+    // the number SC-4b must charge.
+    expect(
+      SEAM_RETRY_JITTER_MAX_MS,
+      "SEAM_RETRY_JITTER_MAX_MS moved. Jitter exists to decorrelate concurrent " +
+        "callers that all failed at the same instant; dropping it to 0 makes " +
+        "every retried caller re-hit a sick upstream in the same millisecond, " +
+        "and raising it widens the worst case SC-4b charges.",
+    ).toBe(250);
+  });
+
+  it("the worst-case retry interval is 500ms — the sum SC-4b charges (D-14b)", () => {
+    // DERIVED on the left, hand-typed on the right — and unlike the ⌈threshold/2⌉
+    // assertion 141.2 / D-05 deleted from this file, this one CAN fail. That one
+    // was arithmetic over a SINGLE constant the file already pinned, so the two
+    // sides could never disagree; this one composes TWO independently-pinned
+    // constants, so a compensating edit (300 + 200) reddens it while leaving both
+    // individual pins green. That difference is the whole test of whether a
+    // derived left-hand side is legitimate here. This is also the number that
+    // actually enters SC-4b's headroom arithmetic: the jitter is added and never
+    // subtracted, so the MAX interval is the sum, not the mean, and it is the SUM,
+    // not either part, that the budget arithmetic spends.
+    expect(
+      SEAM_RETRY_BACKOFF_MS + SEAM_RETRY_JITTER_MAX_MS,
+      "The worst-case wait between a failed seam attempt and its retry is no " +
+        "longer 500ms. SC-4b charges this MAX once per retried leg; if this " +
+        "sum grows, every retried route's worst-case lambda hold grows with it " +
+        "and the tightest route's headroom shrinks. Update the SC-4b arithmetic " +
+        "and its hand-typed worst cases in the same commit — never widen the " +
+        "ceiling to absorb it.",
+    ).toBe(500);
   });
 
   it("BREAKER_LOCK_TOMBSTONE_S is the literal 60", () => {

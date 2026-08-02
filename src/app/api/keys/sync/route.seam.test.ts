@@ -274,7 +274,23 @@ describe("POST /api/keys/sync — REAL client through the seam (SC-1a)", () => {
     // the core-owned base URL, the client's path, a deadline signal, and the
     // CT-4 tenant header. Under the wholesale mock in route.test.ts none of
     // this is observable.
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    //
+    // ONCE, since 141.2 / D-03 — this count was 2 between Phase 141 and here.
+    // `resync` was allowlisted for one retry on the strength of a claim that
+    // the draft-SV pre-check made a replay safe; 141.1-02 re-derived that claim,
+    // found it false (the compute worker's tick advances the draft out of draft
+    // status inside the backoff, so the second attempt inserts a SECOND draft
+    // row) and deleted it, leaving the grant behind. D-03 withdrew the grant, so
+    // this route's timed-out enqueue now surfaces the 504 on its FIRST attempt.
+    //
+    // The 504 outcome and the lambda-release guarantee below are unchanged; what
+    // changed is that the worst case is one budget span rather than two, which
+    // only widens the SC-4b headroom this route already cleared.
+    expect(
+      fetchMock,
+      "the resync enqueue re-attempted. D-03 withdrew resync's retry verdict — " +
+        "a replay can double the draft strategy_verifications row.",
+    ).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe(`${ANALYTICS_BASE}/process-key`);
     expect(init.signal).toBeInstanceOf(AbortSignal);

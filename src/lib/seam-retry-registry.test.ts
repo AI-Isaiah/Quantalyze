@@ -1,0 +1,794 @@
+import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+// The SAME needle the seam-surface comment guard uses, hoisted to a non-test
+// leaf so there is ONE regex, not two. (Importing the sibling TEST file was
+// measured and rejected: vitest re-registered its 46 tests into this file.)
+import { citationsIn, CONVERSION_PROTOCOL } from "./seam-citations-needle";
+// TYPE-ONLY, and load-bearing: these two unions are what the exhaustiveness
+// assertions below are checked AGAINST, so the pins fail on a union edit rather
+// than only on a map edit. `import type` erases, so no runtime edge is added to
+// a test that also reads the leaf's own purity from disk.
+import type { FlowType } from "./process-key-client";
+import type { SeamBudgetKey } from "./resilient-fetch";
+import {
+  RETRY_SAFE_FLOW_TYPES,
+  RETRY_AUDIT_NO_FLOW_TYPES,
+  RETRY_SAFE_ANALYTICS,
+  RETRY_AUDIT_NO_ANALYTICS,
+  retriesForFlow,
+} from "./seam-retry-registry";
+
+/**
+ * Phase 141 / SEAM-05 — the SC1 idempotency-audit artifact is pinned.
+ *
+ * ⚠️ ORACLE INDEPENDENCE (141-VALIDATION.md). Every EXPECTED value in this file
+ * is a hand-typed literal. `Object.keys(...)` appears ONLY on the ACTUAL side of
+ * a comparison; the key lists and counts on the expected side are typed here by
+ * hand. The failure this discipline inverts is a registry test that reads the
+ * registry's verdicts back out and asserts them against themselves — which would
+ * be green for ANY table, including one that allowlisted teaser.
+ *
+ * What each group catches (all six are red-able against production source):
+ *   1. SC3 belt — teaser/csv are strictly absent from the YES flow map.
+ *   2. YES contents — the exact safe sets, each entry retries===1 + non-empty evidence.
+ *   3. Exhaustiveness — YES∪NO covers EVERY flow_type and EVERY analytics wrapper,
+ *      so a future one added without a verdict reddens here.
+ *   4. Disjointness — nothing is simultaneously safe and unsafe.
+ *   5. Lock resolution — match-recompute's NO evidence still carries the SEAM-05
+ *      PROCESS-LOCAL finding; deleting it from the artifact reddens.
+ *   6. Purity — the leaf imports nothing by VALUE (browser-bundle + mock survival).
+ */
+
+// ── Hand-typed EXPECTED literals (never read from the module under test) ──────
+
+// 141.2 / D-03 — `resync` LEFT this set. It was allowlisted on a sentence
+// 141.1-02 later deleted as false, and the grant outlived its own evidence.
+// Its verdict now lives in RETRY_AUDIT_NO_FLOW_TYPES. If a future change puts
+// it back, the entry has to argue against the written finding there.
+const EXPECTED_SAFE_FLOW_KEYS = ["onboard"];
+const EXPECTED_SAFE_ANALYTICS_KEYS = [
+  "bridge",
+  "optimize-weights",
+  "portfolio-optimizer",
+  "simulator",
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// [D-11] SC-I — REAL EXHAUSTIVENESS. Read this before touching the two lists.
+//
+// THE DEFECT THESE THREE ASSERTIONS REPAIR. The runtime pins below compare
+// `YES ∪ NO` against `EXPECTED_ALL_FLOW_KEYS` / `EXPECTED_ALL_ANALYTICS_KEYS` —
+// and BOTH SIDES WERE HAND-TYPED TO THE SAME LIST. They agreed by copy-paste.
+// Adding a 5th member to `FlowType` reddened NOTHING, while the registry
+// docblock claimed the opposite ("forcing a verdict before it can ship").
+//
+// HOW IT IS REAL NOW — a CHAIN, not a single check, and the chain is the point:
+//   1. `as const satisfies readonly FlowType[]` — every entry must BE a member
+//      (catches a typo'd key, which a bare `string[]` swallowed).
+//   2. The `Exclude`-to-`never` assertion — every MEMBER must be in the list.
+//      A new union member makes `_MissingFlowVerdict` non-`never`, the
+//      conditional resolves to `never`, and `npm run typecheck` fails HERE
+//      without anyone having touched a list. This is the `for-quants-lead`
+//      house form, which has fired twice on real PRs.
+//   3. Adding the member to the list to clear (2) is exactly what then REDDENS
+//      the runtime pin, because `YES ∪ NO` no longer equals the list. The only
+//      way back to green is a real verdict in a YES or a NO map.
+//
+// Step 2 alone forces a LIST EDIT, not a verdict; step 3 alone is the pre-141.1
+// vacuous pin. Do not delete either half believing the other covers it.
+//
+// ⚠️ ORACLE INDEPENDENCE IS UNDISTURBED. These lists are still hand-typed
+// literals — the TYPE, not the map under test, is what they are now checked
+// against. Deriving them from `Object.keys(RETRY_SAFE_*)` would make every pin
+// below green for any table, which is the failure this file's header forbids.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** All four `/process-key` flow_types — the `FlowType` union in `process-key-client`. */
+const EXPECTED_ALL_FLOW_KEYS = [
+  "csv",
+  "onboard",
+  "resync",
+  "teaser",
+] as const satisfies readonly FlowType[];
+
+type _MissingFlowVerdict = Exclude<
+  FlowType,
+  (typeof EXPECTED_ALL_FLOW_KEYS)[number]
+>;
+const _flowVerdictExhaustiveness: _MissingFlowVerdict extends never
+  ? true
+  : never = true;
+// Reference the binding so `noUnusedLocals` cannot strip the assertion.
+void _flowVerdictExhaustiveness;
+
+/**
+ * The FOUR `SeamBudgetKey`s that are ROUTE budgets, not analytics-seam-function
+ * verdicts, and are therefore DELIBERATELY absent from the analytics maps —
+ * registry §(c). Hand-typed here so the `Exclude` below cannot quietly absorb a
+ * new key: a 14th `SeamBudgetKey` must be classified as an analytics wrapper
+ * (→ a verdict) or as a route budget (→ this list), and doing NEITHER is a
+ * compile error rather than a silent exclusion.
+ */
+type RouteBudgetKey =
+  | "keys-permissions"
+  | "process-key-enqueue"
+  | "process-key-sync"
+  | "process-key-unified-dormant";
+
+/** The nine analytics-seam wrapper budget keys (Class E, PATTERNS). */
+const EXPECTED_ALL_ANALYTICS_KEYS = [
+  "bridge",
+  "encrypt-key",
+  "match-eval",
+  "match-recompute",
+  "optimize-weights",
+  "portfolio-analytics",
+  "portfolio-optimizer",
+  "simulator",
+  "validate-key",
+] as const satisfies readonly SeamBudgetKey[];
+
+type _MissingAnalyticsVerdict = Exclude<
+  SeamBudgetKey,
+  (typeof EXPECTED_ALL_ANALYTICS_KEYS)[number] | RouteBudgetKey
+>;
+const _analyticsVerdictExhaustiveness: _MissingAnalyticsVerdict extends never
+  ? true
+  : never = true;
+void _analyticsVerdictExhaustiveness;
+
+const LEAF_PATH = "src/lib/seam-retry-registry.ts";
+
+describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
+  describe("SC3 belt — teaser and csv are ABSENT from the YES flow map", () => {
+    it("RETRY_SAFE_FLOW_TYPES.teaser is strictly undefined", () => {
+      // Absence semantics: a present teaser entry would be retried on the next
+      // Railway blip, double-minting verification + public_token + lead.
+      expect(RETRY_SAFE_FLOW_TYPES.teaser).toBeUndefined();
+    });
+    it("RETRY_SAFE_FLOW_TYPES.csv is strictly undefined", () => {
+      expect(RETRY_SAFE_FLOW_TYPES.csv).toBeUndefined();
+    });
+  });
+
+  describe("YES maps carry exactly the audited-safe sets", () => {
+    it("RETRY_SAFE_FLOW_TYPES keys equal the hand-typed safe set", () => {
+      expect(Object.keys(RETRY_SAFE_FLOW_TYPES).sort()).toEqual(
+        EXPECTED_SAFE_FLOW_KEYS,
+      );
+    });
+    it("RETRY_SAFE_ANALYTICS keys equal the hand-typed safe set", () => {
+      expect(Object.keys(RETRY_SAFE_ANALYTICS).sort()).toEqual(
+        EXPECTED_SAFE_ANALYTICS_KEYS,
+      );
+    });
+    it("every YES entry is retries===1 with non-empty evidence", () => {
+      for (const entry of Object.values(RETRY_SAFE_FLOW_TYPES)) {
+        expect(entry?.retries).toBe(1);
+        expect((entry?.evidence.length ?? 0) > 0).toBe(true);
+      }
+      for (const entry of Object.values(RETRY_SAFE_ANALYTICS)) {
+        expect(entry?.retries).toBe(1);
+        expect((entry?.evidence.length ?? 0) > 0).toBe(true);
+      }
+    });
+  });
+
+  describe("exhaustiveness — every flow_type and every wrapper has a verdict", () => {
+    it("YES∪NO flow keys cover ALL four flow_types", () => {
+      const union = [
+        ...Object.keys(RETRY_SAFE_FLOW_TYPES),
+        ...Object.keys(RETRY_AUDIT_NO_FLOW_TYPES),
+      ].sort();
+      expect(union).toEqual(EXPECTED_ALL_FLOW_KEYS);
+    });
+    it("YES∪NO analytics keys cover ALL nine wrappers", () => {
+      const union = [
+        ...Object.keys(RETRY_SAFE_ANALYTICS),
+        ...Object.keys(RETRY_AUDIT_NO_ANALYTICS),
+      ].sort();
+      expect(union).toEqual(EXPECTED_ALL_ANALYTICS_KEYS);
+    });
+    it("every NO analytics verdict is a non-empty evidence string", () => {
+      for (const evidence of Object.values(RETRY_AUDIT_NO_ANALYTICS)) {
+        expect(typeof evidence).toBe("string");
+        expect(evidence.length > 0).toBe(true);
+      }
+    });
+  });
+
+  describe("disjointness — nothing is simultaneously safe and unsafe", () => {
+    it("YES ∩ NO = ∅ at flow grain", () => {
+      const noKeys = new Set(Object.keys(RETRY_AUDIT_NO_FLOW_TYPES));
+      const overlap = Object.keys(RETRY_SAFE_FLOW_TYPES).filter((k) =>
+        noKeys.has(k),
+      );
+      expect(overlap).toEqual([]);
+    });
+    it("YES ∩ NO = ∅ at analytics grain", () => {
+      const noKeys = new Set(Object.keys(RETRY_AUDIT_NO_ANALYTICS));
+      const overlap = Object.keys(RETRY_SAFE_ANALYTICS).filter((k) =>
+        noKeys.has(k),
+      );
+      expect(overlap).toEqual([]);
+    });
+  });
+
+  describe("the SEAM-05 lock resolution lives in the committed artifact", () => {
+    it("match-recompute NO evidence records the PROCESS-LOCAL finding", () => {
+      // Deleting the _get_recompute_lock resolution from the artifact reddens
+      // here — the audit's explicit ask cannot silently leave the registry.
+      expect(RETRY_AUDIT_NO_ANALYTICS["match-recompute"]).toMatch(
+        /process-local/i,
+      );
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 141.1 CONTENT PINS — the re-derived evidence is pinned CLAIM BY CLAIM.
+  //
+  // WHY A CONTENT PIN AND NOT A KEY PIN. The key-set pins above prove WHICH
+  // rows are allowlisted; they are blind to WHY. But the registry's premise is
+  // "the evidence IS the entry" — a future engineer extending the allowlist
+  // reasons from this prose, so prose that says something false is a defective
+  // deliverable even while every verdict is right. The 141.1 re-derivation
+  // found exactly that: three of the four analytics YES entries claimed "no
+  // persisted server-side write" and all three DO write. These pins make the
+  // corrected claims load-bearing, so a revert to the false text reddens
+  // instead of silently restoring the reasoning that would authorise a wrong
+  // YES.
+  //
+  // ⚠️ ORACLE INDEPENDENCE HOLDS HERE TOO: every key list below is hand-typed.
+  // Deriving them from `Object.keys` of the map under test would make these
+  // pins green for any table, including one whose evidence had been emptied.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** The three analytics YES entries that DO write (D-04). `optimize-weights` is excluded. */
+  const EXPECTED_WRITING_ANALYTICS_KEYS = [
+    "bridge",
+    "portfolio-optimizer",
+    "simulator",
+  ] as const;
+
+  /** The banned claim — true of `optimize-weights` alone (D-04). */
+  const BANNED_WRITELESS_CLAIM = "no persisted server-side write";
+
+  describe("[D-04] the writeless claim belongs to optimize-weights ALONE", () => {
+    it.each(EXPECTED_WRITING_ANALYTICS_KEYS)(
+      "%s evidence does NOT claim to be writeless",
+      (key) => {
+        expect(
+          RETRY_SAFE_ANALYTICS[key]?.evidence,
+          `${key} carries the claim "${BANNED_WRITELESS_CLAIM}", which the 141.1 ` +
+            `re-derivation DISPROVED for it (bridge and simulator append audit ` +
+            `rows; portfolio-optimizer additionally UPDATEs ` +
+            `portfolio_analytics.optimizer_suggestions). This is not a wording ` +
+            `nit: the next engineer extending the allowlist reads this prose as ` +
+            `the audit, and "writeless" is the single fact that would make a new ` +
+            `YES look free. State the ACTUAL writes and why the retry is safe ` +
+            `given them — never re-assert writelessness here.`,
+        ).not.toContain(BANNED_WRITELESS_CLAIM);
+      },
+    );
+
+    it("optimize-weights DOES still carry it (the pin is not vacuous)", () => {
+      // Without this, deleting the claim everywhere would leave the pin above
+      // green — a ban that bans nothing because the string no longer exists.
+      expect(RETRY_SAFE_ANALYTICS["optimize-weights"]?.evidence).toContain(
+        BANNED_WRITELESS_CLAIM,
+      );
+    });
+  });
+
+  describe("[D-03] every analytics YES entry records the doubled-compute cost", () => {
+    // ⚠️ WHY THIS PIN NAMES THE MECHANISM AND NOT A LOOSE ALTERNATION. The first
+    // draft of this pin was `/concurrent|is_disconnected|doubled/i`. Measured
+    // against the real mutation (delete the COST sentence from `simulator`) it
+    // stayed GREEN: simulator's evidence separately says the failure-path row
+    // "cannot be doubled by a seam retry", so the alternation was satisfied by a
+    // sentence about something else entirely. That is this phase's own thesis
+    // turned on the guard — a scanner that matches something incidental reports
+    // agreement forever. Both halves below are load-bearing and appear ONLY in
+    // the COST sentence, so deleting that sentence reddens for all four keys.
+    // NEVER relax these to an alternation that some other sentence can satisfy.
+    it.each(EXPECTED_SAFE_ANALYTICS_KEYS)(
+      "%s evidence records the second concurrent compute AND names the mechanism",
+      (key) => {
+        const evidence =
+          RETRY_SAFE_ANALYTICS[key as keyof typeof RETRY_SAFE_ANALYTICS]?.evidence;
+        const message =
+          `${key} no longer records the D-03 cost. A retry on this budget adds a ` +
+          `SECOND concurrent full compute while attempt 1 still burns CPU, ` +
+          `because nothing on the FastAPI side awaits request.is_disconnected(). ` +
+          `That is an ACCEPTED consequence of this phase, not an absent one — ` +
+          `deleting it lets the cost be inherited silently by whoever reads this ` +
+          `entry as precedent, and server-side cancellation is deferred to its ` +
+          `own phase precisely BECAUSE the cost is recorded here.`;
+        expect(evidence, message).toMatch(/second concurrent full compute/);
+        expect(evidence, message).toMatch(/request\.is_disconnected\(\)/);
+      },
+    );
+  });
+
+  describe("[D-05] the flow evidence states its residuals and its qualification", () => {
+    // ⚠️ THIS PIN READS THE **NO** MAP, AND THAT IS THE POINT (141.2 / D-03).
+    // It used to read `RETRY_SAFE_FLOW_TYPES.resync?.evidence`. After the move
+    // that expression is `undefined`, and `expect(undefined).not.toMatch(...)`
+    // is a MATCHER ERROR, not a clean failure — the pin would have THROWN while
+    // appearing to guard something. Re-pointed at the map the verdict actually
+    // lives in, and given BOTH polarities: a guard that only bans a phrase goes
+    // vacuous the moment the prose is emptied, so the second half requires the
+    // entry to positively state the residual it is refusing to overstate.
+    it("resync's NO evidence refuses the closure claim AND states the open window", () => {
+      const evidence = RETRY_AUDIT_NO_FLOW_TYPES.resync;
+      const message =
+        `resync's NO evidence no longer describes the residual that WITHDREW ` +
+        `its retry. The strategy-scoped pre-check filters status='draft'; the ` +
+        `compute worker's tick advances the first draft verification out of ` +
+        `draft, so a transition landing inside the backoff lets a SECOND draft ` +
+        `row through. Restating that window as settled is exactly the over-claim ` +
+        `141.1-02 deleted and 141.2 acted on — and it is what a future reader ` +
+        `would rely on when deciding a NEW flow needs no dedup.`;
+      // It IS a string — asserted before the matchers, so an emptied or moved
+      // entry fails HERE with a readable message instead of throwing inside a
+      // matcher handed `undefined`.
+      expect(typeof evidence, message).toBe("string");
+      expect(evidence, message).not.toMatch(/class is closed/i);
+      expect(evidence, message).toMatch(/window is OPEN/);
+    });
+
+    it.each(EXPECTED_SAFE_FLOW_KEYS)(
+      "%s qualifies 'exactly one job' to the three INDEXED statuses",
+      (key) => {
+        expect(
+          RETRY_SAFE_FLOW_TYPES[key as keyof typeof RETRY_SAFE_FLOW_TYPES]?.evidence,
+          `${key} no longer names the three statuses the partial unique index ` +
+            `compute_jobs_one_inflight_per_kind_strategy actually admits ` +
+            `(pending, running, done_pending_children). Unqualified, "exactly one ` +
+            `job" reads as an absolute — but failed_retry sits OUTSIDE the index ` +
+            `predicate, so the guarantee lapses exactly where a retry story cares.`,
+          // `[\s\S]*` rather than `.*` with the `s` flag: the dotAll flag needs
+          // an es2018+ target and this repo's tsconfig is lower (TS1501). The
+          // two are equivalent here and this form compiles everywhere.
+        ).toMatch(/pending[\s\S]*running[\s\S]*done_pending_children/);
+      },
+    );
+
+    it("onboard records the PROVENANCE of the wizard_session_id guarantee", () => {
+      // The pre-141.1 text stated the non-NULL guarantee as a bare fact. A fact
+      // cannot be falsified by a future producer; a recorded provenance can.
+      const evidence = RETRY_SAFE_FLOW_TYPES.onboard?.evidence;
+      const message =
+        "onboard's evidence has lost part of the provenance chain that makes its " +
+        "non-NULL wizard_session_id guarantee FALSIFIABLE rather than merely " +
+        "asserted: the isUuid 400 gate in create-with-key, the 7-day " +
+        "cleanup_abandoned_wizard_drafts purge, and the SV dedup index " +
+        "strategy_verifications_strategy_wizard_session_uniq. Restore the link " +
+        "that was deleted — a future producer emitting a NULL session id must " +
+        "visibly trip this reasoning, not silently invalidate it.";
+      expect(evidence, message).toMatch(/isUuid/);
+      expect(evidence, message).toMatch(/cleanup_abandoned_wizard_drafts/);
+      expect(evidence, message).toMatch(
+        /strategy_verifications_strategy_wizard_session_uniq/,
+      );
+    });
+
+    it("onboard names BOTH of its producers", () => {
+      // Evidence derived from ONE member of a class of two is the
+      // instance-not-class shape this phase exists to repair: `onboard` is
+      // emitted by strategies/finalize-wizard AND by keys/validate-and-encrypt,
+      // and the provenance argument above holds for only the first.
+      const evidence = RETRY_SAFE_FLOW_TYPES.onboard?.evidence;
+      const message =
+        "onboard's evidence no longer names both emitters of flow_type=onboard. " +
+        "The wizard path (strategies/finalize-wizard) is where the provenance " +
+        "argument was derived; keys/validate-and-encrypt sends NO " +
+        "wizard_session_id at all and is retry-safe for a DIFFERENT reason (its " +
+        "budget row is pinned at zero retries). Dropping either producer leaves " +
+        "the verdict resting on evidence that covers only half its own class.";
+      expect(evidence, message).toMatch(/finalize-wizard/);
+      expect(evidence, message).toMatch(/validate-and-encrypt/);
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // [D-06] SC-H — THE REGISTRY-LOCAL CITATION GUARD, over the evidence STRING
+  // LITERALS. This is the half that catches today's rot.
+  //
+  // WHY THE SIBLING GUARD IS NOT ENOUGH. `seam-citations.invariant.test.ts` now
+  // lists this registry on its surface, but that guard EXTRACTS COMMENTS and
+  // feeds only those to the needle. Its own `-1` self-test pins the fact that a
+  // coordinate inside a STRING LITERAL is invisible to it. In this one file the
+  // string literals ARE the prose — the registry's premise is "the evidence IS
+  // the entry" — so the comment half finds zero offences here while the rot that
+  // actually shipped lived in the evidence strings. Both halves, or neither
+  // works.
+  //
+  // ⚠️ TWO VALUE SHAPES, HANDLED EXPLICITLY. The two YES maps hold
+  // `RetrySafeEntry` OBJECTS (the prose is `entry.evidence`); the two NO maps are
+  // `Partial<Record<K, string>>` where the VALUE **is** the prose. A naive
+  // `.evidence` access across all four yields `undefined` for 7 of the 13
+  // strings, and `citationsIn(undefined)` would throw or silently pass — a guard
+  // half-vacuous on exactly the half where the load-bearing rot lived.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Hand-typed PER MAP, never derived from the maps, and asserted PER MAP
+   * against its own population before the total is checked.
+   *
+   * ⚠️ WHY THE BREAKDOWN IS FOUR SEPARATE LITERALS AND NOT ONE SUM (141.2 /
+   * D-03, SC-E). This fence used to be the single expression `2 + 4 + 2 + 5`,
+   * compared against the flattened population with a message that spelled the
+   * breakdown out in prose. Moving `resync` from the YES flow map to the NO flow
+   * map takes the populations from 2/4/2/5 to 1/4/3/5 — **and both sum to 13**.
+   * The pin stayed GREEN while its own failure message ("2 flow YES … 2 flow
+   * NO") became false: a fence reporting agreement about numbers it was no
+   * longer checking. That is this phase's whole thesis applied to the phase's
+   * own guard, so the total is now DERIVED from four literals that are each
+   * pinned to their own map. A move in EITHER direction reddens the map it left
+   * and the map it joined, and no arithmetic coincidence can absorb both.
+   *
+   * Emptying a map still reddens rather than shrinking the scanned population to
+   * zero and passing — the "scanner that matches nothing reports agreement
+   * forever" fence, which is why these are literals and never `Object.keys`.
+   */
+  const EXPECTED_FLOW_YES_EVIDENCE = 1; // onboard (resync withdrawn, 141.2/D-03)
+  const EXPECTED_ANALYTICS_YES_EVIDENCE = 4; // bridge, simulator, portfolio-optimizer, optimize-weights
+  const EXPECTED_FLOW_NO_EVIDENCE = 3; // teaser, csv, resync
+  const EXPECTED_ANALYTICS_NO_EVIDENCE = 5; // validate-key, encrypt-key, match-recompute, portfolio-analytics, match-eval
+  const EXPECTED_EVIDENCE_STRING_COUNT =
+    EXPECTED_FLOW_YES_EVIDENCE +
+    EXPECTED_ANALYTICS_YES_EVIDENCE +
+    EXPECTED_FLOW_NO_EVIDENCE +
+    EXPECTED_ANALYTICS_NO_EVIDENCE;
+
+  /** Every evidence string across ALL FOUR maps, each shape read correctly. */
+  function allEvidenceStrings(): Array<{ where: string; text: string }> {
+    const out: Array<{ where: string; text: string }> = [];
+    // Shape 1 — YES maps: the prose hangs off `.evidence`.
+    for (const [key, entry] of Object.entries(RETRY_SAFE_FLOW_TYPES)) {
+      if (entry) out.push({ where: `RETRY_SAFE_FLOW_TYPES.${key}`, text: entry.evidence });
+    }
+    for (const [key, entry] of Object.entries(RETRY_SAFE_ANALYTICS)) {
+      if (entry) out.push({ where: `RETRY_SAFE_ANALYTICS.${key}`, text: entry.evidence });
+    }
+    // Shape 2 — NO maps: the VALUE is the prose.
+    for (const [key, text] of Object.entries(RETRY_AUDIT_NO_FLOW_TYPES)) {
+      if (text) out.push({ where: `RETRY_AUDIT_NO_FLOW_TYPES.${key}`, text });
+    }
+    for (const [key, text] of Object.entries(RETRY_AUDIT_NO_ANALYTICS)) {
+      if (text) out.push({ where: `RETRY_AUDIT_NO_ANALYTICS.${key}`, text });
+    }
+    return out;
+  }
+
+  describe("[D-06 / SC-H] no coordinate citation in any evidence STRING", () => {
+    /** Non-empty scanned strings whose `where` names the given map. */
+    function scannedIn(mapName: string): number {
+      return allEvidenceStrings().filter(
+        (e) =>
+          e.where.startsWith(`${mapName}.`) &&
+          typeof e.text === "string" &&
+          e.text.length > 0,
+      ).length;
+    }
+
+    it.each([
+      ["RETRY_SAFE_FLOW_TYPES", EXPECTED_FLOW_YES_EVIDENCE],
+      ["RETRY_SAFE_ANALYTICS", EXPECTED_ANALYTICS_YES_EVIDENCE],
+      ["RETRY_AUDIT_NO_FLOW_TYPES", EXPECTED_FLOW_NO_EVIDENCE],
+      ["RETRY_AUDIT_NO_ANALYTICS", EXPECTED_ANALYTICS_NO_EVIDENCE],
+    ] as const)(
+      "%s contributes exactly %i non-empty evidence strings (per-map anti-vacuity fence)",
+      (mapName, expected) => {
+        expect(
+          scannedIn(mapName),
+          `${mapName} contributes ${scannedIn(mapName)} non-empty evidence ` +
+            `strings, not ${expected}. THE BREAKDOWN IS CHECKED PER MAP ON ` +
+            `PURPOSE: a verdict MOVED between two maps leaves the total ` +
+            `unchanged, so a total-only fence stays green while its own stated ` +
+            `breakdown goes false — measured on exactly that move when resync ` +
+            `went from the YES flow map to the NO one (2+4+2+5 and 1+4+3+5 are ` +
+            `both 13). If a verdict was legitimately added, removed or moved, ` +
+            `change the per-map literal IN THE SAME COMMIT as the entry. If it ` +
+            `was not, a map has been emptied and the citation guard below is now ` +
+            `inspecting less than it claims while still reporting green.`,
+        ).toBe(expected);
+      },
+    );
+
+    it("scans 13 non-empty evidence strings in total (the four maps, summed)", () => {
+      // The total is DERIVED from the four per-map literals above, so it cannot
+      // disagree with them; it is kept because it is the number the citation
+      // guard below actually inspects, and a shape the flattener mishandles
+      // (a fifth map added and not wired into `allEvidenceStrings`) shows up
+      // here rather than nowhere.
+      const scanned = allEvidenceStrings().filter(
+        (e) => typeof e.text === "string" && e.text.length > 0,
+      );
+      expect(
+        scanned.length,
+        `the flattened evidence-string population is ${scanned.length}, not ` +
+          `${EXPECTED_EVIDENCE_STRING_COUNT}. The per-map fences above localise ` +
+          `WHICH map moved; this one catches a map that is not being flattened ` +
+          `at all.`,
+      ).toBe(EXPECTED_EVIDENCE_STRING_COUNT);
+    });
+
+    it("every evidence string is free of `file.ext:NN` coordinates", () => {
+      const offences: string[] = [];
+      for (const { where, text } of allEvidenceStrings()) {
+        for (const c of citationsIn(text)) {
+          offences.push(`${where} cites \`${c.target}:${c.lines}\``);
+        }
+      }
+      expect(
+        offences,
+        `a coordinate citation in evidence prose rots silently — anchor the ` +
+          `symbol, not the address. ${offences.join("; ")}. ${CONVERSION_PROTOCOL} ` +
+          `Note that the sibling comment guard in seam-citations.invariant.test.ts ` +
+          `CANNOT see these: it extracts comments, and this rot lives in string ` +
+          `literals.`,
+      ).toEqual([]);
+    });
+
+    // BOTH POLARITIES on evidence-shaped text. Without the +1 the guard could be
+    // a needle that never matches; without the -1 it could ban the conversion
+    // target it is supposed to reward.
+    it("+1: the needle catches a planted coordinate in evidence-shaped text", () => {
+      expect(citationsIn("planted foo.ts:12 rot")).toHaveLength(1);
+    });
+
+    it("-1: a SYMBOL-anchored evidence sentence produces no offence", () => {
+      expect(
+        citationsIn(
+          "resolved by _resume_duplicate_job in process_key.py — no coordinate",
+        ),
+      ).toEqual([]);
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // [D-11] SC-I — IMMUTABILITY, AT BOTH LEVELS.
+  //
+  // The registry docblock claimed the maps were immutable while they were
+  // exported with a widening TYPE ANNOTATION and nothing else: both
+  // `RETRY_SAFE_FLOW_TYPES.teaser = { retries: 1, evidence: "" }` and
+  // `delete RETRY_SAFE_FLOW_TYPES.onboard` typechecked clean AND took at
+  // runtime. A pushed row is a legitimate retry verdict from that moment on, and
+  // for `teaser` that verdict double-mints the verification, the public_token
+  // and the lead — the exact anti-feature the SC3 belt above exists to prevent,
+  // reached by writing to the belt instead of around it.
+  //
+  // TWO MECHANISMS, PINNED SEPARATELY, BECAUSE THEY FAIL SEPARATELY. The
+  // `@ts-expect-error` fixtures pin the COMPILE half (delete a comment and
+  // `npm run typecheck` reds on that line); the throw assertions pin the RUNTIME
+  // half, which is the one that survives the type erasure at build. Neither
+  // implies the other: `as const` alone is erased, and `Object.freeze` alone
+  // leaves the mutation compiling and failing loudly only in production.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  describe("[D-11 / SC-I] the four verdict maps are immutable", () => {
+    it.each([
+      ["RETRY_SAFE_FLOW_TYPES", RETRY_SAFE_FLOW_TYPES],
+      ["RETRY_AUDIT_NO_FLOW_TYPES", RETRY_AUDIT_NO_FLOW_TYPES],
+      ["RETRY_SAFE_ANALYTICS", RETRY_SAFE_ANALYTICS],
+      ["RETRY_AUDIT_NO_ANALYTICS", RETRY_AUDIT_NO_ANALYTICS],
+    ] as const)("%s is frozen at runtime", (name, map) => {
+      expect(
+        Object.isFrozen(map),
+        `${name} is not frozen — a consumer push can ADD a verdict row, and an ` +
+          `added row is indistinguishable from an audited one at the gate.`,
+      ).toBe(true);
+    });
+
+    // 141.2 / D-03 — `RETRY_SAFE_FLOW_TYPES.resync` left this list with the
+    // entry itself. `Object.freeze(undefined)` would have made the case pass
+    // vacuously rather than red, so the row is not merely deleted: the freeze
+    // obligation follows the verdict to the NO map in the case below, where the
+    // value is a STRING (primitives are frozen by nature — the assertion there
+    // is that the CONTAINER is frozen, which is what closes the push vector).
+    it.each([
+      ["RETRY_SAFE_FLOW_TYPES.onboard", RETRY_SAFE_FLOW_TYPES.onboard],
+      ["RETRY_SAFE_ANALYTICS.bridge", RETRY_SAFE_ANALYTICS.bridge],
+      ["RETRY_SAFE_ANALYTICS.simulator", RETRY_SAFE_ANALYTICS.simulator],
+      [
+        "RETRY_SAFE_ANALYTICS.portfolio-optimizer",
+        RETRY_SAFE_ANALYTICS["portfolio-optimizer"],
+      ],
+      [
+        "RETRY_SAFE_ANALYTICS.optimize-weights",
+        RETRY_SAFE_ANALYTICS["optimize-weights"],
+      ],
+    ] as const)("%s (the ENTRY, not just the map) is frozen", (name, entry) => {
+      // A shallow freeze closes the ADD vector and leaves the REPOINT vector
+      // open. `RETRY_SAFE_ANALYTICS.bridge.retries = 5` reaches the gate through
+      // a row that is already a legal YES, so no key-set pin above would see it,
+      // and five retries on a handler that appends an audit row per attempt is
+      // the elevation T-141.1-11 names.
+      expect(
+        Object.isFrozen(entry),
+        `${name} is reachable for mutation — freezing the map but not its ` +
+          `entries makes the docblock's "immutable" claim half true, which is ` +
+          `the over-claim class this phase exists to remove.`,
+      ).toBe(true);
+    });
+
+    it("pushing a `teaser` YES row does not compile AND throws at runtime", () => {
+      expect(() => {
+        // C4 / D-11 — this line used to TYPECHECK CLEAN. The @ts-expect-error is
+        // the pin: remove it and `npm run typecheck` reds here (TS2540, assignment
+        // to a read-only property), which is the proof the compile half is real.
+        // @ts-expect-error — pinned as a COMPILE error; see above.
+        RETRY_SAFE_FLOW_TYPES.teaser = { retries: 1, evidence: "" };
+      }).toThrow(TypeError);
+      // …and the push left no residue. Belt for the assertion above: a runtime
+      // that silently ignored the write instead of throwing would still be safe,
+      // but this registry would not know which of the two it got.
+      expect(RETRY_SAFE_FLOW_TYPES.teaser).toBeUndefined();
+    });
+
+    it("deleting the `onboard` YES row does not compile AND throws at runtime", () => {
+      expect(() => {
+        // C4 / D-11 — likewise clean before the freeze. Remove the next line and
+        // typecheck reds with TS2704 (the operand of a `delete` operator cannot
+        // be a read-only property).
+        // @ts-expect-error — pinned as a COMPILE error; see above.
+        delete RETRY_SAFE_FLOW_TYPES.onboard;
+      }).toThrow(TypeError);
+      expect(RETRY_SAFE_FLOW_TYPES.onboard?.retries).toBe(1);
+    });
+
+    it("overwriting the `resync` NO verdict does not compile AND throws at runtime", () => {
+      // 141.2 / D-03 — the freeze obligation that used to sit on
+      // `RETRY_SAFE_FLOW_TYPES.resync`, following the verdict to its new map.
+      // The vector is different in shape and identical in effect: a NO entry is
+      // a STRING, so there is no inner object to repoint, and the re-grant is
+      // performed by REPLACING the refusal text (or deleting the row, which
+      // reddens the exhaustiveness pin). Overwriting it silently would leave a
+      // registry that reads as an audit while carrying prose nobody audited.
+      expect(() => {
+        // @ts-expect-error — pinned as a COMPILE error; the `Readonly<…>`
+        // annotation makes this TS2540 (assignment to a read-only property).
+        RETRY_AUDIT_NO_FLOW_TYPES.resync = "safe now, trust me";
+      }).toThrow(TypeError);
+      expect(RETRY_AUDIT_NO_FLOW_TYPES.resync).toMatch(/WITHDRAWN GRANT/);
+    });
+  });
+
+  /**
+   * Phase 141.2 / D-01 (finding 1) — `retriesForFlow`, the gate that decides
+   * BOTH halves of the verdict.
+   *
+   * The behavioural half of this fix is pinned where it actually acts, at the
+   * five-caller chokepoint in `process-key-client.test.ts` (driving the REAL
+   * `postProcessKey` and reading `retriesOverride` off the captured init). These
+   * cases are the UNIT half: the branch table of the helper itself, including
+   * the one arm the chokepoint cannot reach.
+   *
+   * ⚠️ ORACLE INDEPENDENCE. Every expectation below is a hand-typed literal.
+   * Deriving them from the maps (`RETRY_SAFE_FLOW_TYPES[k]?.retries ?? 0`) would
+   * restate the implementation and be green for any table.
+   */
+  describe("[141.2 / D-01] retriesForFlow — flow verdict AND key presence", () => {
+    const SESSION_ID = "33333333-3333-4333-8333-333333333333";
+
+    it("fails CLOSED when the context is undefined — the runtime belt (SC-L)", () => {
+      // ⚠️ WHY THIS PIN LIVES HERE AND NOT AT THE CALL SITE. Fail-closed is
+      // enforced at TWO layers and this pin covers the second one only.
+      //   1. COMPILE — `PostProcessKeyArgs.context` is a REQUIRED field, so a
+      //      caller that states no context does not compile. That is the
+      //      stronger guarantee and 141.2 / plan 05 records the decision to KEEP
+      //      it; the field is deliberately not optional.
+      //   2. RUNTIME — this arm. The type system is erased at build, so a JS
+      //      caller, an `as any` cast, or a future refactor that widens the
+      //      field can still arrive here with nothing. A flow must not inherit a
+      //      retry it has not earned through any of those doors.
+      // Because of (1) the omission is NOT type-expressible through
+      // `postProcessKey`, so it is pinned at the helper rather than faked with a
+      // cast through the chokepoint — a cast would be testing TypeScript, not
+      // the belt.
+      expect(
+        retriesForFlow("onboard", undefined),
+        "the helper granted a retry to a caller that supplied no context at " +
+          "all. Absent context cannot evidence an idempotency key, and " +
+          "unproven ⇒ no-retry is this registry's whole construction. The " +
+          "default must be 0.",
+      ).toBe(0);
+    });
+
+    it("grants onboard exactly one retry when a truthy wizard_session_id is present", () => {
+      expect(
+        retriesForFlow("onboard", { wizard_session_id: SESSION_ID }),
+        "onboard's YES verdict stopped producing a retry even with its own " +
+          "antecedent satisfied. If the grant is being withdrawn outright, the " +
+          "verdict belongs in RETRY_AUDIT_NO_FLOW_TYPES with written evidence, " +
+          "not silently in this helper.",
+      ).toBe(1);
+    });
+
+    it.each([
+      ["an absent key", {} as Record<string, unknown>],
+      ["an EMPTY-STRING key", { wizard_session_id: "" }],
+      ["a null key", { wizard_session_id: null }],
+    ])("refuses onboard a retry for %s", (_label, context) => {
+      // The empty string is the discriminating case: Python gates on
+      // `bool(context.get("wizard_session_id"))` at the flow-type gate in
+      // process_key.py, so "" is FALSE there. An implementation written as
+      // `!== null` passes the absent and null cases and DIVERGES here — the two
+      // sides of the seam running different predicates while appearing to
+      // agree. Write it as a truthiness test.
+      expect(
+        retriesForFlow("onboard", context),
+        "onboard was granted a retry on a key the SERVER will not dedupe on. " +
+          "The server mints a fresh session per attempt in that state, so the " +
+          "unique index cannot collide and attempt 2 inserts a second " +
+          "verification row.",
+      ).toBe(0);
+    });
+
+    it.each(["teaser", "csv", "resync"] as const)(
+      "refuses %s a retry even when a wizard_session_id IS present — the NO verdict dominates",
+      (flowType) => {
+        // Order of operations, pinned: the flow verdict is consulted FIRST. A
+        // helper that checked key presence first would hand `teaser` a retry
+        // the moment a caller happened to include a session id in its context —
+        // and a teaser retry double-mints the verification, the public_token
+        // and the lead, which is the SC3 anti-feature the belt above exists to
+        // prevent, reached through the new argument rather than around it.
+        expect(
+          retriesForFlow(flowType, { wizard_session_id: SESSION_ID }),
+          `${flowType} was granted a retry because a session id happened to be ` +
+            `in its context. Key presence NARROWS a YES verdict; it can never ` +
+            `create one. Absence from the YES map means no-retry, full stop.`,
+        ).toBe(0);
+      },
+    );
+
+    it("refuses every non-onboard flow a retry with an empty context too (both polarities of the dominance rule)", () => {
+      // Without this the case above could be passing for the wrong reason — a
+      // helper that returned 0 for everything would satisfy it.
+      for (const flowType of ["teaser", "csv", "resync"] as const) {
+        expect(retriesForFlow(flowType, {})).toBe(0);
+      }
+      // …and the discriminating positive, restated locally so this case cannot
+      // be green against a helper that has stopped granting anything at all.
+      expect(retriesForFlow("onboard", { wizard_session_id: SESSION_ID })).toBe(
+        1,
+      );
+    });
+  });
+
+  describe("purity — the leaf imports nothing by VALUE", () => {
+    // Same mechanism as seam-discriminator.purity.test.ts: read the source from
+    // disk, strip comments, and assert every import statement is `import type`.
+    // A VALUE import of resilient-fetch.ts would pull @upstash/redis + a
+    // Redis.fromEnv() side effect into the "use client" wizard bundle, and would
+    // evaluate to undefined under the wholesale seam-client mocks.
+    const src = readFileSync(join(process.cwd(), LEAF_PATH), "utf8");
+    const codeLines = src
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("//"));
+    const importLines = codeLines.filter((line) => /^\s*import\s/.test(line));
+
+    it("has import statements (guard is not vacuous)", () => {
+      expect(importLines.length > 0).toBe(true);
+    });
+    it("every import statement is a type-only import", () => {
+      for (const line of importLines) {
+        expect(
+          /^\s*import\s+type\s/.test(line),
+          `${LEAF_PATH} has a non-type import: ${line.trim()} — a VALUE import ` +
+            `here reaches the browser bundle and dies under wholesale seam mocks.`,
+        ).toBe(true);
+      }
+    });
+    it("contains no require() or dynamic import()", () => {
+      const code = codeLines.join("\n");
+      expect(/\brequire\s*\(/.test(code)).toBe(false);
+      expect(/\bimport\s*\(/.test(code)).toBe(false);
+    });
+  });
+});

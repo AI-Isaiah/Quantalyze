@@ -5,6 +5,7 @@ import { CircuitOpenError, SeamBodyReadError } from "./seam-errors";
 import { seamBreakerVerdict } from "./seam-discriminator";
 import { scrubSeamError } from "./seam-redaction";
 import { captureToSentry, shouldCaptureNow } from "./sentry-capture";
+import { parseRetryAfterSeconds } from "./retry/retry-after";
 
 /**
  * Phase 140 / SEAM-02 + SEAM-03 — the ONE shared resilience core for the
@@ -145,6 +146,66 @@ export function breakerKeyFor(dependency: SeamServiceDependency): string {
  * circuit trips. 5 is low enough to react inside a single user's retry
  * patience and high enough that one unlucky request, or a single pod restart
  * mid-deploy, does not take the seam down.
+ *
+ * ⚠️ THE UNIT IS AN ATTEMPT, NOT A REQUEST, AND THIS DOCBLOCK USED TO REASON AS
+ * IF THEY WERE THE SAME THING. The sentence above predates the retry loop: it
+ * argued only from the under-trip direction, and it was written when one
+ * `resilientFetch` call could contribute at most ONE failure. Phase 141's
+ * per-attempt latch (see `recordOnce` and the Class D note at its reset) changed
+ * that deliberately — a retried attempt is a distinct request as far as the
+ * breaker is concerned, so a doubly-failing retried call now records TWO.
+ *
+ * THE ARITHMETIC, stated so this is a number rather than a wish:
+ *
+ *   | traffic shape                        | failures per user request | requests to trip |
+ *   |--------------------------------------|---------------------------|------------------|
+ *   | no retry (every row before 141)      | 1                         | 5                |
+ *   | retried, both attempts failing       | 2                         | ⌈5/2⌉ = 3        |
+ *
+ * ⚠️ "**3 user requests instead of 5**" WAS STATED HERE UNCONDITIONALLY, and it
+ * is no longer unconditional. It is kept, named, and qualified rather than
+ * quietly deleted, because it is still the right summary for the traffic shape
+ * it describes — and because two 141.2 decisions narrowed that shape from both
+ * ends:
+ *
+ *   · D-06 narrowed the FAILURE class. The second row above presupposes a
+ *     second attempt happened at all. A 503 that names a POSITIVE wait now
+ *     fails fast (`hasContractualWait` parses the header via
+ *     `parseRetryAfterSeconds` instead of testing its presence), so it records
+ *     ONE failure and trips at the ordinary five. Every SERVICE-TRANSIENT 503
+ *     the analytics service emits carries such a header by contract — so for
+ *     that status class, which is the mandatory one, the top row applies.
+ *     Two-per-request is the transport/timeout class: throws, deadlines and
+ *     header-less edge 5xx.
+ *   · D-01 and D-03 narrowed the CALLER set. A retry-enabled budget row no
+ *     longer implies a retried call: the `/process-key` verdict is taken from
+ *     `retriesForFlow` in `seam-retry-registry.ts`, which grants a retry only
+ *     to `onboard`, and only when the call carries a usable idempotency key.
+ *
+ * So: sustained degradation trips in three user requests where a call actually
+ * retries AND its failures carry no contractual wait, and in five otherwise.
+ * The trip is also WIDE: `breakerKeysFor`
+ * appends the global `BREAKER_KEY` to every call site's check, so an open global
+ * circuit gates all fifteen routes — including the anonymous public teaser
+ * (the exposure recorded and accepted at the `process-key-sync` row).
+ *
+ * ACCEPTED, decided 2026-07-31 (Phase 141.1 / D-02), and the direction is the
+ * point: a Railway blip that reaches five COUNTED failures inside 30 s is a real
+ * outage, not noise, and containing it two requests sooner is the behaviour we
+ * want from a breaker. Faster containment is bought with a fail-open breaker
+ * whose cooldown is 30 s, so the cost of an early trip is bounded and the cost
+ * of a late one is not.
+ *
+ * Raising this number is therefore TWO decisions, not one: it delays protection
+ * during a real outage AND it delays it further still for retried traffic, by a
+ * factor this docblock's table makes explicit. The two halves are pinned in two
+ * different places, on purpose: `seam-constants.pin.test.ts` pins the LITERAL,
+ * and the per-attempt-latch case in `resilient-fetch.retry.test.ts` pins the
+ * per-attempt BEHAVIOUR the table's second row rests on, by driving the real
+ * loop and counting the recordings. This docblock used to claim the pin file
+ * held both — it held the literal and an arithmetic restatement of it, which
+ * 141.2 / D-05 deleted for being unable to fail (finding 13). Neither half can
+ * move in silence now; before, only the literal could not.
  */
 export const BREAKER_FAILURE_THRESHOLD = 5;
 
@@ -309,6 +370,44 @@ export const BREAKER_STORE_RETRIES = 1;
 export const BREAKER_STORE_BACKOFF_MS = 250;
 
 // ---------------------------------------------------------------------------
+// SEAM-06 — the retry loop's backoff (Phase 141)
+//
+// Declared beside the breaker-store constants because they are the same KIND of
+// value — a term in the SC-4b worst case, declared rather than defaulted so the
+// headroom arithmetic can read it. The retry loop lives in `resilientFetch`; the
+// wait BETWEEN a failed attempt and its one retry is `SEAM_RETRY_BACKOFF_MS +
+// Math.random() × SEAM_RETRY_JITTER_MAX_MS`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Fixed pause before the single retry.
+ *
+ * FIXED, not exponential, and that is not a contradiction of SEAM-06's
+ * "exponential + jitter" wording: with EXACTLY ONE retry there is a single
+ * interval, and a single interval has no growth to be exponential ABOUT — the
+ * first (and only) exponential term `base × 2⁰` is just `base`. So "fixed +
+ * jitter" and "exponential + jitter" coincide here, and the fixed form is the
+ * one the SC-4b headroom arithmetic can state as one number (the lesson
+ * `BREAKER_STORE_BACKOFF_MS` above records verbatim). If a future policy widens
+ * to N>1 retries this becomes the exponential base and plan 04's invariant
+ * updates with it.
+ */
+export const SEAM_RETRY_BACKOFF_MS = 250;
+
+/**
+ * Upper bound on the random jitter added to `SEAM_RETRY_BACKOFF_MS`.
+ *
+ * Jitter DECORRELATES the retries of concurrent callers that all failed on the
+ * same Railway blip — without it, N lambdas retry in lock-step and re-create the
+ * synchronised storm the breaker exists to damp (T-141-04). The jitter is
+ * `Math.random() × this`, i.e. unbounded-BELOW-only: it can only ADD to the
+ * backoff, never subtract, so the worst-case interval is `SEAM_RETRY_BACKOFF_MS
+ * + SEAM_RETRY_JITTER_MAX_MS` = 500ms. SC-4b (plan 04) must charge that MAX, not
+ * the mean, because the headroom assertion has to hold for the slowest draw.
+ */
+export const SEAM_RETRY_JITTER_MAX_MS = 250;
+
+// ---------------------------------------------------------------------------
 // SEAM-02 — the ONE timeout budget table
 // ---------------------------------------------------------------------------
 
@@ -416,7 +515,21 @@ export const SEAM_BUDGETS: Record<
     timeoutMs: number;
     /** Service dependencies whose open breaker may block THIS call site. */
     dependencies: readonly SeamServiceDependency[];
-    /** Retries this call site performs. Phase 141 flips these, one row at a time. */
+    /**
+     * ACCOUNTING ONLY — this number does NOT turn retry on (D-08).
+     *
+     * It declares how many retries this call site is EXPECTED to perform, and
+     * exactly two readers consume it: SC-4b's headroom arithmetic in
+     * `seam-budgets.invariant.test.ts` (which must charge the retried leg's
+     * wall-clock and store round trips against the route's Vercel ceiling), and
+     * the `EXPECTED_RETRIES` literal pin in `seam-constants.pin.test.ts`.
+     *
+     * What actually gates a retry is `ResilientFetchInit.retriesOverride`, a
+     * REQUIRED `0 | 1` fed by `RETRY_SAFE_FLOW_TYPES` / `RETRY_SAFE_ANALYTICS`
+     * at the two client chokepoints. Editing this literal changes the BILL, not
+     * the behaviour; editing it without the matching registry entry is caught by
+     * the row↔registry agreement assertion in `seam-constants.pin.test.ts`.
+     */
     retries: number;
     notes: string;
   }
@@ -448,28 +561,36 @@ export const SEAM_BUDGETS: Record<
   bridge: {
     timeoutMs: 15_000,
     dependencies: [],
-    retries: SEAM_RETRIES,
+    // Phase 141 / SEAM-06 — retry-safe. Registry entry: RETRY_SAFE_ANALYTICS.bridge
+    // (findReplacementCandidates — pure compute, no persisted write on the path).
+    retries: 1,
     notes:
       "Weighted-covariance compute. Was hardcoded inside analytics-client's findReplacementCandidates.",
   },
   simulator: {
     timeoutMs: 15_000,
     dependencies: [],
-    retries: SEAM_RETRIES,
+    // Phase 141 / SEAM-06 — retry-safe. Registry entry: RETRY_SAFE_ANALYTICS.simulator
+    // (simulateAddCandidate — pure compute, no persisted write on the path).
+    retries: 1,
     notes:
       "Portfolio impact simulator compute. Was hardcoded inside analytics-client's simulateAddCandidate.",
   },
   "portfolio-optimizer": {
     timeoutMs: 15_000,
     dependencies: [],
-    retries: SEAM_RETRIES,
+    // Phase 141 / SEAM-06 — retry-safe. Registry entry:
+    // RETRY_SAFE_ANALYTICS["portfolio-optimizer"] (runPortfolioOptimizer — pure compute).
+    retries: 1,
     notes:
       "Heavy compute. Was OPTIMIZER_TIMEOUT_MS declared inside the route rather than the client — the budget-ownership split this table exists to end.",
   },
   "optimize-weights": {
     timeoutMs: 30_000,
     dependencies: [],
-    retries: SEAM_RETRIES,
+    // Phase 141 / SEAM-06 — retry-safe. Registry entry:
+    // RETRY_SAFE_ANALYTICS["optimize-weights"] (optimizeScenarioWeights — pure compute).
+    retries: 1,
     notes: "Scenario composer optimizer. Was the analytics-client 30s default.",
   },
   "match-eval": {
@@ -504,7 +625,18 @@ export const SEAM_BUDGETS: Record<
   "process-key-enqueue": {
     timeoutMs: 15_000,
     dependencies: [],
-    retries: SEAM_RETRIES,
+    // Phase 141 / SEAM-06 — retry-safe at the ROW grain, and the row is NOT the
+    // retry gate for ANY seam: since D-08 the gate is the required
+    // `retriesOverride`, fed by RETRY_SAFE_FLOW_TYPES / RETRY_SAFE_ANALYTICS at
+    // the two client chokepoints, and `resilientFetch` no longer reads this
+    // literal at all. What it IS: the accounting statement SC-4b's headroom
+    // arithmetic reads (an honest row — this budget really does perform two
+    // attempts in production, and the route's lambda ceiling must be charged for
+    // both). ⚠️ The row is at the WRONG GRAIN to be a gate here even in
+    // principle: it serves BOTH onboard AND resync (budgetKeyFor is
+    // many-to-one), while the audit that authorises the retry is per flow_type.
+    // Teaser/csv live on process-key-sync (retries: 0) for the same reason.
+    retries: 1,
     notes:
       "flow_type in {resync, onboard}: the server merely enqueues onto the worker dyno and returns 202 (verified in analytics-service/routers/process_key.py:_is_long_fetch). An enqueue that takes 15s means Railway is sick. Tightened from the blanket 60s; nothing observes these two budgets (research §6.4).",
   },
@@ -893,6 +1025,21 @@ export function encodeBreakerLock(
 }
 
 /**
+ * The widest span a LEGITIMATE lock can encode: its own cooldown plus the
+ * tombstone the KEY outlives the lock by. A span longer than that describes no
+ * state this module can produce — see `decodeBreakerLock`.
+ *
+ * DERIVED from the two constants rather than hand-typed, deliberately. The bound
+ * means "as long as a lock can possibly be", not "90 000 ms", so retuning either
+ * constant has to move it. It cannot drift in silence in either direction:
+ * `seam-constants.pin.test.ts` pins both constants literal-against-literal, and
+ * the G2 case in `resilient-fetch.test.ts` pins this ceiling against its own
+ * hand-typed 90 000 from the outside.
+ */
+const MAX_BREAKER_LOCK_SPAN_MS =
+  (BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S) * 1_000;
+
+/**
  * Parse a stored breaker lock, or `null` if the value is not one.
  *
  * ⚠️ AN UNPARSEABLE VALUE IS `null`, AND `null` READS CLOSED. That is the
@@ -903,14 +1050,74 @@ export function encodeBreakerLock(
  * `"open"`, which new instances ignore. That is at most one cooldown of
  * under-protection at a deploy boundary, in the direction this module always
  * errs.
+ *
+ * ⚠️ PARSEABLE IS NOT THE SAME AS PLAUSIBLE — LO-02 / TS-39, discharged here.
+ * The shape above accepts any two digit strings, so `open:0:100000000000000000`
+ * used to decode to a lock ~1e17 ms in the future. `isBreakerOpen` derived
+ * `retryAfterS ≈ 1e14` from it, `CircuitOpenError`'s A-15 guard accepted that
+ * (`Number.isInteger` is true of it), and the value went ON THE WIRE as a
+ * `Retry-After` — including to the anonymous teaser. A REVERSED pair
+ * (`expiresAtMs < armedAtMs`) separately made `emitBreakerTransition`'s
+ * `cooldownS` negative. A-15 exists precisely to keep implausible values out of
+ * that header, and this decoder was the one remaining path that could mint one
+ * which PASSED it.
+ *
+ * The span bound is therefore part of the parse, not a caller's duty.
+ *
+ * ⚠️ TWO SENTENCES THAT USED TO STAND HERE WERE WRONG, AND BOTH ARE NAMED
+ * RATHER THAN QUIETLY DELETED (phase 141.2, findings 10 and 11 — the review of
+ * the very change that added the span bound).
+ *
+ *  1. "The rejection direction is `null` — i.e. CLOSED — so corruption still
+ *     fails forward, UNCHANGED." True of the read side; the opposite of true of
+ *     the write side, and the write side is where it mattered. `null` conflated
+ *     two different store states — "key absent" and "key present but
+ *     undecodable" — and `recordSeamFailure`'s trip path branched its WRITE
+ *     decision on that conflation, so a corrupt-but-present value was routed
+ *     into `SET NX`, which cannot overwrite an existing key. Nothing was
+ *     written, no transition was emitted, and the circuit could not open for
+ *     the rest of that key's TTL. What is true now: the READ side still fails
+ *     forward to CLOSED, unchanged; the WRITE side distinguishes RAW presence
+ *     from a failed decode, so a corrupt value is DISPLACED and the store
+ *     self-heals on the next recorded failure. See the trip path's own branch.
+ *
+ *  2. "PARSEABLE IS NOT THE SAME AS PLAUSIBLE … discharged here", of a bound
+ *     that was purely RELATIVE. A span bound cannot see an absurd PLACE on the
+ *     timeline: every lock this module writes has span exactly
+ *     `BREAKER_COOLDOWN_S` seconds, so ANY pair sharing that delta passed —
+ *     `open:100000000000000000:100000000000030000` decoded cleanly and still
+ *     minted the ~1e14 `Retry-After` the paragraph above claims it closed. The
+ *     absolute bound below is what discharges LO-02 / TS-39 for real.
+ *
+ * ⚠️ THE ABSOLUTE BOUND IS ONE-SIDED, DELIBERATELY. A lock in the FUTURE beyond
+ * its own maximum span describes no state this module can produce. A lock in the
+ * PAST is a TOMBSTONE, and `isBreakerOpen` depends on decoding tombstones to
+ * announce the close — locked decision 3 makes TTL expiry the half-open
+ * transition, so that read is the only moment "the circuit is usable again"
+ * becomes observable. A past-side bound would report CLOSED for the right reason
+ * by the wrong mechanism, and take the close event with it.
+ *
+ * `nowMs` is a PARAMETER with a `Date.now()` default rather than a bare call, so
+ * the bound stays deterministically testable without coupling every existing
+ * case to the wall clock or to a fake timer. Existing callers are unchanged.
  */
 export function decodeBreakerLock(
   value: unknown,
+  nowMs: number = Date.now(),
 ): { armedAtMs: number; expiresAtMs: number } | null {
   if (typeof value !== "string") return null;
   const parsed = /^open:(\d+):(\d+)$/.exec(value);
   if (!parsed) return null;
-  return { armedAtMs: Number(parsed[1]), expiresAtMs: Number(parsed[2]) };
+  const armedAtMs = Number(parsed[1]);
+  const expiresAtMs = Number(parsed[2]);
+  // `<= 0` covers the reversed pair AND the zero-length lock, which is already
+  // expired at the instant it was armed and so is not an open circuit either.
+  const spanMs = expiresAtMs - armedAtMs;
+  if (spanMs <= 0 || spanMs > MAX_BREAKER_LOCK_SPAN_MS) return null;
+  // ABSOLUTE plausibility, future side only — see the one-sidedness note above.
+  // A live lock cannot expire further out than its own widest legitimate span.
+  if (expiresAtMs > nowMs + MAX_BREAKER_LOCK_SPAN_MS) return null;
+  return { armedAtMs, expiresAtMs };
 }
 
 // ---------------------------------------------------------------------------
@@ -1263,7 +1470,17 @@ export async function recordSeamFailure(
     // failure would change the deployed breaker's timing behaviour during
     // precisely the correlated incident it exists for.
     const now = Date.now();
-    const existing = decodeBreakerLock(await redis.get<string>(breakerKey));
+    // ⚠️ THE RAW VALUE IS KEPT, AND THAT IS THE WHOLE OF FINDING 10 (141.2).
+    // `decodeBreakerLock` answers `null` for TWO different store states — the
+    // key is ABSENT, and the key is PRESENT but undecodable — and only the first
+    // of them justifies the `nx` write below. Deciding the write from `existing`
+    // alone therefore sent a corrupt-but-present value into `SET NX`, which
+    // cannot overwrite an existing key: no lock stored, no transition emitted,
+    // and the circuit unable to open for the rest of that key's TTL across every
+    // seam route. The GUARDS below still read `existing` — they are questions
+    // about a lock, and a value that is not a lock cannot answer them.
+    const rawLock = await redis.get<string>(breakerKey);
+    const existing = decodeBreakerLock(rawLock);
     if (existing) {
       // Already open. Return without writing, so the FIRST writer's expiry
       // stands and a second instance tripping 200ms later cannot ratchet the
@@ -1292,7 +1509,10 @@ export async function recordSeamFailure(
     const value = encodeBreakerLock(now, expiresAtMs);
     const ttlS = BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S;
     let written: unknown;
-    if (existing === null) {
+    if (rawLock === null) {
+      // The key is GENUINELY ABSENT — the raw read, not the decode, is what says
+      // so (finding 10; see the note at the read above).
+      //
       // `nx: true` makes CONCURRENT trips idempotent — two instances tripping
       // milliseconds apart, neither of which saw the other's write.
       //
@@ -1304,12 +1524,21 @@ export async function recordSeamFailure(
       // RATCHET a live lock", which reddens under `nx: false`.
       written = await redis.set(breakerKey, value, { ex: ttlS, nx: true });
     } else {
-      // ── OVERWRITING A TOMBSTONE — THE BRANCH THAT ACTUALLY RACES (HI-01) ──
+      // ── OVERWRITING A PRESENT VALUE — THE BRANCH THAT ACTUALLY RACES (HI-01) ──
       //
-      // Reaching here means the previous lock has expired AND this failure is
-      // new evidence gathered after it was armed, so a fresh cooldown is right.
-      // `nx` cannot express that: the key still EXISTS as a tombstone, so `nx`
-      // would refuse every re-arm for the whole tombstone window.
+      // Reaching here means the key HOLDS something: an expired lock whose
+      // evidence this failure post-dates, or — since 141.2 / finding 10 — a
+      // value this module's decoder rejects. In the tombstone case a fresh
+      // cooldown is right because the previous lock has expired AND this failure
+      // is new evidence gathered after it was armed. In the CORRUPT case there
+      // is no lock at all, so there is nothing to preserve and displacing it is
+      // how the store self-heals: the value decodes to `null`, `written` is
+      // therefore true, and the transition that follows is truthful — this call
+      // DID arm the circuit.
+      //
+      // `nx` cannot express either: the key still EXISTS, so `nx` would refuse
+      // every re-arm for the whole tombstone window, and would refuse the
+      // corrupt key for its entire remaining TTL.
       //
       // This used to be a BLIND write returning a truthy `"OK"` unconditionally,
       // and that made it the one door the idempotency story above does not
@@ -1423,6 +1652,32 @@ export type ResilientFetchInit = Omit<RequestInit, "signal"> & {
    * SEAM-02 exists to end.
    */
   timeoutMsOverride?: number;
+  /**
+   * How many retries THIS call performs — SEAM-06's only retry input.
+   *
+   * ⚠️ REQUIRED, AND THE ONLY THING THAT TURNS RETRY ON. There is no fallback to
+   * `SEAM_BUDGETS[budgetKey].retries`: five rows carry `retries: 1`, but the row
+   * is an ACCOUNTING declaration (see the field's docblock on `SEAM_BUDGETS`),
+   * never a gate. Being required is the mechanism, not a style choice — while it
+   * was optional, a new call site could pick a budget key whose row happened to
+   * be `1` and inherit a retry with the retry-safety registry never consulted,
+   * and it typechecked (Phase 141.1 / D-08, bucket C1). Now absence does not
+   * compile: every call site states a verdict.
+   *
+   * Where the verdict comes from: `postProcessKey` reads `RETRY_SAFE_FLOW_TYPES`
+   * by `flow_type` (never by `budgetKey`, which is many-to-one and would retry
+   * the deliberately non-idempotent `teaser` — CONTEXT registry-keying note);
+   * the analytics seam reads `RETRY_SAFE_ANALYTICS` by its 1:1 `budgetKey`. A
+   * caller outside those two chokepoints passes `0` unless it can cite an audit
+   * entry.
+   *
+   * `0 | 1` is compile-time only, so the value is ALSO validated to the integer
+   * 0 or 1 ABOVE the classification window, exactly like `timeoutMsOverride`: a
+   * JS caller or an `as any` still needs the throw, a bad value is a caller
+   * fault and never Railway degradation, and one retry is the whole locked
+   * policy (CONTEXT — "exactly ONE retry").
+   */
+  retriesOverride: 0 | 1;
 };
 
 /**
@@ -1739,6 +1994,68 @@ async function readDependencyBody(res: Response): Promise<unknown> {
 }
 
 /**
+ * Does this response carry the upstream's OWN contractual wait hint?
+ *
+ * Phase 141.1 / D-01. `error_contract.service_error` makes `Retry-After`
+ * MANDATORY on every SERVICE-TRANSIENT 503 it emits — its `_validate` refuses to
+ * raise one without it — drawn from a table of 15s (supabase) / 30s
+ * (mt5-gateway). A 503 that names a wait is the upstream saying "not yet", and
+ * the retry backoff is three orders of magnitude shorter than the shortest wait
+ * it advertises.
+ *
+ * WHY ONLY 503, mirroring `readDependencyBody`'s discipline exactly: 503 is the
+ * ONE status the contract obliges to carry the header. The other counting 5xx
+ * (502/504) come from the platform EDGE, outside that contract, so a header
+ * arriving on one of those is not our upstream telling us anything and must not
+ * gate the retry.
+ *
+ * ⚠️ CAPABILITY-CHECKED, for the same reason `readDependencyBody` checks
+ * `clone`: `SeamResponse` is deliberately structural so route tests can stub the
+ * core with a `Response`-shaped object, and several existing fixtures are bare
+ * `{ ok, status }` literals with no `headers` at all. A missing `headers.get`
+ * must degrade to "no hint", never throw — a throw here lands inside the
+ * classification window and would replace the real upstream error with a
+ * bookkeeping one. `parseRetryAfterSeconds` defends the same way, so the local
+ * check is the belt in front of its braces, not a duplicate of it: it also
+ * rejects a `get` that is present but not callable.
+ *
+ * ⚠️ THE VALUE IS PARSED (Phase 141.2 / D-06, finding 9). This used to read
+ * `headers.get("Retry-After") !== null` and its docblock said *"Only presence is
+ * tested, so a malformed or hostile value cannot influence timing or logs"*.
+ * That was unsound: presence asserts the EMITTER'S contract without verifying
+ * the responder is bound by it. A `Retry-After: 0` means "retry now" (RFC 9110
+ * §10.2.3), and an empty or garbage value names no wait at all — yet all three
+ * suppressed the retry and handed the caller attempt 1's 503, for exactly the
+ * transient blip the retry exists to absorb.
+ *
+ * The predicate now DELEGATES to `parseRetryAfterSeconds` (B20 — the ONE
+ * `Retry-After` parser in this repo, enforced by the `no-raw-retry-after-parse`
+ * contract). Its contract IS this gate's predicate: strictly positive seconds,
+ * or `null` for absent / empty / zero / negative / unparseable. It covers BOTH
+ * RFC 9110 forms — delta-seconds, and an HTTP-date resolved against the
+ * response's OWN `Date` header, so a skewed client clock cannot distort the
+ * delta (no `Date` header ⇒ not reliably knowable ⇒ `null`). A date-form wait is
+ * a contractual wait like any other and fails fast; there is no deliberate gap
+ * here to work around. Do not hand-roll a second parse of this header.
+ *
+ * THE SAFETY PROPERTY SURVIVES VERBATIM: the parsed seconds are DISCARDED at the
+ * `!== null`. No `Retry-After` value reaches a sleep, a log or a timer — only the
+ * boolean changed.
+ *
+ * Scope, honestly: `error_contract.service_error` raises on a non-positive
+ * `retry_after` and refuses to emit a 503 without the header, so the only
+ * contract-bound emitter we own CANNOT produce the values above. Whether the
+ * platform edge can is UNVERIFIED — no such response has been captured. This is
+ * a repair to a check that was unsound by construction, not a fix for an
+ * observed production trace.
+ */
+function hasContractualWait(res: Response): boolean {
+  if (res.status !== 503) return false;
+  if (typeof res.headers?.get !== "function") return false;
+  return parseRetryAfterSeconds(res.headers) !== null;
+}
+
+/**
  * The ONE way to call the Railway analytics service.
  *
  * Sequence: caller/config validation → breaker check → budgeted fetch →
@@ -1772,12 +2089,17 @@ async function readDependencyBody(res: Response): Promise<unknown> {
  * not thrown — status interpretation is the caller's contract, and only the
  * caller knows whether a 404 is an error or an expected empty result.
  */
+/** Resolve after `ms` milliseconds — the retry backoff, extracted to one line. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function resilientFetch(
   budgetKey: SeamBudgetKey,
   path: string,
-  init: ResilientFetchInit = {},
+  init: ResilientFetchInit,
 ): Promise<SeamResponse> {
-  const { timeoutMsOverride, ...requestInit } = init;
+  const { timeoutMsOverride, retriesOverride, ...requestInit } = init;
 
   // ── ABOVE THE WINDOW ────────────────────────────────────────────────────
   // Everything from here to the `try` is a CALLER or CONFIG fault if it fails,
@@ -1819,6 +2141,33 @@ export async function resilientFetch(
     }
   }
   const timeoutMs = timeoutMsOverride ?? SEAM_BUDGETS[budgetKey].timeoutMs;
+
+  // SEAM-06 / D-08. `retriesOverride` is a REQUIRED `0 | 1`, so there is no
+  // `!== undefined` guard to write and no ME-03 present-vs-absent question to
+  // answer: absence does not compile. The check below is not redundant with the
+  // type — `0 | 1` erases at runtime, and a JS caller or an `as any` can still
+  // hand this function a `2`, a NaN or a string. One retry is the whole locked
+  // policy, so the only legal values are 0 and 1; anything else is a caller bug
+  // and is raised HERE, above the classification window, so a config typo can
+  // never be recorded as Railway degradation (the reason `SeamConfigError`
+  // exists — see its docblock).
+  if (
+    typeof retriesOverride !== "number" ||
+    !Number.isInteger(retriesOverride) ||
+    retriesOverride < 0 ||
+    retriesOverride > 1
+  ) {
+    console.error(
+      `[resilient-fetch] ${budgetKey}: CONFIG fault — invalid retriesOverride ${String(retriesOverride)}. This is a caller misconfiguration, NOT an analytics-service failure; the only legal values are 0 and 1.`,
+    );
+    throw new SeamConfigError(
+      `[resilient-fetch] ${budgetKey}: invalid retriesOverride ${String(retriesOverride)} — expected the integer 0 or 1`,
+    );
+  }
+  // The caller's verdict, and nothing else. The row fallback that used to sit
+  // here is gone (D-08): it let a hand-picked budget key inherit a retry with
+  // the retry-safety registry never consulted.
+  const retries = retriesOverride;
 
   // A-22. Hoisting the template alone is NOT sufficient: a malformed base URL
   // does not throw here, it makes `fetch` REJECT — landing in the transport
@@ -1863,21 +2212,51 @@ export async function resilientFetch(
    * instant and not `Date.now()` at recording time: by construction a request
    * records after it was admitted, and the gap between the two is the entire
    * subject of the guard.
+   *
+   * ⚠️ A `let`, REASSIGNED PER ATTEMPT — see the per-attempt-state note below and
+   * the recapture inside the loop's `attempt > 0` block.
    */
-  const admittedAtMs = Date.now();
+  let admittedAtMs = Date.now();
 
   /**
-   * ONE request records AT MOST ONE failure, whichever arm classifies it.
+   * ONE ATTEMPT records AT MOST ONE failure, whichever arm classifies it.
    *
    * Wave 5 moved the body read inside the classification window and left this
-   * interaction open deliberately, because this plan replaces the status branch:
-   * a counting status AND a body that then aborts are two arms observing ONE
-   * degraded request. Recording both halves the failures needed to trip, so five
-   * genuinely-distinct incidents' worth of protection would fire after two or
-   * three — a breaker that opens early is still an outage it created itself.
+   * interaction open deliberately: a counting status AND a body that then aborts
+   * are two arms observing ONE degraded request. Recording both halves the
+   * failures needed to trip, so five genuinely-distinct incidents' worth of
+   * protection would fire after two or three — a breaker that opens early is
+   * still an outage it created itself.
    *
    * A latch rather than an ordering rule: the arms cannot be ordered, since the
    * body read happens whenever the CALLER chooses to read it, arbitrarily later.
+   *
+   * ⚠️ SEAM-06 Class D — THE LATCH IS PER-ATTEMPT, RESET AT THE TOP OF EACH LOOP
+   * ITERATION. Within one attempt the status+body dedup above still holds, but a
+   * RETRIED attempt is a distinct request as far as the breaker is concerned:
+   * two failing transient attempts must advance the counter TWICE, or a retried
+   * outage would take twice as many requests to trip. `recordOnce` closes over
+   * `recorded`, so resetting `recorded` below re-arms the same closure — and the
+   * closure handed to `instrumentBody` after the loop therefore carries the LAST
+   * attempt's latch, which is correct: a post-return body-read failure belongs
+   * to the attempt that produced the response.
+   *
+   * ⚠️ THE LATCH IS NOT THE ONLY PER-ATTEMPT STATE — `admittedAtMs` IS THE OTHER
+   * (141.2 / finding 5, D-09), and it was missed when the loop was introduced.
+   * A-25's predicate, stated in `recordSeamFailure`, is "was this request
+   * already IN FLIGHT when that lock was armed" — and "in flight" is a property
+   * of an ATTEMPT, not of the logical request: attempt 2 is admitted separately,
+   * past its own re-check of a by-then-expired lock, so its failure is evidence
+   * gathered entirely AFTER the arming and must be allowed to re-arm the
+   * circuit. Captured once above the loop, that timestamp made every retried
+   * wave's evidence look stale — on the 30 s `optimize-weights` budget the
+   * breaker could never re-arm from a retried call at all, so allocators waited
+   * 60 s+ per click instead of receiving an immediate circuit error. Reassigned
+   * below, immediately after the pre-attempt re-check passes, for the same
+   * reason `recorded` is reset there: `recordOnce` closes over the binding, so
+   * the recording arms and the post-return `instrumentBody` closure all carry
+   * the LAST admitted attempt's instant — the attempt that produced what they
+   * are recording.
    */
   let recorded = false;
   async function recordOnce(breakerKey: string): Promise<void> {
@@ -1886,13 +2265,95 @@ export async function resilientFetch(
     await recordSeamFailure(breakerKey, admittedAtMs);
   }
 
-  // Constructed after the breaker check so the budget covers the REQUEST, not
-  // the store round-trip that decides whether to make one.
-  const deadline = AbortSignal.timeout(timeoutMs);
+  // ── THE RETRY LOOP (SEAM-06) ────────────────────────────────────────────
+  // Bounded by `1 + retries`, with `retries ∈ {0, 1}` (validated above). At
+  // retries=0 — every caller whose registry verdict is 0, which is every call
+  // site outside the audited allowlist — this runs exactly once and is
+  // behaviourally byte-equivalent to the pre-141 single-attempt path.
+  // Retry-eligible outcomes are ONLY the
+  // counting/transient classes: a transport throw (what `seamBreakerVerdict(null)`
+  // counts) and a response whose `verdict.counts` is true (503/other-5xx). A
+  // 2xx or a 4xx returns immediately. `SeamConfigError` was raised above the
+  // loop; `CircuitOpenError` from the pre-attempt re-check is thrown from ABOVE
+  // the fetch `try`, so nothing in the loop can catch or swallow it (SC4 /
+  // T-141-03).
+  //
+  // ⚠️ Phase 141.1 / D-17 — WHY A STATUS IS CARRIED ACROSS ITERATIONS. `res` is
+  // declared INSIDE the loop body and is out of scope at the pre-attempt-2
+  // re-check, so the `CircuitOpenError` arm below could not name the response it
+  // was discarding. This is the minimal carry: the STATUS NUMBER only.
+  //
+  // ⚠️ DO NOT "SIMPLIFY" THIS BY HOISTING `res` ITSELF. A `Response` hoisted out
+  // of the loop keeps a body stream — and the credentials any error rendered
+  // from it could inline — alive across the backoff and into the next attempt,
+  // which is exactly the leak lifetime the H2 class names. A number cannot leak.
+  let lastCountingStatus: number | undefined;
 
-  // ── THE CLASSIFICATION WINDOW ───────────────────────────────────────────
-  let res: Response;
-  try {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const lastAttempt = attempt === retries;
+
+    if (attempt > 0) {
+      // Fixed backoff + jitter, THEN re-check. Jitter (`Math.random() ×
+      // SEAM_RETRY_JITTER_MAX_MS`) decorrelates concurrent callers that all
+      // failed on the same blip so they do not retry in lock-step (T-141-04).
+      // Waiting before the re-check means the read that gates the retry is the
+      // freshest one — the breaker may have opened DURING the backoff.
+      await sleep(SEAM_RETRY_BACKOFF_MS + Math.random() * SEAM_RETRY_JITTER_MAX_MS);
+
+      // SC4 — the EXACT entry gate (the `isBreakerOpen` + `CircuitOpenError`
+      // throw above this retry loop), re-run before attempt 2. The
+      // breaker may have opened from attempt 1's OWN recorded failure or from a
+      // concurrent caller; a retry that fired anyway would amplify the very
+      // outage the breaker exists to contain. Thrown here, above the fetch try.
+      const reBreaker = await isBreakerOpen(budgetKey);
+      if (reBreaker.open) {
+        // ⚠️ Phase 141.1 / D-17 — THE DIAGNOSIS DIES HERE OTHERWISE. The caller
+        // is about to receive a `CircuitOpenError` instead of attempt 1's
+        // response, and that response carried the freshest fact available: the
+        // status, and on a 503 the `dependency` and `human_message` the caller
+        // USED to receive on this path pre-141. The response itself cannot be
+        // surfaced (the breaker is open; the point is not to serve it), so the
+        // status is logged rather than silently dropped.
+        //
+        // Same discipline as the transport arm below: the budget key is a
+        // module-derived value from a closed set, and the status is a number.
+        // The path, the body and every header value stay OUT.
+        console.error(
+          `[resilient-fetch] ${budgetKey}: breaker opened between attempts — ` +
+            `discarding attempt ${attempt}'s ` +
+            (lastCountingStatus === undefined
+              ? "transport failure (no status line)"
+              : `${lastCountingStatus} response`) +
+            " and returning a circuit error instead",
+        );
+        throw new CircuitOpenError(
+          reBreaker.retryAfterS ?? DEFAULT_RETRY_AFTER_S,
+        );
+      }
+
+      // ── PER-ATTEMPT ADMISSION RECAPTURE (141.2 / finding 5, D-09) ──────────
+      // This attempt has just been admitted past a circuit re-checked HERE, and
+      // this is the instant it happened. It has to be taken AFTER the throw
+      // above, not before the re-check: an attempt the breaker refuses is never
+      // admitted at all, and stamping it as though it were would hand A-25 an
+      // admission that no request ever had. See the per-attempt-state note above
+      // `recorded` for why the guard's predicate is per attempt.
+      admittedAtMs = Date.now();
+    }
+
+    // Per-attempt latch reset (Class D).
+    recorded = false;
+
+    // Design A: each attempt gets its OWN fresh per-attempt deadline. Total
+    // worst case is `timeoutMs × (1 + retries) + backoff`; restricting the
+    // override to headroom-safe routes is plan 04's job (SC-4b). Constructed
+    // after the breaker check so the budget covers the REQUEST, not the store
+    // round-trip that decides whether to make one.
+    const deadline = AbortSignal.timeout(timeoutMs);
+
+    // ── THE CLASSIFICATION WINDOW ─────────────────────────────────────────
+    let res: Response;
+    try {
     // Headers, body, and cache pass through byte-for-byte. A dropped
     // `Authorization` turns a working call into a 401 the breaker would then
     // count as degradation, and a dropped `X-Service-Key` silently
@@ -1966,10 +2427,16 @@ export async function resilientFetch(
     if (transportVerdict.counts) {
       await recordOnce(transportVerdict.breakerKey);
     }
-    // Rethrow the ORIGINAL error. Both clients map `err.name` onto their own
-    // typed errors (AnalyticsTimeoutError / UPSTREAM_TIMEOUT); wrapping here
-    // would silently reclassify every timeout in the codebase.
-    throw err;
+    // A transport failure IS retry-eligible. On the last attempt, rethrow the
+    // ORIGINAL error UNWRAPPED, exactly as the single-attempt path always has —
+    // both clients map `err.name` onto their own typed errors
+    // (AnalyticsTimeoutError / UPSTREAM_TIMEOUT), and wrapping here would
+    // silently reclassify every timeout in the codebase. Otherwise loop for the
+    // one retry; the pre-attempt-2 breaker re-check runs at the top.
+    if (lastAttempt) {
+      throw err;
+    }
+    continue;
   }
 
   // ── ATTRIBUTABILITY (SEAMCORE-01 / ROADMAP SC2) ─────────────────────────
@@ -1995,10 +2462,61 @@ export async function resilientFetch(
   // counting verdict would have been dropped in production. Deleted — `counts`
   // narrows `breakerKey` to `string`. Pinned at runtime by
   // `seam-breaker-failopen.regression.test.ts`.
-  const verdict = seamBreakerVerdict(res.status, await readDependencyBody(res));
-  if (verdict.counts) {
-    await recordOnce(verdict.breakerKey);
-  }
+    const verdict = seamBreakerVerdict(res.status, await readDependencyBody(res));
+    if (verdict.counts) {
+      await recordOnce(verdict.breakerKey);
+      // A counting status is retry-eligible too. Not the last attempt → discard
+      // this response and loop for the one retry; last attempt → fall through
+      // and RETURN it, so a caller still sees the 503 body its contract reads.
+      //
+      // ⚠️ Phase 141.1 / D-01 — HONOUR THE UPSTREAM'S OWN CONTRACT. Every
+      // SERVICE-TRANSIENT 503 this service emits carries a mandatory
+      // `Retry-After` (see `hasContractualWait`). Retrying inside the backoff is
+      // near-certain to fail AND spends a second breaker failure learning that,
+      // on billed lambda wall clock. So a 503 that NAMES a wait fails fast: fall
+      // through and RETURN attempt 1's response with its body intact. Attempt
+      // 1's own failure is still recorded — `recordOnce` above runs first,
+      // because the 503 did happen; what is not spent is the SECOND one.
+      //
+      // The jittered backoff above is UNCHANGED for the transport/timeout
+      // class, which is the dominant Railway-blip class and carries no response
+      // at all, let alone a header to honour. A 429 never reaches this arm —
+      // `seamBreakerVerdict` classifies it `counts: false`.
+      lastCountingStatus = res.status;
+      if (!lastAttempt && !hasContractualWait(res)) {
+        // ⚠️ Phase 141.1 / D-17 — THIS ARM USED TO BE SILENT, AND IT IS THE ONE
+        // ARM THAT SHOULD NOT BE. A 503 that is retried and then succeeds is
+        // invisible to the caller by design, and it is also the ONLY signal that
+        // a dependency is degrading BELOW the breaker threshold. With no line
+        // here the retry loop made the seam quieter than the single-attempt path
+        // it replaced: the transport arm below logs, this one did not.
+        //
+        // ⚠️ THE SENTENCE SAYS "RETRYING", AND THAT IS LOAD-BEARING. Since D-01
+        // this arm has TWO exits — this `continue`, and a fall-through that is
+        // either the D-01 fail-fast (the 503 named its own wait) or the last
+        // attempt surrendering. Only the RETRY is logged, and it says so, so a
+        // line here can never be misread as a surrender. Do not generalise this
+        // message to cover the fall-through without splitting it in two: a
+        // fail-fast and a last-attempt surrender are different operator facts,
+        // and one sentence covering both would report neither.
+        //
+        // Log discipline, verbatim from the transport arm: the BUDGET KEY (a
+        // module-derived value from a frozen closed set) and the STATUS (a
+        // number). Never the path — that is caller input — and never
+        // `requestInit`, whose headers and body carry raw exchange API secrets,
+        // `INTERNAL_API_TOKEN` and a live end-user Supabase JWT. If an error
+        // object is ever rendered into this line it goes through
+        // `scrubSeamError(err, credentialHeaderValues(requestInit))` with BOTH
+        // arguments; see the TS-15 incident note on the transport arm for what
+        // dropping the second one shipped. Pinned from the outside by the
+        // sentinel case SC-M′.
+        console.error(
+          `[resilient-fetch] ${budgetKey}: attempt ${attempt + 1} of ` +
+            `${retries + 1} returned ${res.status} — retrying after backoff`,
+        );
+        continue;
+      }
+    }
   // 4xx NEVER records — including the `424` whose body names the caller's VENUE,
   // whose slug must never become a breaker key (STATUS_CONTRACT §4). A user's bad
   // API key returning 400 is Railway working CORRECTLY; `create-with-key` and
@@ -2011,5 +2529,13 @@ export async function resilientFetch(
   // The window does not close here. `instrumentBody` keeps `json()` and
   // `text()` inside it, which is what makes the docblock's "classified failure
   // recording" true for a stalling upstream (SEAMCORE-02 / SC1).
-  return instrumentBody(res, budgetKey, timeoutMs, recordOnce);
+    return instrumentBody(res, budgetKey, timeoutMs, recordOnce);
+  }
+
+  // Unreachable: every path inside the loop returns or throws. Present so the
+  // function's control flow is total for the type checker without a non-null
+  // assertion or a mutable `res` hoisted out of the loop.
+  throw new Error(
+    "[resilient-fetch] retry loop exited without returning — unreachable",
+  );
 }

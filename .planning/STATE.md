@@ -2,16 +2,20 @@
 gsd_state_version: 1.0
 milestone: v1.16
 milestone_name: Production Resilience & Reliability
-status: verifying
-stopped_at: Completed 140.3-G9-PLAN.md (admin/strategy-review — the TENTH seam-importing route the 140.3-VERIFICATION nine-route list MISSED — 0→27 coded arms; two new tokens REVIEW_SOURCE_READ_FAILED ×13 byte-identical 503s + REVIEW_RECHECK_FAILED ×5 409s; 3 plan-missed arms coded [status-pin 409 → REVIEW_RECHECK_FAILED, two write-fault 500s → UNKNOWN]; arm-agnostic source-scan fence; RED-on-neutering observed. Only seam import = scrubSeamError, in-class by definition. SEAMUX-03 aggregate NOT closed.)
-last_updated: "2026-07-31T06:35:00.000Z"
-last_activity: 2026-07-31
+status: planning
+stopped_at: >-
+  SEAM group (140 → 141.2) CLOSED OUT 2026-08-01. All 11 phases now read
+  roadmap_complete; next is Phase 142 (JOB group), which has no directory yet.
+  ⏳ ONE thing is outstanding and is NOT mine: PR #656 (`feat/v1.16-141-jobs-rate-retry`,
+  131 commits, MERGEABLE) is still OPEN — 141/141.1/141.2 are verified but unshipped.
+last_updated: "2026-08-01T20:05:00.000Z"
+last_activity: 2026-08-01
 progress:
-  total_phases: 14
-  completed_phases: 7
-  total_plans: 86
-  completed_plans: 82
-  percent: 50
+  total_phases: 16
+  completed_phases: 11
+  total_plans: 105
+  completed_plans: 105
+  percent: 69
 ---
 
 # Project State — Quantalyze
@@ -46,8 +50,65 @@ RATE-01..05 — all mapped, Traceability filled). Roadmap: `.planning/ROADMAP.md
 
 ## Current Position
 
-Phase: v1.16 SEAM + error-surface COMPLETE — phases 140 → 140.5 all shipped to main (@ `4f45dcab`); the analytics worker is deployed (`git_sha 4f45dcab`, `/health` ok, ticking). **Next: Phase 141 (SEAM retry-with-backoff, gated on the idempotency audit) via `/gsd-autonomous --from 141`.**
-Status: 140.1.2 + 140.5 VERIFICATION **passed**. 140.4's flagged user-facing gap (SEAM_MISCONFIGURED→UNKNOWN) was already RESOLVED in code (VERIFICATION.md was stale — `recogniseSeamErrorCode` hop present at ConnectKeyStep.tsx:496 + MultiKeyConnectStep.tsx:829). **140.3 SEAMUX-03 CLOSED 2026-07-31** — gap series G4–G9 coded the typed `{code}` envelope on all 16 seam routes (class-map found **10** bare routes, not the 9 named — it missed `admin/strategy-review`); opus verifier PASSED, 817/817 tests, RED-on-neuter confirmed, `140.3-VERIFICATION.md` SEAMUX-03 → `resolved`. Non-blocking residuals in TODOS: 2 SEAMRIM-05-pinned `rateLimitDenyJson` deny bodies, poll-disjointness pin, SC2 `COMPOSITE_UNSUPPORTED_UNIFIED`, analytics-client ledger row. **Ready for Phase 141.**
+Phase: 141.2 (seamfix) — ✅ EXECUTED + VERIFIED (17/17 must-haves, 0 review blockers).
+        Six plans across three waves, each wave gated at its boundary; final suite
+        10 487 vitest + 4 824 pytest green, typecheck clean, coverage above ratchet.
+        13 findings CLOSED PER THEIR DISPOSITIONS — twelve remediated, finding 8
+        DISPOSITIONED (retry→limiter amplification still live, booked in TODOS.md).
+        Next: VERSION bump → `/ship` → `/land-and-deploy`.
+        ⛔ DO NOT SHIP 141.1 AS-IS. The xhigh code review (30 agents, 25 findings
+        deduped to 13) found a DATA-INTEGRITY defect on the money path: `onboard`'s
+        retry can insert TWO `strategy_verifications` rows for one user submit when
+        `strategies.wizard_session_id` is NULL, because the retry-safety grant rests
+        on an `idempotent_by_session` that is false in exactly that case. Also: the
+        D-16 flag-monitor denominator rewrite shipped three monitoring-integrity
+        regressions — a silently-truncating unbounded `.select()`, dedup on an
+        attacker-controllable header reachable unauthenticated, and a dedup that
+        collapses nothing on the only two retry-eligible flows. Evidence with
+        per-finding failure scenarios: `141.2-FINDINGS.md`.
+
+Prior phase: 141.1 (seambackoff-…) — COMPLETE and verified, merged, NOT pushed
+Plan: 9 of 9 complete — VERIFIED, phase closed
+Status: Phase 141.1 — Wave 1 (01, 02, 03, 08) and Wave 2 (04, 05) merged to
+        `feat/v1.16-141-jobs-rate-retry`. Post-merge gate after Wave 2 GREEN: tsc clean,
+        FULL vitest 735 files / 10450 passed / 287 skipped, tsc + lint clean.
+        Wave 4 (09) merged. FINAL GATE GREEN: tsc clean, lint 0 errors, vitest
+        735 files / 10450 passed / 287 skipped, pytest 4824 passed / 96 skipped.
+        VERSION+package.json bumped in lockstep to 0.51.0.0.
+        VERIFIED: 0 BLOCKER / 3 WARNING, 19/20 decision IDs (D-06 partial), 16/16 SC.
+        The verifier re-traced 20 registry/runbook claims against live source — all
+        held. All 3 warnings CLOSED: stale D-06 coordinate replaced with a symbol
+        anchor; the two deferred-item ledgers reconciled; the falsifiability ledger
+        transcribed 20/20 with three mutations recorded as explicitly UN-RUN
+        (SC-C' green-polarity only, SC-G' 2 of 5 anchors un-mutated, SC-K jitter
+        constant never mutated alone). Approval: CLOSED 2026-07-31.
+        ⚠️ 4 items stay OPEN in TODOS.md: DEF-141.1-02-A/02-B/06-A/09-A.
+        ⚠️ FOUNDER ACTION: RESEND_API_KEY + FOUNDER_LP_REPORT_TO must be set in
+        Vercel prod or the repaired flag-monitor alert computes correctly and pages
+        nobody. The numerator is correctly scoped but has NEVER been observed firing.
+        ⭐ SC-E RESOLVED. Precise history (corrected at verification — the earlier
+        wording here was itself an over-claim): PRE-D-08 the row fallback WAS
+        reachable (the validator was wrapped in `!== undefined`), so 141.1-04's D-08
+        change closed a REAL hole. What was wrong was only 04's follow-up
+        MEASUREMENT — having closed it, 04 re-added `?? SEAM_BUDGETS[budgetKey].retries`
+        as a mutation, saw green, and booked its own already-closed hole as still
+        open. Post-D-08 the validator is unguarded, so `undefined` throws
+        SeamConfigError first and that mutation is a no-op by construction. 141.1-06
+        established this and closed the axis at three independent points via the
+        semantically live form. Verified: 04's false framing did NOT propagate into
+        the runbook, CHANGELOG, or TODOS.
+        ⚠️ ORCHESTRATOR ERROR: `isolation:"worktree"` forks from the DEFAULT BRANCH
+        (#2015) — 3/3 spawns came up on `origin/main` 56–67 commits stale, missing
+        their `depends_on` commits. GSD prevents this via the `EXPECTED_BASE` +
+        `<worktree_branch_check>` block (`execute-phase.md:519,573`); hand-written
+        executor prompts OMITTED it. All merged worktrees were verified to contain
+        their dependencies, so landed work is sound. Wave 4 uses the verbatim block
+        and one-Agent-per-message dispatch (`.git/config.lock` race, `:531`).
+        ⚠️ Wave 1 was interrupted by a host restart on 2026-07-31 and resumed in the
+        original worktrees. Lesson recorded in `141.1-WAVE-MANIFEST.md`: an
+        uncommitted diff left by a killed executor may be an acceptance MUTATION
+        mid-probe, not progress — 141.1-08's orphaned `route.ts` diff was exactly
+        that (it re-added the dead `path:` term) and was correctly discarded.
         ---- 140.2-05 (wave 5, 2026-07-27) ----
         **ROADMAP SC1 CLOSED.** The classification window now covers the response-body
         read and excludes caller/config faults. A stalling upstream (headers fast, body
@@ -139,7 +200,7 @@ Status: 140.1.2 + 140.5 VERIFICATION **passed**. 140.4's flagged user-facing gap
         at `finalize-wizard/route.ts:840-851`), now ledger row TS-33; its "strictly
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
-Last activity: 2026-07-30 -- Phase 140.5 execution started
+Last activity: 2026-08-01 -- Phase 141.2 executed, merged and verified (twelve findings remediated, one dispositioned)
 
 Progress: [██████████] 95%
 
@@ -232,6 +293,7 @@ Load-bearing sequencing (do not reorder):
 - Phase 140.1 inserted after Phase 140: PYAPI — Python service contract, status attributability & limiter identity (URGENT)
 - Phase 140.2 inserted after Phase 140: SEAMCORE — Seam core & breaker correctness + harness integrity (URGENT)
 - Phase 140.3 inserted after Phase 140: SEAMUX — Client & wizard seam error surface (URGENT)
+- Phase 141.1 inserted after Phase 141: 8-agent review campaign: Retry-After built by 140.5 never consumed; breaker threshold uncalibrated for per-attempt counting; SEAM-05 evidence wrong in 4 places. Zero user-facing/data-integrity defects. (URGENT)
 
 ### Decisions (requirements-time, from research Open Decisions 1–8)
 
@@ -913,6 +975,9 @@ Load-bearing sequencing (do not reorder):
 
 ### Blockers / Concerns
 
+- **⏳ PR #656 is OPEN and unmerged** (`feat/v1.16-141-jobs-rate-retry`, 131 commits ahead of `origin/main`, MERGEABLE). 141 / 141.1 / 141.2 are all verified `passed` but NOT shipped. Founder call — everything else in the SEAM group is closed.
+- **⚠️ Phase 140's `human_verification` item was never dispositioned — still owed as live ops.** "Watch Sentry during the next real Railway degradation window: confirm `CIRCUIT_OPEN` 503 envelopes appear and that no cascade-500s occur in the same window." It cannot be closed from the repo (no live Upstash in CI/local — 20+ test files delete the env vars — and no controllable Railway failure injection); it was declared manual-only in `140-VALIDATION.md`. `140-VERIFICATION.md` still reads `human_needed` for this one reason. Mirrored into TODOS.md.
+- **📋 Close-out lesson (2026-08-01):** the SEAM group's phase-close bookkeeping went un-run because the phases were hand-driven per-phase rather than under `/gsd-autonomous`, so nothing owned **autonomous step 3d (post-execution routing)**. Consequences found and fixed in one pass: 141.1 sat at `gaps_found` for a day after all three of its gaps were closed in the tree (`22332e34` + the ledger reconciliation) simply because the VERIFICATION was never re-run; 141.2 sat at `human_needed` with four probes nobody had been asked to run (three were dischargeable read-only in minutes); 141.1/141.2 had **no milestone-list entry at all**; and 41 plan checkboxes across 140.4, 140.5, 141, 141.1 and 141.2 were never ticked, plus 8 missing G-series rows under 140.3. See memory `feedback_hand_driving_gsd_skips_orchestrator_gates`. **If a phase is hand-driven, run the close-out explicitly — the verifier flags these as "orchestrator-owned" and then nothing owns them.**
 - **SEAM-05 audit is the Phase 141 long pole** — retry-safety of `recomputeMatch` / `computePortfolioAnalytics` / optimizer / simulator / bridge is UNAUDITED; `_get_recompute_lock` may be process-local, not distributed. Default everything unproven to no-retry.
 - **Phase 143 needs a short design pass** — "what counts as orphaned" per strategy source (csv vs wizard vs resync) before it becomes one migration.
 - **⚠️ OPS (140.2-09 / SC7) — confirm `INTERNAL_API_TOKEN` in the Vercel PRODUCTION env, and that it MATCHES the analytics service's value.** RESEARCH A3 could not verify it, and 140.2-09 changed the consequence: an ABSENT token now 500s every `analytics-client` route and 503s `/process-key` (intended fail-loud, better than an invisible platform bucket). A **MISMATCHED** token is the one state that still degrades silently — every claim fails `compare_digest` and every route sits on `platform:<path>` with no error anywhere. Likely present (`process-key-client` and `keys/[id]/permissions` already read it and `/process-key` works in prod), but unverified. `vercel env ls production | grep INTERNAL_API_TOKEN`.
@@ -929,7 +994,7 @@ Load-bearing sequencing (do not reorder):
 
 ## Session Continuity
 
-**Last activity:** 2026-07-30
+**Last activity:** 2026-07-31
 **Stopped at:** Completed 140.3-G4-PLAN.md (SEAMUX-03 coded arms on verify-strategy + validate-and-encrypt)
 **Next step:** run `/gsd:verify-work` on Phase 140.1.1. Nothing is left to execute.
 

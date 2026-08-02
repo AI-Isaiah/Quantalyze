@@ -1,5 +1,164 @@
 # Changelog
 
+## [0.51.0.0] - 2026-08-01
+### 141 SEAM + 141.1 SEAMBACKOFF + 141.2 SEAMFIX — audited bounded retry on the Vercel→Railway seam
+Turns retry ON for the first time on the seam between the Vercel routes and the Railway analytics
+service — but only where a written idempotency audit says a replay is safe **and the call carries
+the key that audit's reasoning depends on**. All three phases ship as one release: 141 added the
+retry, 141.1 repaired the evidence, guards and observability around it, and 141.2 closed the 13
+findings of the review of 141.1 — including two where the shipped grant was broader than its own
+evidence supported.
+
+**Landing fixes (2026-08-02) — two red CI gates, both harness defects, neither a product defect.**
+Found while landing this release; the product code they guard is unchanged and was verified intact.
+
+- **`e2e-seeded` now joins the repo-wide `shared-test-db` concurrency group.** It drives the ONE
+  shared Supabase test project via `secrets.TEST_SUPABASE_URL`, exactly like the `python` job — but
+  the group was only ever on `python`, added for CROSS-PR contention ("two different PRs' python
+  jobs"). It never covered two jobs inside ONE run. `claim_compute_jobs_with_priority` claims a
+  GLOBAL batch of 50 ready rows and cannot be scoped to a caller, so while `e2e-seeded` enqueued
+  `compute_jobs`, a concurrent `python` fencing test that seeded a pending row and then claimed it
+  had its row swept into the other job's traffic. `_claim_one(..., want_job_id=…)` then correctly
+  returned `None` rather than a foreign row — reddening 10 fencing/drain tests with
+  `assert None is not None` and `assert 'pending' == 'running'`, identically across two runs. The
+  `e2e` smoke job needs no group: it builds against `https://placeholder.supabase.co` and never
+  reaches the shared project. Costs wall-clock — `e2e-seeded` now queues behind `python` instead of
+  overlapping it — which is the price of the suite reddening on defects rather than on interleaving.
+- **The `strategy-review` gate-refusal cases stop racing a second `vi.doMock` onto a path
+  `beforeEach` already mocked.** The file's own docblock records that a second `doMock` for the same
+  path "does not reliably override" at import time; when it lost, the throwing factory never took,
+  the standard `passed: true` stub ran, and the route legitimately answered 200 — reddening
+  "`StrategyGateUnevaluableError` -> 503" with `expected 200 to be 503` on whichever shard lost the
+  race, while passing in isolation and on the other shard. Both cases now flip one module-scope
+  switch the single registered stub reads, cleared in `beforeEach`. **Still falsifying:** neutering
+  the route's gate-catch arm (`route.ts` line 282, `503` -> `200` — one of 13 identical
+  `REVIEW_SOURCE_READ_FAILED` arms, so it must be mutated by line, not by string) reddens exactly
+  that test with `expected 200 to be 503`. The route's `instanceof` narrowing and its 503 arm are
+  untouched.
+
+- **⚠️ Retry is narrower than Phase 141 shipped it, and this is the founder-visible headline.** 141
+  enabled retry for two `/process-key` flow types. 141.2 withdrew one of them outright and made the
+  other conditional:
+  - **`resync` retries no more.** It had been allowlisted on the strength of a single sentence
+    asserting the sequential-replay class was closed; 141.1 re-derived that sentence, found it
+    false, and deleted it — but left the grant it had justified standing. `resync` mints its
+    session server-side, so it has no durable key to deduplicate on: when the compute worker's tick
+    advances the first draft verification out of `draft` status during the seam's backoff, attempt
+    2's pre-check matches nothing and inserts a second draft row. On the production audit history,
+    `resync` is **20 of 42 all-time `/process-key` rows (48%)** — so withdrawing it removes the
+    dominant share of retry-eligible traffic, not a corner case.
+  - **`onboard` retries only with a usable idempotency key.** Its YES verdict always rested on an
+    antecedent — a non-NULL `wizard_session_id` makes the server's duplicate pre-check fire — that
+    was asserted and never checked. The column is nullable by design, and `onboard` has a second
+    producer that sends no session id at all. The gate is now the antecedent: `retriesForFlow`
+    refuses the retry when the key is absent or empty, decided at the shared `postProcessKey`
+    chokepoint, using the same truthiness predicate the Python side applies so the two sides of the
+    seam cannot disagree on the empty string. **A caller that states nothing gets no retry.**
+
+  Read together: **141's retry rollout was broader than its evidence supported on BOTH flows it
+  enabled.** The evidence was right; the gate simply never required it to hold.
+- **Bounded retry, gated on an audit, not on a config row.** Up to **two attempts** (one retry) with
+  a jittered 250–500 ms backoff. Eligibility is a **required** `retriesOverride` argument fed from
+  the committed registry in `seam-retry-registry.ts` — four analytics wrappers (`bridge`,
+  `simulator`, `portfolio-optimizer`, `optimize-weights`) and, on `/process-key`, `onboard` with a
+  key. A new seam call site cannot compile without stating a retry verdict.
+- **The anonymous public teaser is provably never retried.** It is deliberately non-idempotent — a
+  retry would double-mint `strategy_verifications` rows and public tokens — so it carries an
+  evidence-backed NO verdict, and a test forces the budget row and the registry into disagreement to
+  prove the verdict is taken from the audit rather than the row.
+- **`Retry-After` fail-fast — now PARSED, not merely detected (141.1, corrected in 141.2).** Every
+  SERVICE-TRANSIENT `503` the analytics service emits carries a mandatory `Retry-After` longer than
+  the backoff, so retrying inside it was near-certain to fail *and* spent a second breaker failure
+  on billed lambda wall clock; such a 503 is surfaced immediately with its body intact. 141.1 gated
+  that on the header's **presence**, which meant `Retry-After: 0` — which means "retry now" — and an
+  empty or unparseable value all **suppressed** the retry the user needed. The gate now delegates to
+  the single shared parser: strictly positive seconds, or the normal backoff path. The value still
+  reaches no sleep, timer or log line, so a hostile header cannot influence timing.
+- **Breaker threshold ratified, not retuned — and the claim is now correctly qualified.** Because
+  the breaker counts **attempts**, a retried call that fails twice records two failures, halving the
+  user requests needed to trip. Reviewed and **accepted** (faster containment of a real outage,
+  bought against a fail-open breaker with a 30 s cooldown). 141.2 corrected the summary: that
+  halving applies to the transport/timeout class, **not** to the mandatory-`Retry-After` 503 class,
+  which now fails fast and records one — and a retry-enabled budget row no longer implies a retried
+  call at all.
+- **Registry-bypass axis closed at three independent points:** the call-site type, the core's row
+  delegation, and the validator's rejection of an absent override. A row edit can no longer buy a
+  retry that no audit granted.
+- **SEAM-05 evidence re-derived against the handlers.** The pre-existing audit text claimed all four
+  analytics wrappers were writeless; tracing found audit appends on three and an in-place UPDATE on
+  one. **No verdict changed** — each entry now states its actual traced writes and why the retry is
+  safe given them.
+- **Known accepted costs, stated as costs.** (a) A retry on a heavy analytics budget adds a **second
+  concurrent full compute** while attempt 1 still burns Railway CPU, because nothing on the FastAPI
+  side awaits `request.is_disconnected()`; server-side cancellation is deferred to its own phase.
+  (b) **A retry spends a second token of the shared `/process-key` rate-limit ceiling, and that is
+  accepted rather than fixed** — draining the ceiling would refuse the anonymous teaser and CSV
+  flows that never retry, and the breaker cannot contain it because a `429` is classified
+  non-counting. No limiter code changed. What changed is the exposure: with `resync` withdrawn and
+  `onboard` conditional, the amplification applies to an order of magnitude less traffic. Both costs
+  are recorded on the registry entries, in `TODOS.md` and in the runbook.
+- **The seam's two silent arms now log.** The counting-5xx retry arm and the pre-attempt-2
+  `CircuitOpenError` both emit a line naming the budget key and status — credential-clean, proven by
+  a mutation that shipped sentinel credentials verbatim.
+- **⚠️ The breaker could not arm over a corrupt lock — a 141.1 regression, repaired in 141.2.** The
+  span bound 141.1 added to `decodeBreakerLock` made a corrupt-but-**present** Redis value decode to
+  `null`, which routed the trip path into a `SET NX` that cannot overwrite an existing key: no lock
+  written, no transition event, and **the circuit unable to open for that key's remaining TTL across
+  every seam route**. The trip path now branches on the raw value's presence, so a corrupt value is
+  displaced by the next recorded failure and the store self-heals. ⚠️ The sentence that used to
+  stand in this entry — "a `Retry-After` of 1e17 can no longer be minted" — was **false** when
+  written, and is corrected here because this release has not shipped: the bound was span-only and never
+  compared either timestamp to the clock, so an absurd absolute epoch with a legal span passed
+  through. A one-sided absolute plausibility bound now rejects it; the past side stays open
+  deliberately, because expired locks must still decode for the close event to fire. **A read-only
+  probe of production on 2026-08-01 found all five breaker keys absent, so this landed as hardening,
+  not as incident remediation** — though the defect itself was live on every seam call for the whole
+  period, and a point-in-time probe is not a history.
+- **The breaker can re-arm during a retried wave.** The admission timestamp the staleness guard
+  compares against was captured once above the retry loop, so attempt 2's failure was judged with
+  attempt 1's admission and discarded as stale evidence. On the 30 s `optimize-weights` budget that
+  suppressed the whole retried wave: allocators waited 60 s per click for a 502/504 instead of
+  receiving an immediate circuit error with a `Retry-After`. It is captured per attempt now.
+- **Flag-monitor error-rate alert repaired — it had never fired once since Phase 19.** Its Sentry
+  numerator filtered on `path:`, and **this repo writes `path` to Sentry `extra`, never to `tags`**;
+  `extra` is unindexed, so the query matched nothing and the alert was structurally silent. The
+  numerator is now built from indexed fields only. ⚠️ **The denominator half shipped in 141.1 was
+  itself defective and is replaced in 141.2:** counting *distinct* requests by correlation id keyed
+  the alert on a value the wire supplies (reachable unauthenticated through the public teaser route,
+  so a single repeated id could collapse the denominator toward 1), required materialising rows and
+  so truncated silently at PostgREST's 1000-row cap with HTTP 200 and `error: null`, and deduplicated
+  nothing on real traffic — 42 of 42 production rows already carried distinct server-minted ids,
+  because the Python handler re-mints any inbound id that is not a bare UUID. It is now an uncapped
+  server-side COUNT that reads no caller-supplied value, attempt-grained on both sides to match the
+  Sentry event count. The residual is stated rather than engineered around: retries inflate the
+  denominator, so the rate biases **downward** — the safe direction, versus a fabricated denominator
+  that pages falsely and a wire-controlled one that can be silenced on demand. A failed read is now
+  its own outcome (`denominator_read_failed`) instead of a literal `0` that read as "no traffic".
+  The phase's own review round then found that closure was **partial**: a null `error` does not mean
+  a usable count, and `count ?? 0` sent PostgREST's two other unusable shapes down the zero-traffic
+  branch anyway (`count: null` when the `content-range` header is absent, `NaN` when it reads `*/*`).
+  NaN was the worse of the two — not `=== 0`, so the zero-streak guard missed it as well, and
+  `errorCount / NaN` sits below both alert thresholds, so that window answered `ok` with alerting
+  silently disarmed. Anything that is not a non-negative integer is now a read we could not complete.
+  ⚠️ **Corrected two-cause diagnosis, recorded forward:** the 2026-05-27 region-URL fix
+  (`8904b204`) addressed only **one of two independent, separately-sufficient causes** — the second
+  is the unindexed-`path` fault above, which made the term unsearchable regardless of its value (and
+  the value was wrong too: `/api/process-key` vs the FastAPI `/process-key`). The historical
+  `[0.24.x]` entries are **deliberately not rewritten** — a changelog records what was believed at
+  release time, and the partial diagnosis is itself the useful evidence.
+- **A pin that could not fail was deleted rather than strengthened.** 141.1 shipped an assertion
+  that the circuit trips in three user requests — computed as arithmetic over the very threshold
+  constant the test pinned ten lines above, so it stayed green under the exact mutation its own
+  failure message described. The behaviour is genuinely pinned elsewhere, by a test that drives the
+  real retry loop and counts the recorded failures; the tautology is gone, and the two references
+  that pointed at it went with it in the same commit.
+- **New runbook: `docs/runbooks/seam-breaker.md`.** The seam breaker had no ops surface, and the
+  only "circuit breaker" in the runbooks was a *different* mechanism (the Python per-API-key 429
+  cooldown), so on-call got the wrong mental model. Covers fail-open doctrine, the Upstash keys and
+  which two can never open, the constants, the measured `[30 s, 60 s]` recovery band, the
+  `seam.breaker.*` signals, and the things that look like fixes and are not. Indexed under incident
+  response and cross-linked both ways with the compute-queue runbook.
+
 ## [0.50.1.0] - 2026-07-31
 ### 140.3 SEAMUX-03 — a machine-readable `code` on every seam-route error arm
 Completes the v1.16 error-surface class the milestone opened: every error response emitted by the

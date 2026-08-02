@@ -645,12 +645,242 @@ describe("isBreakerOpen", () => {
       });
       await expect(
         mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+          retriesOverride: 0,
           method: "POST",
         }),
       ).resolves.toBeDefined();
       expect(fetchMock).toHaveBeenCalledTimes(1);
     },
   );
+
+  /**
+   * Phase 141.1 / D-19 (G2) — the LO-02 / TS-39 obligation, discharged.
+   *
+   * The `^open:(\d+):(\d+)$` shape accepts ANY pair of digit strings, so
+   * `open:0:100000000000000000` used to decode to a lock ~1e17 ms in the future.
+   * `isBreakerOpen` then derived `retryAfterS ≈ 1e14`, `CircuitOpenError`'s A-15
+   * guard accepted it (`Number.isInteger` is true of it), and
+   * `Retry-After: 100000000000000` went ON THE WIRE — including to the anonymous
+   * teaser. A reversed pair made `emitBreakerTransition`'s `cooldownS` negative.
+   *
+   * The value is only writable by us today, so this is bookkeeping corruption
+   * rather than an attack path — but A-15 exists precisely to stop implausible
+   * values reaching a header, and the decoder was the one remaining path that
+   * could mint one which PASSED it.
+   *
+   * The rejection direction is `null`, i.e. CLOSED, which is LOCKED DECISION 4's
+   * fail-forward doctrine unchanged: a corrupt byte in a store shared with
+   * fifteen production limiters must not be able to deny the whole seam.
+   */
+  it("G2 — a lock whose span is nonsensical decodes to null and reads CLOSED (LO-02 / TS-39)", async () => {
+    const mod = await import("./resilient-fetch");
+
+    // 90 000 ms, hand-typed here: the 30 s cooldown plus the 60 s tombstone,
+    // never `(BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S) * 1000` read back
+    // out of the module under test. A legitimate lock cannot outlive the window
+    // in which its own key survives.
+    const ARMED_AT = 1_700_000_000_000;
+
+    // A span at the ceiling still decodes — the bound rejects the implausible,
+    // not the merely long.
+    expect(
+      mod.decodeBreakerLock(`open:${ARMED_AT}:${ARMED_AT + 90_000}`),
+      "The span bound rejected a lock at exactly the cooldown+tombstone " +
+        "ceiling. That is a REAL state (a lock armed and read at the far edge " +
+        "of its own tombstone), and rejecting it would silently disarm the " +
+        "breaker at exactly the moment it is doing its job.",
+    ).toEqual({ armedAtMs: ARMED_AT, expiresAtMs: ARMED_AT + 90_000 });
+    // And the ordinary 30 s cooldown, the case every other test in this file
+    // depends on.
+    expect(
+      mod.decodeBreakerLock(`open:${ARMED_AT}:${ARMED_AT + 30_000}`),
+    ).toEqual({ armedAtMs: ARMED_AT, expiresAtMs: ARMED_AT + 30_000 });
+
+    // The LO-02 headline: an unbounded span.
+    expect(
+      mod.decodeBreakerLock("open:0:100000000000000000"),
+      "A lock span of ~1e17 ms decoded to a LOCK. `isBreakerOpen` turns that " +
+        "into retryAfterS ≈ 1e14, A-15's Number.isInteger guard accepts it, " +
+        "and `Retry-After: 100000000000000` goes on the wire — to the " +
+        "anonymous teaser among others.",
+    ).toBeNull();
+    // One millisecond past the ceiling — the bound is a real edge, not a
+    // gesture at a large number.
+    expect(
+      mod.decodeBreakerLock(`open:${ARMED_AT}:${ARMED_AT + 90_001}`),
+    ).toBeNull();
+    // A REVERSED pair: `expiresAtMs < armedAtMs` makes the emitted
+    // `cooldownS` negative.
+    expect(
+      mod.decodeBreakerLock(`open:${ARMED_AT}:${ARMED_AT - 30_000}`),
+      "A reversed lock span decoded to a lock. `emitBreakerTransition` then " +
+        "reports a NEGATIVE cooldownS to the operator reading the incident.",
+    ).toBeNull();
+    // A zero span is not a lock either: it is already expired at the instant it
+    // was armed, and `<= 0` is the bound TODOS.md's LO-02 prescribes.
+    expect(mod.decodeBreakerLock(`open:${ARMED_AT}:${ARMED_AT}`)).toBeNull();
+
+    // END TO END — the harm LO-02 actually names. Without the bound this store
+    // value makes `isBreakerOpen` report OPEN with an absurd hint; with it, the
+    // corruption reads CLOSED and the seam call proceeds.
+    shared.store.set(FAKE_BREAKER_KEY, {
+      value: "open:0:100000000000000000",
+      expiresAt: Date.now() + 30_000,
+    } satisfies FakeUpstashEntry);
+    const fetchMock = okFetch();
+
+    await expect(
+      mod.isBreakerOpen("bridge"),
+      "A corrupt lock span minted a caller-visible Retry-After instead of " +
+        "reading CLOSED.",
+    ).resolves.toEqual({ open: false });
+    await expect(
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        retriesOverride: 0,
+        method: "POST",
+      }),
+    ).resolves.toBeDefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * Phase 141.2 / SC-B — finding 11. G2's bound is RELATIVE, and a relative
+   * bound cannot see an absurd PLACE on the timeline.
+   *
+   * G2 above closed the unbounded SPAN. It did not close the unbounded EPOCH.
+   * Every lock this module writes has span exactly 30 000 ms, so ANY pair
+   * sharing that delta passes the span test regardless of where it sits:
+   * `open:100000000000000000:100000000000030000` decoded cleanly, `isBreakerOpen`
+   * derived a `retryAfterS` around 1e14 from it, `CircuitOpenError`'s A-15 guard
+   * accepted that (`Number.isInteger` is true of it), and the value went ON THE
+   * WIRE as a `Retry-After` — including to the anonymous teaser. That is the
+   * precise outcome G2's own docblock claims this parse prevents, which is why
+   * the claim, not just the code, moved with this fix.
+   *
+   * The REACHABLE production variant is milder and identical in shape: a writer
+   * instance an hour ahead on the clock arms a legal-span lock, and every reader
+   * then tells users to wait ~3 600 s instead of 30.
+   *
+   * ⚠️ THE ONE-SIDEDNESS IS PINNED BY G2c BELOW, IN ITS OWN CASE, AND THAT
+   * SEPARATION IS DELIBERATE. The falsifiability ledger requires the tombstone
+   * guard to be observed GREEN while THIS case is red under the SC-B mutation.
+   * A guard living inside the mutated case cannot be observed at all — the run
+   * stops at the first failed assertion — so a one-case version would have
+   * reported the one-sidedness as unverified exactly when it mattered.
+   */
+  it("G2b — an implausible ABSOLUTE epoch with a LEGAL span decodes to null (finding 11)", async () => {
+    const mod = await import("./resilient-fetch");
+
+    // `nowMs` is passed EXPLICITLY so these cases pin arithmetic rather than
+    // wall clock, and so no fake timer is needed to state them (the decoder's
+    // parameter exists for exactly this). Hand-typed, never `Date.now()`.
+    const NOW = 1_800_000_000_000;
+
+    // The headline. Span is exactly 30 000 ms — the only span this module ever
+    // writes — sitting ~1e17 ms out.
+    expect(
+      mod.decodeBreakerLock("open:100000000000000000:100000000000030000", NOW),
+      "A lock with a LEGAL 30 000 ms span at an absurd absolute epoch decoded " +
+        "to a lock. `isBreakerOpen` turns that into a retryAfterS of ~1e14, " +
+        "A-15 accepts it because it is an integer, and `Retry-After: " +
+        "99998214430587` goes on the wire — to the anonymous teaser among " +
+        "others. The span bound alone never compares either timestamp to now.",
+    ).toBeNull();
+
+    // The REACHABLE variant: a writer whose clock is an hour ahead.
+    expect(
+      mod.decodeBreakerLock(`open:${NOW + 3_600_000}:${NOW + 3_630_000}`, NOW),
+      "A clock-skewed writer's legal-span lock decoded, so every reader tells " +
+        "users to retry in ~3 600 s instead of 30. This is the variant that " +
+        "does not need a corrupt byte to happen — only one instance an hour " +
+        "ahead of the others.",
+    ).toBeNull();
+
+    // The bound is a real EDGE, not a gesture at a large number. 90 000 ms is
+    // hand-typed here (the cooldown plus the tombstone), exactly as G2 types it,
+    // never read back out of the module under test.
+    expect(
+      mod.decodeBreakerLock(`open:${NOW + 60_000}:${NOW + 90_000}`, NOW),
+      "A lock expiring exactly at the ceiling was rejected. That is a REAL " +
+        "state — the widest legitimate lock, observed at the instant it was " +
+        "armed — and rejecting it disarms the breaker while it is working.",
+    ).toEqual({ armedAtMs: NOW + 60_000, expiresAtMs: NOW + 90_000 });
+    expect(
+      mod.decodeBreakerLock(`open:${NOW + 60_001}:${NOW + 90_001}`, NOW),
+    ).toBeNull();
+
+    // END TO END, the harm finding 11 actually names: the future-side value
+    // must not reach a caller as a wait hint.
+    shared.store.set(FAKE_BREAKER_KEY, {
+      value: "open:100000000000000000:100000000000030000",
+      expiresAt: Date.now() + 30_000,
+    } satisfies FakeUpstashEntry);
+    const fetchMock = okFetch();
+
+    await expect(
+      mod.isBreakerOpen("bridge"),
+      "An implausible absolute epoch minted a caller-visible Retry-After " +
+        "instead of reading CLOSED.",
+    ).resolves.toEqual({ open: false });
+    await expect(
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        retriesOverride: 0,
+        method: "POST",
+      }),
+    ).resolves.toBeDefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * Phase 141.2 / SC-B guard — the plausibility bound is ONE-SIDED, and this is
+   * the case that has to stay GREEN while G2b is red under the SC-B mutation.
+   *
+   * A lock whose encoded expiry has passed is a TOMBSTONE. Locked decision 3
+   * makes TTL expiry the half-open transition, so the read that observes a
+   * tombstone is the ONLY moment "the circuit is usable again" becomes
+   * observable — which means the decoder has to keep decoding expired locks. A
+   * symmetric bound would have been the obvious "tidier" shape and would have
+   * silently deleted the close event.
+   */
+  it("G2c — the bound is ONE-SIDED: a tombstone still DECODES, and still announces the close", async () => {
+    const mod = await import("./resilient-fetch");
+    const NOW = 1_800_000_000_000;
+
+    expect(
+      mod.decodeBreakerLock(`open:${NOW - 90_000}:${NOW - 60_000}`, NOW),
+      "The plausibility bound became two-sided and rejected a TOMBSTONE. " +
+        "`isBreakerOpen` decodes expired locks on purpose — that read is the " +
+        "only moment 'the circuit is usable again' becomes observable.",
+    ).toEqual({ armedAtMs: NOW - 90_000, expiresAtMs: NOW - 60_000 });
+    // Arbitrarily far into the past, deliberately: there is no past-side bound
+    // at all, and stating that as a case is cheaper than discovering it later.
+    expect(mod.decodeBreakerLock("open:0:30000", NOW)).toEqual({
+      armedAtMs: 0,
+      expiresAtMs: 30_000,
+    });
+
+    // END TO END, and this is the assertion that keeps the one-sidedness
+    // honest. A decoder that REJECTED the tombstone would also report
+    // `{ open: false }` here — identical observable, wrong mechanism. The close
+    // EVENT is the discriminator: it exists only because the value was decoded.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const tombstoneArmedAt = Date.now() - 90_000;
+    shared.store.set(FAKE_BREAKER_KEY, {
+      value: `open:${tombstoneArmedAt}:${tombstoneArmedAt + 30_000}`,
+      expiresAt: Date.now() + 30_000,
+    } satisfies FakeUpstashEntry);
+
+    await expect(mod.isBreakerOpen("bridge")).resolves.toEqual({ open: false });
+    expect(
+      warnSpy.mock.calls.filter((c) =>
+        String(c[0]).includes("seam.breaker.close"),
+      ),
+      "The tombstone read CLOSED but announced nothing, so the decoder is " +
+        "rejecting it rather than reading it. The circuit's own recovery is " +
+        "then invisible for the whole tombstone window — the right answer " +
+        "reached by the mechanism that hides the incident's end.",
+    ).toHaveLength(1);
+  });
 
   it("fails OPEN when Redis errors", async () => {
     // SC-3a. A store outage must never become the outage: every exit path out
@@ -673,7 +903,10 @@ describe("isBreakerOpen", () => {
     // or merely "nothing was open".
     seedBreakerOpen(shared.store);
     await expect(
-      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      }),
     ).resolves.toBeDefined();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -698,7 +931,10 @@ describe("isBreakerOpen", () => {
 
     // Production is asserted above; the seam call still reaches Railway.
     await expect(
-      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      }),
     ).resolves.toBeDefined();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -864,14 +1100,36 @@ describe("[SEAMCORE-05 / A-25] a doomed in-flight failure cannot re-arm an expir
     // looks live to `nx`). Its falsifier is the mutation "pass `Date.now()`
     // instead of the admission instant", observed and recorded in this plan's
     // summary alongside M40.
+    //
+    // ⚠️ A SECOND COINCIDENCE HAS SINCE BEEN REMOVED FROM THIS CASE — phase
+    // 141.2, and it is finding 10's failure shape living inside a pin. The seed
+    // used to be a REVERSED pair (`armedAt` AFTER `expiresAt`), which
+    // `decodeBreakerLock` rejects: `existing` was `null`, so the trip path never
+    // reached the A-25 guard at all and the assertion below was satisfied by a
+    // refused `SET NX` instead. The moment the write decision stopped branching
+    // on the decode — the finding-10 fix — the seed was displaced and this case
+    // went red, having never once exercised the guard it is named for. The seed
+    // is now a REAL tombstone — and it is written 250 ms INTO the request's
+    // flight, by the concurrent caller it always stood for, rather than before
+    // the call. That ordering is forced: a lock already present at the entry
+    // check reads OPEN and short-circuits the request, so "armed after this
+    // request was admitted" is not a state any pre-seeded value can express.
+    // The span is 100 ms rather than the 30 000 ms production writes,
+    // deliberately: the guard reads `armedAtMs`, and pulling the admission and
+    // recording instants 30 s apart is not something a real-timer case can do.
+    // The unit cases above carry the production-shaped spans.
     vi.spyOn(console, "error").mockImplementation(() => {});
     const mod = await import("./resilient-fetch");
 
     // Four fast 503s load the counter to one below the fake's hand-typed 5.
+    // retriesOverride:0 pins single-attempt (the bridge row is retries:1 since
+    // Phase 141), so each call records exactly one — the counter arithmetic here
+    // depends on it.
     okFetch(503);
     for (let i = 0; i < 4; i++) {
       await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
         method: "POST",
+        retriesOverride: 0,
       });
     }
     expect(storedLock(shared.store.get("breaker:railway"))).toBeNull();
@@ -887,17 +1145,32 @@ describe("[SEAMCORE-05 / A-25] a doomed in-flight failure cannot re-arm an expir
     );
 
     const admittedAt = Date.now();
-    const tombstone = encodeFakeBreakerLock(admittedAt + 250, admittedAt - 1_000);
-    shared.store.set("breaker:railway", {
-      value: tombstone,
-      expiresAt: admittedAt + 85_000,
-    } satisfies FakeUpstashEntry);
+    let tombstone = "";
+    setTimeout(() => {
+      const armedAtMs = Date.now();
+      tombstone = encodeFakeBreakerLock(armedAtMs, armedAtMs + 100);
+      shared.store.set("breaker:railway", {
+        value: tombstone,
+        expiresAt: admittedAt + 85_000,
+      } satisfies FakeUpstashEntry);
+    }, 250);
 
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
       method: "POST",
+      // Single-attempt: a retry would arm the breaker on attempt 1, then the
+      // pre-attempt-2 re-check would throw, and this test proves the ADMISSION
+      // instant of ONE straddling request.
+      retriesOverride: 0,
     });
     // The request really did straddle the tombstone's armedAt.
     expect(Date.now()).toBeGreaterThan(admittedAt + 250);
+    // VACUITY FENCE: the concurrent arming really happened before the recording,
+    // so the assertion below is about a lock and not about an empty string.
+    expect(
+      tombstone,
+      "The concurrent lock was never armed, so this case asserts nothing about " +
+        "the guard — it compares the store against a value that was never set.",
+    ).not.toBe("");
 
     expect(
       shared.store.get("breaker:railway")?.value,
@@ -1144,6 +1417,162 @@ describe("recordSeamFailure", () => {
     expect(errorSpy).toHaveBeenCalled();
     expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
   });
+
+  // ── Phase 141.2 / SC-A — finding 10, the WRITE path ───────────────────────
+  //
+  // ⚠️ THIS IS THE PATH THE 141.1 REGRESSION TEST DID NOT DRIVE, AND THAT IS
+  // THE WHOLE LESSON. The G2 case in the `isBreakerOpen` block seeds the exact
+  // corrupt value these cases seed — and then exercises only the READ path plus
+  // one successful fetch. It was real, it ran, and it passed, while the defect
+  // it was written for sat in `recordSeamFailure`. A pin aimed one function away
+  // from the defect is indistinguishable from a pin that works.
+  //
+  // The defect: `decodeBreakerLock` collapses TWO store states into one `null` —
+  // "key absent" and "key present but undecodable" — and only the first
+  // justifies `nx`. Branching the WRITE decision on the decoded result therefore
+  // routed a present-but-corrupt key into `SET NX`, which cannot overwrite an
+  // existing key, so nothing was written and `emitBreakerTransition` never
+  // fired: the circuit could not open for that key's whole TTL, on all fifteen
+  // seam routes, silently. The branch is now on the RAW value's presence.
+  //
+  // The four store states, and where each is pinned:
+  //   1. key ABSENT                     → `nx` arm — the threshold case above,
+  //      and the HI-01 ratchet case (a stale reader that observes no key at all
+  //      must not overwrite a live lock). Untouched by this change.
+  //   2. key present, decodable, LIVE   → the still-live-lock guard, above.
+  //   3. key present, decodable, EXPIRED (tombstone) → the displacement arm and
+  //      its ownership rule — the two HI-01 tombstone cases.
+  //   4. key present, UNDECODABLE       → the ONLY state on which "branch on the
+  //      raw value" and "branch on the decoded value" disagree, so it is the
+  //      only state that needs a new case. These are it.
+
+  it("[141.2 / SC-A] arms the circuit over a CORRUPT-but-PRESENT lock value, and announces it (finding 10)", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+
+    // The exact value G2 seeds, under a LIVE key TTL: undecodable, and PRESENT.
+    const CORRUPT = "open:0:100000000000000000";
+    shared.store.set("breaker:railway", {
+      value: CORRUPT,
+      expiresAt: Date.now() + 30_000,
+    } satisfies FakeUpstashEntry);
+
+    // A hand-typed 5 — the fake's threshold, pinned literal-against-literal to
+    // production's in seam-constants.pin.test.ts rather than read from it.
+    for (let i = 0; i < 5; i++) {
+      await mod.recordSeamFailure("breaker:railway");
+    }
+
+    // VACUITY FENCE. Every assertion below is about what the trip path wrote;
+    // all of them also hold if the trip path was never reached at all.
+    expect(
+      shared.counters.limitCalls,
+      "The recordings never reached the counter, so the trip path was never " +
+        "entered and the assertions below prove nothing about it.",
+    ).toBe(5);
+
+    expect(
+      shared.store.get("breaker:railway")?.value,
+      "The corrupt value is STILL THERE after a full threshold of failures. " +
+        "That is finding 10: the write took the absent-key `nx` arm, Redis " +
+        "refused it because the key exists, and no lock was stored. The " +
+        "circuit cannot open for the rest of that key's TTL — on every seam " +
+        "route, including the anonymous teaser — and nothing says so.",
+    ).not.toBe(CORRUPT);
+    const armed = expectLockArmed(shared.store.get("breaker:railway"));
+    expect(
+      armed.armedAtMs,
+      "The stored lock still carries the corrupt value's own armedAtMs, so it " +
+        "was not replaced by a fresh one.",
+    ).toBeGreaterThan(0);
+
+    expect(
+      warnSpy.mock.calls.filter((c) =>
+        String(c[0]).includes("seam.breaker.open"),
+      ),
+      "The circuit armed but no transition event was emitted. `written` gates " +
+        "the announcement, so a refused write silently removes both the " +
+        "protection AND the only signal that it is missing.",
+    ).toHaveLength(1);
+  });
+
+  it("[141.2 / SC-A] the same corruption cannot jam the ENGINE's trip path either (finding 10, end to end)", async () => {
+    // The second driver, through `resilientFetch` rather than the recording
+    // function directly — the failopen-regression precedent. It is not a copy of
+    // the case above: that one proves the write decision, this one proves the
+    // decision is REACHED from a real degraded seam call and that the armed
+    // circuit then actually refuses traffic. Under the defect, five real
+    // failures against a corrupt key leave the seam wide open.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const CORRUPT = "open:0:100000000000000000";
+    shared.store.set("breaker:railway", {
+      value: CORRUPT,
+      expiresAt: Date.now() + 30_000,
+    } satisfies FakeUpstashEntry);
+    const fetchMock = okFetch(503);
+    const mod = await import("./resilient-fetch");
+
+    // retriesOverride:0 keeps each call single-attempt, so the loop bound is the
+    // number of FAILURES and not twice it.
+    for (let i = 0; i < 5; i++) {
+      await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      });
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+
+    expectLockArmed(shared.store.get("breaker:railway"));
+    expect(
+      warnSpy.mock.calls.filter((c) =>
+        String(c[0]).includes("seam.breaker.open"),
+      ),
+    ).toHaveLength(1);
+    await expect(
+      mod.isBreakerOpen("bridge"),
+      "Five real degraded seam calls against a key holding a corrupt value " +
+        "left the circuit CLOSED. Every later call keeps hammering the dead " +
+        "upstream for the rest of that key's TTL.",
+    ).resolves.toMatchObject({ open: true });
+  });
+
+  it("[141.2 / SC-A] a racer that still sees the CORRUPT value displaces a LIVE lock and must NOT claim the trip", async () => {
+    // The ownership rule, applied to the arm this fix routes the corrupt value
+    // into. The displacement arm's reply is what decides who armed the circuit —
+    // "you armed it iff what you DISPLACED was not a live lock" — and the danger
+    // of adding a state to that arm is making its answer unconditional. This
+    // case is red under `written = true`, and green under the defect, which is
+    // exactly why it does not stand in for the two cases above.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+    const CORRUPT = "open:0:100000000000000000";
+    shared.store.set("breaker:railway", {
+      value: CORRUPT,
+      expiresAt: Date.now() + 30_000,
+    } satisfies FakeUpstashEntry);
+
+    for (let i = 0; i < 5; i++) {
+      await mod.recordSeamFailure("breaker:railway");
+    }
+    const opens = () =>
+      warnSpy.mock.calls.filter((c) =>
+        String(c[0]).includes("seam.breaker.open"),
+      );
+    expect(opens()).toHaveLength(1);
+
+    // Instance B's read landed before A's write, so it still observes the
+    // corrupt value and reaches the same arm — but A's fresh lock is live
+    // underneath it by the time it writes.
+    shared.mode.staleReadOnce = { value: CORRUPT };
+    await mod.recordSeamFailure("breaker:railway");
+
+    expect(
+      opens(),
+      "A second instance displacing a lock a racer had ALREADY armed also " +
+        "claimed the transition, double-counting one trip across the fleet.",
+    ).toHaveLength(1);
+  });
 });
 
 describe("resilientFetch breaker short-circuit", () => {
@@ -1153,8 +1582,14 @@ describe("resilientFetch breaker short-circuit", () => {
     n: number,
   ): Promise<void> {
     for (let i = 0; i < n; i++) {
+      // retriesOverride:0 pins the SINGLE-ATTEMPT path: since Phase 141 flipped
+      // the bridge ROW to retries:1, a bare call would now retry and this
+      // breaker-loading loop would trip mid-drive. The retry loop has its own
+      // file (resilient-fetch.retry.test.ts); these breaker tests isolate the
+      // one-attempt classification mechanics.
       await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
         method: "POST",
+        retriesOverride: 0,
       });
     }
   }
@@ -1175,7 +1610,10 @@ describe("resilientFetch breaker short-circuit", () => {
     const b = await import("./resilient-fetch");
 
     await expect(
-      b.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+      b.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      }),
     // Same-registry class object — see the CLASS IDENTITY note in the header.
     ).rejects.toBeInstanceOf(b.CircuitOpenError);
     // THE assertion that proves "without touching Railway".
@@ -1189,7 +1627,10 @@ describe("resilientFetch breaker short-circuit", () => {
     const mod = await import("./resilient-fetch");
 
     await expect(
-      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      }),
     ).rejects.toMatchObject({
       name: "CircuitOpenError",
       retryAfterS: 12,
@@ -1218,7 +1659,10 @@ describe("resilientFetch breaker short-circuit", () => {
     const b = await import("./resilient-fetch");
 
     await expect(
-      b.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+      b.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      }),
     ).resolves.toBeDefined();
     expect(fetchB).toHaveBeenCalledTimes(1);
   });
@@ -1231,8 +1675,12 @@ describe("resilientFetch failure classification", () => {
     expectThrow: boolean,
   ): Promise<void> {
     for (let i = 0; i < n; i++) {
+      // retriesOverride:0 — single-attempt path. The bridge ROW is retries:1
+      // since Phase 141; without this pin these classification tests would retry
+      // and trip the breaker mid-drive (retry is covered in the retry test file).
       const call = mod.resilientFetch("bridge", "/api/portfolio-bridge", {
         method: "POST",
+        retriesOverride: 0,
       });
       if (expectThrow) await expect(call).rejects.toBeDefined();
       else await call;
@@ -1250,6 +1698,7 @@ describe("resilientFetch failure classification", () => {
 
     const before = fetchMock.mock.calls.length;
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     expect(fetchMock.mock.calls.length).toBe(before + 1);
@@ -1292,7 +1741,10 @@ describe("resilientFetch failure classification", () => {
     const mod = await import("./resilient-fetch");
 
     await expect(
-      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      }),
     ).rejects.toBe(original);
   });
 });
@@ -1311,6 +1763,7 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
     const mod = await import("./resilient-fetch");
 
     const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     // Nothing recorded yet — proof the transport arm genuinely did not fire and
@@ -1352,6 +1805,7 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
       vi.unstubAllGlobals();
       bodyRejectingFetch(new DOMException("aborted", "TimeoutError"));
       const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        retriesOverride: 0,
         method: "POST",
       });
       await expect(res.json()).rejects.toBeInstanceOf(mod.SeamBodyReadError);
@@ -1368,6 +1822,7 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
     const mod = await import("./resilient-fetch");
 
     const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     const thrown = await res.text().then(
@@ -1394,6 +1849,7 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
     const mod = await import("./resilient-fetch");
 
     const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     await expect(res.json()).resolves.toEqual({ ok: true });
@@ -1426,6 +1882,9 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
 
     const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
       method: "POST",
+      // Single-attempt (bridge row is retries:1 since Phase 141): the counter
+      // assertion below pins ONE record for the 503 status arm.
+      retriesOverride: 0,
     });
     const thrown = await res.json().then(
       () => null,
@@ -1450,6 +1909,7 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
     const mod = await import("./resilient-fetch");
 
     const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     expect(res.ok).toBe(false);
@@ -1466,12 +1926,16 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
     okFetch(503);
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
       method: "POST",
+      // Single-attempt: the bridge row retries since Phase 141, but this arm
+      // pins that ONE 503 records exactly ONE breaker failure.
+      retriesOverride: 0,
     });
     expect(shared.counters.limitCalls).toBe(1);
 
     vi.unstubAllGlobals();
     okFetch(400);
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     expect(shared.counters.limitCalls).toBe(1);
@@ -1482,6 +1946,7 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
     vi.unstubAllGlobals();
     okFetch(500);
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     expect(shared.counters.limitCalls).toBe(1);
@@ -1507,6 +1972,7 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
       });
 
       const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        retriesOverride: 0,
         method: "POST",
       });
       expect(res.status).toBe(status);
@@ -1554,6 +2020,7 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
       vi.unstubAllGlobals();
       jsonFetch(429, body);
       await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        retriesOverride: 0,
         method: "POST",
       });
     }
@@ -1575,6 +2042,7 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
         },
       });
       await mod.resilientFetch("validate-key", "/api/validate-key", {
+        retriesOverride: 0,
         method: "POST",
       });
     }
@@ -1603,6 +2071,7 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
       },
     });
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     expect(shared.counters.limitCalls).toBe(0);
@@ -1612,6 +2081,7 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
     vi.unstubAllGlobals();
     textFetch(500, "Internal Server Error");
     const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     expect(res.status).toBe(500);
@@ -1641,6 +2111,7 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
     // A hand-typed 5 — production's threshold is not read here.
     for (let i = 0; i < 5; i++) {
       await mod.resilientFetch("match-recompute", "/api/match/recompute", {
+        retriesOverride: 0,
         method: "POST",
       });
     }
@@ -1665,6 +2136,9 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
 
     const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
       method: "POST",
+      // Single-attempt: pins ONE record for the text/plain 503 (bridge retries
+      // since Phase 141; retry mechanics live in the retry test file).
+      retriesOverride: 0,
     });
     expect(res.status).toBe(503);
     await expect(res.text()).resolves.toBe("Service Unavailable");
@@ -1689,6 +2163,9 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
     for (let i = 0; i < 5; i++) {
       await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
         method: "POST",
+        // Single-attempt: five distinct 503s load the counter to the threshold;
+        // a retry would trip mid-loop and the pre-attempt-2 re-check would throw.
+        retriesOverride: 0,
       });
     }
 
@@ -1706,6 +2183,7 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
 
     await expect(
       mod.resilientFetch("match-recompute", "/api/match/recompute", {
+        retriesOverride: 0,
         method: "POST",
       }),
     ).rejects.toBeInstanceOf(TypeError);
@@ -1744,6 +2222,9 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
 
     const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
       method: "POST",
+      // Single-attempt: this pins that ONE degraded request records ONCE (status
+      // arm + body-read arm within the same attempt do not double-count).
+      retriesOverride: 0,
     });
     // The status arm has already recorded once.
     expect(shared.counters.limitCalls).toBe(1);
@@ -1770,6 +2251,7 @@ describe("[OB-8] one dependency's open circuit does not suppress unrelated calls
 
     await expect(
       mod.resilientFetch("match-recompute", "/api/match/recompute", {
+        retriesOverride: 0,
         method: "POST",
       }),
     ).resolves.toBeDefined();
@@ -1791,6 +2273,7 @@ describe("[OB-8] one dependency's open circuit does not suppress unrelated calls
 
     await expect(
       mod.resilientFetch("validate-key", "/api/validate-key", {
+        retriesOverride: 0,
         method: "POST",
       }),
     ).rejects.toBeInstanceOf(mod.CircuitOpenError);
@@ -1804,6 +2287,7 @@ describe("[OB-8] one dependency's open circuit does not suppress unrelated calls
 
     await expect(
       mod.resilientFetch("match-recompute", "/api/match/recompute", {
+        retriesOverride: 0,
         method: "POST",
       }),
     ).rejects.toMatchObject({
@@ -1823,10 +2307,14 @@ describe("[OB-8] one dependency's open circuit does not suppress unrelated calls
     const mod = await import("./resilient-fetch");
 
     await expect(
-      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      }),
     ).rejects.toBeInstanceOf(mod.CircuitOpenError);
     await expect(
       mod.resilientFetch("match-recompute", "/api/match/recompute", {
+        retriesOverride: 0,
         method: "POST",
       }),
     ).rejects.toBeInstanceOf(mod.CircuitOpenError);
@@ -1845,6 +2333,7 @@ describe("[SEAMCORE-11 / A-23] the seam refuses redirects", () => {
     const mod = await import("./resilient-fetch");
 
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
 
@@ -1860,6 +2349,7 @@ describe("[SEAMCORE-11 / A-23] the seam refuses redirects", () => {
     const mod = await import("./resilient-fetch");
 
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
       redirect: "follow",
     });
@@ -1895,6 +2385,7 @@ describe("[SEAMCORE-11 / A-22 + A-28] caller and config faults are NOT Railway d
 
       const thrown = await mod
         .resilientFetch("bridge", "/api/portfolio-bridge", {
+          retriesOverride: 0,
           method: "POST",
           timeoutMsOverride: value as number,
         })
@@ -1938,6 +2429,7 @@ describe("[SEAMCORE-11 / A-22 + A-28] caller and config faults are NOT Railway d
     const mod = await import("./resilient-fetch");
 
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
       timeoutMsOverride: undefined,
     });
@@ -1962,6 +2454,7 @@ describe("[SEAMCORE-11 / A-22 + A-28] caller and config faults are NOT Railway d
 
     await mod
       .resilientFetch("bridge", "/api/portfolio-bridge", {
+        retriesOverride: 0,
         method: "POST",
         timeoutMsOverride: -1,
       })
@@ -1984,6 +2477,7 @@ describe("[SEAMCORE-11 / A-22 + A-28] caller and config faults are NOT Railway d
     const mod = await import("./resilient-fetch");
 
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
       timeoutMsOverride: 7_000,
     });
@@ -2012,7 +2506,10 @@ describe("[SEAMCORE-11 / A-22 + A-28] caller and config faults are NOT Railway d
     const mod = await import("./resilient-fetch");
 
     const thrown = await mod
-      .resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" })
+      .resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      })
       .then(
         () => null,
         (e: unknown) => e,
@@ -2045,7 +2542,10 @@ describe("[SEAMCORE-11 / A-22 + A-28] caller and config faults are NOT Railway d
     const mod = await import("./resilient-fetch");
 
     await expect(
-      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      }),
     ).rejects.toBeInstanceOf(mod.SeamConfigError);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(shared.counters.limitCalls).toBe(0);
@@ -2061,6 +2561,7 @@ describe("resilientFetch budget wiring", () => {
     const mod = await import("./resilient-fetch");
 
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     expect(timeoutSpy).toHaveBeenCalledWith(mod.SEAM_BUDGETS.bridge.timeoutMs);
@@ -2072,6 +2573,7 @@ describe("resilientFetch budget wiring", () => {
     const mod = await import("./resilient-fetch");
 
     await mod.resilientFetch("process-key-sync", "/process-key", {
+      retriesOverride: 0,
       method: "POST",
     });
     expect(timeoutSpy).toHaveBeenCalledWith(
@@ -2085,6 +2587,7 @@ describe("resilientFetch budget wiring", () => {
     const mod = await import("./resilient-fetch");
 
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
       timeoutMsOverride: 7_000,
     });
@@ -2106,6 +2609,7 @@ describe("resilientFetch budget wiring", () => {
     };
 
     await mod.resilientFetch("process-key-enqueue", "/process-key", {
+      retriesOverride: 0,
       method: "POST",
       headers,
       body: JSON.stringify({ flow_type: "resync" }),
@@ -2122,6 +2626,7 @@ describe("resilientFetch budget wiring", () => {
     const fetchMock = okFetch();
     const mod = await import("./resilient-fetch");
     await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      retriesOverride: 0,
       method: "POST",
     });
     expect(String(fetchMock.mock.calls[0][0])).toBe(
@@ -2542,7 +3047,12 @@ describe("[SEAMCORE-06 / A-10] the network-failure line is diagnostic AND safe",
     fetchMock.mockRejectedValue(rejection);
     const mod = await import("./resilient-fetch");
     await mod
-      .resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" })
+      // Single-attempt: the bridge row retries since Phase 141, but the "records
+      // exactly ONE" assertion downstream pins the one-attempt transport arm.
+      .resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        retriesOverride: 0,
+      })
       .catch(() => undefined);
     return errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
   }
@@ -2817,5 +3327,56 @@ describe("[SEAMRIM-04] the breaker's transitions and store failures reach the ca
 
     expect(shared.captures).toHaveLength(0);
     expect(shared.afterTasks).toHaveLength(0);
+  });
+});
+
+/**
+ * [141.1 / D-08 / SC-E] THE REGISTRY-BYPASS AXIS IS CLOSED AT COMPILE TIME.
+ *
+ * ⚠️ THE COMPILER IS THE ASSERTION HERE — there is no runtime expectation that
+ * can fail, and none is wanted. Bucket C1: while `retriesOverride` was optional
+ * and `resilientFetch` fell back to `SEAM_BUDGETS[budgetKey].retries`, the call
+ * below inherited `retries: 1` from the `process-key-enqueue` row — with the
+ * SEAM-06 retry-safety registry never consulted — and it TYPECHECKED. The body
+ * is the aggravating detail rather than decoration: `flow_type: "teaser"` is the
+ * one flow deliberately excluded from `RETRY_SAFE_FLOW_TYPES` (a teaser compute
+ * is not idempotent), and hand-picking a budget key beside a hand-written
+ * `flow_type` is not hypothetical — `keys/validate-and-encrypt/route.ts` is a
+ * live instance of that shape.
+ *
+ * The directive below is load-bearing in BOTH directions. Today it absorbs a
+ * real TS2345 ("`retriesOverride` is missing … but required"). If anyone ever
+ * makes the field optional again, or restores the row fallback in a way that
+ * softens the type, the error disappears and `tsc --noEmit` fails instead with
+ * "Unused '@ts-expect-error' directive". That tsc failure IS this test.
+ *
+ * Following the house form of `src/__tests__/seed-demo-data-types.test.ts`: all
+ * type-level assertions live in a function that is NEVER invoked, so nothing
+ * here issues a fetch or touches the breaker; vitest still type-checks the file.
+ */
+function _d08TypeAssertions(rf: typeof import("./resilient-fetch")): void {
+  // The C1 shape: a budget key picked by hand, a flow_type written by hand, and
+  // no retry verdict anywhere. It must not compile.
+  // @ts-expect-error - retriesOverride is REQUIRED (D-08): a call site cannot acquire a retry without stating a verdict
+  void rf.resilientFetch("process-key-enqueue", "/process-key", {
+    method: "POST",
+    body: JSON.stringify({ flow_type: "teaser" }),
+  });
+
+  // The same call WITH a verdict compiles — the negative control, without which
+  // the directive above could be satisfied by any unrelated type error.
+  void rf.resilientFetch("process-key-enqueue", "/process-key", {
+    method: "POST",
+    body: JSON.stringify({ flow_type: "teaser" }),
+    retriesOverride: 0,
+  });
+}
+
+describe("[141.1 / D-08 / SC-E] a call site cannot acquire a retry by inheritance", () => {
+  it("compiles this file at all — the @ts-expect-error fixture above is the real assertion", () => {
+    // The one runtime line: proves the fixture still references the symbol it
+    // claims to (a rename of `resilientFetch` would otherwise leave the type
+    // fixture asserting nothing while this file stayed green).
+    expect(typeof _d08TypeAssertions).toBe("function");
   });
 });

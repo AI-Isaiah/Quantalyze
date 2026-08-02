@@ -382,9 +382,12 @@ vi.mock("@/lib/resilient-fetch", async (importOriginal) => {
     resilientFetch: async (
       budgetKey: Parameters<typeof actual.resilientFetch>[0],
       path: string,
-      init: Parameters<typeof actual.resilientFetch>[2] = {},
+      // No `= {}` default: D-08 made `init` (and its `retriesOverride`)
+      // REQUIRED on the real signature, and a double that still defaulted would
+      // be the one call shape production can no longer express.
+      init: Parameters<typeof actual.resilientFetch>[2],
     ) => {
-      RF.lastCall = { budgetKey, path, init: init as Record<string, unknown> };
+      RF.lastCall ={ budgetKey, path, init: init as Record<string, unknown> };
       if (RF.breakerOpen) throw new CircuitOpenError(RF.retryAfterS);
       return actual.resilientFetch(budgetKey, path, init);
     },
@@ -2681,6 +2684,32 @@ describe("POST /api/strategies/finalize-wizard — CONTRIB-02 private-by-default
  * duplicate appeared" is ALSO true when nothing appeared at all. Every case
  * below therefore asserts the POSITIVE — that the call fired, and fired
  * carrying the RIGHT identity — before asserting any absence.
+ *
+ * ── 141.2 / D-01: WHERE THE OTHER HALF OF THIS CONTRACT IS PINNED ────────────
+ *
+ * This describe owns the ROUTE half only: the context carries EXACTLY what the
+ * draft row has — the draft's own id when the column is populated, and NOTHING
+ * when it is NULL (absence forwarded as absence, never synthesised). Both
+ * polarities are asserted below, and they are a contract, not an implementation
+ * detail, because of what the OTHER side now does with them.
+ *
+ * That other side is `retriesForFlow` in `seam-retry-registry.ts`, which
+ * `postProcessKey` consults at its single `resilientFetch` chokepoint. It turns
+ * the absence this route forwards into `retriesOverride: 0` — an `onboard` call
+ * with no usable idempotency key is refused a retry, because the server has
+ * nothing to dedupe on in that state and would insert a second verification row
+ * on attempt 2. So the "no key" case below is not merely tolerated downstream;
+ * it now CHANGES the retry verdict.
+ *
+ * ⚠️ AND THIS FILE STRUCTURALLY CANNOT SEE THAT. The `vi.mock` of
+ * `@/lib/process-key-client` above replaces the seam client WHOLESALE, so no
+ * assertion here can ever observe `retriesOverride` — the real chokepoint is
+ * never executed. That is why the retry pins live in `process-key-client.test.ts`
+ * (the `retriesForFlow` cases in the D-01 describe there, which drive the REAL
+ * `postProcessKey` and read the value off the captured core init), and the
+ * helper's own branch table is pinned in `seam-retry-registry.test.ts`. A reader
+ * who changes the context contract below must look at all three; a green run
+ * here alone proves only that the route sent what the draft had.
  */
 describe("POST /api/strategies/finalize-wizard — TS-33 wizard_session_id reaches the dedupe", () => {
   const DRAFT_SESSION_ID = "33333333-3333-4333-8333-333333333333";
