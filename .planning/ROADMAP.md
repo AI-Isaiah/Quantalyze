@@ -452,7 +452,7 @@ Plans:
 **Goal:** Close the 16 items raised by three independent passes over Phase 142 (high-effort workflow review, blind `gsd-code-reviewer`, and the `gsd-verifier` goal-backward pass that had never run) — so that the reap clock genuinely measures the whole job chain, no terminal writer can launder a failure into a green factsheet, the `sql-function-snapshot` CI gate is green again, and Phase 142's own falsifiability evidence is complete rather than 4/11.
 **Requirements**: JOB-01, JOB-02, JOB-03 (remediation of Phase 142 delivery; no new REQ IDs)
 **Depends on:** Phase 142
-**Plans:** 7 plans
+**Plans:** 8 plans
 
 **Scope + per-item failure scenarios:** `.planning/STATE.md` § "Phase 142.1 scope".
 **Evidence:** `142-VERIFICATION.md` (status `gaps_found`, 9/10), `142-REVIEW.md` (0 blockers, 4 warnings).
@@ -469,16 +469,17 @@ Plans:
 **Wave 2**
 
 - [ ] 142.1-02-PLAN.md — test hygiene: D-10 shared _scan_helpers (union surface), D-06 wall-clock deletion, D-09 backlog=0, D-15 arity hoist + new pytest
-- [ ] 142.1-03-PLAN.md — CI hardening: D-05 narrowed neutralizations + shared-test-db group + grep gate; D-02/R1 fail-loud migrate + YAML pins
+- [ ] 142.1-03-PLAN.md — CI hardening: D-05 neutralizers DELETED — isolation by construction (D-18) + shared-test-db group + one-rule grep gate; D-02/R1 fail-loud migrate + YAML pins
 
 **Wave 3**
 
 - [ ] 142.1-04-PLAN.md — stamp-gate rework: D-07 soften raise arms, D-04 widen TS census, D-03 terminal-warned parity + csv-finalize one-line fix
-- [ ] 142.1-05-PLAN.md — migration 20260803120000: D-17 trigger + D-11 companion arm (arm D inverted + drift gate re-pointed SAME commit) + SQL gate Part 6 + D-12 run 2
+- [ ] 142.1-05-PLAN.md — migration 20260803120000: D-17 BEFORE UPDATE trigger (D-18) + D-11 companion arm (arm D inverted + Part 4 retrofit + drift gate/comments re-pointed SAME commit) + D-12 run 2
 
 **Wave 4**
 
 - [ ] 142.1-06-PLAN.md — D-01 comment correction + D-02/R2 PGRST204 fallback in _mark_unrecoverable (after D-07, per C-12)
+- [ ] 142.1-08-PLAN.md — SQL gate Part 6 (G1 trigger sentinel, seeds at INSERT per D-18; grep-gate pin 0→3)
 
 **Wave 5**
 
