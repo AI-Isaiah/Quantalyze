@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from typing import Any, TypedDict
 
 from fastapi import HTTPException
+from postgrest.exceptions import APIError
 from supabase import Client
 
 from services.benchmark import get_benchmark_returns
@@ -56,6 +57,16 @@ from services.position_reconstruction import _normalize_side
 from services.nav_twr import NAV_TWR_GUARD_KEYS
 
 logger = logging.getLogger("quantalyze.analytics.runner")
+
+
+# D-02 / R2 — PostgREST answers any payload naming a column its schema cache
+# does not know with this code, and writes NOTHING. It is a deploy-window
+# condition rather than a data fault: between the moment code that names
+# computing_started_at goes live and the moment PostgREST reloads its cache,
+# every write naming that column is rejected. Matching on the code (not on a
+# message substring) is the audit.py convention — server messages localize, the
+# code does not.
+_PGRST_SCHEMA_CACHE_MISS: str = "PGRST204"
 
 
 # ---------------------------------------------------------------------------
@@ -1233,8 +1244,30 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 # reap_strategy_analytics_stuck_computing (migration 20260802120000)
                 # keys on THIS column, never computed_at. Client-side UTC ISO is
                 # mandatory: a PostgREST payload is a literal and cannot express
-                # SQL now(). Unconditional here is correct — every invocation of
-                # this writer genuinely transitions the row INTO computing.
+                # SQL now().
+                #
+                # D-01/D-18 — the write is unconditional, but its EFFECT is not.
+                # It depends on how this job was reached, and on one of the two
+                # paths the value is written and then discarded by design:
+                #
+                #   * 4-hop chain (process_key_long -> sync_trades ->
+                #     derive_broker_dailies -> compute_analytics_from_csv): the row
+                #     has been 'computing' since hop 1, so this upsert takes its
+                #     ON CONFLICT path — an UPDATE — and the BEFORE UPDATE trigger
+                #     strategy_analytics_stamp_computing_started_trigger (migration
+                #     20260803120000) silently COERCES the payload value back to
+                #     the hop-1 chain-start stamp. The reaper's clock must measure
+                #     the whole chain, not this hop, so the override is the point.
+                #   * CSV-first path (src/app/api/strategies/csv-finalize/route.ts
+                #     :822-826 enqueues compute_analytics_from_csv as the
+                #     strategy's FIRST job, with no prior bridge call): here the
+                #     stamp IS the real transition in, and it lands as written. On
+                #     the upsert's INSERT path the UPDATE-only trigger (D-18) does
+                #     not fire at all; on a real transition-in UPDATE its arm (c)
+                #     respects an explicit stamp.
+                #
+                # Do not make this write conditional on the strength of the first
+                # bullet alone — on the second path there is no other writer.
                 "computing_started_at": datetime.now(timezone.utc).isoformat(),
             },
             on_conflict="strategy_id",
@@ -1695,19 +1728,53 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 (getattr(prior_res, "data", None) or {}).get("data_quality_flags") or {}
             )
             prior_flags["csv_source"] = True
-            supabase.table("strategy_analytics").upsert(
-                {
-                    "strategy_id": strategy_id,
-                    "computation_status": "failed",
-                    # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
-                    "computation_warned": False,
-                    # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
-                    "computing_started_at": None,
-                    "computation_error": "CSV analytics computation failed.",
-                    "data_quality_flags": prior_flags,
-                },
-                on_conflict="strategy_id",
-            ).execute()
+            try:
+                supabase.table("strategy_analytics").upsert(
+                    {
+                        "strategy_id": strategy_id,
+                        "computation_status": "failed",
+                        # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                        "computation_warned": False,
+                        # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                        "computing_started_at": None,
+                        "computation_error": "CSV analytics computation failed.",
+                        "data_quality_flags": prior_flags,
+                    },
+                    on_conflict="strategy_id",
+                ).execute()
+            except APIError as api_exc:
+                if getattr(api_exc, "code", None) != _PGRST_SCHEMA_CACHE_MISS:
+                    # Narrow ON PURPOSE. Swallowing every APIError here would
+                    # hide a serialization failure or a permission denial behind
+                    # a silently degraded payload; the caller logs and continues.
+                    raise
+                # D-02 / R2 — this writer is the CATCH-ALL exit: every other
+                # failure arm in this runner reaches it. If it cannot write, the
+                # already-failed job leaves the row 'computing' forever and the
+                # owner-side UI spins. So drop the key PostgREST just said it
+                # does not know and re-issue; a degraded stamp beats a permanent
+                # spinner. Omitting it is safe because the BEFORE UPDATE trigger
+                # named in _mark_computing's comment owns the exit-clear as soon
+                # as the column is visible again — and in this window the column
+                # does not exist server-side to be left stale.
+                logger.warning(
+                    "csv analytics: strategy_analytics schema cache does not "
+                    "know computing_started_at (code %s) — re-issuing the "
+                    "terminal 'failed' for %s without it. This is a deploy "
+                    "window; if it persists, PostgREST has not reloaded.",
+                    _PGRST_SCHEMA_CACHE_MISS,
+                    strategy_id,
+                )
+                supabase.table("strategy_analytics").upsert(
+                    {
+                        "strategy_id": strategy_id,
+                        "computation_status": "failed",
+                        "computation_warned": False,
+                        "computation_error": "CSV analytics computation failed.",
+                        "data_quality_flags": prior_flags,
+                    },
+                    on_conflict="strategy_id",
+                ).execute()
 
         try:
             await db_execute(_mark_unrecoverable)
