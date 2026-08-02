@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -66,6 +65,16 @@ from tests.test_worker_isolation_e2e import (  # noqa: E402
     _wait_port_listening,
 )
 
+# D-10: the scan surface is SHARED, not forked. This file previously carried its
+# own `_py_scan_files` naming five files by hand — a strict subset of the union
+# `test_computing_started_at_stamp` walked, while its docstring claimed parity.
+from tests._scan_helpers import (
+    _count_in_text,
+    _is_pure_comment,
+    _py_scan_files,
+    _repo_root,
+)
+
 # ---------------------------------------------------------------------------
 # Forbidden tokens — LOCAL literals, deliberately never a shared constant.
 # ---------------------------------------------------------------------------
@@ -84,81 +93,21 @@ FORBIDDEN_TOKENS = (REAPER_CRON_JOBNAME, DELETED_ONE_OFF_STEM)
 
 
 # ---------------------------------------------------------------------------
-# Scan helpers — same idioms as tests/test_dark_path_deleted.py:37-95.
+# Scan surface — see tests/_scan_helpers.py.
 # ---------------------------------------------------------------------------
-
-
-def _repo_root() -> Path:
-    """The monorepo root — the first ancestor containing BOTH ``src/`` and
-    ``analytics-service/``. Resolved by walking up so the scan works from the
-    ``analytics-service`` pytest cwd and in CI."""
-    for parent in Path(__file__).resolve().parents:
-        if (parent / "src").is_dir() and (parent / "analytics-service").is_dir():
-            return parent
-    raise RuntimeError(
-        "could not locate the repo root (an ancestor with both src/ and "
-        "analytics-service/)"
-    )
-
-
-def _strip_comment(line: str, *, lang: str = "py") -> bool:
-    """True when ``line`` is a pure comment for its language (grep-gate
-    hygiene: a docstring/comment mentioning a token must neither trip nor
-    satisfy the gate)."""
-    stripped = line.lstrip()
-    if lang == "py":
-        return stripped.startswith("#")
-    return stripped.startswith("//") or stripped.startswith("*")
-
-
-def _count_in_text(text: str, token: str, *, lang: str = "py") -> int:
-    """Comment-stripped occurrences of ``token`` in ``text``.
-
-    Split out from :func:`_count` so the scanner itself can be exercised
-    against synthetic in-memory source — see
-    ``test_scanner_flags_a_synthetic_reaper_identifier``. Without that
-    self-test the structural gate's GREEN would be unfalsifiable.
-    """
-    return sum(
-        line.count(token)
-        for line in text.splitlines()
-        if not _strip_comment(line, lang=lang)
-    )
-
-
-def _count(path: Path, token: str, *, lang: str = "py") -> int:
-    """Comment-stripped occurrences of ``token`` in ``path``."""
-    if not path.exists():
-        return 0
-    return _count_in_text(path.read_text(), token, lang=lang)
-
-
-def _py_scan_files() -> list[Path]:
-    """The worker's DISPATCH-REACHABLE Python surface: the runner + worker +
-    cron entrypoints plus a full walk of ``routers/`` and ``scripts/``. Any
-    wiring of reaper work onto the shared event loop would land in one of
-    these (same file list as ``test_dark_path_deleted._py_scan_files``)."""
-    svc = _repo_root() / "analytics-service"
-    files: list[Path] = [
-        svc / "services" / "analytics_runner.py",
-        svc / "services" / "job_worker.py",
-        svc / "routers" / "cron.py",
-        svc / "main_worker.py",
-        svc / "main.py",
-    ]
-    for sub in ("routers", "scripts"):
-        files.extend(sorted((svc / sub).rglob("*.py")))
-    # dedupe (cron.py is also under the routers walk) while preserving the
-    # explicit entrypoints, and keep only files that exist.
-    seen: set[Path] = set()
-    scan: list[Path] = []
-    for f in files:
-        rf = f.resolve()
-        if rf in seen or not rf.exists():
-            continue
-        seen.add(rf)
-        scan.append(rf)
-    return scan
+# ``_py_scan_files`` is the SHARED union defined in ``tests/_scan_helpers.py``:
+# ``{main_worker.py, main.py} ∪ services/** ∪ routers/** ∪ scripts/**``. Any
+# wiring of reaper work onto the shared event loop lands in one of these.
+#
+# ⚠️ It was NOT always this wide. Until phase 142.1 (D-10) this file carried a
+# private copy that named five files by hand — ``services/analytics_runner.py``,
+# ``services/job_worker.py``, ``routers/cron.py`` and the two entrypoints — and
+# its docstring simultaneously claimed the same list as
+# ``test_dark_path_deleted`` (true) AND coverage of "any wiring of reaper work"
+# (FALSE: ``services/`` was cherry-picked to two modules, so a reaper wired into
+# e.g. ``services/basis_series.py`` was invisible while this gate stayed green).
+# The claim is honest again only because the surface is now the walked union;
+# do not re-narrow it to a hand list.
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +140,7 @@ def test_no_reaper_identifier_on_worker_surface() -> None:
     for path in scan:
         text = path.read_text()
         for lineno, line in enumerate(text.splitlines(), start=1):
-            if _strip_comment(line):
+            if _is_pure_comment(line):
                 continue
             for token in FORBIDDEN_TOKENS:
                 if token in line:
