@@ -2160,7 +2160,7 @@ class TestPerJobHealthzRefresh:
 # ---------------------------------------------------------------------------
 # The reaper's staleness threshold exists in TWO places: the Python constant
 # STRATEGY_ANALYTICS_REAP_THRESHOLD (declared canonical) and the interval
-# literal baked into the pg_cron body of migration 20260803120000. Nothing at
+# literal baked into the pg_cron body of the migration named below. Nothing at
 # runtime reconciles them — the migration is applied by Supabase, the constant is
 # read by nobody at runtime — so silent divergence is invisible until the reaper
 # either mis-reaps healthy chains (literal too small) or never fires (too large).
@@ -2174,9 +2174,25 @@ class TestPerJobHealthzRefresh:
 # phase exists to close (corrections C-10 / D-04 / D-10). services/job_worker.py's
 # STRATEGY_ANALYTICS_REAP_THRESHOLD comment names the same file; the two move
 # together, and test_migration_file_exists below says so in its failure message.
+#
+# ⚠️⚠️ MOVED AGAIN by D-19 — and the reason is worth reading before the next
+# forward-only re-registration. D-19 re-registered this job a THIRD time (to
+# restore the LIMIT bound; see that migration's header). The pointer was left on
+# the superseded file, so this gate went on guarding a body pg_cron no longer
+# runs while staying green — which is structurally the SAME defect D-19 itself
+# fixed one layer down, where the SQL gate asserted a bound the planner did not
+# apply. Caught by the phase's migration review, not by any gate.
+#
+# The SQL gate at supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql
+# is immune to this class because it EXECUTEs the real cron.job row rather than
+# scanning a file. THIS gate is a file scan, so its pointer is hand-maintained
+# and will rot again unless the rule is followed:
+#
+#   RULE: every forward-only cron re-registration moves this pointer, and
+#   job_worker.py's cross-reference, in the SAME commit as the migration.
 
 _REAPER_MIGRATION_NAME = (
-    "20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql"
+    "20260803130000_reaper_limit_bound_materialized_cte.sql"
 )
 
 

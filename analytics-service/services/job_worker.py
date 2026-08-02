@@ -520,14 +520,16 @@ JOB_CHAIN_FOLLOW_ON: Final[dict[str, tuple[str, ...]]] = {
 # stuck-'computing' reaper, as a Postgres interval string.
 #
 # (1) CANONICAL SOURCE. Migration
-#     20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql
+#     20260803130000_reaper_limit_bound_materialized_cte.sql
 #     embeds this literal in its pg_cron body; the drift gate (plan 142-04) fails
 #     CI if the SQL literal and this constant diverge. Change it HERE first.
-#     (Phase 142.1 / D-11 re-registered the same pg_cron job under that later
-#     migration to add the NULL-stamp clock-start arm, superseding the Phase 142
-#     migration that registered the original one-arm body. This name and
-#     tests/test_main_worker.py::_REAPER_MIGRATION_NAME move together — always
-#     name the migration that registers the body pg_cron actually runs.)
+#     (The same pg_cron job has now been re-registered three times: Phase 142
+#     registered the original one-arm body, Phase 142.1 / D-11 added the
+#     NULL-stamp clock-start arm, and 142.1 / D-19 restored the LIMIT bound.
+#     This name and tests/test_main_worker.py::_REAPER_MIGRATION_NAME move
+#     together — always name the migration that registers the body pg_cron
+#     actually runs. Leaving either behind keeps the drift gate green while it
+#     guards a superseded body, which is how D-19's own pointer went stale.)
 # (2) DERIVATION — the chain-inclusive ceiling computed by
 #     tests/test_main_worker.py::TestReaperThresholdInvariant: 43,920 s (~12.2 h),
 #     the worst simple path through JOB_CHAIN_FOLLOW_ON
