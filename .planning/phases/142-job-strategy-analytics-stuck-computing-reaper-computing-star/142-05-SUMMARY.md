@@ -472,3 +472,40 @@ artifacts. `grep -rn MUTANT` → 0. No mutation residue, because no mutation ran
 ---
 *Phase: 142-job-strategy-analytics-stuck-computing-reaper-computing-star*
 *Completed: 2026-08-02*
+
+---
+
+## Follow-up run #2 — the deferred proof is CLOSED (2026-08-02, orchestrator)
+
+The account above, and the "Follow-up run" section before this one, are **left unedited**. Both were
+accurate when written; this section records what changed, not a correction.
+
+**Route 1 was taken.** The blocker was correctly diagnosed by the previous follow-up: `mcp__*` tools
+are stripped from subagent contexts (proved with a non-Supabase control probe), so the MCP grant is
+usable only by the orchestrator session. The orchestrator therefore performed plan 142-05 Task 2
+itself rather than delegating it again.
+
+**Result: SC-1, SC-1b, SC-2 and SC-2b are now `✅ Observed`** with pasted evidence in
+`142-VALIDATION.md` (see the new `‡ DEPLOYED-RUN` section there for the full protocol, the
+verification table, and the post-run integrity check). Ledger moves from **7 Observed / 4 SKIPPED**
+to **11 Observed / 0 SKIPPED / 0 caught-without-run**.
+
+Migration `20260802120000` is applied to TEST `qmnijlgmdhviwzwfyzlc`, recorded under MCP's own
+timestamp `20260802111053` (documented drift; re-apply is a safe no-op).
+
+**Two things this run did NOT do, stated so they are not assumed:**
+
+1. It did **not** execute the 637-line gate file end-to-end. The four mutation REDs were driven
+   against the deployed objects directly. Running the gate file remains CI's job (`sql-tests`), and
+   CI structurally cannot produce these four REDs — it runs the gate, it does not mutate the
+   deployed body.
+2. It did **not** import the throwaway-Postgres smokes from 142-04 or this plan as evidence. Both
+   authors scoped them as pre-evidence; that scoping stands.
+
+**One improvement on the plan's protocol worth carrying forward.** The plan specified
+capture-`pg_get_functiondef`-then-restore-from-capture. An empirical probe showed MCP `execute_sql`
+preserves `BEGIN … ROLLBACK`, so the mutation was placed *inside* the transaction and the rollback
+reverted the deployed-body change automatically. That removes the class of failure where a restore is
+attempted and silently gets it wrong. Byte-equality against the pre-mutation capture was still
+asserted afterwards, and held. Note `cron.job` is not directly writable by this role (42501) — the
+mutations went through `cron.schedule`, the same SECURITY DEFINER path the migration uses.

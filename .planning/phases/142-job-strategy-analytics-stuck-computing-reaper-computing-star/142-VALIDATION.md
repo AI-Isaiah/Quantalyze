@@ -112,10 +112,10 @@ created: 2026-08-02
 
 | SC | Mutation (exact edit to production source) | Must turn RED | Observed? | Evidence |
 |----|-------------------------------------------|---------------|-----------|----------|
-| SC-1 | Reaper function body: `computation_status = 'failed'` → `'pending'` | `test_strategy_analytics_stuck_computing_reaper.sql` — stranded-row terminal assertion | ⛔ **SKIPPED** | No route to TEST — see †MCP-STRIP below. Not caught. |
-| SC-1b | Reaper function body: **delete** the `computation_warned = FALSE` assignment | SQL gate — the "no false success" assertion (a reaped row must never launder to `complete_with_warnings`) | ⛔ **SKIPPED** | No route to TEST — see †MCP-STRIP below. Not caught. |
-| SC-2 | Reaper `WHERE`: `computing_started_at < now() - <threshold>` → `computed_at < now() - <threshold>` | **Both** SC#2 direction tests in the SQL gate | ⛔ **SKIPPED** | No route to TEST — see †MCP-STRIP below. Not caught. |
-| SC-2b | `sync_strategy_analytics_status` branch (a): replace the transition-conditional stamp with an unconditional `computing_started_at = now()` | SQL gate — "a second bridge call on an already-`computing` row does not advance the stamp". This is the C-3 trap; a naive "the writer sets the stamp" gate passes it | ⛔ **SKIPPED** | No route to TEST — see †MCP-STRIP below. Not caught. |
+| SC-1 | Reaper function body: `computation_status = 'failed'` → `'pending'` | `test_strategy_analytics_stuck_computing_reaper.sql` — stranded-row terminal assertion | ✅ **Observed** | Run against TEST `qmnijlgmdhviwzwfyzlc` 2026-08-02 (see ‡DEPLOYED-RUN). Mutant body `md5=93a7e8d1c04bc53330ce350fd9cb70ac`; stranded seed came out `observed_status='pending'`, gate expects `'failed'` ⇒ `assertion_would_RED=true`. |
+| SC-1b | Reaper function body: **delete** the `computation_warned = FALSE` assignment | SQL gate — the "no false success" assertion (a reaped row must never launder to `complete_with_warnings`) | ✅ **Observed** | Run against TEST 2026-08-02. Row *was* reaped (`observed_status='failed'`) but `observed_warned=true`; gate expects `false` ⇒ `assertion_would_RED=true`. This is the laundering path: the bridge would resolve it to `complete_with_warnings` — a false success on a money surface. |
+| SC-2 | Reaper `WHERE`: `computing_started_at < now() - <threshold>` → `computed_at < now() - <threshold>` | **Both** SC#2 direction tests in the SQL gate | ✅ **Observed — both directions** | Run against TEST 2026-08-02. **A** (fresh `computed_at` + old stamp): `observed='computing'`, expects `'failed'` ⇒ RED. **B** (old `computed_at` + fresh stamp): `observed='failed'`, expects `'computing'` ⇒ RED. Both halves live, as research C-2 predicted. |
+| SC-2b | `sync_strategy_analytics_status` branch (a): replace the transition-conditional stamp with an unconditional `computing_started_at = now()` | SQL gate — "a second bridge call on an already-`computing` row does not advance the stamp". This is the C-3 trap; a naive "the writer sets the stamp" gate passes it | ✅ **Observed** | Run against TEST 2026-08-02. Sentinel `2026-08-02 08:17:21.629336+00` → observed `2026-08-02 11:17:21.629336+00` — exactly 3h later ⇒ RED. **Identical microseconds prove the frozen-clock hazard is real**: `now()` is constant inside the transaction, so without the sentinel both values would have matched and the mutant would have passed. |
 | SC-3 | The Python reaper-threshold constant: divide by 10 (below the chain-inclusive ceiling) | `pytest tests/test_main_worker.py -k Reaper` — the headroom invariant | ⬜ pending | |
 | SC-3b | Change the threshold literal embedded in the migration so it no longer equals the Python constant | The SQL↔Python drift gate | ⬜ pending | |
 | SC-4 | Wire the reaper identifier into `dispatch_tick` (inject the cron jobname onto the worker dispatch surface — plan 142-02 T1) | `test_job07_reaper_off_worker_loop.py` — structural absence gate | ⬜ pending | |
@@ -124,7 +124,53 @@ created: 2026-08-02
 | SC-5b | `job_worker.py` composite success write: delete the `computing_started_at: None` clear from the `headline_payload` dict literal (~:6635, consumed by the NESTED `_write_headline_and_by_basis` upsert at ~:6744 — plan 142-03 m2) | same file — exit-clear rule reached via the ast.Name payload-resolution arm; this RED doubles as the Name-arm liveness proof | ⬜ pending | |
 | SC-5c | `src/app/api/keys/sync/route.ts:532`: delete `computing_started_at: null` from the failed-placeholder payload (plan 142-03 m3) | same file — TS object-literal half (the payload is built in `compositeMemberCount` and passed as an argument; only the object-literal anchor can see it) | ⬜ pending | |
 
-### † MCP-STRIP — why SC-1 / SC-1b / SC-2 / SC-2b are still SKIPPED (2026-08-02, follow-up run)
+### ‡ DEPLOYED-RUN — how SC-1 / SC-1b / SC-2 / SC-2b were closed (2026-08-02, orchestrator)
+
+> **This supersedes †MCP-STRIP below.** That section is retained unedited because its diagnosis is
+> correct and reusable — it is *why* route 1 was the one that worked, and its control probe is what
+> corrected 142-05's misdiagnosis. Nothing in it was wrong; it was simply addressed.
+
+Route 1 was taken: the **orchestrator** performed the work itself, since it holds the MCP grant that
+subagents cannot inherit.
+
+**Migration applied to TEST `qmnijlgmdhviwzwfyzlc`** via MCP `apply_migration`. Verified by direct
+query, not by trusting the tool's `success: true`:
+
+| Check | Result |
+|---|---|
+| `computing_started_at` | `timestamp with time zone`, `notnull=false`, `hasdef=false` |
+| `idx_strategy_analytics_computing_started` | present |
+| cron job | `*/15 * * * *`, `active=true` |
+| backfill rows touched | **0** — matches the 142-04 census exactly |
+| bridge stamp conditional (`= CASE`) | `true` |
+| bridge unconditional `= now()` | `false` — the C-3 trap absent |
+| per-kind supersession `d.kind = f.kind` | `true` — F-3/PUB-02 not reverted by the re-base |
+
+⚠️ **Recorded-version drift (expected, documented):** MCP stamped the migration as
+**`20260802111053`** (its own `now()`), not the filename's `20260802120000`. Re-apply is safe — the
+migration is `ADD COLUMN IF NOT EXISTS` / `CREATE OR REPLACE` / unschedule-then-schedule / `IS NULL`-guarded
+backfill — so a later file-based apply recording `20260802120000` is a no-op, not a conflict.
+
+**Protocol used — safer than the plan's capture-and-restore.** An empirical probe first established
+that MCP `execute_sql` **preserves `BEGIN … ROLLBACK`** (`CREATE TABLE` inside a rolled-back
+transaction left `to_regclass` NULL). That allowed the *mutation itself* to live inside the
+transaction, so the rollback reverts the deployed-body change automatically instead of depending on a
+correct manual restore. `cron.job` is not directly writable by this role (42501), so mutations went
+through the `cron.schedule` SECURITY DEFINER function — the same path the migration uses.
+
+**Post-run integrity, verified:** cron body **byte-identical** to its pre-mutation capture
+(`md5=2df1ec5d46dbff7b8b39161c1a92f4c0`, 1063 bytes), schedule and `active` unchanged, bridge `CASE`
+restored with SECDEF intact and no unconditional `now()`, `strategy_analytics` still 7,371 rows with
+**0** computing / **0** stamped, **0** seeded `compute_jobs` left, probe table absent, and the seed
+candidate back at its original `complete`. **TEST was not polluted.**
+
+**Scope of what this does and does not prove.** These four REDs are real observations against the
+*deployed* objects on TEST. They are **not** a run of the 637-line gate file end-to-end — that
+remains CI's job (`sql-tests`), and CI can never produce these four mutation REDs because it runs the
+gate rather than mutating the deployed body. The 142-04 and 142-05 throwaway-Postgres smokes remain
+excluded from this ledger, as their own authors specified.
+
+### † MCP-STRIP — why SC-1 / SC-1b / SC-2 / SC-2b were SKIPPED before the run above (2026-08-02, follow-up run)
 
 A dedicated follow-up run was dispatched **specifically** to close these four rows, on the premise that
 the Supabase MCP had been authorized mid-session and the harness therefore existed. **It does not exist
