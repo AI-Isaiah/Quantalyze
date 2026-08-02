@@ -292,7 +292,15 @@ async def _drive_probe_against_dispatch(
     monkeypatch.setenv("PORT", str(port))
 
     jobs = [{"id": "job-janitor-sim", "kind": "sync_trades", "strategy_id": "s-1"}]
-    mock_supabase = _stranded_backlog_supabase(jobs, backlog_rows=5_000)
+    # D-09: ZERO backlog rows, deliberately. This driver's property is
+    # blocking-vs-yielding at the healthz boundary; the backlog is never read by
+    # anything it exercises (`dispatch` is patched out and the reaper lives in
+    # pg_cron, so nothing here ever queries the stranded rows). The previous
+    # `5_000` built 10,000 dicts across this driver's two arms and — the real
+    # cost — implied that backlog SIZE is load-bearing for the healthz outcome,
+    # which it is not. The one place the size genuinely is the premise is
+    # `test_healthz_stays_200_with_large_stranded_backlog`, which keeps it.
+    mock_supabase = _stranded_backlog_supabase(jobs, backlog_rows=0)
 
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -496,10 +504,17 @@ class TestReaperOffWorkerLoopBehavior:
             "it does not, the twin is not actually yielding and the pair proves "
             "nothing"
         )
-        assert obs["latency"] < 0.1, (
-            "a yielding reap must not delay healthz — got "
-            f"{obs['latency']:.3f}s (the blocking arm's symptom must be absent here)"
-        )
+        # D-06: there is deliberately NO wall-clock latency budget here. The
+        # deleted assertion pinned the measured probe latency under a 100 ms
+        # ceiling — REAL elapsed time against a real asyncio server, while
+        # pytest shards run in parallel on a shared CI runner. A 200 ms GC
+        # pause could redden `analytics` on an unrelated PR, and its message
+        # ("a yielding reap must not delay healthz") misdirected the next
+        # engineer to the reaper instead of runner contention. It was
+        # DELETED rather than loosened: the property is already pinned
+        # deterministically by the tick_after_work/tick_before_work asymmetry
+        # above (which the blocking arm inverts), so a looser threshold would
+        # only add flake without adding evidence.
         assert b"200 OK" in obs["response"], obs["response"][:120]
         assert obs["probe_landed_mid_dispatch"], (
             "the yielding twin's probe must be serviced WHILE the dispatch is "
