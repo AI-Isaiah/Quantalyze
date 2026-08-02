@@ -1945,6 +1945,8 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                         # every terminal 'failed' so the status bridge (branches
                         # a/c) cannot resurrect a stale complete_with_warnings.
                         "computation_warned": False,
+                        # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                        "computing_started_at": None,
                         "computation_error": (
                             "Analytics enqueue failed during sync. "
                             "The next scheduled sync will retry — "
@@ -2379,6 +2381,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         "computation_status": "failed",
                         # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
                         "computation_warned": False,
+                        # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                        "computing_started_at": None,
                         "computation_error": stamp_detail + scrubbed,
                         "data_quality_flags": {"csv_source": True},
                         # F-4 (Fable): authoritative-clear the by-basis column on a
@@ -2493,6 +2497,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         "computation_status": "failed",
                         # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
                         "computation_warned": False,
+                        # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                        "computing_started_at": None,
                         "computation_error": scrubbed,
                         "data_quality_flags": {"csv_source": True},
                         # F-4 (Fable): authoritative-clear the by-basis column so a
@@ -4370,6 +4376,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     "computation_status": "failed",
                     # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
                     "computation_warned": False,
+                    # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                    "computing_started_at": None,
                     "computation_error": (
                         "Insufficient broker history. At least 2 days of "
                         "activity required."
@@ -5188,6 +5196,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
                     "computation_warned": False,
+                    # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                    "computing_started_at": None,
                     "computation_error": scrubbed,
                     "data_quality_flags": merged_flags,
                 },
@@ -6690,6 +6700,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         "strategy_id": strategy_id,
         "computation_status": composite_status,
         "computation_warned": member_warned,
+        # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+        "computing_started_at": None,
         "computation_error": None,
         "trade_metrics": None,     # composite has no fills
         "volume_metrics": None,

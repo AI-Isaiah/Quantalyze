@@ -1226,7 +1226,17 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
     # Mark computing.
     def _mark_computing() -> None:
         supabase.table("strategy_analytics").upsert(
-            {"strategy_id": strategy_id, "computation_status": "computing"},
+            {
+                "strategy_id": strategy_id,
+                "computation_status": "computing",
+                # JOB-01: writer-stamped transition timestamp — the pg_cron reaper
+                # reap_strategy_analytics_stuck_computing (migration 20260802120000)
+                # keys on THIS column, never computed_at. Client-side UTC ISO is
+                # mandatory: a PostgREST payload is a literal and cannot express
+                # SQL now(). Unconditional here is correct — every invocation of
+                # this writer genuinely transitions the row INTO computing.
+                "computing_started_at": datetime.now(timezone.utc).isoformat(),
+            },
             on_conflict="strategy_id",
         ).execute()
     await db_execute(_mark_computing)
@@ -1273,6 +1283,8 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                         "computation_status": "failed",
                         # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
                         "computation_warned": False,
+                        # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                        "computing_started_at": None,
                         "computation_error": "Insufficient CSV history. At least 2 data points required.",
                         "data_quality_flags": {"csv_source": True},
                     },
@@ -1492,6 +1504,8 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 # (TRUE when the broker→CSV guard flags promoted csv_status,
                 # FALSE on a clean run). The bridge branches (a)/(c) read it.
                 "computation_warned": _warned,
+                # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                "computing_started_at": None,
                 "computation_error": None,
                 "data_quality_flags": data_quality_flags,
                 "trade_metrics": None,    # CSV has no fills
@@ -1592,6 +1606,8 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                     "computation_status": "failed",
                     # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
                     "computation_warned": False,
+                    # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                    "computing_started_at": None,
                     "computation_error": (
                         f"CSV analytics aborted: dataset exceeds "
                         f"{trunc.page_count * trunc.page_size:,} rows "
@@ -1632,6 +1648,8 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
                     "computation_warned": False,
+                    # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                    "computing_started_at": None,
                     "computation_error": (
                         "Strategy returns_denominator_config is malformed; "
                         "operator intervention required."
@@ -1683,6 +1701,8 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                     "computation_status": "failed",
                     # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
                     "computation_warned": False,
+                    # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                    "computing_started_at": None,
                     "computation_error": "CSV analytics computation failed.",
                     "data_quality_flags": prior_flags,
                 },
