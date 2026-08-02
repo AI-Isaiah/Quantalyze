@@ -1478,6 +1478,8 @@ async function compositeMemberCount(
         strategy_id: strategyId,
         computation_status: "failed",
         computation_warned: false,
+        // JOB-01: clear on exit from computing (reaper key — migration 20260802120000)
+        computing_started_at: null,
         computation_error:
           "Could not determine composite membership " +
           "(strategy_keys count unavailable). Please retry submission.",
@@ -1540,6 +1542,8 @@ async function unifiedFinalizeWizardHandler(args: {
         strategy_id: args.strategy_id,
         computation_status: "failed",
         computation_warned: false,
+        // JOB-01: clear on exit from computing (reaper key — migration 20260802120000)
+        computing_started_at: null,
         computation_error:
           "Composite (multi-key) strategies are not yet supported on the " +
           "unified-backbone finalize path. Contact support.",

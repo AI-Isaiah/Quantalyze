@@ -39,22 +39,56 @@ import type { User } from "@supabase/supabase-js";
  * on an unknowable membership count.
  *
  * ─── Direct-writes audit (D.10) ───────────────────────────────────────
- * Post-2.9 R2 writers of strategy_analytics.computation_status:
+ * Post-2.9 R2 writers of strategy_analytics.computation_status.
+ *
+ * JOB-01 stamp obligation (migration 20260802120000): the TWO writers that set
+ * 'computing' — (a) and (c) — must set computing_started_at in the SAME
+ * statement, and EVERY writer that leaves 'computing' must clear it to NULL in
+ * the same payload, or the pg_cron reaper either skips the row forever
+ * (NULL-stamp skip rule) or re-fires on a stale stamp. Enforced statically at
+ * build time by analytics-service/tests/test_computing_started_at_stamp.py
+ * (Python + this TS route surface) and supabase/tests/
+ * test_strategy_analytics_stuck_computing_reaper.sql (the deployed SQL bodies).
+ *
  *   (a) Worker: sync_strategy_analytics_status RPC (migration 038) — the
  *       compute_jobs worker is the sole writer on the unified/queue path.
+ *       Branch (a) is a 'computing' WRITER and stamps computing_started_at
+ *       CONDITIONALLY, on the transition INTO computing only: it is PERFORMed on
+ *       every job hop, so an unconditional stamp would reset the clock each hop
+ *       and the row would never age past the threshold. Branches (b)/(c) are the
+ *       SQL exit transitions and clear the stamp to NULL.
  *   (c) analytics_runner.py (Python /api/compute-analytics) — upserts
  *       'computing'/'complete'/'failed' during compute, invoked by the
- *       worker internally.
+ *       worker internally. `_mark_computing` is the ONLY Python 'computing'
+ *       writer and stamps computing_started_at client-side (UTC ISO — a
+ *       PostgREST payload cannot express SQL now()). Its terminal writers, and
+ *       the job_worker.py terminal/composite-success writers, all clear the
+ *       stamp to NULL.
  *   (d) portfolio.py (Python /api/portfolio-analytics) — writes
  *       computation_status for portfolio_analytics rows only, not strategy.
+ *       Out of scope for the stamp: different table.
  *   (e) Initial strategy creation: migration 001 DEFAULT 'pending' on INSERT.
+ *       Never 'computing', so no stamp.
  *   (f) set_wizard_composite_members RPC (migration 20260712120000, RT-1) —
  *       when the composite draft's member set CHANGES, resets a COMPLETED row
  *       ('complete'/'complete_with_warnings' → 'pending') to invalidate the
  *       stale stitch so the wizard re-stitches. Scoped to completed/IDLE rows
  *       ONLY (never a 'computing' row the worker owns), so it does not race the
  *       worker's compute-time writes; an identical re-Continue leaves it
- *       untouched (WIZ-05 no-op invariant).
+ *       untouched (WIZ-05 no-op invariant). No stamp: it never touches a
+ *       'computing' row.
+ *   (g) pg_cron reaper reap_strategy_analytics_stuck_computing (migration
+ *       20260802120000) — terminalizes a stranded 'computing' row (past the
+ *       threshold, no active compute_jobs row) to 'failed' with
+ *       computation_warned=FALSE and computing_started_at=NULL. Terminalizes
+ *       only; it never re-enqueues.
+ *   (h) THIS ROUTE and its two Next.js siblings — strategies/finalize-wizard
+ *       (×2) and strategies/csv-finalize — write terminal 'failed' PLACEHOLDER
+ *       rows on their own error paths (never 'computing'), so they are
+ *       stamp-CLEARING exit sites and set computing_started_at to NULL. This
+ *       supersedes the older claim above that "this route never upserts
+ *       computation_status directly": it does, via
+ *       stampCompositeFailedUnlessComplete, on the unknowable-membership arm.
  * No other paths write strategy_analytics.computation_status for strategies.
  * ──────────────────────────────────────────────────────────────────────
  */
@@ -531,6 +565,8 @@ async function compositeMemberCount(
       {
         computation_status: "failed",
         computation_warned: false,
+        // JOB-01: clear on exit from computing (reaper key — migration 20260802120000)
+        computing_started_at: null,
         computation_error:
           "Could not determine composite membership " +
           "(strategy_keys count unavailable). Please retry.",
