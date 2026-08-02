@@ -273,6 +273,22 @@ true for 146 and half of 142–145, and **false for 141**.
   no-op; `cassette-refresh.yml` failed 17/17 with no alerting.
 - 20 of 35 Playwright specs wired to no workflow; migrations auto-apply to prod but not the
   test project; generated DB types have no regen/drift gate.
+- **`analytics-service/tests/` is entirely untyped — 5,439 `mypy --strict` errors across 182 of
+  213 test files** (MEASURED 2026-08-02 from Phase 142; `test_main_worker.py` alone = 59, which
+  is typical at ~30/file, NOT an outlier). ⚠️ **This is CONFORMANCE, not drift**: `ci.yml:1130`
+  states *"tests/ stays untyped by design"* and the gate is deliberately
+  `mypy --strict --follow-imports=silent services/ routers/ models/`. So the open question is a
+  **policy** one — should the staged B-mypy program (ingestion → `services/` part g →
+  `routers/` part h → `models/` part i) get a part j for `tests/`? — not a bug to fix.
+  **No owning phase, and deliberately not given one:** it belongs to none of 143/144/145 (JOB —
+  job-state integrity) or 146 (RATE), and it does NOT justify a Phase 147 inside v1.16 — a
+  5,439-error program is milestone-scale and orthogonal to "Production Resilience & Reliability"
+  money-path plumbing. Route to a future milestone as B-mypy part j, or close as WON'T-FIX if
+  the untyped-tests posture is reaffirmed. Surfaced because a Phase 142 executor ran
+  `mypy --strict` on a path the gate excludes; **zero errors fell in Phase 142's added ranges.**
+  The narrow real risk worth separating out, if anyone revisits this: an untyped fixture/double
+  can drift from the real contract it stands in for — but the fix for that is targeted
+  contract-pinning (already the repo's practice), not blanket typing.
 
 ### Tech-debt / maintainability (opportunistic, don't force)
 - God-files: `queries.ts` (3,205 lines), `job_worker.run_sync_trades_job` (688 lines),
