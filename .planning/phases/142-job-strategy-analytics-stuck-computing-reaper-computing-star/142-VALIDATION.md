@@ -157,8 +157,13 @@ created: 2026-08-02
    wrong map changes real enqueue behavior and reddens the existing job-flow suites
    (`test_main_worker.py`, `test_job_worker_csv_kind.py`) run in the same plan's verify; the
    batch/retry inputs stay local literals (P-8); and the 6–24 h ceiling sanity band plus the
-   topology-coverage asserts (keys ⊆ TIMEOUT_PER_KIND; chain ceiling ≥ all-kinds single-hop
-   ceiling) guard a zeroed or under-covering map.
+   topology-coverage asserts (keys and named follow-on kinds ⊆ TIMEOUT_PER_KIND; the
+   literal-pinned registry count `assert len(TIMEOUT_PER_KIND) == 15` — the real key count,
+   verified by reading at test-authoring time) guard a zeroed or under-covering map. The
+   earlier dominance form (chain ceiling ≥ all-kinds single-hop ceiling) is NOT the
+   compensating coverage: the checker proved it unconditionally true — both sides share
+   max(TIMEOUT_PER_KIND.values()) — so it can never fail, and 142-01 T2's acceptance
+   criteria now FORBID it; the registry-count literal is the mechanism that ships (W-1).
 2. **Plan 142-04 T3** (`TestReaperThresholdDriftGate`) imports `STRATEGY_ANALYTICS_REAP_THRESHOLD`
    from `services.job_worker` — deliberate: the Python constant is DECLARED canonical and the test
    pins SQL↔Python equality, not value correctness. Compensating coverage: VALUE-correctness is
