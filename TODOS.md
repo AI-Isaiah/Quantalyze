@@ -681,8 +681,11 @@ plan `142.1-05` before execution and are recorded as discharged.
    remediation phase should carry. ⚠️ **There is also a live convention conflict:** the GSD
    VALIDATION template's Oracle Independence checklist requires *"Table/registry sizes are pinned
    to a **literal count**, not to `len(THE_TABLE)`"* — which is precisely the form D-08 argues
-   against. That conflict deserves its own decision on the merits, not a drive-by change. ⛔ **Do
-   not close this by bumping 15 → 16.**
+   against. That conflict deserves its own decision on the merits, not a drive-by change. ⛔ **Hard
+   rule: never close this by bumping the literal to 16.** That is the exact behaviour the trip-wire
+   exists to prevent, and it is why the item was raised. Confirmed unchanged at 142.1 execution time
+   (`test_main_worker.py:1295` still asserts `len(TIMEOUT_PER_KIND) == 15`) — Phase 142.1
+   deliberately implemented no part of D-08.
 2. **W-3 — inverted arm D's determinism rests on an unpinned assumption.** The D-11 companion cron
    arm's `LIMIT 25` has no `ORDER BY`, so the inverted arm-D assertion is deterministic only while
    fewer than 25 foreign `(computing, NULL, no-active-job)` rows exist on the shared TEST project.

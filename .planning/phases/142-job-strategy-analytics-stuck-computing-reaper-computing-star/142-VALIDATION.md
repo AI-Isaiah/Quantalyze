@@ -1,9 +1,9 @@
 ---
 phase: 142
 slug: job-strategy-analytics-stuck-computing-reaper-computing-star
-status: planned
+status: executed
 nyquist_compliant: true
-wave_0_complete: false
+wave_0_complete: true
 created: 2026-08-02
 ---
 
@@ -52,6 +52,14 @@ created: 2026-08-02
 > Task IDs are assigned by the planner. The Requirement / Secure Behavior / Test Type / Command
 > columns below are **fixed by research** and carry over verbatim into the planner's task rows.
 
+> ⚠️ **This map was deliberately NOT backfilled (Phase 142.1, D-14, 2026-08-02).** D-14's scope is
+> the **Falsifiability Ledger only**. Every `⬜ pending` / `❌` cell below is therefore **NOT evidence
+> of execution** — it is an un-updated planning artifact, and it must not be read as "these checks
+> were run and are outstanding" nor as "these checks failed". The frontmatter's `status: executed`
+> refers to the **ledger's Pass-C closure**, not to this table. Saying so explicitly matters:
+> declaring the file executed over an all-pending status table would be a diluted instance of the
+> exact "no SKIPPED rows remain ≠ all rows observed" conflation that created Phase 142.1.
+
 | Task ID | Plan | Wave | Requirement | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|-----------------|-----------|-------------------|-------------|--------|
 | 142-05.T1 | 05 | 3 | JOB-01 | `computing_started_at` exists, `timestamptz`, nullable, no default | SQL gate | `psql … -f supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql` | ❌ W0 | ⬜ pending |
@@ -80,17 +88,23 @@ created: 2026-08-02
 
 ## Wave 0 Requirements
 
-- [ ] `supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql` — the JOB-02 gate plus the
+- [x] `supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql` — the JOB-02 gate plus the
       SQL half of JOB-01. **Must be MCP-applied to TEST first** or the presence gate green-skips.
-- [ ] `analytics-service/tests/test_computing_started_at_stamp.py` — the JOB-01 writer invariant,
+      ⚠️ **The file EXISTS; it has still never been run end-to-end against TEST** — that is Phase
+      142.1's D-16, and it is why the sign-off's MCP-applied box below stays unchecked.
+- [x] `analytics-service/tests/test_computing_started_at_stamp.py` — the JOB-01 writer invariant,
       covering **both** runtimes (Python *and* the SQL function body). A Python-only gate is a false
       pass (research P-11).
-- [ ] Reaper-threshold invariants added to `analytics-service/tests/test_main_worker.py`, beside
+- [x] Reaper-threshold invariants added to `analytics-service/tests/test_main_worker.py`, beside
       `TestWatchdogInvariant` (JOB-03).
-- [ ] `analytics-service/tests/test_job07_reaper_off_worker_loop.py` — the JOB-07 structural gate and
+- [x] `analytics-service/tests/test_job07_reaper_off_worker_loop.py` — the JOB-07 structural gate and
       the behavioural probe **with its positive control**.
-- [ ] A module-level declaration of the **job-chain topology** in `analytics-service/`, so the JOB-03
-      oracle reads it rather than re-deriving it.
+- [x] A module-level declaration of the **job-chain topology** in `analytics-service/`, so the JOB-03
+      oracle reads it rather than re-deriving it (`JOB_CHAIN_FOLLOW_ON` in `services/job_worker.py`).
+
+*Boxes checked 2026-08-02 (Phase 142.1, D-14) alongside the frontmatter's `wave_0_complete: true` —
+each artifact was confirmed present on disk at that time. **Presence is all that is claimed here;**
+end-to-end execution of the SQL gate against TEST is separately owed as D-16.*
 
 *No framework install needed — pytest, vitest, and the psql SQL-gate harness all already exist.*
 
@@ -110,19 +124,21 @@ created: 2026-08-02
 > **Coverage answers "is it verified?". This section answers "CAN the verification FAIL?"**
 > Complete the Observed column at execution time.
 
+> **Provenance (Phase 142.1, D-14, 2026-08-02):** rows **SC-3 · SC-3b · SC-4 · SC-4b · SC-5 · SC-5b · SC-5c** were **backfilled from `142-VERIFICATION.md` Pass C** — those seven mutations were run by the `gsd-verifier` **post-execution**, NOT at execution time; their Observed/Evidence text is transcribed, not re-derived. ⚠️ The earlier in-session report of **"11 Observed / 0 SKIPPED" for this ledger was WRONG**: only the four rows that had been marked SKIPPED were closed, and these seven sat un-run in the pending state with an empty Evidence cell — "no SKIPPED rows remain" was conflated with "all rows observed". SC-5b's and SC-5c's **Mutation** coordinates were also stale and are corrected in this same edit (correction C-3): `job_worker.py` `~:6635/~:6744` → `:6704`, and `keys/sync/route.ts:532` → `:569`.
+
 | SC | Mutation (exact edit to production source) | Must turn RED | Observed? | Evidence |
 |----|-------------------------------------------|---------------|-----------|----------|
 | SC-1 | Reaper function body: `computation_status = 'failed'` → `'pending'` | `test_strategy_analytics_stuck_computing_reaper.sql` — stranded-row terminal assertion | ✅ **Observed** | Run against TEST `qmnijlgmdhviwzwfyzlc` 2026-08-02 (see ‡DEPLOYED-RUN). Mutant body `md5=93a7e8d1c04bc53330ce350fd9cb70ac`; stranded seed came out `observed_status='pending'`, gate expects `'failed'` ⇒ `assertion_would_RED=true`. |
 | SC-1b | Reaper function body: **delete** the `computation_warned = FALSE` assignment | SQL gate — the "no false success" assertion (a reaped row must never launder to `complete_with_warnings`) | ✅ **Observed** | Run against TEST 2026-08-02. Row *was* reaped (`observed_status='failed'`) but `observed_warned=true`; gate expects `false` ⇒ `assertion_would_RED=true`. This is the laundering path: the bridge would resolve it to `complete_with_warnings` — a false success on a money surface. |
 | SC-2 | Reaper `WHERE`: `computing_started_at < now() - <threshold>` → `computed_at < now() - <threshold>` | **Both** SC#2 direction tests in the SQL gate | ✅ **Observed — both directions** | Run against TEST 2026-08-02. **A** (fresh `computed_at` + old stamp): `observed='computing'`, expects `'failed'` ⇒ RED. **B** (old `computed_at` + fresh stamp): `observed='failed'`, expects `'computing'` ⇒ RED. Both halves live, as research C-2 predicted. |
 | SC-2b | `sync_strategy_analytics_status` branch (a): replace the transition-conditional stamp with an unconditional `computing_started_at = now()` | SQL gate — "a second bridge call on an already-`computing` row does not advance the stamp". This is the C-3 trap; a naive "the writer sets the stamp" gate passes it | ✅ **Observed** | Run against TEST 2026-08-02. Sentinel `2026-08-02 08:17:21.629336+00` → observed `2026-08-02 11:17:21.629336+00` — exactly 3h later ⇒ RED. **Identical microseconds prove the frozen-clock hazard is real**: `now()` is constant inside the transaction, so without the sentinel both values would have matched and the mutant would have passed. |
-| SC-3 | The Python reaper-threshold constant: divide by 10 (below the chain-inclusive ceiling) | `pytest tests/test_main_worker.py -k Reaper` — the headroom invariant | ⬜ pending | |
-| SC-3b | Change the threshold literal embedded in the migration so it no longer equals the Python constant | The SQL↔Python drift gate | ⬜ pending | |
-| SC-4 | Wire the reaper identifier into `dispatch_tick` (inject the cron jobname onto the worker dispatch surface — plan 142-02 T1) | `test_job07_reaper_off_worker_loop.py` — structural absence gate | ⬜ pending | |
-| SC-4b | Run a loop-blocking synchronous reap on the shared event loop (the control pair's `time.sleep` arm — plan 142-02 T2; no production edit needed, the pair IS the mutation+control) | same file — behavioral control pair: the blocking arm starves the probe (latency/503 + stale `LAST_TICK_AT`) while the yielding twin stays 200 | ⬜ pending | |
-| SC-5 | `analytics_runner.py` `_mark_computing` (~:1227): delete the `computing_started_at` stamp key from the entry upsert dict (plan 142-03 m1) | `pytest tests/test_computing_started_at_stamp.py` — entry rule: literal `"computing"` ⇒ stamp present and ≠ None | ⬜ pending | |
-| SC-5b | `job_worker.py` composite success write: delete the `computing_started_at: None` clear from the `headline_payload` dict literal (~:6635, consumed by the NESTED `_write_headline_and_by_basis` upsert at ~:6744 — plan 142-03 m2) | same file — exit-clear rule reached via the ast.Name payload-resolution arm; this RED doubles as the Name-arm liveness proof | ⬜ pending | |
-| SC-5c | `src/app/api/keys/sync/route.ts:532`: delete `computing_started_at: null` from the failed-placeholder payload (plan 142-03 m3) | same file — TS object-literal half (the payload is built in `compositeMemberCount` and passed as an argument; only the object-literal anchor can see it) | ⬜ pending | |
+| SC-3 | The Python reaper-threshold constant: divide by 10 (below the chain-inclusive ceiling) | `pytest tests/test_main_worker.py -k Reaper` — the headroom invariant | ✅ **Observed** | Pass C (2026-08-02, post-execution — see Provenance): threshold ÷ 10 → **5,760 s vs 43,920 s ceiling** ⇒ **headroom assert False ⇒ RED**. |
+| SC-3b | Change the threshold literal embedded in the migration so it no longer equals the Python constant | The SQL↔Python drift gate | ✅ **Observed** | Pass C (2026-08-02, post-execution): migration literal `16 hours`→`4 hours` (temp copy) ⇒ **drift gate RED, names both sides**. |
+| SC-4 | Wire the reaper identifier into `dispatch_tick` (inject the cron jobname onto the worker dispatch surface — plan 142-02 T1) | `test_job07_reaper_off_worker_loop.py` — structural absence gate | ✅ **Observed** | Pass C (2026-08-02, post-execution): plant the cron jobname in a copy of `main_worker.py` ⇒ **structural gate RED with file:line**. |
+| SC-4b | Run a loop-blocking synchronous reap on the shared event loop (the control pair's `time.sleep` arm — plan 142-02 T2; no production edit needed, the pair IS the mutation+control) | same file — behavioral control pair: the blocking arm starves the probe (latency/503 + stale `LAST_TICK_AT`) while the yielding twin stays 200 | ✅ **Observed** | Pass C (2026-08-02, post-execution): blocking vs yielding control pair ⇒ **both arms pass as designed (blocking arm asserts starvation)**. |
+| SC-5 | `analytics_runner.py` `_mark_computing` (~:1227): delete the `computing_started_at` stamp key from the entry upsert dict (plan 142-03 m1) | `pytest tests/test_computing_started_at_stamp.py` — entry rule: literal `"computing"` ⇒ stamp present and ≠ None | ✅ **Observed** | Pass C (2026-08-02, post-execution): delete the stamp key from `_mark_computing` (copy) ⇒ **"do NOT co-locate computing_started_at" ⇒ RED**. |
+| SC-5b | `job_worker.py:6704` composite success write: delete the `computing_started_at: None` clear from the `headline_payload` dict literal (plan 142-03 m2) | same file — exit-clear rule reached via the ast.Name payload-resolution arm; this RED doubles as the Name-arm liveness proof | ✅ **Observed** | Pass C (2026-08-02, post-execution): delete the clear at `job_worker.py:6704` (copy) ⇒ **RED via the n1 Name-resolution arm**. |
+| SC-5c | `src/app/api/keys/sync/route.ts:569`: delete `computing_started_at: null` from the failed-placeholder payload (plan 142-03 m3) | same file — TS object-literal half (the payload is built in `compositeMemberCount` and passed as an argument; only the object-literal anchor can see it) | ✅ **Observed** | Pass C (2026-08-02, post-execution): delete `computing_started_at: null` from `keys/sync/route.ts` (copy) ⇒ **TS half RED, Python half stays green**. |
 
 ### ‡ DEPLOYED-RUN — how SC-1 / SC-1b / SC-2 / SC-2b were closed (2026-08-02, orchestrator)
 
@@ -263,15 +279,27 @@ is appended to `142-05-SUMMARY.md` under "Follow-up run".
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency < 30s
-- [ ] SQL gate MCP-applied to TEST before it is trusted as evidence
-- [ ] **Every success criterion has a Falsifiability Ledger row**
-- [ ] **Every ledger row is `Observed ✅` with pasted evidence, or explicitly marked skipped-with-reason**
-- [ ] **Oracle Independence checklist complete**
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify
+- [x] Wave 0 covers all MISSING references
+- [x] No watch-mode flags
+- [x] Feedback latency < 30s
+- [ ] SQL gate MCP-applied to TEST before it is trusted as evidence — ⛔ **STILL OWED, deliberately
+      left unchecked.** The 637-line gate file has **never been run end-to-end against TEST by
+      anyone** (Phase 142.1 **D-16**). SC-1 / SC-1b / SC-2 / SC-2b were closed by an orchestrator MCP
+      run of the **extracted** cron body and re-based bridge, *not* by executing the gate file — see
+      ‡DEPLOYED-RUN. Checking this box would be the over-claim this ledger already made once.
+- [x] **Every success criterion has a Falsifiability Ledger row** — 11 rows for 11 SCs
+- [x] **Every ledger row is `Observed ✅` with pasted evidence, or explicitly marked skipped-with-reason**
+      — **11/11 Observed** as of 2026-08-02. Honest provenance: 4 rows (SC-1/1b/2/2b) were closed at
+      execution time via ‡DEPLOYED-RUN; the other 7 were **backfilled from Pass C**, which ran them
+      **post-execution**, not at execution time. See the Provenance note above the ledger.
+- [x] **Oracle Independence checklist complete** — completed with **two deliberate self-referential
+      oracles named** (142-01 T2 and 142-04 T3) and their compensating coverage stated.
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending
+**Approval:** CLOSED 2026-08-02 — on `142-VERIFICATION.md` **Pass C** (`gsd-verifier`, verdict
+`gaps_found`, 9/10 must-haves), which executed all seven previously-`⬜ pending` ledger mutations and
+confirmed each goes RED. Closure covers the **Falsifiability Ledger** only. Explicitly NOT covered
+and still open: **D-16** (the end-to-end SQL-gate run against TEST) and the Per-Task Verification
+Map, which was deliberately not backfilled.

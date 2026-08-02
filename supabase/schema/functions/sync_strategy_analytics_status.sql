@@ -2,7 +2,10 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260710150000_sync_status_supersede_failed_per_kind.sql
+-- source migration: 20260802120000_strategy_analytics_stuck_computing_reaper.sql
+-- --------------------------------------------------------------------------
+-- STEP 4: re-base sync_strategy_analytics_status (see header re-base contract)
+-- --------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION sync_strategy_analytics_status(p_strategy_id UUID)
 RETURNS VOID
 LANGUAGE plpgsql
@@ -47,8 +50,10 @@ BEGIN
      AND status IN ('pending', 'running', 'done_pending_children', 'failed_retry');
 
   IF v_nonterminal_count > 0 THEN
-    INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error)
-    VALUES (p_strategy_id, 'computing', NULL)
+    -- JOB-01 (Phase 142): a FRESH INSERT at 'computing' IS the transition in, so
+    -- the VALUES arm stamps now() unconditionally. The ON CONFLICT arm must NOT.
+    INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at)
+    VALUES (p_strategy_id, 'computing', NULL, now())
     ON CONFLICT (strategy_id) DO UPDATE
        SET computation_status = CASE
              WHEN strategy_analytics.computation_status = 'complete_with_warnings'
@@ -57,12 +62,32 @@ BEGIN
              ELSE 'computing'
            END,
            computation_error  = EXCLUDED.computation_error,
+           -- JOB-01 (Phase 142): stamp on the TRANSITION INTO computing only,
+           -- keyed off the RESOLVED status above — never off the branch. This
+           -- bridge is PERFORMed in-RPC on EVERY job transition, so an
+           -- unconditional now() here would reset the stamp on every hop of a
+           -- multi-hop chain and the reaper would never fire (the Phase 106
+           -- janitor bug, re-implemented in a new column).
+           computing_started_at = CASE
+             -- Arm 1: this branch RESOLVED to complete_with_warnings, i.e. the
+             -- row is NOT computing. That is an exit — clear the stamp.
+             WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+                  OR strategy_analytics.computation_warned
+             THEN NULL
+             -- Arm 2: resolved to 'computing' from some OTHER prior status —
+             -- a genuine transition in. Stamp it.
+             WHEN strategy_analytics.computation_status IS DISTINCT FROM 'computing'
+             THEN now()
+             -- Arm 3: already 'computing' — KEEP the original stamp, so a second
+             -- bridge call cannot advance it and defer the reap indefinitely.
+             ELSE strategy_analytics.computing_started_at
+           END,
            computed_at        = now();
     RETURN;
   END IF;
 
   -- (b) all terminal, any NON-SUPERSEDED failed_final → 'failed' with latest error.
-  -- PER-(strategy,kind) created_at SUPERSESSION (F-3 / PUB-02 close, this migration):
+  -- PER-(strategy,kind) created_at SUPERSESSION (F-3 / PUB-02 close, mig 20260710150000):
   -- a failed_final poisons the strategy ONLY when it is NOT superseded by a
   -- strictly-later 'done' job of the SAME (strategy_id, kind). A fresh ledger
   -- generation (a re-enqueued job — enqueue dedup is in-flight-only, so a resubmit
@@ -106,11 +131,13 @@ BEGIN
      ORDER BY f.created_at DESC
      LIMIT 1;
 
-    INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error)
-    VALUES (p_strategy_id, 'failed', v_latest_error)
+    -- JOB-01 (Phase 142): SQL exit transition #1 — clear the stamp.
+    INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at)
+    VALUES (p_strategy_id, 'failed', v_latest_error, NULL)
     ON CONFLICT (strategy_id) DO UPDATE
        SET computation_status = EXCLUDED.computation_status,
            computation_error  = EXCLUDED.computation_error,
+           computing_started_at = NULL,
            computed_at        = now();
     RETURN;
   END IF;
@@ -121,8 +148,10 @@ BEGIN
   -- read is what closes the failed_final-bounce launder, since branch (b) may
   -- have bounced computation_status to 'failed' in between); otherwise resolve
   -- to 'complete'. Clears any stale computation_error either way.
-  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error)
-  VALUES (p_strategy_id, 'complete', NULL)
+  -- JOB-01 (Phase 142): SQL exit transition #2 — clear the stamp. Both arms of
+  -- the status CASE are terminal, so the clear is unconditional here.
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at)
+  VALUES (p_strategy_id, 'complete', NULL, NULL)
   ON CONFLICT (strategy_id) DO UPDATE
      SET computation_status = CASE
            WHEN strategy_analytics.computation_status = 'complete_with_warnings'
@@ -131,6 +160,7 @@ BEGIN
            ELSE 'complete'
          END,
          computation_error  = NULL,
+         computing_started_at = NULL,
          computed_at        = now();
 END;
 $$;
