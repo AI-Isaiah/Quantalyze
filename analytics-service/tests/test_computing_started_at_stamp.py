@@ -36,32 +36,55 @@ against the DEPLOYED function bodies via ``pg_get_functiondef`` / ``cron.job.com
 A Python-only gate is a FALSE PASS. Neither file alone is the invariant.
 
 ────────────────────────────────────────────────────────────────────────────
-TypeScript scan boundary — stated honestly, deliberately NOT widened (W-8)
+TypeScript scan boundary — the WHOLE ``src/`` write surface (D-04)
 ────────────────────────────────────────────────────────────────────────────
-The TS surface scanned here is ``src/app/api/**/*.ts`` route handlers ONLY. All four
-census write sites live there today. A FUTURE ``strategy_analytics.computation_status``
-writer placed in a server action, in ``src/lib/``, or in a page component would be
-OUTSIDE this gate's coverage. The discoverability pointer for that class is the
-"Direct-writes audit (D.10)" census comment in ``src/app/api/keys/sync/route.ts``,
-which names every writer including the SQL ones.
+The TS surface scanned here is the union of ``src/**/*.ts`` and ``src/**/*.tsx``,
+excluding test files (``*.test.*``, ``*.spec.*``, any ``__tests__/`` segment) and
+``.d.ts``. It was previously ``src/app/api/**/*.ts`` route handlers ONLY, which meant
+a ``strategy_analytics`` writer in a ``.tsx`` server action, in ``src/lib/`` or in a
+page component passed SILENTLY and could re-create the exact permanent-spinner class
+this gate exists to kill. Coverage is now the whole write surface, not the corner of
+it that happened to hold every writer on the day the gate was written.
 
-Widening the textual scan to all of ``src/`` was considered and REJECTED, because a
-key-colon regex cannot distinguish a DB payload key from three benign shapes that
-already exist in the repo:
+This gate still has NO TypeScript parser, so widening had to survive the benign
+shapes that already carry a ``computation_status`` key. Two mechanisms do that, and
+both are deliberately conservative — a shape the gate cannot classify must land in a
+census that a human has to update, never in silence:
 
-  * ``src/lib/utils.ts`` ``EMPTY_ANALYTICS`` — an in-memory placeholder object
-    literal, not a DB write. (It DOES carry ``computing_started_at: null``, added by
-    plan 142-06, so it would pass — but it would be passing for the wrong reason.)
-  * ``src/app/(dashboard)/portfolios/[id]/page.tsx:503`` — a ``portfolio_analytics``
-    payload. This is the TypeScript twin of the ``routers/portfolio.py`` trap the
-    Python half is chain-scoped to survive: a naive widen would flag the WRONG
-    table's payload.
-  * type-annotation members — ``src/lib/queries.ts:414,452`` and
-    ``src/components/admin/AdminTabs.tsx:82`` declare ``computation_status`` as an
-    interface/generic member. Only a real TS parser could tell those from payload
-    keys, and this gate has no TS parser.
+  1. **Value-token discrimination.** A PAYLOAD key is followed by a value — a quoted
+     string literal or ``null``. A TYPE member is followed by a type
+     (``string``, ``string | null``, ``StrategyAnalyticsComputationStatus``). Only
+     the former is counted. That is what excludes ``src/lib/queries.ts:414,452``,
+     ``src/components/admin/AdminTabs.tsx:82``, ``src/lib/types.ts:299,1345,1381,1392``
+     and every ``src/lib/database.types.ts`` member — 10 of the 17 raw key matches in
+     the tree today, none of them by name and none of them by file.
 
-So the coverage claim is scoped: this file covers the API-route WRITER surface.
+  2. **A two-tier, count-pinned census** (``_TS_PAYLOAD_FILES`` /
+     ``_TS_BENIGN_FILES``). Value-token discrimination alone cannot separate the
+     remaining three, because each is a quoted literal in a non-DB position, so they
+     are named explicitly WITH their expected count:
+
+       * ``src/lib/utils.ts`` ``EMPTY_ANALYTICS`` — an in-memory placeholder object
+         literal, not a DB write. (It DOES carry ``computing_started_at: null``, added
+         by plan 142-06, so it would pass — but it would be passing for the wrong
+         reason, which is precisely why it is classified rather than counted.)
+       * ``src/app/(dashboard)/portfolios/[id]/page.tsx`` — a ``portfolio_analytics``
+         payload in ``chooseAnalytics``. This is the TypeScript twin of the
+         ``routers/portfolio.py`` trap the Python half is chain-scoped to survive: a
+         naive widen would flag the WRONG table's payload.
+       * ``src/lib/types.ts`` — a string-literal TYPE (``a is T & { … : "complete" }``)
+         inside a type predicate. Quoted, therefore invisible to mechanism 1.
+
+Why an allowlist rather than requiring a nearby ``strategy_analytics`` reference:
+``src/app/api/keys/sync/route.ts``'s payload is built inside ``compositeMemberCount``
+and passed as an ARGUMENT to ``stampCompositeFailedUnlessComplete``, whose ``from()``
+calls are ~76 lines away (the same fact that forces object-literal anchoring — see
+:func:`_enclosing_object_literal`). Any table-proximity rule strong enough to reject
+the portfolios page would also drop that genuine writer, trading a false positive for
+a false negative. The census keeps the green falsifiable instead: every scanned file
+holding a value-shaped key must appear in exactly one tier with an exact count, so a
+new writer in an UNKNOWN file reddens the unknown-file arm, and a new writer in a
+KNOWN file reddens that file's count. Neither can be absorbed silently.
 
 ────────────────────────────────────────────────────────────────────────────
 Why the Python half is CHAIN-scoped and not FUNCTION-scoped
@@ -736,6 +759,40 @@ def test_helper_built_payload_is_recorded_not_fatal() -> None:
 # (csv-finalize/route.ts:746) — the `?` sits between the name and the colon.
 _TS_KEY_RE: Final[re.Pattern[str]] = re.compile(r"\bcomputation_status\s*:")
 
+# Mechanism 1 of the widening (module docstring): the token immediately after the
+# key colon. A payload writes a VALUE — a quoted string literal or `null`. A type
+# member writes a TYPE, which never starts with a quote. Anchored at the match end,
+# so it is a check on THIS key, not a search of the rest of the line.
+_TS_VALUE_RE: Final[re.Pattern[str]] = re.compile(
+    r"""\s*(?:"[^"\n]*"|'[^'\n]*'|`[^`\n]*`|null\b)"""
+)
+
+# Mechanism 2, tier A — files holding GENUINE strategy_analytics payload writes.
+# Every hit in these files is subject to the stamp + terminal-warned rules. Counts
+# are pinned so a moved, deleted or added writer is a conscious census update.
+_TS_PAYLOAD_FILES: Final[dict[str, int]] = {
+    # ×2: the unknowable-membership stamp in `compositeMemberCount` and the
+    # composite-unsupported stamp.
+    "src/app/api/strategies/finalize-wizard/route.ts": 2,
+    # ×1: `writeFailedStrategyAnalyticsPlaceholder`.
+    "src/app/api/strategies/csv-finalize/route.ts": 1,
+    # ×1: the `stampCompositeFailedUnlessComplete` argument.
+    "src/app/api/keys/sync/route.ts": 1,
+}
+
+# Mechanism 2, tier B — value-shaped keys that are NOT strategy_analytics writes.
+# Exempt from the rules, but counted: a real writer added to one of these files
+# reddens its count. Each entry is justified in the module docstring; do not add a
+# file here without writing down why it can never be a strategy_analytics payload.
+_TS_BENIGN_FILES: Final[dict[str, int]] = {
+    # `chooseAnalytics` fallback row — the WRONG table (portfolio_analytics).
+    "src/app/(dashboard)/portfolios/[id]/page.tsx": 1,
+    # A string-literal TYPE inside a type predicate, not a value.
+    "src/lib/types.ts": 1,
+    # `EMPTY_ANALYTICS` — an in-memory placeholder, never sent to PostgREST.
+    "src/lib/utils.ts": 1,
+}
+
 
 class _TsHit(NamedTuple):
     path: Path
@@ -743,14 +800,28 @@ class _TsHit(NamedTuple):
 
 
 def _ts_scan_files() -> list[Path]:
-    """``src/app/api/**/*.ts`` route handlers, excluding tests. See the module
-    docstring for why this boundary is not widened."""
-    api = _repo_root() / "src" / "app" / "api"
-    return sorted(
-        p
-        for p in api.rglob("*.ts")
-        if not p.name.endswith(".test.ts")
-    )
+    """The whole TypeScript write surface: ``src/**/*.ts`` ∪ ``src/**/*.tsx``,
+    excluding test files and ``.d.ts``.
+
+    ⚠️ Never narrow this to a subtree or a hand list. The boundary it replaced was
+    ``src/app/api/**/*.ts``, and its cost was D-04: a writer one directory outside it
+    was invisible while the gate still reported green (the same silent-narrowing
+    class as D-10). The exclusions below are shape-based, never name-based, so a new
+    directory is covered on the day it lands.
+    """
+    src = _repo_root() / "src"
+    files: list[Path] = []
+    for pattern in ("*.ts", "*.tsx"):
+        for p in src.rglob(pattern):
+            name = p.name
+            if name.endswith(".d.ts"):
+                continue
+            if ".test." in name or ".spec." in name:
+                continue
+            if any(part == "__tests__" for part in p.parts):
+                continue
+            files.append(p)
+    return sorted(set(files))
 
 
 def _ts_effective_lines(path: Path) -> list[str]:
@@ -803,6 +874,11 @@ def _enclosing_object_literal(text: str, pos: int, where: str) -> str:
 
 
 def _scan_typescript() -> list[_TsHit]:
+    """Every VALUE-shaped ``computation_status`` key across the whole ``src/`` surface.
+
+    Both census tiers. Type members are dropped here by :data:`_TS_VALUE_RE`;
+    tier separation happens in :func:`_ts_payload_hits`.
+    """
     hits: list[_TsHit] = []
     for path in _ts_scan_files():
         lines = _ts_effective_lines(path)
@@ -811,14 +887,37 @@ def _scan_typescript() -> list[_TsHit]:
             # stripping; excluded anyway for hygiene.
             if ".select(" in line:
                 continue
-            if _TS_KEY_RE.search(line):
-                hits.append(_TsHit(path, index + 1))
+            match = _TS_KEY_RE.search(line)
+            if match is None:
+                continue
+            if _TS_VALUE_RE.match(line, match.end()) is None:
+                # A type member, not a payload key. See mechanism 1 in the module
+                # docstring.
+                continue
+            hits.append(_TsHit(path, index + 1))
     return hits
 
 
+def _ts_payload_hits(hits: list[_TsHit]) -> list[_TsHit]:
+    """The tier-A subset: hits in files that hold real ``strategy_analytics`` writes."""
+    return [h for h in hits if _rel(h.path) in _TS_PAYLOAD_FILES]
+
+
+def _ts_literal_at(hit: _TsHit) -> tuple[str, str]:
+    """``(where, enclosing object literal)`` for one hit."""
+    where = f"{_rel(hit.path)}:{hit.lineno}"
+    lines = _ts_effective_lines(hit.path)
+    text = "\n".join(lines)
+    # Re-locate the hit inside the joined effective text.
+    offset = sum(len(line) + 1 for line in lines[: hit.lineno - 1])
+    match = _TS_KEY_RE.search(text, offset)
+    assert match is not None, f"{where}: internal offset mismatch; {_EXTEND}."
+    return where, _enclosing_object_literal(text, match.start(), where)
+
+
 def test_typescript_route_payloads_clear_the_stamp() -> None:
-    """Every ``computation_status`` payload key in an ``src/app/api`` route handler
-    sits in an object literal that ALSO carries ``computing_started_at``.
+    """Every ``strategy_analytics`` payload key anywhere in ``src/`` sits in an object
+    literal that ALSO carries ``computing_started_at``.
 
     All four are terminal-'failed' placeholder writers, i.e. exit writers from
     'computing', so each must clear the reaper key.
@@ -826,7 +925,7 @@ def test_typescript_route_payloads_clear_the_stamp() -> None:
     files = _ts_scan_files()
     assert files, "the typescript scan found no files — path resolution is broken"
 
-    hits = _scan_typescript()
+    hits = _ts_payload_hits(_scan_typescript())
     assert hits, (
         "the typescript scan found zero computation_status payload keys — the regex "
         "or the scan surface is broken (the four census sites must be found)"
@@ -834,21 +933,12 @@ def test_typescript_route_payloads_clear_the_stamp() -> None:
 
     offenders: list[str] = []
     for hit in hits:
-        where = f"{_rel(hit.path)}:{hit.lineno}"
-        text = "\n".join(_ts_effective_lines(hit.path))
-        # Re-locate the hit inside the joined effective text.
-        offset = sum(
-            len(line) + 1
-            for line in _ts_effective_lines(hit.path)[: hit.lineno - 1]
-        )
-        match = _TS_KEY_RE.search(text, offset)
-        assert match is not None, f"{where}: internal offset mismatch; {_EXTEND}."
-        literal = _enclosing_object_literal(text, match.start(), where)
+        where, literal = _ts_literal_at(hit)
         if _STAMP_KEY not in literal:
             offenders.append(where)
 
     assert not offenders, (
-        "JOB-01: these Next.js API-route strategy_analytics payloads write "
+        "JOB-01: these Next.js strategy_analytics payloads write "
         f"{_STATUS_KEY} without clearing {_STAMP_KEY} in the same object literal. "
         "They are exit writers from 'computing'; a stale stamp on a terminal row can "
         "re-trigger the pg_cron reaper:\n  " + "\n  ".join(offenders)
@@ -856,21 +946,30 @@ def test_typescript_route_payloads_clear_the_stamp() -> None:
 
 
 def test_typescript_writer_census_counts() -> None:
-    """Anti-vacuity for the TS half. Per-FILE counts (robust to line drift) plus the
-    total, so a 5th payload site, a moved one, or a missing one all FAIL LOUD.
+    """Anti-vacuity for the TS half over the WIDENED surface. Per-FILE counts (robust
+    to line drift) plus the totals, so a 5th payload site, a moved one, or a missing
+    one all redden — and so does a value-shaped key in a file neither tier knows.
 
-    Census (checker-verified, exactly 4 in non-test code):
+    Census re-derived 2026-08-02 against the widened union scan (17 raw key matches
+    in the tree; 10 dropped as type members by :data:`_TS_VALUE_RE`, leaving 7):
+
+    PAYLOAD tier — 4:
       finalize-wizard/route.ts ×2 — the unknowable-membership stamp in
       ``compositeMemberCount`` and the composite-unsupported stamp;
       csv-finalize/route.ts ×1 — ``writeFailedStrategyAnalyticsPlaceholder``;
       keys/sync/route.ts ×1 — the ``stampCompositeFailedUnlessComplete`` argument.
+
+    BENIGN tier — 3: the portfolios page's wrong-table row, ``src/lib/types.ts``'s
+    string-literal type, ``EMPTY_ANALYTICS``. Justified individually in the module
+    docstring.
+
+    ⚠️ Both totals are separate literal ints rather than ``len(...)`` of the dicts
+    above: double-entry bookkeeping, so a one-sided edit cannot pass.
     """
-    EXPECTED_PER_FILE: Final[dict[str, int]] = {
-        "src/app/api/strategies/finalize-wizard/route.ts": 2,
-        "src/app/api/strategies/csv-finalize/route.ts": 1,
-        "src/app/api/keys/sync/route.ts": 1,
-    }
+    EXPECTED_PER_FILE: Final[dict[str, int]] = _TS_PAYLOAD_FILES
     EXPECTED_TOTAL = 4
+    EXPECTED_BENIGN_PER_FILE: Final[dict[str, int]] = _TS_BENIGN_FILES
+    EXPECTED_BENIGN_TOTAL = 3
 
     hits = _scan_typescript()
     actual: dict[str, int] = {}
@@ -878,10 +977,13 @@ def test_typescript_writer_census_counts() -> None:
         key = _rel(hit.path)
         actual[key] = actual.get(key, 0) + 1
 
-    unexpected = sorted(set(actual) - set(EXPECTED_PER_FILE))
+    known = set(EXPECTED_PER_FILE) | set(EXPECTED_BENIGN_PER_FILE)
+    unexpected = sorted(set(actual) - known)
     assert not unexpected, (
-        "a computation_status payload key appeared in an API route the JOB-01 census "
-        f"does not know about — it must stamp/clear too; {_EXTEND}:\n  "
+        "a value-shaped computation_status key appeared in a src/ file the JOB-01 "
+        "census does not know about. If it is a strategy_analytics payload it must "
+        "stamp/clear too; if it is not, classify it in _TS_BENIGN_FILES with a "
+        f"written reason. {_EXTEND}:\n  "
         + "\n  ".join(
             f"{_rel(h.path)}:{h.lineno}"
             for h in hits
@@ -894,6 +996,28 @@ def test_typescript_writer_census_counts() -> None:
             f"found {actual.get(filename, 0)}. A moved or deleted writer must be a "
             "conscious census update."
         )
-    assert len(hits) == EXPECTED_TOTAL, (
-        f"expected exactly {EXPECTED_TOTAL} TS payload sites, found {len(hits)}"
+    for filename, expected in EXPECTED_BENIGN_PER_FILE.items():
+        assert actual.get(filename, 0) == expected, (
+            f"expected {expected} classified-benign computation_status key(s) in "
+            f"{filename}, found {actual.get(filename, 0)}. This file is EXEMPT from "
+            "the stamp rule, so a new key here would be exempt too — re-read it and "
+            "either re-classify the file or move the writer somewhere covered."
+        )
+
+    payload_hits = _ts_payload_hits(hits)
+    assert len(payload_hits) == EXPECTED_TOTAL, (
+        f"expected exactly {EXPECTED_TOTAL} TS payload sites, found "
+        f"{len(payload_hits)}"
+    )
+    assert len(hits) - len(payload_hits) == EXPECTED_BENIGN_TOTAL, (
+        f"expected exactly {EXPECTED_BENIGN_TOTAL} classified-benign TS sites, found "
+        f"{len(hits) - len(payload_hits)}"
+    )
+
+    # Positive control (PATTERNS S-2): the widened glob must actually reach OUTSIDE
+    # src/app/api, or every assertion above would hold vacuously on the old surface.
+    scanned = {_rel(p) for p in _ts_scan_files()}
+    assert "src/lib/utils.ts" in scanned and "src/components/admin/AdminTabs.tsx" in scanned, (
+        "the widened scan no longer reaches src/lib or a .tsx component — D-04 has "
+        "regressed and this census is green over the old narrow surface"
     )
