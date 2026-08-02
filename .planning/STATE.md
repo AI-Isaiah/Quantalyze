@@ -4,7 +4,7 @@ milestone: v1.16
 milestone_name: Production Resilience & Reliability
 status: executing
 stopped_at: Completed 140.3-G4-PLAN.md (SEAMUX-03 coded arms on verify-strategy + validate-and-encrypt)
-last_updated: "2026-08-02T16:51:55.745Z"
+last_updated: "2026-08-02T17:08:59.936Z"
 last_activity: 2026-08-02
 progress:
   total_phases: 17
@@ -46,7 +46,8 @@ RATE-01..05 — all mapped, Traceability filled). Roadmap: `.planning/ROADMAP.md
 
 ## Current Position
 
-Phase: 142.1 (INSERTED) — close the 142 code-review findings. NOT PLANNED yet;
+Phase: 142.1 (close-142-review-findings-chain-start-stamp-preservation-dep) — EXECUTING
+Plan: 1 of 8
         awaiting `/gsd:plan-phase 142.1`. Scope + hazards recorded below.
 
 Phase 142 (JOB — strategy_analytics stuck-computing reaper + computing_started_at DDL) — EXECUTED
@@ -252,7 +253,7 @@ goal-backward verification is still outstanding.
 
 Prior phase: 141.1 (seambackoff-…) — COMPLETE and verified, merged, NOT pushed
 Plan: 0 of 0 (142.1 not planned)
-Status: Ready to execute
+Status: Executing Phase 142.1
 
 Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         `feat/v1.16-141-jobs-rate-retry`. Post-merge gate after Wave 2 GREEN: tsc clean,
