@@ -10,9 +10,19 @@ and never on ``computed_at``. Two consequences make this a build-time gate:
   * an exit writer that fails to clear the stamp leaves a stale timestamp on a
     terminal row, which the reaper could later re-fire on.
 
-Enforcement is STATIC, not runtime. A runtime ``CHECK`` constraint was rejected in
+Enforcement is STATIC here. A runtime ``CHECK`` constraint was rejected in
 CONTEXT.md: a missed writer would then surface as a 23514 on the live money path
 instead of a red build.
+
+⚠️ This census is NO LONGER the enforcement point. Since D-17/D-18 the ``BEFORE
+UPDATE`` trigger function ``strategy_analytics_stamp_computing_started`` (migration
+``20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql``)
+coerces the column in the database, silently and regardless of payload shape or
+call-site language — the one place every writer must pass through. It is proven by
+Part 6 of ``supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql``.
+What survives here is payload HYGIENE: the fast, cheap signal that a writer's
+intent is legible at the call site. That distinction is why an unreadable payload
+is recorded rather than fatal (D-07) — see :func:`_resolve_name`.
 
 ────────────────────────────────────────────────────────────────────────────
 THIS FILE IS NOT THE WHOLE INVARIANT (research P-11)
@@ -26,32 +36,55 @@ against the DEPLOYED function bodies via ``pg_get_functiondef`` / ``cron.job.com
 A Python-only gate is a FALSE PASS. Neither file alone is the invariant.
 
 ────────────────────────────────────────────────────────────────────────────
-TypeScript scan boundary — stated honestly, deliberately NOT widened (W-8)
+TypeScript scan boundary — the WHOLE ``src/`` write surface (D-04)
 ────────────────────────────────────────────────────────────────────────────
-The TS surface scanned here is ``src/app/api/**/*.ts`` route handlers ONLY. All four
-census write sites live there today. A FUTURE ``strategy_analytics.computation_status``
-writer placed in a server action, in ``src/lib/``, or in a page component would be
-OUTSIDE this gate's coverage. The discoverability pointer for that class is the
-"Direct-writes audit (D.10)" census comment in ``src/app/api/keys/sync/route.ts``,
-which names every writer including the SQL ones.
+The TS surface scanned here is the union of ``src/**/*.ts`` and ``src/**/*.tsx``,
+excluding test files (``*.test.*``, ``*.spec.*``, any ``__tests__/`` segment) and
+``.d.ts``. It was previously ``src/app/api/**/*.ts`` route handlers ONLY, which meant
+a ``strategy_analytics`` writer in a ``.tsx`` server action, in ``src/lib/`` or in a
+page component passed SILENTLY and could re-create the exact permanent-spinner class
+this gate exists to kill. Coverage is now the whole write surface, not the corner of
+it that happened to hold every writer on the day the gate was written.
 
-Widening the textual scan to all of ``src/`` was considered and REJECTED, because a
-key-colon regex cannot distinguish a DB payload key from three benign shapes that
-already exist in the repo:
+This gate still has NO TypeScript parser, so widening had to survive the benign
+shapes that already carry a ``computation_status`` key. Two mechanisms do that, and
+both are deliberately conservative — a shape the gate cannot classify must land in a
+census that a human has to update, never in silence:
 
-  * ``src/lib/utils.ts`` ``EMPTY_ANALYTICS`` — an in-memory placeholder object
-    literal, not a DB write. (It DOES carry ``computing_started_at: null``, added by
-    plan 142-06, so it would pass — but it would be passing for the wrong reason.)
-  * ``src/app/(dashboard)/portfolios/[id]/page.tsx:503`` — a ``portfolio_analytics``
-    payload. This is the TypeScript twin of the ``routers/portfolio.py`` trap the
-    Python half is chain-scoped to survive: a naive widen would flag the WRONG
-    table's payload.
-  * type-annotation members — ``src/lib/queries.ts:414,452`` and
-    ``src/components/admin/AdminTabs.tsx:82`` declare ``computation_status`` as an
-    interface/generic member. Only a real TS parser could tell those from payload
-    keys, and this gate has no TS parser.
+  1. **Value-token discrimination.** A PAYLOAD key is followed by a value — a quoted
+     string literal or ``null``. A TYPE member is followed by a type
+     (``string``, ``string | null``, ``StrategyAnalyticsComputationStatus``). Only
+     the former is counted. That is what excludes ``src/lib/queries.ts:414,452``,
+     ``src/components/admin/AdminTabs.tsx:82``, ``src/lib/types.ts:299,1345,1381,1392``
+     and every ``src/lib/database.types.ts`` member — 10 of the 17 raw key matches in
+     the tree today, none of them by name and none of them by file.
 
-So the coverage claim is scoped: this file covers the API-route WRITER surface.
+  2. **A two-tier, count-pinned census** (``_TS_PAYLOAD_FILES`` /
+     ``_TS_BENIGN_FILES``). Value-token discrimination alone cannot separate the
+     remaining three, because each is a quoted literal in a non-DB position, so they
+     are named explicitly WITH their expected count:
+
+       * ``src/lib/utils.ts`` ``EMPTY_ANALYTICS`` — an in-memory placeholder object
+         literal, not a DB write. (It DOES carry ``computing_started_at: null``, added
+         by plan 142-06, so it would pass — but it would be passing for the wrong
+         reason, which is precisely why it is classified rather than counted.)
+       * ``src/app/(dashboard)/portfolios/[id]/page.tsx`` — a ``portfolio_analytics``
+         payload in ``chooseAnalytics``. This is the TypeScript twin of the
+         ``routers/portfolio.py`` trap the Python half is chain-scoped to survive: a
+         naive widen would flag the WRONG table's payload.
+       * ``src/lib/types.ts`` — a string-literal TYPE (``a is T & { … : "complete" }``)
+         inside a type predicate. Quoted, therefore invisible to mechanism 1.
+
+Why an allowlist rather than requiring a nearby ``strategy_analytics`` reference:
+``src/app/api/keys/sync/route.ts``'s payload is built inside ``compositeMemberCount``
+and passed as an ARGUMENT to ``stampCompositeFailedUnlessComplete``, whose ``from()``
+calls are ~76 lines away (the same fact that forces object-literal anchoring — see
+:func:`_enclosing_object_literal`). Any table-proximity rule strong enough to reject
+the portfolios page would also drop that genuine writer, trading a false positive for
+a false negative. The census keeps the green falsifiable instead: every scanned file
+holding a value-shaped key must appear in exactly one tier with an exact count, so a
+new writer in an UNKNOWN file reddens the unknown-file arm, and a new writer in a
+KNOWN file reddens that file's count. Neither can be absorbed silently.
 
 ────────────────────────────────────────────────────────────────────────────
 Why the Python half is CHAIN-scoped and not FUNCTION-scoped
@@ -96,6 +129,7 @@ from tests._scan_helpers import (
 _TABLE: Final[str] = "strategy_analytics"
 _STATUS_KEY: Final[str] = "computation_status"
 _STAMP_KEY: Final[str] = "computing_started_at"
+_WARNED_KEY: Final[str] = "computation_warned"
 
 # Only these three PostgREST verbs mutate. Read verbs (.select/.eq/.in_/…) are NOT
 # write sites and are ignored — that is the portfolio.py false-positive exclusion.
@@ -220,8 +254,9 @@ def _resolve_name(
     chain: tuple[_Scope, ...],
     upto: int,
     where: str,
-) -> ast.Dict:
-    """Resolve a ``Name`` payload to its dict literal.
+    skipped: list[str],
+) -> ast.Dict | None:
+    """Resolve a ``Name`` payload to its dict literal, or record a skip.
 
     ``chain[0]`` is the module; ``chain[1:]`` are the enclosing ``(Async)FunctionDef``
     scopes, innermost LAST. ``upto`` is how many chain entries are visible; the walk
@@ -234,8 +269,24 @@ def _resolve_name(
         resolve its default. A ``Name`` default resumes the n1 walk at the scope
         ENCLOSING the def, which is where defaults are evaluated.
 
-    Every unresolvable shape FAILS LOUD. There is no silent-skip arm: a write site
-    the gate cannot classify must redden the build, never pass unchecked.
+    ── RESOLUTION POLICY (D-07) ───────────────────────────────────────────────
+    A payload shape neither arm can read appends one line to ``skipped`` and
+    returns ``None``. It does not raise.
+
+    The stamp invariant is owned by the DATABASE, not by this census: the
+    ``BEFORE UPDATE`` trigger function ``strategy_analytics_stamp_computing_started``
+    (migration ``20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql``)
+    coerces the column regardless of payload shape or call-site language, and Part 6
+    of ``supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql`` proves
+    that against the deployed object. What remains here is best-effort payload
+    hygiene over the shapes a parser-free census can read. Refactoring a payload
+    into a builder helper is legitimate engineering and must not be able to break
+    the build, nor force an author to grow AST arms in a test file.
+
+    The skip is NOT silent: ``test_python_writer_census_counts`` pins the skip count
+    to a literal, so a site moving kept→skipped reddens that counter and has to be
+    acknowledged in the census. That is a decidable, visible signal instead of a
+    hard stop.
     """
     for index in range(upto - 1, -1, -1):
         scope = chain[index]
@@ -247,15 +298,16 @@ def _resolve_name(
             if len(dict_bindings) == 1:
                 return dict_bindings[0]
             if len(dict_bindings) > 1:
-                raise AssertionError(
+                skipped.append(
                     f"{where}: payload name {name!r} has {len(dict_bindings)} dict "
-                    f"bindings in one scope — the gate cannot tell which one the "
-                    f"write uses; {_EXTEND}."
+                    f"bindings in one scope — ambiguous, not read."
                 )
-            raise AssertionError(
+                return None
+            skipped.append(
                 f"{where}: payload name {name!r} is bound to a non-dict expression "
-                f"({type(bindings[0]).__name__}); {_EXTEND}."
+                f"({type(bindings[0]).__name__}) — not read."
             )
+            return None
 
         # ---- (n2) parameter default on this scope's own def --------------
         if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -263,38 +315,56 @@ def _resolve_name(
             if resolved is not None:
                 tag, node = resolved
                 if tag == "star":
-                    raise AssertionError(
+                    skipped.append(
                         f"{where}: payload name {name!r} is a *args/**kwargs "
-                        f"parameter of {scope.name!r} — there is no default to "
-                        f"resolve; {_EXTEND}."
+                        f"parameter of {scope.name!r} — no default to read."
                     )
+                    return None
                 if tag == "nodefault":
-                    raise AssertionError(
+                    skipped.append(
                         f"{where}: payload name {name!r} is a parameter of "
-                        f"{scope.name!r} with NO default — the gate cannot see the "
-                        f"caller's dict; {_EXTEND}."
+                        f"{scope.name!r} with NO default — the caller's dict is not "
+                        f"statically visible."
                     )
+                    return None
                 if isinstance(node, ast.Dict):
                     return node
                 if isinstance(node, ast.Name):
                     # Defaults are evaluated in the ENCLOSING scope.
-                    return _resolve_name(node.id, chain, index, where)
-                raise AssertionError(
+                    return _resolve_name(node.id, chain, index, where, skipped)
+                skipped.append(
                     f"{where}: payload name {name!r} defaults to an unsupported "
-                    f"expression ({type(node).__name__}); {_EXTEND}."
+                    f"expression ({type(node).__name__}) — not read."
                 )
+                return None
 
-    raise AssertionError(
-        f"{where}: payload name {name!r} has zero resolvable bindings in any "
-        f"enclosing scope (neither single-assignment nor parameter default); "
-        f"{_EXTEND}."
+    skipped.append(
+        f"{where}: payload name {name!r} has zero readable bindings in any "
+        f"enclosing scope (neither single-assignment nor parameter default)."
     )
+    return None
 
 
-def _collect_write_sites(path: Path) -> list[_WriteSite]:
-    """Every resolved ``strategy_analytics`` WRITE site in one file."""
-    module = ast.parse(path.read_text(encoding="utf-8"))
+class _FileScan(NamedTuple):
+    """One file's (or one synthetic source's) resolved sites plus its skips."""
+
+    sites: list[_WriteSite]
+    skipped: list[str]
+
+
+def _collect_write_sites_in_text(source: str, *, label: str) -> _FileScan:
+    """Every readable ``strategy_analytics`` WRITE site in ``source``.
+
+    Split out from :func:`_collect_write_sites` so the resolver can be exercised
+    against synthetic in-memory source — the ``_count_in_text`` / ``_count`` split
+    in ``tests/_scan_helpers.py`` is the precedent, and the reason is the same:
+    without it, D-07's record-and-continue policy would be an unfalsifiable claim.
+    See ``test_helper_built_payload_is_recorded_not_fatal``.
+    """
+    module = ast.parse(source)
+    path = Path(label)
     sites: list[_WriteSite] = []
+    skipped: list[str] = []
 
     def visit(node: ast.AST, chain: tuple[_Scope, ...]) -> None:
         next_chain = chain
@@ -303,38 +373,51 @@ def _collect_write_sites(path: Path) -> list[_WriteSite]:
         if isinstance(node, ast.Call) and _write_target_table(node) == _TABLE:
             where = f"{_rel(path)}:{node.lineno}"
             if not node.args:
-                raise AssertionError(
-                    f"{where}: {_TABLE} write has no positional payload argument; "
-                    f"{_EXTEND}."
+                skipped.append(
+                    f"{where}: {_TABLE} write has no positional payload argument."
                 )
-            arg = node.args[0]
-            if isinstance(arg, ast.Dict):
-                sites.append(_WriteSite(path, node.lineno, arg, "literal"))
-            elif isinstance(arg, ast.Name):
-                # `chain` (not `next_chain`): a Call is never its own scope.
-                visible = (module,) + chain
-                # Distinguish which arm resolved it, for the liveness counters.
-                arm = "n1"
-                innermost = chain[-1] if chain else None
-                if (
-                    isinstance(innermost, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and not _dict_bindings(innermost, arg.id)
-                    and _param_default(innermost, arg.id) is not None
-                ):
-                    arm = "n2"
-                payload = _resolve_name(arg.id, visible, len(visible), where)
-                sites.append(_WriteSite(path, node.lineno, payload, arm))
             else:
-                raise AssertionError(
-                    f"{where}: {_TABLE} write payload is a "
-                    f"{type(arg).__name__}, which the gate cannot resolve to a "
-                    f"dict literal; {_EXTEND}."
-                )
+                arg = node.args[0]
+                if isinstance(arg, ast.Dict):
+                    sites.append(_WriteSite(path, node.lineno, arg, "literal"))
+                elif isinstance(arg, ast.Name):
+                    # `chain` (not `next_chain`): a Call is never its own scope.
+                    visible = (module,) + chain
+                    # Distinguish which arm resolved it, for the liveness counters.
+                    arm = "n1"
+                    innermost = chain[-1] if chain else None
+                    if (
+                        isinstance(innermost, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and not _dict_bindings(innermost, arg.id)
+                        and _param_default(innermost, arg.id) is not None
+                    ):
+                        arm = "n2"
+                    payload = _resolve_name(
+                        arg.id, visible, len(visible), where, skipped
+                    )
+                    if payload is not None:
+                        sites.append(_WriteSite(path, node.lineno, payload, arm))
+                else:
+                    # D-07: a payload built by a helper call, a merge expression or a
+                    # comprehension is recorded and stepped over. The DB trigger owns
+                    # the invariant; see _resolve_name's RESOLUTION POLICY.
+                    skipped.append(
+                        f"{where}: {_TABLE} write payload is a "
+                        f"{type(arg).__name__} — not a dict literal this census "
+                        f"can read."
+                    )
         for child in ast.iter_child_nodes(node):
             visit(child, next_chain)
 
     visit(module, ())
-    return sites
+    return _FileScan(sites, skipped)
+
+
+def _collect_write_sites(path: Path) -> _FileScan:
+    """Every readable ``strategy_analytics`` WRITE site in one file."""
+    return _collect_write_sites_in_text(
+        path.read_text(encoding="utf-8"), label=str(path)
+    )
 
 
 def _dict_value(node: ast.Dict, key: str) -> ast.expr | None:
@@ -357,16 +440,20 @@ def _is_none(node: ast.expr | None) -> bool:
 class _PyScan(NamedTuple):
     all_sites: list[_WriteSite]
     kept: list[_WriteSite]  # sites whose payload carries computation_status
+    skipped: list[str]  # writes whose payload shape this census cannot read (D-07)
 
 
 def _scan_python(files: list[Path]) -> _PyScan:
     all_sites: list[_WriteSite] = []
+    skipped: list[str] = []
     for path in files:
-        all_sites.extend(_collect_write_sites(path))
+        scan = _collect_write_sites(path)
+        all_sites.extend(scan.sites)
+        skipped.extend(scan.skipped)
     # The three partial data_quality_flags upserts resolve to dicts WITHOUT a status
     # key and drop out HERE — untouched, exactly as the writer census requires.
     kept = [s for s in all_sites if _has_key(s.payload, _STATUS_KEY)]
-    return _PyScan(all_sites, kept)
+    return _PyScan(all_sites, kept, skipped)
 
 
 # ---------------------------------------------------------------------------
@@ -467,10 +554,16 @@ def test_python_writer_census_counts() -> None:
         It resolves to a dict with keys {strategy_id, data_quality_flags} and NO
         status key, so it DROPS OUT of the kept set. Counting it across ALL write
         sites rather than kept ones is therefore the only liveness proof n2 can have.
-        Without this arm the gate FAILS LOUD on that correct, deliberately-untouched
-        partial upsert.
+        Without this arm that correct, deliberately-untouched partial upsert would
+        move into the skipped count below (before D-07 it aborted the whole run).
       * exactly 1 kept dict carries the literal 'computing'. A SECOND entry writer
         must be a conscious decision, never an accident.
+      * exactly 0 write sites are SKIPPED as unreadable (D-07). Under the
+        record-and-continue policy a payload this census cannot read is no longer
+        fatal, so this counter is what keeps the green honest: a refactor that
+        moves a site kept→skipped reddens HERE, visibly and decidably, instead of
+        passing unnoticed. Raising it above 0 is a deliberate act — write down
+        which site and why.
 
     (A third n1 resolution exists — ``csv_flag_payload`` in ``analytics_runner``'s
     sibling-upsert failure arm — but it is a partial data_quality_flags upsert with
@@ -482,6 +575,7 @@ def test_python_writer_census_counts() -> None:
     EXPECTED_KEPT_VIA_N1 = 2
     EXPECTED_SITES_VIA_N2 = 1
     EXPECTED_COMPUTING_DICTS = 1
+    EXPECTED_SKIPPED_UNRESOLVED = 0
 
     scan = _scan_python(_py_scan_files())
 
@@ -534,6 +628,15 @@ def test_python_writer_census_counts() -> None:
         + "\nA second entry writer must be a conscious decision (and must stamp)."
     )
 
+    assert len(scan.skipped) == EXPECTED_SKIPPED_UNRESOLVED, (
+        f"expected exactly {EXPECTED_SKIPPED_UNRESOLVED} python "
+        f"{_TABLE} write(s) whose payload shape this census cannot read, found "
+        f"{len(scan.skipped)}:\n  " + "\n  ".join(scan.skipped)
+        + "\nD-07: a skipped site is NOT a build failure — the DB trigger owns the "
+        "stamp invariant. It IS a coverage change: confirm the site is genuinely "
+        "outside static reach and bump this literal, or restore a readable payload."
+    )
+
 
 def test_portfolio_router_has_zero_findings() -> None:
     """The false-positive exclusion, asserted rather than assumed.
@@ -547,7 +650,7 @@ def test_portfolio_router_has_zero_findings() -> None:
     path = (_repo_root() / "analytics-service" / "routers" / "portfolio.py").resolve()
     assert path.exists(), f"expected analog file missing: {path}"
 
-    sites = _collect_write_sites(path)
+    sites = _collect_write_sites(path).sites
     assert sites == [], (
         "routers/portfolio.py must yield zero strategy_analytics WRITE sites — its "
         "computation_status payloads target portfolio_analytics and its "
@@ -568,6 +671,86 @@ def test_portfolio_router_has_zero_findings() -> None:
     )
 
 
+# Synthetic source for the D-07 tolerance self-test. The payload is RETURNED FROM A
+# HELPER — the single shape the finding named as the one an unrelated refactor most
+# plausibly produces, and the shape that used to abort the whole run.
+_SYNTHETIC_HELPER_BUILT_PAYLOAD = '''
+def _build_failed_payload(strategy_id):
+    return {
+        "strategy_id": strategy_id,
+        "computation_status": "failed",
+        "computation_warned": False,
+        "computing_started_at": None,
+    }
+
+
+def mark_failed(supabase, strategy_id):
+    supabase.table("strategy_analytics").upsert(
+        _build_failed_payload(strategy_id), on_conflict="strategy_id"
+    ).execute()
+'''
+
+# Positive control for the same self-test: the SAME harness, the SAME table, a payload
+# the census CAN read. Without it, "0 sites, 1 skip" above would also be produced by a
+# broken chain-unwind that saw no write at all.
+_SYNTHETIC_LITERAL_PAYLOAD = '''
+def mark_failed(supabase, strategy_id):
+    supabase.table("strategy_analytics").upsert(
+        {
+            "strategy_id": strategy_id,
+            "computation_status": "failed",
+            "computation_warned": False,
+            "computing_started_at": None,
+        },
+        on_conflict="strategy_id",
+    ).execute()
+'''
+
+
+def test_helper_built_payload_is_recorded_not_fatal() -> None:
+    """D-07's standing observable: an unreadable payload is COUNTED, not fatal.
+
+    The stamp invariant is enforced by the DB trigger
+    ``strategy_analytics_stamp_computing_started`` (migration ``20260803120000``),
+    so a developer who hoists a payload into a builder helper must not be forced to
+    choose between abandoning the refactor and growing AST arms in this file. What
+    this census owes them instead is an honest count of what it stopped reading.
+
+    Neuter the record-and-continue policy — put the ``raise`` back at the
+    payload-shape arm of ``_collect_write_sites_in_text`` — and this test goes RED
+    on the raise rather than on an assertion, which is the point.
+    """
+    scan = _collect_write_sites_in_text(
+        _SYNTHETIC_HELPER_BUILT_PAYLOAD, label="<synthetic-helper-built>"
+    )
+
+    assert scan.sites == [], (
+        "a helper-built payload must not be reported as a READ site — the census "
+        f"cannot see inside the helper: {[s.lineno for s in scan.sites]}"
+    )
+    assert len(scan.skipped) == 1, (
+        "expected exactly one recorded skip for the helper-built payload, got "
+        f"{len(scan.skipped)}:\n  " + "\n  ".join(scan.skipped)
+    )
+    assert "<synthetic-helper-built>:" in scan.skipped[0], (
+        f"the skip record must name the site it skipped: {scan.skipped[0]!r}"
+    )
+
+    # Positive control (PATTERNS S-2).
+    control = _collect_write_sites_in_text(
+        _SYNTHETIC_LITERAL_PAYLOAD, label="<synthetic-literal>"
+    )
+    assert control.skipped == [], (
+        "the literal-payload control must record no skips: " + "; ".join(control.skipped)
+    )
+    assert len(control.sites) == 1, (
+        "the literal-payload control must resolve exactly one write site, got "
+        f"{len(control.sites)} — if this is 0 the harness is not driving the "
+        "chain-unwind at all and the skip assertion above is vacuous"
+    )
+    assert _has_key(control.sites[0].payload, _STATUS_KEY)
+
+
 # ---------------------------------------------------------------------------
 # TypeScript half — textual, anchored on object-literal PROPERTY KEYS
 # ---------------------------------------------------------------------------
@@ -577,21 +760,70 @@ def test_portfolio_router_has_zero_findings() -> None:
 # (csv-finalize/route.ts:746) — the `?` sits between the name and the colon.
 _TS_KEY_RE: Final[re.Pattern[str]] = re.compile(r"\bcomputation_status\s*:")
 
+# Mechanism 1 of the widening (module docstring): the token immediately after the
+# key colon. A payload writes a VALUE — a quoted string literal or `null`. A type
+# member writes a TYPE, which never starts with a quote. Anchored at the match end,
+# so it is a check on THIS key, not a search of the rest of the line.
+_TS_VALUE_RE: Final[re.Pattern[str]] = re.compile(
+    r"""\s*(?:"[^"\n]*"|'[^'\n]*'|`[^`\n]*`|null\b)"""
+)
+
+# Mechanism 2, tier A — files holding GENUINE strategy_analytics payload writes.
+# Every hit in these files is subject to the stamp + terminal-warned rules. Counts
+# are pinned so a moved, deleted or added writer is a conscious census update.
+_TS_PAYLOAD_FILES: Final[dict[str, int]] = {
+    # ×2: the unknowable-membership stamp in `compositeMemberCount` and the
+    # composite-unsupported stamp.
+    "src/app/api/strategies/finalize-wizard/route.ts": 2,
+    # ×1: `writeFailedStrategyAnalyticsPlaceholder`.
+    "src/app/api/strategies/csv-finalize/route.ts": 1,
+    # ×1: the `stampCompositeFailedUnlessComplete` argument.
+    "src/app/api/keys/sync/route.ts": 1,
+}
+
+# Mechanism 2, tier B — value-shaped keys that are NOT strategy_analytics writes.
+# Exempt from the rules, but counted: a real writer added to one of these files
+# reddens its count. Each entry is justified in the module docstring; do not add a
+# file here without writing down why it can never be a strategy_analytics payload.
+_TS_BENIGN_FILES: Final[dict[str, int]] = {
+    # `chooseAnalytics` fallback row — the WRONG table (portfolio_analytics).
+    "src/app/(dashboard)/portfolios/[id]/page.tsx": 1,
+    # A string-literal TYPE inside a type predicate, not a value.
+    "src/lib/types.ts": 1,
+    # `EMPTY_ANALYTICS` — an in-memory placeholder, never sent to PostgREST.
+    "src/lib/utils.ts": 1,
+}
+
 
 class _TsHit(NamedTuple):
     path: Path
     lineno: int
+    value: str  # the value token exactly as written: '"failed"', 'null', …
 
 
 def _ts_scan_files() -> list[Path]:
-    """``src/app/api/**/*.ts`` route handlers, excluding tests. See the module
-    docstring for why this boundary is not widened."""
-    api = _repo_root() / "src" / "app" / "api"
-    return sorted(
-        p
-        for p in api.rglob("*.ts")
-        if not p.name.endswith(".test.ts")
-    )
+    """The whole TypeScript write surface: ``src/**/*.ts`` ∪ ``src/**/*.tsx``,
+    excluding test files and ``.d.ts``.
+
+    ⚠️ Never narrow this to a subtree or a hand list. The boundary it replaced was
+    ``src/app/api/**/*.ts``, and its cost was D-04: a writer one directory outside it
+    was invisible while the gate still reported green (the same silent-narrowing
+    class as D-10). The exclusions below are shape-based, never name-based, so a new
+    directory is covered on the day it lands.
+    """
+    src = _repo_root() / "src"
+    files: list[Path] = []
+    for pattern in ("*.ts", "*.tsx"):
+        for p in src.rglob(pattern):
+            name = p.name
+            if name.endswith(".d.ts"):
+                continue
+            if ".test." in name or ".spec." in name:
+                continue
+            if any(part == "__tests__" for part in p.parts):
+                continue
+            files.append(p)
+    return sorted(set(files))
 
 
 def _ts_effective_lines(path: Path) -> list[str]:
@@ -644,6 +876,11 @@ def _enclosing_object_literal(text: str, pos: int, where: str) -> str:
 
 
 def _scan_typescript() -> list[_TsHit]:
+    """Every VALUE-shaped ``computation_status`` key across the whole ``src/`` surface.
+
+    Both census tiers. Type members are dropped here by :data:`_TS_VALUE_RE`;
+    tier separation happens in :func:`_ts_payload_hits`.
+    """
     hits: list[_TsHit] = []
     for path in _ts_scan_files():
         lines = _ts_effective_lines(path)
@@ -652,14 +889,55 @@ def _scan_typescript() -> list[_TsHit]:
             # stripping; excluded anyway for hygiene.
             if ".select(" in line:
                 continue
-            if _TS_KEY_RE.search(line):
-                hits.append(_TsHit(path, index + 1))
+            match = _TS_KEY_RE.search(line)
+            if match is None:
+                continue
+            value = _TS_VALUE_RE.match(line, match.end())
+            if value is None:
+                # A type member, not a payload key. See mechanism 1 in the module
+                # docstring.
+                continue
+            hits.append(_TsHit(path, index + 1, value.group().strip()))
     return hits
 
 
+def _ts_terminal_status(hit: _TsHit) -> str | None:
+    """The TERMINAL ``computation_status`` literal ``hit`` writes, or ``None``.
+
+    Ports the Python half's terminal-status concept across the language boundary.
+    It reuses the SAME :data:`_TERMINAL_STATUSES` frozenset rather than declaring a
+    parallel TS-side copy: two hand-maintained copies of one closed set is the exact
+    divergence D-10 was raised about, and the set is a property of the DB column, not
+    of either language.
+    """
+    token = hit.value
+    if len(token) >= 2 and token[0] in "\"'`" and token[-1] == token[0]:
+        inner = token[1:-1]
+        if inner in _TERMINAL_STATUSES:
+            return inner
+    return None
+
+
+def _ts_payload_hits(hits: list[_TsHit]) -> list[_TsHit]:
+    """The tier-A subset: hits in files that hold real ``strategy_analytics`` writes."""
+    return [h for h in hits if _rel(h.path) in _TS_PAYLOAD_FILES]
+
+
+def _ts_literal_at(hit: _TsHit) -> tuple[str, str]:
+    """``(where, enclosing object literal)`` for one hit."""
+    where = f"{_rel(hit.path)}:{hit.lineno}"
+    lines = _ts_effective_lines(hit.path)
+    text = "\n".join(lines)
+    # Re-locate the hit inside the joined effective text.
+    offset = sum(len(line) + 1 for line in lines[: hit.lineno - 1])
+    match = _TS_KEY_RE.search(text, offset)
+    assert match is not None, f"{where}: internal offset mismatch; {_EXTEND}."
+    return where, _enclosing_object_literal(text, match.start(), where)
+
+
 def test_typescript_route_payloads_clear_the_stamp() -> None:
-    """Every ``computation_status`` payload key in an ``src/app/api`` route handler
-    sits in an object literal that ALSO carries ``computing_started_at``.
+    """Every ``strategy_analytics`` payload key anywhere in ``src/`` sits in an object
+    literal that ALSO carries ``computing_started_at``.
 
     All four are terminal-'failed' placeholder writers, i.e. exit writers from
     'computing', so each must clear the reaper key.
@@ -667,7 +945,7 @@ def test_typescript_route_payloads_clear_the_stamp() -> None:
     files = _ts_scan_files()
     assert files, "the typescript scan found no files — path resolution is broken"
 
-    hits = _scan_typescript()
+    hits = _ts_payload_hits(_scan_typescript())
     assert hits, (
         "the typescript scan found zero computation_status payload keys — the regex "
         "or the scan surface is broken (the four census sites must be found)"
@@ -675,43 +953,93 @@ def test_typescript_route_payloads_clear_the_stamp() -> None:
 
     offenders: list[str] = []
     for hit in hits:
-        where = f"{_rel(hit.path)}:{hit.lineno}"
-        text = "\n".join(_ts_effective_lines(hit.path))
-        # Re-locate the hit inside the joined effective text.
-        offset = sum(
-            len(line) + 1
-            for line in _ts_effective_lines(hit.path)[: hit.lineno - 1]
-        )
-        match = _TS_KEY_RE.search(text, offset)
-        assert match is not None, f"{where}: internal offset mismatch; {_EXTEND}."
-        literal = _enclosing_object_literal(text, match.start(), where)
+        where, literal = _ts_literal_at(hit)
         if _STAMP_KEY not in literal:
             offenders.append(where)
 
     assert not offenders, (
-        "JOB-01: these Next.js API-route strategy_analytics payloads write "
+        "JOB-01: these Next.js strategy_analytics payloads write "
         f"{_STATUS_KEY} without clearing {_STAMP_KEY} in the same object literal. "
         "They are exit writers from 'computing'; a stale stamp on a terminal row can "
         "re-trigger the pg_cron reaper:\n  " + "\n  ".join(offenders)
     )
 
 
-def test_typescript_writer_census_counts() -> None:
-    """Anti-vacuity for the TS half. Per-FILE counts (robust to line drift) plus the
-    total, so a 5th payload site, a moved one, or a missing one all FAIL LOUD.
+def test_typescript_terminal_writers_carry_computation_warned() -> None:
+    """D-03. Every TS ``strategy_analytics`` literal writing a TERMINAL status must
+    carry ``computation_warned`` in the SAME literal.
 
-    Census (checker-verified, exactly 4 in non-test code):
+    This is a MONEY-SURFACE rule, not hygiene. ``computation_warned`` is a marker the
+    runner owns; a terminal write that leaves the previous run's ``true`` in place
+    lets the bridge's branch (a) resolve the row back to ``complete_with_warnings``,
+    and the factsheet then renders GREEN off the prior run's stale ``metrics_json``.
+    A failed import that displays as a successful one is the worst failure this
+    surface has.
+
+    The Python half has enforced the same class since 142 (``_TERMINAL_STATUSES``
+    applied in ``test_python_status_writers_stamp_and_clear``); this ports the concept
+    across the language boundary, which is what left ``csv-finalize/route.ts`` as the
+    lone defective writer of 17 across three languages with NO observable.
+
+    Mutation to confirm this rule is live: delete ``computation_warned`` from the
+    csv-finalize terminal-failed upsert and this test names that file.
+    """
+    # Anti-vacuity (PATTERNS S-2). All four TS payload sites are terminal-'failed'
+    # writers today. A rule that matched zero literals would pass vacuously, so pin
+    # the population the rule actually ran against.
+    EXPECTED_TERMINAL_SITES = 4
+
+    hits = _ts_payload_hits(_scan_typescript())
+    terminal = [h for h in hits if _ts_terminal_status(h) is not None]
+
+    assert len(terminal) == EXPECTED_TERMINAL_SITES, (
+        f"expected exactly {EXPECTED_TERMINAL_SITES} TS payload literals writing a "
+        f"terminal {_STATUS_KEY}, found {len(terminal)}:\n  "
+        + "\n  ".join(f"{_rel(h.path)}:{h.lineno} → {h.value}" for h in terminal)
+        + "\nIf this drops, the parity rule below is passing over an empty set."
+    )
+
+    offenders: list[str] = []
+    for hit in terminal:
+        where, literal = _ts_literal_at(hit)
+        if _WARNED_KEY not in literal:
+            offenders.append(f"{where}: terminal {hit.value}")
+
+    assert not offenders, (
+        f"D-03: these TS {_TABLE} payloads write a terminal {_STATUS_KEY} without "
+        f"{_WARNED_KEY} in the same object literal. The stale marker from the prior "
+        "run survives, branch (a) of the status bridge resolves the row back to "
+        "'complete_with_warnings', and the factsheet renders a GREEN surface from "
+        "the previous run's metrics_json — a failed import shown as a successful "
+        "one:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_typescript_writer_census_counts() -> None:
+    """Anti-vacuity for the TS half over the WIDENED surface. Per-FILE counts (robust
+    to line drift) plus the totals, so a 5th payload site, a moved one, or a missing
+    one all redden — and so does a value-shaped key in a file neither tier knows.
+
+    Census re-derived 2026-08-02 against the widened union scan (17 raw key matches
+    in the tree; 10 dropped as type members by :data:`_TS_VALUE_RE`, leaving 7):
+
+    PAYLOAD tier — 4:
       finalize-wizard/route.ts ×2 — the unknowable-membership stamp in
       ``compositeMemberCount`` and the composite-unsupported stamp;
       csv-finalize/route.ts ×1 — ``writeFailedStrategyAnalyticsPlaceholder``;
       keys/sync/route.ts ×1 — the ``stampCompositeFailedUnlessComplete`` argument.
+
+    BENIGN tier — 3: the portfolios page's wrong-table row, ``src/lib/types.ts``'s
+    string-literal type, ``EMPTY_ANALYTICS``. Justified individually in the module
+    docstring.
+
+    ⚠️ Both totals are separate literal ints rather than ``len(...)`` of the dicts
+    above: double-entry bookkeeping, so a one-sided edit cannot pass.
     """
-    EXPECTED_PER_FILE: Final[dict[str, int]] = {
-        "src/app/api/strategies/finalize-wizard/route.ts": 2,
-        "src/app/api/strategies/csv-finalize/route.ts": 1,
-        "src/app/api/keys/sync/route.ts": 1,
-    }
+    EXPECTED_PER_FILE: Final[dict[str, int]] = _TS_PAYLOAD_FILES
     EXPECTED_TOTAL = 4
+    EXPECTED_BENIGN_PER_FILE: Final[dict[str, int]] = _TS_BENIGN_FILES
+    EXPECTED_BENIGN_TOTAL = 3
 
     hits = _scan_typescript()
     actual: dict[str, int] = {}
@@ -719,10 +1047,13 @@ def test_typescript_writer_census_counts() -> None:
         key = _rel(hit.path)
         actual[key] = actual.get(key, 0) + 1
 
-    unexpected = sorted(set(actual) - set(EXPECTED_PER_FILE))
+    known = set(EXPECTED_PER_FILE) | set(EXPECTED_BENIGN_PER_FILE)
+    unexpected = sorted(set(actual) - known)
     assert not unexpected, (
-        "a computation_status payload key appeared in an API route the JOB-01 census "
-        f"does not know about — it must stamp/clear too; {_EXTEND}:\n  "
+        "a value-shaped computation_status key appeared in a src/ file the JOB-01 "
+        "census does not know about. If it is a strategy_analytics payload it must "
+        "stamp/clear too; if it is not, classify it in _TS_BENIGN_FILES with a "
+        f"written reason. {_EXTEND}:\n  "
         + "\n  ".join(
             f"{_rel(h.path)}:{h.lineno}"
             for h in hits
@@ -735,6 +1066,28 @@ def test_typescript_writer_census_counts() -> None:
             f"found {actual.get(filename, 0)}. A moved or deleted writer must be a "
             "conscious census update."
         )
-    assert len(hits) == EXPECTED_TOTAL, (
-        f"expected exactly {EXPECTED_TOTAL} TS payload sites, found {len(hits)}"
+    for filename, expected in EXPECTED_BENIGN_PER_FILE.items():
+        assert actual.get(filename, 0) == expected, (
+            f"expected {expected} classified-benign computation_status key(s) in "
+            f"{filename}, found {actual.get(filename, 0)}. This file is EXEMPT from "
+            "the stamp rule, so a new key here would be exempt too — re-read it and "
+            "either re-classify the file or move the writer somewhere covered."
+        )
+
+    payload_hits = _ts_payload_hits(hits)
+    assert len(payload_hits) == EXPECTED_TOTAL, (
+        f"expected exactly {EXPECTED_TOTAL} TS payload sites, found "
+        f"{len(payload_hits)}"
+    )
+    assert len(hits) - len(payload_hits) == EXPECTED_BENIGN_TOTAL, (
+        f"expected exactly {EXPECTED_BENIGN_TOTAL} classified-benign TS sites, found "
+        f"{len(hits) - len(payload_hits)}"
+    )
+
+    # Positive control (PATTERNS S-2): the widened glob must actually reach OUTSIDE
+    # src/app/api, or every assertion above would hold vacuously on the old surface.
+    scanned = {_rel(p) for p in _ts_scan_files()}
+    assert "src/lib/utils.ts" in scanned and "src/components/admin/AdminTabs.tsx" in scanned, (
+        "the widened scan no longer reaches src/lib or a .tsx component — D-04 has "
+        "regressed and this census is green over the old narrow surface"
     )
