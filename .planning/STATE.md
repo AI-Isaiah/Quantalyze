@@ -4,14 +4,14 @@ milestone: v1.16
 milestone_name: Production Resilience & Reliability
 status: executing
 stopped_at: Completed 140.3-G4-PLAN.md (SEAMUX-03 coded arms on verify-strategy + validate-and-encrypt)
-last_updated: "2026-08-02T08:33:46.680Z"
+last_updated: "2026-08-02T16:51:55.745Z"
 last_activity: 2026-08-02
 progress:
-  total_phases: 16
-  completed_phases: 11
-  total_plans: 111
-  completed_plans: 105
-  percent: 69
+  total_phases: 17
+  completed_phases: 12
+  total_plans: 119
+  completed_plans: 111
+  percent: 71
 ---
 
 # Project State — Quantalyze
@@ -46,7 +46,10 @@ RATE-01..05 — all mapped, Traceability filled). Roadmap: `.planning/ROADMAP.md
 
 ## Current Position
 
-Phase: 142 (JOB — strategy_analytics stuck-computing reaper + computing_started_at DDL) — EXECUTING
+Phase: 142.1 (INSERTED) — close the 142 code-review findings. NOT PLANNED yet;
+        awaiting `/gsd:plan-phase 142.1`. Scope + hazards recorded below.
+
+Phase 142 (JOB — strategy_analytics stuck-computing reaper + computing_started_at DDL) — EXECUTED
         Six plans across three waves, each wave gated at its boundary; final suite
         10 487 vitest + 4 824 pytest green, typecheck clean, coverage above ratchet.
         13 findings CLOSED PER THEIR DISPOSITIONS — twelve remediated, finding 8
@@ -63,9 +66,195 @@ Phase: 142 (JOB — strategy_analytics stuck-computing reaper + computing_starte
         collapses nothing on the only two retry-eligible flows. Evidence with
         per-finding failure scenarios: `141.2-FINDINGS.md`.
 
+### Phase 142.1 scope (inserted 2026-08-02)
+
+Sources — THREE independent passes, deliberately not cross-fed:
+
+- **Pass A** — high-effort workflow code review (35 agents; 31 candidates verified,
+  17 refuted, 10 reported) → items 1–10.
+
+- **Pass B** — `gsd-code-reviewer`, blind to Pass A → 0 blockers, 4 warnings.
+  WR-01/03/04 re-derived items 1, 5 and a Pass-A-refuted item; WR-02 was new.
+
+- **Pass C** — `gsd-verifier` on Phase 142, the goal-backward pass that had never
+  run. Verdict **`gaps_found`, 9/10 must-haves**. It did NOT trust SUMMARY claims:
+  it stood up a throwaway PostgreSQL 16, extracted the real `$cron$` body and the
+  real re-based bridge from the migration, and executed them. **The phase goal IS
+  achieved** — all four ROADMAP SCs hold behaviourally. Gaps → items 11–14, 16.
+
+**Sixteen items in scope.** Convergence is itself signal: item 1 was found
+independently by all three passes.
+
+1. **CONFIRMED — `analytics_runner.py:1238`.** `_mark_computing` re-stamps
+   `computing_started_at` on a row that is ALREADY `computing`, so the reap clock
+   restarts at the LAST chain hop instead of chain start. Worst-case stranded
+   spinner ≈28 h, not the 16 h the threshold derivation and migration header
+   promise. Note the shape: the migration's Arm 3 and the SQL gate's Part 4
+   sentinel correctly forbid a *bridge* call from advancing the stamp — verified
+   live on TEST — but the Python writer sets the column DIRECTLY, outside that
+   boundary. The cross-language census passed because it checks that writers
+   stamp, not that they stamp ONLY on transition.
+
+2. **`analytics_runner.py:1238`.** The `computing_started_at` payload ships ahead
+   of its own migration. Merging `supabase/migrations/**` auto-applies to PROD
+   while Railway/Vercel redeploy independently; a worker that restarts first gets
+   PGRST204, and the catch-all recovery write carries the SAME unknown key, so the
+   job cannot even stamp `failed`.
+
+3. **`csv-finalize/route.ts:769`.** The lone terminal-`failed` writer missing
+   `computation_warned: false`; the bridge's branch (c) then resolves the row back
+   to `complete_with_warnings` and shows a green factsheet built from the prior
+   run's stale metrics. Money-surface false success.
+
+4. **`test_computing_started_at_stamp.py:631`.** The TS half of the census globs
+   only `src/app/api/**/*.ts` (and pins `EXPECTED_TOTAL = 4` to that same narrow
+   set), so a writer added in a `.tsx` server action or `src/lib` passes silently
+   and re-creates the exact permanent spinner 142 exists to kill.
+
+5. **`test_strategy_analytics_stuck_computing_reaper.sql:339/340/343`.** Three
+   unqualified table-wide neutralizing UPDATEs row-lock other tenants' in-flight
+   rows on the SHARED TEST project under a 5 s `lock_timeout` — the same
+   shared-DB contention class already fixed once for `e2e-seeded`.
+
+6. **`test_job07_reaper_off_worker_loop.py:550`.** The yielding control arm pins
+   REAL wall-clock latency (`< 0.1 s`) plus a `0.2 s` staleness threshold against a
+   real asyncio server, while pytest shards run in parallel on a shared runner. A
+   200 ms GC pause reddens `analytics` on an unrelated PR, and the message ("a
+   yielding reap must not delay healthz") misdirects the next engineer to the
+   reaper instead of runner contention. The property is ALREADY proven
+   deterministically by the `tick_before_work` / `tick_after_work` pair — delete
+   the wall-clock budget rather than loosen it.
+
+7. **`test_computing_started_at_stamp.py:375`.** The AST gate raises on any
+   `strategy_analytics` write payload it cannot statically resolve
+   (`.upsert(base | extra)`, `{**base, …}` bound through two names, a dict
+   comprehension, a payload returned from a helper). It is a static analyser
+   masquerading as a test: an unrelated refactor into a payload-builder helper
+   forces the developer to abandon the refactor or add AST arms to a 785-line test
+   file. ⚠️ **Decide this one before touching 4 or 7 in isolation** — it is the
+   strongest argument for relocating the whole invariant into a BEFORE
+   INSERT/UPDATE trigger, where payload shape and call-site language are both
+   irrelevant. A trigger would subsume findings 1, 4 and 7 at once.
+
+8. **`test_main_worker.py:1295`.** `assert len(TIMEOUT_PER_KIND) == 15` couples
+   every future job-kind addition to the reaper suite. The cheapest way to green it
+   is to bump the literal WITHOUT the re-derivation the assertion message demands —
+   the trip-wire trains the exact behaviour it exists to prevent. Replace with:
+   assert the chain map covers every kind that can hold a `strategy_analytics` row
+   at `computing` (every kind with a `strategy_id`), which does not move when a
+   strategy-less kind is added.
+
+9. **`test_job07_reaper_off_worker_loop.py:346`.** `backlog_rows=5_000` builds
+   15,000 dicts across three invocations that no code under test reads (`dispatch`
+   is patched; the reaper is in pg_cron and never touches the mock). The real cost
+   is not cycles — the number implies backlog size is load-bearing for the healthz
+   outcome, which it is not. Pass `0` or drop the parameter.
+
+10. **`test_computing_started_at_stamp.py:107`.** `_repo_root` is copy-pasted
+    verbatim into four test files, the comment-detection helper into five under two
+    names, and `_py_scan_files` into three with three DIFFERENT file lists. That
+    last divergence is the actual risk: on a repo-layout change one gate keeps
+    covering the surface while another silently narrows and still reports green —
+    the same silent-narrowing failure mode as finding 4. Extract to
+    `tests/_scan_helpers.py` (or conftest) once.
+
+11. **`migration:514` + `:103-107,165-168` (Pass B WR-02 = Pass C gap 3).** Rows
+    already at `(computing, NULL)` are invisible to the reaper AND to the gate, and
+    the migration CLAIMS the static CI invariant is the detection mechanism for
+    them. That claim is a category error — a source scan cannot see DB rows.
+    Distinct from item 4: item 4 is "the gate has a hole"; this is "no gate of any
+    kind could cover it, because the rows already exist." Reachable with no source
+    bug at all, via the migration-auto-applies-before-Railway-deploy window
+    (item 2). Suggested remedy: a non-destructive companion cron arm that STARTS
+    the clock rather than terminalizing.
+
+12. **⛔ `supabase/schema/functions/sync_strategy_analytics_status.sql` IS STALE —
+    CI IS RED (Pass C gap 1).** `npx tsx scripts/dump-sql-functions.ts --check`
+    **exits 1**; ORCHESTRATOR-VERIFIED 2026-08-02, not taken on the agent's word.
+    The declared canonical body is the PRE-142 function with no stamp maintenance
+    at all. This is wired into a real CI job — `sql-function-snapshot.yml:84`,
+    path-triggered on migrations — so the branch is red on a gate nobody ran
+    locally. **Fix: `npm run schema:functions` + commit.** Do this FIRST; it is a
+    one-command fix and it is currently the only hard-red gate on the branch.
+
+13. **`.planning/REQUIREMENTS.md:53` (Pass C gap 7).** JOB-03 still specifies the
+    threshold as `batch_size × max_per_kind_timeout` — ORCHESTRATOR-VERIFIED, the
+    text is still there. That is the exact formula research collision C-6 proved
+    would yield 9,000 s (≈4.9× too small) and reap healthy in-flight chains. The
+    shipped code correctly uses the 43,920 s chain-inclusive derivation, so the
+    REQUIREMENT now contradicts the implementation and would mislead anyone who
+    re-derives from it. Fix the requirement text to match the shipped derivation.
+
+14. **`142-VALIDATION.md` — 7 of 11 Falsifiability Ledger rows are `⬜ pending`
+    (Pass C gap 6).** ORCHESTRATOR-VERIFIED: only SC-1, SC-1b, SC-2, SC-2b carry
+    `✅ Observed`; SC-3, SC-3b, SC-4, SC-4b, SC-5, SC-5b, SC-5c were never run at
+    execution time. Pass C has now RUN all seven and reports each goes RED under
+    its mutation, but did NOT write them into the file. Frontmatter also still says
+    `status: planned`. Backfill the seven rows from Pass C's table and fix the
+    frontmatter. ⚠️ See the correction note below — this ledger was previously
+    reported as fully closed, and it was not.
+
+15. **`long_fetch.py:588-592` (Pass B WR-04 = Pass C gap 5) — LOWEST TIER, and
+    included with a caveat.** The `JOB_CHAIN_FOLLOW_ON` late import and fixed-arity
+    2-tuple unpack sit OUTSIDE the `try:` at `:599` whose own comment says this
+    block must never crash the handler. ⚠️ **Pass A raised this THREE times and
+    independent verifiers REFUTED it all three times** — correctly: the map is a
+    module-level literal 2-tuple, so the unpack cannot fail at runtime today. It is
+    latent, biting only after a topology edit. In scope ONLY because it is a
+    two-line hoist. Do NOT let anyone record this as "Pass A missed it."
+
+16. **The 637-line SQL gate has NEVER been run end-to-end against TEST by anyone
+    (Pass C human-verification item).** Pass C proved it COMPILES (all 5 `DO`
+    blocks, zero syntax errors) and reddens when the migration is unapplied, but
+    Parts 2–5 need real `auth.users` / `profiles` / `compute_jobs` constraints.
+    ⚠️ Orchestrator-only (MCP stripped from subagents). Settling command is in
+    `142-VERIFICATION.md`, along with three more human items: cron registration,
+    the PROD backfill census, and the live wizard render.
+
+Tiering (do NOT flatten):
+
+- **Hard-red now:** (12) — CI is failing on it.
+- **Clear the founder stopping rule on their own:** (1)–(3) — user-facing or
+  data-integrity. Plus (11), which is the same permanent-spinner class.
+
+- **Evidence integrity:** (14), (16) — the phase's own proof is incomplete.
+- **Do NOT clear the bar; in scope only because the phase exists:** (4)–(10),
+  (13), (15). If 142.1 is cut for time, cut from here.
+
+Sequencing notes:
+
+1. Item 12 first — one command, unblocks CI.
+2. Settle item 7's trigger-vs-static-gate question BEFORE fixing 1, 4 or 7
+   separately. If the invariant moves to a BEFORE INSERT/UPDATE trigger, items 1,
+   4, 7 and much of 11 collapse into that single change, and separate fixes would
+   be wasted work. Pass B's cheaper alternative for item 1 alone: split
+   `_mark_computing` into two statements guarded by
+   `.is_("computing_started_at", "null")`.
+
+3. Item 1's real cost is now quantified by two passes independently: worst-case
+   reap ≈25.8 h (≈28 h with retries) against the migration header's advertised
+   `~16h15m` — under a heading titled "CADENCE HONESTY". `TestReaperThresholdInvariant`'s
+   premise no longer matches the code.
+
+⚠️ **CORRECTION (2026-08-02, orchestrator).** Phase 142's ledger was previously
+reported in-session as "11 Observed / 0 SKIPPED". That was WRONG. Four rows were
+closed (the four that had been marked SKIPPED); the remaining seven were never
+SKIPPED — they were `⬜ pending` and had never been run. "No SKIPPED rows remain"
+was conflated with "all rows observed". Pass C caught it. Item 14 closes it.
+
+⚠️ **Orchestrator-only work:** (1) and (2) need TEST-DB confirmation, and MCP
+tools are stripped from subagents (upstream `anthropics/claude-code#13898`), so
+those runs must happen in the orchestrator session, not in a gsd-executor.
+
+⚠️ **Carried from 142:** no `142-VERIFICATION.md` exists — `execute-phase` ran
+with `--no-transition` and no `gsd-verifier` was ever dispatched, so 142's
+goal-backward verification is still outstanding.
+
 Prior phase: 141.1 (seambackoff-…) — COMPLETE and verified, merged, NOT pushed
-Plan: 1 of 6
-Status: Executing Phase 142
+Plan: 0 of 0 (142.1 not planned)
+Status: Ready to execute
+
+Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         `feat/v1.16-141-jobs-rate-retry`. Post-merge gate after Wave 2 GREEN: tsc clean,
         FULL vitest 735 files / 10450 passed / 287 skipped, tsc + lint clean.
         Wave 4 (09) merged. FINAL GATE GREEN: tsc clean, lint 0 errors, vitest
@@ -235,7 +424,7 @@ Progress: [██████████] 95%
 
 ## Current Focus
 
-**Next: `/gsd:plan-phase 140`.** Phase order 140 → 141 → 142 → 143 → 144 → 145 → 146.
+**Next: `/gsd:plan-phase 142.1`.** Phase order 140 → 141 → 142 → **142.1 (INSERTED)** → 143 → 144 → 145 → 146.
 Load-bearing sequencing (do not reorder):
 
 - **Breaker (140) BEFORE retry (141)** — fail-fast alone has zero double-execution
@@ -290,6 +479,7 @@ Load-bearing sequencing (do not reorder):
 - Phase 140.2 inserted after Phase 140: SEAMCORE — Seam core & breaker correctness + harness integrity (URGENT)
 - Phase 140.3 inserted after Phase 140: SEAMUX — Client & wizard seam error surface (URGENT)
 - Phase 141.1 inserted after Phase 141: 8-agent review campaign: Retry-After built by 140.5 never consumed; breaker threshold uncalibrated for per-attempt counting; SEAM-05 evidence wrong in 4 places. Zero user-facing/data-integrity defects. (URGENT)
+- Phase 142.1 inserted after Phase 142: Close 142 code-review findings: chain-start stamp preservation, deploy sequencing, terminal-writer parity, census boundary, SQL gate lock scope (URGENT)
 
 ### Decisions (requirements-time, from research Open Decisions 1–8)
 
