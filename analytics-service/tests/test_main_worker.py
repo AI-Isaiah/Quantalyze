@@ -15,6 +15,8 @@ Plus a shutdown-signal test that verifies the SHUTDOWN event stops the loops.
 
 import asyncio
 import json
+import pathlib
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -2150,4 +2152,164 @@ class TestPerJobHealthzRefresh:
         assert len(seen) == 2
         assert seen[1] > seen[0], (
             f"LAST_TICK_AT must strictly advance between jobs; got {seen}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# JOB-03 / SC-3b — SQL <-> Python reaper-threshold drift gate
+# ---------------------------------------------------------------------------
+# The reaper's staleness threshold exists in TWO places: the Python constant
+# STRATEGY_ANALYTICS_REAP_THRESHOLD (declared canonical) and the interval
+# literal baked into the pg_cron body of migration 20260802120000. Nothing at
+# runtime reconciles them — the migration is applied by Supabase, the constant is
+# read by nobody at runtime — so silent divergence is invisible until the reaper
+# either mis-reaps healthy chains (literal too small) or never fires (too large).
+# This gate makes that divergence a red build instead.
+
+_REAPER_MIGRATION_NAME = (
+    "20260802120000_strategy_analytics_stuck_computing_reaper.sql"
+)
+
+
+def _reaper_migration_path() -> pathlib.Path:
+    """Repo-root-relative path to the reaper migration.
+
+    ``parents[2]`` from ``analytics-service/tests/`` is the repo root, matching
+    the resolution in ``tests/test_migration_132.py``.
+    """
+    return (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "supabase"
+        / "migrations"
+        / _REAPER_MIGRATION_NAME
+    )
+
+
+def _reaper_cron_body() -> str:
+    """The text BETWEEN the ``$cron$`` delimiters — i.e. exactly the body that
+    ``cron.schedule`` stores and pg_cron executes.
+
+    Scoping to the body is load-bearing, not tidiness. The migration's prose
+    header legitimately discusses ``computed_at`` at length (it explains why
+    ``computed_at`` is the wrong ONGOING key and why it is acceptable as the
+    one-shot backfill anchor), and the backfill statement itself reads
+    ``computed_at``. A whole-file grep would therefore be TRIPPED by a comment
+    and by correct code. Grep-gate hygiene: prose must neither satisfy nor trip
+    the gate.
+    """
+    src = _reaper_migration_path().read_text(encoding="utf-8")
+    match = re.search(r"\$cron\$(.*?)\$cron\$", src, flags=re.DOTALL)
+    assert match is not None, (
+        f"{_REAPER_MIGRATION_NAME} has no $cron$...$cron$ block. The reaper body "
+        "must be an INLINE dollar-quoted literal passed to cron.schedule (no "
+        "named function => no SECURITY DEFINER surface and no caller-suppliable "
+        "threshold). If the body moved into a function, this gate and the phase's "
+        "threat model both need revisiting."
+    )
+    body = match.group(1)
+    # Anti-vacuity guard (PATTERNS S-5): if the extraction silently returns
+    # nothing, every negative assertion below would pass by default.
+    assert "UPDATE public.strategy_analytics" in body, (
+        "extracted $cron$ body does not contain the reaping UPDATE — the "
+        f"extraction is broken, so the assertions below prove nothing. Body was: "
+        f"{body[:200]!r}"
+    )
+    return body
+
+
+class TestReaperThresholdDriftGate:
+    """JOB-03 / Falsifiability Ledger SC-3b. The interval literal deployed in the
+    pg_cron reaper body MUST equal the canonical Python constant. If they drift,
+    the number that was DERIVED (and guarded by TestReaperThresholdInvariant) is
+    not the number that RUNS, and every guarantee in this phase is about a
+    constant nothing executes."""
+
+    def test_migration_file_exists(self) -> None:
+        """The migration is on disk under its exact expected name.
+
+        Catches a silent rebase-drop or a rename of the slot out from under the
+        constant's own comment block (job_worker.py names this filename
+        explicitly). Without this, the two tests below would fail with an
+        unhelpful FileNotFoundError instead of naming the real cause.
+        """
+        path = _reaper_migration_path()
+        assert path.is_file(), (
+            f"reaper migration missing at {path}. services/job_worker.py's "
+            "STRATEGY_ANALYTICS_REAP_THRESHOLD comment names this file as the "
+            "consumer of the constant; if the migration was renamed, update "
+            "_REAPER_MIGRATION_NAME here and that comment together."
+        )
+
+    def test_sql_interval_literal_equals_python_constant(self) -> None:
+        """SC-3b: change the migration's interval literal and this goes RED.
+
+        Oracle note (VALIDATION.md §Oracle Independence, deliberate exception
+        #2): this test IMPORTS STRATEGY_ANALYTICS_REAP_THRESHOLD from the module
+        it pins. That is correct for a DRIFT gate — the Python side is DECLARED
+        canonical, and the property under test is SQL==Python equality, not value
+        correctness. VALUE correctness is owned separately by
+        TestReaperThresholdInvariant, whose chain-inclusive ceiling is derived
+        from local literals and does not trust this constant.
+        """
+        from services.job_worker import STRATEGY_ANALYTICS_REAP_THRESHOLD
+
+        body = _reaper_cron_body()
+
+        intervals = {
+            literal.strip().lower()
+            for literal in re.findall(
+                r"interval\s*'([^']+)'", body, flags=re.IGNORECASE
+            )
+        }
+        assert intervals, (
+            "the deployed reaper body carries NO interval literal at all — the "
+            "staleness threshold is missing, so every 'computing' row with a "
+            "non-NULL stamp and no active job is reapable immediately."
+        )
+        expected = STRATEGY_ANALYTICS_REAP_THRESHOLD.strip().lower()
+        assert intervals == {expected}, (
+            f"SQL<->Python threshold DRIFT. The pg_cron body in "
+            f"{_REAPER_MIGRATION_NAME} carries interval literal(s) "
+            f"{sorted(intervals)!r}, but services/job_worker.py "
+            f"STRATEGY_ANALYTICS_REAP_THRESHOLD is {expected!r}. The Python "
+            "constant is CANONICAL: change it there first (re-running "
+            "TestReaperThresholdInvariant to confirm the new value still clears "
+            "the chain-inclusive ceiling), then update the migration literal and "
+            "its header to match. A literal SMALLER than the ceiling reaps "
+            "healthy in-flight chains as 'failed' — a false failure on a money "
+            "surface."
+        )
+
+    def test_cron_body_never_keys_on_computed_at(self) -> None:
+        """P-1 pinned at the SOURCE-TEXT level, so the trap reddens in CI with no
+        database.
+
+        ``computed_at`` is wrong in BOTH directions as the ongoing key: the
+        status bridge re-stamps it ``now()`` on every job transition (so a
+        multi-hop chain would never be reaped), and the Python runner's entry
+        upsert omits it (so it holds the prior 'complete' run's value and the row
+        would be reaped instantly). ``updated_at`` does not exist on
+        strategy_analytics at all — the deleted one-off script raised 42703 on
+        exactly that. Neither may appear in the deployed body.
+        """
+        body = _reaper_cron_body()
+
+        assert "computed_at" not in body, (
+            "the deployed reaper body references computed_at. The status bridge "
+            "re-stamps computed_at = now() on EVERY job transition, so a keyed-on-"
+            "computed_at reaper never fires for a multi-hop chain — this is the "
+            "Phase 106 janitor bug that was reverted, and the reason "
+            "computing_started_at exists. Key on computing_started_at."
+        )
+        assert "updated_at" not in body, (
+            "the deployed reaper body references updated_at, a column "
+            "strategy_analytics does not have. The deleted one-off "
+            "scripts/reset_stuck_computing_rows.py filtered on updated_at and "
+            "raised 42703 under PostgREST; do not carry that defect into SQL."
+        )
+        # Positive control (PATTERNS S-5): the two negative asserts above would
+        # also pass on a body that had been gutted. Pin what MUST be present.
+        assert "computing_started_at" in body, (
+            "the deployed reaper body does not reference computing_started_at at "
+            "all — the negative assertions above are passing vacuously."
         )
