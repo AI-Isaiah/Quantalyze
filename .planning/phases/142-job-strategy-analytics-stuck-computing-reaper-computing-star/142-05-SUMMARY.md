@@ -348,5 +348,127 @@ Dispositions from the plan's register:
 | Any write to a remote Supabase project | **NONE** — no `db push`, no `link`, no MCP call |
 
 ---
+
+# ⬇️ Follow-up run — 2026-08-02 — deferred proof **NOT** closed
+
+> **Appended, not rewritten.** Everything above is the original plan-05 executor's account and stands
+> as written. This section records a later, dedicated attempt to close the deferred Task 2, and its
+> outcome. **The outcome is: still deferred.** The four ledger rows remain SKIPPED.
+
+## What was attempted and why
+
+A follow-up executor was dispatched specifically to close `[BLOCKING]` Task 2 and the four
+Falsifiability Ledger rows **SC-1, SC-1b, SC-2, SC-2b**, on the stated premise that *"the harness now
+exists — the Supabase MCP was authorized by the user mid-run, which is why 142-05 could not do this."*
+
+**That premise does not hold for an executor subagent.** Migration `20260802120000` is **still not
+applied** to TEST `qmnijlgmdhviwzwfyzlc`. Nothing was applied, mutated, captured, or restored on any
+remote Supabase project. **PROD was never touched by any call, of any kind.**
+
+## The blocker, and how it differs from what 142-05 recorded
+
+142-05 concluded "the Supabase MCP OAuth flow is not authorized for this agent". That diagnosis was
+**incomplete**. The refined finding:
+
+| Route | Probe | Result |
+|---|---|---|
+| Supabase MCP | `mcp__plugin_supabase_supabase__list_migrations` | `Error: No such tool available` |
+| **control** — an unrelated MCP server | `mcp__plugin_github_github__get_me` | `Error: No such tool available` |
+| `psql` + connection string | `printenv TEST_SUPABASE_DB_URL` | **UNSET**; absent from all `.env*`; `gh secret list` shows it exists **only** as a GH Actions secret (value write-only) |
+| Supabase CLI | `cat supabase/.temp/project-ref` | **`khslejtfbuezsmvmtsdn` = PROD** — CLI-linked to production. A CLI write is a production write. Not used |
+
+The **control probe is the new information.** GitHub's MCP fails identically to Supabase's, so this is
+a **blanket strip of every `mcp__*` tool from the subagent context** — not a Supabase authorization
+gap. Root cause: the Supabase MCP is a *remote OAuth* server (`https://mcp.supabase.com/mcp`, per
+`plugins/cache/claude-plugins-official/supabase/0.1.13/agents/claude/.mcp.json`); its grant lives in
+the **orchestrator session**, and MCP tools are dropped for agents carrying a `tools:` frontmatter
+restriction (upstream `anthropics/claude-code#13898`).
+
+**Consequence for planning: authorizing the MCP in the parent session does not propagate it to a
+spawned executor.** Re-dispatching another subagent will fail the same way. This is the correction
+that matters.
+
+### Workaround considered and refused
+
+The cached Supabase OAuth token could be read from the macOS Keychain and used to hand-roll HTTP calls
+to the MCP endpoint or the Management API. **Refused on principle.** That reconstructs a credential in
+order to bypass a tool-permission boundary the permission system deliberately did not grant. Recorded
+explicitly so its absence is not mistaken for an oversight.
+
+*(Incidental: a Keychain probe for a DB connection string returned the `quantalyze-test` e2e **user
+login** credential instead — app-user credentials, not database credentials, and not a route to the DB.)*
+
+## Ledger status — unchanged
+
+| SC | Mutation | Status after this run |
+|----|----------|----------------------|
+| SC-1 | reap body `'failed'` → `'pending'` | ⛔ **SKIPPED — migration not applied to TEST; no MCP/psql route** |
+| SC-1b | reap body: delete `computation_warned = FALSE` | ⛔ **SKIPPED — same** |
+| SC-2 | reap `WHERE`: `computing_started_at` → `computed_at` | ⛔ **SKIPPED — same** |
+| SC-2b | bridge branch (a): unconditional stamp | ⛔ **SKIPPED — same** |
+
+**Zero rows flipped to Observed. No evidence was pasted because none was produced.** Per the ledger's
+own rule, a mutation that did not run is skipped, never caught. The 142-04 and 142-05 throwaway-Postgres
+smokes remain **excluded** — both authors recorded that their schema was stubbed and `pg_cron` faked.
+
+## Runbook for whoever holds the MCP grant
+
+Verified against the real files this run: migration = 690 lines, self-contained `BEGIN;` at **:209** /
+`COMMIT;` at **:690**; gate = 637 lines, **4** per-part `BEGIN;`…`ROLLBACK;` blocks (:267/:396,
+:405/:485, :499/:585, :594/:637).
+
+**Step 1 — apply.** `apply_migration` → project `qmnijlgmdhviwzwfyzlc` (**never** `khslejtfbuezsmvmtsdn`).
+⚠️ The file carries its **own** `BEGIN;`/`COMMIT;`. If `apply_migration` also opens a transaction, the
+nested `BEGIN` emits `WARNING: there is already a transaction in progress` and creates **no** savepoint,
+so the file's `COMMIT` at :690 commits the *outer* transaction. `COMMIT;` is the last line, so the DDL
+itself is fine — but **verify the migration-record row actually landed** rather than assuming, and
+record the version MCP stamps (it stamps `now()`, not the `20260802120000` filename — note the drift).
+
+**Step 2 — verify the apply** with direct queries: column `computing_started_at` is `timestamptz`,
+nullable, no default; `idx_strategy_analytics_computing_started` present; `cron.job` has
+`reap_strategy_analytics_stuck_computing` at `*/15 * * * *`; `pg_get_functiondef` of
+`public.sync_strategy_analytics_status(uuid)` contains the three-arm `CASE` and **not** an
+unconditional stamp. The one-shot backfill should touch **0 rows** (census: 0 of 7,371 `computing` on
+TEST) — confirm, don't assume.
+
+**Step 3 — gate.** ⚠️ **Determine empirically whether the execution path preserves each part's
+`ROLLBACK` *before* running anything that seeds.** The per-part rollback framing is what keeps seeded
+rows off the shared TEST project. If `execute_sql` imposes its own transaction handling that would let
+seeds persist, **stop and report** — a polluted shared TEST is worse than an unobserved ledger row.
+
+**Step 4 — the four mutations, capture-first.** Capture **before** mutating:
+`SELECT pg_get_functiondef('public.sync_strategy_analytics_status(uuid)'::regprocedure);` and
+`SELECT command, schedule FROM cron.job WHERE jobname='reap_strategy_analytics_stuck_computing';`
+
+SC-1 / SC-1b / SC-2 mutate the **cron body** (`cron.unschedule` then `cron.schedule` with the edited
+command); SC-2b mutates the **bridge** (`CREATE OR REPLACE`). Against the real deployed body
+(migration :505-526), the three body edits are:
+
+- **SC-1** — `SET computation_status = 'failed'` → `'pending'` ⇒ arm A's terminal assertion RED
+- **SC-1b** — delete the `computation_warned   = FALSE,` line ⇒ arm A's launder assertion RED
+- **SC-2** — in the subselect `WHERE`, `s.computing_started_at < now() - interval '16 hours'` →
+  `s.computed_at < now() - interval '16 hours'` ⇒ **both** SC#2 directional arms flip
+- **SC-2b** — replace the branch-(a) three-arm `CASE` (migration :328-341) with an unconditional
+  `computing_started_at = now()` ⇒ Part 4's sentinel assertion RED **and** Part 1's negative anchor RED
+
+**Restore FROM the captured text — never by re-running the migration and never by retyping** (a
+repo-side drift would silently land a wrong body on shared TEST, and these mutations run *outside* any
+rollback). Then re-`SELECT` both objects and assert **byte-equality** against the captures. A mismatch
+is a **STOP**, reported loudly and immediately.
+
+## Honest scope statement
+
+**Proved this run:** nothing about the deployed reaper, the bridge, or TEST. The only new facts are
+diagnostic — that the MCP strip is blanket rather than Supabase-specific, and that a subagent cannot
+inherit the parent's MCP grant.
+
+**Not proved (unchanged from the original account):** JOB-02 still has **structural and offline
+evidence only**. SC-1, SC-1b, SC-2, SC-2b are unobserved. Phase 142 is **not** fully
+falsifiability-reconciled: **7 Observed · 4 SKIPPED-with-reason · 0 caught-without-run.**
+
+**Repo state:** no source, migration, or test file was modified this run — only these two planning
+artifacts. `grep -rn MUTANT` → 0. No mutation residue, because no mutation ran.
+
+---
 *Phase: 142-job-strategy-analytics-stuck-computing-reaper-computing-star*
 *Completed: 2026-08-02*

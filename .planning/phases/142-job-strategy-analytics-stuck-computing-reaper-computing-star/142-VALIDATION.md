@@ -112,10 +112,10 @@ created: 2026-08-02
 
 | SC | Mutation (exact edit to production source) | Must turn RED | Observed? | Evidence |
 |----|-------------------------------------------|---------------|-----------|----------|
-| SC-1 | Reaper function body: `computation_status = 'failed'` → `'pending'` | `test_strategy_analytics_stuck_computing_reaper.sql` — stranded-row terminal assertion | ⬜ pending | |
-| SC-1b | Reaper function body: **delete** the `computation_warned = FALSE` assignment | SQL gate — the "no false success" assertion (a reaped row must never launder to `complete_with_warnings`) | ⬜ pending | |
-| SC-2 | Reaper `WHERE`: `computing_started_at < now() - <threshold>` → `computed_at < now() - <threshold>` | **Both** SC#2 direction tests in the SQL gate | ⬜ pending | |
-| SC-2b | `sync_strategy_analytics_status` branch (a): replace the transition-conditional stamp with an unconditional `computing_started_at = now()` | SQL gate — "a second bridge call on an already-`computing` row does not advance the stamp". This is the C-3 trap; a naive "the writer sets the stamp" gate passes it | ⬜ pending | |
+| SC-1 | Reaper function body: `computation_status = 'failed'` → `'pending'` | `test_strategy_analytics_stuck_computing_reaper.sql` — stranded-row terminal assertion | ⛔ **SKIPPED** | No route to TEST — see †MCP-STRIP below. Not caught. |
+| SC-1b | Reaper function body: **delete** the `computation_warned = FALSE` assignment | SQL gate — the "no false success" assertion (a reaped row must never launder to `complete_with_warnings`) | ⛔ **SKIPPED** | No route to TEST — see †MCP-STRIP below. Not caught. |
+| SC-2 | Reaper `WHERE`: `computing_started_at < now() - <threshold>` → `computed_at < now() - <threshold>` | **Both** SC#2 direction tests in the SQL gate | ⛔ **SKIPPED** | No route to TEST — see †MCP-STRIP below. Not caught. |
+| SC-2b | `sync_strategy_analytics_status` branch (a): replace the transition-conditional stamp with an unconditional `computing_started_at = now()` | SQL gate — "a second bridge call on an already-`computing` row does not advance the stamp". This is the C-3 trap; a naive "the writer sets the stamp" gate passes it | ⛔ **SKIPPED** | No route to TEST — see †MCP-STRIP below. Not caught. |
 | SC-3 | The Python reaper-threshold constant: divide by 10 (below the chain-inclusive ceiling) | `pytest tests/test_main_worker.py -k Reaper` — the headroom invariant | ⬜ pending | |
 | SC-3b | Change the threshold literal embedded in the migration so it no longer equals the Python constant | The SQL↔Python drift gate | ⬜ pending | |
 | SC-4 | Wire the reaper identifier into `dispatch_tick` (inject the cron jobname onto the worker dispatch surface — plan 142-02 T1) | `test_job07_reaper_off_worker_loop.py` — structural absence gate | ⬜ pending | |
@@ -123,6 +123,49 @@ created: 2026-08-02
 | SC-5 | `analytics_runner.py` `_mark_computing` (~:1227): delete the `computing_started_at` stamp key from the entry upsert dict (plan 142-03 m1) | `pytest tests/test_computing_started_at_stamp.py` — entry rule: literal `"computing"` ⇒ stamp present and ≠ None | ⬜ pending | |
 | SC-5b | `job_worker.py` composite success write: delete the `computing_started_at: None` clear from the `headline_payload` dict literal (~:6635, consumed by the NESTED `_write_headline_and_by_basis` upsert at ~:6744 — plan 142-03 m2) | same file — exit-clear rule reached via the ast.Name payload-resolution arm; this RED doubles as the Name-arm liveness proof | ⬜ pending | |
 | SC-5c | `src/app/api/keys/sync/route.ts:532`: delete `computing_started_at: null` from the failed-placeholder payload (plan 142-03 m3) | same file — TS object-literal half (the payload is built in `compositeMemberCount` and passed as an argument; only the object-literal anchor can see it) | ⬜ pending | |
+
+### † MCP-STRIP — why SC-1 / SC-1b / SC-2 / SC-2b are still SKIPPED (2026-08-02, follow-up run)
+
+A dedicated follow-up run was dispatched **specifically** to close these four rows, on the premise that
+the Supabase MCP had been authorized mid-session and the harness therefore existed. **It does not exist
+for an executor subagent.** Migration `20260802120000` is still **NOT applied to TEST**
+`qmnijlgmdhviwzwfyzlc`, so no mutation, capture, or restore was performed.
+
+All four candidate routes are closed:
+
+| Route | Probe | Result |
+|---|---|---|
+| Supabase MCP | `mcp__plugin_supabase_supabase__list_migrations` | `Error: No such tool available` |
+| *(control)* any other MCP | `mcp__plugin_github_github__get_me` | `Error: No such tool available` — so this is a **blanket strip**, not a Supabase-specific auth gap |
+| `psql` + connection string | `printenv TEST_SUPABASE_DB_URL` | **UNSET**; absent from every `.env*`. `gh secret list` confirms it exists **only** as a GitHub Actions secret, whose value is write-only and cannot be read back |
+| Supabase CLI | `cat supabase/.temp/project-ref` | **`khslejtfbuezsmvmtsdn` = PROD.** The repo is CLI-linked to production; any CLI write is a production write. Not used |
+
+**Root cause:** the MCP server is a *remote OAuth* server (`https://mcp.supabase.com/mcp`, per
+`plugins/cache/claude-plugins-official/supabase/0.1.13/agents/claude/.mcp.json`). Its authorization is
+held by the **orchestrator session**; `mcp__*` tools are stripped from subagent tool contexts
+(upstream `anthropics/claude-code#13898` — MCP tools are dropped for agents carrying a `tools:`
+frontmatter restriction). Authorizing the MCP in the parent session therefore does **not** propagate
+the tools to a spawned executor. The control probe above is what distinguishes this from "the OAuth
+flow was never completed", which is what 142-05 recorded.
+
+**Explicitly rejected workaround:** extracting the cached Supabase OAuth token from the macOS Keychain
+and hand-rolling HTTP calls to the MCP endpoint or the Management API. That would reconstruct a
+credential in order to bypass a tool-permission boundary the permission system deliberately did not
+grant. It is refused on principle, not on difficulty — and it is recorded here so no later reader
+mistakes its absence for an oversight.
+
+**What closes these four rows — one of:**
+1. The **orchestrator** (which holds the MCP authorization) performs Task 2 of `142-05-PLAN.md` itself,
+   rather than delegating it to a subagent; **or**
+2. `TEST_SUPABASE_DB_URL` is exported into the executor's environment, enabling the plan's own
+   `psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/…` route; **or**
+3. CI runs the gate — but note CI's `sql-tests` job **also** requires the migration to be applied to
+   TEST first, so route 1 or 2 is a prerequisite either way, and CI can never produce the four
+   *mutation* REDs (it runs the gate, it does not mutate the deployed body).
+
+A ready-to-run runbook for whichever route is taken — the exact `apply_migration` payload, the four
+mutation statements against the real deployed body, and the capture/restore/byte-equality protocol —
+is appended to `142-05-SUMMARY.md` under "Follow-up run".
 
 *Rules:*
 - **Observed means run.** "The test covers it" is not evidence. Paste the failing assertion.
