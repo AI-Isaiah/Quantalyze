@@ -1,8 +1,8 @@
 ---
 phase: 142
 slug: job-strategy-analytics-stuck-computing-reaper-computing-star
-status: draft
-nyquist_compliant: false
+status: planned
+nyquist_compliant: true
 wave_0_complete: false
 created: 2026-08-02
 ---
@@ -54,24 +54,24 @@ created: 2026-08-02
 
 | Task ID | Plan | Wave | Requirement | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|-----------------|-----------|-------------------|-------------|--------|
-| TBD | TBD | TBD | JOB-01 | `computing_started_at` exists, `timestamptz`, nullable, no default | SQL gate | `psql … -f supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | JOB-01 | The Python `computing` writer co-locates the stamp in the same statement | unit/AST | `cd analytics-service && pytest tests/test_computing_started_at_stamp.py -x` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | JOB-01 | SQL bridge branch (a) stamps on the **transition only** — a second bridge call on an already-`computing` row does NOT advance the stamp | SQL gate (both directions) | same SQL gate file | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | JOB-01 | The stamp is cleared to NULL on **every** exit from `computing` | SQL gate + pytest | same | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | JOB-02 | Stranded row (past threshold, no active job) → `failed` + `computation_error` + `computation_warned=FALSE` | SQL gate, `EXECUTE`-the-deployed-cron-body oracle | same | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | JOB-02 | `computing` row **with** an active `compute_jobs` row → **NOT** reaped | SQL gate | same | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | JOB-02 | `computing` row with **NULL** stamp → **NOT** reaped (skip, never destructively reap) | SQL gate | same | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | JOB-02 (SC#2) | fresh `computed_at` + old `computing_started_at` → **REAPED** | SQL gate | same | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | JOB-02 (SC#2) | old `computed_at` + fresh `computing_started_at` → **NOT** reaped | SQL gate | same | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | JOB-02 | Cron job registered under the expected name, at the expected cadence | SQL gate | same | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | JOB-02 | The `LIMIT` bound holds — N+1 stranded rows ⇒ exactly N reaped in one tick | SQL gate | same | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | JOB-03 | Threshold exceeds every relevant handler's **chain-inclusive** worst case | pytest, beside `TestWatchdogInvariant` | `cd analytics-service && pytest tests/test_main_worker.py -k Reaper -x` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | JOB-03 | SQL literal == Python constant (drift gate, reads `cron.job.command`) | SQL gate + pytest | both | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | JOB-03 | Sane upper bound on the threshold (unit-typo catcher) | pytest, mirroring `test_watchdog_threshold_has_sane_upper_bound` | same | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | JOB-07 | No reaper identifier is reachable from `dispatch_tick` | pytest AST/grep gate | `cd analytics-service && pytest tests/test_job07_reaper_off_worker_loop.py -x` | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | JOB-07 | Backlog ⇒ real healthz TCP probe stays 200; **control**: injected loop-blocking reap ⇒ 503 | pytest, mirroring `tests/test_worker_isolation_e2e.py:119,182` | same | ❌ W0 | ⬜ pending |
-| TBD | TBD | TBD | cross | `computation_status` CHECK ↔ TS closed-set parity unbroken | vitest (existing) | `npx vitest run src/__tests__/contracts/check-zod-db-check-parity.test.ts` | ✅ exists | ⬜ pending |
-| TBD | TBD | TBD | cross | `mypy --strict` clean on `analytics-service` | type gate | `cd analytics-service && mypy --strict .` | ✅ exists | ⬜ pending |
+| 142-05.T1 | 05 | 3 | JOB-01 | `computing_started_at` exists, `timestamptz`, nullable, no default | SQL gate | `psql … -f supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql` | ❌ W0 | ⬜ pending |
+| 142-03.T3 | 03 | 2 | JOB-01 | The Python `computing` writer co-locates the stamp in the same statement | unit/AST | `cd analytics-service && pytest tests/test_computing_started_at_stamp.py -x` | ❌ W0 | ⬜ pending |
+| 142-05.T1 | 05 | 3 | JOB-01 | SQL bridge branch (a) stamps on the **transition only** — a second bridge call on an already-`computing` row does NOT advance the stamp | SQL gate (both directions) | same SQL gate file | ❌ W0 | ⬜ pending |
+| 142-03.T3 + 142-05.T1 | 03/05 | 2/3 | JOB-01 | The stamp is cleared to NULL on **every** exit from `computing` | SQL gate + pytest | same | ❌ W0 | ⬜ pending |
+| 142-05.T1 | 05 | 3 | JOB-02 | Stranded row (past threshold, no active job) → `failed` + `computation_error` + `computation_warned=FALSE` | SQL gate, `EXECUTE`-the-deployed-cron-body oracle | same | ❌ W0 | ⬜ pending |
+| 142-05.T1 | 05 | 3 | JOB-02 | `computing` row **with** an active `compute_jobs` row → **NOT** reaped | SQL gate | same | ❌ W0 | ⬜ pending |
+| 142-05.T1 | 05 | 3 | JOB-02 | `computing` row with **NULL** stamp → **NOT** reaped (skip, never destructively reap) | SQL gate | same | ❌ W0 | ⬜ pending |
+| 142-05.T1 | 05 | 3 | JOB-02 (SC#2) | fresh `computed_at` + old `computing_started_at` → **REAPED** | SQL gate | same | ❌ W0 | ⬜ pending |
+| 142-05.T1 | 05 | 3 | JOB-02 (SC#2) | old `computed_at` + fresh `computing_started_at` → **NOT** reaped | SQL gate | same | ❌ W0 | ⬜ pending |
+| 142-05.T1 | 05 | 3 | JOB-02 | Cron job registered under the expected name, at the expected cadence | SQL gate | same | ❌ W0 | ⬜ pending |
+| 142-05.T1 | 05 | 3 | JOB-02 | The `LIMIT` bound holds — N+1 stranded rows ⇒ exactly N reaped in one tick | SQL gate | same | ❌ W0 | ⬜ pending |
+| 142-01.T2 | 01 | 1 | JOB-03 | Threshold exceeds every relevant handler's **chain-inclusive** worst case | pytest, beside `TestWatchdogInvariant` | `cd analytics-service && pytest tests/test_main_worker.py -k Reaper -x` | ❌ W0 | ⬜ pending |
+| 142-04.T3 + 142-05.T1 | 04/05 | 2/3 | JOB-03 | SQL literal == Python constant (drift gate, reads `cron.job.command`) | SQL gate + pytest | both | ❌ W0 | ⬜ pending |
+| 142-01.T2 | 01 | 1 | JOB-03 | Sane upper bound on the threshold (unit-typo catcher) | pytest, mirroring `test_watchdog_threshold_has_sane_upper_bound` | same | ❌ W0 | ⬜ pending |
+| 142-02.T1 | 02 | 1 | JOB-07 | No reaper identifier is reachable from `dispatch_tick` | pytest AST/grep gate | `cd analytics-service && pytest tests/test_job07_reaper_off_worker_loop.py -x` | ❌ W0 | ⬜ pending |
+| 142-02.T2 | 02 | 1 | JOB-07 | Backlog ⇒ real healthz TCP probe stays 200; **control**: injected loop-blocking reap ⇒ 503 | pytest, mirroring `tests/test_worker_isolation_e2e.py:119,182` | same | ❌ W0 | ⬜ pending |
+| 142-03.T2 + 142-05.T3 | 03/05 | 2/3 | cross | `computation_status` CHECK ↔ TS closed-set parity unbroken | vitest (existing) | `npx vitest run src/__tests__/contracts/check-zod-db-check-parity.test.ts` | ✅ exists | ⬜ pending |
+| 142-03 + 142-05.T3 | 03/05 | 2/3 | cross | `mypy --strict` clean on `analytics-service` | type gate | `cd analytics-service && mypy --strict .` | ✅ exists | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
