@@ -67,7 +67,9 @@ at ``.table("strategy_analytics")`` is what keeps that file clean;
 
 Mechanism analogs: the chain-unwind is
 ``tests/test_verify_strategy_no_legacy_writes.py:34-98``; ``_repo_root`` /
-``_strip_comment`` / the anti-vacuity asserts are ``tests/test_dark_path_deleted.py``.
+``_is_pure_comment`` / ``_py_scan_files`` now live ONCE in
+``tests/_scan_helpers.py`` (D-10 — this file donated the canonical wide-union
+forms); the anti-vacuity assert idiom is ``tests/test_dark_path_deleted.py``.
 """
 
 from __future__ import annotations
@@ -76,6 +78,16 @@ import ast
 import re
 from pathlib import Path
 from typing import Final, NamedTuple
+
+# D-10: the path/hygiene/scan helpers live in ONE module. Three copies of
+# ``_py_scan_files`` with three different file lists used to mean a gate could
+# silently narrow its surface and keep reporting green.
+from tests._scan_helpers import (
+    _is_pure_comment,
+    _py_scan_files,
+    _rel,
+    _repo_root,
+)
 
 # ---------------------------------------------------------------------------
 # Contract constants
@@ -100,44 +112,6 @@ _EXTEND = "extend the gate"
 
 
 # ---------------------------------------------------------------------------
-# Shared path / hygiene helpers (idiom: tests/test_dark_path_deleted.py:37-68)
-# ---------------------------------------------------------------------------
-
-
-def _repo_root() -> Path:
-    """The monorepo root — the first ancestor containing BOTH ``src/`` and
-    ``analytics-service/``. Resolved by walking up so the scan works from the
-    ``analytics-service`` pytest cwd and in CI."""
-    for parent in Path(__file__).resolve().parents:
-        if (parent / "src").is_dir() and (parent / "analytics-service").is_dir():
-            return parent
-    raise RuntimeError(
-        "could not locate the repo root (an ancestor with both src/ and "
-        "analytics-service/)"
-    )
-
-
-def _is_pure_comment(line: str, *, lang: str) -> bool:
-    """True when ``line`` is a pure comment for its language.
-
-    Grep-gate hygiene, and LOAD-BEARING for the TypeScript half:
-    ``src/app/api/keys/sync/route.ts`` mentions ``computation_status:'failed'``
-    inside a block comment, which must neither trip nor satisfy the gate.
-    """
-    stripped = line.lstrip()
-    if lang == "py":
-        return stripped.startswith("#")
-    return stripped.startswith("//") or stripped.startswith("*")
-
-
-def _rel(path: Path) -> str:
-    try:
-        return str(path.relative_to(_repo_root()))
-    except ValueError:  # pragma: no cover - defensive
-        return str(path)
-
-
-# ---------------------------------------------------------------------------
 # Python half — AST, chain-scoped to the WRITE call, with payload resolution
 # ---------------------------------------------------------------------------
 
@@ -149,25 +123,6 @@ class _WriteSite(NamedTuple):
     lineno: int
     payload: ast.Dict
     arm: str  # "literal" | "n1" | "n2"
-
-
-def _py_scan_files() -> list[Path]:
-    """The live Python write surface: everything under ``services/``, ``routers/``
-    and ``scripts/`` plus the two entrypoints. Any new ``strategy_analytics``
-    status writer would land in one of these."""
-    svc = _repo_root() / "analytics-service"
-    files: list[Path] = [svc / "main_worker.py", svc / "main.py"]
-    for sub in ("services", "routers", "scripts"):
-        files.extend(sorted((svc / sub).rglob("*.py")))
-    seen: set[Path] = set()
-    scan: list[Path] = []
-    for f in files:
-        rf = f.resolve()
-        if rf in seen or not rf.exists():
-            continue
-        seen.add(rf)
-        scan.append(rf)
-    return scan
 
 
 def _write_target_table(call: ast.Call) -> str | None:

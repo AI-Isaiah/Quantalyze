@@ -48,6 +48,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import services.basis_series as _bs
 from services.job_worker import DispatchOutcome, run_derive_broker_dailies_job
+from tests._scan_helpers import _is_pure_comment, _repo_root
 from tests.test_mtm_single_key import (
     _ALLOC_CONFIG,
     _STRATEGY_ID,
@@ -653,26 +654,10 @@ async def test_ccxt_malformed_config_fails_permanent() -> None:
 # ── boundary guards (Task 2): SERIES-ONLY + INERT read + single seam ─────────
 
 
-def _repo_root() -> Path:
-    """The monorepo root — the first ancestor containing BOTH ``src/`` and
-    ``analytics-service/``. Resolved by walking up from this file so the scan works
-    from the ``analytics-service`` pytest cwd and in CI."""
-    for parent in Path(__file__).resolve().parents:
-        if (parent / "src").is_dir() and (parent / "analytics-service").is_dir():
-            return parent
-    raise RuntimeError(
-        "could not locate the repo root (an ancestor with both src/ and "
-        "analytics-service/)"
-    )
-
-
-def _strip_comment(line: str, *, lang: str) -> bool:
-    """True when ``line`` is a pure comment for its language (grep-gate hygiene: a
-    docstring/comment mentioning a token must neither trip nor satisfy the gate)."""
-    stripped = line.lstrip()
-    if lang == "py":
-        return stripped.startswith("#")
-    return stripped.startswith("//") or stripped.startswith("*")
+# D-10: ``_repo_root`` and the comment-detection helper are shared — see
+# ``tests/_scan_helpers.py``. The helper is imported under its honest name
+# ``_is_pure_comment`` (it returns bool and strips nothing; the old local name
+# ``_strip_comment`` was a lie).
 
 
 # Phase 105 (BB-02, collapse #2) DELETED the Phase-104 SC-2 boundary guard
@@ -715,7 +700,7 @@ def test_no_reader_consumes_cash_settlement_series_row() -> None:
     offenders: list[str] = []
     for lang, f in scanned:
         for i, line in enumerate(f.read_text().splitlines(), 1):
-            if _strip_comment(line, lang=lang):
+            if _is_pure_comment(line, lang=lang):
                 continue
             if "cash_settlement" in line and (
                 "kind" in line or "strategy_analytics_series" in line
@@ -748,7 +733,7 @@ def test_single_cash_settlement_persist_seam() -> None:
     worker = _repo_root() / "analytics-service" / "services" / "job_worker.py"
     code = "\n".join(
         ln for ln in worker.read_text().splitlines()
-        if not _strip_comment(ln, lang="py")
+        if not _is_pure_comment(ln, lang="py")
     )
     total = code.count('basis="cash_settlement"')
     heals = code.count('basis="cash_settlement", result=None')
