@@ -93,20 +93,20 @@ _SCOPED_RE = re.compile(
 #     because migration
 #     20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql
 #     coerces the stamp on any UPDATE of an already-computing row) -> reaper 1 -> 0
-#   * plan 142.1-08's Part 6 adds three scoped driver UPDATEs
-#                                              -> reaper 0 -> 3
+#   * plan 142.1-08's Part 6 (the G1 trigger sentinel) added three scoped driver
+#     UPDATEs — 6a never-advance, 6b clock-start closure, 6c exit-clear — each
+#     bound to a strategy_id that block seeded    -> reaper 0 -> 3 (DONE)
 #
 # ⚠️ A count of ZERO is expressed by ABSENCE, not by an explicit `: 0` entry.
 # `actual` below is built with a truthiness filter, so a file with no matches
 # never appears in it and an explicit `: 0` here would fail the comparison. The
-# gate is unweakened: if the reaper file regains an UPDATE, `actual` gains a key
-# this map does not have and the assertion still fires.
+# gate is unweakened: if a file with no UPDATE today regains one, `actual` gains
+# a key this map does not have and the assertion still fires.
 # ---------------------------------------------------------------------------
 _EXPECTED_MATCH_COUNTS: dict[str, int] = {
     "test_metrics_by_basis_write.sql": 4,
+    "test_strategy_analytics_stuck_computing_reaper.sql": 3,
     "test_wizard_composite_members.sql": 2,
-    # test_strategy_analytics_stuck_computing_reaper.sql: 0 — intentionally
-    # absent per the note above. Plan 142.1-08 restores it at 3.
 }
 
 
