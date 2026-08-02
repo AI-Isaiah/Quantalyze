@@ -144,6 +144,31 @@ _ENTRY_STATUS: Final[str] = "computing"
 
 _EXTEND = "extend the gate"
 
+# ── D-02/R2: the ONE terminal payload allowed to omit the stamp key ─────────
+# ``analytics_runner._mark_unrecoverable`` re-issues its 'failed' upsert without
+# ``computing_started_at`` when PostgREST rejects the first attempt with a
+# schema-cache miss on that column — a deploy window in which the column does
+# not exist server-side at all. Naming the key is exactly what made the first
+# write fail, and there is no stale stamp to leave behind on a column PostgREST
+# cannot see. That writer is the catch-all exit: without the re-issue an
+# already-failed job leaves its row 'computing' forever.
+#
+# The exemption is matched on the payload's exact KEY SET, never on a file or a
+# function name, so it cannot spill onto the compliant sibling payload in the
+# same function. See :func:`_is_stamp_omission_exempt` for why that direction
+# matters, and ``EXPECTED_STAMP_OMISSION_EXEMPT`` for the count that pins it.
+_STAMP_OMISSION_EXEMPT_FILE: Final[str] = "analytics_runner.py"
+_STAMP_OMISSION_EXEMPT_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "strategy_id",
+        _STATUS_KEY,
+        _WARNED_KEY,
+        "computation_error",
+        "data_quality_flags",
+    }
+)
+EXPECTED_STAMP_OMISSION_EXEMPT: Final[int] = 1
+
 
 # ---------------------------------------------------------------------------
 # Python half — AST, chain-scoped to the WRITE call, with payload resolution
@@ -437,6 +462,39 @@ def _is_none(node: ast.expr | None) -> bool:
     return isinstance(node, ast.Constant) and node.value is None
 
 
+def _payload_keys(node: ast.Dict) -> frozenset[str]:
+    """The string keys of a payload literal (``**spread`` entries have no key)."""
+    return frozenset(
+        k.value
+        for k in node.keys
+        if isinstance(k, ast.Constant) and isinstance(k.value, str)
+    )
+
+
+def _is_stamp_omission_exempt(site: _WriteSite) -> bool:
+    """True for the D-02/R2 recovery payload, identified by SHAPE not by name.
+
+    Matching on the exact key set is what makes the exemption safe in BOTH
+    directions, which a file+function match would not be:
+
+      * delete the recovery payload and the exempt count falls to 0 — the
+        exemption itself reddens, so a dead carve-out cannot linger;
+      * strip the stamp key from the compliant SIBLING payload in the same
+        function and its key set collapses onto this same signature, taking the
+        exempt count to 2 — the defect reddens here instead of being absorbed by
+        a carve-out that was only ever meant to cover one write.
+
+    Any other terminal writer that omits the stamp key does not match, lands in
+    ``missing``, and fails the invariant as before.
+    """
+    if site.path.name != _STAMP_OMISSION_EXEMPT_FILE:
+        return False
+    status = _dict_value(site.payload, _STATUS_KEY)
+    if not (isinstance(status, ast.Constant) and status.value == "failed"):
+        return False
+    return _payload_keys(site.payload) == _STAMP_OMISSION_EXEMPT_KEYS
+
+
 class _PyScan(NamedTuple):
     all_sites: list[_WriteSite]
     kept: list[_WriteSite]  # sites whose payload carries computation_status
@@ -477,10 +535,14 @@ def test_python_status_writers_stamp_and_clear() -> None:
 
     missing: list[str] = []
     wrong: list[str] = []
+    exempt: list[str] = []
     for site in scan.kept:
         where = f"{_rel(site.path)}:{site.lineno}"
         if not _has_key(site.payload, _STAMP_KEY):
-            missing.append(where)
+            if _is_stamp_omission_exempt(site):
+                exempt.append(where)
+            else:
+                missing.append(where)
             continue
         status = _dict_value(site.payload, _STATUS_KEY)
         stamp = _dict_value(site.payload, _STAMP_KEY)
@@ -531,6 +593,17 @@ def test_python_status_writers_stamp_and_clear() -> None:
         "JOB-01: these strategy_analytics status writers carry "
         f"{_STAMP_KEY} with the WRONG value:\n  " + "\n  ".join(wrong)
     )
+    assert len(exempt) == EXPECTED_STAMP_OMISSION_EXEMPT, (
+        f"expected exactly {EXPECTED_STAMP_OMISSION_EXEMPT} terminal payload "
+        f"exempt from the {_STAMP_KEY} rule (D-02/R2 — the schema-cache-miss "
+        f"re-issue in _mark_unrecoverable), found {len(exempt)}:\n  "
+        + "\n  ".join(exempt)
+        + f"\n0 means the recovery re-issue is GONE and a deploy-window "
+        f"{_STAMP_OMISSION_EXEMPT_FILE} failure can strand a row in "
+        f"'{_ENTRY_STATUS}' again. More than 1 means a second writer now matches "
+        "the carve-out — most likely the compliant payload beside it lost its "
+        "stamp key. Neither is absorbable: read the sites above."
+    )
 
 
 def test_python_writer_census_counts() -> None:
@@ -538,11 +611,16 @@ def test_python_writer_census_counts() -> None:
     of this census rather than sliding in under a green gate.
 
     Census (verified 2026-08-02 against the post-142-01/142-02 tree):
-      * 12 status-writing dicts — 6 in ``analytics_runner.py`` (1 entry + 5 exits)
-        and 6 in ``job_worker.py`` (5 terminal 'failed' + the composite success
-        headline). The would-be 13th, ``scripts/reset_stuck_computing_rows.py``, is
+      * 13 status-writing dicts — 7 in ``analytics_runner.py`` (1 entry + 5 exits
+        + the D-02/R2 schema-cache-miss re-issue in ``_mark_unrecoverable``) and 6
+        in ``job_worker.py`` (5 terminal 'failed' + the composite success
+        headline). A would-be 14th, ``scripts/reset_stuck_computing_rows.py``, is
         GONE: plan 142-02 deleted that broken one-off, which is why plan 142-03
         depends on it.
+        ⚠️ The re-issue payload is the ONE terminal dict that omits the stamp
+        key. It is not silently tolerated — it is carved out by shape and pinned
+        at ``EXPECTED_STAMP_OMISSION_EXEMPT``, asserted in
+        :func:`test_python_status_writers_stamp_and_clear`.
       * 2 of those 12 are reached ONLY through the n1 ``ast.Name`` arm — the
         ``payload`` bound in ``analytics_runner._mark_complete`` and the
         ``headline_payload`` bound in the OUTER ``run_stitch_composite_job`` body but
@@ -564,13 +642,18 @@ def test_python_writer_census_counts() -> None:
         moves a site kept→skipped reddens HERE, visibly and decidably, instead of
         passing unnoticed. Raising it above 0 is a deliberate act — write down
         which site and why.
+        Plan 142.1-04 forecast this counter moving to 1 once the D-02/R2 re-issue
+        landed. It did NOT, and the reason is worth recording: C-12 required that
+        payload to be an explicit second literal rather than a merge expression,
+        and a literal is resolvable — so the re-issue is COUNTED among the 13
+        above rather than skipped. Re-measured against a live scan, not assumed.
 
     (A third n1 resolution exists — ``csv_flag_payload`` in ``analytics_runner``'s
     sibling-upsert failure arm — but it is a partial data_quality_flags upsert with
     no status key, so it is not among the 12 and is not counted here.)
     """
-    EXPECTED_STATUS_DICTS = 12
-    EXPECTED_RUNNER_DICTS = 6
+    EXPECTED_STATUS_DICTS = 13
+    EXPECTED_RUNNER_DICTS = 7
     EXPECTED_WORKER_DICTS = 6
     EXPECTED_KEPT_VIA_N1 = 2
     EXPECTED_SITES_VIA_N2 = 1
