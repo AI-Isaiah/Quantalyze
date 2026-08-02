@@ -438,8 +438,8 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 142-03-PLAN.md — JOB-01 app writers: stamp W1 + clear 11 Python & 4 TS exit sites, D.10 census, two-runtime stamp CI gate (wave 2)
-- [ ] 142-04-PLAN.md — migration 20260802120000: DDL + backfill + index + re-based bridge (conditional stamp) + inline pg_cron reaper; SQL↔Python drift gate (wave 2)
+- [x] 142-03-PLAN.md — JOB-01 app writers: stamp W1 + clear 11 Python & 4 TS exit sites, D.10 census, two-runtime stamp CI gate (wave 2)
+- [x] 142-04-PLAN.md — migration 20260802120000: DDL + backfill + index + re-based bridge (conditional stamp) + inline pg_cron reaper; SQL↔Python drift gate (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -512,7 +512,7 @@ Plans:
 | 140.1. PYAPI contract/status/limiter (INSERTED) | 9/9 | Complete | 2026-07-26 |
 | 140.1.1. PYAPI-FIX (INSERTED) | 7/7 | Complete    | 2026-07-26 |
 | 141. SEAM retry (audit-gated) | 4/4 | Complete    | 2026-07-31 |
-| 142. JOB reaper + DDL | 3/6 | In Progress|  |
+| 142. JOB reaper + DDL | 5/6 | In Progress|  |
 | 143. JOB dropped-enqueue sweep | 0/? | Not started | - |
 | 144. JOB WR-02 terminal UPDATE | 0/? | Not started | - |
 | 145. JOB csv-finalize atomicity | 0/? | Not started | - |
