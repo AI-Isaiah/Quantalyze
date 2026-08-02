@@ -697,10 +697,15 @@ live access, so they cannot be planned around.
 
 ### v1.16 Phase-142.1 — planning residuals (added 2026-08-02, at plan time — NOT execution findings)
 
-Raised by the `gsd-plan-checker` across three verification rounds on 142.1's plans. **None clears
-the founder blast-radius bar** — all are documentation-rationale or comment-coverage. Logged here
-so the next reader does not mistake their absence for oversight. W-1 and W-2 were folded into
-plan `142.1-05` before execution and are recorded as discharged.
+Items 1–5 and 7 were raised by the `gsd-plan-checker` across three verification rounds on 142.1's
+plans. **None of those clears the founder blast-radius bar** — all are documentation-rationale or
+comment-coverage. Logged here so the next reader does not mistake their absence for oversight. W-1
+and W-2 were folded into plan `142.1-05` before execution and are recorded as discharged.
+
+⚠️ **Item 6 (`D-19`) is different in kind and the section heading does not cover it: it is an
+EXECUTION finding, not a planning residual** — a real defect found by running the gate against TEST
+on 2026-08-02, already fixed on this branch, with a live PROD residual that must be closed at merge.
+Read it as such.
 
 1. **⛔ `DEF-142.1-08` — D-08 was CUT from Phase 142.1, and must not be closed by bumping a
    literal.** The finding: `test_main_worker.py:1295`'s `assert len(TIMEOUT_PER_KIND) == 15`
@@ -743,7 +748,33 @@ plan `142.1-05` before execution and are recorded as discharged.
    ⚠️ supersession note in `read_first`, and CONTEXT § D-18 Part 1 states the supersession — but
    the research document itself is never annotated, so a reader who opens it first gets the wrong
    shape. One banner line fixes it.
-6. **✅ Discharged at plan time (recorded so they are not re-raised): W-1 and W-2.** W-1: plans
+6. **⚠️ `D-19` — the reaper's `LIMIT`-25 bound is restored on THIS BRANCH ONLY; the PROD cron body
+   still carries the unbounded shape until it merges.** Found by the first end-to-end run of
+   `supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql` against TEST (phase 142.1
+   plan 07 / D-16). Part 3 arm E: 26 seeded stranded rows, **zero** foreign competitors, one tick
+   terminalized **26 of 26** — expected 25. Cause: both arms bound their batch through
+   `WHERE strategy_id IN (SELECT … LIMIT 25 FOR UPDATE SKIP LOCKED)`; `FOR UPDATE` makes the subplan
+   un-hashable, so the planner attaches it as the inner side of a nested-loop semi-join and
+   **re-executes it once per outer row**, applying a fresh `LIMIT` each time — the cap is
+   per-rescan, never global (measured on PostgreSQL 17.6). Fixed by
+   `supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql` (commit `2b8c016f`),
+   which forces single evaluation of the bounded batch on **both** arms; verified on TEST before the
+   migration was written (`failed=25`, `still_computing=1`, the 26th survives) and the gate re-ran
+   green after. ⚠️ **A FROM-clause subquery form was ALSO measured and ALSO reaps 26 of 26** — the
+   planner is equally free to nest-loop it, so forcing single evaluation is load-bearing, not
+   stylistic; do not "simplify" it away. **Impact is a LOCK-DURATION and BLAST-RADIUS defect, NOT
+   data corruption** — the rows are genuinely stranded (>16 h, no active job), but unbounded, one
+   `*/15` tick against a backlog of N terminalizes all N in one statement and holds row locks on all
+   N, on a table every live analytics write touches. **RESIDUAL / ACTION:** ⛔ the migration is
+   applied to **TEST only** (stamped `20260802212852`). PROD's registered cron body is still the
+   unbounded shape until `feat/v1.16-142-146-job-rate` merges to `main` and the auto-apply runs.
+   **The merge-time PROD verification must re-confirm the deployed body carries the bound as TWO
+   single-evaluation batches — one per arm — not just that the `LIMIT` token is present.** That
+   token-presence check is exactly what every gate in phases 142 and 142.1 passed over. Class census
+   at discovery: of the 8 registered cron jobs, only `reap_strategy_analytics_stuck_computing` puts
+   a `LIMIT` inside an `IN (…)` subquery; the other seven carry no `LIMIT` at all — the class is
+   closed at one member, so no sweep is owed.
+7. **✅ Discharged at plan time (recorded so they are not re-raised): W-1 and W-2.** W-1: plans
    claimed SQL-gate Part 4b "stays falsifiable" after the D-18 retrofit; it does not — 4b is a
    **double-mutation** defence-in-depth assertion (trigger arm (a) and the bridge's own keep-arm
    each independently preserve the sentinel). W-2: after the retrofit Part 4a's
