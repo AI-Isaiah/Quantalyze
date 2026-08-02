@@ -184,6 +184,26 @@ true for 146 and half of 142–145, and **false for 141**.
   those changes invalidate. Plan-check found 4; plans 06, 07 and 08 each found one *more* the plan did
   not predict. Fold into the planning template, not a code phase.
 
+### MT5 wizard — founder-observed on live UI (added 2026-08-02)
+- **MT5 connect fails with copy that names the wrong exchanges.** Submitting the MT5 form
+  (login / investor password / broker server, all filled) renders *"This does not look like a
+  valid API key for the selected exchange… Binance secrets are 64 hex characters; OKX and Bybit
+  use different formats"* with `code: KEY_INVALID_FORMAT`. Two defects stacked, both real:
+  1. **Leading hypothesis for the rejection itself — the documented client-on/server-off
+     half-state.** `create-with-key/route.ts:147` returns exactly this code when
+     `isMt5EnabledServer()` is false, and that gate is strict `MT5_ENABLED === "true"` on the
+     **Vercel/Next server** — a *different* variable from the worker's `MT5_ENABLED` and from
+     `NEXT_PUBLIC_MT5_ENABLED` (which is what renders the MT5 card the founder clicked).
+     **Check Vercel prod env for a server-side `MT5_ENABLED=true` before writing any code** —
+     if it is missing this is an env fix, not a code fix, and the card is offerable while the
+     submit path is closed.
+  2. **Independent of (1): the wizard's `KEY_INVALID_FORMAT` copy is exchange-generic and
+     discards the server's specific `error` string.** The route sent *"MT5 integration is not
+     yet available."*; the user was shown Binance/OKX/Bybit hex-length advice. One shared code
+     is bucketing unrelated causes, and the renderer drops the detail that would have explained
+     it. Fix the mapping to be exchange-aware (and to surface the server reason) regardless of
+     how (1) resolves — otherwise every future MT5 rejection lies the same way.
+
 ---
 
 ## 🟡 FIX MID-TERM
@@ -298,6 +318,21 @@ true for 146 and half of 142–145, and **false for 141**.
   The narrow real risk worth separating out, if anyone revisits this: an untyped fixture/double
   can drift from the real contract it stands in for — but the fix for that is targeted
   contract-pinning (already the repo's practice), not blanket typing.
+
+### UX / product polish (founder-requested)
+- **MT5 "Broker server" should not be a masked field, and should be searchable.**
+  `ConnectKeyStep.tsx:696` renders the passphrase-slot input as
+  `type={showSecret ? "text" : "password"}`, which is right for an OKX passphrase but wrong for
+  MT5 — a broker server name is not a secret, and masking it makes the "copy it exactly as it
+  appears in your terminal" instruction hard to satisfy (you cannot proofread what you typed).
+  Two parts: (a) render this slot as plain text when the venue's passphrase slot is
+  non-secret — needs a per-exchange flag next to the existing `passphraseLabel` /
+  `passphrasePlaceholder` / `passphraseHelper` overrides, not a blanket change, since OKX must
+  stay masked; (b) turn it into a typeahead — user types a fragment, we scan available MT5
+  servers matching it and present a dropdown. **Open question for (b):** where the server list
+  comes from — the MT5 gateway can enumerate what its terminal knows, but that is one terminal's
+  view, not a global registry. Decide between gateway-enumerated, a curated broker→servers map,
+  or free-text-with-suggestions before planning.
 
 ### Tech-debt / maintainability (opportunistic, don't force)
 - God-files: `queries.ts` (3,205 lines), `job_worker.run_sync_trades_job` (688 lines),
