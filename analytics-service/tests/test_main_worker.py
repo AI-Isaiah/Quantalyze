@@ -2160,14 +2160,23 @@ class TestPerJobHealthzRefresh:
 # ---------------------------------------------------------------------------
 # The reaper's staleness threshold exists in TWO places: the Python constant
 # STRATEGY_ANALYTICS_REAP_THRESHOLD (declared canonical) and the interval
-# literal baked into the pg_cron body of migration 20260802120000. Nothing at
+# literal baked into the pg_cron body of migration 20260803120000. Nothing at
 # runtime reconciles them — the migration is applied by Supabase, the constant is
 # read by nobody at runtime — so silent divergence is invisible until the reaper
 # either mis-reaps healthy chains (literal too small) or never fires (too large).
 # This gate makes that divergence a red build instead.
+#
+# ⚠️ The name below must always point at the migration that registers the
+# CURRENTLY DEPLOYED cron body. Phase 142.1 (D-11/D-17) re-registered the same
+# pg_cron job under a later migration, so this constant moved with it; leaving it
+# on the superseded file would have kept this gate green while guarding a body
+# pg_cron no longer runs — the third instance of the silent-narrowing class the
+# phase exists to close (corrections C-10 / D-04 / D-10). services/job_worker.py's
+# STRATEGY_ANALYTICS_REAP_THRESHOLD comment names the same file; the two move
+# together, and test_migration_file_exists below says so in its failure message.
 
 _REAPER_MIGRATION_NAME = (
-    "20260802120000_strategy_analytics_stuck_computing_reaper.sql"
+    "20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql"
 )
 
 

@@ -279,9 +279,20 @@ $$;
 --   arm A  stranded, warned=TRUE, FRESH computed_at   -> MUST be reaped (all 4 cols)
 --   arm B  fresh stamp, OLD computed_at               -> MUST survive
 --   arm C  old stamp but ONE active compute_jobs row  -> MUST survive
---   arm D  NULL stamp (writer bug), no jobs           -> MUST survive
+--   arm D  NULL stamp, no active jobs                 -> MUST have its CLOCK STARTED
+--          (still computing, stamp no longer NULL)
 -- Arms A and B together are the SC#2 pair: they fail in OPPOSITE directions if
 -- the predicate keys on computed_at instead of computing_started_at.
+--
+-- ⚠️ ARM D WAS INVERTED in Phase 142.1 (D-11 / correction C-6). It used to assert
+-- the NULL-stamp row was left UNMUTATED, because the deployed body was a single
+-- reap statement that deliberately skipped NULL stamps. The deployed body is now
+-- TWO statements -- a non-destructive clock-start arm FIRST, then the unchanged
+-- reap -- so the correct expectation is the opposite: the row keeps its
+-- 'computing' status (the arm never terminalizes) AND acquires a stamp, after
+-- which the ordinary threshold applies to it like any other row. This arm IS
+-- SC-11's gate: delete the clock-start arm from the migration and the stamp
+-- stays NULL and this part reddens.
 -- ==========================================================================
 BEGIN;
 SET LOCAL lock_timeout = '5s';
@@ -291,7 +302,7 @@ DECLARE
   v_a        uuid;   -- stranded          -> MUST reap
   v_b        uuid;   -- fresh stamp       -> MUST survive
   v_c        uuid;   -- active job        -> MUST survive
-  v_d        uuid;   -- NULL stamp        -> MUST survive
+  v_d        uuid;   -- NULL stamp        -> MUST get its clock STARTED
   v_seeded   uuid[];
   v_command  TEXT;
   v_status   TEXT;
@@ -352,8 +363,21 @@ BEGIN
     (kind, strategy_id, status, priority, attempts, next_attempt_at, claim_token, claimed_at)
   VALUES ('compute_analytics_from_csv', v_c, 'running', 'normal', 1, now(), gen_random_uuid(), now());
 
-  -- arm D: NULL stamp. That is a WRITER bug, not a stranded job; destructively
-  -- terminalizing it would convert a bug into user-visible data loss.
+  -- arm D: NULL stamp with no active job -- the D-11 population. Terminalizing
+  -- it would convert a writer bug into user-visible data loss, so the deployed
+  -- body does the non-destructive thing instead: it STARTS the clock, and the
+  -- ordinary 16-hour threshold takes it from there. Seeded by INSERT, which is
+  -- what makes it reachable at all: the stamp trigger (migration 20260803120000)
+  -- fires on UPDATE only, precisely so this file can establish state at INSERT
+  -- (D-18 part 2).
+  --
+  -- DETERMINISM, stated honestly (the migration carries the mirror of this note
+  -- beside the arm): the clock-start arm is bounded LIMIT 25 and cannot be
+  -- ordered (every candidate's stamp is NULL, so there is nothing to sort on).
+  -- This assertion therefore rests on the header's RESIDUAL ASSUMPTION plus
+  -- fewer than 25 FOREIGN rows sitting at ('computing', NULL, no active job) on
+  -- the shared TEST project when this runs. Changing the arm's target predicate
+  -- and this argument are a SAME-COMMIT pair, in both directions.
   INSERT INTO public.strategy_analytics
     (strategy_id, computation_status, computation_warned, computing_started_at, computed_at)
   VALUES (v_d, 'computing', FALSE, NULL, v_fresh - interval '100 days');
@@ -395,17 +419,19 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (2/arm C/JOB-02): a row with an ACTIVE compute_jobs row was reaped (got %). A healthy in-flight chain always has a non-terminal job row; reaping it fails a live computation.', v_status;
   END IF;
 
-  -- arm D: the writer-bug skip rule.
+  -- arm D: the clock-start rule. NON-DESTRUCTIVE is half the property, so BOTH
+  -- assertions are load-bearing: the status must NOT move (the arm terminalizes
+  -- nothing) AND the stamp must now be set (the arm actually ran).
   SELECT computation_status, computing_started_at INTO v_status, v_stamp
     FROM public.strategy_analytics WHERE strategy_id = v_d;
   IF v_status IS DISTINCT FROM 'computing' THEN
-    RAISE EXCEPTION 'TEST FAILED (2/arm D/JOB-02): a computing row with a NULL computing_started_at was reaped (got %). A NULL stamp is a WRITER bug, not a stranded job; the reaper must skip it and let the static CI stamp invariant catch the writer.', v_status;
+    RAISE EXCEPTION 'TEST FAILED (2/arm D/JOB-02): a computing row with a NULL computing_started_at was reaped (got %). A NULL stamp is a WRITER bug, not a stranded job; the clock-start arm must START its clock, never terminalize it -- that would convert a bug into user-visible data loss.', v_status;
   END IF;
-  IF v_stamp IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (2/arm D): the NULL-stamp row was mutated by the reaper (stamp is now %).', v_stamp;
+  IF v_stamp IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm D/D-11): the clock-start arm did not start the clock on a (computing, NULL stamp, no active job) row -- the stamp is still NULL. Such a row is invisible to the reap arm forever, and no STATIC gate can ever see it (a source scan cannot see rows). Either the clock-start arm is missing from the deployed body, or 25+ foreign rows in the same condition consumed its budget (see this arm''s DETERMINISM note above).';
   END IF;
 
-  RAISE NOTICE 'Part 2 OK: stranded row reaped on all four columns; fresh-stamp/old-computed_at survived; active-job row survived; NULL-stamp row survived untouched.';
+  RAISE NOTICE 'Part 2 OK: stranded row reaped on all four columns; fresh-stamp/old-computed_at survived; active-job row survived; NULL-stamp row had its clock started without being terminalized.';
 
   -- Teardown, belt-and-suspenders; the ROLLBACK also discards everything.
   DELETE FROM auth.users WHERE id = v_user;
@@ -527,11 +553,45 @@ ROLLBACK;
 -- jobs of THREE DISTINCT kinds, because
 -- compute_jobs_one_inflight_per_kind_strategy is a partial unique on
 -- (strategy_id, kind) over the in-flight statuses. Rolls back unconditionally.
---   4a  first job done, siblings in flight -> row resolves computing AND stamps
---   4b  SC-2b: sentinel pre-set, second job done -> stamp NOT advanced
+--   4a  first job done, siblings in flight -> row stays computing, stamp KEPT
+--   4b  SC-2b: second job done -> the seeded sentinel is still there
 --   4c  last job done -> branch (c) terminal -> stamp CLEARED
 -- No pg_cron gate here: this part needs only the migration's column and the
 -- re-based bridge, so it must redden (not skip) on an unapplied migration.
+--
+-- ⚠️ RETROFITTED in Phase 142.1 (D-18 part 2). The sentinel is now seeded in the
+-- part's INSERT, and the mid-test UPDATE that used to install it between 4a and
+-- 4b is DELETED. Reason: the stamp trigger (migration 20260803120000) fires
+-- BEFORE UPDATE and coerces the stamp on an already-computing row, so an UPDATE
+-- could no longer install a sentinel at all -- it would be reverted before it
+-- landed, and this part would have gone green over a value it never wrote. The
+-- rule the retrofit encodes is general: this file establishes state at INSERT,
+-- where the trigger by design does not fire, and NEVER by UPDATE-ing a computing
+-- row.
+--
+-- ⛔ WHAT 4a AND 4b DO AND DO NOT PROVE -- read before "strengthening" either.
+--
+--   * 4a's `IF v_stamp IS NULL` is an S-2 SEED-INTEGRITY CONTROL, not a proof.
+--     The row is SEEDED at computing with the sentinel, so after the retrofit
+--     that check cannot fail on any behaviour of the code under test; it exists
+--     to catch a broken seed. What 4a demonstrates is the mid-chain property: a
+--     bridge hop on an already-computing row keeps it computing and PRESERVES
+--     the pre-existing stamp.
+--   * The behavioural proof that a transition INTO computing STAMPS has LEFT
+--     Part 4. It now lives in Part 1's structural anchors (`= CASE` and
+--     `IS DISTINCT FROM 'computing'` against the deployed functiondef), in
+--     migration 20260802120000's own STEP 7 anchors, and behaviourally in
+--     trigger arm (b) at Part 6 (plan 142.1-08). ⛔ Do NOT "restore" it by
+--     re-seeding this part at 'pending' -- that re-breaks the sentinel, which is
+--     the exact defect the retrofit fixed.
+--   * 4b is DOUBLE-MUTATION defence-in-depth, NOT a single-mutation observable.
+--     Two independent mechanisms now preserve the sentinel: trigger arm (a)
+--     coerces an advancing write back to the old stamp, AND the bridge's own
+--     Arm 3 keeps it. Breaking either ALONE leaves 4b green; only breaking BOTH
+--     reddens it. SC-2b's single-mutation observable is Part 6/6a (plan
+--     142.1-08), and a bridge that stamps unconditionally is caught by Part 1's
+--     negative anchor and by the migration's STEP 7 anchor. 4b adds depth, not
+--     coverage -- do not credit it as the SC-2b proof in any evidence ledger.
 -- ==========================================================================
 BEGIN;
 SET LOCAL lock_timeout = '5s';
@@ -556,10 +616,15 @@ BEGIN
   INSERT INTO public.strategies (user_id, name)
     VALUES (v_user, 'sa-reaper-stamp-strat') RETURNING id INTO v_strat;
 
-  -- Pre-transition state: NOT computing, NO stamp.
+  -- Mid-chain state, established at INSERT (D-18 part 2): already computing,
+  -- with the SC-2b sentinel three hours back as its start time. This is the only
+  -- point at which this part may set the stamp -- the trigger does not fire on
+  -- INSERT, so the sentinel lands verbatim, whereas an UPDATE would be coerced.
+  v_sentinel := now() - interval '3 hours';
+
   INSERT INTO public.strategy_analytics
     (strategy_id, computation_status, computation_warned, computing_started_at)
-  VALUES (v_strat, 'pending', FALSE, NULL);
+  VALUES (v_strat, 'computing', FALSE, v_sentinel);
 
   INSERT INTO public.compute_jobs
     (id, kind, strategy_id, status, priority, attempts, next_attempt_at, claim_token, claimed_at)
@@ -568,7 +633,7 @@ BEGIN
     (v_j2, 'derive_broker_dailies',      v_strat, 'running', 'normal', 1, now(), v_t2, now()),
     (v_j3, 'compute_analytics_from_csv', v_strat, 'running', 'normal', 1, now(), v_t3, now());
 
-  -- ----- 4a: the transition INTO computing stamps ------------------------
+  -- ----- 4a: a mid-chain bridge hop keeps computing AND keeps the stamp -----
   PERFORM public.mark_compute_job_done(v_j1, v_t1);
 
   SELECT computation_status, computing_started_at INTO v_status, v_stamp
@@ -576,21 +641,22 @@ BEGIN
   IF v_status IS DISTINCT FROM 'computing' THEN
     RAISE EXCEPTION 'TEST FAILED (4a): with two sibling jobs still in flight the bridge did not resolve computing (got %).', v_status;
   END IF;
+  -- S-2 SEED-INTEGRITY CONTROL, not a behavioural proof (see the Part 4 header):
+  -- the row was seeded WITH a stamp, so this can only fail if the seed itself is
+  -- broken -- which would make every assertion below vacuous.
   IF v_stamp IS NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (4a/JOB-01): the SQL writer entered computing WITHOUT setting computing_started_at. That row would be skipped by the reaper forever (the NULL-stamp skip rule is deliberate).';
+    RAISE EXCEPTION 'TEST FAILED (4a/seed): the seeded computing_started_at is gone before the SC-2b arm even runs, so 4b would compare against nothing. This is a broken fixture, not a finding about the bridge.';
   END IF;
 
   -- ----- 4b: SC-2b, the frozen-clock-proof form -------------------------
   -- now() is CONSTANT inside this transaction, so "call twice and compare the
   -- two stamps" CANNOT FAIL -- an unconditional stamp writes the same frozen
-  -- now() both times. Pre-set a SENTINEL three hours back instead: the
-  -- conditional (already-computing) arm KEEPS it; an unconditional stamp
-  -- overwrites it with the frozen now() and this assertion reddens.
-  v_sentinel := now() - interval '3 hours';
-  UPDATE public.strategy_analytics
-     SET computing_started_at = v_sentinel
-   WHERE strategy_id = v_strat;
-
+  -- now() both times. The sentinel three hours back (seeded above, at INSERT) is
+  -- what makes the difference visible: a writer that advances the stamp
+  -- overwrites it with the frozen now(), which differs from the sentinel by
+  -- three hours. ⚠️ Two mechanisms now defend that value, so this arm is
+  -- defence-in-depth rather than a single-mutation observable -- see the ⛔ note
+  -- in the Part 4 header before citing it as evidence for anything.
   PERFORM public.mark_compute_job_done(v_j2, v_t2);
 
   SELECT computation_status, computing_started_at INTO v_status, v_stamp

@@ -88,16 +88,25 @@ _SCOPED_RE = re.compile(
 #
 # ⚠️ These counts are EXPECTED TO MOVE, and each move belongs in the SAME commit
 # as the SQL edit that causes it — that is the pin doing its job, not churn:
-#   * plan 142.1-05's Part-4 retrofit DELETES the reaper's :553-era sentinel
-#     UPDATE (seeds it at INSERT instead)      -> reaper 1 -> 0
+#   * plan 142.1-05's Part-4 retrofit DELETED the reaper file's last remaining
+#     strategy_analytics UPDATE (the SC-2b sentinel is now seeded at INSERT,
+#     because migration
+#     20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql
+#     coerces the stamp on any UPDATE of an already-computing row) -> reaper 1 -> 0
 #   * plan 142.1-08's Part 6 adds three scoped driver UPDATEs
 #                                              -> reaper 0 -> 3
+#
+# ⚠️ A count of ZERO is expressed by ABSENCE, not by an explicit `: 0` entry.
+# `actual` below is built with a truthiness filter, so a file with no matches
+# never appears in it and an explicit `: 0` here would fail the comparison. The
+# gate is unweakened: if the reaper file regains an UPDATE, `actual` gains a key
+# this map does not have and the assertion still fires.
 # ---------------------------------------------------------------------------
 _EXPECTED_MATCH_COUNTS: dict[str, int] = {
     "test_metrics_by_basis_write.sql": 4,
     "test_wizard_composite_members.sql": 2,
-    # The lone survivor: Part 4b's sentinel pre-set, `WHERE strategy_id = v_strat`.
-    "test_strategy_analytics_stuck_computing_reaper.sql": 1,
+    # test_strategy_analytics_stuck_computing_reaper.sql: 0 — intentionally
+    # absent per the note above. Plan 142.1-08 restores it at 3.
 }
 
 
