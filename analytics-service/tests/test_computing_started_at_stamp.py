@@ -10,9 +10,19 @@ and never on ``computed_at``. Two consequences make this a build-time gate:
   * an exit writer that fails to clear the stamp leaves a stale timestamp on a
     terminal row, which the reaper could later re-fire on.
 
-Enforcement is STATIC, not runtime. A runtime ``CHECK`` constraint was rejected in
+Enforcement is STATIC here. A runtime ``CHECK`` constraint was rejected in
 CONTEXT.md: a missed writer would then surface as a 23514 on the live money path
 instead of a red build.
+
+⚠️ This census is NO LONGER the enforcement point. Since D-17/D-18 the ``BEFORE
+UPDATE`` trigger function ``strategy_analytics_stamp_computing_started`` (migration
+``20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql``)
+coerces the column in the database, silently and regardless of payload shape or
+call-site language — the one place every writer must pass through. It is proven by
+Part 6 of ``supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql``.
+What survives here is payload HYGIENE: the fast, cheap signal that a writer's
+intent is legible at the call site. That distinction is why an unreadable payload
+is recorded rather than fatal (D-07) — see :func:`_resolve_name`.
 
 ────────────────────────────────────────────────────────────────────────────
 THIS FILE IS NOT THE WHOLE INVARIANT (research P-11)
@@ -220,8 +230,9 @@ def _resolve_name(
     chain: tuple[_Scope, ...],
     upto: int,
     where: str,
-) -> ast.Dict:
-    """Resolve a ``Name`` payload to its dict literal.
+    skipped: list[str],
+) -> ast.Dict | None:
+    """Resolve a ``Name`` payload to its dict literal, or record a skip.
 
     ``chain[0]`` is the module; ``chain[1:]`` are the enclosing ``(Async)FunctionDef``
     scopes, innermost LAST. ``upto`` is how many chain entries are visible; the walk
@@ -234,8 +245,24 @@ def _resolve_name(
         resolve its default. A ``Name`` default resumes the n1 walk at the scope
         ENCLOSING the def, which is where defaults are evaluated.
 
-    Every unresolvable shape FAILS LOUD. There is no silent-skip arm: a write site
-    the gate cannot classify must redden the build, never pass unchecked.
+    ── RESOLUTION POLICY (D-07) ───────────────────────────────────────────────
+    A payload shape neither arm can read appends one line to ``skipped`` and
+    returns ``None``. It does not raise.
+
+    The stamp invariant is owned by the DATABASE, not by this census: the
+    ``BEFORE UPDATE`` trigger function ``strategy_analytics_stamp_computing_started``
+    (migration ``20260803120000_strategy_analytics_stamp_trigger_null_stamp_clock_start.sql``)
+    coerces the column regardless of payload shape or call-site language, and Part 6
+    of ``supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql`` proves
+    that against the deployed object. What remains here is best-effort payload
+    hygiene over the shapes a parser-free census can read. Refactoring a payload
+    into a builder helper is legitimate engineering and must not be able to break
+    the build, nor force an author to grow AST arms in a test file.
+
+    The skip is NOT silent: ``test_python_writer_census_counts`` pins the skip count
+    to a literal, so a site moving kept→skipped reddens that counter and has to be
+    acknowledged in the census. That is a decidable, visible signal instead of a
+    hard stop.
     """
     for index in range(upto - 1, -1, -1):
         scope = chain[index]
@@ -247,15 +274,16 @@ def _resolve_name(
             if len(dict_bindings) == 1:
                 return dict_bindings[0]
             if len(dict_bindings) > 1:
-                raise AssertionError(
+                skipped.append(
                     f"{where}: payload name {name!r} has {len(dict_bindings)} dict "
-                    f"bindings in one scope — the gate cannot tell which one the "
-                    f"write uses; {_EXTEND}."
+                    f"bindings in one scope — ambiguous, not read."
                 )
-            raise AssertionError(
+                return None
+            skipped.append(
                 f"{where}: payload name {name!r} is bound to a non-dict expression "
-                f"({type(bindings[0]).__name__}); {_EXTEND}."
+                f"({type(bindings[0]).__name__}) — not read."
             )
+            return None
 
         # ---- (n2) parameter default on this scope's own def --------------
         if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -263,38 +291,56 @@ def _resolve_name(
             if resolved is not None:
                 tag, node = resolved
                 if tag == "star":
-                    raise AssertionError(
+                    skipped.append(
                         f"{where}: payload name {name!r} is a *args/**kwargs "
-                        f"parameter of {scope.name!r} — there is no default to "
-                        f"resolve; {_EXTEND}."
+                        f"parameter of {scope.name!r} — no default to read."
                     )
+                    return None
                 if tag == "nodefault":
-                    raise AssertionError(
+                    skipped.append(
                         f"{where}: payload name {name!r} is a parameter of "
-                        f"{scope.name!r} with NO default — the gate cannot see the "
-                        f"caller's dict; {_EXTEND}."
+                        f"{scope.name!r} with NO default — the caller's dict is not "
+                        f"statically visible."
                     )
+                    return None
                 if isinstance(node, ast.Dict):
                     return node
                 if isinstance(node, ast.Name):
                     # Defaults are evaluated in the ENCLOSING scope.
-                    return _resolve_name(node.id, chain, index, where)
-                raise AssertionError(
+                    return _resolve_name(node.id, chain, index, where, skipped)
+                skipped.append(
                     f"{where}: payload name {name!r} defaults to an unsupported "
-                    f"expression ({type(node).__name__}); {_EXTEND}."
+                    f"expression ({type(node).__name__}) — not read."
                 )
+                return None
 
-    raise AssertionError(
-        f"{where}: payload name {name!r} has zero resolvable bindings in any "
-        f"enclosing scope (neither single-assignment nor parameter default); "
-        f"{_EXTEND}."
+    skipped.append(
+        f"{where}: payload name {name!r} has zero readable bindings in any "
+        f"enclosing scope (neither single-assignment nor parameter default)."
     )
+    return None
 
 
-def _collect_write_sites(path: Path) -> list[_WriteSite]:
-    """Every resolved ``strategy_analytics`` WRITE site in one file."""
-    module = ast.parse(path.read_text(encoding="utf-8"))
+class _FileScan(NamedTuple):
+    """One file's (or one synthetic source's) resolved sites plus its skips."""
+
+    sites: list[_WriteSite]
+    skipped: list[str]
+
+
+def _collect_write_sites_in_text(source: str, *, label: str) -> _FileScan:
+    """Every readable ``strategy_analytics`` WRITE site in ``source``.
+
+    Split out from :func:`_collect_write_sites` so the resolver can be exercised
+    against synthetic in-memory source — the ``_count_in_text`` / ``_count`` split
+    in ``tests/_scan_helpers.py`` is the precedent, and the reason is the same:
+    without it, D-07's record-and-continue policy would be an unfalsifiable claim.
+    See ``test_helper_built_payload_is_recorded_not_fatal``.
+    """
+    module = ast.parse(source)
+    path = Path(label)
     sites: list[_WriteSite] = []
+    skipped: list[str] = []
 
     def visit(node: ast.AST, chain: tuple[_Scope, ...]) -> None:
         next_chain = chain
@@ -303,38 +349,51 @@ def _collect_write_sites(path: Path) -> list[_WriteSite]:
         if isinstance(node, ast.Call) and _write_target_table(node) == _TABLE:
             where = f"{_rel(path)}:{node.lineno}"
             if not node.args:
-                raise AssertionError(
-                    f"{where}: {_TABLE} write has no positional payload argument; "
-                    f"{_EXTEND}."
+                skipped.append(
+                    f"{where}: {_TABLE} write has no positional payload argument."
                 )
-            arg = node.args[0]
-            if isinstance(arg, ast.Dict):
-                sites.append(_WriteSite(path, node.lineno, arg, "literal"))
-            elif isinstance(arg, ast.Name):
-                # `chain` (not `next_chain`): a Call is never its own scope.
-                visible = (module,) + chain
-                # Distinguish which arm resolved it, for the liveness counters.
-                arm = "n1"
-                innermost = chain[-1] if chain else None
-                if (
-                    isinstance(innermost, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and not _dict_bindings(innermost, arg.id)
-                    and _param_default(innermost, arg.id) is not None
-                ):
-                    arm = "n2"
-                payload = _resolve_name(arg.id, visible, len(visible), where)
-                sites.append(_WriteSite(path, node.lineno, payload, arm))
             else:
-                raise AssertionError(
-                    f"{where}: {_TABLE} write payload is a "
-                    f"{type(arg).__name__}, which the gate cannot resolve to a "
-                    f"dict literal; {_EXTEND}."
-                )
+                arg = node.args[0]
+                if isinstance(arg, ast.Dict):
+                    sites.append(_WriteSite(path, node.lineno, arg, "literal"))
+                elif isinstance(arg, ast.Name):
+                    # `chain` (not `next_chain`): a Call is never its own scope.
+                    visible = (module,) + chain
+                    # Distinguish which arm resolved it, for the liveness counters.
+                    arm = "n1"
+                    innermost = chain[-1] if chain else None
+                    if (
+                        isinstance(innermost, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and not _dict_bindings(innermost, arg.id)
+                        and _param_default(innermost, arg.id) is not None
+                    ):
+                        arm = "n2"
+                    payload = _resolve_name(
+                        arg.id, visible, len(visible), where, skipped
+                    )
+                    if payload is not None:
+                        sites.append(_WriteSite(path, node.lineno, payload, arm))
+                else:
+                    # D-07: a payload built by a helper call, a merge expression or a
+                    # comprehension is recorded and stepped over. The DB trigger owns
+                    # the invariant; see _resolve_name's RESOLUTION POLICY.
+                    skipped.append(
+                        f"{where}: {_TABLE} write payload is a "
+                        f"{type(arg).__name__} — not a dict literal this census "
+                        f"can read."
+                    )
         for child in ast.iter_child_nodes(node):
             visit(child, next_chain)
 
     visit(module, ())
-    return sites
+    return _FileScan(sites, skipped)
+
+
+def _collect_write_sites(path: Path) -> _FileScan:
+    """Every readable ``strategy_analytics`` WRITE site in one file."""
+    return _collect_write_sites_in_text(
+        path.read_text(encoding="utf-8"), label=str(path)
+    )
 
 
 def _dict_value(node: ast.Dict, key: str) -> ast.expr | None:
@@ -357,16 +416,20 @@ def _is_none(node: ast.expr | None) -> bool:
 class _PyScan(NamedTuple):
     all_sites: list[_WriteSite]
     kept: list[_WriteSite]  # sites whose payload carries computation_status
+    skipped: list[str]  # writes whose payload shape this census cannot read (D-07)
 
 
 def _scan_python(files: list[Path]) -> _PyScan:
     all_sites: list[_WriteSite] = []
+    skipped: list[str] = []
     for path in files:
-        all_sites.extend(_collect_write_sites(path))
+        scan = _collect_write_sites(path)
+        all_sites.extend(scan.sites)
+        skipped.extend(scan.skipped)
     # The three partial data_quality_flags upserts resolve to dicts WITHOUT a status
     # key and drop out HERE — untouched, exactly as the writer census requires.
     kept = [s for s in all_sites if _has_key(s.payload, _STATUS_KEY)]
-    return _PyScan(all_sites, kept)
+    return _PyScan(all_sites, kept, skipped)
 
 
 # ---------------------------------------------------------------------------
@@ -467,10 +530,16 @@ def test_python_writer_census_counts() -> None:
         It resolves to a dict with keys {strategy_id, data_quality_flags} and NO
         status key, so it DROPS OUT of the kept set. Counting it across ALL write
         sites rather than kept ones is therefore the only liveness proof n2 can have.
-        Without this arm the gate FAILS LOUD on that correct, deliberately-untouched
-        partial upsert.
+        Without this arm that correct, deliberately-untouched partial upsert would
+        move into the skipped count below (before D-07 it aborted the whole run).
       * exactly 1 kept dict carries the literal 'computing'. A SECOND entry writer
         must be a conscious decision, never an accident.
+      * exactly 0 write sites are SKIPPED as unreadable (D-07). Under the
+        record-and-continue policy a payload this census cannot read is no longer
+        fatal, so this counter is what keeps the green honest: a refactor that
+        moves a site kept→skipped reddens HERE, visibly and decidably, instead of
+        passing unnoticed. Raising it above 0 is a deliberate act — write down
+        which site and why.
 
     (A third n1 resolution exists — ``csv_flag_payload`` in ``analytics_runner``'s
     sibling-upsert failure arm — but it is a partial data_quality_flags upsert with
@@ -482,6 +551,7 @@ def test_python_writer_census_counts() -> None:
     EXPECTED_KEPT_VIA_N1 = 2
     EXPECTED_SITES_VIA_N2 = 1
     EXPECTED_COMPUTING_DICTS = 1
+    EXPECTED_SKIPPED_UNRESOLVED = 0
 
     scan = _scan_python(_py_scan_files())
 
@@ -534,6 +604,15 @@ def test_python_writer_census_counts() -> None:
         + "\nA second entry writer must be a conscious decision (and must stamp)."
     )
 
+    assert len(scan.skipped) == EXPECTED_SKIPPED_UNRESOLVED, (
+        f"expected exactly {EXPECTED_SKIPPED_UNRESOLVED} python "
+        f"{_TABLE} write(s) whose payload shape this census cannot read, found "
+        f"{len(scan.skipped)}:\n  " + "\n  ".join(scan.skipped)
+        + "\nD-07: a skipped site is NOT a build failure — the DB trigger owns the "
+        "stamp invariant. It IS a coverage change: confirm the site is genuinely "
+        "outside static reach and bump this literal, or restore a readable payload."
+    )
+
 
 def test_portfolio_router_has_zero_findings() -> None:
     """The false-positive exclusion, asserted rather than assumed.
@@ -547,7 +626,7 @@ def test_portfolio_router_has_zero_findings() -> None:
     path = (_repo_root() / "analytics-service" / "routers" / "portfolio.py").resolve()
     assert path.exists(), f"expected analog file missing: {path}"
 
-    sites = _collect_write_sites(path)
+    sites = _collect_write_sites(path).sites
     assert sites == [], (
         "routers/portfolio.py must yield zero strategy_analytics WRITE sites — its "
         "computation_status payloads target portfolio_analytics and its "
@@ -566,6 +645,86 @@ def test_portfolio_router_has_zero_findings() -> None:
         "portfolio.py no longer touches strategy_analytics — this exclusion test is "
         "now vacuous."
     )
+
+
+# Synthetic source for the D-07 tolerance self-test. The payload is RETURNED FROM A
+# HELPER — the single shape the finding named as the one an unrelated refactor most
+# plausibly produces, and the shape that used to abort the whole run.
+_SYNTHETIC_HELPER_BUILT_PAYLOAD = '''
+def _build_failed_payload(strategy_id):
+    return {
+        "strategy_id": strategy_id,
+        "computation_status": "failed",
+        "computation_warned": False,
+        "computing_started_at": None,
+    }
+
+
+def mark_failed(supabase, strategy_id):
+    supabase.table("strategy_analytics").upsert(
+        _build_failed_payload(strategy_id), on_conflict="strategy_id"
+    ).execute()
+'''
+
+# Positive control for the same self-test: the SAME harness, the SAME table, a payload
+# the census CAN read. Without it, "0 sites, 1 skip" above would also be produced by a
+# broken chain-unwind that saw no write at all.
+_SYNTHETIC_LITERAL_PAYLOAD = '''
+def mark_failed(supabase, strategy_id):
+    supabase.table("strategy_analytics").upsert(
+        {
+            "strategy_id": strategy_id,
+            "computation_status": "failed",
+            "computation_warned": False,
+            "computing_started_at": None,
+        },
+        on_conflict="strategy_id",
+    ).execute()
+'''
+
+
+def test_helper_built_payload_is_recorded_not_fatal() -> None:
+    """D-07's standing observable: an unreadable payload is COUNTED, not fatal.
+
+    The stamp invariant is enforced by the DB trigger
+    ``strategy_analytics_stamp_computing_started`` (migration ``20260803120000``),
+    so a developer who hoists a payload into a builder helper must not be forced to
+    choose between abandoning the refactor and growing AST arms in this file. What
+    this census owes them instead is an honest count of what it stopped reading.
+
+    Neuter the record-and-continue policy — put the ``raise`` back at the
+    payload-shape arm of ``_collect_write_sites_in_text`` — and this test goes RED
+    on the raise rather than on an assertion, which is the point.
+    """
+    scan = _collect_write_sites_in_text(
+        _SYNTHETIC_HELPER_BUILT_PAYLOAD, label="<synthetic-helper-built>"
+    )
+
+    assert scan.sites == [], (
+        "a helper-built payload must not be reported as a READ site — the census "
+        f"cannot see inside the helper: {[s.lineno for s in scan.sites]}"
+    )
+    assert len(scan.skipped) == 1, (
+        "expected exactly one recorded skip for the helper-built payload, got "
+        f"{len(scan.skipped)}:\n  " + "\n  ".join(scan.skipped)
+    )
+    assert "<synthetic-helper-built>:" in scan.skipped[0], (
+        f"the skip record must name the site it skipped: {scan.skipped[0]!r}"
+    )
+
+    # Positive control (PATTERNS S-2).
+    control = _collect_write_sites_in_text(
+        _SYNTHETIC_LITERAL_PAYLOAD, label="<synthetic-literal>"
+    )
+    assert control.skipped == [], (
+        "the literal-payload control must record no skips: " + "; ".join(control.skipped)
+    )
+    assert len(control.sites) == 1, (
+        "the literal-payload control must resolve exactly one write site, got "
+        f"{len(control.sites)} — if this is 0 the harness is not driving the "
+        "chain-unwind at all and the skip assertion above is vacuous"
+    )
+    assert _has_key(control.sites[0].payload, _STATUS_KEY)
 
 
 # ---------------------------------------------------------------------------
