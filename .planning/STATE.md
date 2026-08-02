@@ -4,7 +4,7 @@ milestone: v1.16
 milestone_name: Production Resilience & Reliability
 status: executing
 stopped_at: Completed 140.3-G4-PLAN.md (SEAMUX-03 coded arms on verify-strategy + validate-and-encrypt)
-last_updated: "2026-08-02T08:29:02.734Z"
+last_updated: "2026-08-02T08:33:46.680Z"
 last_activity: 2026-08-02
 progress:
   total_phases: 16
@@ -46,7 +46,7 @@ RATE-01..05 — all mapped, Traceability filled). Roadmap: `.planning/ROADMAP.md
 
 ## Current Position
 
-Phase: 141.2 (seamfix) — ✅ EXECUTED + VERIFIED (17/17 must-haves, 0 review blockers).
+Phase: 142 (JOB — strategy_analytics stuck-computing reaper + computing_started_at DDL) — EXECUTING
         Six plans across three waves, each wave gated at its boundary; final suite
         10 487 vitest + 4 824 pytest green, typecheck clean, coverage above ratchet.
         13 findings CLOSED PER THEIR DISPOSITIONS — twelve remediated, finding 8
@@ -64,8 +64,8 @@ Phase: 141.2 (seamfix) — ✅ EXECUTED + VERIFIED (17/17 must-haves, 0 review b
         per-finding failure scenarios: `141.2-FINDINGS.md`.
 
 Prior phase: 141.1 (seambackoff-…) — COMPLETE and verified, merged, NOT pushed
-Plan: 9 of 9 complete — VERIFIED, phase closed
-Status: Ready to execute
+Plan: 1 of 6
+Status: Executing Phase 142
         `feat/v1.16-141-jobs-rate-retry`. Post-merge gate after Wave 2 GREEN: tsc clean,
         FULL vitest 735 files / 10450 passed / 287 skipped, tsc + lint clean.
         Wave 4 (09) merged. FINAL GATE GREEN: tsc clean, lint 0 errors, vitest
@@ -196,7 +196,7 @@ Status: Ready to execute
         at `finalize-wizard/route.ts:840-851`), now ledger row TS-33; its "strictly
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
-Last activity: 2026-08-02 -- Phase 142 planning complete
+Last activity: 2026-08-02 -- Phase 142 execution started
 
 Progress: [██████████] 95%
 

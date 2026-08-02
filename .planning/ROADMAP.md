@@ -432,9 +432,9 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 142-01-PLAN.md — JOB-03 Python side: JOB_CHAIN_FOLLOW_ON topology (enqueue sites read it) + canonical reap-threshold constant + TestReaperThresholdInvariant (wave 1)
-- [ ] 142-02-PLAN.md — JOB-07 structural gate + healthz blocking-vs-yielding control pair; delete broken reset_stuck_computing_rows.py + stays-absent gate (wave 1)
-- [ ] 142-06-PLAN.md — JOB-01 row type: StrategyAnalytics.computing_started_at (string | null, never optional) + EMPTY_ANALYTICS + 7 fixture files — the checker-measured 8-file compile blast radius (wave 1)
+- [x] 142-01-PLAN.md — JOB-03 Python side: JOB_CHAIN_FOLLOW_ON topology (enqueue sites read it) + canonical reap-threshold constant + TestReaperThresholdInvariant (wave 1)
+- [x] 142-02-PLAN.md — JOB-07 structural gate + healthz blocking-vs-yielding control pair; delete broken reset_stuck_computing_rows.py + stays-absent gate (wave 1)
+- [x] 142-06-PLAN.md — JOB-01 row type: StrategyAnalytics.computing_started_at (string | null, never optional) + EMPTY_ANALYTICS + 7 fixture files — the checker-measured 8-file compile blast radius (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -512,7 +512,7 @@ Plans:
 | 140.1. PYAPI contract/status/limiter (INSERTED) | 9/9 | Complete | 2026-07-26 |
 | 140.1.1. PYAPI-FIX (INSERTED) | 7/7 | Complete    | 2026-07-26 |
 | 141. SEAM retry (audit-gated) | 4/4 | Complete    | 2026-07-31 |
-| 142. JOB reaper + DDL | 0/? | Not started | - |
+| 142. JOB reaper + DDL | 3/6 | In Progress|  |
 | 143. JOB dropped-enqueue sweep | 0/? | Not started | - |
 | 144. JOB WR-02 terminal UPDATE | 0/? | Not started | - |
 | 145. JOB csv-finalize atomicity | 0/? | Not started | - |
