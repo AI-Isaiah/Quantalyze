@@ -452,7 +452,7 @@ Plans:
 **Goal:** Close the 16 items raised by three independent passes over Phase 142 (high-effort workflow review, blind `gsd-code-reviewer`, and the `gsd-verifier` goal-backward pass that had never run) — so that the reap clock genuinely measures the whole job chain, no terminal writer can launder a failure into a green factsheet, the `sql-function-snapshot` CI gate is green again, and Phase 142's own falsifiability evidence is complete rather than 4/11.
 **Requirements**: JOB-01, JOB-02, JOB-03 (remediation of Phase 142 delivery; no new REQ IDs)
 **Depends on:** Phase 142
-**Plans:** 8 plans
+**Plans:** 1/8 plans executed
 
 **Scope + per-item failure scenarios:** `.planning/STATE.md` § "Phase 142.1 scope".
 **Evidence:** `142-VERIFICATION.md` (status `gaps_found`, 9/10), `142-REVIEW.md` (0 blockers, 4 warnings).
@@ -464,7 +464,7 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 142.1-01-PLAN.md — D-12 run 1 (FIRST commit, clears the hard-red snapshot gate) + D-13 JOB-03 text + D-14 ledger backfill + DEF-142.1-08 deferral
+- [x] 142.1-01-PLAN.md — D-12 run 1 (FIRST commit, clears the hard-red snapshot gate) + D-13 JOB-03 text + D-14 ledger backfill + DEF-142.1-08 deferral
 
 **Wave 2**
 
