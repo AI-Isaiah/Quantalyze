@@ -286,6 +286,15 @@ true for 146 and half of 142–145, and **false for 141**.
   money-path plumbing. Route to a future milestone as B-mypy part j, or close as WON'T-FIX if
   the untyped-tests posture is reaffirmed. Surfaced because a Phase 142 executor ran
   `mypy --strict` on a path the gate excludes; **zero errors fell in Phase 142's added ranges.**
+- **All 16 Phase 142 review/verification items are OWNED BY PHASE 142.1** — not tracked here.
+  Full text with per-item failure scenarios: `.planning/STATE.md` § "Phase 142.1 scope".
+  Raised by three independent passes (high-effort workflow review, blind `gsd-code-reviewer`,
+  `gsd-verifier`). Seven are test-quality/doc items that would normally live here under the
+  stopping rule; they were pulled into 142.1 on 2026-08-02 because the phase existed anyway.
+  ⚠️ **If 142.1 is descoped or cut, re-file those seven here** — they have no other owner.
+  ⚠️ One item is a hard-red CI gate today: `scripts/dump-sql-functions.ts --check` exits 1
+  (`sql-function-snapshot.yml:84`) because `supabase/schema/functions/` was not regenerated
+  after migration `20260802120000`. One-command fix: `npm run schema:functions`.
   The narrow real risk worth separating out, if anyone revisits this: an untyped fixture/double
   can drift from the real contract it stands in for — but the fix for that is targeted
   contract-pinning (already the repo's practice), not blanket typing.
@@ -650,6 +659,61 @@ live access, so they cannot be planned around.
 
 1. **BOTH TypeScript type files are stale on `strategy_analytics` by `computation_warned` + `metrics_json_by_basis`.** `grep -n "computation_warned\|metrics_json_by_basis" src/lib/types.ts src/lib/database.types.ts` returns **zero hits in either file**, while both columns are live in the DB and read by app code (`src/app/api/strategies/finalize-wizard/route.ts`, `src/app/factsheet/[id]/v2/page.tsx`). The last `strategy_analytics` column that actually threaded into `types.ts` was `volume_metrics`/`exposure_metrics` (migration `20260412125725`) — four months and two columns ago, so the interface reads as maintained when it is not. Phase 142 added **only** `computing_started_at` (plan 142-06: the `types.ts` line plus its compile-forced blast radius, 9 files total — `types.ts` + `src/lib/utils.ts` `EMPTY_ANALYTICS` + 7 test fixtures) and deliberately did NOT widen to the other two: that is scope containment, not an oversight, and it is recorded here so the next agent does not read the single addition as evidence the file is current. `database.types.ts` was left untouched entirely and has **no CI freshness gate** (`package.json` + `ci.yml` mention `database.types` nowhere), which is the reason the drift went four months unnoticed. Fix when either file is next touched; the honest fix is all three columns plus a gate, not a fourth one-off addition.
 2. **`.claude/agents/migration-reviewer.md` invariant #14 contradicts the repo's actual `BEGIN`/`COMMIT` convention.** The reviewer doc forbids `BEGIN`/`COMMIT` in migrations; **150 of 231 migrations use them, including the repo tip**. Per Rule 11 (conformance over taste inside the codebase) and Rule 7 (pick one, don't blend), Phase 142 followed the repo and pre-documented the deviation in its own migration header so review would not re-litigate it — but that is a per-migration workaround, and every future migration author hits the same contradiction and pays the same cost. The doc is the artifact that is wrong. Fix = update invariant #14 to match the repo (and say what `ROLLBACK` outside `supabase/tests/` still means, which is the part that IS enforced). Documentation-only, no runtime surface.
+
+### v1.16 Phase-142.1 — planning residuals (added 2026-08-02, at plan time — NOT execution findings)
+
+Raised by the `gsd-plan-checker` across three verification rounds on 142.1's plans. **None clears
+the founder blast-radius bar** — all are documentation-rationale or comment-coverage. Logged here
+so the next reader does not mistake their absence for oversight. W-1 and W-2 were folded into
+plan `142.1-05` before execution and are recorded as discharged.
+
+1. **⛔ `DEF-142.1-08` — D-08 was CUT from Phase 142.1, and must not be closed by bumping a
+   literal.** The finding: `test_main_worker.py:1295`'s `assert len(TIMEOUT_PER_KIND) == 15`
+   couples every future job-kind addition to the reaper suite, and the cheapest way to green it is
+   to bump the literal WITHOUT the re-derivation the assertion message demands — the trip-wire
+   trains the exact behaviour it exists to prevent. It was cut because **no derivation source
+   exists for the proposed replacement**: `grep -rn "STRATEGY_SCOPED\|_SCOPED_KINDS\|ALLOCATOR_KINDS"`
+   over `analytics-service/` returns **zero hits**, so there is no machine-readable
+   strategy-scoped/allocator-scoped partition to assert against. Both remedies are bad — a
+   hand-maintained `frozenset` beside `TIMEOUT_PER_KIND` **re-imports D-08's own complaint one
+   level up**, and deriving from the `compute_jobs` enqueue surface (which kinds are ever enqueued
+   with a non-NULL `p_strategy_id`) is a genuine derivation but materially larger than a
+   remediation phase should carry. ⚠️ **There is also a live convention conflict:** the GSD
+   VALIDATION template's Oracle Independence checklist requires *"Table/registry sizes are pinned
+   to a **literal count**, not to `len(THE_TABLE)`"* — which is precisely the form D-08 argues
+   against. That conflict deserves its own decision on the merits, not a drive-by change. ⛔ **Do
+   not close this by bumping 15 → 16.**
+2. **W-3 — inverted arm D's determinism rests on an unpinned assumption.** The D-11 companion cron
+   arm's `LIMIT 25` has no `ORDER BY`, so the inverted arm-D assertion is deterministic only while
+   fewer than 25 foreign `(computing, NULL, no-active-job)` rows exist on the shared TEST project.
+   Plan 142.1-05 requires the GATE-DETERMINISM NOTE in prose but — unlike plan 03's header
+   assumption, which carries an acceptance grep — pins it with none. Add acceptance greps on both
+   the migration side and the gate side when either is next touched.
+3. **W-4 — `sql-tests` against TEST is expected RED for 142.1's waves 3–4.** Plan 05 inverts arm D
+   to require the companion arm, but migration `20260803120000` is not applied to TEST until plan
+   07 Task 1 (wave 5), because MCP is stripped from subagents. Unavoidable, and plan 07 already
+   documents the false-positive verification state. The residual risk is only that a wave gate is
+   misread as a defect — one line in the wave-3/4 SUMMARY templates would close it.
+4. **W-5 — gate-file comments owned by no task.** In
+   `supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql`: the file header (`:5`
+   "Guards migration 20260802120000", `:111` "Run order"), the Part-2 arm summary at `:263`, and
+   `:380`'s "arm D: the writer-bug skip rule". Plan 05 step 9 names only `:332-336` and `:390`.
+   After 142.1 these comments describe a superseded migration and a superseded arm-D semantics.
+   Comment rot only.
+5. **W-6 — `142.1-RESEARCH.md` § "Architecture Patterns" still carries the superseded
+   `BEFORE INSERT OR UPDATE` trigger sketch verbatim.** Every consuming plan carries an inline
+   ⚠️ supersession note in `read_first`, and CONTEXT § D-18 Part 1 states the supersession — but
+   the research document itself is never annotated, so a reader who opens it first gets the wrong
+   shape. One banner line fixes it.
+6. **✅ Discharged at plan time (recorded so they are not re-raised): W-1 and W-2.** W-1: plans
+   claimed SQL-gate Part 4b "stays falsifiable" after the D-18 retrofit; it does not — 4b is a
+   **double-mutation** defence-in-depth assertion (trigger arm (a) and the bridge's own keep-arm
+   each independently preserve the sentinel). W-2: after the retrofit Part 4a's
+   `IF v_stamp IS NULL THEN RAISE` is satisfied by its own seed and can no longer fail. Both were
+   over-claims of assertion strength — **the same failure class that produced this phase** (142's
+   ledger was reported 11/11 Observed when 7 rows had never been run) — so both were corrected in
+   `142.1-05-PLAN.md` rather than deferred, and the plan now forbids crediting either as the SC-2b
+   observable in the D-16 evidence. SC-2b's single-mutation proof is Part 6/6a in plan 142.1-08.
 
 ---
 
