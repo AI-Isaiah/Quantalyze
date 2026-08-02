@@ -196,6 +196,22 @@ None — no external service configuration required. This plan installs zero pac
 - **JOB-07 note for plan 142-02:** the cron jobname `reap_strategy_analytics_stuck_computing` appears **nowhere in Python** after this plan — that absence is the JOB-07 property and remains intact (`grep` for it under `analytics-service/` returns 0).
 - **Watch item for future kinds:** `len(TIMEOUT_PER_KIND) == 15` is now pinned. Adding a job kind will redden `test_threshold_exceeds_chain_inclusive_ceiling` by design, forcing a conscious chain-edge decision. That is the intended cost, not a flake.
 
+## Self-Check: PASSED
+
+All claimed files exist on disk and all claimed commits exist on the branch.
+
+| Claim | Result |
+|---|---|
+| `analytics-service/services/job_worker.py` | FOUND |
+| `analytics-service/services/ingestion/long_fetch.py` | FOUND |
+| `analytics-service/tests/test_main_worker.py` | FOUND |
+| `.planning/phases/142-.../142-01-SUMMARY.md` | FOUND |
+| Commit `85647b27` (Task 1) | FOUND |
+| Commit `91496ad9` (Task 2) | FOUND |
+| Commit `76b8fcac` (SUMMARY) | FOUND |
+
+No files were deleted by any commit in this plan (`git diff --diff-filter=D HEAD~1 HEAD` empty after each). No untracked files remain.
+
 ---
 *Phase: 142-job-strategy-analytics-stuck-computing-reaper-computing-star*
 *Completed: 2026-08-02*
