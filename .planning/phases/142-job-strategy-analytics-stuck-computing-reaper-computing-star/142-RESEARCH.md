@@ -1282,7 +1282,7 @@ If planning later reaches for a package, the gate applies in full.
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Does the reaper's threshold need to be hours at all?** *(RESOLVED — plan 142-01 context:
    the deployed interval MUST exceed the chain-inclusive ceiling; smallest whole 4-hour multiple

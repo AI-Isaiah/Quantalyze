@@ -72,6 +72,7 @@ created: 2026-08-02
 | 142-02.T2 | 02 | 1 | JOB-07 | Backlog ⇒ real healthz TCP probe stays 200; **control**: injected loop-blocking reap ⇒ 503 | pytest, mirroring `tests/test_worker_isolation_e2e.py:119,182` | same | ❌ W0 | ⬜ pending |
 | 142-03.T2 + 142-05.T3 | 03/05 | 2/3 | cross | `computation_status` CHECK ↔ TS closed-set parity unbroken | vitest (existing) | `npx vitest run src/__tests__/contracts/check-zod-db-check-parity.test.ts` | ✅ exists | ⬜ pending |
 | 142-03 + 142-05.T3 | 03/05 | 2/3 | cross | `mypy --strict` clean on `analytics-service` | type gate | `cd analytics-service && mypy --strict .` | ✅ exists | ⬜ pending |
+| 142-06.T1 | 06 | 1 | JOB-01 | `StrategyAnalytics` row type carries `computing_started_at: string \| null` (T \| null, never optional) and all 9 blast-radius files compile | type gate | `npm run typecheck` | ✅ exists | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -117,7 +118,8 @@ created: 2026-08-02
 | SC-2b | `sync_strategy_analytics_status` branch (a): replace the transition-conditional stamp with an unconditional `computing_started_at = now()` | SQL gate — "a second bridge call on an already-`computing` row does not advance the stamp". This is the C-3 trap; a naive "the writer sets the stamp" gate passes it | ⬜ pending | |
 | SC-3 | The Python reaper-threshold constant: divide by 10 (below the chain-inclusive ceiling) | `pytest tests/test_main_worker.py -k Reaper` — the headroom invariant | ⬜ pending | |
 | SC-3b | Change the threshold literal embedded in the migration so it no longer equals the Python constant | The SQL↔Python drift gate | ⬜ pending | |
-| SC-4 | Wire the reaper identifier into `dispatch_tick` (or inject a loop-blocking call on the shared event loop) | `test_job07_reaper_off_worker_loop.py` — structural gate **and** the positive control's 503 | ⬜ pending | |
+| SC-4 | Wire the reaper identifier into `dispatch_tick` (inject the cron jobname onto the worker dispatch surface — plan 142-02 T1) | `test_job07_reaper_off_worker_loop.py` — structural absence gate | ⬜ pending | |
+| SC-4b | Run a loop-blocking synchronous reap on the shared event loop (the control pair's `time.sleep` arm — plan 142-02 T2; no production edit needed, the pair IS the mutation+control) | same file — behavioral control pair: the blocking arm starves the probe (latency/503 + stale `LAST_TICK_AT`) while the yielding twin stays 200 | ⬜ pending | |
 | SC-5 | `analytics_runner.py` `_mark_computing` (~:1227): delete the `computing_started_at` stamp key from the entry upsert dict (plan 142-03 m1) | `pytest tests/test_computing_started_at_stamp.py` — entry rule: literal `"computing"` ⇒ stamp present and ≠ None | ⬜ pending | |
 | SC-5b | `job_worker.py` composite success write: delete the `computing_started_at: None` clear from the `headline_payload` dict literal (~:6635, consumed by the NESTED `_write_headline_and_by_basis` upsert at ~:6744 — plan 142-03 m2) | same file — exit-clear rule reached via the ast.Name payload-resolution arm; this RED doubles as the Name-arm liveness proof | ⬜ pending | |
 | SC-5c | `src/app/api/keys/sync/route.ts:532`: delete `computing_started_at: null` from the failed-placeholder payload (plan 142-03 m3) | same file — TS object-literal half (the payload is built in `compositeMemberCount` and passed as an argument; only the object-literal anchor can see it) | ⬜ pending | |
