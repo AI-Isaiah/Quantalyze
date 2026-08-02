@@ -1065,6 +1065,40 @@ describe("Critical regression guards", () => {
       });
     });
 
+    // Phase 142.1 D-05: the `sql-tests` job runs supabase/tests/*.sql against
+    // the ONE shared Supabase test project. test_strategy_analytics_stuck_
+    // computing_reaper.sql EXECUTEs the real deployed cron body, whose reap
+    // statement is a GLOBAL `ORDER BY computing_started_at ASC LIMIT 25` with
+    // `FOR UPDATE SKIP LOCKED` — it can briefly lock up to 25 FOREIGN rows per
+    // tick under a 5 s lock_timeout. Unserialized, a concurrent run's rows land
+    // in this run's 25-row budget (LIMIT assertions redden on interleaving, not
+    // on a defect) and lock contention surfaces as a 55P03 flake on an innocent
+    // PR. The group MUST be the repo-wide `shared-test-db` that `python` and
+    // `e2e-seeded` already carry — a job-private group name would serialize
+    // this job only against itself and leave the cross-job races open.
+    describe("sql-tests shared-test-db serialization (D-05)", () => {
+      it("ci.yml sql-tests job joins the shared-test-db concurrency group", () => {
+        const src = readText(".github/workflows/ci.yml");
+        // Same job-slicing idiom as the supabase-migrate describes above:
+        // anchor on the start-of-line job key, stop at the next top-level one.
+        const sqlTestsJob = findOrFail(
+          src,
+          /^ {2}sql-tests:\s*\n([\s\S]*?)(?=\n {2}[a-z])/m,
+          "ci.yml: sql-tests job not found",
+        );
+        expectMatch(
+          sqlTestsJob,
+          /group:\s*shared-test-db/,
+          "ci.yml sql-tests job lost `group: shared-test-db` — the SQL gates run unserialized against the SHARED test project, so the reaper gate's LIMIT-25 assertions can be broken by a concurrent run's rows and its 5 s lock_timeout becomes a 55P03 flake on unrelated PRs (D-05). A DIFFERENT group name does not fix this: it must be the same group `python` and `e2e-seeded` carry.",
+        );
+        expectMatch(
+          sqlTestsJob,
+          /cancel-in-progress:\s*false/,
+          "ci.yml sql-tests job lost `cancel-in-progress: false` — contending runs would be CANCELLED instead of queued, so a push-to-main sql-tests job could lose its required per-SHA check (D-05)",
+        );
+      });
+    });
+
     // retro-PR188-F8 (red-team #35, HIGH/9): the SHA-pin regex test
     // operates on source text. YAML anchors (&name) + aliases (*name)
     // could in theory be used to indirect a uses: value through an
