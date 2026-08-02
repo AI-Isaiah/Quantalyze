@@ -1140,6 +1140,212 @@ class TestWatchdogInvariant:
             _watchdog_seconds("10 fortnights")
 
 
+def _chain_inclusive_ceiling_seconds() -> tuple[float, list[str]]:
+    """JOB-03 — the longest a HEALTHY strategy_analytics row can legitimately
+    sit at computation_status='computing', in seconds, plus the worst path.
+
+    A strategy_analytics row is 'computing' for a whole multi-hop chain, not for
+    one claimed job. So the ceiling is summed PER HOP along the worst simple
+    path through the chain topology, where each hop costs:
+
+      (P_BATCH_SIZE - 1) x MAX_HANDLER_TIMEOUT_S   batch-tail exposure: the hop's
+                                                   job can be the last of a claimed
+                                                   batch, behind up to 4 siblings
+                                                   each running to its own ceiling
+      + TIMEOUT_PER_KIND[hop] x MAX_ATTEMPTS       its own handler, fully retried
+      + RETRY_BACKOFF_TOTAL_S                      the scheduled waits between those
+                                                   attempts
+
+    ⚠️ This is deliberately NOT `batch_size x max_per_kind_timeout`. That is the
+    compute_jobs orphaned-running formula (migration 20260720120000:24-25) and it
+    bounds how long ONE claimed job may sit 'running' — a strictly smaller
+    quantity that under-counts this chain by ~4x (CONTEXT.md C-6). A test that
+    re-derived the implementation's own expression could not fail when that
+    expression is the wrong one (VALIDATION.md P-8).
+    """
+    from services.job_worker import JOB_CHAIN_FOLLOW_ON, TIMEOUT_PER_KIND
+
+    # LOCAL literals, never imports — these are the production inputs the oracle
+    # pins independently (VALIDATION.md §Oracle Independence, research P-8):
+    #   P_BATCH_SIZE        main_worker.py:470 and :511 ("p_batch_size": 5)
+    #   MAX_ATTEMPTS        job_worker.py:8171 (job.get("max_attempts", 3))
+    #   RETRY_BACKOFF_*     migration 20260505115047:176-182 / COMMENT :209 —
+    #                       attempt 1 -> +30s, attempt 2 -> +2min, ELSE -> +8min
+    P_BATCH_SIZE = 5
+    MAX_ATTEMPTS = 3
+    RETRY_BACKOFF_TOTAL_S = 30 + 120 + 480  # 630s across the 3 attempts
+
+    max_handler_s = max(TIMEOUT_PER_KIND.values())
+
+    def _hop_cost(kind: str) -> float:
+        return (
+            (P_BATCH_SIZE - 1) * max_handler_s
+            + TIMEOUT_PER_KIND[kind] * MAX_ATTEMPTS
+            + RETRY_BACKOFF_TOTAL_S
+        )
+
+    # Every SIMPLE path (no kind revisited, so a future cycle cannot make this
+    # unbounded). Walking from every key rather than from computed "roots" is
+    # deliberate: root detection is extra logic that could silently drop the
+    # worst path, and every root-originated path is already enumerated here, so
+    # the maximum is identical.
+    worst_seconds = 0.0
+    worst_path: list[str] = []
+
+    def _walk(path: list[str]) -> None:
+        nonlocal worst_seconds, worst_path
+        total = sum(_hop_cost(k) for k in path)
+        if total > worst_seconds:
+            worst_seconds, worst_path = total, list(path)
+        for follow_on in JOB_CHAIN_FOLLOW_ON.get(path[-1], ()):
+            if follow_on not in path:
+                _walk([*path, follow_on])
+
+    for root in JOB_CHAIN_FOLLOW_ON:
+        _walk([root])
+
+    return worst_seconds, worst_path
+
+
+class TestReaperThresholdInvariant:
+    """JOB-03. The strategy_analytics stuck-'computing' reaper threshold MUST
+    exceed the longest a healthy multi-hop chain can legitimately hold a row at
+    'computing'. If it doesn't, the pg_cron reaper flips a LIVE, healthy chain's
+    row to 'failed' mid-compute — the user sees a false failure on a money
+    surface, worse than the spinner the reaper exists to end."""
+
+    def test_threshold_exceeds_chain_inclusive_ceiling(self) -> None:
+        """The headroom invariant (Falsifiability Ledger SC-3: divide the
+        constant by 10 and this must go RED).
+
+        Oracle note: this imports JOB_CHAIN_FOLLOW_ON and TIMEOUT_PER_KIND from
+        the module under test — a DELIBERATE exception recorded in
+        VALIDATION.md §Oracle Independence. It is mitigated because the three
+        production enqueue sites now READ JOB_CHAIN_FOLLOW_ON, so a wrong map
+        changes real enqueue behavior and reddens the job-flow suites
+        (test_main_worker.py, test_job_worker_csv_kind.py). The batch/retry
+        inputs stay local literals, and the coverage asserts below stop a
+        zeroed or under-covering map from passing vacuously.
+
+        NOT asserted here, on purpose: the dominance form "chain ceiling >=
+        the all-kinds single-hop ceiling". The plan-checker proved it
+        unconditionally true — both sides share max(TIMEOUT_PER_KIND.values()),
+        so any >=2-hop path exceeds the single-hop ceiling by
+        M + RETRY_BACKOFF_TOTAL_S + MAX_ATTEMPTS x sum(T) > 0, and a new kind
+        raises M on BOTH sides (real numbers: M = 1800s, 4-hop ceiling 43,920s
+        vs single-hop 13,230s). A dead assert pinned as coverage is exactly the
+        Rule-9 defect; the literal-pinned registry count below is what actually
+        forces a conscious decision."""
+        from services.job_worker import (
+            JOB_CHAIN_FOLLOW_ON,
+            STRATEGY_ANALYTICS_REAP_THRESHOLD,
+            TIMEOUT_PER_KIND,
+        )
+
+        ceiling_s, worst_path = _chain_inclusive_ceiling_seconds()
+
+        # Anti-vacuity: a topology edit that zeroes or truncates the map would
+        # otherwise let the headroom assert pass against a meaningless ceiling.
+        # 6h/24h are deliberate literals — the real ceiling today is ~12.2h.
+        assert 6 * 3600 < ceiling_s < 24 * 3600, (
+            f"chain-inclusive ceiling {ceiling_s:.0f}s ({ceiling_s / 3600:.1f}h) "
+            "left the 6h-24h sanity band. Either the chain topology was zeroed / "
+            "truncated (the ceiling is now meaningless and the headroom assert "
+            "below would pass vacuously), or the chain genuinely changed shape — "
+            "in which case re-derive STRATEGY_ANALYTICS_REAP_THRESHOLD and this "
+            "band together, consciously."
+        )
+
+        threshold_s = _watchdog_seconds(STRATEGY_ANALYTICS_REAP_THRESHOLD)
+        assert threshold_s > ceiling_s, (
+            f"STRATEGY_ANALYTICS_REAP_THRESHOLD is "
+            f"{STRATEGY_ANALYTICS_REAP_THRESHOLD!r} ({threshold_s:.0f}s) but the "
+            f"chain-inclusive ceiling is {ceiling_s:.0f}s "
+            f"({ceiling_s / 3600:.1f}h) on path {' -> '.join(worst_path)}. "
+            "Below the ceiling the pg_cron reaper terminalizes healthy in-flight "
+            "chains as 'failed' — a false failure on a money surface. Raise the "
+            "constant. Do NOT re-derive it as batch_size x "
+            "max(TIMEOUT_PER_KIND): that is the compute_jobs formula (migration "
+            "20260720120000) and it measures ONE claimed job, not a whole "
+            "multi-hop chain (CONTEXT.md C-6)."
+        )
+
+        # Coverage (i): the topology may only name kinds the worker can actually
+        # run. A typo'd kind would otherwise sit in the map contributing a
+        # KeyError-free-looking edge that production never takes.
+        for kind, follow_ons in JOB_CHAIN_FOLLOW_ON.items():
+            assert kind in TIMEOUT_PER_KIND, (
+                f"JOB_CHAIN_FOLLOW_ON key {kind!r} is not a TIMEOUT_PER_KIND "
+                "kind — the chain map names a job kind the worker cannot run."
+            )
+            for follow_on in follow_ons:
+                assert follow_on in TIMEOUT_PER_KIND, (
+                    f"JOB_CHAIN_FOLLOW_ON[{kind!r}] enqueues {follow_on!r}, "
+                    "which is not a TIMEOUT_PER_KIND kind."
+                )
+
+        # Coverage (ii): the blind spot the walk alone cannot see. The reaper
+        # holds a row 'computing' for ANY non-terminal kind, but the walk only
+        # visits the 5 kinds in the topology — a kind added to TIMEOUT_PER_KIND
+        # and never to JOB_CHAIN_FOLLOW_ON could therefore never raise the
+        # ceiling. Pinning the registry SIZE to a literal (not to len() of the
+        # table under test) converts that silent gap into a forced decision.
+        assert len(TIMEOUT_PER_KIND) == 15, (
+            f"TIMEOUT_PER_KIND now has {len(TIMEOUT_PER_KIND)} kinds, not the "
+            "pinned 15 — a job kind was added/removed. Decide consciously "
+            "whether it joins JOB_CHAIN_FOLLOW_ON (it is a chain edge: some "
+            "handler enqueues it, or it enqueues a follow-on) or is "
+            "chain-terminal, re-derive STRATEGY_ANALYTICS_REAP_THRESHOLD if the "
+            "ceiling moved, then bump this literal."
+        )
+
+    def test_threshold_has_sane_upper_bound(self) -> None:
+        """The headroom assert above only stops a threshold that is too SMALL.
+        A unit typo in the other direction — '160 hours' where '16 hours' was
+        meant, or 'hours' where 'minutes' was meant — produces a window so
+        large the reaper effectively never fires and the spinner it exists to
+        end persists indefinitely.
+
+        Cap at 2.0x the computed ceiling: the shipped value sits at ~1.31x, so
+        2.0x is comfortable headroom for a re-derivation while far below the
+        10x a divide/multiply typo yields. A deliberate larger window must
+        raise MAX_RATIO and justify why a stranded row should sit that long —
+        which is the point: make the decision explicit instead of letting a
+        typo through silently."""
+        from services.job_worker import STRATEGY_ANALYTICS_REAP_THRESHOLD
+
+        MAX_RATIO = 2.0
+        ceiling_s, _ = _chain_inclusive_ceiling_seconds()
+        threshold_s = _watchdog_seconds(STRATEGY_ANALYTICS_REAP_THRESHOLD)
+        ratio = threshold_s / ceiling_s
+        assert ratio <= MAX_RATIO, (
+            f"STRATEGY_ANALYTICS_REAP_THRESHOLD "
+            f"{STRATEGY_ANALYTICS_REAP_THRESHOLD!r} ({threshold_s:.0f}s) is "
+            f"{ratio:.1f}x the {ceiling_s:.0f}s chain-inclusive ceiling — above "
+            f"the {MAX_RATIO}x sanity cap. This smells like a unit typo (e.g. "
+            "'160 hours' where '16 hours' was meant). A stranded row would sit "
+            "on a spinner far too long. If the large window is intentional, "
+            "raise MAX_RATIO and document why."
+        )
+
+    def test_threshold_is_parseable_interval(self) -> None:
+        """The constant is embedded verbatim into the reaper migration's
+        pg_cron body as a Postgres interval literal. A malformed string would
+        reach SQL as a 22007 at cron time — inside a scheduled job with no
+        caller to see it. Fail here, at build time, instead."""
+        from services.job_worker import STRATEGY_ANALYTICS_REAP_THRESHOLD
+
+        seconds = _watchdog_seconds(STRATEGY_ANALYTICS_REAP_THRESHOLD)
+        assert seconds > 0, (
+            f"STRATEGY_ANALYTICS_REAP_THRESHOLD "
+            f"{STRATEGY_ANALYTICS_REAP_THRESHOLD!r} resolves to {seconds}s. A "
+            "zero or negative interval makes the reaper's "
+            "`computing_started_at < now() - interval` predicate true for every "
+            "just-started row — it would terminalize chains the instant they "
+            "begin computing."
+        )
+
+
 # ---------------------------------------------------------------------------
 # audit-2026-05-07 C-0190 — missing-RPC fallback
 # ---------------------------------------------------------------------------
