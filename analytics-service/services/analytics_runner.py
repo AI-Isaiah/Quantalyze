@@ -1233,8 +1233,30 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 # reap_strategy_analytics_stuck_computing (migration 20260802120000)
                 # keys on THIS column, never computed_at. Client-side UTC ISO is
                 # mandatory: a PostgREST payload is a literal and cannot express
-                # SQL now(). Unconditional here is correct — every invocation of
-                # this writer genuinely transitions the row INTO computing.
+                # SQL now().
+                #
+                # D-01/D-18 — the write is unconditional, but its EFFECT is not.
+                # It depends on how this job was reached, and on one of the two
+                # paths the value is written and then discarded by design:
+                #
+                #   * 4-hop chain (process_key_long -> sync_trades ->
+                #     derive_broker_dailies -> compute_analytics_from_csv): the row
+                #     has been 'computing' since hop 1, so this upsert takes its
+                #     ON CONFLICT path — an UPDATE — and the BEFORE UPDATE trigger
+                #     strategy_analytics_stamp_computing_started_trigger (migration
+                #     20260803120000) silently COERCES the payload value back to
+                #     the hop-1 chain-start stamp. The reaper's clock must measure
+                #     the whole chain, not this hop, so the override is the point.
+                #   * CSV-first path (src/app/api/strategies/csv-finalize/route.ts
+                #     :822-826 enqueues compute_analytics_from_csv as the
+                #     strategy's FIRST job, with no prior bridge call): here the
+                #     stamp IS the real transition in, and it lands as written. On
+                #     the upsert's INSERT path the UPDATE-only trigger (D-18) does
+                #     not fire at all; on a real transition-in UPDATE its arm (c)
+                #     respects an explicit stamp.
+                #
+                # Do not make this write conditional on the strength of the first
+                # bullet alone — on the second path there is no other writer.
                 "computing_started_at": datetime.now(timezone.utc).isoformat(),
             },
             on_conflict="strategy_id",
