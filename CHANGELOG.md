@@ -9,6 +9,33 @@ retry, 141.1 repaired the evidence, guards and observability around it, and 141.
 findings of the review of 141.1 — including two where the shipped grant was broader than its own
 evidence supported.
 
+**Landing fixes (2026-08-02) — two red CI gates, both harness defects, neither a product defect.**
+Found while landing this release; the product code they guard is unchanged and was verified intact.
+
+- **`e2e-seeded` now joins the repo-wide `shared-test-db` concurrency group.** It drives the ONE
+  shared Supabase test project via `secrets.TEST_SUPABASE_URL`, exactly like the `python` job — but
+  the group was only ever on `python`, added for CROSS-PR contention ("two different PRs' python
+  jobs"). It never covered two jobs inside ONE run. `claim_compute_jobs_with_priority` claims a
+  GLOBAL batch of 50 ready rows and cannot be scoped to a caller, so while `e2e-seeded` enqueued
+  `compute_jobs`, a concurrent `python` fencing test that seeded a pending row and then claimed it
+  had its row swept into the other job's traffic. `_claim_one(..., want_job_id=…)` then correctly
+  returned `None` rather than a foreign row — reddening 10 fencing/drain tests with
+  `assert None is not None` and `assert 'pending' == 'running'`, identically across two runs. The
+  `e2e` smoke job needs no group: it builds against `https://placeholder.supabase.co` and never
+  reaches the shared project. Costs wall-clock — `e2e-seeded` now queues behind `python` instead of
+  overlapping it — which is the price of the suite reddening on defects rather than on interleaving.
+- **The `strategy-review` gate-refusal cases stop racing a second `vi.doMock` onto a path
+  `beforeEach` already mocked.** The file's own docblock records that a second `doMock` for the same
+  path "does not reliably override" at import time; when it lost, the throwing factory never took,
+  the standard `passed: true` stub ran, and the route legitimately answered 200 — reddening
+  "`StrategyGateUnevaluableError` -> 503" with `expected 200 to be 503` on whichever shard lost the
+  race, while passing in isolation and on the other shard. Both cases now flip one module-scope
+  switch the single registered stub reads, cleared in `beforeEach`. **Still falsifying:** neutering
+  the route's gate-catch arm (`route.ts` line 282, `503` -> `200` — one of 13 identical
+  `REVIEW_SOURCE_READ_FAILED` arms, so it must be mutated by line, not by string) reddens exactly
+  that test with `expected 200 to be 503`. The route's `instanceof` narrowing and its 503 arm are
+  untouched.
+
 - **⚠️ Retry is narrower than Phase 141 shipped it, and this is the founder-visible headline.** 141
   enabled retry for two `/process-key` flow types. 141.2 withdrew one of them outright and made the
   other conditional:

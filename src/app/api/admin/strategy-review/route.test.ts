@@ -70,13 +70,39 @@ vi.mock("@/lib/email", () => ({
  * the file — the TOCTOU beforeEach re-asserts this one before every test so no
  * case can inherit a previous case's gate.
  */
+/**
+ * C-3 gate behaviour switch — the ONE knob the two gate-refusal cases turn.
+ *
+ * Why this exists instead of a second `vi.doMock("@/lib/strategyGate", ...)`:
+ * a second `doMock` for a path that `beforeEach` has ALREADY doMocked does not
+ * reliably override at import time (this file's own §G9 docblock says so). When
+ * it silently lost, the throwing factory never took, the standard pass:true stub
+ * ran, and the route legitimately answered 200 — reddening
+ * "StrategyGateUnevaluableError -> 503" with `expected 200 to be 503` on
+ * whichever CI shard happened to lose the race, while passing in isolation and
+ * on the other shard. The assertion was sound; the harness under it was not.
+ *
+ * `gateThrow` is read INSIDE the stub at call time, so there is exactly one
+ * registered factory for the path and nothing to race. `beforeEach` clears it,
+ * so no case can inherit the previous case's throw.
+ *
+ * Declared `var` deliberately: `vi.mock` is hoisted, and `var` hoists to
+ * `undefined` (falsy) rather than a TDZ ReferenceError if the factory is ever
+ * evaluated earlier than expected.
+ */
+// eslint-disable-next-line no-var
+var gateThrow: (() => never) | null = null;
+
 async function stubbedGateModule() {
   const actual =
     await vi.importActual<typeof import("@/lib/strategyGate")>(
       "@/lib/strategyGate",
     );
   return {
-    checkStrategyGate: () => ({ passed: true }),
+    checkStrategyGate: () => {
+      if (gateThrow) gateThrow();
+      return { passed: true };
+    },
     // Real impl (exchange === "deribit") — the venue-aware re-check predicate
     // depends on it, and the mockAdminClient `api_keys` route supplies the
     // exchange, so mocking it faithfully keeps the ledger-vs-perp branch honest.
@@ -128,10 +154,16 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     // explicit doUnmock, every test below would 429 before reaching the
     // gate logic we want to exercise.
     vi.doUnmock("@/lib/ratelimit");
-    // Re-assert the standard gate stub: the two C-3 gate-refusal cases install
-    // a THROWING doMock, and vi.doMock persists for the remainder of the file.
-    // Without this, the next test in declaration order inherits the throw —
-    // observed, not hypothetical (it reddened SC-4 on the first run).
+    // Re-assert the standard gate stub: the two C-3 gate-refusal cases used to
+    // install a THROWING doMock, and vi.doMock persists for the remainder of the
+    // file. Without this, the next test in declaration order inherited the throw
+    // — observed, not hypothetical (it reddened SC-4 on the first run).
+    //
+    // Those two cases now flip `gateThrow` instead (see its docblock), so the
+    // reset below is what actually clears them; the doMock re-assert stays
+    // because the CSRF/rate-limit suite above registers its own factories and
+    // this keeps ONE known-good factory on the path.
+    gateThrow = null;
     vi.doMock("@/lib/strategyGate", () => stubbedGateModule());
     vi.resetModules();
   });
@@ -945,20 +977,16 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
       recheckStatus: "complete",
       updateAffected: [{ id: "strat-1" }],
     });
-    vi.doMock("@/lib/strategyGate", async () => {
-      const actual =
-        await vi.importActual<typeof import("@/lib/strategyGate")>(
-          "@/lib/strategyGate",
-        );
-      return {
-        ...actual,
-        checkStrategyGate: () => {
-          // The REAL error class, so the route's `instanceof` narrowing is
-          // exercised rather than a look-alike.
-          throw new actual.StrategyGateUnevaluableError(12);
-        },
-      };
-    });
+    // Flip the ONE registered stub's behaviour rather than racing a second
+    // doMock onto the same path (see `gateThrow`). The REAL error class, so the
+    // route's `instanceof` narrowing is exercised rather than a look-alike.
+    const actualGate =
+      await vi.importActual<typeof import("@/lib/strategyGate")>(
+        "@/lib/strategyGate",
+      );
+    gateThrow = () => {
+      throw new actualGate.StrategyGateUnevaluableError(12);
+    };
     const res = await postApprove();
     expect(res.status).toBe(503);
     expect((await res.json()).error).toMatch(READ_FAILURE_503);
@@ -973,18 +1001,10 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
       recheckStatus: "complete",
       updateAffected: [{ id: "strat-1" }],
     });
-    vi.doMock("@/lib/strategyGate", async () => {
-      const actual =
-        await vi.importActual<typeof import("@/lib/strategyGate")>(
-          "@/lib/strategyGate",
-        );
-      return {
-        ...actual,
-        checkStrategyGate: () => {
-          throw new TypeError("something else entirely");
-        },
-      };
-    });
+    // Same switch as the case above — one registered factory, nothing to race.
+    gateThrow = () => {
+      throw new TypeError("something else entirely");
+    };
     await expect(postApprove()).rejects.toThrow(/something else entirely/);
   });
 
