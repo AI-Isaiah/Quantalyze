@@ -452,7 +452,7 @@ Plans:
 **Goal:** Close the 16 items raised by three independent passes over Phase 142 (high-effort workflow review, blind `gsd-code-reviewer`, and the `gsd-verifier` goal-backward pass that had never run) — so that the reap clock genuinely measures the whole job chain, no terminal writer can launder a failure into a green factsheet, the `sql-function-snapshot` CI gate is green again, and Phase 142's own falsifiability evidence is complete rather than 4/11.
 **Requirements**: JOB-01, JOB-02, JOB-03 (remediation of Phase 142 delivery; no new REQ IDs)
 **Depends on:** Phase 142
-**Plans:** 5/8 plans executed
+**Plans:** 7/8 plans executed
 
 **Scope + per-item failure scenarios:** `.planning/STATE.md` § "Phase 142.1 scope".
 **Evidence:** `142-VERIFICATION.md` (status `gaps_found`, 9/10), `142-REVIEW.md` (0 blockers, 4 warnings).
@@ -478,8 +478,8 @@ Plans:
 
 **Wave 4**
 
-- [ ] 142.1-06-PLAN.md — D-01 comment correction + D-02/R2 PGRST204 fallback in _mark_unrecoverable (after D-07, per C-12)
-- [ ] 142.1-08-PLAN.md — SQL gate Part 6 (G1 trigger sentinel, seeds at INSERT per D-18; grep-gate pin 0→3)
+- [x] 142.1-06-PLAN.md — D-01 comment correction + D-02/R2 PGRST204 fallback in _mark_unrecoverable (after D-07, per C-12)
+- [x] 142.1-08-PLAN.md — SQL gate Part 6 (G1 trigger sentinel, seeds at INSERT per D-18; grep-gate pin 0→3)
 
 **Wave 5**
 
