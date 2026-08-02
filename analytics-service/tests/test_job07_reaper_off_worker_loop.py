@@ -43,7 +43,28 @@ deleted — it is broken code, not a reference implementation (142-RESEARCH C-5)
 
 from __future__ import annotations
 
+import asyncio
+import time
 from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+import main_worker
+import main_worker_healthz
+from main_worker import dispatch_tick
+from services.job_worker import DispatchOutcome, DispatchResult
+
+# The TCP-probe helpers are IMPORTED, not forked, from the WORKER-02 analog
+# (`tests/test_worker_isolation_e2e.py:48,62,80`). Re-typing them here would
+# create a second implementation that could drift from the one the existing
+# isolation suite trusts.
+from tests.test_worker_isolation_e2e import (  # noqa: E402
+    _free_ephemeral_port,
+    _probe_healthz,
+    _wait_port_listening,
+)
 
 # ---------------------------------------------------------------------------
 # Forbidden tokens — LOCAL literals, deliberately never a shared constant.
@@ -245,3 +266,330 @@ def test_superseded_one_off_stays_deleted() -> None:
         "omits the `computation_warned = FALSE` clear. The pg_cron reaper "
         "supersedes it; do not resurrect the one-off."
     )
+
+
+# ===========================================================================
+# BEHAVIOURAL — the real healthz TCP probe, plus the control pair that gives
+# its 200 any meaning.
+# ===========================================================================
+
+# How long the simulated janitor pass occupies the worker. Long enough that a
+# BLOCKING arm is unambiguously distinguishable from a yielding one at the
+# thresholds asserted below, short enough to keep the file well under 15s.
+_WORK_S = 0.5
+
+# Shrunk copies of the two production knobs. Both are read at request/tick time
+# (`main_worker_healthz._handle_healthz` reads STALE_THRESHOLD per request;
+# `_heartbeat` reads the interval per loop), so monkeypatching the module
+# attributes takes effect without touching production defaults.
+_FAST_HEARTBEAT_S = 0.02
+_TIGHT_STALE_THRESHOLD_S = 0.2
+
+
+def _stranded_backlog_supabase(
+    jobs: list[dict[str, Any]], *, backlog_rows: int
+) -> MagicMock:
+    """A supabase double whose `strategy_analytics` surface holds a large
+    stranded-`computing` backlog while the claim RPC returns a normal small
+    batch — i.e. exactly the DB state the pg_cron reaper exists to drain."""
+    mock_supabase = MagicMock()
+
+    claim_chain = MagicMock()
+    claim_chain.execute.return_value = MagicMock(data=jobs)
+    mock_supabase.rpc.return_value = claim_chain
+
+    backlog = [
+        {
+            "strategy_id": f"s-stranded-{i}",
+            "computation_status": "computing",
+            "computing_started_at": "2026-08-01T00:00:00+00:00",
+        }
+        for i in range(backlog_rows)
+    ]
+    table_chain = MagicMock()
+    for builder in ("select", "eq", "lt", "is_", "order", "limit"):
+        getattr(table_chain, builder).return_value = table_chain
+    table_chain.execute.return_value = MagicMock(data=backlog)
+    mock_supabase.table.return_value = table_chain
+
+    return mock_supabase
+
+
+async def _drive_probe_against_dispatch(
+    monkeypatch: pytest.MonkeyPatch, *, blocking: bool
+) -> dict[str, Any]:
+    """Run ONE real ``dispatch_tick`` whose handler occupies the worker for
+    ``_WORK_S`` and probe the REAL healthz server while it does.
+
+    The two arms differ in exactly one token — ``time.sleep`` (blocks the shared
+    event loop, the WEDGE-01 shape a reaper wrongly run on the worker would
+    have) versus ``await asyncio.sleep`` (yields). Everything else — the mock
+    supabase, the port, the heartbeat interval, the staleness threshold, the
+    probe timing — is shared code, so any observed difference is attributable to
+    the blocking-vs-yielding property and nothing else.
+
+    Returns the observations: LAST_TICK_AT sampled immediately before and
+    immediately after the work (both sampled INSIDE the handler, so the
+    "after" sample is taken before the loop can run anything else), the probe
+    response bytes, and the probe latency measured from the instant the work is
+    released.
+    """
+    monkeypatch.setattr(main_worker, "_HEARTBEAT_INTERVAL_S", _FAST_HEARTBEAT_S)
+    monkeypatch.setattr(
+        main_worker_healthz, "STALE_THRESHOLD", _TIGHT_STALE_THRESHOLD_S
+    )
+
+    port = _free_ephemeral_port()
+    monkeypatch.setenv("PORT", str(port))
+
+    jobs = [{"id": "job-janitor-sim", "kind": "sync_trades", "strategy_id": "s-1"}]
+    mock_supabase = _stranded_backlog_supabase(jobs, backlog_rows=5_000)
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    obs: dict[str, Any] = {}
+
+    async def _work(job: dict[str, Any]) -> DispatchResult:
+        entered.set()
+        # Wait until the probe has been issued, so both arms are probed at the
+        # same point in the handler's life — no timing asymmetry between them.
+        await release.wait()
+        obs["tick_before_work"] = main_worker_healthz.LAST_TICK_AT
+        if blocking:
+            time.sleep(_WORK_S)  # <-- the ONLY difference between the arms
+        else:
+            await asyncio.sleep(_WORK_S)  # <-- the ONLY difference
+        obs["tick_after_work"] = main_worker_healthz.LAST_TICK_AT
+        return DispatchResult(outcome=DispatchOutcome.DONE)
+
+    _saved_latch = (main_worker._FALLBACK_CLAIM_RPC, main_worker._FALLBACK_LATCHED_AT)
+    _saved_tick = main_worker_healthz.LAST_TICK_AT
+    main_worker._FALLBACK_CLAIM_RPC = False
+    main_worker._FALLBACK_LATCHED_AT = 0.0
+
+    server_task = asyncio.create_task(main_worker_healthz.start_healthz_server())
+    try:
+        await _wait_port_listening(port)
+        with patch("main_worker.get_supabase", return_value=mock_supabase), patch(
+            "main_worker.dispatch", new=_work
+        ):
+            dt = asyncio.create_task(dispatch_tick("worker-job07"))
+            await entered.wait()
+            probe_task = asyncio.create_task(_probe_healthz(port))
+            # One loop turn so the probe has opened its connection before the
+            # work starts — otherwise the blocking arm would wedge the loop
+            # before the request is even on the wire and we would be measuring
+            # connect latency instead of service latency.
+            await asyncio.sleep(0)
+            started_at = time.monotonic()
+            release.set()
+            obs["response"] = await probe_task
+            obs["latency"] = time.monotonic() - started_at
+            # Recorded, NOT asserted here: whether the probe was serviced while
+            # the dispatch was still in flight is itself part of the asymmetry
+            # the two arms expose (the yielding twin asserts it; a wedged loop
+            # by definition cannot service anything until it releases).
+            obs["probe_landed_mid_dispatch"] = not dt.done()
+            await dt
+    finally:
+        server_task.cancel()
+        try:
+            await server_task
+        except asyncio.CancelledError:
+            pass
+        main_worker_healthz.LAST_TICK_AT = _saved_tick
+        (
+            main_worker._FALLBACK_CLAIM_RPC,
+            main_worker._FALLBACK_LATCHED_AT,
+        ) = _saved_latch
+
+    return obs
+
+
+class TestReaperOffWorkerLoopBehavior:
+    """The deployed healthz server, probed over a real TCP socket while a real
+    ``dispatch_tick`` is in flight — with the control pair that makes a 200
+    mean something."""
+
+    @pytest.mark.asyncio
+    async def test_healthz_stays_200_with_large_stranded_backlog(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With 5,000 stranded ``computation_status='computing'`` rows present,
+        a mid-dispatch probe of the REAL healthz server answers 200 and
+        ``LAST_TICK_AT`` advances.
+
+        ⚠️ READ THIS BEFORE TRUSTING THIS TEST. **On its own it cannot fail for
+        the JOB-07 property.** The reaper is a pg_cron-scheduled SQL function,
+        so there is no worker-loop reap path that a backlog could stall — this
+        assertion passes trivially for every possible implementation of the
+        reaper, including a catastrophically wrong one. It is kept because it
+        pins the *composed* worker (real server + real dispatch_tick +
+        heartbeat) against the backlog state, not because it is evidence.
+
+        The teeth for JOB-07 live in
+        ``test_no_reaper_identifier_on_worker_surface`` (the structural gate,
+        with its scanner self-test) and in the blocking-vs-yielding control pair
+        below, which CAN and does fail. Do not cite this test as proof that the
+        reaper is off the loop.
+        """
+        monkeypatch.setattr(main_worker, "_HEARTBEAT_INTERVAL_S", _FAST_HEARTBEAT_S)
+
+        port = _free_ephemeral_port()
+        monkeypatch.setenv("PORT", str(port))
+
+        jobs = [{"id": "job-slow", "kind": "sync_trades", "strategy_id": "s-slow"}]
+        mock_supabase = _stranded_backlog_supabase(jobs, backlog_rows=5_000)
+
+        # The fixture really does represent the backlog it claims to (a docstring
+        # that lies about its own setup is the SEAMUX-08 defect class).
+        stranded = mock_supabase.table("strategy_analytics").select("*").eq(
+            "computation_status", "computing"
+        ).execute().data
+        assert len(stranded) == 5_000
+        assert all(r["computation_status"] == "computing" for r in stranded)
+
+        started = asyncio.Event()
+
+        async def _slow_dispatch(job: dict[str, Any]) -> DispatchResult:
+            started.set()
+            await asyncio.sleep(0.3)  # ~15 heartbeat intervals, all yielding
+            return DispatchResult(outcome=DispatchOutcome.DONE)
+
+        _saved_tick = main_worker_healthz.LAST_TICK_AT
+        server_task = asyncio.create_task(main_worker_healthz.start_healthz_server())
+        try:
+            await _wait_port_listening(port)
+
+            with patch(
+                "main_worker.get_supabase", return_value=mock_supabase
+            ), patch("main_worker.dispatch", new=_slow_dispatch):
+                dt = asyncio.create_task(dispatch_tick("worker-job07-backlog"))
+                await started.wait()
+                start_stamp = main_worker_healthz.LAST_TICK_AT
+                await asyncio.sleep(0.05)
+                mid_dispatch_resp = await _probe_healthz(port)
+                assert not dt.done(), (
+                    "probe must be captured WHILE the dispatch is in flight"
+                )
+                await dt
+
+            assert b"200 OK" in mid_dispatch_resp, mid_dispatch_resp[:120]
+            assert (
+                b'"last_tick_at":null'
+                not in mid_dispatch_resp.replace(b" ", b"")
+            )
+            assert main_worker_healthz.LAST_TICK_AT > start_stamp, (
+                "the heartbeat must refresh LAST_TICK_AT while a dispatch runs "
+                "with a large stranded backlog present"
+            )
+        finally:
+            server_task.cancel()
+            try:
+                await server_task
+            except asyncio.CancelledError:
+                pass
+            main_worker_healthz.LAST_TICK_AT = _saved_tick
+
+    @pytest.mark.asyncio
+    async def test_probe_starved_by_loop_blocking_sync_work(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SC-4b, blocking arm — the falsifier.
+
+        A reap run SYNCHRONOUSLY on the shared event loop (``time.sleep``, a
+        stand-in for a blocking DB sweep or a pandas pass) starves the healthz
+        probe: the response cannot be produced until the block releases, and the
+        heartbeat cannot advance ``LAST_TICK_AT`` while the loop is wedged. That
+        is WEDGE-01 exactly.
+
+        The `LAST_TICK_AT`-did-not-advance assertion is the deterministic one:
+        both samples are taken INSIDE the handler, so no scheduling race can
+        smear them. The latency/503 assertion is the user-visible symptom.
+        """
+        obs = await _drive_probe_against_dispatch(monkeypatch, blocking=True)
+
+        assert obs["tick_before_work"] == obs["tick_after_work"], (
+            "LAST_TICK_AT advanced across a loop-BLOCKING span — impossible if "
+            "the block is real, so the arm is not exercising the property "
+            f"(before={obs['tick_before_work']!r} after={obs['tick_after_work']!r})"
+        )
+
+        starved_by_latency = obs["latency"] >= _WORK_S * 0.8
+        starved_by_staleness = (
+            b"503 Service Unavailable" in obs["response"]
+            and b'"status": "stale"' in obs["response"]
+        )
+        assert starved_by_latency or starved_by_staleness, (
+            "a loop-blocking reap must be OBSERVABLE at the healthz boundary — "
+            f"expected latency >= {_WORK_S * 0.8:.2f}s or a 503 stale body, got "
+            f"latency={obs['latency']:.3f}s response={obs['response'][:120]!r}. "
+            "If neither holds, healthz is lying about a wedged worker."
+        )
+
+    @pytest.mark.asyncio
+    async def test_probe_healthy_when_same_work_yields(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SC-4b, yielding twin — the same driver, the same duration, the same
+        thresholds, one token changed (``await asyncio.sleep``).
+
+        The probe returns fast and 200, and the heartbeat DOES advance
+        ``LAST_TICK_AT`` across the work. Paired with the blocking arm this pins
+        the PROPERTY rather than an implementation: swapping the yielding sleep
+        for a blocking one flips exactly one of these two tests, which is the
+        red asymmetry that proves the control is live rather than decorative.
+        """
+        obs = await _drive_probe_against_dispatch(monkeypatch, blocking=False)
+
+        assert obs["tick_after_work"] > obs["tick_before_work"], (
+            "the heartbeat must advance LAST_TICK_AT across YIELDING work; if "
+            "it does not, the twin is not actually yielding and the pair proves "
+            "nothing"
+        )
+        assert obs["latency"] < 0.1, (
+            "a yielding reap must not delay healthz — got "
+            f"{obs['latency']:.3f}s (the blocking arm's symptom must be absent here)"
+        )
+        assert b"200 OK" in obs["response"], obs["response"][:120]
+        assert obs["probe_landed_mid_dispatch"], (
+            "the yielding twin's probe must be serviced WHILE the dispatch is "
+            "still in flight — otherwise the 200 was captured after the work "
+            "finished and proves nothing about liveness during it"
+        )
+
+    @pytest.mark.asyncio
+    async def test_healthz_503_when_tick_stale(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The cheap deployed-server staleness proof (mirrors
+        ``test_worker_isolation_e2e.py:182``): with ``LAST_TICK_AT`` forced past
+        ``STALE_THRESHOLD`` and no dispatch running, the same real-socket probe
+        returns 503 — so the probe used above exercises the real staleness
+        contract and is not a stub that always answers 200.
+
+        Honesty bound (``main_worker.py:637-641``): this is loop-liveness only.
+        A YIELDING single-job hang leaves the loop alive, so healthz stays green;
+        that case is covered by the per-kind outer ``wait_for`` and the DB
+        watchdog re-claim, never by this probe.
+        """
+        port = _free_ephemeral_port()
+        monkeypatch.setenv("PORT", str(port))
+
+        _saved_tick = main_worker_healthz.LAST_TICK_AT
+        server_task = asyncio.create_task(main_worker_healthz.start_healthz_server())
+        try:
+            await _wait_port_listening(port)
+            main_worker_healthz.LAST_TICK_AT = time.time() - (
+                main_worker_healthz.STALE_THRESHOLD + 10
+            )
+            resp = await _probe_healthz(port)
+            assert b"503 Service Unavailable" in resp, resp[:120]
+            assert b'"status": "stale"' in resp
+        finally:
+            server_task.cancel()
+            try:
+                await server_task
+            except asyncio.CancelledError:
+                pass
+            main_worker_healthz.LAST_TICK_AT = _saved_tick
