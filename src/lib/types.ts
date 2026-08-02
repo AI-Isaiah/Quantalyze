@@ -289,6 +289,11 @@ export interface StrategyAnalytics {
   id: string;
   strategy_id: string;
   computed_at: string;
+  // JOB-01: NULL = "not currently computing". Writer-stamped in the SAME statement that
+  // sets computation_status='computing'; cleared on every exit. The pg_cron reaper
+  // reap_strategy_analytics_stuck_computing (migration 20260802120000) keys on this,
+  // never computed_at.
+  computing_started_at: string | null;
   // B9: single source of truth is STRATEGY_ANALYTICS_COMPUTATION_STATUSES in
   // closed-sets.ts, pinned against the DB CHECK by check-zod-db-check-parity.test.ts.
   computation_status: StrategyAnalyticsComputationStatus;

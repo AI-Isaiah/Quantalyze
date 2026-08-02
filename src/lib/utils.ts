@@ -179,6 +179,7 @@ export const EMPTY_ANALYTICS: StrategyAnalytics = {
   id: "",
   strategy_id: "",
   computed_at: "",
+  computing_started_at: null,
   computation_status: "pending",
   computation_error: null,
   benchmark: null,
