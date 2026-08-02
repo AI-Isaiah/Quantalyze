@@ -92,8 +92,8 @@
 -- seed invariant.
 --
 -- RESIDUAL ASSUMPTION, stated honestly (D-18): correctness of the reap-arm
--- assertions now rests on NO FOREIGN ROW on the shared TEST project carrying a
--- computing_started_at OLDER than the seed epoch (a century back). If enough
+-- assertions now rests on no foreign row on the shared TEST project carrying a
+-- computing_started_at older than the seed epoch (a century back). If enough
 -- such rows ever existed to consume the 25-row budget, the arm-A and LIMIT
 -- assertions would redden for a reason unrelated to the reaper. That is a loud,
 -- diagnosable failure -- unlike the cross-tenant writes it replaces, whose cost
