@@ -306,10 +306,17 @@ true for 146 and half of 142–145, and **false for 141**.
   `retention_compute_jobs_failed` (jobid 8, `failed_final`/`failed_retry`) and
   `retention_compute_jobs_orphaned_running` (jobid 11) exist — **there is no sweep for
   stale `pending`**, the one status an undrained enqueue cron produces.
-  ⛔ Do NOT "fix" this by adding a stale-`pending` retention cron in
-  `supabase/migrations/**`: merging that to main auto-applies it to PRODUCTION, where
-  deleting pending jobs destroys real queued work. Any such sweep must be TEST-only, which
-  this repo has no mechanism for.
+  ➡️ **OWNER: Phase 144 (JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence)**
+  for the retention half. Same table, same cron family (it already edits jobid 11), and two
+  of its success criteria are this problem's shape: SC 1 (orphan → terminal `failed` so a
+  poller sees a real outcome and the row survives for audit) and SC 3 (reconcile the
+  TEST-DELETE / PROD-reset split into ONE behavior — the exact TEST-vs-PROD mechanism gap
+  below). Add stale-`pending` as a fourth swept status when 144 is planned.
+  ⛔ Sweep it the 144 way — **terminal UPDATE, never DELETE**. A `DELETE` of stale `pending`
+  shipped under `supabase/migrations/**` auto-applies to PRODUCTION on merge and destroys
+  real queued work; transitioning a long-unclaimable row to terminal `failed` loses nothing
+  and makes the failure visible, which is what 144 exists to do. Size the threshold, not the
+  cadence, to protect live jobs (the WORKER-04 2h→4h lesson).
   Preferred fix (test-side, no prod blast radius, and it encodes the invariant the recorded
   lesson already asks for — *assert your OWN seed, never global empty-state*): make the
   live claim tests independent of queue depth rather than assuming an empty queue. Seeding

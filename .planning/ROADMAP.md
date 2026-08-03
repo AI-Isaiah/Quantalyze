@@ -512,6 +512,7 @@ Plans:
 
 **Plans**: TBD
 **Note**: The "fence flake also clears" claim is observation-only, NOT an acceptance criterion (research correction #4). Constrained by JOB-07 (pg_cron only).
+**Added scope (2026-08-03, routed from `TODOS.md` § CI / test-infra ratchet)**: the retention family sweeps `done` (jobid 4), `failed_final`/`failed_retry` (jobid 8) and orphaned `running` (jobid 11) — **nothing sweeps stale `pending`**, the one status an undrained enqueue cron produces. On the TEST project this is not hypothetical: the `derive-allocator-key-dailies` cron fanned out 1,884 `derive_broker_dailies` rows on 2026-08-02, and because `claim_compute_jobs_with_priority` orders by `next_attempt_at` ASC, the backlog sat permanently at the head of the claim queue and starved every live claim test (10 hard failures in `python`, cleared by hand). Add stale `pending` as a fourth swept status here, using this phase's own terminal-UPDATE pattern — a `DELETE` of pending auto-applies to PROD and would destroy real queued work, whereas a terminal `failed` transition loses nothing and is visible. The TEST-vs-PROD split in SC 3 is the same gap.
 
 ### Phase 145: JOB — csv-finalize atomicity (reproduce-first)
 
