@@ -1003,6 +1003,182 @@ def test_byte_identical_combine_snapshot():
     assert meta["computation_status_hint"] == "complete"
 
 
+# --- MT5-12: the series_completeness verdict, per combiner return path --------
+#
+# ORACLE INDEPENDENCE (VALIDATION.md § Oracle Independence). Every expected
+# verdict below is a STRING LITERAL hand-typed into the test. Nothing here
+# imports ``SeriesCompleteness`` or ``SERIES_COMPLETENESS_VALUES`` from the module
+# under test — importing the registry would mean a producer that starts emitting a
+# NEW value silently widens its own oracle, and the assertion could never fail.
+#
+# There are EIGHT combiner return paths. Five are stamped and each has its own
+# case below (a per-path case, not a per-function case, so an edit that drops ONE
+# of combine_native_ledger's two stamps reddens). The remaining three are
+# empty-series early returns that are EXEMPT by design; the last case here pins
+# the exemption's PREMISE rather than pretending the exemption is untestable.
+
+
+def _mt5_trading_deals() -> list[dict]:
+    """A minimal MT5 deal ledger with real trading activity across two UTC days.
+    Shape mirrors ``history_deals_get`` rows (see tests/test_mt5_deal_reconstruction.py):
+    ``type`` 0/1 = BUY/SELL, ``entry`` 1 = position close."""
+    return [
+        {"type": 0, "entry": 1, "profit": 500.0, "swap": 0.0, "commission": -100.0,
+         "fee": 0.0, "time": int(datetime(2025, 6, 2, 12, tzinfo=timezone.utc).timestamp())},
+        {"type": 1, "entry": 1, "profit": -200.0, "swap": 0.0, "commission": 0.0,
+         "fee": 0.0, "time": int(datetime(2025, 6, 3, 12, tzinfo=timezone.utc).timestamp())},
+    ]
+
+
+def _sfox_nav(values: list[float], days: list[str]) -> pd.Series:
+    """sFOX daily ``usd_value`` NAV observations on the given calendar days."""
+    idx = pd.DatetimeIndex([pd.Timestamp(d) for d in days]).as_unit("us")
+    return pd.Series([float(v) for v in values], index=idx, name="usd_value")
+
+
+def test_ccxt_combiner_stamps_fill_derived_unproven():
+    """combine_realized_and_funding (binance/bybit/okx) stamps
+    ``fill_derived_unproven`` — a CONSTANT, even on a healthy-looking book with
+    BOTH input streams present. The constant is deliberate: this path sums two
+    independent fetches with no residual, so a silently-truncated fills fetch
+    still yields a plausible series. Refining it to a data-driven verdict would
+    newly ADMIT exactly the accounts a truncation bug makes look healthy."""
+    days = [f"2026-03-{d:02d}" for d in range(1, 11)]
+    realized = [_realized_record(d, 80.0) for d in days]
+    funding = [_funding_row(d, 40.0) for d in days]
+
+    _returns, meta = combine_realized_and_funding(realized, funding, 100_000.0)
+
+    assert meta["series_completeness"] == "fill_derived_unproven"
+
+
+def test_mt5_combiner_stamps_ledger_complete():
+    """combine_mt5_deal_ledger stamps ``ledger_complete``: ``history_deals_get``
+    is a full-history fetch with no retention window, and an unclassifiable
+    DEAL_TYPE raises Mt5DealClassificationError BEFORE any series exists — so a
+    series that returns at all was folded from a whole, fully-interpretable
+    ledger."""
+    from services.broker_dailies import combine_mt5_deal_ledger
+
+    _returns, meta = combine_mt5_deal_ledger(
+        _mt5_trading_deals(), account_equity=100_200.0, account_balance=100_200.0
+    )
+
+    assert meta["series_completeness"] == "ledger_complete"
+
+
+def test_deribit_nav_path_stamps_ledger_complete():
+    """combine_native_ledger RETURN PATH 2 of 2 — the NAV backward-roll branch
+    (``denominator_config=None``, every normal deribit strategy). Separate case
+    from the allocated-capital branch below so dropping EITHER stamp reddens."""
+    from services.broker_dailies import combine_native_ledger
+
+    ledger = _usd_native_ledger({0: 100_000.0, 1: 50_000.0, 2: -30_000.0})
+    _returns, meta = combine_native_ledger(ledger, frozenset())
+
+    assert meta["series_completeness"] == "ledger_complete"
+
+
+def test_deribit_allocated_capital_path_stamps_ledger_complete():
+    """combine_native_ledger RETURN PATH 1 of 2 — the Zavara allocated-capital
+    denominator branch, which bypasses reconstruct_native_nav_and_twr entirely
+    and returns from its own ``return`` statement. This is the LIVE account: a
+    plan that stamped 'the deribit combiner' once at the bottom of the function
+    would miss this path completely, and no test keyed on the NAV branch would
+    notice."""
+    from datetime import date
+
+    from services.allocated_capital import (
+        CapitalScheduleEntry,
+        ReturnsDenominatorConfig,
+    )
+    from services.broker_dailies import combine_native_ledger
+
+    cfg = ReturnsDenominatorConfig(
+        denominator="allocated_capital",
+        pnl_basis="cash_settlement",
+        capital_schedule=(CapitalScheduleEntry(date(2026, 1, 1), 1_000_000.0),),
+        metrics_basis="active_day",
+    )
+    ledger = _usd_native_ledger({0: 10_000.0, 1: -4_000.0, 2: 6_000.0})
+
+    _returns, meta = combine_native_ledger(
+        ledger, frozenset(), denominator_config=cfg
+    )
+
+    assert meta["series_completeness"] == "ledger_complete"
+
+
+def test_sfox_clean_span_stamps_ledger_complete():
+    """combine_sfox_balance_history with ZERO interior NAV holes: the observed
+    span IS the whole record, so the verdict is ``ledger_complete``."""
+    from services.broker_dailies import combine_sfox_balance_history
+
+    nav = _sfox_nav(
+        [10_000.0, 10_100.0, 10_050.0, 10_200.0],
+        ["2026-04-01", "2026-04-02", "2026-04-03", "2026-04-04"],
+    )
+    _returns, meta = combine_sfox_balance_history(
+        nav, pd.Series(dtype="float64", name="flows")
+    )
+
+    # Premise: this fixture really has no holes (else the case is vacuous).
+    assert meta.get("nav_coverage_gap_days", 0) == 0
+    assert meta["series_completeness"] == "ledger_complete"
+
+
+def test_sfox_interior_hole_stamps_sampled_gapped():
+    """combine_sfox_balance_history with an interior NAV hole (04-03 unobserved):
+    sFOX NAV is a SAMPLED series, so a missing day is UNKNOWN, not flat — a real
+    coverage gap in the record. Verdict ``sampled_gapped``.
+
+    ⚠️ This is the newly-refusing branch: it is the first completeness check sFOX
+    has ever had. sFOX is dormant in production, so blast radius is zero."""
+    from services.broker_dailies import combine_sfox_balance_history
+
+    nav = _sfox_nav(
+        [10_000.0, 10_100.0, 10_300.0, 10_400.0],
+        ["2026-04-01", "2026-04-02", "2026-04-04", "2026-04-05"],  # 04-03 ABSENT
+    )
+    _returns, meta = combine_sfox_balance_history(
+        nav, pd.Series(dtype="float64", name="flows")
+    )
+
+    # Premise: the hole really registered (else this would pass for the wrong reason).
+    assert meta.get("nav_coverage_gap_days", 0) >= 1
+    assert meta["series_completeness"] == "sampled_gapped"
+
+
+def test_mt5_no_trading_deals_is_exempt_and_stays_inside_the_short_circuit():
+    """The EXEMPTION case — combine_mt5_deal_ledger's no-trading-deals early
+    return (a deposit-only account). It stamps NO verdict, deliberately: stamping
+    ``ledger_complete`` would assert a complete track record for an account that
+    has never traded.
+
+    The exemption is sound only because ``run_derive_broker_dailies_job``
+    short-circuits on ``int(returns.notna().sum()) < 2`` (job_worker.py:4340)
+    BEFORE the persist-seam verdict assert — an empty series is never persisted,
+    so an absent verdict here is unreachable at that seam. This test therefore
+    pins BOTH halves: the verdict is absent, AND the series stays inside :4340's
+    guard condition. If the row-count assertion below ever fails, the exemption's
+    PREMISE has broken and this path must be stamped or refused — the absence
+    assertion alone would still pass and would silently become a fail-open."""
+    from services.broker_dailies import combine_mt5_deal_ledger
+
+    deposit_only = [
+        {"type": 2, "profit": 25_000.0, "swap": 0.0, "commission": 0.0, "fee": 0.0,
+         "time": int(datetime(2025, 6, 2, 12, tzinfo=timezone.utc).timestamp())},
+    ]
+    returns, meta = combine_mt5_deal_ledger(
+        deposit_only, account_equity=25_000.0, account_balance=25_000.0
+    )
+
+    assert "series_completeness" not in meta
+    # The :4340 premise — fewer than 2 interpretable rows, so the job short-circuits
+    # before the persist seam and this series is never written.
+    assert int(returns.notna().sum()) < 2
+
+
 def test_external_flows_param_threads_through_combine_to_core():
     """74-02 Task 3 (updated for 75-05 HIGH-1): the external_flows kwarg passed to
     combine_realized_and_funding is THREADED all the way to the honest core
