@@ -170,6 +170,47 @@ describe("[ONB-01] MultiKeyConnectStep — Add converts to State B", () => {
   });
 });
 
+/**
+ * MT5-03 / D-03 — the cross-file half of the OKX masking contract.
+ *
+ * This component carries NO MT5 card (its only `mt5` mentions are two
+ * error-code strings), so MT5-03 does not touch it. Its passphrase input is
+ * hardcoded OKX and, until now, nothing asserted that it renders masked at
+ * all — an absence that would have let a future "unify the two venue arrays"
+ * refactor silently import ConnectKeyStep's new `passphraseSecret` plumbing
+ * with the wrong default and unmask a genuine API credential here, with the
+ * whole test suite green.
+ *
+ * Written from scratch rather than marked satisfied-by-absence.
+ */
+describe("[MT5-03 / D-03] MultiKeyConnectStep — the OKX passphrase stays masked", () => {
+  it("renders key 0's OKX passphrase as type=password, Show-toggleable", () => {
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    const panel0 = screen.getByTestId("key-panel-0");
+    // Key 0 defaults to binance (no passphrase) — select OKX to reveal the slot.
+    fireEvent.click(within(panel0).getByTestId("key-0-exchange-okx"));
+
+    const passphrase = within(panel0).getByTestId("key-0-passphrase");
+    expect(passphrase).toHaveAttribute("type", "password");
+    // The label is hardcoded OKX here — pinning it is what makes a venue-array
+    // unification that relabels this slot visible rather than silent.
+    expect(within(panel0).getByLabelText("OKX Passphrase")).toBe(passphrase);
+
+    // Existing Show/Hide behaviour, unchanged.
+    fireEvent.click(within(panel0).getByRole("button", { name: "Show" }));
+    expect(within(panel0).getByTestId("key-0-passphrase")).toHaveAttribute(
+      "type",
+      "text",
+    );
+    fireEvent.click(within(panel0).getByRole("button", { name: "Hide" }));
+    expect(within(panel0).getByTestId("key-0-passphrase")).toHaveAttribute(
+      "type",
+      "password",
+    );
+  });
+});
+
 describe("[UAT] MultiKeyConnectStep — add-another-key UX (F-4 / F-5)", () => {
   // F-4: entering a key in the State-A single-key form and THEN clicking
   // "+ Add another key window" must carry that draft into panel 1 — not erase
