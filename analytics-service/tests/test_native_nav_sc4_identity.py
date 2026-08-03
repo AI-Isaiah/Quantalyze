@@ -448,6 +448,48 @@ def _legacy_gapfilled(fx: _Fixture) -> tuple[pd.Series, dict[str, object]]:
     return gap_fill_daily_returns(returns), meta
 
 
+# MT5-12: the ONE key excluded from the meta byte-equality below, named as a
+# literal here rather than imported, and excluded for a structural reason.
+#
+# This gate compares the legacy CORE (reconstruct_nav_and_twr) against the native
+# path THROUGH combine_native_ledger — i.e. across a layer boundary, exactly as
+# this module's header docstring describes ("the transforms-level counterpart is
+# combine_native_ledger, Phase 80"). ``series_completeness`` is a PRODUCER-layer
+# trust verdict that only a combiner may stamp: it is the combiner's judgement of
+# whether the raw venue inputs it consumed were WHOLE, which the pure arithmetic
+# core has no way to know and deliberately does not emit. It is not a DQ-01 guard,
+# not a chain-break flag, and not a materiality flag — and this gate's subject is
+# precisely "the legacy guard/chain-break/materiality meta byte-for-byte".
+# Comparing it across these two layers would assert that a core emits a producer's
+# stamp, which is a claim nobody wants to be true.
+#
+# ⚠️ The exclusion is NOT a weakening: ``test_real_adapter_stamps_the_producer_
+# verdict`` below asserts POSITIVELY that the native (combiner) side carries the
+# verdict, so dropping the stamp still reddens this file. An exclusion without
+# that positive pin would let a dropped stamp pass silently here.
+_PRODUCER_ONLY_META_KEYS = ("series_completeness",)
+
+
+def _guard_meta(meta: dict[str, object]) -> dict[str, object]:
+    """The guard/chain-break/materiality surface this gate compares — the full meta
+    minus the producer-layer keys the raw core cannot emit (see above)."""
+    return {k: v for k, v in meta.items() if k not in _PRODUCER_ONLY_META_KEYS}
+
+
+def test_real_adapter_stamps_the_producer_verdict(monkeypatch: Any) -> None:
+    """MT5-12 companion to the exclusion in the gate below: the native REAL seam
+    goes through ``combine_native_ledger``, so its meta MUST carry the deribit
+    producer verdict ``ledger_complete``. Without this, excluding the key from the
+    gate's dict equality would let a dropped stamp slip through this file
+    unnoticed. The expected value is a hand-typed literal (oracle independence)."""
+    fx = next(f for f in _FIXTURES if f.name == "no_flows")
+    _returns, native_meta = _native_real(fx, monkeypatch)
+    assert native_meta["series_completeness"] == "ledger_complete"
+    # And the legacy side is the raw CORE, which must NOT stamp a producer verdict.
+    _legacy_returns, legacy_meta = _legacy_gapfilled(fx)
+    assert "series_completeness" not in legacy_meta
+
+
 @pytest.mark.parametrize("fx", _FIXTURES, ids=lambda f: f.name)
 def test_dual_run_bit_exact_real_adapter(fx: _Fixture, monkeypatch: Any) -> None:
     """SHIP GATE (i): the native path through the REAL build_deribit_native_ledger
@@ -479,7 +521,10 @@ def test_dual_run_bit_exact_real_adapter(fx: _Fixture, monkeypatch: Any) -> None
     pd.testing.assert_series_equal(
         legacy_returns, native_returns, check_exact=True, check_names=False
     )
-    assert dict(legacy_meta) == dict(native_meta)
+    # Guard/chain-break/materiality parity. The producer-layer verdict is excluded
+    # (see _PRODUCER_ONLY_META_KEYS) and pinned positively by
+    # test_real_adapter_stamps_the_producer_verdict.
+    assert _guard_meta(legacy_meta) == _guard_meta(native_meta)
 
 
 def test_real_adapter_materiality_flag_is_load_bearing(monkeypatch: Any) -> None:
@@ -495,11 +540,16 @@ def test_real_adapter_materiality_flag_is_load_bearing(monkeypatch: Any) -> None
     assert legacy_meta.get("unrealized_pnl_in_anchor") is True
     assert native_meta.get("unrealized_pnl_in_anchor") is True
     assert native_meta.get("computation_status_hint") == "complete_with_warnings"
-    # And a native meta WITHOUT the flag would break the gate equality.
-    dropped = dict(native_meta)
+    # And a native meta WITHOUT the flag would break the gate equality. Compared
+    # through _guard_meta — the SAME reduction the gate applies — so this proves the
+    # gate catches a dropped WARNING specifically, not merely that the two dicts
+    # differ somewhere. (Without the reduction the producer-layer verdict would make
+    # the dicts unequal on its own, and this assertion would pass for the wrong
+    # reason no matter what happened to the materiality flag.)
+    dropped = _guard_meta(native_meta)
     dropped.pop("unrealized_pnl_in_anchor", None)
     dropped["computation_status_hint"] = "complete"
-    assert dict(legacy_meta) != dropped
+    assert _guard_meta(legacy_meta) != dropped
 
 
 def test_anchor_composition_pin_real_adapter(monkeypatch: Any) -> None:
