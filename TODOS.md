@@ -311,7 +311,15 @@ true for 146 and half of 142–145, and **false for 141**.
   of its success criteria are this problem's shape: SC 1 (orphan → terminal `failed` so a
   poller sees a real outcome and the row survives for audit) and SC 3 (reconcile the
   TEST-DELETE / PROD-reset split into ONE behavior — the exact TEST-vs-PROD mechanism gap
-  below). Add stale-`pending` as a fourth swept status when 144 is planned.
+  below).
+  ⚙️ **It is WIRED, not just noted.** GSD never reads `TODOS.md` (zero references anywhere
+  in `~/.claude/get-shit-done/`), and the planner's coverage audit checks only
+  `REQUIREMENTS.md`, `RESEARCH.md`, the ROADMAP **goal** and `CONTEXT.md` decisions — a
+  ROADMAP *Note* is NOT audited. So this was promoted to **`JOB-08`** in
+  `.planning/REQUIREMENTS.md`, added to Phase 144's `Requirements:` line, and given **SC 4**
+  on the phase. The audit iterates the phase's REQ-IDs and flags any not claimed by a plan,
+  so 144 cannot be planned without JOB-08 being answered. Measure-first: "stale `pending`
+  population is zero on prod" is a valid close.
   ⛔ Sweep it the 144 way — **terminal UPDATE, never DELETE**. A `DELETE` of stale `pending`
   shipped under `supabase/migrations/**` auto-applies to PRODUCTION on merge and destroys
   real queued work; transitioning a long-unclaimable row to terminal `failed` loses nothing

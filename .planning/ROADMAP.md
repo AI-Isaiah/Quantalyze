@@ -503,16 +503,17 @@ Plans:
 
 **Goal**: An orphaned `running` compute job terminates VISIBLY — pollers break out, the audit trail survives — resolving the founder's open WR-02 DELETE-vs-reset call
 **Depends on**: Phase 143 (JOB sequence; independent mechanism on `compute_jobs`)
-**Requirements**: JOB-05
+**Requirements**: JOB-05, JOB-08
 **Success Criteria** (what must be TRUE):
 
   1. An orphaned `running` `compute_jobs` row (past the UNCHANGED 4h `claimed_at` threshold) transitions to a terminal `failed` status instead of being DELETEd — so a wizard poller sees a real outcome and the row survives for audit until the existing 30/90-day retention crons delete it.
   2. Detection latency drops from ~24h to the tightened cadence (e.g. hourly) while a legitimate batch-tail job under 4h is never touched — the threshold, not the frequency, is what protects live jobs (the WORKER-04 2h→4h lesson).
   3. The change ships as a NEW migration layered on `20260720120000` (the shipped migration is never edited), reconciling the TEST-DELETE / PROD-reset split into ONE behavior.
+  4. A committed measurement of the stale-`pending` `compute_jobs` population **on PROD** exists BEFORE any stale-`pending` sweep is scoped, and the gap is closed EITHER by adding `pending` as a fourth swept status (using SC 1's terminal-UPDATE pattern, never `DELETE`) OR by an explicit WON'T-FIX carrying that measurement — "zero on prod" is a valid, budget-saving outcome. The retention family covers `done` (jobid 4), `failed_*` (jobid 8) and orphaned `running` (jobid 11); stale `pending` is the one status an undrained enqueue cron produces and the only one nothing sweeps.
 
 **Plans**: TBD
 **Note**: The "fence flake also clears" claim is observation-only, NOT an acceptance criterion (research correction #4). Constrained by JOB-07 (pg_cron only).
-**Added scope (2026-08-03, routed from `TODOS.md` § CI / test-infra ratchet)**: the retention family sweeps `done` (jobid 4), `failed_final`/`failed_retry` (jobid 8) and orphaned `running` (jobid 11) — **nothing sweeps stale `pending`**, the one status an undrained enqueue cron produces. On the TEST project this is not hypothetical: the `derive-allocator-key-dailies` cron fanned out 1,884 `derive_broker_dailies` rows on 2026-08-02, and because `claim_compute_jobs_with_priority` orders by `next_attempt_at` ASC, the backlog sat permanently at the head of the claim queue and starved every live claim test (10 hard failures in `python`, cleared by hand). Add stale `pending` as a fourth swept status here, using this phase's own terminal-UPDATE pattern — a `DELETE` of pending auto-applies to PROD and would destroy real queued work, whereas a terminal `failed` transition loses nothing and is visible. The TEST-vs-PROD split in SC 3 is the same gap.
+**Note (SC 4 / JOB-08, added 2026-08-03)**: routed here from `TODOS.md` § CI / test-infra ratchet — same table, same cron family this phase already edits, and SC 3's TEST-vs-PROD split is the same gap. Full evidence and the two ⛔ traps (never `DELETE` pending; never `cron.unschedule(9)`) are in `REQUIREMENTS.md` § JOB-08. ⚠️ The gap is CERTAIN on the TEST project and UNMEASURED on prod — that asymmetry is why SC 4 is measure-first rather than build-first.
 
 ### Phase 145: JOB — csv-finalize atomicity (reproduce-first)
 
