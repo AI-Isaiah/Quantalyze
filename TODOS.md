@@ -285,6 +285,40 @@ true for 146 and half of 142–145, and **false for 141**.
 - **No Python lock file; ccxt unpinned** — unreproducible prod builds in the money-math path.
 
 ### CI / test-infra ratchet
+- 🔁 **RECURS DAILY 05:30 UTC — nothing reaps stale `pending` compute_jobs on the TEST
+  project, and a full claim queue starves every live claim test** (diagnosed 2026-08-03
+  while landing v0.52.0.0; cleaned by hand, NOT fixed).
+  Chain: TEST holds ~1,900 `api_keys` (1,437 older than 7 days — fixture rows no test
+  cleans up) → the `derive-allocator-key-dailies` cron (`30 5 * * *`, jobid 9,
+  `SELECT enqueue_derive_broker_dailies_for_allocator_keys()`) runs on TEST exactly as on
+  prod and fans out ONE `derive_broker_dailies` job per key → 1,884 rows landed at
+  `2026-08-02 05:30:00.236555+00` → nothing on TEST drains them.
+  ⚠️ **The starvation is the part to understand, and it is not a flake.**
+  `claim_compute_jobs_with_priority` ends `ORDER BY <priority rank>, next_attempt_at, id
+  LIMIT p_batch_size`. A test seeding a fresh job gets `next_attempt_at = now()`, so it
+  sorts BEHIND every stale row. `_claim_one` (`test_compute_jobs_fencing.py:692`) claims
+  `p_batch_size=50` and returns only its own `want_job_id`, so with 989 stale rows ahead
+  the seeded job sits at position ~990 and `_claim_one` returns `None` **every time**.
+  10 tests fail identically (7 in `test_compute_jobs_fencing.py`, 3 in
+  `test_drain_semantics.py`). It reddens `python` on ANY branch, including main — main's
+  last green CI ran 05:01 on 2026-08-02, 29 minutes before the cron fired.
+  **Retention coverage gap = the root cause**: `retention_compute_jobs_done` (jobid 4),
+  `retention_compute_jobs_failed` (jobid 8, `failed_final`/`failed_retry`) and
+  `retention_compute_jobs_orphaned_running` (jobid 11) exist — **there is no sweep for
+  stale `pending`**, the one status an undrained enqueue cron produces.
+  ⛔ Do NOT "fix" this by adding a stale-`pending` retention cron in
+  `supabase/migrations/**`: merging that to main auto-applies it to PRODUCTION, where
+  deleting pending jobs destroys real queued work. Any such sweep must be TEST-only, which
+  this repo has no mechanism for.
+  Preferred fix (test-side, no prod blast radius, and it encodes the invariant the recorded
+  lesson already asks for — *assert your OWN seed, never global empty-state*): make the
+  live claim tests independent of queue depth rather than assuming an empty queue. Seeding
+  at `priority: 'high'` puts the seed ahead of an all-`normal` backlog and survives any
+  depth. ⚠️ Check first that no test in scope is itself asserting priority ordering or
+  low-priority claim behaviour — `v_high_pending` gates low-priority rows out entirely once
+  any high row is pending, so a blanket change is not safe.
+  Second, independent fix worth doing: TEST `api_keys` grow without bound (1,900 and
+  climbing). Fewer fixture keys = a smaller daily fan-out.
 - 44 live-DB vitest files + ~112 python tests are green-skipped in CI while migrations
   auto-apply to prod.
 - pytest 80% gate measures only `services/` (routers/ ~7.8k LOC + `main_worker.py` uncovered).
