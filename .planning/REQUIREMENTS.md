@@ -48,12 +48,13 @@ investor factsheet on a spinner that never resolves.
 
 ### JOB — Job-state integrity (no forever-spinners)
 
-- [ ] **JOB-01**: `strategy_analytics` carries a dedicated writer-stamped `computing_started_at`, set in the SAME statement/transaction that sets `computation_status='computing'` — never `updated_at`/`computed_at`, the exact mistake that forced the 106-janitor revert.
-- [ ] **JOB-02**: A recurring pg_cron reaper transitions stranded `strategy_analytics` rows (stuck `computing` past threshold AND no active `compute_jobs` row) to a TERMINAL `failed` state carrying a user-recoverable message, so a wizard poll — or a page refresh — sees a real outcome instead of spinning forever. Supersedes the one-off `reset_stuck_computing_rows.py` script.
-- [ ] **JOB-03**: The reaper's staleness threshold is derived from `strategy_analytics`'s own batch-tail math (`batch_size × max_per_kind_timeout`), not copied from the `compute_jobs` 4h number, and a CI invariant (mirroring `test_every_kind_has_watchdog_headroom`) fails if any handler's real worst case exceeds it.
+- [x] **JOB-01**: `strategy_analytics` carries a dedicated writer-stamped `computing_started_at`, set in the SAME statement/transaction that sets `computation_status='computing'` — never `updated_at`/`computed_at`, the exact mistake that forced the 106-janitor revert.
+- [x] **JOB-02**: A recurring pg_cron reaper transitions stranded `strategy_analytics` rows (stuck `computing` past threshold AND no active `compute_jobs` row) to a TERMINAL `failed` state carrying a user-recoverable message, so a wizard poll — or a page refresh — sees a real outcome instead of spinning forever. Supersedes the one-off `reset_stuck_computing_rows.py` script.
+- [x] **JOB-03**: The reaper's staleness threshold is derived from the **chain-inclusive** worst case a `strategy_analytics` row can legitimately sit at `computing` — walk `JOB_CHAIN_FOLLOW_ON` over `TIMEOUT_PER_KIND` and sum the per-hop ceiling `(batch_size - 1) × max_handler + handler × max_attempts + backoff` across the longest chain, yielding a **43,920 s (12.2 h)** ceiling that sits under the shipped 16 h threshold — never copied from the `compute_jobs` 4h number, and a CI invariant (mirroring `test_every_kind_has_watchdog_headroom`) fails if any handler's real worst case exceeds it. ⛔ REJECTED derivation, recorded so it is never re-derived: `batch_size × max_per_kind_timeout` is the **`compute_jobs`** formula (`20260720120000:24-25`); research collision C-6 proved that re-applying it here yields **9,000 s (≈4.9× too small)** because it counts only the LAST chain hop, and a reaper on that threshold would reap healthy in-flight chains. It is named here only as the rejected answer.
 - [ ] **JOB-04**: A reconciliation sweep detects strategies with persisted daily-returns data but NO `compute_jobs` row of any status and no terminal `strategy_analytics` row past a grace window — the "`after()` never ran at all" hole that the in-closure placeholder guard structurally cannot catch — and idempotently re-enqueues + alerts Sentry.
 - [ ] **JOB-05**: The existing orphaned-`running` `compute_jobs` purge transitions rows to a terminal `failed` status instead of bare `DELETE` (so pollers break out and the audit trail survives), at a tightened cadence with the 4h `claimed_at` threshold UNCHANGED; delivered as a NEW migration layered on `20260720120000`, reconciling the TEST-DELETE / PROD-reset split (WR-02).
 - [ ] **JOB-06**: The stale 42501 / `PROCESS_KEY_UNIFIED_BACKBONE` claim is reproduced against current `main` before any fix is scoped (documented pass/fail); the genuinely-open gap — csv-finalize's three-step RPC → RPC → `after()` sequence having no wrapping transaction — is closed by either one SECURITY DEFINER transaction or explicit compensating cleanup + Sentry, so a partial failure leaves no orphan strategy row.
+- [ ] **JOB-08**: The retention family's **stale-`pending` gap is decided on measured evidence, not skipped by default**. `retention_compute_jobs_done` (jobid 4), `retention_compute_jobs_failed` (jobid 8) and `retention_compute_jobs_orphaned_running` (jobid 11) exist; **nothing sweeps stale `pending`** — the one status an undrained enqueue cron produces. A committed measurement of the stale-`pending` population **on PROD** exists BEFORE any sweep is scoped, and the outcome is EITHER a sweep added as a fourth swept status using JOB-05's terminal-UPDATE pattern, OR an explicit WON'T-FIX carrying that measurement as evidence — **"population is zero on prod" is a valid, budget-saving outcome** (same measure-first shape as JOB-06). ⛔ The sweep, if built, transitions to a terminal status and NEVER `DELETE`s: a `DELETE` of `pending` under `supabase/migrations/**` auto-applies to PRODUCTION on merge and destroys real queued work. Evidence that the gap is real on the TEST project (where it is certain, since TEST has no draining worker): the `derive-allocator-key-dailies` cron fanned out 1,884 `derive_broker_dailies` rows on 2026-08-02, and because `claim_compute_jobs_with_priority` orders by `next_attempt_at` ASC before `LIMIT p_batch_size`, the backlog sat permanently at the head of the claim queue and starved every live claim test — 10 deterministic `python` failures on ANY branch including main, cleared only by hand. ⛔ Do NOT close this by `cron.unschedule(9)`: `supabase/tests/test_derive_allocator_keys_fanout.sql` assertion 6 requires that cron registered, so unscheduling reddens the `sql-tests` gate instead.
 - [ ] **JOB-07**: No reaper or sweep runs heavy work on the worker's shared asyncio event loop; a regression test proves a large synthetic backlog does not stall `healthz` past `STALE_THRESHOLD` (the WEDGE-01 crash class the janitor exists to clean up after).
 
 ### RATE — Rate limiting (audit + close verified gaps)
@@ -265,11 +266,12 @@ Populated during roadmap creation.
 | SEAM-04 | Phase 140 | Complete |
 | SEAM-05 | Phase 141 | Complete |
 | SEAM-06 | Phase 141 | Complete |
-| JOB-01 | Phase 142 | Pending |
-| JOB-02 | Phase 142 | Pending |
-| JOB-03 | Phase 142 | Pending |
+| JOB-01 | Phase 142 | Complete |
+| JOB-02 | Phase 142 | Complete |
+| JOB-03 | Phase 142 | Complete |
 | JOB-04 | Phase 143 | Pending |
 | JOB-05 | Phase 144 | Pending |
+| JOB-08 | Phase 144 | Pending |
 | JOB-06 | Phase 145 | Pending |
 | JOB-07 | Phase 142 | Pending |
 | RATE-01 | Phase 146 | Pending |

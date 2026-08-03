@@ -15,6 +15,8 @@ Plus a shutdown-signal test that verifies the SHUTDOWN event stops the loops.
 
 import asyncio
 import json
+import pathlib
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1140,6 +1142,212 @@ class TestWatchdogInvariant:
             _watchdog_seconds("10 fortnights")
 
 
+def _chain_inclusive_ceiling_seconds() -> tuple[float, list[str]]:
+    """JOB-03 — the longest a HEALTHY strategy_analytics row can legitimately
+    sit at computation_status='computing', in seconds, plus the worst path.
+
+    A strategy_analytics row is 'computing' for a whole multi-hop chain, not for
+    one claimed job. So the ceiling is summed PER HOP along the worst simple
+    path through the chain topology, where each hop costs:
+
+      (P_BATCH_SIZE - 1) x MAX_HANDLER_TIMEOUT_S   batch-tail exposure: the hop's
+                                                   job can be the last of a claimed
+                                                   batch, behind up to 4 siblings
+                                                   each running to its own ceiling
+      + TIMEOUT_PER_KIND[hop] x MAX_ATTEMPTS       its own handler, fully retried
+      + RETRY_BACKOFF_TOTAL_S                      the scheduled waits between those
+                                                   attempts
+
+    ⚠️ This is deliberately NOT `batch_size x max_per_kind_timeout`. That is the
+    compute_jobs orphaned-running formula (migration 20260720120000:24-25) and it
+    bounds how long ONE claimed job may sit 'running' — a strictly smaller
+    quantity that under-counts this chain by ~4x (CONTEXT.md C-6). A test that
+    re-derived the implementation's own expression could not fail when that
+    expression is the wrong one (VALIDATION.md P-8).
+    """
+    from services.job_worker import JOB_CHAIN_FOLLOW_ON, TIMEOUT_PER_KIND
+
+    # LOCAL literals, never imports — these are the production inputs the oracle
+    # pins independently (VALIDATION.md §Oracle Independence, research P-8):
+    #   P_BATCH_SIZE        main_worker.py:470 and :511 ("p_batch_size": 5)
+    #   MAX_ATTEMPTS        job_worker.py:8171 (job.get("max_attempts", 3))
+    #   RETRY_BACKOFF_*     migration 20260505115047:176-182 / COMMENT :209 —
+    #                       attempt 1 -> +30s, attempt 2 -> +2min, ELSE -> +8min
+    P_BATCH_SIZE = 5
+    MAX_ATTEMPTS = 3
+    RETRY_BACKOFF_TOTAL_S = 30 + 120 + 480  # 630s across the 3 attempts
+
+    max_handler_s = max(TIMEOUT_PER_KIND.values())
+
+    def _hop_cost(kind: str) -> float:
+        return (
+            (P_BATCH_SIZE - 1) * max_handler_s
+            + TIMEOUT_PER_KIND[kind] * MAX_ATTEMPTS
+            + RETRY_BACKOFF_TOTAL_S
+        )
+
+    # Every SIMPLE path (no kind revisited, so a future cycle cannot make this
+    # unbounded). Walking from every key rather than from computed "roots" is
+    # deliberate: root detection is extra logic that could silently drop the
+    # worst path, and every root-originated path is already enumerated here, so
+    # the maximum is identical.
+    worst_seconds = 0.0
+    worst_path: list[str] = []
+
+    def _walk(path: list[str]) -> None:
+        nonlocal worst_seconds, worst_path
+        total = sum(_hop_cost(k) for k in path)
+        if total > worst_seconds:
+            worst_seconds, worst_path = total, list(path)
+        for follow_on in JOB_CHAIN_FOLLOW_ON.get(path[-1], ()):
+            if follow_on not in path:
+                _walk([*path, follow_on])
+
+    for root in JOB_CHAIN_FOLLOW_ON:
+        _walk([root])
+
+    return worst_seconds, worst_path
+
+
+class TestReaperThresholdInvariant:
+    """JOB-03. The strategy_analytics stuck-'computing' reaper threshold MUST
+    exceed the longest a healthy multi-hop chain can legitimately hold a row at
+    'computing'. If it doesn't, the pg_cron reaper flips a LIVE, healthy chain's
+    row to 'failed' mid-compute — the user sees a false failure on a money
+    surface, worse than the spinner the reaper exists to end."""
+
+    def test_threshold_exceeds_chain_inclusive_ceiling(self) -> None:
+        """The headroom invariant (Falsifiability Ledger SC-3: divide the
+        constant by 10 and this must go RED).
+
+        Oracle note: this imports JOB_CHAIN_FOLLOW_ON and TIMEOUT_PER_KIND from
+        the module under test — a DELIBERATE exception recorded in
+        VALIDATION.md §Oracle Independence. It is mitigated because the three
+        production enqueue sites now READ JOB_CHAIN_FOLLOW_ON, so a wrong map
+        changes real enqueue behavior and reddens the job-flow suites
+        (test_main_worker.py, test_job_worker_csv_kind.py). The batch/retry
+        inputs stay local literals, and the coverage asserts below stop a
+        zeroed or under-covering map from passing vacuously.
+
+        NOT asserted here, on purpose: the dominance form "chain ceiling >=
+        the all-kinds single-hop ceiling". The plan-checker proved it
+        unconditionally true — both sides share max(TIMEOUT_PER_KIND.values()),
+        so any >=2-hop path exceeds the single-hop ceiling by
+        M + RETRY_BACKOFF_TOTAL_S + MAX_ATTEMPTS x sum(T) > 0, and a new kind
+        raises M on BOTH sides (real numbers: M = 1800s, 4-hop ceiling 43,920s
+        vs single-hop 13,230s). A dead assert pinned as coverage is exactly the
+        Rule-9 defect; the literal-pinned registry count below is what actually
+        forces a conscious decision."""
+        from services.job_worker import (
+            JOB_CHAIN_FOLLOW_ON,
+            STRATEGY_ANALYTICS_REAP_THRESHOLD,
+            TIMEOUT_PER_KIND,
+        )
+
+        ceiling_s, worst_path = _chain_inclusive_ceiling_seconds()
+
+        # Anti-vacuity: a topology edit that zeroes or truncates the map would
+        # otherwise let the headroom assert pass against a meaningless ceiling.
+        # 6h/24h are deliberate literals — the real ceiling today is ~12.2h.
+        assert 6 * 3600 < ceiling_s < 24 * 3600, (
+            f"chain-inclusive ceiling {ceiling_s:.0f}s ({ceiling_s / 3600:.1f}h) "
+            "left the 6h-24h sanity band. Either the chain topology was zeroed / "
+            "truncated (the ceiling is now meaningless and the headroom assert "
+            "below would pass vacuously), or the chain genuinely changed shape — "
+            "in which case re-derive STRATEGY_ANALYTICS_REAP_THRESHOLD and this "
+            "band together, consciously."
+        )
+
+        threshold_s = _watchdog_seconds(STRATEGY_ANALYTICS_REAP_THRESHOLD)
+        assert threshold_s > ceiling_s, (
+            f"STRATEGY_ANALYTICS_REAP_THRESHOLD is "
+            f"{STRATEGY_ANALYTICS_REAP_THRESHOLD!r} ({threshold_s:.0f}s) but the "
+            f"chain-inclusive ceiling is {ceiling_s:.0f}s "
+            f"({ceiling_s / 3600:.1f}h) on path {' -> '.join(worst_path)}. "
+            "Below the ceiling the pg_cron reaper terminalizes healthy in-flight "
+            "chains as 'failed' — a false failure on a money surface. Raise the "
+            "constant. Do NOT re-derive it as batch_size x "
+            "max(TIMEOUT_PER_KIND): that is the compute_jobs formula (migration "
+            "20260720120000) and it measures ONE claimed job, not a whole "
+            "multi-hop chain (CONTEXT.md C-6)."
+        )
+
+        # Coverage (i): the topology may only name kinds the worker can actually
+        # run. A typo'd kind would otherwise sit in the map contributing a
+        # KeyError-free-looking edge that production never takes.
+        for kind, follow_ons in JOB_CHAIN_FOLLOW_ON.items():
+            assert kind in TIMEOUT_PER_KIND, (
+                f"JOB_CHAIN_FOLLOW_ON key {kind!r} is not a TIMEOUT_PER_KIND "
+                "kind — the chain map names a job kind the worker cannot run."
+            )
+            for follow_on in follow_ons:
+                assert follow_on in TIMEOUT_PER_KIND, (
+                    f"JOB_CHAIN_FOLLOW_ON[{kind!r}] enqueues {follow_on!r}, "
+                    "which is not a TIMEOUT_PER_KIND kind."
+                )
+
+        # Coverage (ii): the blind spot the walk alone cannot see. The reaper
+        # holds a row 'computing' for ANY non-terminal kind, but the walk only
+        # visits the 5 kinds in the topology — a kind added to TIMEOUT_PER_KIND
+        # and never to JOB_CHAIN_FOLLOW_ON could therefore never raise the
+        # ceiling. Pinning the registry SIZE to a literal (not to len() of the
+        # table under test) converts that silent gap into a forced decision.
+        assert len(TIMEOUT_PER_KIND) == 15, (
+            f"TIMEOUT_PER_KIND now has {len(TIMEOUT_PER_KIND)} kinds, not the "
+            "pinned 15 — a job kind was added/removed. Decide consciously "
+            "whether it joins JOB_CHAIN_FOLLOW_ON (it is a chain edge: some "
+            "handler enqueues it, or it enqueues a follow-on) or is "
+            "chain-terminal, re-derive STRATEGY_ANALYTICS_REAP_THRESHOLD if the "
+            "ceiling moved, then bump this literal."
+        )
+
+    def test_threshold_has_sane_upper_bound(self) -> None:
+        """The headroom assert above only stops a threshold that is too SMALL.
+        A unit typo in the other direction — '160 hours' where '16 hours' was
+        meant, or 'hours' where 'minutes' was meant — produces a window so
+        large the reaper effectively never fires and the spinner it exists to
+        end persists indefinitely.
+
+        Cap at 2.0x the computed ceiling: the shipped value sits at ~1.31x, so
+        2.0x is comfortable headroom for a re-derivation while far below the
+        10x a divide/multiply typo yields. A deliberate larger window must
+        raise MAX_RATIO and justify why a stranded row should sit that long —
+        which is the point: make the decision explicit instead of letting a
+        typo through silently."""
+        from services.job_worker import STRATEGY_ANALYTICS_REAP_THRESHOLD
+
+        MAX_RATIO = 2.0
+        ceiling_s, _ = _chain_inclusive_ceiling_seconds()
+        threshold_s = _watchdog_seconds(STRATEGY_ANALYTICS_REAP_THRESHOLD)
+        ratio = threshold_s / ceiling_s
+        assert ratio <= MAX_RATIO, (
+            f"STRATEGY_ANALYTICS_REAP_THRESHOLD "
+            f"{STRATEGY_ANALYTICS_REAP_THRESHOLD!r} ({threshold_s:.0f}s) is "
+            f"{ratio:.1f}x the {ceiling_s:.0f}s chain-inclusive ceiling — above "
+            f"the {MAX_RATIO}x sanity cap. This smells like a unit typo (e.g. "
+            "'160 hours' where '16 hours' was meant). A stranded row would sit "
+            "on a spinner far too long. If the large window is intentional, "
+            "raise MAX_RATIO and document why."
+        )
+
+    def test_threshold_is_parseable_interval(self) -> None:
+        """The constant is embedded verbatim into the reaper migration's
+        pg_cron body as a Postgres interval literal. A malformed string would
+        reach SQL as a 22007 at cron time — inside a scheduled job with no
+        caller to see it. Fail here, at build time, instead."""
+        from services.job_worker import STRATEGY_ANALYTICS_REAP_THRESHOLD
+
+        seconds = _watchdog_seconds(STRATEGY_ANALYTICS_REAP_THRESHOLD)
+        assert seconds > 0, (
+            f"STRATEGY_ANALYTICS_REAP_THRESHOLD "
+            f"{STRATEGY_ANALYTICS_REAP_THRESHOLD!r} resolves to {seconds}s. A "
+            "zero or negative interval makes the reaper's "
+            "`computing_started_at < now() - interval` predicate true for every "
+            "just-started row — it would terminalize chains the instant they "
+            "begin computing."
+        )
+
+
 # ---------------------------------------------------------------------------
 # audit-2026-05-07 C-0190 — missing-RPC fallback
 # ---------------------------------------------------------------------------
@@ -1944,4 +2152,189 @@ class TestPerJobHealthzRefresh:
         assert len(seen) == 2
         assert seen[1] > seen[0], (
             f"LAST_TICK_AT must strictly advance between jobs; got {seen}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# JOB-03 / SC-3b — SQL <-> Python reaper-threshold drift gate
+# ---------------------------------------------------------------------------
+# The reaper's staleness threshold exists in TWO places: the Python constant
+# STRATEGY_ANALYTICS_REAP_THRESHOLD (declared canonical) and the interval
+# literal baked into the pg_cron body of the migration named below. Nothing at
+# runtime reconciles them — the migration is applied by Supabase, the constant is
+# read by nobody at runtime — so silent divergence is invisible until the reaper
+# either mis-reaps healthy chains (literal too small) or never fires (too large).
+# This gate makes that divergence a red build instead.
+#
+# ⚠️ The name below must always point at the migration that registers the
+# CURRENTLY DEPLOYED cron body. Phase 142.1 (D-11/D-17) re-registered the same
+# pg_cron job under a later migration, so this constant moved with it; leaving it
+# on the superseded file would have kept this gate green while guarding a body
+# pg_cron no longer runs — the third instance of the silent-narrowing class the
+# phase exists to close (corrections C-10 / D-04 / D-10). services/job_worker.py's
+# STRATEGY_ANALYTICS_REAP_THRESHOLD comment names the same file; the two move
+# together, and test_migration_file_exists below says so in its failure message.
+#
+# ⚠️⚠️ MOVED AGAIN by D-19 — and the reason is worth reading before the next
+# forward-only re-registration. D-19 re-registered this job a THIRD time (to
+# restore the LIMIT bound; see that migration's header). The pointer was left on
+# the superseded file, so this gate went on guarding a body pg_cron no longer
+# runs while staying green — which is structurally the SAME defect D-19 itself
+# fixed one layer down, where the SQL gate asserted a bound the planner did not
+# apply. Caught by the phase's migration review, not by any gate.
+#
+# The SQL gate at supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql
+# is immune to this class because it EXECUTEs the real cron.job row rather than
+# scanning a file. THIS gate is a file scan, so its pointer is hand-maintained
+# and will rot again unless the rule is followed:
+#
+#   RULE: every forward-only cron re-registration moves this pointer, and
+#   job_worker.py's cross-reference, in the SAME commit as the migration.
+
+_REAPER_MIGRATION_NAME = (
+    "20260803130000_reaper_limit_bound_materialized_cte.sql"
+)
+
+
+def _reaper_migration_path() -> pathlib.Path:
+    """Repo-root-relative path to the reaper migration.
+
+    ``parents[2]`` from ``analytics-service/tests/`` is the repo root, matching
+    the resolution in ``tests/test_migration_132.py``.
+    """
+    return (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "supabase"
+        / "migrations"
+        / _REAPER_MIGRATION_NAME
+    )
+
+
+def _reaper_cron_body() -> str:
+    """The text BETWEEN the ``$cron$`` delimiters — i.e. exactly the body that
+    ``cron.schedule`` stores and pg_cron executes.
+
+    Scoping to the body is load-bearing, not tidiness. The migration's prose
+    header legitimately discusses ``computed_at`` at length (it explains why
+    ``computed_at`` is the wrong ONGOING key and why it is acceptable as the
+    one-shot backfill anchor), and the backfill statement itself reads
+    ``computed_at``. A whole-file grep would therefore be TRIPPED by a comment
+    and by correct code. Grep-gate hygiene: prose must neither satisfy nor trip
+    the gate.
+    """
+    src = _reaper_migration_path().read_text(encoding="utf-8")
+    match = re.search(r"\$cron\$(.*?)\$cron\$", src, flags=re.DOTALL)
+    assert match is not None, (
+        f"{_REAPER_MIGRATION_NAME} has no $cron$...$cron$ block. The reaper body "
+        "must be an INLINE dollar-quoted literal passed to cron.schedule (no "
+        "named function => no SECURITY DEFINER surface and no caller-suppliable "
+        "threshold). If the body moved into a function, this gate and the phase's "
+        "threat model both need revisiting."
+    )
+    body = match.group(1)
+    # Anti-vacuity guard (PATTERNS S-5): if the extraction silently returns
+    # nothing, every negative assertion below would pass by default.
+    assert "UPDATE public.strategy_analytics" in body, (
+        "extracted $cron$ body does not contain the reaping UPDATE — the "
+        f"extraction is broken, so the assertions below prove nothing. Body was: "
+        f"{body[:200]!r}"
+    )
+    return body
+
+
+class TestReaperThresholdDriftGate:
+    """JOB-03 / Falsifiability Ledger SC-3b. The interval literal deployed in the
+    pg_cron reaper body MUST equal the canonical Python constant. If they drift,
+    the number that was DERIVED (and guarded by TestReaperThresholdInvariant) is
+    not the number that RUNS, and every guarantee in this phase is about a
+    constant nothing executes."""
+
+    def test_migration_file_exists(self) -> None:
+        """The migration is on disk under its exact expected name.
+
+        Catches a silent rebase-drop or a rename of the slot out from under the
+        constant's own comment block (job_worker.py names this filename
+        explicitly). Without this, the two tests below would fail with an
+        unhelpful FileNotFoundError instead of naming the real cause.
+        """
+        path = _reaper_migration_path()
+        assert path.is_file(), (
+            f"reaper migration missing at {path}. services/job_worker.py's "
+            "STRATEGY_ANALYTICS_REAP_THRESHOLD comment names this file as the "
+            "consumer of the constant; if the migration was renamed, update "
+            "_REAPER_MIGRATION_NAME here and that comment together."
+        )
+
+    def test_sql_interval_literal_equals_python_constant(self) -> None:
+        """SC-3b: change the migration's interval literal and this goes RED.
+
+        Oracle note (VALIDATION.md §Oracle Independence, deliberate exception
+        #2): this test IMPORTS STRATEGY_ANALYTICS_REAP_THRESHOLD from the module
+        it pins. That is correct for a DRIFT gate — the Python side is DECLARED
+        canonical, and the property under test is SQL==Python equality, not value
+        correctness. VALUE correctness is owned separately by
+        TestReaperThresholdInvariant, whose chain-inclusive ceiling is derived
+        from local literals and does not trust this constant.
+        """
+        from services.job_worker import STRATEGY_ANALYTICS_REAP_THRESHOLD
+
+        body = _reaper_cron_body()
+
+        intervals = {
+            literal.strip().lower()
+            for literal in re.findall(
+                r"interval\s*'([^']+)'", body, flags=re.IGNORECASE
+            )
+        }
+        assert intervals, (
+            "the deployed reaper body carries NO interval literal at all — the "
+            "staleness threshold is missing, so every 'computing' row with a "
+            "non-NULL stamp and no active job is reapable immediately."
+        )
+        expected = STRATEGY_ANALYTICS_REAP_THRESHOLD.strip().lower()
+        assert intervals == {expected}, (
+            f"SQL<->Python threshold DRIFT. The pg_cron body in "
+            f"{_REAPER_MIGRATION_NAME} carries interval literal(s) "
+            f"{sorted(intervals)!r}, but services/job_worker.py "
+            f"STRATEGY_ANALYTICS_REAP_THRESHOLD is {expected!r}. The Python "
+            "constant is CANONICAL: change it there first (re-running "
+            "TestReaperThresholdInvariant to confirm the new value still clears "
+            "the chain-inclusive ceiling), then update the migration literal and "
+            "its header to match. A literal SMALLER than the ceiling reaps "
+            "healthy in-flight chains as 'failed' — a false failure on a money "
+            "surface."
+        )
+
+    def test_cron_body_never_keys_on_computed_at(self) -> None:
+        """P-1 pinned at the SOURCE-TEXT level, so the trap reddens in CI with no
+        database.
+
+        ``computed_at`` is wrong in BOTH directions as the ongoing key: the
+        status bridge re-stamps it ``now()`` on every job transition (so a
+        multi-hop chain would never be reaped), and the Python runner's entry
+        upsert omits it (so it holds the prior 'complete' run's value and the row
+        would be reaped instantly). ``updated_at`` does not exist on
+        strategy_analytics at all — the deleted one-off script raised 42703 on
+        exactly that. Neither may appear in the deployed body.
+        """
+        body = _reaper_cron_body()
+
+        assert "computed_at" not in body, (
+            "the deployed reaper body references computed_at. The status bridge "
+            "re-stamps computed_at = now() on EVERY job transition, so a keyed-on-"
+            "computed_at reaper never fires for a multi-hop chain — this is the "
+            "Phase 106 janitor bug that was reverted, and the reason "
+            "computing_started_at exists. Key on computing_started_at."
+        )
+        assert "updated_at" not in body, (
+            "the deployed reaper body references updated_at, a column "
+            "strategy_analytics does not have. The deleted one-off "
+            "scripts/reset_stuck_computing_rows.py filtered on updated_at and "
+            "raised 42703 under PostgREST; do not carry that defect into SQL."
+        )
+        # Positive control (PATTERNS S-5): the two negative asserts above would
+        # also pass on a body that had been gutted. Pin what MUST be present.
+        assert "computing_started_at" in body, (
+            "the deployed reaper body does not reference computing_started_at at "
+            "all — the negative assertions above are passing vacuously."
         )

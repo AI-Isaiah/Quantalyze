@@ -1,5 +1,63 @@
 # Changelog
 
+## [0.52.0.0] - 2026-08-03
+### 142 JOB + 142.1 — a reaper for strategies stuck in `computing`, and the remediation that found a real bug in it
+
+Closes the "permanent spinner" hole: a strategy whose analytics chain dies mid-flight used to sit at
+`computation_status = 'computing'` forever, with nothing in the system able to notice. A `*/15`
+pg_cron reaper now terminalizes rows stranded past a 16-hour threshold, and a `computing_started_at`
+clock makes "stranded" measurable in the first place.
+
+**142 shipped the reaper. 142.1 exists because three independent passes over it found 16 issues** —
+including that Phase 142's own falsifiability ledger was reported 11/11 observed when 7 rows had
+never been run. 142.1 closed 15 of them (D-08 was cut, deliberately, and is NOT closed by bumping
+the registry literal it complains about).
+
+**The clock now measures the whole chain, not its last hop.** `_mark_computing` wrote
+`computing_started_at` on every chain hop, so the reap clock restarted continuously and the
+worst-case stranded spinner ran ~1.75× the advertised bound. Fixed at the TABLE with a
+`BEFORE UPDATE` trigger rather than per-writer, because a per-writer rule cannot bind a writer that
+has not been written yet. The trigger never advances a clock that is already running, starts one
+when an update leaves a computing row unclocked, and clears it on every exit — silently, because
+raising would kill the live call and strand the strategy it is protecting.
+
+**Rows already stuck with no clock get one started, never terminalized.** A NULL stamp is a writer
+bug, not a stranded job; terminalizing it would convert a bug into user-visible data loss. A
+companion cron arm starts the clock and lets the ordinary threshold take it from there.
+
+**⚠️ The reaper's `LIMIT 25` bound did not exist at runtime, and the fix is in this release.** Both
+arms bound their batch with `... IN (SELECT ... LIMIT 25 FOR UPDATE SKIP LOCKED)`. `FOR UPDATE`
+makes that subplan un-hashable, so Postgres attaches it as the inner side of a nested-loop semi-join
+and **re-executes it once per outer row** — applying a fresh `LIMIT` each time. Measured against the
+TEST database: 26 seeded stranded rows, one tick, **26 of 26 terminalized**. The bound is a
+blast-radius control, so unbounded meant one tick could terminalize an entire backlog in a single
+statement while holding row locks on all of it, on a table every live analytics write touches. Fixed
+with `WITH batch AS MATERIALIZED (...)` on both arms — the keyword is the fix, since a bare CTE
+inlines and a `FROM`-clause subquery was measured reaping 26 of 26 as well.
+
+**Every static gate in both phases passed over that defect**, because they all assert the *presence*
+of `LIMIT` and the token was right there. It was caught the first time the 925-line SQL gate was
+executed end-to-end against a real database — which is the entire argument for running it, and the
+reason this release treats a green `sql-tests` run as a prerequisite for the three migrations rather
+than a nice-to-have.
+
+**Two more gates were found asserting against something other than what runs**, both fixed here: the
+Python threshold drift gate was scanning the superseded migration after the job was re-registered,
+and the `supabase-migrate` push gate matched an env-var declaration instead of the branch condition
+(so making its fail-loud branch unreachable on every event still passed). Each fix carries a pasted
+mutation proving it now reddens.
+
+**CI:** `sql-tests` became the third member of the `shared-test-db` concurrency group, which holds
+exactly one pending slot — so a third arrival cancelled a pending gate, as a grey check rather than
+a red one. Now gated behind `python` so the group can never evict a member.
+
+**Terminal writers can no longer launder a failure into a green factsheet** — `csv-finalize`'s
+terminal-failed path carries `computation_warned: false`, with a parity gate over the whole TS write
+surface.
+
+Migrations `20260802120000`, `20260803120000`, `20260803130000` apply on merge. Verified against the
+TEST project by direct query, not by trusting an apply tool's `success: true`.
+
 ## [0.51.0.0] - 2026-08-01
 ### 141 SEAM + 141.1 SEAMBACKOFF + 141.2 SEAMFIX — audited bounded retry on the Vercel→Railway seam
 Turns retry ON for the first time on the seam between the Vercel routes and the Railway analytics

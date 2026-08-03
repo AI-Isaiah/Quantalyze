@@ -184,6 +184,26 @@ true for 146 and half of 142–145, and **false for 141**.
   those changes invalidate. Plan-check found 4; plans 06, 07 and 08 each found one *more* the plan did
   not predict. Fold into the planning template, not a code phase.
 
+### MT5 wizard — founder-observed on live UI (added 2026-08-02)
+- **MT5 connect fails with copy that names the wrong exchanges.** Submitting the MT5 form
+  (login / investor password / broker server, all filled) renders *"This does not look like a
+  valid API key for the selected exchange… Binance secrets are 64 hex characters; OKX and Bybit
+  use different formats"* with `code: KEY_INVALID_FORMAT`. Two defects stacked, both real:
+  1. **Leading hypothesis for the rejection itself — the documented client-on/server-off
+     half-state.** `create-with-key/route.ts:147` returns exactly this code when
+     `isMt5EnabledServer()` is false, and that gate is strict `MT5_ENABLED === "true"` on the
+     **Vercel/Next server** — a *different* variable from the worker's `MT5_ENABLED` and from
+     `NEXT_PUBLIC_MT5_ENABLED` (which is what renders the MT5 card the founder clicked).
+     **Check Vercel prod env for a server-side `MT5_ENABLED=true` before writing any code** —
+     if it is missing this is an env fix, not a code fix, and the card is offerable while the
+     submit path is closed.
+  2. **Independent of (1): the wizard's `KEY_INVALID_FORMAT` copy is exchange-generic and
+     discards the server's specific `error` string.** The route sent *"MT5 integration is not
+     yet available."*; the user was shown Binance/OKX/Bybit hex-length advice. One shared code
+     is bucketing unrelated causes, and the renderer drops the detail that would have explained
+     it. Fix the mapping to be exchange-aware (and to surface the server reason) regardless of
+     how (1) resolves — otherwise every future MT5 rejection lies the same way.
+
 ---
 
 ## 🟡 FIX MID-TERM
@@ -265,6 +285,55 @@ true for 146 and half of 142–145, and **false for 141**.
 - **No Python lock file; ccxt unpinned** — unreproducible prod builds in the money-math path.
 
 ### CI / test-infra ratchet
+- 🔁 **RECURS DAILY 05:30 UTC — nothing reaps stale `pending` compute_jobs on the TEST
+  project, and a full claim queue starves every live claim test** (diagnosed 2026-08-03
+  while landing v0.52.0.0; cleaned by hand, NOT fixed).
+  Chain: TEST holds ~1,900 `api_keys` (1,437 older than 7 days — fixture rows no test
+  cleans up) → the `derive-allocator-key-dailies` cron (`30 5 * * *`, jobid 9,
+  `SELECT enqueue_derive_broker_dailies_for_allocator_keys()`) runs on TEST exactly as on
+  prod and fans out ONE `derive_broker_dailies` job per key → 1,884 rows landed at
+  `2026-08-02 05:30:00.236555+00` → nothing on TEST drains them.
+  ⚠️ **The starvation is the part to understand, and it is not a flake.**
+  `claim_compute_jobs_with_priority` ends `ORDER BY <priority rank>, next_attempt_at, id
+  LIMIT p_batch_size`. A test seeding a fresh job gets `next_attempt_at = now()`, so it
+  sorts BEHIND every stale row. `_claim_one` (`test_compute_jobs_fencing.py:692`) claims
+  `p_batch_size=50` and returns only its own `want_job_id`, so with 989 stale rows ahead
+  the seeded job sits at position ~990 and `_claim_one` returns `None` **every time**.
+  10 tests fail identically (7 in `test_compute_jobs_fencing.py`, 3 in
+  `test_drain_semantics.py`). It reddens `python` on ANY branch, including main — main's
+  last green CI ran 05:01 on 2026-08-02, 29 minutes before the cron fired.
+  **Retention coverage gap = the root cause**: `retention_compute_jobs_done` (jobid 4),
+  `retention_compute_jobs_failed` (jobid 8, `failed_final`/`failed_retry`) and
+  `retention_compute_jobs_orphaned_running` (jobid 11) exist — **there is no sweep for
+  stale `pending`**, the one status an undrained enqueue cron produces.
+  ➡️ **OWNER: Phase 144 (JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence)**
+  for the retention half. Same table, same cron family (it already edits jobid 11), and two
+  of its success criteria are this problem's shape: SC 1 (orphan → terminal `failed` so a
+  poller sees a real outcome and the row survives for audit) and SC 3 (reconcile the
+  TEST-DELETE / PROD-reset split into ONE behavior — the exact TEST-vs-PROD mechanism gap
+  below).
+  ⚙️ **It is WIRED, not just noted.** GSD never reads `TODOS.md` (zero references anywhere
+  in `~/.claude/get-shit-done/`), and the planner's coverage audit checks only
+  `REQUIREMENTS.md`, `RESEARCH.md`, the ROADMAP **goal** and `CONTEXT.md` decisions — a
+  ROADMAP *Note* is NOT audited. So this was promoted to **`JOB-08`** in
+  `.planning/REQUIREMENTS.md`, added to Phase 144's `Requirements:` line, and given **SC 4**
+  on the phase. The audit iterates the phase's REQ-IDs and flags any not claimed by a plan,
+  so 144 cannot be planned without JOB-08 being answered. Measure-first: "stale `pending`
+  population is zero on prod" is a valid close.
+  ⛔ Sweep it the 144 way — **terminal UPDATE, never DELETE**. A `DELETE` of stale `pending`
+  shipped under `supabase/migrations/**` auto-applies to PRODUCTION on merge and destroys
+  real queued work; transitioning a long-unclaimable row to terminal `failed` loses nothing
+  and makes the failure visible, which is what 144 exists to do. Size the threshold, not the
+  cadence, to protect live jobs (the WORKER-04 2h→4h lesson).
+  Preferred fix (test-side, no prod blast radius, and it encodes the invariant the recorded
+  lesson already asks for — *assert your OWN seed, never global empty-state*): make the
+  live claim tests independent of queue depth rather than assuming an empty queue. Seeding
+  at `priority: 'high'` puts the seed ahead of an all-`normal` backlog and survives any
+  depth. ⚠️ Check first that no test in scope is itself asserting priority ordering or
+  low-priority claim behaviour — `v_high_pending` gates low-priority rows out entirely once
+  any high row is pending, so a blanket change is not safe.
+  Second, independent fix worth doing: TEST `api_keys` grow without bound (1,900 and
+  climbing). Fewer fixture keys = a smaller daily fan-out.
 - 44 live-DB vitest files + ~112 python tests are green-skipped in CI while migrations
   auto-apply to prod.
 - pytest 80% gate measures only `services/` (routers/ ~7.8k LOC + `main_worker.py` uncovered).
@@ -273,6 +342,50 @@ true for 146 and half of 142–145, and **false for 141**.
   no-op; `cassette-refresh.yml` failed 17/17 with no alerting.
 - 20 of 35 Playwright specs wired to no workflow; migrations auto-apply to prod but not the
   test project; generated DB types have no regen/drift gate.
+- **`analytics-service/tests/` is entirely untyped — 5,439 `mypy --strict` errors across 182 of
+  213 test files** (MEASURED 2026-08-02 from Phase 142; `test_main_worker.py` alone = 59, which
+  is typical at ~30/file, NOT an outlier). ⚠️ **This is CONFORMANCE, not drift**: `ci.yml:1130`
+  states *"tests/ stays untyped by design"* and the gate is deliberately
+  `mypy --strict --follow-imports=silent services/ routers/ models/`. So the open question is a
+  **policy** one — should the staged B-mypy program (ingestion → `services/` part g →
+  `routers/` part h → `models/` part i) get a part j for `tests/`? — not a bug to fix.
+  **No owning phase, and deliberately not given one:** it belongs to none of 143/144/145 (JOB —
+  job-state integrity) or 146 (RATE), and it does NOT justify a Phase 147 inside v1.16 — a
+  5,439-error program is milestone-scale and orthogonal to "Production Resilience & Reliability"
+  money-path plumbing. Route to a future milestone as B-mypy part j, or close as WON'T-FIX if
+  the untyped-tests posture is reaffirmed. Surfaced because a Phase 142 executor ran
+  `mypy --strict` on a path the gate excludes; **zero errors fell in Phase 142's added ranges.**
+- **All 16 Phase 142 review/verification items are OWNED BY PHASE 142.1** — not tracked here.
+  Full text with per-item failure scenarios: `.planning/STATE.md` § "Phase 142.1 scope".
+  Raised by three independent passes (high-effort workflow review, blind `gsd-code-reviewer`,
+  `gsd-verifier`). Seven are test-quality/doc items that would normally live here under the
+  stopping rule; they were pulled into 142.1 on 2026-08-02 because the phase existed anyway.
+  ⚠️ **If 142.1 is descoped or cut, re-file those seven here** — they have no other owner.
+  ✅ **RESOLVED in v0.52.0.0 (2026-08-03)** — the one item that was a hard-red CI gate
+  (`scripts/dump-sql-functions.ts --check` exiting 1 at `sql-function-snapshot.yml:84`, because
+  `supabase/schema/functions/` had not been regenerated after migration `20260802120000`) was
+  fixed twice on this branch: commit `fea74933` for `20260802120000` and `400070c3` after the
+  `20260803120000` trigger migration. `npm run schema:functions:check` now reports the snapshot
+  current (105 functions). Phase 142.1 shipped, so the "re-file those seven here" contingency
+  below did not fire.
+  The narrow real risk worth separating out, if anyone revisits this: an untyped fixture/double
+  can drift from the real contract it stands in for — but the fix for that is targeted
+  contract-pinning (already the repo's practice), not blanket typing.
+
+### UX / product polish (founder-requested)
+- **MT5 "Broker server" should not be a masked field, and should be searchable.**
+  `ConnectKeyStep.tsx:696` renders the passphrase-slot input as
+  `type={showSecret ? "text" : "password"}`, which is right for an OKX passphrase but wrong for
+  MT5 — a broker server name is not a secret, and masking it makes the "copy it exactly as it
+  appears in your terminal" instruction hard to satisfy (you cannot proofread what you typed).
+  Two parts: (a) render this slot as plain text when the venue's passphrase slot is
+  non-secret — needs a per-exchange flag next to the existing `passphraseLabel` /
+  `passphrasePlaceholder` / `passphraseHelper` overrides, not a blanket change, since OKX must
+  stay masked; (b) turn it into a typeahead — user types a fragment, we scan available MT5
+  servers matching it and present a dropdown. **Open question for (b):** where the server list
+  comes from — the MT5 gateway can enumerate what its terminal knows, but that is one terminal's
+  view, not a global registry. Decide between gateway-enumerated, a curated broker→servers map,
+  or free-text-with-suggestions before planning.
 
 ### Tech-debt / maintainability (opportunistic, don't force)
 - God-files: `queries.ts` (3,205 lines), `job_worker.run_sync_trades_job` (688 lines),
@@ -629,6 +742,141 @@ live access, so they cannot be planned around.
 2. **⏳ PR #656 is OPEN and unmerged** — `feat/v1.16-141-jobs-rate-retry`, 131 commits ahead of `origin/main`, MERGEABLE. Phases 141, 141.1 and 141.2 are all verified `passed` but unshipped. Founder call.
 3. **The fourth 141.2 human item stays PARKED, by design.** "Capture a real Railway-edge 503 carrying an empty, zero or non-numeric `Retry-After`." Cannot be induced: the only contract-bound 503 emitter we own (`error_contract._validate`) raises on `retry_after <= 0` and structurally cannot emit one, and a local dev server sits behind no platform edge. The docblock's and runbook's "whether the platform edge can is unverified" sentences **stay as written** — that is the accurate state. Re-open only if such a trace is ever captured in the wild.
 4. **✅ Discharged 2026-08-01 (recorded so the numbers are not re-probed):** the other three 141.2 production probes were run read-only against prod (`khslejtfbuezsmvmtsdn` + live Upstash). `audit_log` `entity_type='process_key'` → **42 rows, 42 distinct `correlation_id`, 0 carrying a `wizard:` prefix**; flow_type **resync 20 · csv 20 · onboard 2** (resync = 47.6%, the quoted "48%"). Unbounded `.select()` → **HTTP 200, `error: null`, exactly 1000 rows** against a 7351-row table, reproducing the silent `max_rows` truncation. All five breaker keys **ABSENT**. ⚠️ One correction owed if anyone re-reads it: the CHANGELOG quotes the table as **7350** rows; it measured **7351** — one row landed between the two reads. The claim is unaffected; the figure is stale by one.
+
+### v1.16 Phase-142 (JOB) — deferred items (added 2026-08-02)
+
+1. **BOTH TypeScript type files are stale on `strategy_analytics` by `computation_warned` + `metrics_json_by_basis`.** `grep -n "computation_warned\|metrics_json_by_basis" src/lib/types.ts src/lib/database.types.ts` returns **zero hits in either file**, while both columns are live in the DB and read by app code (`src/app/api/strategies/finalize-wizard/route.ts`, `src/app/factsheet/[id]/v2/page.tsx`). The last `strategy_analytics` column that actually threaded into `types.ts` was `volume_metrics`/`exposure_metrics` (migration `20260412125725`) — four months and two columns ago, so the interface reads as maintained when it is not. Phase 142 added **only** `computing_started_at` (plan 142-06: the `types.ts` line plus its compile-forced blast radius, 9 files total — `types.ts` + `src/lib/utils.ts` `EMPTY_ANALYTICS` + 7 test fixtures) and deliberately did NOT widen to the other two: that is scope containment, not an oversight, and it is recorded here so the next agent does not read the single addition as evidence the file is current. `database.types.ts` was left untouched entirely and has **no CI freshness gate** (`package.json` + `ci.yml` mention `database.types` nowhere), which is the reason the drift went four months unnoticed. Fix when either file is next touched; the honest fix is all three columns plus a gate, not a fourth one-off addition.
+2. **`.claude/agents/migration-reviewer.md` invariant #14 contradicts the repo's actual `BEGIN`/`COMMIT` convention.** The reviewer doc forbids `BEGIN`/`COMMIT` in migrations; **150 of 231 migrations use them, including the repo tip**. Per Rule 11 (conformance over taste inside the codebase) and Rule 7 (pick one, don't blend), Phase 142 followed the repo and pre-documented the deviation in its own migration header so review would not re-litigate it — but that is a per-migration workaround, and every future migration author hits the same contradiction and pays the same cost. The doc is the artifact that is wrong. Fix = update invariant #14 to match the repo (and say what `ROLLBACK` outside `supabase/tests/` still means, which is the part that IS enforced). Documentation-only, no runtime surface.
+
+### v1.16 Phase-142.1 — planning residuals (added 2026-08-02, at plan time — NOT execution findings)
+
+Items 1–5 and 7 were raised by the `gsd-plan-checker` across three verification rounds on 142.1's
+plans. **None of those clears the founder blast-radius bar** — all are documentation-rationale or
+comment-coverage. Logged here so the next reader does not mistake their absence for oversight. W-1
+and W-2 were folded into plan `142.1-05` before execution and are recorded as discharged.
+
+⚠️ **Item 6 (`D-19`) is different in kind and the section heading does not cover it: it is an
+EXECUTION finding, not a planning residual** — a real defect found by running the gate against TEST
+on 2026-08-02, already fixed on this branch, with a live PROD residual that must be closed at merge.
+Read it as such.
+
+1. **⛔ `DEF-142.1-08` — D-08 was CUT from Phase 142.1, and must not be closed by bumping a
+   literal.** The finding: `test_main_worker.py:1295`'s `assert len(TIMEOUT_PER_KIND) == 15`
+   couples every future job-kind addition to the reaper suite, and the cheapest way to green it is
+   to bump the literal WITHOUT the re-derivation the assertion message demands — the trip-wire
+   trains the exact behaviour it exists to prevent. It was cut because **no derivation source
+   exists for the proposed replacement**: `grep -rn "STRATEGY_SCOPED\|_SCOPED_KINDS\|ALLOCATOR_KINDS"`
+   over `analytics-service/` returns **zero hits**, so there is no machine-readable
+   strategy-scoped/allocator-scoped partition to assert against. Both remedies are bad — a
+   hand-maintained `frozenset` beside `TIMEOUT_PER_KIND` **re-imports D-08's own complaint one
+   level up**, and deriving from the `compute_jobs` enqueue surface (which kinds are ever enqueued
+   with a non-NULL `p_strategy_id`) is a genuine derivation but materially larger than a
+   remediation phase should carry. ⚠️ **There is also a live convention conflict:** the GSD
+   VALIDATION template's Oracle Independence checklist requires *"Table/registry sizes are pinned
+   to a **literal count**, not to `len(THE_TABLE)`"* — which is precisely the form D-08 argues
+   against. That conflict deserves its own decision on the merits, not a drive-by change. ⛔ **Hard
+   rule: never close this by bumping the literal to 16.** That is the exact behaviour the trip-wire
+   exists to prevent, and it is why the item was raised. Confirmed unchanged at 142.1 execution time
+   (`test_main_worker.py:1295` still asserts `len(TIMEOUT_PER_KIND) == 15`) — Phase 142.1
+   deliberately implemented no part of D-08.
+2. **W-3 — inverted arm D's determinism rests on an unpinned assumption.** The D-11 companion cron
+   arm's `LIMIT 25` has no `ORDER BY`, so the inverted arm-D assertion is deterministic only while
+   fewer than 25 foreign `(computing, NULL, no-active-job)` rows exist on the shared TEST project.
+   Plan 142.1-05 requires the GATE-DETERMINISM NOTE in prose but — unlike plan 03's header
+   assumption, which carries an acceptance grep — pins it with none. Add acceptance greps on both
+   the migration side and the gate side when either is next touched.
+3. **W-4 — `sql-tests` against TEST is expected RED for 142.1's waves 3–4.** Plan 05 inverts arm D
+   to require the companion arm, but migration `20260803120000` is not applied to TEST until plan
+   07 Task 1 (wave 5), because MCP is stripped from subagents. Unavoidable, and plan 07 already
+   documents the false-positive verification state. The residual risk is only that a wave gate is
+   misread as a defect — one line in the wave-3/4 SUMMARY templates would close it.
+4. **W-5 — gate-file comments owned by no task.** In
+   `supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql`: the file header (`:5`
+   "Guards migration 20260802120000", `:111` "Run order"), the Part-2 arm summary at `:263`, and
+   `:380`'s "arm D: the writer-bug skip rule". Plan 05 step 9 names only `:332-336` and `:390`.
+   After 142.1 these comments describe a superseded migration and a superseded arm-D semantics.
+   Comment rot only.
+5. **W-6 — `142.1-RESEARCH.md` § "Architecture Patterns" still carries the superseded
+   `BEFORE INSERT OR UPDATE` trigger sketch verbatim.** Every consuming plan carries an inline
+   ⚠️ supersession note in `read_first`, and CONTEXT § D-18 Part 1 states the supersession — but
+   the research document itself is never annotated, so a reader who opens it first gets the wrong
+   shape. One banner line fixes it.
+6. **⚠️ `D-19` — the reaper's `LIMIT`-25 bound is restored on THIS BRANCH ONLY; the PROD cron body
+   still carries the unbounded shape until it merges.** Found by the first end-to-end run of
+   `supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql` against TEST (phase 142.1
+   plan 07 / D-16). Part 3 arm E: 26 seeded stranded rows, **zero** foreign competitors, one tick
+   terminalized **26 of 26** — expected 25. Cause: both arms bound their batch through
+   `WHERE strategy_id IN (SELECT … LIMIT 25 FOR UPDATE SKIP LOCKED)`; `FOR UPDATE` makes the subplan
+   un-hashable, so the planner attaches it as the inner side of a nested-loop semi-join and
+   **re-executes it once per outer row**, applying a fresh `LIMIT` each time — the cap is
+   per-rescan, never global (measured on PostgreSQL 17.6). Fixed by
+   `supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql` (commit `2b8c016f`),
+   which forces single evaluation of the bounded batch on **both** arms; verified on TEST before the
+   migration was written (`failed=25`, `still_computing=1`, the 26th survives) and the gate re-ran
+   green after. ⚠️ **A FROM-clause subquery form was ALSO measured and ALSO reaps 26 of 26** — the
+   planner is equally free to nest-loop it, so forcing single evaluation is load-bearing, not
+   stylistic; do not "simplify" it away. **Impact is a LOCK-DURATION and BLAST-RADIUS defect, NOT
+   data corruption** — the rows are genuinely stranded (>16 h, no active job), but unbounded, one
+   `*/15` tick against a backlog of N terminalizes all N in one statement and holds row locks on all
+   N, on a table every live analytics write touches. **RESIDUAL / ACTION:** ⛔ the migration is
+   applied to **TEST only** (stamped `20260802212852`). PROD's registered cron body is still the
+   unbounded shape until `feat/v1.16-142-146-job-rate` merges to `main` and the auto-apply runs.
+   **The merge-time PROD verification must re-confirm the deployed body carries the bound as TWO
+   single-evaluation batches — one per arm — not just that the `LIMIT` token is present.** That
+   token-presence check is exactly what every gate in phases 142 and 142.1 passed over. Class census
+   at discovery: of the 8 registered cron jobs, only `reap_strategy_analytics_stuck_computing` puts
+   a `LIMIT` inside an `IN (…)` subquery; the other seven carry no `LIMIT` at all — the class is
+   closed at one member, so no sweep is owed.
+7. **✅ Discharged at plan time (recorded so they are not re-raised): W-1 and W-2.** W-1: plans
+   claimed SQL-gate Part 4b "stays falsifiable" after the D-18 retrofit; it does not — 4b is a
+   **double-mutation** defence-in-depth assertion (trigger arm (a) and the bridge's own keep-arm
+   each independently preserve the sentinel). W-2: after the retrofit Part 4a's
+   `IF v_stamp IS NULL THEN RAISE` is satisfied by its own seed and can no longer fail. Both were
+   over-claims of assertion strength — **the same failure class that produced this phase** (142's
+   ledger was reported 11/11 Observed when 7 rows had never been run) — so both were corrected in
+   `142.1-05-PLAN.md` rather than deferred, and the plan now forbids crediting either as the SC-2b
+   observable in the D-16 evidence. SC-2b's single-mutation proof is Part 6/6a in plan 142.1-08.
+
+8. **WR-01 — a D-19 self-verify guard that provably cannot fire (dead guard, NOT a hole).**
+   `supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql:188` asserts
+   `v_command ~* 'IN\s*\(\s*SELECT[^)]*LIMIT'` to ban the un-hashable-subplan shape D-19 removed.
+   `[^)]*` cannot cross a `)`, and BOTH arms carry `AND NOT EXISTS ( SELECT 1 … cj.status IN (…) )`
+   between `IN (SELECT` and `LIMIT` — measured against the exact superseded body: **no match**. The
+   bound is still genuinely guarded by the `v_mat <> 2` MATERIALIZED-count check immediately above
+   it (that one fires, and fails closed on formatting drift), so this is redundancy, not exposure.
+   ⚠️ **Deliberately NOT fixed in place:** `20260803130000` is already applied to TEST (stamped
+   `20260802212852`), and editing an applied migration is itself a tracked invariant violation
+   (migration-reviewer #11) — desyncing TEST's applied text from the file to repair a *redundant*
+   guard is the worse trade. Close it in the NEXT forward-only migration that touches this job, or
+   by asserting something that can actually fire (e.g. `FROM batch` occurring exactly twice).
+   Danger if left unread: the guard's `RAISE` text is what the next engineer will read as proof the
+   broken shape is banned. Found by migration review, 2026-08-03.
+
+9. **WR-02 — the `awk`-range hazard recurred in the gate file, and a SUMMARY over-claims it closed.**
+   `supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql:16-18` explains that its final
+   part is named descriptively *because* its acceptance gate is an `awk '/Part 6/,0'` range. Plan
+   `142.1-05` (a different wave) then mentioned that literal twice in the Part 4 header, so the range
+   now starts at `:595` and sweeps Parts 4–6 instead of Part 6 alone. **The measured value is 0
+   either way, so there is no false green** — the exposure is that `142.1-08-SUMMARY.md:304` records
+   the hazard as closed when it is not. Fix: anchor the criterion on `^-- Part 6 --`, which matches
+   exactly once. Worth reading as a pattern rather than a nit: this phase was bitten by `awk` range
+   semantics **three separate times** (plans 05, 08, and here), always because prose *about* a gate
+   sits inside that gate's blast radius. Found by code review, 2026-08-03.
+
+10. **`sql-tests` is in no aggregator's `needs:`, so the reaper's only behavioural gate can vanish
+    silently.** `.github/workflows/ci.yml`'s `frontend` aggregator gates branch protection on the
+    `frontend-*` jobs; `sql-tests` is not among them and self-disables when
+    `vars.E2E_TEST_DB_CONFIGURED` is unset. It is the ONLY gate that `EXECUTE`s the real deployed
+    cron body — the one that caught D-19 after every static gate passed over it. Partial mitigation
+    exists: `e2e-seeded`'s go-live check errors on a skip for trusted events and its message notes
+    that the same variable also disables `sql-tests` — so a missing variable is loud, but a
+    `sql-tests` job that is *present and failing* is not gated on by anything. ⚠️ With branch
+    protection deferred until paying clients, every CI gate here is advisory at merge anyway, so
+    this is about SIGNAL, not enforcement: say "would have caught", never "did stop". Fix: mirror
+    the `e2e-seeded` result check for `sql-tests`, or add it to an aggregator's `needs:`.
+    Found by the /ship coverage audit, 2026-08-03. **Related and already FIXED in 0.52.0.0:** the
+    same job had been made the third member of the one-pending-slot `shared-test-db` concurrency
+    group, which cancelled a pending gate outright; it is now gated behind `python`.
 
 ---
 

@@ -491,6 +491,61 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "derive_allocator_equity": 5 * 60,  # Phase 115.1 / RD-3 Option B — pure DB + math, no exchange I/O (5 min < 10 min watchdog floor → no override needed)
 }
 
+# ---------------------------------------------------------------------------
+# JOB-03: job-chain topology (which kind enqueues which follow-on)
+# ---------------------------------------------------------------------------
+# The CANONICAL chain map. The production enqueue sites READ this constant —
+# it is load-bearing, not decorative documentation. A wrong entry changes real
+# enqueue behavior and reddens the job-flow suites (tests/test_main_worker.py,
+# tests/test_job_worker_csv_kind.py), which is exactly what keeps the JOB-03
+# reaper-threshold oracle from being pinned to a fiction.
+#
+# A strategy_analytics row stays 'computing' for a WHOLE chain, not one job, so
+# TestReaperThresholdInvariant walks this map to compute the chain-inclusive
+# ceiling that STRATEGY_ANALYTICS_REAP_THRESHOLD must exceed.
+#
+# Chain edges only. The routers/cron.py daily re-entry and
+# main_worker.WATCHDOG_PER_KIND_OVERRIDES are NOT chain edges.
+JOB_CHAIN_FOLLOW_ON: Final[dict[str, tuple[str, ...]]] = {
+    # Tuple order is LOAD-BEARING: (ledger-backed tail, trade-backed tail) —
+    # read by services/ingestion/long_fetch.py tail selection.
+    "process_key_long": ("derive_broker_dailies", "sync_trades"),
+    "sync_trades": ("derive_broker_dailies",),          # run_sync_trades_job follow-on
+    "derive_broker_dailies": ("compute_analytics_from_csv",),  # _enqueue_csv_analytics
+    "compute_analytics_from_csv": (),  # chain-terminal — compiles the factsheet
+    "stitch_composite": (),            # chain-terminal — Phase 86 / COMP-02 fan-out
+}
+
+# JOB-03: the CANONICAL staleness threshold for the strategy_analytics
+# stuck-'computing' reaper, as a Postgres interval string.
+#
+# (1) CANONICAL SOURCE. Migration
+#     20260803130000_reaper_limit_bound_materialized_cte.sql
+#     embeds this literal in its pg_cron body; the drift gate (plan 142-04) fails
+#     CI if the SQL literal and this constant diverge. Change it HERE first.
+#     (The same pg_cron job has now been re-registered three times: Phase 142
+#     registered the original one-arm body, Phase 142.1 / D-11 added the
+#     NULL-stamp clock-start arm, and 142.1 / D-19 restored the LIMIT bound.
+#     This name and tests/test_main_worker.py::_REAPER_MIGRATION_NAME move
+#     together — always name the migration that registers the body pg_cron
+#     actually runs. Leaving either behind keeps the drift gate green while it
+#     guards a superseded body, which is how D-19's own pointer went stale.)
+# (2) DERIVATION — the chain-inclusive ceiling computed by
+#     tests/test_main_worker.py::TestReaperThresholdInvariant: 43,920 s (~12.2 h),
+#     the worst simple path through JOB_CHAIN_FOLLOW_ON
+#     (process_key_long → sync_trades → derive_broker_dailies →
+#     compute_analytics_from_csv), each hop costing batch-tail exposure +
+#     retried handler timeout + retry backoff. '16 hours' (57,600 s) is the
+#     smallest whole 4-hour multiple >= 1.25x that ceiling (ratio 1.31x).
+#     It is NOT batch_size x max(TIMEOUT_PER_KIND) — that is the compute_jobs
+#     formula (migration 20260720120000) and it measures ONE claimed job, which
+#     under-counts a multi-hop chain by ~4x (CONTEXT C-6).
+# (3) SAFETY lives in the reaper's NOT EXISTS(active compute_jobs) conjunct — a
+#     healthy in-flight chain always has a non-terminal compute_jobs row. This
+#     interval is defense-in-depth debounce. Do not shrink it without
+#     re-deriving the invariant.
+STRATEGY_ANALYTICS_REAP_THRESHOLD: Final[str] = "16 hours"
+
 # Fallback derive budget (seconds) used when TIMEOUT_PER_KIND lacks
 # "derive_broker_dailies". Single-sourced so the MTM second pass and the smoothed
 # third pass can never drift; TIMEOUT_PER_KIND stays the real source of truth.
@@ -1854,7 +1909,9 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # Follow-on analytics kind: the funding-inclusive CSV route
     # (derive_broker_dailies → compute_analytics_from_csv). The legacy
     # trades-only compute_analytics re-entry was retired in 106-08.
-    _follow_on_kind = "derive_broker_dailies"
+    # JOB-03: read the canonical chain topology — never an inline literal, so
+    # the reaper-threshold oracle and this enqueue can never disagree.
+    _follow_on_kind = JOB_CHAIN_FOLLOW_ON["sync_trades"][0]
     try:
         def _enqueue_follow_on() -> None:
             ctx.supabase.rpc(
@@ -1895,6 +1952,8 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                         # every terminal 'failed' so the status bridge (branches
                         # a/c) cannot resurrect a stale complete_with_warnings.
                         "computation_warned": False,
+                        # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                        "computing_started_at": None,
                         "computation_error": (
                             "Analytics enqueue failed during sync. "
                             "The next scheduled sync will retry — "
@@ -2329,6 +2388,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         "computation_status": "failed",
                         # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
                         "computation_warned": False,
+                        # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                        "computing_started_at": None,
                         "computation_error": stamp_detail + scrubbed,
                         "data_quality_flags": {"csv_source": True},
                         # F-4 (Fable): authoritative-clear the by-basis column on a
@@ -2443,6 +2504,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         "computation_status": "failed",
                         # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
                         "computation_warned": False,
+                        # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                        "computing_started_at": None,
                         "computation_error": scrubbed,
                         "data_quality_flags": {"csv_source": True},
                         # F-4 (Fable): authoritative-clear the by-basis column so a
@@ -4320,6 +4383,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     "computation_status": "failed",
                     # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
                     "computation_warned": False,
+                    # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                    "computing_started_at": None,
                     "computation_error": (
                         "Insufficient broker history. At least 2 days of "
                         "activity required."
@@ -4880,10 +4945,14 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     await db_execute(_prestamp_dq_flags)
 
     # Hand off to the standard CSV analytics route to compile the factsheet.
+    # JOB-03: read the canonical chain topology — never an inline literal, so
+    # the reaper-threshold oracle and this enqueue can never disagree.
+    _csv_analytics_kind = JOB_CHAIN_FOLLOW_ON["derive_broker_dailies"][0]
+
     def _enqueue_csv_analytics() -> None:
         ctx.supabase.rpc(
             "enqueue_compute_job",
-            {"p_strategy_id": strategy_id, "p_kind": "compute_analytics_from_csv"},
+            {"p_strategy_id": strategy_id, "p_kind": _csv_analytics_kind},
         ).execute()
 
     await db_execute(_enqueue_csv_analytics)
@@ -5134,6 +5203,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
                     "computation_warned": False,
+                    # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                    "computing_started_at": None,
                     "computation_error": scrubbed,
                     "data_quality_flags": merged_flags,
                 },
@@ -6636,6 +6707,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         "strategy_id": strategy_id,
         "computation_status": composite_status,
         "computation_warned": member_warned,
+        # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+        "computing_started_at": None,
         "computation_error": None,
         "trade_metrics": None,     # composite has no fills
         "volume_metrics": None,

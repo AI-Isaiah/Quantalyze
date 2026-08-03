@@ -71,6 +71,7 @@ function makeAnalytics(
     id: "an-1",
     strategy_id: "s-1",
     computed_at: "2026-01-01T00:00:00Z",
+    computing_started_at: null,
     computation_status: "complete",
     computation_error: null,
     benchmark: null,

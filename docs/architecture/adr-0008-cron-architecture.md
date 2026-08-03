@@ -62,8 +62,20 @@ Assign each mechanism a workload class:
 | Analytics warmup | 0 0 * * * | Vercel Cron (1) | `/api/cron/warm-analytics` |
 | Alert digest | 0 9 * * * | Vercel Cron (4) | `/api/alert-digest` |
 | Match recompute | Hourly | pg_cron (3) | FastAPI `/api/match/cron-recompute` |
+| Stuck-`computing` reaper | `*/15 * * * *` | pg_cron, **in-DB SQL** (no FastAPI hop) | `reap_strategy_analytics_stuck_computing` |
 | Compute trigger | On insert | Edge Function (3) | `compute-trigger` |
 | Admin notification | On event | Edge Function (3) | `notify-admin` |
+
+> The reaper (added v0.52.0.0) is a **sixth shape** the five mechanisms above do
+> not describe: pg_cron running SQL directly in the database, with no service
+> call and therefore no auth pattern at all. It terminalizes `strategy_analytics`
+> rows stranded in `computing` past a 16-hour threshold. It is deliberately
+> in-DB — the failure it repairs is "the worker died", so routing its repair
+> through the worker would make it unreachable exactly when it is needed. Note
+> this also means it writes **no `cron_runs` row**; observability is
+> `cron.job_run_details`. See [`docs/runbooks/compute-queue.md`](../runbooks/compute-queue.md)
+> § "The stuck-`computing` reaper". This inventory is a partial snapshot — the
+> prod project carries 8 registered pg_cron jobs.
 
 ## Consequences
 
@@ -85,6 +97,10 @@ Assign each mechanism a workload class:
   (lines 19-24).
 - pg_cron: `supabase/migrations/20260408113029_cron_heartbeat.sql` (lines 162-176),
   `supabase/migrations/20260408215026_schedule_match_cron_hourly.sql` (lines 65-79).
+- pg_cron (in-DB SQL, no service hop):
+  `supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql`
+  — the currently-registered `reap_strategy_analytics_stuck_computing` body,
+  superseding the registrations in `20260802120000` and `20260803120000`.
 - Edge Functions: `supabase/functions/compute-trigger/index.ts`,
   `supabase/functions/notify-admin/index.ts`.
   > **⚠ Doc-vs-live drift (flagged 2026-06-20, tech-debt #13):** these two

@@ -765,6 +765,9 @@ async function writeFailedStrategyAnalyticsPlaceholder(
         {
           strategy_id: strategyId,
           computation_status: "failed",
+          computation_warned: false,
+          // JOB-01: clear on exit from computing (reaper key — migration 20260802120000)
+          computing_started_at: null,
           computation_error: computationError,
           data_quality_flags: { csv_source: true },
         },

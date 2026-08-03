@@ -580,14 +580,32 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
     # here to avoid changing the published/fingerprint behavior other code reads.
     analytics_strategy_id = context.get("strategy_id") or job.get("strategy_id")
     if source != "csv" and analytics_strategy_id:
-        tail_kind = "derive_broker_dailies" if is_ledger_backed else "sync_trades"
         # Best-effort, mirroring run_sync_trades_job's follow-on compute_analytics
         # enqueue (which is also wrapped). The verification is already 'published',
         # so a worker retry short-circuits on that status (idempotency check above)
         # and would NOT re-run this tail — therefore we must NOT let an enqueue
         # blip crash the handler. Log loudly instead; strategy_analytics can be
         # recomputed via a manual re-sync if this rare path is hit.
+        #
+        # D-15: the topology read and the unpack live INSIDE this try:, not above
+        # it. They are the same class of failure as an enqueue blip — a future
+        # edit that widens the chain entry (a third tail) would otherwise raise
+        # ValueError out of the handler, and because the verification is already
+        # 'published' the retry short-circuits and NEVER re-reaches this block:
+        # the strategy stays published with no analytics chain and no recorded
+        # failure. Pinned by tests/test_long_fetch_follow_on_guard.py.
+        tail_kind: str | None = None
         try:
+            # JOB-03: read the canonical chain topology instead of inline
+            # literals, so the reaper-threshold oracle can never be pinned to a
+            # stale copy of these edges. Late import mirrors the DispatchResult
+            # import above — services.job_worker imports services.ingestion when
+            # it dispatches, so a module-level import here would close the cycle.
+            from services.job_worker import JOB_CHAIN_FOLLOW_ON
+
+            # Tuple order is (ledger-backed tail, trade-backed tail).
+            ledger_tail, trade_tail = JOB_CHAIN_FOLLOW_ON["process_key_long"]
+            tail_kind = ledger_tail if is_ledger_backed else trade_tail
             supabase.rpc(
                 "enqueue_compute_job",
                 {

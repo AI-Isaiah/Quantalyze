@@ -23,7 +23,7 @@ cp .env.example .env.local
 # 3. Apply database migrations with the Supabase CLI
 #   supabase link --project-ref <your-project-ref>
 #   supabase db push
-# (supabase/migrations/ holds 190+ timestamp-named migrations.) Set the
+# (supabase/migrations/ holds 230+ timestamp-named migrations.) Set the
 # admin email before the is_admin backfill migration runs, so it backfills
 # automatically:
 #   ALTER DATABASE postgres SET app.admin_email = 'you@example.com';

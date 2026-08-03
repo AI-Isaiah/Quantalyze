@@ -875,6 +875,64 @@ jobs:
     # fails the job.
     runs-on: ubuntu-latest
     if: (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && vars.E2E_TEST_DB_CONFIGURED == 'true'
+    # Phase 142.1 (D-05): join the SAME repo-wide `shared-test-db` group the
+    # `python` and `e2e-seeded` jobs carry. These SQL files run against the ONE
+    # shared Supabase test project (`secrets.TEST_SUPABASE_DB_URL`), and
+    # test_strategy_analytics_stuck_computing_reaper.sql `EXECUTE`s the REAL
+    # deployed cron body — a GLOBAL `ORDER BY computing_started_at ASC LIMIT 25`
+    # over strategy_analytics that cannot be scoped to a caller. Each tick
+    # briefly holds `FOR UPDATE SKIP LOCKED` locks on up to 25 FOREIGN candidate
+    # rows inside a rolled-back transaction under a 5 s `lock_timeout`. Two
+    # concurrent gate runs — or a gate run overlapping the `python` /
+    # `e2e-seeded` jobs writing the same project — must SERIALIZE, not race:
+    # unserialized, one run's rows land in the other's 25-row budget and the
+    # LIMIT assertions redden on interleaving rather than on a defect, and the
+    # 5 s lock_timeout turns lock contention into a 55P03 failure on an innocent
+    # PR.
+    #
+    # ⛔ Do NOT give this job its own private group name — 142-REVIEW.md:286-291
+    # proposed one, and it is the wrong fix: a distinct group serializes this
+    # job only against itself and does nothing about the `python`/`e2e-seeded`
+    # jobs writing the SAME project. The group name must stay identical to
+    # theirs.
+    #
+    # Costs wall-clock: this job now queues behind `python` (~7m) instead of
+    # overlapping it — the same price `e2e-seeded` already pays below, and for
+    # the same reason.
+    #
+    # ⛔ The `needs: [python]` below is NOT an ordering preference — it is what
+    # keeps this group CORRECT, and removing it silently disables a gate.
+    # GitHub Actions holds exactly ONE pending entry per concurrency group:
+    # "Any previously pending job or workflow in the concurrency group will be
+    # canceled." With two members that is stable (one runs, one pends). Adding
+    # this job made THREE, and `python` + `sql-tests` both dispatch at t=0 while
+    # `e2e-seeded` arrives minutes later behind frontend-typecheck — so
+    # `e2e-seeded` evicted whichever of the first two was still pending. The
+    # victim is CANCELLED, which renders as a GREY check, not a red one, and
+    # branch protection is deferred on this repo, so nothing blocks on it. On a
+    # push to main touching supabase/migrations/** that is the merge which
+    # auto-applies migrations to PROD losing either the Python drift gates or
+    # this job — the only gate that EXECUTEs the real deployed cron body, and
+    # the one that caught D-19.
+    # Gating THIS job behind `python` fixes it without touching `e2e-seeded`:
+    # `python` and `sql-tests` can then never be queued at the same instant, so
+    # the group holds at most (1 in-progress + 1 pending) and no member is ever
+    # evicted. Cross-run serialization — the reason the group exists — is
+    # unchanged, since all three still share the group name.
+    #
+    # ⛔ Do NOT "finish the chain" by adding `sql-tests` to `e2e-seeded`'s
+    # `needs:`. A skipped `needs:` job skips its dependents, and the two `if:`
+    # conditions diverge on `workflow_dispatch`: this job requires
+    # `github.event_name == 'push'` (false on dispatch) while `e2e-seeded` only
+    # requires `!= 'pull_request'` (true) — so the chain would disable
+    # `e2e-seeded` on every manual run and trip the aggregator's skip check.
+    # `python` carries no `if:`, so this job's own dependency is always safe.
+    # Found by the /ship pre-landing review, 2026-08-03.
+    needs:
+      - python
+    concurrency:
+      group: shared-test-db
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
@@ -1479,6 +1537,14 @@ jobs:
     concurrency:
       group: shared-test-db
       cancel-in-progress: false
+    # ⛔ Do NOT add `sql-tests` to this `needs:` list to serialize the
+    # shared-test-db group. It looks right and it silently disables THIS job on
+    # every `workflow_dispatch` run: a skipped `needs:` job skips its dependents,
+    # and the two `if:` conditions diverge on manual dispatch — `sql-tests`
+    # requires `github.event_name == 'push'` (false) while this job only requires
+    # `!= 'pull_request'` (true). The aggregator at the `e2e-seeded result=`
+    # check then errors on the skip. The group is serialized by gating
+    # `sql-tests` behind `python` instead; see the ⛔ note on that job.
     needs:
       - frontend-typecheck
     steps:
