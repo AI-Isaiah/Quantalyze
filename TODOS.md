@@ -412,6 +412,28 @@ true for 146 and half of 142–145, and **false for 141**.
   ⚠️ Note the adjacent risk: an MCP surface is a **new public read boundary**. Every hardening
   lesson already paid for on the public factsheet path applies to it from day one, not later.
 
+- **⚠️ `strategy_analytics (*)` splats EVERY analytics column to anon on two public paths.**
+  Found 2026-08-03 by the migration review of Phase 142.2 plan 01, while checking whether a new
+  column would be publicly readable. It would — but so is everything else, and that is the finding.
+  - `src/lib/queries.ts:218` — `getStrategiesByCategory`, wrapped in `withPublishedOnly` → public
+    discovery/browse by category.
+  - `src/app/(dashboard)/compare/page.tsx:68` — same `withPublishedOnly` shape.
+  Policy `analytics_read` (`20260405061912:35-44`) is `status = 'published' OR user_id = auth.uid()`
+  **with no `TO` clause**, so it applies to `anon`. RLS is row-level and cannot hide a column, so the
+  `(*)` embed hands an anonymous reader every column on the row for any published strategy —
+  including `daily_returns`, `metrics_json` and `data_quality_flags`.
+  **The fix already exists in the same file and is half-applied:** `queries.ts:410` and `:448` use
+  the curated `PUBLIC_ANALYTICS_COLUMNS` (`:284`), and the comment at `:700` explicitly says to
+  replace `select("*, strategy_analytics (*)")` with explicit column lists. These two sites were
+  missed. ⚠️ Not a drop-in edit — consumers are typed (`StrategyWithAnalytics`) and browse/compare
+  must be re-checked against the narrowed projection, so it needs its own change with its own tests.
+  ⛔ **Do NOT "fix" this with a column-level `REVOKE` on `anon`.** PostgREST errors on a `(*)` embed
+  when the role lacks a column, so a REVOKE would take **public browse down** until the splats are
+  narrowed first. Narrow the projection, then consider grants — in that order.
+  Phase 142.2 deliberately did NOT special-case its own new `series_completeness` column here: it is
+  an enum carrying no magnitude, and protecting one column while the splat stands would be machinery
+  that secures nothing.
+
 ### Tech-debt / maintainability (opportunistic, don't force)
 - God-files: `queries.ts` (3,205 lines), `job_worker.run_sync_trades_job` (688 lines),
   `portfolio.py` (2,423), `exchange.py` (2,777).
