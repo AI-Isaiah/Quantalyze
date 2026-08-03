@@ -312,9 +312,13 @@ true for 146 and half of 142–145, and **false for 141**.
   `gsd-verifier`). Seven are test-quality/doc items that would normally live here under the
   stopping rule; they were pulled into 142.1 on 2026-08-02 because the phase existed anyway.
   ⚠️ **If 142.1 is descoped or cut, re-file those seven here** — they have no other owner.
-  ⚠️ One item is a hard-red CI gate today: `scripts/dump-sql-functions.ts --check` exits 1
-  (`sql-function-snapshot.yml:84`) because `supabase/schema/functions/` was not regenerated
-  after migration `20260802120000`. One-command fix: `npm run schema:functions`.
+  ✅ **RESOLVED in v0.52.0.0 (2026-08-03)** — the one item that was a hard-red CI gate
+  (`scripts/dump-sql-functions.ts --check` exiting 1 at `sql-function-snapshot.yml:84`, because
+  `supabase/schema/functions/` had not been regenerated after migration `20260802120000`) was
+  fixed twice on this branch: commit `fea74933` for `20260802120000` and `400070c3` after the
+  `20260803120000` trigger migration. `npm run schema:functions:check` now reports the snapshot
+  current (105 functions). Phase 142.1 shipped, so the "re-file those seven here" contingency
+  below did not fire.
   The narrow real risk worth separating out, if anyone revisits this: an untyped fixture/double
   can drift from the real contract it stands in for — but the fix for that is targeted
   contract-pinning (already the repo's practice), not blanket typing.

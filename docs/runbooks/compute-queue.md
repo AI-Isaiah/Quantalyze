@@ -227,6 +227,15 @@ Sentry fires this when Query 2 would return 6+ `failed_final` rows.
 
 The wizard `SyncPreviewStep` shows "Computing..." and never advances.
 
+> **Since v0.52.0.0 this resolves itself within 16 hours — loudly.** A pg_cron
+> job, `reap_strategy_analytics_stuck_computing`, runs every 15 minutes and
+> terminalizes stranded rows. If you find a strategy sitting at
+> `computation_status = 'failed'` with
+> `computation_error = 'Analytics was interrupted before it could finish and did
+> not recover. Retry the sync.'`, **no human and no route wrote that — the
+> reaper did**, and the user's next action is the Retry button. See "The
+> stuck-`computing` reaper" below for what it does and does not touch.
+
 1. Open `/admin/compute-jobs`, filter to the user's strategy
 2. If rows exist in `running` with `claimed_at > 10 minutes ago` →
    watchdog should reclaim them within 10 minutes. Wait.
@@ -242,6 +251,76 @@ The wizard `SyncPreviewStep` shows "Computing..." and never advances.
    `/api/keys/sync`. If the enqueue RPC itself is failing, that is the
    incident — there is no legacy fallback to flip to; fix forward or
    `git revert` the offending deploy.
+
+### The stuck-`computing` reaper (pg_cron, v0.52.0.0+)
+
+`compute_jobs` has had a watchdog since Sprint 2. `strategy_analytics` did not —
+a chain that died mid-flight left `computation_status = 'computing'` forever and
+nothing in the system could notice. The reaper closes that.
+
+- **Job:** `reap_strategy_analytics_stuck_computing`, pg_cron, `*/15 * * * *`.
+- **Clock:** `strategy_analytics.computing_started_at`. NULL means "not currently
+  computing". A `BEFORE UPDATE` trigger owns it at the table, so it measures the
+  **whole job chain** (`process_key_long` → `sync_trades` →
+  `derive_broker_dailies` → `compute_analytics_from_csv`), not the last hop. Do
+  not reason about staleness from `computed_at` — the reaper never reads it.
+- **Threshold:** 16 hours, derived (not guessed) from the chain-inclusive
+  worst-case ceiling. The canonical copy is
+  `STRATEGY_ANALYTICS_REAP_THRESHOLD` in
+  `analytics-service/services/job_worker.py`; a CI drift gate fails if the SQL
+  literal and that constant disagree. **Change it there first.**
+- **Two arms per tick, each bounded to 25 rows:**
+  1. `computing` + `computing_started_at IS NULL` → **starts the clock**. A NULL
+     stamp is a writer bug, not a stranded job, so this arm never terminalizes;
+     the ordinary threshold takes it from there on a later tick.
+  2. `computing` + stamped older than 16 hours → **terminalizes** to `failed`
+     with `computation_warned = FALSE`, the user-facing message above, and the
+     stamp cleared.
+- **Both arms require `NOT EXISTS` an active `compute_jobs` row** (`pending`,
+  `running`, `done_pending_children`, `failed_retry`). A healthy in-flight chain
+  always has one, so a live long job is never reaped. The 16 hours is
+  defence-in-depth debounce on top of that check, not the primary safety.
+- **The `LIMIT 25` is a blast-radius control, not a performance tweak**, and it
+  is enforced by `WITH batch AS MATERIALIZED (…)` on both arms. That keyword is
+  load-bearing: with a bare `IN (SELECT … FOR UPDATE)` subquery the planner
+  nest-loops the subplan and re-applies the `LIMIT` per outer row, so the cap
+  does not exist at runtime (measured: 26 of 26 reaped on a 25-row budget). Do
+  not "simplify" it away, and never verify the bound by grepping for the `LIMIT`
+  token — every static gate in phases 142 and 142.1 passed over exactly that
+  defect.
+
+Is it running, and is it doing anything?
+
+```sql
+-- Registered? (expect exactly one row, active, '*/15 * * * *')
+SELECT jobid, jobname, schedule, active FROM cron.job
+WHERE jobname = 'reap_strategy_analytics_stuck_computing';
+
+-- Last 10 ticks and their outcome
+SELECT status, start_time, return_message FROM cron.job_run_details
+WHERE jobid = (SELECT jobid FROM cron.job
+               WHERE jobname = 'reap_strategy_analytics_stuck_computing')
+ORDER BY start_time DESC LIMIT 10;
+
+-- Who is currently in the reaper's sights?
+SELECT strategy_id, computing_started_at,
+       (now() - computing_started_at) AS computing_for
+FROM strategy_analytics
+WHERE computation_status = 'computing'
+ORDER BY computing_started_at NULLS FIRST;
+```
+
+Expected on a healthy system: a handful of rows with recent (minutes-old)
+stamps, and **no NULL stamps**. A persistent NULL stamp means a `computing`
+writer is not stamping — that is a code bug, and arm 1 is papering over it.
+A backlog of rows older than 16 hours that are NOT being reaped means either the
+job is unregistered, or those strategies still have an active `compute_jobs` row
+(check Query 3 first — the watchdog problem is upstream of the reaper).
+
+To behave-test the deployed body rather than trust it, run
+`supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql` — it
+`EXECUTE`s the real registered cron body. It is the only gate that does, and it
+is what caught the missing bound.
 
 ## Rollback procedure
 
@@ -327,6 +406,17 @@ simultaneous processing of the same job id.
   `supabase/migrations/20260411144407_compute_jobs_queue.sql` (queue, RPCs,
   `reclaim_stuck_compute_jobs`) and
   `20260412094449_compute_jobs_admin_and_defer.sql`
+- Stuck-`computing` reaper (three forward-only migrations, applied in order —
+  each re-registers the same `cron.schedule` jobname, so only the last body
+  runs): `20260802120000_strategy_analytics_stuck_computing_reaper.sql`
+  (column, job, terminalize arm), `20260803120000_..._stamp_trigger_null_stamp_clock_start.sql`
+  (the `BEFORE UPDATE` stamp trigger + the NULL-stamp clock-start arm), and
+  `20260803130000_reaper_limit_bound_materialized_cte.sql` (restores the
+  `LIMIT 25` bound). Threshold constant + job-chain topology:
+  `analytics-service/services/job_worker.py`
+  (`STRATEGY_ANALYTICS_REAP_THRESHOLD`, `JOB_CHAIN_FOLLOW_ON`). Behavioural
+  gate: `supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql`
+  (CI job `sql-tests`).
 - Primary dispatch (Phase-19 unified backbone):
   `analytics-service/routers/process_key.py`
 - Worker tick + circuit breaker: `analytics-service/routers/cron.py`,

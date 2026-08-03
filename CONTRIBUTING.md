@@ -40,6 +40,18 @@ merge *is* the apply.
 - Backdated / drift-introducing migrations are blocked at **PR-time** by
   `migration-policy.yml` and `migration-drift-check.yml`. They fire before
   merge, which is the only place they can prevent a bad apply.
+- **The apply job fails loud on a push if its secrets are unset** (v0.52.0.0). A
+  push run only happens when migrations merged, so "skipped, nothing applied"
+  is never a legitimate outcome there — it is how a freshly-deployed worker ends
+  up talking to an old prod schema (`PGRST204`) while every dashboard stays
+  green. A manual `workflow_dispatch` on an unconfigured clone still skips
+  tolerantly. See [`docs/runbooks/migration-failure.md`](docs/runbooks/migration-failure.md).
+- **Behavioural SQL gates run in the `sql-tests` CI job**, which shares the
+  repo-wide `shared-test-db` concurrency group with `python` and `e2e-seeded`
+  and is ordered behind `python`. That ordering is not a preference: the group
+  holds exactly one pending slot, so a third simultaneous arrival cancels a
+  pending gate — which renders grey, not red. Do not remove the `needs: python`,
+  and do not give the job its own group name; the ⛔ comments in `ci.yml` say why.
 - The **test project lags prod** (it is not on the auto-apply path — that
   workflow writes only to the prod ref). A PR that adds a column the frontend
   `SELECT`s can fail the e2e gate with "column does not exist" because e2e runs
