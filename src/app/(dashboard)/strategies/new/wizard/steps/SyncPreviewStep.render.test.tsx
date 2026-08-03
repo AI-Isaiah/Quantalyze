@@ -834,6 +834,15 @@ describe("[P72] SyncPreviewStep — ledger-backed (Deribit) success path", () =>
               cumulative_return: 0.3,
               sparkline_returns: [0.01, -0.02, 0.03],
               computed_at: "2026-07-01T00:00:00.000Z",
+              // MT5-11/12 — the ONLY change this phase makes to the [P72]
+              // harness. The gate no longer infers trust from the key's
+              // exchange; it reads the verdict the series' producer stamped, so
+              // a fixture that omits it now reads null and fails CLOSED. A
+              // ledger fold is exactly what `ledger_complete` describes, and
+              // this row already claims to be one — the fixture was previously
+              // silent about a fact the mock's own `api_keys` arm asserted.
+              // Every [P72] assertion below stays byte-intact.
+              series_completeness: "ledger_complete",
             },
             0,
           );
@@ -1886,6 +1895,12 @@ function installGateSupabaseMock(opts: {
   latestTradeAt?: string | null;
   status?: string;
   computationError?: string | null;
+  /**
+   * `strategy_analytics.series_completeness` (MT5-11/12). Defaults to null —
+   * a row no producer has stamped, which is the honest default for a fixture
+   * that does not say otherwise, and the fail-CLOSED one.
+   */
+  seriesCompleteness?: string | null;
 }) {
   const {
     tradeCount = 0,
@@ -1894,6 +1909,7 @@ function installGateSupabaseMock(opts: {
     latestTradeAt = null,
     status = "complete",
     computationError = null,
+    seriesCompleteness = null,
   } = opts;
 
   type Resolved = { data: unknown; count: number | null; error: null };
@@ -1983,7 +1999,19 @@ function installGateSupabaseMock(opts: {
             Promise.resolve(
               table === "api_keys"
                 ? { data: { exchange: "binance" }, error: null }
-                : { data: null, error: null },
+                : {
+                    // MT5-11/12 — the gate reads the completeness verdict off
+                    // this row. A null verdict is served as an ABSENT ROW (what
+                    // this double always did), not as a row with a null column:
+                    // production coerces both to null, and keeping the absent
+                    // shape leaves every metric column exactly as unset as
+                    // before.
+                    data:
+                      seriesCompleteness === null
+                        ? null
+                        : { series_completeness: seriesCompleteness },
+                    error: null,
+                  },
             ),
           then: (r: (v: Resolved) => void) => r(resolve()),
         };
@@ -2296,7 +2324,23 @@ describe("[140.4-11] SyncPreviewStep — the destructive control must be EARNED"
       {
         input: "gate: keyless draft with a too-short daily-returns series",
         drive: async () => {
-          installGateSupabaseMock({ tradeCount: 0, csvRowCount: 3 });
+          // MT5-11/12 — `user_supplied` is the TRUTHFUL post-phase fixture for
+          // a completed keyless CSV run: that is exactly what the CSV analytics
+          // runner stamps. It is also what keeps this scenario on the
+          // daily-returns branch producing INSUFFICIENT_CSV_HISTORY.
+          //
+          // ⚠️ Do NOT "simplify" by dropping it and letting the case fall to
+          // INSUFFICIENT_TRADES. "keyed account below the trade-count floor"
+          // below already emits that code, so the flip would collapse the
+          // loop's distinct-code count 13 → 12, redden the hand-typed vacuity
+          // fence, and the only way to green it again would be lowering that
+          // floor — permanently un-pinning INSUFFICIENT_CSV_HISTORY's
+          // reachability at this surface.
+          installGateSupabaseMock({
+            tradeCount: 0,
+            csvRowCount: 3,
+            seriesCompleteness: "user_supplied",
+          });
           await renderThroughTheGate({ ...baseProps, apiKeyId: null });
         },
       },

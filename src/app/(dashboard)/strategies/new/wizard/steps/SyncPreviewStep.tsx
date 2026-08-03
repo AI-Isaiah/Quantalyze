@@ -12,7 +12,6 @@ import {
 import { KeyPermissionBadge } from "@/components/connect/KeyPermissionBadge";
 import {
   checkStrategyGate,
-  isLedgerBackedExchange,
   type StrategyGateResult,
 } from "@/lib/strategyGate";
 import {
@@ -1174,7 +1173,10 @@ export function SyncPreviewStep({
             supabase
               .from("strategy_analytics")
               .select(
-                "cagr, sharpe, sortino, max_drawdown, volatility, cumulative_return, sparkline_returns, computed_at",
+                // `series_completeness` rides this existing member of the
+                // Promise.all — the gate needs the persisted completeness
+                // verdict, and widening a column string adds no round trip.
+                "cagr, sharpe, sortino, max_drawdown, volatility, cumulative_return, sparkline_returns, computed_at, series_completeness",
               )
               .eq("strategy_id", strategyId)
               .maybeSingle(),
@@ -1319,10 +1321,18 @@ export function SyncPreviewStep({
             computationStatus: nextStatus,
             computationError: nextError,
             csvRowCount,
-            // P72 — only a ledger-backed (Deribit) keyed strategy may pass on a
-            // daily-returns series; a keyed perp with 0 fills must stay on the
-            // trade branch (its funding series has no completeness gate).
-            isLedgerBacked: isLedgerBackedExchange(keyRow?.exchange),
+            // MT5-11/12 — the persisted completeness verdict decides whether a
+            // keyed strategy may pass on its daily-returns series. The venue is
+            // no longer consulted: every venue folds a ledger into the same
+            // series, and only the producer that wrote it knows whether it is
+            // complete.
+            //
+            // The `?? null` is a DELIBERATE coercion whose only direction is
+            // SAFE. An absent column, an unstamped row, or a row this read did
+            // not return all arrive here as null, and null is not in the gate's
+            // allow-list — so it refuses. Contrast the counts above, where a
+            // coerced null WOULD fabricate a measurement and is thrown on.
+            seriesCompleteness: analytics?.series_completeness ?? null,
           });
 
           if (!gate.passed) {
