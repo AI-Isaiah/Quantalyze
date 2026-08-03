@@ -3950,3 +3950,111 @@ async def test_composite_mtm_overlap_error_permanent() -> None:
         isinstance(p, dict) and p.get("computation_status") == "failed"
         for _t, p, _c in fake.upserts
     ), "an MTM post-clip day collision must stamp a terminal failed row"
+
+
+# ── MT5-12 (Phase 142.2 plan 05): producer 2's verdict of record ─────────────
+# `run_stitch_composite_job` is the SECOND `csv_daily_returns` producer. The
+# publish gate is moving off the `!apiKeyId` term and onto a positive
+# `series_completeness` allow-list, and a composite carries `api_key_id = NULL`
+# with zero fills. If the stitch does not stamp a verdict, every composite reads
+# NULL → falls to the trade branch → INSUFFICIENT_TRADES → NO COMPOSITE CAN EVER
+# BE APPROVED AGAIN. (The admin approve path DOES gate composites — see
+# `strategy-review/route.test.ts:1073`, "Composites (apiKeyId null) source
+# history"; only SyncPreviewStep skips them.)
+#
+# Two things are pinned below and neither is redundant:
+#   1. the LITERAL on the headline payload — the regression that would ship an
+#      un-approvable composite class;
+#   2. its ABSENCE from that payload's data_quality_flags — because
+#      analytics_runner.py:1439 rebuilds data_quality_flags wholesale, and
+#      guard-key membership auto-promotes computation_status to
+#      `complete_with_warnings`, which the gate PASSES. Carrying the verdict
+#      inside that dict would be a fail-open (D-16), not merely a wrong home.
+
+
+def _sa_upserts(fake: _FakeSupabase) -> list[dict[str, Any]]:
+    """Every strategy_analytics upsert payload of the run, in order."""
+    return [
+        payload
+        for table, payload, _ in fake.upserts
+        if table == "strategy_analytics" and isinstance(payload, dict)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_composite_headline_stamps_composite_stitched_verdict() -> None:
+    """The stitch headline write carries series_completeness == 'composite_stitched'
+    as a TOP-LEVEL column, and no later write in the same job clears it.
+
+    Neuter: drop the key from `headline_payload` → assertion 1 reddens. Move it
+    into `merged_flags` instead → assertions 1 AND 2 redden together."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+
+    assert result.outcome == DispatchOutcome.DONE
+    headline = _headline_row(fake)
+    assert headline is not None
+
+    # 1 — the literal, hand-typed here (nothing imports SERIES_COMPLETENESS_VALUES:
+    # what a producer may EMIT and what the gate may TRUST are different questions).
+    assert headline["series_completeness"] == "composite_stitched", (
+        "without this stamp every composite reads NULL at the gate → trade branch "
+        "→ INSUFFICIENT_TRADES → permanently un-approvable"
+    )
+
+    # 2 — and NOT inside data_quality_flags, the wholesale-rebuilt / auto-promoting
+    # channel. This is the fail-open guard, not a style preference.
+    assert "series_completeness" not in headline["data_quality_flags"], (
+        "the verdict must be a SIBLING of data_quality_flags — that dict is "
+        "rebuilt wholesale by analytics_runner and its guard keys auto-promote "
+        "computation_status to complete_with_warnings, which the gate PASSES"
+    )
+
+    # 3 — no LATER strategy_analytics write in the same job clears or overwrites it.
+    # `headline_payload.update(cash_metrics_json)` spreads metric scalars, and the
+    # by-basis object rides the same single upsert; a future second write that
+    # omitted the column would preserve it (A1) but one that set it to NULL would
+    # not. Scan every payload, not just the headline.
+    payloads = _sa_upserts(fake)
+    headline_idx = payloads.index(headline)
+    for later in payloads[headline_idx + 1:]:
+        assert later.get("series_completeness", "composite_stitched") == (
+            "composite_stitched"
+        ), f"a later write clobbered the composite verdict: {later!r}"
+
+
+@pytest.mark.asyncio
+async def test_composite_failure_stamp_omits_the_verdict_column() -> None:
+    """The terminal 'failed' arm must NOT write series_completeness.
+
+    Omission is deliberate and load-bearing: a PostgREST upsert projects only the
+    payload's keys, so a previously-stamped verdict SURVIVES a failed re-stitch
+    (A1, executed against TEST in plan 142.2-04). Writing NULL here would erase a
+    healthy composite's verdict on any transient failure; writing
+    'composite_stitched' would certify a stitch that never completed. Neither —
+    `computation_status='failed'` already blocks the gate."""
+    fake = _FakeSupabase(members=[_member(1, "2024-01-01", None)])
+    m1 = _returns([("2024-01-01", 0.05)])  # exactly ONE present day → degenerate
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+
+    assert result.outcome == DispatchOutcome.FAILED
+    failed_stamps = [
+        p for p in _sa_upserts(fake) if p.get("computation_status") == "failed"
+    ]
+    assert failed_stamps, "the degenerate composite must stamp a terminal failed row"
+    for stamp in failed_stamps:
+        assert "series_completeness" not in stamp, (
+            "the failure stamp must omit the column so a prior verdict survives "
+            f"by omission (A1); got {stamp!r}"
+        )

@@ -6813,6 +6813,36 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         "exposure_metrics": None,
         "metrics_json_by_basis": metrics_json_by_basis,
         "data_quality_flags": merged_flags,
+        # ── MT5-12 (D-15/D-16): producer 2's verdict of record ────────────────
+        # `run_stitch_composite_job` is the SECOND csv_daily_returns producer.
+        # Once the publish gate stops asking `!apiKeyId` and starts asking for a
+        # positive verdict, an unstamped composite reads NULL → falls to the
+        # trade branch → INSUFFICIENT_TRADES → NO COMPOSITE CAN EVER BE APPROVED
+        # AGAIN (composites carry api_key_id NULL and zero fills; the admin
+        # approve path DOES route them through the gate — see
+        # strategy-review/route.test.ts:1073, "Composites (apiKeyId null) source
+        # history"). This stamp is what keeps that branch reachable.
+        #
+        # WHY its own value rather than reusing a member's: the composite series
+        # is the deterministic stitch of its members, so its trust is INHERITED,
+        # not observed. `ledger_complete` would be a false claim (this function
+        # consumed no venue ledger), and `user_supplied` would erase the
+        # distinction between "a machine stitched audited members" and "a human
+        # uploaded a CSV". The gate decides separately what it will trust.
+        #
+        # ⛔ SIBLING KEY, never a member of `merged_flags` (built just above).
+        # data_quality_flags is rebuilt wholesale by analytics_runner.py:1439,
+        # and guard-key membership auto-promotes computation_status to
+        # `complete_with_warnings` — a status the publish gate PASSES. Routing
+        # the verdict through that channel would be a fail-open. Mirrors Task 1's
+        # `_prestamp_payload` vs `_prestamp_flags` rule at the derive seam.
+        #
+        # `headline_payload.update(cash_metrics_json)` below spreads metric
+        # SCALARS only and cannot clobber this key. The failure arm at :5299
+        # deliberately OMITS the column: omission preserves a previously-stamped
+        # verdict through a PostgREST upsert (A1, executed against TEST in plan
+        # 142.2-04), and `computation_status='failed'` blocks the gate anyway.
+        "series_completeness": "composite_stitched",
     }
     # Spread the canonical composite scalars into the headline — the SAME object as
     # metrics_json_by_basis.cash_settlement. A single upsert also REPLACES
