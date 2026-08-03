@@ -387,6 +387,31 @@ true for 146 and half of 142–145, and **false for 141**.
   view, not a global registry. Decide between gateway-enumerated, a curated broker→servers map,
   or free-text-with-suggestions before planning.
 
+- **⭐ Expose an MCP server so a client can read their own stored data and analyse it with their own
+  AI** (founder-requested 2026-08-03, during `/gsd-plan-phase 142.2`). Once we have ingested and
+  derived a client's data, they should be able to point their own AI assistant at it — Claude
+  Desktop, Claude Code, ChatGPT, whatever they use — and ask their own questions, rather than being
+  limited to the analyses we chose to render. This is a **product** idea, not a refactor: it turns
+  Quantalyze from "the dashboard we built" into "your data, queryable", and it is a natural fit for
+  the backbone because **dailies are canonical** — one clean series to expose rather than N bespoke
+  panels.
+  **Not planned, not scoped, not scheduled** — captured so it is not lost. Before it can be planned,
+  four things need a decision, and the first two are the ones that make it non-trivial:
+  - **Auth.** MCP has no ambient session. This needs a per-user credential (scoped token / OAuth)
+    with a revocation story, and it must be **read-only** and **owner-scoped** — the RLS discipline
+    that governs every other read path applies here, and a SECURITY DEFINER shortcut would be a
+    tenant-leak risk. See the `get_published_trust_signals` SECDEF precedent for how narrow such a
+    surface has to be.
+  - **What is exposed.** Dailies + derived metrics is the honest answer (canonical, already the
+    single source). Raw `trades` is tempting and mostly wrong — it is a partly-redundant
+    representation only some venues populate (see Phase 142.2 / D-16). Exposing it would re-teach
+    clients the same wrong model the strategy gate just had to unlearn.
+  - **Hosting shape.** Remote MCP endpoint on our infra vs. a small local server the client runs
+    against an API token. Remote is far easier to support and revoke; local is easier to trust.
+  - **Whether it is a paid tier.** Likely yes, but that is a CEO call, not an engineering one.
+  ⚠️ Note the adjacent risk: an MCP surface is a **new public read boundary**. Every hardening
+  lesson already paid for on the public factsheet path applies to it from day one, not later.
+
 ### Tech-debt / maintainability (opportunistic, don't force)
 - God-files: `queries.ts` (3,205 lines), `job_worker.run_sync_trades_job` (688 lines),
   `portfolio.py` (2,423), `exchange.py` (2,777).
@@ -827,6 +852,14 @@ Read it as such.
    at discovery: of the 8 registered cron jobs, only `reap_strategy_analytics_stuck_computing` puts
    a `LIMIT` inside an `IN (…)` subquery; the other seven carry no `LIMIT` at all — the class is
    closed at one member, so no sweep is owed.
+   **✅ CLOSED 2026-08-03 (post-merge QA, PR #659 in `main`):** the merge-time PROD verification ran
+   read-only against `khslejtfbuezsmvmtsdn` and the deployed `cron.job.command` carries the bound as
+   required — NOT by token presence but by shape: the full body was read and eyeballed; each arm is a
+   single-evaluation `WITH batch AS MATERIALIZED (SELECT … LIMIT 25 FOR UPDATE SKIP LOCKED) UPDATE …
+   FROM batch`, the `AS MATERIALIZED` count is exactly 2, and no `IN (SELECT … LIMIT` shape remains.
+   Job registered `*/15 * * * *`, `active=true`. Bonus: the deployed body includes the non-destructive
+   clock-start companion arm for `(computing, NULL-stamp)` rows, which also closes 142-VERIFICATION
+   Gap 3's deploy-ordering observability window. PROD stuck-`computing` census at check time: **0**.
 7. **✅ Discharged at plan time (recorded so they are not re-raised): W-1 and W-2.** W-1: plans
    claimed SQL-gate Part 4b "stays falsifiable" after the D-18 retrofit; it does not — 4b is a
    **double-mutation** defence-in-depth assertion (trigger arm (a) and the bridge's own keep-arm
@@ -877,6 +910,49 @@ Read it as such.
     Found by the /ship coverage audit, 2026-08-03. **Related and already FIXED in 0.52.0.0:** the
     same job had been made the third member of the one-pending-slot `shared-test-db` concurrency
     group, which cancelled a pending gate outright; it is now gated behind `python`.
+
+### v1.16 milestone human-audit QA sweep — authed-browser + PROD probes (added 2026-08-03)
+
+Run via /qa over the open GSD human-verification items of phases 140→142.1 against live PROD
+(authed browser as `qa-demo@quantalyze.app` + read-only Supabase/Upstash probes). Discharged that
+day: D-19 PROD cron body (see ✅ on the 142.1 item 6 above), PROD stuck-`computing` census = 0,
+TEST reaper cron registered/active, 140.1 index shape on PROD correct
+(`strategy_verifications_strategy_wizard_session_uniq` present, old index gone), 141.2 audit
+numbers re-confirmed (42/42/0 `wizard:`-prefix; resync 20/42; five breaker keys still ABSENT),
+wizard AUTH_FAILED arm renders named+actionable copy with Retry/Diagnostics and clean diagnostics
+(`code` + `correlation_id` only, no internals), teaser `/api/verify-strategy` rejection envelope
+carries `human_message` end-to-end and the TS-17 client fix (`human_message` read first) is live.
+New findings, none clearing the founder blast-radius bar as blocking:
+
+1. **Raw Python exception leaks into user-facing `computation_error`.** PROD row: strategy
+   `ec722557` ("Alpha Centauri", owner `helmut@metaworldfund.com`) has
+   `computation_error = "'<' not supported between instances of 'str' and 'NoneType'"`.
+   That is an internal TypeError string in the field the wizard/factsheet renders as failure
+   copy — the exact attribution class 140.x closed on the HTTP seam, still open on the
+   `computation_error` persistence path. Fix shape: map non-contract exceptions to the
+   user-recoverable message at the writer (same pattern the 142 reaper message uses) and keep
+   the raw string in logs/Sentry only. Also worth a one-off: root-cause the `str`-vs-`None`
+   comparison itself (likely a missing-field sort/compare in analytics for that strategy).
+2. **Wizard AUTH_FAILED copy names the wrong venue.** With **Binance** selected, the rejection
+   panel's example text reads "(e.g. Deribit returns invalid_credentials)" and a bullet says
+   "on Deribit the key is the ClientId and the secret is the ClientSecret". The copy block is
+   venue-generic where it should be parameterized by the selected exchange. Cosmetic/prose —
+   batch with the next wizardErrors.ts copy pass.
+3. **Verified factsheet shows FRESH while its return series ended 89 days ago.** Phoenix
+   Protocol (API-verified, "Synced 8h ago", "COMPUTED · FRESH (0d)") has an observation window
+   ending 2026-05-06. Sync succeeds and compute is fresh, but no dailies exist after May 6 —
+   either the account went flat (then the factsheet arguably should say so) or the daily-derive
+   stopped attributing new days (then it's a data-pipeline gap). Needs a look at the dailies for
+   that key before deciding which. Investigate — data-integrity-adjacent.
+4. **Example strategies advertise "Synced 67d ago" on discovery.** All example rows (Hide
+   examples OFF, the default) show a stale sync badge; real strategies show "Synced 8h ago".
+   Allocators can read the stale badge as platform-wide staleness. Consider suppressing the
+   sync badge on example rows. Cosmetic.
+5. **Validation-rejected keys leave no audit trail (observation, decide-only).** A failed wizard
+   key validation (AUTH_FAILED) writes no `audit_log` `process_key` row — audit starts only when
+   a key enters processing. Consistent with current design; recorded so the 141.2 audit censuses
+   are read correctly (they count processed flows, not attempts). No action unless rejected-attempt
+   telemetry is wanted beyond Sentry.
 
 ---
 
