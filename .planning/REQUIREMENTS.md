@@ -218,7 +218,15 @@ and MT5 is already folded into the unified backbone at `broker_dailies.py:403` �
 explicitly not evidence for this group. MT5-06..09 are satisfied only by an end-to-end run against
 a live funded account on a **trading day**.
 
-- [ ] **MT5-01**: The production half-state is closed. Server-side `MT5_ENABLED=true` is set in
+- [x] **MT5-01** — ✅ **DELIVERED 2026-08-03, ahead of planning** (D-01 called for the flip *before*
+  any code). All six env entries now exist: `MT5_ENABLED` on Production / Preview / Development and
+  `NEXT_PUBLIC_MT5_ENABLED` on all three (it was Production-only). Production was **redeployed** —
+  `quantalyze-djygeqsqy`, `main` @ `d80a1ba`, Ready — so the var is in effect, not merely stored.
+  Preview/Development pick theirs up on their next build, which is the normal path. ⚠️ Vercel CLI had
+  to be upgraded 54.4.1 → 58.4.4 first: the old CLI looped on `env add … preview`, answering
+  `git_branch_required` and then suggesting verbatim the command just run. The requirement text below
+  is retained as the specification.
+  The production half-state is closed. Server-side `MT5_ENABLED=true` is set in
   Vercel **and redeployed** (an env change alone is inert), across Production, Preview **and**
   Development — and because `NEXT_PUBLIC_MT5_ENABLED` is today Production-only, **both** vars are
   extended to Preview and Development so no environment carries a gate the others do not. Evidence
@@ -229,7 +237,13 @@ a live funded account on a **trading day**.
   rejects every one of their submissions. ⛔ The closed-set no-widening pin holds: `mt5` stays OUT
   of `UI_EXCHANGE_CODES` / `EXCHANGES` / `FUNDING_EXCHANGES` / `CRYPTO_EXCHANGES` regardless of the
   flag (`closed-sets.ts:119-122`).
-- [ ] **MT5-02**: The `/security#mt5-readonly` investor-password guide renders in production. It
+- [x] **MT5-02** — ✅ **DELIVERED + VERIFIED 2026-08-03** as a consequence of MT5-01, and verified by
+  observation rather than inference: `curl https://quantalyze.xyz/security` now returns the
+  `mt5-readonly` anchor and the "investor (read-only) password" copy (4 matches each), content that
+  renders **only** when `isMt5EnabledServer()` is true. Before the redeploy it returned none. This
+  doubles as the live proof that MT5-01's server gate is actually in effect — the same function
+  guards `create-with-key/route.ts:147`, so that rejection arm can no longer fire.
+  The `/security#mt5-readonly` investor-password guide renders in production. It
   gates on the same `isMt5EnabledServer()` (`src/app/(marketing)/security/page.tsx:544`), so it is
   currently **blank** — the wizard tells a founder to use an investor password while the page
   explaining what that is shows nothing. Content is already correct; this is a gating consequence
