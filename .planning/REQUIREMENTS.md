@@ -297,6 +297,63 @@ a live funded account on a **trading day**.
   ⚠️ The **stale comment is part of the defect** — a future reader following it re-narrows the
   function. Whatever replaces the hardcoded literal must make TS/Python divergence *detectable*
   rather than restating the instruction that already failed.
+  ⛔ **Delivery route settled by the founder 2026-08-03: NOT a standalone PR.** This requirement is
+  satisfied **through MT5-12** (delete the venue-list proxy; the daily series answers for itself).
+  Shipping the one-term widening on its own is explicitly rejected — it would re-arm the identical
+  drift for the next venue. MT5-11 remains listed separately because it names the *observed* defect
+  and its PROD evidence; MT5-12 names the *fix*.
+- [ ] **MT5-12** *(ARCHITECTURAL — founder call 2026-08-03: consolidate the backbone, do NOT ship
+  MT5-11 as a standalone patch)*: **Strategy admissibility is decided from the canonical daily
+  series itself, not from a venue-name list.** `isLedgerBackedExchange` is **deleted**, not widened,
+  and no hardcoded venue set governs gate routing in *either* language.
+  **Why the one-line fix is refused as the deliverable:** MT5-11's branch condition is a **proxy**.
+  The gate's real question — stated in `strategyGate.ts:170` — is *"is this daily series complete,
+  or is it a funding-only stub with a fills gap that would understate the track record?"* It
+  approximates that with *"which venue is this?"*, hand-maintained in two languages with only a
+  comment ("keep the two in lockstep") as enforcement. That proxy was always going to drift; it
+  drifted; widening it re-arms the same trap for the next venue.
+  ⭐ **Founder insight 2026-08-03, verified in code — "all venues produce a ledger."** This is
+  correct and it reshapes the requirement. `services/broker_dailies.py` holds **four** combine
+  functions and **every venue already derives the same daily series from ledger-shaped inputs**:
+  `combine_realized_and_funding:152` (binance/bybit/okx — realized PnL **+ funding**),
+  `combine_native_ledger:185` (deribit), `combine_sfox_balance_history:241` (sfox),
+  `combine_mt5_deal_ledger:403` (mt5). The file header records that funding was **+20.4% on a live
+  Bybit account — two-thirds of the profit** — and that `fetch_daily_pnl` excludes funding by
+  design, so realized-only is wrong. Some venues *additionally* expose equity / unrealized PnL.
+  ⇒ **"ledger-backed vs fill-based" was never about whether a ledger exists.** Every venue has one.
+  The only genuine difference is that perps *also* fetch fills (`adapter.fetch_raw`) into `trades`;
+  `long_fetch.py:461` skips that step for ledger venues because it is redundant or unimplemented
+  there. `trades` is therefore a **parallel, partly-redundant representation populated by only some
+  venues** — and the gate reads *it* instead of the daily series every venue produces. **MT5 did not
+  fall through a gap in the backbone; it revealed the gate was never on the backbone for any venue.
+  Binance passes for the same wrong reason MT5 fails.**
+  ⇒ **Supersedes the initial "add a provenance column" sketch.** Since all venues already land in
+  one daily series, completeness is a property of **that series' inputs**, not a venue label — and
+  today it is interrogated *only* for perps and *only* by venue name, while deribit/sfox/mt5 ledgers
+  receive **no completeness check at all** and are trusted purely by list membership. The
+  requirement is the invariant (below), not any particular carrier; research/planning chooses
+  between a per-series completeness signal, a derived check over the inputs, or another mechanism.
+  **The missing piece, confirmed on PROD:** `csv_daily_returns` carries
+  `strategy_id, date, daily_return, created_at, updated_at, id, api_key_id, allocator_id` — and
+  **no completeness or provenance column**. A canonical daily row therefore cannot state whether it
+  is a complete ledger-derived return or a funding-only stub, which is precisely why the gate is
+  forced to interrogate a venue list. "Dailies are canonical" currently holds for **computation**
+  and fails for **trust**: trustworthiness lives outside the dailies.
+  ⚠️ **The falsification test — the safety property MUST survive.** A naive "always read the daily
+  series" satisfies MT5-11 and **breaks the invariant the branch exists to protect**: it would admit
+  a keyed perp whose `csv_daily_returns` holds funding only (no fail-loud completeness gate), and
+  publish an understated track record as verified. The fix is not "stop asking"; it is "make the
+  daily series answer". Any candidate implementation is rejected unless a fixture of a
+  fills-gapped perp is still **refused** — that case is the oracle, not MT5 passing.
+  ⚠️ Scope reaches every venue's ingestion (it must write the provenance the gate will read) and
+  needs a schema change + migration. ⛔ `supabase/migrations/**` **auto-applies to PRODUCTION on
+  merge to main** — the migration is the highest-risk artefact in this phase.
+  **MT5-11 is delivered *through* this requirement, not before it.** If the combined work proves too
+  large, the founder's stated valve is a **follow-up phase immediately after 142.2** — not a revert
+  to the standalone patch, and not shipping MT5 blocked.
+  *Deferred, explicitly not required here:* renaming `csv_daily_returns`, whose CSV-era name now
+  carries API-derived MT5/Deribit/perp data — the same seam showing in the schema. Cosmetic relative
+  to the invariant; log to `TODOS.md`.
 - [ ] **MT5-06** *(measure-first)*: The MT5 server-UTC offset is **measured live and asserted on**,
   not assumed. The gateway's server time is read against UTC at connect and the observed offset is
   persisted (`139-VERIFICATION.md:12` names `MT5_SOAK_SERVER_OFFSET_MIN` as the intended carrier);
@@ -405,7 +462,7 @@ Populated during roadmap creation.
 | JOB-08 | Phase 144 | Pending |
 | JOB-06 | Phase 145 | Pending |
 | JOB-07 | Phase 142 | Pending |
-| MT5-01..11 | Phase 142.2 | Pending (MT5-01, MT5-02 complete) |
+| MT5-01..12 | Phase 142.2 | Pending (MT5-01, MT5-02 complete) |
 | RATE-01 | Phase 146 | Pending |
 | RATE-02 | Phase 146 | Pending |
 | RATE-03 | Phase 146 | Pending |

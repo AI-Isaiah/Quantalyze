@@ -488,7 +488,7 @@ Plans:
 ### Phase 142.2: Get MetaTrader 5 running end to end on the unified backbone (INSERTED)
 
 **Goal:** A founder can connect a real MetaTrader 5 account through the wizard and see correct performance rendered from the unified backbone — key → dailies → backbone → UI — with no step requiring a human to know an internal error code, a server name, or a flag.
-**Requirements**: MT5-01..10 (set at /gsd-discuss-phase 2026-08-03; see `142.2-CONTEXT.md` for the eleven decisions behind them)
+**Requirements**: MT5-01..12 (set at /gsd-discuss-phase 2026-08-03; see `142.2-CONTEXT.md` for the fifteen decisions behind them). ⚠️ MT5-11/MT5-12 were added AFTER the discussion, from live dogfood: the gate is not on the unified backbone. MT5-01/02 are already complete.
 **Depends on:** Phase 142
 **Plans:** 0 plans
 
