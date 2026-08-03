@@ -490,7 +490,7 @@ Plans:
 **Goal:** A founder can connect a real MetaTrader 5 account through the wizard and reach a rendered strategy — key → dailies → backbone → UI — with no step requiring a human to know an internal error code, a server name, or a flag, and with admissibility decided by the canonical daily series rather than a hand-maintained venue list.
 **Requirements**: MT5-01..05, MT5-11, MT5-12 (set at /gsd-discuss-phase 2026-08-03; see `142.2-CONTEXT.md` for the sixteen decisions behind them). ⚠️ MT5-11/MT5-12 were added AFTER the discussion, from live dogfood: the gate is not on the unified backbone. MT5-01/02 are already complete.
 **Depends on:** Phase 142
-**Plans:** 0 plans
+**Plans:** 8 plans
 
 ⚠️ **SPLIT 2026-08-03 at the D-14 valve, on the researcher's sizing finding (`142.2-RESEARCH.md`).** The original scope (MT5-01..12) was two phases, and the second was unbounded *by construction*: MT5-10 is uncapped by founder decision, and MT5-06/07/08 are human- and calendar-gated on a live trading-day session at the terminal. **MT5-06..10 moved to Phase 142.3.** This is the founder's pre-authorised valve (D-14) — a follow-up phase, **not** a scope cut. The dependency graph across the cut is one-directional: 142.2 makes MT5 *reachable and honest*, 142.3 proves it *correct*.
 
@@ -503,7 +503,14 @@ Plans:
 ⚠️ **A green unit suite is not evidence that MT5 is correct** — v1.15 shipped with 6/6 phases green and both open items survived it. That evidence is Phase 142.3's job. What 142.2 *can* prove offline is its own safety property: **a fills-gapped perp fixture must still be REFUSED.** MT5 passing is not the test; that perp still failing is.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 142.2 to break down)
+- [ ] 142.2-01-PLAN.md — series_completeness migration (additive nullable, self-verifying) + the CI-counting SQL gate
+- [ ] 142.2-02-PLAN.md — MT5-03: per-venue passphraseSecret flag; MT5 broker-server plain text, OKX byte-identical (SC-7)
+- [ ] 142.2-03-PLAN.md — Python producers: SeriesCompleteness registry + all FIVE combiner return paths stamped + the D-15 economic oracle (SC-1 py)
+- [ ] 142.2-04-PLAN.md — [BLOCKING, orchestrator-only, autonomous:false] MCP apply to TEST + A1/A2 executed evidence + read-only PROD censuses (A6, Pitfall-6)
+- [ ] 142.2-05-PLAN.md — worker enforcement: fail-loud assert BEFORE the reconcile-delete + composite_stitched stitch stamp + keyless user_supplied in the runner (SC-5, SC-6; covers all THREE csv_daily_returns producers)
+- [ ] 142.2-06-PLAN.md — TS gate consolidation: isLedgerBackedExchange DELETED, verdict allow-list, one exported predicate at all three former sites, composites stay approvable (SC-1 ts, SC-2, SC-3, SC-4)
+- [ ] 142.2-07-PLAN.md — MT5-04: KEY_INVALID_FORMAT split across the 24 emitting sites (12+12), copy honesty fix, registry-drift invariant (SC-8, SC-9, SC-10)
+- [ ] 142.2-08-PLAN.md — [autonomous:false] TODOS deferrals + falsifiability ledger backfill + MT5-01/02 delivered-record + MT5-05 founder checkpoint (reachable, NOT correct — 142.3 gates correctness)
 
 ### Phase 142.3: Prove the MT5 numbers correct against the live terminal on a trading day (INSERTED)
 
