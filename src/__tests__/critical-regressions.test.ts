@@ -1095,10 +1095,23 @@ describe("Critical regression guards", () => {
         );
       });
 
+      // ⚠️ Anchor on the CONDITIONAL, never on the bare env name. The workflow
+      // declares `IS_PUSH: ${{ github.event_name == 'push' }}` as a step env var
+      // ~13 lines ABOVE the guard that actually uses it. A pattern starting at
+      // the bare name therefore matches the DECLARATION, and the lazy `[\s\S]*?`
+      // happily spans the guard entirely — so replacing the guard with a
+      // constant-false condition (making the fail-loud branch unreachable on
+      // every event) walked straight through a green test. Measured during the
+      // 142.1 ship coverage audit, 2026-08-03. Matching the literal
+      // `if [ "$IS_PUSH" = "true" ]` is what makes the branch itself
+      // load-bearing rather than merely mentioned.
+      const PUSH_FAIL_LOUD_BRANCH =
+        /if \[ "\$IS_PUSH" = "true" \][\s\S]*?::error::[\s\S]*?exit 1/;
+
       it("the push path emits ::error:: and exits non-zero", () => {
         expectMatch(
           checkStep(),
-          /IS_PUSH[\s\S]*?::error::[\s\S]*?exit 1/,
+          PUSH_FAIL_LOUD_BRANCH,
           "supabase-migrate.yml's unset-secrets branch no longer fails loud on push — a push to main touching supabase/migrations/** means migrations MERGED, so applying nothing must be a hard error, not a green no-op (D-02/R1, PGRST204 producer 1)",
         );
       });
@@ -1109,7 +1122,7 @@ describe("Critical regression guards", () => {
         // Assert it STRUCTURALLY instead: the tolerant notice must sit AFTER
         // the push-gated `exit 1`, so a push run can never reach it.
         const step = checkStep();
-        const pushExitIdx = step.search(/IS_PUSH[\s\S]*?::error::[\s\S]*?exit 1/);
+        const pushExitIdx = step.search(PUSH_FAIL_LOUD_BRANCH);
         const noticeIdx = step.indexOf("::notice::");
         expect(
           pushExitIdx,
