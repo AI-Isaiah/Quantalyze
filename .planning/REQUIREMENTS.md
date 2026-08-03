@@ -354,6 +354,25 @@ a live funded account on a **trading day**.
   *Deferred, explicitly not required here:* renaming `csv_daily_returns`, whose CSV-era name now
   carries API-derived MT5/Deribit/perp data — the same seam showing in the schema. Cosmetic relative
   to the invariant; log to `TODOS.md`.
+#### MT5-06..10 — moved to Phase 142.3 (split 2026-08-03 at the D-14 valve)
+
+⚠️ The five requirements below were **split out of Phase 142.2 into Phase 142.3** on 2026-08-03,
+on the sizing finding in `142.2-RESEARCH.md`. They are unchanged in content — only their owning
+phase moved. The cut is the founder's pre-authorised D-14 valve (*"we can do another phase right
+after this one, if this one becomes too large"*), **not** a scope cut: nothing here is dropped,
+deferred to v2, or made optional.
+
+Why these five and not others: they are exactly the requirements that **cannot be satisfied
+offline**. MT5-06/07/08 need a founder at the MT5 terminal on a trading day with the live funded
+account; MT5-09/10 can only run once that comparison has produced numbers. MT5-10 is additionally
+**uncapped by founder decision**, so bundling it with the reachability work made the combined
+phase unsizeable rather than merely large. The dependency across the cut is one-directional —
+142.2 makes MT5 reachable, 142.3 proves it correct.
+
+⛔ **142.2 closing is not "MT5 is done."** It means MT5 is *reachable*. v1.15's failure mode was
+shipping 6/6 green with both open items intact; these five are the items. Do not archive the
+milestone or advertise MT5 until 142.3 passes.
+
 - [ ] **MT5-06** *(measure-first)*: The MT5 server-UTC offset is **measured live and asserted on**,
   not assumed. The gateway's server time is read against UTC at connect and the observed offset is
   persisted (`139-VERIFICATION.md:12` names `MT5_SOAK_SERVER_OFFSET_MIN` as the intended carrier);
@@ -462,7 +481,8 @@ Populated during roadmap creation.
 | JOB-08 | Phase 144 | Pending |
 | JOB-06 | Phase 145 | Pending |
 | JOB-07 | Phase 142 | Pending |
-| MT5-01..12 | Phase 142.2 | Pending (MT5-01, MT5-02 complete) |
+| MT5-01..05, MT5-11, MT5-12 | Phase 142.2 | Pending (MT5-01, MT5-02 complete) |
+| MT5-06..10 | Phase 142.3 | Pending (split out of 142.2 on 2026-08-03 at the D-14 valve) |
 | RATE-01 | Phase 146 | Pending |
 | RATE-02 | Phase 146 | Pending |
 | RATE-03 | Phase 146 | Pending |

@@ -487,10 +487,12 @@ Plans:
 
 ### Phase 142.2: Get MetaTrader 5 running end to end on the unified backbone (INSERTED)
 
-**Goal:** A founder can connect a real MetaTrader 5 account through the wizard and see correct performance rendered from the unified backbone — key → dailies → backbone → UI — with no step requiring a human to know an internal error code, a server name, or a flag.
-**Requirements**: MT5-01..12 (set at /gsd-discuss-phase 2026-08-03; see `142.2-CONTEXT.md` for the fifteen decisions behind them). ⚠️ MT5-11/MT5-12 were added AFTER the discussion, from live dogfood: the gate is not on the unified backbone. MT5-01/02 are already complete.
+**Goal:** A founder can connect a real MetaTrader 5 account through the wizard and reach a rendered strategy — key → dailies → backbone → UI — with no step requiring a human to know an internal error code, a server name, or a flag, and with admissibility decided by the canonical daily series rather than a hand-maintained venue list.
+**Requirements**: MT5-01..05, MT5-11, MT5-12 (set at /gsd-discuss-phase 2026-08-03; see `142.2-CONTEXT.md` for the sixteen decisions behind them). ⚠️ MT5-11/MT5-12 were added AFTER the discussion, from live dogfood: the gate is not on the unified backbone. MT5-01/02 are already complete.
 **Depends on:** Phase 142
 **Plans:** 0 plans
+
+⚠️ **SPLIT 2026-08-03 at the D-14 valve, on the researcher's sizing finding (`142.2-RESEARCH.md`).** The original scope (MT5-01..12) was two phases, and the second was unbounded *by construction*: MT5-10 is uncapped by founder decision, and MT5-06/07/08 are human- and calendar-gated on a live trading-day session at the terminal. **MT5-06..10 moved to Phase 142.3.** This is the founder's pre-authorised valve (D-14) — a follow-up phase, **not** a scope cut. The dependency graph across the cut is one-directional: 142.2 makes MT5 *reachable and honest*, 142.3 proves it *correct*.
 
 **Known inputs (do NOT re-derive at plan time):**
 - v1.15 shipped MT5 and is ARCHIVED at tag `v1.15`. Live config: worker `MT5_ENABLED=true` + `MT5_GATEWAY_HOST=mt5-gateway.railway.internal:8001`, Vercel `NEXT_PUBLIC_MT5_ENABLED=true`. N accounts serialize through ONE gateway lock.
@@ -498,10 +500,29 @@ Plans:
 - Founder-observed dogfood defects are already recorded in `TODOS.md` § "MT5 wizard — founder-observed on live UI": the Broker-server field is password-masked and should be plain text + searchable typeahead, and the connect-failure copy renders a generic `KEY_INVALID_FORMAT` that names Binance/OKX/Bybit at an MT5 user.
 - "Unified backbone" here means the ONE pipeline (`key → dailies → backbone → UI`), not a second MT5-specific path. Dailies are canonical; derive metrics/charts/coverage from them.
 
-⚠️ **Verification must be end-to-end against a real account on a trading day.** A green unit suite is not evidence for this phase's goal — v1.15 shipped with 6/6 phases green and both open items survived it.
+⚠️ **A green unit suite is not evidence that MT5 is correct** — v1.15 shipped with 6/6 phases green and both open items survived it. That evidence is Phase 142.3's job. What 142.2 *can* prove offline is its own safety property: **a fills-gapped perp fixture must still be REFUSED.** MT5 passing is not the test; that perp still failing is.
 
 Plans:
 - [ ] TBD (run /gsd-plan-phase 142.2 to break down)
+
+### Phase 142.3: Prove the MT5 numbers correct against the live terminal on a trading day (INSERTED)
+
+**Goal:** The performance Quantalyze renders for a live funded MT5 account matches the MT5 terminal's own equity and balance figures on a trading day, on every surface that renders it, with the broker-server-to-UTC offset measured rather than assumed — and any discrepancy found is fixed, wherever its root cause lives.
+**Requirements**: MT5-06..10 (split out of Phase 142.2 on 2026-08-03 at the D-14 valve; the decisions behind them are D-07..D-11 in `142.2-CONTEXT.md`).
+**Depends on:** Phase 142.2 (MT5 must be reachable through the gate before its numbers can be checked)
+**Plans:** 0 plans
+
+**Known inputs (do NOT re-derive at plan time):**
+- ⚠️ This phase is **human- and calendar-gated**. It cannot be completed by an agent alone or on a weekend: it needs a founder at the MT5 terminal, on a trading day, with the live funded account's read-only investor password.
+- ⚠️ **MT5-10 is uncapped by explicit founder decision** (D-10). A bounded alternative — split shared-cause fixes into their own phase — was offered and **declined**. Shared-backbone money-math root causes are IN scope. Size for the unbounded case; do not treat it as an escape hatch.
+- `MT5_SERVER_UTC_OFFSET_S=10800` is **already live** on the worker. The open problem is **DST and multi-broker**, not the base offset. The last-deal offset estimator was already built and already failed (the −810 stale-deal artifact), and `test_mt5_client_contract.py:719-736` explicitly forbids `symbol_info_tick` on `Mt5Client` — read `142.2-RESEARCH.md` before proposing a measurement mechanism.
+- ⛔ **No tolerance number exists anywhere for MT5-07.** "Matching within a stated tolerance" with no stated number is unverifiable. This needs a founder call before MT5-07 can have an acceptance criterion — surface it at /gsd-discuss-phase 142.3, do not invent one.
+- The residual risk MT5-09 exists to test is the **backbone-bypass surfaces** logged in `TODOS.md`: `_compute_portfolio_analytics` (`analytics-service/routers/portfolio.py:628`), `equity_reconstruction.py`, and the bespoke TS stacks — they re-derive metrics rather than reading them. One daily series checked five ways; a divergence is a finding.
+
+⛔ **This phase is the gate on any "MT5 is done" claim.** 142.2 closing does not mean MT5 is verified — it means MT5 is reachable. The v1.15 failure mode was exactly this: ship green, open items survive. Do not archive the milestone or advertise MT5 until 142.3 passes.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 142.3 to break down)
 
 ### Phase 143: JOB — Dropped-enqueue reconciliation sweep
 
