@@ -610,13 +610,22 @@ def test_python_writer_census_counts() -> None:
     """Anti-vacuity. EXACT literal counts so a NEW writer forces a conscious update
     of this census rather than sliding in under a green gate.
 
-    Census (verified 2026-08-02 against the post-142-01/142-02 tree):
-      * 13 status-writing dicts — 7 in ``analytics_runner.py`` (1 entry + 5 exits
-        + the D-02/R2 schema-cache-miss re-issue in ``_mark_unrecoverable``) and 6
-        in ``job_worker.py`` (5 terminal 'failed' + the composite success
-        headline). A would-be 14th, ``scripts/reset_stuck_computing_rows.py``, is
-        GONE: plan 142-02 deleted that broken one-off, which is why plan 142-03
+    Census (re-measured 2026-08-03 against the post-142.2-05 tree):
+      * 14 status-writing dicts — 7 in ``analytics_runner.py`` (1 entry + 5 exits
+        + the D-02/R2 schema-cache-miss re-issue in ``_mark_unrecoverable``) and 7
+        in ``job_worker.py`` (6 terminal 'failed' + the composite success
+        headline). A would-be extra one, ``scripts/reset_stuck_computing_rows.py``,
+        is GONE: plan 142-02 deleted that broken one-off, which is why plan 142-03
         depends on it.
+        ⬆️ **+1 on 2026-08-03 (plan 142.2-05, MT5-12).** The sixth job_worker
+        terminal 'failed' is the series-completeness VERDICT refusal at the derive
+        persist seam (``run_derive_broker_dailies_job``). It is a genuine new
+        terminal exit — a producer that ships a daily series without stating
+        whether its venue inputs were whole is refused PERMANENTLY, before the
+        reconcile DELETE — so it carries the full companion set
+        (``computing_started_at: None``, ``computation_warned: False``,
+        ``metrics_json_by_basis: None``) exactly like its five siblings. Counted,
+        not carved out.
         ⚠️ The re-issue payload is the ONE terminal dict that omits the stamp
         key. It is not silently tolerated — it is carved out by shape and pinned
         at ``EXPECTED_STAMP_OMISSION_EXEMPT``, asserted in
@@ -652,9 +661,9 @@ def test_python_writer_census_counts() -> None:
     sibling-upsert failure arm — but it is a partial data_quality_flags upsert with
     no status key, so it is not among the 12 and is not counted here.)
     """
-    EXPECTED_STATUS_DICTS = 13
+    EXPECTED_STATUS_DICTS = 14
     EXPECTED_RUNNER_DICTS = 7
-    EXPECTED_WORKER_DICTS = 6
+    EXPECTED_WORKER_DICTS = 7
     EXPECTED_KEPT_VIA_N1 = 2
     EXPECTED_SITES_VIA_N2 = 1
     EXPECTED_COMPUTING_DICTS = 1

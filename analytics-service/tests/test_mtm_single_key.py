@@ -200,6 +200,26 @@ def _report(
     )
 
 
+def _ledger_meta() -> dict:
+    """The benign deribit combiner meta used by every mock in this module.
+
+    MT5-12 (Phase 142.2): `combine_native_ledger` stamps
+    ``series_completeness="ledger_complete"`` on BOTH its return paths, and the
+    derive persist seam now REFUSES (permanent FAILED, before the reconcile
+    DELETE) any series whose meta lacks a recognised verdict. A mock that omits
+    the key is therefore no longer a faithful stand-in for the producer it
+    replaces. Hand-typed literal — nothing here imports the registry.
+
+    Returns a FRESH dict per call: the worker mutates `meta` in place on several
+    paths (``unrealized_pnl_in_anchor``, ``flow_coverage_incomplete``, …), so a
+    shared module-level dict would leak state between tests.
+    """
+    return {
+        "used_heuristic_capital": False,
+        "series_completeness": "ledger_complete",
+    }
+
+
 def _cash_series() -> pd.Series:
     return pd.Series(
         [0.01, -0.02, 0.03],
@@ -304,9 +324,9 @@ async def test_options_book_runs_second_mtm_pass_same_anchor() -> None:
     ]
     ledger_mock, calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
-        (_cash_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_cash_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
     ])
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
@@ -327,7 +347,7 @@ async def test_perp_only_book_runs_single_pass() -> None:
     ctx, _ = _ctx(strategy_row={"asset_class": "crypto"})
     reports = [_report(has_option_activity=False)]
     ledger_mock, calls = _recording_ledger(reports)
-    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     )):
@@ -344,7 +364,7 @@ async def test_key_mode_never_runs_second_pass() -> None:
     ctx, _ = _ctx(strategy_row=None, key_mode=True)
     reports = [_report(has_option_activity=True)]
     ledger_mock, calls = _recording_ledger(reports)
-    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
     with _apply(_base_patches(
         ctx, key_mode=True, ledger_mock=ledger_mock, combine_mock=combine,
     )):
@@ -364,7 +384,7 @@ async def test_structural_mtm_failure_degrades_with_reason() -> None:
         reports,
         side_effects=[None, LedgerValuationError("pre-rollout straddle: no V0 anchor")],
     )
-    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     )):
@@ -400,7 +420,7 @@ async def test_transient_valueerror_on_mtm_propagates() -> None:
         reports,
         side_effects=[None, ValueError("transient JSON decode")],
     )
-    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     )):
@@ -418,7 +438,7 @@ async def test_transient_read_error_on_mtm_propagates() -> None:
         reports,
         side_effects=[None, DeribitTransientReadError("summaries read blip")],
     )
-    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     )):
@@ -449,7 +469,7 @@ async def test_inception_reconciliation_on_mtm_stamps_anchor_race() -> None:
             ),
         ],
     )
-    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     )):
@@ -492,7 +512,7 @@ async def test_non_inception_structural_mtm_failure_keeps_coverage_reason() -> N
             NavReconstructionError("schema-drifted flow amount (not an inception breach)"),
         ],
     )
-    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     )):
@@ -573,9 +593,9 @@ async def test_finite_mtm_object_persisted() -> None:
     ]
     ledger_mock, _calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
-        (_cash_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_cash_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
     ])
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
@@ -616,7 +636,7 @@ async def test_degraded_mtm_persists_null_and_reason() -> None:
         reports,
         side_effects=[None, LedgerValuationError("summary hole mid-window")],
     )
-    combine = MagicMock(return_value=(_mtm_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_mtm_series(), _ledger_meta()))
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     ) + [_patch_benchmark()]):
@@ -647,7 +667,7 @@ async def test_non_options_deribit_authoritatively_nulls_by_basis() -> None:
     ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
     reports = [_report(has_option_activity=False)]
     ledger_mock, _calls = _recording_ledger(reports)
-    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     ) + [_patch_benchmark()]):
@@ -704,9 +724,9 @@ async def test_benchmark_failure_never_gates_mtm() -> None:
     ]
     ledger_mock, _calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
-        (_cash_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_cash_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
     ])
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
@@ -748,7 +768,7 @@ async def _run_mtm_off() -> dict:
     ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
     reports = [_report(has_option_activity=False)]
     ledger_mock, _calls = _recording_ledger(reports)
-    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     ) + [_patch_benchmark()]):
@@ -776,9 +796,9 @@ async def test_sc4_cash_parity_mtm_on_vs_off() -> None:
     ]
     ledger_a, _ = _recording_ledger(reports_a)
     combine_a = MagicMock(side_effect=[
-        (_cash_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_cash_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
     ])
     with _apply(_base_patches(
         ctx_a, key_mode=False, ledger_mock=ledger_a, combine_mock=combine_a,
@@ -814,7 +834,7 @@ async def test_sc4_cash_parity_mtm_degraded() -> None:
         side_effects=[None, LedgerValuationError("pre-rollout straddle")],
     )
     combine_a = MagicMock(
-        return_value=(_cash_series(), {"used_heuristic_capital": False})
+        return_value=(_cash_series(), _ledger_meta())
     )
     with _apply(_base_patches(
         ctx_a, key_mode=False, ledger_mock=ledger_a, combine_mock=combine_a,
@@ -869,9 +889,9 @@ async def test_mtm_object_uses_allocated_capital_conventions() -> None:
     ]
     ledger_mock, _calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
-        (_cash_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_cash_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
     ])
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
@@ -911,9 +931,9 @@ async def test_mtm_compute_valueerror_degrades() -> None:
     ]
     ledger_mock, _calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
-        (_cash_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_cash_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
     ])
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
@@ -1031,9 +1051,9 @@ async def test_mtm_periods_uses_crypto_clock_from_real_select() -> None:
     ]
     ledger_mock, _calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
-        (_cash_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_cash_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
     ])
 
     from services import metrics as _metrics_mod
@@ -1112,7 +1132,7 @@ async def test_composite_to_single_conversion_nulls_stale_by_basis() -> None:
     ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
     reports = [_report(has_option_activity=False)]  # perp-only → mtm_attempted=False
     ledger_mock, _calls = _recording_ledger(reports)
-    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     ) + [_patch_benchmark()]):
@@ -1144,7 +1164,7 @@ async def test_mtm_headline_flip_clears_stale_by_basis() -> None:
     # call, ONE combine. mtm_attempted=False.
     reports = [_report(has_option_activity=True)]
     ledger_mock, _calls = _recording_ledger(reports)
-    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     ) + [_patch_benchmark()]):
@@ -1171,7 +1191,7 @@ async def test_terminal_failure_clears_stale_by_basis() -> None:
     ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
     reports = [_report(has_option_activity=False)]
     ledger_mock, _calls = _recording_ledger(reports)
-    combine = MagicMock(return_value=(_one_day_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_one_day_series(), _ledger_meta()))
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     ) + [_patch_benchmark()]):
@@ -1209,7 +1229,7 @@ async def test_mtm_second_pass_timeout_degrades_loud_not_failed_final() -> None:
     ledger_mock, _calls = _recording_ledger(
         reports, side_effects=[None, _asyncio.TimeoutError()]
     )
-    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     ) + [_patch_benchmark()]):
@@ -1255,9 +1275,9 @@ async def test_single_key_routes_through_shared_derive_and_persists() -> None:
     ]
     ledger_mock, _calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
-        (_cash_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_cash_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
     ])
     _real_derive = _bs.derive_basis_series
     _results: list[Any] = []
@@ -1319,9 +1339,9 @@ async def test_single_key_derive_helper_valueerror_degrades_and_heals() -> None:
     ]
     ledger_mock, _calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
-        (_cash_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_cash_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
     ])
     persist_spy = MagicMock()
     with _apply(_base_patches(
@@ -1367,7 +1387,7 @@ async def test_single_key_not_attempted_heals_series_row() -> None:
     ctx, _capture = _ctx(strategy_row={"asset_class": "crypto"})
     reports = [_report(has_option_activity=False)]
     ledger_mock, _calls = _recording_ledger(reports)
-    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
     persist_spy = MagicMock()
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
@@ -1423,9 +1443,9 @@ async def test_options_book_runs_third_smoothed_pass_same_anchor() -> None:
     ]
     ledger_mock, calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
-        (_cash_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_cash_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
     ])
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
@@ -1476,8 +1496,8 @@ async def test_structural_smoothed_failure_degrades_keeps_cash_mtm() -> None:
         ],
     )
     combine = MagicMock(side_effect=[
-        (_cash_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_cash_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
     ])
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
@@ -1524,8 +1544,8 @@ async def test_smoothed_dark_launch_options_book_skips_third_pass(monkeypatch) -
     ]
     ledger_mock, calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
-        (_cash_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_cash_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
     ])
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
@@ -1581,7 +1601,7 @@ async def test_smoothed_headline_config_flag_off_fails_loud_no_crawl(monkeypatch
     )
     reports = [_report(has_option_activity=True)]
     ledger_mock, calls = _recording_ledger(reports)
-    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     ) + [_patch_benchmark()]):
@@ -1625,7 +1645,7 @@ async def test_smoothed_headline_config_flag_on_allowed() -> None:
     )
     reports = [_report(has_option_activity=True)]
     ledger_mock, calls = _recording_ledger(reports)
-    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     ) + [_patch_benchmark()]):
@@ -1661,7 +1681,7 @@ async def test_smoothed_headline_config_flag_on_allowed() -> None:
     )
     reports = [_report(has_option_activity=True)]
     ledger_mock, calls = _recording_ledger(reports)
-    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     ) + [_patch_benchmark()]):
@@ -1700,8 +1720,8 @@ async def test_smoothed_dark_launch_mark_hole_cannot_fail_job(monkeypatch) -> No
         )],
     )
     combine = MagicMock(side_effect=[
-        (_cash_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_cash_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
     ])
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
@@ -1731,7 +1751,7 @@ async def test_smoothed_persisted_when_mtm_degrades() -> None:
         # cash ok, MTM raises (degrades), smoothed (idx 2) ok
         side_effects=[None, LedgerValuationError("summary hole mid-window")],
     )
-    combine = MagicMock(return_value=(_mtm_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_mtm_series(), _ledger_meta()))
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     ) + [_patch_benchmark()]):
@@ -1763,7 +1783,7 @@ async def test_perp_only_skips_smoothed_pass_sc4() -> None:
     ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
     reports = [_report(has_option_activity=False)]
     ledger_mock, calls = _recording_ledger(reports)
-    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
     persist_spy = MagicMock()
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
@@ -1795,9 +1815,9 @@ async def test_smoothed_series_persisted_via_smoothed_kind() -> None:
     ]
     ledger_mock, _calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
-        (_cash_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_cash_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
     ])
     persist_spy = MagicMock()
     with _apply(_base_patches(
@@ -1837,9 +1857,9 @@ async def test_pre_mark_retention_stamps_complete_with_warnings() -> None:
     ]
     ledger_mock, _calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
-        (_cash_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_cash_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
     ])
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
@@ -1877,8 +1897,8 @@ async def test_smoothed_third_pass_timeout_degrades_not_failed_final() -> None:
         reports, side_effects=[None, None, _asyncio.TimeoutError()]
     )
     combine = MagicMock(side_effect=[
-        (_cash_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_cash_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
     ])
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
@@ -1915,7 +1935,7 @@ async def test_smoothed_third_pass_insufficient_budget_skips_cash_ships() -> Non
     ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
     reports = [_report(has_option_activity=True)]
     ledger_mock, calls = _recording_ledger(reports)
-    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_cash_series(), _ledger_meta()))
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     ) + [
@@ -1961,9 +1981,9 @@ async def test_smoothed_combine_runs_off_event_loop() -> None:
     loop_thread_id = threading.get_ident()
     seen_threads: list[int] = []
     _outs = [
-        (_cash_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_cash_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
     ]
 
     def _combine(*_a: Any, **_k: Any) -> tuple[pd.Series, dict[str, Any]]:
@@ -2014,9 +2034,9 @@ async def test_smoothed_scalar_degrade_heals_series_row() -> None:
     ]
     ledger_mock, _calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
-        (_cash_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
-        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_cash_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
+        (_mtm_series(), _ledger_meta()),
     ])
     _real_derive = _bs.derive_basis_series
     _derive_calls: list[int] = []

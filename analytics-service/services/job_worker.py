@@ -4405,6 +4405,88 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         await _heal_delete_basis_series()
         return DispatchResult(outcome=DispatchOutcome.DONE)
 
+    # ── MT5-12: the series-completeness VERDICT seam (D-15 / D-16) ──────────────
+    # THE fail-loud chokepoint for producer 1 (`run_derive_broker_dailies_job`).
+    # Every keyed venue funnels its reconstructed series through here — BOTH
+    # strategy-mode and key-mode share this one seam — so a future fifth combiner
+    # added to the open-ended venue registry cannot ship a series into
+    # csv_daily_returns without stating whether the venue inputs it consumed were
+    # whole. The publish gate reads that verdict; an unjudged series would read
+    # NULL and be silently mis-trusted.
+    #
+    # ⛔ PLACEMENT IS LOAD-BEARING. This MUST stay textually ABOVE the
+    # `_reconcile_span_delete` construction (~40 lines below) and its
+    # `await db_execute(_reconcile_span_delete)`. That DELETE fires BEFORE the
+    # upsert, so an assert placed between them would refuse to write the NEW
+    # series only AFTER destroying the OLD one — turning fail-loud into data
+    # loss. A refusal must cost nothing.
+    #
+    # ⚠️ `mypy --strict` CANNOT enforce this. The combiners return
+    # `dict[str, Any]` and `NavTWRMeta` is `total=False`, so a return path that
+    # OMITS the key type-checks cleanly. This runtime seam is the only oracle.
+    #
+    # The <2-row short-circuit at :4340 above has already returned for the three
+    # deliberately-exempt empty-series combiner paths (broker_dailies.py, marked
+    # `MT5-12 EXEMPT`), so reaching this line means a real series exists and a
+    # verdict is genuinely owed.
+    from services.broker_dailies import SERIES_COMPLETENESS_VALUES
+
+    _verdict = meta.get("series_completeness")
+    if _verdict not in SERIES_COMPLETENESS_VALUES:
+        from services.redact import scrub_freeform_string
+
+        # T-142.2-14: the message carries the VERDICT repr and nothing else — no
+        # venue data, no magnitudes, no account identifiers. Scrubbed anyway
+        # because `meta` is producer-supplied and a malformed value could in
+        # principle carry anything; bounded so a pathological value cannot
+        # balloon the stamped error column.
+        _verdict_repr = str(scrub_freeform_string(repr(_verdict)))[:120]
+        _detail = (
+            "Series completeness verdict missing or unrecognised "
+            f"(series_completeness={_verdict_repr}). MT5-12: every daily-series "
+            "producer must state whether the venue inputs it consumed were whole."
+        )
+        # `funding_label` is the one identity bound on BOTH branches (strategy_id
+        # in strategy-mode, api_key_id in key-mode) — `strategy_id` itself is
+        # UNBOUND in key-mode.
+        logger.error(
+            "derive_broker_dailies: MT5-12 verdict refusal (key_mode=%s id=%s "
+            "venue=%s) — %s",
+            is_key_mode, funding_label, venue, _detail,
+        )
+        if not is_key_mode:
+            # Key-mode (allocator) has NO per-key strategy_analytics row (per-key
+            # reads are Phase 36) — a stamp there would write a phantom row, so
+            # key-mode gets the refusal without the stamp, exactly like the <2-day
+            # branch and `_dispose_broker_nav_error`.
+            def _stamp_verdict_failed(detail: str = _detail) -> None:
+                ctx.supabase.table("strategy_analytics").upsert(
+                    {
+                        "strategy_id": strategy_id,
+                        "computation_status": "failed",
+                        # SI-02: clear the runner-owned warned marker so the status
+                        # bridge cannot resurrect complete_with_warnings over this.
+                        "computation_warned": False,
+                        # JOB-01: clear on exit or the reaper re-fires on a stale stamp.
+                        "computing_started_at": None,
+                        "computation_error": detail,
+                        "data_quality_flags": {"csv_source": True},
+                        # F-4: authoritative-clear the by-basis column so a prior
+                        # derive's object can't render on a now-FAILED row.
+                        "metrics_json_by_basis": None,
+                    },
+                    on_conflict="strategy_id",
+                ).execute()
+
+            await db_execute(_stamp_verdict_failed)
+        # PERMANENT: a combiner that does not stamp will not start stamping on
+        # retry (T-74-02 DoS — never retry a structural defect forever).
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=_detail,
+            error_kind="permanent",
+        )
+
     # Service-role upsert into csv_daily_returns. The worker has no auth.uid()
     # session so it cannot call persist_csv_daily_returns (auth-gated); it
     # writes the table directly like it does for trades. The per-axis unique
@@ -4740,6 +4822,22 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     _prestamp_payload: dict[str, Any] = {
         "strategy_id": strategy_id,
         "data_quality_flags": _prestamp_flags,
+        # MT5-12: the series-completeness verdict rides as a SIBLING key of
+        # data_quality_flags, NEVER as a member of `_prestamp_flags`. Two reasons,
+        # both fatal if ignored:
+        #   1. `data_quality_flags` is REPLACED wholesale on every write (MED-3
+        #      above, and analytics_runner.py:1439 rebuilds it again), so a verdict
+        #      carried inside it would be erased by the very next analytics run.
+        #   2. Membership of the guard-key sets is what auto-promotes
+        #      computation_status to `complete_with_warnings` — a status the publish
+        #      gate PASSES. Routing a gating signal through the promotion channel is
+        #      a fail-open (D-16).
+        # `_verdict` is guaranteed to be a member of SERIES_COMPLETENESS_VALUES —
+        # the seam above refused permanently otherwise. Key-mode never reaches this
+        # bridge (it returns at the key-mode exit): there is no per-key
+        # strategy_analytics row to stamp, so key-mode series get the assert but no
+        # verdict of record.
+        "series_completeness": _verdict,
     }
     # 106-02 (D5 / M2): the by-basis scalar assignment + prestamp upsert are DEFERRED
     # to AFTER both basis-series persists below (see the moved block just above the
