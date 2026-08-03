@@ -59,8 +59,13 @@
 --
 -- Merging this file to main auto-applies it to production.
 
-BEGIN;
-SET lock_timeout = '5s';
+-- Transaction framing: NO explicit BEGIN/COMMIT -- Supabase wraps each migration
+-- in its own transaction, and `SET LOCAL` scopes the bound to that transaction.
+-- A session-level `SET lock_timeout` survives COMMIT and silently leaks into
+-- every later migration in the same `db push`. This follows the newest migration
+-- on this same table (20260803120000, lines 101-107), which documents the
+-- choice; the older explicit-BEGIN style elsewhere in the tree predates it.
+SET LOCAL lock_timeout = '5s';
 
 -- --------------------------------------------------------------------------
 -- STEP 1: DDL -- the verdict column
@@ -97,9 +102,10 @@ DO $$
 DECLARE
   v_is_nullable TEXT;
   v_default     TEXT;
+  v_data_type   TEXT;
 BEGIN
-  SELECT c.is_nullable, c.column_default
-    INTO v_is_nullable, v_default
+  SELECT c.is_nullable, c.column_default, c.data_type
+    INTO v_is_nullable, v_default, v_data_type
     FROM information_schema.columns c
    WHERE c.table_schema = 'public'
      AND c.table_name = 'strategy_analytics'
@@ -113,11 +119,16 @@ BEGIN
     RAISE EXCEPTION 'MT5-12 verification failed: strategy_analytics.series_completeness is not nullable (is_nullable=%); a NOT NULL here is a 23502 timebomb against every existing writer that upserts strategy_analytics without the column', v_is_nullable;
   END IF;
 
+  -- ADD COLUMN IF NOT EXISTS silently no-ops on a pre-existing column of ANY
+  -- type, so without this arm the NOTICE below would assert 'text' about a
+  -- column it never inspected.
+  IF v_data_type <> 'text' THEN
+    RAISE EXCEPTION 'MT5-12 verification failed: strategy_analytics.series_completeness is % not text (ADD COLUMN IF NOT EXISTS no-ops on a pre-existing column of any type)', v_data_type;
+  END IF;
+
   IF v_default IS NOT NULL THEN
     RAISE EXCEPTION 'MT5-12 verification failed: strategy_analytics.series_completeness carries a DEFAULT (%); a default stamps a trust verdict on rows whose inputs nobody examined', v_default;
   END IF;
 
   RAISE NOTICE 'MT5-12: strategy_analytics.series_completeness shape verified (text, nullable, no default).';
 END $$;
-
-COMMIT;

@@ -34,11 +34,24 @@
 --      different question and is not a copy of the producer set. This assertion
 --      reddens CI if someone later "helpfully" adds the constraint.
 --
--- Test DB lag: the shared test DB tracks prod but lags main, so on a PR branch
--- the migration may not be applied yet. The assertions are gated on the column
--- being present (NOTICE skip otherwise) so the test becomes a hard regression
--- guard once the test DB catches up, without red-failing pre-apply. The
--- migration itself self-verifies on apply. Whole test rolls back.
+-- ANTI-GREEN-SKIP CONTRACT (read this before adding any presence gate)
+-- -------------------------------------------------------------------
+-- An earlier draft of this file green-skipped when the column was absent
+-- (`RAISE NOTICE 'SKIP' ... RETURN`), on the reasoning that the shared test DB
+-- lags main. That is exactly the pattern
+-- test_strategy_analytics_stuck_computing_reaper.sql forbids, on this same
+-- table, one migration earlier: "A gate that green-skips when the object under
+-- test is absent is not evidence." It is worse here than in the general case,
+-- because merging supabase/migrations/** applies the migration to PRODUCTION,
+-- not to the test DB -- so nothing in the merge path would ever have made this
+-- column appear here, and the gate could have stayed vacuously green forever
+-- while reporting success.
+--
+-- Absence is therefore an EXCEPTION, not a skip. The apply-to-TEST step is a
+-- BLOCKING task in plan 142.2-04 and runs BEFORE the PR exists, so this file is
+-- red only in the window where the migration genuinely has not been applied --
+-- which is the state it is supposed to report. Do not re-add a presence gate.
+-- The migration itself also self-verifies on apply. Whole test rolls back.
 
 BEGIN;
 
@@ -57,8 +70,7 @@ BEGIN
       AND column_name = 'series_completeness';
 
   IF v_col_type IS NULL THEN
-    RAISE NOTICE 'SKIP: migration 20260803150000 not yet applied here (series_completeness column absent). Assertions enforce once the test DB catches up to prod.';
-    RETURN;
+    RAISE EXCEPTION 'TEST FAILED (0): strategy_analytics.series_completeness is absent — apply migration 20260803150000 to this project before merging (TEST is qmnijlgmdhviwzwfyzlc; plan 142.2-04 owns the apply). This is deliberately an EXCEPTION and not a skip: merging supabase/migrations/** applies to PRODUCTION, never to the test DB, so a presence gate here would stay vacuously green forever. See the ANTI-GREEN-SKIP CONTRACT above.';
   END IF;
 
   -- ---- (1) column type -------------------------------------------------------
