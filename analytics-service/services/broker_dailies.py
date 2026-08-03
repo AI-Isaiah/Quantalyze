@@ -51,7 +51,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -75,6 +75,72 @@ from services.nav_twr import (
 from services.transforms import trades_to_daily_returns_with_status
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# MT5-12 — the series-completeness verdict (D-15 / D-16)
+# ---------------------------------------------------------------------------
+SeriesCompleteness = Literal[
+    "ledger_complete",
+    "sampled_gapped",
+    "fill_derived_unproven",
+    "user_supplied",
+    "composite_stitched",
+]
+
+SERIES_COMPLETENESS_VALUES: frozenset[str] = frozenset(
+    {
+        "ledger_complete",
+        "sampled_gapped",
+        "fill_derived_unproven",
+        "user_supplied",
+        "composite_stitched",
+    }
+)
+"""The ONE PRODUCER registry for the ``series_completeness`` verdict (MT5-12).
+
+WHY this exists (D-15/D-16). "Dailies are canonical" holds for COMPUTATION and
+fails for TRUST. Before this, the publish gate asked a hardcoded VENUE LIST
+whether a daily series could be trusted — a proxy that drifted out of lockstep
+with its Python counterpart and that trusted deribit/sfox/mt5 by list membership
+with no completeness check at all. Completeness is a property of the series'
+INPUTS, and only the function that consumed those raw venue inputs can judge
+whether they were whole. So the verdict is stamped HERE, by the producer, and
+nothing downstream is allowed a second opinion.
+
+⛔ There is deliberately NO SQL ``CHECK`` constraint on the persisted column and
+deliberately NO import of this frozenset by TypeScript. The gate's ADMISSIBILITY
+allow-list is a hand-typed SUBSET on the TypeScript side: this registry says what
+a producer may EMIT, that subset says what the gate may TRUST, and they are not
+the same question. Wiring them together would mean widening this set silently
+widens what gets published.
+
+Who stamps what (all five values, one producer each):
+
+  ``ledger_complete``       — ``combine_native_ledger`` (deribit, BOTH return
+                              paths) · ``combine_sfox_balance_history`` when the
+                              observed NAV span has zero interior holes ·
+                              ``combine_mt5_deal_ledger``. A full-history ledger
+                              fetch that fails loud rather than truncating.
+  ``sampled_gapped``        — ``combine_sfox_balance_history`` when
+                              ``nav_gap_days > 0``. A SAMPLED NAV with interior
+                              holes: computable, but not a complete record.
+  ``fill_derived_unproven`` — ``combine_realized_and_funding`` (binance / bybit /
+                              okx), ALWAYS and unconditionally. See that
+                              function for why the constant is deliberate.
+  ``user_supplied``         — the keyless-CSV path (``analytics_runner``). Stamped
+                              by producer 3, not by any combiner here.
+  ``composite_stitched``    — ``run_stitch_composite_job``. Producer 2, likewise
+                              not a combiner.
+
+The last two values are members of this set even though NO combiner in this
+module emits them, because the derive-seam assert validates every producer's
+verdict against THIS frozenset — including the two producers that live elsewhere.
+
+T-73-02 / T-74-03 leak discipline: the verdict is an ENUM STRING and nothing else.
+Never a gap-day count, never a row count, never money. A magnitude on this channel
+is an account-size leak.
+"""
 
 
 def _funding_iso_day(ts: Any) -> str | None:
@@ -169,7 +235,22 @@ def combine_realized_and_funding(
     so every existing caller is byte-identical; sourcing/valuing real flows is
     Phase 75's job. An in-window flow adjusts the chain-linked TWR numerator; a
     flow dated outside the return window fails loud (``NavReconstructionError``)
-    rather than silently dropping realized cash."""
+    rather than silently dropping realized cash.
+
+    MT5-12 verdict: ``fill_derived_unproven``, ALWAYS — a CONSTANT, not a
+    data-driven refinement. This path takes TWO independent input streams
+    (realized PnL records and funding rows) and adds them. If either stream came
+    back short, the sum is still a non-empty, plausible-looking series — there is
+    no residual, no reconciliation, and nothing in the output that distinguishes
+    "the venue had no fills that day" from "the fills fetch silently truncated".
+    That is exactly the D-15 failure: a keyed perp whose realized-PnL fetch had a
+    gap publishes a funding-only series as a verified track record, materially
+    understating the truth. And the gap is not hypothetical here — the venues on
+    this path carry hard retention caps (OKX ~90d, Bybit ~365d), the DQ-02
+    coverage terminus, and a live OKX-paginator truncation bug. Refining this to
+    "ledger_complete when the book looks healthy" would newly ADMIT precisely the
+    accounts that a silent-truncation bug makes look healthy, which is the
+    population the verdict exists to refuse. So it stays constant."""
     combined = list(realized_pnl_records) + funding_rows_to_daily_pnl_records(funding_rows)
     returns, meta = trades_to_daily_returns_with_status(
         combined,
@@ -179,7 +260,9 @@ def combine_realized_and_funding(
         open_unrealized_usd=open_unrealized_usd,
     )
     returns = gap_fill_daily_returns(returns)
-    return returns, dict(meta)
+    out_meta = dict(meta)
+    out_meta["series_completeness"] = "fill_derived_unproven"
+    return returns, out_meta
 
 
 def combine_native_ledger(
@@ -225,17 +308,44 @@ def combine_native_ledger(
     modes cannot diverge. If a future caller builds a ledger in one mode and calls
     this in the other, the allocated returns would leak (or drop) spot extraction —
     keep the two signals wired to the SAME source."""
+    # MT5-12 verdict, BOTH return paths below: ``ledger_complete``. The deribit
+    # crawl is a full-history txn-log pass whose completeness is ENFORCED before
+    # any series exists — ``assert_ledger_complete`` raises LedgerCompletenessError
+    # on a scope×currency that never reached continuation=null, and
+    # LedgerTruncatedError on a truncated crawl; both fail the whole job PERMANENT
+    # with no csv_daily_returns write. So by the time either return below is
+    # reached, the input stream is whole by construction, not by inspection.
+    #
+    # ⚠️ BEHAVIOUR-PRESERVING on ``twr_chain_broken`` (Pitfall 7). ``meta`` here may
+    # carry ``twr_chain_broken`` (DQ-03: an INTERIOR chain break, where the
+    # cumulative figure compounds only the maximal contiguous post-break suffix).
+    # A holed CHAIN is arguably not a complete RECORD, and tightening this to
+    # ``sampled_gapped`` when that flag is set is a live open question — but it is
+    # NOT decided here. This is the first completeness check deribit has ever had,
+    # and how many live PROD accounts carry that flag is unknown; refusing them
+    # blind would break real published strategies. The tightening is gated on the
+    # read-only PROD census in plan 142.2-04 and recorded as a decision in
+    # 142.2-08. Do not tighten it in this function without that count.
     if denominator_config is not None:
+        # Return path 1 of 2 — the Zavara allocated-capital denominator branch.
+        # Stamped separately from the NAV path below ON PURPOSE: stamping "the
+        # deribit combiner" once at the bottom would miss this branch entirely,
+        # and this branch is the LIVE account.
         ac_returns, ac_meta = allocated_capital_returns_and_metrics(
             ledger.native_pnl, ledger.marks, denominator_config
         )
         ac_returns = gap_fill_daily_returns(ac_returns)
-        return ac_returns, dict(ac_meta)
+        out_ac_meta = dict(ac_meta)
+        out_ac_meta["series_completeness"] = "ledger_complete"
+        return ac_returns, out_ac_meta
+    # Return path 2 of 2 — the NAV backward-roll path (every normal strategy).
     returns, meta = reconstruct_native_nav_and_twr(
         ledger, indexable_currencies=indexable, venue="deribit"
     )
     returns = gap_fill_daily_returns(returns)
-    return returns, dict(meta)
+    out_meta = dict(meta)
+    out_meta["series_completeness"] = "ledger_complete"
+    return returns, out_meta
 
 
 def combine_sfox_balance_history(
@@ -289,6 +399,16 @@ def combine_sfox_balance_history(
     """
     empty = pd.Series(dtype="float64", name="returns")
     if usd_value is None or len(usd_value) == 0:
+        # MT5-12 EXEMPT (empty-series early return 1 of 3) — NO verdict stamped,
+        # deliberately and in writing, never by omission. This return produces ZERO
+        # interpretable rows, and ``run_derive_broker_dailies_job`` short-circuits on
+        # ``int(returns.notna().sum()) < 2`` (job_worker.py:4340) BEFORE the
+        # persist-seam verdict assert — so an empty series is never persisted and an
+        # absent verdict here is unreachable at that seam. Stamping one anyway would
+        # FABRICATE a trust claim about inputs that produced no series at all, which
+        # is the same fabrication the no-backfill rule forbids. Fail-CLOSED even if
+        # this rots: were a future refactor to remove the :4340 short-circuit, the
+        # seam assert refuses the unverdicted persist loudly rather than admitting it.
         return empty, {}
 
     # Sort + coerce to an ascending daily DatetimeIndex unit [us] — pin the unit
@@ -303,6 +423,15 @@ def combine_sfox_balance_history(
     if len(nav) < 2:
         # A single observed point has no prior day → no computable return. Never
         # invent a day-0 row.
+        #
+        # MT5-12 EXEMPT (empty-series early return 2 of 3) — NO verdict stamped,
+        # deliberately and in writing, never by omission. Same reasoning as the
+        # empty-NAV return above: zero interpretable rows, so
+        # ``run_derive_broker_dailies_job``'s ``int(returns.notna().sum()) < 2``
+        # short-circuit (job_worker.py:4340) fires BEFORE the persist-seam verdict
+        # assert and the series is never persisted. A stamp here would fabricate a
+        # trust claim about inputs that produced no series. Fail-CLOSED if the
+        # short-circuit ever moves: the seam assert refuses the unverdicted persist.
         return empty, {}
 
     # prev0 = the FIRST OBSERVED usd_value (A3). Captured BEFORE the reindex so an
@@ -397,6 +526,19 @@ def combine_sfox_balance_history(
     if nav_gap_days > 0:
         meta["nav_coverage_gap_days"] = nav_gap_days
         meta["computation_status_hint"] = "complete_with_warnings"
+    # MT5-12 verdict, keyed off the gap count this function already computed above.
+    # sFOX HANDS us a SAMPLED NAV series, so a hole is a real coverage gap in the
+    # record (contrast a ledger venue, where an absent day is genuinely flat). Zero
+    # interior holes ⇒ the observed span IS the whole record ⇒ ``ledger_complete``;
+    # any hole ⇒ ``sampled_gapped``, computable but not complete.
+    # ⚠️ ENUM ONLY (T-73-02): ``nav_gap_days`` decides the branch, it never rides
+    # INTO the verdict — the count is a magnitude and belongs on its own key.
+    # ⚠️ Behaviour change accepted at plan time: this is the first completeness
+    # check sFOX has ever had, so an sFOX account with interior NAV holes is newly
+    # refused by the gate. sFOX is dormant in production; blast radius is zero.
+    meta["series_completeness"] = (
+        "ledger_complete" if nav_gap_days == 0 else "sampled_gapped"
+    )
     return returns, meta
 
 
@@ -527,6 +669,16 @@ def combine_mt5_deal_ledger(
     # track record); return an empty series so the downstream <2-day / material-equity
     # gates dispose it, never a fabricated flat series off pure flows.
     if daily_pnl_series.empty:
+        # MT5-12 EXEMPT (empty-series early return 3 of 3) — NO verdict stamped,
+        # deliberately and in writing, never by omission. A deposit-only ledger has
+        # no track record, so this returns an EMPTY series: zero interpretable rows,
+        # which ``run_derive_broker_dailies_job`` short-circuits on via
+        # ``int(returns.notna().sum()) < 2`` (job_worker.py:4340) BEFORE the
+        # persist-seam verdict assert. Nothing is persisted, so an absent verdict
+        # here is unreachable at that seam. Stamping ``ledger_complete`` would be
+        # the worst of the three: it would assert a complete track record for an
+        # account that has never traded. Fail-CLOSED if the short-circuit ever
+        # moves — the seam assert refuses the unverdicted persist loudly.
         return (
             gap_fill_daily_returns(pd.Series(dtype="float64", name="returns")),
             dict(_build_nav_meta({})),
@@ -538,4 +690,13 @@ def combine_mt5_deal_ledger(
         open_unrealized_usd=account_equity - account_balance,
     )
     returns = gap_fill_daily_returns(returns)
-    return returns, dict(meta)
+    out_meta = dict(meta)
+    # MT5-12 verdict: ``ledger_complete``. ``history_deals_get`` is a FULL-HISTORY
+    # fetch (no retention window to truncate against, unlike the ccxt venues), and
+    # every deal is classified before any series exists — an unclassifiable or
+    # ambiguous DEAL_TYPE raises ``Mt5DealClassificationError`` out of the loop
+    # above, killing the whole combine rather than silently dropping a row. So a
+    # series that reaches this return was folded from a ledger that was whole and
+    # fully interpretable; nothing partial can get here.
+    out_meta["series_completeness"] = "ledger_complete"
+    return returns, out_meta
