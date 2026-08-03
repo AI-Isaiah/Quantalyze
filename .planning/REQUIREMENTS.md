@@ -207,6 +207,96 @@ investor factsheet on a spinner that never resolves.
 - [x] **PYAPI-09**: Idempotency is complete rather than partial: a replay can never return "duplicate" for work that was never enqueued, and there is no state from which a client is told to retry forever with no path to success. *(C-01, C-19, C-20, C-21)*
 - [x] **PYAPI-10**: The `/process-key` success surface has **one discriminator**, and no security verdict is delivered under a success status. *(C-22)*
 
+### MT5 — MetaTrader 5 end-to-end on the unified backbone (Phase 142.2)
+
+Added 2026-08-03 from `/gsd-discuss-phase 142.2`. Scope anchor: the connect experience and the
+correctness of what it produces. v1.15 already shipped the MT5 pipeline (tag `v1.15`, 6/6 phases)
+and MT5 is already folded into the unified backbone at `broker_dailies.py:403` — this group does
+**not** build a pipeline, it makes the existing one reachable, honest, and *proven*.
+
+⚠️ v1.15 shipped **6/6 phases green with two open items intact**. A green unit suite is therefore
+explicitly not evidence for this group. MT5-06..09 are satisfied only by an end-to-end run against
+a live funded account on a **trading day**.
+
+- [ ] **MT5-01**: The production half-state is closed. Server-side `MT5_ENABLED=true` is set in
+  Vercel **and redeployed** (an env change alone is inert), across Production, Preview **and**
+  Development — and because `NEXT_PUBLIC_MT5_ENABLED` is today Production-only, **both** vars are
+  extended to Preview and Development so no environment carries a gate the others do not. Evidence
+  the gap is real: prod holds 29 encrypted vars and `MT5_ENABLED` is absent from all of them, so
+  `isMt5EnabledServer()` (`src/lib/closed-sets.ts:178`, strict `=== "true"`) is false while
+  `MT5_UI_ENABLED` (`:124`, a bare `NEXT_PUBLIC_MT5_ENABLED === "true"` with **no founder gate**)
+  is true — the MT5 card renders for **every** production user and `create-with-key/route.ts:147`
+  rejects every one of their submissions. ⛔ The closed-set no-widening pin holds: `mt5` stays OUT
+  of `UI_EXCHANGE_CODES` / `EXCHANGES` / `FUNDING_EXCHANGES` / `CRYPTO_EXCHANGES` regardless of the
+  flag (`closed-sets.ts:119-122`).
+- [ ] **MT5-02**: The `/security#mt5-readonly` investor-password guide renders in production. It
+  gates on the same `isMt5EnabledServer()` (`src/app/(marketing)/security/page.tsx:544`), so it is
+  currently **blank** — the wizard tells a founder to use an investor password while the page
+  explaining what that is shows nothing. Content is already correct; this is a gating consequence
+  of MT5-01, asserted separately because it is a distinct user-visible surface.
+- [ ] **MT5-03**: The Broker-server field renders as plain text while OKX's passphrase stays
+  masked, via a **per-venue** flag (`passphraseSecret`) added alongside the per-venue
+  `passphraseLabel` / `passphrasePlaceholder` config the file already carries. MT5 reuses OKX's
+  passphrase slot (`ConnectKeyStep.tsx:141`), and that slot is `type={showSecret ? "text" :
+  "password"}` at `:697` — so a global unmask would expose the OKX passphrase, a genuine API
+  credential. The OKX render stays **byte-identical**.
+- [ ] **MT5-04**: `KEY_INVALID_FORMAT` no longer buckets unrelated causes. The 28 sites across
+  `src/app/api/strategies/create-with-key/route.ts` (14) and
+  `src/app/api/strategies/composite/add-key/route.ts` (14) are split into honest codes
+  (missing-required-field, unsupported-venue, venue-not-enabled, input-too-long), leaving
+  `KEY_INVALID_FORMAT` for **actual format failures only** — which makes its existing copy true
+  again. Today `wizardErrors.ts:477` states *"Client-side format check failed before sending the
+  key to the exchange"*, which was **factually false** for the observed failure (a server-side
+  feature gate), and offers Binance/OKX/Bybit hex-length advice to an MT5 user. ⚠️ MT5-01 makes the
+  MT5-gate arm (`route.ts:147`) **unreachable** — a fix aimed only at that arm would repair a line
+  that can no longer fire; the value is in the class. MT5 already has correct dedicated copy
+  (`KEY_MT5_MASTER_PASSWORD`, `KEY_MT5_WRONG_SERVER`, `wizardErrors.ts:470`) the route never
+  reaches. Out of scope, logged to `TODOS.md`: the same defect's 11 remaining sites in
+  `keys/validate-and-encrypt/route.ts` (5) and `verify-strategy/route.ts` (6).
+- [ ] **MT5-05**: A founder completes the MT5 connect flow through the wizard **without needing to
+  know an internal error code, a server name, or a flag** — the phase-goal sentence, asserted as
+  an outcome rather than as the sum of MT5-01..04.
+- [ ] **MT5-06** *(measure-first)*: The MT5 server-UTC offset is **measured live and asserted on**,
+  not assumed. The gateway's server time is read against UTC at connect and the observed offset is
+  persisted (`139-VERIFICATION.md:12` names `MT5_SOAK_SERVER_OFFSET_MIN` as the intended carrier);
+  a **near-midnight deal** becomes an explicit regression test — a deal within the offset window of
+  midnight must land on the day the terminal shows. MT5 brokers stamp deals in broker-server time
+  (commonly UTC+2/+3, DST-shifting) while dailies bucket by UTC date. ⚠️ This is the one failure the
+  MT5-07 oracle **cannot see unaided**: a wrong offset leaves period totals reconciling perfectly
+  while the daily series is shifted, corrupting Sharpe, max drawdown and every risk metric derived
+  from it. Hardcoding the broker's offset is not acceptable — it breaks at the next DST transition
+  and is wrong for every other broker.
+- [ ] **MT5-07**: Rendered performance is verified against an **external** oracle — the MT5
+  terminal's own equity and balance figures, or the broker statement, over a fixed window, matching
+  within a stated tolerance. ⛔ Internal consistency (dailies compound to displayed equity, backbone
+  agrees with UI) does **not** satisfy this: that is the self-referential oracle shape that let
+  three money bugs survive six review passes. `broker_dailies.py` already claims `account_info()
+  .equity` is authoritative (`:514`); this tests the claim.
+- [ ] **MT5-08**: Verification runs against the **live funded account** on a **trading day** — real
+  fills, fees, swap charges and equity, via the read-only investor password. A demo account does
+  not satisfy this (synthetic fills/swaps, artificial starting balance exercising different anchor
+  logic), nor does reusing the v1.15 soak account (it shipped green with both open items intact, so
+  it has already demonstrated it does not catch these). A weekend run proves nothing.
+- [ ] **MT5-09**: Every surface that renders strategy performance shows the same, correct MT5
+  numbers — strategy detail, public factsheet, scenario composer, portfolio PDF, browse. The
+  architecture says these agree by construction (`job_worker.py:6043`, via shared
+  `strategies.asset_class`), and MT5's annualization clock is already correct
+  (`create-with-key/route.ts:510` stamps `isCryptoExchange(exchange) ? "crypto" : "traditional"`;
+  `finalize-wizard/route.ts:731` says "stamp `traditional` for mt5 (forex/CFD)"; `portfolio-stats
+  .ts` **defaults** to 252, so a caller that forgets the basis still lands on MT5's right clock —
+  crypto is the fragile direction, not MT5). This requirement exists to **test that invariant, not
+  assume it**: the backbone-bypass surfaces logged in `TODOS.md` — `_compute_portfolio_analytics`
+  (`analytics-service/routers/portfolio.py:628`), `equity_reconstruction.py`, and the bespoke TS
+  stacks `portfolio-stats.ts` / `scenario-blend-panels.ts` / `health-score.ts` — **re-derive**
+  metrics rather than reading them, and are the one place it could be false. One daily series
+  checked five ways; a divergence is a finding.
+- [ ] **MT5-10** *(uncapped by founder decision)*: Any discrepancy MT5-07/09 surfaces is **fixed
+  within this phase**, wherever its root cause lives — including in shared backbone money-math
+  affecting every venue. A bounded alternative (split shared-cause fixes into their own phase) was
+  offered and **declined**, so the planner must size for the unbounded case rather than treat it as
+  an escape hatch. The phase does not close while the terminal and the UI disagree: a known-wrong
+  number rendered to users is worse than an unfinished phase.
+
 ---
 
 ## v2 Requirements
@@ -274,6 +364,7 @@ Populated during roadmap creation.
 | JOB-08 | Phase 144 | Pending |
 | JOB-06 | Phase 145 | Pending |
 | JOB-07 | Phase 142 | Pending |
+| MT5-01..10 | Phase 142.2 | Pending |
 | RATE-01 | Phase 146 | Pending |
 | RATE-02 | Phase 146 | Pending |
 | RATE-03 | Phase 146 | Pending |

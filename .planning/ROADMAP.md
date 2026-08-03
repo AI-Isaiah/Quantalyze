@@ -485,6 +485,24 @@ Plans:
 
 - [x] 142.1-07-PLAN.md — [BLOCKING, orchestrator-only, autonomous:false] MCP apply to TEST + D-01/D-02 TEST confirmations + D-16 end-to-end gate run + ledger consolidation
 
+### Phase 142.2: Get MetaTrader 5 running end to end on the unified backbone (INSERTED)
+
+**Goal:** A founder can connect a real MetaTrader 5 account through the wizard and see correct performance rendered from the unified backbone — key → dailies → backbone → UI — with no step requiring a human to know an internal error code, a server name, or a flag.
+**Requirements**: MT5-01..10 (set at /gsd-discuss-phase 2026-08-03; see `142.2-CONTEXT.md` for the eleven decisions behind them)
+**Depends on:** Phase 142
+**Plans:** 0 plans
+
+**Known inputs (do NOT re-derive at plan time):**
+- v1.15 shipped MT5 and is ARCHIVED at tag `v1.15`. Live config: worker `MT5_ENABLED=true` + `MT5_GATEWAY_HOST=mt5-gateway.railway.internal:8001`, Vercel `NEXT_PUBLIC_MT5_ENABLED=true`. N accounts serialize through ONE gateway lock.
+- ⚠️ v1.15 closed with two OPEN items, both live: **server-UTC offset**, and **confirm on a TRADING day** (a weekend run proves nothing).
+- Founder-observed dogfood defects are already recorded in `TODOS.md` § "MT5 wizard — founder-observed on live UI": the Broker-server field is password-masked and should be plain text + searchable typeahead, and the connect-failure copy renders a generic `KEY_INVALID_FORMAT` that names Binance/OKX/Bybit at an MT5 user.
+- "Unified backbone" here means the ONE pipeline (`key → dailies → backbone → UI`), not a second MT5-specific path. Dailies are canonical; derive metrics/charts/coverage from them.
+
+⚠️ **Verification must be end-to-end against a real account on a trading day.** A green unit suite is not evidence for this phase's goal — v1.15 shipped with 6/6 phases green and both open items survived it.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 142.2 to break down)
+
 ### Phase 143: JOB — Dropped-enqueue reconciliation sweep
 
 **Goal**: "`after()` never ran at all" enqueue drops — architecturally invisible from inside the route handler — are detected by absence and healed
