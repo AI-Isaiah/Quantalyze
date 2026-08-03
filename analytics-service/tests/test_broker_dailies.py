@@ -1179,6 +1179,124 @@ def test_mt5_no_trading_deals_is_exempt_and_stays_inside_the_short_circuit():
     assert int(returns.notna().sum()) < 2
 
 
+# --- D-15: THE phase acceptance oracle (economic, not verdict-string) ---------
+
+
+def _cumulative(returns: pd.Series) -> float:
+    """Cumulative return by the plain ECONOMIC definition — compound the daily
+    returns. Computed HERE, in the test, from first principles: the oracle must
+    not route through the production metrics stack, or a shared bug in the
+    compounding would cancel out of both sides of the comparison below."""
+    return float((1.0 + returns.dropna()).prod() - 1.0)
+
+
+# The materiality bound, HAND-TYPED. The fixture's designed understatement is
+# ~8.77 percentage points (see the docstring's arithmetic); floating-point noise
+# on a 20-day compound is ~1e-12. 5 percentage points therefore sits two orders
+# of magnitude above anything rounding could produce and an order of magnitude
+# below the real gap — so this can only be satisfied by a genuinely material
+# economic difference, and it does not silently track the implementation.
+_UNDERSTATEMENT_MATERIALITY = 0.05
+
+
+def test_funding_only_series_is_understated_and_never_certified():
+    """⭐ THE D-15 ACCEPTANCE ORACLE — the safety property this whole phase must
+    not break, and the one falsifiable claim 142.2 can prove offline.
+
+    THE FAILURE BEING REFUSED. A keyed perpetuals account whose realized-PnL
+    fetch had a GAP still produces a complete-looking daily series, because
+    ``combine_realized_and_funding`` takes TWO input streams and adds them — with
+    one empty you get funding only, which is non-empty, dense, and plausible.
+    Published as an api_verified track record it materially UNDERSTATES the
+    account's real performance. The publish gate used to refuse this by asking a
+    hardcoded venue list; MT5-12 deletes that list, so the refusal must now come
+    from the producer's own verdict. A naive "always trust the dailies" satisfies
+    MT5-11 and BREAKS this. MT5 passing is not the test — this still failing is.
+
+    WHY THIS IS NOT SELF-REFERENTIAL (VALIDATION.md § Oracle Independence; live
+    precedent: three money bugs on this codebase survived six review passes
+    behind self-referential oracles). The test builds TWO DIFFERENT combiner
+    calls with DIFFERENT inputs and compares them to each other on an ECONOMIC
+    quantity that the test computes itself. It never asserts that the combiner
+    returned what the combiner computed, and the compounding is done by
+    ``_cumulative`` above rather than by the production metrics stack — so a bug
+    in compounding cannot cancel out of both sides.
+
+    THE ARITHMETIC (hand-derived; the anchor mechanism is what makes the
+    understatement large). ``trades_to_daily_returns_with_status`` derives
+    initial capital as ``equity_anchor − total_pnl`` and rolls forward, so the
+    equity read is REAL in both runs — only the PnL attribution differs:
+      TRUTH   Σrealized 20×400 = 8_000, Σfunding 20×20 = 400 ⇒ total 8_400
+              initial = 100_000 − 8_400 = 91_600 ⇒ cumulative ≈ +9.17%
+      GAPPED  realized fetch returned NOTHING ⇒ total 400
+              initial = 100_000 −   400 = 99_600 ⇒ cumulative ≈ +0.40%
+    The missing fills are mis-attributed to a LARGER starting capital, so the
+    account's ~+9% year reads as ~+0.4%. Understatement ≈ 8.77pp.
+
+    Note the fixture deliberately inverts the module's usual funding-dominant
+    shape: here REALIZED dominates, because the gap being modelled is in the
+    realized stream.
+    """
+    days = [f"2026-03-{d:02d}" for d in range(1, 21)]
+    funding = [_funding_row(d, 20.0) for d in days]
+    realized = [_realized_record(d, 400.0) for d in days]
+    equity_anchor = 100_000.0
+
+    # (1) THE TRUTH — the same book with realized PnL present.
+    truth_returns, _truth_meta = combine_realized_and_funding(
+        realized, funding, equity_anchor
+    )
+    # (2) THE GAPPED SERIES — the identical call with the fills fetch empty.
+    gapped_returns, gapped_meta = combine_realized_and_funding(
+        [], funding, equity_anchor
+    )
+
+    # --- PREMISE: the gapped series LOOKS PUBLISHABLE ------------------------
+    # This is why a row-count or emptiness check cannot save us, and why the
+    # refusal has to be a trust verdict. The gapped series is dense, carries
+    # plenty of interpretable rows (so job_worker.py:4340's <2 short-circuit does
+    # NOT fire), and its own status hint says 'complete'.
+    assert not gapped_returns.empty
+    assert int(gapped_returns.notna().sum()) >= 2
+    assert gapped_meta.get("computation_status_hint") == "complete"
+
+    truth_cum = _cumulative(truth_returns)
+    gapped_cum = _cumulative(gapped_returns)
+
+    # Anti-vacuity: the truth is a materially POSITIVE track record, so the
+    # inequality below cannot be satisfied by two near-zero series.
+    assert truth_cum > _UNDERSTATEMENT_MATERIALITY, (
+        f"fixture premise broken: the truth book must show material return, "
+        f"got {truth_cum}"
+    )
+
+    # --- ASSERT 1 of 2: THE ECONOMICS ---------------------------------------
+    # The realized-empty series is MATERIALLY UNDERSTATED versus the same book
+    # with realized PnL present. This is the money claim; it is what makes
+    # publishing the gapped series a lie rather than a rounding difference.
+    assert gapped_cum < truth_cum - _UNDERSTATEMENT_MATERIALITY, (
+        f"a realized-empty perp series must be MATERIALLY understated versus the "
+        f"same book with realized PnL: gapped={gapped_cum}, truth={truth_cum}, "
+        f"understatement={truth_cum - gapped_cum}, "
+        f"required>{_UNDERSTATEMENT_MATERIALITY}"
+    )
+
+    # --- ASSERT 2 of 2: THE TRUST -------------------------------------------
+    # Having established the series is economically WRONG, pin that the producer
+    # never certifies it. Both halves are hand-typed literals — the allow-list is
+    # NOT imported from the module under test, or widening the module's allow-list
+    # would silently widen this test with it.
+    assert gapped_meta["series_completeness"] == "fill_derived_unproven"
+    assert gapped_meta["series_completeness"] not in (
+        "ledger_complete",
+        "user_supplied",
+        "composite_stitched",
+    ), (
+        "a fills-gapped perp series must NEVER carry a trust verdict the publish "
+        "gate admits — that is the D-15 property this phase exists to preserve"
+    )
+
+
 def test_external_flows_param_threads_through_combine_to_core():
     """74-02 Task 3 (updated for 75-05 HIGH-1): the external_flows kwarg passed to
     combine_realized_and_funding is THREADED all the way to the honest core
