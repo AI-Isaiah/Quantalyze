@@ -270,6 +270,33 @@ a live funded account on a **trading day**.
 - [ ] **MT5-05**: A founder completes the MT5 connect flow through the wizard **without needing to
   know an internal error code, a server name, or a flag** — the phase-goal sentence, asserted as
   an outcome rather than as the sum of MT5-01..04.
+- [ ] **MT5-11** *(BLOCKER — found by live dogfood 2026-08-03, minutes after MT5-01 opened the
+  path)*: `isLedgerBackedExchange` is brought back into lockstep with the Python source set, so an
+  MT5 (and sFOX) strategy is evaluated on the **daily-returns** branch of the gate rather than the
+  fill-based one. **Measured drift:**
+  `analytics-service/services/ingestion/long_fetch.py:63` holds
+  `_LEDGER_BACKED_SOURCES = frozenset({"deribit", "sfox", "mt5"})`, while
+  `src/lib/strategyGate.ts:73` still returns `exchange === "deribit"` — under a comment that
+  explicitly instructs *"Mirrors the analytics-service `is_ledger_backed` … **keep the two in
+  lockstep**. Deribit is the only such venue today."* Python was widened for sfox and mt5; the
+  TypeScript mirror and its comment were never updated.
+  **Observed consequence on PROD** (key `46293712`, strategy `7a5d033a`, connected 14:44 UTC):
+  the pipeline succeeded end to end — `process_key_long` → `derive_broker_dailies` →
+  `compute_analytics_from_csv`, all `done`, 1 attempt, no errors, `unified_backbone_at_claim=true`
+  — and wrote **135 rows to `csv_daily_returns` (2026-03-22 → 2026-08-03, 75 non-zero days, returns
+  −10.57% … +14.97%)** with **0 rows in `trades`**, which is correct-by-construction for a
+  deal-ledger venue. `strategyGate.ts:181`'s `(!input.apiKeyId || input.isLedgerBacked === true)`
+  term then evaluated false, dropping a 135-day account onto the fill branch → `0 < 5` →
+  `GATE_INSUFFICIENT_TRADES`. ⚠️ **The failure is unwinnable and the remedy offered is false**: the
+  screen advises "try another key", but **no** MT5 key can ever pass this gate regardless of
+  history, and `try_another_key` **destroys the draft and every `strategy_keys` member under it**
+  (`SyncPreviewStep.tsx` — `onTryAnotherKey` fires `handleDeleteDraft()`). With the term corrected,
+  135 ≥ `STRATEGY_GATE_MIN_CSV_ROWS` (7) and the same account passes.
+  ⚠️ **sFOX carries this bug latently** — it is in the Python set and absent from the TS mirror;
+  it is masked only because sFOX is dormant. Fix both venues, not just mt5.
+  ⚠️ The **stale comment is part of the defect** — a future reader following it re-narrows the
+  function. Whatever replaces the hardcoded literal must make TS/Python divergence *detectable*
+  rather than restating the instruction that already failed.
 - [ ] **MT5-06** *(measure-first)*: The MT5 server-UTC offset is **measured live and asserted on**,
   not assumed. The gateway's server time is read against UTC at connect and the observed offset is
   persisted (`139-VERIFICATION.md:12` names `MT5_SOAK_SERVER_OFFSET_MIN` as the intended carrier);
@@ -378,7 +405,7 @@ Populated during roadmap creation.
 | JOB-08 | Phase 144 | Pending |
 | JOB-06 | Phase 145 | Pending |
 | JOB-07 | Phase 142 | Pending |
-| MT5-01..10 | Phase 142.2 | Pending |
+| MT5-01..11 | Phase 142.2 | Pending (MT5-01, MT5-02 complete) |
 | RATE-01 | Phase 146 | Pending |
 | RATE-02 | Phase 146 | Pending |
 | RATE-03 | Phase 146 | Pending |
