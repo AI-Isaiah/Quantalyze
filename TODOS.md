@@ -784,6 +784,32 @@ Read it as such.
    `142.1-05-PLAN.md` rather than deferred, and the plan now forbids crediting either as the SC-2b
    observable in the D-16 evidence. SC-2b's single-mutation proof is Part 6/6a in plan 142.1-08.
 
+8. **WR-01 — a D-19 self-verify guard that provably cannot fire (dead guard, NOT a hole).**
+   `supabase/migrations/20260803130000_reaper_limit_bound_materialized_cte.sql:188` asserts
+   `v_command ~* 'IN\s*\(\s*SELECT[^)]*LIMIT'` to ban the un-hashable-subplan shape D-19 removed.
+   `[^)]*` cannot cross a `)`, and BOTH arms carry `AND NOT EXISTS ( SELECT 1 … cj.status IN (…) )`
+   between `IN (SELECT` and `LIMIT` — measured against the exact superseded body: **no match**. The
+   bound is still genuinely guarded by the `v_mat <> 2` MATERIALIZED-count check immediately above
+   it (that one fires, and fails closed on formatting drift), so this is redundancy, not exposure.
+   ⚠️ **Deliberately NOT fixed in place:** `20260803130000` is already applied to TEST (stamped
+   `20260802212852`), and editing an applied migration is itself a tracked invariant violation
+   (migration-reviewer #11) — desyncing TEST's applied text from the file to repair a *redundant*
+   guard is the worse trade. Close it in the NEXT forward-only migration that touches this job, or
+   by asserting something that can actually fire (e.g. `FROM batch` occurring exactly twice).
+   Danger if left unread: the guard's `RAISE` text is what the next engineer will read as proof the
+   broken shape is banned. Found by migration review, 2026-08-03.
+
+9. **WR-02 — the `awk`-range hazard recurred in the gate file, and a SUMMARY over-claims it closed.**
+   `supabase/tests/test_strategy_analytics_stuck_computing_reaper.sql:16-18` explains that its final
+   part is named descriptively *because* its acceptance gate is an `awk '/Part 6/,0'` range. Plan
+   `142.1-05` (a different wave) then mentioned that literal twice in the Part 4 header, so the range
+   now starts at `:595` and sweeps Parts 4–6 instead of Part 6 alone. **The measured value is 0
+   either way, so there is no false green** — the exposure is that `142.1-08-SUMMARY.md:304` records
+   the hazard as closed when it is not. Fix: anchor the criterion on `^-- Part 6 --`, which matches
+   exactly once. Worth reading as a pattern rather than a nit: this phase was bitten by `awk` range
+   semantics **three separate times** (plans 05, 08, and here), always because prose *about* a gate
+   sits inside that gate's blast radius. Found by code review, 2026-08-03.
+
 ---
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
