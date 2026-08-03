@@ -20,6 +20,17 @@ import {
  * These match the historic inline gate at strategy-review/route.ts:34,45.
  */
 
+/**
+ * ORACLE INDEPENDENCE. Every verdict string below is a HAND-TYPED literal.
+ * Nothing is imported from `strategyGate.ts` — not the allow-list Set, not a
+ * union type, not a helper. If the production allow-list is widened, these
+ * tests must be edited by hand to follow it; a test that imported the Set would
+ * widen silently along with the policy it is supposed to pin.
+ *
+ * The allow-list this suite pins, stated so the expectations are readable
+ * without opening the module: { "ledger_complete", "user_supplied",
+ * "composite_stitched" }. Everything else — including NULL — refuses.
+ */
 const BASE: StrategyGateInput = {
   apiKeyId: "ak-1",
   tradeCount: 10,
@@ -27,6 +38,9 @@ const BASE: StrategyGateInput = {
   latestTradeAt: new Date("2026-04-10T00:00:00Z"),
   computationStatus: "complete",
   computationError: null,
+  // Never examined. The trade-branch cases below do not depend on it, and the
+  // honest default for a strategy nobody has stamped is absence.
+  seriesCompleteness: null,
 };
 
 describe("checkStrategyGate", () => {
@@ -88,6 +102,7 @@ describe("checkStrategyGate", () => {
       earliestTradeAt: null,
       latestTradeAt: null,
       csvRowCount: 1112,
+      seriesCompleteness: "user_supplied",
     });
     expect(result.passed).toBe(true);
     expect(result.code).toBeNull();
@@ -103,6 +118,7 @@ describe("checkStrategyGate", () => {
       earliestTradeAt: null,
       latestTradeAt: null,
       csvRowCount: 90,
+      seriesCompleteness: "user_supplied",
     });
     expect(result.passed).toBe(true);
   });
@@ -115,6 +131,7 @@ describe("checkStrategyGate", () => {
       earliestTradeAt: null,
       latestTradeAt: null,
       csvRowCount: 3,
+      seriesCompleteness: "user_supplied",
     });
     expect(result.passed).toBe(false);
     expect(result.code).toBe("INSUFFICIENT_CSV_HISTORY");
@@ -129,6 +146,7 @@ describe("checkStrategyGate", () => {
       earliestTradeAt: null,
       latestTradeAt: null,
       csvRowCount: STRATEGY_GATE_MIN_CSV_ROWS,
+      seriesCompleteness: "user_supplied",
     });
     expect(result.passed).toBe(true);
   });
@@ -154,67 +172,181 @@ describe("checkStrategyGate", () => {
       earliestTradeAt: null,
       latestTradeAt: null,
       csvRowCount: 1112,
+      seriesCompleteness: "user_supplied",
       computationStatus: "computing",
     });
     expect(result.passed).toBe(false);
     expect(result.code).toBe("ANALYTICS_COMPUTING");
   });
 
-  // --- P72: keyed ledger-backed strategies (Deribit). Returns are derived into
-  //     csv_daily_returns and NEVER populate `trades`, so a keyed Deribit
-  //     strategy has tradeCount 0. The daily-returns branch must apply — but
-  //     ONLY when the venue is ledger-backed (`isLedgerBacked: true`). A keyed
-  //     fill-based (perp) strategy with 0 trades + a funding series must stay on
-  //     the trade branch (its series has no completeness gate). ---
+  // --- MT5-11 / MT5-12: the daily-returns branch is decided by the PERSISTED
+  //     completeness verdict, not by a hardcoded venue list. Keyed strategies
+  //     whose venue folds a ledger into csv_daily_returns never populate
+  //     `trades`, so they arrive with tradeCount 0; whether they may publish on
+  //     that series is a question only the producer that wrote it can answer.
+  //     Allow-list, hand-typed above: ledger_complete / user_supplied /
+  //     composite_stitched. ---
 
-  it("keyed Deribit PASSES: ledger-backed, api key set, zero trades, enough csv rows, complete", () => {
+  // ⭐ THE ACCEPTANCE TEST (D-15 / SC-1). This is the phase's single falsifiable
+  //   safety property, and it is a REFUSAL, not a pass. MT5 being admitted is
+  //   NOT the test — this perp still being refused is.
+  it("⭐ D-15 ACCEPTANCE: keyed perp with an UNPROVEN fill-derived series + 135 csv rows + 0 trades is REFUSED", () => {
+    // The economic situation, stated so the fixture is not just a string:
+    // a perpetual-futures account whose realized-PnL fetch had an in-window
+    // gap. `derive_broker_dailies` still produced 135 daily rows — but they
+    // carry FUNDING ONLY, with the realized leg missing. Funding is typically a
+    // small negative or positive drip; the account's actual trading P&L is
+    // absent. Publishing this series would put a MATERIALLY UNDERSTATED track
+    // record on a public factsheet under an "api_verified" badge.
+    //
+    // The trap is `computationStatus: "complete"`: the pipeline SUCCEEDED. Every
+    // job is green, 135 rows exist, nothing errored. The only thing standing
+    // between this strategy and publication is the verdict its producer stamped.
     const result = checkStrategyGate({
       ...BASE,
-      apiKeyId: "ak-deribit",
-      isLedgerBacked: true,
+      apiKeyId: "key-1",
       tradeCount: 0,
       earliestTradeAt: null,
       latestTradeAt: null,
-      csvRowCount: 30,
+      computationStatus: "complete",
+      csvRowCount: 135,
+      seriesCompleteness: "fill_derived_unproven",
+    });
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("INSUFFICIENT_TRADES");
+  });
+
+  it("keyed MT5 PASSES: ledger_complete + 135 csv rows + 0 trades (the MT5-11 unblock)", () => {
+    // An MT5 deal ledger has no fills to fetch — `trades` is empty by
+    // construction, not by failure — so the combiner can and does certify the
+    // series complete. Before this phase this exact account landed on
+    // INSUFFICIENT_TRADES with no winnable remedy.
+    const result = checkStrategyGate({
+      ...BASE,
+      apiKeyId: "key-1",
+      tradeCount: 0,
+      earliestTradeAt: null,
+      latestTradeAt: null,
+      csvRowCount: 135,
+      seriesCompleteness: "ledger_complete",
     });
     expect(result.passed).toBe(true);
     expect(result.code).toBeNull();
   });
 
-  it("keyed Deribit below the CSV floor → INSUFFICIENT_CSV_HISTORY (not INSUFFICIENT_TRADES)", () => {
+  it("keyed ledger_complete below the CSV floor → INSUFFICIENT_CSV_HISTORY (not INSUFFICIENT_TRADES)", () => {
     const result = checkStrategyGate({
       ...BASE,
-      apiKeyId: "ak-deribit",
-      isLedgerBacked: true,
+      apiKeyId: "key-1",
       tradeCount: 0,
       earliestTradeAt: null,
       latestTradeAt: null,
       csvRowCount: 3,
+      seriesCompleteness: "ledger_complete",
     });
     expect(result.passed).toBe(false);
-    // Pre-P72 a keyed + zero-trades strategy took the trade branch and reported
-    // INSUFFICIENT_TRADES; the ledger-backed daily-returns branch owns it now.
+    // A certified series that is merely SHORT is a history problem, not a
+    // trade-count problem: the daily-returns branch owns the verdict.
     expect(result.code).toBe("INSUFFICIENT_CSV_HISTORY");
     expect(result.detail).toEqual({ rows: 3, min: STRATEGY_GATE_MIN_CSV_ROWS });
   });
 
-  it("keyed FILL-based (perp) with 0 trades + funding series must NOT publish → INSUFFICIENT_TRADES (Finding 1 regression guard)", () => {
-    // A keyed perp ALSO writes csv_daily_returns (funding series via
-    // derive_broker_dailies), so tradeCount 0 + csvRowCount >= floor is
-    // reachable. Without the venue term it would wrongly take the daily-returns
-    // branch and PUBLISH on a funding-only series that has no completeness gate.
-    // isLedgerBacked defaults false → must stay on the trade branch.
+  it("SC-2 FAIL-CLOSED: seriesCompleteness null (never examined) + keyed + 135 rows → trade branch → REFUSED", () => {
+    // The allow-list is POSITIVE for exactly this case. Under a deny-list
+    // (`!== "sampled_gapped"`) NULL would pass, and NULL is the state of every
+    // row no producer has stamped yet — i.e. the default, i.e. everything.
     const result = checkStrategyGate({
       ...BASE,
-      apiKeyId: "ak-perp",
-      // isLedgerBacked omitted (undefined → false)
+      apiKeyId: "key-1",
       tradeCount: 0,
       earliestTradeAt: null,
       latestTradeAt: null,
-      csvRowCount: 30,
+      csvRowCount: 135,
+      seriesCompleteness: null,
     });
     expect(result.passed).toBe(false);
     expect(result.code).toBe("INSUFFICIENT_TRADES");
+  });
+
+  it("sampled_gapped → trade branch → REFUSED (a gapped NAV sample is not a complete series)", () => {
+    const result = checkStrategyGate({
+      ...BASE,
+      apiKeyId: "key-1",
+      tradeCount: 0,
+      earliestTradeAt: null,
+      latestTradeAt: null,
+      csvRowCount: 135,
+      seriesCompleteness: "sampled_gapped",
+    });
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("INSUFFICIENT_TRADES");
+  });
+
+  it("an UNRECOGNISED verdict a future producer might invent → REFUSED (allow-list, not deny-list)", () => {
+    const result = checkStrategyGate({
+      ...BASE,
+      apiKeyId: "key-1",
+      tradeCount: 0,
+      earliestTradeAt: null,
+      latestTradeAt: null,
+      csvRowCount: 135,
+      seriesCompleteness: "some_verdict_invented_next_year",
+    });
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("INSUFFICIENT_TRADES");
+  });
+
+  it("COMPOSITE (apiKeyId null) with composite_stitched PASSES — composites stay publishable", () => {
+    // Composites have no api_key_id and passed historically via the
+    // `!apiKeyId` term this phase deleted. They now depend on the stitch job
+    // stamping a verdict. If this case ever reds, no composite can be approved.
+    const result = checkStrategyGate({
+      ...BASE,
+      apiKeyId: null,
+      tradeCount: 0,
+      earliestTradeAt: null,
+      latestTradeAt: null,
+      csvRowCount: 400,
+      seriesCompleteness: "composite_stitched",
+    });
+    expect(result.passed).toBe(true);
+    expect(result.code).toBeNull();
+  });
+
+  it("COMPOSITE with a NULL verdict is REFUSED — the new dependency on the stitch stamp, stated", () => {
+    // Documents the cost of deleting `!apiKeyId`: keylessness alone no longer
+    // admits anything. A composite whose stitch job did not stamp is refused,
+    // and the remedy is a re-stitch, never a backfill.
+    const result = checkStrategyGate({
+      ...BASE,
+      apiKeyId: null,
+      tradeCount: 0,
+      earliestTradeAt: null,
+      latestTradeAt: null,
+      csvRowCount: 400,
+      seriesCompleteness: null,
+    });
+    expect(result.passed).toBe(false);
+    expect(result.code).toBe("INSUFFICIENT_TRADES");
+  });
+
+  it("NO_DATA_SOURCE guard is UNCHANGED: keyless, 0 trades, 0 csv rows → NO_DATA_SOURCE (not a verdict question)", () => {
+    // The guard keys off `!apiKeyId` and always did; apiKeyId left the
+    // daily-branch predicate, not the input type. A strategy with nothing at
+    // all must still say so, whatever its verdict column holds.
+    for (const verdict of [null, "user_supplied", "ledger_complete"]) {
+      const result = checkStrategyGate({
+        ...BASE,
+        apiKeyId: null,
+        tradeCount: 0,
+        earliestTradeAt: null,
+        latestTradeAt: null,
+        csvRowCount: 0,
+        seriesCompleteness: verdict,
+      });
+      expect(result.passed).toBe(false);
+      expect(result.code).toBe("NO_DATA_SOURCE");
+    }
   });
 
   it("keyed perp WITH trades stays on the trade branch (no regression)", () => {
@@ -412,7 +544,7 @@ describe("checkStrategyGate", () => {
     expect(result.code).toBe("INSUFFICIENT_TRADES");
   });
 
-  it("does NOT refuse on the daily-returns branch with null timestamps (CSV / ledger-backed)", () => {
+  it("does NOT refuse on the daily-returns branch with null timestamps (keyless CSV / certified keyed series)", () => {
     expect(() =>
       checkStrategyGate({
         ...BASE,
@@ -421,17 +553,18 @@ describe("checkStrategyGate", () => {
         earliestTradeAt: null,
         latestTradeAt: null,
         csvRowCount: 90,
+        seriesCompleteness: "user_supplied",
       }),
     ).not.toThrow();
     expect(() =>
       checkStrategyGate({
         ...BASE,
-        apiKeyId: "ak-deribit",
-        isLedgerBacked: true,
+        apiKeyId: "key-1",
         tradeCount: 0,
         earliestTradeAt: null,
         latestTradeAt: null,
         csvRowCount: 30,
+        seriesCompleteness: "ledger_complete",
       }),
     ).not.toThrow();
   });
