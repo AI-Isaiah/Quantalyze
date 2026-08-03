@@ -188,6 +188,41 @@ describe("Phase 69 — Deribit wizard card (UX-01)", () => {
     expect(screen.getByLabelText(/passphrase/i)).toBeInTheDocument();
   });
 
+  /**
+   * MT5-03 / D-03 — the OKX half of the per-venue masking contract.
+   *
+   * MT5 reuses this EXACT passphrase slot to collect a broker SERVER NAME and
+   * unmasks it with `passphraseSecret: false`. OKX's passphrase is a genuine
+   * API credential, so it must stay masked at rest and the pre-existing
+   * Show/Hide toggle must keep working bit-for-bit. The founder rejected a
+   * global unmask precisely because it would leak this field.
+   *
+   * This is the load-bearing half of SC-7: flipping OKX to
+   * `passphraseSecret: false` — or deleting the `?? true` default that makes
+   * OKX byte-identical without editing its config entry — turns this RED.
+   * The `type` attribute is asserted directly, not via a snapshot, so the
+   * failure names the actual regression.
+   */
+  it("keeps the OKX passphrase MASKED at rest and Show-toggleable (D-03 byte-identity)", () => {
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-exchange-okx"));
+    expect(screen.getByLabelText("OKX Passphrase")).toHaveAttribute(
+      "type",
+      "password",
+    );
+    // The Show/Hide behaviour that existed before the flag is unchanged.
+    fireEvent.click(screen.getByRole("button", { name: "Show" }));
+    expect(screen.getByLabelText("OKX Passphrase")).toHaveAttribute(
+      "type",
+      "text",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Hide" }));
+    expect(screen.getByLabelText("OKX Passphrase")).toHaveAttribute(
+      "type",
+      "password",
+    );
+  });
+
   it("swaps credential labels + placeholders per exchange (both directions)", () => {
     renderStep();
     // Default (binance) state: generic API Key / API Secret wiring.
@@ -507,6 +542,51 @@ describe("Phase 138 — MT5 wizard card (MT5UI-01+02)", () => {
     expect(screen.queryByLabelText("OKX Passphrase")).toBeNull();
     // Generic labels are gone for MT5.
     expect(screen.queryByLabelText("API Secret")).toBeNull();
+  });
+
+  /**
+   * MT5-03 / D-03 — the broker server renders as LEGIBLE TEXT.
+   *
+   * The founder was typing a server name into a dot-masked field and could not
+   * verify it, against helper copy that instructs "copy the server name exactly
+   * as it appears in your MT5 terminal" — an instruction that is unfollowable
+   * if you cannot read what you typed. The slot is a broker SERVER NAME, not a
+   * credential, so it is unmasked UNCONDITIONALLY: it does not ride the
+   * Show/Hide secret toggle in either direction.
+   *
+   * The same-render contrast on "Investor password" is what stops a blanket
+   * "unmask everything" regression from satisfying this case.
+   *
+   * (Display only — the value still POSTs on the `passphrase` key and is
+   * encrypted at rest; the slot-mapping case below pins that separately.)
+   */
+  it("renders Broker server as legible text, unconditionally, while the investor password stays masked", async () => {
+    await renderWithMt5On();
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    expect(screen.getByLabelText("Broker server")).toHaveAttribute(
+      "type",
+      "text",
+    );
+    // Same render, same form: a genuine credential IS still masked.
+    expect(screen.getByLabelText("Investor password")).toHaveAttribute(
+      "type",
+      "password",
+    );
+    // Independent of the Show/Hide toggle in BOTH directions.
+    fireEvent.click(screen.getByRole("button", { name: "Show" }));
+    expect(screen.getByLabelText("Broker server")).toHaveAttribute(
+      "type",
+      "text",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Hide" }));
+    expect(screen.getByLabelText("Broker server")).toHaveAttribute(
+      "type",
+      "text",
+    );
+    expect(screen.getByLabelText("Investor password")).toHaveAttribute(
+      "type",
+      "password",
+    );
   });
 
   it("renders the muted investor-password steer and the broker-server find-it helper", async () => {
