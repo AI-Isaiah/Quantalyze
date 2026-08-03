@@ -83,6 +83,40 @@ export type WizardErrorCode =
   //     fix is the server string shown in the MT5 terminal login window.
   | "KEY_MT5_MASTER_PASSWORD"
   | "KEY_MT5_WRONG_SERVER"
+  // Phase 142.2 / MT5-04 (D-05) — THE FOUR CAUSES `KEY_INVALID_FORMAT` USED TO
+  // SWALLOW. The two wizard connect routes (`strategies/create-with-key` and
+  // `strategies/composite/add-key`) answered ONE code at TWELVE guards each —
+  // malformed body, unsupported venue, missing api_key, the two venue server
+  // gates, two missing-secret arms, a missing OKX passphrase, a missing session
+  // id, and three length caps — and every one of them rendered "This does not
+  // look like a valid API key for the selected exchange" with Binance hex-length
+  // advice. A founder who submitted a COMPLETE MT5 form, with no format problem
+  // anywhere in it, was told their key format was wrong.
+  //
+  // ⚠️ THE VALUE IS IN THE CLASS, NOT THE INSTANCE. The arm the founder actually
+  // hit (the MT5 server gate) became unreachable the moment MT5-01 turned the
+  // server-side switch on, so a fix aimed at that ONE line would repair
+  // something that can no longer fire while eleven siblings kept lying.
+  //
+  //   KEY_MISSING_REQUIRED_FIELD — a field the form requires arrived empty, or
+  //     the body was not a readable object. Five of the twelve guards.
+  //   KEY_UNSUPPORTED_VENUE — the exchange named is not one we support at all.
+  //     A permanent property of the VENUE, not of the credential.
+  //   KEY_VENUE_NOT_ENABLED — we support the venue but it is not open here yet.
+  //     Distinct from the above on purpose: "never" and "not yet" have
+  //     different remedies, and collapsing them tells a user to abandon a venue
+  //     that is coming.
+  //   KEY_INPUT_TOO_LONG — a value exceeded its maximum length. The three cap
+  //     guards.
+  //
+  // `KEY_INVALID_FORMAT` keeps exactly ONE emitter per route — the
+  // `api_secret.length < 8` check on the ccxt venues — which is the only one of
+  // the twelve that was ever a format failure, and which makes its existing copy
+  // true again.
+  | "KEY_MISSING_REQUIRED_FIELD"
+  | "KEY_UNSUPPORTED_VENUE"
+  | "KEY_VENUE_NOT_ENABLED"
+  | "KEY_INPUT_TOO_LONG"
   | "KEY_INVALID_FORMAT"
   | "KEY_IP_ALLOWLIST"
   // Phase 140.3-05 / TS-35 — the two venue-transient verdicts that had no
@@ -474,10 +508,83 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["clear_and_retry", "request_call"],
   },
 
+  // ── Phase 142.2 / MT5-04 (D-05) — the four honest causes ──────────────────
+  // Each entry names ITS OWN cause and remedy. The bar every one of them has to
+  // clear is the one the old bucket failed: a user who reads it must be able to
+  // tell what to change. None of them may name an internal switch, a service, or
+  // a field the form does not show — the copy is static, so the discipline
+  // `scrubSeamError` enforces on derived strings is simply written in here.
+
+  KEY_MISSING_REQUIRED_FIELD: {
+    title: "One of the required fields is empty.",
+    cause:
+      "The form arrived without a value we need — one of the credential fields was blank, or the submission was incomplete. Nothing was sent to the exchange and nothing was stored.",
+    fix: [
+      "Fill in every field shown for the exchange you selected — the fields differ by exchange, so a slot that is optional elsewhere may be required here.",
+      "Submit again once each one has a value.",
+    ],
+    docsHref: "/security#readonly-key",
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  KEY_UNSUPPORTED_VENUE: {
+    title: "We do not support that exchange.",
+    cause:
+      "The exchange named in this submission is not one we can connect to. This is about the venue, not about your key — the same credentials on a supported exchange would be fine.",
+    fix: [
+      "Pick one of the exchanges shown on this step and connect a key from that account.",
+      "If the exchange you need is missing, tell us which one — we prioritise by what people ask for.",
+    ],
+    docsHref: "/security#readonly-key",
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  KEY_VENUE_NOT_ENABLED: {
+    // NOT recoverable, deliberately, on the same mechanism `SEAM_MISCONFIGURED`
+    // and `COMPOSITE_TOO_MANY_MEMBERS` use: `actions` carries no member of
+    // RECOVERABLE_ACTIONS (src/lib/envelope.ts), so `buildEnvelope` derives
+    // `recoverable: false` and `ErrorEnvelope` renders NO Retry control.
+    // Resubmitting the identical request cannot succeed while the venue is
+    // closed, and a Retry button that can only fail again is the exact defect
+    // this phase exists to remove.
+    title: "This exchange is not open on Quantalyze yet.",
+    cause:
+      "We support this exchange but have not switched it on for connections yet. Your credentials were not sent anywhere and nothing was stored.",
+    fix: [
+      "Connect a key from one of the other exchanges on this step in the meantime.",
+      "Ask us to let you know when this exchange opens — we can turn it on for your account first.",
+    ],
+    docsHref: "/security#readonly-key",
+    actions: ["request_call"],
+  },
+
+  KEY_INPUT_TOO_LONG: {
+    title: "One of the values you pasted is too long.",
+    cause:
+      "A field exceeded its maximum length. We cap each credential field at 512 characters and the label at 100, which is well above what any exchange issues — a value past the cap is almost always a paste that picked up more than the value itself.",
+    fix: [
+      "Re-copy the value from your exchange on its own, without the surrounding text, line breaks, or a second credential pasted after it.",
+      "Shorten the label to 100 characters or fewer.",
+      "Paste the corrected values and submit again.",
+    ],
+    docsHref: "/security#readonly-key",
+    actions: ["clear_and_retry", "request_call"],
+  },
+
   KEY_INVALID_FORMAT: {
+    // 142.2 / MT5-04: the `cause` used to open by blaming a check performed in
+    // the BROWSER before the key was sent — false at all 24 of the sites that
+    // carried this code, every one of which is a guard inside a route handler.
+    // (The removed clause is DESCRIBED rather than quoted: this plan's
+    // acceptance grep for it is a raw repo scan with no comment exclusion, so a
+    // pasted citation would keep reporting the class open. Same discipline as
+    // `ConnectKeyStep.tsx`'s KNOWN_CREATE_WITH_KEY_CODES docblock.) The sentence
+    // is corrected rather than deleted because the SECOND half (the per-venue
+    // secret formats) is genuinely useful, and it becomes true again now that
+    // the split leaves only the `api_secret.length < 8` ccxt arm on this code.
     title: "This does not look like a valid API key for the selected exchange.",
     cause:
-      "Client-side format check failed before sending the key to the exchange. Binance secrets are 64 hex characters; OKX and Bybit use different formats.",
+      "A format check on our side rejected the API secret before anything was sent to the exchange. Binance secrets are 64 hex characters; OKX and Bybit use different formats.",
     fix: [
       "Check that you selected the correct exchange tab above.",
       "Re-copy the key and secret from your exchange, without extra spaces.",

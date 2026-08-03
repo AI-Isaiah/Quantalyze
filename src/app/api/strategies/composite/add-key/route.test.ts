@@ -428,7 +428,9 @@ describe("POST /api/strategies/composite/add-key — sfox api_secret carve-out (
     const res = await POST(makeReq({ ...SFOX_BODY, api_secret: "s".repeat(513) }));
 
     expect(res.status).toBe(400);
-    expect((await res.json()).code).toBe("KEY_INVALID_FORMAT");
+    // 142.2-07 / MT5-04: the CAP is byte-unchanged; only the code it answers
+    // moved off the format bucket. A length cap is not a format judgement.
+    expect((await res.json()).code).toBe("KEY_INPUT_TOO_LONG");
     expect(validateKeyMock).not.toHaveBeenCalled();
   });
 
@@ -520,7 +522,7 @@ describe("POST /api/strategies/composite/add-key — sfox server gate (F2, SFOX_
 
       expect(res.status).toBe(400);
       const json = await res.json();
-      expect(json.code).toBe("KEY_INVALID_FORMAT");
+      expect(json.code).toBe("KEY_VENUE_NOT_ENABLED");
       expect(json.error).toBe("sFOX integration is not yet available.");
       expect(validateKeyMock).not.toHaveBeenCalled();
       expect(encryptKeyMock).not.toHaveBeenCalled();
@@ -716,7 +718,9 @@ describe("POST /api/strategies/composite/add-key — mt5 acceptance (MT5SRC-03)"
 
     expect(res.status).toBe(400);
     const json = await res.json();
-    expect(json.code).toBe("KEY_INVALID_FORMAT");
+    // 142.2-07 / MT5-04: an ABSENT investor password is a missing field, not a
+    // malformed one — same split as the create-with-key sibling.
+    expect(json.code).toBe("KEY_MISSING_REQUIRED_FIELD");
     expect(json.error).toBe("api_secret is required");
     expect(validateKeyMock).not.toHaveBeenCalled();
   });
@@ -741,7 +745,7 @@ describe("POST /api/strategies/composite/add-key — mt5 acceptance (MT5SRC-03)"
 
     expect(res.status).toBe(400);
     const json = await res.json();
-    expect(json.code).toBe("KEY_INVALID_FORMAT");
+    expect(json.code).toBe("KEY_UNSUPPORTED_VENUE");
     expect(json.error).toBe("Unsupported exchange");
     expect(validateKeyMock).not.toHaveBeenCalled();
   });
@@ -778,7 +782,7 @@ describe("POST /api/strategies/composite/add-key — mt5 server gate (MT5_ENABLE
 
       expect(res.status).toBe(400);
       const json = await res.json();
-      expect(json.code).toBe("KEY_INVALID_FORMAT");
+      expect(json.code).toBe("KEY_VENUE_NOT_ENABLED");
       expect(json.error).toBe("MT5 integration is not yet available.");
       expect(validateKeyMock).not.toHaveBeenCalled();
       expect(encryptKeyMock).not.toHaveBeenCalled();
@@ -1098,5 +1102,201 @@ describe("[140.3-13b / SEAMUX-08] POST /api/strategies/composite/add-key — Sen
     expect(res.status).toBe(429);
     expect(validateKeyMock).not.toHaveBeenCalled();
     await expectNoCapture();
+  });
+});
+
+/**
+ * Phase 142.2-07 / MT5-04 (D-05) — EVERY REJECTION SITE, ONE HONEST CODE EACH.
+ * The SECOND MEMBER of the class, and the reason it exists as its own table.
+ *
+ * ⚠️ THIS IS NOT A COPY OF THE CREATE-WITH-KEY TABLE, IT IS THE OTHER HALF OF A
+ * CLASS FIX. `KEY_INVALID_FORMAT` bucketed twelve causes at BOTH wizard connect
+ * routes, and a delivery that split only the famous one would leave a real user
+ * — anyone adding a second key to a composite — reading the identical lie. The
+ * per-guard cases are duplicated on purpose so a one-route fix cannot pass as
+ * the class, exactly as this file's Sentry block is duplicated for the same
+ * reason (see its header).
+ *
+ * ⚠️ THE mt5 ROW IS UI-UNREACHABLE FROM THIS SURFACE and is tested at ROUTE
+ * level only. `MultiKeyConnectStep.tsx` carries NO MT5 card — its only `mt5`
+ * mentions are two error-code strings — so no click path reaches this guard.
+ * It is split for class-consistency and is covered here as a ROUTE contract; no
+ * claim is made that a UI test exercises it.
+ *
+ * Counts, error strings and the byte-identity rule are as documented on the
+ * create-with-key twin: 12 emitting guards (a raw grep says 14 and counts two
+ * comment mentions), only the `code` literal moved.
+ */
+describe("[142.2-07 / MT5-04] composite/add-key — all 12 rejection sites, honest codes", () => {
+  const LONG = "x".repeat(513);
+
+  beforeEach(resetHappyMocks);
+  beforeEach(() => {
+    delete process.env.SFOX_ENABLED;
+    delete process.env.MT5_ENABLED;
+  });
+
+  afterEach(() => {
+    delete process.env.SFOX_ENABLED;
+    delete process.env.MT5_ENABLED;
+  });
+
+  /**
+   * HAND-TYPED, one row per emitting guard, in source order. Not generated from
+   * the route, and not imported from the create-with-key spec: two hand-typed
+   * tables that agree are evidence the routes are in lockstep; one shared table
+   * would only be evidence that a constant equals itself.
+   */
+  const SITES: ReadonlyArray<{
+    guard: string;
+    body: unknown;
+    env?: Record<string, string>;
+    code: string;
+    error: string;
+  }> = [
+    {
+      guard: "body is not an object",
+      body: null,
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      error: "Invalid request body",
+    },
+    {
+      guard: "exchange is not one we support",
+      body: { ...VALID_BODY, exchange: "notanexchange" },
+      code: "KEY_UNSUPPORTED_VENUE",
+      error: "Unsupported exchange",
+    },
+    {
+      guard: "api_key absent",
+      body: {
+        exchange: "binance",
+        api_secret: "ccxt-secret-enough",
+        wizard_session_id: WIZARD_SESSION_ID,
+      },
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      error: "api_key is required",
+    },
+    {
+      guard: "sfox venue switch is off",
+      body: {
+        exchange: "sfox",
+        api_key: "sfox-bearer-token-value",
+        wizard_session_id: WIZARD_SESSION_ID,
+      },
+      code: "KEY_VENUE_NOT_ENABLED",
+      error: "sFOX integration is not yet available.",
+    },
+    {
+      // UI-UNREACHABLE from this surface (MultiKeyConnectStep has no MT5 card)
+      // AND unreachable in production since MT5-01. Covered as a ROUTE contract
+      // so the two routes cannot drift; NOT claimed as UI coverage.
+      guard: "mt5 venue switch is off (route-level only — no MT5 card here)",
+      body: {
+        exchange: "mt5",
+        api_key: "500123456",
+        api_secret: "investor-password-123",
+        passphrase: "MetaQuotes-Demo",
+        wizard_session_id: WIZARD_SESSION_ID,
+      },
+      code: "KEY_VENUE_NOT_ENABLED",
+      error: "MT5 integration is not yet available.",
+    },
+    {
+      guard: "mt5 investor password absent (route-level only)",
+      body: {
+        exchange: "mt5",
+        api_key: "500123456",
+        passphrase: "MetaQuotes-Demo",
+        wizard_session_id: WIZARD_SESSION_ID,
+      },
+      env: { MT5_ENABLED: "true" },
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      error: "api_secret is required",
+    },
+    {
+      // ⭐ THE ONE GENUINE FORMAT FAILURE on this route too.
+      guard: "ccxt api_secret shorter than 8 — THE format failure",
+      body: {
+        exchange: "binance",
+        api_key: "ccxt-key-with-enough-chars",
+        api_secret: "short77",
+        wizard_session_id: WIZARD_SESSION_ID,
+      },
+      code: "KEY_INVALID_FORMAT",
+      error: "api_secret is required",
+    },
+    {
+      guard: "OKX passphrase absent",
+      body: {
+        exchange: "okx",
+        api_key: "okx-key-with-enough-chars",
+        api_secret: "okx-secret-with-enough-chars",
+        wizard_session_id: WIZARD_SESSION_ID,
+      },
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      error: "OKX requires a passphrase",
+    },
+    {
+      guard: "wizard_session_id is not a uuid",
+      body: { ...VALID_BODY, wizard_session_id: "not-a-uuid" },
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      error: "wizard_session_id required",
+    },
+    {
+      guard: "api_secret over the 512 cap",
+      body: { ...VALID_BODY, api_secret: LONG },
+      code: "KEY_INPUT_TOO_LONG",
+      error: "Key or secret too long",
+    },
+    {
+      guard: "passphrase over the 512 cap",
+      body: { ...VALID_BODY, passphrase: LONG },
+      code: "KEY_INPUT_TOO_LONG",
+      error: "Passphrase too long",
+    },
+    {
+      guard: "label over the 100 cap",
+      body: { ...VALID_BODY, label: "L".repeat(101) },
+      code: "KEY_INPUT_TOO_LONG",
+      error: "Label too long",
+    },
+  ];
+
+  it("the table covers every emitting guard — hand-typed count, not a derivation", () => {
+    expect(SITES.length).toBe(12);
+  });
+
+  it.each(SITES)("$guard -> 400 $code", async ({ body, env, code, error }) => {
+    for (const [k, v] of Object.entries(env ?? {})) process.env[k] = v;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(body));
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe(code);
+    // The error string is the PRE-SPLIT one, verbatim. Only the code moved.
+    expect(json.error).toBe(error);
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("KEY_INVALID_FORMAT is left on exactly ONE guard — the negative pin", () => {
+    const formatRows = SITES.filter((s) => s.code === "KEY_INVALID_FORMAT");
+    expect(formatRows.map((s) => s.guard)).toEqual([
+      "ccxt api_secret shorter than 8 — THE format failure",
+    ]);
+  });
+
+  it("the split is real — five distinct codes where there used to be one", () => {
+    const distinct = new Set(SITES.map((s) => s.code));
+    expect([...distinct].sort()).toEqual([
+      "KEY_INPUT_TOO_LONG",
+      "KEY_INVALID_FORMAT",
+      "KEY_MISSING_REQUIRED_FIELD",
+      "KEY_UNSUPPORTED_VENUE",
+      "KEY_VENUE_NOT_ENABLED",
+    ]);
   });
 });

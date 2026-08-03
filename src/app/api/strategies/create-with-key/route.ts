@@ -69,7 +69,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const body = await req.json().catch(() => null);
   if (!body || typeof body !== "object") {
     return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "Invalid request body" },
+      { code: "KEY_MISSING_REQUIRED_FIELD", error: "Invalid request body" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -85,7 +85,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   if (typeof exchange !== "string" || !isSupportedExchange(exchange)) {
     return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "Unsupported exchange" },
+      { code: "KEY_UNSUPPORTED_VENUE", error: "Unsupported exchange" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -108,16 +108,20 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // ccxt API keys are long secrets; an MT5 login is a short broker ACCOUNT NUMBER
   // (commonly 5-8 digits — a demo/spike account is frequently < 8), so mt5 requires
   // only a NON-BLANK login, mirroring the validate-and-encrypt mt5 shape. Without
-  // this carve-out a legitimate short MT5 login is wrongly rejected here as
-  // KEY_INVALID_FORMAT — and this is the route the wizard submits to, so the two
+  // this carve-out a legitimate short MT5 login is wrongly rejected here as a
+  // missing api_key — and this is the route the wizard submits to, so the two
   // routes MUST NOT diverge (RED-TEAM). sfox + every ccxt venue keep the byte-
   // identical <8 rejection.
+  // (142.2-07 / MT5-04: this guard's code is now KEY_MISSING_REQUIRED_FIELD.
+  // The sentence named the old bucket code, which would have made this comment
+  // the ONLY remaining claim in the file that a missing login is a format
+  // problem.)
   if (
     typeof api_key !== "string" ||
     (isMt5 ? api_key.trim().length === 0 : api_key.length < 8)
   ) {
     return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "api_key is required" },
+      { code: "KEY_MISSING_REQUIRED_FIELD", error: "api_key is required" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -130,7 +134,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // crash, never a false KEY_AUTH, never a live probe. ccxt paths are unaffected.
   if (isSfox && !isSfoxEnabledServer()) {
     return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "sFOX integration is not yet available." },
+      { code: "KEY_VENUE_NOT_ENABLED", error: "sFOX integration is not yet available." },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -146,7 +150,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // strict `MT5_ENABLED === "true"`. ccxt/sfox paths are unaffected (isMt5 false).
   if (isMt5 && !isMt5EnabledServer()) {
     return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "MT5 integration is not yet available." },
+      { code: "KEY_VENUE_NOT_ENABLED", error: "MT5 integration is not yet available." },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -165,7 +169,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       passphrase.trim().length === 0)
   ) {
     return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "api_secret is required" },
+      { code: "KEY_MISSING_REQUIRED_FIELD", error: "api_secret is required" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -186,33 +190,33 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     (typeof passphrase !== "string" || passphrase.length === 0)
   ) {
     return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "OKX requires a passphrase" },
+      { code: "KEY_MISSING_REQUIRED_FIELD", error: "OKX requires a passphrase" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
   if (!isUuid(wizard_session_id)) {
     return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "wizard_session_id required" },
+      { code: "KEY_MISSING_REQUIRED_FIELD", error: "wizard_session_id required" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
   if (api_key.length > 512 || apiSecretNormalized.length > 512) {
     return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "Key or secret too long" },
+      { code: "KEY_INPUT_TOO_LONG", error: "Key or secret too long" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   if (typeof passphrase === "string" && passphrase.length > 512) {
     return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "Passphrase too long" },
+      { code: "KEY_INPUT_TOO_LONG", error: "Passphrase too long" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   if (typeof label === "string" && label.length > 100) {
     return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "Label too long" },
+      { code: "KEY_INPUT_TOO_LONG", error: "Label too long" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }

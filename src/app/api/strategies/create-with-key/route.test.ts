@@ -669,7 +669,9 @@ describe("POST /api/strategies/create-with-key — sfox api_secret carve-out (SF
     const res = await POST(makeReq({ ...SFOX_BODY, api_secret: "s".repeat(513) }));
 
     expect(res.status).toBe(400);
-    expect((await res.json()).code).toBe("KEY_INVALID_FORMAT");
+    // 142.2-07 / MT5-04: the CAP is byte-unchanged; only the code it answers
+    // moved off the format bucket. A length cap is not a format failure.
+    expect((await res.json()).code).toBe("KEY_INPUT_TOO_LONG");
     expect(validateKeyMock).not.toHaveBeenCalled();
   });
 
@@ -772,7 +774,7 @@ describe("POST /api/strategies/create-with-key — sfox server gate (F2, SFOX_EN
 
       expect(res.status).toBe(400);
       const json = await res.json();
-      expect(json.code).toBe("KEY_INVALID_FORMAT");
+      expect(json.code).toBe("KEY_VENUE_NOT_ENABLED");
       expect(json.error).toBe("sFOX integration is not yet available.");
       expect(validateKeyMock).not.toHaveBeenCalled();
       expect(encryptKeyMock).not.toHaveBeenCalled();
@@ -896,7 +898,10 @@ describe("POST /api/strategies/create-with-key — mt5 acceptance (MT5SRC-03)", 
 
     expect(res.status).toBe(400);
     const json = await res.json();
-    expect(json.code).toBe("KEY_INVALID_FORMAT");
+    // 142.2-07 / MT5-04: an ABSENT investor password is a missing field, not a
+    // malformed one. The ccxt `<8` arm below keeps KEY_INVALID_FORMAT because
+    // that one really is a format judgement.
+    expect(json.code).toBe("KEY_MISSING_REQUIRED_FIELD");
     expect(json.error).toBe("api_secret is required");
     expect(validateKeyMock).not.toHaveBeenCalled();
   });
@@ -923,7 +928,7 @@ describe("POST /api/strategies/create-with-key — mt5 acceptance (MT5SRC-03)", 
 
     expect(res.status).toBe(400);
     const json = await res.json();
-    expect(json.code).toBe("KEY_INVALID_FORMAT");
+    expect(json.code).toBe("KEY_MISSING_REQUIRED_FIELD");
     expect(validateKeyMock).not.toHaveBeenCalled();
   });
 
@@ -933,7 +938,7 @@ describe("POST /api/strategies/create-with-key — mt5 acceptance (MT5SRC-03)", 
 
     expect(res.status).toBe(400);
     const json = await res.json();
-    expect(json.code).toBe("KEY_INVALID_FORMAT");
+    expect(json.code).toBe("KEY_UNSUPPORTED_VENUE");
     expect(json.error).toBe("Unsupported exchange");
     expect(validateKeyMock).not.toHaveBeenCalled();
   });
@@ -987,7 +992,7 @@ describe("POST /api/strategies/create-with-key — mt5 server gate (MT5_ENABLED 
 
       expect(res.status).toBe(400);
       const json = await res.json();
-      expect(json.code).toBe("KEY_INVALID_FORMAT");
+      expect(json.code).toBe("KEY_VENUE_NOT_ENABLED");
       expect(json.error).toBe("MT5 integration is not yet available.");
       expect(validateKeyMock).not.toHaveBeenCalled();
       expect(encryptKeyMock).not.toHaveBeenCalled();
@@ -1555,5 +1560,225 @@ describe("[140.3-13b / SEAMUX-08] POST /api/strategies/create-with-key — Sentr
     expect(res.status).toBe(400);
     expect(validateKeyMock).not.toHaveBeenCalled();
     await expectNoCapture();
+  });
+});
+
+/**
+ * Phase 142.2-07 / MT5-04 (D-05) — EVERY REJECTION SITE, ONE HONEST CODE EACH.
+ *
+ * ⚠️ WHAT THIS REPLACES, AND WHY IT IS A TABLE. This route answered
+ * `KEY_INVALID_FORMAT` at ALL TWELVE input-validation guards. Eleven of them
+ * were not format failures — a malformed body, an unsupported venue, a missing
+ * login, two venue switches, a missing investor password, a missing OKX
+ * passphrase, a missing session id and three length caps — and every one
+ * rendered "This does not look like a valid API key for the selected exchange"
+ * with Binance hex-length advice. A founder who submitted a COMPLETE MT5 form
+ * was told their key format was wrong.
+ *
+ * ⚠️ THE ARM THE FOUNDER HIT IS NOW UNREACHABLE. MT5-01 set the server-side
+ * switch, so the mt5 arm can no longer fire in production. It is covered here
+ * anyway, and the row says so: a fix aimed only at the instance would have
+ * repaired a line that cannot fire while eleven siblings kept lying. The CLASS
+ * is the subject, not the instance.
+ *
+ * THE COUNT IS 12, NOT 14. `grep -c KEY_INVALID_FORMAT` on the route returned 14
+ * before the split; `grep -c 'code: "KEY_INVALID_FORMAT"'` returned 12. The
+ * delta is two COMMENT mentions of the code. The table below is the emitting
+ * population, one row per guard, and the same 12 is pinned from disk in
+ * `wizardErrors.invariant.test.ts`.
+ *
+ * The `error` string on every row is the one that shipped BEFORE this plan and
+ * is asserted verbatim: only the `code` literal was allowed to move. A row whose
+ * error string changed would mean the guard itself was edited, which is exactly
+ * what this plan is not allowed to do (V5 — changing validation posture under
+ * cover of a copy fix).
+ */
+describe("[142.2-07 / MT5-04] create-with-key — all 12 rejection sites, honest codes", () => {
+  const LONG = "x".repeat(513);
+
+  beforeEach(() => {
+    validateKeyMock.mockReset();
+    encryptKeyMock.mockReset();
+    rpcMock.mockReset();
+    draftLookupMock.mockReset();
+    draftLookupMock.mockResolvedValue({ data: null, error: null });
+    delete process.env.SFOX_ENABLED;
+    delete process.env.MT5_ENABLED;
+  });
+
+  afterEach(() => {
+    delete process.env.SFOX_ENABLED;
+    delete process.env.MT5_ENABLED;
+  });
+
+  /**
+   * HAND-TYPED, one row per emitting guard, in source order. Deliberately NOT
+   * generated from the route: an expectation derived from its own subject
+   * cannot fail when the subject changes.
+   */
+  const SITES: ReadonlyArray<{
+    guard: string;
+    body: unknown;
+    env?: Record<string, string>;
+    code: string;
+    error: string;
+  }> = [
+    {
+      guard: "body is not an object",
+      body: null,
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      error: "Invalid request body",
+    },
+    {
+      guard: "exchange is not one we support",
+      body: { ...VALID_BODY, exchange: "notanexchange" },
+      code: "KEY_UNSUPPORTED_VENUE",
+      error: "Unsupported exchange",
+    },
+    {
+      guard: "api_key absent",
+      body: {
+        exchange: "binance",
+        api_secret: "ccxt-secret-enough",
+        wizard_session_id: WIZARD_SESSION_ID,
+      },
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      error: "api_key is required",
+    },
+    {
+      guard: "sfox venue switch is off",
+      body: {
+        exchange: "sfox",
+        api_key: "sfox-bearer-token-value",
+        wizard_session_id: WIZARD_SESSION_ID,
+      },
+      code: "KEY_VENUE_NOT_ENABLED",
+      error: "sFOX integration is not yet available.",
+    },
+    {
+      // UNREACHABLE IN PRODUCTION since MT5-01 set the server switch. Covered
+      // because the CLASS is the subject: this is the arm the founder hit, and
+      // a split that skipped it would leave the class open at the very site
+      // that proved it was broken.
+      guard: "mt5 venue switch is off (unreachable post-MT5-01)",
+      body: {
+        exchange: "mt5",
+        api_key: "500123456",
+        api_secret: "investor-password-123",
+        passphrase: "MetaQuotes-Demo",
+        wizard_session_id: WIZARD_SESSION_ID,
+      },
+      code: "KEY_VENUE_NOT_ENABLED",
+      error: "MT5 integration is not yet available.",
+    },
+    {
+      guard: "mt5 investor password absent",
+      body: {
+        exchange: "mt5",
+        api_key: "500123456",
+        passphrase: "MetaQuotes-Demo",
+        wizard_session_id: WIZARD_SESSION_ID,
+      },
+      env: { MT5_ENABLED: "true" },
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      error: "api_secret is required",
+    },
+    {
+      // ⭐ THE ONE GENUINE FORMAT FAILURE. The only guard of the twelve that
+      // judges the SHAPE of a value, and the reason KEY_INVALID_FORMAT's copy
+      // (Binance secrets are 64 hex characters, etc.) is true again now that
+      // the other eleven have moved off it.
+      guard: "ccxt api_secret shorter than 8 — THE format failure",
+      body: {
+        exchange: "binance",
+        api_key: "ccxt-key-with-enough-chars",
+        api_secret: "short77",
+        wizard_session_id: WIZARD_SESSION_ID,
+      },
+      code: "KEY_INVALID_FORMAT",
+      error: "api_secret is required",
+    },
+    {
+      guard: "OKX passphrase absent",
+      body: {
+        exchange: "okx",
+        api_key: "okx-key-with-enough-chars",
+        api_secret: "okx-secret-with-enough-chars",
+        wizard_session_id: WIZARD_SESSION_ID,
+      },
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      error: "OKX requires a passphrase",
+    },
+    {
+      guard: "wizard_session_id is not a uuid",
+      body: { ...VALID_BODY, wizard_session_id: "not-a-uuid" },
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      error: "wizard_session_id required",
+    },
+    {
+      guard: "api_secret over the 512 cap",
+      body: { ...VALID_BODY, api_secret: LONG },
+      code: "KEY_INPUT_TOO_LONG",
+      error: "Key or secret too long",
+    },
+    {
+      guard: "passphrase over the 512 cap",
+      body: { ...VALID_BODY, passphrase: LONG },
+      code: "KEY_INPUT_TOO_LONG",
+      error: "Passphrase too long",
+    },
+    {
+      guard: "label over the 100 cap",
+      body: { ...VALID_BODY, label: "L".repeat(101) },
+      code: "KEY_INPUT_TOO_LONG",
+      error: "Label too long",
+    },
+  ];
+
+  it("the table covers every emitting guard — hand-typed count, not a derivation", () => {
+    // Pinned as the LITERAL 12. Comparing `SITES.length` to itself is an
+    // expectation that reads its own subject and can never fail, and 14 would
+    // pin the raw-grep fiction that counted two comment mentions as emitters.
+    expect(SITES.length).toBe(12);
+  });
+
+  it.each(SITES)("$guard -> 400 $code", async ({ body, env, code, error }) => {
+    for (const [k, v] of Object.entries(env ?? {})) process.env[k] = v;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(body));
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe(code);
+    // The error string is the PRE-SPLIT one, verbatim. Only the code moved.
+    expect(json.error).toBe(error);
+    // Every one of these rejects BEFORE the live probe, which is what makes the
+    // new copy's "nothing was sent to the exchange" claim observable rather
+    // than asserted.
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("KEY_INVALID_FORMAT is left on exactly ONE guard — the negative pin", () => {
+    const formatRows = SITES.filter((s) => s.code === "KEY_INVALID_FORMAT");
+    expect(formatRows.map((s) => s.guard)).toEqual([
+      "ccxt api_secret shorter than 8 — THE format failure",
+    ]);
+  });
+
+  it("the split is real — five distinct codes where there used to be one", () => {
+    // The defect in one line: before the split this set had exactly ONE member
+    // for twelve distinct causes. A regression that re-merged any pair shrinks
+    // it, and the failure names which code disappeared.
+    const distinct = new Set(SITES.map((s) => s.code));
+    expect([...distinct].sort()).toEqual([
+      "KEY_INPUT_TOO_LONG",
+      "KEY_INVALID_FORMAT",
+      "KEY_MISSING_REQUIRED_FIELD",
+      "KEY_UNSUPPORTED_VENUE",
+      "KEY_VENUE_NOT_ENABLED",
+    ]);
   });
 });

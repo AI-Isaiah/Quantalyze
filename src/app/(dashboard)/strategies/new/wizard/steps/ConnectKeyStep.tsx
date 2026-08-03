@@ -266,6 +266,16 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
   new Set<WizardErrorCode>([
     // Emitted directly by the route's own guards.
     "KEY_INVALID_FORMAT",
+    // 142.2 / MT5-04 (D-05) — the four codes `KEY_INVALID_FORMAT` was split
+    // into. `create-with-key/route.ts` emits all four from its own guards, so
+    // all four belong HERE and not only in the union: a code absent from this
+    // roster is rejected as unrecognised and renders UNKNOWN, which would have
+    // replaced one wrong sentence with a worse one. `KEY_INVALID_FORMAT` stays
+    // because the route still emits it at its one genuine format guard.
+    "KEY_MISSING_REQUIRED_FIELD",
+    "KEY_UNSUPPORTED_VENUE",
+    "KEY_VENUE_NOT_ENABLED",
+    "KEY_INPUT_TOO_LONG",
     "KEY_NOT_READ_ONLY",
     "KEY_HAS_TRADING_PERMS",
     "KEY_HAS_WITHDRAW_PERMS",
