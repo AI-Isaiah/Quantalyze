@@ -46,9 +46,10 @@ RATE-01..05 — all mapped, Traceability filled). Roadmap: `.planning/ROADMAP.md
 
 ## Current Position
 
-Phase: 142.1 (close-142-review-findings-chain-start-stamp-preservation-dep) — EXECUTING
-Plan: 1 of 8
-        awaiting `/gsd:plan-phase 142.1`. Scope + hazards recorded below.
+Phase: 142.1 (close-142-review-findings-chain-start-stamp-preservation-dep) — EXECUTED
+Plan: 8 of 8
+        All 8 plans complete across 5 waves. Verified `human_needed` (41/42, zero
+        gaps) — 7 items persisted to `142.1-HUMAN-UAT.md`. Scope + hazards below.
 
 Phase 142 (JOB — strategy_analytics stuck-computing reaper + computing_started_at DDL) — EXECUTED
         Six plans across three waves, each wave gated at its boundary; final suite
@@ -247,13 +248,13 @@ was conflated with "all rows observed". Pass C caught it. Item 14 closes it.
 tools are stripped from subagents (upstream `anthropics/claude-code#13898`), so
 those runs must happen in the orchestrator session, not in a gsd-executor.
 
-⚠️ **Carried from 142:** no `142-VERIFICATION.md` exists — `execute-phase` ran
-with `--no-transition` and no `gsd-verifier` was ever dispatched, so 142's
-goal-backward verification is still outstanding.
+✅ **Resolved (was "carried from 142"):** `142-VERIFICATION.md` now EXISTS —
+status `gaps_found`, 9/10 — and 142.1 is the phase that closed its findings.
+The line that used to sit here claimed no such file existed; it was stale.
 
 Prior phase: 141.1 (seambackoff-…) — COMPLETE and verified, merged, NOT pushed
-Plan: 0 of 0 (142.1 not planned)
-Status: Executing Phase 142.1
+Plan: 8 of 8 (142.1 executed; verification `human_needed`, 7 UAT items open)
+Status: Phase 142.1 EXECUTED — awaiting merge-gate human items
 
 Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         `feat/v1.16-141-jobs-rate-retry`. Post-merge gate after Wave 2 GREEN: tsc clean,
