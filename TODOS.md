@@ -810,6 +810,21 @@ Read it as such.
    semantics **three separate times** (plans 05, 08, and here), always because prose *about* a gate
    sits inside that gate's blast radius. Found by code review, 2026-08-03.
 
+10. **`sql-tests` is in no aggregator's `needs:`, so the reaper's only behavioural gate can vanish
+    silently.** `.github/workflows/ci.yml`'s `frontend` aggregator gates branch protection on the
+    `frontend-*` jobs; `sql-tests` is not among them and self-disables when
+    `vars.E2E_TEST_DB_CONFIGURED` is unset. It is the ONLY gate that `EXECUTE`s the real deployed
+    cron body — the one that caught D-19 after every static gate passed over it. Partial mitigation
+    exists: `e2e-seeded`'s go-live check errors on a skip for trusted events and its message notes
+    that the same variable also disables `sql-tests` — so a missing variable is loud, but a
+    `sql-tests` job that is *present and failing* is not gated on by anything. ⚠️ With branch
+    protection deferred until paying clients, every CI gate here is advisory at merge anyway, so
+    this is about SIGNAL, not enforcement: say "would have caught", never "did stop". Fix: mirror
+    the `e2e-seeded` result check for `sql-tests`, or add it to an aggregator's `needs:`.
+    Found by the /ship coverage audit, 2026-08-03. **Related and already FIXED in 0.52.0.0:** the
+    same job had been made the third member of the one-pending-slot `shared-test-db` concurrency
+    group, which cancelled a pending gate outright; it is now gated behind `python`.
+
 ---
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
