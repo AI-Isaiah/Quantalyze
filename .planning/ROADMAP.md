@@ -1,71 +1,6 @@
 # Roadmap: Quantalyze
 
-## Current Milestone: v1.17 MT5 — usable end-to-end, not merely ingested (Phases 147–152)
-
-**Opened 2026-08-04** by founder call, mid-v1.16. v1.16 is **PARKED, not finished** — see the parked
-block below for exactly what is outstanding and how to resume.
-
-**Goal:** MT5 *works*, in the founder's sense rather than the wizard's. Founder verbatim:
-
-> *"The goal is that MT5 works. And at the moment, maybe it ingests the data, but I cannot use it in
-> the scenario, and I can still not produce a factsheet."*
-
-v0.53.0.0 + v0.53.0.1 got an MT5 strategy all the way through the wizard with a real 136-day series
-(MT5-05 discharged on PROD 2026-08-04). Everything **after** ingestion is still broken for it.
-
-**Scope:** MT5-GOAL-01 (umbrella) + SCEN-01..05, AUM-01..05, NAV-01, OWN-02/03/04, MT5-14/15,
-WIZFORM-01..04, WIZCONT-01/02, STALE-01, MT5-06..10, per `.planning/REQUIREMENTS.md`.
-
-⭐ **The defining fact of this milestone: almost none of it is an MT5 defect.** MT5 is the first
-venue to traverse the whole path from a cold start, so it is exposing pre-existing holes in the
-surfaces after ingestion. SCEN-01 hits **7 of 30 published CSV strategies**. OWN-02 blocks every
-unpublished strategy at any venue. AUM-05 will hit sFOX the day its flag flips. Plan and verify these
-as **general fixes that MT5 happens to have found** — a fix scoped to `exchange === 'mt5'` is the
-wrong fix in almost every case here.
-
-**Ordering rationale (non-negotiable):**
-
-- **SCEN-01 first.** It is a silent money-path correctness bug (18/42 analytics rows contribute an
-  empty series with no error) AND it blocks meaningful testing of everything else — you cannot judge
-  a scenario surface whose engine is receiving nothing.
-- **OWN-02 second.** Three separate items (NAV-01, OWN-04, SCEN-03) all link to a factsheet that
-  currently 404s. Shipping any of them first builds the exact dead-end Phase 142.2 existed to delete.
-  ⛔ Its acceptance test is adversarial, not happy-path: **after an owner views their draft, an anon
-  request for the same id must still 404** (the route is publicly cached).
-- **AUM after both** — AUM-04 (the forced blank slate) is what made the founder's book unreachable,
-  but its symptom is entangled with SCEN-01's zeros; fixing AUM first would ship into a screen that
-  still reads 0.00 and prove nothing.
-- **MT5 numeric verification (MT5-06..10) LAST** — it needs a live funded account on a real trading
-  day and a stable surface to measure. Running it before the above means re-running it after.
-
-## Phases — v1.17 (CURRENT)
-
-- [ ] **Phase 147: SCEN — the series actually reaches the engine** - SCEN-01 (empty `daily_returns` vs populated `returns_series`, 18/42 rows, silent) + MT5-15 (`complete_with_warnings` on all three MT5 strategies, uninvestigated). ⛔ establish writer-vs-reader from the code before choosing a remedy; a backfill touches `supabase/migrations/**` which auto-applies to PROD
-- [ ] **Phase 148: OWN — an allocator can see their own strategy** - OWN-02 (owner factsheet WITHOUT breaking the public cache) + NAV-01 (a "my strategies" entry — the allocator side is write-only today) + OWN-04 + SCEN-03 (clickable rows)
-- [ ] **Phase 149: AUM — a book you can reach and a size you can set** - AUM-04 (all-or-nothing per-key gate + ⭐manager-key cross-role contamination) + AUM-02/05 (holdings sync crashes on every non-ccxt venue — fix the CLASS) + AUM-01 (settable AUM) + AUM-03 (copy naming a control that does not exist)
-- [ ] **Phase 150: WIZ — the wizard stops costing submits** - WIZFORM-01..04 (inline field errors; codeless 400 → `UNKNOWN`; impossible advice) + WIZCONT-01/02 (allocators have NO resume path; dedup) + STALE-01 (root cause NOT yet established — investigate before planning) + MT5-14 (venue chips + preselect; ⛔ re-cut the no-widening pin deliberately)
-- [ ] **Phase 151: SCEN-UX — the composer explains itself** - SCEN-02 (own-vs-third-party marker; ⚠️ additive WIRE change + persisted schema bump) + SCEN-04 (unlabelled numbers) + SCEN-05 (duplicate browse rows) + OWN-03 (⭐the missing WIZARD QUESTION — own capital vs verifying a team; ⛔ NOT an auto-add; first WRITING requirement → money-path review)
-- [ ] **Phase 152: MT5-VERIFY — the numbers are true** - MT5-06 (server-UTC offset measured live) + MT5-07 (external oracle) + MT5-08 (live funded account, trading day) + MT5-09 (every surface agrees) + MT5-10 (uncapped fix budget)
-
----
-
-## ⏸️ PARKED Milestone: v1.16 Production Resilience & Reliability (Phases 140–146)
-
-**PARKED 2026-08-04 at 68% — 13 of 19 phases complete, 119 of 127 plans.** ⛔ **This milestone is NOT
-finished and must NOT be recorded as shipped.** The founder parked it deliberately to take v1.17 MT5
-first, and will reopen it after MT5 delivers.
-
-**Outstanding on resume — 4 phases, all in the JOB/RATE groups:**
-- **Phase 143: JOB** — dropped-enqueue reconciliation sweep
-- **Phase 144: JOB** — WR-02 orphaned-running DELETE→terminal UPDATE + cadence.
-  ⚠️ Carries a known live decision: the purge DELETEs rather than resets, which risks prod job-loss;
-  TEST wants DELETE, PROD wants reset, same migration. Resolve at the flip.
-- **Phase 145: JOB** — csv-finalize atomicity (reproduce-first)
-- **Phase 146: RATE** — audit + close the two verified gaps
-
-**To resume:** flip this heading back to `## Current Milestone`, restore STATE.md's `milestone` to
-`v1.16`, and continue at Phase 143. Nothing below this line was rolled back — every completed v1.16
-phase remains shipped and live.
+## Current Milestone: v1.16 Production Resilience & Reliability (Phases 140–146)
 
 **Goal:** Give the live money-bearing plumbing failure handling — so a hung Railway request, a
 silently-dropped compute-job enqueue, or a mid-job worker crash can't strand a real investor
@@ -95,7 +30,7 @@ factsheet on a spinner that never resolves.
 - **RATE last** — mechanical, and its gap list must come from a fresh kickoff grep, not from
   anything upstream.
 
-### Phases — v1.16 (PARKED)
+## Phases
 
 - [x] **Phase 140: SEAM — Shared resilience core + circuit breaker** - Both Vercel→Railway chokepoints fail fast through one Upstash-backed breaker with unified timeout budgets and a clean 503 envelope (no retry yet) (completed 2026-07-25)
 - [x] **Phase 140.1: PYAPI — Python service contract, status attributability & limiter identity** (INSERTED) - Tenant-scope the wizard-session leak, make 4xx/5xx attributable at the source, per-tenant `/process-key` throttling, complete idempotency (completed 2026-07-26)
@@ -730,12 +665,8 @@ Plans:
 
 ## Current position
 
-**v1.17 MT5 — usable end-to-end** — milestone opened 2026-08-04 by founder call, Phases 147–152.
-Next: `/gsd:plan-phase 147` (SCEN-01 — highest priority, silent money-path bug).
-
-⏸️ **v1.16 Production Resilience & Reliability is PARKED at 68%** (13/19 phases, 119/127 plans),
-NOT shipped. Resume at Phase 143 once v1.17 delivers. See the parked block above for the outstanding
-four phases and the resume procedure.
+**v1.16 Production Resilience & Reliability** — roadmap created 2026-07-25, Phases 140–146.
+Next: `/gsd:plan-phase 140`.
 
 ---
 
