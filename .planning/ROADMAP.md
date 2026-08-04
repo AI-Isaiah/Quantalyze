@@ -79,7 +79,7 @@ unpublished strategy; AUM-05 will hit sFOX the day its flag flips. **A fix scope
 Plans:
 **Wave 1**
 
-- [ ] 147-01-PLAN.md — Foundation: resolve-series leaf extraction + SeriesState/deriveEmptySeriesState (16h age bound) (wave 1)
+- [x] 147-01-PLAN.md — Foundation: resolve-series leaf extraction + SeriesState/deriveEmptySeriesState (16h age bound) (wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -252,7 +252,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 147. SCEN-01 engine series | 0/? | Not started | - |
+| 147. SCEN-01 engine series | 1/6 | In Progress|  |
 | 148. OWN owner factsheet | 0/? | Not started | - |
 | 149. NAV my-strategies ranking | 0/? | Not started | - |
 | 150. OWN-03 portfolio question | 0/? | Not started | - |
