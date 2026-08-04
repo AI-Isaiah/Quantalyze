@@ -12,6 +12,7 @@ import {
 import { KeyPermissionBadge } from "@/components/connect/KeyPermissionBadge";
 import {
   checkStrategyGate,
+  isDailyReturnsSourced,
   type StrategyGateResult,
 } from "@/lib/strategyGate";
 import {
@@ -931,7 +932,13 @@ export function SyncPreviewStep({
                 supabase
                   .from("strategy_analytics")
                   .select(
-                    "cagr, sharpe, sortino, max_drawdown, volatility, cumulative_return, sparkline_returns, metrics_json_by_basis, data_quality_flags, computed_at",
+                    // 142.2 review FIX 3 — `series_completeness` rides this
+                    // existing member of the Promise.all, exactly as the
+                    // single-key arm does. The composite arm must evaluate the
+                    // same admissibility the admin approve path will apply, and
+                    // that verdict is what decides it. Widening a column string
+                    // adds no round trip.
+                    "cagr, sharpe, sortino, max_drawdown, volatility, cumulative_return, sparkline_returns, metrics_json_by_basis, data_quality_flags, computed_at, series_completeness",
                   )
                   .eq("strategy_id", strategyId)
                   .maybeSingle(),
@@ -1047,6 +1054,64 @@ export function SyncPreviewStep({
             // real result.
             if (series.length === 0) {
               return "repoll";
+            }
+
+            // ── 142.2 review FIX 3: PREVIEW AND PUBLISH MUST AGREE ──────────
+            //
+            // This arm used to reach `setPhase("passed")` without evaluating
+            // ANY admissibility, and that was harmless for as long as the admin
+            // approve path admitted composites on the deleted `!input.apiKeyId`
+            // term — keylessness alone let them through on both sides, so the
+            // two agreed by accident. They no longer do. Admission on the
+            // daily-returns branch now requires a POSITIVE verdict, and this
+            // arm never looked at one. A user completing the composite wizard
+            // against an unstamped row — a legacy composite, or a stitch that
+            // took the failure arm, which deliberately OMITS the column so a
+            // prior verdict survives — saw "passed", submitted, and was then
+            // refused at publish. Preview promising what publish will refuse is
+            // worse than either refusing.
+            //
+            // The SHARED predicate is called, never restated. The admin route's
+            // TOCTOU re-check learned this lesson already: what stood there was
+            // a hand-written copy under a comment saying the two "must never
+            // diverge", and they diverged anyway. A third hand-copy here would
+            // be the same mistake a third time.
+            //
+            // ⚠️ THE ORIGINAL INTENT IS PRESERVED: a composite must NOT be
+            // false-failed for having zero fills. That is exactly why this is
+            // `isDailyReturnsSourced` and NOT `checkStrategyGate` — the gate
+            // would apply the trade-count floor to a strategy that has zero
+            // trades by construction. This asks only the one question the phase
+            // added and this arm never answered. `series.length > 0` is
+            // guaranteed by the repoll guard directly above, so the predicate's
+            // row-count term cannot be what refuses here; only the verdict can.
+            //
+            // NOT ADDRESSED, deliberately: the admin path also applies a 7-row
+            // CSV floor that this arm still does not. That divergence is
+            // PRE-EXISTING — it predates this phase and is not what FIX 3 is
+            // about — so closing it here would be scope the review did not ask
+            // for. Recorded in 142.2-FIXES.md rather than silently fixed.
+            const compositeAdmissible = isDailyReturnsSourced({
+              // Zero BY CONSTRUCTION for a composite; this arm never queries
+              // `trades` and must not start.
+              tradeCount: 0,
+              csvRowCount: series.length,
+              // Same `?? null` coercion as the single-key arm, and its only
+              // direction is SAFE: an absent column or an unstamped row arrives
+              // as null, which no allow-list admits.
+              seriesCompleteness:
+                (analyticsRow?.series_completeness as string | null) ?? null,
+            });
+            if (!compositeAdmissible) {
+              setErrorCode("GATE_SERIES_PROVENANCE_UNVERIFIED");
+              setPhase("gate_failed");
+              trackForQuantsEventClient("wizard_error", {
+                wizard_session_id: wizardSessionId,
+                step: "sync_preview",
+                code: "GATE_SERIES_PROVENANCE_UNVERIFIED",
+                trade_count: 0,
+              });
+              return "done";
             }
 
             const compositeMetrics: FactsheetPreviewMetric[] = [
