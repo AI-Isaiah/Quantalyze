@@ -96,7 +96,7 @@ From 147-RESEARCH.md "Validation Architecture" Wave-0 gaps — each is created b
 | SC-3 | `returns/route.ts`: replace the resolver call with `normalizeDailyReturns(row?.returns_series)` (forward the wealth index raw) | `route.test.ts` SC3 case — day one becomes ≈ 1.0 (+100%) and length becomes N, not N−1 | ⬜ pending — run in 147-02 T1 | |
 | SC-3(share) | `share-resolve.ts`: revert the loop to the pre-147 `normalizeDailyReturns(s.daily_returns)` | `share-resolve.test.ts` SC1-share + SC3-share cases | ⬜ pending — run in 147-03 T1 | |
 | SC-4 | Composer tolerance narrowing: map `"empty"` to `"computing"` | `ScenarioComposer.test.tsx` empty-note case (NO DATA chip becomes SYNCING) | ⬜ pending — run in 147-05 T2 | |
-| SC-4(book) | `queries.ts`: hard-code the terminal-empty arm of the series_state derivation to `"computing"` | `queries.my-allocation.test.ts` state-empty-terminal case | ⬜ pending — run in 147-04 T2 | |
+| SC-4(book) | `queries.ts`: hard-code the terminal-empty arm of the series_state derivation to `"computing"` | `queries.my-allocation.test.ts` state-empty-terminal case | ✅ observed 2026-08-04 (147-04 T2) | 2 failed / 6 passed. state-empty-terminal: `AssertionError: expected 'computing' to be 'empty'` at `queries.my-allocation.test.ts:2714`; the 16h missing-row bound also fell (`:2723`, 17h-old row stayed 'computing'). Reverted; 84/84 green after revert. |
 
 *Each mutation is run by the task named in its row, immediately after that task's tests go GREEN: apply mutation → observe RED → revert → paste evidence here. 147-06 T3 refuses to close while any row is pending.*
 

@@ -32,6 +32,7 @@ function makeStrategy(over: {
       organization_name: over.strategy?.organization_name ?? null,
       trust_tier: over.strategy?.trust_tier ?? null,
       is_composite: over.strategy?.is_composite ?? false,
+      series_state: over.strategy?.series_state ?? "empty",
       strategy_analytics:
         over.strategy?.strategy_analytics !== undefined
           ? over.strategy.strategy_analytics

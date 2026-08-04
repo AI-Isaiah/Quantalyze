@@ -4,7 +4,12 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { castRow } from "@/lib/supabase/cast";
 import { loadManagerIdentity as loadManagerIdentityRaw } from "./manager-identity";
 import { extractAnalytics, EMPTY_ANALYTICS } from "./utils";
-import { blendPeriodsPerYear, isComputedAnalytics } from "./closed-sets";
+import {
+  blendPeriodsPerYear,
+  deriveEmptySeriesState,
+  isComputedAnalytics,
+  type SeriesState,
+} from "./closed-sets";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
 import { API_KEY_USER_COLUMNS, type ApiKeyUserColumn } from "./constants";
 import { equitySnapshotsToDailyPoints } from "@/lib/allocation-helpers";
@@ -1664,6 +1669,17 @@ export interface MyAllocationDashboardPayload {
        * shipped to the client — only this boolean projection (T-111-03).
        */
       is_composite: boolean;
+      /**
+       * Phase 147 / SCEN-01 — what an EMPTY `strategy_analytics.daily_returns`
+       * MEANS for this book row: a live job ("computing"), or genuine absence
+       * ("empty"). Derived server-side by `deriveEmptySeriesState`, the SAME
+       * single predicate the lazy /returns route uses — UI-SPEC §3 forbids a
+       * second derivation table, so the composer's chip cannot disagree with
+       * itself depending on which path supplied the leg. The RAW
+       * `computation_status` column that feeds this is NEVER shipped (T-147-10);
+       * only this three-valued presentation string crosses to the client.
+       */
+      series_state: SeriesState;
       strategy_analytics: Pick<
         StrategyAnalytics,
         "daily_returns" | "cagr" | "sharpe" | "volatility" | "max_drawdown"
@@ -3397,6 +3413,7 @@ export const getMyAllocationDashboard = cache(
             markets,
             start_date,
             asset_class,
+            created_at,
             organization:organizations(name),
             strategy_verifications (
               trust_tier,
@@ -3575,6 +3592,28 @@ export const getMyAllocationDashboard = cache(
           analyticsForPayload as MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"];
       }
 
+      // Phase 147 / SCEN-01 — ONE rule shared with the returns route via
+      // deriveEmptySeriesState; UI-SPEC §3 forbids a second table (SC2). A
+      // non-empty resolved series is decided by LENGTH here (the predicate
+      // never returns "available"); everything else defers to the shared
+      // ladder, including the 16h bound that terminates the missing-row
+      // spinner — a `strategies` row does not guarantee a `strategy_analytics`
+      // row, so status stays null forever when the compute job was never
+      // enqueued.
+      const seriesStatus =
+        typeof analyticsObj?.computation_status === "string"
+          ? analyticsObj.computation_status
+          : null;
+      const strategyCreatedAt =
+        typeof (strategy as unknown as { created_at?: unknown }).created_at ===
+        "string"
+          ? ((strategy as unknown as { created_at: string }).created_at)
+          : null;
+      const series_state: SeriesState =
+        resolvedDailyReturns.length > 0
+          ? "available"
+          : deriveEmptySeriesState(seriesStatus, strategyCreatedAt);
+
       // eligibility: a strategy is eligible for outcome
       // recording only when:
       //   1. it was sent_as_intro to this allocator
@@ -3622,13 +3661,19 @@ export const getMyAllocationDashboard = cache(
       // `organization_name` is emitted). Phase 111 / CONSTIT-02: likewise drop
       // the raw `strategy_verifications` embed — only the derived `trust_tier`
       // string is emitted (the embed's status/created_at never ship).
+      // Phase 147 / SCEN-01: `created_at` is selected ONLY to feed the
+      // missing-row age bound above; it is dropped here for the same reason as
+      // the embeds — this projection ships exactly the fields the payload type
+      // declares, never an undeclared passenger.
       const {
         organization: _rawOrganization,
         strategy_verifications: _rawVerifications,
+        created_at: _rawStrategyCreatedAt,
         ...strategyRest
       } = strategy as StrategyPayload & {
         organization?: unknown;
         strategy_verifications?: unknown;
+        created_at?: unknown;
       };
 
       // NEW-C09-08 (B1, audit-2026-05-07) — CLOSED. Gate `current_weight`
@@ -3665,6 +3710,7 @@ export const getMyAllocationDashboard = cache(
             // the raw verification + flags embeds are stripped above).
             trust_tier,
             is_composite,
+            series_state,
             strategy_analytics: strategyAnalyticsForPayload,
           },
         },
