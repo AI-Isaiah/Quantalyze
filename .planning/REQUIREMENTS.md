@@ -488,6 +488,34 @@ D-14 valve.
 
 ---
 
+### WIZ-CONT — Wizard continuity & credential dedup (founder call 2026-08-04, live MT5-05 run)
+
+- [ ] **WIZCONT-01**: Re-entering "add a strategy" with an existing wizard draft **continues where the
+  founder left off** instead of restarting. ⚠️ **Resume is NOT missing — do not rebuild it.**
+  `WizardClient.tsx:187-191` already resumes to `sync_preview` when `initialDraft` is present, and the
+  server query on `page.tsx:79-90` correctly finds the row (verified on PROD: the live draft carries
+  `source='wizard'`, `status='draft'`, so it IS matched). The restart is therefore attributable to the
+  **entry point BEFORE the wizard** — `/strategies/new` is a branch chooser with no draft awareness,
+  so it re-asks API-vs-CSV and the founder experiences "step 1" without the resuming component ever
+  mounting. **Establish the exact entry path first** (this was inferred from code, not observed
+  click-by-click) and fix the chooser, not the state machine.
+
+- [ ] **WIZCONT-02** *(DATA INTEGRITY — founder: "this should always first dedup")*: Connecting a key
+  **deduplicates on the credential**, never creating a second strategy + second `api_keys` row for an
+  account already connected. **Measured gap, 2026-08-04:** a guard exists at
+  `create-with-key/route.ts:255-269` but is keyed on **(user, wizard SESSION)** — sized for a
+  double-click or browser retry. Navigating away and back mints a NEW session, so it matches nothing.
+  And `public.api_keys` carries **NO unique constraint beyond the primary key** (confirmed against
+  PROD `pg_constraint` + `pg_indexes`), so nothing at the database level refuses a duplicate.
+  Only luck prevented one during the MT5-05 run: the founder did not re-enter credentials.
+  ⚠️ **The dedup key needs design, not a quick UNIQUE index.** Credentials are stored ENCRYPTED
+  (`api_key_encrypted`, per-row `dek_encrypted` + `nonce`), so a unique index on ciphertext dedups
+  nothing — two encryptions of the same secret differ. The identity must come from something stable
+  and non-secret (e.g. the venue's own account identifier returned at validation), which is a
+  different value per venue and does not exist for every venue today.
+  ⛔ **Fail toward the EXISTING row, never toward a silent overwrite**: re-connecting must not
+  clobber a key whose `strategy_keys` membership and synced history other strategies already depend on.
+
 ### STALE — No stale screens (founder call 2026-08-04: "no stale screens")
 
 - [ ] **STALE-01**: A wizard screen never shows a state the backend has already left. Two instances
@@ -572,6 +600,8 @@ Populated during roadmap creation.
 | MT5-13 | Phase 142.3 | Pending (found by the MT5-05 live run 2026-08-04; blocks a clean MT5-05) |
 | OWN-01 | — | **Already met** (CONTRIB-03, verified in code 2026-08-04) — no phase needed |
 | OWN-02..04 | unassigned | Pending — needs its own phase; ⛔ do NOT fold into 142.3 (see the OWN scope fence) |
+| WIZCONT-01 | unassigned | Pending — resume EXISTS; suspect the `/strategies/new` chooser, confirm the entry path before planning |
+| WIZCONT-02 | unassigned | Pending — **data integrity**; dedup guard is session-scoped, no DB uniqueness on `api_keys`; dedup key needs design (credentials are encrypted) |
 | STALE-01 | unassigned | Pending — root cause NOT yet established; investigate before planning |
 | RATE-01 | Phase 146 | Pending |
 | RATE-02 | Phase 146 | Pending |
