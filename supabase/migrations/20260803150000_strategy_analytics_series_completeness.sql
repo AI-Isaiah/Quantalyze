@@ -14,13 +14,27 @@
 -- The verdict values (five, exhaustive as of this migration):
 --   ledger_complete       -- every input the series needs was present in the
 --                            venue's own ledger; nothing was inferred.
---   sampled_gapped        -- the inputs were sampled and are known to have
---                            holes (e.g. a perp whose fills are missing, whose
---                            dailies therefore carry funding only). This is the
---                            verdict the gate must keep REFUSING -- it is the
---                            safety property, and MT5 passing is not the test.
---   fill_derived_unproven -- derived from fills with no independent balance or
---                            equity anchor proving the series closes.
+--   sampled_gapped        -- stamped by combine_sfox_balance_history, and ONLY
+--                            by it, when nav_gap_days > 0: a SAMPLED NAV series
+--                            with interior holes. Computable, but not a complete
+--                            record. ⚠️ NOT the gapped-perp case. A perp whose
+--                            realized-PnL fetch left a hole is
+--                            fill_derived_unproven (below), and attributing that
+--                            case here was this comment's first disagreement
+--                            with the producer registry.
+--   fill_derived_unproven -- stamped by combine_realized_and_funding (binance /
+--                            bybit / okx) ALWAYS and UNCONDITIONALLY -- a
+--                            constant, not a data-driven refinement, and the
+--                            NORMAL case for every ccxt venue rather than
+--                            evidence of a particular account's gap. It does NOT
+--                            mean "we looked for a balance/equity anchor and
+--                            found none": that path sums two independently
+--                            fetched streams with no residual and no
+--                            reconciliation, so a silently truncated fetch is
+--                            indistinguishable from a genuinely quiet day. This
+--                            is the verdict the gate must keep REFUSING -- it is
+--                            the safety property, and MT5 passing is not the
+--                            test.
 --   user_supplied         -- the numbers came from a human-provided file; the
 --                            underlying inputs were never observed by us.
 --   composite_stitched    -- stitched from member series by the composite
@@ -79,8 +93,12 @@ ALTER TABLE public.strategy_analytics
 
 COMMENT ON COLUMN public.strategy_analytics.series_completeness IS
   'MT5-12 (Phase 142.2): the completeness verdict for this strategy''s daily '
-  'series. Values: ledger_complete | sampled_gapped | fill_derived_unproven | '
-  'user_supplied | composite_stitched. The PRODUCER decides: the verdict is '
+  'series. Values: ledger_complete | sampled_gapped (a SAMPLED NAV series with '
+  'interior holes -- combine_sfox_balance_history only, when nav_gap_days > 0; '
+  'NOT the gapped-perp case) | fill_derived_unproven (every ccxt fills+funding '
+  'series, ALWAYS and unconditionally -- the normal case for that path, not a '
+  'per-account judgement) | user_supplied | composite_stitched. The PRODUCER '
+  'decides: the verdict is '
   'assigned by the code that builds the series, from a single producer '
   'registry in Python (analytics-service/services/broker_dailies.py). '
   'TypeScript holds a SEPARATE admissibility policy -- a hand-typed subset in '
