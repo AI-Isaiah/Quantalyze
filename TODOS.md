@@ -1082,6 +1082,33 @@ None of these clears the founder blast-radius bar as blocking. Each names its so
     copy decision, not a safety one, which is why it was not smuggled into a fix commit. The honest
     remedy is a fourth outcome meaning "your series was examined and found incomplete"; doing it
     requires re-cutting D-15's oracle deliberately, never incidentally.
+15. **`DEF-142.2-15` — the six code-review findings deferred by founder scope call (2026-08-04).**
+    All six cleared the *stopping rule* bar (none user-facing, none data-integrity), which is why
+    they were not fixed alongside the four that were. Recorded here so the deferral is a decision
+    with a record, not an omission. Batch them with the next edit to each file:
+    - **(a) `analytics_runner.py:1564` — `_stamp_user_supplied` infers "not broker-sourced" from a
+      null `api_key_id`, which `ON DELETE SET NULL` also produces.** Delete an API key, and a later
+      recompute stamps `user_supplied` on a series that was actually broker-derived — overstating
+      how the numbers were obtained. Needs a structural check, not a null test.
+    - **(b) `broker_dailies.py:524` — `nav_gap_days` reindexes over the FULL span,** so leading and
+      trailing gaps count the same as interior holes. An sFOX account whose NAV history simply
+      starts later than the requested span is stamped `sampled_gapped` with no interior holes, and
+      is refused. Should count interior-only.
+    - **(c) `analytics_runner.py:1500` — the composite exclusion rests on the `existing_flags`
+      `'composite'` marker, not structural identity.** If that flag is ever cleared or rebuilt
+      without the key, a composite recompute stamps `user_supplied` and erases the
+      machine-stitched-vs-human-uploaded distinction.
+    - **(d) `strategyGate.ts` — the publish-time TOCTOU re-check still refuses with trade-count
+      wording** when analytics are recomputed between wizard preview and admin approve. Same false-
+      sentence class as `DEF-142.2-14`; fix them together.
+    - **(e) `broker_dailies.py:91` — only ONE of the three producer paths validates its stamp
+      against `SERIES_COMPLETENESS_VALUES`.** The other two can emit an unregistered string. Drift
+      direction is fail-closed (an unrecognised verdict refuses), so this is a missing loud signal
+      at the producer, not a live money bug.
+    - **(f) `broker_dailies.py:91` + `strategyGate.ts` — the verdict list is hand-maintained in
+      BOTH Python and TypeScript.** ⚠️ **Do not "fix" this by importing one from the other** — the
+      duplication is deliberate (producer set vs admissibility policy) and documented in the
+      migration comment. The hygiene item is drift *detection*, not de-duplication.
 
 ⚠️ **Cross-reference, do NOT duplicate:** the anon-readable `strategy_analytics` splat that plan
 04's A2 check re-confirmed (`anon` holds `SELECT` on `series_completeness`, as it does on every
