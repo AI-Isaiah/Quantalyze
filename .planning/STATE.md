@@ -3,8 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: planning
-last_updated: "2026-08-04T17:10:00.000Z"
-last_activity: 2026-08-04
+stopped_at: Phase 147 UI-SPEC approved
+last_updated: "2026-08-04T18:31:50.773Z"
+last_activity: 2026-08-03
 progress:
   total_phases: 9
   completed_phases: 0
@@ -423,19 +424,24 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - **SCEN-01 (147) FIRST** — silent money-path bug AND it blocks meaningful verification of every
   other scenario surface; the READER is wrong (reuse `resolveDailyReturnSeries`, difference the
   wealth index, never backfill against migration 087).
+
 - **OWN-02 (148) before NAV-01 (149) / OWN-04 (same phase) / SCEN-03 (152)** — they link to a
   factsheet that today 404s. 148/149/150 split 2026-08-04: 149 = NAV-01 as a RANKING at discovery
   parity (reuse the existing ranking component/query — the visibility predicate is the only
   difference); 150 = OWN-03 wizard question (first OWN write — money-path review isolated).
   ⛔ Adversarial acceptance: after an owner views their draft, anon must still 404 (the route is
   public and `unstable_cache`d).
+
 - **AUM (151) after SCEN-01** — its zeros-on-screen symptom is entangled with SCEN-01's; fix the
   non-ccxt holdings-sync CLASS (sFOX latent, close before its go-live flip), not the MT5 instance.
+
 - **MT5-06..10 (155) LAST** — live funded account, real trading day, stable surface; human- and
   calendar-gated; MT5-10 UNCAPPED by founder decision; ⛔ no MT5-07 tolerance number exists —
   founder call at discuss-phase. MT5-GOAL-01 (umbrella) closes there.
+
 - ⏸️ **v1.16 PARKED at 68%** — resume at Phase 143 after v1.17; Phase 144 carries the live WR-02
   TEST-DELETE/PROD-reset founder decision. 142.3's scope re-homed to 155; MT5-14 to 153.
+
 ## Performance Metrics
 
 | Phase | Plan | Duration | Tasks | Files | Completed |
@@ -1181,7 +1187,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session Continuity
 
 **Last activity:** 2026-08-03
-**Stopped at:** Phase 142.2 context gathered
+**Stopped at:** Phase 147 UI-SPEC approved
 **Next step:** run `/gsd:verify-work` on Phase 140.1.1. Nothing is left to execute.
 
 ⚠️ **Env changed and LEFT changed:** `slowapi` was synced **0.1.9 → 0.1.10** (the CI pin at `analytics-service/requirements.txt:226`) and deliberately NOT restored — matching CI is the point, and every #3/#4/#5 mutation row is version-stamped against it. A verifier re-running those cycles on 0.1.9 would not be reproducing this evidence.
