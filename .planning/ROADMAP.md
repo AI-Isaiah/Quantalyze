@@ -83,9 +83,9 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 147-02-PLAN.md — Returns route (the SCEN-01 bug proper) + OG route: widen, resolve, series_state (wave 2)
-- [ ] 147-03-PLAN.md — Share path: Phase-84 sibling read + pure-layer resolver, zero DDL (wave 2)
-- [ ] 147-04-PLAN.md — Book path (queries.ts:3405, the 4th reader): server-side resolution + derived series_state (wave 2)
+- [x] 147-02-PLAN.md — Returns route (the SCEN-01 bug proper) + OG route: widen, resolve, series_state (wave 2)
+- [x] 147-03-PLAN.md — Share path: Phase-84 sibling read + pure-layer resolver, zero DDL (wave 2)
+- [x] 147-04-PLAN.md — Book path (queries.ts:3405, the 4th reader): server-side resolution + derived series_state (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -252,7 +252,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 147. SCEN-01 engine series | 1/6 | In Progress|  |
+| 147. SCEN-01 engine series | 4/6 | In Progress|  |
 | 148. OWN owner factsheet | 0/? | Not started | - |
 | 149. NAV my-strategies ranking | 0/? | Not started | - |
 | 150. OWN-03 portfolio question | 0/? | Not started | - |
