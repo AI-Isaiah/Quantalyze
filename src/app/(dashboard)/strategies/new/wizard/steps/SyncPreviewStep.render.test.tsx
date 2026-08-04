@@ -2352,6 +2352,26 @@ describe("[140.4-11] SyncPreviewStep — the destructive control must be EARNED"
         },
       },
       {
+        // 142.2 review FIX 1 — the newly reachable terminal code, and the one
+        // this property most needs to cover. The state it replaces rendered
+        // GATE_INSUFFICIENT_TRADES, which EARNS the draft-deleting control:
+        // a keyed ledger-backed strategy with 135 daily rows and 0 trades was
+        // offered "Try another key" (→ handleDeleteDraft) as its remedy for a
+        // problem that was never about the key. This row pins that the
+        // replacement does NOT earn that control.
+        input: "gate: keyed account whose daily series no producer has stamped",
+        drive: async () => {
+          installGateSupabaseMock({
+            tradeCount: 0,
+            csvRowCount: 135,
+            // NULL — the honest state of every pre-existing analytics row, since
+            // the 142.2 migration is additive with NO backfill.
+            seriesCompleteness: null,
+          });
+          await renderThroughTheGate({ ...baseProps, apiKeyId: "key-1" });
+        },
+      },
+      {
         input: "gate: keyed account with trades spanning under a week",
         drive: async () => {
           installGateSupabaseMock({
@@ -2457,19 +2477,30 @@ describe("[140.4-11] SyncPreviewStep — the destructive control must be EARNED"
     // now separated: `driven` counts scenarios that actually rendered an
     // envelope and is pinned at the full 14, which no code-level collapse can
     // satisfy. Lower `driven` only when a scenario is genuinely deleted.
+    //
+    // ⚠️ THE 142.2 CODE REVIEW (FIX 1) RAISED BOTH FLOORS BY ONE — 14→15 driven,
+    // 13→14 distinct. `GATE_SERIES_PROVENANCE_UNVERIFIED` is a NEWLY REACHABLE
+    // terminal code at this surface (a keyed strategy whose daily series carries
+    // no producer verdict), added with its own scenario row above. A new
+    // reachable code RAISES these floors; it may never lower them. If a future
+    // edit makes this loop red, the fix is to restore the scenario, never to
+    // walk a floor back down — a lowered floor un-pins whichever code stopped
+    // being reachable, silently.
     expect(
       driven,
-      "Fewer than fourteen scenarios actually rendered an envelope. A loop " +
+      "Fewer than fifteen scenarios actually rendered an envelope. A loop " +
         "that renders nothing satisfies every assertion inside it and reports " +
         "agreement forever — which is worse than having no guard at all.",
-    ).toBeGreaterThanOrEqual(14);
+    ).toBeGreaterThanOrEqual(15);
     expect(
       observed.size,
-      "Fewer than thirteen DISTINCT codes were driven. Two scenarios share " +
+      "Fewer than fourteen DISTINCT codes were driven. Two scenarios share " +
         "SERVICE_UNREACHABLE since 140.5-03 (the transport deadline and the " +
-        "kickoff catch), so 13 is the honest distinct-code floor; anything " +
-        "below it means rows stopped reaching the codes they name.",
-    ).toBeGreaterThanOrEqual(13);
+        "kickoff catch), and 142.2 FIX 1 added " +
+        "GATE_SERIES_PROVENANCE_UNVERIFIED, so 14 is the honest distinct-code " +
+        "floor; anything below it means rows stopped reaching the codes they " +
+        "name.",
+    ).toBeGreaterThanOrEqual(14);
 
     // The forced choice must be absent from the WHOLE observed set, stated
     // once more as a set-level claim so a per-row `continue` cannot hide it.

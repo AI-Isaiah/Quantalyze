@@ -17,6 +17,7 @@ export type GateFailureCode =
   | "INSUFFICIENT_TRADES"
   | "INSUFFICIENT_DAYS"
   | "INSUFFICIENT_CSV_HISTORY"
+  | "SERIES_PROVENANCE_UNVERIFIED"
   | "ANALYTICS_MISSING"
   | "ANALYTICS_PENDING"
   | "ANALYTICS_COMPUTING"
@@ -105,6 +106,45 @@ const SERIES_TRUSTED_FOR_DAILY_BRANCH: ReadonlySet<string> = new Set([
   "ledger_complete",
   "user_supplied",
   "composite_stitched",
+]);
+
+/**
+ * 142.2 review FIX 1 — the verdicts a producer DID stamp after examining the
+ * series, and which nevertheless do not earn admission.
+ *
+ * ⚠️ THIS SET DECIDES A MESSAGE, NEVER AN ADMISSION. Admission is
+ * `SERIES_TRUSTED_FOR_DAILY_BRANCH` above and nothing else. This one answers a
+ * third, narrower question — "did anybody actually look?" — whose only effect is
+ * WHICH REFUSAL the user reads. Every value here refuses, every value not here
+ * refuses; the two branches differ only in what they say and what remedy they
+ * offer.
+ *
+ * WHY THE DISTINCTION IS WORTH A SET. Fail-closed correctly routes an
+ * unexamined series to the trade branch — but the trade branch's sentence is
+ * "Strategy has only 0 trade(s). A minimum of 5 trades is required." For a
+ * ledger-backed strategy with 135 daily rows and zero fills BY CONSTRUCTION,
+ * that is verbatim the false message this whole phase exists to delete, and the
+ * migration is additive with NO BACKFILL — so EVERY pre-existing analytics row
+ * reads NULL and lands there. Deploying the phase without this branch ships the
+ * founder's own dogfood bug back to the screen.
+ *
+ * ⛔ THE FIX IS NOT A BACKFILL. Backfilling is forbidden by the migration's own
+ * comment: it would fabricate a trust claim about series whose inputs no longer
+ * exist to examine. The data is right; the DIAGNOSIS was wrong. A zero-trade
+ * strategy with an unexamined series is not "a strategy with too few trades" —
+ * it is a strategy whose provenance was never established, and the honest remedy
+ * is a re-sync/re-derive that makes a producer look.
+ *
+ * DRIFT DIRECTION IS SAFE, and that is why a hand-typed set is acceptable here.
+ * If a future producer mints a sixth verdict this file has not been taught, it
+ * is absent from BOTH sets: absent from the allow-list, so it still refuses
+ * (unchanged, fail-closed); absent from here, so it renders the
+ * provenance-unverified copy and offers a re-sync. A slightly imprecise sentence
+ * on a refusal — never an admission.
+ */
+const SERIES_EXAMINED_BUT_REFUSED: ReadonlySet<string> = new Set([
+  "fill_derived_unproven",
+  "sampled_gapped",
 ]);
 
 /**
@@ -258,6 +298,44 @@ export function checkStrategyGate(input: StrategyGateInput): StrategyGateResult 
       };
     }
   } else {
+    // 142.2 review FIX 1 — DIAGNOSE THE REFUSAL BEFORE COUNTING TRADES.
+    //
+    // Reaching here with `tradeCount === 0 && csvRowCount > 0` means: this
+    // strategy HAS a daily-return series, and that series did not earn
+    // admission. Falling straight through to the trade floor answers
+    // "Strategy has only 0 trade(s). A minimum of 5 trades is required." about a
+    // strategy that has 135 days of returns and no fills BY CONSTRUCTION —
+    // which is both false and unwinnable, and is the exact sentence this phase
+    // was opened to delete.
+    //
+    // Split by WHETHER A PRODUCER LOOKED, not by whether we like what it found:
+    //   · it looked and found the series wanting (`fill_derived_unproven`,
+    //     `sampled_gapped`) → keep the existing trade-branch routing. The
+    //     D-15 acceptance test pins that case and it is unchanged here.
+    //   · nobody looked (NULL — every pre-existing row, since the migration is
+    //     additive with no backfill — or a verdict this module has not been
+    //     taught) → say THAT, and offer the remedy that makes a producer look.
+    //
+    // Both arms REFUSE. This changes no admission decision anywhere; it changes
+    // which true sentence the user is shown. `?? ""` matches the coercion on
+    // `isDailyReturnsSourced` — the empty string is in neither set, so an absent
+    // verdict lands on the honest "nobody looked" arm rather than the trade one.
+    if (
+      input.tradeCount === 0 &&
+      csvRowCount > 0 &&
+      !SERIES_EXAMINED_BUT_REFUSED.has(input.seriesCompleteness ?? "")
+    ) {
+      return {
+        passed: false,
+        code: "SERIES_PROVENANCE_UNVERIFIED",
+        reason:
+          `Strategy has ${csvRowCount} day(s) of daily returns and no individual trades, ` +
+          `but no record of how that series was built. We cannot verify a track record ` +
+          `whose provenance was never established. Re-sync this strategy to re-derive it.`,
+        detail: { rows: csvRowCount },
+      };
+    }
+
     if (input.tradeCount < STRATEGY_GATE_MIN_TRADES) {
       return {
         passed: false,

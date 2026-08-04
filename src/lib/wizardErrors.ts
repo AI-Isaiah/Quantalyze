@@ -149,6 +149,11 @@ export type WizardErrorCode =
   | "GATE_INSUFFICIENT_DAYS"
   | "GATE_ANALYTICS_FAILED"
   | "GATE_NO_DATA_SOURCE"
+  // 142.2 review FIX 1 — a daily-return series exists but nothing recorded how
+  // it was built. Distinct from GATE_INSUFFICIENT_TRADES on purpose: the
+  // strategy is not short of trades, it is short of PROVENANCE, and its remedy
+  // is a re-sync rather than a different key.
+  | "GATE_SERIES_PROVENANCE_UNVERIFIED"
   // Metadata step (MetadataStep) — Phase 53 / APPLY-02 inline per-field
   // validation. Copy lives here (the canonical wizard-copy home) so the
   // component never carries an invented inline string (copy-drift guard).
@@ -789,6 +794,35 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     ],
     docsHref: "/security#draft-resume",
     actions: ["start_fresh", "request_call"],
+  },
+
+  // 142.2 review FIX 1 — the copy that replaces a false "you have too few
+  // trades" for a strategy whose daily series was never examined.
+  //
+  // ⛔ `actions` DELIBERATELY EXCLUDES `try_another_key`, and that exclusion is
+  // load-bearing rather than stylistic. In SyncPreviewStep `try_another_key` is
+  // what EARNS the destructive control (`keyReplacementIsEarned`), and that
+  // button fires `handleDeleteDraft()` — destroying the draft and every
+  // `strategy_keys` member under it. Routing this state there would answer "we
+  // never recorded where your returns came from" with "delete your work", for a
+  // strategy whose data is fine. The destructive-remedy problem itself is booked
+  // as DEF-142.2-03; this code simply must not feed it.
+  //
+  // `clear_and_retry` IS the right remedy and is not a placebo here:
+  // `kickoffRetryCanChangeTheOutcome` keys off exactly this action, so the
+  // envelope renders a Retry wired to `handleKickoffRetry`, which re-runs the
+  // sync — and a completed re-derive is precisely what makes a producer examine
+  // the series and stamp a verdict.
+  GATE_SERIES_PROVENANCE_UNVERIFIED: {
+    title: "We can't confirm where this strategy's daily returns came from.",
+    cause:
+      "This strategy has a daily-return series but no individual trades, and nothing on our side recorded how that series was built. Our pipeline stamps that record at the moment it builds a series — so either this one predates the record, or the last sync did not finish stamping it. We will not publish a track record whose provenance we cannot state. This is a gap in our bookkeeping, not a judgement about your trading.",
+    fix: [
+      "Retry the sync from this page. A completed re-derive rebuilds the series and records how it was built.",
+      "If it still says this after a sync completes, request a call — that combination is a fault on our side and we want to see it.",
+    ],
+    docsHref: "/security#sync-timing",
+    actions: ["clear_and_retry", "request_call"],
   },
 
   METADATA_DESCRIPTION_REQUIRED: {
@@ -1607,6 +1641,12 @@ export function gateFailureToWizardError(code: GateFailureCode): WizardErrorCode
       return "GATE_ANALYTICS_FAILED";
     case "NO_DATA_SOURCE":
       return "GATE_NO_DATA_SOURCE";
+    case "SERIES_PROVENANCE_UNVERIFIED":
+      // 142.2 review FIX 1. Terminal AND wizard-reachable, so it maps to real
+      // copy — never UNKNOWN. Both the single-key arm (a keyed ledger-backed
+      // strategy on an unstamped row) and the composite arm (FIX 3) can land
+      // here.
+      return "GATE_SERIES_PROVENANCE_UNVERIFIED";
     case "ANALYTICS_MISSING":
     case "ANALYTICS_PENDING":
     case "ANALYTICS_COMPUTING":

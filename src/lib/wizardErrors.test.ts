@@ -477,6 +477,13 @@ describe("M-0591 — every reachable error code resolves to real (non-UNKNOWN) c
       "INSUFFICIENT_TRADES",
       "INSUFFICIENT_DAYS",
       "INSUFFICIENT_CSV_HISTORY",
+      // 142.2 review FIX 1. Deliberately NOT added to `intentionallyUnknown`
+      // below: it is terminal AND wizard-reachable (a keyed ledger-backed
+      // strategy on an unstamped analytics row lands here, as does an unstamped
+      // composite), so it MUST resolve to real, non-UNKNOWN copy. That is the
+      // whole point of minting it — the state it names previously rendered
+      // GATE_INSUFFICIENT_TRADES, whose sentence was false for it.
+      "SERIES_PROVENANCE_UNVERIFIED",
       "ANALYTICS_MISSING",
       "ANALYTICS_PENDING",
       "ANALYTICS_COMPUTING",
@@ -1381,6 +1388,21 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * DO carry a destructive action, so an entry with one non-destructive action
    * is out of its population by construction.
    *
+   * **62 at the 142.2 code review (FIX 1)**, which added
+   * `GATE_SERIES_PROVENANCE_UNVERIFIED` — the honest answer for a strategy whose
+   * daily series no producer has examined, replacing a false
+   * `GATE_INSUFFICIENT_TRADES` for that state. The reasoning was re-run before
+   * the number moved, and this entry is one THIS guard has a direct stake in:
+   * its actions are `clear_and_retry` + `request_call`, carrying NEITHER
+   * `try_another_key` NOR `start_fresh`, so the destructive class below is
+   * unchanged at four members and the entry is out of the scanned population by
+   * construction. That exclusion is the fix, not a side effect — the state it
+   * replaces rendered `try_another_key`, whose control fires
+   * `handleDeleteDraft()` and destroys the draft plus every `strategy_keys`
+   * member under it. Answering "we never recorded where your returns came from"
+   * with "delete your work" is the dead end the code was minted to remove, so
+   * re-adding a destructive action here would defeat its purpose.
+   *
    * Without it a table that SHRANK — an entry deleted, or the export replaced
    * by an empty object — would satisfy every assertion below vacuously. A scan
    * over nothing passes.
@@ -1390,7 +1412,7 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * Bumping the LITERAL when the table legitimately grows is the intended
    * maintenance cost; replacing it with a derived value removes the guard.
    */
-  const EXPECTED_TABLE_SIZE = 61;
+  const EXPECTED_TABLE_SIZE = 62;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -1558,8 +1580,22 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * is the same test 140.3-15's entry passed and the CSV case failed: the
    * question is not whether the sentence is comforting but whether the code path
    * makes it observable.
+   *
+   * **62 at the 142.2 code review (FIX 1)**
+   * (`GATE_SERIES_PROVENANCE_UNVERIFIED`). Read against all four FORBIDDEN
+   * fragments by hand before the number moved. It mentions no notification, no
+   * trade fetching, and no session field name. The one needing care is again
+   * "data is unchanged", because the entry DOES make a server-state claim:
+   * "nothing on our side recorded how that series was built". That is not the
+   * banned string, and — applying the same test 140.3-15's entry passed and the
+   * CSV case failed — it is OBSERVABLE rather than asserted: it restates the
+   * exact value the gate just read (`strategy_analytics.series_completeness` was
+   * NULL or unrecognised) and is the sole reason the refusal fired. It is not a
+   * negative about a write that may or may not have landed. The entry also
+   * volunteers "This is a gap in our bookkeeping, not a judgement about your
+   * trading", which is a statement about US and is the point of the code.
    */
-  const EXPECTED_TABLE_SIZE = 61;
+  const EXPECTED_TABLE_SIZE = 62;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
