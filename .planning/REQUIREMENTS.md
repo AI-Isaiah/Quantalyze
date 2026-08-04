@@ -248,15 +248,15 @@ a live funded account on a **trading day**.
   currently **blank** — the wizard tells a founder to use an investor password while the page
   explaining what that is shows nothing. Content is already correct; this is a gating consequence
   of MT5-01, asserted separately because it is a distinct user-visible surface.
-- [ ] **MT5-03**: The Broker-server field renders as plain text while OKX's passphrase stays
+- [x] **MT5-03**: The Broker-server field renders as plain text while OKX's passphrase stays
   masked, via a **per-venue** flag (`passphraseSecret`) added alongside the per-venue
   `passphraseLabel` / `passphrasePlaceholder` config the file already carries. MT5 reuses OKX's
   passphrase slot (`ConnectKeyStep.tsx:141`), and that slot is `type={showSecret ? "text" :
   "password"}` at `:697` — so a global unmask would expose the OKX passphrase, a genuine API
   credential. The OKX render stays **byte-identical**.
-- [ ] **MT5-04**: `KEY_INVALID_FORMAT` no longer buckets unrelated causes. The 28 sites across
-  `src/app/api/strategies/create-with-key/route.ts` (14) and
-  `src/app/api/strategies/composite/add-key/route.ts` (14) are split into honest codes
+- [x] **MT5-04**: `KEY_INVALID_FORMAT` no longer buckets unrelated causes. The **24 emitting** sites across
+  `src/app/api/strategies/create-with-key/route.ts` (12) and
+  `src/app/api/strategies/composite/add-key/route.ts` (12) are split into honest codes
   (missing-required-field, unsupported-venue, venue-not-enabled, input-too-long), leaving
   `KEY_INVALID_FORMAT` for **actual format failures only** — which makes its existing copy true
   again. Today `wizardErrors.ts:477` states *"Client-side format check failed before sending the
@@ -265,12 +265,19 @@ a live funded account on a **trading day**.
   MT5-gate arm (`route.ts:147`) **unreachable** — a fix aimed only at that arm would repair a line
   that can no longer fire; the value is in the class. MT5 already has correct dedicated copy
   (`KEY_MT5_MASTER_PASSWORD`, `KEY_MT5_WRONG_SERVER`, `wizardErrors.ts:470`) the route never
-  reaches. Out of scope, logged to `TODOS.md`: the same defect's 11 remaining sites in
-  `keys/validate-and-encrypt/route.ts` (5) and `verify-strategy/route.ts` (6).
+  reaches. Out of scope, logged to `TODOS.md`: the same defect's **9** remaining emitting sites in
+  `keys/validate-and-encrypt/route.ts` (4) and `verify-strategy/route.ts` (5).
+  ⚠️ **Counts corrected 2026-08-04 from executed measurement, replacing the research's 28/11.**
+  `grep -c 'KEY_INVALID_FORMAT'` returns 14 per in-scope route, but `grep -c 'code: "KEY_INVALID_FORMAT"'`
+  returns **12** — the delta is comment prose describing the MT5 short-login carve-out. Only emitting
+  sites can lie to a user, so 24 (12+12) in scope and 9 (4+5) deferred are the real numbers, and the
+  `wizardErrors.invariant.test.ts` registry pin uses the literal **12**. Re-verified by grep at HEAD by
+  plan 07 and again by the phase verifier. A miscounted class-fix ledger is this phase's own defect
+  class — the requirements doc must not carry a number its own execution disproved.
 - [ ] **MT5-05**: A founder completes the MT5 connect flow through the wizard **without needing to
   know an internal error code, a server name, or a flag** — the phase-goal sentence, asserted as
   an outcome rather than as the sum of MT5-01..04.
-- [ ] **MT5-11** *(BLOCKER — found by live dogfood 2026-08-03, minutes after MT5-01 opened the
+- [x] **MT5-11** *(BLOCKER — found by live dogfood 2026-08-03, minutes after MT5-01 opened the
   path)*: `isLedgerBackedExchange` is brought back into lockstep with the Python source set, so an
   MT5 (and sFOX) strategy is evaluated on the **daily-returns** branch of the gate rather than the
   fill-based one. **Measured drift:**
@@ -302,7 +309,7 @@ a live funded account on a **trading day**.
   Shipping the one-term widening on its own is explicitly rejected — it would re-arm the identical
   drift for the next venue. MT5-11 remains listed separately because it names the *observed* defect
   and its PROD evidence; MT5-12 names the *fix*.
-- [ ] **MT5-12** *(ARCHITECTURAL — founder call 2026-08-03: consolidate the backbone, do NOT ship
+- [x] **MT5-12** *(ARCHITECTURAL — founder call 2026-08-03: consolidate the backbone, do NOT ship
   MT5-11 as a standalone patch)*: **Strategy admissibility is decided from the canonical daily
   series itself, not from a venue-name list.** `isLedgerBackedExchange` is **deleted**, not widened,
   and no hardcoded venue set governs gate routing in *either* language.
