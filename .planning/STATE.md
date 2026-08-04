@@ -1,17 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.16
-milestone_name: Production Resilience & Reliability
-status: executing
-stopped_at: Phase 142.2 context gathered
-last_updated: "2026-08-03T17:36:49.151Z"
-last_activity: 2026-08-03
+milestone: v1.17
+milestone_name: MT5 — usable end-to-end, not merely ingested
+status: planning
+last_updated: "2026-08-04T15:40:06.950Z"
+last_activity: 2026-08-04
 progress:
-  total_phases: 19
-  completed_phases: 13
-  total_plans: 127
-  completed_plans: 119
-  percent: 68
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State — Quantalyze
@@ -46,38 +45,10 @@ RATE-01..05 — all mapped, Traceability filled). Roadmap: `.planning/ROADMAP.md
 
 ## Current Position
 
-Phase: 142.2
-Plan: Not started
-        Phase 142.2 (INSERTED, urgent) — Get MetaTrader 5 running end to end on the
-        unified backbone. Not planned yet. Dogfood items feeding it are in TODOS.md
-        § "MT5 wizard — founder-observed on live UI".
-
-Phase 142.1 (Close 142 review findings) — SHIPPED in v0.52.0.0, merged `d80a1bae`
-        All 8 plans complete across 5 waves. Verified `human_needed` (41/42, zero
-        gaps) — 7 items persisted to `142.1-HUMAN-UAT.md`.
-        ✅ POST-MERGE PROD CHECK PASSED (UAT item 4, the blocking one): PROD
-        `cron.job.command` for `reap_strategy_analytics_stuck_computing` carries
-        exactly TWO `AS MATERIALIZED` batches, the unbounded `IN (SELECT ... LIMIT)`
-        shape is absent, job active on `*/15 * * * *`. Verified against the live
-        `cron.job` row on `khslejtfbuezsmvmtsdn`, NOT inferred from a green CI tick —
-        a `LIMIT` token alone is exactly what D-19 proved insufficient.
-
-Phase 142 (JOB — strategy_analytics stuck-computing reaper + computing_started_at DDL) — EXECUTED
-        Six plans across three waves, each wave gated at its boundary; final suite
-        10 487 vitest + 4 824 pytest green, typecheck clean, coverage above ratchet.
-        13 findings CLOSED PER THEIR DISPOSITIONS — twelve remediated, finding 8
-        DISPOSITIONED (retry→limiter amplification still live, booked in TODOS.md).
-        Next: VERSION bump → `/ship` → `/land-and-deploy`.
-        ⛔ DO NOT SHIP 141.1 AS-IS. The xhigh code review (30 agents, 25 findings
-        deduped to 13) found a DATA-INTEGRITY defect on the money path: `onboard`'s
-        retry can insert TWO `strategy_verifications` rows for one user submit when
-        `strategies.wizard_session_id` is NULL, because the retry-safety grant rests
-        on an `idempotent_by_session` that is false in exactly that case. Also: the
-        D-16 flag-monitor denominator rewrite shipped three monitoring-integrity
-        regressions — a silently-truncating unbounded `.select()`, dedup on an
-        attacker-controllable header reachable unauthenticated, and a dedup that
-        collapses nothing on the only two retry-eligible flows. Evidence with
-        per-finding failure scenarios: `141.2-FINDINGS.md`.
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-08-04 — Milestone v1.17 started
 
 ### Phase 142.1 scope (inserted 2026-08-02)
 

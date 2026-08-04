@@ -20,7 +20,52 @@ Allocators act on Bridge recommendations and see whether those suggestions
 actually worked — and can model the impact of composition changes before they
 make them.
 
-## Current Milestone: v1.16 Production Resilience & Reliability (planning, started 2026-07-25)
+## Current Milestone: v1.17 MT5 — usable end-to-end, not merely ingested (started 2026-08-04)
+
+**Goal:** MT5 *works* in the founder's sense rather than the wizard's — it ingests (done), it projects
+in a scenario, and its factsheet is viewable by the allocator who uploaded it.
+
+**Founder verbatim (2026-08-04, minutes after MT5-05 was discharged on PROD):**
+> *"The goal is that MT5 works. And at the moment, maybe it ingests the data, but I cannot use it in
+> the scenario, and I can still not produce a factsheet."*
+
+**Target features (REQ groups — see `.planning/REQUIREMENTS.md`):**
+- **SCEN — the series actually reaches the engine.** `strategy_analytics.daily_returns` has **no
+  production writer at all** (PROD: 0 of 27 real strategies populated vs 15/15 demo seeds), and the
+  scenario's data route reads only that column. Affected strategies contribute nothing and the
+  composer renders zeros with no error. Plus the composer's own legibility: ownership marker,
+  clickable rows, labelled numbers, duplicate browse entries.
+- **OWN / NAV — an allocator can see and reach their own strategy.** The owner factsheet 404s today
+  (⛔ its acceptance test is adversarial: after an owner views their draft, an anon request for the
+  same id must STILL 404 — that route is publicly cached), and there is no "my strategies" nav entry,
+  so the allocator side is write-only.
+- **AUM — a book you can reach and a size you can set.** The holdings sync crashes on every non-ccxt
+  venue (a raw `AttributeError` sits in a user-visible column on PROD), an all-or-nothing per-key gate
+  hides a live book behind a forced blank slate, AUM is derived-only with no input anywhere, and the
+  refusal copy names a control that was deliberately never built.
+- **WIZ — the wizard stops costing submits.** Inline field errors, a resume path for allocators,
+  credential dedup, no stale screens, and MT5 selectable as its own venue.
+- **MT5-VERIFY — the numbers are true.** Server-UTC offset measured live, rendered performance checked
+  against an external oracle, on a live funded account on a real trading day.
+
+⭐ **Defining constraint: almost NONE of this is an MT5 defect.** MT5 is the first venue to traverse
+the whole path from a cold start, so it is exposing pre-existing holes in the surfaces AFTER
+ingestion. SCEN-01 affects every real strategy at every venue; OWN-02 blocks every unpublished
+strategy; AUM-05 will hit sFOX the day its flag flips. **A fix scoped to `exchange === 'mt5'` is the
+wrong fix for nearly all of it.**
+
+**Scope decisions (founder 2026-08-04):** v1.16 **PARKED at 68%, not shipped** — 13/19 phases,
+119/127 plans, with Phases 143–146 outstanding; to be reopened after v1.17 delivers. Research SKIPPED
+(zero new external features; every requirement is a defect already root-caused with PROD evidence and
+file:line citations). Phase numbering continues from **147**.
+
+## ⏸️ PARKED Milestone: v1.16 Production Resilience & Reliability (planning, started 2026-07-25)
+
+⛔ **PARKED 2026-08-04 at 68% — NOT shipped, NOT complete.** Outstanding: Phase 143 (dropped-enqueue
+sweep), 144 (WR-02 orphaned-running DELETE→terminal UPDATE — carries the live TEST-DELETE/PROD-reset
+founder call), 145 (csv-finalize atomicity), 146 (RATE audit). Resume at Phase 143. All 29 phase
+directories were deliberately PRESERVED (the workflow's `phases.clear` was skipped by founder call) so
+this milestone resumes without reconstruction.
 
 **Goal:** Give the live money-bearing plumbing failure handling — so a hung Railway request, a silently-dropped compute-job enqueue, or a mid-job worker crash can't strand a real investor factsheet on a spinner that never resolves. This is hardening of existing seams (Deribit, MT5, and sFOX/Nautilus now carry real accounts), not new external features. The biggest live-surface risk is no longer correctness math (mostly latent/flag-gated) — it's that the plumbing has no failure handling.
 
