@@ -3,10 +3,10 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: planning
-last_updated: "2026-08-04T15:40:06.950Z"
+last_updated: "2026-08-04T15:58:17.000Z"
 last_activity: 2026-08-04
 progress:
-  total_phases: 0
+  total_phases: 7
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -21,34 +21,43 @@ progress:
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
-**Milestone v1.16 — Production Resilience & Reliability, Phases 140–146.** Real
-money-bearing integrations are now LIVE (Deribit, MT5; sFOX/Nautilus next); the top
-live-surface risk is that the plumbing has no failure handling. Scope = **SEAM**
-(Vercel→Railway retry + Upstash breaker + unified timeout budgets across BOTH
-chokepoints — `analytics-client.ts` AND `process-key-client.ts`), **JOB** (job-state
-integrity: `strategy_analytics` reaper + `computing_started_at` DDL, dropped-enqueue
-sweep, WR-02 DELETE→terminal-UPDATE, csv-finalize atomicity — all in **pg_cron**,
-never the worker loop), **RATE** (audit + close `admin/match/eval` and Python
-`routers/match.py`; limiter-value audit; `withRateLimit` HOF). CRON + MONEY groups
-deferred (founder 2026-07-25).
+**Milestone v1.17 — MT5: usable end-to-end, not merely ingested, Phases 147–153.**
+Founder verbatim (2026-08-04, minutes after MT5-05 was discharged on PROD): *"The goal is that
+MT5 works. And at the moment, maybe it ingests the data, but I cannot use it in the scenario,
+and I can still not produce a factsheet."* Scope = **SCEN** (the series actually reaches the
+engine — SCEN-01 is a silent money-path bug: `strategy_analytics.daily_returns` has NO
+production writer, 0/27 real strategies vs 15/15 demo seeds; fix the READER via the existing
+`resolveDailyReturnSeries`, difference the wealth-index `returns_series`, never backfill against
+migration 087), **OWN/NAV** (owner factsheet without cache disclosure — adversarial anon-404
+acceptance — plus "my strategies" nav, preview link, and the own-capital-vs-verifying-a-team
+wizard question, money-path reviewed), **AUM** (direct AUM input; non-ccxt holdings-sync crash
+fixed as a CLASS incl. latent sFOX; all-or-nothing book gate + cross-role contamination; honest
+copy), **WIZ** (inline field errors, honest codes, absorbed transient failures, continuity,
+token-less dedup, MT5 declarable + preselected), **STALE** (root cause NOT established —
+investigate before fixing), **MT5-VERIFY** (live trading-day external-oracle verification,
+MT5-10 UNCAPPED, `complete_with_warnings` explained; MT5-GOAL-01 umbrella acceptance gate).
+⭐ Almost NONE of this is an MT5 defect — MT5 is the first venue through the whole path from a
+cold start; a fix scoped to `exchange === 'mt5'` is the wrong fix for nearly all of it.
+Research SKIPPED (every requirement already root-caused with PROD evidence + file:line).
 
-⚠️ **Requirements were written against the RESEARCH-CORRECTED scope**
-(`.planning/research/SUMMARY.md` — all four researchers contradicted three milestone
-premises): RATE was ~85% already shipped; seam timeouts already exist in both clients;
-retry-safety is per-`flow_type` (`teaser` deliberately NON-idempotent); the fence-flake
-"two birds" claim is NOT an acceptance criterion; the 42501 claim gets a
-reproduce-first gate.
+Requirements: `.planning/REQUIREMENTS.md` (29 in-scope IDs — SCEN-01..05, AUM-01..05, NAV-01,
+OWN-02..04, MT5-06..10, MT5-14, MT5-15, WIZFORM-01..04, WIZCONT-01..02, STALE-01 + MT5-GOAL-01
+umbrella — 29/29 mapped to Phases 147–153, Traceability updated; OWN-01 excluded, already met).
+Roadmap: `.planning/ROADMAP.md` (v1.17 section, Phases 147–153).
 
-Requirements: `.planning/REQUIREMENTS.md` (18 v1 reqs — SEAM-01..06, JOB-01..07,
-RATE-01..05 — all mapped, Traceability filled). Roadmap: `.planning/ROADMAP.md`
-(v1.16 section, Phases 140–146). Research: `.planning/research/SUMMARY.md` (2026-07-25).
+⏸️ **v1.16 Production Resilience & Reliability is PARKED at 68%** (13/19 phases, 119/127 plans)
+— NOT shipped, NOT complete. Outstanding: 143 (dropped-enqueue sweep), 144 (WR-02 — carries the
+LIVE TEST-DELETE/PROD-reset founder decision, same migration), 145 (csv-finalize,
+reproduce-first), 146 (RATE). **Resume at Phase 143 after v1.17.** All 29 phase directories
+preserved (`phases.clear` skipped by founder call). Phase 142.3's scope (MT5-06..10) and MT5-14
+are re-homed into v1.17 (Phases 153 / 151); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: Not started (defining requirements)
+Phase: 147 of 147–153 (not started)
 Plan: —
-Status: Defining requirements
-Last activity: 2026-08-04 — Milestone v1.17 started
+Status: Roadmap created — 7 phases, 29/29 in-scope requirement IDs mapped; ready to plan Phase 147
+Last activity: 2026-08-04 — v1.17 roadmap created; v1.16 parked at 68% (resume at Phase 143)
 
 ### Phase 142.1 scope (inserted 2026-08-02)
 
@@ -371,7 +380,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [██████████] 95%
+Progress: [░░░░░░░░░░] 0% (v1.17 — 0/7 phases)
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -408,21 +417,22 @@ Progress: [██████████] 95%
 
 ## Current Focus
 
-**Next: `/gsd:plan-phase 142.2`.** Phase order 140 → 141 → 142 → 142.1 → **142.2 (INSERTED)** → 143 → 144 → 145 → 146.
-Load-bearing sequencing (do not reorder):
+**Next: `/gsd:plan-phase 147`.** v1.17 phase order 147 → 148 → 149 → 150 → 151 → 152 → 153.
+Load-bearing sequencing (real dependencies, do not reorder):
 
-- **Breaker (140) BEFORE retry (141)** — fail-fast alone has zero double-execution
-  risk and can land while the SEAM-05 idempotency audit is written; retry without a
-  breaker amplifies an outage. 141 is GATED on the committed audit artifact.
-
-- **SEAM before JOB** — JOB sweeps consume SEAM's timeout/upstream/network taxonomy.
-- **142 before 143** — same `strategies`/`strategy_analytics`/`compute_jobs` triangle;
-  one non-racing mechanism.
-
-- **145 reproduce-first** — "could not reproduce" the 42501 claim is a valid outcome.
-- **146 (RATE) last** — gap list comes from a fresh kickoff grep, never the stale
-  TODOS.md route list.
-
+- **SCEN-01 (147) FIRST** — silent money-path bug AND it blocks meaningful verification of every
+  other scenario surface; the READER is wrong (reuse `resolveDailyReturnSeries`, difference the
+  wealth index, never backfill against migration 087).
+- **OWN-02 (148) before NAV-01 / OWN-04 / SCEN-03** — they link to a factsheet that today 404s.
+  ⛔ Adversarial acceptance: after an owner views their draft, anon must still 404 (the route is
+  public and `unstable_cache`d).
+- **AUM (149) after SCEN-01** — its zeros-on-screen symptom is entangled with SCEN-01's; fix the
+  non-ccxt holdings-sync CLASS (sFOX latent, close before its go-live flip), not the MT5 instance.
+- **MT5-06..10 (153) LAST** — live funded account, real trading day, stable surface; human- and
+  calendar-gated; MT5-10 UNCAPPED by founder decision; ⛔ no MT5-07 tolerance number exists —
+  founder call at discuss-phase. MT5-GOAL-01 (umbrella) closes there.
+- ⏸️ **v1.16 PARKED at 68%** — resume at Phase 143 after v1.17; Phase 144 carries the live WR-02
+  TEST-DELETE/PROD-reset founder decision. 142.3's scope re-homed to 153; MT5-14 to 151.
 ## Performance Metrics
 
 | Phase | Plan | Duration | Tasks | Files | Completed |
@@ -465,6 +475,7 @@ Load-bearing sequencing (do not reorder):
 - Phase 141.1 inserted after Phase 141: 8-agent review campaign: Retry-After built by 140.5 never consumed; breaker threshold uncalibrated for per-attempt counting; SEAM-05 evidence wrong in 4 places. Zero user-facing/data-integrity defects. (URGENT)
 - Phase 142.1 inserted after Phase 142: Close 142 code-review findings: chain-start stamp preservation, deploy sequencing, terminal-writer parity, census boundary, SQL gate lock scope (URGENT)
 - Phase 142.2 inserted after Phase 142: Get MetaTrader 5 running end to end on the unified backbone (URGENT)
+- v1.17 roadmap created 2026-08-04 (Phases 147–153); v1.16 PARKED at 68% (13/19 phases, 119/127 plans; resume at Phase 143). Phase 142.3's scope (MT5-06..10) re-homed to Phase 153, MT5-14 to Phase 151. Ordering locked: SCEN-01 first, OWN-02 before NAV-01/OWN-04/SCEN-03, AUM after SCEN-01, MT5 numeric verification last
 
 ### Decisions (requirements-time, from research Open Decisions 1–8)
 
