@@ -653,6 +653,148 @@ D-14 valve.
 
 ---
 
+### MT5-GOAL — "MT5 works" is not "MT5 finishes the wizard" (founder reframe 2026-08-04)
+
+⭐ **Read this before treating any MT5 checkbox as done.** MT5-05 is legitimately discharged — a
+founder completed the wizard and the strategy exists with a real 136-day series. But the founder's
+actual goal is broader than the requirement that was written, stated verbatim after the wizard
+succeeded:
+
+> *"The goal is that MT5 works. And at the moment, maybe it ingests the data, but I cannot use it in
+> the scenario, and I can still not produce a factsheet."*
+
+So the phase requirement measured the wizard, and the founder measures the **product**. Both readings
+are defensible; the founder's is the one that decides whether MT5 ships. The gap between them is
+exactly SCEN-01 (the series never reaches the scenario engine) and OWN-02 (no factsheet for an
+unpublished strategy you own) — neither of which is an MT5 defect. **MT5 is the first venue to
+traverse this path from a cold start, so it is exposing pre-existing holes in the surfaces AFTER
+ingestion, not bugs of its own.** Every one of the findings below reproduces for non-MT5 strategies.
+
+- [ ] **MT5-GOAL-01**: An MT5 strategy is usable end-to-end by the allocator who uploaded it: it
+  ingests (done), it **projects in a scenario** (blocked by SCEN-01), and its **factsheet is
+  viewable** (blocked by OWN-02). This is an umbrella acceptance requirement — it closes only when its
+  three dependencies close, and it exists so "MT5-05 ✅" can never be mistaken for "MT5 works".
+
+---
+
+### SCEN — The scenario composer actually projects what you add (dogfood 2026-08-04)
+
+All five found in one live founder session, composing a scenario from a just-uploaded MT5 strategy.
+
+- [ ] **SCEN-01** ⛔ **HIGHEST PRIORITY — silent money-path correctness bug, NOT MT5-specific**:
+  A strategy added to a scenario contributes its **actual return series**. Today ~4 in 10 do not, and
+  fail **silently**.
+  **Measured on PROD 2026-08-04:** `strategy_analytics` carries two JSONB series columns, and **18 of
+  42 rows have `returns_series` populated but `daily_returns` EMPTY** (15 have `daily_returns`, 33
+  have `returns_series`). `src/app/api/strategies/[id]/returns/route.ts:221` selects **only**
+  `daily_returns`, and that route is what the composer lazily fetches for a drawer-added strategy. So
+  the engine receives an empty series and renders *"0 overlapping days"*, *"Only 0 observations"* and
+  `0.00` for every metric — **with no error, no warning, no empty-state**.
+  **Blast radius spans every source, so this is not an MT5 bug:** CSV published **7 of 30** (these are
+  visible to ALL allocators, not just the owner), CSV pending_review 3 of 4, okx 3, mt5 3, bybit 1;
+  statuses published / pending_review / private / draft.
+  **The data is intact** — `csv_daily_returns` holds all 136 rows for the founder's instance
+  (`4eab92b0`, 2026-03-22 → 2026-08-04). Nothing was lost; it is a plumbing gap between the producer
+  and this one reader.
+  ⚠️ **Do NOT pick between "fix the writer" and "fix the reader" on instinct.** The two columns may
+  carry different SHAPES (point objects vs scalars — the route runs `normalizeDailyReturns` over the
+  raw value), and PostgREST upsert column projection means an upsert that omits `daily_returns`
+  leaves whatever was there. Establish which column is canonical from the code and its history first.
+  ⛔ A backfill would touch `supabase/migrations/**`, which **auto-applies to PROD on merge** — treat
+  any migration-shaped remedy as a separate, consciously-reviewed decision.
+
+- [ ] **SCEN-02**: In the scenario composition list, a strategy **the allocator uploaded themselves**
+  is visually distinguishable from a third-party published one.
+  **Today there is no such marker anywhere** (verified in code): the added-strategy row
+  (`ScenarioComposer.tsx:5558-5686`) renders a toggle, the name, a `TrustTierLabel` (data
+  *provenance*: api_verified / csv_uploaded / self_reported / composite) and a `CoverageStateChip`
+  (in-blend / manually-excluded) — none of which is ownership. The ownership bit **does exist
+  server-side** and is deliberately discarded: `browse/route.ts:220` computes `isOwnRow` purely to
+  un-redact the name, and the emitted row (`:233-245`) is a named-key fence carrying only
+  `id, name, codename, markets, strategy_types, is_example`.
+  ⚠️ **Cost note:** surfacing it is an ADDITIVE WIRE CHANGE, not a client derivation — `AddedStrategy`
+  (`allocations/lib/scenario-state.ts:96-104`) carries only `id, name, markets, strategy_types`, and
+  that type is zod-validated AND PERSISTED (`SCENARIO_SCHEMA_VERSION = 4`), so a new field is a
+  schema-version decision.
+
+- [ ] **SCEN-03**: A strategy row in the scenario is **clickable**, opening richer detail (and, once
+  OWN-02 exists, the full factsheet). Today rows are **not clickable at all** — no `onClick`, no
+  `href`, no drawer, no expansion (`ScenarioComposer.tsx:5588-5595`). The Holdings tab already has
+  this affordance (`HoldingsTable.tsx:468` → `HoldingDetail`), so the composer is the outlier.
+  ⚠️ Partially cheap: `addedStrategyMetadataLookup` (`ScenarioComposer.tsx:2180-2215`) **already holds
+  `cagr` and `sharpe` in memory** for book strategies and never renders them. For drawer-added
+  strategies they are null — the returns route does not return them — so a richer row is NOT uniformly
+  free. ⛔ Depends on OWN-02 for the factsheet link (same dead-end trap as OWN-04).
+
+- [ ] **SCEN-04**: The numbers on a scenario row are **labelled**. Founder, looking at a live row:
+  *"What do the numbers actually mean?"* The row renders `1.000`, a `LEVERAGE` toggle, `1`, and `—`
+  with no column headers and no inline labels (`ScenarioComposer.tsx:5630-5672`). They are weight,
+  mode, leverage, and notional; the last is an em-dash whenever it is non-derivable, which reads as
+  "broken" rather than "not applicable".
+
+- [ ] **SCEN-05**: The strategy browser does not show **duplicate rows for the same strategy**.
+  Observed live: **two identical "Alpha Centauri" entries**, indistinguishable in the list. Both are
+  real, owned, `status='private'` rows (`8d382aaf`, created 2026-08-04; `081f2912`, created
+  2026-07-20) — so this is not a rendering bug, it is the accumulated cost of re-running the wizard.
+  Relates to WIZCONT-02 (dedup) but is distinct: WIZCONT-02 prevents creating them, this one is about
+  not presenting the user with an unresolvable choice between two identical names.
+
+---
+
+### AUM — An allocator can size a hypothetical book (founder call 2026-08-04, verbatim)
+
+- [ ] **AUM-01** ⛔ **DESIGN FLAW, founder-stated**: The allocator can **set AUM directly**, and
+  weights follow from it. Founder verbatim: *"I should be able to change AUM, and then the weight
+  changes. That is it. Currently, I have only strategies that are not in my book, which consequently
+  leads then to no AUM, and no computation at all. You see how silly that is?"*
+  **Today AUM is derived-only and has no input anywhere.** `scenarioAum`
+  (`ScenarioComposer.tsx:3463-3472`) sums **exclusively** live holdings whose scope-ref is toggled on
+  (`scopeRef.startsWith("holding:")`); an added strategy contributes nothing by construction. Size is
+  then `weight × scenarioAum` (`:3570`), so "allocate $500k to this strategy" is **not expressible** —
+  only "this strategy is N% of my existing book".
+  **The causality is backwards for the primary use case:** evaluating a candidate you do not yet hold
+  is precisely what a scenario is for, and that is the case that cannot compute a size or commit.
+  ⚠️ **CORRECTION recorded so the fix is not mis-scoped:** the founder linked AUM=0 to *"no computation
+  at all"*, and that link is **wrong** — verified in code. `scenarioMetrics`
+  (`ScenarioComposer.tsx:2814`) depends on `engineSet, engineState, dateMapCache, blendBasis` and
+  **NOT on `scenarioAum`**. Sharpe/CAGR/cumulative-return/max-DD are weight-based; AUM scales only
+  dollar figures and gates the commit. **The 0.00s the founder saw were SCEN-01, not this.** Shipping
+  AUM-01 alone would leave the screen showing zeros — do not let it be planned as the fix for that.
+
+- [ ] **AUM-02**: An **MT5 account's equity can contribute to AUM**. Today it cannot, ever:
+  `allocator_holdings` on PROD contains **zero `mt5` rows** (bybit 11,623 / okx 980 / deribit 1,058,
+  all current to 2026-08-04) despite a live, active, successfully-syncing MT5 key. So an MT5-only
+  scenario can never be committed — the gate at `ScenarioComposer.tsx:3557` refuses on AUM=0.
+  ⚠️ **Establish whether this is a DELIBERATE venue fence before planning.** This repo fences mt5 on
+  purpose elsewhere (`src/lib/closed-sets.ts:119-122`, enforced by a no-widening pin test), and the
+  MT5 gateway is a single shared Windows terminal serialised behind ONE lock, so a holdings sync is
+  not obviously free. Under investigation as of 2026-08-04.
+
+- [ ] **AUM-03**: The AUM-zero refusal names an affordance the user can **find**. Current copy:
+  *"Can't record a scenario commit: portfolio AUM is zero. Connect an exchange API key or toggle on a
+  live holding before submitting."* (`ScenarioComposer.tsx:3559`). The founder hit this with **four
+  venues already connected and ~$460k of holdings on PROD** — the scenario was in "Blank slate" mode,
+  so every holding toggle was off. So the first half of the advice is impossible to act on (they are
+  already connected) and the second half names a control whose location was not discoverable.
+  Same class as WIZFORM-03 ("switch to a different exchange" was impossible advice for MT5).
+
+---
+
+### NAV — The allocator can reach their own strategies (founder call 2026-08-04)
+
+- [ ] **NAV-01**: There is a way in from the sidebar to **an overview of all my strategies**, and
+  clicking one opens its factsheet. Founder verbatim, pointing at the MY WORKSPACE nav (My Allocation
+  / Recommendations / Compare / Decks / Add a Strategy): *"Here should be a button, where I click, and
+  I have similar to the Crypto SMA ranking, an overview of all my strategies. And when I click on the
+  strategy, I get the factsheet."*
+  Restated after the scenario session, and this is the sharpest statement of the gap:
+  *"Still don't know how to get to the actual factsheet of a key that I upload."*
+  ⚠️ There is an **Add a Strategy** entry but no **see my strategies** entry, so the flow is
+  write-only from the allocator's side. ⛔ Depends on OWN-02 — a list that links to `notFound()` is
+  the dead-end class Phase 142.2 existed to delete (same trap as OWN-04).
+
+---
+
 ## v2 Requirements
 
 Deferred to a future milestone. Tracked, not in this roadmap.
@@ -733,6 +875,16 @@ Populated during roadmap creation.
 | WIZFORM-03 | unassigned | Pending — "switch to a different exchange" is impossible advice for MT5 |
 | WIZFORM-04 | unassigned | Pending — **blocking UX**; transient seam timeout must not become a user decision; ⛔ ask whether the per-submit re-validation is needed before adding retries |
 | STALE-01 | unassigned | Pending — root cause NOT yet established; investigate before planning |
+| MT5-GOAL-01 | unassigned | **Umbrella** — MT5 'works' only when SCEN-01 + OWN-02 close. Exists so `MT5-05 ✅` is never read as 'MT5 works' |
+| SCEN-01 | unassigned | ⛔ **HIGHEST** — silent; 18/42 analytics rows have `returns_series` but empty `daily_returns`; 7 of 30 PUBLISHED CSV strategies affected. NOT MT5-specific. Under investigation 2026-08-04 |
+| SCEN-02 | unassigned | Pending — no ownership marker exists; ownership bit deliberately discarded at `browse/route.ts:220`. ⚠️ additive WIRE change + persisted-schema bump |
+| SCEN-03 | unassigned | Pending — scenario rows are not clickable at all; ⛔ depends on OWN-02 for the factsheet link |
+| SCEN-04 | unassigned | Pending — row numbers carry no labels; founder could not tell what they meant |
+| SCEN-05 | unassigned | Pending — two identical 'Alpha Centauri' rows in Browse; related to but distinct from WIZCONT-02 |
+| AUM-01 | unassigned | ⛔ **DESIGN FLAW** — AUM is derived-only, no input anywhere; blank-slate (the primary use case) cannot size or commit. ⚠️ does NOT cause the 0.00 metrics — that is SCEN-01 |
+| AUM-02 | unassigned | Pending — ZERO mt5 rows in `allocator_holdings`, ever; ⚠️ verify whether a deliberate venue fence before planning. Under investigation 2026-08-04 |
+| AUM-03 | unassigned | Pending — refusal copy names affordances the founder could not act on (already connected / control not discoverable) |
+| NAV-01 | unassigned | Pending — no 'my strategies' nav entry; the allocator side is write-only. ⛔ depends on OWN-02 |
 | RATE-01 | Phase 146 | Pending |
 | RATE-02 | Phase 146 | Pending |
 | RATE-03 | Phase 146 | Pending |
