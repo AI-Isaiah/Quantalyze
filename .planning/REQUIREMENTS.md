@@ -421,6 +421,84 @@ milestone or advertise MT5 until 142.3 passes.
   an escape hatch. The phase does not close while the terminal and the UI disagree: a known-wrong
   number rendered to users is worse than an unfinished phase.
 
+- [ ] **MT5-13** *(found by the MT5-05 live run, 2026-08-04 — BLOCKS a clean MT5-05 pass)*: **A venue
+  with no API-scope concept never renders a failed scope probe.** The MT5 success screen shows
+  `PROBE_FAILED: Could not check key scopes. Try again.` in red, with copy blaming the venue
+  ("This is a problem at the venue — try again shortly"). It is **deterministic, not flaky**: the
+  probe handler (`analytics-service/routers/internal.py:184-460`) contains **zero `mt5` references**
+  and its own docstring names step 5 as *"Open a CCXT exchange + call `detect_permissions`"*. MT5 is
+  not a ccxt venue and a login / investor-password / server triple **has no scopes to detect**, so
+  `detect_permissions` throws → 424 `EXCHANGE_PROBE_FAILED` → `wizardErrors.ts:1728` maps it to
+  `KEY_PROBE_FAILED`. Every MT5 key hits it, every time.
+  **Why this blocks MT5-05:** that requirement's wording is "without needing to know an internal
+  error code", and a literal `PROBE_FAILED:` string on the success screen is exactly that. The
+  "try again" advice is also unwinnable — retrying can never succeed.
+  ⛔ **NOT a security hole, and the fix must not be sold as one.** Read-only IS enforced for MT5, by
+  a different and appropriate mechanism: `_validate_mt5_key` (`routers/exchange.py:222`), built as
+  the fail-CLOSED clone of the sFOX validator, probes with `client.order_check(mt5_probe_request())`
+  and rejects any credential that can trade. Verified 2026-08-04. The defect is the *badge*, not the
+  enforcement.
+  **Shape:** follow the D-03 precedent set by `passphraseSecret` — a per-venue capability flag whose
+  DEFAULT preserves today's behaviour, so every ccxt venue stays byte-identical and MT5 opts out. MT5
+  renders an explanatory line (investor passwords are read-only by design), never a failed probe.
+
+---
+
+### OWN — An allocator can see and use their OWN unpublished strategy (founder call 2026-08-04)
+
+Raised during the MT5-05 live run. The allocator connecting a key is often **verifying a trading
+team's performance**, not publishing their own track record — so the strategy must be fully usable
+by its owner while staying invisible to everyone else. Publication stays admin-only; none of this
+weakens that.
+
+⚠️ **Scope fence — this is NOT MT5 work and must not be folded into Phase 142.3.** 142.3's job is
+proving MT5 *numbers* are correct. This group is a visibility/caching feature touching the factsheet,
+scenario and portfolio. Mixing them repeats the 142.2 sizing mistake the researcher caught at the
+D-14 valve.
+
+- [x] **OWN-01** *(ALREADY MET — recorded with evidence, do NOT re-implement)*: The owner's
+  not-yet-published strategy is **addable to a scenario**. `/api/strategies/browse` runs through
+  `withPublishedOrOwner(..., user.id)` (CONTRIB-03): the owner sees their own unpublished rows under
+  their REAL name (own rows skip the codename redaction), everyone else sees `status='published'`
+  only. It is picker-driven, so **nothing is auto-added** — which is the founder's stated requirement
+  (adding a team's key to verify performance must not silently join the allocation).
+
+- [ ] **OWN-02**: The owner can **view the full factsheet** of their own unpublished strategy from the
+  account that uploaded it. Today `factsheet/[id]/v2/page.tsx:344` wraps the signature probe in
+  `withPublishedOnly(...)` with **no owner branch**, so the owner gets `notFound()` — the page's own
+  log hint reads *"strategy may be draft / archived or RLS-hidden"*. The correct primitive already
+  exists and is used by browse (`withPublishedOrOwner`).
+  ⛔ **THIS IS NOT A ONE-LINE SWAP, and shipping it as one would create a disclosure bug.** That
+  route is **public and cached**: it builds an `unstable_cache` entry keyed on `${id}::${computedAt}`,
+  and the file's own header justifies that cache as safe *because "the only fields we cache come from
+  the published row."* Make the gate owner-inclusive without touching caching and an owner rendering
+  their draft **populates a cache entry an anonymous visitor can then read** — the same disclosure
+  class as the `strategy_analytics (*)` anon splat already in TODOS. The acceptance test is therefore
+  adversarial, not happy-path: **after an owner has viewed their draft, an anon request for the same
+  id must still 404.**
+
+- [ ] **OWN-03**: If the strategy is genuinely the allocator's own, it can be **added to their
+  portfolio** (not only a scenario). ⚠️ **UNVERIFIED** — the scenario path (OWN-01) was confirmed in
+  code; the portfolio path was NOT checked as of 2026-08-04. Establish current behaviour BEFORE
+  planning work, or this may turn out to be already met like OWN-01.
+
+- [ ] **OWN-04**: The wizard preview links to the full factsheet **once that view exists**. Explicitly
+  BLOCKED ON OWN-02: adding the link first would point every draft at a `notFound()` — the same
+  dead-end class Phase 142.2 existed to delete.
+
+---
+
+### STALE — No stale screens (founder call 2026-08-04: "no stale screens")
+
+- [ ] **STALE-01**: A wizard screen never shows a state the backend has already left. Two instances
+  observed on PROD during the MT5-05 run: (a) the wizard sat on **"Fetching trades…"** after the job
+  chain had finished at 11:39:35; (b) the gate rendered a refusal computed from a **stale analytics
+  row while a re-derive was in flight**, so the user saw a failure that was already being fixed.
+  ⚠️ **Root cause NOT yet established** — the poll loop was mapped but the investigation was not
+  finished. `SyncPreviewStep.tsx:109-111` states the loop "has no time-based abort (it stops only on
+  success / terminal failure / 3 consecutive network errors)", which means it *should* have
+  terminated at 11:39:35; why it did not is the open question. Do not plan a fix before answering it.
+
 ---
 
 ## v2 Requirements
@@ -488,8 +566,13 @@ Populated during roadmap creation.
 | JOB-08 | Phase 144 | Pending |
 | JOB-06 | Phase 145 | Pending |
 | JOB-07 | Phase 142 | Pending |
-| MT5-01..05, MT5-11, MT5-12 | Phase 142.2 | Pending (MT5-01, MT5-02 complete) |
+| MT5-01..04, MT5-11, MT5-12 | Phase 142.2 | **Complete** — shipped v0.53.0.0 (PR #660) 2026-08-04 |
+| MT5-05 | Phase 142.2 | **OPEN — blocking human gate.** Live run 2026-08-04 got as far as "Your verified factsheet is ready" with the continue button enabled, but the flow was NOT completed (strategy still `draft`) and MT5-13 puts an internal error code on that same screen. Not dischargeable yet. |
 | MT5-06..10 | Phase 142.3 | Pending (split out of 142.2 on 2026-08-03 at the D-14 valve) |
+| MT5-13 | Phase 142.3 | Pending (found by the MT5-05 live run 2026-08-04; blocks a clean MT5-05) |
+| OWN-01 | — | **Already met** (CONTRIB-03, verified in code 2026-08-04) — no phase needed |
+| OWN-02..04 | unassigned | Pending — needs its own phase; ⛔ do NOT fold into 142.3 (see the OWN scope fence) |
+| STALE-01 | unassigned | Pending — root cause NOT yet established; investigate before planning |
 | RATE-01 | Phase 146 | Pending |
 | RATE-02 | Phase 146 | Pending |
 | RATE-03 | Phase 146 | Pending |
