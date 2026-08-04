@@ -1529,6 +1529,40 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         # mtm_gated_reason exclusion shares the same lookup.)
         _clear_stale_by_basis = _was_composite
 
+        # ── MT5-12 (D-15/D-16): producer 3's verdict of record ────────────────
+        # The THIRD csv_daily_returns producer is the keyless CSV upload
+        # (csv-finalize/route.ts → the persist_csv_daily_returns SECDEF RPC). Its
+        # rows are written in TypeScript, so the derive seam's Python assert
+        # cannot reach it; the verdict is stamped HERE instead, at the success
+        # path's first analytics-side touchpoint. csv-finalize's own
+        # strategy_analytics writes (route.ts:724, :763) are FAILURE placeholders
+        # only, so nothing upstream of this function could have carried it.
+        #
+        # ⛔ PROVENANCE, never current column state. Stamping because "the verdict
+        # is currently NULL" would promote a KEYED funding-only perp — whose
+        # combiner honestly declined to certify it — into the gate's allow-list,
+        # which is exactly the publication D-15 exists to refuse. The
+        # discriminator is `api_key_id IS NULL` (`_is_broker_sourced`, already
+        # read from the strategy row above): the wizard's CSV branch.
+        #
+        # Two exclusions, both deliberate:
+        #   * KEYED — the column is ABSENT from this and every other payload in
+        #     this file, so the derive-stamped verdict survives the analytics
+        #     round trip by OMISSION (A1, executed against TEST in plan 142.2-04:
+        #     a PostgREST upsert projects only the payload's keys).
+        #   * FORMER COMPOSITE — composites carry api_key_id NULL too
+        #     (admin/strategy-review/route.test.ts:1073), so keyless alone would
+        #     relabel a machine stitch as a human upload and erase the
+        #     `composite_stitched` run_stitch_composite_job wrote. A CURRENT
+        #     composite cannot reach here (stitch_composite is chain-terminal in
+        #     JOB_CHAIN_FOLLOW_ON), so this fires only during a composite→keyless
+        #     transition, where the prior `composite` flag is the last honest
+        #     statement about the series. It self-heals: this upsert rebuilds
+        #     data_quality_flags wholesale, so the NEXT run sees no `composite`
+        #     flag and stamps user_supplied. Both values are allow-listed, so the
+        #     one-run lag costs approvability nothing.
+        _stamp_user_supplied = not _is_broker_sourced and not _was_composite
+
         def _mark_complete() -> None:
             payload: dict[str, Any] = {
                 "strategy_id": strategy_id,
@@ -1549,6 +1583,14 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 # SQL NULL (never JSON null) — Phase 85 CHECK allows NULL or a jsonb
                 # object. Python None → SQL NULL.
                 payload["metrics_json_by_basis"] = None
+            if _stamp_user_supplied:
+                # MT5-12: the ONE site in this file that writes the verdict. A
+                # SIBLING key — never a member of data_quality_flags, which this
+                # very upsert REPLACES wholesale (see the rebuild above) and
+                # whose NAV_TWR_GUARD_KEYS members auto-promote
+                # computation_status to complete_with_warnings, a status the
+                # publish gate PASSES (the D-16 fail-open).
+                payload["series_completeness"] = "user_supplied"
             payload.update(metrics_result.metrics_json)
             supabase.table("strategy_analytics").upsert(
                 payload, on_conflict="strategy_id"
