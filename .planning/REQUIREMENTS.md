@@ -421,6 +421,208 @@ milestone or advertise MT5 until 142.3 passes.
   an escape hatch. The phase does not close while the terminal and the UI disagree: a known-wrong
   number rendered to users is worse than an unfinished phase.
 
+- [ ] **MT5-13** *(found by the MT5-05 live run, 2026-08-04 — BLOCKS a clean MT5-05 pass)*: **A venue
+  with no API-scope concept never renders a failed scope probe.** The MT5 success screen shows
+  `PROBE_FAILED: Could not check key scopes. Try again.` in red, with copy blaming the venue
+  ("This is a problem at the venue — try again shortly"). It is **deterministic, not flaky**: the
+  probe handler (`analytics-service/routers/internal.py:184-460`) contains **zero `mt5` references**
+  and its own docstring names step 5 as *"Open a CCXT exchange + call `detect_permissions`"*. MT5 is
+  not a ccxt venue and a login / investor-password / server triple **has no scopes to detect**, so
+  `detect_permissions` throws → 424 `EXCHANGE_PROBE_FAILED` → `wizardErrors.ts:1728` maps it to
+  `KEY_PROBE_FAILED`. Every MT5 key hits it, every time.
+  **Why this blocks MT5-05:** that requirement's wording is "without needing to know an internal
+  error code", and a literal `PROBE_FAILED:` string on the success screen is exactly that. The
+  "try again" advice is also unwinnable — retrying can never succeed.
+  ⛔ **NOT a security hole, and the fix must not be sold as one.** Read-only IS enforced for MT5, by
+  a different and appropriate mechanism: `_validate_mt5_key` (`routers/exchange.py:222`), built as
+  the fail-CLOSED clone of the sFOX validator, probes with `client.order_check(mt5_probe_request())`
+  and rejects any credential that can trade. Verified 2026-08-04. The defect is the *badge*, not the
+  enforcement.
+  **Shape:** follow the D-03 precedent set by `passphraseSecret` — a per-venue capability flag whose
+  DEFAULT preserves today's behaviour, so every ccxt venue stays byte-identical and MT5 opts out. MT5
+  renders an explanatory line (investor passwords are read-only by design), never a failed probe.
+
+- [ ] **MT5-14** *(found by the MT5-05 live run, 2026-08-04)*: An MT5 strategy can declare **MT5** as
+  its supported exchange in the wizard metadata step, and the venue is **preselected from the key the
+  founder already connected** rather than asked again.
+  ⛔ **SEVERITY CORRECTED 2026-08-04 — this was mis-filed as cosmetic and it is a HARD BLOCKER.**
+  The same ccxt-only probe is called by `finalize-wizard` on EVERY submit as a scope-broadening
+  defence (`:175` → `/internal/keys/{id}/permissions?force_refresh=true`). For MT5 it throws
+  `Unsupported exchange: mt5` (confirmed in Sentry 2026-08-04T11:53:52 on
+  `GET /api/keys/6d36dd92-…/permissions`), `!res.ok` throws at `:194`, and the catch maps **every**
+  probe failure to `KEY_NETWORK_TIMEOUT` 502 at `:519`. So a PERMANENT venue-unsupported condition is
+  reported to the user as a temporary network blip that says "try again" — the founder clicked Retry
+  **five times** against a failure that can never succeed.
+  **Consequence: an MT5 strategy cannot be submitted AT ALL.** MT5 reaching the wizard's preview
+  (v0.53.0.0) is real, but the LAST click fails in a different subsystem, so MT5 is **not usable
+  end-to-end in production**. MT5-05 is not completable until this lands.
+  **Two distinct fixes, both required:** (a) the probe must handle MT5 (or finalize must not demand a
+  ccxt scope probe for a venue that has none — read-only is already proven by `_validate_mt5_key`);
+  (b) the catch-all mapping of any probe failure to `KEY_NETWORK_TIMEOUT` must stop — a permanent
+  unsupported-venue error must never render as a retryable timeout.
+  **Observed (the badge, same root cause):** the "Supported exchanges" chips render Binance / OKX / Bybit / Deribit / sFOX — no MT5
+  — on a strategy whose only key IS MT5. The founder must either mis-declare the venue or leave it blank.
+  ⛔ **This is NOT the MT5-11 drift class — do not "fix the stale list".** It is DELIBERATE:
+  `closed-sets.ts:119-122` states *"mt5 stays OUT of UI_EXCHANGE_CODES / EXCHANGES / FUNDING_EXCHANGES
+  / CRYPTO_EXCHANGES regardless of this flag — the manager-surface `<Select>` must not silently
+  widen"*, citing UI-SPEC §MT5-Manager-Parity and enforced by the `closed-sets.mt5-flag` no-widening
+  pin. **A test WILL go red when this changes, and that is the guard working, not a regression to
+  route around.** The pin must be re-cut deliberately, with its reasoning updated, in the same commit.
+  **Why the decision is now outgrown:** it was taken while MT5 could not reach the end of the wizard.
+  As of v0.53.0.0 it can, so a live MT5 strategy now hits a metadata step that cannot describe it.
+  **Second half, independent of the list:** the wizard already knows the connected key's exchange, so
+  preselecting it removes the question entirely. Do not ship the widening without the preselect —
+  widening alone just adds a sixth chip the founder still has to find.
+
+---
+
+### OWN — An allocator can see and use their OWN unpublished strategy (founder call 2026-08-04)
+
+Raised during the MT5-05 live run. The allocator connecting a key is often **verifying a trading
+team's performance**, not publishing their own track record — so the strategy must be fully usable
+by its owner while staying invisible to everyone else. Publication stays admin-only; none of this
+weakens that.
+
+⚠️ **Scope fence — this is NOT MT5 work and must not be folded into Phase 142.3.** 142.3's job is
+proving MT5 *numbers* are correct. This group is a visibility/caching feature touching the factsheet,
+scenario and portfolio. Mixing them repeats the 142.2 sizing mistake the researcher caught at the
+D-14 valve.
+
+- [x] **OWN-01** *(ALREADY MET — recorded with evidence, do NOT re-implement)*: The owner's
+  not-yet-published strategy is **addable to a scenario**. `/api/strategies/browse` runs through
+  `withPublishedOrOwner(..., user.id)` (CONTRIB-03): the owner sees their own unpublished rows under
+  their REAL name (own rows skip the codename redaction), everyone else sees `status='published'`
+  only. It is picker-driven, so **nothing is auto-added** — which is the founder's stated requirement
+  (adding a team's key to verify performance must not silently join the allocation).
+
+- [ ] **OWN-02**: The owner can **view the full factsheet** of their own unpublished strategy from the
+  account that uploaded it. Today `factsheet/[id]/v2/page.tsx:344` wraps the signature probe in
+  `withPublishedOnly(...)` with **no owner branch**, so the owner gets `notFound()` — the page's own
+  log hint reads *"strategy may be draft / archived or RLS-hidden"*. The correct primitive already
+  exists and is used by browse (`withPublishedOrOwner`).
+  ⛔ **THIS IS NOT A ONE-LINE SWAP, and shipping it as one would create a disclosure bug.** That
+  route is **public and cached**: it builds an `unstable_cache` entry keyed on `${id}::${computedAt}`,
+  and the file's own header justifies that cache as safe *because "the only fields we cache come from
+  the published row."* Make the gate owner-inclusive without touching caching and an owner rendering
+  their draft **populates a cache entry an anonymous visitor can then read** — the same disclosure
+  class as the `strategy_analytics (*)` anon splat already in TODOS. The acceptance test is therefore
+  adversarial, not happy-path: **after an owner has viewed their draft, an anon request for the same
+  id must still 404.**
+
+- [ ] **OWN-03**: If the strategy is genuinely the allocator's own, it can be **added to their
+  portfolio** (not only a scenario). ⚠️ **UNVERIFIED** — the scenario path (OWN-01) was confirmed in
+  code; the portfolio path was NOT checked as of 2026-08-04. Establish current behaviour BEFORE
+  planning work, or this may turn out to be already met like OWN-01.
+
+- [ ] **OWN-04**: The wizard preview links to the full factsheet **once that view exists**. Explicitly
+  BLOCKED ON OWN-02: adding the link first would point every draft at a `notFound()` — the same
+  dead-end class Phase 142.2 existed to delete.
+
+---
+
+### WIZ-CONT — Wizard continuity & credential dedup (founder call 2026-08-04, live MT5-05 run)
+
+- [ ] **WIZCONT-01**: Re-entering "add a strategy" with an existing wizard draft **continues where the
+  founder left off** instead of restarting. ⚠️ **Resume is NOT missing — do not rebuild it.**
+  `WizardClient.tsx:187-191` already resumes to `sync_preview` when `initialDraft` is present, and the
+  server query on `page.tsx:79-90` correctly finds the row (verified on PROD: the live draft carries
+  `source='wizard'`, `status='draft'`, so it IS matched). The restart is therefore attributable to the
+  **entry point BEFORE the wizard** — `/strategies/new` is a branch chooser with no draft awareness,
+  so it re-asks API-vs-CSV and the founder experiences "step 1" without the resuming component ever
+  mounting. **Establish the exact entry path first** (this was inferred from code, not observed
+  click-by-click) and fix the chooser, not the state machine.
+
+- [ ] **WIZCONT-02** *(NARROW — was mis-recorded as a data-integrity hole; corrected 2026-08-04 by
+  live observation)*: Re-connecting the same credentials from a context that has **lost the wizard
+  session token** must not create a second strategy + second `api_keys` row.
+  ✅ **The common case is ALREADY SAFE, and an earlier draft of this requirement got it wrong.** I
+  predicted that navigating away and re-entering the wizard would duplicate; the founder re-ran it on
+  PROD and **no duplicate was created**. Mechanism, verified: `wizard_session_id` is a client
+  idempotency token held in **localStorage**, "regenerated only on an explicit draft delete" — so it
+  SURVIVES navigation. The re-run matched the fence at `create-with-key/route.ts:263` and returned the
+  existing draft **before** the Railway validate + encrypt (observable as the run being much faster).
+  A DB backstop also exists on PROD: `strategies_user_wizard_session_source_uniq`
+  — `UNIQUE (user_id, wizard_session_id, source) WHERE wizard_session_id IS NOT NULL`.
+  ⚠️ **Residual gap, genuinely narrower:** the fence and the unique index are both keyed on
+  `wizard_session_id`, so they cannot match when that token is gone — a different browser/profile, a
+  cleared localStorage, or an incognito window. In that path nothing refuses a duplicate, because
+  `public.api_keys` has **no unique constraint beyond the primary key** (confirmed on PROD).
+  ⚠️ **A quick UNIQUE index is not the fix.** Credentials are stored ENCRYPTED (`api_key_encrypted`,
+  per-row `dek_encrypted` + `nonce`), so uniqueness on ciphertext dedups nothing — two encryptions of
+  the same secret differ. Identity must come from a stable non-secret value (e.g. the venue's own
+  account id returned at validation), which differs per venue and does not exist everywhere today.
+  ⛔ **Fail toward the EXISTING row, never a silent overwrite**: re-connecting must not clobber a key
+  whose `strategy_keys` membership and synced history other strategies depend on.
+  **Priority: LOW** relative to WIZCONT-01 — it needs a lost token, not ordinary navigation.
+
+### WIZFORM — Form errors belong on the form (founder call 2026-08-04, verbatim)
+
+> "It should not error on any input from the strategy description page. And if it errors, the error
+> should be shown on that page next to the wrong answer, highlighting the box in which the answer
+> belongs in red."
+
+- [ ] **WIZFORM-01** *(BLOCKING UX — cost the founder 3 failed submits during the MT5-05 run)*: A
+  field the user can get wrong is validated **on the form, inline, next to that field**, with the
+  offending input highlighted — never as a terminal page-level error after submit.
+  **Observed:** a 2-character description passed the metadata step, then failed at submit as a
+  full-page red envelope. The founder could not tell which field was wrong, so they changed the
+  **supported-exchanges chips twice** (adding sFOX, which is factually wrong for an MT5 account)
+  chasing an error that was actually about the description. **A misleading error does not just cost a
+  retry — it sends people to corrupt unrelated fields.**
+  The server already knows the answer: `finalize-wizard/route.ts:338-346` returns the exact string
+  `"description must be 10-5000 characters"`. The user never sees it (see WIZFORM-02). The client
+  knows the rule too and could refuse at the field.
+
+- [ ] **WIZFORM-02** *(the same UNKNOWN class Phase 142.2 was supposed to delete)*: No wizard failure
+  renders as `code: UNKNOWN` / "We could not classify this failure" when the server DID classify it.
+  **Root cause:** `finalize-wizard`'s `validatePayload` returns bare `{ error: "..." }` with **no
+  `code` field** (`:345`, and the sibling 400s at `:298/:324/:333/:355/:381/:392/:427`), and the
+  client collapses any code-less or unmapped response to `UNKNOWN`.
+  ⚠️ **Phase 142.2 plan 07 split 24 rejection sites onto honest codes and MISSED this validator** —
+  so the defect class we shipped a fix for on 2026-08-04 was still reachable the same afternoon.
+  Whatever sweep closes this must be driven from the emitting sites, not from a hand-listed set.
+  ⚠️ **A prior investigation logged this exact route + shape** (`wizard-finalize-codeless-400-unknown`,
+  recorded 2026-07-08 as fixed by making description optional). The 10-char minimum is still enforced
+  at `:339`, so that fix was narrower than recorded or has regressed. Treat the stored learning as
+  STALE and re-derive from source.
+
+- [ ] **WIZFORM-04** *(founder, verbatim: "clicking twice is not acceptable, especially with this
+  mistake message. A user would just not know what to do")*: A **transient infrastructure** failure
+  never becomes a user decision. Submit absorbs it — bounded automatic retry with backoff — and only
+  surfaces an error once retries are genuinely exhausted, then with copy naming an action the user
+  can actually take.
+  **Observed:** submit returned `KEY_NETWORK_TIMEOUT` and required a manual **Retry** click. The
+  founder knew to click it; a real allocator sees "We could not reach the exchange … switch to a
+  different exchange" on a **forex account they own**, and stops.
+  ⛔ **The fix is NOT "add a retry loop" — that papers over the real question.**
+  `finalize-wizard` crosses a Railway seam on **EVERY submit** to re-validate key permissions, for a
+  key that was validated minutes earlier and has already synced 136 daily rows. MT5 serialises every
+  gateway call through ONE lock, so that re-validation is the most contended call in the flow and the
+  timeout is a **self-inflicted** dependency at the worst moment — the last click of the funnel.
+  **Ask first whether the call is needed at all** (a recent successful validation + a live synced
+  series is already evidence), and only then discuss retry.
+  ⚠️ Anything added here must respect the existing seam-budget contract
+  (`src/lib/seam-budgets.invariant.test.ts` recomputes it) — a naive retry multiplies the budget this
+  route is explicitly capped on, and there is a circuit breaker (`breaker:railway`) the retries would
+  feed. Retrying into an open breaker is how one slow venue takes down every other user's submits.
+
+- [ ] **WIZFORM-03**: Venue-shaped error copy must not be shown for venues it cannot apply to. The
+  MT5 submit timeout advises *"switch to a different exchange"* — impossible advice when the account
+  IS the venue. Same unwinnable-remedy class as MT5-13 and the deleted "0 trades" message.
+  ℹ️ The timeout itself is expected under load, not a defect: `finalize-wizard` crosses a Railway seam
+  on EVERY submit to re-check permissions, and MT5 serialises through a single gateway lock.
+
+### STALE — No stale screens (founder call 2026-08-04: "no stale screens")
+
+- [ ] **STALE-01**: A wizard screen never shows a state the backend has already left. Two instances
+  observed on PROD during the MT5-05 run: (a) the wizard sat on **"Fetching trades…"** after the job
+  chain had finished at 11:39:35; (b) the gate rendered a refusal computed from a **stale analytics
+  row while a re-derive was in flight**, so the user saw a failure that was already being fixed.
+  ⚠️ **Root cause NOT yet established** — the poll loop was mapped but the investigation was not
+  finished. `SyncPreviewStep.tsx:109-111` states the loop "has no time-based abort (it stops only on
+  success / terminal failure / 3 consecutive network errors)", which means it *should* have
+  terminated at 11:39:35; why it did not is the open question. Do not plan a fix before answering it.
+
 ---
 
 ## v2 Requirements
@@ -488,8 +690,20 @@ Populated during roadmap creation.
 | JOB-08 | Phase 144 | Pending |
 | JOB-06 | Phase 145 | Pending |
 | JOB-07 | Phase 142 | Pending |
-| MT5-01..05, MT5-11, MT5-12 | Phase 142.2 | Pending (MT5-01, MT5-02 complete) |
+| MT5-01..04, MT5-11, MT5-12 | Phase 142.2 | **Complete** — shipped v0.53.0.0 (PR #660) 2026-08-04 |
+| MT5-05 | Phase 142.2 | ⛔ **OPEN and NOT COMPLETABLE without MT5-13.** Live run 2026-08-04 reached "Your verified factsheet is ready" (gate work confirmed live), but submit fails permanently: the ccxt-only permissions probe rejects MT5 and the failure is mis-rendered as a retryable `KEY_NETWORK_TIMEOUT`. Founder retried 5×. |
 | MT5-06..10 | Phase 142.3 | Pending (split out of 142.2 on 2026-08-03 at the D-14 valve) |
+| OWN-01 | — | **Already met** (CONTRIB-03, verified in code 2026-08-04) — no phase needed |
+| OWN-02..04 | unassigned | Pending — needs its own phase; ⛔ do NOT fold into 142.3 (see the OWN scope fence) |
+| MT5-13 | Phase 142.3 | ⛔ **HARD BLOCKER (severity corrected)** — the ccxt-only probe is called by `finalize-wizard` on EVERY submit, so an MT5 strategy **cannot be submitted at all**; MT5-05 is not completable until this lands |
+| MT5-14 | Phase 142.3 | Pending — MT5 missing from the metadata exchange chips; ⛔ deliberate no-widening pin will red, re-cut it consciously |
+| WIZCONT-01 | unassigned | Pending — **OBSERVED**: allocators have NO resume path at all (`/strategies/*` is manager-only; the overlay hardcodes `initialDraft={null}`, Phase 110 deferral) |
+| WIZCONT-02 | unassigned | Pending — **LOW**; corrected 2026-08-04, the common case is already safe (localStorage session token + `strategies_user_wizard_session_source_uniq`) |
+| WIZFORM-01 | unassigned | Pending — **blocking UX**; inline field errors, cost 3 failed submits and drove wrong-field edits |
+| WIZFORM-02 | unassigned | Pending — code-less 400 → `UNKNOWN`; 142.2 plan 07's sweep missed this validator |
+| WIZFORM-03 | unassigned | Pending — "switch to a different exchange" is impossible advice for MT5 |
+| WIZFORM-04 | unassigned | Pending — **blocking UX**; transient seam timeout must not become a user decision; ⛔ ask whether the per-submit re-validation is needed before adding retries |
+| STALE-01 | unassigned | Pending — root cause NOT yet established; investigate before planning |
 | RATE-01 | Phase 146 | Pending |
 | RATE-02 | Phase 146 | Pending |
 | RATE-03 | Phase 146 | Pending |
