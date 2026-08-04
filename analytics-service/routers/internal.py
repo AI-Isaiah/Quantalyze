@@ -204,7 +204,12 @@ async def get_key_permissions(
          Best-effort — a write failure here logs and continues; we'd rather
          answer the call than fail closed on an audit hiccup.
       4. Load + decrypt the api_keys row.
-      5. Open a CCXT exchange + call ``detect_permissions`` (TTL-cached).
+      5. Branch on the venue. ``sfox`` and ``mt5`` are NOT ccxt exchanges —
+         ``create_exchange`` raises ValueError for both — so each has its own arm
+         ABOVE the ccxt path, returning the honest STRUCTURAL read-only triple
+         (neither adapter exposes a trade surface, so there is no scope to
+         probe). Everything else opens a CCXT exchange and calls
+         ``detect_permissions`` (TTL-cached).
       6. Return the triple plus a ``detected_at`` ISO timestamp.
 
     Errors (PYAPI-05 — see ``docs/STATUS_CONTRACT.md``; the status line alone is
@@ -434,6 +439,47 @@ async def get_key_permissions(
         finally:
             if sfox_client is not None:
                 await sfox_client.aclose()
+
+    # MT5-13 — mt5 is NOT a ccxt exchange either, and it had no branch here. It
+    # fell through to `create_exchange`, which raises ValueError("Unsupported
+    # exchange: mt5") -> the 400 below -> finalize-wizard renders EVERY probe
+    # failure as KEY_NETWORK_TIMEOUT ("we could not reach the exchange, try
+    # again"). So a PERMANENT unsupported-venue condition was sold to the user as
+    # a transient one, on a route that fires on EVERY submit: MT5 strategies
+    # could not be finalized at all, and the retry the copy invited could never
+    # work (measured 2026-08-04 — the founder clicked Submit five times before
+    # this was traced). Branch BEFORE create_exchange, exactly as sfox does above.
+    #
+    # Read-only is STRUCTURAL here, so there is no scope to probe:
+    #   * `Mt5Client` composes read methods + the `order_check` probe ONLY — no
+    #     trade surface, no `__getattr__` passthrough. Our code cannot trade with
+    #     this credential whatever it is. That is the same argument the sfox arm
+    #     above makes for its GET-only adapter, and it is why neither venue emits
+    #     a probed scope triple.
+    #   * On TOP of that, the stored credential was proven investor-only
+    #     BEHAVIOURALLY at connect: `routers/exchange._validate_mt5_key` runs
+    #     `order_check` and REJECTS a trade-capable (master) login, persisting
+    #     nothing. An MT5 investor password cannot be promoted to a master one —
+    #     broadening means supplying a DIFFERENT credential, which re-runs connect
+    #     and that validator.
+    # The scope-broadening threat this `force_refresh` probe exists to catch
+    # therefore has no MT5 instance, and the structural triple is the honest
+    # answer rather than a convenient one.
+    #
+    # Deliberately NO live gateway round-trip, which is where this diverges from
+    # the sfox arm's `get_balances()`: an RPyC `login` switches the ONE shared
+    # terminal onto this account (the MT5CONC-02 hazard the worker serialises
+    # behind a single gateway lock), and it would buy zero scope information
+    # because the answer is fixed by construction. Liveness is the sync path's
+    # job and fails loudly there; this endpoint answers scopes.
+    if exchange_name == "mt5":
+        return {
+            "read": True,
+            "trade": False,
+            "withdraw": False,
+            "probe_error": False,
+            "detected_at": datetime.now(timezone.utc).isoformat(),
+        }
 
     try:
         exchange = create_exchange(exchange_name, api_key, api_secret, passphrase)
