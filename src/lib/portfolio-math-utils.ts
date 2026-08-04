@@ -59,6 +59,66 @@ export function normalizeDailyReturns(raw: unknown): DailyPoint[] {
   return out.sort((a, b) => a.date.localeCompare(b.date));
 }
 
+// ── Analytics column-drift resolver ─────────────────────────────────
+/**
+ * Convert a wealth (equity) curve into the daily-return series. The input
+ * carries wealth values (cumulative product of 1 + r); successive ratios
+ * recover the daily-return series.
+ *
+ * Returns an empty array when the input has fewer than two points (the
+ * factsheet builder bails on series length below 2 anyway).
+ *
+ * Note the first point has no predecessor and so yields no return — an
+ * N-point curve produces N-1 returns.
+ */
+export function equityCurveToDailyReturns(points: DailyPoint[]): DailyPoint[] {
+  if (!Array.isArray(points) || points.length < 2) return [];
+  const sorted = [...points]
+    .filter(
+      (p) =>
+        p &&
+        typeof p.date === "string" &&
+        Number.isFinite(p.value) &&
+        p.value > 0,
+    )
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const out: DailyPoint[] = [];
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1].value;
+    const curr = sorted[i].value;
+    if (prev > 0 && Number.isFinite(curr)) {
+      out.push({ date: sorted[i].date, value: curr / prev - 1 });
+    }
+  }
+  return out;
+}
+
+/**
+ * Resolve an analytics row's return series into the daily-return shape every
+ * consumer expects, handling the analytics-service column drift.
+ *
+ * The analytics-service writes the cumprod equity curve to
+ * `strategy_analytics.returns_series`; the `daily_returns` column is only
+ * populated by CSV ingest. Analytics-only strategies leave `daily_returns`
+ * null, so reading it alone strands the caller on an empty series even though
+ * the real one exists in `returns_series`. Try the daily-return column first
+ * (cheaper, no derivation), fall back to deriving from the wealth curve.
+ *
+ * Lives here rather than in `@/lib/factsheet/allocator-portfolio-payload`
+ * (which re-exports it for its existing importers) because that module pulls
+ * `build-payload` — and with it the bundled BTC/SPX/ETH/GLD/IEF benchmark
+ * series — into any graph that touches it. The API route that serves the
+ * scenario composer's lazy returns needs THIS resolver and none of that.
+ */
+export function resolveDailyReturnSeries(
+  dailyReturnsRaw: unknown,
+  returnsSeriesRaw: unknown,
+): DailyPoint[] {
+  const direct = normalizeDailyReturns(dailyReturnsRaw);
+  if (direct.length > 0) return direct;
+  return equityCurveToDailyReturns(normalizeDailyReturns(returnsSeriesRaw));
+}
+
 // ── Numeric helpers ─────────────────────────────────────────────────
 /** Arithmetic mean. Returns 0 for an empty array. */
 export function mean(values: number[]): number {

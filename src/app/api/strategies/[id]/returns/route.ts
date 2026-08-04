@@ -56,7 +56,10 @@ import {
   isRateLimitMisconfigured,
 } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
-import { normalizeDailyReturns, type DailyPoint } from "@/lib/portfolio-math-utils";
+import {
+  resolveDailyReturnSeries,
+  type DailyPoint,
+} from "@/lib/portfolio-math-utils";
 import { readPublicVerificationSignals } from "@/lib/queries";
 
 // AGENTS.md: default to the Node.js runtime explicitly. The route touches the
@@ -216,9 +219,11 @@ export async function GET(
       // data_quality_flags so is_composite can be derived server-side. Only the
       // strict `composite === true` boolean is forwarded; the raw blob (venue
       // detail) never leaves the server (T-111-03).
+      // SERIES-DRIFT — and `returns_series`, which is where the series for an
+      // analytics-service-computed strategy ACTUALLY lives (see below).
       const { data, error } = await supabase
         .from("strategy_analytics")
-        .select("daily_returns, data_quality_flags")
+        .select("daily_returns, returns_series, data_quality_flags")
         .eq("strategy_id", id)
         .maybeSingle();
 
@@ -235,21 +240,52 @@ export async function GET(
         );
       }
 
-      // Normalize the raw JSONB through the canonical parser, NOT a bare
-      // Array.isArray cast. `strategy_analytics.daily_returns` is TYPED as a
-      // year-keyed nested record (types.ts:304) and the Python analytics writer
-      // can store it that way; reading the column RAW from the DB here (no
-      // queries.ts flattening, unlike the book path) means the nested shape
-      // reaches us directly. A bare `Array.isArray(raw) ? raw : []` would
-      // silently drop a real nested-shape series to [] — the exact WR-05
-      // silent-data-loss the book path's normalizeBookReturns already guards.
-      // normalizeDailyReturns handles array + flat-dict + nested-record,
-      // validates every point, and date-sorts. A genuinely absent/NULL/unusable
-      // value still collapses to [] (honest empty, 29-RESEARCH Pitfall 4 — the
-      // added strategy is then warm-up-gated out until a real series exists,
-      // which is correct), NEVER a fabricated series.
-      const raw = (data as { daily_returns: unknown } | null)?.daily_returns;
-      const daily_returns: DailyPoint[] = normalizeDailyReturns(raw);
+      // SERIES-DRIFT — `strategy_analytics.daily_returns` has NO production
+      // writer. The analytics service spreads `metrics_result.metrics_json` into
+      // the strategy_analytics upsert (analytics_runner.py:1594
+      // `payload.update(...)`, job_worker.py:5299) and that dict — built at
+      // metrics.py:1176-1196 — carries `returns_series`, NOT `daily_returns`.
+      // PostgREST upserts project only the columns they NAME, so an un-named
+      // column keeps whatever was there: NULL, forever, for every strategy the
+      // service has ever computed. Measured on PROD 2026-08-04: all 15 rows with
+      // a populated `daily_returns` are `strategies.is_example = true` (the demo
+      // seed, scripts/seed-full-app-demo.ts:1633, is the only writer left); all
+      // 27 real strategies carry NULL. Reading the column alone therefore handed
+      // the scenario composer [] for a drawer-added strategy, which warm-up-gated
+      // it out and rendered "0 overlapping days" / 0.00 metrics — silently, with
+      // no error state to notice. The READER drifted, not the writer.
+      //
+      // `resolveDailyReturnSeries` is the codebase's settled answer to exactly
+      // this drift: legacy column first (cheap, no derivation), else difference
+      // the `returns_series` wealth curve — `(1+r).cumprod()`, metrics.py:775-778
+      // — back into per-day returns. It is already the resolver behind BOTH
+      // strategy-detail surfaces (factsheet/[id]/v2/page.tsx:71,
+      // discovery/[slug]/[strategyId]/page.tsx:65), so the composer now blends
+      // the SAME series those pages render rather than a third one. NOTE the
+      // curve must be DIFFERENCED, never passed through raw: it is shape-
+      // identical to DailyPoint[] but starts at 1.0, so feeding it as returns
+      // would claim +100% on day one.
+      //
+      // Legacy-column-first ordering (not a replacement) keeps the seeded example
+      // universe and the e2e fixtures (e2e/helpers/seed-test-project.ts:570)
+      // working unchanged. Both sources absent still collapses to [] — honest
+      // empty (29-RESEARCH Pitfall 4: warm-up-gated out until a real series
+      // exists, which is correct), NEVER a fabricated series.
+      //
+      // The parser under both arms is the canonical `normalizeDailyReturns`, NOT
+      // a bare Array.isArray cast: `daily_returns` is TYPED as a year-keyed
+      // nested record (types.ts:327) and seeded rows store it that way. Reading
+      // the column RAW here (no queries.ts flattening, unlike the book path)
+      // means the nested shape reaches us directly, and `Array.isArray(raw) ? raw
+      // : []` would silently drop a real series — the exact WR-05 data-loss the
+      // book path's normalizeBookReturns already guards.
+      const analyticsRow = data as
+        | { daily_returns: unknown; returns_series?: unknown }
+        | null;
+      const daily_returns: DailyPoint[] = resolveDailyReturnSeries(
+        analyticsRow?.daily_returns,
+        analyticsRow?.returns_series,
+      );
 
       // BLEND-01 — forward the published strategy's asset_class (null when
       // unset). `strat` is the widened probe row; a stale build that predates the

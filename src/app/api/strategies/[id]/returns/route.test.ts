@@ -90,6 +90,12 @@ const STATE = vi.hoisted(() => ({
   // When set, the strategy_analytics read resolves with this error so the
   // route's 500 branch + redaction can be pinned.
   analyticsQueryError: null as { code: string; message: string } | null,
+  // SERIES-DRIFT — the `returns_series` column on the SAME analytics row: the
+  // `(1+r).cumprod()` wealth curve the analytics service actually writes
+  // (metrics.py:775-778). This is where a real computed strategy's series
+  // lives; the legacy `daily_returns` column has no production writer, so a
+  // row carrying ONLY this is the normal PROD shape, not an edge case.
+  analyticsReturnsSeries: null as unknown,
   observedFilters: {
     // The (legacy) withPublishedOnly predicate appends .eq("status","published")
     // to the existence probe. After CONTRIB-03 the route uses withPublishedOrOwner
@@ -221,7 +227,17 @@ vi.mock("@/lib/supabase/server", () => ({
             if (STATE.analyticsQueryError) {
               return { data: null, error: STATE.analyticsQueryError };
             }
-            return { data: STATE.analyticsRow, error: null };
+            if (STATE.analyticsRow === null) return { data: null, error: null };
+            // `returns_series` rides the SAME row as daily_returns (one widened
+            // select, not a second query) — model it that way so a test that
+            // sets only the wealth curve exercises the real PROD row shape.
+            return {
+              data: {
+                ...STATE.analyticsRow,
+                returns_series: STATE.analyticsReturnsSeries,
+              },
+              error: null,
+            };
           },
         };
         return builder;
@@ -302,6 +318,9 @@ beforeEach(() => {
   });
   STATE.analyticsRow = { daily_returns: [] };
   STATE.analyticsQueryError = null;
+  // Default: no wealth curve. Tests that exercise the drift fallback set
+  // STATE.analyticsReturnsSeries.
+  STATE.analyticsReturnsSeries = null;
   STATE.observedFilters = {
     status: null,
     ownerOrFilter: null,
@@ -615,5 +634,104 @@ describe("GET /api/strategies/[id]/returns", () => {
     expect(body.error).toMatch(/not found/i);
     // No series (and no existence detail) leaks on the cross-tenant 404 path.
     expect(JSON.stringify(body)).not.toContain("daily_returns");
+  });
+
+  // ── SERIES-DRIFT: the legacy column has no production writer ────────────────
+  // Measured on PROD 2026-08-04: all 27 real strategies carry
+  // strategy_analytics.daily_returns = NULL; the only 15 populated rows are
+  // is_example=true demo seeds. The analytics service spreads
+  // metrics_result.metrics_json into the strategy_analytics upsert
+  // (analytics_runner.py:1594) and that dict carries `returns_series`, never
+  // `daily_returns` — and a PostgREST upsert leaves un-named columns untouched,
+  // so the legacy column stays NULL forever.
+  //
+  // WHY this matters economically, not just structurally: the composer treats a
+  // [] series as "no overlapping days" and warm-up-gates the strategy out. So a
+  // 4-in-10 slice of the catalog contributed NOTHING to a scenario projection
+  // and the UI reported "0 observations" / 0.00 for every metric as if that were
+  // the truth about the strategy. The failure is silent by construction — there
+  // is no error state to notice — which is exactly why it needs a pinned test.
+  it("R12 — NULL legacy column + a populated returns_series wealth curve → 200 + the DIFFERENCED series (the PROD shape)", async () => {
+    // The exact PROD row shape for strategy 4eab92b0…3a ("Black Swan", mt5):
+    // daily_returns NULL, returns_series a 136-point cumprod curve starting at
+    // 1.0. Pre-fix this returned []. Values below are the real leading points.
+    STATE.analyticsRow = { daily_returns: null };
+    STATE.analyticsReturnsSeries = [
+      { date: "2026-03-22", value: 1.0 },
+      { date: "2026-03-23", value: 1.0272925 },
+      { date: "2026-03-24", value: 1.032200753968254 },
+    ];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // ECONOMIC oracle, not the implementation's own formula: the recovered
+    // returns must reproduce the wealth curve when compounded. Day 1 has no
+    // predecessor, so an N-point curve yields N-1 returns.
+    expect(body.daily_returns).toHaveLength(2);
+    expect(body.daily_returns[0].date).toBe("2026-03-23");
+    expect(body.daily_returns[1].date).toBe("2026-03-24");
+    const compounded = body.daily_returns.reduce(
+      (w: number, p: { value: number }) => w * (1 + p.value),
+      1.0,
+    );
+    expect(compounded).toBeCloseTo(1.032200753968254, 12);
+    // The curve is DIFFERENCED, never forwarded raw. A pass-through would emit
+    // ~1.03 as a "daily return" (+103% in a day) — the failure mode that makes
+    // returns_series shape-identical to DailyPoint[] but semantically inverted.
+    for (const p of body.daily_returns) {
+      expect(Math.abs(p.value)).toBeLessThan(0.5);
+    }
+    // Non-vacuity: the widened select is what makes the wealth curve reachable.
+    expect(STATE.observedFilters.analyticsSelect).toContain("returns_series");
+  });
+
+  it("R12b — the legacy column WINS when populated; the wealth curve is a fallback, not an override", async () => {
+    // The seeded example universe (15/15 on PROD) populates the legacy column,
+    // and the e2e fixtures seed it directly (e2e/helpers/seed-test-project.ts
+    // :570). Ordering must stay column-then-curve or those surfaces silently
+    // switch to a differenced series (which drops their first day).
+    const legacy = [
+      { date: "2022-01-10", value: -0.007462 },
+      { date: "2022-01-11", value: 0.0031 },
+    ];
+    STATE.analyticsRow = { daily_returns: legacy };
+    STATE.analyticsReturnsSeries = [
+      { date: "2099-01-01", value: 1.0 },
+      { date: "2099-01-02", value: 1.5 },
+    ];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.daily_returns).toEqual(legacy);
+  });
+
+  it("R12c — neither source has a series → 200 + [] (honest empty, never fabricated)", async () => {
+    // A strategy mid-compute (analytics row absent, or present with both series
+    // columns null) must still collapse to the SAME honest empty the pre-fix
+    // route returned — the composer then warm-up-gates it out, which is correct.
+    for (const row of [null, { daily_returns: null }]) {
+      STATE.analyticsRow = row;
+      STATE.analyticsReturnsSeries = null;
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.daily_returns).toEqual([]);
+    }
+  });
+
+  it("R12d — a single-point wealth curve yields [] (one point cannot produce a return)", async () => {
+    // A strategy whose analytics ran on a 1-day window. Differencing needs a
+    // predecessor, so the honest answer is [] — never a fabricated 0.0 day that
+    // would let the composer claim an overlapping observation it does not have.
+    STATE.analyticsRow = { daily_returns: null };
+    STATE.analyticsReturnsSeries = [{ date: "2026-03-22", value: 1.0 }];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.daily_returns).toEqual([]);
   });
 });
