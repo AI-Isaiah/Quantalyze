@@ -41,7 +41,11 @@ import {
 } from "@/lib/scenario";
 import { blendPeriodsPerYear } from "@/lib/closed-sets";
 import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
-import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
+// The LEAF specifier (Phase 147). This module is documented PURE and is read by
+// the phase-63 series-space source scan, so its import graph must stay free of
+// network / Next modules — importing the resolver from
+// factsheet/allocator-portfolio-payload would drag build-payload in here.
+import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
 import { sanitizeLeverageMap } from "@/lib/leverage";
 
 /** One `get_shared_scenario` series row (RPC `series` jsonb element). */
@@ -159,6 +163,19 @@ export function resolveSharedScenario(
    * conservative √252 leg, byte-identical to the pre-84 default.
    */
   assetClassById?: Record<string, string | null>,
+  /**
+   * Phase 147 (SCEN-01) — strategy id → raw `strategy_analytics.returns_series`
+   * (the analytics-service's cumprod WEALTH index), sourced by the SSR caller
+   * (page.tsx) from a sibling read bounded to the RPC's own series ids. It
+   * arrives caller-side for the same reason `assetClassById` does: the phase-29
+   * frozen-spine gate (FORBIDDEN_MIGRATION_RE = /scenario|share/i) forbids
+   * widening the `get_shared_scenario` RPC, whose `series` jsonb carries only
+   * the `daily_returns` column — which CSV ingest alone populates, so an
+   * analytics-only strategy arrives null and projected EMPTY. Absent id /
+   * undefined lookup → the resolver falls back to `s.daily_returns` alone,
+   * byte-identical to the pre-147 behavior.
+   */
+  returnsSeriesById?: Record<string, unknown>,
 ): ResolvedSharedScenario {
   // The codec's `decode` takes a raw STRING (localStorage shape). The RPC hands
   // us a parsed jsonb object, so re-serialize it to drive the same trichotomy.
@@ -181,7 +198,15 @@ export function resolveSharedScenario(
   // in `series` and are intentionally never resolved here (live-book boundary).
   const seriesById = new Map<string, DailyPoint[]>();
   for (const s of row.series ?? []) {
-    seriesById.set(s.strategy_id, normalizeDailyReturns(s.daily_returns));
+    // Phase 147 (SCEN-01) — the ONE series-resolution mechanism: the direct
+    // `daily_returns` column first (CSV ingest), else DIFFERENCE the caller's
+    // `returns_series` cumprod wealth index into returns. Forwarding that index
+    // raw would read its 1.0 base as a +100% day; the resolver owns the
+    // conversion so this page can never diverge from the owner's composer.
+    seriesById.set(
+      s.strategy_id,
+      resolveDailyReturnSeries(s.daily_returns, returnsSeriesById?.[s.strategy_id]),
+    );
   }
 
   const strategies: StrategyForBuilder[] = [];

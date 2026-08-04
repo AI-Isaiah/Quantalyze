@@ -94,11 +94,38 @@ From 147-RESEARCH.md "Validation Architecture" Wave-0 gaps — each is created b
 | SC-1(route) | `returns/route.ts`: remove `returns_series` from the analytics select string | `route.test.ts` SC1 case + select-width assertion | ⬜ pending — run in 147-02 T1 | |
 | SC-2 | Plant a bare `daily_returns` select (no `returns_series`) in `src/lib/queries.ts` — a second site the gate author did not hand-pick | BOTH layers of `phase-147-series-resolution-guards.test.ts` (repo scan + allowlist pin) | ⬜ pending — run in 147-06 T2 (non-vacuity, recorded in docstring + commit message) | |
 | SC-3 | `returns/route.ts`: replace the resolver call with `normalizeDailyReturns(row?.returns_series)` (forward the wealth index raw) | `route.test.ts` SC3 case — day one becomes ≈ 1.0 (+100%) and length becomes N, not N−1 | ⬜ pending — run in 147-02 T1 | |
-| SC-3(share) | `share-resolve.ts`: revert the loop to the pre-147 `normalizeDailyReturns(s.daily_returns)` | `share-resolve.test.ts` SC1-share + SC3-share cases | ⬜ pending — run in 147-03 T1 | |
+| SC-3(share) | `share-resolve.ts`: revert the loop to the pre-147 `normalizeDailyReturns(s.daily_returns)` | `share-resolve.test.ts` SC1-share + SC3-share cases | ✅ Observed (147-03 T1) | See below |
 | SC-4 | Composer tolerance narrowing: map `"empty"` to `"computing"` | `ScenarioComposer.test.tsx` empty-note case (NO DATA chip becomes SYNCING) | ⬜ pending — run in 147-05 T2 | |
 | SC-4(book) | `queries.ts`: hard-code the terminal-empty arm of the series_state derivation to `"computing"` | `queries.my-allocation.test.ts` state-empty-terminal case | ⬜ pending — run in 147-04 T2 | |
 
 *Each mutation is run by the task named in its row, immediately after that task's tests go GREEN: apply mutation → observe RED → revert → paste evidence here. 147-06 T3 refuses to close while any row is pending.*
+
+### SC-3(share) evidence — observed 2026-08-04 (plan 147-03, Task 1)
+
+Mutation applied to `src/app/scenario-share/[token]/share-resolve.ts` AFTER the
+tests went GREEN: the `resolveDailyReturnSeries(...)` call in the `seriesById`
+loop was reverted to the pre-147 `normalizeDailyReturns(s.daily_returns)`, with
+the resolver left imported and intact — so this pins the **wiring**, not the
+helper.
+
+```
+ FAIL  src/app/scenario-share/[token]/share-resolve.test.ts > resolveSharedScenario — returns_series resolution (SCEN-01) > SC1-share: a returns_series-only leg (daily_returns null) projects the REAL differenced series
+AssertionError: expected [] to have a length of 11 but got +0
+ ❯ src/app/scenario-share/[token]/share-resolve.test.ts:975:35
+    975|     expect(result.portfolioDaily).toHaveLength(KNOWN_RETURNS.length);
+
+ FAIL  src/app/scenario-share/[token]/share-resolve.test.ts > resolveSharedScenario — returns_series resolution (SCEN-01) > SC3-share: the wealth index is DIFFERENCED at the wiring, never forwarded raw
+TypeError: Cannot read properties of undefined (reading 'value')
+ ❯ src/app/scenario-share/[token]/share-resolve.test.ts:997:37
+    997|     expect(result.portfolioDaily[0].value).not.toBeCloseTo(1.0, 10);
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 28 passed (30)
+```
+
+Mutation reverted; suite back to 30/30 green. Note the other 28 cases stayed
+GREEN under the mutation — that is the intended back-compat signal (the pre-147
+path is unchanged for `daily_returns`-populated shares).
 
 ---
 
