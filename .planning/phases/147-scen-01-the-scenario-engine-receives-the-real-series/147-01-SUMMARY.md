@@ -141,6 +141,12 @@ None - no external service configuration required.
 - Signatures match the plan's `<interfaces>` block exactly, including the optional `nowMs` third parameter.
 - Note for 147-02: `deriveEmptySeriesState` needs the strategy's `created_at`, and PATTERNS §Pinned Literals flags that the returns-route probe `.select("id, asset_class")` is byte-pinned by `phase-84-asset-class-flow.test.ts:42` — the age input must come from a separate read or the pin must be updated deliberately.
 
+## Self-Check: PASSED
+
+- Files claimed created exist on disk: `src/lib/factsheet/resolve-series.ts`, `src/lib/closed-sets.series-state.test.ts`, `147-01-SUMMARY.md`
+- Commits claimed exist in this worktree's history: `ac69de50`, `5e5d6c2f`, `0960938c`, `0899aea8`
+- No missing items.
+
 ---
 *Phase: 147-scen-01-the-scenario-engine-receives-the-real-series*
 *Completed: 2026-08-04*
