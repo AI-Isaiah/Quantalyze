@@ -770,7 +770,7 @@ Gate design requirements:
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Is the founder's MT5 strategy a composite?**
    - What we know: `csv_daily_returns` holds 136 rows for `4eab92b0`; `returns_series`
@@ -779,6 +779,9 @@ Gate design requirements:
    - What's unclear: whether `data_quality_flags.composite === true` for that id.
    - Recommendation: one PROD read at plan time. It decides whether SC1's expected count is
      ~135 differenced days or the composite path's own count.
+   - **RESOLVED:** carried as 147-VALIDATION.md §Manual-Only Verifications "A1 composite
+     check" — a PROD read (orchestrator-only; MCP stripped from subagents) executed before
+     the acceptance walkthrough judges SC1.
 
 2. **Does the missing-analytics-row case exist on PROD today, and at what volume?**
    - What we know: nothing structurally guarantees the row exists; no cron backstops a
@@ -786,6 +789,9 @@ Gate design requirements:
    - What's unclear: the present count.
    - Recommendation: implement the P5 age bound regardless (it is ~6 lines and reuses a
      deployed threshold), and record the count for the acceptance write-up.
+   - **RESOLVED:** the P5 age bound is implemented in 147-02 Task 1 regardless of count;
+     the PROD census is carried as 147-VALIDATION.md §Manual-Only Verifications "A2
+     missing-row census".
 
 3. **Is P6 (reopen / page-refresh never re-fetches added series) in this phase?**
    - What we know: `fetchAddedReturns` has exactly two call sites, both add seams.
@@ -793,6 +799,8 @@ Gate design requirements:
    - Recommendation: **surface it as an explicit plan-time decision.** It is small, it shares
      the user-visible symptom, and leaving it silently open means the acceptance walkthrough
      must never refresh the page. Do not absorb it silently in either direction.
+   - **RESOLVED:** orchestrator ruled P6 IN SCOPE (the founder's acceptance anchor must
+     survive a page refresh); implemented in 147-06 Task 1 (hydration effect).
 
 4. **Should `getPortfolioStrategies` (`queries.ts:1299`) consumers be audited?**
    - What we know: that query already selects both columns, so the grep-gate passes.
@@ -800,6 +808,8 @@ Gate design requirements:
      `null` for real strategies.
    - Recommendation: a plan-time grep of its consumers; log anything found to TODOS rather
      than expanding this phase further.
+   - **RESOLVED:** 147-06 Task 3 runs the log-only consumer audit — findings logged to
+     TODOS.md as DEF-147-A/B/…; NO code changes, no scope expansion.
 
 ---
 
