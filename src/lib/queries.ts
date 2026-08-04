@@ -5,6 +5,7 @@ import { castRow } from "@/lib/supabase/cast";
 import { loadManagerIdentity as loadManagerIdentityRaw } from "./manager-identity";
 import { extractAnalytics, EMPTY_ANALYTICS } from "./utils";
 import { blendPeriodsPerYear, isComputedAnalytics } from "./closed-sets";
+import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
 import { API_KEY_USER_COLUMNS, type ApiKeyUserColumn } from "./constants";
 import { equitySnapshotsToDailyPoints } from "@/lib/allocation-helpers";
 import {
@@ -3408,7 +3409,9 @@ export const getMyAllocationDashboard = cache(
               sharpe,
               volatility,
               max_drawdown,
-              data_quality_flags
+              data_quality_flags,
+              returns_series,
+              computation_status
             )
           )
           `,
@@ -3532,12 +3535,44 @@ export const getMyAllocationDashboard = cache(
       const analyticsObj = (analytics ?? null) as Record<string, unknown> | null;
       const dqf = analyticsObj?.data_quality_flags as { composite?: unknown } | null | undefined;
       const is_composite = dqf?.composite === true;
+      // Phase 147 / SCEN-01 — resolve the series HERE, server-side, and emit it
+      // under the SAME `daily_returns` field name. The analytics-service writes
+      // the cumprod WEALTH curve to `returns_series` and leaves `daily_returns`
+      // null for analytics-only strategies; the scenario composer reads THIS
+      // payload first for strategies already in the allocator's book and
+      // deliberately skips the lazy /returns fetch for them, so a bare
+      // daily_returns projection has no rescue path and collapses to 0.00
+      // (RESEARCH P2 — the founder's own-portfolio anchor). Resolving here fixes
+      // all six downstream payload consumers with zero change to any of them.
+      //
+      // The raw `returns_series` and `computation_status` columns are stripped
+      // by the same `_dqf` destructure idiom above — only the resolved series
+      // and the derived state cross to the client (T-147-10).
+      const resolvedDailyReturns = analyticsObj
+        ? resolveDailyReturnSeries(
+            analyticsObj.daily_returns,
+            analyticsObj.returns_series,
+          )
+        : [];
       let strategyAnalyticsForPayload:
         | MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"] = null;
       if (analyticsObj) {
-        const { data_quality_flags: _dqf, ...analyticsRest } = analyticsObj;
+        const {
+          data_quality_flags: _dqf,
+          returns_series: _rs,
+          computation_status: _cs,
+          ...analyticsRest
+        } = analyticsObj;
+        // P3: keep the intermediate at the Record<string, unknown> idiom this
+        // block already uses. Annotating it (rather than casting an object
+        // literal) preserves the index signature the payload cast needs, so the
+        // client-facing Pick<> never has to admit a raw series column.
+        const analyticsForPayload: Record<string, unknown> = {
+          ...analyticsRest,
+          daily_returns: resolvedDailyReturns,
+        };
         strategyAnalyticsForPayload =
-          analyticsRest as MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"];
+          analyticsForPayload as MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"];
       }
 
       // eligibility: a strategy is eligible for outcome
