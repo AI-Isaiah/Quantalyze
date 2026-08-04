@@ -1,6 +1,6 @@
 # Roadmap: Quantalyze
 
-## Current Milestone: v1.17 MT5 — usable end-to-end, not merely ingested (Phases 147–153)
+## Current Milestone: v1.17 MT5 — usable end-to-end, not merely ingested (Phases 147–155)
 
 **Goal:** MT5 *works* in the founder's sense rather than the wizard's — it ingests (done), it
 projects in a scenario, and its factsheet is viewable by the allocator who uploaded it.
@@ -29,22 +29,33 @@ unpublished strategy; AUM-05 will hit sFOX the day its flag flips. **A fix scope
   (`strategy_analytics.daily_returns` has NO production writer: 0 of 27 real strategies populated
   vs 15/15 demo seeds) AND it blocks meaningful verification of every other scenario surface —
   you cannot judge a composer whose engine receives an empty series.
-- **OWN-02 (148) before NAV-01, OWN-04 and SCEN-03** — all three link to a factsheet that today
-  404s; shipping them first builds the exact dead-end the previous milestone existed to delete.
-- **AUM (149) after SCEN-01** — its symptom (zeros on screen) is entangled with SCEN-01's and
+- **OWN-02 (148) before NAV-01 (149), OWN-04 (same phase, strictly after) and SCEN-03 (152)** —
+  all three link to a factsheet that today 404s; shipping them first builds the exact dead-end the
+  previous milestone existed to delete.
+- **148/149/150 split (revision 2026-08-04, superseding the approved single Phase 148):** the
+  approved roadmap carried OWN-02 + OWN-03 + OWN-04 + NAV-01 as one phase. NAV-01 was then
+  SHARPENED by the founder from "an overview" to a full **ranking at discovery parity** over every
+  uploaded key incl. `private`/`draft` rows, and the bundled phase would have mixed three review
+  profiles that dilute each other: a cache-disclosure fix with an adversarial acceptance test
+  (OWN-02), a parity/no-invented-data UI surface (NAV-01), and the OWN set's first money-path
+  WRITE (OWN-03, founder-mandated money-path review). Split so each gets the review it needs;
+  every ordering constraint is unchanged and now structural (149 cannot start before 148).
+- **AUM (151) after SCEN-01** — its symptom (zeros on screen) is entangled with SCEN-01's and
   would otherwise appear unfixed. ⚠️ AUM-01 does NOT fix the 0.00 metrics — that is SCEN-01.
-- **MT5-06..10 (153) LAST** — they need a live funded account on a real trading day and a stable
+- **MT5-06..10 (155) LAST** — they need a live funded account on a real trading day and a stable
   surface to measure; running them earlier means re-running them.
 
 ## Phases
 
 - [ ] **Phase 147: SCEN-01 — The scenario engine receives the real series** - Fix the READER (never the writer): every added strategy contributes its actual daily returns via the existing `resolveDailyReturnSeries`; wealth-index `returns_series` is differenced, never forwarded raw
-- [ ] **Phase 148: OWN/NAV — An allocator can see and claim their own strategy** - Owner factsheet without cache disclosure (adversarial anon-404 test), "my strategies" nav entry, wizard-preview link, own-capital-vs-verifying-a-team wizard question (money-path reviewed)
-- [ ] **Phase 149: AUM — A book you can reach and a size you can set** - Direct AUM input, non-ccxt holdings-sync crash fixed as a CLASS (MT5 + latent sFOX), all-or-nothing book gate fixed incl. cross-role contamination, honest refusal copy
-- [ ] **Phase 150: SCEN — Composer legibility** - Ownership marker, clickable rows with a working factsheet link, labelled numbers, no duplicate browse entries
-- [ ] **Phase 151: WIZFORM — Form errors belong on the form (+ MT5 declarable)** - Inline field validation, honest error codes from emitting sites, transient infra absorbed not surfaced, venue-appropriate copy, MT5 preselected in metadata
-- [ ] **Phase 152: WIZCONT/STALE — Wizard continuity, no stale screens** - Draft-aware entry chooser, stale-screen root cause investigated BEFORE fixed, token-less credential dedup toward the existing row
-- [ ] **Phase 153: MT5-VERIFY — The numbers are true, live on a trading day** - Server-UTC offset measured, external-oracle parity on the live funded account, five surfaces agree, discrepancies fixed (uncapped), warnings explained; MT5-GOAL-01 acceptance gate
+- [ ] **Phase 148: OWN — Owner factsheet without cache disclosure** - The owner views the full factsheet of their own unpublished strategy; adversarial anon-404 acceptance on the public `unstable_cache`d route; wizard-preview link that can never dead-end (OWN-04 strictly after OWN-02)
+- [ ] **Phase 149: NAV — "My strategies": a ranking at discovery parity** - Sidebar entry showing every uploaded key + derived strategy incl. `private`/`draft` rows, ranked with the SAME component/query as the external ranking (visibility predicate is the only difference); honest pending states, never zeros
+- [ ] **Phase 150: OWN-03 — The wizard asks whose capital this is** - Own-capital-with-allocation vs verifying-a-team question at allocator finalize; (b) stays the default and a no-op; only an explicit (a) creates the portfolio position (money-path reviewed)
+- [ ] **Phase 151: AUM — A book you can reach and a size you can set** - Direct AUM input, non-ccxt holdings-sync crash fixed as a CLASS (MT5 + latent sFOX), all-or-nothing book gate fixed incl. cross-role contamination, honest refusal copy
+- [ ] **Phase 152: SCEN — Composer legibility** - Ownership marker, clickable rows with a working factsheet link, labelled numbers, no duplicate browse entries
+- [ ] **Phase 153: WIZFORM — Form errors belong on the form (+ MT5 declarable)** - Inline field validation, honest error codes from emitting sites, transient infra absorbed not surfaced, venue-appropriate copy, MT5 preselected in metadata
+- [ ] **Phase 154: WIZCONT/STALE — Wizard continuity, no stale screens** - Draft-aware entry chooser, stale-screen root cause investigated BEFORE fixed, token-less credential dedup toward the existing row
+- [ ] **Phase 155: MT5-VERIFY — The numbers are true, live on a trading day** - Server-UTC offset measured, external-oracle parity on the live funded account, five surfaces agree, discrepancies fixed (uncapped), warnings explained; MT5-GOAL-01 acceptance gate
 
 ## Phase Details
 
@@ -63,25 +74,56 @@ unpublished strategy; AUM-05 will hit sFOX the day its flag flips. **A fix scope
 - ⚠️ `returns_series` is a WEALTH INDEX — `_drop_nonfinite(cumprod(1+returns))`, verified on PROD for `4eab92b0`: starts at exactly 1.0, ends 0.7196. Shape-identical to `DailyPoint[]`, semantically inverted. It must be differenced.
 - ⭐ Reuse `resolveDailyReturnSeries(daily_returns, returns_series)` — it already backs BOTH strategy-detail surfaces (`factsheet/[id]/v2/page.tsx:71`, `discovery/[slug]/[strategyId]/page.tsx:65`), has its own tests, and its docstring names this exact bug. Rule 7: do not mint a third mechanism.
 
-### Phase 148: OWN/NAV — An allocator can see and claim their own strategy
-**Goal**: An allocator can see, reach, and claim the strategy they uploaded — while it stays invisible to everyone else, and publication stays admin-only
-**Depends on**: Phase 147 (sequencing; OWN-02 is itself the hard prerequisite for every factsheet link shipped later — NAV-01, OWN-04, SCEN-03)
-**Requirements**: OWN-02, OWN-03, OWN-04, NAV-01
+### Phase 148: OWN — Owner factsheet without cache disclosure
+**Goal**: The allocator who uploaded a strategy can view its full factsheet from that account — while it stays invisible to everyone else, and publication stays admin-only
+**Depends on**: Phase 147 (sequencing; OWN-02 is itself the hard prerequisite for every factsheet link shipped later — NAV-01 in 149, SCEN-03 in 152, and OWN-04 within this phase)
+**Requirements**: OWN-02, OWN-04
 **Success Criteria** (what must be TRUE):
-  1. The owner, from the account that uploaded it, views the FULL factsheet of their own unpublished (private/draft) strategy — today `withPublishedOnly` 404s them.
+  1. The owner, from the account that uploaded it, views the FULL factsheet of their own unpublished (private/draft) strategy — today `withPublishedOnly` at `factsheet/[id]/v2/page.tsx:344` 404s them.
   2. **Adversarial, not happy-path:** AFTER an owner has viewed their draft, an anonymous request for the same id still 404s — the public `unstable_cache`d factsheet route never serves a cache entry populated by an owner render. Proven by a test.
-  3. A sidebar "my strategies" entry shows the allocator's own uploads as a **RANKING at parity with the external/discovery ranking** — same metric columns, same sort affordances, same `#n` + percentile rank presentation — covering **every key they uploaded and the strategies derived from them, including `private` and `draft` rows** (the founder's account: 8 active keys across bybit/okx/deribit/mt5, none of which appear on any ranking today). Clicking a row opens its factsheet. The allocator side stops being write-only (NAV-01).
-  3b. That ranking REUSES the existing ranking component/query rather than adding a second ranking surface — the only difference from discovery is the visibility predicate (own-including-unpublished via OWN-02's `withPublishedOrOwner`, vs published-only). Two ranking implementations would drift.
-  4. The wizard preview links to the full factsheet, and no link shipped in this phase can land on `notFound()` (OWN-04 — strictly after OWN-02 within the phase).
-  5. At allocator finalize, the wizard ASKS which of two things this is: (a) my own capital with an allocation — a form needing an amount, offering the portfolio add — or (b) a trading team's key I am verifying — the DEFAULT, which stays a no-op exactly as today. Choosing (a) creates the portfolio position; auto-add remains refused (OWN-03).
+  3. The wizard preview links to the full factsheet, and no link shipped in this phase can land on `notFound()` (OWN-04 — strictly after OWN-02 within the phase).
+  4. Nothing shipped here widens visibility beyond the owner: anonymous and non-owner authed requests still see published-only on every surface the gate change touches, and publication remains admin-only.
 **Plans**: TBD
 **UI hint**: yes
 **Notes (binding traps)**:
 - ⛔ **OWN-02 is NOT a one-line `withPublishedOnly` → `withPublishedOrOwner` swap.** The route is PUBLIC and `unstable_cache`d keyed on `${id}::${computedAt}`, and its own header justifies the cache as safe *because "the only fields we cache come from the published row."* An owner-inclusive gate without cache work is a disclosure bug (same class as the `strategy_analytics (*)` anon splat in TODOS). Criterion 2 is the acceptance test.
-- ⚠️ **OWN-03 is the first WRITING requirement in the OWN set** → it needs its own money-path review (weights, allocation basis, what happens when the same strategy is added twice). The deliverable is a WIZARD QUESTION, not an auto-add — the founder has refused auto-add TWICE; (b) must stay the default and stay a no-op.
-- ⛔ NAV-01 and OWN-04 must not land before OWN-02 within the phase — a list/link to `notFound()` is the dead-end class Phase 142.2 existed to delete.
+- ⛔ OWN-04 must not land before OWN-02 within the phase — a link to `notFound()` is the dead-end class Phase 142.2 existed to delete.
+- ℹ️ NAV-01 (the "my strategies" ranking) moved to Phase 149 in the 2026-08-04 revision; it consumes this phase's cache-safe `withPublishedOrOwner` gate and MUST NOT be pulled forward into this phase.
 
-### Phase 149: AUM — A book you can reach and a size you can set
+### Phase 149: NAV — "My strategies": a ranking at discovery parity
+**Goal**: The allocator side stops being write-only — a sidebar entry shows every key they uploaded and every strategy derived from them as a ranking at parity with the external/discovery ranking, and every row opens its factsheet
+**Depends on**: Phase 148 (OWN-02 — both the cache-safe visibility predicate and a factsheet that resolves; a ranking whose rows link to `notFound()` is the dead-end class Phase 142.2 existed to delete)
+**Requirements**: NAV-01
+**Success Criteria** (what must be TRUE):
+  1. A sidebar "my strategies" entry (MY WORKSPACE) opens a ranking covering **every key the allocator uploaded AND the strategies derived from them — including `private` and `draft` rows**, which are exactly what every existing ranking surface filters out. Proof case: the founder's account (8 active keys — bybit, okx, deribit ×3, mt5 ×3), none of which appears on any ranking today, all present here.
+  2. The ranking is at **PARITY with the external/discovery ranking** — same metric columns, same sort affordances, same `#n` + percentile presentation per DESIGN.md — so the allocator judges their own uploads on the same axes they judge third-party strategies.
+  3. **Structural reuse, asserted not merely observed:** the surface is the EXISTING ranking component/query, and the visibility predicate is the only genuine difference (own-including-unpublished via OWN-02's `withPublishedOrOwner`, vs published-only). No second ranking implementation exists to drift.
+  4. Metrics for `private`/`draft` rows come from the same analytics the factsheet renders — never a placeholder or a reduced column set for unpublished rows; a row whose analytics have not computed yet shows an honest pending state, never zeros (no-invented-data).
+  5. Clicking any row — including a `private`/`draft` one — opens its factsheet (via OWN-02), never `notFound()`.
+**Plans**: TBD
+**UI hint**: yes
+**Notes (binding traps)**:
+- ⚠️ **Reuse cuts both ways.** Parameterize the visibility predicate; do NOT globally widen the shared query — the published-only predicate on discovery/public surfaces must be provably unchanged, or this phase ships the leak OWN-02's cache work exists to prevent. An unpublished row's metrics must never reach any anon or non-owner surface through the shared path.
+- ⚠️ **Percentile population is a deliberate plan-time decision** (own rows ranked against the published universe vs among themselves) — decide it explicitly at plan/discuss time, do not let it fall out of whichever query is handy. Whatever is chosen must be honest about its comparison set.
+- ⛔ Do not start before Phase 148 lands — the dependency is structural, not stylistic.
+
+### Phase 150: OWN-03 — The wizard asks whose capital this is
+**Goal**: At allocator finalize the product asks the question it never asked — own capital with an allocation, or a trading team's key being verified — and only an explicit own-capital answer creates a portfolio position
+**Depends on**: Phase 148 (soft — keeps the OWN cluster contiguous, and the created position's strategy is then visible via factsheet/ranking so the write can be verified end-to-end; no hard code dependency)
+**Requirements**: OWN-03
+**Success Criteria** (what must be TRUE):
+  1. At allocator finalize, the wizard ASKS which of two things this is: (a) my own capital with an allocation — a form needing an amount, offering the portfolio add — or (b) a trading team's key I am verifying — the DEFAULT, which stays a no-op exactly as today.
+  2. Choosing (a) creates the portfolio position from wizard state with the stated allocation amount; choosing (b) — or any finalize path that never reaches the question — changes nothing: `status='private'`, portfolio untouched, behaviour-compatible with today.
+  3. Auto-add remains refused: no code path adds to the portfolio without the explicit (a) answer — the founder has refused auto-add TWICE.
+  4. Adding the same strategy twice has a defined, reviewed behaviour — never a silent duplicate position or a double-count.
+**Plans**: TBD
+**UI hint**: yes
+**Notes (binding traps)**:
+- ⚠️ **OWN-03 is the first WRITING requirement in the OWN set** → it needs its own money-path review (weights, allocation basis, what happens when the same strategy is added twice). That review is WHY this is its own phase rather than a rider on 148 — do not fold it back.
+- ⛔ The deliverable is a WIZARD QUESTION, not an auto-add; (b) must stay the default and stay a no-op.
+- ⚠️ Coordinate with AUM-04 (Phase 151): a position created from an owned strategy must not re-introduce cross-role gate contamination or double-count against live holdings.
+
+### Phase 151: AUM — A book you can reach and a size you can set
 **Goal**: An allocator can always reach their live book, size a hypothetical one directly, and no venue crashes the holdings sync
 **Depends on**: Phase 147 (AUM's zeros-on-screen symptom is entangled with SCEN-01's and would otherwise appear unfixed)
 **Requirements**: AUM-01, AUM-02, AUM-03, AUM-04, AUM-05
@@ -97,7 +139,7 @@ unpublished strategy; AUM-05 will hit sFOX the day its flag flips. **A fix scope
 - ⚠️ MT5 holdings fetch is a SECOND job kind contending for the ONE shared Windows terminal — reuse `_mt5_terminal_lock_for`, the login bracket, the bounded-restart helper and the read-timeout discipline (MT5CONC class). Per-symbol MT5 holdings is a SEPARATE decision guarded by a deliberate client-facade pin — do not quietly widen it.
 - ⚠️ AUM-01 does NOT cause or fix the 0.00 metrics (that was SCEN-01, closed in 147) — do not let it be planned as that fix.
 
-### Phase 150: SCEN — Composer legibility
+### Phase 152: SCEN — Composer legibility
 **Goal**: The composer is legible: rows say whose they are, what the numbers mean, open detail on click, and browse never presents an unresolvable duplicate
 **Depends on**: Phase 147 (rows must carry real series to be worth inspecting), Phase 148 (SCEN-03's factsheet link needs OWN-02 or it is a dead end)
 **Requirements**: SCEN-02, SCEN-03, SCEN-04, SCEN-05
@@ -105,13 +147,13 @@ unpublished strategy; AUM-05 will hit sFOX the day its flag flips. **A fix scope
   1. In the composition list, a strategy the allocator uploaded themselves is visually distinguishable from a third-party published one — the ownership bit (already computed server-side and discarded at `browse/route.ts:220`) is wired through additively; this is a persisted-schema decision (`AddedStrategy` is zod-validated at `SCENARIO_SCHEMA_VERSION = 4`), not a client derivation (SCEN-02).
   2. Clicking a scenario row opens richer detail, including a working link to the strategy's factsheet (SCEN-03).
   3. The numbers on a row are labelled — weight, mode, leverage, notional — and a non-derivable notional reads as "not applicable", not as a broken em-dash (SCEN-04).
-  4. The strategy browser never shows two indistinguishable rows for the same strategy — the two identical "Alpha Centauri" entries become distinguishable or resolved (SCEN-05; prevention of future duplicates is WIZCONT-02 in Phase 152 — this is the presentation half).
+  4. The strategy browser never shows two indistinguishable rows for the same strategy — the two identical "Alpha Centauri" entries become distinguishable or resolved (SCEN-05; prevention of future duplicates is WIZCONT-02 in Phase 154 — this is the presentation half).
 **Plans**: TBD
 **UI hint**: yes
 
-### Phase 151: WIZFORM — Form errors belong on the form (+ MT5 declarable)
+### Phase 153: WIZFORM — Form errors belong on the form (+ MT5 declarable)
 **Goal**: The wizard stops costing submits — errors land inline on the offending field, transient infrastructure never becomes a user decision, copy never advises the impossible, and an MT5 strategy can declare its venue
-**Depends on**: Nothing hard (sequenced after the money-path phases; before 153 so the wizard surface is stable for verification)
+**Depends on**: Nothing hard (sequenced after the money-path phases; before 155 so the wizard surface is stable for verification)
 **Requirements**: WIZFORM-01, WIZFORM-02, WIZFORM-03, WIZFORM-04, MT5-14
 **Success Criteria** (what must be TRUE):
   1. A field the user can get wrong (e.g. a 2-character description) is refused inline at the field, red-highlighted, BEFORE submit — never a terminal full-page envelope after it, and never an error that sends users to corrupt unrelated fields (WIZFORM-01).
@@ -124,10 +166,11 @@ unpublished strategy; AUM-05 will hit sFOX the day its flag flips. **A fix scope
 **Notes (binding traps)**:
 - ⛔ **MT5-14: the `closed-sets.mt5-flag` no-widening pin WILL go red — that is the guard working, not a regression to route around.** The pin must be re-cut deliberately, with its reasoning updated, in the same commit. This is NOT the MT5-11 drift class; the exclusion was a deliberate decision that is now outgrown.
 - ⚠️ WIZFORM-04: a naive retry loop multiplies the budget `src/lib/seam-budgets.invariant.test.ts` recomputes, and retrying into an open breaker is how one slow venue takes down every other user's submits. The fix starts with "is the call needed", not "add a loop".
+- ⚠️ The allocation-amount form Phase 150 (OWN-03) adds is IN SCOPE for the inline-validation criterion — a freshly-shipped wizard step must not re-introduce the terminal-envelope class this phase deletes.
 
-### Phase 152: WIZCONT/STALE — Wizard continuity, no stale screens
+### Phase 154: WIZCONT/STALE — Wizard continuity, no stale screens
 **Goal**: Re-entering the wizard continues where the founder left off, screens never show a state the backend has already left, and a token-less credential re-connect cannot mint duplicates
-**Depends on**: Nothing hard (sequenced before 153 so the wizard surface is stable for verification)
+**Depends on**: Nothing hard (sequenced before 155 so the wizard surface is stable for verification)
 **Requirements**: WIZCONT-01, WIZCONT-02, STALE-01
 **Success Criteria** (what must be TRUE):
   1. Re-entering "add a strategy" with an existing wizard draft resumes at the draft's step — the entry point BEFORE the wizard (`/strategies/new` branch chooser) becomes draft-aware, with the exact entry path established by observation FIRST (WIZCONT-01 — resume is NOT missing: `WizardClient` already resumes when `initialDraft` is present; fix the chooser, not the state machine).
@@ -136,9 +179,9 @@ unpublished strategy; AUM-05 will hit sFOX the day its flag flips. **A fix scope
 **Plans**: TBD
 **UI hint**: yes
 
-### Phase 153: MT5-VERIFY — The numbers are true, live on a trading day
+### Phase 155: MT5-VERIFY — The numbers are true, live on a trading day
 **Goal**: The performance Quantalyze renders for the live funded MT5 account is proven true against the terminal's own figures on a trading day, on every surface that renders it — and the milestone's umbrella acceptance (MT5-GOAL-01) closes
-**Depends on**: Phases 147–152 (needs a stable surface to measure — running earlier means re-running). ⚠️ Human- and calendar-gated: a founder at the MT5 terminal, on a trading day, with the live funded account's read-only investor password. A demo account, the v1.15 soak account, or a weekend run does not satisfy it.
+**Depends on**: Phases 147–154 (needs a stable surface to measure — running earlier means re-running). ⚠️ Human- and calendar-gated: a founder at the MT5 terminal, on a trading day, with the live funded account's read-only investor password. A demo account, the v1.15 soak account, or a weekend run does not satisfy it.
 **Requirements**: MT5-06, MT5-07, MT5-08, MT5-09, MT5-10, MT5-15, MT5-GOAL-01 (umbrella acceptance)
 **Success Criteria** (what must be TRUE):
   1. The MT5 server-UTC offset is MEASURED live at connect and asserted on — never hardcoded (breaks at the next DST transition, wrong for every other broker) — and a near-midnight deal lands on the day the terminal shows, pinned by a regression test (MT5-06; the one failure MT5-07's oracle cannot see unaided).
@@ -154,28 +197,34 @@ unpublished strategy; AUM-05 will hit sFOX the day its flag flips. **A fix scope
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 147. SCEN-01 engine series | 0/? | Not started | - |
-| 148. OWN/NAV owner visibility | 0/? | Not started | - |
-| 149. AUM book + sizing | 0/? | Not started | - |
-| 150. SCEN composer legibility | 0/? | Not started | - |
-| 151. WIZFORM + MT5-14 | 0/? | Not started | - |
-| 152. WIZCONT + STALE | 0/? | Not started | - |
-| 153. MT5-VERIFY + acceptance | 0/? | Not started | - |
+| 148. OWN owner factsheet | 0/? | Not started | - |
+| 149. NAV my-strategies ranking | 0/? | Not started | - |
+| 150. OWN-03 portfolio question | 0/? | Not started | - |
+| 151. AUM book + sizing | 0/? | Not started | - |
+| 152. SCEN composer legibility | 0/? | Not started | - |
+| 153. WIZFORM + MT5-14 | 0/? | Not started | - |
+| 154. WIZCONT + STALE | 0/? | Not started | - |
+| 155. MT5-VERIFY + acceptance | 0/? | Not started | - |
 
 ## Requirement Coverage (v1.17)
 
 | Phase | Requirements |
 |-------|--------------|
 | 147 | SCEN-01 |
-| 148 | OWN-02, OWN-03, OWN-04, NAV-01 |
-| 149 | AUM-01, AUM-02, AUM-03, AUM-04, AUM-05 |
-| 150 | SCEN-02, SCEN-03, SCEN-04, SCEN-05 |
-| 151 | WIZFORM-01, WIZFORM-02, WIZFORM-03, WIZFORM-04, MT5-14 |
-| 152 | WIZCONT-01, WIZCONT-02, STALE-01 |
-| 153 | MT5-06, MT5-07, MT5-08, MT5-09, MT5-10, MT5-15, MT5-GOAL-01 (umbrella) |
+| 148 | OWN-02, OWN-04 |
+| 149 | NAV-01 |
+| 150 | OWN-03 |
+| 151 | AUM-01, AUM-02, AUM-03, AUM-04, AUM-05 |
+| 152 | SCEN-02, SCEN-03, SCEN-04, SCEN-05 |
+| 153 | WIZFORM-01, WIZFORM-02, WIZFORM-03, WIZFORM-04, MT5-14 |
+| 154 | WIZCONT-01, WIZCONT-02, STALE-01 |
+| 155 | MT5-06, MT5-07, MT5-08, MT5-09, MT5-10, MT5-15, MT5-GOAL-01 (umbrella) |
 
 29/29 in-scope requirement IDs mapped (28 work + 1 umbrella), each to exactly one phase. No
 orphans, no duplicates. OWN-01 excluded (already met — CONTRIB-03, verified in code 2026-08-04).
 ⛔ Everything in SEAM / JOB / RATE / PYAPI* / SEAMCORE / SEAMUX remains v1.16 (PARKED below).
+Revised 2026-08-04 after NAV-01 was sharpened: the approved Phase 148 (OWN-02/03/04 + NAV-01)
+split into 148/149/150; later phases renumbered +2 (149→151 … 153→155) with dependencies intact.
 
 ---
 
@@ -191,8 +240,8 @@ All 29 phase directories were deliberately preserved (the workflow's `phases.cle
 by founder call) so this milestone resumes without reconstruction.
 
 ⚠️ **Re-homed into v1.17 (2026-08-04):** Phase 142.3's entire scope — MT5-06..10, the live
-trading-day numeric verification — now lives in **v1.17 Phase 153**, and MT5-14 (wizard metadata:
-MT5 declarable + preselected) in **v1.17 Phase 151**. Phase 142.3 will not run as a v1.16 phase.
+trading-day numeric verification — now lives in **v1.17 Phase 155**, and MT5-14 (wizard metadata:
+MT5 declarable + preselected) in **v1.17 Phase 153**. Phase 142.3 will not run as a v1.16 phase.
 
 **Goal:** Give the live money-bearing plumbing failure handling — so a hung Railway request, a
 silently-dropped compute-job enqueue, or a mid-job worker crash can't strand a real investor
@@ -858,7 +907,8 @@ Plans:
 ## Current position
 
 **v1.17 MT5 — usable end-to-end, not merely ingested** — roadmap created 2026-08-04, Phases
-147–153. v1.16 is ⏸️ PARKED at 68% (13/19 phases, 119/127 plans) — resume at Phase 143 after
+147–155 (revised same day: Phase 148 split into 148 owner-factsheet / 149 NAV ranking /
+150 OWN-03 portfolio question after NAV-01 was sharpened to ranking parity). v1.16 is ⏸️ PARKED at 68% (13/19 phases, 119/127 plans) — resume at Phase 143 after
 v1.17; Phase 144 carries the live WR-02 DELETE-vs-reset founder decision.
 Next: `/gsd:plan-phase 147`.
 
