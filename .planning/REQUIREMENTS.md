@@ -274,9 +274,18 @@ a live funded account on a **trading day**.
   `wizardErrors.invariant.test.ts` registry pin uses the literal **12**. Re-verified by grep at HEAD by
   plan 07 and again by the phase verifier. A miscounted class-fix ledger is this phase's own defect
   class — the requirements doc must not carry a number its own execution disproved.
-- [ ] **MT5-05**: A founder completes the MT5 connect flow through the wizard **without needing to
-  know an internal error code, a server name, or a flag** — the phase-goal sentence, asserted as
-  an outcome rather than as the sum of MT5-01..04.
+- [x] **MT5-05** *(DISCHARGED 2026-08-04 on PROD, after MT5-13 landed)*: A founder completes the MT5
+  connect flow through the wizard **without needing to know an internal error code, a server name, or
+  a flag** — the phase-goal sentence, asserted as an outcome rather than as the sum of MT5-01..04.
+  **Evidence** (live founder run, not a test): strategy `8d382aaf-4e23-4fc1-85b9-78fafc5c8e54`
+  "Alpha Centauri" — `status='private'` (the correct allocator/contribution terminal status),
+  `supported_exchanges=['mt5']`, linked key venue `mt5` and active, `series_completeness='ledger_complete'`,
+  metrics computed 14:19Z (`sharpe=-0.78`, `max_drawdown=-41.5%`, `computation_error=NULL`).
+  ⚠️ **It took TWO blockers past the phase's own green suite to get here** — MT5-11 (gate drift, found
+  by dogfood) and MT5-13 (the ccxt-only probe, found by this run). Both were invisible to 10k+ tests
+  and visible within minutes of a real submit. Weight exposure over review depth accordingly.
+  ⚠️ `computation_status='complete_with_warnings'` — not a blocker for this requirement, but NOT
+  investigated; do not read this checkbox as "the MT5 numbers are audited."
 - [x] **MT5-11** *(BLOCKER — found by live dogfood 2026-08-03, minutes after MT5-01 opened the
   path)*: `isLedgerBackedExchange` is brought back into lockstep with the Python source set, so an
   MT5 (and sFOX) strategy is evaluated on the **daily-returns** branch of the gate rather than the
@@ -510,9 +519,28 @@ D-14 valve.
   id must still 404.**
 
 - [ ] **OWN-03**: If the strategy is genuinely the allocator's own, it can be **added to their
-  portfolio** (not only a scenario). ⚠️ **UNVERIFIED** — the scenario path (OWN-01) was confirmed in
-  code; the portfolio path was NOT checked as of 2026-08-04. Establish current behaviour BEFORE
-  planning work, or this may turn out to be already met like OWN-01.
+  portfolio** (not only a scenario).
+  ✅ **CURRENT BEHAVIOUR ESTABLISHED 2026-08-04** by the live MT5-05 run, so the "verify before
+  planning" caveat is discharged: a contribution-wizard finalize lands `status='private'` and the
+  **portfolio does NOT update**. Confirmed on PROD (`8d382aaf`, "Alpha Centauri", `status=private`,
+  `series_completeness=ledger_complete`, metrics computed 14:19Z) and by the founder in the UI.
+  ⭐ **FOUNDER CALL (2026-08-04, same run): the current behaviour is CORRECT, and the defect is the
+  MISSING QUESTION — not the missing write.** Verbatim: *"my portfolio hasn't updated. Which is not
+  wrong, as there was no question whether this is my own strategy with allocation, or a ready API key
+  for a team to check. This needs to be in the wizard for the allocator."*
+  So the deliverable is a **wizard step, not a portfolio mutation**: when an ALLOCATOR finalizes a
+  contribution, ask which of the two things this is —
+    (a) **my own capital, with an allocation** → offer to add it to the portfolio (still a choice, and
+        it needs an allocation amount, so this is a form, not a checkbox); or
+    (b) **a trading team's key I am verifying** → private strategy only, portfolio untouched, which is
+        exactly what ships today.
+  ⛔ **(b) MUST remain the default and MUST stay a no-op.** Auto-adding on finalize is the behaviour
+  the founder has now refused TWICE (see OWN-01, where the same reasoning made picker-driven scenario
+  adds correct): a key connected purely to check someone else's numbers must never silently join the
+  allocator's book. The gap is that the product never ASKS, so the honest branch is unreachable.
+  ⚠️ Scope note: this is the first requirement in the OWN set that WRITES. OWN-01/02/04 are read/gate
+  changes; this one creates a portfolio position from wizard state, so it needs its own money-path
+  review (weights, allocation basis, and what happens when the same strategy is added twice).
 
 - [ ] **OWN-04**: The wizard preview links to the full factsheet **once that view exists**. Explicitly
   BLOCKED ON OWN-02: adding the link first would point every draft at a `notFound()` — the same
@@ -694,8 +722,9 @@ Populated during roadmap creation.
 | MT5-05 | Phase 142.2 | ⛔ **OPEN and NOT COMPLETABLE without MT5-13.** Live run 2026-08-04 reached "Your verified factsheet is ready" (gate work confirmed live), but submit fails permanently: the ccxt-only permissions probe rejects MT5 and the failure is mis-rendered as a retryable `KEY_NETWORK_TIMEOUT`. Founder retried 5×. |
 | MT5-06..10 | Phase 142.3 | Pending (split out of 142.2 on 2026-08-03 at the D-14 valve) |
 | OWN-01 | — | **Already met** (CONTRIB-03, verified in code 2026-08-04) — no phase needed |
-| OWN-02..04 | unassigned | Pending — needs its own phase; ⛔ do NOT fold into 142.3 (see the OWN scope fence) |
-| MT5-13 | Phase 142.3 | ⛔ **HARD BLOCKER (severity corrected)** — the ccxt-only probe is called by `finalize-wizard` on EVERY submit, so an MT5 strategy **cannot be submitted at all**; MT5-05 is not completable until this lands |
+| OWN-02, OWN-04 | unassigned | Pending — needs its own phase; ⛔ do NOT fold into 142.3 (see the OWN scope fence) |
+| OWN-03 | unassigned | Pending — **current behaviour now ESTABLISHED, not unverified**: portfolio correctly does NOT auto-update. Founder call — the deliverable is a **wizard question** (own-capital vs verifying-a-team), NOT an auto-add. ⚠️ first WRITING requirement in the OWN set → money-path review |
+| MT5-13 | **SHIPPED v0.53.0.1** (PR #662, merged `135b6164`) | ✅ Closed 2026-08-04. mt5 branch added to the internal probe (structural read-only triple); permanent probe failures split off `KEY_NETWORK_TIMEOUT` onto `KEY_SCOPE_CHECK_UNAVAILABLE` (no Retry control). Railway `git_sha` confirmed matching before the retry. **MT5-05 discharged the same day** — see OWN-03 for the PROD evidence |
 | MT5-14 | Phase 142.3 | Pending — MT5 missing from the metadata exchange chips; ⛔ deliberate no-widening pin will red, re-cut it consciously |
 | WIZCONT-01 | unassigned | Pending — **OBSERVED**: allocators have NO resume path at all (`/strategies/*` is manager-only; the overlay hardcodes `initialDraft={null}`, Phase 110 deferral) |
 | WIZCONT-02 | unassigned | Pending — **LOW**; corrected 2026-08-04, the common case is already safe (localStorage session token + `strategies_user_wizard_session_source_uniq`) |
