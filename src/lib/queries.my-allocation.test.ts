@@ -2672,6 +2672,62 @@ describe("getMyAllocationDashboard — Phase 147 SCEN-01 series resolution", () 
     expect(series).not.toHaveLength(4);
     expect(series[0].value).not.toBeCloseTo(1.0, 10);
   });
+
+  // -------------------------------------------------------------------------
+  // series_state — the derived honesty signal for the book row's chip.
+  // ONE rule, shared with the returns route via deriveEmptySeriesState
+  // (UI-SPEC §3 forbids a second table). The 16h missing-row bound is what
+  // stops a strategy whose compute job was never enqueued from spinning
+  // forever; it is expressed here as hour offsets, never as an imported
+  // constant.
+  // -------------------------------------------------------------------------
+  const hoursAgo = (h: number) =>
+    new Date(Date.now() - h * 60 * 60 * 1000).toISOString();
+  const seriesState = (row: { strategy: unknown }) =>
+    (row.strategy as { series_state?: unknown }).series_state;
+
+  it("reports series_state 'available' when the resolved series is non-empty", async () => {
+    const row = await bookRow({
+      daily_returns: null,
+      returns_series: SC1_WEALTH_CURVE,
+      computation_status: "complete",
+    });
+    expect(seriesState(row)).toBe("available");
+  });
+
+  it("reports series_state 'computing' while a job is live and no series exists yet", async () => {
+    const row = await bookRow({
+      daily_returns: null,
+      returns_series: null,
+      computation_status: "computing",
+    });
+    expect(seriesState(row)).toBe("computing");
+  });
+
+  it("reports series_state 'empty' for a TERMINAL status with no series (complete and failed alike)", async () => {
+    for (const status of ["complete", "failed"]) {
+      const row = await bookRow({
+        daily_returns: null,
+        returns_series: null,
+        computation_status: status,
+      });
+      expect(seriesState(row)).toBe("empty");
+    }
+  });
+
+  it("age-bounds a MISSING analytics row: 17h old is 'empty', 1h old is still 'computing'", async () => {
+    const stale = await bookRow({
+      analyticsRow: false,
+      strategy_created_at: hoursAgo(17),
+    });
+    expect(seriesState(stale)).toBe("empty");
+
+    const fresh = await bookRow({
+      analyticsRow: false,
+      strategy_created_at: hoursAgo(1),
+    });
+    expect(seriesState(fresh)).toBe("computing");
+  });
 });
 
 // ---------------------------------------------------------------------------
