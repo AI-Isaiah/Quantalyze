@@ -490,12 +490,16 @@ Plans:
 **Goal:** A founder can connect a real MetaTrader 5 account through the wizard and reach a rendered strategy — key → dailies → backbone → UI — with no step requiring a human to know an internal error code, a server name, or a flag, and with admissibility decided by the canonical daily series rather than a hand-maintained venue list.
 **Requirements**: MT5-01..05, MT5-11, MT5-12 (set at /gsd-discuss-phase 2026-08-03; see `142.2-CONTEXT.md` for the sixteen decisions behind them). ⚠️ MT5-11/MT5-12 were added AFTER the discussion, from live dogfood: the gate is not on the unified backbone. MT5-01/02 are already complete.
 **Depends on:** Phase 142
-**Plans:** 8/8 plans complete — ⚠️ **CODE-COMPLETE, NOT CLOSED.**
+**Plans:** 8/8 plans complete — ✅ **SHIPPED TO PRODUCTION as `v0.53.0.0` (PR #660, squash `8b327594`, 2026-08-04).** ⚠️ **STILL NOT CLOSED.**
 
-⛔ **MT5-05 is an OUTSTANDING blocking human gate.** `142.2-HUMAN-UAT.md` carries `status: pending` /
-`gate: blocking-human`: a founder must complete the MT5 connect flow on **production**, after
-`/ship` + `/land-and-deploy`, without needing to know an internal error code, a server name, or a
-flag. Nothing is deployed yet, so it could not be run and was deliberately **not** approved.
+Migration `20260803150000` applied to PROD via the auto-apply path; verified there read-only as
+**text / nullable / no default, 0 CHECK constraints, 0 of 40 rows stamped** (no backfill, as designed).
+Vercel Production is on `8b327594`; `quantalyze.xyz` returns 200 with `/api/health` `ok`.
+
+⛔ **MT5-05 is an OUTSTANDING blocking human gate — and the deploy that blocked it has now happened,
+so it is RUNNABLE.** `142.2-HUMAN-UAT.md` carries `status: pending` / `gate: blocking-human`: a founder
+must complete the MT5 connect flow on **production**, without needing to know an internal error code,
+a server name, or a flag. It is deliberately **not** approved — it has not been run.
 ⛔ **And even once MT5-05 passes, this phase means MT5 is REACHABLE, not CORRECT.** The numbers are
 Phase 142.3's gate (D-17). Do not archive the milestone or advertise MT5 on the strength of 142.2 —
 that is precisely how v1.15 shipped 6/6 phases green with both open items intact.
