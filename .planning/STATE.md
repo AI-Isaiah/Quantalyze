@@ -1,17 +1,31 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.16
-milestone_name: Production Resilience & Reliability
-status: executing
-stopped_at: Phase 142.2 context gathered
-last_updated: "2026-08-03T17:36:49.151Z"
-last_activity: 2026-08-03
+milestone: v1.17
+milestone_name: "MT5 — usable end-to-end, not merely ingested"
+status: planning
+stopped_at: Milestone opened; Phase 147 not yet planned
+last_updated: "2026-08-04T15:10:00.000Z"
+last_activity: 2026-08-04
 progress:
-  total_phases: 19
-  completed_phases: 13
-  total_plans: 127
-  completed_plans: 119
-  percent: 68
+  total_phases: 6
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
+parked_milestone:
+  milestone: v1.16
+  milestone_name: Production Resilience & Reliability
+  parked_on: 2026-08-04
+  reason: "Founder call — take v1.17 MT5 first, reopen v1.16 after MT5 delivers"
+  status: parked_incomplete
+  resume_at: Phase 143
+  outstanding_phases: [143, 144, 145, 146]
+  progress:
+    total_phases: 19
+    completed_phases: 13
+    total_plans: 127
+    completed_plans: 119
+    percent: 68
 ---
 
 # Project State — Quantalyze

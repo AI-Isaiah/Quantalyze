@@ -483,6 +483,18 @@ milestone or advertise MT5 until 142.3 passes.
   preselecting it removes the question entirely. Do not ship the widening without the preselect —
   widening alone just adds a sixth chip the founder still has to find.
 
+- [ ] **MT5-15** *(raised by the MT5-05 close, 2026-08-04 — the caveat on that checkbox, given its own
+  ID so it cannot be lost)*: An MT5 strategy's analytics complete **without warnings**, or the warning
+  is understood and accepted in writing. **All three** MT5 strategies on PROD carry
+  `computation_status='complete_with_warnings'` (`8d382aaf` Alpha Centauri, `4eab92b0` Black Swan, and
+  Arctic Fox) with `computation_error = NULL`.
+  ⚠️ **NOT investigated.** MT5-05 is discharged on the wizard-completion criterion it was written
+  against, and this does not reopen it — but it is the reason that checkbox must not be read as "the
+  MT5 numbers are audited". Establish what the warning IS before deciding whether it matters; it may
+  be benign (short history, non-trading days) or it may be the same class MT5-07 exists to catch.
+  ⛔ Do NOT plan MT5-07 (external-oracle verification) as closing this — MT5-07 compares rendered
+  performance against the terminal; this asks why our own pipeline flagged itself.
+
 ---
 
 ### OWN — An allocator can see and use their OWN unpublished strategy (founder call 2026-08-04)
@@ -684,9 +696,24 @@ All five found in one live founder session, composing a scenario from a just-upl
 - [ ] **SCEN-01** ⛔ **HIGHEST PRIORITY — silent money-path correctness bug, NOT MT5-specific**:
   A strategy added to a scenario contributes its **actual return series**. Today ~4 in 10 do not, and
   fail **silently**.
-  **Measured on PROD 2026-08-04:** `strategy_analytics` carries two JSONB series columns, and **18 of
-  42 rows have `returns_series` populated but `daily_returns` EMPTY** (15 have `daily_returns`, 33
-  have `returns_series`). `src/app/api/strategies/[id]/returns/route.ts:221` selects **only**
+  ⭐ **CENSUS CORRECTED 2026-08-04 after investigation — my first count UNDERSTATED it.** I reported
+  "18 of 42 rows". The truth is worse: **`strategy_analytics.daily_returns` has NO PRODUCTION WRITER
+  AT ALL.** Re-measured on PROD, split by `is_example`:
+
+  | population | rows | `daily_returns` populated | `returns_series` populated |
+  |---|---|---|---|
+  | real strategies (`is_example = false`) | 27 | **0** | 18 |
+  | demo seeds (`is_example = true`) | 15 | **15** | 15 |
+
+  **Every populated row is a demo seed.** The only writers left are `scripts/seed-full-app-demo.ts:1633`
+  and `e2e/helpers/seed-test-project.ts:570`. The service builds its upsert from
+  `metrics_result.metrics_json` (`analytics_runner.py:1594`, `job_worker.py:5299/:2385/:4380`), and that
+  dict (`metrics.py:1176-1196`) carries `returns_series`, `drawdown_series`, `monthly_returns`,
+  `rolling_metrics`, `return_quantiles` — **never `daily_returns`**. PostgREST projects only named
+  columns, so the un-named one stays NULL forever. My "18" were merely the rows that got far enough to
+  have a `returns_series`; the real figure is **every strategy the service has ever computed**.
+  ⚠️ **This is exactly why the demo universe looked fine and real strategies did not** — the seeds
+  write the column the engine reads, so no amount of demo-driven testing could surface it. `src/app/api/strategies/[id]/returns/route.ts:221` selects **only**
   `daily_returns`, and that route is what the composer lazily fetches for a drawer-added strategy. So
   the engine receives an empty series and renders *"0 overlapping days"*, *"Only 0 observations"* and
   `0.00` for every metric — **with no error, no warning, no empty-state**.
@@ -696,12 +723,19 @@ All five found in one live founder session, composing a scenario from a just-upl
   **The data is intact** — `csv_daily_returns` holds all 136 rows for the founder's instance
   (`4eab92b0`, 2026-03-22 → 2026-08-04). Nothing was lost; it is a plumbing gap between the producer
   and this one reader.
-  ⚠️ **Do NOT pick between "fix the writer" and "fix the reader" on instinct.** The two columns may
-  carry different SHAPES (point objects vs scalars — the route runs `normalizeDailyReturns` over the
-  raw value), and PostgREST upsert column projection means an upsert that omits `daily_returns`
-  leaves whatever was there. Establish which column is canonical from the code and its history first.
-  ⛔ A backfill would touch `supabase/migrations/**`, which **auto-applies to PROD on merge** — treat
-  any migration-shaped remedy as a separate, consciously-reviewed decision.
+  ✅ **RESOLVED — the READER is wrong, decisively, and backfilling the writer would have been the
+  wrong lever.** Heavy series were deliberately moved OFF `strategy_analytics` by migration 087
+  (`20260428120919`, decision D-02, the 1MB TOAST ceiling), so re-populating a fat JSONB column would
+  fight a settled architectural decision.
+  ⚠️ **`returns_series` must NOT be forwarded raw.** It is `_drop_nonfinite(cumprod(1+returns))`
+  (`metrics.py:775-778`) — a WEALTH INDEX, shape-identical to `DailyPoint[]` but semantically
+  inverted. Verified on PROD for `4eab92b0`: it starts at exactly **1.0** (2026-03-22) and ends at
+  **0.7196** (2026-08-04). Forwarding it raw would claim **+100% on day one**. It must be DIFFERENCED.
+  ⭐ **The codebase had already settled this drift** — `resolveDailyReturnSeries(daily_returns,
+  returns_series)` backs BOTH strategy-detail surfaces (`factsheet/[id]/v2/page.tsx:71`,
+  `discovery/[slug]/[strategyId]/page.tsx:65`) with its own tests and a docstring naming this bug.
+  Rule 7: use that resolver, do not mint a third mechanism. The composer then blends the same series
+  those pages render.
 
 - [ ] **SCEN-02**: In the scenario composition list, a strategy **the allocator uploaded themselves**
   is visually distinguishable from a third-party published one.
@@ -797,6 +831,19 @@ All five found in one live founder session, composing a scenario from a just-upl
   `fetch_allocator_holdings` (`allocator_positions.py:268`) would stop stamping a daily raw
   `AttributeError` into the user-visible `sync_error`. Ship only as an explicit interim decision — it
   papers over the gap.
+
+- [ ] **AUM-05** *(split out of AUM-02 so it cannot be lost when that item is scoped to MT5)*: **sFOX
+  will crash the holdings sync the same way MT5 does, the first day a real key exists.** `SfoxClient`
+  exposes `get_balances()` (`sfox_client.py:272`), not the ccxt `fetch_balance()` that
+  `_fetch_spot_rows` calls unconditionally (`allocator_positions.py:154`) — so a live sFOX key will
+  stamp `sync_error = "'SfoxClient' object has no attribute 'fetch_balance'"`, byte-identical in
+  shape to the MT5 failure already on PROD.
+  ⚠️ **Invisible today only because sFOX is flag-off with zero keys** — which is exactly why it needs
+  its own line. It is not a hypothetical: the same widening that put MT5 on this path is already
+  written for sFOX and simply has not been switched on. **Fix the CLASS (non-ccxt venues in the
+  holdings path), not the MT5 instance**, or sFOX go-live re-runs this outage with a new venue name.
+  🔗 The sFOX go-live gate is tracked separately (worker egress IPs, founder flag) — this must be
+  closed BEFORE that flip, not discovered by it.
 
 - [ ] **AUM-03** ⛔ **WORSE THAN FILED — the copy names a control THAT DOES NOT EXIST.** The AUM-zero
   refusal must name an affordance the user can find. Current copy: *"Can't record a scenario commit:
@@ -923,6 +970,7 @@ Populated during roadmap creation.
 | OWN-03 | unassigned | Pending — **current behaviour now ESTABLISHED, not unverified**: portfolio correctly does NOT auto-update. Founder call — the deliverable is a **wizard question** (own-capital vs verifying-a-team), NOT an auto-add. ⚠️ first WRITING requirement in the OWN set → money-path review |
 | MT5-13 | **SHIPPED v0.53.0.1** (PR #662, merged `135b6164`) | ✅ Closed 2026-08-04. mt5 branch added to the internal probe (structural read-only triple); permanent probe failures split off `KEY_NETWORK_TIMEOUT` onto `KEY_SCOPE_CHECK_UNAVAILABLE` (no Retry control). Railway `git_sha` confirmed matching before the retry. **MT5-05 discharged the same day** — see OWN-03 for the PROD evidence |
 | MT5-14 | Phase 142.3 | Pending — MT5 missing from the metadata exchange chips; ⛔ deliberate no-widening pin will red, re-cut it consciously |
+| MT5-15 | Phase 147 | Pending — ALL THREE MT5 strategies on PROD are `complete_with_warnings`; ⚠️ NOT investigated. Do not read `MT5-05 ✅` as 'the numbers are audited'. ⛔ MT5-07 does NOT close this |
 | WIZCONT-01 | unassigned | Pending — **OBSERVED**: allocators have NO resume path at all (`/strategies/*` is manager-only; the overlay hardcodes `initialDraft={null}`, Phase 110 deferral) |
 | WIZCONT-02 | unassigned | Pending — **LOW**; corrected 2026-08-04, the common case is already safe (localStorage session token + `strategies_user_wizard_session_source_uniq`) |
 | WIZFORM-01 | unassigned | Pending — **blocking UX**; inline field errors, cost 3 failed submits and drove wrong-field edits |
@@ -930,17 +978,18 @@ Populated during roadmap creation.
 | WIZFORM-03 | unassigned | Pending — "switch to a different exchange" is impossible advice for MT5 |
 | WIZFORM-04 | unassigned | Pending — **blocking UX**; transient seam timeout must not become a user decision; ⛔ ask whether the per-submit re-validation is needed before adding retries |
 | STALE-01 | unassigned | Pending — root cause NOT yet established; investigate before planning |
-| MT5-GOAL-01 | unassigned | **Umbrella** — MT5 'works' only when SCEN-01 + OWN-02 close. Exists so `MT5-05 ✅` is never read as 'MT5 works' |
-| SCEN-01 | unassigned | ⛔ **HIGHEST** — silent; 18/42 analytics rows have `returns_series` but empty `daily_returns`; 7 of 30 PUBLISHED CSV strategies affected. NOT MT5-specific. Under investigation 2026-08-04 |
-| SCEN-02 | unassigned | Pending — no ownership marker exists; ownership bit deliberately discarded at `browse/route.ts:220`. ⚠️ additive WIRE change + persisted-schema bump |
-| SCEN-03 | unassigned | Pending — scenario rows are not clickable at all; ⛔ depends on OWN-02 for the factsheet link |
-| SCEN-04 | unassigned | Pending — row numbers carry no labels; founder could not tell what they meant |
-| SCEN-05 | unassigned | Pending — two identical 'Alpha Centauri' rows in Browse; related to but distinct from WIZCONT-02 |
-| AUM-01 | unassigned | ⛔ **DESIGN FLAW** — AUM is derived-only, no input anywhere; blank-slate (the primary use case) cannot size or commit. ⚠️ does NOT cause the 0.00 metrics — that is SCEN-01 |
-| AUM-02 | unassigned | ⛔ **NOT a fence — a CRASH**. Holdings sync is ccxt-only; PROD `sync_error = "'Mt5Session' object has no attribute 'fetch_balance'"` in a USER-VISIBLE column. sFOX same latent bug. ~1–1.5d, medium risk (gateway concurrency) |
-| AUM-03 | unassigned | ⛔ **Worse than filed** — copy says "toggle on a live holding"; that control **does not exist** in the composer, deliberately (CONSTIT-03) |
-| AUM-04 | unassigned | ⛔ **ROOT CAUSE of AUM=0** — blank slate was FORCED: all-or-nothing `perKeyDailiesGateSatisfied` hides "From my book". ⭐ MANAGER-side mt5 keys pin the ALLOCATOR's gate false permanently (cross-role contamination) |
-| NAV-01 | unassigned | Pending — no 'my strategies' nav entry; the allocator side is write-only. ⛔ depends on OWN-02 |
+| MT5-GOAL-01 | **v1.17 umbrella** | **Umbrella** — MT5 'works' only when SCEN-01 + OWN-02 close. Exists so `MT5-05 ✅` is never read as 'MT5 works' |
+| SCEN-01 | **Phase 147** | ⛔ **HIGHEST** — ⭐census corrected: `daily_returns` has **NO production writer**; **0 of 27 REAL** strategies populated vs 15/15 demo seeds. Root-caused: the READER is wrong; use the existing `resolveDailyReturnSeries`. ⚠️`returns_series` is a WEALTH INDEX — must be DIFFERENCED, never forwarded raw |
+| SCEN-02 | Phase 151 | Pending — no ownership marker exists; ownership bit deliberately discarded at `browse/route.ts:220`. ⚠️ additive WIRE change + persisted-schema bump |
+| SCEN-03 | Phase 148 | Pending — scenario rows are not clickable at all; ⛔ depends on OWN-02 for the factsheet link |
+| SCEN-04 | Phase 151 | Pending — row numbers carry no labels; founder could not tell what they meant |
+| SCEN-05 | Phase 151 | Pending — two identical 'Alpha Centauri' rows in Browse; related to but distinct from WIZCONT-02 |
+| AUM-01 | Phase 149 | ⛔ **DESIGN FLAW** — AUM is derived-only, no input anywhere; blank-slate (the primary use case) cannot size or commit. ⚠️ does NOT cause the 0.00 metrics — that is SCEN-01 |
+| AUM-02 | Phase 149 | ⛔ **NOT a fence — a CRASH**. Holdings sync is ccxt-only; PROD `sync_error = "'Mt5Session' object has no attribute 'fetch_balance'"` in a USER-VISIBLE column. sFOX same latent bug. ~1–1.5d, medium risk (gateway concurrency) |
+| AUM-03 | Phase 149 | ⛔ **Worse than filed** — copy says "toggle on a live holding"; that control **does not exist** in the composer, deliberately (CONSTIT-03) |
+| AUM-04 | Phase 149 | ⛔ **ROOT CAUSE of AUM=0** — blank slate was FORCED: all-or-nothing `perKeyDailiesGateSatisfied` hides "From my book". ⭐ MANAGER-side mt5 keys pin the ALLOCATOR's gate false permanently (cross-role contamination) |
+| AUM-05 | Phase 149 | Pending — **sFOX will crash the holdings sync identically** (`get_balances` not `fetch_balance`); invisible only because the flag is off. ⛔ close BEFORE sFOX go-live; fix the non-ccxt CLASS not the MT5 instance |
+| NAV-01 | Phase 148 | Pending — no 'my strategies' nav entry; the allocator side is write-only. ⛔ depends on OWN-02 |
 | RATE-01 | Phase 146 | Pending |
 | RATE-02 | Phase 146 | Pending |
 | RATE-03 | Phase 146 | Pending |
