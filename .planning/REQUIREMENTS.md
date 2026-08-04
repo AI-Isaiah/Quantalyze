@@ -895,6 +895,29 @@ All five found in one live founder session, composing a scenario from a just-upl
   write-only from the allocator's side. ⛔ Depends on OWN-02 — a list that links to `notFound()` is
   the dead-end class Phase 142.2 existed to delete (same trap as OWN-04).
 
+  ⭐ **SHARPENED 2026-08-04 — "similar to the Crypto SMA ranking" means RANKING PARITY, not just a
+  list.** The founder restated it precisely: *"an overview like the ranking of external strategies, a
+  ranking of strategies that the allocator uploaded, so all keys he uploaded and the derived
+  strategies in a ranking similar to the ranking of external strategies."* Two things this pins that a
+  plain list would miss:
+  - **Coverage is per-KEY, not per-published-strategy.** It must show **every key the allocator
+    uploaded and the strategies derived from them** — including `private` and `draft` rows, which are
+    exactly the ones every existing ranking surface filters out. The founder's own account is the
+    proof case: 8 active keys (bybit, okx, deribit ×3, mt5 ×3) and several derived strategies, none of
+    which appear on any ranking today.
+  - **Ranking PARITY with the external/discovery ranking** — the same metric columns, the same sort
+    affordances, and the same rank presentation (`#n` + percentile per DESIGN.md), so the allocator
+    can judge their own uploads on the same axes they judge third-party strategies on. A bare list of
+    names would technically satisfy "an overview" and would miss the point of the ask.
+  ⚠️ **Reuse the existing ranking component//query rather than building a second ranking surface** —
+  two ranking implementations would drift, and the founder is explicitly asking for the SAME thing
+  pointed at a different row set. The only genuine difference is the visibility predicate
+  (own-including-unpublished vs published-only), which is OWN-02's `withPublishedOrOwner` primitive.
+  ⚠️ Metrics for `private`/`draft` rows must come from the same analytics the factsheet renders — do
+  NOT invent a placeholder or a reduced column set for unpublished rows; that is the
+  [[no-invented-data]] class. A row whose analytics have not computed yet shows an honest pending
+  state, not zeros.
+
 ---
 
 ## v2 Requirements
