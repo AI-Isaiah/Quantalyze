@@ -50,30 +50,70 @@ export interface StrategyGateInput {
    */
   csvRowCount?: number;
   /**
-   * True when the strategy's connected exchange is ledger-backed (Deribit):
-   * returns are derived into `csv_daily_returns` from the txn-log ledger and
-   * the `trades` table is NEVER populated (P72). This is what lets the gate
-   * admit a KEYED daily-returns strategy — WITHOUT it, dropping the `!apiKeyId`
-   * term would also admit a keyed FILL-based (perp) strategy that merely has 0
-   * trades in-window but a funding-derived `csv_daily_returns` series (which,
-   * unlike the Deribit ledger, has no fail-loud completeness gate). Compute via
-   * `isLedgerBackedExchange(api_keys.exchange)`. Undefined/false for fill-based
-   * exchanges and CSV uploads.
+   * The PERSISTED completeness verdict for this strategy's daily-return
+   * series — `strategy_analytics.series_completeness`, verbatim, as the caller
+   * read it.
+   *
+   * REQUIRED and NULLABLE, deliberately. Required so a caller that "forgot" to
+   * read it is a compile error rather than a silent fail-open; nullable because
+   * NULL is a real and common state (no producer has examined this series yet).
+   *
+   * THIS MODULE DOES NOT COMPUTE IT. The producers do, each at the moment they
+   * write the series and can still see its inputs: the `broker_dailies`
+   * combiners (keyed venues), the CSV analytics runner (keyless uploads), and
+   * the composite stitch job. TypeScript only READS the verdict; it holds no
+   * opinion about which venue deserves trust.
+   *
+   * NULL means never-examined, and never-examined MUST refuse (fail closed).
    */
-  isLedgerBacked?: boolean;
+  seriesCompleteness: string | null;
 }
 
 /**
- * Ledger-backed exchanges derive their return series into `csv_daily_returns`
- * from a transaction-log ledger and never write the `trades` table. Mirrors the
- * analytics-service `is_ledger_backed = source == "deribit"`
- * (services/ingestion/long_fetch.py) — keep the two in lockstep. Deribit is the
- * only such venue today.
+ * The POSITIVE allow-list of completeness verdicts that admit a strategy to the
+ * daily-returns branch. Positive by construction: a deny-list would admit every
+ * value nobody thought of — including NULL, including a verdict a future
+ * producer invents — and admission is the unsafe direction (it publishes).
+ *
+ * - `ledger_complete`   — the series was folded from a complete transaction
+ *                         ledger; there is nothing else to fetch.
+ * - `user_supplied`     — a keyless CSV upload: the series IS the submission.
+ * - `composite_stitched` — stitched from constituent series that each carried
+ *                         their own verdict.
+ *
+ * Everything else refuses: `fill_derived_unproven` (a realized-PnL fetch left a
+ * gap, so the series may be funding-only and materially understated),
+ * `sampled_gapped`, and anything unrecognised.
  */
-export function isLedgerBackedExchange(
-  exchange: string | null | undefined,
-): boolean {
-  return exchange === "deribit";
+const SERIES_TRUSTED_FOR_DAILY_BRANCH: ReadonlySet<string> = new Set([
+  "ledger_complete",
+  "user_supplied",
+  "composite_stitched",
+]);
+
+/**
+ * The daily-returns-branch predicate, exported so every caller invokes ONE
+ * implementation. It previously existed as a hand-duplicated copy in the admin
+ * approval route's TOCTOU re-check, kept in step by a comment that said the two
+ * "must never diverge" — and they diverged anyway. A comment is not an
+ * enforcement mechanism; a shared function is.
+ *
+ * NOTE THE `?? ""` COERCION, and that its direction is the safe one: a NULL or
+ * absent verdict becomes the empty string, which is not a member of the
+ * allow-list, so it lands on the trade branch and REFUSES. A coerced-null that
+ * silently passed would be the fabrication class this gate exists to prevent;
+ * here the coercion can only ever refuse.
+ */
+export function isDailyReturnsSourced(input: {
+  tradeCount: number;
+  csvRowCount: number;
+  seriesCompleteness: string | null;
+}): boolean {
+  return (
+    input.tradeCount === 0 &&
+    input.csvRowCount > 0 &&
+    SERIES_TRUSTED_FOR_DAILY_BRANCH.has(input.seriesCompleteness ?? "")
+  );
 }
 
 /**
@@ -163,26 +203,36 @@ export function checkStrategyGate(input: StrategyGateInput): StrategyGateResult 
 
   // Daily-returns-sourced strategy (no trades, but has daily-return rows): the
   // trade-count and trade-span thresholds don't apply — there are zero trades
-  // by construction. This covers BOTH keyless CSV uploads AND keyed ledger-
-  // backed exchanges (Deribit) whose returns are derived into `csv_daily_returns`
-  // and never write the `trades` table (P72).
+  // by construction.
   //
-  // The `!input.apiKeyId || input.isLedgerBacked` term is load-bearing: a keyed
-  // FILL-based (perp) strategy ALSO writes `csv_daily_returns` (funding series
-  // via derive_broker_dailies), so `tradeCount === 0 && csvRowCount > 0` is
-  // reachable for a perp with an in-window fills gap. Admitting that perp here
-  // would publish it on a funding-only series that — unlike the Deribit ledger —
-  // has NO fail-loud completeness gate (understated track record). So a keyed
-  // strategy takes this branch ONLY when it is ledger-backed; a keyed perp with
-  // 0 trades stays on the trade branch → INSUFFICIENT_TRADES until fills land.
+  // Admission is decided by the PERSISTED completeness verdict, never by which
+  // venue the key points at. The question the branch actually needs answered is
+  // "is this daily series complete?", and only the producer that wrote the
+  // series can answer it — it is the only party that could still see the
+  // inputs. Every venue folds a ledger into the same daily series; whether a
+  // venue additionally fetches fills into `trades` is an adapter capability and
+  // says nothing about completeness.
+  //
+  // WHY AN UNKNOWN VERDICT REFUSES. A keyed FILL-based (perp) strategy also
+  // writes `csv_daily_returns` (a funding series via derive_broker_dailies), so
+  // `tradeCount === 0 && csvRowCount > 0` is reachable for a perp whose
+  // realized-PnL fetch left a gap. Admitting it would publish a materially
+  // understated track record as verified. Its producer stamps
+  // `fill_derived_unproven`, which is not in the allow-list; and a series no
+  // producer has stamped at all reads NULL, which is also not in the allow-list
+  // (see the `?? ""` note on isDailyReturnsSourced — the coercion's only
+  // possible direction is refusal). Either way the strategy stays on the trade
+  // branch → INSUFFICIENT_TRADES until it has a verdict that earns admission.
+  //
   // The NO_DATA_SOURCE guard above still keys off `!apiKeyId`, so a keyed
   // strategy always has a source. Gate on the daily-return row count, then fall
   // through to the shared analytics-completeness checks below.
-  const isDailyReturnsSourced =
-    input.tradeCount === 0 &&
-    csvRowCount > 0 &&
-    (!input.apiKeyId || input.isLedgerBacked === true);
-  if (isDailyReturnsSourced) {
+  const dailyReturnsSourced = isDailyReturnsSourced({
+    tradeCount: input.tradeCount,
+    csvRowCount,
+    seriesCompleteness: input.seriesCompleteness,
+  });
+  if (dailyReturnsSourced) {
     if (csvRowCount < STRATEGY_GATE_MIN_CSV_ROWS) {
       return {
         passed: false,
