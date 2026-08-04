@@ -445,7 +445,22 @@ milestone or advertise MT5 until 142.3 passes.
 - [ ] **MT5-14** *(found by the MT5-05 live run, 2026-08-04)*: An MT5 strategy can declare **MT5** as
   its supported exchange in the wizard metadata step, and the venue is **preselected from the key the
   founder already connected** rather than asked again.
-  **Observed:** the "Supported exchanges" chips render Binance / OKX / Bybit / Deribit / sFOX — no MT5
+  ⛔ **SEVERITY CORRECTED 2026-08-04 — this was mis-filed as cosmetic and it is a HARD BLOCKER.**
+  The same ccxt-only probe is called by `finalize-wizard` on EVERY submit as a scope-broadening
+  defence (`:175` → `/internal/keys/{id}/permissions?force_refresh=true`). For MT5 it throws
+  `Unsupported exchange: mt5` (confirmed in Sentry 2026-08-04T11:53:52 on
+  `GET /api/keys/6d36dd92-…/permissions`), `!res.ok` throws at `:194`, and the catch maps **every**
+  probe failure to `KEY_NETWORK_TIMEOUT` 502 at `:519`. So a PERMANENT venue-unsupported condition is
+  reported to the user as a temporary network blip that says "try again" — the founder clicked Retry
+  **five times** against a failure that can never succeed.
+  **Consequence: an MT5 strategy cannot be submitted AT ALL.** MT5 reaching the wizard's preview
+  (v0.53.0.0) is real, but the LAST click fails in a different subsystem, so MT5 is **not usable
+  end-to-end in production**. MT5-05 is not completable until this lands.
+  **Two distinct fixes, both required:** (a) the probe must handle MT5 (or finalize must not demand a
+  ccxt scope probe for a venue that has none — read-only is already proven by `_validate_mt5_key`);
+  (b) the catch-all mapping of any probe failure to `KEY_NETWORK_TIMEOUT` must stop — a permanent
+  unsupported-venue error must never render as a retryable timeout.
+  **Observed (the badge, same root cause):** the "Supported exchanges" chips render Binance / OKX / Bybit / Deribit / sFOX — no MT5
   — on a strategy whose only key IS MT5. The founder must either mis-declare the venue or leave it blank.
   ⛔ **This is NOT the MT5-11 drift class — do not "fix the stale list".** It is DELIBERATE:
   `closed-sets.ts:119-122` states *"mt5 stays OUT of UI_EXCHANGE_CODES / EXCHANGES / FUNDING_EXCHANGES
@@ -571,6 +586,26 @@ D-14 valve.
   at `:339`, so that fix was narrower than recorded or has regressed. Treat the stored learning as
   STALE and re-derive from source.
 
+- [ ] **WIZFORM-04** *(founder, verbatim: "clicking twice is not acceptable, especially with this
+  mistake message. A user would just not know what to do")*: A **transient infrastructure** failure
+  never becomes a user decision. Submit absorbs it — bounded automatic retry with backoff — and only
+  surfaces an error once retries are genuinely exhausted, then with copy naming an action the user
+  can actually take.
+  **Observed:** submit returned `KEY_NETWORK_TIMEOUT` and required a manual **Retry** click. The
+  founder knew to click it; a real allocator sees "We could not reach the exchange … switch to a
+  different exchange" on a **forex account they own**, and stops.
+  ⛔ **The fix is NOT "add a retry loop" — that papers over the real question.**
+  `finalize-wizard` crosses a Railway seam on **EVERY submit** to re-validate key permissions, for a
+  key that was validated minutes earlier and has already synced 136 daily rows. MT5 serialises every
+  gateway call through ONE lock, so that re-validation is the most contended call in the flow and the
+  timeout is a **self-inflicted** dependency at the worst moment — the last click of the funnel.
+  **Ask first whether the call is needed at all** (a recent successful validation + a live synced
+  series is already evidence), and only then discuss retry.
+  ⚠️ Anything added here must respect the existing seam-budget contract
+  (`src/lib/seam-budgets.invariant.test.ts` recomputes it) — a naive retry multiplies the budget this
+  route is explicitly capped on, and there is a circuit breaker (`breaker:railway`) the retries would
+  feed. Retrying into an open breaker is how one slow venue takes down every other user's submits.
+
 - [ ] **WIZFORM-03**: Venue-shaped error copy must not be shown for venues it cannot apply to. The
   MT5 submit timeout advises *"switch to a different exchange"* — impossible advice when the account
   IS the venue. Same unwinnable-remedy class as MT5-13 and the deleted "0 trades" message.
@@ -656,17 +691,18 @@ Populated during roadmap creation.
 | JOB-06 | Phase 145 | Pending |
 | JOB-07 | Phase 142 | Pending |
 | MT5-01..04, MT5-11, MT5-12 | Phase 142.2 | **Complete** — shipped v0.53.0.0 (PR #660) 2026-08-04 |
-| MT5-05 | Phase 142.2 | **OPEN — blocking human gate.** Live run 2026-08-04 got as far as "Your verified factsheet is ready" with the continue button enabled, but the flow was NOT completed (strategy still `draft`) and MT5-13 puts an internal error code on that same screen. Not dischargeable yet. |
+| MT5-05 | Phase 142.2 | ⛔ **OPEN and NOT COMPLETABLE without MT5-13.** Live run 2026-08-04 reached "Your verified factsheet is ready" (gate work confirmed live), but submit fails permanently: the ccxt-only permissions probe rejects MT5 and the failure is mis-rendered as a retryable `KEY_NETWORK_TIMEOUT`. Founder retried 5×. |
 | MT5-06..10 | Phase 142.3 | Pending (split out of 142.2 on 2026-08-03 at the D-14 valve) |
-| MT5-13 | Phase 142.3 | Pending (found by the MT5-05 live run 2026-08-04; blocks a clean MT5-05) |
 | OWN-01 | — | **Already met** (CONTRIB-03, verified in code 2026-08-04) — no phase needed |
 | OWN-02..04 | unassigned | Pending — needs its own phase; ⛔ do NOT fold into 142.3 (see the OWN scope fence) |
+| MT5-13 | Phase 142.3 | ⛔ **HARD BLOCKER (severity corrected)** — the ccxt-only probe is called by `finalize-wizard` on EVERY submit, so an MT5 strategy **cannot be submitted at all**; MT5-05 is not completable until this lands |
 | MT5-14 | Phase 142.3 | Pending — MT5 missing from the metadata exchange chips; ⛔ deliberate no-widening pin will red, re-cut it consciously |
 | WIZCONT-01 | unassigned | Pending — **OBSERVED**: allocators have NO resume path at all (`/strategies/*` is manager-only; the overlay hardcodes `initialDraft={null}`, Phase 110 deferral) |
 | WIZCONT-02 | unassigned | Pending — **LOW**; corrected 2026-08-04, the common case is already safe (localStorage session token + `strategies_user_wizard_session_source_uniq`) |
 | WIZFORM-01 | unassigned | Pending — **blocking UX**; inline field errors, cost 3 failed submits and drove wrong-field edits |
 | WIZFORM-02 | unassigned | Pending — code-less 400 → `UNKNOWN`; 142.2 plan 07's sweep missed this validator |
 | WIZFORM-03 | unassigned | Pending — "switch to a different exchange" is impossible advice for MT5 |
+| WIZFORM-04 | unassigned | Pending — **blocking UX**; transient seam timeout must not become a user decision; ⛔ ask whether the per-submit re-validation is needed before adding retries |
 | STALE-01 | unassigned | Pending — root cause NOT yet established; investigate before planning |
 | RATE-01 | Phase 146 | Pending |
 | RATE-02 | Phase 146 | Pending |
