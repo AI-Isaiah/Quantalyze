@@ -184,25 +184,39 @@ true for 146 and half of 142–145, and **false for 141**.
   those changes invalidate. Plan-check found 4; plans 06, 07 and 08 each found one *more* the plan did
   not predict. Fold into the planning template, not a code phase.
 
-### MT5 wizard — founder-observed on live UI (added 2026-08-02)
-- **MT5 connect fails with copy that names the wrong exchanges.** Submitting the MT5 form
-  (login / investor password / broker server, all filled) renders *"This does not look like a
+### MT5 wizard — founder-observed on live UI (added 2026-08-02) — ✅ BOTH DEFECTS CLOSED
+
+> ⚠️ **Neither defect is open.** Kept as a record because the *shape* of the fix (a class fix, not
+> the instance) and one **rejected** remedy are what future readers need. Do not re-open either
+> item; the residual scope lives in `DEF-142.2-02` below (the 9 out-of-scope emitting sites).
+> ⛔ **Closing these means the MT5 connect flow is REACHABLE and its rejections are HONEST. It does
+> NOT mean MT5's rendered numbers are correct** — that is Phase 142.3's gate (D-17).
+
+- **MT5 connect failed with copy that named the wrong exchanges.** Submitting the MT5 form
+  (login / investor password / broker server, all filled) rendered *"This does not look like a
   valid API key for the selected exchange… Binance secrets are 64 hex characters; OKX and Bybit
-  use different formats"* with `code: KEY_INVALID_FORMAT`. Two defects stacked, both real:
-  1. **Leading hypothesis for the rejection itself — the documented client-on/server-off
-     half-state.** `create-with-key/route.ts:147` returns exactly this code when
-     `isMt5EnabledServer()` is false, and that gate is strict `MT5_ENABLED === "true"` on the
-     **Vercel/Next server** — a *different* variable from the worker's `MT5_ENABLED` and from
-     `NEXT_PUBLIC_MT5_ENABLED` (which is what renders the MT5 card the founder clicked).
-     **Check Vercel prod env for a server-side `MT5_ENABLED=true` before writing any code** —
-     if it is missing this is an env fix, not a code fix, and the card is offerable while the
-     submit path is closed.
-  2. **Independent of (1): the wizard's `KEY_INVALID_FORMAT` copy is exchange-generic and
-     discards the server's specific `error` string.** The route sent *"MT5 integration is not
-     yet available."*; the user was shown Binance/OKX/Bybit hex-length advice. One shared code
-     is bucketing unrelated causes, and the renderer drops the detail that would have explained
-     it. Fix the mapping to be exchange-aware (and to surface the server reason) regardless of
-     how (1) resolves — otherwise every future MT5 rejection lies the same way.
+  use different formats"* with `code: KEY_INVALID_FORMAT`. Two defects were stacked, both real:
+  1. ✅ **CLOSED — it WAS the client-on/server-off half-state, and it was an env fix.**
+     `create-with-key/route.ts:147` returned exactly this code when `isMt5EnabledServer()` was
+     false, and that gate is strict `MT5_ENABLED === "true"` on the **Vercel/Next server** — a
+     *different* variable from the worker's `MT5_ENABLED` and from `NEXT_PUBLIC_MT5_ENABLED`
+     (which is what renders the MT5 card the founder clicked). **Resolved 2026-08-03 by MT5-01:**
+     the server-side flag was set in Vercel prod and the app redeployed, verified by the
+     `/security` mt5-readonly curl. No code was written for it — it was never a code defect.
+  2. ✅ **CLOSED as a CLASS by Phase 142.2 plan 07 (MT5-04), not as the instance.** The single
+     `KEY_INVALID_FORMAT` bucket was split across **24 emitting sites (12 + 12)** in
+     `create-with-key/route.ts` and `composite/add-key/route.ts` into four honest codes
+     (`KEY_MISSING_REQUIRED_FIELD`, `KEY_UNSUPPORTED_VENUE`, `KEY_VENUE_NOT_ENABLED`,
+     `KEY_INPUT_TOO_LONG`); `KEY_INVALID_FORMAT` now survives on exactly one genuine format guard
+     per route and its copy no longer claims a browser-side check that never ran. Guards, HTTP
+     statuses and `error` strings are byte-identical at every site — only the `code:` literal
+     moved. `wizardErrors.invariant.test.ts` reddens if a future code is emitted without landing
+     in all three registries. ⚠️ Fixing the *class* was deliberate: MT5-01 had already made the
+     founder's own failing arm unreachable, so an instance fix would have repaired a line that
+     can no longer fire.
+     ⛔ **The "surface the server's `error` string" half was REJECTED by founder decision D-05 —
+     copy-by-code only.** Do not re-open it as an unfinished half of this item. The wizard renders
+     copy keyed on the code and deliberately renders no server-supplied string.
 
 ---
 
@@ -932,6 +946,129 @@ Read it as such.
     Found by the /ship coverage audit, 2026-08-03. **Related and already FIXED in 0.52.0.0:** the
     same job had been made the third member of the one-pending-slot `shared-test-db` concurrency
     group, which cancelled a pending gate outright; it is now gated behind `python`.
+
+### v1.16 Phase-142.2 (MT5 on the unified backbone) — deferred items (added 2026-08-04)
+
+Booked at phase close (plan `142.2-08`). ⛔ **Read the boundary first: 142.2 delivered MT5
+*reachable and honest* — the connect flow works and its rejections name their true cause. It did
+NOT verify that MT5's rendered performance NUMBERS are correct.** That is Phase 142.3 (MT5-06..10,
+decisions D-07..D-11), against the live terminal on a trading day. Nothing below, and no artifact
+of 142.2, may be read as evidence of MT5 number-correctness.
+
+None of these clears the founder blast-radius bar as blocking. Each names its source decision.
+
+1. **`DEF-142.2-01` — MT5 broker-server typeahead (D-04). ⛔ NOT a simple UI task: there is no data
+   source.** The field ships as plain text (now legible rather than dot-masked, MT5-03) plus the
+   helper copy at `ConnectKeyStep.tsx:144` ("copy the server name exactly as it appears in your MT5
+   terminal") — which is the only reliably correct instruction we can give. **The blocker is data,
+   not UI.** `grep` for `broker_server` / `server_name` across `.py`/`.ts`/`.tsx` returns **zero
+   hits repo-wide**, and there is no public canonical registry of MT5 broker server names. Three
+   candidate sources were considered and rejected: (a) **curated static list** — rots silently as
+   brokers add/rename servers, and the field must stay free-text anyway, so the list can only ever
+   be a hint; (b) **learn-from-successful-connections** — empty until MT5 has real users, and it
+   leaks one user's broker choice to every other user; (c) **public registry** — does not exist.
+   ⚠️ A *partial* list is worse than none: it invites picking a near-match that then fails
+   validation, which is precisely the confusing-rejection class this phase just closed. Re-open
+   only with a named, maintainable data source attached.
+2. **`DEF-142.2-02` — `KEY_INVALID_FORMAT` split, the remaining 2 routes (D-06): 9 emitting sites,
+   not 11.** Measured at HEAD by `grep -c 'code: "KEY_INVALID_FORMAT"'`:
+   `src/app/api/keys/validate-and-encrypt/route.ts` → **4**, `src/app/api/verify-strategy/route.ts`
+   → **5**. (The research's "11" and the 142.2-CONTEXT D-06 text counted comment prose; the same
+   two-per-file delta that made the in-scope routes read 14 instead of 12.) **Same defect class** as
+   the 24 sites plan 07 fixed — one code bucketing unrelated causes — but **different callers and
+   different copy contracts**: `validate-and-encrypt` is an internal surface and `verify-strategy`
+   is the public/teaser verification path, so the four new codes' wizard copy is not automatically
+   the right copy there. Deliberately untouched by 142.2: both files are byte-unchanged.
+3. **`DEF-142.2-03` — the destructive remedy on a gate refusal is still live.** `GATE_INSUFFICIENT_TRADES`
+   offers "try another key"; `onTryAnotherKey` (`WizardClient.tsx:911-926`) fires
+   `void handleDeleteDraft()`, which destroys the draft **and cascades away every `strategy_keys`
+   member**. MT5-12 removed the *unwinnable* case for MT5 (a complete daily series can now pass the
+   gate on its own verdict, so an MT5 user is no longer cornered into pressing it), but **the
+   destructive remedy itself is unchanged** and still the offered remedy on every other refusal.
+   Classed DoS (user-inflicted) in the 142.2 RESEARCH security table. Verified still live at HEAD.
+4. **`DEF-142.2-04` — ccxt/perp verdict refinement is blocked on the ingestion truncation bugs,
+   deliberately.** `combine_realized_and_funding` stamps `fill_derived_unproven` **always — a
+   constant, not a computation**. A data-driven refinement (stamp `ledger_complete` when realized
+   records provably span the series) would newly **ADMIT** exactly the accounts a silent-truncation
+   bug makes look healthy. Fix the known truncating inputs first — the **OKX bills paginator** and
+   the **bybit funding cursor**, both already booked under § Money-path correctness — then revisit.
+   Order matters: refining first would publish understated track records with a certified verdict.
+5. **`DEF-142.2-05` — `_LEDGER_BACKED_SOURCES` → `adapter.fetches_fills` (optional follow-up).**
+   `analytics-service/services/ingestion/long_fetch.py:63` still holds a venue literal set. ⚠️ It is
+   **NOT** the set MT5-12 deleted and must not be removed: it answers an **adapter-capability**
+   question (does this adapter implement `fetch_raw` / `compute_fingerprint` /
+   `reconstruct_positions`, or does it raise `NotImplementedError` by design?), which is legitimately
+   a venue property. The TypeScript mirror was the trust judgement, and that one is gone. Turning
+   the ingestion set into a property on the adapter that already knows the answer would remove the
+   last venue literal; it is cheap, and **not required by the MT5-12 invariant**.
+6. **`DEF-142.2-06` — `database.types.ts` is drifting and there is no regeneration script.** Phase
+   142.2 plan 06 hand-patched **only** `series_completeness` (3 sites: `Row`/`Insert`/`Update`).
+   Three pre-existing `strategy_analytics` columns remain missing: `computing_started_at`,
+   `computation_warned`, `metrics_json_by_basis`. `package.json` has **no** types-generation script
+   and `ci.yml` mentions `database.types` nowhere, so there is no freshness gate — which is why the
+   drift went months unnoticed. The honest fix is all three columns **plus a gate**, not a fourth
+   one-off addition. **Supersedes/absorbs** the narrower Phase-142 item above (§ "BOTH TypeScript
+   type files are stale…"), which names the same two columns for `types.ts`; do not fix them
+   separately.
+7. **`DEF-142.2-07` — Deribit `twr_chain_broken` tightening: FOUNDER DECISION, with the census
+   number attached.** Plan 03 shipped the **behaviour-preserving** default — deribit keeps
+   `ledger_complete` on **both** return paths even when `meta` carries `twr_chain_broken`.
+   Tightening it (stamp a non-admissible verdict when the chain is broken) is a real option, and the
+   read-only PROD census that governs it was run in plan 04: **deribit rows carrying
+   `twr_chain_broken` = 0 — total AND published** (1 row carries the flag on a non-deribit venue).
+   **So tightening would affect nothing today.** ⚠️ Not decided by the phase, on purpose — it is a
+   trust-policy call, not an implementation detail. **Remedy rule if it is ever tightened: affected
+   series get a RE-DERIVE, never a backfill `UPDATE`** (see item 9 for why).
+8. **`DEF-142.2-08` — renaming `csv_daily_returns`.** The table is the canonical daily series for
+   **every** producer (keyed derive, composite stitch, CSV upload), so the `csv_` prefix now names
+   only one of three producers. Cosmetic relative to the MT5-12 invariant, which is satisfied by the
+   verdict column regardless of the table's name. Low value, non-trivial blast radius; do it only if
+   the table is being touched for another reason.
+9. **`DEF-142.2-09` — the Pitfall-6 healing population: 6 unpublished strategies, THREE remedies,
+   one per producer. ⛔ NEVER a backfill `UPDATE`.** Every pre-existing `strategy_analytics` row has
+   `series_completeness IS NULL`, and the gate is fail-closed on NULL. Plan 04's read-only PROD
+   census (44 strategies: 33 published, 8 `pending_review`, 1 draft, 1 private, 1 archived) sized it:
+   - **1 keyed** → **RE-DERIVE** (`derive_broker_dailies`; the combiner re-examines the venue inputs
+     and stamps the verdict it can still justify).
+   - **4 keyless CSV** (`api_key_id IS NULL`, non-composite) → **RE-RUN `compute_analytics_from_csv`**,
+     whose `run_csv_strategy_analytics` pass stamps `user_supplied`. ⚠️ **This is the remedy that is
+     easy to omit and it covers the LARGEST group.** No derive job ever runs for a keyless
+     non-composite and no stitch exists for it, so a note saying only "re-derive or re-stitch" hands
+     the founder an *impossible instruction* for 4 of the 6.
+   - **1 composite** → **RE-STITCH** (`run_stitch_composite_job` stamps `composite_stitched`).
+   - **0 published composites** — the composite regression `composite_stitched` exists to prevent has
+     **no live victims** today.
+   The population **self-heals**: the gate runs at exactly two moments (wizard `SyncPreviewStep`,
+   admin approve), so a NULL verdict cannot un-publish anything already live; it only refuses the
+   next preview until the series is re-produced. ⛔ **A backfill `UPDATE` is forbidden** — it would
+   fabricate a trust claim about series whose inputs were never examined and, for some, no longer
+   exist. That is the exact lie the verdict column was added to make impossible.
+10. **`DEF-142.2-10` — Vercel tooling recommends Workflow DevKit on both wizard connect routes;
+    DECLINED, with the reasoning that must survive.** (Was `DEF-142.2-07-A` in the phase's
+    `deferred-items.md`.) The repo's Vercel plugin hook fires on every edit to
+    `create-with-key/route.ts` (~`:270`, the post-validation seam) and its `composite/add-key`
+    mirror, recommending durable execution for the seam's retry handling. **Not applied, and the
+    reason is a threat-model question rather than a taste call: these are the two SECRET-BEARING
+    routes** — raw `api_key` / `api_secret` / `passphrase` arrive in the request body — so moving
+    them onto a durable-execution substrate puts live credentials across a **new persistence
+    boundary**. Second reason: both routes spend two seam budgets back to back (`validate-key`, then
+    `encrypt-key`) under `maxDuration = 300`, and the 140-series work built a deliberate
+    circuit-breaker + classification posture around that seam (`SERVICE_UNAVAILABLE_RETRY`,
+    `SERVICE_UNREACHABLE`, `SEAM_MISCONFIGURED`) that a large body of route tests pins. Any move
+    must preserve that classification contract. **Disposition:** evaluate as its own phase with a
+    threat model, or reject explicitly and silence the hook on these two paths so it stops
+    recommending a change the security posture does not want.
+11. **`DEF-142.2-11` — `EquityChart.tsx:1119` `react-hooks/exhaustive-deps` warning
+    (`useMemo` missing dep `period`).** Pre-existing, untouched by 142.2, recorded by plans 02, 06
+    and 07 as the sole output of `npm run lint` (0 errors, 1 warning). Batch it with the next edit to
+    that file.
+
+⚠️ **Cross-reference, do NOT duplicate:** the anon-readable `strategy_analytics` splat that plan
+04's A2 check re-confirmed (`anon` holds `SELECT` on `series_completeness`, as it does on every
+column of that table) is already booked above under § Security — *"`strategy_analytics (*)` splats
+every analytics column to anon on two public paths"* (commit `d935fa61`). The new column adds no
+new exposure class: it is an enum carrying no magnitude, and protecting one column while the splat
+stands would secure nothing.
 
 ### v1.16 milestone human-audit QA sweep — authed-browser + PROD probes (added 2026-08-03)
 
