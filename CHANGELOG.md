@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.53.0.1] - 2026-08-04
+### MT5-13 — the submit button works for MetaTrader, and a permanent failure stops pretending to be a flaky network
+
+The previous release got MT5 to the *last* step of the wizard. Submitting from that step then failed,
+every time, with *"We could not reach the exchange. Try again in a moment."* Nothing was unreachable
+and no retry could work: just before publishing, finalize re-checks the key's live permissions, and
+that check is a ccxt call. MT5 is not a ccxt venue, so it answered **"unsupported exchange"** on every
+attempt — a permanent condition, rendered as a temporary one, with a Retry button as the only offered
+remedy. The founder clicked it five times.
+
+**MetaTrader now answers the permission check.** Read-only is structural for MT5 rather than probed:
+our client composes read methods and an order-check probe only — no trade surface at all — and the
+stored credential was already proven investor-only at connect, where a trade-capable login is rejected
+and never persisted. An investor password cannot be promoted to a master one, so the scope-broadening
+this check defends against has no MetaTrader instance, and the honest answer is that structural
+verdict. Deliberately without a live gateway round-trip: it would buy no new information, and it would
+put every submit in contention for the single shared terminal.
+
+**Permanent probe failures are no longer sold as timeouts.** The check's failure envelope was one
+bucket. It is now two, split on whether an identical retry could ever answer differently. Rate limits
+and venues that did not respond keep the retry copy, because for those it is true. A venue with no
+probe adapter, an unknown key, a key row with no exchange named — these get copy that says so, admits
+it is ours to fix, and **renders no Retry control at all**, because a button that can only fail again
+reads as *you did it wrong* and invites exactly the clicking it caused.
+
+The refusal itself is unchanged and still fails closed: a key whose permissions cannot be verified is
+never published. This release changes what the user is told, and unblocks the venue that could not be
+told anything true.
+
 ## [0.53.0.0] - 2026-08-04
 ### 142.2 — MetaTrader 5 reaches the end of the wizard, because the gate stopped asking the wrong question
 

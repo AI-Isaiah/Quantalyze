@@ -140,6 +140,13 @@ export type WizardErrorCode =
   | "KEY_VENUE_TRANSIENT"
   | "KEY_RATE_LIMIT"
   | "KEY_NETWORK_TIMEOUT"
+  // MT5-13 — the permanent sibling of KEY_NETWORK_TIMEOUT. Both mean "the live
+  // scope re-check at finalize did not produce an answer", but this one means it
+  // will not produce one on a retry either: the venue has no probe adapter, the
+  // key row carries no exchange, the key id is unknown, our internal token is
+  // misconfigured. Splitting them is the whole point — the timeout copy's Retry
+  // control was the only affordance offered for a condition retries cannot clear.
+  | "KEY_SCOPE_CHECK_UNAVAILABLE"
   | "KEY_SCOPE_BROADENED"
   | "DRAFT_ALREADY_EXISTS"
   // Sync + gate (SyncPreviewStep) — these wrap strategyGate.ts codes
@@ -680,6 +687,26 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
+  },
+
+  KEY_SCOPE_CHECK_UNAVAILABLE: {
+    // NOT recoverable, on the same mechanism KEY_VENUE_NOT_ENABLED and
+    // COMPOSITE_TOO_MANY_MEMBERS use: `actions` holds no member of
+    // RECOVERABLE_ACTIONS (src/lib/envelope.ts), so `buildEnvelope` derives
+    // `recoverable: false` and `ErrorEnvelope` renders NO Retry control. That is
+    // the entire fix. The copy this code was split out of said "try again in a
+    // moment" for a condition where trying again is guaranteed to fail, and a
+    // Retry button that can only fail again is worse than no button: it reads as
+    // "you did it wrong", so the user keeps clicking.
+    title: "We could not check this key's permissions.",
+    cause:
+      "The permission check we run just before publishing did not complete, and it will not complete on a retry — this is something on our side to fix, not something you can clear. Nothing about your strategy was lost; it stays exactly where it is.",
+    fix: [
+      "Nothing you can do from here — tell us and we will fix it.",
+      "Your draft is saved. You can come back to it once we have.",
+    ],
+    docsHref: "/security#readonly-key",
+    actions: ["request_call"],
   },
 
   KEY_SCOPE_BROADENED: {

@@ -627,6 +627,62 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
     fetchSpy.mockRestore();
   });
 
+  // MT5-13 — the probe-failure split. Every non-OK probe response used to map to
+  // KEY_NETWORK_TIMEOUT, whose copy says "we could not reach the exchange, try
+  // again in a moment" and carries a Retry control. For a PERMANENT 4xx that is
+  // wrong in both halves, and it is how a blocked MT5 submit presented as a
+  // flaky network: the probe answered 400 "Unsupported exchange: mt5" on every
+  // attempt, so the invited retry could never work. What matters is not which
+  // status maps where in the abstract — it is that a user facing a condition
+  // retries cannot clear is never handed a Retry button.
+  //
+  // Both arms assert the fail-CLOSED outcome is UNCHANGED (no RPC, 502): this
+  // split changes the envelope only. A fix that unblocked finalize by letting an
+  // unverified key through would be a security regression, not a fix.
+  it.each([
+    // 400 — the venue has no probe adapter (the literal MT5 case).
+    { status: 400, expected: "KEY_SCOPE_CHECK_UNAVAILABLE" },
+    // 422 — the api_keys row carries no exchange (the service's KEY_MISSING_EXCHANGE).
+    { status: 422, expected: "KEY_SCOPE_CHECK_UNAVAILABLE" },
+    // 404 — unknown key id. Permanent until someone reconnects the key.
+    { status: 404, expected: "KEY_SCOPE_CHECK_UNAVAILABLE" },
+    // 429 — per-key probe rate limit. Carved OUT: an identical retry clears it,
+    // so the timeout copy's Retry is correct here.
+    { status: 429, expected: "KEY_NETWORK_TIMEOUT" },
+    // 424 — the VENUE did not answer. `retryable: true` in the service contract.
+    { status: 424, expected: "KEY_NETWORK_TIMEOUT" },
+    // 503 — upstream transient. Unchanged.
+    { status: 503, expected: "KEY_NETWORK_TIMEOUT" },
+  ])(
+    "a $status probe failure surfaces $expected",
+    async ({ status, expected }) => {
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(
+          new Response(JSON.stringify({ detail: "nope" }), {
+            status,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      const consoleErr = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
+
+      const POST = await importPost();
+      const res = await POST(makeReq(VALID_BODY));
+
+      expect(res.status).toBe(502);
+      expect((await res.json()).code).toBe(expected);
+      // Fail CLOSED on every arm — the RPC must not have run.
+      expect(
+        STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+      ).toBeUndefined();
+
+      consoleErr.mockRestore();
+      fetchSpy.mockRestore();
+    },
+  );
+
   it("SEAMCORE-02: a probe whose BODY aborts still fails CLOSED", async () => {
     // The shape that used to slip through. `AbortSignal.timeout` aborts the
     // response STREAM, so headers can arrive and the body then stall: `fetch`

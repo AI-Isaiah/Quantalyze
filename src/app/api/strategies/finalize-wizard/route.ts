@@ -143,6 +143,43 @@ const PROBE_PARSE_MISS = { probe_error: true } as const;
 type ProbeParseMiss = typeof PROBE_PARSE_MISS;
 
 /**
+ * MT5-13 — a non-OK probe response, carrying the STATUS the service answered.
+ *
+ * It used to be a bare `Error` whose status survived only inside a message
+ * string, so the catch below could not tell the two classes apart and mapped
+ * every one of them to `KEY_NETWORK_TIMEOUT` — copy that says "we could not
+ * reach the exchange" and offers a Retry. For a transient 5xx that is right.
+ * For a PERMANENT 4xx (the venue has no probe adapter, the key row carries no
+ * exchange, the key id is unknown) it is a lie in both halves: nothing was
+ * unreachable, and no number of retries will change the answer. That is how a
+ * blocked MT5 submit presented as a flaky network, five clicks running.
+ */
+class ProbeUpstreamError extends Error {
+  constructor(readonly status: number) {
+    super(`permissions probe failed: ${status}`);
+    this.name = "ProbeUpstreamError";
+  }
+}
+
+/**
+ * Is this probe status permanent — i.e. will an identical retry answer the same
+ * way until an operator or a deploy acts?
+ *
+ * The 4xx block is the service's CALLER class (see the endpoint's own PYAPI-05
+ * contract): 400 unsupported venue, 403 internal-token misconfig, 404 unknown
+ * key, 422 key row has no exchange. Two 4xx are carved out because they are
+ * genuinely transient there and their existing timeout treatment is correct:
+ *   429 — per-key probe rate limit, which an identical retry clears.
+ *   424 — the VENUE did not answer; `retryable: true` in the contract.
+ * 5xx stays transient-shaped too. Some of it is service-permanent, but it is
+ * ours to page on and the user's remedy is the same either way, so this hotfix
+ * does not re-litigate that boundary.
+ */
+function isPermanentProbeStatus(status: number): boolean {
+  return status >= 400 && status < 500 && status !== 429 && status !== 424;
+}
+
+/**
  * Force-refresh the live `{read, trade, withdraw}` triple for an
  * api_keys row. Bypasses BOTH cache layers:
  *   - Next `unstable_cache` (60s) is sidestepped by NOT calling the
@@ -191,7 +228,7 @@ async function fetchLivePermissions(
     },
   );
   if (!res.ok) {
-    throw new Error(`permissions probe failed: ${res.status}`);
+    throw new ProbeUpstreamError(res.status);
   }
   // SEAMCORE-02: `res.json()` is the core's INSTRUMENTED read — a body-read
   // failure records one breaker failure and throws `SeamBodyReadError`. Letting
@@ -513,6 +550,27 @@ async function runScopeBroadeningProbe(
     console.error(
       `[strategies/finalize-wizard] live permissions probe failed: ${scrubSeamError(probeErr)}`,
     );
+    // MT5-13 — ORDER: this arm sits AFTER CircuitOpenError (which is its own
+    // transient verdict) and BEFORE the generic timeout, because a permanent
+    // status is the more specific claim. Same fail-CLOSED outcome as every other
+    // probe failure — finalize is still blocked, nothing is promoted — but the
+    // envelope stops inviting a retry that cannot work. `KEY_SCOPE_CHECK_UNAVAILABLE`
+    // carries no recoverable action, so the wizard renders no Retry control at all.
+    if (
+      probeErr instanceof ProbeUpstreamError &&
+      isPermanentProbeStatus(probeErr.status)
+    ) {
+      return {
+        ok: false,
+        response: NextResponse.json(
+          {
+            error: "Could not verify key scopes",
+            code: "KEY_SCOPE_CHECK_UNAVAILABLE",
+          },
+          { status: 502, headers: NO_STORE_HEADERS },
+        ),
+      };
+    }
     return {
       ok: false,
       response: NextResponse.json(

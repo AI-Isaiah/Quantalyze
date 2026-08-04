@@ -1407,12 +1407,23 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * by an empty object — would satisfy every assertion below vacuously. A scan
    * over nothing passes.
    *
+   * **63 at MT5-13**, which added `KEY_SCOPE_CHECK_UNAVAILABLE` — the permanent
+   * sibling of `KEY_NETWORK_TIMEOUT`, for a finalize scope re-check that will
+   * not succeed on a retry. The reasoning was re-run before the number moved.
+   * Its actions are `request_call` ALONE: no `try_another_key`, no
+   * `start_fresh`, so the destructive class below is unchanged at four members
+   * and the entry is out of the scanned population by construction — the same
+   * shape `KEY_VENUE_NOT_ENABLED` established. That is load-bearing here rather
+   * than incidental: the whole reason this code exists is that the condition is
+   * not the user's to clear, so offering a control that deletes their draft
+   * would be the worst possible answer to it.
+   *
    * Deliberately NOT `Object.keys(WIZARD_ERROR_COPY).length`: reading the
    * subject to build the expectation is how a guard stops being able to fail.
    * Bumping the LITERAL when the table legitimately grows is the intended
    * maintenance cost; replacing it with a derived value removes the guard.
    */
-  const EXPECTED_TABLE_SIZE = 62;
+  const EXPECTED_TABLE_SIZE = 63;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -1594,8 +1605,26 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * negative about a write that may or may not have landed. The entry also
    * volunteers "This is a gap in our bookkeeping, not a judgement about your
    * trading", which is a statement about US and is the point of the code.
+   *
+   * **63 at MT5-13** (`KEY_SCOPE_CHECK_UNAVAILABLE`). Read against all four
+   * FORBIDDEN fragments by hand before the number moved. It mentions no
+   * notification, no trade fetching, and no session field name — and note it
+   * deliberately does NOT say "our team has been notified" even though the copy
+   * asks the user to tell us, which is exactly the fragment's point. The one
+   * needing care is again "data is unchanged", because the entry DOES make a
+   * server-state claim twice: "Nothing about your strategy was lost; it stays
+   * exactly where it is" and "Your draft is saved". Neither is the banned
+   * string, and — applying the same test 140.3-15's entry passed and the CSV
+   * case failed — both are OBSERVABLE rather than asserted. This arm returns
+   * from `runScopeBroadeningProbe` BEFORE `finalize_wizard_strategy` is called
+   * at all, which is not a reading of the code but a pinned assertion: the
+   * route's own probe-failure tests check `STATE.rpcCalls` holds no
+   * `finalize_wizard_strategy`. The draft row predates the request and this path
+   * issues no write, so "unchanged" is a property of the control flow rather
+   * than a comfort about a write that may or may not have landed — the
+   * distinction the CSV entry failed on, where the handler HAD run the RPC.
    */
-  const EXPECTED_TABLE_SIZE = 62;
+  const EXPECTED_TABLE_SIZE = 63;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(

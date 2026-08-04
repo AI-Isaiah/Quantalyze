@@ -172,6 +172,15 @@ export function SubmitStep({
           [
             "KEY_SCOPE_BROADENED",
             "KEY_NETWORK_TIMEOUT",
+            // MT5-13 — the permanent half of the probe-failed split, admitted
+            // HERE IN THE SAME COMMIT the route started emitting it. Omit this
+            // line and the new code fails the membership check below, falls
+            // through to UNKNOWN — whose copy IS recoverable — and the fix ships
+            // invisible: the user gets a Retry button again, which is the exact
+            // defect being removed. (Same trap COMPOSITE_TOO_MANY_MEMBERS
+            // records above.) Like that one, its copy is deliberately
+            // NON-recoverable and renders no Retry control.
+            "KEY_SCOPE_CHECK_UNAVAILABLE",
             "GATE_DRAFT_GONE",
             "GUARD_BLOCKED",
             // Phase 88 / W-4 — composite membership probe fail-closed (503).
