@@ -56,7 +56,9 @@ import {
   isRateLimitMisconfigured,
 } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
-import { normalizeDailyReturns, type DailyPoint } from "@/lib/portfolio-math-utils";
+import type { DailyPoint } from "@/lib/portfolio-math-utils";
+import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
+import { deriveEmptySeriesState, type SeriesState } from "@/lib/closed-sets";
 import { readPublicVerificationSignals } from "@/lib/queries";
 
 // AGENTS.md: default to the Node.js runtime explicitly. The route touches the
@@ -103,6 +105,24 @@ export interface ReturnsResponse {
    * blob is NEVER forwarded — only this boolean projection (T-111-03).
    */
   is_composite: boolean;
+  /**
+   * Phase 147 / SCEN-01 (UI-SPEC §3) — what an EMPTY `daily_returns` MEANS.
+   * `daily_returns.length === 0` cannot distinguish "the analytics job is still
+   * running" from "this strategy genuinely has no series", so deriving the
+   * distinction client-side from array length would guarantee one of the two
+   * readings is a lie. The server owns it: a resolved non-empty series is
+   * `available`; an empty one is discriminated by `deriveEmptySeriesState`
+   * against `strategy_analytics.computation_status` — age-bounded at 16h when
+   * there is no analytics row at all, so a never-enqueued strategy cannot spin
+   * "Syncing" forever. Additive: the happy-path shape is otherwise
+   * byte-identical, so a composer build that ignores this field is unaffected.
+   *
+   * Disclosure (T-147-04): emitted only AFTER the withPublishedOrOwner probe
+   * has already 404'd a non-existent / unpublished / cross-tenant id, so it
+   * reveals nothing the existing 404 existence-oracle did not already gate —
+   * the same argument as asset_class and trust_tier above.
+   */
+  series_state: SeriesState;
 }
 
 export async function GET(
@@ -216,9 +236,23 @@ export async function GET(
       // data_quality_flags so is_composite can be derived server-side. Only the
       // strict `composite === true` boolean is forwarded; the raw blob (venue
       // detail) never leaves the server (T-111-03).
+      // Phase 147 / SCEN-01 — widen it again for `returns_series` and
+      // `computation_status`. The analytics-service writes the cumprod EQUITY
+      // curve to `returns_series` and leaves `daily_returns` NULL (that column
+      // is only populated by CSV ingest), so reading `daily_returns` alone
+      // returned [] for EVERY service-computed strategy — the drawer-added
+      // strategy then contributed nothing and was warm-up-gated out of the
+      // blend. This is the SAME select width the already-correct factsheet v2
+      // read uses (factsheet/[id]/v2/page.tsx:45). Disclosure is unchanged:
+      // `analytics_read` RLS is table-level (published OR owner) — there are no
+      // column grants — and `returns_series` is already served publicly for
+      // published strategies by that factsheet (T-147-03). Neither raw column
+      // is forwarded; only the RESOLVED series and the derived state ship.
       const { data, error } = await supabase
         .from("strategy_analytics")
-        .select("daily_returns, data_quality_flags")
+        .select(
+          "daily_returns, returns_series, computation_status, data_quality_flags",
+        )
         .eq("strategy_id", id)
         .maybeSingle();
 
@@ -235,21 +269,77 @@ export async function GET(
         );
       }
 
-      // Normalize the raw JSONB through the canonical parser, NOT a bare
-      // Array.isArray cast. `strategy_analytics.daily_returns` is TYPED as a
-      // year-keyed nested record (types.ts:304) and the Python analytics writer
-      // can store it that way; reading the column RAW from the DB here (no
-      // queries.ts flattening, unlike the book path) means the nested shape
-      // reaches us directly. A bare `Array.isArray(raw) ? raw : []` would
-      // silently drop a real nested-shape series to [] — the exact WR-05
-      // silent-data-loss the book path's normalizeBookReturns already guards.
-      // normalizeDailyReturns handles array + flat-dict + nested-record,
-      // validates every point, and date-sorts. A genuinely absent/NULL/unusable
-      // value still collapses to [] (honest empty, 29-RESEARCH Pitfall 4 — the
-      // added strategy is then warm-up-gated out until a real series exists,
-      // which is correct), NEVER a fabricated series.
-      const raw = (data as { daily_returns: unknown } | null)?.daily_returns;
-      const daily_returns: DailyPoint[] = normalizeDailyReturns(raw);
+      // Resolve the series through the ONE shared mechanism (SC2), NOT a bare
+      // read of a single column and NOT a bare Array.isArray cast.
+      // `resolveDailyReturnSeries` closes two independent silent-data-loss
+      // holes at once:
+      //   (a) `strategy_analytics.daily_returns` is TYPED as a year-keyed
+      //       nested record (types.ts:304) and the Python analytics writer can
+      //       store it that way; this route reads the column RAW from the DB
+      //       (no queries.ts flattening, unlike the book path), so the nested
+      //       shape reaches us directly. `normalizeDailyReturns` — which the
+      //       resolver runs first — handles array + flat-dict + nested-record,
+      //       validates every point and date-sorts (the WR-05 guard).
+      //   (b) service-computed strategies leave `daily_returns` NULL entirely;
+      //       their real track lives in `returns_series` as a cumprod WEALTH
+      //       curve. The resolver derives the daily-return series from it by
+      //       successive ratios, which is why the emitted array is N−1 points
+      //       long — day one is consumed by the differencing. Forwarding the
+      //       wealth index raw would read as a +100% day one and inflate every
+      //       downstream metric, so it is never passed through as-is.
+      // A genuinely absent/NULL/unusable value in BOTH columns still collapses
+      // to [] (honest empty, 29-RESEARCH Pitfall 4 — the added strategy is then
+      // warm-up-gated out until a real series exists, which is correct), NEVER
+      // a fabricated series. `DailyReturn` is structurally `DailyPoint`.
+      const analyticsRow = data as {
+        daily_returns?: unknown;
+        returns_series?: unknown;
+        computation_status?: unknown;
+      } | null;
+      const daily_returns: DailyPoint[] = resolveDailyReturnSeries(
+        analyticsRow?.daily_returns,
+        analyticsRow?.returns_series,
+      );
+
+      // SCEN-01 / UI-SPEC §3 — say what an EMPTY series MEANS, server-side. A
+      // non-empty resolved series is self-evidently `available`; only the empty
+      // case needs the discriminator, and it is the SHARED one (never a second
+      // inlined status ladder).
+      let series_state: SeriesState = "available";
+      if (daily_returns.length === 0) {
+        const status =
+          typeof analyticsRow?.computation_status === "string"
+            ? analyticsRow.computation_status
+            : null;
+        // The strategy's age is needed ONLY to bound the missing-analytics-row
+        // arm (P5: no trigger creates that row on INSERT and no cron backstops
+        // a MISSING one, so an un-enqueued strategy would otherwise spin
+        // "Syncing" forever). It comes from a SEPARATE lazy read rather than a
+        // widened existence probe because that probe's `.select("id,
+        // asset_class")` is pinned byte-for-byte by
+        // phase-84-asset-class-flow.test.ts:42. Lazy = zero cost on the happy
+        // path: this fires only when the series is empty AND no analytics row
+        // exists at all. Fail-soft by design — a read error or an absent row
+        // yields a null age, and deriveEmptySeriesState then answers "empty"
+        // (honest absence), never an unbounded spinner.
+        let strategyCreatedAt: string | null = null;
+        if (analyticsRow === null) {
+          const { data: ageRow, error: ageError } = await supabase
+            .from("strategies")
+            .select("created_at")
+            .eq("id", id)
+            .maybeSingle();
+          if (ageError) {
+            // error-absent ≠ legit-absent (Rule 12): log the breadcrumb so a
+            // schema/RLS fault is debuggable, then degrade to honest absence.
+            console.error("[api/strategies/returns] age read error:", ageError);
+          }
+          const createdAt = (ageRow as { created_at?: unknown } | null)
+            ?.created_at;
+          strategyCreatedAt = typeof createdAt === "string" ? createdAt : null;
+        }
+        series_state = deriveEmptySeriesState(status, strategyCreatedAt);
+      }
 
       // BLEND-01 — forward the published strategy's asset_class (null when
       // unset). `strat` is the widened probe row; a stale build that predates the
@@ -278,6 +368,7 @@ export async function GET(
         asset_class,
         trust_tier,
         is_composite,
+        series_state,
       };
       return NextResponse.json(body, { status: 200, headers: NO_STORE_HEADERS });
     },

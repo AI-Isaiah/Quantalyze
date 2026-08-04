@@ -285,7 +285,27 @@ vi.mock("@/lib/supabase/server", () => ({
             if (STATE.analyticsQueryError) {
               return { data: null, error: STATE.analyticsQueryError };
             }
-            return { data: STATE.analyticsRow, error: null };
+            if (STATE.analyticsRow === null) return { data: null, error: null };
+            // PROJECT to the selected columns, exactly as PostgREST does. Phase
+            // 147: without this the fixture's `returns_series` would reach the
+            // route even if the select never asked for it, making the SC-1
+            // mutation (drop the column from the select) unfalsifiable — the
+            // select-width assertion would go red but the BEHAVIOUR test would
+            // stay green, which is the "tested the helper, not the wiring"
+            // failure mode. A narrowed select must starve the series.
+            const cols = (STATE.observedFilters.analyticsSelect ?? "")
+              .split(",")
+              .map((c) => c.trim())
+              .filter(Boolean);
+            const projected: Record<string, unknown> = {};
+            for (const col of cols) {
+              if (col in STATE.analyticsRow) {
+                projected[col] = (
+                  STATE.analyticsRow as Record<string, unknown>
+                )[col];
+              }
+            }
+            return { data: projected, error: null };
           },
         };
         return builder;
