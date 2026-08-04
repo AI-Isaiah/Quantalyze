@@ -442,6 +442,23 @@ milestone or advertise MT5 until 142.3 passes.
   DEFAULT preserves today's behaviour, so every ccxt venue stays byte-identical and MT5 opts out. MT5
   renders an explanatory line (investor passwords are read-only by design), never a failed probe.
 
+- [ ] **MT5-14** *(found by the MT5-05 live run, 2026-08-04)*: An MT5 strategy can declare **MT5** as
+  its supported exchange in the wizard metadata step, and the venue is **preselected from the key the
+  founder already connected** rather than asked again.
+  **Observed:** the "Supported exchanges" chips render Binance / OKX / Bybit / Deribit / sFOX — no MT5
+  — on a strategy whose only key IS MT5. The founder must either mis-declare the venue or leave it blank.
+  ⛔ **This is NOT the MT5-11 drift class — do not "fix the stale list".** It is DELIBERATE:
+  `closed-sets.ts:119-122` states *"mt5 stays OUT of UI_EXCHANGE_CODES / EXCHANGES / FUNDING_EXCHANGES
+  / CRYPTO_EXCHANGES regardless of this flag — the manager-surface `<Select>` must not silently
+  widen"*, citing UI-SPEC §MT5-Manager-Parity and enforced by the `closed-sets.mt5-flag` no-widening
+  pin. **A test WILL go red when this changes, and that is the guard working, not a regression to
+  route around.** The pin must be re-cut deliberately, with its reasoning updated, in the same commit.
+  **Why the decision is now outgrown:** it was taken while MT5 could not reach the end of the wizard.
+  As of v0.53.0.0 it can, so a live MT5 strategy now hits a metadata step that cannot describe it.
+  **Second half, independent of the list:** the wizard already knows the connected key's exchange, so
+  preselecting it removes the question entirely. Do not ship the widening without the preselect —
+  widening alone just adds a sixth chip the founder still has to find.
+
 ---
 
 ### OWN — An allocator can see and use their OWN unpublished strategy (founder call 2026-08-04)
@@ -500,21 +517,65 @@ D-14 valve.
   mounting. **Establish the exact entry path first** (this was inferred from code, not observed
   click-by-click) and fix the chooser, not the state machine.
 
-- [ ] **WIZCONT-02** *(DATA INTEGRITY — founder: "this should always first dedup")*: Connecting a key
-  **deduplicates on the credential**, never creating a second strategy + second `api_keys` row for an
-  account already connected. **Measured gap, 2026-08-04:** a guard exists at
-  `create-with-key/route.ts:255-269` but is keyed on **(user, wizard SESSION)** — sized for a
-  double-click or browser retry. Navigating away and back mints a NEW session, so it matches nothing.
-  And `public.api_keys` carries **NO unique constraint beyond the primary key** (confirmed against
-  PROD `pg_constraint` + `pg_indexes`), so nothing at the database level refuses a duplicate.
-  Only luck prevented one during the MT5-05 run: the founder did not re-enter credentials.
-  ⚠️ **The dedup key needs design, not a quick UNIQUE index.** Credentials are stored ENCRYPTED
-  (`api_key_encrypted`, per-row `dek_encrypted` + `nonce`), so a unique index on ciphertext dedups
-  nothing — two encryptions of the same secret differ. The identity must come from something stable
-  and non-secret (e.g. the venue's own account identifier returned at validation), which is a
-  different value per venue and does not exist for every venue today.
-  ⛔ **Fail toward the EXISTING row, never toward a silent overwrite**: re-connecting must not
-  clobber a key whose `strategy_keys` membership and synced history other strategies already depend on.
+- [ ] **WIZCONT-02** *(NARROW — was mis-recorded as a data-integrity hole; corrected 2026-08-04 by
+  live observation)*: Re-connecting the same credentials from a context that has **lost the wizard
+  session token** must not create a second strategy + second `api_keys` row.
+  ✅ **The common case is ALREADY SAFE, and an earlier draft of this requirement got it wrong.** I
+  predicted that navigating away and re-entering the wizard would duplicate; the founder re-ran it on
+  PROD and **no duplicate was created**. Mechanism, verified: `wizard_session_id` is a client
+  idempotency token held in **localStorage**, "regenerated only on an explicit draft delete" — so it
+  SURVIVES navigation. The re-run matched the fence at `create-with-key/route.ts:263` and returned the
+  existing draft **before** the Railway validate + encrypt (observable as the run being much faster).
+  A DB backstop also exists on PROD: `strategies_user_wizard_session_source_uniq`
+  — `UNIQUE (user_id, wizard_session_id, source) WHERE wizard_session_id IS NOT NULL`.
+  ⚠️ **Residual gap, genuinely narrower:** the fence and the unique index are both keyed on
+  `wizard_session_id`, so they cannot match when that token is gone — a different browser/profile, a
+  cleared localStorage, or an incognito window. In that path nothing refuses a duplicate, because
+  `public.api_keys` has **no unique constraint beyond the primary key** (confirmed on PROD).
+  ⚠️ **A quick UNIQUE index is not the fix.** Credentials are stored ENCRYPTED (`api_key_encrypted`,
+  per-row `dek_encrypted` + `nonce`), so uniqueness on ciphertext dedups nothing — two encryptions of
+  the same secret differ. Identity must come from a stable non-secret value (e.g. the venue's own
+  account id returned at validation), which differs per venue and does not exist everywhere today.
+  ⛔ **Fail toward the EXISTING row, never a silent overwrite**: re-connecting must not clobber a key
+  whose `strategy_keys` membership and synced history other strategies depend on.
+  **Priority: LOW** relative to WIZCONT-01 — it needs a lost token, not ordinary navigation.
+
+### WIZFORM — Form errors belong on the form (founder call 2026-08-04, verbatim)
+
+> "It should not error on any input from the strategy description page. And if it errors, the error
+> should be shown on that page next to the wrong answer, highlighting the box in which the answer
+> belongs in red."
+
+- [ ] **WIZFORM-01** *(BLOCKING UX — cost the founder 3 failed submits during the MT5-05 run)*: A
+  field the user can get wrong is validated **on the form, inline, next to that field**, with the
+  offending input highlighted — never as a terminal page-level error after submit.
+  **Observed:** a 2-character description passed the metadata step, then failed at submit as a
+  full-page red envelope. The founder could not tell which field was wrong, so they changed the
+  **supported-exchanges chips twice** (adding sFOX, which is factually wrong for an MT5 account)
+  chasing an error that was actually about the description. **A misleading error does not just cost a
+  retry — it sends people to corrupt unrelated fields.**
+  The server already knows the answer: `finalize-wizard/route.ts:338-346` returns the exact string
+  `"description must be 10-5000 characters"`. The user never sees it (see WIZFORM-02). The client
+  knows the rule too and could refuse at the field.
+
+- [ ] **WIZFORM-02** *(the same UNKNOWN class Phase 142.2 was supposed to delete)*: No wizard failure
+  renders as `code: UNKNOWN` / "We could not classify this failure" when the server DID classify it.
+  **Root cause:** `finalize-wizard`'s `validatePayload` returns bare `{ error: "..." }` with **no
+  `code` field** (`:345`, and the sibling 400s at `:298/:324/:333/:355/:381/:392/:427`), and the
+  client collapses any code-less or unmapped response to `UNKNOWN`.
+  ⚠️ **Phase 142.2 plan 07 split 24 rejection sites onto honest codes and MISSED this validator** —
+  so the defect class we shipped a fix for on 2026-08-04 was still reachable the same afternoon.
+  Whatever sweep closes this must be driven from the emitting sites, not from a hand-listed set.
+  ⚠️ **A prior investigation logged this exact route + shape** (`wizard-finalize-codeless-400-unknown`,
+  recorded 2026-07-08 as fixed by making description optional). The 10-char minimum is still enforced
+  at `:339`, so that fix was narrower than recorded or has regressed. Treat the stored learning as
+  STALE and re-derive from source.
+
+- [ ] **WIZFORM-03**: Venue-shaped error copy must not be shown for venues it cannot apply to. The
+  MT5 submit timeout advises *"switch to a different exchange"* — impossible advice when the account
+  IS the venue. Same unwinnable-remedy class as MT5-13 and the deleted "0 trades" message.
+  ℹ️ The timeout itself is expected under load, not a defect: `finalize-wizard` crosses a Railway seam
+  on EVERY submit to re-check permissions, and MT5 serialises through a single gateway lock.
 
 ### STALE — No stale screens (founder call 2026-08-04: "no stale screens")
 
@@ -600,8 +661,12 @@ Populated during roadmap creation.
 | MT5-13 | Phase 142.3 | Pending (found by the MT5-05 live run 2026-08-04; blocks a clean MT5-05) |
 | OWN-01 | — | **Already met** (CONTRIB-03, verified in code 2026-08-04) — no phase needed |
 | OWN-02..04 | unassigned | Pending — needs its own phase; ⛔ do NOT fold into 142.3 (see the OWN scope fence) |
-| WIZCONT-01 | unassigned | Pending — resume EXISTS; suspect the `/strategies/new` chooser, confirm the entry path before planning |
-| WIZCONT-02 | unassigned | Pending — **data integrity**; dedup guard is session-scoped, no DB uniqueness on `api_keys`; dedup key needs design (credentials are encrypted) |
+| MT5-14 | Phase 142.3 | Pending — MT5 missing from the metadata exchange chips; ⛔ deliberate no-widening pin will red, re-cut it consciously |
+| WIZCONT-01 | unassigned | Pending — **OBSERVED**: allocators have NO resume path at all (`/strategies/*` is manager-only; the overlay hardcodes `initialDraft={null}`, Phase 110 deferral) |
+| WIZCONT-02 | unassigned | Pending — **LOW**; corrected 2026-08-04, the common case is already safe (localStorage session token + `strategies_user_wizard_session_source_uniq`) |
+| WIZFORM-01 | unassigned | Pending — **blocking UX**; inline field errors, cost 3 failed submits and drove wrong-field edits |
+| WIZFORM-02 | unassigned | Pending — code-less 400 → `UNKNOWN`; 142.2 plan 07's sweep missed this validator |
+| WIZFORM-03 | unassigned | Pending — "switch to a different exchange" is impossible advice for MT5 |
 | STALE-01 | unassigned | Pending — root cause NOT yet established; investigate before planning |
 | RATE-01 | Phase 146 | Pending |
 | RATE-02 | Phase 146 | Pending |
