@@ -761,22 +761,77 @@ All five found in one live founder session, composing a scenario from a just-upl
   dollar figures and gates the commit. **The 0.00s the founder saw were SCEN-01, not this.** Shipping
   AUM-01 alone would leave the screen showing zeros — do not let it be planned as the fix for that.
 
-- [ ] **AUM-02**: An **MT5 account's equity can contribute to AUM**. Today it cannot, ever:
-  `allocator_holdings` on PROD contains **zero `mt5` rows** (bybit 11,623 / okx 980 / deribit 1,058,
-  all current to 2026-08-04) despite a live, active, successfully-syncing MT5 key. So an MT5-only
-  scenario can never be committed — the gate at `ScenarioComposer.tsx:3557` refuses on AUM=0.
-  ⚠️ **Establish whether this is a DELIBERATE venue fence before planning.** This repo fences mt5 on
-  purpose elsewhere (`src/lib/closed-sets.ts:119-122`, enforced by a no-widening pin test), and the
-  MT5 gateway is a single shared Windows terminal serialised behind ONE lock, so a holdings sync is
-  not obviously free. Under investigation as of 2026-08-04.
+- [ ] **AUM-02** ⛔ **NOT A FENCE — A CRASH. Investigated 2026-08-04, initial framing was WRONG.**
+  An **MT5 account's equity can contribute to AUM**. Today it cannot, ever, and the reason is not a
+  deliberate venue decision: **the holdings sync is still ccxt-only and dies on the first call.**
+  **PROD smoking gun** (verified directly, twice): api_key `46293712-59e6-46c0-8204-5dd32afe2503`
+  (mt5, active, not disconnected) carries `sync_status='error'` and
+  `sync_error = "'Mt5Session' object has no attribute 'fetch_balance'"` — a **raw Python AttributeError
+  sitting in a user-visible column**. Job `9d3f9c6e`, kind `poll_allocator_positions`, `failed_final`,
+  fired by the 04:00 cron on 2026-08-04, carries the identical `last_error`.
+  **Mechanism:** `_make_exchange_client` (`job_worker.py:996-1023`) returns an `Mt5Session` for mt5
+  (`:1021-1022`), but `_fetch_spot_rows` unconditionally calls `exchange.fetch_balance()`
+  (`allocator_positions.py:154`) and `_fetch_derivative_rows` calls ccxt `fetch_positions`
+  (`positions.py:317-338`). Neither file contains the string `mt5` or `sfox` anywhere. Enqueue is
+  **venue-agnostic** at both triggers (cron jobid 15 `0 4 * * *`, and the user "Sync now" RPC), so MT5
+  keys ARE scheduled and DO run — they just crash. `_make_exchange_client` was widened to two
+  non-ccxt venues while its holdings-sync consumer stayed ccxt-only.
+  ✅ **No deliberate fence exists in this path** — checked and absent from `run_poll_allocator_positions_job`,
+  `_allocator_key_preflight`, both enqueue functions, and the `allocator_holdings` DDL (`venue` is free
+  TEXT). The real MT5 fences are elsewhere (`closed-sets.ts:101-124`, `job_worker.py:3462-3468`).
+  ⚠️ **sFOX is the same latent bug**: `SfoxClient` exposes `get_balances()`, not `fetch_balance()`
+  (`sfox_client.py:272`). Invisible only because sFOX is flag-off with no keys. Fix the CLASS.
+  ⚠️ **Sizing (~1–1.5 days, medium risk), not a one-liner.** Account-level equity IS available today —
+  `Mt5Client.account_info()` (`mt5_client.py:327-332`) returns equity/balance/currency and the derive
+  path already consumes it (`job_worker.py:3691-3693`) — so ONE holdings row per MT5 account is
+  reachable. But it needs: a non-ccxt venue branch; the **MT5 gateway concurrency story** (a SECOND
+  job kind contending for the ONE shared Windows terminal — must reuse `_mt5_terminal_lock_for`
+  `job_worker.py:379-387`, the login bracket, the bounded-restart helper, the read-timeout discipline,
+  and it re-raises MT5CONC-02 cross-process serialization); the `mt5_enabled_server()` kill-switch for
+  parity with the derive arm; and an FX decision for non-USD account currency (no existing seam).
+  ⛔ **Per-symbol MT5 holdings is a SEPARATE, larger decision**: `positions_get` is deliberately
+  forbidden on the client facade by a parametrized pin (`tests/test_mt5_client_contract.py:720-737`,
+  exact-surface pin at `:747-763`, no-getattr pin at `:741-745`). Widening it means consciously
+  re-cutting a trust-integrity fence, not a quiet edit.
+  💡 **Cheap interim, NOT the fix**: a ~4-line honest skip for non-ccxt venues in
+  `fetch_allocator_holdings` (`allocator_positions.py:268`) would stop stamping a daily raw
+  `AttributeError` into the user-visible `sync_error`. Ship only as an explicit interim decision — it
+  papers over the gap.
 
-- [ ] **AUM-03**: The AUM-zero refusal names an affordance the user can **find**. Current copy:
-  *"Can't record a scenario commit: portfolio AUM is zero. Connect an exchange API key or toggle on a
-  live holding before submitting."* (`ScenarioComposer.tsx:3559`). The founder hit this with **four
-  venues already connected and ~$460k of holdings on PROD** — the scenario was in "Blank slate" mode,
-  so every holding toggle was off. So the first half of the advice is impossible to act on (they are
-  already connected) and the second half names a control whose location was not discoverable.
-  Same class as WIZFORM-03 ("switch to a different exchange" was impossible advice for MT5).
+- [ ] **AUM-03** ⛔ **WORSE THAN FILED — the copy names a control THAT DOES NOT EXIST.** The AUM-zero
+  refusal must name an affordance the user can find. Current copy: *"Can't record a scenario commit:
+  portfolio AUM is zero. Connect an exchange API key or toggle on a live holding before submitting."*
+  (`ScenarioComposer.tsx:3559`).
+  **Both halves are unactionable.** The founder hit this with four venues connected and ~$460k of
+  holdings, so "connect an exchange API key" is already done. And **there is no live-holding toggle
+  anywhere in the composer**: the only `onToggle` call site is on ADDED STRATEGIES (`:5603`); the
+  per-key switch at `:5619` toggles data sources, which never enter `scenarioAum`. The component says
+  so itself — *"Per-coin holdings are NOT rendered — they live on the Holdings tab (CONSTIT-03)"*
+  (`:5431-5432`) and *"live holdings are FIXED context — they cannot be toggled off or reweighted in
+  the UI"* (`:3542-3544`). Same class as WIZFORM-03, but stronger: this instructs the user to use a
+  control that was deliberately never built.
+
+- [ ] **AUM-04** ⛔ **ROOT CAUSE of the founder's AUM=0 — blank slate was FORCED, not chosen.**
+  An allocator with a live book can always reach it. Today one all-or-nothing gate can hide it
+  entirely, with no explanation.
+  **Mechanism:** blank mode does not merely toggle holdings off, it **removes them from the draft**
+  (`holdingsSummary = entryMode === "blank" ? [] : rawHoldingsSummary`, `ScenarioComposer.tsx:837-840`),
+  so `scenarioAum` is **structurally always 0** in blank mode and the commit gate always refuses. The
+  escape hatch — the "From my book" segment — renders only when
+  `canEnterBook = hasLiveBook && payload.perKeyDailiesGateSatisfied` (`:826`, render `:3746-3763`,
+  arrow-key nav short-circuited `:3741-3743`). `perKeyDailiesGateSatisfied` is **all-or-nothing over
+  EVERY eligible key** (`queries.ts:2383-2392`, eligibility `:2419-2427` = every active, non-revoked,
+  non-disconnected key, fetched by bare `user_id`).
+  **PROD, the founder's own account — 8 active keys:** bybit 155 per-key dailies, okx 100, **deribit ×3
+  = 0**, **mt5 ×3 = 0**. One zero ⇒ gate false ⇒ `canEnterBook` false ⇒ composer force-initialised to
+  blank ⇒ AUM 0, with the only remedy invisible.
+  ⭐ **Two distinct defects here, and the second is the nastier:**
+  (a) the gate is all-or-nothing, so a single key with no per-key series hides a $460k book. It was
+      ALREADY false from the three deribit keys before MT5 existed.
+  (b) **cross-role contamination**: MT5 keys are MANAGER-side (they carry `strategy_id`-keyed series —
+      Arctic Fox 135, Alpha Centauri 136, Black Swan 136 — never per-key allocator dailies), yet they
+      count toward the ALLOCATOR's book gate. So every MT5 strategy the founder uploads pins their own
+      book gate false **permanently**. Connecting a manager key must not disable an allocator surface.
 
 ---
 
@@ -882,8 +937,9 @@ Populated during roadmap creation.
 | SCEN-04 | unassigned | Pending — row numbers carry no labels; founder could not tell what they meant |
 | SCEN-05 | unassigned | Pending — two identical 'Alpha Centauri' rows in Browse; related to but distinct from WIZCONT-02 |
 | AUM-01 | unassigned | ⛔ **DESIGN FLAW** — AUM is derived-only, no input anywhere; blank-slate (the primary use case) cannot size or commit. ⚠️ does NOT cause the 0.00 metrics — that is SCEN-01 |
-| AUM-02 | unassigned | Pending — ZERO mt5 rows in `allocator_holdings`, ever; ⚠️ verify whether a deliberate venue fence before planning. Under investigation 2026-08-04 |
-| AUM-03 | unassigned | Pending — refusal copy names affordances the founder could not act on (already connected / control not discoverable) |
+| AUM-02 | unassigned | ⛔ **NOT a fence — a CRASH**. Holdings sync is ccxt-only; PROD `sync_error = "'Mt5Session' object has no attribute 'fetch_balance'"` in a USER-VISIBLE column. sFOX same latent bug. ~1–1.5d, medium risk (gateway concurrency) |
+| AUM-03 | unassigned | ⛔ **Worse than filed** — copy says "toggle on a live holding"; that control **does not exist** in the composer, deliberately (CONSTIT-03) |
+| AUM-04 | unassigned | ⛔ **ROOT CAUSE of AUM=0** — blank slate was FORCED: all-or-nothing `perKeyDailiesGateSatisfied` hides "From my book". ⭐ MANAGER-side mt5 keys pin the ALLOCATOR's gate false permanently (cross-role contamination) |
 | NAV-01 | unassigned | Pending — no 'my strategies' nav entry; the allocator side is write-only. ⛔ depends on OWN-02 |
 | RATE-01 | Phase 146 | Pending |
 | RATE-02 | Phase 146 | Pending |
