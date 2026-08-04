@@ -16,8 +16,8 @@
  * here as the literal 57600000 and is deliberately NOT imported from
  * closed-sets. A test that imports the constant it is pinning cannot fail when
  * the constant drifts — it would only re-assert the implementation against
- * itself. If this literal and MISSING_ROW_COMPUTING_WINDOW_MS ever disagree,
- * this file must go red.
+ * itself. If the shipped window ever stops agreeing with this literal, this
+ * file must go red.
  *
  * `nowMs` is injected on every case so no assertion depends on wall-clock time.
  */
