@@ -743,7 +743,14 @@ class TestNaNAccountHonestEndToEnd:
         combine = MagicMock(
             return_value=(
                 self._nan_bearing_returns(),
-                {"used_heuristic_capital": False, "negative_nav_guard": True},
+                {
+                    "used_heuristic_capital": False,
+                    "negative_nav_guard": True,
+                    # MT5-12: the derive persist seam refuses a series whose meta
+                    # lacks a recognised verdict, so this ccxt stand-in carries the
+                    # one combine_realized_and_funding really stamps.
+                    "series_completeness": "fill_derived_unproven",
+                },
             )
         )
         job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "strat-e2e"}

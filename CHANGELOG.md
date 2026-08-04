@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.53.0.0] - 2026-08-04
+### 142.2 — MetaTrader 5 reaches the end of the wizard, because the gate stopped asking the wrong question
+
+A strategy whose venue reports a **daily equity series but no individual fills** — MT5, Deribit — was
+refused at the last step of the wizard with *"Strategy has only 0 trade(s). A minimum of 5 trades is
+required."* The sentence was false (the strategy had 135 days of returns) and unwinnable (it has no
+fills, by construction, and never will). The only offered remedy was "try another key", which deletes
+the draft and every key under it. This release deletes that dead end.
+
+**The gate no longer knows venue names.** It used to admit the daily-returns branch from a hardcoded
+list of ledger-backed exchanges — a list that had to be edited by hand every time a venue was added,
+and that was silently duplicated in the admin publishing path. Both consumers now call one predicate
+that reads a **persisted completeness verdict** on `strategy_analytics`. Zero venue literals remain in
+`strategyGate.ts`, pinned by a test.
+
+**The producer decides the verdict; the gate decides separately what it will trust.** Five verdicts
+(`ledger_complete`, `sampled_gapped`, `fill_derived_unproven`, `user_supplied`, `composite_stitched`)
+are assigned by the code that builds the series, from a single registry in Python. TypeScript holds a
+**hand-typed subset** — an allow-list, never imported from the producer — answering which verdicts may
+publish. That independence is the point: a sixth verdict invented upstream is absent from the
+allow-list and therefore refuses, rather than being admitted by a shared constant nobody re-read.
+
+**`fill_derived_unproven` still refuses, and MT5 passing is not the test.** Every ccxt fills+funding
+series carries it, always and unconditionally — two independently fetched streams summed with no
+residual and no reconciliation, where a silently truncated fetch is indistinguishable from a quiet
+day. The safety property is that this verdict keeps being refused; an economic acceptance oracle pins
+it on both the pure gate and the admin route.
+
+**The migration is additive, nullable, with no default, no CHECK and no backfill** — so every
+pre-existing row reads NULL. That is deliberate: a backfill would fabricate a trust claim about series
+whose inputs no longer exist to examine. NULL means *nobody looked*, and it now gets its own honest
+refusal (`SERIES_PROVENANCE_UNVERIFIED`) offering a re-sync, instead of inheriting the trade-count
+sentence this release exists to delete. The remedy is deliberately not "try another key" — that action
+is what earns the destructive control.
+
+**Composites inherit known gaps, and nothing else.** A stitched composite stamps `composite_stitched`,
+but a member measured to have interior holes (`sampled_gapped`) now downgrades the whole composite. The
+obvious wider fix — propagate any untrusted member verdict — was rejected as a regression: a composite
+has zero trades by construction, so the daily branch is its only route to publish, and propagating the
+unconditional ccxt verdict would make every ccxt composite permanently un-approvable.
+
+**The wizard stopped previewing what publish would refuse.** The composite arm reached "passed" without
+evaluating admissibility at all; it now runs the same gate the admin path runs.
+
+**`KEY_INVALID_FORMAT` was answering for 24 different rejections** — wrong key, wrong venue, revoked
+permissions, malformed input — so the copy told users to check their key format no matter what had
+actually gone wrong. Split onto four honest codes across all 24 sites, with a registry-drift test that
+reads the codes off disk.
+
+⛔ **This makes MT5 reachable, not verified.** The end-to-end path is unexercised against a live
+MetaTrader account; that gate is human and still open. Migration `20260803150000` applies on merge.
+
 ## [0.52.0.0] - 2026-08-03
 ### 142 JOB + 142.1 — a reaper for strategies stuck in `computing`, and the remediation that found a real bug in it
 

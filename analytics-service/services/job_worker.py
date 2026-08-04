@@ -4405,6 +4405,88 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         await _heal_delete_basis_series()
         return DispatchResult(outcome=DispatchOutcome.DONE)
 
+    # ── MT5-12: the series-completeness VERDICT seam (D-15 / D-16) ──────────────
+    # THE fail-loud chokepoint for producer 1 (`run_derive_broker_dailies_job`).
+    # Every keyed venue funnels its reconstructed series through here — BOTH
+    # strategy-mode and key-mode share this one seam — so a future fifth combiner
+    # added to the open-ended venue registry cannot ship a series into
+    # csv_daily_returns without stating whether the venue inputs it consumed were
+    # whole. The publish gate reads that verdict; an unjudged series would read
+    # NULL and be silently mis-trusted.
+    #
+    # ⛔ PLACEMENT IS LOAD-BEARING. This MUST stay textually ABOVE the
+    # `_reconcile_span_delete` construction (~40 lines below) and its
+    # `await db_execute(_reconcile_span_delete)`. That DELETE fires BEFORE the
+    # upsert, so an assert placed between them would refuse to write the NEW
+    # series only AFTER destroying the OLD one — turning fail-loud into data
+    # loss. A refusal must cost nothing.
+    #
+    # ⚠️ `mypy --strict` CANNOT enforce this. The combiners return
+    # `dict[str, Any]` and `NavTWRMeta` is `total=False`, so a return path that
+    # OMITS the key type-checks cleanly. This runtime seam is the only oracle.
+    #
+    # The <2-row short-circuit at :4340 above has already returned for the three
+    # deliberately-exempt empty-series combiner paths (broker_dailies.py, marked
+    # `MT5-12 EXEMPT`), so reaching this line means a real series exists and a
+    # verdict is genuinely owed.
+    from services.broker_dailies import SERIES_COMPLETENESS_VALUES
+
+    _verdict = meta.get("series_completeness")
+    if _verdict not in SERIES_COMPLETENESS_VALUES:
+        from services.redact import scrub_freeform_string
+
+        # T-142.2-14: the message carries the VERDICT repr and nothing else — no
+        # venue data, no magnitudes, no account identifiers. Scrubbed anyway
+        # because `meta` is producer-supplied and a malformed value could in
+        # principle carry anything; bounded so a pathological value cannot
+        # balloon the stamped error column.
+        _verdict_repr = str(scrub_freeform_string(repr(_verdict)))[:120]
+        _detail = (
+            "Series completeness verdict missing or unrecognised "
+            f"(series_completeness={_verdict_repr}). MT5-12: every daily-series "
+            "producer must state whether the venue inputs it consumed were whole."
+        )
+        # `funding_label` is the one identity bound on BOTH branches (strategy_id
+        # in strategy-mode, api_key_id in key-mode) — `strategy_id` itself is
+        # UNBOUND in key-mode.
+        logger.error(
+            "derive_broker_dailies: MT5-12 verdict refusal (key_mode=%s id=%s "
+            "venue=%s) — %s",
+            is_key_mode, funding_label, venue, _detail,
+        )
+        if not is_key_mode:
+            # Key-mode (allocator) has NO per-key strategy_analytics row (per-key
+            # reads are Phase 36) — a stamp there would write a phantom row, so
+            # key-mode gets the refusal without the stamp, exactly like the <2-day
+            # branch and `_dispose_broker_nav_error`.
+            def _stamp_verdict_failed(detail: str = _detail) -> None:
+                ctx.supabase.table("strategy_analytics").upsert(
+                    {
+                        "strategy_id": strategy_id,
+                        "computation_status": "failed",
+                        # SI-02: clear the runner-owned warned marker so the status
+                        # bridge cannot resurrect complete_with_warnings over this.
+                        "computation_warned": False,
+                        # JOB-01: clear on exit or the reaper re-fires on a stale stamp.
+                        "computing_started_at": None,
+                        "computation_error": detail,
+                        "data_quality_flags": {"csv_source": True},
+                        # F-4: authoritative-clear the by-basis column so a prior
+                        # derive's object can't render on a now-FAILED row.
+                        "metrics_json_by_basis": None,
+                    },
+                    on_conflict="strategy_id",
+                ).execute()
+
+            await db_execute(_stamp_verdict_failed)
+        # PERMANENT: a combiner that does not stamp will not start stamping on
+        # retry (T-74-02 DoS — never retry a structural defect forever).
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=_detail,
+            error_kind="permanent",
+        )
+
     # Service-role upsert into csv_daily_returns. The worker has no auth.uid()
     # session so it cannot call persist_csv_daily_returns (auth-gated); it
     # writes the table directly like it does for trades. The per-axis unique
@@ -4740,6 +4822,22 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     _prestamp_payload: dict[str, Any] = {
         "strategy_id": strategy_id,
         "data_quality_flags": _prestamp_flags,
+        # MT5-12: the series-completeness verdict rides as a SIBLING key of
+        # data_quality_flags, NEVER as a member of `_prestamp_flags`. Two reasons,
+        # both fatal if ignored:
+        #   1. `data_quality_flags` is REPLACED wholesale on every write (MED-3
+        #      above, and analytics_runner.py:1439 rebuilds it again), so a verdict
+        #      carried inside it would be erased by the very next analytics run.
+        #   2. Membership of the guard-key sets is what auto-promotes
+        #      computation_status to `complete_with_warnings` — a status the publish
+        #      gate PASSES. Routing a gating signal through the promotion channel is
+        #      a fail-open (D-16).
+        # `_verdict` is guaranteed to be a member of SERIES_COMPLETENESS_VALUES —
+        # the seam above refused permanently otherwise. Key-mode never reaches this
+        # bridge (it returns at the key-mode exit): there is no per-key
+        # strategy_analytics row to stamp, so key-mode series get the assert but no
+        # verdict of record.
+        "series_completeness": _verdict,
     }
     # 106-02 (D5 / M2): the by-basis scalar assignment + prestamp upsert are DEFERRED
     # to AFTER both basis-series persists below (see the moved block just above the
@@ -6703,6 +6801,58 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
 
     composite_status = "complete_with_warnings" if member_warned else "complete"
 
+    # ── MT5-12 / 142.2 review FIX 2: the composite verdict is DERIVED, never a
+    #    bare literal ────────────────────────────────────────────────────────
+    #
+    # WHAT WAS WRONG. This site stamped `composite_stitched` unconditionally
+    # while `member_metas` — each member's meta, carrying the verdict its own
+    # combiner assigned — was already in hand twenty lines above (the guard-flag
+    # union loop reads the very same list). A member reconstructed through a
+    # combiner that found a KNOWN HOLE was therefore laundered into a composite
+    # verdict the publish gate TRUSTS. The composite's series is the arithmetic
+    # stitch of those member series, so a hole in a member is a hole in the
+    # composite; claiming otherwise is a trust claim about data we know to be
+    # incomplete.
+    #
+    # ⛔ WHY THIS PROPAGATES ONLY `sampled_gapped`, AND WHY THE OBVIOUS
+    #    "PROPAGATE ANY NON-TRUSTED MEMBER VERDICT" WOULD BE A SERIOUS
+    #    REGRESSION.
+    # `combine_realized_and_funding` stamps `fill_derived_unproven` for EVERY
+    # ccxt venue (binance / bybit / okx), ALWAYS and unconditionally — see its
+    # docstring. It is the NORMAL case for that path, not evidence that this
+    # account's series has a gap. Propagating it would give essentially every
+    # ccxt composite a refused verdict, and composites cannot recover on the
+    # trade branch the way single keys do: a single-key ccxt strategy has fills
+    # in `trades` and never needs the daily branch, whereas a composite has zero
+    # trades by construction and the daily branch is its ONLY route to publish.
+    # So propagating unproven-ness would make ccxt composites permanently
+    # un-approvable — the same class of unwinnable refusal this phase exists to
+    # delete, re-created one table over.
+    #
+    # `sampled_gapped` is different in kind: its sole producer
+    # (`combine_sfox_balance_history`) stamps it only when it MEASURED interior
+    # holes in a sampled NAV series (`nav_gap_days > 0`). That is a positive
+    # finding about this account's data, and it is exactly what must survive the
+    # stitch.
+    #
+    # HONEST BOUNDARY — what is inherited and what is not. Known gaps are
+    # inherited. UNPROVEN-NESS is NOT: a composite of ccxt members still reads
+    # `composite_stitched` and the gate still trusts it, even though no member
+    # proved its fills fetch was whole. Closing that requires distinguishing "the
+    # fetch was complete" from "the fetch returned something" at ingestion, which
+    # is booked as DEF-142.2-04 and is not resolvable here.
+    #
+    # Derived from `member_metas`, never hand-written, so a member verdict that
+    # changes upstream cannot silently stop being consulted. Both literals are
+    # members of the producer registry (broker_dailies.SERIES_COMPLETENESS_VALUES).
+    _GAPPED_MEMBER_VERDICT = "sampled_gapped"
+    _member_verdicts = [_m.get("series_completeness") for _m in member_metas]
+    composite_verdict = (
+        _GAPPED_MEMBER_VERDICT
+        if _GAPPED_MEMBER_VERDICT in _member_verdicts
+        else "composite_stitched"
+    )
+
     headline_payload: dict[str, Any] = {
         "strategy_id": strategy_id,
         "computation_status": composite_status,
@@ -6715,6 +6865,46 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         "exposure_metrics": None,
         "metrics_json_by_basis": metrics_json_by_basis,
         "data_quality_flags": merged_flags,
+        # ── MT5-12 (D-15/D-16): producer 2's verdict of record ────────────────
+        # `run_stitch_composite_job` is the SECOND csv_daily_returns producer.
+        # Once the publish gate stops asking `!apiKeyId` and starts asking for a
+        # positive verdict, an unstamped composite reads NULL → falls to the
+        # trade branch → INSUFFICIENT_TRADES → NO COMPOSITE CAN EVER BE APPROVED
+        # AGAIN (composites carry api_key_id NULL and zero fills; the admin
+        # approve path DOES route them through the gate — see
+        # strategy-review/route.test.ts:1073, "Composites (apiKeyId null) source
+        # history"). This stamp is what keeps that branch reachable.
+        #
+        # WHY its own value rather than reusing a member's: the composite series
+        # is the deterministic stitch of its members, so what it can claim is
+        # bounded by them. `ledger_complete` would be a false claim (this
+        # function consumed no venue ledger), and `user_supplied` would erase the
+        # distinction between "a machine stitched audited members" and "a human
+        # uploaded a CSV". The gate decides separately what it will trust.
+        #
+        # ⚠️ "INHERITED" IS A PARTIAL CLAIM, AND THE PARTIALITY IS THE POINT.
+        # Exactly one member property is inherited: a KNOWN gap. The derivation
+        # above downgrades the verdict to `sampled_gapped` when any member
+        # carries it. Member UNPROVEN-NESS (`fill_derived_unproven`, which every
+        # ccxt member carries unconditionally) is NOT inherited — see the long
+        # note above for why propagating it would make every ccxt composite
+        # permanently un-approvable. Do not restate this as "trust inherited from
+        # members" without that qualification; before FIX 2 the claim was not
+        # true at all, and it is still narrower than it sounds.
+        #
+        # ⛔ SIBLING KEY, never a member of `merged_flags` (built just above).
+        # data_quality_flags is rebuilt wholesale by analytics_runner.py:1439,
+        # and guard-key membership auto-promotes computation_status to
+        # `complete_with_warnings` — a status the publish gate PASSES. Routing
+        # the verdict through that channel would be a fail-open. Mirrors Task 1's
+        # `_prestamp_payload` vs `_prestamp_flags` rule at the derive seam.
+        #
+        # `headline_payload.update(cash_metrics_json)` below spreads metric
+        # SCALARS only and cannot clobber this key. The failure arm at :5299
+        # deliberately OMITS the column: omission preserves a previously-stamped
+        # verdict through a PostgREST upsert (A1, executed against TEST in plan
+        # 142.2-04), and `computation_status='failed'` blocks the gate anyway.
+        "series_completeness": composite_verdict,
     }
     # Spread the canonical composite scalars into the headline — the SAME object as
     # metrics_json_by_basis.cash_settlement. A single upsert also REPLACES

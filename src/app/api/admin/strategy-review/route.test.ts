@@ -103,11 +103,13 @@ async function stubbedGateModule() {
       if (gateThrow) gateThrow();
       return { passed: true };
     },
-    // Real impl (exchange === "deribit") — the venue-aware re-check predicate
-    // depends on it, and the mockAdminClient `api_keys` route supplies the
-    // exchange, so mocking it faithfully keeps the ledger-vs-perp branch honest.
-    isLedgerBackedExchange: (exchange: string | null | undefined) =>
-      exchange === "deribit",
+    // THE REAL IMPLEMENTATION, deliberately (SC-4). The TOCTOU re-check is the
+    // subject of this suite's daily-returns cases, and it now CALLS this export
+    // rather than restating it inline. Stubbing it would make every re-check
+    // branch assertion below a test of the stub. `checkStrategyGate` above is
+    // still stubbed — the first-pass gate is covered elsewhere and is isolated
+    // here on purpose — but the shared predicate must be genuine.
+    isDailyReturnsSourced: actual.isDailyReturnsSourced,
     STRATEGY_GATE_MIN_TRADES: 5,
     STRATEGY_GATE_MIN_CSV_ROWS: 7,
     // C-3: the route narrows its gate-refusal catch with `instanceof`, so this
@@ -186,13 +188,17 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     recheckApiKeyId?: string | null;
     /** count returned by the re-check csv_daily_returns query (CSV path). */
     recheckCsvCount?: number;
-    /** exchange returned by the first-pass api_keys lookup (P72 venue gate).
-     *  Default "okx" (fill-based). Set "deribit" to exercise the keyed
-     *  ledger-backed daily-returns branch. Inert when recheckApiKeyId is null. */
-    mockKeyExchange?: string | null;
-    /** when true, the first-pass api_keys exchange lookup returns an error, so
-     *  the route must fail loud (503) rather than coercing isLedgerBacked=false. */
-    mockKeyExchangeError?: boolean;
+    /**
+     * `strategy_analytics.series_completeness` returned by BOTH the first-pass
+     * and the re-check analytics reads (MT5-11/12). This is what decides the
+     * daily-returns branch now — the api_keys venue lookup it replaced is gone
+     * from the route entirely.
+     *
+     * Default `null` — a row no producer has stamped, which is the honest
+     * default and the fail-CLOSED one. A test that wants the daily-returns
+     * branch must say which verdict earns it.
+     */
+    mockSeriesCompleteness?: string | null;
     /**
      * PUB-01 (Phase 87) — number of strategy_keys members. Default 0 (single-key
      * / CSV: SC-4 byte-unchanged path). When >= 1 the route's defense-in-depth
@@ -405,6 +411,11 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
                           : {
                               computation_status: opts.recheckStatus,
                               computation_error: null,
+                              // MT5-11/12 — the completeness verdict rides this
+                              // same read at both passes (the route widened the
+                              // column list rather than adding a query).
+                              series_completeness:
+                                opts.mockSeriesCompleteness ?? null,
                             },
                       error: null,
                     };
@@ -426,23 +437,9 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
               }),
             };
           }
-          if (table === "api_keys") {
-            // P72 venue gate: first-pass exchange lookup
-            // (.select("exchange").eq("id").maybeSingle()).
-            return {
-              select: () => ({
-                eq: () => ({
-                  maybeSingle: async () =>
-                    opts.mockKeyExchangeError
-                      ? { data: null, error: { message: "boom" } }
-                      : {
-                          data: { exchange: opts.mockKeyExchange ?? "okx" },
-                          error: null,
-                        },
-                }),
-              }),
-            };
-          }
+          // MT5-11/12 — the `api_keys` arm that used to live here is GONE with
+          // the route's venue lookup. The gate no longer asks which exchange a
+          // key points at; it reads the verdict the series' producer stamped.
           // strategies — supports both the first-pass single() lookup
           // and the .update().eq().eq().select() write path.
           return {
@@ -641,6 +638,7 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
       recheckApiKeyId: null,
       recheckTradeCount: 0,
       recheckCsvCount: 1112,
+      mockSeriesCompleteness: "user_supplied",
       recheckStatus: "complete",
       updateAffected: [{ id: "strat-1" }],
     });
@@ -654,6 +652,7 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
       recheckApiKeyId: null,
       recheckTradeCount: 0,
       recheckCsvCount: 3,
+      mockSeriesCompleteness: "user_supplied",
       recheckStatus: "complete",
       updateAffected: [{ id: "strat-1" }],
     });
@@ -667,6 +666,7 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
       recheckApiKeyId: null,
       recheckTradeCount: 0,
       recheckCsvCount: 7,
+      mockSeriesCompleteness: "user_supplied",
       recheckStatus: "complete",
       updateAffected: [{ id: "strat-1" }],
     });
@@ -674,20 +674,25 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect(res.status).toBe(200);
   });
 
-  // --- P72: keyed ledger-backed (Deribit) strategies. A CONNECTED api key on a
-  //     ledger-backed venue with 0 trades and a csv_daily_returns series must
-  //     take the re-check's daily-returns branch (not the trade-count branch).
-  //     The mirror predicate uses `!api_key_id || isLedgerBacked` (venue-aware),
-  //     matching the shared gate — a keyed FILL-based venue must NOT be diverted. ---
+  // --- MT5-11/12: the re-check's daily-returns branch is decided by the
+  //     PERSISTED completeness verdict. A CONNECTED api key with 0 trades and a
+  //     csv_daily_returns series takes that branch iff its series is certified;
+  //     the venue is never consulted. Verdict literals below are HAND-TYPED —
+  //     nothing is imported from strategyGate.ts (Oracle Independence).
+  //
+  //     SC-4: these cases run against the REAL exported predicate (see
+  //     stubbedGateModule). What used to sit in the route here was a
+  //     hand-written copy of the first-pass predicate, kept in step by a comment
+  //     saying the two "must never diverge". They diverged. ---
 
-  it("keyed Deribit PASSES the re-check: ledger-backed key + 0 trades + >=7 csv rows + complete -> 200", async () => {
-    // Pre-P72 the mirror predicate required !api_key_id, so a keyed Deribit
-    // strategy (0 trades by construction) fell to the trade branch and 409'd.
-    // The venue-aware term routes a LEDGER-BACKED key to the csv-row check
-    // (30 >= 7) and lets it publish.
+  it("keyed ledger_complete PASSES the re-check: certified series + 0 trades + >=7 csv rows -> 200", async () => {
+    // The MT5-11 unblock, through the path that actually publishes. A deal
+    // ledger has no fills to fetch, so `trades` is empty by construction; the
+    // combiner certifies the series and the re-check routes to the csv-row
+    // check (30 >= 7) instead of 409ing on a trade count that is 0 by design.
     mockAdminClient({
-      recheckApiKeyId: "key-deribit",
-      mockKeyExchange: "deribit",
+      recheckApiKeyId: "key-1",
+      mockSeriesCompleteness: "ledger_complete",
       recheckTradeCount: 0,
       recheckCsvCount: 30,
       recheckStatus: "complete",
@@ -698,10 +703,10 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect((await res.json()).success).toBe(true);
   });
 
-  it("keyed Deribit below the CSV floor in the re-check -> 409 (CSV threshold, not trade count)", async () => {
+  it("keyed ledger_complete below the CSV floor in the re-check -> 409 (CSV threshold, not trade count)", async () => {
     mockAdminClient({
-      recheckApiKeyId: "key-deribit",
-      mockKeyExchange: "deribit",
+      recheckApiKeyId: "key-1",
+      mockSeriesCompleteness: "ledger_complete",
       recheckTradeCount: 0,
       recheckCsvCount: 3,
       recheckStatus: "complete",
@@ -712,14 +717,15 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect((await res.json()).error).toMatch(/CSV history fell below threshold/i);
   });
 
-  it("keyed FILL-based (perp) with 0 trades + csv series -> 409 trade count (Finding 1 regression guard)", async () => {
-    // A keyed perp (non-ledger-backed) with 0 fills in-window but a funding
-    // csv_daily_returns series must NOT be diverted to the csv branch and
-    // published — its series has no completeness gate. isLedgerBacked=false
-    // (exchange "okx") keeps it on the trade branch → 409 trade count.
+  it("⭐ D-15 through the PUBLISHING path: keyed perp with fill_derived_unproven + 30 csv rows -> 409 trade count", async () => {
+    // The phase's safety property, asserted on the admin approve route rather
+    // than only on the pure gate. A keyed perp with 0 fills in-window still has
+    // a funding-only csv_daily_returns series; its producer stamped
+    // `fill_derived_unproven` because the realized-PnL fetch had a gap.
+    // Admitting it here would publish a materially understated track record.
     mockAdminClient({
       recheckApiKeyId: "key-perp",
-      mockKeyExchange: "okx",
+      mockSeriesCompleteness: "fill_derived_unproven",
       recheckTradeCount: 0,
       recheckCsvCount: 30,
       recheckStatus: "complete",
@@ -730,12 +736,57 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect((await res.json()).error).toMatch(/trade count fell below threshold/i);
   });
 
-  it("fails LOUD (503) when the api_keys exchange lookup errors (WR-01) — never coerces isLedgerBacked=false", async () => {
-    // A transient api_keys read error must not silently set isLedgerBacked=false
-    // and reject a legit Deribit onboarding with a misleading trade-count 400.
+  // --- SC-4 ORACLE PAIR. These two cases exist to red-pin the shared-predicate
+  //     call. A hand-copy that kept the deleted `!approveApiKeyId` term passes
+  //     the first and WRONGLY passes the second, because keylessness alone used
+  //     to admit. Only the second can distinguish the two implementations. ---
+
+  it("SC-4(a) COMPOSITE (api_key_id NULL) with composite_stitched is approvable end-to-end -> 200", async () => {
+    // Composites passed historically via `!api_key_id`, the term this phase
+    // deleted. They now depend on the stitch job stamping a verdict. If this
+    // reds, no composite can ever be approved again.
     mockAdminClient({
-      recheckApiKeyId: "key-deribit",
-      mockKeyExchangeError: true,
+      recheckApiKeyId: null,
+      mockSeriesCompleteness: "composite_stitched",
+      recheckTradeCount: 0,
+      recheckCsvCount: 30,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(200);
+    expect((await res.json()).success).toBe(true);
+  });
+
+  it("SC-4(b) COMPOSITE with a NULL verdict is REFUSED -> 409 (the hand-copy would wrongly publish it)", async () => {
+    mockAdminClient({
+      recheckApiKeyId: null,
+      mockSeriesCompleteness: null,
+      recheckTradeCount: 0,
+      recheckCsvCount: 30,
+      recheckStatus: "complete",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/trade count fell below threshold/i);
+  });
+
+  it("WR-01: a failing first-pass verdict read fails LOUD (503) — never a coerced-null verdict rendered as a gate refusal", async () => {
+    // REPURPOSED from "fails LOUD when the api_keys exchange lookup errors":
+    // that lookup no longer exists, but the property it pinned is unchanged and
+    // now attaches to the read that replaced it. The verdict is the value that
+    // selects the gate's branch, and `null` is a MEANINGFUL verdict here (fail
+    // closed) — which is exactly why an UNREAD one must never be coerced into
+    // it. A silent `series_completeness = null` would reject a legitimate
+    // ledger-backed onboarding with a misleading "0 trades" message about the
+    // manager's strategy, when the failure was ours.
+    //
+    // Distinct from the generic first-pass read-error case below: this one
+    // pins the negative — the response must NOT be the gate-refusal 400.
+    const tracker = mockAdminClient({
+      analyticsReadError: true,
+      recheckApiKeyId: "key-1",
       recheckTradeCount: 0,
       recheckCsvCount: 30,
       recheckStatus: "complete",
@@ -747,6 +798,9 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect(body.error).toMatch(/verify strategy data source/i);
     // 140.3-G9 / SEAMUX-03 — one token for the whole source-read 503 fact class.
     expect(body.code).toBe("REVIEW_SOURCE_READ_FAILED");
+    // The negative half: not a verdict ABOUT THE STRATEGY, and nothing written.
+    expect(body.code).not.toBe("GUARD_BLOCKED");
+    expect(tracker.publishUpdateIssued).toBe(false);
   });
 
   // --- PUB-01 (Phase 87) composite gate: OQ-1 defense-in-depth pure READ. A
@@ -764,6 +818,11 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
       recheckApiKeyId: null,
       recheckTradeCount: 0,
       recheckCsvCount: 30,
+      // MT5-11/12 — a composite reaches the daily-returns branch on the stitch
+      // job's verdict now, not on `!api_key_id`. Without it every PUB-01 case
+      // below would 409 on a trade count that is 0 by construction, and the
+      // composite gate under test would never be reached.
+      mockSeriesCompleteness: "composite_stitched",
       recheckStatus: "complete_with_warnings",
       strategyKeysCount: 2,
       latestStitchJobStatus: "done",
@@ -782,6 +841,7 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
       recheckApiKeyId: null,
       recheckTradeCount: 0,
       recheckCsvCount: 30,
+      mockSeriesCompleteness: "composite_stitched",
       recheckStatus: "complete",
       strategyKeysCount: 2,
       latestStitchJobStatus: "running",
@@ -799,6 +859,7 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
       recheckApiKeyId: null,
       recheckTradeCount: 0,
       recheckCsvCount: 30,
+      mockSeriesCompleteness: "composite_stitched",
       recheckStatus: "complete",
       strategyKeysCount: 2,
       latestStitchJobStatus: undefined,
@@ -817,6 +878,7 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
       recheckApiKeyId: null,
       recheckTradeCount: 0,
       recheckCsvCount: 30,
+      mockSeriesCompleteness: "composite_stitched",
       recheckStatus: "complete",
       strategyKeysCountError: true,
       updateAffected: [{ id: "strat-1" }],
@@ -1074,6 +1136,12 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
      *  here — supply >=7 so the gate reaches the analytics-status arm. */
     csvRowCount?: number;
     /**
+     * `strategy_analytics.series_completeness` (MT5-11/12). Default null —
+     * fail closed. A fixture that wants the daily-returns branch must name the
+     * verdict that earns it; keylessness alone no longer admits anything.
+     */
+    seriesCompleteness?: string | null;
+    /**
      * C-3 (140.4-01) anti-over-refusal control. When true the
      * strategy_analytics `.single()` returns PostgREST's PGRST116 — "the result
      * contains 0 rows" — which is an ABSENCE, not a read failure: `data` is
@@ -1158,6 +1226,8 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
                               : {
                                   computation_status: fx.computationStatus,
                                   computation_error: fx.computationError,
+                                  series_completeness:
+                                    fx.seriesCompleteness ?? null,
                                 },
                           error: null,
                         },
@@ -1178,21 +1248,11 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
               }),
             };
           }
-          if (table === "api_keys") {
-            // P72 venue gate: first-pass exchange lookup. Non-ledger ("okx")
-            // keeps a keyed strategy on the trade branch, matching these gate
-            // fixtures' trade/analytics reason-string expectations.
-            return {
-              select: () => ({
-                eq: () => ({
-                  maybeSingle: async () => ({
-                    data: { exchange: "okx" },
-                    error: null,
-                  }),
-                }),
-              }),
-            };
-          }
+          // MT5-11/12 — the `api_keys` venue lookup this arm served is gone from
+          // the route. What kept these fixtures on the trade branch was the
+          // non-ledger exchange "okx"; what keeps them there now is the absent
+          // verdict (seriesCompleteness defaults to null → fail closed), which
+          // is the same outcome reached for a better reason.
           // strategies — first-pass single() lookup.
           return {
             select: () => ({
@@ -1330,15 +1390,22 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
   });
 
   it("PUB-01: a COMPOSITE (api_key_id NULL, csv series) with computation_status='failed' -> 400 blocked at the first-pass gate", async () => {
-    // A composite routes down isDailyReturnsSourced (api_key_id NULL + 0 trades
-    // + csv rows >= 7); a failed member fan-out surfaces as
-    // computation_status='failed', which the first-pass gate blocks with
-    // ANALYTICS_FAILED (400) BEFORE any UPDATE. Pins PUB-01's route direction
-    // for composites at the first pass (previously implicit / untested).
+    // A composite routes down isDailyReturnsSourced (0 trades + csv rows >= 7 +
+    // the stitch job's `composite_stitched` verdict); a failed member fan-out
+    // surfaces as computation_status='failed', which the first-pass gate blocks
+    // with ANALYTICS_FAILED (400) BEFORE any UPDATE. Pins PUB-01's route
+    // direction for composites at the first pass.
+    //
+    // MT5-11/12 — the verdict is now what puts it on that branch (api_key_id
+    // NULL alone no longer does). Without it the composite falls to the trade
+    // branch and reports INSUFFICIENT_TRADES, so this case ALSO covers the
+    // first pass of the SC-4 composite-approvability property, through the real
+    // gate rather than the stub.
     mockGateAdminClient({
       apiKeyId: null,
       tradeCount: 0,
       csvRowCount: 30,
+      seriesCompleteness: "composite_stitched",
       earliest: "2026-01-01T00:00:00Z",
       latest: "2026-03-01T00:00:00Z",
       computationStatus: "failed",

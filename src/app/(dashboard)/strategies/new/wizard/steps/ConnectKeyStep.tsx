@@ -64,6 +64,16 @@ interface ExchangeOption {
   passphraseLabel?: string;
   passphrasePlaceholder?: string;
   passphraseHelper?: string;
+  // Whether the passphrase slot holds a genuine SECRET that must render masked.
+  // Absent → true, which is OKX's behaviour, so every existing and future venue
+  // that omits the key renders byte-identically to today (D-03: the OKX
+  // passphrase is a real API credential and a GLOBAL unmask was rejected). MT5
+  // sets false: the slot carries a broker SERVER NAME, not a credential, and the
+  // founder must be able to read what they typed against the helper copy that
+  // says "copy the server name exactly as it appears in your MT5 terminal".
+  // Display-only — the value still rides the `passphrase` payload key into
+  // encrypt_credentials and stays encrypted at rest.
+  passphraseSecret?: boolean;
   // Optional muted helper rendered directly under the secret input. Absent →
   // nothing renders (byte-neutral). MT5 uses it for the up-front
   // investor-vs-master-password steer.
@@ -139,6 +149,7 @@ const EXCHANGES: ExchangeOption[] = [
             secret: "Your read-only investor password",
           },
           passphraseLabel: "Broker server",
+          passphraseSecret: false,
           passphrasePlaceholder: "Exactly as shown in your MT5 terminal",
           passphraseHelper:
             "Open your MT5 terminal's login window and copy the server name exactly as it appears there — it is broker-specific and often carries a region or Demo/Live suffix.",
@@ -255,6 +266,16 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
   new Set<WizardErrorCode>([
     // Emitted directly by the route's own guards.
     "KEY_INVALID_FORMAT",
+    // 142.2 / MT5-04 (D-05) — the four codes `KEY_INVALID_FORMAT` was split
+    // into. `create-with-key/route.ts` emits all four from its own guards, so
+    // all four belong HERE and not only in the union: a code absent from this
+    // roster is rejected as unrecognised and renders UNKNOWN, which would have
+    // replaced one wrong sentence with a worse one. `KEY_INVALID_FORMAT` stays
+    // because the route still emits it at its one genuine format guard.
+    "KEY_MISSING_REQUIRED_FIELD",
+    "KEY_UNSUPPORTED_VENUE",
+    "KEY_VENUE_NOT_ENABLED",
+    "KEY_INPUT_TOO_LONG",
     "KEY_NOT_READ_ONLY",
     "KEY_HAS_TRADING_PERMS",
     "KEY_HAS_WITHDRAW_PERMS",
@@ -401,6 +422,10 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
   const passphraseHelper =
     activeExchange?.passphraseHelper ??
     "OKX requires a passphrase in addition to key and secret. You set this when you created the API key on OKX.";
+  // MT5-03 / D-03: whether the passphrase slot is masked. Defaults to TRUE —
+  // the default IS the byte-identity mechanism, so the OKX config entry is not
+  // edited and OKX keeps today's Show/Hide-toggled password render exactly.
+  const passphraseSecret = activeExchange?.passphraseSecret ?? true;
   // Optional muted helper under the secret input (MT5's investor-vs-master
   // steer). Absent → render nothing.
   const secretHelper = activeExchange?.secretHelper;
@@ -694,7 +719,7 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
           <div>
             <Input
               label={passphraseLabel}
-              type={showSecret ? "text" : "password"}
+              type={passphraseSecret && !showSecret ? "password" : "text"}
               value={passphrase}
               onChange={(e) => setPassphrase(e.target.value)}
               placeholder={passphrasePlaceholder}

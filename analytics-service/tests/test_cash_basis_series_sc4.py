@@ -58,6 +58,7 @@ from tests.test_mtm_single_key import (
     _ctx,
     _find_failed_stamp,
     _find_prestamp,
+    _ledger_meta,
     _mtm_series,
     _patch_benchmark,
     _recording_ledger,
@@ -121,13 +122,13 @@ async def _run_seam(
             _report(has_option_activity=True),
         ]
         combine = MagicMock(side_effect=[
-            (_returns, {"used_heuristic_capital": False}),
-            (_mtm, {"used_heuristic_capital": False}),
-            (_mtm, {"used_heuristic_capital": False}),
+            (_returns, _ledger_meta()),
+            (_mtm, _ledger_meta()),
+            (_mtm, _ledger_meta()),
         ])
     else:
         reports = [_report(has_option_activity=False)]
-        combine = MagicMock(return_value=(_returns, {"used_heuristic_capital": False}))
+        combine = MagicMock(return_value=(_returns, _ledger_meta()))
     ledger_mock, _calls = _recording_ledger(reports)
     patches = _base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,

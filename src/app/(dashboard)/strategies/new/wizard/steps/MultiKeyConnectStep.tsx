@@ -215,6 +215,16 @@ const KNOWN_ADD_KEY_CODES: ReadonlySet<WizardErrorCode> =
   new Set<WizardErrorCode>([
     // Emitted directly by `composite/add-key/route.ts`'s own guards.
     "KEY_INVALID_FORMAT",
+    // 142.2 / MT5-04 (D-05) — the four codes `KEY_INVALID_FORMAT` was split
+    // into. `composite/add-key/route.ts` mirrors `create-with-key` guard for
+    // guard, so it emits the same four and this roster gains the same four.
+    // The two rosters stay SEPARATE (see the docblock above): they agree here
+    // because the two routes genuinely emit the same set, not because one was
+    // copied from the other.
+    "KEY_MISSING_REQUIRED_FIELD",
+    "KEY_UNSUPPORTED_VENUE",
+    "KEY_VENUE_NOT_ENABLED",
+    "KEY_INPUT_TOO_LONG",
     "KEY_NOT_READ_ONLY",
     "KEY_HAS_TRADING_PERMS",
     "KEY_HAS_WITHDRAW_PERMS",

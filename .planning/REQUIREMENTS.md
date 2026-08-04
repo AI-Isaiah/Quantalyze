@@ -207,6 +207,220 @@ investor factsheet on a spinner that never resolves.
 - [x] **PYAPI-09**: Idempotency is complete rather than partial: a replay can never return "duplicate" for work that was never enqueued, and there is no state from which a client is told to retry forever with no path to success. *(C-01, C-19, C-20, C-21)*
 - [x] **PYAPI-10**: The `/process-key` success surface has **one discriminator**, and no security verdict is delivered under a success status. *(C-22)*
 
+### MT5 — MetaTrader 5 end-to-end on the unified backbone (Phase 142.2)
+
+Added 2026-08-03 from `/gsd-discuss-phase 142.2`. Scope anchor: the connect experience and the
+correctness of what it produces. v1.15 already shipped the MT5 pipeline (tag `v1.15`, 6/6 phases)
+and MT5 is already folded into the unified backbone at `broker_dailies.py:403` — this group does
+**not** build a pipeline, it makes the existing one reachable, honest, and *proven*.
+
+⚠️ v1.15 shipped **6/6 phases green with two open items intact**. A green unit suite is therefore
+explicitly not evidence for this group. MT5-06..09 are satisfied only by an end-to-end run against
+a live funded account on a **trading day**.
+
+- [x] **MT5-01** — ✅ **DELIVERED 2026-08-03, ahead of planning** (D-01 called for the flip *before*
+  any code). All six env entries now exist: `MT5_ENABLED` on Production / Preview / Development and
+  `NEXT_PUBLIC_MT5_ENABLED` on all three (it was Production-only). Production was **redeployed** —
+  `quantalyze-djygeqsqy`, `main` @ `d80a1ba`, Ready — so the var is in effect, not merely stored.
+  Preview/Development pick theirs up on their next build, which is the normal path. ⚠️ Vercel CLI had
+  to be upgraded 54.4.1 → 58.4.4 first: the old CLI looped on `env add … preview`, answering
+  `git_branch_required` and then suggesting verbatim the command just run. The requirement text below
+  is retained as the specification.
+  The production half-state is closed. Server-side `MT5_ENABLED=true` is set in
+  Vercel **and redeployed** (an env change alone is inert), across Production, Preview **and**
+  Development — and because `NEXT_PUBLIC_MT5_ENABLED` is today Production-only, **both** vars are
+  extended to Preview and Development so no environment carries a gate the others do not. Evidence
+  the gap is real: prod holds 29 encrypted vars and `MT5_ENABLED` is absent from all of them, so
+  `isMt5EnabledServer()` (`src/lib/closed-sets.ts:178`, strict `=== "true"`) is false while
+  `MT5_UI_ENABLED` (`:124`, a bare `NEXT_PUBLIC_MT5_ENABLED === "true"` with **no founder gate**)
+  is true — the MT5 card renders for **every** production user and `create-with-key/route.ts:147`
+  rejects every one of their submissions. ⛔ The closed-set no-widening pin holds: `mt5` stays OUT
+  of `UI_EXCHANGE_CODES` / `EXCHANGES` / `FUNDING_EXCHANGES` / `CRYPTO_EXCHANGES` regardless of the
+  flag (`closed-sets.ts:119-122`).
+- [x] **MT5-02** — ✅ **DELIVERED + VERIFIED 2026-08-03** as a consequence of MT5-01, and verified by
+  observation rather than inference: `curl https://quantalyze.xyz/security` now returns the
+  `mt5-readonly` anchor and the "investor (read-only) password" copy (4 matches each), content that
+  renders **only** when `isMt5EnabledServer()` is true. Before the redeploy it returned none. This
+  doubles as the live proof that MT5-01's server gate is actually in effect — the same function
+  guards `create-with-key/route.ts:147`, so that rejection arm can no longer fire.
+  The `/security#mt5-readonly` investor-password guide renders in production. It
+  gates on the same `isMt5EnabledServer()` (`src/app/(marketing)/security/page.tsx:544`), so it is
+  currently **blank** — the wizard tells a founder to use an investor password while the page
+  explaining what that is shows nothing. Content is already correct; this is a gating consequence
+  of MT5-01, asserted separately because it is a distinct user-visible surface.
+- [x] **MT5-03**: The Broker-server field renders as plain text while OKX's passphrase stays
+  masked, via a **per-venue** flag (`passphraseSecret`) added alongside the per-venue
+  `passphraseLabel` / `passphrasePlaceholder` config the file already carries. MT5 reuses OKX's
+  passphrase slot (`ConnectKeyStep.tsx:141`), and that slot is `type={showSecret ? "text" :
+  "password"}` at `:697` — so a global unmask would expose the OKX passphrase, a genuine API
+  credential. The OKX render stays **byte-identical**.
+- [x] **MT5-04**: `KEY_INVALID_FORMAT` no longer buckets unrelated causes. The **24 emitting** sites across
+  `src/app/api/strategies/create-with-key/route.ts` (12) and
+  `src/app/api/strategies/composite/add-key/route.ts` (12) are split into honest codes
+  (missing-required-field, unsupported-venue, venue-not-enabled, input-too-long), leaving
+  `KEY_INVALID_FORMAT` for **actual format failures only** — which makes its existing copy true
+  again. Today `wizardErrors.ts:477` states *"Client-side format check failed before sending the
+  key to the exchange"*, which was **factually false** for the observed failure (a server-side
+  feature gate), and offers Binance/OKX/Bybit hex-length advice to an MT5 user. ⚠️ MT5-01 makes the
+  MT5-gate arm (`route.ts:147`) **unreachable** — a fix aimed only at that arm would repair a line
+  that can no longer fire; the value is in the class. MT5 already has correct dedicated copy
+  (`KEY_MT5_MASTER_PASSWORD`, `KEY_MT5_WRONG_SERVER`, `wizardErrors.ts:470`) the route never
+  reaches. Out of scope, logged to `TODOS.md`: the same defect's **9** remaining emitting sites in
+  `keys/validate-and-encrypt/route.ts` (4) and `verify-strategy/route.ts` (5).
+  ⚠️ **Counts corrected 2026-08-04 from executed measurement, replacing the research's 28/11.**
+  `grep -c 'KEY_INVALID_FORMAT'` returns 14 per in-scope route, but `grep -c 'code: "KEY_INVALID_FORMAT"'`
+  returns **12** — the delta is comment prose describing the MT5 short-login carve-out. Only emitting
+  sites can lie to a user, so 24 (12+12) in scope and 9 (4+5) deferred are the real numbers, and the
+  `wizardErrors.invariant.test.ts` registry pin uses the literal **12**. Re-verified by grep at HEAD by
+  plan 07 and again by the phase verifier. A miscounted class-fix ledger is this phase's own defect
+  class — the requirements doc must not carry a number its own execution disproved.
+- [ ] **MT5-05**: A founder completes the MT5 connect flow through the wizard **without needing to
+  know an internal error code, a server name, or a flag** — the phase-goal sentence, asserted as
+  an outcome rather than as the sum of MT5-01..04.
+- [x] **MT5-11** *(BLOCKER — found by live dogfood 2026-08-03, minutes after MT5-01 opened the
+  path)*: `isLedgerBackedExchange` is brought back into lockstep with the Python source set, so an
+  MT5 (and sFOX) strategy is evaluated on the **daily-returns** branch of the gate rather than the
+  fill-based one. **Measured drift:**
+  `analytics-service/services/ingestion/long_fetch.py:63` holds
+  `_LEDGER_BACKED_SOURCES = frozenset({"deribit", "sfox", "mt5"})`, while
+  `src/lib/strategyGate.ts:73` still returns `exchange === "deribit"` — under a comment that
+  explicitly instructs *"Mirrors the analytics-service `is_ledger_backed` … **keep the two in
+  lockstep**. Deribit is the only such venue today."* Python was widened for sfox and mt5; the
+  TypeScript mirror and its comment were never updated.
+  **Observed consequence on PROD** (key `46293712`, strategy `7a5d033a`, connected 14:44 UTC):
+  the pipeline succeeded end to end — `process_key_long` → `derive_broker_dailies` →
+  `compute_analytics_from_csv`, all `done`, 1 attempt, no errors, `unified_backbone_at_claim=true`
+  — and wrote **135 rows to `csv_daily_returns` (2026-03-22 → 2026-08-03, 75 non-zero days, returns
+  −10.57% … +14.97%)** with **0 rows in `trades`**, which is correct-by-construction for a
+  deal-ledger venue. `strategyGate.ts:181`'s `(!input.apiKeyId || input.isLedgerBacked === true)`
+  term then evaluated false, dropping a 135-day account onto the fill branch → `0 < 5` →
+  `GATE_INSUFFICIENT_TRADES`. ⚠️ **The failure is unwinnable and the remedy offered is false**: the
+  screen advises "try another key", but **no** MT5 key can ever pass this gate regardless of
+  history, and `try_another_key` **destroys the draft and every `strategy_keys` member under it**
+  (`SyncPreviewStep.tsx` — `onTryAnotherKey` fires `handleDeleteDraft()`). With the term corrected,
+  135 ≥ `STRATEGY_GATE_MIN_CSV_ROWS` (7) and the same account passes.
+  ⚠️ **sFOX carries this bug latently** — it is in the Python set and absent from the TS mirror;
+  it is masked only because sFOX is dormant. Fix both venues, not just mt5.
+  ⚠️ The **stale comment is part of the defect** — a future reader following it re-narrows the
+  function. Whatever replaces the hardcoded literal must make TS/Python divergence *detectable*
+  rather than restating the instruction that already failed.
+  ⛔ **Delivery route settled by the founder 2026-08-03: NOT a standalone PR.** This requirement is
+  satisfied **through MT5-12** (delete the venue-list proxy; the daily series answers for itself).
+  Shipping the one-term widening on its own is explicitly rejected — it would re-arm the identical
+  drift for the next venue. MT5-11 remains listed separately because it names the *observed* defect
+  and its PROD evidence; MT5-12 names the *fix*.
+- [x] **MT5-12** *(ARCHITECTURAL — founder call 2026-08-03: consolidate the backbone, do NOT ship
+  MT5-11 as a standalone patch)*: **Strategy admissibility is decided from the canonical daily
+  series itself, not from a venue-name list.** `isLedgerBackedExchange` is **deleted**, not widened,
+  and no hardcoded venue set governs gate routing in *either* language.
+  **Why the one-line fix is refused as the deliverable:** MT5-11's branch condition is a **proxy**.
+  The gate's real question — stated in `strategyGate.ts:170` — is *"is this daily series complete,
+  or is it a funding-only stub with a fills gap that would understate the track record?"* It
+  approximates that with *"which venue is this?"*, hand-maintained in two languages with only a
+  comment ("keep the two in lockstep") as enforcement. That proxy was always going to drift; it
+  drifted; widening it re-arms the same trap for the next venue.
+  ⭐ **Founder insight 2026-08-03, verified in code — "all venues produce a ledger."** This is
+  correct and it reshapes the requirement. `services/broker_dailies.py` holds **four** combine
+  functions and **every venue already derives the same daily series from ledger-shaped inputs**:
+  `combine_realized_and_funding:152` (binance/bybit/okx — realized PnL **+ funding**),
+  `combine_native_ledger:185` (deribit), `combine_sfox_balance_history:241` (sfox),
+  `combine_mt5_deal_ledger:403` (mt5). The file header records that funding was **+20.4% on a live
+  Bybit account — two-thirds of the profit** — and that `fetch_daily_pnl` excludes funding by
+  design, so realized-only is wrong. Some venues *additionally* expose equity / unrealized PnL.
+  ⇒ **"ledger-backed vs fill-based" was never about whether a ledger exists.** Every venue has one.
+  The only genuine difference is that perps *also* fetch fills (`adapter.fetch_raw`) into `trades`;
+  `long_fetch.py:461` skips that step for ledger venues because it is redundant or unimplemented
+  there. `trades` is therefore a **parallel, partly-redundant representation populated by only some
+  venues** — and the gate reads *it* instead of the daily series every venue produces. **MT5 did not
+  fall through a gap in the backbone; it revealed the gate was never on the backbone for any venue.
+  Binance passes for the same wrong reason MT5 fails.**
+  ⇒ **Supersedes the initial "add a provenance column" sketch.** Since all venues already land in
+  one daily series, completeness is a property of **that series' inputs**, not a venue label — and
+  today it is interrogated *only* for perps and *only* by venue name, while deribit/sfox/mt5 ledgers
+  receive **no completeness check at all** and are trusted purely by list membership. The
+  requirement is the invariant (below), not any particular carrier; research/planning chooses
+  between a per-series completeness signal, a derived check over the inputs, or another mechanism.
+  **The missing piece, confirmed on PROD:** `csv_daily_returns` carries
+  `strategy_id, date, daily_return, created_at, updated_at, id, api_key_id, allocator_id` — and
+  **no completeness or provenance column**. A canonical daily row therefore cannot state whether it
+  is a complete ledger-derived return or a funding-only stub, which is precisely why the gate is
+  forced to interrogate a venue list. "Dailies are canonical" currently holds for **computation**
+  and fails for **trust**: trustworthiness lives outside the dailies.
+  ⚠️ **The falsification test — the safety property MUST survive.** A naive "always read the daily
+  series" satisfies MT5-11 and **breaks the invariant the branch exists to protect**: it would admit
+  a keyed perp whose `csv_daily_returns` holds funding only (no fail-loud completeness gate), and
+  publish an understated track record as verified. The fix is not "stop asking"; it is "make the
+  daily series answer". Any candidate implementation is rejected unless a fixture of a
+  fills-gapped perp is still **refused** — that case is the oracle, not MT5 passing.
+  ⚠️ Scope reaches every venue's ingestion (it must write the provenance the gate will read) and
+  needs a schema change + migration. ⛔ `supabase/migrations/**` **auto-applies to PRODUCTION on
+  merge to main** — the migration is the highest-risk artefact in this phase.
+  **MT5-11 is delivered *through* this requirement, not before it.** If the combined work proves too
+  large, the founder's stated valve is a **follow-up phase immediately after 142.2** — not a revert
+  to the standalone patch, and not shipping MT5 blocked.
+  *Deferred, explicitly not required here:* renaming `csv_daily_returns`, whose CSV-era name now
+  carries API-derived MT5/Deribit/perp data — the same seam showing in the schema. Cosmetic relative
+  to the invariant; log to `TODOS.md`.
+#### MT5-06..10 — moved to Phase 142.3 (split 2026-08-03 at the D-14 valve)
+
+⚠️ The five requirements below were **split out of Phase 142.2 into Phase 142.3** on 2026-08-03,
+on the sizing finding in `142.2-RESEARCH.md`. They are unchanged in content — only their owning
+phase moved. The cut is the founder's pre-authorised D-14 valve (*"we can do another phase right
+after this one, if this one becomes too large"*), **not** a scope cut: nothing here is dropped,
+deferred to v2, or made optional.
+
+Why these five and not others: they are exactly the requirements that **cannot be satisfied
+offline**. MT5-06/07/08 need a founder at the MT5 terminal on a trading day with the live funded
+account; MT5-09/10 can only run once that comparison has produced numbers. MT5-10 is additionally
+**uncapped by founder decision**, so bundling it with the reachability work made the combined
+phase unsizeable rather than merely large. The dependency across the cut is one-directional —
+142.2 makes MT5 reachable, 142.3 proves it correct.
+
+⛔ **142.2 closing is not "MT5 is done."** It means MT5 is *reachable*. v1.15's failure mode was
+shipping 6/6 green with both open items intact; these five are the items. Do not archive the
+milestone or advertise MT5 until 142.3 passes.
+
+- [ ] **MT5-06** *(measure-first)*: The MT5 server-UTC offset is **measured live and asserted on**,
+  not assumed. The gateway's server time is read against UTC at connect and the observed offset is
+  persisted (`139-VERIFICATION.md:12` names `MT5_SOAK_SERVER_OFFSET_MIN` as the intended carrier);
+  a **near-midnight deal** becomes an explicit regression test — a deal within the offset window of
+  midnight must land on the day the terminal shows. MT5 brokers stamp deals in broker-server time
+  (commonly UTC+2/+3, DST-shifting) while dailies bucket by UTC date. ⚠️ This is the one failure the
+  MT5-07 oracle **cannot see unaided**: a wrong offset leaves period totals reconciling perfectly
+  while the daily series is shifted, corrupting Sharpe, max drawdown and every risk metric derived
+  from it. Hardcoding the broker's offset is not acceptable — it breaks at the next DST transition
+  and is wrong for every other broker.
+- [ ] **MT5-07**: Rendered performance is verified against an **external** oracle — the MT5
+  terminal's own equity and balance figures, or the broker statement, over a fixed window, matching
+  within a stated tolerance. ⛔ Internal consistency (dailies compound to displayed equity, backbone
+  agrees with UI) does **not** satisfy this: that is the self-referential oracle shape that let
+  three money bugs survive six review passes. `broker_dailies.py` already claims `account_info()
+  .equity` is authoritative (`:514`); this tests the claim.
+- [ ] **MT5-08**: Verification runs against the **live funded account** on a **trading day** — real
+  fills, fees, swap charges and equity, via the read-only investor password. A demo account does
+  not satisfy this (synthetic fills/swaps, artificial starting balance exercising different anchor
+  logic), nor does reusing the v1.15 soak account (it shipped green with both open items intact, so
+  it has already demonstrated it does not catch these). A weekend run proves nothing.
+- [ ] **MT5-09**: Every surface that renders strategy performance shows the same, correct MT5
+  numbers — strategy detail, public factsheet, scenario composer, portfolio PDF, browse. The
+  architecture says these agree by construction (`job_worker.py:6043`, via shared
+  `strategies.asset_class`), and MT5's annualization clock is already correct
+  (`create-with-key/route.ts:510` stamps `isCryptoExchange(exchange) ? "crypto" : "traditional"`;
+  `finalize-wizard/route.ts:731` says "stamp `traditional` for mt5 (forex/CFD)"; `portfolio-stats
+  .ts` **defaults** to 252, so a caller that forgets the basis still lands on MT5's right clock —
+  crypto is the fragile direction, not MT5). This requirement exists to **test that invariant, not
+  assume it**: the backbone-bypass surfaces logged in `TODOS.md` — `_compute_portfolio_analytics`
+  (`analytics-service/routers/portfolio.py:628`), `equity_reconstruction.py`, and the bespoke TS
+  stacks `portfolio-stats.ts` / `scenario-blend-panels.ts` / `health-score.ts` — **re-derive**
+  metrics rather than reading them, and are the one place it could be false. One daily series
+  checked five ways; a divergence is a finding.
+- [ ] **MT5-10** *(uncapped by founder decision)*: Any discrepancy MT5-07/09 surfaces is **fixed
+  within this phase**, wherever its root cause lives — including in shared backbone money-math
+  affecting every venue. A bounded alternative (split shared-cause fixes into their own phase) was
+  offered and **declined**, so the planner must size for the unbounded case rather than treat it as
+  an escape hatch. The phase does not close while the terminal and the UI disagree: a known-wrong
+  number rendered to users is worse than an unfinished phase.
+
 ---
 
 ## v2 Requirements
@@ -274,6 +488,8 @@ Populated during roadmap creation.
 | JOB-08 | Phase 144 | Pending |
 | JOB-06 | Phase 145 | Pending |
 | JOB-07 | Phase 142 | Pending |
+| MT5-01..05, MT5-11, MT5-12 | Phase 142.2 | Pending (MT5-01, MT5-02 complete) |
+| MT5-06..10 | Phase 142.3 | Pending (split out of 142.2 on 2026-08-03 at the D-14 valve) |
 | RATE-01 | Phase 146 | Pending |
 | RATE-02 | Phase 146 | Pending |
 | RATE-03 | Phase 146 | Pending |

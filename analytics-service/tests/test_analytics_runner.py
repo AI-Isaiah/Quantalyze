@@ -2950,10 +2950,14 @@ def test_trade_mix_nan_notional_coerced_to_zero():
 # ---------------------------------------------------------------------------
 # Phase 76 (v1.8 DQ-02): flow_coverage_incomplete status lift (run_csv path)
 # ---------------------------------------------------------------------------
-def _csv_supabase_mock(rows, *, existing_flags):
+def _csv_supabase_mock(rows, *, existing_flags, strategy_row=None):
     """Supabase mock for run_csv_strategy_analytics: existence probe + paginated
     data load + a maybe_single read of the pre-existing data_quality_flags (the
-    DQ-02 pre-stamp channel). Records every upsert payload on ``.upserts``."""
+    DQ-02 pre-stamp channel). Records every upsert payload on ``.upserts``.
+
+    ``strategy_row`` overrides the existence-probe row. The default carries NO
+    ``api_key_id``, i.e. a KEYLESS (user CSV upload) strategy — pass a row with
+    ``api_key_id`` set to exercise the broker-sourced branch (MT5-12)."""
     sb = MagicMock()
     table_mock = MagicMock()
     sb.table.return_value = table_mock
@@ -2969,7 +2973,10 @@ def _csv_supabase_mock(rows, *, existing_flags):
     eq_chain.order.return_value = order_chain
     # existence probe: .select().eq().single().execute()
     single_chain = MagicMock()
-    single_chain.execute.return_value = MagicMock(data={"id": "s1", "user_id": "u1"})
+    single_chain.execute.return_value = MagicMock(
+        data=dict(strategy_row) if strategy_row is not None
+        else {"id": "s1", "user_id": "u1"}
+    )
     eq_chain.single.return_value = single_chain
     # DQ-02 pre-stamp read: .select().eq().maybe_single().execute()
     maybe_single_chain = MagicMock()
@@ -3190,3 +3197,248 @@ async def test_csv_run_stays_complete_without_unrealized_pnl_flag():
         "no material wedge → status must stay exact-string 'complete' (SC-4)"
     )
     assert not (final.get("data_quality_flags") or {}).get("unrealized_pnl_in_anchor")
+
+
+# ---------------------------------------------------------------------------
+# MT5-12 (142.2-05 Task 3) — producer 3's series_completeness verdict.
+#
+# WHY these tests carry the weight: `series_completeness` is a plain key in a
+# `dict[str, Any]` payload. mypy CANNOT see it — neither its presence on the
+# keyless arm nor, more importantly, its ABSENCE from every other payload. The
+# absence is the entire mechanism by which a KEYED strategy's derive-stamped
+# verdict survives this function (A1: a PostgREST upsert projects only the
+# payload's keys — executed against TEST in plan 142.2-04). These assertions are
+# the only oracle for that, so the keyed test scans EVERY captured upsert of the
+# run rather than only the completion one.
+# ---------------------------------------------------------------------------
+_CSV_ROWS_3D = [
+    {"date": "2024-01-01", "daily_return": 0.005},
+    {"date": "2024-01-02", "daily_return": -0.003},
+    {"date": "2024-01-03", "daily_return": 0.008},
+]
+
+
+def _completion_upsert(sb):
+    complete = [
+        u for u in sb.upserts
+        if u.get("computation_status") in ("complete", "complete_with_warnings")
+    ]
+    assert complete, "expected a completion upsert"
+    return complete[-1]
+
+
+def _assert_no_verdict_anywhere(sb, why: str):
+    offenders = [
+        u for u in sb.upserts if "series_completeness" in u
+    ]
+    assert not offenders, (
+        f"{why} — but {len(offenders)}/{len(sb.upserts)} strategy_analytics "
+        f"payload(s) carried the series_completeness key: {offenders}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_csv_keyless_run_stamps_user_supplied():
+    """MT5-12 producer 3: a KEYLESS strategy (api_key_id IS NULL, not a former
+    composite) is a user CSV upload by construction — the wizard's CSV branch is
+    the only route to this function without a key. Its completion upsert carries
+    series_completeness='user_supplied' as a SIBLING key, never a member of
+    data_quality_flags (that dict is rebuilt wholesale by this very upsert, and
+    its guard keys auto-promote status to complete_with_warnings — a status the
+    publish gate PASSES, so carrying the verdict there is the D-16 fail-open)."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _csv_supabase_mock(_CSV_ROWS_3D, existing_flags={"csv_source": True})
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=([], False))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               return_value=_clean_metrics_result()):
+        await run_csv_strategy_analytics("s1")
+
+    final = _completion_upsert(sb)
+    assert final.get("series_completeness") == "user_supplied", (
+        "a keyless CSV upload must stamp its own provenance verdict; without it "
+        "the publish gate reads NULL and the upload can never be approved"
+    )
+    assert "series_completeness" not in (final.get("data_quality_flags") or {}), (
+        "the verdict must NOT ride data_quality_flags (D-16 fail-open channel)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_csv_keyed_run_omits_series_completeness_from_every_payload():
+    """SC-6 oracle. A KEYED strategy's verdict is stamped upstream by the derive
+    combiner (producer 1). This function must not write the column AT ALL on that
+    path — survival is by OMISSION (A1). Scans every captured payload, not just
+    the completion one: `_clear_stale_by_basis` is the standing counter-example
+    that omission here is a mechanism, not a guarantee, so a later arm adding the
+    key would silently overwrite a combiner's honest verdict.
+
+    ⛔ Note what is NOT the discriminator: current column state. Stamping
+    user_supplied because the verdict reads NULL would promote a keyed
+    funding-only perp — whose combiner deliberately refused to certify it — into
+    the gate's allow-list, which is the publication D-15 exists to refuse."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _csv_supabase_mock(
+        _CSV_ROWS_3D,
+        existing_flags={"csv_source": True},
+        strategy_row={"id": "s1", "user_id": "u1", "api_key_id": "key-1"},
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=([], False))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               return_value=_clean_metrics_result()):
+        await run_csv_strategy_analytics("s1")
+
+    assert sb.upserts, "expected the run to issue strategy_analytics upserts"
+    _completion_upsert(sb)  # the run really reached completion, not an early exit
+    _assert_no_verdict_anywhere(
+        sb, "a KEYED strategy's derive-stamped verdict survives by omission (A1)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_csv_former_composite_keyless_omits_series_completeness():
+    """Composites carry api_key_id NULL too (admin/strategy-review/route.test.ts
+    :1073), so `keyless` alone would relabel a machine stitch as a human upload
+    and erase the `composite_stitched` run_stitch_composite_job wrote. A CURRENT
+    composite cannot reach here (stitch_composite is chain-terminal in
+    JOB_CHAIN_FOLLOW_ON), so the prior `composite` flag is the last honest
+    statement about the series during a composite→keyless transition. Omit, and
+    let the next run — which sees the wholesale-rebuilt flags with no `composite`
+    — stamp user_supplied. Both values are allow-listed, so the one-run lag costs
+    approvability nothing, while the wrong stamp would be a permanent lie."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _csv_supabase_mock(
+        _CSV_ROWS_3D,
+        existing_flags={"csv_source": True, "composite": True},
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=([], False))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               return_value=_clean_metrics_result()):
+        await run_csv_strategy_analytics("s1")
+
+    final = _completion_upsert(sb)
+    assert final.get("metrics_json_by_basis", "absent") is None, (
+        "sanity: the former-composite path under test is the one that also NULLs "
+        "the stale by-basis object (Finding 5) — if this drifts, the test is no "
+        "longer exercising a former composite"
+    )
+    _assert_no_verdict_anywhere(
+        sb, "a former composite must keep the composite_stitched verdict, not be "
+            "relabelled user_supplied"
+    )
+
+
+@pytest.mark.asyncio
+async def test_csv_insufficient_history_arm_omits_series_completeness():
+    """Terminal arm (<2 rows). A failed run must never author a trust verdict —
+    and must not wipe one either: omission preserves whatever the producer last
+    stamped, so a re-run heals rather than the failure laundering the series."""
+    from fastapi import HTTPException
+
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _csv_supabase_mock(
+        [{"date": "2024-01-01", "daily_return": 0.005}],
+        existing_flags={"csv_source": True},
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=([], False))):
+        with pytest.raises(HTTPException) as exc_info:
+            await run_csv_strategy_analytics("s1")
+
+    assert exc_info.value.status_code == 400
+    assert any(u.get("computation_status") == "failed" for u in sb.upserts), (
+        "expected the insufficient-history failure stamp"
+    )
+    _assert_no_verdict_anywhere(sb, "the insufficient-history arm must not touch the verdict")
+
+
+@pytest.mark.asyncio
+async def test_csv_truncation_arm_omits_series_completeness():
+    """Terminal arm (PaginatedSelectTruncated → permanent)."""
+    from services.analytics_runner import run_csv_strategy_analytics
+    from services.db import PaginatedSelectTruncated
+
+    sb = _csv_supabase_mock(_CSV_ROWS_3D, existing_flags={"csv_source": True})
+
+    def _boom(*_a, **_kw):
+        raise PaginatedSelectTruncated(page_count=5, page_size=1000, hint="csv")
+
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.paginated_select", side_effect=_boom), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=([], False))):
+        with pytest.raises(PaginatedSelectTruncated):
+            await run_csv_strategy_analytics("s1")
+
+    assert any(u.get("computation_status") == "failed" for u in sb.upserts), (
+        "expected the truncation failure stamp"
+    )
+    _assert_no_verdict_anywhere(sb, "the truncation arm must not touch the verdict")
+
+
+@pytest.mark.asyncio
+async def test_csv_config_error_arm_omits_series_completeness():
+    """Terminal arm (ReturnsDenominatorConfigError → 422 permanent)."""
+    from fastapi import HTTPException
+
+    from services.analytics_runner import run_csv_strategy_analytics
+    from services.allocated_capital import ReturnsDenominatorConfigError
+
+    sb = _csv_supabase_mock(_CSV_ROWS_3D, existing_flags={"csv_source": True})
+
+    def _boom(*_a, **_kw):
+        raise ReturnsDenominatorConfigError("malformed")
+
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.parse_returns_denominator_config",
+               side_effect=_boom), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=([], False))):
+        with pytest.raises(HTTPException) as exc_info:
+            await run_csv_strategy_analytics("s1")
+
+    assert exc_info.value.status_code == 422
+    assert any(u.get("computation_status") == "failed" for u in sb.upserts), (
+        "expected the config-failed stamp"
+    )
+    _assert_no_verdict_anywhere(sb, "the config-error arm must not touch the verdict")
+
+
+@pytest.mark.asyncio
+async def test_csv_unrecoverable_arm_omits_series_completeness():
+    """Terminal catch-all arm. Every other failure branch drains here, so this is
+    the widest opportunity for a verdict to be fabricated or wiped."""
+    from fastapi import HTTPException
+
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    # Two rows that both sanitize away → derive_basis_series raises ValueError
+    # (<2 finite) → the generic catch-all.
+    sb = _csv_supabase_mock(
+        [
+            {"date": "2024-01-01", "daily_return": float("nan")},
+            {"date": "2024-01-02", "daily_return": float("nan")},
+        ],
+        existing_flags={"csv_source": True},
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=([], False))):
+        with pytest.raises(HTTPException) as exc_info:
+            await run_csv_strategy_analytics("s1")
+
+    assert exc_info.value.status_code == 500
+    assert any(u.get("computation_status") == "failed" for u in sb.upserts), (
+        "expected the unrecoverable failure stamp"
+    )
+    _assert_no_verdict_anywhere(sb, "the catch-all arm must not touch the verdict")

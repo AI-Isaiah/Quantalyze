@@ -138,6 +138,21 @@ function defaultAnalyticsRow(
     metrics_json_by_basis: { cash_settlement: {} },
     data_quality_flags: DEFAULT_DQ,
     computed_at: "2026-07-01T00:00:00.000Z",
+    // 142.2 review FIX 3 — the TRUTHFUL post-phase fixture for a COMPLETED
+    // composite stitch. `run_stitch_composite_job` stamps a verdict on its
+    // headline write, so a row that reached this arm at all carries one; a
+    // fixture without it would model a state the successful path cannot
+    // produce. Every case in this file is a completed stitch, which is why it
+    // belongs in the shared default rather than in each test.
+    //
+    // ⚠️ Do NOT "simplify" by removing it. The composite arm now evaluates the
+    // same admissibility the admin approve path applies, so dropping this key
+    // sends all 23 completed-composite cases down the
+    // GATE_SERIES_PROVENANCE_UNVERIFIED arm and they stop testing the passed
+    // render at all — they would go green again only by weakening the
+    // assertions. The unstamped case has its own dedicated test at the bottom
+    // of this file, where the null is the SUBJECT rather than an accident.
+    series_completeness: "composite_stitched",
     ...overrides,
   };
 }
@@ -1351,5 +1366,137 @@ describe("[93-02] SyncPreviewStep — declared-window fallback (HARD-02)", () =>
     });
 
     expect(screen.getByText("2025-08-03 – 2025-09-30")).toBeInTheDocument();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// 142.2 CODE REVIEW — FIX 3: THE COMPOSITE ARM SHOWED A PREVIEW THE ADMIN
+// PATH WOULD REFUSE.
+//
+// The composite arm reached `setPhase("passed")` without evaluating ANY
+// admissibility. That was harmless while the admin approve path admitted
+// composites on the `!input.apiKeyId` term this phase DELETED: keylessness
+// alone let them through on both sides, so preview and publish agreed by
+// accident. Admission now requires a POSITIVE `series_completeness` verdict,
+// which this arm never read — so a composite on an unstamped row (a legacy
+// composite, or a stitch that took the failure arm, which deliberately OMITS
+// the column so a prior verdict survives) saw "passed", submitted, and was
+// then refused at publish.
+//
+// A preview that promises what publish will refuse is worse than either side
+// refusing: the user completes the whole wizard before finding out.
+//
+// ⚠️ THE PAIR IS THE TEST. Either case alone is satisfiable by a wrong
+// implementation — "always refuse" passes the first, "never check" (i.e. the
+// pre-fix code) passes the second. Only both together pin the predicate.
+// ══════════════════════════════════════════════════════════════════════════
+
+describe("[142.2 FIX 3] SyncPreviewStep — composite preview agrees with the publish gate", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    baseProps.onComplete = vi.fn();
+    baseProps.onTryAnotherKey = vi.fn();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ ok: true, accepted: true, status: "syncing", composite: true }),
+        { status: 200 },
+      ),
+    );
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: () => Promise.resolve({ data: null, error: null }),
+          }),
+        }),
+      }),
+    });
+  });
+
+  async function renderComposite(opts: Partial<CompositeMockOpts>) {
+    installCompositeSupabaseMock({
+      pollOutcome: () => ({ kind: "row", status: "complete_with_warnings" }),
+      ...opts,
+    });
+    render(<SyncPreviewStep {...baseProps} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+  }
+
+  it("REFUSES a composite whose stitch never stamped a verdict, instead of previewing it as passed", async () => {
+    // NULL is the state of a legacy composite and of any stitch that took the
+    // failure arm. The admin approve path refuses it; before FIX 3 this arm
+    // showed a full factsheet preview and a "Use this key" button.
+    //
+    // Fails without the fix: the pre-fix arm reaches setPhase("passed") and
+    // renders the preview, so `error-envelope` is absent.
+    await renderComposite({
+      analyticsRow: defaultAnalyticsRow({ series_completeness: null }),
+    });
+
+    const envelope = screen.getByTestId("error-envelope");
+    expect(envelope.getAttribute("data-error-code")).toBe(
+      "GATE_SERIES_PROVENANCE_UNVERIFIED",
+    );
+
+    // The ORIGINAL INTENT of this arm is preserved: a composite must never be
+    // false-failed for having zero fills. It was refused for its missing
+    // verdict, NOT for its trade count.
+    expect(screen.queryByText(/minimum of 5 trades/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/only 0 trade/i)).not.toBeInTheDocument();
+
+    // …and the remedy offered is non-destructive. `onTryAnotherKey` fires
+    // handleDeleteDraft(), which would destroy the draft and every
+    // strategy_keys member under a composite — the worst possible answer to
+    // "we could not read your stitch's verdict".
+    expect(
+      screen.queryByTestId("wizard-try-another-key"),
+    ).not.toBeInTheDocument();
+    expect(baseProps.onTryAnotherKey).not.toHaveBeenCalled();
+    expect(screen.getByTestId("wizard-back-to-strategies")).toBeInTheDocument();
+  });
+
+  it("still PASSES a properly stitched composite — the fix must not refuse the healthy case", async () => {
+    // The anti-over-refusal half. `composite_stitched` is what
+    // run_stitch_composite_job stamps on a successful headline write, and it is
+    // in the gate's allow-list, so preview and publish both admit it.
+    //
+    // Without this, "refuse every composite" would satisfy the test above and
+    // make composites permanently un-previewable.
+    await renderComposite({
+      analyticsRow: defaultAnalyticsRow({
+        series_completeness: "composite_stitched",
+      }),
+    });
+
+    expect(screen.queryByTestId("error-envelope")).not.toBeInTheDocument();
+  });
+
+  it("REFUSES a composite carrying a verdict the gate does not trust", async () => {
+    // FIX 2 downgrades a composite to `sampled_gapped` when any member carried a
+    // MEASURED coverage hole. That verdict is not in the allow-list, so the
+    // admin path refuses it — and this arm must agree rather than previewing a
+    // known-holed track record as passed. Pins that the arm evaluates the
+    // ALLOW-LIST and not merely "is the column non-null".
+    await renderComposite({
+      analyticsRow: defaultAnalyticsRow({
+        series_completeness: "sampled_gapped",
+      }),
+    });
+
+    const envelope = screen.getByTestId("error-envelope");
+    expect(envelope.getAttribute("data-error-code")).toBe(
+      "GATE_SERIES_PROVENANCE_UNVERIFIED",
+    );
   });
 });

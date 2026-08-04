@@ -2495,6 +2495,7 @@ export type Database = {
           return_quantiles: Json | null
           returns_series: Json | null
           rolling_metrics: Json | null
+          series_completeness: string | null
           sharpe: number | null
           six_month_return: number | null
           sortino: number | null
@@ -2525,6 +2526,7 @@ export type Database = {
           return_quantiles?: Json | null
           returns_series?: Json | null
           rolling_metrics?: Json | null
+          series_completeness?: string | null
           sharpe?: number | null
           six_month_return?: number | null
           sortino?: number | null
@@ -2555,6 +2557,7 @@ export type Database = {
           return_quantiles?: Json | null
           returns_series?: Json | null
           rolling_metrics?: Json | null
+          series_completeness?: string | null
           sharpe?: number | null
           six_month_return?: number | null
           sortino?: number | null

@@ -477,6 +477,13 @@ describe("M-0591 — every reachable error code resolves to real (non-UNKNOWN) c
       "INSUFFICIENT_TRADES",
       "INSUFFICIENT_DAYS",
       "INSUFFICIENT_CSV_HISTORY",
+      // 142.2 review FIX 1. Deliberately NOT added to `intentionallyUnknown`
+      // below: it is terminal AND wizard-reachable (a keyed ledger-backed
+      // strategy on an unstamped analytics row lands here, as does an unstamped
+      // composite), so it MUST resolve to real, non-UNKNOWN copy. That is the
+      // whole point of minting it — the state it names previously rendered
+      // GATE_INSUFFICIENT_TRADES, whose sentence was false for it.
+      "SERIES_PROVENANCE_UNVERIFIED",
       "ANALYTICS_MISSING",
       "ANALYTICS_PENDING",
       "ANALYTICS_COMPUTING",
@@ -1369,6 +1376,33 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * destructive member, so this guard is unaffected in substance. The
    * reasoning below was re-run over both new entries BEFORE the number moved.
    *
+   * **61 at 142.2-07**, which added `KEY_MISSING_REQUIRED_FIELD`,
+   * `KEY_UNSUPPORTED_VENUE`, `KEY_VENUE_NOT_ENABLED` and `KEY_INPUT_TOO_LONG`
+   * (MT5-04 / D-05 — the four causes `KEY_INVALID_FORMAT` used to swallow). The
+   * reasoning was re-run over all four before the number moved: three carry
+   * `clear_and_retry` + `request_call` and the fourth (`KEY_VENUE_NOT_ENABLED`)
+   * carries `request_call` alone. NONE carries `start_fresh`, so the destructive
+   * class below is unchanged at four members and this guard is unaffected in
+   * substance. `KEY_VENUE_NOT_ENABLED`'s single-action shape was checked against
+   * the guard directly rather than assumed: the scan only examines entries that
+   * DO carry a destructive action, so an entry with one non-destructive action
+   * is out of its population by construction.
+   *
+   * **62 at the 142.2 code review (FIX 1)**, which added
+   * `GATE_SERIES_PROVENANCE_UNVERIFIED` — the honest answer for a strategy whose
+   * daily series no producer has examined, replacing a false
+   * `GATE_INSUFFICIENT_TRADES` for that state. The reasoning was re-run before
+   * the number moved, and this entry is one THIS guard has a direct stake in:
+   * its actions are `clear_and_retry` + `request_call`, carrying NEITHER
+   * `try_another_key` NOR `start_fresh`, so the destructive class below is
+   * unchanged at four members and the entry is out of the scanned population by
+   * construction. That exclusion is the fix, not a side effect — the state it
+   * replaces rendered `try_another_key`, whose control fires
+   * `handleDeleteDraft()` and destroys the draft plus every `strategy_keys`
+   * member under it. Answering "we never recorded where your returns came from"
+   * with "delete your work" is the dead end the code was minted to remove, so
+   * re-adding a destructive action here would defeat its purpose.
+   *
    * Without it a table that SHRANK — an entry deleted, or the export replaced
    * by an empty object — would satisfy every assertion below vacuously. A scan
    * over nothing passes.
@@ -1378,7 +1412,7 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * Bumping the LITERAL when the table legitimately grows is the intended
    * maintenance cost; replacing it with a derived value removes the guard.
    */
-  const EXPECTED_TABLE_SIZE = 57;
+  const EXPECTED_TABLE_SIZE = 62;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -1531,8 +1565,37 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * "not your data" and "Nothing was saved", neither of which is the banned
    * string, and "Nothing was saved" is verified true at its arm at three
    * layers rather than asserted.
+   *
+   * **61 at 142.2-07** (`KEY_MISSING_REQUIRED_FIELD`, `KEY_UNSUPPORTED_VENUE`,
+   * `KEY_VENUE_NOT_ENABLED`, `KEY_INPUT_TOO_LONG` — MT5-04 / D-05). All four
+   * were read against all four FORBIDDEN fragments by hand before the number
+   * moved. None mentions notification, trade fetching, or a session field name.
+   * The one needing care is again "data is unchanged", because three of the four
+   * DO make a server-state claim: `KEY_MISSING_REQUIRED_FIELD` says "Nothing was
+   * sent to the exchange and nothing was stored" and `KEY_VENUE_NOT_ENABLED`
+   * says "not sent anywhere and nothing was stored". Neither is the banned
+   * string, and both are KNOWABLE rather than asserted — every one of these
+   * guards returns from the route BEFORE `validateKey`, `encryptKey`, the
+   * limiter and the RPC, so no request was issued and no row was written. That
+   * is the same test 140.3-15's entry passed and the CSV case failed: the
+   * question is not whether the sentence is comforting but whether the code path
+   * makes it observable.
+   *
+   * **62 at the 142.2 code review (FIX 1)**
+   * (`GATE_SERIES_PROVENANCE_UNVERIFIED`). Read against all four FORBIDDEN
+   * fragments by hand before the number moved. It mentions no notification, no
+   * trade fetching, and no session field name. The one needing care is again
+   * "data is unchanged", because the entry DOES make a server-state claim:
+   * "nothing on our side recorded how that series was built". That is not the
+   * banned string, and — applying the same test 140.3-15's entry passed and the
+   * CSV case failed — it is OBSERVABLE rather than asserted: it restates the
+   * exact value the gate just read (`strategy_analytics.series_completeness` was
+   * NULL or unrecognised) and is the sole reason the refusal fired. It is not a
+   * negative about a write that may or may not have landed. The entry also
+   * volunteers "This is a gap in our bookkeeping, not a judgement about your
+   * trading", which is a statement about US and is the point of the code.
    */
-  const EXPECTED_TABLE_SIZE = 57;
+  const EXPECTED_TABLE_SIZE = 62;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2343,5 +2406,207 @@ describe("[140.5-02 / B-02] the three real analytics-client messages, replayed",
         ).toBe(false);
       }
     }
+  });
+});
+
+/**
+ * Phase 142.2-07 / MT5-04 (D-05) — THE SPLIT OF `KEY_INVALID_FORMAT`.
+ *
+ * The two wizard connect routes answered ONE code at twelve guards each. Eleven
+ * of the twelve were not format failures at all — a malformed body, an
+ * unsupported venue, a missing api_key, two venue server switches, two
+ * missing-secret arms, a missing OKX passphrase, a missing session id and three
+ * length caps — and every one rendered "This does not look like a valid API key
+ * for the selected exchange", opening with a sentence that blamed a CLIENT-SIDE
+ * check. Every one of those 24 sites is a server-side route guard, so the
+ * sentence was false at all of them.
+ *
+ * These cases cover the REGISTRY half. The (status, code) pairing per guard is
+ * pinned in the two route specs, and the three-registry membership invariant is
+ * pinned in `wizardErrors.invariant.test.ts`.
+ */
+describe("[142.2-07 / MT5-04] KEY_INVALID_FORMAT split into four honest causes", () => {
+  /**
+   * HAND-TYPED, and deliberately not derived from the union or from either
+   * roster: a derivation compared against a second derivation cannot fail. If
+   * this list and the shipped table disagree, one of them is wrong and the
+   * failure has to name which code moved.
+   */
+  const NEW_CODES = [
+    "KEY_MISSING_REQUIRED_FIELD",
+    "KEY_UNSUPPORTED_VENUE",
+    "KEY_VENUE_NOT_ENABLED",
+    "KEY_INPUT_TOO_LONG",
+  ] as const;
+
+  it("the KEY_INVALID_FORMAT cause no longer claims a CLIENT-SIDE check", () => {
+    const copy = WIZARD_ERROR_COPY.KEY_INVALID_FORMAT;
+
+    // The exact regression, stated on the string that carried it. Every site
+    // that emitted this code is a guard inside a Next route handler; the
+    // browser never ran a format check on the secret at all.
+    expect(
+      copy.cause.toLowerCase(),
+      "The cause opened 'Client-side format check failed', which was false at " +
+        "every one of the 24 sites that carried this code — all of them are " +
+        "server-side route guards. Correcting the sentence is half the fix; " +
+        "the other half is that only a genuine format failure still reaches it.",
+    ).not.toContain("client-side");
+
+    // HAND-TYPED expected sentence. Reading the module's own value onto the
+    // expected side would assert only that a string equals itself.
+    expect(copy.cause).toBe(
+      "A format check on our side rejected the API secret before anything was sent to the exchange. Binance secrets are 64 hex characters; OKX and Bybit use different formats.",
+    );
+
+    // The per-venue guidance is the half worth KEEPING, and it only becomes
+    // true once the split leaves this code on the `api_secret.length < 8` ccxt
+    // arm. A future edit that drops it makes the entry less useful, not safer.
+    expect(copy.cause).toContain("64 hex characters");
+  });
+
+  it.each(NEW_CODES)(
+    "%s resolves to a real entry — title, cause, and at least one fix step",
+    (code) => {
+      const copy = formatKeyError(code);
+
+      // Non-UNKNOWN is the load-bearing half: a code in the union with no table
+      // entry falls through to the UNKNOWN fallback, which would replace one
+      // wrong sentence with a vaguer one.
+      expect(
+        copy.title,
+        `${code} rendered the UNKNOWN fallback — it has no entry of its own.`,
+      ).not.toBe(WIZARD_ERROR_COPY.UNKNOWN.title);
+
+      expect(copy.title.length).toBeGreaterThan(4);
+      expect(copy.cause.length).toBeGreaterThan(20);
+      expect(copy.fix.length).toBeGreaterThanOrEqual(1);
+      for (const step of copy.fix) expect(step.length).toBeGreaterThan(10);
+      expect(copy.actions.length).toBeGreaterThanOrEqual(1);
+      expect(copy.docsHref).toMatch(/^\/security/);
+    },
+  );
+
+  /**
+   * HAND-TYPED INTERNAL-VOCABULARY DENYLIST.
+   *
+   * The defect this phase closes is copy that describes OUR machinery to a user
+   * who cannot act on it. The founder's actual failure was a server-side venue
+   * switch reported as a key-format problem — and the tempting "fix" is to name
+   * the switch, which trades a false sentence for an unactionable one and leaks
+   * an internal name (V7). Static strings, so no scrubber runs over them; the
+   * discipline `scrubSeamError` / `scrub_freeform_string` enforce on DERIVED
+   * strings is written into the copy by hand and asserted here.
+   *
+   * Matched at a WORD BOUNDARY with a trailing-word-character allowance, not as
+   * a bare substring: a substring match on "env" reddens on "seven" and one on
+   * "gate" reddens on "propagate", and a guard that cries wolf gets deleted.
+   * The allowance is what keeps "flags", "gated" and "environment" caught.
+   *
+   * ⚠️ KNOWN LIMIT, stated rather than hidden — and it was MEASURED by this
+   * file's own self-test failing on it, not reasoned about in advance. The
+   * trailing allowance also matches an innocent word that merely STARTS with a
+   * denylisted term: "flagrant" trips "flag". The alternative (exact-word match)
+   * lets "flags", "gated" and "environment" through, which are the forms the
+   * offending copy would actually take. The false positive is a word no error
+   * copy on this surface would use; the false negatives are the likely ones. If
+   * a legitimate string ever trips it, add the word to a narrow exemption with
+   * its reason — do not drop the allowance.
+   */
+  const INTERNAL_VOCABULARY: readonly string[] = [
+    "MT5_ENABLED",
+    "SFOX_ENABLED",
+    "flag",
+    "env",
+    "seam",
+    "gate",
+    "server-side",
+    "endpoint",
+    "worker",
+  ];
+
+  function offendingTerms(text: string): string[] {
+    return INTERNAL_VOCABULARY.filter((term) =>
+      new RegExp(`\\b${term}\\w*\\b`, "i").test(text),
+    );
+  }
+
+  it.each(NEW_CODES)("%s's copy carries no internal vocabulary", (code) => {
+    const copy = WIZARD_ERROR_COPY[code];
+    const strings = [copy.title, copy.cause, ...copy.fix];
+
+    for (const s of strings) {
+      expect(
+        offendingTerms(s),
+        `${code} names something a user cannot see or act on, in: "${s}". ` +
+          `Say what THEY should change, never what our software is doing.`,
+      ).toEqual([]);
+    }
+  });
+
+  it("SELF-TEST — the denylist scanner can actually fire, and does not cry wolf", () => {
+    // Without the positive half, "no offenders" is indistinguishable from a
+    // regex that matches nothing — the vacuity failure that makes an absence
+    // assertion green forever.
+    expect(offendingTerms("MT5_ENABLED is not set on the server")).toContain(
+      "MT5_ENABLED",
+    );
+    expect(offendingTerms("the feature flags are off")).toContain("flag");
+    expect(offendingTerms("the seam returned nothing")).toContain("seam");
+    expect(offendingTerms("this venue is gated")).toContain("gate");
+    expect(offendingTerms("read the env var")).toContain("env");
+
+    // The negative half: the boundary allowance exists so ordinary English does
+    // not redden the guard. Each of these CONTAINS a denylisted substring and
+    // must not match.
+    for (const innocent of [
+      "seven of the fields",
+      "eventually the exchange responds",
+      "we propagate the change",
+      "investigate the mismatch",
+      "the exchange rejected the request",
+    ]) {
+      expect(
+        offendingTerms(innocent),
+        `"${innocent}" is ordinary prose and must not trip the denylist.`,
+      ).toEqual([]);
+    }
+  });
+
+  it("the four new codes are members of the union AND resolve through formatKeyError", () => {
+    // A compile-time membership check would be satisfied by a cast; this is the
+    // runtime half. The `satisfies` below is the static half and fails
+    // typecheck if a name drifts.
+    const codes = NEW_CODES satisfies readonly WizardErrorCode[];
+    for (const code of codes) {
+      expect(Object.keys(WIZARD_ERROR_COPY)).toContain(code);
+      expect(formatKeyError(code).title).toBe(WIZARD_ERROR_COPY[code].title);
+    }
+  });
+
+  it("KEY_VENUE_NOT_ENABLED is NOT recoverable — no Retry control on a closed venue", () => {
+    // Behaviour, not copy: `envelope.ts` derives `recoverable` from `actions`,
+    // and neither member of RECOVERABLE_ACTIONS (`clear_and_retry`,
+    // `try_another_key`) is present. Resubmitting the identical request while
+    // the venue is closed can only fail again — the same reasoning
+    // COMPOSITE_TOO_MANY_MEMBERS and SEAM_MISCONFIGURED are built on.
+    const actions = WIZARD_ERROR_COPY.KEY_VENUE_NOT_ENABLED
+      .actions as readonly string[];
+    expect(actions).not.toContain("clear_and_retry");
+    expect(actions).not.toContain("try_another_key");
+    // ...but it must still offer a way out, or it is a dead end (TRAP-4).
+    expect(actions.length).toBeGreaterThanOrEqual(1);
+    expect(actions).toContain("request_call");
+  });
+
+  it("'not supported' and 'not open yet' stay DISTINCT codes with distinct copy", () => {
+    // The split's whole point in miniature. Collapsing these two would tell a
+    // user to abandon a venue that is coming, or to wait for one that is not.
+    const never = WIZARD_ERROR_COPY.KEY_UNSUPPORTED_VENUE;
+    const notYet = WIZARD_ERROR_COPY.KEY_VENUE_NOT_ENABLED;
+
+    expect(never.title).not.toBe(notYet.title);
+    expect(never.cause).not.toBe(notYet.cause);
+    expect(notYet.title.toLowerCase()).toContain("yet");
   });
 });

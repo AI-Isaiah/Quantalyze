@@ -184,25 +184,39 @@ true for 146 and half of 142–145, and **false for 141**.
   those changes invalidate. Plan-check found 4; plans 06, 07 and 08 each found one *more* the plan did
   not predict. Fold into the planning template, not a code phase.
 
-### MT5 wizard — founder-observed on live UI (added 2026-08-02)
-- **MT5 connect fails with copy that names the wrong exchanges.** Submitting the MT5 form
-  (login / investor password / broker server, all filled) renders *"This does not look like a
+### MT5 wizard — founder-observed on live UI (added 2026-08-02) — ✅ BOTH DEFECTS CLOSED
+
+> ⚠️ **Neither defect is open.** Kept as a record because the *shape* of the fix (a class fix, not
+> the instance) and one **rejected** remedy are what future readers need. Do not re-open either
+> item; the residual scope lives in `DEF-142.2-02` below (the 9 out-of-scope emitting sites).
+> ⛔ **Closing these means the MT5 connect flow is REACHABLE and its rejections are HONEST. It does
+> NOT mean MT5's rendered numbers are correct** — that is Phase 142.3's gate (D-17).
+
+- **MT5 connect failed with copy that named the wrong exchanges.** Submitting the MT5 form
+  (login / investor password / broker server, all filled) rendered *"This does not look like a
   valid API key for the selected exchange… Binance secrets are 64 hex characters; OKX and Bybit
-  use different formats"* with `code: KEY_INVALID_FORMAT`. Two defects stacked, both real:
-  1. **Leading hypothesis for the rejection itself — the documented client-on/server-off
-     half-state.** `create-with-key/route.ts:147` returns exactly this code when
-     `isMt5EnabledServer()` is false, and that gate is strict `MT5_ENABLED === "true"` on the
-     **Vercel/Next server** — a *different* variable from the worker's `MT5_ENABLED` and from
-     `NEXT_PUBLIC_MT5_ENABLED` (which is what renders the MT5 card the founder clicked).
-     **Check Vercel prod env for a server-side `MT5_ENABLED=true` before writing any code** —
-     if it is missing this is an env fix, not a code fix, and the card is offerable while the
-     submit path is closed.
-  2. **Independent of (1): the wizard's `KEY_INVALID_FORMAT` copy is exchange-generic and
-     discards the server's specific `error` string.** The route sent *"MT5 integration is not
-     yet available."*; the user was shown Binance/OKX/Bybit hex-length advice. One shared code
-     is bucketing unrelated causes, and the renderer drops the detail that would have explained
-     it. Fix the mapping to be exchange-aware (and to surface the server reason) regardless of
-     how (1) resolves — otherwise every future MT5 rejection lies the same way.
+  use different formats"* with `code: KEY_INVALID_FORMAT`. Two defects were stacked, both real:
+  1. ✅ **CLOSED — it WAS the client-on/server-off half-state, and it was an env fix.**
+     `create-with-key/route.ts:147` returned exactly this code when `isMt5EnabledServer()` was
+     false, and that gate is strict `MT5_ENABLED === "true"` on the **Vercel/Next server** — a
+     *different* variable from the worker's `MT5_ENABLED` and from `NEXT_PUBLIC_MT5_ENABLED`
+     (which is what renders the MT5 card the founder clicked). **Resolved 2026-08-03 by MT5-01:**
+     the server-side flag was set in Vercel prod and the app redeployed, verified by the
+     `/security` mt5-readonly curl. No code was written for it — it was never a code defect.
+  2. ✅ **CLOSED as a CLASS by Phase 142.2 plan 07 (MT5-04), not as the instance.** The single
+     `KEY_INVALID_FORMAT` bucket was split across **24 emitting sites (12 + 12)** in
+     `create-with-key/route.ts` and `composite/add-key/route.ts` into four honest codes
+     (`KEY_MISSING_REQUIRED_FIELD`, `KEY_UNSUPPORTED_VENUE`, `KEY_VENUE_NOT_ENABLED`,
+     `KEY_INPUT_TOO_LONG`); `KEY_INVALID_FORMAT` now survives on exactly one genuine format guard
+     per route and its copy no longer claims a browser-side check that never ran. Guards, HTTP
+     statuses and `error` strings are byte-identical at every site — only the `code:` literal
+     moved. `wizardErrors.invariant.test.ts` reddens if a future code is emitted without landing
+     in all three registries. ⚠️ Fixing the *class* was deliberate: MT5-01 had already made the
+     founder's own failing arm unreachable, so an instance fix would have repaired a line that
+     can no longer fire.
+     ⛔ **The "surface the server's `error` string" half was REJECTED by founder decision D-05 —
+     copy-by-code only.** Do not re-open it as an unfinished half of this item. The wizard renders
+     copy keyed on the code and deliberately renders no server-supplied string.
 
 ---
 
@@ -386,6 +400,53 @@ true for 146 and half of 142–145, and **false for 141**.
   comes from — the MT5 gateway can enumerate what its terminal knows, but that is one terminal's
   view, not a global registry. Decide between gateway-enumerated, a curated broker→servers map,
   or free-text-with-suggestions before planning.
+
+- **⭐ Expose an MCP server so a client can read their own stored data and analyse it with their own
+  AI** (founder-requested 2026-08-03, during `/gsd-plan-phase 142.2`). Once we have ingested and
+  derived a client's data, they should be able to point their own AI assistant at it — Claude
+  Desktop, Claude Code, ChatGPT, whatever they use — and ask their own questions, rather than being
+  limited to the analyses we chose to render. This is a **product** idea, not a refactor: it turns
+  Quantalyze from "the dashboard we built" into "your data, queryable", and it is a natural fit for
+  the backbone because **dailies are canonical** — one clean series to expose rather than N bespoke
+  panels.
+  **Not planned, not scoped, not scheduled** — captured so it is not lost. Before it can be planned,
+  four things need a decision, and the first two are the ones that make it non-trivial:
+  - **Auth.** MCP has no ambient session. This needs a per-user credential (scoped token / OAuth)
+    with a revocation story, and it must be **read-only** and **owner-scoped** — the RLS discipline
+    that governs every other read path applies here, and a SECURITY DEFINER shortcut would be a
+    tenant-leak risk. See the `get_published_trust_signals` SECDEF precedent for how narrow such a
+    surface has to be.
+  - **What is exposed.** Dailies + derived metrics is the honest answer (canonical, already the
+    single source). Raw `trades` is tempting and mostly wrong — it is a partly-redundant
+    representation only some venues populate (see Phase 142.2 / D-16). Exposing it would re-teach
+    clients the same wrong model the strategy gate just had to unlearn.
+  - **Hosting shape.** Remote MCP endpoint on our infra vs. a small local server the client runs
+    against an API token. Remote is far easier to support and revoke; local is easier to trust.
+  - **Whether it is a paid tier.** Likely yes, but that is a CEO call, not an engineering one.
+  ⚠️ Note the adjacent risk: an MCP surface is a **new public read boundary**. Every hardening
+  lesson already paid for on the public factsheet path applies to it from day one, not later.
+
+- **⚠️ `strategy_analytics (*)` splats EVERY analytics column to anon on two public paths.**
+  Found 2026-08-03 by the migration review of Phase 142.2 plan 01, while checking whether a new
+  column would be publicly readable. It would — but so is everything else, and that is the finding.
+  - `src/lib/queries.ts:218` — `getStrategiesByCategory`, wrapped in `withPublishedOnly` → public
+    discovery/browse by category.
+  - `src/app/(dashboard)/compare/page.tsx:68` — same `withPublishedOnly` shape.
+  Policy `analytics_read` (`20260405061912:35-44`) is `status = 'published' OR user_id = auth.uid()`
+  **with no `TO` clause**, so it applies to `anon`. RLS is row-level and cannot hide a column, so the
+  `(*)` embed hands an anonymous reader every column on the row for any published strategy —
+  including `daily_returns`, `metrics_json` and `data_quality_flags`.
+  **The fix already exists in the same file and is half-applied:** `queries.ts:410` and `:448` use
+  the curated `PUBLIC_ANALYTICS_COLUMNS` (`:284`), and the comment at `:700` explicitly says to
+  replace `select("*, strategy_analytics (*)")` with explicit column lists. These two sites were
+  missed. ⚠️ Not a drop-in edit — consumers are typed (`StrategyWithAnalytics`) and browse/compare
+  must be re-checked against the narrowed projection, so it needs its own change with its own tests.
+  ⛔ **Do NOT "fix" this with a column-level `REVOKE` on `anon`.** PostgREST errors on a `(*)` embed
+  when the role lacks a column, so a REVOKE would take **public browse down** until the splats are
+  narrowed first. Narrow the projection, then consider grants — in that order.
+  Phase 142.2 deliberately did NOT special-case its own new `series_completeness` column here: it is
+  an enum carrying no magnitude, and protecting one column while the splat stands would be machinery
+  that secures nothing.
 
 ### Tech-debt / maintainability (opportunistic, don't force)
 - God-files: `queries.ts` (3,205 lines), `job_worker.run_sync_trades_job` (688 lines),
@@ -827,6 +888,14 @@ Read it as such.
    at discovery: of the 8 registered cron jobs, only `reap_strategy_analytics_stuck_computing` puts
    a `LIMIT` inside an `IN (…)` subquery; the other seven carry no `LIMIT` at all — the class is
    closed at one member, so no sweep is owed.
+   **✅ CLOSED 2026-08-03 (post-merge QA, PR #659 in `main`):** the merge-time PROD verification ran
+   read-only against `khslejtfbuezsmvmtsdn` and the deployed `cron.job.command` carries the bound as
+   required — NOT by token presence but by shape: the full body was read and eyeballed; each arm is a
+   single-evaluation `WITH batch AS MATERIALIZED (SELECT … LIMIT 25 FOR UPDATE SKIP LOCKED) UPDATE …
+   FROM batch`, the `AS MATERIALIZED` count is exactly 2, and no `IN (SELECT … LIMIT` shape remains.
+   Job registered `*/15 * * * *`, `active=true`. Bonus: the deployed body includes the non-destructive
+   clock-start companion arm for `(computing, NULL-stamp)` rows, which also closes 142-VERIFICATION
+   Gap 3's deploy-ordering observability window. PROD stuck-`computing` census at check time: **0**.
 7. **✅ Discharged at plan time (recorded so they are not re-raised): W-1 and W-2.** W-1: plans
    claimed SQL-gate Part 4b "stays falsifiable" after the D-18 retrofit; it does not — 4b is a
    **double-mutation** defence-in-depth assertion (trigger arm (a) and the bridge's own keep-arm
@@ -877,6 +946,219 @@ Read it as such.
     Found by the /ship coverage audit, 2026-08-03. **Related and already FIXED in 0.52.0.0:** the
     same job had been made the third member of the one-pending-slot `shared-test-db` concurrency
     group, which cancelled a pending gate outright; it is now gated behind `python`.
+
+### v1.16 Phase-142.2 (MT5 on the unified backbone) — deferred items (added 2026-08-04)
+
+Booked at phase close (plan `142.2-08`). ⛔ **Read the boundary first: 142.2 delivered MT5
+*reachable and honest* — the connect flow works and its rejections name their true cause. It did
+NOT verify that MT5's rendered performance NUMBERS are correct.** That is Phase 142.3 (MT5-06..10,
+decisions D-07..D-11), against the live terminal on a trading day. Nothing below, and no artifact
+of 142.2, may be read as evidence of MT5 number-correctness.
+
+None of these clears the founder blast-radius bar as blocking. Each names its source decision.
+
+1. **`DEF-142.2-01` — MT5 broker-server typeahead (D-04). ⛔ NOT a simple UI task: there is no data
+   source.** The field ships as plain text (now legible rather than dot-masked, MT5-03) plus the
+   helper copy at `ConnectKeyStep.tsx:144` ("copy the server name exactly as it appears in your MT5
+   terminal") — which is the only reliably correct instruction we can give. **The blocker is data,
+   not UI.** `grep` for `broker_server` / `server_name` across `.py`/`.ts`/`.tsx` returns **zero
+   hits repo-wide**, and there is no public canonical registry of MT5 broker server names. Three
+   candidate sources were considered and rejected: (a) **curated static list** — rots silently as
+   brokers add/rename servers, and the field must stay free-text anyway, so the list can only ever
+   be a hint; (b) **learn-from-successful-connections** — empty until MT5 has real users, and it
+   leaks one user's broker choice to every other user; (c) **public registry** — does not exist.
+   ⚠️ A *partial* list is worse than none: it invites picking a near-match that then fails
+   validation, which is precisely the confusing-rejection class this phase just closed. Re-open
+   only with a named, maintainable data source attached.
+2. **`DEF-142.2-02` — `KEY_INVALID_FORMAT` split, the remaining 2 routes (D-06): 9 emitting sites,
+   not 11.** Measured at HEAD by `grep -c 'code: "KEY_INVALID_FORMAT"'`:
+   `src/app/api/keys/validate-and-encrypt/route.ts` → **4**, `src/app/api/verify-strategy/route.ts`
+   → **5**. (The research's "11" and the 142.2-CONTEXT D-06 text counted comment prose; the same
+   two-per-file delta that made the in-scope routes read 14 instead of 12.) **Same defect class** as
+   the 24 sites plan 07 fixed — one code bucketing unrelated causes — but **different callers and
+   different copy contracts**: `validate-and-encrypt` is an internal surface and `verify-strategy`
+   is the public/teaser verification path, so the four new codes' wizard copy is not automatically
+   the right copy there. Deliberately untouched by 142.2: both files are byte-unchanged.
+3. **`DEF-142.2-03` — the destructive remedy on a gate refusal is still live.** `GATE_INSUFFICIENT_TRADES`
+   offers "try another key"; `onTryAnotherKey` (`WizardClient.tsx:911-926`) fires
+   `void handleDeleteDraft()`, which destroys the draft **and cascades away every `strategy_keys`
+   member**. MT5-12 removed the *unwinnable* case for MT5 (a complete daily series can now pass the
+   gate on its own verdict, so an MT5 user is no longer cornered into pressing it), but **the
+   destructive remedy itself is unchanged** and still the offered remedy on every other refusal.
+   Classed DoS (user-inflicted) in the 142.2 RESEARCH security table. Verified still live at HEAD.
+4. **`DEF-142.2-04` — ccxt/perp verdict refinement is blocked on the ingestion truncation bugs,
+   deliberately.** `combine_realized_and_funding` stamps `fill_derived_unproven` **always — a
+   constant, not a computation**. A data-driven refinement (stamp `ledger_complete` when realized
+   records provably span the series) would newly **ADMIT** exactly the accounts a silent-truncation
+   bug makes look healthy. Fix the known truncating inputs first — the **OKX bills paginator** and
+   the **bybit funding cursor**, both already booked under § Money-path correctness — then revisit.
+   Order matters: refining first would publish understated track records with a certified verdict.
+5. **`DEF-142.2-05` — `_LEDGER_BACKED_SOURCES` → `adapter.fetches_fills` (optional follow-up).**
+   `analytics-service/services/ingestion/long_fetch.py:63` still holds a venue literal set. ⚠️ It is
+   **NOT** the set MT5-12 deleted and must not be removed: it answers an **adapter-capability**
+   question (does this adapter implement `fetch_raw` / `compute_fingerprint` /
+   `reconstruct_positions`, or does it raise `NotImplementedError` by design?), which is legitimately
+   a venue property. The TypeScript mirror was the trust judgement, and that one is gone. Turning
+   the ingestion set into a property on the adapter that already knows the answer would remove the
+   last venue literal; it is cheap, and **not required by the MT5-12 invariant**.
+6. **`DEF-142.2-06` — `database.types.ts` is drifting and there is no regeneration script.** Phase
+   142.2 plan 06 hand-patched **only** `series_completeness` (3 sites: `Row`/`Insert`/`Update`).
+   Three pre-existing `strategy_analytics` columns remain missing: `computing_started_at`,
+   `computation_warned`, `metrics_json_by_basis`. `package.json` has **no** types-generation script
+   and `ci.yml` mentions `database.types` nowhere, so there is no freshness gate — which is why the
+   drift went months unnoticed. The honest fix is all three columns **plus a gate**, not a fourth
+   one-off addition. **Supersedes/absorbs** the narrower Phase-142 item above (§ "BOTH TypeScript
+   type files are stale…"), which names the same two columns for `types.ts`; do not fix them
+   separately.
+7. **`DEF-142.2-07` — Deribit `twr_chain_broken` tightening: FOUNDER DECISION, with the census
+   number attached.** Plan 03 shipped the **behaviour-preserving** default — deribit keeps
+   `ledger_complete` on **both** return paths even when `meta` carries `twr_chain_broken`.
+   Tightening it (stamp a non-admissible verdict when the chain is broken) is a real option, and the
+   read-only PROD census that governs it was run in plan 04: **deribit rows carrying
+   `twr_chain_broken` = 0 — total AND published** (1 row carries the flag on a non-deribit venue).
+   **So tightening would affect nothing today.** ⚠️ Not decided by the phase, on purpose — it is a
+   trust-policy call, not an implementation detail. **Remedy rule if it is ever tightened: affected
+   series get a RE-DERIVE, never a backfill `UPDATE`** (see item 9 for why).
+8. **`DEF-142.2-08` — renaming `csv_daily_returns`.** The table is the canonical daily series for
+   **every** producer (keyed derive, composite stitch, CSV upload), so the `csv_` prefix now names
+   only one of three producers. Cosmetic relative to the MT5-12 invariant, which is satisfied by the
+   verdict column regardless of the table's name. Low value, non-trivial blast radius; do it only if
+   the table is being touched for another reason.
+9. **`DEF-142.2-09` — the Pitfall-6 healing population: 6 unpublished strategies, THREE remedies,
+   one per producer. ⛔ NEVER a backfill `UPDATE`.** Every pre-existing `strategy_analytics` row has
+   `series_completeness IS NULL`, and the gate is fail-closed on NULL. Plan 04's read-only PROD
+   census (44 strategies: 33 published, 8 `pending_review`, 1 draft, 1 private, 1 archived) sized it:
+   - **1 keyed** → **RE-DERIVE** (`derive_broker_dailies`; the combiner re-examines the venue inputs
+     and stamps the verdict it can still justify).
+   - **4 keyless CSV** (`api_key_id IS NULL`, non-composite) → **RE-RUN `compute_analytics_from_csv`**,
+     whose `run_csv_strategy_analytics` pass stamps `user_supplied`. ⚠️ **This is the remedy that is
+     easy to omit and it covers the LARGEST group.** No derive job ever runs for a keyless
+     non-composite and no stitch exists for it, so a note saying only "re-derive or re-stitch" hands
+     the founder an *impossible instruction* for 4 of the 6.
+   - **1 composite** → **RE-STITCH** (`run_stitch_composite_job` stamps `composite_stitched`).
+   - **0 published composites** — the composite regression `composite_stitched` exists to prevent has
+     **no live victims** today.
+   The population **self-heals**: the gate runs at exactly two moments (wizard `SyncPreviewStep`,
+   admin approve), so a NULL verdict cannot un-publish anything already live; it only refuses the
+   next preview until the series is re-produced. ⛔ **A backfill `UPDATE` is forbidden** — it would
+   fabricate a trust claim about series whose inputs were never examined and, for some, no longer
+   exist. That is the exact lie the verdict column was added to make impossible.
+10. **`DEF-142.2-10` — Vercel tooling recommends Workflow DevKit on both wizard connect routes;
+    DECLINED, with the reasoning that must survive.** (Was `DEF-142.2-07-A` in the phase's
+    `deferred-items.md`.) The repo's Vercel plugin hook fires on every edit to
+    `create-with-key/route.ts` (~`:270`, the post-validation seam) and its `composite/add-key`
+    mirror, recommending durable execution for the seam's retry handling. **Not applied, and the
+    reason is a threat-model question rather than a taste call: these are the two SECRET-BEARING
+    routes** — raw `api_key` / `api_secret` / `passphrase` arrive in the request body — so moving
+    them onto a durable-execution substrate puts live credentials across a **new persistence
+    boundary**. Second reason: both routes spend two seam budgets back to back (`validate-key`, then
+    `encrypt-key`) under `maxDuration = 300`, and the 140-series work built a deliberate
+    circuit-breaker + classification posture around that seam (`SERVICE_UNAVAILABLE_RETRY`,
+    `SERVICE_UNREACHABLE`, `SEAM_MISCONFIGURED`) that a large body of route tests pins. Any move
+    must preserve that classification contract. **Disposition:** evaluate as its own phase with a
+    threat model, or reject explicitly and silence the hook on these two paths so it stops
+    recommending a change the security posture does not want.
+11. **`DEF-142.2-11` — `EquityChart.tsx:1119` `react-hooks/exhaustive-deps` warning
+    (`useMemo` missing dep `period`).** Pre-existing, untouched by 142.2, recorded by plans 02, 06
+    and 07 as the sole output of `npm run lint` (0 errors, 1 warning). Batch it with the next edit to
+    that file.
+12. **`DEF-142.2-12` — the 7-row CSV floor is still not evaluated on the wizard's COMPOSITE arm.**
+    Surfaced by the FIX 3 work (2026-08-04) and **pre-existing** — it predates 142.2 and is *not*
+    the verdict-term divergence FIX 3 closed. The admin path applies `STRATEGY_GATE_MIN_CSV_ROWS`;
+    the composite preview does not, so a composite with fewer than 7 stitched days previews as
+    `passed` and 409s at publish — the same preview/publish disagreement class, one term over.
+    ⚠️ Fixing this makes residual 13 below live: it is the path that would route
+    `INSUFFICIENT_CSV_HISTORY` through the wizard mapper for the first time. **Fix the two together
+    or neither.**
+13. **`DEF-142.2-13` — `INSUFFICIENT_CSV_HISTORY` maps to `UNKNOWN`** in `gateFailureToWizardError`,
+    on the documented premise that it "never flows through the wizard error mapper". That premise is
+    true **only while `DEF-142.2-12` is open**. Closing 12 without this one ships a real gate refusal
+    rendered as the generic unknown-error copy.
+14. **`DEF-142.2-14` — recognised-but-refused verdicts still render `INSUFFICIENT_TRADES` copy.**
+    A gapped perp (`fill_derived_unproven`, 0 trades, 135 rows) is still told *"only 0 trade(s), a
+    minimum of 5 is required"* — the same class of false sentence FIX 1 deleted for the NULL case,
+    left standing for the examined case because the **D-15 acceptance test pins that exact code** and
+    the review scoped FIX 1 to NULL/unrecognised. ⚠️ **The refusal itself is correct** — this is a
+    copy decision, not a safety one, which is why it was not smuggled into a fix commit. The honest
+    remedy is a fourth outcome meaning "your series was examined and found incomplete"; doing it
+    requires re-cutting D-15's oracle deliberately, never incidentally.
+15. **`DEF-142.2-15` — the six code-review findings deferred by founder scope call (2026-08-04).**
+    All six cleared the *stopping rule* bar (none user-facing, none data-integrity), which is why
+    they were not fixed alongside the four that were. Recorded here so the deferral is a decision
+    with a record, not an omission. Batch them with the next edit to each file:
+    - **(a) `analytics_runner.py:1564` — `_stamp_user_supplied` infers "not broker-sourced" from a
+      null `api_key_id`, which `ON DELETE SET NULL` also produces.** Delete an API key, and a later
+      recompute stamps `user_supplied` on a series that was actually broker-derived — overstating
+      how the numbers were obtained. Needs a structural check, not a null test.
+    - **(b) `broker_dailies.py:524` — `nav_gap_days` reindexes over the FULL span,** so leading and
+      trailing gaps count the same as interior holes. An sFOX account whose NAV history simply
+      starts later than the requested span is stamped `sampled_gapped` with no interior holes, and
+      is refused. Should count interior-only.
+    - **(c) `analytics_runner.py:1500` — the composite exclusion rests on the `existing_flags`
+      `'composite'` marker, not structural identity.** If that flag is ever cleared or rebuilt
+      without the key, a composite recompute stamps `user_supplied` and erases the
+      machine-stitched-vs-human-uploaded distinction.
+    - **(d) `strategyGate.ts` — the publish-time TOCTOU re-check still refuses with trade-count
+      wording** when analytics are recomputed between wizard preview and admin approve. Same false-
+      sentence class as `DEF-142.2-14`; fix them together.
+    - **(e) `broker_dailies.py:91` — only ONE of the three producer paths validates its stamp
+      against `SERIES_COMPLETENESS_VALUES`.** The other two can emit an unregistered string. Drift
+      direction is fail-closed (an unrecognised verdict refuses), so this is a missing loud signal
+      at the producer, not a live money bug.
+    - **(f) `broker_dailies.py:91` + `strategyGate.ts` — the verdict list is hand-maintained in
+      BOTH Python and TypeScript.** ⚠️ **Do not "fix" this by importing one from the other** — the
+      duplication is deliberate (producer set vs admissibility policy) and documented in the
+      migration comment. The hygiene item is drift *detection*, not de-duplication.
+
+⚠️ **Cross-reference, do NOT duplicate:** the anon-readable `strategy_analytics` splat that plan
+04's A2 check re-confirmed (`anon` holds `SELECT` on `series_completeness`, as it does on every
+column of that table) is already booked above under § Security — *"`strategy_analytics (*)` splats
+every analytics column to anon on two public paths"* (commit `d935fa61`). The new column adds no
+new exposure class: it is an enum carrying no magnitude, and protecting one column while the splat
+stands would secure nothing.
+
+### v1.16 milestone human-audit QA sweep — authed-browser + PROD probes (added 2026-08-03)
+
+Run via /qa over the open GSD human-verification items of phases 140→142.1 against live PROD
+(authed browser as `qa-demo@quantalyze.app` + read-only Supabase/Upstash probes). Discharged that
+day: D-19 PROD cron body (see ✅ on the 142.1 item 6 above), PROD stuck-`computing` census = 0,
+TEST reaper cron registered/active, 140.1 index shape on PROD correct
+(`strategy_verifications_strategy_wizard_session_uniq` present, old index gone), 141.2 audit
+numbers re-confirmed (42/42/0 `wizard:`-prefix; resync 20/42; five breaker keys still ABSENT),
+wizard AUTH_FAILED arm renders named+actionable copy with Retry/Diagnostics and clean diagnostics
+(`code` + `correlation_id` only, no internals), teaser `/api/verify-strategy` rejection envelope
+carries `human_message` end-to-end and the TS-17 client fix (`human_message` read first) is live.
+New findings, none clearing the founder blast-radius bar as blocking:
+
+1. **Raw Python exception leaks into user-facing `computation_error`.** PROD row: strategy
+   `ec722557` ("Alpha Centauri", owner `helmut@metaworldfund.com`) has
+   `computation_error = "'<' not supported between instances of 'str' and 'NoneType'"`.
+   That is an internal TypeError string in the field the wizard/factsheet renders as failure
+   copy — the exact attribution class 140.x closed on the HTTP seam, still open on the
+   `computation_error` persistence path. Fix shape: map non-contract exceptions to the
+   user-recoverable message at the writer (same pattern the 142 reaper message uses) and keep
+   the raw string in logs/Sentry only. Also worth a one-off: root-cause the `str`-vs-`None`
+   comparison itself (likely a missing-field sort/compare in analytics for that strategy).
+2. **Wizard AUTH_FAILED copy names the wrong venue.** With **Binance** selected, the rejection
+   panel's example text reads "(e.g. Deribit returns invalid_credentials)" and a bullet says
+   "on Deribit the key is the ClientId and the secret is the ClientSecret". The copy block is
+   venue-generic where it should be parameterized by the selected exchange. Cosmetic/prose —
+   batch with the next wizardErrors.ts copy pass.
+3. **Verified factsheet shows FRESH while its return series ended 89 days ago.** Phoenix
+   Protocol (API-verified, "Synced 8h ago", "COMPUTED · FRESH (0d)") has an observation window
+   ending 2026-05-06. Sync succeeds and compute is fresh, but no dailies exist after May 6 —
+   either the account went flat (then the factsheet arguably should say so) or the daily-derive
+   stopped attributing new days (then it's a data-pipeline gap). Needs a look at the dailies for
+   that key before deciding which. Investigate — data-integrity-adjacent.
+4. **Example strategies advertise "Synced 67d ago" on discovery.** All example rows (Hide
+   examples OFF, the default) show a stale sync badge; real strategies show "Synced 8h ago".
+   Allocators can read the stale badge as platform-wide staleness. Consider suppressing the
+   sync badge on example rows. Cosmetic.
+5. **Validation-rejected keys leave no audit trail (observation, decide-only).** A failed wizard
+   key validation (AUTH_FAILED) writes no `audit_log` `process_key` row — audit starts only when
+   a key enters processing. Consistent with current design; recorded so the 141.2 audit censuses
+   are read correctly (they count processed flows, not attempts). No action unless rejected-attempt
+   telemetry is wanted beyond Sentry.
 
 ---
 

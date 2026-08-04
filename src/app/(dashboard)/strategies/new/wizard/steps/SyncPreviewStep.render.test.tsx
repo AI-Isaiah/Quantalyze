@@ -834,6 +834,15 @@ describe("[P72] SyncPreviewStep — ledger-backed (Deribit) success path", () =>
               cumulative_return: 0.3,
               sparkline_returns: [0.01, -0.02, 0.03],
               computed_at: "2026-07-01T00:00:00.000Z",
+              // MT5-11/12 — the ONLY change this phase makes to the [P72]
+              // harness. The gate no longer infers trust from the key's
+              // exchange; it reads the verdict the series' producer stamped, so
+              // a fixture that omits it now reads null and fails CLOSED. A
+              // ledger fold is exactly what `ledger_complete` describes, and
+              // this row already claims to be one — the fixture was previously
+              // silent about a fact the mock's own `api_keys` arm asserted.
+              // Every [P72] assertion below stays byte-intact.
+              series_completeness: "ledger_complete",
             },
             0,
           );
@@ -1886,6 +1895,12 @@ function installGateSupabaseMock(opts: {
   latestTradeAt?: string | null;
   status?: string;
   computationError?: string | null;
+  /**
+   * `strategy_analytics.series_completeness` (MT5-11/12). Defaults to null —
+   * a row no producer has stamped, which is the honest default for a fixture
+   * that does not say otherwise, and the fail-CLOSED one.
+   */
+  seriesCompleteness?: string | null;
 }) {
   const {
     tradeCount = 0,
@@ -1894,6 +1909,7 @@ function installGateSupabaseMock(opts: {
     latestTradeAt = null,
     status = "complete",
     computationError = null,
+    seriesCompleteness = null,
   } = opts;
 
   type Resolved = { data: unknown; count: number | null; error: null };
@@ -1983,7 +1999,19 @@ function installGateSupabaseMock(opts: {
             Promise.resolve(
               table === "api_keys"
                 ? { data: { exchange: "binance" }, error: null }
-                : { data: null, error: null },
+                : {
+                    // MT5-11/12 — the gate reads the completeness verdict off
+                    // this row. A null verdict is served as an ABSENT ROW (what
+                    // this double always did), not as a row with a null column:
+                    // production coerces both to null, and keeping the absent
+                    // shape leaves every metric column exactly as unset as
+                    // before.
+                    data:
+                      seriesCompleteness === null
+                        ? null
+                        : { series_completeness: seriesCompleteness },
+                    error: null,
+                  },
             ),
           then: (r: (v: Resolved) => void) => r(resolve()),
         };
@@ -2296,7 +2324,23 @@ describe("[140.4-11] SyncPreviewStep — the destructive control must be EARNED"
       {
         input: "gate: keyless draft with a too-short daily-returns series",
         drive: async () => {
-          installGateSupabaseMock({ tradeCount: 0, csvRowCount: 3 });
+          // MT5-11/12 — `user_supplied` is the TRUTHFUL post-phase fixture for
+          // a completed keyless CSV run: that is exactly what the CSV analytics
+          // runner stamps. It is also what keeps this scenario on the
+          // daily-returns branch producing INSUFFICIENT_CSV_HISTORY.
+          //
+          // ⚠️ Do NOT "simplify" by dropping it and letting the case fall to
+          // INSUFFICIENT_TRADES. "keyed account below the trade-count floor"
+          // below already emits that code, so the flip would collapse the
+          // loop's distinct-code count 13 → 12, redden the hand-typed vacuity
+          // fence, and the only way to green it again would be lowering that
+          // floor — permanently un-pinning INSUFFICIENT_CSV_HISTORY's
+          // reachability at this surface.
+          installGateSupabaseMock({
+            tradeCount: 0,
+            csvRowCount: 3,
+            seriesCompleteness: "user_supplied",
+          });
           await renderThroughTheGate({ ...baseProps, apiKeyId: null });
         },
       },
@@ -2304,6 +2348,26 @@ describe("[140.4-11] SyncPreviewStep — the destructive control must be EARNED"
         input: "gate: keyed account below the trade-count floor",
         drive: async () => {
           installGateSupabaseMock({ tradeCount: 0, csvRowCount: 0 });
+          await renderThroughTheGate({ ...baseProps, apiKeyId: "key-1" });
+        },
+      },
+      {
+        // 142.2 review FIX 1 — the newly reachable terminal code, and the one
+        // this property most needs to cover. The state it replaces rendered
+        // GATE_INSUFFICIENT_TRADES, which EARNS the draft-deleting control:
+        // a keyed ledger-backed strategy with 135 daily rows and 0 trades was
+        // offered "Try another key" (→ handleDeleteDraft) as its remedy for a
+        // problem that was never about the key. This row pins that the
+        // replacement does NOT earn that control.
+        input: "gate: keyed account whose daily series no producer has stamped",
+        drive: async () => {
+          installGateSupabaseMock({
+            tradeCount: 0,
+            csvRowCount: 135,
+            // NULL — the honest state of every pre-existing analytics row, since
+            // the 142.2 migration is additive with NO backfill.
+            seriesCompleteness: null,
+          });
           await renderThroughTheGate({ ...baseProps, apiKeyId: "key-1" });
         },
       },
@@ -2413,19 +2477,30 @@ describe("[140.4-11] SyncPreviewStep — the destructive control must be EARNED"
     // now separated: `driven` counts scenarios that actually rendered an
     // envelope and is pinned at the full 14, which no code-level collapse can
     // satisfy. Lower `driven` only when a scenario is genuinely deleted.
+    //
+    // ⚠️ THE 142.2 CODE REVIEW (FIX 1) RAISED BOTH FLOORS BY ONE — 14→15 driven,
+    // 13→14 distinct. `GATE_SERIES_PROVENANCE_UNVERIFIED` is a NEWLY REACHABLE
+    // terminal code at this surface (a keyed strategy whose daily series carries
+    // no producer verdict), added with its own scenario row above. A new
+    // reachable code RAISES these floors; it may never lower them. If a future
+    // edit makes this loop red, the fix is to restore the scenario, never to
+    // walk a floor back down — a lowered floor un-pins whichever code stopped
+    // being reachable, silently.
     expect(
       driven,
-      "Fewer than fourteen scenarios actually rendered an envelope. A loop " +
+      "Fewer than fifteen scenarios actually rendered an envelope. A loop " +
         "that renders nothing satisfies every assertion inside it and reports " +
         "agreement forever — which is worse than having no guard at all.",
-    ).toBeGreaterThanOrEqual(14);
+    ).toBeGreaterThanOrEqual(15);
     expect(
       observed.size,
-      "Fewer than thirteen DISTINCT codes were driven. Two scenarios share " +
+      "Fewer than fourteen DISTINCT codes were driven. Two scenarios share " +
         "SERVICE_UNREACHABLE since 140.5-03 (the transport deadline and the " +
-        "kickoff catch), so 13 is the honest distinct-code floor; anything " +
-        "below it means rows stopped reaching the codes they name.",
-    ).toBeGreaterThanOrEqual(13);
+        "kickoff catch), and 142.2 FIX 1 added " +
+        "GATE_SERIES_PROVENANCE_UNVERIFIED, so 14 is the honest distinct-code " +
+        "floor; anything below it means rows stopped reaching the codes they " +
+        "name.",
+    ).toBeGreaterThanOrEqual(14);
 
     // The forced choice must be absent from the WHOLE observed set, stated
     // once more as a set-level claim so a per-row `continue` cannot hide it.

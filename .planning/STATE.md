@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.16
 milestone_name: Production Resilience & Reliability
-status: ready_to_plan
-stopped_at: Phase 142.1 complete (8/8) — ready to discuss Phase 143
-last_updated: 2026-08-03T05:59:33.622Z
-last_activity: 2026-08-02
+status: executing
+stopped_at: Phase 142.2 context gathered
+last_updated: "2026-08-03T17:36:49.151Z"
+last_activity: 2026-08-03
 progress:
-  total_phases: 17
-  completed_phases: 12
-  total_plans: 119
-  completed_plans: 153
-  percent: 71
+  total_phases: 19
+  completed_phases: 13
+  total_plans: 127
+  completed_plans: 119
+  percent: 68
 ---
 
 # Project State — Quantalyze
@@ -46,10 +46,21 @@ RATE-01..05 — all mapped, Traceability filled). Roadmap: `.planning/ROADMAP.md
 
 ## Current Position
 
-Phase: 143
+Phase: 142.2
 Plan: Not started
+        Phase 142.2 (INSERTED, urgent) — Get MetaTrader 5 running end to end on the
+        unified backbone. Not planned yet. Dogfood items feeding it are in TODOS.md
+        § "MT5 wizard — founder-observed on live UI".
+
+Phase 142.1 (Close 142 review findings) — SHIPPED in v0.52.0.0, merged `d80a1bae`
         All 8 plans complete across 5 waves. Verified `human_needed` (41/42, zero
-        gaps) — 7 items persisted to `142.1-HUMAN-UAT.md`. Scope + hazards below.
+        gaps) — 7 items persisted to `142.1-HUMAN-UAT.md`.
+        ✅ POST-MERGE PROD CHECK PASSED (UAT item 4, the blocking one): PROD
+        `cron.job.command` for `reap_strategy_analytics_stuck_computing` carries
+        exactly TWO `AS MATERIALIZED` batches, the unbounded `IN (SELECT ... LIMIT)`
+        shape is absent, job active on `*/15 * * * *`. Verified against the live
+        `cron.job` row on `khslejtfbuezsmvmtsdn`, NOT inferred from a green CI tick —
+        a `LIMIT` token alone is exactly what D-19 proved insufficient.
 
 Phase 142 (JOB — strategy_analytics stuck-computing reaper + computing_started_at DDL) — EXECUTED
         Six plans across three waves, each wave gated at its boundary; final suite
@@ -254,7 +265,7 @@ The line that used to sit here claimed no such file existed; it was stale.
 
 Prior phase: 141.1 (seambackoff-…) — COMPLETE and verified, merged, NOT pushed
 Plan: 8 of 8 (142.1 executed; verification `human_needed`, 7 UAT items open)
-Status: Ready to plan
+Status: Ready to execute
 
 Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         `feat/v1.16-141-jobs-rate-retry`. Post-merge gate after Wave 2 GREEN: tsc clean,
@@ -426,7 +437,7 @@ Progress: [██████████] 95%
 
 ## Current Focus
 
-**Next: `/gsd:plan-phase 142.1`.** Phase order 140 → 141 → 142 → **142.1 (INSERTED)** → 143 → 144 → 145 → 146.
+**Next: `/gsd:plan-phase 142.2`.** Phase order 140 → 141 → 142 → 142.1 → **142.2 (INSERTED)** → 143 → 144 → 145 → 146.
 Load-bearing sequencing (do not reorder):
 
 - **Breaker (140) BEFORE retry (141)** — fail-fast alone has zero double-execution
@@ -482,6 +493,7 @@ Load-bearing sequencing (do not reorder):
 - Phase 140.3 inserted after Phase 140: SEAMUX — Client & wizard seam error surface (URGENT)
 - Phase 141.1 inserted after Phase 141: 8-agent review campaign: Retry-After built by 140.5 never consumed; breaker threshold uncalibrated for per-attempt counting; SEAM-05 evidence wrong in 4 places. Zero user-facing/data-integrity defects. (URGENT)
 - Phase 142.1 inserted after Phase 142: Close 142 code-review findings: chain-start stamp preservation, deploy sequencing, terminal-writer parity, census boundary, SQL gate lock scope (URGENT)
+- Phase 142.2 inserted after Phase 142: Get MetaTrader 5 running end to end on the unified backbone (URGENT)
 
 ### Decisions (requirements-time, from research Open Decisions 1–8)
 
@@ -1183,7 +1195,7 @@ Load-bearing sequencing (do not reorder):
 ## Session Continuity
 
 **Last activity:** 2026-08-03
-**Stopped at:** Completed 140.3-G4-PLAN.md (SEAMUX-03 coded arms on verify-strategy + validate-and-encrypt)
+**Stopped at:** Phase 142.2 context gathered
 **Next step:** run `/gsd:verify-work` on Phase 140.1.1. Nothing is left to execute.
 
 ⚠️ **Env changed and LEFT changed:** `slowapi` was synced **0.1.9 → 0.1.10** (the CI pin at `analytics-service/requirements.txt:226`) and deliberately NOT restored — matching CI is the point, and every #3/#4/#5 mutation row is version-stamped against it. A verifier re-running those cycles on 0.1.9 would not be reproducing this evidence.

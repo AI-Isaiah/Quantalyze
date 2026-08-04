@@ -1024,6 +1024,27 @@ export async function seedCompositeStrategy(opts?: {
     // Name the seq-2 member (mirrors the worker's scrubbed stamp shape) so the
     // wizard failed gate can echo the offending key label (#338).
     analyticsRow.computation_error = `${memberLabels[1]} (deribit) failed to reconstruct: upstream geo-blocked`;
+  } else {
+    // 142.2 / MT5-12 — a SUCCESSFUL stitch stamps its completeness verdict, so
+    // this fixture must too. `run_stitch_composite_job` writes
+    // `series_completeness` on the headline upsert (job_worker.py), and since
+    // 142.2 BOTH gate consumers (wizard preview and admin approve) require a
+    // POSITIVE verdict on the daily-returns branch — a composite has zero
+    // trades by construction, so that branch is its only route through.
+    //
+    // ⚠️ Omitting this is not "neutral fixture data", it is a row no producer
+    // emits: the wizard correctly refuses it and `wizard-use-this-key` never
+    // renders. That is what this seed reproduced before the stamp was added.
+    // The NULL-verdict case is deliberately covered ELSEWHERE, as a unit test
+    // (SyncPreviewStep.composite.render.test.tsx) asserting the button is
+    // ABSENT — so weakening the gate to keep this e2e green would delete a real
+    // safety property and contradict that test.
+    //
+    // The `failed` variant above deliberately leaves the column ABSENT, which is
+    // also faithful: the stitch failure arm omits it so a previously-stamped
+    // verdict survives the upsert, and `computation_status='failed'` blocks the
+    // gate anyway.
+    analyticsRow.series_completeness = "composite_stitched";
   }
   const { error: aErr } = await admin
     .from("strategy_analytics")
