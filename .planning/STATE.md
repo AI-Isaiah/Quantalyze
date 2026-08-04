@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
-status: planning
+status: executing
 stopped_at: Phase 147 UI-SPEC approved
-last_updated: "2026-08-04T18:31:50.773Z"
-last_activity: 2026-08-03
+last_updated: "2026-08-04T20:07:20.236Z"
+last_activity: 2026-08-04
 progress:
   total_phases: 9
   completed_phases: 0
-  total_plans: 0
+  total_plans: 6
   completed_plans: 0
   percent: 0
 ---
@@ -57,8 +57,8 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 Phase: 147 of 147–155 (not started)
 Plan: —
-Status: Roadmap revised — 9 phases (approved Phase 148 split into 148/149/150 after NAV-01 was sharpened to ranking parity), 29/29 in-scope requirement IDs mapped; ready to plan Phase 147
-Last activity: 2026-08-04 — v1.17 roadmap revised to Phases 147–155 (148 split three ways); v1.16 parked at 68% (resume at Phase 143)
+Status: Ready to execute
+Last activity: 2026-08-04 -- Phase 147 planning complete
 
 ### Phase 142.1 scope (inserted 2026-08-02)
 
@@ -1186,7 +1186,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session Continuity
 
-**Last activity:** 2026-08-03
+**Last activity:** 2026-08-04
 **Stopped at:** Phase 147 UI-SPEC approved
 **Next step:** run `/gsd:verify-work` on Phase 140.1.1. Nothing is left to execute.
 
