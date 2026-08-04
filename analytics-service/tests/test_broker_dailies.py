@@ -452,7 +452,13 @@ def _deribit_patches(
         dtype="float64",
     )
     combine = combine_spy or MagicMock(
-        return_value=(two_day, {"used_heuristic_capital": False})
+        return_value=(
+            two_day,
+            # MT5-12: the derive persist seam refuses a series whose meta lacks a
+            # recognised verdict, so this stand-in carries the one
+            # combine_native_ledger really stamps (hand-typed literal).
+            {"used_heuristic_capital": False, "series_completeness": "ledger_complete"},
+        )
     )
     if ledger_side_effect is not None:
         ledger_mock = AsyncMock(side_effect=ledger_side_effect)
@@ -537,7 +543,7 @@ async def test_deribit_routes_through_native_combine():
                 index=pd.DatetimeIndex(["2024-05-01", "2024-05-02"]),
                 dtype="float64",
             ),
-            {"used_heuristic_capital": False},
+            {"used_heuristic_capital": False, "series_completeness": "ledger_complete"},
         )
     )
     report = CompletenessReport(
