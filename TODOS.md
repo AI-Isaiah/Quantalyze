@@ -1062,6 +1062,26 @@ None of these clears the founder blast-radius bar as blocking. Each names its so
     (`useMemo` missing dep `period`).** Pre-existing, untouched by 142.2, recorded by plans 02, 06
     and 07 as the sole output of `npm run lint` (0 errors, 1 warning). Batch it with the next edit to
     that file.
+12. **`DEF-142.2-12` — the 7-row CSV floor is still not evaluated on the wizard's COMPOSITE arm.**
+    Surfaced by the FIX 3 work (2026-08-04) and **pre-existing** — it predates 142.2 and is *not*
+    the verdict-term divergence FIX 3 closed. The admin path applies `STRATEGY_GATE_MIN_CSV_ROWS`;
+    the composite preview does not, so a composite with fewer than 7 stitched days previews as
+    `passed` and 409s at publish — the same preview/publish disagreement class, one term over.
+    ⚠️ Fixing this makes residual 13 below live: it is the path that would route
+    `INSUFFICIENT_CSV_HISTORY` through the wizard mapper for the first time. **Fix the two together
+    or neither.**
+13. **`DEF-142.2-13` — `INSUFFICIENT_CSV_HISTORY` maps to `UNKNOWN`** in `gateFailureToWizardError`,
+    on the documented premise that it "never flows through the wizard error mapper". That premise is
+    true **only while `DEF-142.2-12` is open**. Closing 12 without this one ships a real gate refusal
+    rendered as the generic unknown-error copy.
+14. **`DEF-142.2-14` — recognised-but-refused verdicts still render `INSUFFICIENT_TRADES` copy.**
+    A gapped perp (`fill_derived_unproven`, 0 trades, 135 rows) is still told *"only 0 trade(s), a
+    minimum of 5 is required"* — the same class of false sentence FIX 1 deleted for the NULL case,
+    left standing for the examined case because the **D-15 acceptance test pins that exact code** and
+    the review scoped FIX 1 to NULL/unrecognised. ⚠️ **The refusal itself is correct** — this is a
+    copy decision, not a safety one, which is why it was not smuggled into a fix commit. The honest
+    remedy is a fourth outcome meaning "your series was examined and found incomplete"; doing it
+    requires re-cutting D-15's oracle deliberately, never incidentally.
 
 ⚠️ **Cross-reference, do NOT duplicate:** the anon-readable `strategy_analytics` splat that plan
 04's A2 check re-confirmed (`anon` holds `SELECT` on `series_completeness`, as it does on every
