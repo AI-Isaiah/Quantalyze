@@ -2429,11 +2429,26 @@ function psProvenance(overrides: {
   strategy_id?: string;
   verifications?: Array<{ trust_tier: string; status: string; created_at: string }>;
   data_quality_flags?: unknown;
+  // Phase 147 / SCEN-01 — series-resolution inputs. Every one of these is
+  // optional with a default that reproduces the pre-147 fixture byte-for-byte,
+  // so the CONSTIT-02 cases above stay unmodified (plan acceptance).
+  daily_returns?: unknown;
+  returns_series?: unknown;
+  computation_status?: string | null;
+  /** false ⇒ the strategy has NO strategy_analytics row at all (embed null). */
+  analyticsRow?: boolean;
+  /** Drives the missing-row age bound in deriveEmptySeriesState. */
+  strategy_created_at?: string | null;
 }): unknown {
   const {
     strategy_id = "sc",
     verifications = [],
     data_quality_flags = null,
+    daily_returns = [],
+    returns_series = null,
+    computation_status = "complete",
+    analyticsRow = true,
+    strategy_created_at = null,
   } = overrides;
   return {
     portfolio_id: "real-1",
@@ -2450,16 +2465,21 @@ function psProvenance(overrides: {
       markets: [],
       start_date: null,
       asset_class: "crypto",
+      created_at: strategy_created_at,
       organization: null,
       strategy_verifications: verifications,
-      strategy_analytics: {
-        daily_returns: [],
-        cagr: 0.1,
-        sharpe: 1,
-        volatility: 0.2,
-        max_drawdown: -0.1,
-        data_quality_flags,
-      },
+      strategy_analytics: analyticsRow
+        ? {
+            daily_returns,
+            cagr: 0.1,
+            sharpe: 1,
+            volatility: 0.2,
+            max_drawdown: -0.1,
+            data_quality_flags,
+            returns_series,
+            computation_status,
+          }
+        : null,
     },
   };
 }
@@ -2537,6 +2557,176 @@ describe("getMyAllocationDashboard — CONSTIT-02 provenance threading", () => {
     // the venue-detail degraded_members must not appear anywhere in the payload
     expect(JSON.stringify(row)).not.toContain("degraded_members");
     expect(JSON.stringify(row)).not.toContain("okx:BTC");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 147 / SCEN-01 — the BOOK path receives the real series.
+//
+// WHY THIS EXISTS: the scenario composer consults this payload's
+// strategy_analytics.daily_returns FIRST for any strategy already in the
+// allocator's own portfolio, and deliberately SKIPS the lazy /returns fetch for
+// those rows — so a bare `daily_returns`-only projection has no rescue path.
+// The analytics-service writes the cumprod WEALTH curve to `returns_series` and
+// leaves `daily_returns` null for analytics-only strategies, which is why the
+// founder's own-portfolio strategy renders 0.00. Server-side resolution here is
+// the acceptance anchor (RESEARCH P2).
+//
+// The expected return values below are HAND-COMPUTED from the wealth curve
+// (successive ratios minus one) and written as literals — they are never
+// produced by calling the resolver under test:
+//   1.05   / 1.0   - 1 =  0.05
+//   0.945  / 1.05  - 1 = -0.10
+//   1.0395 / 0.945 - 1 =  0.10
+// ---------------------------------------------------------------------------
+const SC1_WEALTH_CURVE = [
+  { date: "2026-01-01", value: 1.0 },
+  { date: "2026-01-02", value: 1.05 },
+  { date: "2026-01-03", value: 0.945 },
+  { date: "2026-01-04", value: 1.0395 },
+];
+
+describe("getMyAllocationDashboard — Phase 147 SCEN-01 series resolution", () => {
+  beforeEach(() => {
+    resetState();
+    state.portfolios = [PORTFOLIO_FIXTURE];
+  });
+
+  async function bookRow(overrides: Parameters<typeof psProvenance>[0]) {
+    state.portfolioStrategies = [
+      psProvenance(overrides) as (typeof state.portfolioStrategies)[number],
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    return result.strategies.find((s) => s.strategy_id === "sc")!;
+  }
+
+  it("emits the DIFFERENCED series when only returns_series is populated (the founder's own-portfolio anchor)", async () => {
+    const row = await bookRow({
+      daily_returns: null,
+      returns_series: SC1_WEALTH_CURVE,
+      computation_status: "complete",
+    });
+    const series = (
+      row.strategy.strategy_analytics as unknown as {
+        daily_returns: Array<{ date: string; value: number }>;
+      }
+    ).daily_returns;
+    expect(series).toHaveLength(3);
+    expect(series[0].value).toBeCloseTo(0.05, 10);
+    expect(series[1].value).toBeCloseTo(-0.1, 10);
+    expect(series[2].value).toBeCloseTo(0.1, 10);
+    expect(series.map((p) => p.date)).toEqual([
+      "2026-01-02",
+      "2026-01-03",
+      "2026-01-04",
+    ]);
+  });
+
+  it("never ships the raw returns_series or computation_status columns to the client (T-147-10)", async () => {
+    const row = await bookRow({
+      daily_returns: null,
+      returns_series: SC1_WEALTH_CURVE,
+      computation_status: "complete",
+    });
+    const analytics = row.strategy.strategy_analytics as unknown as Record<
+      string,
+      unknown
+    >;
+    expect("returns_series" in analytics).toBe(false);
+    expect("computation_status" in analytics).toBe(false);
+    expect(JSON.stringify(row)).not.toContain("returns_series");
+    expect(JSON.stringify(row)).not.toContain("computation_status");
+  });
+
+  it("prefers a populated daily_returns column over the wealth curve (direct-first)", async () => {
+    const direct = [
+      { date: "2026-02-01", value: 0.02 },
+      { date: "2026-02-02", value: -0.03 },
+    ];
+    const row = await bookRow({
+      daily_returns: direct,
+      returns_series: SC1_WEALTH_CURVE,
+      computation_status: "complete",
+    });
+    const series = (
+      row.strategy.strategy_analytics as unknown as {
+        daily_returns: Array<{ date: string; value: number }>;
+      }
+    ).daily_returns;
+    expect(series).toEqual(direct);
+  });
+
+  it("does not forward the RAW wealth curve as if it were returns (raw-forward guard)", async () => {
+    const row = await bookRow({
+      daily_returns: null,
+      returns_series: SC1_WEALTH_CURVE,
+      computation_status: "complete",
+    });
+    const series = (
+      row.strategy.strategy_analytics as unknown as {
+        daily_returns: Array<{ date: string; value: number }>;
+      }
+    ).daily_returns;
+    // A raw forward would be length 4 and open at the 1.0 wealth base.
+    expect(series).not.toHaveLength(4);
+    expect(series[0].value).not.toBeCloseTo(1.0, 10);
+  });
+
+  // -------------------------------------------------------------------------
+  // series_state — the derived honesty signal for the book row's chip.
+  // ONE rule, shared with the returns route via deriveEmptySeriesState
+  // (UI-SPEC §3 forbids a second table). The 16h missing-row bound is what
+  // stops a strategy whose compute job was never enqueued from spinning
+  // forever; it is expressed here as hour offsets, never as an imported
+  // constant.
+  // -------------------------------------------------------------------------
+  const hoursAgo = (h: number) =>
+    new Date(Date.now() - h * 60 * 60 * 1000).toISOString();
+  const seriesState = (row: { strategy: unknown }) =>
+    (row.strategy as { series_state?: unknown }).series_state;
+
+  it("reports series_state 'available' when the resolved series is non-empty", async () => {
+    const row = await bookRow({
+      daily_returns: null,
+      returns_series: SC1_WEALTH_CURVE,
+      computation_status: "complete",
+    });
+    expect(seriesState(row)).toBe("available");
+  });
+
+  it("reports series_state 'computing' while a job is live and no series exists yet", async () => {
+    const row = await bookRow({
+      daily_returns: null,
+      returns_series: null,
+      computation_status: "computing",
+    });
+    expect(seriesState(row)).toBe("computing");
+  });
+
+  it("reports series_state 'empty' for a TERMINAL status with no series (complete and failed alike)", async () => {
+    for (const status of ["complete", "failed"]) {
+      const row = await bookRow({
+        daily_returns: null,
+        returns_series: null,
+        computation_status: status,
+      });
+      expect(seriesState(row)).toBe("empty");
+    }
+  });
+
+  it("age-bounds a MISSING analytics row: 17h old is 'empty', 1h old is still 'computing'", async () => {
+    const stale = await bookRow({
+      analyticsRow: false,
+      strategy_created_at: hoursAgo(17),
+    });
+    expect(seriesState(stale)).toBe("empty");
+
+    const fresh = await bookRow({
+      analyticsRow: false,
+      strategy_created_at: hoursAgo(1),
+    });
+    expect(seriesState(fresh)).toBe("computing");
   });
 });
 

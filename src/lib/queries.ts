@@ -4,7 +4,13 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { castRow } from "@/lib/supabase/cast";
 import { loadManagerIdentity as loadManagerIdentityRaw } from "./manager-identity";
 import { extractAnalytics, EMPTY_ANALYTICS } from "./utils";
-import { blendPeriodsPerYear, isComputedAnalytics } from "./closed-sets";
+import {
+  blendPeriodsPerYear,
+  deriveEmptySeriesState,
+  isComputedAnalytics,
+  type SeriesState,
+} from "./closed-sets";
+import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
 import { API_KEY_USER_COLUMNS, type ApiKeyUserColumn } from "./constants";
 import { equitySnapshotsToDailyPoints } from "@/lib/allocation-helpers";
 import {
@@ -1663,6 +1669,17 @@ export interface MyAllocationDashboardPayload {
        * shipped to the client — only this boolean projection (T-111-03).
        */
       is_composite: boolean;
+      /**
+       * Phase 147 / SCEN-01 — what an EMPTY `strategy_analytics.daily_returns`
+       * MEANS for this book row: a live job ("computing"), or genuine absence
+       * ("empty"). Derived server-side by `deriveEmptySeriesState`, the SAME
+       * single predicate the lazy /returns route uses — UI-SPEC §3 forbids a
+       * second derivation table, so the composer's chip cannot disagree with
+       * itself depending on which path supplied the leg. The RAW
+       * `computation_status` column that feeds this is NEVER shipped (T-147-10);
+       * only this three-valued presentation string crosses to the client.
+       */
+      series_state: SeriesState;
       strategy_analytics: Pick<
         StrategyAnalytics,
         "daily_returns" | "cagr" | "sharpe" | "volatility" | "max_drawdown"
@@ -3396,6 +3413,7 @@ export const getMyAllocationDashboard = cache(
             markets,
             start_date,
             asset_class,
+            created_at,
             organization:organizations(name),
             strategy_verifications (
               trust_tier,
@@ -3408,7 +3426,9 @@ export const getMyAllocationDashboard = cache(
               sharpe,
               volatility,
               max_drawdown,
-              data_quality_flags
+              data_quality_flags,
+              returns_series,
+              computation_status
             )
           )
           `,
@@ -3532,13 +3552,67 @@ export const getMyAllocationDashboard = cache(
       const analyticsObj = (analytics ?? null) as Record<string, unknown> | null;
       const dqf = analyticsObj?.data_quality_flags as { composite?: unknown } | null | undefined;
       const is_composite = dqf?.composite === true;
+      // Phase 147 / SCEN-01 — resolve the series HERE, server-side, and emit it
+      // under the SAME `daily_returns` field name. The analytics-service writes
+      // the cumprod WEALTH curve to `returns_series` and leaves `daily_returns`
+      // null for analytics-only strategies; the scenario composer reads THIS
+      // payload first for strategies already in the allocator's book and
+      // deliberately skips the lazy /returns fetch for them, so a bare
+      // daily_returns projection has no rescue path and collapses to 0.00
+      // (RESEARCH P2 — the founder's own-portfolio anchor). Resolving here fixes
+      // all six downstream payload consumers with zero change to any of them.
+      //
+      // The raw `returns_series` and `computation_status` columns are stripped
+      // by the same `_dqf` destructure idiom above — only the resolved series
+      // and the derived state cross to the client (T-147-10).
+      const resolvedDailyReturns = analyticsObj
+        ? resolveDailyReturnSeries(
+            analyticsObj.daily_returns,
+            analyticsObj.returns_series,
+          )
+        : [];
       let strategyAnalyticsForPayload:
         | MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"] = null;
       if (analyticsObj) {
-        const { data_quality_flags: _dqf, ...analyticsRest } = analyticsObj;
+        const {
+          data_quality_flags: _dqf,
+          returns_series: _rs,
+          computation_status: _cs,
+          ...analyticsRest
+        } = analyticsObj;
+        // P3: keep the intermediate at the Record<string, unknown> idiom this
+        // block already uses. Annotating it (rather than casting an object
+        // literal) preserves the index signature the payload cast needs, so the
+        // client-facing Pick<> never has to admit a raw series column.
+        const analyticsForPayload: Record<string, unknown> = {
+          ...analyticsRest,
+          daily_returns: resolvedDailyReturns,
+        };
         strategyAnalyticsForPayload =
-          analyticsRest as MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"];
+          analyticsForPayload as MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"];
       }
+
+      // Phase 147 / SCEN-01 — ONE rule shared with the returns route via
+      // deriveEmptySeriesState; UI-SPEC §3 forbids a second table (SC2). A
+      // non-empty resolved series is decided by LENGTH here (the predicate
+      // never returns "available"); everything else defers to the shared
+      // ladder, including the 16h bound that terminates the missing-row
+      // spinner — a `strategies` row does not guarantee a `strategy_analytics`
+      // row, so status stays null forever when the compute job was never
+      // enqueued.
+      const seriesStatus =
+        typeof analyticsObj?.computation_status === "string"
+          ? analyticsObj.computation_status
+          : null;
+      const strategyCreatedAt =
+        typeof (strategy as unknown as { created_at?: unknown }).created_at ===
+        "string"
+          ? ((strategy as unknown as { created_at: string }).created_at)
+          : null;
+      const series_state: SeriesState =
+        resolvedDailyReturns.length > 0
+          ? "available"
+          : deriveEmptySeriesState(seriesStatus, strategyCreatedAt);
 
       // eligibility: a strategy is eligible for outcome
       // recording only when:
@@ -3587,13 +3661,19 @@ export const getMyAllocationDashboard = cache(
       // `organization_name` is emitted). Phase 111 / CONSTIT-02: likewise drop
       // the raw `strategy_verifications` embed — only the derived `trust_tier`
       // string is emitted (the embed's status/created_at never ship).
+      // Phase 147 / SCEN-01: `created_at` is selected ONLY to feed the
+      // missing-row age bound above; it is dropped here for the same reason as
+      // the embeds — this projection ships exactly the fields the payload type
+      // declares, never an undeclared passenger.
       const {
         organization: _rawOrganization,
         strategy_verifications: _rawVerifications,
+        created_at: _rawStrategyCreatedAt,
         ...strategyRest
       } = strategy as StrategyPayload & {
         organization?: unknown;
         strategy_verifications?: unknown;
+        created_at?: unknown;
       };
 
       // NEW-C09-08 (B1, audit-2026-05-07) — CLOSED. Gate `current_weight`
@@ -3630,6 +3710,7 @@ export const getMyAllocationDashboard = cache(
             // the raw verification + flags embeds are stripped above).
             trust_tier,
             is_composite,
+            series_state,
             strategy_analytics: strategyAnalyticsForPayload,
           },
         },
