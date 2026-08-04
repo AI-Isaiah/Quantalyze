@@ -78,8 +78,24 @@ export interface StrategyGateInput {
  * - `ledger_complete`   — the series was folded from a complete transaction
  *                         ledger; there is nothing else to fetch.
  * - `user_supplied`     — a keyless CSV upload: the series IS the submission.
- * - `composite_stitched` — stitched from constituent series that each carried
- *                         their own verdict.
+ * - `composite_stitched` — the deterministic stitch of member series, stamped
+ *                         by the composite producer after CONSULTING the member
+ *                         verdicts. ⚠️ Read what that does and does not mean.
+ *                         Until the 142.2 review this said the members "each
+ *                         carried their own verdict", which was simply false:
+ *                         the stitch job stamped a bare literal and never looked
+ *                         at them. It looks now, but it inherits exactly ONE
+ *                         property — a KNOWN gap. Any member stamped
+ *                         `sampled_gapped` downgrades the composite to
+ *                         `sampled_gapped`, which this list does not admit.
+ *                         Member UNPROVEN-NESS is deliberately NOT inherited:
+ *                         `fill_derived_unproven` is stamped for every ccxt
+ *                         venue unconditionally, so propagating it would refuse
+ *                         essentially every ccxt composite — and a composite has
+ *                         zero trades by construction, so the daily branch is
+ *                         its only route to publish. Proving a member's fills
+ *                         fetch was whole is ingestion-side work, booked as
+ *                         DEF-142.2-04.
  *
  * Everything else refuses: `fill_derived_unproven` (a realized-PnL fetch left a
  * gap, so the series may be funding-only and materially understated),

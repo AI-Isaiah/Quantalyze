@@ -6801,6 +6801,58 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
 
     composite_status = "complete_with_warnings" if member_warned else "complete"
 
+    # ── MT5-12 / 142.2 review FIX 2: the composite verdict is DERIVED, never a
+    #    bare literal ────────────────────────────────────────────────────────
+    #
+    # WHAT WAS WRONG. This site stamped `composite_stitched` unconditionally
+    # while `member_metas` — each member's meta, carrying the verdict its own
+    # combiner assigned — was already in hand twenty lines above (the guard-flag
+    # union loop reads the very same list). A member reconstructed through a
+    # combiner that found a KNOWN HOLE was therefore laundered into a composite
+    # verdict the publish gate TRUSTS. The composite's series is the arithmetic
+    # stitch of those member series, so a hole in a member is a hole in the
+    # composite; claiming otherwise is a trust claim about data we know to be
+    # incomplete.
+    #
+    # ⛔ WHY THIS PROPAGATES ONLY `sampled_gapped`, AND WHY THE OBVIOUS
+    #    "PROPAGATE ANY NON-TRUSTED MEMBER VERDICT" WOULD BE A SERIOUS
+    #    REGRESSION.
+    # `combine_realized_and_funding` stamps `fill_derived_unproven` for EVERY
+    # ccxt venue (binance / bybit / okx), ALWAYS and unconditionally — see its
+    # docstring. It is the NORMAL case for that path, not evidence that this
+    # account's series has a gap. Propagating it would give essentially every
+    # ccxt composite a refused verdict, and composites cannot recover on the
+    # trade branch the way single keys do: a single-key ccxt strategy has fills
+    # in `trades` and never needs the daily branch, whereas a composite has zero
+    # trades by construction and the daily branch is its ONLY route to publish.
+    # So propagating unproven-ness would make ccxt composites permanently
+    # un-approvable — the same class of unwinnable refusal this phase exists to
+    # delete, re-created one table over.
+    #
+    # `sampled_gapped` is different in kind: its sole producer
+    # (`combine_sfox_balance_history`) stamps it only when it MEASURED interior
+    # holes in a sampled NAV series (`nav_gap_days > 0`). That is a positive
+    # finding about this account's data, and it is exactly what must survive the
+    # stitch.
+    #
+    # HONEST BOUNDARY — what is inherited and what is not. Known gaps are
+    # inherited. UNPROVEN-NESS is NOT: a composite of ccxt members still reads
+    # `composite_stitched` and the gate still trusts it, even though no member
+    # proved its fills fetch was whole. Closing that requires distinguishing "the
+    # fetch was complete" from "the fetch returned something" at ingestion, which
+    # is booked as DEF-142.2-04 and is not resolvable here.
+    #
+    # Derived from `member_metas`, never hand-written, so a member verdict that
+    # changes upstream cannot silently stop being consulted. Both literals are
+    # members of the producer registry (broker_dailies.SERIES_COMPLETENESS_VALUES).
+    _GAPPED_MEMBER_VERDICT = "sampled_gapped"
+    _member_verdicts = [_m.get("series_completeness") for _m in member_metas]
+    composite_verdict = (
+        _GAPPED_MEMBER_VERDICT
+        if _GAPPED_MEMBER_VERDICT in _member_verdicts
+        else "composite_stitched"
+    )
+
     headline_payload: dict[str, Any] = {
         "strategy_id": strategy_id,
         "computation_status": composite_status,
@@ -6824,11 +6876,21 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # history"). This stamp is what keeps that branch reachable.
         #
         # WHY its own value rather than reusing a member's: the composite series
-        # is the deterministic stitch of its members, so its trust is INHERITED,
-        # not observed. `ledger_complete` would be a false claim (this function
-        # consumed no venue ledger), and `user_supplied` would erase the
+        # is the deterministic stitch of its members, so what it can claim is
+        # bounded by them. `ledger_complete` would be a false claim (this
+        # function consumed no venue ledger), and `user_supplied` would erase the
         # distinction between "a machine stitched audited members" and "a human
         # uploaded a CSV". The gate decides separately what it will trust.
+        #
+        # ⚠️ "INHERITED" IS A PARTIAL CLAIM, AND THE PARTIALITY IS THE POINT.
+        # Exactly one member property is inherited: a KNOWN gap. The derivation
+        # above downgrades the verdict to `sampled_gapped` when any member
+        # carries it. Member UNPROVEN-NESS (`fill_derived_unproven`, which every
+        # ccxt member carries unconditionally) is NOT inherited — see the long
+        # note above for why propagating it would make every ccxt composite
+        # permanently un-approvable. Do not restate this as "trust inherited from
+        # members" without that qualification; before FIX 2 the claim was not
+        # true at all, and it is still narrower than it sounds.
         #
         # ⛔ SIBLING KEY, never a member of `merged_flags` (built just above).
         # data_quality_flags is rebuilt wholesale by analytics_runner.py:1439,
@@ -6842,7 +6904,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # deliberately OMITS the column: omission preserves a previously-stamped
         # verdict through a PostgREST upsert (A1, executed against TEST in plan
         # 142.2-04), and `computation_status='failed'` blocks the gate anyway.
-        "series_completeness": "composite_stitched",
+        "series_completeness": composite_verdict,
     }
     # Spread the canonical composite scalars into the headline — the SAME object as
     # metrics_json_by_basis.cash_settlement. A single upsert also REPLACES

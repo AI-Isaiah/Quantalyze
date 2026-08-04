@@ -4058,3 +4058,157 @@ async def test_composite_failure_stamp_omits_the_verdict_column() -> None:
             "the failure stamp must omit the column so a prior verdict survives "
             f"by omission (A1); got {stamp!r}"
         )
+
+
+# ── 142.2 code review FIX 2 — COMPOSITE LAUNDERING ──────────────────────────
+#
+# The stamp above was a BARE LITERAL: it never consulted `member_metas`, even
+# though that list is already in hand at the site (the guard-flag union loop
+# reads it twenty lines earlier). A member whose combiner MEASURED a hole was
+# therefore laundered into a composite verdict the publish gate TRUSTS.
+#
+# The two tests below are a matched pair and neither is sufficient alone. They
+# pin the two halves of a fix that is easy to get wrong in OPPOSITE directions:
+#
+#   · propagate too little (the pre-fix bare literal)  → laundering, test A reds;
+#   · propagate too much  (any non-trusted member verdict) → essentially every
+#     ccxt composite becomes permanently un-approvable, test B reds.
+#
+# THE ECONOMIC INVARIANT, stated so these are not just string comparisons:
+# a composite's daily series is the arithmetic stitch of its members' series.
+# A day missing from a member is a day missing from the composite. So a MEASURED
+# hole must survive the stitch. But `fill_derived_unproven` is not a measurement
+# of a hole — `combine_realized_and_funding` stamps it for every ccxt venue
+# unconditionally — so it says nothing about THIS composite and must not refuse
+# it. Composites have zero trades by construction, so the daily branch is their
+# only route to publication; a refusal there is terminal, not a detour.
+
+# HAND-TYPED, and deliberately NOT imported from `strategyGate.ts` or from
+# `SERIES_COMPLETENESS_VALUES`. This is the TypeScript gate's admissibility
+# subset — what the publish gate will TRUST — restated here as an independent
+# oracle. Importing it (if that were even possible across the language boundary)
+# would make these assertions follow the policy instead of pinning it.
+_VERDICTS_THE_PUBLISH_GATE_TRUSTS = frozenset(
+    {"ledger_complete", "user_supplied", "composite_stitched"}
+)
+
+
+@pytest.mark.asyncio
+async def test_a_known_gapped_member_is_not_laundered_into_a_trusted_composite() -> None:
+    """A member carrying `sampled_gapped` must NOT yield a composite verdict the
+    publish gate trusts.
+
+    `sampled_gapped` has exactly one producer — `combine_sfox_balance_history`
+    when `nav_gap_days > 0` — and it is a POSITIVE finding: interior holes were
+    measured in a sampled NAV series. Stitching cannot fill them.
+
+    Neuter (fails without the fix): restore the bare literal
+    `"series_completeness": "composite_stitched"` in `headline_payload` and this
+    reds with 'composite_stitched is in the set the gate trusts'.
+    """
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    # Member 2 is the one with the measured hole. Member 1 is clean, so this also
+    # pins that ONE bad member is enough — an `all(...)` implementation passes
+    # the both-gapped case and fails here.
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[
+            (m1, {"series_completeness": "ledger_complete"}),
+            (m2, {"series_completeness": "sampled_gapped"}),
+        ],
+        has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+
+    assert result.outcome == DispatchOutcome.DONE
+    headline = _headline_row(fake)
+    assert headline is not None
+
+    verdict = headline["series_completeness"]
+    assert verdict not in _VERDICTS_THE_PUBLISH_GATE_TRUSTS, (
+        f"the composite was stamped {verdict!r}, which the publish gate TRUSTS, "
+        "even though member seq=2 carried a MEASURED coverage hole "
+        "(sampled_gapped). The stitch is arithmetic: a day missing from a "
+        "member is missing from the composite. Stamping a trusted verdict here "
+        "publishes a track record with known holes as verified."
+    )
+    # …and the verdict it DOES carry names the inherited fact, rather than being
+    # some third value that happens to fall outside the trusted set.
+    assert verdict == "sampled_gapped", (
+        f"expected the known gap to be inherited verbatim, got {verdict!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_unproven_ccxt_members_do_not_refuse_the_composite() -> None:
+    """The anti-over-refusal half. `fill_derived_unproven` members must leave the
+    composite verdict at `composite_stitched`.
+
+    ⛔ THIS IS THE TEST THAT STOPS THE OBVIOUS FIX. "Propagate any member verdict
+    the gate does not trust" looks strictly safer and is a serious regression:
+    `combine_realized_and_funding` stamps `fill_derived_unproven` for binance,
+    bybit and okx ALWAYS and unconditionally, so that rule refuses essentially
+    every ccxt composite. Single-key ccxt strategies are unaffected by the
+    verdict because they have fills in `trades` and never reach the daily branch;
+    a composite has zero trades by construction and has nowhere else to go.
+
+    Behaviour-preserving by design: this case stamped `composite_stitched` before
+    FIX 2 and must still.
+    """
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[
+            (m1, {"series_completeness": "fill_derived_unproven"}),
+            (m2, {"series_completeness": "fill_derived_unproven"}),
+        ],
+        has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+
+    assert result.outcome == DispatchOutcome.DONE
+    headline = _headline_row(fake)
+    assert headline is not None
+    assert headline["series_completeness"] == "composite_stitched", (
+        "an all-ccxt composite was refused a trusted verdict. "
+        "fill_derived_unproven is the NORMAL, unconditional stamp for every ccxt "
+        "venue — not a finding about this account — and propagating it makes "
+        "ccxt composites permanently un-approvable, since a composite has zero "
+        "trades and the daily branch is its only route to publish."
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_composite_verdict_is_derived_not_hand_written() -> None:
+    """An UNSTAMPED member set still yields `composite_stitched`.
+
+    Pins the derivation's default arm and keeps the pre-142.2 fixtures honest:
+    every other test in this file passes `{}` metas, so if the derivation ever
+    started refusing an unstamped member, the failure would surface here by name
+    rather than as a diffuse collapse across the suite.
+    """
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+
+    assert result.outcome == DispatchOutcome.DONE
+    headline = _headline_row(fake)
+    assert headline is not None
+    assert headline["series_completeness"] == "composite_stitched"
