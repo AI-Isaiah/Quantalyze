@@ -1218,6 +1218,43 @@ is closed there. Two adjacent findings were surfaced by the audit and are booked
    **Fix shape:** make the mock's `maybeSingle`/embed resolution project to the columns named in the
    recorded select string, mirroring the returns-route harness.
 
+### Phase 148 (OWN) — factsheet v2 payload cache is id-only-keyed (added 2026-08-05)
+
+**`DEF-148-A` — a fresh `strategy_analytics.computed_at` does NOT bust the factsheet v2
+payload cache, so the factsheet can serve metrics up to 3600s stale.** The page's header
+comment claimed the opposite until phase 148 corrected it; the *behaviour* is unchanged and
+deliberately NOT fixed here.
+
+Mechanics. `src/app/factsheet/[id]/v2/page.tsx` passes `` `${id}::${computedAt}` `` into
+`buildFactsheetPayloadCached`, which splits at `"::"` and **discards everything after the id**
+(`page.tsx:229` pre-148 numbering — the `const [id] = cacheKey.split("::")` line). What actually
+keys the entry is Next's own derivation
+(`node_modules/next/dist/server/web/spec-extension/unstable-cache.js:55,82`):
+`fixedKey = ${cb.toString()}-${keyParts.join(',')}`, then
+`invocationKey = ${fixedKey}-${JSON.stringify(args)}`. Here `cb.toString()` is constant source
+text, `keyParts` is `["factsheet-v2-payload-v6", id]`, and `args` is `[]` because the returned
+function is invoked with no arguments. **Effective key: id only.** `computed_at` never
+participates.
+
+Existing mitigations (why this does not clear the founder's blast-radius bar):
+- `revalidate: 3600` is a hard 1h staleness ceiling.
+- `revalidateTag(\`factsheet-v2:${id}\`, "max")` at
+  `src/app/api/admin/strategy-review/route.ts:501` busts the entry on the admin publish/review
+  flow — the only writer, and the only transition where a stale payload would be user-visible
+  as *wrong* rather than merely *late*.
+
+This is **staleness, not user-facing incorrectness and not data integrity**, so per the founder
+stopping rule it is logged, not fixed (phase 148 orchestrator ruling; RESEARCH §3a consequence 3).
+**Fix shape if it is ever taken:** make `computed_at` a real `keyParts` member (and update the
+`factsheet-v2-payload-v6` bump ledger + the admin revalidator together) — do **not** try to encode
+it in the `cacheKey` string, which is exactly the mechanism that already fails.
+
+⛔ **Load-bearing corollary, do not lose:** because the key is id-only, appending a suffix to the
+`cacheKey` string yields the *same* entry. Any attempt at viewer/lane separation via that string
+would write a viewer-dependent payload into the shared entry and serve it to anonymous readers
+for the full TTL. This is why phase 148's owner lane bypasses the cached wrapper entirely rather
+than "giving the owner lane its own cache key".
+
 ---
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
