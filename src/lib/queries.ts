@@ -281,13 +281,19 @@ async function shapeRankingRows(
  * drops rows on an `!inner` miss, which would silently hide the owner's own
  * uncategorised drafts (research Pitfall 4).
  *
- * Fail-soft `[]` (not the `getUserApiKeys` throw): an empty ranking is honest
- * and this is not a money-display path, so a transient DB/RLS failure degrades
- * to "you have no strategies yet" rather than an error boundary — but never to
- * a FABRICATED row. `captureToSentry` keeps the ops signal (the getPercentiles
+ * Error contract (149 review WR-01, the `getMyWatchlist` idiom): returns
+ * `null` on a transient DB/RLS failure — never `[]` — so the page can
+ * distinguish "empty account" (empty-success, still `[]`) from "fetch failed"
+ * and render a temporarily-unavailable notice instead of the definitive
+ * "No strategies yet." empty state + wizard CTA to an owner who HAS
+ * strategies. Still no throw (the `getUserApiKeys` idiom is for money paths):
+ * a degraded render beats an error boundary here, and a fetched row is never
+ * FABRICATED. `captureToSentry` keeps the ops signal (the getPercentiles
  * idiom).
  */
-export async function getMyStrategies(userId: string): Promise<RankedStrategyRow[]> {
+export async function getMyStrategies(
+  userId: string,
+): Promise<RankedStrategyRow[] | null> {
   const supabase = await createClient();
 
   const { data, error } = await supabase
@@ -299,7 +305,7 @@ export async function getMyStrategies(userId: string): Promise<RankedStrategyRow
   if (error) {
     console.error("[queries.getMyStrategies] supabase error:", error.message ?? error);
     captureToSentry(error, { tags: { op: "getMyStrategies" }, level: "error" });
-    return [];
+    return null;
   }
 
   return shapeRankingRows(
@@ -376,10 +382,15 @@ export function deriveStrategylessKeys(
  * `API_KEY_USER_COLUMNS` — after migration 027 (SEC-005) any other projection
  * silently returns NULL for revoked columns on a user client.
  *
- * Fail-soft `[]` + Sentry for the same reason as `getMyStrategies`: a missing
- * placeholder row is an honest under-report; a fabricated one is not.
+ * Error contract matches `getMyStrategies` (149 review WR-01): `null` on a
+ * transient DB failure so the page renders its unavailable notice instead of
+ * silently dropping the placeholder rows and the K sentence; `[]` stays the
+ * honest empty-success. A placeholder row is never fabricated, and Sentry
+ * keeps the ops signal.
  */
-export async function getStrategylessActiveKeys(userId: string): Promise<StrategylessKey[]> {
+export async function getStrategylessActiveKeys(
+  userId: string,
+): Promise<StrategylessKey[] | null> {
   const supabase = await createClient();
 
   // `strategy_keys` (migration 20260710120000) is NOT present in the generated
@@ -422,7 +433,7 @@ export async function getStrategylessActiveKeys(userId: string): Promise<Strateg
       error.message ?? error,
     );
     captureToSentry(error, { tags: { op: "getStrategylessActiveKeys" }, level: "error" });
-    return [];
+    return null;
   }
 
   // Trust-boundary guard, mirroring getUserApiKeys:2078-2101 — the DB column is

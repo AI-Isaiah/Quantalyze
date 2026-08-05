@@ -64,6 +64,11 @@ type Fixtures = {
   apiKeys: Record<string, unknown>[];
   strategyKeys: Record<string, unknown>[];
   portfolio: Record<string, unknown> | null;
+  /**
+   * WR-01 — per-read transient-failure switches, routed by the SAME query
+   * shapes as the payloads so a failure hits exactly one fetcher.
+   */
+  errors: { ownRows?: boolean; apiKeys?: boolean };
 };
 
 const recorded: Recorded[] = [];
@@ -76,14 +81,26 @@ const isPopulationShape = (r: Recorded) =>
 const isOwnRowsShape = (r: Recorded) =>
   r.table === "strategies" && r.select.startsWith("*, strategy_analytics");
 
-function resolvePayload(rec: Recorded): { data: unknown; error: null } {
-  if (rec.table === "api_keys") return { data: fixtures.apiKeys, error: null };
+type Payload = { data: unknown; error: { message: string } | null };
+const TRANSIENT_FAILURE: Payload = {
+  data: null,
+  error: { message: "transient failure" },
+};
+
+function resolvePayload(rec: Recorded): Payload {
+  if (rec.table === "api_keys") {
+    if (fixtures.errors.apiKeys) return TRANSIENT_FAILURE;
+    return { data: fixtures.apiKeys, error: null };
+  }
   if (rec.table === "strategy_keys")
     return { data: fixtures.strategyKeys, error: null };
   if (rec.table === "portfolios")
     return { data: fixtures.portfolio, error: null };
   if (rec.table === "strategies") {
-    if (isOwnRowsShape(rec)) return { data: fixtures.ownRows, error: null };
+    if (isOwnRowsShape(rec)) {
+      if (fixtures.errors.ownRows) return TRANSIENT_FAILURE;
+      return { data: fixtures.ownRows, error: null };
+    }
     if (isPopulationShape(rec)) return { data: fixtures.population, error: null };
     // `id, api_key_id, status` — the coverage anti-join's lite own read.
     return {
@@ -102,9 +119,9 @@ type Builder = {
   select: (cols: string) => Builder;
   eq: (col: string, val: unknown) => Builder;
   neq: (col: string, val: unknown) => Builder;
-  maybeSingle: () => Promise<{ data: unknown; error: null }>;
+  maybeSingle: () => Promise<Payload>;
   then: (
-    onFulfilled?: (v: { data: unknown; error: null }) => unknown,
+    onFulfilled?: (v: Payload) => unknown,
     onRejected?: (e: unknown) => unknown,
   ) => Promise<unknown>;
 };
@@ -284,6 +301,7 @@ function setFixtures(partial: Partial<Fixtures>) {
     apiKeys: [],
     strategyKeys: [],
     portfolio: { id: "port-1", user_id: USER_ID, is_test: false },
+    errors: {},
     ...partial,
   };
 }
@@ -514,6 +532,71 @@ describe("page branches — empty vs placeholders-only", () => {
     expect(screen.getByText(/Deribit · Deribit Options/)).toBeInTheDocument();
     // No published-universe fetch is worth making with zero own rows to score.
     expect(recorded.filter(isPopulationShape)).toHaveLength(0);
+  });
+});
+
+describe("WR-01 — fetch error renders the unavailable notice, NEVER the empty state", () => {
+  // 149 review WR-01 regression. Before the fix, both owner fetchers
+  // fail-softed to `[]`, so a transient DB failure rendered the DEFINITIVE
+  // "No strategies yet." panel + Add-a-Strategy CTA to an owner who HAS
+  // strategies. Error and empty are distinct states: null = fetch failed →
+  // notice; [] = empty success → empty state. Each spec below goes RED on
+  // the pre-fix `return []` arms.
+  const NOTICE = /My Strategies temporarily unavailable/;
+
+  it("a failed own-rows read renders ONLY the notice — not the empty panel or its CTA", async () => {
+    setFixtures({
+      // The owner HAS a strategy; the read for it fails. Rendering the empty
+      // state here is the account-state lie this fix removes.
+      ownRows: [dbStrategy("s-1", "Nebula One", "private")],
+      population: Array.from({ length: 7 }, (_, i) =>
+        populationRow(`p-${i}`, i + 1),
+      ),
+      apiKeys: [],
+      errors: { ownRows: true },
+    });
+
+    await renderPage();
+
+    expect(screen.getByText(NOTICE)).toBeInTheDocument();
+    expect(screen.queryByText(EMPTY_HEADING)).toBeNull();
+    expect(screen.queryByText(EMPTY_BODY)).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Add a Strategy" }),
+    ).toBeNull();
+    // No table section either: nothing loaded, so there is nothing honest to
+    // rank — the notice is the whole degraded surface.
+    expect(screen.queryByTestId("comparison-set-note")).toBeNull();
+  });
+
+  it("a failed keys read keeps the rows that DID load under the notice (no silent placeholder vanish)", async () => {
+    setFixtures({
+      ownRows: [dbStrategy("s-1", "Nebula One", "private")],
+      population: Array.from({ length: 7 }, (_, i) =>
+        populationRow(`p-${i}`, i + 1),
+      ),
+      apiKeys: [activeKey("k-1", "bybit", "Bybit Main")],
+      errors: { apiKeys: true },
+    });
+
+    await renderPage();
+
+    // The discovery watchlist-banner pattern: partial degradation is DECLARED,
+    // while the successful fetch still renders in full.
+    expect(screen.getByText(NOTICE)).toBeInTheDocument();
+    expect(screen.queryByText(EMPTY_HEADING)).toBeNull();
+    expect(screen.getByTestId("comparison-set-note").textContent).toBe(
+      mapCopy(7),
+    );
+  });
+
+  it("genuine empty-success still renders the empty state, with NO notice (the states stay distinct both ways)", async () => {
+    setFixtures({ ownRows: [], population: [], apiKeys: [] });
+
+    await renderPage();
+
+    expect(screen.getByText(EMPTY_HEADING)).toBeInTheDocument();
+    expect(screen.queryByText(NOTICE)).toBeNull();
   });
 });
 

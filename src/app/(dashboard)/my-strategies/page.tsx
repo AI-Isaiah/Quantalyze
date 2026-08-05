@@ -66,6 +66,14 @@ export default async function MyStrategiesPage() {
     getRealPortfolio(user.id),
   ]);
 
+  // 149 review WR-01 — error ≠ empty (the getMyWatchlist / discovery-page
+  // idiom): both owner fetchers return `null` on a transient DB failure, and
+  // ONLY the fetch-succeeded-empty case may render the definitive "No
+  // strategies yet." panel + wizard CTA. A failed fetch renders the
+  // temporarily-unavailable notice instead — never an account-state claim.
+  const fetchFailed = strategies === null || bareKeys === null;
+  const strategyRows = strategies ?? [];
+
   // Sequential, not parallel: it consumes the rows the first fetch returned.
   //
   // FOUNDER SCORER RULING + W-A (2026-08-05): own rows — drafts and private
@@ -79,18 +87,18 @@ export default async function MyStrategiesPage() {
   // `Object.keys(await getPercentiles()).length`, i.e. the number of strategies
   // that ENTERED the ranking, which is exactly what the sentence claims. A
   // per-metric n can be smaller; do NOT build a per-metric N.
-  const own = strategies.length > 0 ? await getOwnRowPercentiles(strategies) : null;
+  const own = strategyRows.length > 0 ? await getOwnRowPercentiles(strategyRows) : null;
 
   // Delta 5 — formatted SERVER-side so the client table never owns exchange
   // naming (and so an unmapped code can never reach the DOM as `undefined`).
-  const placeholderRows = bareKeys.map((k) => ({
+  const placeholderRows = (bareKeys ?? []).map((k) => ({
     id: k.id,
     exchangeLabel: EXCHANGE_DISPLAY[k.exchange],
     keyLabel: k.label,
   }));
 
   const noteParts: string[] = [];
-  if (strategies.length > 0) {
+  if (strategyRows.length > 0) {
     // The two branches flip together with getOwnRowPercentiles' own `< 5`
     // gates, so the page can never show a Pnn while claiming there is no
     // comparison set, or vice versa.
@@ -101,7 +109,11 @@ export default async function MyStrategiesPage() {
   }
   const noteText = noteParts.join(" ");
 
-  const isEmpty = strategies.length === 0 && placeholderRows.length === 0;
+  // WR-01: `isEmpty` is an ACCOUNT-STATE claim, so it requires fetch success.
+  // On failure with partial data (one fetcher succeeded), the notice renders
+  // ABOVE whatever did load — the discovery watchlist-banner pattern.
+  const isEmpty = !fetchFailed && strategyRows.length === 0 && placeholderRows.length === 0;
+  const hasRows = strategyRows.length > 0 || placeholderRows.length > 0;
 
   return (
     // Data surface fluid-fill: fill toward ~1920px then center (Phase 52
@@ -109,9 +121,19 @@ export default async function MyStrategiesPage() {
     // cap goes here at the page shell rather than in the layout.
     <div className="mx-auto max-w-[1920px]">
       <PageHeader title="My Strategies" />
+      {fetchFailed && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="mb-6 rounded-lg border border-border bg-card px-4 py-3 text-sm text-text-secondary"
+        >
+          My Strategies temporarily unavailable — your strategies and keys may
+          not appear. Refresh to retry.
+        </div>
+      )}
       {isEmpty ? (
         <MyStrategiesEmptyState />
-      ) : (
+      ) : hasRows ? (
         <>
           <p
             data-testid="comparison-set-note"
@@ -127,13 +149,13 @@ export default async function MyStrategiesPage() {
               omission (iteration-2 checker I-2). No `key={…}` remount prop
               either — this is a static route, not a dynamic segment. */}
           <MyStrategiesSection
-            strategies={strategies}
+            strategies={strategyRows}
             placeholderKeys={placeholderRows}
             portfolioId={portfolio?.id ?? null}
             percentiles={own?.ownMap ?? null}
           />
         </>
-      )}
+      ) : null}
     </div>
   );
 }
