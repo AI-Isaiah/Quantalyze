@@ -57,6 +57,8 @@
  * param-keying the probe (`user.id` → the route `id`) reddens tests 8 & 9.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render } from "@testing-library/react";
+import type { ReactElement } from "react";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 vi.mock("server-only", () => ({}));
@@ -116,6 +118,10 @@ const SIGNATURE_SELECT =
  *  predicate (`user_id.eq.<route id>`) cannot produce this string. */
 const EXPECTED_OWNER_OR_FILTER =
   "status.eq.published,user_id.eq.11111111-1111-4111-8111-111111111111";
+
+/** Banner heading copy — typed HERE, never imported from FactsheetView.tsx
+ *  (oracle independence, same rule as FactsheetView.owner-notice.test.tsx). */
+const BANNER_HEADING = "Unpublished — only you can see this";
 
 const CASH_DAILY = [
   { date: "2025-08-01", value: 0.01 },
@@ -434,6 +440,31 @@ describe("SC2-A — the owner lane never touches the shared cache", () => {
       vi.mocked(unstable_cache),
       "a null must never be offered to the shared cache from the owner lane",
     ).toHaveBeenCalledTimes(0);
+
+    // WR-02 regression — the OWNER-lane placeholder must carry the visibility
+    // notice. The still-computing draft shows its real name and reads like a
+    // soon-to-be-live factsheet; the pending state is when an owner is MOST
+    // likely to share the URL "for when it's ready", so the disclosure must
+    // be present here too, not only on the full render.
+    const ownerPlaceholder = render(jsx as ReactElement);
+    const note = ownerPlaceholder.container.querySelector('[role="note"]');
+    expect(note, "owner placeholder must carry the visibility notice").not.toBeNull();
+    expect(note!.textContent).toContain(BANNER_HEADING);
+
+    // …and the PUBLIC-lane placeholder must NOT: a published strategy whose
+    // build returns null renders the same placeholder with zero banner nodes.
+    STATE.sessionUser = null;
+    STATE.publishedRow = signatureRow("Phoenix Options");
+    STATE.ownerRow = null;
+    STATE.adminRow = null;
+    const publicJsx = await renderPage();
+    expect(findPayload(publicJsx), "public placeholder carries no payload").toBeNull();
+    const publicPlaceholder = render(publicJsx as ReactElement);
+    expect(
+      publicPlaceholder.container.querySelector('[role="note"]'),
+      "public-lane placeholder must carry ZERO banner nodes",
+    ).toBeNull();
+    expect(publicPlaceholder.container.textContent).not.toContain(BANNER_HEADING);
   });
 });
 

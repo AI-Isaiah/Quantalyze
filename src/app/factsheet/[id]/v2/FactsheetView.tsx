@@ -608,8 +608,14 @@ function NotEnoughDataPanel({ title, body }: { title: string; body: string }) {
  * Not dismissible, and it carries no print-hiding class on purpose (UI-SPEC:108):
  * a draft screenshotted or handed to an LP on paper must still carry its
  * unpublished status.
+ *
+ * EXPORTED (review WR-02): page.tsx's payload-pending placeholder arm renders
+ * this same component when `lane === "owner"` — a draft mid-recompute is when
+ * an owner is MOST likely to share the URL "for when it's ready", so the
+ * placeholder must carry the disclosure too. One exported component keeps the
+ * UI-SPEC copy single-sourced; do NOT inline a second copy of the banner.
  */
-function OwnerUnpublishedNotice() {
+export function OwnerUnpublishedNotice() {
   return (
     <section
       role="note"

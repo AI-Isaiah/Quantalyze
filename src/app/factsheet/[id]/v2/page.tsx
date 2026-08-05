@@ -13,7 +13,7 @@ import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
 import { readCompositeFactsheet, singleKeyDataQuality, readSingleKeyBasisOpts } from "@/lib/factsheet/composite-read-path";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { FactsheetPayload, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
-import { FactsheetView } from "./FactsheetView";
+import { FactsheetView, OwnerUnpublishedNotice } from "./FactsheetView";
 
 // Pin to dynamic rendering. This route's render output already depends on the
 // per-request authentication state (cookies → supabase.auth.getUser() inside
@@ -522,11 +522,12 @@ export default async function FactsheetV2Page({
       computedAt,
       hint: "buildFactsheetPayload returned null — check (a) admin client visibility on strategies row, (b) strategy_analytics.daily_returns shape, (c) series clipped to BENCH_START/BENCH_END (2023-04-26 onward) has at least 2 points",
     });
-    // The strategy IS published (signature gate passed) but its analytics
-    // payload couldn't be built. Render a friendly placeholder rather than
-    // hard-404'ing: this is a transient state (analytics service still
-    // computing) or a CSV-ingested strategy whose daily_returns are not
-    // yet populated. Hard-404 only on the signature gate above.
+    // The strategy passed the signature gate (published, or the viewer's own
+    // draft on the owner lane) but its analytics payload couldn't be built.
+    // Render a friendly placeholder rather than hard-404'ing: this is a
+    // transient state (analytics service still computing) or a CSV-ingested
+    // strategy whose daily_returns are not yet populated. Hard-404 only on
+    // the signature gate above.
     // Full-identity context — prefer the real name, fall back to the
     // pseudonym only when the strategy genuinely has no public name.
     const pendingName =
@@ -540,6 +541,13 @@ export default async function FactsheetV2Page({
       });
     return (
       <article className="mx-auto max-w-[760px] px-4 sm:px-6 lg:px-10 py-12">
+        {/* WR-02: the owner lane's placeholder must carry the visibility
+            notice too — a still-computing draft shows its real name and reads
+            like a soon-to-be-live factsheet, and the pending state is when an
+            owner is MOST likely to share the URL. Same exported component as
+            the full render (single-sourced UI-SPEC copy), first child so the
+            disclosure precedes any document content (UI-SPEC:97). */}
+        {lane === "owner" && <OwnerUnpublishedNotice />}
         <p className="text-fixed-10 font-mono uppercase tracking-[0.22em] text-text-muted">
           Institutional Factsheet · Quantalyze
         </p>
