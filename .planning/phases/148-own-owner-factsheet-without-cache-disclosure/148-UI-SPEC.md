@@ -1,7 +1,8 @@
 ---
 phase: 148
 slug: 148-own-owner-factsheet-without-cache-disclosure
-status: draft
+status: approved
+reviewed_at: 2026-08-05
 shadcn_initialized: false
 preset: none
 created: 2026-08-05
@@ -46,9 +47,9 @@ Project base unit 4px; DESIGN.md ladder 2/4/8/12/16/24/32/48/64. This phase uses
 
 | Token | Value | Usage here |
 |-------|-------|-----------|
-| sm | 8px | Banner heading → body gap (`mt-1` idiom is 4px in the sibling panel; banner uses 4px, see component spec) |
+| xs | 4px | Banner heading → body gap (`mt-1`, matching the sibling panel idiom — see component spec) |
 | md | 16px | Banner horizontal padding (`px-4`) |
-| md- | 12px | Banner vertical padding (`py-3`) — matches `NotEnoughDataPanel` |
+| 12px | 12px | Banner vertical padding (`py-3`) — matches `NotEnoughDataPanel` |
 | lg | 24px | Banner → masthead gap (`mb-6`); preview-panel → link gap uses 12px (`mt-3`) |
 
 Exceptions: none. All values are existing ladder members already used on these exact surfaces.
@@ -57,7 +58,7 @@ Exceptions: none. All values are existing ladder members already used on these e
 
 ## Typography
 
-This phase lives inside the v2 factsheet's locked 4-size / 2-weight contract (DESIGN.md Decisions Log 2026-04-29) and the wizard's standard tiers. Declared sizes for the two new elements — 3 sizes, 2 weights total:
+This phase lives inside the v2 factsheet's locked 4-size / 2-weight contract (DESIGN.md Decisions Log 2026-04-29) and the wizard's standard tiers. Declared tokens for the two new elements — 2 sizes; 2 weights per surface (banner 400/600 · wizard link 400/500):
 
 | Role | Size | Weight | Line Height | Face |
 |------|------|--------|-------------|------|
@@ -65,7 +66,7 @@ This phase lives inside the v2 factsheet's locked 4-size / 2-weight contract (DE
 | Banner body | 12px (`text-micro` → 10–11px is too small for a load-bearing disclosure; use `text-caption` 12px) | 400 regular | 1.5 | DM Sans |
 | Preview link + caption | 13px (`text-small`) link · 12px (`text-caption`) caption | 500 medium link · 400 caption | 1.5 | DM Sans |
 
-No new sizes, no third weight. Sub-emphasis via the uppercase-tracked mono transform, never a new weight (v2 contract rule).
+No new sizes; no third weight ON EITHER SURFACE (banner stays 400/600 inside the v2 contract; the wizard link's 500 medium is DESIGN.md's sanctioned interactive-label voice on the wizard surface). Sub-emphasis via the uppercase-tracked mono transform, never a new weight (v2 contract rule).
 
 ---
 
@@ -171,11 +172,11 @@ The banner body deliberately names the exact recipient consequence ("sees a 404"
 
 ## Checker Sign-Off
 
-- [ ] Dimension 1 Copywriting: PASS
-- [ ] Dimension 2 Visuals: PASS
-- [ ] Dimension 3 Color: PASS
-- [ ] Dimension 4 Typography: PASS
-- [ ] Dimension 5 Spacing: PASS
-- [ ] Dimension 6 Registry Safety: PASS
+- [x] Dimension 1 Copywriting: PASS
+- [x] Dimension 2 Visuals: PASS
+- [x] Dimension 3 Color: PASS
+- [x] Dimension 4 Typography: PASS
+- [x] Dimension 5 Spacing: PASS
+- [x] Dimension 6 Registry Safety: PASS
 
-**Approval:** pending
+**Approval:** approved — 2026-08-05
