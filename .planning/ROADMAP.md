@@ -10,7 +10,7 @@ projects in a scenario, and its factsheet is viewable by the allocator who uploa
 > in the scenario, and I can still not produce a factsheet."*
 
 **Scope:** 29 in-scope requirement IDs — SCEN-01..05, AUM-01..05, NAV-01, OWN-02..04, MT5-06..10,
-MT5-14, MT5-15, WIZFORM-01..04, WIZCONT-01..02, STALE-01, plus the umbrella acceptance requirement
+MT5-14, MT5-15, WIZFORM-01..05, WIZCONT-01..02, STALE-01, plus the umbrella acceptance requirement
 MT5-GOAL-01 — per `.planning/REQUIREMENTS.md`. ⛔ OWN-01 excluded (already met — CONTRIB-03,
 verified in code 2026-08-04; do not re-implement). ⛔ SEAM / JOB / RATE / PYAPI* / SEAMCORE /
 SEAMUX remain v1.16 (PARKED below) and appear in NO v1.17 phase. Research SKIPPED (zero new
@@ -239,12 +239,13 @@ Plans:
 
 **Goal**: The wizard stops costing submits — errors land inline on the offending field, transient infrastructure never becomes a user decision, copy never advises the impossible, and an MT5 strategy can declare its venue
 **Depends on**: Nothing hard (sequenced after the money-path phases; before 155 so the wizard surface is stable for verification)
-**Requirements**: WIZFORM-01, WIZFORM-02, WIZFORM-03, WIZFORM-04, MT5-14
+**Requirements**: WIZFORM-01, WIZFORM-02, WIZFORM-03, WIZFORM-04, WIZFORM-05, MT5-14
 **Success Criteria** (what must be TRUE):
 
   1. A field the user can get wrong (e.g. a 2-character description) is refused inline at the field, red-highlighted, BEFORE submit — never a terminal full-page envelope after it, and never an error that sends users to corrupt unrelated fields (WIZFORM-01).
-  2. No wizard failure renders `code: UNKNOWN` when the server DID classify it — every `finalize-wizard` `validatePayload` 400 arm carries a `code`, and the closing sweep is driven from the emitting sites, not a hand-listed set (the 142.2 plan-07 sweep missed this validator) (WIZFORM-02). SECOND LIVE INSTANCE (founder-hit 2026-08-05, correlation `wizard:0320530a-…`): the client rosters `KNOWN_CREATE_WITH_KEY_CODES` (`ConnectKeyStep.tsx`) and `KNOWN_ADD_KEY_CODES` (`MultiKeyConnectStep.tsx`) are missing `SERVICE_UNREACHABLE`, `KEY_MISSING_READ_SCOPE`, `KEY_PERMISSION_DENIED` — the server's honest verdict is downgraded to `UNKNOWN` client-side, invisible to Sentry. The derived-roster + coverage-assertion fix MUST cover these rosters, not only `validatePayload`. (A 3-member stopgap may land earlier via hotfix — the CLASS fix still belongs here.) Full diagnosis in TODOS.md.
-  3. A transient seam failure on submit is absorbed: FIRST answer whether the per-submit permissions re-validation is needed at all (a recent successful validation + a live synced series is already evidence), and only then add bounded retry — respecting the seam-budget invariant and the `breaker:railway` (never retrying into an open breaker) — surfacing an error only after genuine exhaustion, with copy naming an action the user can take (WIZFORM-04). ALSO OWNED HERE (added 2026-08-05, previously unowned): the MT5 validate-key DEADLINE INVERSION — `SEAM_ROUTE_BUDGETS["validate-key"].timeoutMs` is 30s but the analytics-service applies `_MT5_PROBE_TIMEOUT_S` (35s) SEPARATELY to three stages (`exchange.py:328/380/456`), so a slow MT5 login's honest verdict can NEVER arrive inside the client budget. Reconcile the two (venue-aware budget or bounded Python probe) under this criterion's existing seam-budget trap warning. Full diagnosis in TODOS.md.
+  2. No wizard failure renders `code: UNKNOWN` when the server DID classify it — every `finalize-wizard` `validatePayload` 400 arm carries a `code`, and the closing sweep is driven from the emitting sites, not a hand-listed set (the 142.2 plan-07 sweep missed this validator) (WIZFORM-02). SECOND LIVE INSTANCE (founder-hit 2026-08-05, correlation `wizard:0320530a-…`): the client rosters `KNOWN_CREATE_WITH_KEY_CODES` (`ConnectKeyStep.tsx`) and `KNOWN_ADD_KEY_CODES` (`MultiKeyConnectStep.tsx`) are missing `SERVICE_UNREACHABLE`, `KEY_MISSING_READ_SCOPE`, `KEY_PERMISSION_DENIED` — the server's honest verdict is downgraded to `UNKNOWN` client-side, invisible to Sentry. The derived-roster + coverage-assertion fix MUST cover these rosters, not only `validatePayload`. (A 3-member stopgap may land earlier via hotfix — the CLASS fix still belongs here; see REQUIREMENTS WIZFORM-02.)
+  3. A transient seam failure on submit is absorbed: FIRST answer whether the per-submit permissions re-validation is needed at all (a recent successful validation + a live synced series is already evidence), and only then add bounded retry — respecting the seam-budget invariant and the `breaker:railway` (never retrying into an open breaker) — surfacing an error only after genuine exhaustion, with copy naming an action the user can take (WIZFORM-04).
+  5. The MT5 validate-key deadline inversion is reconciled — an MT5 validation's honest verdict always arrives inside the budget the client grants: today `SEAM_ROUTE_BUDGETS["validate-key"].timeoutMs` (30s) loses to `_MT5_PROBE_TIMEOUT_S` (35s) applied SEPARATELY to three stages (`exchange.py:328/380/456`), so a slow MT5 login can never report in time. Venue-aware budget or bounded Python probe — either way under this phase's existing seam-budget trap warning (WIZFORM-05, added 2026-08-05).
   4. No venue-shaped error copy renders for venues it cannot apply to — an MT5 user never sees "switch to a different exchange" (WIZFORM-03).
   5. MT5 is declarable in the supported-exchanges metadata step AND preselected from the key the founder already connected — do not ship the widening without the preselect (MT5-14).
 
@@ -285,7 +286,7 @@ Plans:
 
 **Plans**: TBD
 **Notes**: Re-homed from v1.16 Phase 142.3 (which was split out of 142.2 at the D-14 valve on 2026-08-03 and will NOT run as a v1.16 phase). ⛔ Do not archive the milestone or advertise MT5 until this phase passes — v1.15's failure mode was shipping 6/6 green with both open items intact.
-⚠️ PRECONDITION (found 2026-08-05): all 3 PROD MT5 keys sit at `sync_status='error'` — `'Mt5Session' object has no attribute 'fetch_balance'` (+ sibling `'…' has no attribute 'id'` in `fetch_daily_pnl`, Sentry QUANTALYZE-K). No MT5 sync completes, so this phase cannot start until it is fixed. Owned by a HOTFIX PR landing right after Phase 149 (founder call 2026-08-05: short fix, not an inserted phase); if the hotfix reveals a deeper defect, insert a phase before this one. Full diagnosis in TODOS.md.
+⚠️ PRECONDITION (found 2026-08-05): all 3 PROD MT5 keys sit at `sync_status='error'` — `'Mt5Session' object has no attribute 'fetch_balance'` (+ sibling `'…' has no attribute 'id'` in `fetch_daily_pnl`, Sentry QUANTALYZE-K). No MT5 sync completes, so this phase cannot start until it is fixed. Owned by a HOTFIX PR landing right after Phase 149 (founder call 2026-08-05: short fix, not an inserted phase); if the hotfix reveals a deeper defect, insert a phase before this one.
 
 ## Progress
 

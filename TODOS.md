@@ -218,36 +218,6 @@ true for 146 and half of 142–145, and **false for 141**.
      copy-by-code only.** Do not re-open it as an unfinished half of this item. The wizard renders
      copy keyed on the code and deliberately renders no server-supplied string.
 
-### MT5 wizard `code: UNKNOWN` on validate-key — DIAGNOSED (founder-observed 2026-08-05, correlation `wizard:0320530a-76d9-4dc0-9b69-f59d5445ad24`)
-
-> Read-only investigation 2026-08-05 (Vercel + Railway logs, PROD Supabase, Sentry). Nothing was
-> persisted (failure is strictly before `encryptKey`/`create_wizard_strategy`); Retry is safe but
-> will likely hit the same wall. The gateway was UP the whole time — not an outage.
-
-- **Two stacked defects, neither an outage:**
-  1. **Client roster gap (owner: Phase 153 / WIZFORM-02).** The server classified the failure
-     correctly (`SERVICE_UNREACHABLE`, honest copy exists at `wizardErrors.ts:1416`) but
-     `KNOWN_CREATE_WITH_KEY_CODES` (`ConnectKeyStep.tsx:265-297`) and `KNOWN_ADD_KEY_CODES`
-     (`MultiKeyConnectStep.tsx:214-246`) don't list it → client downgrades to `UNKNOWN`.
-     Same gap for `KEY_MISSING_READ_SCOPE` and `KEY_PERMISSION_DENIED` (added 140.5-02).
-     WIZFORM-02's own wording is the durable fix: derive rosters from the classifier's output
-     set + emitting sites, plus a coverage assertion — don't hand-add three members.
-     ⚠️ This class is INVISIBLE to Sentry (route only pages on its own `UNKNOWN` verdict).
-     ~5-line stopgap is a candidate pull-forward if founder keeps dogfooding MT5 pre-153.
-  2. **Deadline inversion (owner: Phase 155 / MT5-VERIFY, x-ref 153/WIZFORM-04).**
-     `SEAM_ROUTE_BUDGETS["validate-key"].timeoutMs = 30_000` (`resilient-fetch.ts:537`) but
-     `_MT5_PROBE_TIMEOUT_S = 35s` applied SEPARATELY to 3 stages (`exchange.py:328/380/456`) —
-     a slow MT5 login legitimately takes 35–70s+, so an MT5 transient verdict can NEVER land
-     inside the client budget. ccxt venues answer fast; only MT5 bites.
-     ⚠️ Raising the TS budget touches `seam-budgets.invariant.test.ts` and sums with
-     `encrypt-key` per request (roadmap already flags the trap).
-- **Root cause of the slow login itself UNDETERMINED** (needs a live probe; MT5 `last_error`
-  code `0`, ~60s to fail — wrong/unreachable broker server name or slow broker).
-- **NEW, separate live defect (owner: Phase 155):** all 3 founder MT5 keys sit at
-  `sync_status='error'` with `'Mt5Session' object has no attribute 'fetch_balance'`; Sentry
-  QUANTALYZE-K shows sibling `'Mt5Session' object has no attribute 'id'` in `fetch_daily_pnl`.
-  MT5 keys create fine but every sync fails — Phase 155 trips over this on day one.
-
 ---
 
 ## 🟡 FIX MID-TERM
