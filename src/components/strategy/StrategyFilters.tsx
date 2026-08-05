@@ -86,6 +86,16 @@ interface StrategyFiltersProps {
    * (e.g. /browse callers without a userId).
    */
   onOpenCustomize?: () => void;
+  /**
+   * Phase 149 / NAV-01 — renders the table/grid toggle group. DEFAULT `true`,
+   * so every existing caller (/discovery/[slug], /browse/[slug]) is unchanged.
+   * `false` ONLY on the owner-scoped /my-strategies surface, where grid view is
+   * deliberately unreachable: a grid card links to
+   * `${basePath}/${categorySlug}/${id}`, which resolves through
+   * withPublishedOnly → notFound() for an own unpublished row — a dead end and
+   * an existence oracle. Founder ruling 2026-08-05 keeps grid discovery-only.
+   */
+  showViewToggle?: boolean;
 }
 
 // --- Sort options ---
@@ -270,6 +280,7 @@ export function StrategyFilters({
   onAdvancedFiltersChange,
   leadingSlot,
   onOpenCustomize,
+  showViewToggle = true,
 }: StrategyFiltersProps) {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [draft, setDraft] = useState<AdvancedFilters>(advancedFilters);
@@ -374,23 +385,27 @@ export function StrategyFilters({
           </button>
         )}
 
-        {/* View toggle */}
-        <div className="flex items-center gap-1 border border-border rounded-lg p-0.5">
-          <button
-            onClick={() => onViewModeChange("table")}
-            className={`p-1.5 rounded transition-colors ${viewMode === "table" ? "bg-accent/10" : "hover:bg-page"}`}
-            aria-label="Table view"
-          >
-            <TableIcon active={viewMode === "table"} />
-          </button>
-          <button
-            onClick={() => onViewModeChange("grid")}
-            className={`p-1.5 rounded transition-colors ${viewMode === "grid" ? "bg-accent/10" : "hover:bg-page"}`}
-            aria-label="Grid view"
-          >
-            <GridIcon active={viewMode === "grid"} />
-          </button>
-        </div>
+        {/* View toggle — suppressed wholesale (not disabled) when the caller
+            has no reachable grid view; a disabled control would advertise a
+            destination that 404s. */}
+        {showViewToggle && (
+          <div className="flex items-center gap-1 border border-border rounded-lg p-0.5">
+            <button
+              onClick={() => onViewModeChange("table")}
+              className={`p-1.5 rounded transition-colors ${viewMode === "table" ? "bg-accent/10" : "hover:bg-page"}`}
+              aria-label="Table view"
+            >
+              <TableIcon active={viewMode === "table"} />
+            </button>
+            <button
+              onClick={() => onViewModeChange("grid")}
+              className={`p-1.5 rounded transition-colors ${viewMode === "grid" ? "bg-accent/10" : "hover:bg-page"}`}
+              aria-label="Grid view"
+            >
+              <GridIcon active={viewMode === "grid"} />
+            </button>
+          </div>
+        )}
 
         {/* Clear link */}
         {(search || hasAdvanced) && (

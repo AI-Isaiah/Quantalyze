@@ -134,6 +134,27 @@ interface StrategyTableProps {
    * strategies) — renders no suffix at all (honest absence, no fabricated rank).
    */
   percentiles?: PercentileMap;
+  /**
+   * Phase 149 / NAV-01 — which strategy statuses this mount is allowed to
+   * render. The DEFAULT `"published-only"` reproduces byte-for-byte the
+   * behavior /discovery/[slug] and /browse/[slug] have had since 2eef614a: an
+   * in-component `status === "published"` filter ahead of every other predicate.
+   *
+   * `"owner-all-statuses"` is passed ONLY by the owner-scoped /my-strategies
+   * surface, whose SERVER query already narrowed the set to
+   * `user_id = <session id>`. This prop therefore WIDENS NOTHING — it stops the
+   * component re-filtering an already-owner-scoped set, which is why the page
+   * would otherwise render "No strategies match your filters." for every
+   * private/draft row (RESEARCH Pitfall 1).
+   *
+   * Pinned by `src/__tests__/phase-149-my-strategies-parity.test.ts` (per D:
+   * the in-component published filter must be PARAMETERIZED with the published
+   * DEFAULT, so the discovery surfaces are provably unchanged) and behaviorally
+   * by `StrategyTable.visibility.test.tsx`. Same literal-default idiom as
+   * `basePath` above — a closed string union, never a function prop (a function
+   * is non-serializable across the RSC→client boundary).
+   */
+  visibility?: "published-only" | "owner-all-statuses";
 }
 
 // --- Range filter helper ---
@@ -180,6 +201,7 @@ export function StrategyTable({
   userId,
   initialWatchedSet,
   percentiles,
+  visibility = "published-only",
 }: StrategyTableProps) {
   const reactId = useId();
   const tabIdBase = `watchlist${reactId}`;
@@ -191,6 +213,19 @@ export function StrategyTable({
   const [viewMode, setViewMode] = useState<ViewMode>("table");
   const [advancedFilters, setAdvancedFilters] = useState<AdvancedFilters>(EMPTY_ADVANCED_FILTERS);
   const [page, setPage] = useState(0);
+
+  // Phase 149 / NAV-01 — the SINGLE enforcement point for "grid view is
+  // unreachable on the owner surface". A grid card links to
+  // `${basePath}/${categorySlug}/${id}` (StrategyGrid.tsx:52-55), which resolves
+  // through getStrategyDetail → withPublishedOnly (queries.ts:530) →
+  // notFound() for an own unpublished row — a 404 dead end AND an existence
+  // oracle (RESEARCH Pitfall 3). Founder ruling 2026-08-05: keep grid
+  // DISCOVERY-ONLY and hide the toggle here rather than adding a `rowLinkMode`
+  // passthrough. Deriving (instead of clamping `viewMode` itself) is deliberate:
+  // the prefs-hydration effect below still writes `setViewMode(prefs.view)`, so
+  // a stale persisted `view:"grid"` would otherwise resurrect the dead end.
+  // Public surfaces keep both view modes — this collapses to `viewMode` there.
+  const effectiveViewMode = visibility === "owner-all-statuses" ? "table" : viewMode;
 
   // STATE-03 dense reshape — table-scoped density ("comfortable" = the :root
   // 44px/16px default, "compact" = the [data-strategy-table][data-density="tight"]
@@ -328,7 +363,16 @@ export function StrategyTable({
   }
 
   const filtered = useMemo(() => {
-    let result = strategies.filter((s) => s.status === "published");
+    // Phase 149 / NAV-01 — the in-component publication predicate, now
+    // parameterized rather than deleted (deleting it would widen the SHARED
+    // component for /discovery and /browse, the roadmap's leak trap).
+    // ⚠️ `.slice()` is mandatory on the owner arm: `result.sort(...)` below
+    // mutates in place and `strategies` is in this memo's dep array, so handing
+    // back the prop array would re-order the caller's data.
+    let result =
+      visibility === "published-only"
+        ? strategies.filter((s) => s.status === "published")
+        : strategies.slice();
 
     // Watchlist scope narrows FIRST — restricting to starred strategies
     // before search/advanced/sort/paging avoids paginating across all
@@ -412,8 +456,8 @@ export function StrategyTable({
     }
 
     // Sort - in table mode use column sort, in grid mode use top-bar sort
-    const effectiveSortKey = viewMode === "table" ? tableSortKey : sortKey;
-    const effectiveSortDir = viewMode === "table" ? tableSortDir : sortDir;
+    const effectiveSortKey = effectiveViewMode === "table" ? tableSortKey : sortKey;
+    const effectiveSortDir = effectiveViewMode === "table" ? tableSortDir : sortDir;
 
     result.sort((a, b) => {
       const aVal = getSortValue(a, effectiveSortKey);
@@ -425,7 +469,7 @@ export function StrategyTable({
     });
 
     return result;
-  }, [strategies, search, showExamples, advancedFilters, sortKey, sortDir, tableSortKey, tableSortDir, viewMode, mountedAtMs, scope, watchedSet]);
+  }, [strategies, visibility, search, showExamples, advancedFilters, sortKey, sortDir, tableSortKey, tableSortDir, effectiveViewMode, mountedAtMs, scope, watchedSet]);
 
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
   const paged = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
@@ -455,7 +499,7 @@ export function StrategyTable({
     }
     window.addEventListener("resize", measure);
     return () => window.removeEventListener("resize", measure);
-  }, [density, page, viewMode, paged.length]);
+  }, [density, page, effectiveViewMode, paged.length]);
 
   // Column count for the "no rows" placeholder. Leading rank column (1) +
   // Strategy + Return% + CAGR + Sharpe + Max DD (5). Priority-collapsed but
@@ -512,6 +556,7 @@ export function StrategyTable({
         onSortDirChange={handleSortDirChange}
         viewMode={viewMode}
         onViewModeChange={setViewMode}
+        showViewToggle={visibility !== "owner-all-statuses"}
         advancedFilters={advancedFilters}
         onAdvancedFiltersChange={(f) => { setAdvancedFilters(f); setPage(0); }}
         leadingSlot={
@@ -544,7 +589,7 @@ export function StrategyTable({
       >
         {showEmptyWatchlist ? (
           <EmptyWatchlist />
-        ) : viewMode === "table" ? (
+        ) : effectiveViewMode === "table" ? (
           <div
             data-strategy-table=""
             data-density={density === "compact" ? "tight" : undefined}
@@ -826,12 +871,25 @@ export function StrategyTable({
                             </dl>
                           </details>
                         </td>
+                        {/* Phase 149 / NAV-01 — Simulate Impact is gated on the
+                            row's publication status. VERIFIED
+                            analytics-service/routers/simulator.py:287-290: the
+                            service fetches the candidate with
+                            `.eq("status","published")` and rejects anything
+                            else, so a button on an own draft/private row would
+                            fail on EVERY click. Rendering nothing beats
+                            rendering a button that cannot work (the
+                            no-disabled-buttons UAT direction). Behavior-invariant
+                            on /discovery and /browse, where the visibility
+                            default already guarantees every row is published. */}
                         <td className="px-4 py-3 text-right group-hover:bg-page/50 transition-colors">
-                          <SimulateImpactButton
-                            candidateStrategyId={s.id}
-                            candidateName={s.name}
-                            portfolioId={portfolioId}
-                          />
+                          {s.status === "published" && (
+                            <SimulateImpactButton
+                              candidateStrategyId={s.id}
+                              candidateName={s.name}
+                              portfolioId={portfolioId}
+                            />
+                          )}
                         </td>
                       </tr>
                     );
