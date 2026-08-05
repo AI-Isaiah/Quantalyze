@@ -910,8 +910,13 @@ const KNOWN_RETURNS = [
 ];
 
 /**
- * Build the cumprod wealth index the analytics-service writes to
- * `strategy_analytics.returns_series`: 1.0 on day 0, then w_i = w_{i-1}·(1+r_i).
+ * Build an ANCHORED cumprod wealth index: a 1.0 base row on day 0, then
+ * w_i = w_{i-1}·(1+r_i). ⚠️ The 1.0 base row is a TEST CONVENIENCE (it makes
+ * every KNOWN_RETURNS entry recoverable by differencing) — the analytics-service
+ * writer never persists it. Production's `returns_series` is `(1+r).cumprod()`
+ * over the returns' OWN date index, so its first element is (1 + r_0)
+ * (metrics.py day-0-exclusion semantics); the production-shaped companion test
+ * below (`.slice(1)` of this fixture) pins that N−1 reality.
  * Explicit consecutive UTC dates, no randomness. With KNOWN_RETURNS the head is
  * the hand-computed [1.0, 1.05, 0.945, 1.0395] (asserted below as a fixture
  * integrity check — a broken builder must not silently weaken these tests).
@@ -982,6 +987,31 @@ describe("resolveSharedScenario — returns_series resolution (SCEN-01)", () => 
     result.portfolioDaily.forEach((p, i) => {
       expect(p.value).toBeCloseTo(KNOWN_RETURNS[i], 10);
     });
+  });
+
+  it("SC1b-share: a PRODUCTION-shaped index (first element 1+r_0, no base row) yields N−1 returns — day one's return is unrecoverable", () => {
+    // The writer never persists a 1.0 base row, so on real data differencing
+    // consumes the first STORED point: N points → N−1 returns, the return baked
+    // into element 0 (+5% here) is permanently absent, and the derived series
+    // starts one day later than the stored curve. This is the honest companion
+    // to SC1-share's anchored fixture (which recovers all N by construction).
+    const wealth = makeWealthIndex("2026-01-01", KNOWN_RETURNS).slice(1);
+    expect(wealth[0].value).toBeCloseTo(1.05, 10); // (1 + r_0), NOT a 1.0 base
+
+    const result = resolveSharedScenario(scRow(null), {}, { [SC_STRAT]: wealth });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    // N stored points → N−1 returns; metrics.n counts them honestly.
+    expect(result.portfolioDaily).toHaveLength(KNOWN_RETURNS.length - 1);
+    expect(result.metrics.n).toBe(KNOWN_RETURNS.length - 1);
+    // The recovered series is KNOWN_RETURNS[1..] — day one's +0.05 is absent.
+    expect(result.portfolioDaily[0].value).toBeCloseTo(-0.1, 10);
+    result.portfolioDaily.forEach((p, i) => {
+      expect(p.value).toBeCloseTo(KNOWN_RETURNS[i + 1], 10);
+    });
+    // The derived start date shifts one day later than the anchored variant's.
+    expect(result.portfolioDaily[0].date).toBe("2026-01-03");
   });
 
   it("SC3-share: the wealth index is DIFFERENCED at the wiring, never forwarded raw", () => {

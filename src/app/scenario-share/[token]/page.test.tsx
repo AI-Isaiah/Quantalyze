@@ -203,8 +203,13 @@ function okRow() {
 // carries a NULL daily_returns (that column is CSV-ingest only), and the real
 // track arrives from the sibling strategy_analytics read as a cumprod WEALTH
 // index. Built as the cumulative product of makeSeries() — the mathematical
-// INVERSE of the differencing under test, never that function itself — so the
-// two fixtures carry identical economics by construction.
+// INVERSE of the differencing under test, never that function itself.
+// ⚠️ ANCHORED variant: the prepended 1.0 base row is a TEST CONVENIENCE that
+// makes all 40 returns recoverable, so this fixture and makeSeries() carry
+// identical economics BY CONSTRUCTION. The production writer never persists
+// that base row — its first element is (1 + r_0) over the returns' own date
+// index (metrics.py day-0-exclusion semantics) — so real data yields N−1
+// returns and day one drops. makeProductionWealthIndex() below pins that shape.
 function makeWealthIndex(): Array<{ date: string; value: number }> {
   const out = [{ date: "2022-12-31", value: 1 }];
   let w = 1;
@@ -213,6 +218,12 @@ function makeWealthIndex(): Array<{ date: string; value: number }> {
     out.push({ date: r.date, value: w });
   }
   return out;
+}
+
+// The PRODUCTION shape: `(1+r).cumprod()` with NO base row — first element
+// (1 + r_0). Exactly the anchored fixture minus its test-convenience anchor.
+function makeProductionWealthIndex(): Array<{ date: string; value: number }> {
+  return makeWealthIndex().slice(1);
 }
 
 function analyticsOnlyRow() {
@@ -387,8 +398,11 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     // analytics-service-only case) must project IDENTICALLY to the same track
     // arriving via daily_returns. Pre-147 the analytics-only leg resolved EMPTY
     // and the recipient saw a silently zeroed blend. The wealth index below is
-    // the cumprod of makeSeries(), so the two paths carry the same economics and
-    // the rendered markup must match byte-for-byte.
+    // the ANCHORED cumprod of makeSeries() (1.0 base row prepended — a fixture
+    // convenience the production writer never persists), so the two paths carry
+    // the same economics BY CONSTRUCTION and the rendered markup must match
+    // byte-for-byte. On PRODUCTION data day one drops (N−1 semantics) and exact
+    // parity is NOT expected — the companion test below pins that shape.
     rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
     const csvHtml = await renderPage("csv-leg");
 
@@ -416,6 +430,34 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     // The RAW wealth index never reaches the client — the page emits only the
     // resolved projection. 1.0-based wealth values are absent from the markup.
     expect(analyticsHtml).not.toContain("returns_series");
+  });
+
+  it("SCEN-01 — a PRODUCTION-shaped wealth index (no 1.0 base row) renders a real projection, but byte parity with the CSV twin is an anchored-fixture property only", async () => {
+    // The writer's `returns_series` is `(1+r).cumprod()` over the returns' own
+    // date index — first element (1 + r_0), no base row. Differencing recovers
+    // N−1 returns: day one's return is unrecoverable and the derived start date
+    // shifts one day later. So an analytics-only leg on REAL data must still
+    // render a live projection (never the em-dash shell), while the CSV twin's
+    // exact markup is NOT reproducible — the previous test's byte-for-byte
+    // parity holds only for the anchored fixture.
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    const csvHtml = await renderPage("csv-leg-prod");
+
+    analyticsReadMock.mockResolvedValueOnce({
+      data: [
+        { strategy_id: STRAT_A, returns_series: makeProductionWealthIndex() },
+      ],
+      error: null,
+    });
+    rpcMock.mockResolvedValueOnce({ data: [analyticsOnlyRow()], error: null });
+    const analyticsHtml = await renderPage("analytics-leg-prod");
+
+    // A real projection renders — never the degenerate all-em-dash shell.
+    expect(analyticsHtml).toContain("My Q3 Blend");
+    expect(analyticsHtml).toMatch(/\d%/);
+    expect(analyticsHtml).not.toContain("returns_series");
+    // …but not the CSV twin's markup: one fewer daily return, a later start.
+    expect(analyticsHtml).not.toBe(csvHtml);
   });
 
   it("SCEN-01 — a failed returns_series read degrades to the pre-147 daily_returns projection, never throws the page", async () => {

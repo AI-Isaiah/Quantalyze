@@ -748,6 +748,40 @@ describe("GET /api/strategies/[id]/returns", () => {
     expect(body.series_state).toBe("available");
   });
 
+  it("R12b — PRODUCTION shape (no 1.0 base row): N stored points → N−1 returns, day-one's return is UNRECOVERABLE", async () => {
+    // The writer's first element is (1 + r_0) over the returns' own date index —
+    // it never prepends a 1.0 base row (metrics.py:654 cumprod; :1250-1257
+    // documents the day-0-exclusion semantics). WEALTH_INDEX above carries a
+    // test-convenience 1.0 anchor that makes ALL its returns recoverable; this
+    // companion drops it so the oracle pins what production data delivers:
+    // differencing recovers only N−1 returns, the return baked into element 0
+    // (+5% here) is permanently absent, and the derived series starts one day
+    // LATER than the stored curve.
+    const PROD_WEALTH_INDEX = WEALTH_INDEX.slice(1); // head 1.05 = (1 + 0.05)
+    STATE.analyticsRow = {
+      daily_returns: null,
+      returns_series: PROD_WEALTH_INDEX,
+      computation_status: "complete",
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.daily_returns).toHaveLength(PROD_WEALTH_INDEX.length - 1);
+    expect(body.daily_returns[0].value).toBeCloseTo(-0.1, 10);
+    expect(body.daily_returns[1].value).toBeCloseTo(0.1, 10);
+    // Day one's +5% never surfaces as an emitted return.
+    for (const p of body.daily_returns as Array<{ value: number }>) {
+      expect(p.value).not.toBeCloseTo(0.05, 10);
+    }
+    // The date axis starts at the SECOND stored day (day one drops).
+    expect(body.daily_returns.map((p: { date: string }) => p.date)).toEqual([
+      "2026-01-03",
+      "2026-01-04",
+    ]);
+    expect(body.series_state).toBe("available");
+  });
+
   it("R13 — SC3: a wealth index starting at exactly 1.0 is NEVER forwarded raw (no +100% day one)", async () => {
     // The failure mode this pins: forwarding the cumprod curve as if it were a
     // return series makes day one read as +100% (value 1.0 = "the strategy
