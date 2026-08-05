@@ -421,12 +421,13 @@ function capitalizeExchange(exchange: string): string {
  * created the strategy. Reordering these two would reintroduce that dead end.
  *
  * Style note (Rule 7 — one pattern, not a blend): the two other in-wizard
- * `target="_blank"` links use `hover:underline` (WizardChrome.tsx:255) and
- * `rel="noopener"` without `noreferrer` (ConnectKeyStep.tsx:661). The approved
- * 148-UI-SPEC wins on both counts — a PERSISTENT underline (WCAG 1.4.1, the
- * DESIGN.md 2026-06-28 decision) and the full `noopener noreferrer`. Those two
- * divergences are logged in TODOS.md for a separate cleanup pass; they are
- * deliberately not touched here.
+ * `target="_blank"` links diverge from this treatment — the "Review our
+ * security posture" footer link in `WizardChrome` uses `hover:underline`, and
+ * the per-exchange "setup guide" link in `ConnectKeyStep` uses `rel="noopener"`
+ * without `noreferrer`. The approved 148-UI-SPEC wins on both counts: a
+ * PERSISTENT underline (WCAG 1.4.1, the DESIGN.md 2026-06-28 decision) and the
+ * full `noopener noreferrer`. Both divergences are logged in TODOS.md as
+ * DEF-148-B for a separate cleanup sweep; they are deliberately not touched here.
  */
 function ViewFullFactsheetLink({ strategyId }: { strategyId: string }) {
   return (
