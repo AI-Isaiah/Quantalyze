@@ -201,6 +201,7 @@ Plans:
 - ⚠️ **OWN-03 is the first WRITING requirement in the OWN set** → it needs its own money-path review (weights, allocation basis, what happens when the same strategy is added twice). That review is WHY this is its own phase rather than a rider on 148 — do not fold it back.
 - ⛔ The deliverable is a WIZARD QUESTION, not an auto-add; (b) must stay the default and stay a no-op.
 - ⚠️ Coordinate with AUM-04 (Phase 151): a position created from an owned strategy must not re-introduce cross-role gate contamination or double-count against live holdings.
+- ⚠️ **DISCUSS-PHASE DECISION (founder-hit 2026-08-05): the retro path.** SC1's question fires at wizard FINALIZE — but the founder's already-contributed strategies (Black Swan, Alpha Centauri, Arctic Fox) finalized BEFORE the question existed, so they can NEVER be allocated without re-onboarding. Decide the allocate-existing-own-strategy affordance (e.g. an "Allocate…" action on the /my-strategies row or the owner factsheet) — same money-path review, same no-auto-add rule. Related observed confusion: the header "+ Allocation" button on non-Scenario tabs opens the connect-key wizard (Phase 116 design) with no path to an existing strategy, and the Holdings STRATEGIES panel says "No strategies onboarded yet" while contributed strategies exist — copy/affordance both belong to this phase's surface once positions become creatable.
 
 ### Phase 151: AUM — A book you can reach and a size you can set
 
