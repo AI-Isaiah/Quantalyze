@@ -78,11 +78,69 @@ import { describe, expect, it } from "vitest";
  *     un-stripped repo walk would flag types.ts as an offender and the gate
  *     would be red on a healthy tree.
  *
- * Rule-9 NON-VACUITY — ledger PENDING. Two production mutations (148-VALIDATION.md
- * rows SC-2B-a / SC-2B-b) are run against this gate in the next commit; their
- * OBSERVED failure output is pasted here then. Until that commit lands, this
- * file is a gate whose falsifiability is asserted but not yet demonstrated.
- * The gate is 9/9 green on the fixed tree.
+ * Rule-9 NON-VACUITY — TWO experiments run during authoring (2026-08-05) at two
+ * INDEPENDENT sites, recorded here, in the commit message, and in
+ * 148-VALIDATION.md rows SC-2B-a / SC-2B-b:
+ *
+ *   1. PREDICATE DROP AT THE PAYLOAD-BUILD SITE (SC-2B-a). The cached callback
+ *      `async () => fetchAndBuildPayload(id, withPublishedOnly)` was changed to
+ *      `async () => fetchAndBuildPayload(id, (q) => q)` — an identity
+ *      predicate. This is the scariest realistic regression on this route: the
+ *      builder runs on the SERVICE-ROLE admin client, where the injected
+ *      predicate is the ONLY gate, so an identity predicate caches UNFILTERED
+ *      rows and serves a draft strategy to anonymous readers for the full TTL.
+ *      Two assertions went red:
+ *
+ *        × the cached callback names withPublishedOnly as a LITERAL and never
+ *          the owner-inclusive predicate
+ *          AssertionError: expected 'async () => fetchAndBuildPayload(id, …' to
+ *          contain 'withPublishedOnly'
+ *          Received: "async () => fetchAndBuildPayload(id, (q) => q)"
+ *        × the cached callback calls fetchAndBuildPayload with the published-only
+ *          predicate spelled out, not a variable
+ *          AssertionError: expected 'async () => fetchAndBuildPayload(id, …' to
+ *          contain 'fetchAndBuildPayload(id, withPublishe…'
+ *          Received: "async () => fetchAndBuildPayload(id, (q) => q)"
+ *
+ *        → 2 failed / 7 passed in this file.
+ *
+ *      MEASURED ASYMMETRY — this is the whole reason the file exists, not a
+ *      gap in it. Under the SAME mutation the 148-03 behaviour spec
+ *      `page.owner-lane.test.tsx` stayed 10/10 GREEN ("Tests 10 passed (10)").
+ *      Its supabase double does not apply the injected predicate, so no
+ *      behavioural assertion can observe the predicate being dropped. For this
+ *      edit the structural gate is the SOLE control.
+ *
+ *   2. SIGNATURE-GATE MUTATION (SC-2B-b) — a DIFFERENT site, not a repeat of
+ *      the first. `buildFactsheetPayloadCached(cacheKey: string)` was widened to
+ *      `(cacheKey: string, visibility: StrategyVisibility)`, `visibility` was
+ *      threaded into the callback in place of the literal, and the Lane A call
+ *      site passed `withPublishedOnly` in. `npm run typecheck` stayed at 0
+ *      errors — this is the edit a well-meaning refactor actually makes, and
+ *      the type system cannot object to it once the seam is re-opened. Three
+ *      assertions went red:
+ *
+ *        × the cached callback names withPublishedOnly as a LITERAL and never
+ *          the owner-inclusive predicate
+ *          Received: "async () => fetchAndBuildPayload(id, visibility)"
+ *        × the cached callback calls fetchAndBuildPayload with the published-only
+ *          predicate spelled out, not a variable
+ *          AssertionError: expected 'async () => fetchAndBuildPayload(id, …' to
+ *          contain 'fetchAndBuildPayload(id, withPublishe…'
+ *        × the cached wrapper takes NO visibility parameter (the seam is
+ *          type-level unrepresentable, formatting-independent)
+ *          AssertionError: expected 'function buildFactsheetPayloadCached(…'
+ *          not to contain 'visibility'
+ *          + function buildFactsheetPayloadCached(
+ *          +   cacheKey: string,
+ *          +   visibility: StrategyVisibility,
+ *          + ): Promise<FactsheetPayload | null>
+ *
+ *        → 3 failed / 6 passed in this file, with tsc at 0.
+ *
+ *   Both mutations were reverted by RE-EDITING the mutated lines (never a
+ *   file-level `git checkout --`), and `git diff --quiet -- page.tsx` exits 0.
+ *   The gate is 9/9 green on the fixed tree.
  */
 
 const ROOT = join(__dirname, "..", "..");
