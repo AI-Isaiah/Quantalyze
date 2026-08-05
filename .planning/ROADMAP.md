@@ -167,7 +167,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 149-04-PLAN.md — /my-strategies page + comparison-set line + sidebar entry + role wiring (Wave 3)
+- [x] 149-04-PLAN.md — /my-strategies page + comparison-set line + sidebar entry + role wiring (Wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
@@ -293,7 +293,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 147. SCEN-01 engine series | 6/6 | Complete   | 2026-08-05 |
 | 148. OWN owner factsheet | 5/5 | Complete   | 2026-08-05 |
-| 149. NAV my-strategies ranking | 3/5 | In Progress|  |
+| 149. NAV my-strategies ranking | 4/5 | In Progress|  |
 | 150. OWN-03 portfolio question | 0/? | Not started | - |
 | 151. AUM book + sizing | 0/? | Not started | - |
 | 152. SCEN composer legibility | 0/? | Not started | - |
