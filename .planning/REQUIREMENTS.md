@@ -625,6 +625,12 @@ D-14 valve.
   recorded 2026-07-08 as fixed by making description optional). The 10-char minimum is still enforced
   at `:339`, so that fix was narrower than recorded or has regressed. Treat the stored learning as
   STALE and re-derive from source.
+  ⚠️ **SECOND LIVE INSTANCE (founder-hit 2026-08-05):** the validate-key client rosters
+  `KNOWN_CREATE_WITH_KEY_CODES` (`ConnectKeyStep.tsx`) / `KNOWN_ADD_KEY_CODES`
+  (`MultiKeyConnectStep.tsx`) are missing `SERVICE_UNREACHABLE`, `KEY_MISSING_READ_SCOPE`,
+  `KEY_PERMISSION_DENIED` → the server's honest verdict is downgraded to `UNKNOWN` client-side,
+  invisible to Sentry. The derived-sweep MUST cover these rosters too. A 3-member stopgap may land
+  earlier via hotfix; the class fix stays here. See ROADMAP Phase 153 SC2 + TODOS.md diagnosis.
 
 - [ ] **WIZFORM-04** *(founder, verbatim: "clicking twice is not acceptable, especially with this
   mistake message. A user would just not know what to do")*: A **transient infrastructure** failure
@@ -645,6 +651,12 @@ D-14 valve.
   (`src/lib/seam-budgets.invariant.test.ts` recomputes it) — a naive retry multiplies the budget this
   route is explicitly capped on, and there is a circuit breaker (`breaker:railway`) the retries would
   feed. Retrying into an open breaker is how one slow venue takes down every other user's submits.
+  ⚠️ **ALSO OWNED HERE (added 2026-08-05, previously unowned): the MT5 validate-key DEADLINE
+  INVERSION** — `SEAM_ROUTE_BUDGETS["validate-key"].timeoutMs` (30s, `resilient-fetch.ts:537`) vs
+  `_MT5_PROBE_TIMEOUT_S` (35s) applied SEPARATELY to three stages (`exchange.py:328/380/456`): a
+  slow MT5 login's honest verdict can NEVER arrive inside the client budget (founder-hit
+  2026-08-05, two 502s at exactly 30s). Reconcile venue-aware budget vs bounded Python probe under
+  the same seam-budget contract above. See ROADMAP Phase 153 SC3 + TODOS.md diagnosis.
 
 - [ ] **WIZFORM-03**: Venue-shaped error copy must not be shown for venues it cannot apply to. The
   MT5 submit timeout advises *"switch to a different exchange"* — impossible advice when the account
