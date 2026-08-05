@@ -3049,6 +3049,14 @@ export function ScenarioComposer({
     for (const s of engineSet.strategies) {
       if (!engineSet.state.selected[s.id]) continue; // manual-off is NOT here
       if (coverageEligible[s.id]) continue; // in-blend
+      // Phase 147 SCEN-01 (review WR-02) — a row whose series is still syncing
+      // or terminally absent is not "outside the window": there is nothing to
+      // place in one. Its ONE signal is the main list's Syncing / No data chip
+      // (147-UI-SPEC §2 precedence — one signal per row); rendering it here too
+      // double-labels the row with a CONTRADICTORY caption ("no data — outside
+      // window" vs "First metrics arrive in ~10–15 min"). Non-added rows have
+      // no series_state entry → "available" → pre-147 behavior unchanged.
+      if ((addedSeriesStateByRef[s.id] ?? "available") !== "available") continue;
       const span = selectedSpanById.get(s.id) ?? null;
       out.push({
         id: s.id,
@@ -3058,7 +3066,13 @@ export function ScenarioComposer({
       });
     }
     return out;
-  }, [engineSet, coverageWindow, coverageEligible, selectedSpanById]);
+  }, [
+    engineSet,
+    coverageWindow,
+    coverageEligible,
+    selectedSpanById,
+    addedSeriesStateByRef,
+  ]);
 
   // Phase 58 (COVERAGE-01) — the mini-gantt rows: one per SELECTED strategy,
   // carrying its coverage span + the in-blend/auto-excluded flag read from the

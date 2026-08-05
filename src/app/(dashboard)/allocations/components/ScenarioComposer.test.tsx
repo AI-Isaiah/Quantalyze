@@ -10076,6 +10076,65 @@ describe("ScenarioComposer — Phase 147 SCEN-01 honest empty state (SC4)", () =
     expect(within(addedRow()).queryByText("Syncing")).toBeNull();
   });
 
+  it("SC4-10 (review WR-02) a computing leg NEVER appears in the auto-excluded group — the main-list Syncing chip is its ONE signal", async () => {
+    // The founder scenario this phase targets: a fresh key still syncing
+    // (~10–15 min) inside a mixed book with a LIVE intersection window. The
+    // empty-series leg has a null span, so pre-fix the autoExcluded memo also
+    // rendered it with "no data — outside window" — contradicting the main
+    // list's "First metrics arrive in ~10–15 min — not in the blend yet"
+    // (one says data is coming, the other that there is none). UI-SPEC §2:
+    // one signal per row, and series availability outranks coverage.
+    pickerOnApply = null;
+    const release = stubReturnsFetch({
+      daily_returns: [],
+      series_state: "computing",
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload(unequalSpanBook())}
+        allocatorId={`${ALLOCATOR_A}-wr02`}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: SYNC_ID,
+      name: "Fresh Key Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+
+    // Apply a window that drops B for coverage → the group RENDERS (non-vacuous:
+    // the group exists, so the syncing leg's absence is a real skip, not an
+    // absent group).
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+
+    // Main list: the ONE signal — the amber Syncing chip + its note.
+    await waitFor(() => {
+      expect(addedRow()).toHaveAttribute("data-series-state", "computing");
+    });
+    expect(within(addedRow()).getByText("Syncing")).toBeInTheDocument();
+
+    // The auto-excluded group renders B (a genuine coverage drop with a span)…
+    const group = screen.getByTestId("scenario-auto-excluded-group");
+    expect(
+      within(group).getByTestId(`auto-excluded-row-${REF_WIN_B}`),
+    ).toBeInTheDocument();
+    // …but NEVER the computing leg — no second, contradictory caption.
+    expect(
+      within(group).queryByTestId(`auto-excluded-row-${SYNC_ID}`),
+    ).toBeNull();
+    expect(within(group).queryByText(/no data — outside window/i)).toBeNull();
+  });
+
   // -------------------------------------------------------------------------
   // The remaining 147-UI-SPEC "Falsifiable Acceptance" items. Items 1 and 2 are
   // pinned by SC4-1/-2 above; these close the rest. Each test names its item.
