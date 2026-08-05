@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.53.3.0] - 2026-08-05
+### NAV-01 — "My strategies": the allocator's own ranking, at discovery parity
+
+The allocator side of the product was write-only: you could upload keys and contribute
+strategies, but no surface ever showed you your own book ranked the way the world sees it. A
+founder with 8 active keys had zero rows visible on any ranking. The new sidebar entry
+**My Strategies** (MY WORKSPACE) fixes that with the discovery table itself — the SAME
+component and the SAME percentile formula, not a second implementation.
+
+**Every key is accounted for.** Ranked rows cover every derived strategy including `private`
+and `draft` — each opens its full factsheet through the owner lane shipped in 0.53.2.0. Keys
+that have not produced a strategy yet render an honest unranked placeholder (exchange + label,
+em-dash metrics, "No strategy yet" → wizard link) — never invented numbers. Rows whose
+analytics have not computed show a Syncing/No-data chip derived from the same state machine
+the allocations book uses; archived strategies neither rank nor count as key coverage.
+
+**Drafts get real percentiles without touching public numbers.** The percentile scoring core
+was extracted into one pure function used by BOTH the public ranking and the new owner surface:
+your unpublished rows are scored against the published universe ("if published, this would sit
+at Pnn") while never entering the population any other viewer sees. Discovery and browse are
+provably byte-identical — the public pages pass no new props, the published-only default is a
+literal pinned by a 13-assertion structural gate, and a 9-site mutation campaign proved the
+gate catches the one edit (leaking drafts to anonymous /browse) that no behavioural spec sees.
+
+**Honest failure, not false emptiness.** A transient fetch error renders "temporarily
+unavailable — refresh to retry", never the "No strategies yet" empty state (review WR-01).
+
+Also in this release: the MT5 wizard incident of 2026-08-05 was diagnosed end-to-end
+(client roster gap → new scope on WIZFORM-02, validate-key deadline inversion → new
+requirement WIZFORM-05, Mt5Session sync defect → hotfix precondition for Phase 155), and
+Phase 150's charter now carries the founder's capital-mark model (mark at key-add, allocate
+from Holdings, team keys never allocatable) plus new requirement OWN-05 (rename own
+strategies).
+
 ## [0.53.2.0] - 2026-08-05
 ### OWN-02/OWN-04 — the owner can see their own factsheet, and nobody else can
 
