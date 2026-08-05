@@ -14,6 +14,32 @@ import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-pa
 import type { FactsheetPayload, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { FactsheetView } from "./FactsheetView";
 
+// Pin to dynamic rendering. This route's render output already depends on the
+// per-request authentication state (cookies → supabase.auth.getUser() inside
+// createClient()), and it depends on it more the moment any part of the render
+// varies by viewer identity. Today that dynamism is only IMPLICIT — a future
+// refactor that hoisted or dropped the cookie read could silently make the
+// route statically renderable, and the failure mode is fail-open: an
+// authenticated-rendered HTML response (an owner's own unpublished factsheet)
+// cached and served to anonymous visitors. Note this is a RESPONSE-level
+// concern, distinct from the unstable_cache DATA-level concern documented
+// below. force-dynamic mirrors the sibling factsheet/[id]/tearsheet/page.tsx
+// pin, which carries the same reasoning for the disclosure-tier redaction.
+export const dynamic = "force-dynamic";
+
+/**
+ * The visibility predicate injected into `fetchAndBuildPayload`. Structurally
+ * compatible with `withPublishedOnly` and with an owner-inclusive predicate
+ * partially applied to a session user id — both are `<Q>(query: Q) => Q`
+ * (see src/lib/visibility.ts).
+ *
+ * The parameter it types is REQUIRED, deliberately with no default: the
+ * builder runs on the SERVICE-ROLE admin client, where the injected predicate
+ * is the ONLY gate. A default would let a call site silently make no
+ * visibility decision; as written, omitting it is a compile error.
+ */
+type StrategyVisibility = <Q>(query: Q) => Q;
+
 /**
  * Two-layer visibility:
  *   1. Outer `signature` probe uses the REQUEST-scoped supabase client —
@@ -29,12 +55,31 @@ import { FactsheetView } from "./FactsheetView";
  * outer gate. If a future RLS predicate adds per-user filtering on those
  * columns, this comment is the warning sign.
  *
- * Cache key = `${id}::${computedAt}` so a new analytics row automatically
- * misses cache. Tag-based revalidation handles publish/unpublish flips.
+ * CACHE KEY REALITY (corrected phase 148 — the previous claim here was false).
+ * The `cacheKey` string the page passes in is split at "::" and everything
+ * after the id is DISCARDED (`buildFactsheetPayloadCached` below). The
+ * effective unstable_cache key is id-ONLY: Next derives it from the callback's
+ * source text plus the keyParts ["factsheet-v2-payload-v6", id] and an empty
+ * args array. So a fresh `strategy_analytics.computed_at` does NOT bust this
+ * cache — entries live the full revalidate=3600s, or until the admin publish
+ * flow calls revalidateTag(`factsheet-v2:${id}`). Tag-based revalidation is
+ * what actually handles publish/unpublish flips. (The resulting staleness
+ * window is a known, logged item — see TODOS.md, phase 148 — deliberately not
+ * fixed here.)
+ *
+ * ⛔ Corollary: viewer/lane separation can NEVER be expressed through the
+ * cacheKey string. Appending a suffix yields the SAME entry, so any
+ * viewer-dependent payload built through the cached wrapper would be served to
+ * every subsequent reader — including anonymous ones — for the full TTL. A
+ * viewer-dependent payload must bypass the cached wrapper entirely, which is
+ * why the wrapper below hard-codes its predicate instead of accepting one.
  */
-async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null> {
+async function fetchAndBuildPayload(
+  id: string,
+  visibility: StrategyVisibility,
+): Promise<FactsheetPayload | null> {
   const supabase = createAdminClient();
-  const { data: strategy, error } = await withPublishedOnly(
+  const { data: strategy, error } = await visibility(
     supabase
       .from("strategies")
       .select(
@@ -94,7 +139,7 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
     // H-2: the composite read-path is shared with the discovery detail page via
     // `readCompositeFactsheet` so the two surfaces can't diverge (the "one path"
     // lesson). It REUSES the in-scope service-role admin `supabase` handle
-    // already created above under the SAME `withPublishedOnly` visibility
+    // already created above under the SAME injected `visibility` predicate
     // boundary — NO new client, NO broader privilege; the outer request-scoped
     // RLS signature probe + notFound() remains the unchanged auth gate. The
     // helper carries C-1 (config-driven method), F1/H-1 (headline gate), F2/M-1
@@ -120,9 +165,12 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
     //
     // MTM-01 (Phase 102): a single-key OPTIONS strategy also persists its MTM
     // basis (`metrics_json_by_basis.mark_to_market`) + an honest degrade reason.
-    // The F-4 `computation_status`-DONE gate rides the `${id}::${computedAt}` cache
-    // key (:344) because a re-derive stamps a fresh computed_at; status is
-    // public-safe on a published row (unchanged RLS boundary — the outer
+    // The F-4 `computation_status`-DONE gate was documented as riding a
+    // computed_at-bearing cache key; it does NOT — the effective key is id-only
+    // and a re-derive does not bust it (see the corrected header comment above).
+    // The gate is still correct, it just drains on the TTL / publish tag rather
+    // than on a fresh computed_at. Status is public-safe on a published row
+    // (unchanged RLS boundary — the outer
     // request-scoped signature probe stays the auth gate). The assembly returns
     // `{}` for every non-options single-key strategy → byte-identical.
     //
@@ -231,8 +279,16 @@ function buildFactsheetPayloadCached(
   // strategy's payload rather than busting every factsheet at once. The
   // global `factsheet-v2` tag is retained so a schema-level migration can
   // still wipe the whole surface with a single `revalidateTag` call.
+  //
+  // ⛔ This wrapper takes NO visibility parameter, and the predicate below is a
+  // LITERAL, never a variable. Whatever this callback builds is shared with
+  // every subsequent reader of the same id for the full TTL (the key is
+  // id-only — see the header comment), so a viewer-dependent predicate here
+  // would be a disclosure bug. Keeping the parameter off the signature makes
+  // that unrepresentable: a caller cannot pass one, and the literal cannot be
+  // reached by a caller at all.
   return unstable_cache(
-    async () => fetchAndBuildPayload(id),
+    async () => fetchAndBuildPayload(id, withPublishedOnly),
     // Cache key carries a shape-version suffix. Bump it (e.g. -v2 → -v3)
     // whenever FactsheetPayload adds non-optional fields, so unstable_cache
     // entries from the previous shape don't crash readers expecting the new
