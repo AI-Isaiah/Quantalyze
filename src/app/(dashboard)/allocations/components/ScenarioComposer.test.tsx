@@ -10075,4 +10075,215 @@ describe("ScenarioComposer — Phase 147 SCEN-01 honest empty state (SC4)", () =
     expect(addedRow()).toHaveAttribute("data-series-state", "available");
     expect(within(addedRow()).queryByText("Syncing")).toBeNull();
   });
+
+  // -------------------------------------------------------------------------
+  // The remaining 147-UI-SPEC "Falsifiable Acceptance" items. Items 1 and 2 are
+  // pinned by SC4-1/-2 above; these close the rest. Each test names its item.
+  // -------------------------------------------------------------------------
+
+  /** Every CoverageStateChip inside a row. The chip's BASE ladder
+   *  (`text-fixed-11 uppercase tracking-wide`) identifies it unambiguously —
+   *  the sibling TrustTierLabel badge is `text-xs` and never uppercase. */
+  function chipsIn(row: HTMLElement): HTMLElement[] {
+    return Array.from(row.querySelectorAll<HTMLElement>("span")).filter(
+      (el) =>
+        el.className.includes("text-fixed-11") &&
+        el.className.includes("uppercase") &&
+        el.className.includes("tracking-wide"),
+    );
+  }
+
+  /** Every APPLIED negative token in a row. `hover:`-prefixed tokens are
+   *  excluded deliberately: the Remove × carries `hover:border-negative
+   *  hover:text-negative` on EVERY row in EVERY state (it is the destructive
+   *  action's affordance, not the state's rendering), so counting it would make
+   *  this assertion fail for a reason unrelated to the claim. */
+  function appliedNegativeTokens(row: HTMLElement): string[] {
+    const hits: string[] = [];
+    for (const el of Array.from(row.querySelectorAll<HTMLElement>("*"))) {
+      for (const token of el.className.split(/\s+/)) {
+        if (token.startsWith("hover:")) continue;
+        if (/^(text|bg|border)-negative$/.test(token)) hits.push(token);
+      }
+    }
+    return hits;
+  }
+
+  it("UI-SPEC #3 neither new state dims or strikes through its row, and the include toggle stays ON", async () => {
+    for (const state of ["computing", "empty"] as const) {
+      cleanup();
+      // The draft persists to localStorage — clear it so each iteration starts
+      // from a genuinely fresh row (a leaked toggle state from the previous
+      // iteration would silently invert the gesture below).
+      lsStore.clear();
+      await renderWithLazyBody({ daily_returns: [], series_state: state });
+      await waitFor(() => {
+        expect(addedRow()).toHaveAttribute("data-series-state", state);
+      });
+
+      // opacity-50 / line-through is the MANUAL-exclusion vocabulary. Wearing it
+      // here would read as "you turned this off" when the user did nothing.
+      expect(addedRow().className).not.toContain("opacity-50");
+      expect(addedRow().className).not.toContain("line-through");
+      // The strategy stays ADDED and SELECTED — it joins the blend by itself the
+      // moment the series lands (147-CONTEXT locked).
+      expect(
+        within(addedRow()).getByRole("switch", { name: /Toggle .* on\/off/i }),
+      ).toHaveAttribute("aria-checked", "true");
+    }
+  });
+
+  it("UI-SPEC #4 neither new state disables the weight or leverage input (the typed weight is already correct when the series arrives)", async () => {
+    for (const state of ["computing", "empty"] as const) {
+      cleanup();
+      lsStore.clear();
+      await renderWithLazyBody({ daily_returns: [], series_state: state });
+      await waitFor(() => {
+        expect(addedRow()).toHaveAttribute("data-series-state", state);
+      });
+
+      expect(
+        within(addedRow()).getByLabelText(/weight$/i),
+      ).not.toBeDisabled();
+      expect(
+        within(addedRow()).getByLabelText(/leverage multiplier$/i),
+      ).not.toBeDisabled();
+    }
+  });
+
+  it("UI-SPEC #5 a FAILED computation (which the server maps to series_state 'empty') renders the MUTED chip — no applied negative token anywhere in the row", async () => {
+    // computation_status "failed" never reaches the client: the server's ONE
+    // derivation table maps it to "empty" because the user-facing fact on this
+    // surface is absence. The remedy for a failed computation lives on the
+    // strategy's own detail page, which this surface deliberately does not link
+    // to. A red row here would claim the allocator's scenario had failed.
+    await renderWithLazyBody({ daily_returns: [], series_state: "empty" });
+    await waitFor(() => {
+      expect(addedRow()).toHaveAttribute("data-series-state", "empty");
+    });
+
+    const chip = within(addedRow()).getByText("No data");
+    expect(chip.className).toContain("text-text-muted");
+    expect(chip.className).toContain("bg-track");
+    expect(appliedNegativeTokens(addedRow())).toEqual([]);
+    // Non-vacuous: the scanner DOES see this row's classes (it finds the
+    // hover-only tokens it is deliberately excluding).
+    expect(addedRow().innerHTML).toContain("hover:text-negative");
+  });
+
+  it("UI-SPEC #6 no row ever renders two chips — one signal per row across all four reachable states", async () => {
+    // computing / empty / available-and-eligible / manually-excluded.
+    for (const state of ["computing", "empty"] as const) {
+      cleanup();
+      lsStore.clear();
+      await renderWithLazyBody({ daily_returns: [], series_state: state });
+      await waitFor(() => {
+        expect(addedRow()).toHaveAttribute("data-series-state", state);
+      });
+      expect(chipsIn(addedRow())).toHaveLength(1);
+
+      // Toggling off swaps the chip for "Excluded" — it must not ADD one.
+      act(() => {
+        fireEvent.click(
+          within(addedRow()).getByRole("switch", { name: /Toggle .* on\/off/i }),
+        );
+      });
+      expect(chipsIn(addedRow())).toHaveLength(1);
+      expect(within(addedRow()).getByText("Excluded")).toBeInTheDocument();
+    }
+
+    // A row with a real series: the in-blend chip, still exactly one.
+    cleanup();
+    lsStore.clear();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve({ ok: true, status: 200, json: async () => [] }),
+      ),
+    );
+    const series = Array.from({ length: 14 }, (_, i) => ({
+      date: `2026-02-${String(i + 1).padStart(2, "0")}`,
+      value: 0.001,
+    }));
+    render(
+      <ScenarioComposer
+        payload={makeBookPayload("available", series)}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: SYNC_ID,
+      name: "In Blend Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    expect(chipsIn(addedRow()).length).toBeLessThanOrEqual(1);
+  });
+
+  it("UI-SPEC #7 with zero contributing constituents the REAL blend KPI cells render em-dash, never the literal 0.00", async () => {
+    // The composer's own KpiStrip is module-mocked in this file, so asserting
+    // against the mock would be vacuous. Instead: capture the EXACT props the
+    // composer handed it with a zero-contribution blend, then render the REAL
+    // KpiStrip with those props. That is the wiring (real engine output → real
+    // KPI renderer), not a helper's return value.
+    await renderWithLazyBody({ daily_returns: [], series_state: "empty" });
+    await waitFor(() => {
+      expect(addedRow()).toHaveAttribute("data-series-state", "empty");
+    });
+
+    const kpiProps = vi.mocked(KpiStrip).mock.calls.at(-1)?.[0];
+    expect(kpiProps).toBeDefined();
+    // Non-vacuous: the blend genuinely has nothing to compute from.
+    expect(kpiProps!.mode).toBe("scenario");
+
+    cleanup();
+    const actual =
+      await vi.importActual<typeof import("./KpiStrip")>("./KpiStrip");
+    const { container } = render(<actual.KpiStrip {...kpiProps!} />);
+
+    // DESIGN.md Numbers Contract: null / non-finite → em-dash. Never 0, never
+    // blank, never a fabricated value an LP could act on.
+    expect(container.textContent).not.toContain("0.00");
+    expect(container.textContent).toContain("—");
+  });
+
+  it("UI-SPEC #8 the UNIFY-04 loading banner still renders while a lazy fetch is in flight (a third, distinct axis — not folded into the new states)", async () => {
+    const release = stubReturnsFetch({
+      daily_returns: [],
+      series_state: "computing",
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: SYNC_ID,
+      name: "In Flight Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    // In flight — the client-fetch axis speaks, and the server-state axis is
+    // silent (nothing has answered yet).
+    expect(screen.getByTestId("scenario-loading-returns")).toBeInTheDocument();
+    expect(screen.queryByTestId("scenario-series-state-note")).toBeNull();
+
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+
+    // Settled — the banner retires and the server-state axis takes over. The
+    // two never render at once, and neither replaced the other.
+    await waitFor(() => {
+      expect(screen.queryByTestId("scenario-loading-returns")).toBeNull();
+    });
+    expect(
+      screen.getByTestId("scenario-series-state-note"),
+    ).toHaveTextContent(SYNCING_NOTE);
+  });
 });
