@@ -90,6 +90,18 @@ function readDisclosureTier(strategy: unknown): DisclosureTier {
 
 type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
 
+/**
+ * Phase 149 (149-02) — a row for a RANKED strategy list, carrying the
+ * absent-analytics signal alongside the crash-free `analytics` fallback.
+ * `analyticsPresent === false` means NO `strategy_analytics` row exists, which
+ * is NOT the same as a row whose computation is pending. See `shapeRankingRows`
+ * for why conflating them ships a permanent "Syncing" chip.
+ *
+ * Public consumers that only read `Strategy & { analytics }` ignore the extra
+ * field (structural typing — zero behaviour change for discovery/browse).
+ */
+export type RankedStrategyRow = StrategyWithAnalytics & { analyticsPresent: boolean };
+
 /** Metric keys we compute percentile ranks for */
 const PERCENTILE_METRICS = [
   "cagr",
@@ -201,7 +213,7 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
 // Both helpers are pure and have no Supabase dependency — they live in utils.
 export { extractAnalytics, EMPTY_ANALYTICS };
 
-export async function getStrategiesByCategory(categorySlug: string): Promise<StrategyWithAnalytics[]> {
+export async function getStrategiesByCategory(categorySlug: string): Promise<RankedStrategyRow[]> {
   const supabase = await createClient();
 
   // Single query: join strategies with category filter + analytics +
@@ -240,18 +252,252 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Str
   // zero rows for non-owner viewers, hiding every list badge for anon (same root
   // cause as the factsheet — see readPublicVerificationSignals). One batched read
   // for the whole list.
+  return shapeRankingRows(strategies);
+}
+
+/**
+ * Phase 149 (149-02) — the shared row-shaper for every RANKED strategy list
+ * (discovery/browse via `getStrategiesByCategory`, /my-strategies via
+ * `getMyStrategies`). Extracted verbatim from the former
+ * `getStrategiesByCategory` tail so both surfaces project trust_tier the same
+ * way and neither can drift.
+ *
+ * ⚠️ B-1 (the load-bearing correction): the `EMPTY_ANALYTICS` fallback keeps
+ * cells crash-free (they render em-dashes), but it HARDCODES
+ * `computation_status: "pending"` and `computed_at: ""` (utils.ts:178).
+ * Substituting it silently turns every never-enqueued strategy into a live
+ * "pending" job, which downstream renders as a PERMANENT "Syncing" chip — the
+ * exact forever-spinner class the 16h bound in `deriveEmptySeriesState` exists
+ * to kill. So the ABSENT-row signal must survive the fallback:
+ * `analyticsPresent` is false iff no `strategy_analytics` row exists.
+ * Same coercion precedent as `returns/route.ts:310-341` and
+ * `queries.ts:3604-3615`, which derive a `status: string | null` where null
+ * means "no row", not "pending".
+ */
+async function shapeRankingRows(
+  strategies: { id: string; strategy_analytics: unknown }[],
+): Promise<RankedStrategyRow[]> {
   const signals = await readPublicVerificationSignals(
     strategies.map((s) => (s as unknown as Strategy).id),
   );
 
   return strategies.map((s) => {
     const strat = s as unknown as Strategy;
+    const a = extractAnalytics(s.strategy_analytics);
     return {
       ...strat,
       trust_tier: (signals.get(strat.id)?.trust_tier ?? null) as Strategy["trust_tier"],
-      analytics: extractAnalytics(s.strategy_analytics) ?? { ...EMPTY_ANALYTICS, strategy_id: s.id },
+      analytics: a ?? { ...EMPTY_ANALYTICS, strategy_id: s.id },
+      analyticsPresent: a !== null,
     };
   });
+}
+
+/**
+ * Phase 149 (149-02, NAV-01) — every strategy the SESSION OWNER has, at every
+ * non-archived status, shaped exactly like the discovery rows so /my-strategies
+ * reaches discovery parity.
+ *
+ * ⚠️ DOCUMENTED ROADMAP DEVIATION (founder ruling 2026-08-05). SC-3 and CONTEXT
+ * name `withPublishedOrOwner` as the predicate. That helper is `published OR
+ * own` (visibility.ts:130-133) — on a page titled "My Strategies" it would
+ * render the ENTIRE published universe. This uses OWN-ONLY
+ * `.eq("user_id", userId)` at every status instead, which is strictly NARROWER
+ * than the named helper and cannot leak. RLS is the backstop: `strategies_read`
+ * = `status='published' OR user_id = auth.uid()` (migration 20260405061912:28),
+ * with `analytics_read` as its EXISTS-mirror. The ROADMAP wording's intent
+ * ("own including unpublished") is satisfied.
+ *
+ * `.neq("status", "archived")` is the W-4 ruling (2026-08-05): archived rows
+ * are excluded from the ranked list, and their keys become placeholder-eligible
+ * via `deriveStrategylessKeys` — archived is not coverage.
+ *
+ * NO `discovery_categories!inner`: `category_id` is nullable and PostgREST
+ * drops rows on an `!inner` miss, which would silently hide the owner's own
+ * uncategorised drafts (research Pitfall 4).
+ *
+ * Fail-soft `[]` (not the `getUserApiKeys` throw): an empty ranking is honest
+ * and this is not a money-display path, so a transient DB/RLS failure degrades
+ * to "you have no strategies yet" rather than an error boundary — but never to
+ * a FABRICATED row. `captureToSentry` keeps the ops signal (the getPercentiles
+ * idiom).
+ */
+export async function getMyStrategies(userId: string): Promise<RankedStrategyRow[]> {
+  const supabase = await createClient();
+
+  const { data, error } = await supabase
+    .from("strategies")
+    .select(`*, strategy_analytics (*)`)
+    .eq("user_id", userId)
+    .neq("status", "archived");
+
+  if (error) {
+    console.error("[queries.getMyStrategies] supabase error:", error.message ?? error);
+    captureToSentry(error, { tags: { op: "getMyStrategies" }, level: "error" });
+    return [];
+  }
+
+  return shapeRankingRows(
+    (data ?? []) as unknown as { id: string; strategy_analytics: unknown }[],
+  );
+}
+
+/** Phase 149 (149-02) — an active key with no live strategy behind it. */
+export type StrategylessKey = { id: string; exchange: SupportedExchange; label: string };
+
+/**
+ * @internal Exported for unit testing only (the `isPerKeyDailiesEligibleKey`
+ * precedent) — see `queries.my-strategies.test.ts`.
+ *
+ * The Delta-5 anti-join: which of the owner's ACTIVE keys have no live
+ * strategy behind them?
+ *
+ * ⚠️ Coverage must consider BOTH link forms. `strategies.api_key_id` is the
+ * direct link; `strategy_keys` (migration 20260710120000) is the composite
+ * link, where N keys map to 1 strategy. The founder's Alpha Centauri composite
+ * carries 3 keys that way and has `api_key_id: null` — an `api_key_id`-only
+ * anti-join fabricates 3 spurious placeholders on the founder's own account
+ * (PROD census 2026-08-05: 8 active keys → 4 strategies → exactly 2 bare keys).
+ *
+ * ⚠️ W-4 ruling (2026-08-05): archived strategies are NOT coverage. The owner
+ * archived them, so their keys must reappear as placeholders — matching
+ * `getMyStrategies`'s `.neq("status", "archived")` exclusion from the list.
+ *
+ * Eligibility reuses the exported `isPerKeyDailiesEligibleKey` predicate
+ * (queries.ts) rather than re-deriving `is_active && sync_status !== "revoked"
+ * && disconnected_at == null`.
+ */
+export function deriveStrategylessKeys(
+  keys: Pick<
+    ApiKeyUserView,
+    "id" | "exchange" | "label" | "is_active" | "sync_status" | "disconnected_at"
+  >[],
+  ownStrategies: readonly { id: string; api_key_id: string | null; status: string }[],
+  strategyKeyLinks: readonly { strategy_id: string; api_key_id: string }[],
+): StrategylessKey[] {
+  // W-4: archived ≠ coverage.
+  const live = ownStrategies.filter((s) => s.status !== "archived");
+  const liveIds = new Set(live.map((s) => s.id));
+
+  const covered = new Set<string>([
+    ...live
+      .map((s) => s.api_key_id)
+      .filter((id): id is string => id != null),
+    // A key may hold TWO disjoint windows on the same composite (there is no
+    // (strategy_id, api_key_id) uniqueness constraint) — the Set de-dupes.
+    // Links whose strategy is archived or not the owner's are dropped by the
+    // liveIds membership check.
+    ...strategyKeyLinks
+      .filter((l) => liveIds.has(l.strategy_id))
+      .map((l) => l.api_key_id),
+  ]);
+
+  return keys
+    .filter(isPerKeyDailiesEligibleKey)
+    .filter((k) => !covered.has(k.id))
+    .map(({ id, exchange, label }) => ({
+      id,
+      exchange: exchange as SupportedExchange,
+      label,
+    }));
+}
+
+/**
+ * Phase 149 (149-02, Delta 5) — the owner's ACTIVE keys that have no live
+ * strategy behind them, rendered as "No strategy yet" placeholder rows.
+ *
+ * All three reads are OWNER-SCOPED on the USER client (`user_id`/`owner_id`),
+ * so RLS is a backstop rather than the only gate. `api_keys` MUST project
+ * `API_KEY_USER_COLUMNS` — after migration 027 (SEC-005) any other projection
+ * silently returns NULL for revoked columns on a user client.
+ *
+ * Fail-soft `[]` + Sentry for the same reason as `getMyStrategies`: a missing
+ * placeholder row is an honest under-report; a fabricated one is not.
+ */
+export async function getStrategylessActiveKeys(userId: string): Promise<StrategylessKey[]> {
+  const supabase = await createClient();
+
+  // `strategy_keys` (migration 20260710120000) is NOT present in the generated
+  // `database.types.ts` — the types file predates the table and has not been
+  // regenerated. Every other reader in the codebase filters on `strategy_id`
+  // (a column name the type-checker resolves against some OTHER generated
+  // table), which is why none of them hit this; an owner-scoped read cannot
+  // dodge it. Narrow ONE builder to the exact shape used here rather than
+  // widening the whole client, so the owner scope stays a literal
+  // `.eq("owner_id", …)`. Regenerating database.types.ts is the real fix and is
+  // logged as deferred (out of this plan's declared file scope).
+  type StrategyKeyLinkRow = { strategy_id: string; api_key_id: string };
+  const strategyKeysTable = (
+    supabase as unknown as {
+      from: (relation: "strategy_keys") => {
+        select: (columns: string) => {
+          eq: (
+            column: string,
+            value: string,
+          ) => PromiseLike<{
+            data: StrategyKeyLinkRow[] | null;
+            error: { message: string } | null;
+          }>;
+        };
+      };
+    }
+  ).from("strategy_keys");
+
+  const [keysRes, strategiesRes, linksRes] = await Promise.all([
+    supabase.from("api_keys").select(API_KEY_USER_COLUMNS).eq("user_id", userId),
+    // `status` is projected so the archived filter is decidable in-memory.
+    supabase.from("strategies").select("id, api_key_id, status").eq("user_id", userId),
+    strategyKeysTable.select("strategy_id, api_key_id").eq("owner_id", userId),
+  ]);
+
+  const error = keysRes.error ?? strategiesRes.error ?? linksRes.error;
+  if (error) {
+    console.error(
+      "[queries.getStrategylessActiveKeys] supabase error:",
+      error.message ?? error,
+    );
+    captureToSentry(error, { tags: { op: "getStrategylessActiveKeys" }, level: "error" });
+    return [];
+  }
+
+  // Trust-boundary guard, mirroring getUserApiKeys:2078-2101 — the DB column is
+  // plain TEXT with no CHECK constraint, so a typo row would break downstream
+  // EXCHANGE_DISPLAY lookups with `undefined`. Drop + escalate.
+  const rows = (keysRes.data ?? []) as ApiKeyUserView[];
+  const validKeys: ApiKeyUserView[] = [];
+  let droppedRows = 0;
+  for (const row of rows) {
+    if (SUPPORTED_EXCHANGE_SET.has(row.exchange as SupportedExchange)) {
+      validKeys.push(row);
+    } else {
+      droppedRows += 1;
+    }
+  }
+  if (droppedRows > 0) {
+    console.warn(
+      "[queries.getStrategylessActiveKeys] dropped api_keys rows with unknown exchange",
+      { userId, dropped: droppedRows },
+    );
+    captureToSentry(
+      new Error(
+        "[queries.getStrategylessActiveKeys] dropped api_keys rows with unknown exchange",
+      ),
+      {
+        tags: {
+          op: "getStrategylessActiveKeys",
+          reason: "unknown_exchange_in_api_key_row",
+        },
+        extra: { userId, dropped: droppedRows },
+        level: "warning",
+      },
+    );
+  }
+
+  return deriveStrategylessKeys(
+    validKeys,
+    (strategiesRes.data ?? []) as { id: string; api_key_id: string | null; status: string }[],
+    linksRes.data ?? [],
+  );
 }
 
 export async function getPopulatedCategorySlugs(): Promise<string[]> {
