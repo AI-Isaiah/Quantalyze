@@ -113,7 +113,7 @@ Plans:
   3. The wizard preview links to the full factsheet, and no link shipped in this phase can land on `notFound()` (OWN-04 — strictly after OWN-02 within the phase).
   4. Nothing shipped here widens visibility beyond the owner: anonymous and non-owner authed requests still see published-only on every surface the gate change touches, and publication remains admin-only.
 
-**Plans:** 2/5 plans executed
+**Plans:** 4/5 plans executed
 
 Plans:
 **Wave 1**
@@ -123,11 +123,11 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 148-03-PLAN.md — Lane B owner lane (probe-first, uncached build) + page.owner-lane.test.tsx with unstable_cache SPY (SC1/SC2-A/SC4)
+- [x] 148-03-PLAN.md — Lane B owner lane (probe-first, uncached build) + page.owner-lane.test.tsx with unstable_cache SPY (SC1/SC2-A/SC4)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 148-04-PLAN.md — SC2-B structural CI invariant (147-guards clone) + Rule-9 mutations at two sites
+- [x] 148-04-PLAN.md — SC2-B structural CI invariant (147-guards clone) + Rule-9 mutations at two sites
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
@@ -272,7 +272,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 147. SCEN-01 engine series | 6/6 | Complete   | 2026-08-05 |
-| 148. OWN owner factsheet | 2/5 | In Progress|  |
+| 148. OWN owner factsheet | 4/5 | In Progress|  |
 | 149. NAV my-strategies ranking | 0/? | Not started | - |
 | 150. OWN-03 portfolio question | 0/? | Not started | - |
 | 151. AUM book + sizing | 0/? | Not started | - |
