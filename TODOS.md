@@ -468,6 +468,8 @@ true for 146 and half of 142–145, and **false for 141**.
   that secures nothing.
 
 ### Tech-debt / maintainability (opportunistic, don't force)
+- **149 review IN-01:** `MyStrategiesSection.tsx` comment claims namespaced prefs persistence, but with no `userId` the prefs hook is a persistence no-op on that surface — fix the comment (or pass userId if prefs are wanted there).
+- **149 review IN-02:** `getOwnRowPercentiles` fully computes `publishedMap` only for its key-count; name the future consumer or reduce to a count.
 - God-files: `queries.ts` (3,205 lines), `job_worker.run_sync_trades_job` (688 lines),
   `portfolio.py` (2,423), `exchange.py` (2,777).
 - ~4.6k LOC dead-code sweep (35 files, stale 3,256-line DB-types twin, unused deps); wire knip.
