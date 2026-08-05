@@ -553,6 +553,24 @@ D-14 valve.
   ⚠️ Scope note: this is the first requirement in the OWN set that WRITES. OWN-01/02/04 are read/gate
   changes; this one creates a portfolio position from wizard state, so it needs its own money-path
   review (weights, allocation basis, and what happens when the same strategy is added twice).
+  ⭐ **FOUNDER MODEL REFINEMENT (2026-08-05, evening — SUPERSEDES the 2026-08-04 finalize-form
+  reading above where they differ):** the question and the allocation are TWO SEPARATE STEPS.
+  Verbatim: *"When an allocator adds a key, they have to be asked, whether that is a key with their
+  own capital in it, or a trading team's key that they want to verify. If it is their own capital,
+  it gets marked, and then in holdings tab it can be added to the allocation. A trading team's key
+  can never move into allocation, as an allocator cannot put money into the trading team's
+  account."* So:
+    (1) The wizard (key-add/categorization step) asks the question and stores a persistent
+        OWNERSHIP MARK (own-capital vs team-review) — no amount, no position write in the wizard.
+    (2) The HOLDINGS tab is where a marked own-capital strategy gets ADDED to the allocation
+        (explicit action + amount — the money-path review applies HERE).
+    (3) ⛔ HARD INVARIANT, not a default: a team-review-marked strategy is NEVER allocatable — no
+        code path may create a position from it (an allocator cannot put money into a trading
+        team's account). Structural exclusion, assert it like the visibility gates.
+    (4) Retro path: existing own strategies (Black Swan et al., finalized before the question
+        existed) need the mark to be settable so they become allocatable from Holdings.
+  Discuss-phase may still confirm a wizard-side shortcut ("mark now, allocate here too?") but the
+  canonical allocation surface is Holdings.
   ⭐ **FOUNDER DIRECTION (2026-08-05 dogfooding, screenshots on record): the categorization/profile
   step is CULLED TO ESSENTIALS in the same pass.** Verbatim: *"there should be a question in the
   categorization, whether the strategy is an allocators own strategy with capital or a key from a
