@@ -1277,6 +1277,25 @@ Fix shape if taken: one sweep, both files, plus a check for any third instance
 links, button-styled links, and card links keep their existing hover treatment, so a blanket
 `hover:underline` purge would be wrong.
 
+### Phase 148 review IN-01 — `withPublishedOrOwner` uid interpolation lacks shape validation (added 2026-08-05)
+
+**`DEF-148-C` — `withPublishedOrOwner` (`src/lib/visibility.ts:115-125`) builds the PostgREST
+`.or()` group by raw interpolation: `` `status.eq.published,user_id.eq.${authUserId}` ``.**
+Logged only; deliberately **NOT** fixed in phase 148 (pre-existing phase-110 helper — outside the
+founder blast-radius bar for review blocking).
+
+Not exploitable today: every current caller (including both phase-148 `page.tsx` sites) passes the
+session `user.id`, a GoTrue-minted UUID. But the helper's contract ("`authUserId` MUST come from
+the authenticated session") is enforced only by convention — a future caller passing a
+user-influenced string could inject additional PostgREST filter clauses into the OR group
+(e.g. `x,status.eq.draft`), widening visibility. On the admin-client call path introduced in
+phase 148 the injected predicate is the **ONLY** gate, which is what upgrades this from hygiene
+to a real landmine for future callers.
+
+**Fix shape:** belt-and-suspenders inside the helper, fail-loud —
+`if (!/^[0-9a-f-]{36}$/i.test(authUserId)) throw new Error("withPublishedOrOwner: authUserId is not a uuid")` —
+plus a unit test proving a non-uuid throws (the test must fail if the guard is removed).
+
 ---
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound

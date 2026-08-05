@@ -67,6 +67,11 @@ both Warnings are user-facing and therefore in-scope for fixing.
 
 ### WR-01: A transient Lane A probe error mislabels a PUBLISHED strategy as "Unpublished — only you can see this"
 
+**Status:** fixed — commit `8f040475` (2026-08-05). Lane B select carries `status`; the
+owner lane (and banner) is gated on `ownRow.status !== "published"`. Test 9's
+select-equality pin relaxed to Lane B ⊇ Lane A + `status`; new test 11 pins the
+regression (red-run without the fix: tests 9 + 11 fail).
+
 **File:** `src/app/factsheet/[id]/v2/page.tsx:424-486` (miss condition at 424, lane assignment at 483-485)
 **Issue:** The owner-lane branch is entered on `signRes.error || !signature` — i.e.
 also on a **transient query error** for a strategy that IS published. If the viewer
@@ -113,6 +118,12 @@ be re-checked against the new condition.
 
 ### WR-02: Owner lane's payload-pending placeholder omits the unpublished banner
 
+**Status:** fixed — commit `6d98a626` (2026-08-05). `OwnerUnpublishedNotice` is exported
+from `FactsheetView.tsx` (copy stays single-sourced) and rendered as the placeholder's
+first child when `lane === "owner"`. Test 6 extended: owner placeholder carries the
+`role="note"` banner with the verbatim heading; public-lane placeholder carries zero
+banner nodes (red-run without the fix: test 6 fails).
+
 **File:** `src/app/factsheet/[id]/v2/page.tsx:504-548`
 **Issue:** When the owner-lane build returns `null` (draft mid-recompute — e.g. a
 member-set change resets analytics to pending, a composite read-path data defect, or
@@ -142,6 +153,10 @@ placeholder tree on the owner lane (and absent on the public-lane placeholder).
 ## Info
 
 ### IN-01: `withPublishedOrOwner` interpolates the uid into the PostgREST `.or()` filter without shape validation
+
+**Status:** acknowledged — log-only per the founder blast-radius bar (pre-existing
+phase-110 helper, not exploitable today: every caller passes the GoTrue session
+`user.id`). Booked as `DEF-148-C` in TODOS.md (2026-08-05); not fixed in this pass.
 
 **File:** `src/lib/visibility.ts:115-125`
 **Issue:** The helper builds `` `status.eq.published,user_id.eq.${authUserId}` `` by
