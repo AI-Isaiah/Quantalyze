@@ -1255,6 +1255,28 @@ would write a viewer-dependent payload into the shared entry and serve it to ano
 for the full TTL. This is why phase 148's owner lane bypasses the cached wrapper entirely rather
 than "giving the owner lane its own cache key".
 
+### Phase 148 (OWN-04) — two in-wizard link-style divergences from the UI-SPEC treatment (added 2026-08-05)
+
+**`DEF-148-B` — the two pre-existing `target="_blank"` links in the wizard tree do not match the
+now-authoritative link treatment shipped by OWN-04.** Logged only; deliberately **NOT** fixed in
+phase 148 (out of the task's blast radius — Rule 3 / phase-148 orchestrator ruling).
+
+The OWN-04 link (`SyncPreviewStep.tsx`, `ViewFullFactsheetLink`) follows 148-UI-SPEC:122/126:
+`underline underline-offset-4` (persistent) + `rel="noopener noreferrer"`. Two older siblings
+diverge, each in a different way:
+
+| File:line | Divergence | Why the UI-SPEC treatment is the correct one |
+|-----------|-----------|----------------------------------------------|
+| `src/app/(dashboard)/strategies/new/wizard/WizardChrome.tsx:257` | `className="text-accent underline-offset-4 hover:underline"` — underline appears on **hover only** | It is an inline link inside body prose (`<p className="text-caption text-text-muted">Wizard help · …`), distinguished from the surrounding text by the accent teal ALONE until hover. That is the exact `link-in-text-block` shape DESIGN.md's 2026-06-28 decision ruled a WCAG 1.4.1 failure and remediated on `/security`; this instance was not swept in. |
+| `src/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep.tsx:662` | `rel="noopener"` — no `noreferrer` | `noopener` alone closes the reverse-tabnabbing hole but still leaks the full wizard URL (including the draft strategy id path) as `Referer` to `/security`. Same-origin here, so the exposure is low — which is why this is logged, not escalated. |
+
+Fix shape if taken: one sweep, both files, plus a check for any third instance
+(`grep -rn 'hover:underline' src/app/(dashboard)/strategies/new/wizard/` and
+`grep -rn 'rel="noopener"' src`) — a point-fix of these two would leave the class open.
+⚠️ Scope caveat: DESIGN.md's persistent-underline rule applies to **body-prose links only**; nav
+links, button-styled links, and card links keep their existing hover treatment, so a blanket
+`hover:underline` purge would be wrong.
+
 ---
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
