@@ -205,6 +205,12 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
     notes: "Discovery strategy detail — session-gated.",
   },
   {
+    route: "/my-strategies",
+    class: "private",
+    notes:
+      "Phase 149 NAV-01 — allocator-only ranking of own strategies at every status; requireRolePage('allocator') + own-only user_id predicate.",
+  },
+  {
     route: "/onboarding",
     class: "private",
     notes:
