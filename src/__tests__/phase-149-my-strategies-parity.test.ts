@@ -104,12 +104,159 @@ import { describe, expect, it } from "vitest";
  * idiom) — there is no bare `grep -c`-equivalent over unstripped source here.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * Rule-9 NON-VACUITY — the mutation campaign
+ * Rule-9 NON-VACUITY — the mutation campaign (run 2026-08-05)
  *
- * (EMPTY — filled by 149-05 task 2. Every row below is written only AFTER the
- * mutation was actually run and the failure actually observed; a mutation that
- * is not run is recorded as SKIPPED, never as caught.)
+ * NINE semantic mutations at NINE INDEPENDENT production sites, each RUN, each
+ * failure OBSERVED and pasted below verbatim, each reverted by RE-EDITING the
+ * mutated line (never a file-level `git checkout --`). `git diff --quiet` on
+ * every mutated file exits 0 afterwards and `git status --short` is empty.
+ * Second-member sites are preferred throughout: the mutation targets the site
+ * the author did NOT have in mind. Mirrored in 149-VALIDATION.md's
+ * Falsifiability Ledger. Nothing here is a prediction — a mutation that was not
+ * run would be recorded SKIPPED, never caught.
  *
+ *   M1 — StrategyTable.tsx:272, delete the default from the destructuring
+ *        (`visibility = "published-only",` → `visibility,`). PIN 1 RED:
+ *          × pin 1 — the published-only DEFAULT survives as a literal, and the
+ *            published arm was parameterized rather than deleted
+ *            AssertionError: expected '"use client";…' to contain
+ *            'visibility = "published-only"'                 (1 failed | 12 passed)
+ *        MEASURED: `StrategyTable.visibility.test.tsx` ALSO reddens
+ *        (1 failed | 11 passed) — "the DEFAULT recipe (no visibility prop) still
+ *        drops every non-published row", with `Private Nebula` rendering as a
+ *        real `<a href="/factsheet/…">`. Both layers catch M1. They DIVERGE at
+ *        M2, M6 and M9 below, which is the point of running all four.
+ *
+ *   M2 (second member) — browse/[slug]/page.tsx:63, add
+ *        `visibility="owner-all-statuses"` to the `<StrategyTable>` mount.
+ *        Browse is the public member nobody talks about; discovery is the one
+ *        everybody remembers. PINS 2 + 10 RED:
+ *          × pin 2 — src/app/browse/[slug]/page.tsx passes no visibility,
+ *            placeholder or wizard prop
+ *            AssertionError: expected 'import Link from "next/link";\nimport…'
+ *            not to contain 'visibility='
+ *          × pin 10 — exactly ONE production file widens the shared table to
+ *            owner-all-statuses, and it is the my-strategies surface
+ *            AssertionError: expected [ …(2) ] to have a length of 1 but got 2
+ *                                                            (2 failed | 11 passed)
+ *        MEASURED ASYMMETRY — the whole reason this file exists: under the SAME
+ *        mutation the entire behavioural table suite stayed GREEN
+ *        (StrategyTable.visibility + StrategyTable.pending-chip +
+ *        StrategyTable.test = 61 passed / 61, 3 files). No behavioural spec in
+ *        this phase mounts the browse RSC, so nothing behavioural can observe a
+ *        prop appearing on it. For this edit the structural gate is the SOLE
+ *        control — and the edit's blast radius is every anonymous visitor to
+ *        /browse seeing every user's drafts.
+ *
+ *   M3 — queries.ts:296, swap `.eq("user_id", userId)` for
+ *        `withPublishedOrOwner(query, userId)` — the ROADMAP's literal wording,
+ *        which the founder ruling overrode. (The helper had to be added to the
+ *        `./visibility` import for the mutation to be SEMANTIC rather than a
+ *        ReferenceError; both edits were reverted.) PIN 4 RED:
+ *          × pin 4 — getMyStrategies is own-only and archived-excluded, and
+ *            reaches neither the published-OR-own helper nor the category inner
+ *            join
+ *            AssertionError: expected '\n  const supabase = await createClie…'
+ *            to contain '.eq("user_id"'                      (1 failed | 12 passed)
+ *        MEASURED: `my-strategies/page.test.tsx` also reddens, 9 failed / 9 —
+ *        but recorded HONESTLY: it reddens on the CHAIN SHAPE, not on an
+ *        observed filter string. Its recording double implements
+ *        `.from/.select/.eq/.neq` and not `.or`, so the first failure is
+ *        `TypeError: query.or is not a function` at visibility.ts:122 via
+ *        getMyStrategies (queries.ts:293). A double that DID implement `.or`
+ *        would leave the widened predicate behaviourally invisible.
+ *
+ *   M4 — queries.ts:144, remove the `withPublishedOnly(` wrapper from
+ *        getPercentiles' UN-SCOPED branch, leaving the scoped branch wrapped.
+ *        PIN 5 RED — and this is precisely the mutation a PRESENCE check is
+ *        structurally blind to, because the scoped branch's surviving
+ *        occurrence keeps a `toContain("withPublishedOnly(")` green:
+ *          × pin 5 — getPercentiles keeps its signature and BOTH
+ *            withPublishedOnly branches (an occurrence COUNT, not a presence
+ *            check)
+ *            AssertionError: expected 1 to be 2 // Object.is equality
+ *                                                            (1 failed | 12 passed)
+ *        MEASURED: everything else stayed green — queries.percentiles.test.ts +
+ *        percentile-core.test.ts + visibility.test.ts = 17 passed / 17,
+ *        INCLUDING the B10 raw-predicate sweep (the mutation removes a wrapper
+ *        without introducing a raw `.eq` predicate, so the sweep has nothing to
+ *        match). The count is the only control that exists for this edit.
+ *
+ *   M5 (placeholder class) — queries.ts:355-357, drop the `strategyKeyLinks`
+ *        union from the `covered` Set (an api_key_id-only anti-join).
+ *        `queries.my-strategies.test.ts` RED, 3 failed / 6 passed — the founder's
+ *        Alpha Centauri composite fabricates exactly 3 spurious placeholders:
+ *          × returns EXACTLY the 2 bare keys when 3 are covered directly and 3
+ *            via strategy_keys
+ *            AssertionError: expected [ 'k4', 'k5', 'k6', 'k7', 'k8' ] to deeply
+ *            equal [ 'k7', 'k8' ]
+ *          × strategy_keys link: a key linked ONLY to an archived composite
+ *            still yields a placeholder
+ *            AssertionError: expected [ { id: 'k4', …(2) } ] to deeply equal []
+ *          × a key linked twice (two disjoint windows) is covered exactly once
+ *            AssertionError: expected [ 'k4', 'k9' ] to deeply equal [ 'k9' ]
+ *
+ *   M6 (SC-5 second member) — StrategyTable.tsx:641,
+ *        `showViewToggle={visibility !== "owner-all-statuses"}` →
+ *        `showViewToggle={true}`. This is the wire the gate deliberately does
+ *        NOT pin; the behavioural spec is the control:
+ *          × StrategyTable.visibility.test.tsx › hides BOTH view-toggle buttons
+ *            under visibility='owner-all-statuses'
+ *            AssertionError: expected <button …(2)>…(1)</button> to be null
+ *                                                            (1 failed | 11 passed)
+ *        MEASURED: the gate stayed 13/13 GREEN. Recorded, not hidden — the
+ *        toggle wire is an AFFORDANCE (nothing 404s if it shows), while the
+ *        derivation M9 mutates is the DEAD-END guard. Different properties,
+ *        deliberately pinned by different layers.
+ *
+ *   M7 (scorer core) — percentile-core.ts:112, flip the inversion arm
+ *        (`percentile = 100 - percentile;` → `percentile = percentile;`). BOTH
+ *        callers' specs RED — the "one core, two callers" property made
+ *        observable (2 files failed, 4 failed | 6 passed):
+ *          × percentile-core.test.ts › inverts volatility (positive
+ *            lower-is-better)
+ *            AssertionError: expected 33 to be 67 // Object.is equality
+ *          × percentile-core.test.ts › mixes higher- and lower-is-better in ONE
+ *            record and omits null metrics
+ *            AssertionError: expected { cagr: 67, max_drawdown: 50, …(1) } to
+ *            deeply equal { cagr: 67, volatility: 67, …(1) }
+ *          × queries.percentiles.test.ts › ranks the smallest drawdown as the
+ *            highest percentile and the largest as the lowest
+ *            AssertionError: expected 20 to be greater than 100
+ *          × queries.percentiles.test.ts › still ranks volatility (positive
+ *            lower-is-better) correctly
+ *            AssertionError: expected 20 to be greater than 100
+ *
+ *   M8 (B-1 coercion) — StrategyTable.tsx:851-854, drop the `analyticsPresent`
+ *        coercion (`const chipStatus = s.analytics.computation_status ?? null;`),
+ *        resurrecting the forever-`Syncing` defect through EMPTY_ANALYTICS's
+ *        hardcoded `"pending"`. `StrategyTable.pending-chip.test.tsx` RED
+ *        (1 failed | 17 passed):
+ *          × shows 'No data' for a NEVER-ENQUEUED row PAST the 16h window (the
+ *            B-1 falsifier)
+ *            AssertionError: expected <span …(3)></span> to be null
+ *            + Received:
+ *            + <span aria-label="Syncing — first metrics arrive in ~10–15 min"
+ *            +       class="… text-warning bg-warning-bg border border-warning-border">
+ *            +   Syncing
+ *            + </span>
+ *
+ *   M9 (SC-5 member A — the precise site) — StrategyTable.tsx:298, replace the
+ *        derivation with `const effectiveViewMode = viewMode;`, making grid
+ *        reachable again on the owner surface (every card links into
+ *        getStrategyDetail → withPublishedOnly → notFound()). PIN 7 RED:
+ *          × pin 7 — grid view is unreachable on the owner recipe and Simulate
+ *            stays gated on a published row
+ *            AssertionError: expected '"use client";\n\nimport { useState, u…'
+ *            to contain 'const effectiveViewMode = visibility …'
+ *                                                            (1 failed | 12 passed)
+ *        MEASURED ASYMMETRY: the behavioural table suite stayed 61/61 GREEN.
+ *        The toggle-hide case asserts the BUTTONS are absent, and the buttons
+ *        are wired off `showViewToggle` (M6's site), not off this derivation —
+ *        so no behavioural spec can see the dead end re-opening for a stale
+ *        persisted `view: "grid"` preference. For M9 the structural gate is the
+ *        SOLE control; for M6 the behavioural spec is. That is why BOTH sites
+ *        exist and why BOTH were mutated.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
