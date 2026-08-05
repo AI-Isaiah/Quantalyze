@@ -156,11 +156,23 @@ Plans:
 **Plans**: 5 plans in 4 waves (planned 2026-08-05)
 
 Plans:
+**Wave 1**
+
 - [ ] 149-01-PLAN.md — StrategyTable `visibility` parameterization (Pitfall 1) + grid-toggle suppression + published-gated Simulate button (Wave 1)
 - [ ] 149-02-PLAN.md — getMyStrategies (own-only predicate, documented deviation) + strategy-less-keys anti-join (both key links) + Badge `private` fix (Wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 149-03-PLAN.md — status marker + honest pending chip + Delta-5 placeholder rows (Wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 149-04-PLAN.md — /my-strategies page + comparison-set line + sidebar entry + role wiring (Wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
 - [ ] 149-05-PLAN.md — phase-149 structural CI gate + Rule-9 mutation campaign + phase gate (Wave 4)
+
 **UI hint**: yes
 **Notes (binding traps)**:
 
