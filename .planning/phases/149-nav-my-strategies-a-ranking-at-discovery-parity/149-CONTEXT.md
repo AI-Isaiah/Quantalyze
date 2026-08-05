@@ -24,7 +24,9 @@ publication flow; the ranking toggle (deferred — see decisions).
 - Own rows (incl. private/draft) get percentiles against the PUBLISHED UNIVERSE — the same
   population every ranking surface uses. Semantics: "if published, this would sit at #n /
   Pth percentile."
-- `getPercentiles()` is reused UNCHANGED — no second percentile mechanism.
+- `getPercentiles()` is reused UNCHANGED — no second percentile mechanism. (Reading refined
+  by the 2026-08-05 scorer ruling below: the SIGNATURE and observable behavior are unchanged;
+  the scoring core is extracted so own rows can be scored by the same formula.)
 - The comparison set is LABELED on the surface ("ranked against N published strategies") —
   the honest-set requirement from the roadmap trap.
 - Own unpublished rows NEVER enter the percentile population — a draft must not shift public
@@ -59,6 +61,23 @@ publication flow; the ranking toggle (deferred — see decisions).
   exchange + label, em-dash metrics (no invented data), honest "No strategy yet" state, link
   into the wizard. Also fixes the keys-without-strategies account view (PROD reality: one
   account has 10 active keys, 0 strategies).
+- **Percentile scoring for own rows (FOUNDER RULING 2026-08-05 — plan-revision checker B-4;
+  supersedes the LITERAL reading of "getPercentiles() is reused UNCHANGED" above):**
+  `getPercentiles` keeps its EXACT signature and observable behavior (the signature IS
+  unchanged; `queries.percentiles.test.ts` is the byte-behavior oracle and must stay green
+  with zero edits), but its scoring core — the percentile formula + lower-is-better inversion
+  + max_drawdown magnitude (queries.ts:112-117 semantics) — is EXTRACTED into ONE pure
+  function (`scoreAgainstPopulation`, new file `src/lib/percentile-core.ts`; a NEW function,
+  the pinned queries.ts block is never reordered — phase-84 slice pins respected). A thin
+  helper (`getOwnRowPercentiles`) scores OWN rows' metrics against the SAME published
+  population via that core, so private/draft rows DO get Pnn ("if published, this would sit
+  at Pnn") — making the approved comparison-set copy true. Own rows still NEVER enter the
+  population. No second formula: the phase-149 structural gate pins BOTH callers to the one
+  core.
+- **Archived rows (checker W-4 ruling, 2026-08-05):** archived strategies do NOT count as
+  key coverage (the key gets a placeholder) AND archived rows are excluded from the ranked
+  list (`getMyStrategies` carries `.neq("status", "archived")`). Both pinned with `status`
+  literals in the deriveStrategylessKeys and getMyStrategies/page specs.
 - ⚠️ StrategyTable filters to `status === "published"` IN THE COMPONENT (`StrategyTable.tsx:331`)
   — the reuse must parameterize this (research Pitfall 1); grid-view links dead-end via
   `getStrategyDetail` published-only (Pitfall 3) — resolve in-plan.
@@ -78,7 +97,8 @@ publication flow; the ranking toggle (deferred — see decisions).
 
 ### Reusable Assets
 - `getPercentiles(categorySlug?)` — `src/lib/queries.ts:118`; published-only, min-5
-  population, lower-is-better inversion. REUSE UNCHANGED.
+  population, lower-is-better inversion. Signature/behavior REUSED UNCHANGED; scoring core
+  extracted per the 2026-08-05 scorer ruling (see Post-research rulings).
 - `withPublishedOrOwner` (`src/lib/visibility.ts:115`) — the 148-landed gate this ranking
   consumes.
 - The existing discovery/external ranking component + query (pattern mapper to pin exact

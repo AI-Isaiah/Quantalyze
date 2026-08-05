@@ -903,9 +903,21 @@ should expect these to carry the most review risk.
 3. **Delta-5 key census** — the anti-join must cover `strategy_keys`, not just
    `strategies.api_key_id`. Confirm against the founder's account at the Wave-0
    `checkpoint:human-verify` (RESEARCH Open Q2).
-4. **A1 CLOSED by this map** — `deriveEmptySeriesState(status, strategyCreatedAt, nowMs?)`
-   signature verified (`closed-sets.ts:491-495`); no adapter needed beyond passing
-   `s.analytics.computation_status` + `s.created_at`.
+4. **A1 NOT closed — CORRECTED at plan revision 2026-08-05 (checker B-1; the prior
+   "A1 CLOSED" claim here was WRONG).** The `deriveEmptySeriesState(status,
+   strategyCreatedAt, nowMs?)` signature IS verified (`closed-sets.ts:491-495`), but "no
+   adapter needed beyond passing `s.analytics.computation_status`" was false: the shared
+   row-shaper substitutes `EMPTY_ANALYTICS` (`utils.ts:178` — hardcoded
+   `computation_status: "pending"`, `computed_at: ""`) for an ABSENT `strategy_analytics`
+   row, so passing `s.analytics.computation_status` raw makes every never-enqueued strategy
+   read as a LIVE pending job → a PERMANENT "Syncing" chip that never reaches the 16h
+   "No data" arm (the exact forever-spinner `MISSING_ROW_COMPUTING_WINDOW_MS` exists to
+   kill). The adapter IS needed: the shaper must preserve the absent-row signal
+   (`analyticsPresent: boolean`, plan 02) and the chip derivation must coerce it away first —
+   `deriveEmptySeriesState(analyticsPresent ? s.analytics.computation_status : null,
+   s.created_at)` — the `returns/route.ts:310-341` and `queries.ts:3604-3615` coercion
+   precedents. The chip's render gate is `!isComputedAnalytics(chipStatus)`, never
+   `!computed_at` (live jobs carry a computed_at default; EMPTY_ANALYTICS carries `""`).
 
 ---
 

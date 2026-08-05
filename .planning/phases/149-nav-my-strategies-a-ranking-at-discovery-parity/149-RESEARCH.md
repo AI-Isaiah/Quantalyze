@@ -844,7 +844,22 @@ included.
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+> **Resolution status (plan revision 2026-08-05 — checker W-2):** all four questions are
+> CLOSED by the rulings recorded in `149-CONTEXT.md` §Post-research rulings and the plans:
+> - **Q1** → CONTEXT ruling: own-only `.eq("user_id", user.id)` (documented ROADMAP
+>   deviation); NOT `withPublishedOrOwner`. Implemented in plan 02, pinned by gate pin 4.
+> - **Q2** → CONTEXT "Key coverage" ruling + founder PROD census (8 keys → 4 strategies →
+>   2 placeholders; Alpha Centauri = 3 keys via strategy_keys). No Wave-0 checkpoint — the
+>   census stands, and the founder proof case is discharged by POST-MERGE PROD UAT
+>   (149-VALIDATION.md §Manual-Only, checker W-3 ruling).
+> - **Q3** → both copy branches unit-specced (plan 04 SC-2c); the threshold copy on PROD is
+>   briefed as HONEST in 149-VALIDATION.md §Manual-Only.
+> - **Q4** → plan-time read performed: `analytics-service/routers/simulator.py:288-290`
+>   fetches the candidate `.eq("status","published")` → SimulateImpactButton is row-gated to
+>   `status === "published"` in plan 01 (no button that fails on every click).
+
 
 ### 1. `withPublishedOrOwner` vs `.eq("user_id", …)` — a locked-decision conflict
 - **What we know:** ROADMAP SC-3 and CONTEXT both name `withPublishedOrOwner` as the
