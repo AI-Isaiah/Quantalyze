@@ -3,7 +3,8 @@ import type { Metadata } from "next";
 import { unstable_cache } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { withPublishedOnly } from "@/lib/visibility";
+import { withPublishedOnly, withPublishedOrOwner } from "@/lib/visibility";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
 import { readPublicVerificationSignals } from "@/lib/queries";
@@ -405,26 +406,101 @@ export default async function FactsheetV2Page({
     readPublicVerificationSignals([id]),
   ]);
 
-  const signature = signRes.data;
+  // TWO-LANE SELECTION (phase 148 / OWN-02). Lane A is the published/cached
+  // lane above and is byte-unchanged. Lane B exists ONLY on a Lane A miss: an
+  // authenticated owner may read their OWN unpublished strategy, built directly
+  // (never through the shared cache — see the header comment: the cache key is
+  // id-only, so an owner-built entry would be served to anonymous readers for
+  // the full TTL).
+  //
+  // ⛔ LANE ORDER IS LOAD-BEARING. The published probe runs FIRST and the
+  // session probe only on its miss, so a public (even authed) view pays ZERO
+  // extra queries. Hoisting `auth.getUser()` above the Promise.all — e.g. to
+  // widen `user`'s scope — reverses that and is forbidden; `ownerUid` below is
+  // the scope bridge that makes the hoist unnecessary.
+  let signature = signRes.data;
+  let lane: "public" | "owner" = "public";
+  let ownerUid: string | null = null;
   if (signRes.error || !signature) {
-    console.warn("[factsheet/v2/page] signature gate -> notFound", {
-      id,
-      hasError: !!signRes.error,
-      errorCode: signRes.error?.code,
-      errorMessage: signRes.error?.message,
-      hasSignature: !!signature,
-      hint: signRes.error
-        ? "supabase query errored — check RLS on strategies / strategy_analytics for the calling user"
-        : "no row matched (id, status='published') — strategy may be draft / archived or RLS-hidden",
-    });
-    notFound();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      console.warn("[factsheet/v2/page] signature gate -> notFound", {
+        id,
+        lane: "public",
+        hasError: !!signRes.error,
+        errorCode: signRes.error?.code,
+        errorMessage: signRes.error?.message,
+        hasSignature: !!signature,
+        hint: signRes.error
+          ? "supabase query errored on the PUBLISHED lane — check RLS on strategies / strategy_analytics for the calling user"
+          : "no row matched (id, status='published') on the PUBLISHED lane and the request carries no session, so the owner lane was not attempted — strategy may be draft / archived or RLS-hidden",
+      });
+      notFound();
+    }
+    // LANE B probe — request-scoped client (RLS on) with the owner-inclusive
+    // predicate mirroring `strategies_read`. `user.id` is SESSION-only, from the
+    // getUser() call directly above in this same function — NEVER params /
+    // searchParams; a caller who could name another owner would read that
+    // owner's drafts (T-148-02, the T-110-05/07 class). The select list is
+    // character-identical to Lane A's because `signature` feeds both the
+    // computed_at read below and the payload-pending fallback's name/codename/
+    // disclosure_tier — a narrower list breaks that fallback on the owner lane
+    // only.
+    const { data: ownRow, error: probeError } = await withPublishedOrOwner(
+      supabase
+        .from("strategies")
+        .select("id, name, codename, disclosure_tier, strategy_analytics ( computed_at )")
+        .eq("id", id),
+      user.id,
+    ).maybeSingle();
+    if (probeError) {
+      // error-absent ≠ legit-absent: a PostgREST error returns
+      // {data:null,error} and would 404 a REAL owner-visible strategy with no
+      // signal. The 404 stays (the status must never become an existence
+      // oracle), but the breadcrumb is logged server-side (Rule 12).
+      console.error("[factsheet/v2/page] owner probe error:", probeError);
+      captureToSentry(probeError, {
+        tags: { route: "factsheet/v2/page", stage: "owner-probe" },
+      });
+    }
+    if (!ownRow) {
+      // The SAME notFound() an anonymous visitor gets. A non-owner authed
+      // viewer, an anonymous viewer and a genuinely missing id are
+      // indistinguishable from the outside (T-148-04).
+      console.warn("[factsheet/v2/page] signature gate -> notFound", {
+        id,
+        lane: "owner",
+        hasError: !!probeError,
+        errorCode: probeError?.code,
+        errorMessage: probeError?.message,
+        hasSignature: false,
+        hint: "no row matched the OWNER lane either (status='published' OR user_id=<session user>) — the session user does not own this strategy, or it does not exist",
+      });
+      notFound();
+    }
+    signature = ownRow;
+    lane = "owner";
+    ownerUid = user.id;
   }
   const signAnalytics = Array.isArray(signature.strategy_analytics)
     ? signature.strategy_analytics[0]
     : signature.strategy_analytics;
   const computedAt = signAnalytics?.computed_at ?? "0";
 
-  const payload = await buildFactsheetPayloadCached(`${id}::${computedAt}`);
+  // ⛔ The owner arm calls the builder DIRECTLY: no cache read, no cache write.
+  // It cannot route through `buildFactsheetPayloadCached` — the effective
+  // unstable_cache key is id-ONLY (header comment), so an owner-built payload
+  // would be served to every subsequent reader of this id, anonymous ones
+  // included, for the full 3600s TTL. The same applies to a `null`: unstable_cache
+  // stores it unconditionally, so a draft that fails to build must not reach the
+  // wrapper either. The lambda closes over `ownerUid` (the session id captured in
+  // the miss branch above), never over `user`, which is out of scope here.
+  const payload =
+    lane === "owner"
+      ? await fetchAndBuildPayload(id, (q) => withPublishedOrOwner(q, ownerUid!))
+      : await buildFactsheetPayloadCached(`${id}::${computedAt}`);
   if (!payload) {
     console.warn("[factsheet/v2/page] payload pending -> rendering fallback", {
       id,
@@ -516,7 +592,13 @@ export default async function FactsheetV2Page({
   return (
     <>
       <script type="application/ld+json">{jsonLdStr}</script>
-      <FactsheetView payload={payloadWithTrust} />
+      {/* The notice is derived from the LANE decision, never from a payload
+          field — lane state must not enter the object the shared public cache
+          serves (UI-SPEC:112). */}
+      <FactsheetView
+        payload={payloadWithTrust}
+        viewerNotice={lane === "owner" ? "owner_unpublished" : undefined}
+      />
     </>
   );
 }
