@@ -10287,3 +10287,346 @@ describe("ScenarioComposer — Phase 147 SCEN-01 honest empty state (SC4)", () =
     ).toHaveTextContent(SYNCING_NOTE);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 147 / SCEN-01 — RESEARCH P6: a reopened / page-refreshed draft must
+// re-fetch its added strategies' series.
+// ---------------------------------------------------------------------------
+// WHY THIS EXISTS: `fetchAddedReturns` had exactly TWO call sites, both ADD
+// seams (handleAddStrategy and the BridgeDrawer onAdd). Neither
+// `openSavedScenario` nor the localStorage-draft hydration fired it, and
+// `addedReturnsById` starts empty on every fresh mount — so the founder could
+// add a strategy, see the real series, press F5, and watch every added leg
+// contribute [] again. That is a DISTINCT root cause from the phase's column
+// fix (no fetch at all, vs. fetching the wrong column): the column fix alone
+// leaves the SCEN-01 symptom fully reproducible one refresh later.
+//
+// These tests drive the hydration path the only honest way — by pre-seeding
+// localStorage with a draft that already carries an added strategy and then
+// mounting the component with NO user interaction whatsoever. Every `addStrategy`
+// call in this block (there is exactly one, in the retry arm) is a deliberate
+// SECOND gesture, never the trigger under test.
+describe("ScenarioComposer — Phase 147 SCEN-01 hydration re-fetch (P6)", () => {
+  const HYD_ID = "dddddddd-1111-2222-3333-444444444444";
+  const HYD_SERIES = [
+    { date: "2026-03-02", value: 0.011 },
+    { date: "2026-03-03", value: -0.004 },
+    { date: "2026-03-04", value: 0.007 },
+  ];
+  /** Fingerprint for makePayload()'s holdingsSummary [BTC, ETH, SOL] — matching,
+   *  so the draft is ADOPTED on mount (a mismatch would re-initialize from
+   *  holdings and drop the added strategy, making the test vacuous). */
+  const MATCHING_FP = "BTC:binance:spot|ETH:binance:spot|SOL:binance:spot";
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  /** Persist a draft that already carries HYD_ID as an added strategy — exactly
+   *  what a page refresh or an `openSavedScenario` reopen leaves behind. */
+  function seedHydratedDraft(): void {
+    lsStore.set(
+      `allocations.scenario_v0_15.${ALLOCATOR_A}`,
+      JSON.stringify({
+        schema_version: 4,
+        init_holdings_fingerprint: MATCHING_FP,
+        toggleByScopeRef: {
+          [REF_BTC]: true,
+          [REF_ETH]: true,
+          [REF_SOL]: true,
+          [HYD_ID]: true,
+        },
+        addedStrategies: [
+          {
+            id: HYD_ID,
+            name: "Reopened Strat",
+            markets: ["binance"],
+            strategy_types: ["momentum"],
+          },
+        ],
+        weightOverrides: {
+          [REF_BTC]: 0.45,
+          [REF_ETH]: 0.225,
+          [REF_SOL]: 0.075,
+          [HYD_ID]: 0.25,
+        },
+        memberKeyIds: [],
+        lastEditedAt: "2026-03-01T00:00:00Z",
+      }),
+    );
+  }
+
+  /** The per-id series the REAL engine set last carried into computeScenario.
+   *  (The identically-shaped helper in the Plan-06b describe is out of scope
+   *  here, so this block reads the module-level spy directly.) */
+  function latestReturnsLookup(): Record<string, unknown[]> {
+    expect(computeScenarioStateArgs.length).toBeGreaterThan(0);
+    return computeScenarioStateArgs[computeScenarioStateArgs.length - 1]
+      .returnsById as Record<string, unknown[]>;
+  }
+
+  /** Count the /returns requests fired for HYD_ID — the direct observable for
+   *  "the effect fired" and for "the effect did NOT double-fire". */
+  function returnsCalls(fetchMock: { mock: { calls: unknown[][] } }): number {
+    return fetchMock.mock.calls.filter((c) =>
+      String(c[0]).includes(`/api/strategies/${HYD_ID}/returns`),
+    ).length;
+  }
+
+  it("HYD-1 a REOPENED draft (added strategy already in localStorage, zero user interaction) fetches its series on mount and renders it", async () => {
+    let release: () => void = () => {};
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${HYD_ID}/returns`)) {
+        return new Promise((resolve) => {
+          release = () =>
+            resolve({
+              ok: true,
+              status: 200,
+              json: async () => ({
+                daily_returns: HYD_SERIES,
+                series_state: "available",
+              }),
+            });
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    seedHydratedDraft();
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // The row IS in the draft (hydration worked) — so a still-[] lookup below is
+    // the P6 defect, not a missing row.
+    expect(screen.getAllByText(/Reopened Strat/i).length).toBeGreaterThan(0);
+
+    // THE CLAIM: the fetch fired with no gesture at all.
+    await waitFor(() => expect(returnsCalls(fetchMock)).toBe(1));
+
+    // NON-VACUOUS half — before the response lands the leg contributes [] and
+    // the honest in-flight affordance is up.
+    expect(latestReturnsLookup()[HYD_ID]).toEqual([]);
+    expect(screen.getByTestId("scenario-loading-returns")).toBeInTheDocument();
+
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+
+    // The row leaves the loading state and the REAL series reaches the engine.
+    await waitFor(() =>
+      expect(latestReturnsLookup()[HYD_ID]).toEqual(HYD_SERIES),
+    );
+    expect(screen.queryByTestId("scenario-loading-returns")).toBeNull();
+  });
+
+  it("HYD-2 a hydrated added strategy that IS in the book fires NO lazy fetch (the book value is authoritative — same guard as the add seam)", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    seedHydratedDraft();
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          strategies: [
+            {
+              strategy: {
+                id: HYD_ID,
+                disclosure_tier: "verified",
+                series_state: "available",
+                strategy_analytics: {
+                  cagr: null,
+                  sharpe: null,
+                  daily_returns: HYD_SERIES,
+                },
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              } as any,
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            } as any,
+          ],
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // The book series reached the engine — so the leg IS resolved, just not by
+    // the route. (Non-vacuity: proves the row exists and is wired.)
+    await waitFor(() =>
+      expect(latestReturnsLookup()[HYD_ID]).toEqual(HYD_SERIES),
+    );
+    // THE CLAIM: no request was ever made for a strategy the book already answers.
+    expect(returnsCalls(fetchMock)).toBe(0);
+    expect(screen.queryByTestId("scenario-loading-returns")).toBeNull();
+  });
+
+  it("HYD-3 the hydration effect is idempotent: re-renders while in flight AND after settle never fire a second fetch", async () => {
+    let release: () => void = () => {};
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${HYD_ID}/returns`)) {
+        return new Promise((resolve) => {
+          release = () =>
+            resolve({
+              ok: true,
+              status: 200,
+              json: async () => ({
+                daily_returns: HYD_SERIES,
+                series_state: "available",
+              }),
+            });
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    seedHydratedDraft();
+    const { rerender } = render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    await waitFor(() => expect(returnsCalls(fetchMock)).toBe(1));
+
+    // Re-render with a FRESH payload object twice — new `strategies` array
+    // identity re-runs every payload-derived memo (and therefore the effect)
+    // while the first request is still in flight. The lazyAbortRef in-flight
+    // guard inside fetchAddedReturns is what must hold here; a second
+    // mechanism (ref-flag / mount latch) would be redundant.
+    await act(async () => {
+      rerender(
+        <ScenarioComposer
+          payload={makePayload()}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      rerender(
+        <ScenarioComposer
+          payload={makePayload()}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+    });
+    expect(returnsCalls(fetchMock)).toBe(1);
+
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(latestReturnsLookup()[HYD_ID]).toEqual(HYD_SERIES),
+    );
+
+    // And after the entry is resolved, the `addedReturnsById[id] === undefined`
+    // half of the guard is what stops the refetch.
+    await act(async () => {
+      rerender(
+        <ScenarioComposer
+          payload={makePayload()}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+    });
+    expect(returnsCalls(fetchMock)).toBe(1);
+  });
+
+  it("HYD-4 a FAILED hydration fetch degrades through the existing WR-01 surface: honest [], no fabricated series, and the id stays retryable", async () => {
+    let attempt = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${HYD_ID}/returns`)) {
+        attempt += 1;
+        // The hydration-triggered attempt fails; a later retry succeeds.
+        if (attempt === 1) {
+          return Promise.resolve({
+            ok: false,
+            status: 500,
+            json: async () => ({}),
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            daily_returns: HYD_SERIES,
+            series_state: "available",
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    seedHydratedDraft();
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    await waitFor(() => expect(returnsCalls(fetchMock)).toBe(1));
+    // Honest degrade: [] in the lookup (warm-up-gated out), the in-flight
+    // affordance retires, and the component does not crash.
+    await waitFor(() => expect(latestReturnsLookup()[HYD_ID]).toEqual([]));
+    await waitFor(() =>
+      expect(screen.queryByTestId("scenario-loading-returns")).toBeNull(),
+    );
+    expect(screen.getAllByText(/Reopened Strat/i).length).toBeGreaterThan(0);
+
+    // WR-01 retryability: the failure left `addedReturnsById[id]` UNDEFINED, so
+    // remove + re-add re-fires — a silent settle([]) would make this stay 1.
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Remove from scenario/i }),
+      );
+    });
+    addStrategy({
+      id: HYD_ID,
+      name: "Reopened Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    await waitFor(() => expect(returnsCalls(fetchMock)).toBe(2));
+    await waitFor(() =>
+      expect(latestReturnsLookup()[HYD_ID]).toEqual(HYD_SERIES),
+    );
+  });
+});
