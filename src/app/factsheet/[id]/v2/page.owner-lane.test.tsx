@@ -103,9 +103,12 @@ const STRATEGY_ID = "44444444-4444-4444-8444-444444444444";
 const OWNER_UID = "11111111-1111-4111-8111-111111111111";
 const OTHER_UID = "22222222-2222-4222-8222-222222222222";
 
-/** The Lane A select list, typed as a LITERAL. Lane B must use the identical
- *  list or the payload-pending fallback (which reads
- *  `signature.name / codename / disclosure_tier`) breaks on the owner lane. */
+/** The Lane A select list, typed as a LITERAL. Lane B must select a SUPERSET
+ *  of these columns or the payload-pending fallback (which reads
+ *  `signature.name / codename / disclosure_tier`) breaks on the owner lane.
+ *  Lane B additionally selects `status` — the lane/banner decision is derived
+ *  from the ROW's status, never from which probe matched (review WR-01), so
+ *  equality between the two lists is deliberately NOT pinned anymore. */
 const SIGNATURE_SELECT =
   "id, name, codename, disclosure_tier, strategy_analytics ( computed_at )";
 
@@ -127,7 +130,9 @@ const CASH_DAILY = [
   { date: "2025-08-10", value: 0.01 },
 ];
 
-/** Signature-probe row shape (both lanes select the same columns). */
+/** Signature-probe row shape. Lane A rows carry no `status` (its select does
+ *  not name the column); Lane B rows spread `status` on top of this — the
+ *  column its select adds so the page can gate the lane on row status. */
 function signatureRow(name: string) {
   return {
     id: STRATEGY_ID,
@@ -310,10 +315,12 @@ function givenPublished() {
   STATE.adminRow = adminStrategyRow("published");
 }
 
-/** Unpublished id owned by the session user: Lane A misses, Lane B hits. */
+/** Unpublished id owned by the session user: Lane A misses, Lane B hits.
+ *  The Lane B row carries `status: "draft"` — the column the owner probe's
+ *  select adds so the page can gate the lane on row status (WR-01). */
 function givenOwnerDraft() {
   STATE.publishedRow = null;
-  STATE.ownerRow = signatureRow("Draft Alpha");
+  STATE.ownerRow = { ...signatureRow("Draft Alpha"), status: "draft" };
   STATE.adminRow = adminStrategyRow("draft");
   STATE.sessionUser = { id: OWNER_UID };
 }
@@ -466,12 +473,50 @@ describe("SC4 — uniform notFound, session-keyed owner predicate", () => {
     // The route param is the strategy id, not the user id — a param-keyed
     // predicate could not produce the string above.
     expect(STATE.observed.requestOrFilters[0]).not.toContain(STRATEGY_ID);
-    // Lane B must select the IDENTICAL column list as Lane A, or the
-    // payload-pending fallback breaks on the owner lane only.
-    expect(STATE.observed.requestSelects).toEqual([
-      SIGNATURE_SELECT,
-      SIGNATURE_SELECT,
-    ]);
+    // Lane B must select a SUPERSET of Lane A's columns, or the
+    // payload-pending fallback breaks on the owner lane only. NOT equality:
+    // Lane B additionally selects `status`, the column the WR-01 lane gate
+    // reads (a probe-derived lane cannot distinguish "matched because
+    // published" from "matched because owner").
+    expect(STATE.observed.requestSelects).toHaveLength(2);
+    expect(STATE.observed.requestSelects[0]).toBe(SIGNATURE_SELECT);
+    const laneBSelect = STATE.observed.requestSelects[1];
+    for (const col of SIGNATURE_SELECT.split(", ")) {
+      expect(
+        laneBSelect,
+        `Lane B select must carry Lane A column "${col}" (payload-pending fallback reads it)`,
+      ).toContain(col);
+    }
+    expect(
+      laneBSelect,
+      "Lane B select must carry `status` — the WR-01 lane gate reads it",
+    ).toContain("status");
+  });
+});
+
+describe("WR-01 regression — a PUBLISHED row reached via Lane B renders WITHOUT the owner banner", () => {
+  it("11. authed viewer + published row via Lane B (Lane A miss: transient error / publish race) → cached public lane, viewerNotice undefined", async () => {
+    // Lane A misses (models the publish race / a transient published-probe
+    // miss), the viewer is authed, and the owner-inclusive probe matches the
+    // row via its `status.eq.published` arm — which it does for ANY authed
+    // viewer, owner or not. The row's status says "published", so the page
+    // must NOT claim "Unpublished — only you can see this … anyone else sees
+    // a 404" on a public document, and must serve it through the shared
+    // cached lane like any other published render.
+    STATE.publishedRow = null;
+    STATE.ownerRow = { ...signatureRow("Phoenix Options"), status: "published" };
+    STATE.adminRow = adminStrategyRow("published");
+    STATE.sessionUser = { id: OTHER_UID }; // a random authed NON-owner
+
+    const jsx = await renderPage();
+
+    expect(findPayload(jsx), "published row must still render").not.toBeNull();
+    expect(
+      findViewProps(jsx)?.viewerNotice,
+      "a published row must never carry the owner_unpublished notice",
+    ).toBeUndefined();
+    // lane stays "public" → the payload is served via the shared cached lane.
+    expect(vi.mocked(unstable_cache)).toHaveBeenCalledTimes(1);
   });
 });
 

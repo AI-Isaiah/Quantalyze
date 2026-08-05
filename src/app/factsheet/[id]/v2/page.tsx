@@ -443,15 +443,19 @@ export default async function FactsheetV2Page({
     // predicate mirroring `strategies_read`. `user.id` is SESSION-only, from the
     // getUser() call directly above in this same function — NEVER params /
     // searchParams; a caller who could name another owner would read that
-    // owner's drafts (T-148-02, the T-110-05/07 class). The select list is
-    // character-identical to Lane A's because `signature` feeds both the
-    // computed_at read below and the payload-pending fallback's name/codename/
-    // disclosure_tier — a narrower list breaks that fallback on the owner lane
-    // only.
+    // owner's drafts (T-148-02, the T-110-05/07 class). The select list is a
+    // SUPERSET of Lane A's (Lane A columns + `status`) because `signature`
+    // feeds both the computed_at read below and the payload-pending fallback's
+    // name/codename/disclosure_tier — a narrower list breaks that fallback on
+    // the owner lane only. `status` is the extra column: the lane decision
+    // below is derived from the ROW's status, never from which probe matched
+    // (review WR-01 — `withPublishedOrOwner` also matches PUBLISHED rows for
+    // ANY authed viewer via its `status.eq.published` arm, so "Lane B matched"
+    // must not be read as "viewer owns an unpublished row").
     const { data: ownRow, error: probeError } = await withPublishedOrOwner(
       supabase
         .from("strategies")
-        .select("id, name, codename, disclosure_tier, strategy_analytics ( computed_at )")
+        .select("id, name, codename, disclosure_tier, status, strategy_analytics ( computed_at )")
         .eq("id", id),
       user.id,
     ).maybeSingle();
@@ -481,8 +485,19 @@ export default async function FactsheetV2Page({
       notFound();
     }
     signature = ownRow;
-    lane = "owner";
-    ownerUid = user.id;
+    // WR-01: the owner lane (and its "Unpublished — only you can see this"
+    // banner) is gated on the ROW's status, not on which probe resolved the
+    // row. A PUBLISHED row can legitimately arrive here — a transient Lane A
+    // query error, or the publish race (Lane A probe before the publish
+    // commit, Lane B probe after) — and for any authed viewer, owner or not.
+    // Claiming "unpublished / anyone else sees a 404" on a published document
+    // would be a false disclosure statement. lane stays "public" for a
+    // published row: `buildFactsheetPayloadCached` serves it below and no
+    // banner renders.
+    if (ownRow.status !== "published") {
+      lane = "owner";
+      ownerUid = user.id;
+    }
   }
   const signAnalytics = Array.isArray(signature.strategy_analytics)
     ? signature.strategy_analytics[0]
