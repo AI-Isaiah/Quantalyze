@@ -901,8 +901,12 @@ should expect these to carry the most review risk.
    on this surface as a documented UI-SPEC deviation. **Do not ship a button that 500s on
    every own private row.**
 3. **Delta-5 key census** — the anti-join must cover `strategy_keys`, not just
-   `strategies.api_key_id`. Confirm against the founder's account at the Wave-0
-   `checkpoint:human-verify` (RESEARCH Open Q2).
+   `strategies.api_key_id`. ~~Confirm against the founder's account at the Wave-0
+   `checkpoint:human-verify` (RESEARCH Open Q2).~~ **SUPERSEDED (checker W-3 ruling,
+   2026-08-05):** there is NO in-phase checkpoint — the founder-account census confirmation is
+   discharged by post-merge PROD UAT (149-VALIDATION.md Manual-Only table), and plan 05's
+   SUMMARY must state that discharge; the derivation itself is pinned in-phase by plan 02's
+   pure-function falsifiers (the Alpha Centauri fixture).
 4. **A1 NOT closed — CORRECTED at plan revision 2026-08-05 (checker B-1; the prior
    "A1 CLOSED" claim here was WRONG).** The `deriveEmptySeriesState(status,
    strategyCreatedAt, nowMs?)` signature IS verified (`closed-sets.ts:491-495`), but "no
