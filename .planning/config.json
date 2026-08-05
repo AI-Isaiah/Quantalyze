@@ -49,7 +49,7 @@
   "model_overrides": {
     "gsd-planner": "fable",
     "gsd-roadmapper": "fable",
-    "gsd-ui-researcher": "opus",
+    "gsd-ui-researcher": "fable",
     "gsd-advisor-researcher": "fable",
     "gsd-assumptions-analyzer": "fable",
     "gsd-plan-checker": "opus",

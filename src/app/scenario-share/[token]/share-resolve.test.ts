@@ -876,3 +876,200 @@ describe("resolveSharedScenario — persisted leverage applied + labeled (round-
     if (result.kind === "ok") expect(result.leveraged).toBe(false);
   });
 });
+
+// --- Phase 147 / SCEN-01 — returns_series resolution ------------------------
+
+/**
+ * WHY these exist: the `get_shared_scenario` RPC's `series` jsonb carries ONLY
+ * the `daily_returns` column, which is populated by CSV ingest alone. An
+ * analytics-service-only strategy leaves it null and writes the real track to
+ * `strategy_analytics.returns_series` as a CUMPROD WEALTH INDEX. Pre-147 this
+ * layer called `normalizeDailyReturns(s.daily_returns)` — so a share recipient
+ * silently received an EMPTY leg for exactly the strategies whose series exists,
+ * while the owner's composer showed the real blend. The RPC cannot be widened
+ * (the phase-29 frozen-spine gate fails the build on any /scenario|share/i
+ * migration), so the wealth index arrives caller-side and is threaded in here.
+ *
+ * The economic invariant under test is the DIFFERENCING: a wealth index must be
+ * converted to returns via successive ratios, never forwarded raw (a raw-forward
+ * reads a 1.0 wealth base as a +100% day and inflates every downstream metric).
+ */
+const SC_STRAT = "33333333-3333-4333-8333-333333333333";
+
+/**
+ * The ORACLE — a known daily-return series. The wealth-index fixture below is
+ * built from it by CUMPRODUCT, the mathematical INVERSE of the differencing
+ * under test, so these expectations are never re-derived through
+ * `equityCurveToDailyReturns` (self-referential oracles let three money bugs
+ * survive six review passes; the oracle must pin the economics, not the impl).
+ * 11 returns → n ≥ 10, clearing computeScenario's metrics floor so the blended
+ * per-day values are observable on `portfolioDaily` at all.
+ */
+const KNOWN_RETURNS = [
+  0.05, -0.1, 0.1, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01,
+];
+
+/**
+ * Build an ANCHORED cumprod wealth index: a 1.0 base row on day 0, then
+ * w_i = w_{i-1}·(1+r_i). ⚠️ The 1.0 base row is a TEST CONVENIENCE (it makes
+ * every KNOWN_RETURNS entry recoverable by differencing) — the analytics-service
+ * writer never persists it. Production's `returns_series` is `(1+r).cumprod()`
+ * over the returns' OWN date index, so its first element is (1 + r_0)
+ * (metrics.py day-0-exclusion semantics); the production-shaped companion test
+ * below (`.slice(1)` of this fixture) pins that N−1 reality.
+ * Explicit consecutive UTC dates, no randomness. With KNOWN_RETURNS the head is
+ * the hand-computed [1.0, 1.05, 0.945, 1.0395] (asserted below as a fixture
+ * integrity check — a broken builder must not silently weaken these tests).
+ */
+function makeWealthIndex(startDate: string, returns: number[]): DailyPoint[] {
+  const start = new Date(startDate + "T00:00:00Z");
+  const out: DailyPoint[] = [{ date: startDate, value: 1 }];
+  let w = 1;
+  for (let i = 0; i < returns.length; i += 1) {
+    w *= 1 + returns[i];
+    const d = new Date(start.getTime() + (i + 1) * 86_400_000);
+    out.push({ date: d.toISOString().slice(0, 10), value: w });
+  }
+  return out;
+}
+
+/** A single fully-weighted, toggled-on added leg, so the blended
+ *  `portfolioDaily` IS that leg's resolved series (weight renormalizes to 1). */
+function scDraft(): ScenarioDraft {
+  return {
+    schema_version: SCENARIO_SCHEMA_VERSION,
+    init_holdings_fingerprint: "",
+    toggleByScopeRef: { [SC_STRAT]: true },
+    addedStrategies: [
+      {
+        id: SC_STRAT as never,
+        name: "Analytics-only",
+        markets: ["BTC"],
+        strategy_types: ["trend"],
+      },
+    ],
+    weightOverrides: { [SC_STRAT]: 1 },
+    memberKeyIds: [],
+    lastEditedAt: "2026-06-22T00:00:00.000Z",
+  };
+}
+
+function scRow(dailyReturns: unknown): Parameters<typeof resolveSharedScenario>[0] {
+  return {
+    name: "Analytics-only share",
+    draft: scDraft(),
+    schema_version: SCENARIO_SCHEMA_VERSION,
+    series: [{ strategy_id: SC_STRAT, daily_returns: dailyReturns }],
+  };
+}
+
+describe("resolveSharedScenario — returns_series resolution (SCEN-01)", () => {
+  it("SC1-share: a returns_series-only leg (daily_returns null) projects the REAL differenced series", () => {
+    const wealth = makeWealthIndex("2026-01-01", KNOWN_RETURNS);
+    // Fixture integrity — the head is the plan's hand-computed wealth index.
+    expect(wealth[0].value).toBeCloseTo(1.0, 10);
+    expect(wealth[1].value).toBeCloseTo(1.05, 10);
+    expect(wealth[2].value).toBeCloseTo(0.945, 10);
+    expect(wealth[3].value).toBeCloseTo(1.0395, 10);
+
+    const result = resolveSharedScenario(scRow(null), {}, { [SC_STRAT]: wealth });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    // Differencing consumes the base point: 12 wealth points → 11 returns.
+    expect(result.portfolioDaily).toHaveLength(KNOWN_RETURNS.length);
+    // The three literals the plan hand-computed: 1.05/1.0−1, 0.945/1.05−1,
+    // 1.0395/0.945−1.
+    expect(result.portfolioDaily[0].value).toBeCloseTo(0.05, 10);
+    expect(result.portfolioDaily[1].value).toBeCloseTo(-0.1, 10);
+    expect(result.portfolioDaily[2].value).toBeCloseTo(0.1, 10);
+    // …and the whole series round-trips back to the oracle.
+    result.portfolioDaily.forEach((p, i) => {
+      expect(p.value).toBeCloseTo(KNOWN_RETURNS[i], 10);
+    });
+  });
+
+  it("SC1b-share: a PRODUCTION-shaped index (first element 1+r_0, no base row) yields N−1 returns — day one's return is unrecoverable", () => {
+    // The writer never persists a 1.0 base row, so on real data differencing
+    // consumes the first STORED point: N points → N−1 returns, the return baked
+    // into element 0 (+5% here) is permanently absent, and the derived series
+    // starts one day later than the stored curve. This is the honest companion
+    // to SC1-share's anchored fixture (which recovers all N by construction).
+    const wealth = makeWealthIndex("2026-01-01", KNOWN_RETURNS).slice(1);
+    expect(wealth[0].value).toBeCloseTo(1.05, 10); // (1 + r_0), NOT a 1.0 base
+
+    const result = resolveSharedScenario(scRow(null), {}, { [SC_STRAT]: wealth });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    // N stored points → N−1 returns; metrics.n counts them honestly.
+    expect(result.portfolioDaily).toHaveLength(KNOWN_RETURNS.length - 1);
+    expect(result.metrics.n).toBe(KNOWN_RETURNS.length - 1);
+    // The recovered series is KNOWN_RETURNS[1..] — day one's +0.05 is absent.
+    expect(result.portfolioDaily[0].value).toBeCloseTo(-0.1, 10);
+    result.portfolioDaily.forEach((p, i) => {
+      expect(p.value).toBeCloseTo(KNOWN_RETURNS[i + 1], 10);
+    });
+    // The derived start date shifts one day later than the anchored variant's.
+    expect(result.portfolioDaily[0].date).toBe("2026-01-03");
+  });
+
+  it("SC3-share: the wealth index is DIFFERENCED at the wiring, never forwarded raw", () => {
+    // Wiring, not helper: this asserts the SHARE layer invokes the resolver.
+    // Neutering the call site (back to bare normalizeDailyReturns) reds this.
+    const wealth = makeWealthIndex("2026-01-01", KNOWN_RETURNS);
+    const result = resolveSharedScenario(scRow(null), {}, { [SC_STRAT]: wealth });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    // A raw forward emits the wealth points AS returns — day one would be the
+    // 1.0 base read as a +100% day, and the length would be the full 12.
+    expect(result.portfolioDaily[0].value).not.toBeCloseTo(1.0, 10);
+    expect(result.portfolioDaily).not.toHaveLength(wealth.length);
+    // Off-by-one pinned in the positive direction too.
+    expect(result.metrics.n).toBe(KNOWN_RETURNS.length);
+  });
+
+  it("returnsSeriesById omitted / id absent → the pre-147 daily_returns-only projection, unchanged", () => {
+    // The conservative default: with no lookup (or a lookup that does not carry
+    // this id) the resolver falls back to s.daily_returns alone — exactly what
+    // the pre-147 line did. This is the regression pin for every existing share.
+    const row = {
+      name: "Two-strategy blend",
+      draft: okDraft(),
+      schema_version: 2,
+      series: okSeriesRows(),
+    };
+    const pre147 = resolveSharedScenario(row);
+    const emptyLookup = resolveSharedScenario(row, {}, {});
+    const missingId = resolveSharedScenario(row, {}, {
+      "99999999-9999-4999-8999-999999999999": makeWealthIndex(
+        "2026-01-01",
+        KNOWN_RETURNS,
+      ),
+    });
+
+    expect(JSON.stringify(emptyLookup)).toBe(JSON.stringify(pre147));
+    expect(JSON.stringify(missingId)).toBe(JSON.stringify(pre147));
+    expect(pre147.kind).toBe("ok");
+    if (pre147.kind !== "ok") throw new Error("expected ok");
+    expect(pre147.metrics.n).toBeGreaterThanOrEqual(10);
+  });
+
+  it("BOTH populated → the direct daily_returns wins (the resolver's direct-first contract)", () => {
+    // A CSV-ingested strategy that ALSO has an analytics wealth curve must keep
+    // projecting its own daily_returns — deriving instead would silently swap
+    // the recipient onto a different track.
+    const direct = makeSeriesFrom("2026-01-01", 20, 0);
+    const decoy = makeWealthIndex("2026-01-01", KNOWN_RETURNS);
+
+    const result = resolveSharedScenario(scRow(direct), {}, { [SC_STRAT]: decoy });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    // 20 direct days, not the decoy's 11 derived ones.
+    expect(result.portfolioDaily).toHaveLength(direct.length);
+    expect(result.portfolioDaily).not.toHaveLength(KNOWN_RETURNS.length);
+    expect(result.portfolioDaily[0].value).toBeCloseTo(direct[0].value, 10);
+  });
+});

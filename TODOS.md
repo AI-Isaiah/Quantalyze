@@ -1160,6 +1160,64 @@ New findings, none clearing the founder blast-radius bar as blocking:
    are read correctly (they count processed flows, not attempts). No action unless rejected-attempt
    telemetry is wanted beyond Sentry.
 
+### Phase 147 (SCEN-01) class-closure audit — `getPortfolioStrategies` consumers (added 2026-08-05)
+
+Phase 147 fixed FOUR readers that selected only `strategy_analytics.daily_returns` and therefore
+saw `null` for every API-ingested strategy (whose track lives in `returns_series` as a cumprod
+wealth index). Plan 147-06 T3 ran the class-closure audit over `getPortfolioStrategies` — the
+query already selects BOTH columns (`queries.ts:1305`), but a *consumer* reading only
+`daily_returns` would still strand the series. **Grep, log, do not fix** (orchestrator ruling —
+these are outside the phase's locked scope).
+
+**Audit result: 0 bare consumers.** Commands run against `HEAD`:
+
+```
+grep -rn --include="*.ts" --include="*.tsx" "getPortfolioStrategies" src/ | grep -v "\.test\."
+  → 3 consumers: portfolios/[id]/page.tsx, .../manage/page.tsx, .../documents/page.tsx
+grep -n "daily_returns\|returns_series" <each consumer>
+  → zero `daily_returns` reads in all three
+```
+
+None of the three touches `daily_returns` at all — they read the scalar metrics
+(`cagr`/`sharpe`/`max_drawdown`/`sparkline_returns`) via `extractAnalytics`. The bare-reader class
+is closed there. Two adjacent findings were surfaced by the audit and are booked, not fixed:
+
+1. **`DEF-147-A` — `buildEquityCurveSeries` hard-codes `equityCurve: null` behind a comment that is
+   now false.** `src/app/(dashboard)/portfolios/[id]/page.tsx:211-231` returns `null` for every
+   per-strategy equity curve, justified by an inline comment reading *"Returns_series is not
+   selected in the existing query (would balloon the response)"*. That has not been true since
+   `getPortfolioStrategies` began selecting `returns_series` (`src/lib/queries.ts:1305`) — the data
+   is already on the wire and is being thrown away. Not user-facing as a WRONG number (the chart
+   renders the portfolio composite line and simply omits per-strategy lines), which is why it is
+   not fixed here. **Fix shape:** pipe `returns_series` through `resolveDailyReturnSeries` +
+   the existing cumprod transform instead of returning `null`, and delete the stale comment.
+   ⚠️ Confirm the response-size concern the comment cites is still acceptable before wiring it —
+   the reason may be stale but the cost is real.
+
+2. **`DEF-147-B` — two dead `daily_returns?: unknown` type annotations promise a column the query
+   never selects.** `src/lib/queries.ts:420` (`getPublicStrategyDetail`) and `:458`
+   (`getFactsheetDetail`) both annotate their `.single<…>()` generic with
+   `strategy_analytics: { daily_returns?: unknown; … }`, but both selects use
+   `PUBLIC_ANALYTICS_COLUMNS` (`queries.ts:290`), which contains **neither** `daily_returns` **nor**
+   `returns_series`. No consumer reads the field today (`browse/[slug]/[strategyId]/page.tsx`,
+   `strategy/[id]/page.tsx`, `factsheet/[id]/tearsheet/page.tsx` — checked, zero hits), so nothing
+   is broken. It is a latent trap: the type invites a future reader to consume a field that is
+   always `undefined`, which is exactly how the four Phase-147 readers came to render `[]`.
+   **Fix shape:** delete the `daily_returns?: unknown` member from both generics (type-only, no
+   behaviour change). The Phase 147 grep-gate does **not** flag this — by design, it targets select
+   payloads, not type annotations, because a scan wide enough to catch this would redden on prose.
+
+3. **`DEF-147-C` — `queries.my-allocation.test.ts` mock returns fixtures wholesale instead of
+   projecting to selected columns.** The mock (`:267-272`) records the select string but hands back
+   the full fixture regardless, so narrowing the `getMyAllocationDashboard` embed back to bare
+   `daily_returns` would NOT redden that behavioural file (unlike `returns/route.test.ts:296-308`,
+   which projects as PostgREST does). Not a phase gap: the 147-04 SC-1 ledger mutation targeted the
+   resolver-call argument (falsifiable in that harness), and the select-width regression is held by
+   the phase-147 gate's Layer B (verifier confirmed RED under exactly that mutation). Test hygiene
+   only (2026-08-05, booked from 147-VERIFICATION.md).
+   **Fix shape:** make the mock's `maybeSingle`/embed resolution project to the columns named in the
+   recorded select string, mirroring the returns-route harness.
+
 ---
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound

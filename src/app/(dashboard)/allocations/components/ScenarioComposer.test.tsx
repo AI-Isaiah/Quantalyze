@@ -9774,3 +9774,918 @@ describe("ScenarioComposer — Phase 84 BLEND-01 blend basis threading", () => {
     expect(assetClasses.every((c) => c !== "crypto")).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 147 / SCEN-01 — the honest empty/degraded state (ROADMAP SC4).
+// ---------------------------------------------------------------------------
+// WHY THIS EXISTS: before 147, an added strategy whose analytics had not been
+// computed contributed [] to the blend and rendered "0 overlapping days" / 0.00
+// with NO signal — the surface asserted a number it did not have. The server now
+// ships a three-valued `series_state` discriminator ("available" | "computing" |
+// "empty") from BOTH reader paths (147-02 the lazy /returns route, 147-04 the
+// book payload), and the row must say which kind of empty it is.
+//
+// The discriminator is SERVER-owned on purpose: `daily_returns.length === 0`
+// cannot distinguish "still computing" from "terminal absence", so deriving it
+// client-side would guarantee one of the two states is a lie (147-UI-SPEC §3).
+// These tests therefore drive the state through the wire fields ONLY — none of
+// them reaches into the component to set it.
+describe("ScenarioComposer — Phase 147 SCEN-01 honest empty state (SC4)", () => {
+  const SYNC_ID = "cccccccc-1111-2222-3333-444444444444";
+  const SYNCING_NOTE = "First metrics arrive in ~10–15 min — not in the blend yet";
+  const EMPTY_NOTE = "No return series available — not in the blend";
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  /** A fetch stub whose /returns response body is caller-supplied and resolved
+   *  on demand, so each test can observe the row BEFORE and AFTER the wire
+   *  value lands (the non-vacuous half — pre-resolve every row is "available"). */
+  function stubReturnsFetch(body: Record<string, unknown>): () => void {
+    let release: () => void = () => {};
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${SYNC_ID}/returns`)) {
+        return new Promise((resolve) => {
+          release = () =>
+            resolve({ ok: true, status: 200, json: async () => body });
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return () => release();
+  }
+
+  function addedRow(): HTMLElement {
+    return screen.getByTestId("scenario-constituent-added");
+  }
+
+  /** Drive a NON-book (drawer-added) strategy through the lazy route with the
+   *  given 200 body, and return once the response has settled. */
+  async function renderWithLazyBody(
+    body: Record<string, unknown>,
+  ): Promise<void> {
+    const release = stubReturnsFetch(body);
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: SYNC_ID,
+      name: "Fresh Key Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    // Pre-resolve: nothing has been told to us yet → the conservative default.
+    expect(addedRow()).toHaveAttribute("data-series-state", "available");
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+  }
+
+  /** A book payload row (147-04's path): the composer consults the payload
+   *  FIRST for an in-book strategy and deliberately skips the lazy fetch, so
+   *  this is a genuinely independent supply line for the SAME discriminator. */
+  function makeBookPayload(
+    seriesState: string,
+    dailyReturns: unknown = [],
+  ): MyAllocationDashboardPayload {
+    return makePayload({
+      strategies: [
+        {
+          strategy: {
+            id: SYNC_ID,
+            disclosure_tier: "verified",
+            series_state: seriesState,
+            strategy_analytics: {
+              cagr: null,
+              sharpe: null,
+              daily_returns: dailyReturns,
+            },
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+      ],
+    });
+  }
+
+  it("SC4-1 a lazily-fetched 'computing' series_state renders the SYNCING chip, the syncing note, and role=status (UI-SPEC #1)", async () => {
+    await renderWithLazyBody({ daily_returns: [], series_state: "computing" });
+
+    await waitFor(() => {
+      expect(addedRow()).toHaveAttribute("data-series-state", "computing");
+    });
+    // The chip's uppercase is CSS (`uppercase`), so the DOM text is the label.
+    expect(within(addedRow()).getByText("Syncing")).toBeInTheDocument();
+    const note = screen.getByTestId("scenario-series-state-note");
+    expect(note).toHaveTextContent(SYNCING_NOTE);
+    // The syncing → in-blend transition happens without user action, so it must
+    // be announced (DESIGN-05). polite, never role=alert — it is not an error.
+    expect(note).toHaveAttribute("role", "status");
+    expect(note).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("SC4-2 a lazily-fetched 'empty' series_state renders the muted NO DATA chip and the terminal note WITHOUT a live region (UI-SPEC #2)", async () => {
+    await renderWithLazyBody({ daily_returns: [], series_state: "empty" });
+
+    await waitFor(() => {
+      expect(addedRow()).toHaveAttribute("data-series-state", "empty");
+    });
+    expect(within(addedRow()).getByText("No data")).toBeInTheDocument();
+    const note = screen.getByTestId("scenario-series-state-note");
+    expect(note).toHaveTextContent(EMPTY_NOTE);
+    // Terminal state — it does not transition on its own. An idle live region
+    // on every no-series row is announcement spam.
+    expect(note).not.toHaveAttribute("role");
+  });
+
+  it("SC4-3 a stale deploy that omits series_state degrades to 'available' — no chip, no note, no throw (T-147-13)", async () => {
+    await renderWithLazyBody({ daily_returns: [] });
+
+    // The row is still rendered (no throw) and reports the conservative default.
+    expect(addedRow()).toHaveAttribute("data-series-state", "available");
+    expect(within(addedRow()).queryByText("Syncing")).toBeNull();
+    expect(within(addedRow()).queryByText("No data")).toBeNull();
+    expect(screen.queryByTestId("scenario-series-state-note")).toBeNull();
+  });
+
+  it("SC4-4 a garbage series_state value collapses to 'available' rather than a false Syncing (T-147-13 literal-match tolerance)", async () => {
+    await renderWithLazyBody({ daily_returns: [], series_state: "garbage" });
+
+    expect(addedRow()).toHaveAttribute("data-series-state", "available");
+    expect(within(addedRow()).queryByText("Syncing")).toBeNull();
+    expect(within(addedRow()).queryByText("No data")).toBeNull();
+    expect(screen.queryByTestId("scenario-series-state-note")).toBeNull();
+  });
+
+  it("SC4-5 the BOOK payload path renders the identical syncing surface — ONE derivation table, never a client re-derivation from array length (UI-SPEC §3 / SC2)", () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve({ ok: true, status: 200, json: async () => [] }),
+      ),
+    );
+    render(
+      <ScenarioComposer
+        payload={makeBookPayload("computing", [])}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: SYNC_ID,
+      name: "Book Syncing Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    // Same empty array as SC4-3/-4 carry — only the SERVER's discriminator
+    // differs, which is precisely the thing array length cannot tell you.
+    expect(addedRow()).toHaveAttribute("data-series-state", "computing");
+    expect(within(addedRow()).getByText("Syncing")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("scenario-series-state-note"),
+    ).toHaveTextContent(SYNCING_NOTE);
+  });
+
+  it("SC4-6 the BOOK payload path renders the terminal empty surface", () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve({ ok: true, status: 200, json: async () => [] }),
+      ),
+    );
+    render(
+      <ScenarioComposer
+        payload={makeBookPayload("empty", [])}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: SYNC_ID,
+      name: "Book Empty Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    expect(addedRow()).toHaveAttribute("data-series-state", "empty");
+    expect(within(addedRow()).getByText("No data")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("scenario-series-state-note"),
+    ).toHaveTextContent(EMPTY_NOTE);
+  });
+
+  it("SC4-7 user intent wins: a manually-excluded row shows EXCLUDED and no series note, even while computing (precedence rung 1)", async () => {
+    await renderWithLazyBody({ daily_returns: [], series_state: "computing" });
+    await waitFor(() => {
+      expect(within(addedRow()).getByText("Syncing")).toBeInTheDocument();
+    });
+
+    act(() => {
+      fireEvent.click(
+        within(addedRow()).getByRole("switch", { name: /Toggle .* on\/off/i }),
+      );
+    });
+
+    // The toggle is the most recent and most explicit signal, so it labels the
+    // row. Exactly ONE signal per row — the note does not double up.
+    expect(within(addedRow()).getByText("Excluded")).toBeInTheDocument();
+    expect(within(addedRow()).queryByText("Syncing")).toBeNull();
+    expect(screen.queryByTestId("scenario-series-state-note")).toBeNull();
+    // The data attribute still reports the SERVER fact — intent hides the chip,
+    // it does not rewrite what the server said.
+    expect(addedRow()).toHaveAttribute("data-series-state", "computing");
+  });
+
+  it("SC4-8 series_state outranks coverage eligibility: a computing row is never labelled IN BLEND (precedence rung 2)", () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve({ ok: true, status: 200, json: async () => [] }),
+      ),
+    );
+    // A book row carrying BOTH a real series (⇒ coverage-eligible) and a
+    // "computing" discriminator. The server never emits this pair (a non-empty
+    // resolved series short-circuits to "available"), so this exists purely to
+    // pin the LADDER ORDER against a future reshuffle.
+    const series = Array.from({ length: 14 }, (_, i) => ({
+      date: `2026-02-${String(i + 1).padStart(2, "0")}`,
+      value: 0.001,
+    }));
+    render(
+      <ScenarioComposer
+        payload={makeBookPayload("computing", series)}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: SYNC_ID,
+      name: "Ladder Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    expect(within(addedRow()).getByText("Syncing")).toBeInTheDocument();
+    expect(within(addedRow()).queryByText("In blend")).toBeNull();
+  });
+
+  it("SC4-9 remove + re-add purges the fetched series_state (a re-add starts clean, not stale-Syncing)", async () => {
+    await renderWithLazyBody({ daily_returns: [], series_state: "computing" });
+    await waitFor(() => {
+      expect(addedRow()).toHaveAttribute("data-series-state", "computing");
+    });
+
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Remove from scenario/i }),
+      );
+    });
+    expect(screen.queryByTestId("scenario-constituent-added")).toBeNull();
+
+    // Re-add: the retry fetch is left in flight, so nothing has told us anything
+    // yet. A surviving map entry would show a stale "computing" here.
+    addStrategy({
+      id: SYNC_ID,
+      name: "Fresh Key Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    expect(addedRow()).toHaveAttribute("data-series-state", "available");
+    expect(within(addedRow()).queryByText("Syncing")).toBeNull();
+  });
+
+  it("SC4-10 (review WR-02) a computing leg NEVER appears in the auto-excluded group — the main-list Syncing chip is its ONE signal", async () => {
+    // The founder scenario this phase targets: a fresh key still syncing
+    // (~10–15 min) inside a mixed book with a LIVE intersection window. The
+    // empty-series leg has a null span, so pre-fix the autoExcluded memo also
+    // rendered it with "no data — outside window" — contradicting the main
+    // list's "First metrics arrive in ~10–15 min — not in the blend yet"
+    // (one says data is coming, the other that there is none). UI-SPEC §2:
+    // one signal per row, and series availability outranks coverage.
+    pickerOnApply = null;
+    const release = stubReturnsFetch({
+      daily_returns: [],
+      series_state: "computing",
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload(unequalSpanBook())}
+        allocatorId={`${ALLOCATOR_A}-wr02`}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: SYNC_ID,
+      name: "Fresh Key Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+
+    // Apply a window that drops B for coverage → the group RENDERS (non-vacuous:
+    // the group exists, so the syncing leg's absence is a real skip, not an
+    // absent group).
+    fireEvent.click(
+      screen.getByRole("button", { name: /set coverage window/i }),
+    );
+    act(() => {
+      pickerOnApply!({ start: "2026-01-01", end: "2026-01-12" });
+    });
+
+    // Main list: the ONE signal — the amber Syncing chip + its note.
+    await waitFor(() => {
+      expect(addedRow()).toHaveAttribute("data-series-state", "computing");
+    });
+    expect(within(addedRow()).getByText("Syncing")).toBeInTheDocument();
+
+    // The auto-excluded group renders B (a genuine coverage drop with a span)…
+    const group = screen.getByTestId("scenario-auto-excluded-group");
+    expect(
+      within(group).getByTestId(`auto-excluded-row-${REF_WIN_B}`),
+    ).toBeInTheDocument();
+    // …but NEVER the computing leg — no second, contradictory caption.
+    expect(
+      within(group).queryByTestId(`auto-excluded-row-${SYNC_ID}`),
+    ).toBeNull();
+    expect(within(group).queryByText(/no data — outside window/i)).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // The remaining 147-UI-SPEC "Falsifiable Acceptance" items. Items 1 and 2 are
+  // pinned by SC4-1/-2 above; these close the rest. Each test names its item.
+  // -------------------------------------------------------------------------
+
+  /** Every CoverageStateChip inside a row. The chip's BASE ladder
+   *  (`text-fixed-11 uppercase tracking-wide`) identifies it unambiguously —
+   *  the sibling TrustTierLabel badge is `text-xs` and never uppercase. */
+  function chipsIn(row: HTMLElement): HTMLElement[] {
+    return Array.from(row.querySelectorAll<HTMLElement>("span")).filter(
+      (el) =>
+        el.className.includes("text-fixed-11") &&
+        el.className.includes("uppercase") &&
+        el.className.includes("tracking-wide"),
+    );
+  }
+
+  /** Every APPLIED negative token in a row. `hover:`-prefixed tokens are
+   *  excluded deliberately: the Remove × carries `hover:border-negative
+   *  hover:text-negative` on EVERY row in EVERY state (it is the destructive
+   *  action's affordance, not the state's rendering), so counting it would make
+   *  this assertion fail for a reason unrelated to the claim. */
+  function appliedNegativeTokens(row: HTMLElement): string[] {
+    const hits: string[] = [];
+    for (const el of Array.from(row.querySelectorAll<HTMLElement>("*"))) {
+      for (const token of el.className.split(/\s+/)) {
+        if (token.startsWith("hover:")) continue;
+        if (/^(text|bg|border)-negative$/.test(token)) hits.push(token);
+      }
+    }
+    return hits;
+  }
+
+  it("UI-SPEC #3 neither new state dims or strikes through its row, and the include toggle stays ON", async () => {
+    for (const state of ["computing", "empty"] as const) {
+      cleanup();
+      // The draft persists to localStorage — clear it so each iteration starts
+      // from a genuinely fresh row (a leaked toggle state from the previous
+      // iteration would silently invert the gesture below).
+      lsStore.clear();
+      await renderWithLazyBody({ daily_returns: [], series_state: state });
+      await waitFor(() => {
+        expect(addedRow()).toHaveAttribute("data-series-state", state);
+      });
+
+      // opacity-50 / line-through is the MANUAL-exclusion vocabulary. Wearing it
+      // here would read as "you turned this off" when the user did nothing.
+      expect(addedRow().className).not.toContain("opacity-50");
+      expect(addedRow().className).not.toContain("line-through");
+      // The strategy stays ADDED and SELECTED — it joins the blend by itself the
+      // moment the series lands (147-CONTEXT locked).
+      expect(
+        within(addedRow()).getByRole("switch", { name: /Toggle .* on\/off/i }),
+      ).toHaveAttribute("aria-checked", "true");
+    }
+  });
+
+  it("UI-SPEC #4 neither new state disables the weight or leverage input (the typed weight is already correct when the series arrives)", async () => {
+    for (const state of ["computing", "empty"] as const) {
+      cleanup();
+      lsStore.clear();
+      await renderWithLazyBody({ daily_returns: [], series_state: state });
+      await waitFor(() => {
+        expect(addedRow()).toHaveAttribute("data-series-state", state);
+      });
+
+      expect(
+        within(addedRow()).getByLabelText(/weight$/i),
+      ).not.toBeDisabled();
+      expect(
+        within(addedRow()).getByLabelText(/leverage multiplier$/i),
+      ).not.toBeDisabled();
+    }
+  });
+
+  it("UI-SPEC #5 a FAILED computation (which the server maps to series_state 'empty') renders the MUTED chip — no applied negative token anywhere in the row", async () => {
+    // computation_status "failed" never reaches the client: the server's ONE
+    // derivation table maps it to "empty" because the user-facing fact on this
+    // surface is absence. The remedy for a failed computation lives on the
+    // strategy's own detail page, which this surface deliberately does not link
+    // to. A red row here would claim the allocator's scenario had failed.
+    await renderWithLazyBody({ daily_returns: [], series_state: "empty" });
+    await waitFor(() => {
+      expect(addedRow()).toHaveAttribute("data-series-state", "empty");
+    });
+
+    const chip = within(addedRow()).getByText("No data");
+    expect(chip.className).toContain("text-text-muted");
+    expect(chip.className).toContain("bg-track");
+    expect(appliedNegativeTokens(addedRow())).toEqual([]);
+    // Non-vacuous: the scanner DOES see this row's classes (it finds the
+    // hover-only tokens it is deliberately excluding).
+    expect(addedRow().innerHTML).toContain("hover:text-negative");
+  });
+
+  it("UI-SPEC #6 no row ever renders two chips — one signal per row across all four reachable states", async () => {
+    // computing / empty / available-and-eligible / manually-excluded.
+    for (const state of ["computing", "empty"] as const) {
+      cleanup();
+      lsStore.clear();
+      await renderWithLazyBody({ daily_returns: [], series_state: state });
+      await waitFor(() => {
+        expect(addedRow()).toHaveAttribute("data-series-state", state);
+      });
+      expect(chipsIn(addedRow())).toHaveLength(1);
+
+      // Toggling off swaps the chip for "Excluded" — it must not ADD one.
+      act(() => {
+        fireEvent.click(
+          within(addedRow()).getByRole("switch", { name: /Toggle .* on\/off/i }),
+        );
+      });
+      expect(chipsIn(addedRow())).toHaveLength(1);
+      expect(within(addedRow()).getByText("Excluded")).toBeInTheDocument();
+    }
+
+    // A row with a real series: the in-blend chip, still exactly one.
+    cleanup();
+    lsStore.clear();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve({ ok: true, status: 200, json: async () => [] }),
+      ),
+    );
+    const series = Array.from({ length: 14 }, (_, i) => ({
+      date: `2026-02-${String(i + 1).padStart(2, "0")}`,
+      value: 0.001,
+    }));
+    render(
+      <ScenarioComposer
+        payload={makeBookPayload("available", series)}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: SYNC_ID,
+      name: "In Blend Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    expect(chipsIn(addedRow()).length).toBeLessThanOrEqual(1);
+  });
+
+  it("UI-SPEC #7 with zero contributing constituents the REAL blend KPI cells render em-dash, never the literal 0.00", async () => {
+    // The composer's own KpiStrip is module-mocked in this file, so asserting
+    // against the mock would be vacuous. Instead: capture the EXACT props the
+    // composer handed it with a zero-contribution blend, then render the REAL
+    // KpiStrip with those props. That is the wiring (real engine output → real
+    // KPI renderer), not a helper's return value.
+    await renderWithLazyBody({ daily_returns: [], series_state: "empty" });
+    await waitFor(() => {
+      expect(addedRow()).toHaveAttribute("data-series-state", "empty");
+    });
+
+    const kpiProps = vi.mocked(KpiStrip).mock.calls.at(-1)?.[0];
+    expect(kpiProps).toBeDefined();
+    // Non-vacuous: the blend genuinely has nothing to compute from.
+    expect(kpiProps!.mode).toBe("scenario");
+
+    cleanup();
+    const actual =
+      await vi.importActual<typeof import("./KpiStrip")>("./KpiStrip");
+    const { container } = render(<actual.KpiStrip {...kpiProps!} />);
+
+    // DESIGN.md Numbers Contract: null / non-finite → em-dash. Never 0, never
+    // blank, never a fabricated value an LP could act on.
+    expect(container.textContent).not.toContain("0.00");
+    expect(container.textContent).toContain("—");
+  });
+
+  it("UI-SPEC #8 the UNIFY-04 loading banner still renders while a lazy fetch is in flight (a third, distinct axis — not folded into the new states)", async () => {
+    const release = stubReturnsFetch({
+      daily_returns: [],
+      series_state: "computing",
+    });
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: SYNC_ID,
+      name: "In Flight Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    // In flight — the client-fetch axis speaks, and the server-state axis is
+    // silent (nothing has answered yet).
+    expect(screen.getByTestId("scenario-loading-returns")).toBeInTheDocument();
+    expect(screen.queryByTestId("scenario-series-state-note")).toBeNull();
+
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+
+    // Settled — the banner retires and the server-state axis takes over. The
+    // two never render at once, and neither replaced the other.
+    await waitFor(() => {
+      expect(screen.queryByTestId("scenario-loading-returns")).toBeNull();
+    });
+    expect(
+      screen.getByTestId("scenario-series-state-note"),
+    ).toHaveTextContent(SYNCING_NOTE);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 147 / SCEN-01 — RESEARCH P6: a reopened / page-refreshed draft must
+// re-fetch its added strategies' series.
+// ---------------------------------------------------------------------------
+// WHY THIS EXISTS: `fetchAddedReturns` had exactly TWO call sites, both ADD
+// seams (handleAddStrategy and the BridgeDrawer onAdd). Neither
+// `openSavedScenario` nor the localStorage-draft hydration fired it, and
+// `addedReturnsById` starts empty on every fresh mount — so the founder could
+// add a strategy, see the real series, press F5, and watch every added leg
+// contribute [] again. That is a DISTINCT root cause from the phase's column
+// fix (no fetch at all, vs. fetching the wrong column): the column fix alone
+// leaves the SCEN-01 symptom fully reproducible one refresh later.
+//
+// These tests drive the hydration path the only honest way — by pre-seeding
+// localStorage with a draft that already carries an added strategy and then
+// mounting the component with NO user interaction whatsoever. Every `addStrategy`
+// call in this block (there is exactly one, in the retry arm) is a deliberate
+// SECOND gesture, never the trigger under test.
+describe("ScenarioComposer — Phase 147 SCEN-01 hydration re-fetch (P6)", () => {
+  const HYD_ID = "dddddddd-1111-2222-3333-444444444444";
+  const HYD_SERIES = [
+    { date: "2026-03-02", value: 0.011 },
+    { date: "2026-03-03", value: -0.004 },
+    { date: "2026-03-04", value: 0.007 },
+  ];
+  /** Fingerprint for makePayload()'s holdingsSummary [BTC, ETH, SOL] — matching,
+   *  so the draft is ADOPTED on mount (a mismatch would re-initialize from
+   *  holdings and drop the added strategy, making the test vacuous). */
+  const MATCHING_FP = "BTC:binance:spot|ETH:binance:spot|SOL:binance:spot";
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  /** Persist a draft that already carries HYD_ID as an added strategy — exactly
+   *  what a page refresh or an `openSavedScenario` reopen leaves behind. */
+  function seedHydratedDraft(): void {
+    lsStore.set(
+      `allocations.scenario_v0_15.${ALLOCATOR_A}`,
+      JSON.stringify({
+        schema_version: 4,
+        init_holdings_fingerprint: MATCHING_FP,
+        toggleByScopeRef: {
+          [REF_BTC]: true,
+          [REF_ETH]: true,
+          [REF_SOL]: true,
+          [HYD_ID]: true,
+        },
+        addedStrategies: [
+          {
+            id: HYD_ID,
+            name: "Reopened Strat",
+            markets: ["binance"],
+            strategy_types: ["momentum"],
+          },
+        ],
+        weightOverrides: {
+          [REF_BTC]: 0.45,
+          [REF_ETH]: 0.225,
+          [REF_SOL]: 0.075,
+          [HYD_ID]: 0.25,
+        },
+        memberKeyIds: [],
+        lastEditedAt: "2026-03-01T00:00:00Z",
+      }),
+    );
+  }
+
+  /** The per-id series the REAL engine set last carried into computeScenario.
+   *  (The identically-shaped helper in the Plan-06b describe is out of scope
+   *  here, so this block reads the module-level spy directly.) */
+  function latestReturnsLookup(): Record<string, unknown[]> {
+    expect(computeScenarioStateArgs.length).toBeGreaterThan(0);
+    return computeScenarioStateArgs[computeScenarioStateArgs.length - 1]
+      .returnsById as Record<string, unknown[]>;
+  }
+
+  /** Count the /returns requests fired for HYD_ID — the direct observable for
+   *  "the effect fired" and for "the effect did NOT double-fire". */
+  function returnsCalls(fetchMock: { mock: { calls: unknown[][] } }): number {
+    return fetchMock.mock.calls.filter((c) =>
+      String(c[0]).includes(`/api/strategies/${HYD_ID}/returns`),
+    ).length;
+  }
+
+  it("HYD-1 a REOPENED draft (added strategy already in localStorage, zero user interaction) fetches its series on mount and renders it", async () => {
+    let release: () => void = () => {};
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${HYD_ID}/returns`)) {
+        return new Promise((resolve) => {
+          release = () =>
+            resolve({
+              ok: true,
+              status: 200,
+              json: async () => ({
+                daily_returns: HYD_SERIES,
+                series_state: "available",
+              }),
+            });
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    seedHydratedDraft();
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // The row IS in the draft (hydration worked) — so a still-[] lookup below is
+    // the P6 defect, not a missing row.
+    expect(screen.getAllByText(/Reopened Strat/i).length).toBeGreaterThan(0);
+
+    // THE CLAIM: the fetch fired with no gesture at all.
+    await waitFor(() => expect(returnsCalls(fetchMock)).toBe(1));
+
+    // NON-VACUOUS half — before the response lands the leg contributes [] and
+    // the honest in-flight affordance is up.
+    expect(latestReturnsLookup()[HYD_ID]).toEqual([]);
+    expect(screen.getByTestId("scenario-loading-returns")).toBeInTheDocument();
+
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+
+    // The row leaves the loading state and the REAL series reaches the engine.
+    await waitFor(() =>
+      expect(latestReturnsLookup()[HYD_ID]).toEqual(HYD_SERIES),
+    );
+    expect(screen.queryByTestId("scenario-loading-returns")).toBeNull();
+  });
+
+  it("HYD-2 a hydrated added strategy that IS in the book fires NO lazy fetch (the book value is authoritative — same guard as the add seam)", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    seedHydratedDraft();
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          strategies: [
+            {
+              strategy: {
+                id: HYD_ID,
+                disclosure_tier: "verified",
+                series_state: "available",
+                strategy_analytics: {
+                  cagr: null,
+                  sharpe: null,
+                  daily_returns: HYD_SERIES,
+                },
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              } as any,
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            } as any,
+          ],
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // The book series reached the engine — so the leg IS resolved, just not by
+    // the route. (Non-vacuity: proves the row exists and is wired.)
+    await waitFor(() =>
+      expect(latestReturnsLookup()[HYD_ID]).toEqual(HYD_SERIES),
+    );
+    // THE CLAIM: no request was ever made for a strategy the book already answers.
+    expect(returnsCalls(fetchMock)).toBe(0);
+    expect(screen.queryByTestId("scenario-loading-returns")).toBeNull();
+  });
+
+  it("HYD-3 the hydration effect is idempotent: re-renders while in flight AND after settle never fire a second fetch", async () => {
+    let release: () => void = () => {};
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${HYD_ID}/returns`)) {
+        return new Promise((resolve) => {
+          release = () =>
+            resolve({
+              ok: true,
+              status: 200,
+              json: async () => ({
+                daily_returns: HYD_SERIES,
+                series_state: "available",
+              }),
+            });
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    seedHydratedDraft();
+    const { rerender } = render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    await waitFor(() => expect(returnsCalls(fetchMock)).toBe(1));
+
+    // Re-render with a FRESH payload object twice — new `strategies` array
+    // identity re-runs every payload-derived memo (and therefore the effect)
+    // while the first request is still in flight. The lazyAbortRef in-flight
+    // guard inside fetchAddedReturns is what must hold here; a second
+    // mechanism (ref-flag / mount latch) would be redundant.
+    await act(async () => {
+      rerender(
+        <ScenarioComposer
+          payload={makePayload()}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      rerender(
+        <ScenarioComposer
+          payload={makePayload()}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+    });
+    expect(returnsCalls(fetchMock)).toBe(1);
+
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(latestReturnsLookup()[HYD_ID]).toEqual(HYD_SERIES),
+    );
+
+    // And after the entry is resolved, the `addedReturnsById[id] === undefined`
+    // half of the guard is what stops the refetch.
+    await act(async () => {
+      rerender(
+        <ScenarioComposer
+          payload={makePayload()}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+    });
+    expect(returnsCalls(fetchMock)).toBe(1);
+  });
+
+  it("HYD-4 a FAILED hydration fetch degrades through the existing WR-01 surface: honest [], no fabricated series, and the id stays retryable", async () => {
+    let attempt = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${HYD_ID}/returns`)) {
+        attempt += 1;
+        // The hydration-triggered attempt fails; a later retry succeeds.
+        if (attempt === 1) {
+          return Promise.resolve({
+            ok: false,
+            status: 500,
+            json: async () => ({}),
+          });
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            daily_returns: HYD_SERIES,
+            series_state: "available",
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    seedHydratedDraft();
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    await waitFor(() => expect(returnsCalls(fetchMock)).toBe(1));
+    // Honest degrade: [] in the lookup (warm-up-gated out), the in-flight
+    // affordance retires, and the component does not crash.
+    await waitFor(() => expect(latestReturnsLookup()[HYD_ID]).toEqual([]));
+    await waitFor(() =>
+      expect(screen.queryByTestId("scenario-loading-returns")).toBeNull(),
+    );
+    expect(screen.getAllByText(/Reopened Strat/i).length).toBeGreaterThan(0);
+
+    // WR-01 retryability: the failure left `addedReturnsById[id]` UNDEFINED, so
+    // remove + re-add re-fires — a silent settle([]) would make this stay 1.
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Remove from scenario/i }),
+      );
+    });
+    addStrategy({
+      id: HYD_ID,
+      name: "Reopened Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    await waitFor(() => expect(returnsCalls(fetchMock)).toBe(2));
+    await waitFor(() =>
+      expect(latestReturnsLookup()[HYD_ID]).toEqual(HYD_SERIES),
+    );
+  });
+});

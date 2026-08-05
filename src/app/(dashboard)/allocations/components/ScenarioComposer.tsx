@@ -75,7 +75,7 @@ import {
 } from "@/lib/scenario";
 import { buildScenarioPeerRankRequest } from "@/lib/scenario-peer-request";
 import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
-import { blendPeriodsPerYear } from "@/lib/closed-sets";
+import { blendPeriodsPerYear, type SeriesState } from "@/lib/closed-sets";
 import {
   coverageSpanOf,
   covers,
@@ -608,6 +608,28 @@ function normalizeBookReturns(raw: unknown): DailyPoint[] | null {
 }
 
 /**
+ * Phase 147 / SCEN-01 — the `series_state` trust-boundary narrowing, shared by
+ * BOTH supply lines (the lazy `/api/strategies/[id]/returns` body and the book
+ * payload row). ONE function so the two paths cannot drift into disagreeing
+ * about what an empty series means (147-UI-SPEC §3 / SC2).
+ *
+ * Additive-field tolerance, exactly the BLEND-01 idiom the asset_class parse
+ * uses: accept ONLY the two literals that change the render, and collapse
+ * everything else — absent (a stale deploy that predates the widening), null,
+ * or malformed — to the conservative "available", which renders no chip and no
+ * note. Never a throw (a degraded field must not take down the composer), and
+ * never a FALSE "Syncing" (a permanent spinner is the exact class Phase 142
+ * exists to kill).
+ *
+ * ⛔ This never inspects the series itself: an EMPTY returns array cannot
+ * distinguish "still computing" from "terminal absence", so the client does not
+ * get a vote — the server owns the discriminator.
+ */
+function narrowSeriesState(raw: unknown): SeriesState {
+  return raw === "computing" || raw === "empty" ? raw : "available";
+}
+
+/**
  * DSRC-02 (D2) — per-holding equity contribution, the per-key WEIGHT source.
  *
  * Mirrors the SSR `holdingEquityContribution` (queries.ts:2113) EXACTLY:
@@ -1015,6 +1037,16 @@ export function ScenarioComposer({
   const [addedProvenanceById, setAddedProvenanceById] = useState<
     Record<string, { trust_tier: string | null; is_composite: boolean }>
   >({});
+  // Phase 147 / SCEN-01 — the lazily-fetched `series_state` discriminator for a
+  // drawer-added, NON-book strategy, keyed by id. Same lifecycle as
+  // addedAssetClassById (settle writer + purge on remove, so a re-add starts
+  // clean): the book payload carries series_state on book rows, but a
+  // drawer-added strategy's can only come from the widened /returns response.
+  // An id with NO entry is "available" — the conservative default that renders
+  // no chip, so an in-flight or degraded fetch never fabricates a Syncing row.
+  const [addedSeriesStateById, setAddedSeriesStateById] = useState<
+    Record<string, SeriesState>
+  >({});
   // Ids whose lazy fetch is in flight — drives the honest "loading returns…"
   // affordance on the added row. While loading, the strategy contributes []
   // (warm-up-gated), NEVER a fabricated flat/zero series (Pitfall 4).
@@ -1308,11 +1340,15 @@ export function ScenarioComposer({
       series: DailyPoint[],
       assetClass: string | null,
       provenance: { trust_tier: string | null; is_composite: boolean },
+      seriesState: SeriesState,
     ) => {
       setAddedReturnsById((prev) => ({ ...prev, [id]: series }));
       setAddedAssetClassById((prev) => ({ ...prev, [id]: assetClass }));
       // CONSTIT-02 — record the drawer-added leg's provenance beside asset_class.
       setAddedProvenanceById((prev) => ({ ...prev, [id]: provenance }));
+      // SCEN-01 — record what an EMPTY series means for this leg, so the row can
+      // say "Syncing" or "No data" instead of rendering 0.00 with no signal.
+      setAddedSeriesStateById((prev) => ({ ...prev, [id]: seriesState }));
       clearInflight();
     };
     fetch(`/api/strategies/${encodeURIComponent(id)}/returns`, {
@@ -1335,6 +1371,7 @@ export function ScenarioComposer({
           asset_class?: unknown;
           trust_tier?: unknown;
           is_composite?: unknown;
+          series_state?: unknown;
         }) => {
           // A 200 with a non-array body is a malformed/failed response, NOT a
           // genuine empty series — treat it as a retryable failure (WR-01).
@@ -1354,10 +1391,20 @@ export function ScenarioComposer({
             trust_tier: typeof d.trust_tier === "string" ? d.trust_tier : null,
             is_composite: d.is_composite === true,
           };
+          // SCEN-01 — narrow the additive discriminator through the SHARED
+          // boundary helper (the book merge below calls the same one). A stale
+          // deploy that omits it, or any malformed value, degrades to
+          // "available": no chip, no note, never a false Syncing.
+          const seriesState = narrowSeriesState(d.series_state);
           // A genuine 200 with a real array (including an empty one) settles. An
           // empty array here means the strategy legitimately has no published
           // returns yet — distinct from a failure, so it is cached, not retried.
-          settle(d.daily_returns as DailyPoint[], assetClass, provenance);
+          settle(
+            d.daily_returns as DailyPoint[],
+            assetClass,
+            provenance,
+            seriesState,
+          );
         },
       )
       .catch((err: unknown) => {
@@ -2074,6 +2121,26 @@ export function ScenarioComposer({
     [scenario.draft.addedStrategies, strategyById, addedReturnsById],
   );
 
+  // Phase 147 / SCEN-01 — the per-row `series_state` the chip + note render
+  // from, merged across the SAME two supply lines as the returns lookup above
+  // and in the SAME precedence: the book payload wins when the strategy is in
+  // the book (that path never fires a lazy fetch), otherwise the lazily-fetched
+  // value, otherwise "available" (nothing has told us anything yet → no chip).
+  // Both branches narrow through the ONE shared helper, so the two paths cannot
+  // disagree about what an empty series means (UI-SPEC §3 / SC2). ⛔ No branch
+  // here consults the series itself — array length cannot tell computing from
+  // terminal-empty, so the server owns the discriminator.
+  const addedSeriesStateByRef = useMemo<Record<string, SeriesState>>(() => {
+    const map: Record<string, SeriesState> = {};
+    for (const a of scenario.draft.addedStrategies) {
+      const found = strategyById.get(a.id);
+      map[a.id] = found
+        ? narrowSeriesState(found.strategy.series_state)
+        : (addedSeriesStateById[a.id] ?? "available");
+    }
+    return map;
+  }, [scenario.draft.addedStrategies, strategyById, addedSeriesStateById]);
+
   // UNIFY-04 — the display names of added strategies whose lazy returns fetch
   // is still in flight, for the honest "loading returns…" affordance. Derived
   // from the loading-id set ∩ the current added strategies (an id that was
@@ -2084,6 +2151,36 @@ export function ScenarioComposer({
       .filter((a) => loadingReturnsIds.has(a.id))
       .map((a) => a.name);
   }, [loadingReturnsIds, scenario.draft.addedStrategies]);
+
+  // Phase 147 / SCEN-01 (RESEARCH P6) — the HYDRATION seam. `fetchAddedReturns`
+  // used to have exactly two call sites, both ADD seams (handleAddStrategy just
+  // below, and the BridgeDrawer onAdd) — so a strategy that entered the draft in
+  // a PREVIOUS session never got fetched. `addedReturnsById` starts empty on
+  // every fresh mount, so a page refresh or an `openSavedScenario` reopen left
+  // every added leg contributing [] again and the SCEN-01 symptom survived the
+  // phase's column fix one F5 later. This effect covers BOTH un-fixed entry
+  // paths (reopen and localStorage-draft hydration) because both land their
+  // strategies in `draft.addedStrategies` on a mount where `addedReturnsById` is
+  // empty.
+  //
+  // It reuses the add seam's guard predicate VERBATIM — not in the book, and not
+  // already resolved — and leans on `fetchAddedReturns`' own `lazyAbortRef`
+  // in-flight guard (:1315) for idempotence. ⛔ Deliberately NO second dedup
+  // mechanism (no ref flag, no mount-once latch): the fetch function already
+  // dedupes, and a parallel mechanism is exactly the drift this phase exists to
+  // prevent.
+  useEffect(() => {
+    for (const a of scenario.draft.addedStrategies) {
+      if (!strategyById.has(a.id) && addedReturnsById[a.id] === undefined) {
+        fetchAddedReturns(a.id);
+      }
+    }
+  }, [
+    scenario.draft.addedStrategies,
+    strategyById,
+    addedReturnsById,
+    fetchAddedReturns,
+  ]);
 
   // UNIFY-04 — the single add seam for catalog adds (empty-state drawer,
   // main-body drawer, Bridge). Appends to the draft via the hook mutator, THEN
@@ -2139,6 +2236,13 @@ export function ScenarioComposer({
       setAddedProvenanceById((prev) => {
         if (!(id in prev)) return prev;
         const { [id]: _dropProv, ...rest } = prev;
+        return rest;
+      });
+      // SCEN-01 — purge the fetched series_state identically, or a re-add would
+      // render a STALE "Syncing" against a retry that has not answered yet.
+      setAddedSeriesStateById((prev) => {
+        if (!(id in prev)) return prev;
+        const { [id]: _dropState, ...rest } = prev;
         return rest;
       });
       // LEV-02 (round-2 M-2) + WEIGHTS-04 / F1 — purge the removed leg's ENTIRE
@@ -2945,6 +3049,14 @@ export function ScenarioComposer({
     for (const s of engineSet.strategies) {
       if (!engineSet.state.selected[s.id]) continue; // manual-off is NOT here
       if (coverageEligible[s.id]) continue; // in-blend
+      // Phase 147 SCEN-01 (review WR-02) — a row whose series is still syncing
+      // or terminally absent is not "outside the window": there is nothing to
+      // place in one. Its ONE signal is the main list's Syncing / No data chip
+      // (147-UI-SPEC §2 precedence — one signal per row); rendering it here too
+      // double-labels the row with a CONTRADICTORY caption ("no data — outside
+      // window" vs "First metrics arrive in ~10–15 min"). Non-added rows have
+      // no series_state entry → "available" → pre-147 behavior unchanged.
+      if ((addedSeriesStateByRef[s.id] ?? "available") !== "available") continue;
       const span = selectedSpanById.get(s.id) ?? null;
       out.push({
         id: s.id,
@@ -2954,7 +3066,13 @@ export function ScenarioComposer({
       });
     }
     return out;
-  }, [engineSet, coverageWindow, coverageEligible, selectedSpanById]);
+  }, [
+    engineSet,
+    coverageWindow,
+    coverageEligible,
+    selectedSpanById,
+    addedSeriesStateByRef,
+  ]);
 
   // Phase 58 (COVERAGE-01) — the mini-gantt rows: one per SELECTED strategy,
   // carrying its coverage span + the in-blend/auto-excluded flag read from the
@@ -4811,6 +4929,7 @@ export function ScenarioComposer({
           portfolioMaxDrawdown={scenarioMetrics.max_drawdown}
           onRemoveAdded={handleRemoveAdded}
           coverageEligible={coverageEligible}
+          addedSeriesStateByRef={addedSeriesStateByRef}
         />
       </CollapsibleSection>
 
@@ -5222,6 +5341,15 @@ interface CompositionListProps {
    * + this map.
    */
   coverageEligible: Record<string, boolean>;
+  /**
+   * Phase 147 / SCEN-01 — the SERVER-derived per-row answer to "what does an
+   * empty series mean here?" ("available" | "computing" | "empty"), merged from
+   * the book payload and the lazy returns route by the composer's ONE narrowing
+   * helper. Threaded READ-ONLY: this list renders the chip + note from it and
+   * never re-derives it (least of all from `daily_returns.length`, which cannot
+   * tell a running job from terminal absence — UI-SPEC §3).
+   */
+  addedSeriesStateByRef: Record<string, SeriesState>;
 }
 
 // WEIGHTS-04 (Phase 113) — the honest failure copy for a `!ok` solve. Mirrors
@@ -5261,6 +5389,7 @@ function CompositionList({
   portfolioMaxDrawdown,
   onRemoveAdded,
   coverageEligible,
+  addedSeriesStateByRef,
 }: CompositionListProps) {
   // WEIGHTS-00 (A1 locked) — the DERIVED, read-only notional string for a row:
   // equity × blend-share × leverage. It is purely informative (a
@@ -5571,24 +5700,37 @@ function CompositionList({
           const weight = mixedPerKeyBook
             ? (blendShareByRef[a.id] ?? draft.weightOverrides[a.id] ?? 0)
             : (draft.weightOverrides[a.id] ?? 0);
-          // Phase 58 COVERAGE-02 — three-state chip, derived (NOT re-computed)
-          // from the row's `enabled` (the `selected` axis) + the threaded
-          // `coverageEligible` map, exactly the two states the plan wires here:
-          //   enabled === false            → manually-excluded
-          //   enabled && coverageEligible  → in-blend
+          // Phase 58 COVERAGE-02 + Phase 147 SCEN-01 — the row's ONE chip,
+          // derived (NOT re-computed) from the row's `enabled` (the `selected`
+          // axis), the SERVER-derived `series_state`, and the threaded
+          // `coverageEligible` map. Precedence is locked by 147-UI-SPEC §2 and a
+          // row is never double-labelled:
+          //   enabled === false            → manually-excluded  (user intent is the
+          //                                  most recent + most explicit signal)
+          //   series_state "computing"     → syncing
+          //   series_state "empty"         → no-series
+          //   coverageEligible             → in-blend
+          // Series availability outranks coverage because a row with no series
+          // is not "outside the window" — it has nothing to place in a window.
           // The enabled-but-not-eligible (auto-excluded, amber) state is rendered
           // by its own group + Plan 02 — no chip here for it, so the main list
           // never mislabels an outside-window row as in-blend.
+          const seriesState = addedSeriesStateByRef[a.id] ?? "available";
           const chipState: CoverageState | null = !enabled
             ? "manually-excluded"
-            : coverageEligible[a.id]
-              ? "in-blend"
-              : null;
+            : seriesState === "computing"
+              ? "syncing"
+              : seriesState === "empty"
+                ? "no-series"
+                : coverageEligible[a.id]
+                  ? "in-blend"
+                  : null;
           return (
             <li
               key={a.id}
               data-scope-ref={a.id}
               data-testid="scenario-constituent-added"
+              data-series-state={seriesState}
               className={`flex flex-col gap-2 rounded-md border border-border p-3 ${
                 enabled ? "" : "opacity-50 line-through"
               }`}
@@ -5680,6 +5822,33 @@ function CompositionList({
                 </button>
               </div>
               </div>
+              {/* Phase 147 / SCEN-01 — the excluded-from-blend note, keyed off
+                  the SAME chipState as the chip so a row carries exactly one
+                  signal (a manually-excluded row says "Excluded" and stops —
+                  the note would be a second, competing explanation).
+                  Chip-then-note reads as a complete sentence: what the state is,
+                  then what it means for the blend. The syncing note carries a
+                  polite live region because it resolves on its own without any
+                  user action (DESIGN-05); the terminal note does NOT — an idle
+                  live region on every no-series row is announcement spam. */}
+              {chipState === "syncing" && (
+                <p
+                  role="status"
+                  aria-live="polite"
+                  data-testid="scenario-series-state-note"
+                  className="text-fixed-11 font-medium text-warning"
+                >
+                  First metrics arrive in ~10–15 min — not in the blend yet
+                </p>
+              )}
+              {chipState === "no-series" && (
+                <p
+                  data-testid="scenario-series-state-note"
+                  className="text-fixed-11 font-medium text-text-muted"
+                >
+                  No return series available — not in the blend
+                </p>
+              )}
               {renderSolveState(a.id)}
             </li>
           );

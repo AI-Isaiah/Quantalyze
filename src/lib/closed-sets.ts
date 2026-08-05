@@ -445,6 +445,69 @@ export function isComputedAnalytics(
   return status === "complete" || status === "complete_with_warnings";
 }
 
+// --- Series state (Phase 147 / SCEN-01) ------------------------------------
+// What a read surface may say about a strategy's return series. "available" is
+// decided by the RESOLVED series' own length at the call site; the other two
+// are the two honest readings of an EMPTY series, discriminated by
+// deriveEmptySeriesState below. DISTINCT from
+// STRATEGY_ANALYTICS_COMPUTATION_STATUSES: that set is the DB job lifecycle,
+// this one is the presentation vocabulary derived from it.
+export const SERIES_STATES = ["available", "computing", "empty"] as const;
+export type SeriesState = (typeof SERIES_STATES)[number];
+
+// The age after which a MISSING strategy_analytics row stops meaning "warming
+// up" and starts meaning "no data". This is deliberately the SAME threshold the
+// analytics-service reaper uses to terminalize a stuck 'computing' row —
+// STRATEGY_ANALYTICS_REAP_THRESHOLD = "16 hours"
+// (analytics-service/job_worker.py), mirrored by the pg_cron reaper migration
+// 20260802120000_* — so the system has ONE staleness threshold, not two that
+// can drift apart. Anything the reaper considers dead, the UI must too.
+export const MISSING_ROW_COMPUTING_WINDOW_MS = 16 * 60 * 60 * 1000;
+
+/**
+ * Decide what an EMPTY resolved return series MEANS: still computing, or
+ * genuinely absent. The ONE server-side discriminator — share it, do not
+ * inline this ladder at a second read site.
+ *
+ * (a) Callers invoke this ONLY when the resolved series is empty. "available"
+ *     is never returned here: that state is decided by the resolved series'
+ *     length at the call site, not by any status column.
+ *
+ * (b) Why the missing-row arm is AGE-BOUNDED (the load-bearing part): a
+ *     `strategies` row does NOT guarantee a `strategy_analytics` row. No
+ *     trigger creates one on INSERT; the finalize-wizard's enqueue_compute_job
+ *     failure is logged and swallowed inside a Promise.allSettled; and no cron
+ *     backstops a MISSING row (reconcile-strategies is scoped to funding
+ *     exchanges with a recent sync, and the reaper only terminalizes rows
+ *     already at 'computing'). So a strategy whose job was never enqueued has
+ *     status === null forever — and mapping that to "computing" without a bound
+ *     is a spinner that never stops, the exact permanent-spinner class Phase 142
+ *     killed. Past MISSING_ROW_COMPUTING_WINDOW_MS, and whenever the age is
+ *     unknown or unparseable, degrade to honest absence.
+ *
+ * `nowMs` is injected so callers/tests can be deterministic; it defaults to
+ * Date.now() for production reads.
+ */
+export function deriveEmptySeriesState(
+  status: string | null,
+  strategyCreatedAt: string | null,
+  nowMs: number = Date.now(),
+): SeriesState {
+  // A live job is authoritative — age is the reaper's problem, not ours.
+  if (status === "pending" || status === "computing") return "computing";
+  if (status === null) {
+    const created = strategyCreatedAt ? Date.parse(strategyCreatedAt) : NaN;
+    if (!Number.isFinite(created)) return "empty"; // unknown age → honest absence
+    return nowMs - created < MISSING_ROW_COMPUTING_WINDOW_MS
+      ? "computing"
+      : "empty";
+  }
+  // complete / complete_with_warnings / failed (and any unrecognised value) with
+  // no series → terminal absence. `failed` is deliberately NOT special-cased:
+  // the UI renders a MUTED "No data" for it, never a red error chip.
+  return "empty";
+}
+
 // --- Signup roles (SECURITY BOUNDARY) --------------------------------------
 // SECURITY BOUNDARY (NEW-C15-05): the AUTHORITATIVE allowlist for the role a
 // new user receives is the SQL trigger handle_new_user

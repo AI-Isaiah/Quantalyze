@@ -46,12 +46,18 @@ vi.mock("@/lib/ratelimit", () => ({
   getClientIp: () => "203.0.113.7",
 }));
 
-// Admin client — the RPC is the primary read. Phase 84 (BLEND-01) adds ONE
-// narrow non-RPC read: the published-only `strategies` (id, asset_class)
-// enrichment for the blend basis. `rpcMock` drives the RPC result; the
-// `strategies` builder's terminal `.eq()` resolves `strategiesReadMock`
-// (default: no rows → empty lookup → √252). Any OTHER table still THROWS — the
-// leak guard proving the page reads nothing arbitrary.
+// Admin client — the RPC is the primary read. Exactly TWO narrow non-RPC reads
+// are sanctioned, both bounded to the RPC's own series ids:
+//   - Phase 84 (BLEND-01): published-only `strategies` (id, asset_class) for the
+//     blend basis. Terminal `.eq()` resolves `strategiesReadMock` (default: no
+//     rows → empty lookup → √252).
+//   - Phase 147 (SCEN-01): `strategy_analytics` (strategy_id, returns_series) so
+//     analytics-service-only legs (daily_returns null) still project their real
+//     series. Terminal `.in()` resolves `analyticsReadMock` (default: no rows →
+//     empty lookup → the pre-147 daily_returns-only projection).
+// Any OTHER table still THROWS — the leak guard proving the page reads nothing
+// arbitrary. Both builders capture their select string + id bound so the double
+// is pinned against the real contract it stands in for.
 const rpcMock = vi.hoisted(() => vi.fn());
 const adminFromMock = vi.hoisted(() => vi.fn());
 const strategiesReadMock = vi.hoisted(() =>
@@ -68,13 +74,19 @@ const strategiesReadMock = vi.hoisted(() =>
     }),
   ),
 );
+const analyticsReadMock = vi.hoisted(() =>
+  vi.fn(async (_cols?: string, _inCol?: string, _ids?: unknown) => ({
+    data: [] as Array<{ strategy_id: string; returns_series: unknown }>,
+    error: null,
+  })),
+);
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     rpc: (fn: string, args: unknown) => rpcMock(fn, args),
     from: (table: string) => {
       adminFromMock(table);
-      // The ONLY non-RPC read this page is allowed (BLEND-01): the narrow
-      // published-only strategies (id, asset_class) blend-basis enrichment.
+      // Sanctioned read #1 (BLEND-01): the narrow published-only strategies
+      // (id, asset_class) blend-basis enrichment.
       if (table === "strategies") {
         return {
           select: (cols: string) => ({
@@ -82,6 +94,19 @@ vi.mock("@/lib/supabase/admin", () => ({
               eq: (statusCol: string, statusVal: unknown) =>
                 strategiesReadMock(cols, ids, statusCol, statusVal, inCol),
             }),
+          }),
+        };
+      }
+      // Sanctioned read #2 (SCEN-01): strategy_analytics (strategy_id,
+      // returns_series), bounded to the RPC series ids. Terminal is `.in()` —
+      // there is deliberately NO `.eq("status", …)` here: `status` is a
+      // `strategies`-table column, and these ids are already published-gated
+      // inside the SECURITY DEFINER RPC that produced them.
+      if (table === "strategy_analytics") {
+        return {
+          select: (cols: string) => ({
+            in: (inCol: string, ids: unknown) =>
+              analyticsReadMock(cols, inCol, ids),
           }),
         };
       }
@@ -174,6 +199,42 @@ function okRow() {
   };
 }
 
+// Phase 147 / SCEN-01 — the analytics-service-only shape: the RPC's series row
+// carries a NULL daily_returns (that column is CSV-ingest only), and the real
+// track arrives from the sibling strategy_analytics read as a cumprod WEALTH
+// index. Built as the cumulative product of makeSeries() — the mathematical
+// INVERSE of the differencing under test, never that function itself.
+// ⚠️ ANCHORED variant: the prepended 1.0 base row is a TEST CONVENIENCE that
+// makes all 40 returns recoverable, so this fixture and makeSeries() carry
+// identical economics BY CONSTRUCTION. The production writer never persists
+// that base row — its first element is (1 + r_0) over the returns' own date
+// index (metrics.py day-0-exclusion semantics) — so real data yields N−1
+// returns and day one drops. makeProductionWealthIndex() below pins that shape.
+function makeWealthIndex(): Array<{ date: string; value: number }> {
+  const out = [{ date: "2022-12-31", value: 1 }];
+  let w = 1;
+  for (const r of makeSeries()) {
+    w *= 1 + r.value;
+    out.push({ date: r.date, value: w });
+  }
+  return out;
+}
+
+// The PRODUCTION shape: `(1+r).cumprod()` with NO base row — first element
+// (1 + r_0). Exactly the anchored fixture minus its test-convenience anchor.
+function makeProductionWealthIndex(): Array<{ date: string; value: number }> {
+  return makeWealthIndex().slice(1);
+}
+
+function analyticsOnlyRow() {
+  return {
+    name: "My Q3 Blend",
+    draft: okDraft(),
+    schema_version: 2,
+    series: [{ strategy_id: STRAT_A, daily_returns: null }],
+  };
+}
+
 // Phase 64 / PRESENT-03 — a MIXED share: persisted book membership
 // (memberKeyIds non-empty) PLUS catalog adds (addedStrategies non-empty). Only
 // the catalog legs are publicly computable → the honesty caption must fire.
@@ -216,6 +277,8 @@ beforeEach(() => {
   adminFromMock.mockClear();
   strategiesReadMock.mockReset();
   strategiesReadMock.mockResolvedValue({ data: [], error: null });
+  analyticsReadMock.mockReset();
+  analyticsReadMock.mockResolvedValue({ data: [], error: null });
   dashboardMock.mockClear();
   vi.stubGlobal(
     "fetch",
@@ -249,11 +312,16 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     // RPC was the primary read, hashed-token arg, never the dashboard helper.
     expect(rpcMock).toHaveBeenCalledWith("get_shared_scenario", expect.any(Object));
     expect(dashboardMock).not.toHaveBeenCalled();
-    // BLEND-01 — the page performs exactly ONE non-RPC read: the narrow
-    // published-only `strategies` asset_class enrichment. It must NEVER touch any
-    // OTHER table (the guard `from()` throws for anything but "strategies").
+    // BLEND-01 + SCEN-01 — the page performs exactly TWO non-RPC reads: the
+    // narrow published-only `strategies` asset_class enrichment and the
+    // `strategy_analytics` returns_series enrichment, both bounded to the RPC's
+    // own series ids. It must NEVER touch any OTHER table. This stays a CLOSED
+    // allow-list (the guard `from()` throws for anything outside it) — widening
+    // it to a third table is a deliberate, reviewable edit, never incidental.
     expect(
-      adminFromMock.mock.calls.every(([t]) => t === "strategies"),
+      adminFromMock.mock.calls.every(
+        ([t]) => t === "strategies" || t === "strategy_analytics",
+      ),
     ).toBe(true);
     expect(notFoundMock).not.toHaveBeenCalled();
 
@@ -322,6 +390,87 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     expect(notFoundMock).not.toHaveBeenCalled();
     expect(html).toContain("My Q3 Blend");
     expect(html).toContain("basis:252"); // honest default, no crash
+  });
+
+  it("SCEN-01 — reads returns_series bounded to the RPC series ids, and an analytics-only leg renders the SAME projection as the CSV leg", async () => {
+    // The economic invariant: a strategy whose real track lives in
+    // `strategy_analytics.returns_series` (daily_returns null — the
+    // analytics-service-only case) must project IDENTICALLY to the same track
+    // arriving via daily_returns. Pre-147 the analytics-only leg resolved EMPTY
+    // and the recipient saw a silently zeroed blend. The wealth index below is
+    // the ANCHORED cumprod of makeSeries() (1.0 base row prepended — a fixture
+    // convenience the production writer never persists), so the two paths carry
+    // the same economics BY CONSTRUCTION and the rendered markup must match
+    // byte-for-byte. On PRODUCTION data day one drops (N−1 semantics) and exact
+    // parity is NOT expected — the companion test below pins that shape.
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    const csvHtml = await renderPage("csv-leg");
+
+    analyticsReadMock.mockResolvedValueOnce({
+      data: [{ strategy_id: STRAT_A, returns_series: makeWealthIndex() }],
+      error: null,
+    });
+    rpcMock.mockResolvedValueOnce({ data: [analyticsOnlyRow()], error: null });
+    const analyticsHtml = await renderPage("analytics-leg");
+
+    // The read contract: narrow projection, bounded to the RPC-returned ids.
+    // No status filter — `status` is a `strategies` column, and these ids were
+    // already published-gated inside the SECURITY DEFINER RPC that emitted them.
+    expect(analyticsReadMock).toHaveBeenCalledTimes(2); // once per render
+    const [cols, inCol, ids] = analyticsReadMock.mock.calls[1]!;
+    expect(cols).toBe("strategy_id, returns_series");
+    expect(inCol).toBe("strategy_id");
+    expect(ids).toEqual([STRAT_A]);
+
+    // Same series, same projection — and NOT the degenerate all-em-dash shell.
+    expect(analyticsHtml).toBe(csvHtml);
+    expect(analyticsHtml).toContain("My Q3 Blend");
+    expect(analyticsHtml).toMatch(/\d%/); // a real percentage KPI, not "—"
+
+    // The RAW wealth index never reaches the client — the page emits only the
+    // resolved projection. 1.0-based wealth values are absent from the markup.
+    expect(analyticsHtml).not.toContain("returns_series");
+  });
+
+  it("SCEN-01 — a PRODUCTION-shaped wealth index (no 1.0 base row) renders a real projection, but byte parity with the CSV twin is an anchored-fixture property only", async () => {
+    // The writer's `returns_series` is `(1+r).cumprod()` over the returns' own
+    // date index — first element (1 + r_0), no base row. Differencing recovers
+    // N−1 returns: day one's return is unrecoverable and the derived start date
+    // shifts one day later. So an analytics-only leg on REAL data must still
+    // render a live projection (never the em-dash shell), while the CSV twin's
+    // exact markup is NOT reproducible — the previous test's byte-for-byte
+    // parity holds only for the anchored fixture.
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    const csvHtml = await renderPage("csv-leg-prod");
+
+    analyticsReadMock.mockResolvedValueOnce({
+      data: [
+        { strategy_id: STRAT_A, returns_series: makeProductionWealthIndex() },
+      ],
+      error: null,
+    });
+    rpcMock.mockResolvedValueOnce({ data: [analyticsOnlyRow()], error: null });
+    const analyticsHtml = await renderPage("analytics-leg-prod");
+
+    // A real projection renders — never the degenerate all-em-dash shell.
+    expect(analyticsHtml).toContain("My Q3 Blend");
+    expect(analyticsHtml).toMatch(/\d%/);
+    expect(analyticsHtml).not.toContain("returns_series");
+    // …but not the CSV twin's markup: one fewer daily return, a later start.
+    expect(analyticsHtml).not.toBe(csvHtml);
+  });
+
+  it("SCEN-01 — a failed returns_series read degrades to the pre-147 daily_returns projection, never throws the page", async () => {
+    // The enrichment is optional: a transient DB fault must fall back to the
+    // RPC's own daily_returns (the pre-147 behavior), never a thrown public page.
+    analyticsReadMock.mockRejectedValueOnce(new Error("transient db error"));
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+
+    const html = await renderPage("degrade-series");
+
+    expect(notFoundMock).not.toHaveBeenCalled();
+    expect(html).toContain("My Q3 Blend");
+    expect(html).toMatch(/\d%/); // the daily_returns projection still rendered
   });
 
   it("unknown token (RPC 0 rows) → notFound()", async () => {

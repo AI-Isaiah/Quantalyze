@@ -1,15 +1,20 @@
 // SECURITY BOUNDARY:
-// This is a PUBLIC, sessionless route. Two Supabase reads happen here, both on
+// This is a PUBLIC, sessionless route. Three Supabase reads happen here, all on
 // the admin (service_role) transport: (1) the token-scoped `get_shared_scenario`
 // SECURITY DEFINER RPC — the gate — which self-scopes on `token_hash +
 // revoked_at IS NULL` and returns ONLY name/draft/schema_version + the draft's
-// addedStrategies[].id PUBLISHED series; and (2) a Phase-84 sibling read of
+// addedStrategies[].id PUBLISHED series; (2) a Phase-84 sibling read of
 // `strategies(id, asset_class)` bounded to those RPC-returned series ids and
 // `status='published'` (via withPublishedOnly), purely for the blend
-// annualization basis. NEVER add a query that reads an arbitrary id, NEVER call
-// the allocator-dashboard query helper, and NEVER read holdings / AUM / api_keys
-// / portfolios on this page. The recipient sees the scenario in return /
-// percentage form only, never an allocator identity.
+// annualization basis; and (3) a Phase-147 sibling read of
+// `strategy_analytics(strategy_id, returns_series)` bounded to the SAME
+// RPC-returned ids, purely to recover the real return series for
+// analytics-service-only legs (whose `daily_returns` is null). Reads (2) and (3)
+// are BOUNDED BY CONSTRUCTION to the RPC's own id output, so neither can widen
+// what the share token already exposes. NEVER add a query that reads an
+// arbitrary id, NEVER call the allocator-dashboard query helper, and NEVER read
+// holdings / AUM / api_keys / portfolios on this page. The recipient sees the
+// scenario in return / percentage form only, never an allocator identity.
 
 import { notFound } from "next/navigation";
 import { headers } from "next/headers";
@@ -160,6 +165,11 @@ export default async function ScenarioSharePage({
   //     to an empty lookup → the √252 default (honest), never a throw on this
   //     public page.
   const assetClassById: Record<string, string | null> = {};
+  // Phase 147 (SCEN-01) — raw `strategy_analytics.returns_series` per leg, read
+  // below. Declared here so it is in scope at the resolve call regardless of the
+  // seriesIds guard; an empty lookup is the conservative default (the resolver
+  // then falls back to the RPC's own daily_returns alone, i.e. pre-147).
+  const returnsSeriesById: Record<string, unknown> = {};
   const seriesIds = (row.series ?? []).map((s) => s.strategy_id);
   if (seriesIds.length > 0) {
     try {
@@ -195,6 +205,61 @@ export default async function ScenarioSharePage({
         message: (e as { message?: string }).message,
       });
     }
+
+    // 3c. Phase 147 (SCEN-01) — the per-leg RETURN SERIES. The RPC's `series`
+    //     jsonb carries only `strategy_analytics.daily_returns`, which CSV
+    //     ingest alone populates: an analytics-service-only strategy leaves it
+    //     null and writes its real track to `returns_series` as a cumprod wealth
+    //     index. Pre-147 those legs resolved EMPTY here, so a recipient saw a
+    //     silently zeroed blend while the owner's composer showed the real one.
+    //
+    //     (a) This is the SAME Phase-84 sibling-read pattern as the block above,
+    //         and for the same reason: the phase-29 frozen-spine gate
+    //         (phase-29-frozen-spine-guards.test.ts:141, FORBIDDEN_MIGRATION_RE
+    //         = /scenario|share/i) fails the build on ANY new scenarios/share
+    //         migration, so `get_shared_scenario` cannot be widened to project
+    //         returns_series. The data must arrive caller-side.
+    //     (b) DISCLOSURE BOUND: the read is `.in("strategy_id", seriesIds)`,
+    //         where seriesIds is the RPC's OWN output — the id universe IS the
+    //         RPC's, so this read can never widen what the share token already
+    //         exposes. Those ids were published-gated inside the SECURITY
+    //         DEFINER function itself (migration 20260622120000:205), which is
+    //         why `withPublishedOnly` is NOT applied here: it is a `strategies`-
+    //         table predicate (status column) and `strategy_analytics` has no
+    //         such column, so wrapping this read would be a type-level lie, not
+    //         a gate. Reading an ARBITRARY strategy_id on this page would be a
+    //         disclosure bug — the `.in()` bound is what prevents it.
+    //     The projection stays narrow (strategy_id + returns_series only) and
+    //     the raw index NEVER reaches the client: resolveSharedScenario consumes
+    //     it server-side and emits only resolved DailyPoint arrays.
+    try {
+      const { data: rsRows, error: rsError } = await admin
+        .from("strategy_analytics")
+        .select("strategy_id, returns_series")
+        .in("strategy_id", seriesIds);
+      if (rsError) {
+        // error-absent ≠ legit-absent (same rule as the asset_class arm above):
+        // a PostgREST error returns {data:null,error} WITHOUT throwing, and a
+        // silent empty lookup would re-create the exact zeroed-blend defect this
+        // read exists to fix — with no signal. Log; still degrade to empty.
+        console.error("[scenario-share/page] returns_series read failed", {
+          message: (rsError as { message?: string }).message,
+        });
+      }
+      for (const r of (rsRows ?? []) as Array<{
+        strategy_id: string;
+        returns_series: unknown;
+      }>) {
+        returnsSeriesById[r.strategy_id] = r.returns_series;
+      }
+    } catch (e) {
+      // Transport/throw path degrades to the empty lookup (→ daily_returns
+      // alone, the pre-147 projection). This public page never throws on an
+      // enrichment read; log the breadcrumb.
+      console.error("[scenario-share/page] returns_series read threw", {
+        message: (e as { message?: string }).message,
+      });
+    }
   }
 
   // 4. Public BTC benchmark series (cacheable — NOT no-store). 5. Resolve.
@@ -202,7 +267,7 @@ export default async function ScenarioSharePage({
   // inside ScenarioBenchmarkSection from portfolioDaily + btcDaily); the page
   // still fetches it here to feed the chart overlay + the section directly.
   const btcDaily = await fetchBtcDaily();
-  const resolved = resolveSharedScenario(row, assetClassById);
+  const resolved = resolveSharedScenario(row, assetClassById, returnsSeriesById);
 
   // DI-23-01 — a version-ahead / undecodable / dangling-ref draft is honest
   // absence, NEVER a live-book substitution and NEVER a 404 (the link IS valid).

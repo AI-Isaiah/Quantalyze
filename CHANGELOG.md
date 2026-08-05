@@ -1,6 +1,39 @@
 # Changelog
 
-## [0.53.0.1] - 2026-08-04
+## [0.53.1.0] - 2026-08-05
+### SCEN-01 — the scenario engine receives the real series, at every reader
+
+Adding a real strategy to a scenario produced 0.00 everywhere and "0 overlapping days" — the
+founder's MT5 strategy, 136 stored days, contributed nothing. The root cause was never MT5:
+`strategy_analytics.daily_returns` has **no production writer** (only demo seeds populate it —
+0 of 27 real strategies vs 15/15 demos), and four separate readers selected only that dead
+column. The real series lives in `returns_series` — a wealth index that must be differenced,
+never forwarded raw. Both strategy-detail pages already resolved this correctly through
+`resolveDailyReturnSeries`; the scenario surfaces never did.
+
+**All four bare readers now resolve through that one mechanism**: the composer's returns route,
+the allocator book path (`getMyAllocationDashboard` — strategies already in your portfolio were
+worst off: they never even hit the lazy-fetch rescue), the shared-scenario page (via a
+caller-side read bounded to the share RPC's ids — zero migration changes), and the OG factsheet
+card. The resolver was extracted to an import-light leaf so public routes don't drag the
+factsheet build graph.
+
+**Empty is now honest, in two distinct states.** A strategy still computing says "Syncing —
+first metrics arrive in ~10–15 min"; one with genuinely no series says "No return series
+available" and is excluded from the blend with a visible note — never 0.00 with no signal. The
+server decides which state applies (`series_state`), age-bounding missing analytics rows at the
+same 16h threshold the reaper uses, so a strategy whose compute job was lost can never spin
+"Syncing" forever. And the fix survives a page refresh: reopening a saved scenario now re-fetches
+every added strategy's series (previously it silently reverted to zeros on F5).
+
+**The class is structurally closed.** A repo-wide gate test now fails CI if any code selects
+`daily_returns` without `returns_series` and the resolver — planting a bare reader anywhere
+reddens the suite (verified by mutation, twice). A regression test feeds a wealth index starting
+at exactly 1.0 and proves day one is not rendered as +100%. Day-counts are N−1 by construction
+(differencing consumes the first day): the founder's 136-day strategy correctly shows 135
+overlapping days.
+
+
 ### MT5-13 — the submit button works for MetaTrader, and a permanent failure stops pretending to be a flaky network
 
 The previous release got MT5 to the *last* step of the wizard. Submitting from that step then failed,
