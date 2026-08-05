@@ -9774,3 +9774,305 @@ describe("ScenarioComposer — Phase 84 BLEND-01 blend basis threading", () => {
     expect(assetClasses.every((c) => c !== "crypto")).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 147 / SCEN-01 — the honest empty/degraded state (ROADMAP SC4).
+// ---------------------------------------------------------------------------
+// WHY THIS EXISTS: before 147, an added strategy whose analytics had not been
+// computed contributed [] to the blend and rendered "0 overlapping days" / 0.00
+// with NO signal — the surface asserted a number it did not have. The server now
+// ships a three-valued `series_state` discriminator ("available" | "computing" |
+// "empty") from BOTH reader paths (147-02 the lazy /returns route, 147-04 the
+// book payload), and the row must say which kind of empty it is.
+//
+// The discriminator is SERVER-owned on purpose: `daily_returns.length === 0`
+// cannot distinguish "still computing" from "terminal absence", so deriving it
+// client-side would guarantee one of the two states is a lie (147-UI-SPEC §3).
+// These tests therefore drive the state through the wire fields ONLY — none of
+// them reaches into the component to set it.
+describe("ScenarioComposer — Phase 147 SCEN-01 honest empty state (SC4)", () => {
+  const SYNC_ID = "cccccccc-1111-2222-3333-444444444444";
+  const SYNCING_NOTE = "First metrics arrive in ~10–15 min — not in the blend yet";
+  const EMPTY_NOTE = "No return series available — not in the blend";
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  /** A fetch stub whose /returns response body is caller-supplied and resolved
+   *  on demand, so each test can observe the row BEFORE and AFTER the wire
+   *  value lands (the non-vacuous half — pre-resolve every row is "available"). */
+  function stubReturnsFetch(body: Record<string, unknown>): () => void {
+    let release: () => void = () => {};
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${SYNC_ID}/returns`)) {
+        return new Promise((resolve) => {
+          release = () =>
+            resolve({ ok: true, status: 200, json: async () => body });
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return () => release();
+  }
+
+  function addedRow(): HTMLElement {
+    return screen.getByTestId("scenario-constituent-added");
+  }
+
+  /** Drive a NON-book (drawer-added) strategy through the lazy route with the
+   *  given 200 body, and return once the response has settled. */
+  async function renderWithLazyBody(
+    body: Record<string, unknown>,
+  ): Promise<void> {
+    const release = stubReturnsFetch(body);
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: SYNC_ID,
+      name: "Fresh Key Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    // Pre-resolve: nothing has been told to us yet → the conservative default.
+    expect(addedRow()).toHaveAttribute("data-series-state", "available");
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+  }
+
+  /** A book payload row (147-04's path): the composer consults the payload
+   *  FIRST for an in-book strategy and deliberately skips the lazy fetch, so
+   *  this is a genuinely independent supply line for the SAME discriminator. */
+  function makeBookPayload(
+    seriesState: string,
+    dailyReturns: unknown = [],
+  ): MyAllocationDashboardPayload {
+    return makePayload({
+      strategies: [
+        {
+          strategy: {
+            id: SYNC_ID,
+            disclosure_tier: "verified",
+            series_state: seriesState,
+            strategy_analytics: {
+              cagr: null,
+              sharpe: null,
+              daily_returns: dailyReturns,
+            },
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+      ],
+    });
+  }
+
+  it("SC4-1 a lazily-fetched 'computing' series_state renders the SYNCING chip, the syncing note, and role=status (UI-SPEC #1)", async () => {
+    await renderWithLazyBody({ daily_returns: [], series_state: "computing" });
+
+    await waitFor(() => {
+      expect(addedRow()).toHaveAttribute("data-series-state", "computing");
+    });
+    // The chip's uppercase is CSS (`uppercase`), so the DOM text is the label.
+    expect(within(addedRow()).getByText("Syncing")).toBeInTheDocument();
+    const note = screen.getByTestId("scenario-series-state-note");
+    expect(note).toHaveTextContent(SYNCING_NOTE);
+    // The syncing → in-blend transition happens without user action, so it must
+    // be announced (DESIGN-05). polite, never role=alert — it is not an error.
+    expect(note).toHaveAttribute("role", "status");
+    expect(note).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("SC4-2 a lazily-fetched 'empty' series_state renders the muted NO DATA chip and the terminal note WITHOUT a live region (UI-SPEC #2)", async () => {
+    await renderWithLazyBody({ daily_returns: [], series_state: "empty" });
+
+    await waitFor(() => {
+      expect(addedRow()).toHaveAttribute("data-series-state", "empty");
+    });
+    expect(within(addedRow()).getByText("No data")).toBeInTheDocument();
+    const note = screen.getByTestId("scenario-series-state-note");
+    expect(note).toHaveTextContent(EMPTY_NOTE);
+    // Terminal state — it does not transition on its own. An idle live region
+    // on every no-series row is announcement spam.
+    expect(note).not.toHaveAttribute("role");
+  });
+
+  it("SC4-3 a stale deploy that omits series_state degrades to 'available' — no chip, no note, no throw (T-147-13)", async () => {
+    await renderWithLazyBody({ daily_returns: [] });
+
+    // The row is still rendered (no throw) and reports the conservative default.
+    expect(addedRow()).toHaveAttribute("data-series-state", "available");
+    expect(within(addedRow()).queryByText("Syncing")).toBeNull();
+    expect(within(addedRow()).queryByText("No data")).toBeNull();
+    expect(screen.queryByTestId("scenario-series-state-note")).toBeNull();
+  });
+
+  it("SC4-4 a garbage series_state value collapses to 'available' rather than a false Syncing (T-147-13 literal-match tolerance)", async () => {
+    await renderWithLazyBody({ daily_returns: [], series_state: "garbage" });
+
+    expect(addedRow()).toHaveAttribute("data-series-state", "available");
+    expect(within(addedRow()).queryByText("Syncing")).toBeNull();
+    expect(within(addedRow()).queryByText("No data")).toBeNull();
+    expect(screen.queryByTestId("scenario-series-state-note")).toBeNull();
+  });
+
+  it("SC4-5 the BOOK payload path renders the identical syncing surface — ONE derivation table, never a client re-derivation from array length (UI-SPEC §3 / SC2)", () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve({ ok: true, status: 200, json: async () => [] }),
+      ),
+    );
+    render(
+      <ScenarioComposer
+        payload={makeBookPayload("computing", [])}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: SYNC_ID,
+      name: "Book Syncing Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    // Same empty array as SC4-3/-4 carry — only the SERVER's discriminator
+    // differs, which is precisely the thing array length cannot tell you.
+    expect(addedRow()).toHaveAttribute("data-series-state", "computing");
+    expect(within(addedRow()).getByText("Syncing")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("scenario-series-state-note"),
+    ).toHaveTextContent(SYNCING_NOTE);
+  });
+
+  it("SC4-6 the BOOK payload path renders the terminal empty surface", () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve({ ok: true, status: 200, json: async () => [] }),
+      ),
+    );
+    render(
+      <ScenarioComposer
+        payload={makeBookPayload("empty", [])}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: SYNC_ID,
+      name: "Book Empty Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    expect(addedRow()).toHaveAttribute("data-series-state", "empty");
+    expect(within(addedRow()).getByText("No data")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("scenario-series-state-note"),
+    ).toHaveTextContent(EMPTY_NOTE);
+  });
+
+  it("SC4-7 user intent wins: a manually-excluded row shows EXCLUDED and no series note, even while computing (precedence rung 1)", async () => {
+    await renderWithLazyBody({ daily_returns: [], series_state: "computing" });
+    await waitFor(() => {
+      expect(within(addedRow()).getByText("Syncing")).toBeInTheDocument();
+    });
+
+    act(() => {
+      fireEvent.click(
+        within(addedRow()).getByRole("switch", { name: /Toggle .* on\/off/i }),
+      );
+    });
+
+    // The toggle is the most recent and most explicit signal, so it labels the
+    // row. Exactly ONE signal per row — the note does not double up.
+    expect(within(addedRow()).getByText("Excluded")).toBeInTheDocument();
+    expect(within(addedRow()).queryByText("Syncing")).toBeNull();
+    expect(screen.queryByTestId("scenario-series-state-note")).toBeNull();
+    // The data attribute still reports the SERVER fact — intent hides the chip,
+    // it does not rewrite what the server said.
+    expect(addedRow()).toHaveAttribute("data-series-state", "computing");
+  });
+
+  it("SC4-8 series_state outranks coverage eligibility: a computing row is never labelled IN BLEND (precedence rung 2)", () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve({ ok: true, status: 200, json: async () => [] }),
+      ),
+    );
+    // A book row carrying BOTH a real series (⇒ coverage-eligible) and a
+    // "computing" discriminator. The server never emits this pair (a non-empty
+    // resolved series short-circuits to "available"), so this exists purely to
+    // pin the LADDER ORDER against a future reshuffle.
+    const series = Array.from({ length: 14 }, (_, i) => ({
+      date: `2026-02-${String(i + 1).padStart(2, "0")}`,
+      value: 0.001,
+    }));
+    render(
+      <ScenarioComposer
+        payload={makeBookPayload("computing", series)}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    addStrategy({
+      id: SYNC_ID,
+      name: "Ladder Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    expect(within(addedRow()).getByText("Syncing")).toBeInTheDocument();
+    expect(within(addedRow()).queryByText("In blend")).toBeNull();
+  });
+
+  it("SC4-9 remove + re-add purges the fetched series_state (a re-add starts clean, not stale-Syncing)", async () => {
+    await renderWithLazyBody({ daily_returns: [], series_state: "computing" });
+    await waitFor(() => {
+      expect(addedRow()).toHaveAttribute("data-series-state", "computing");
+    });
+
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Remove from scenario/i }),
+      );
+    });
+    expect(screen.queryByTestId("scenario-constituent-added")).toBeNull();
+
+    // Re-add: the retry fetch is left in flight, so nothing has told us anything
+    // yet. A surviving map entry would show a stale "computing" here.
+    addStrategy({
+      id: SYNC_ID,
+      name: "Fresh Key Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    expect(addedRow()).toHaveAttribute("data-series-state", "available");
+    expect(within(addedRow()).queryByText("Syncing")).toBeNull();
+  });
+});
