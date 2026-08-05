@@ -1207,6 +1207,17 @@ is closed there. Two adjacent findings were surfaced by the audit and are booked
    behaviour change). The Phase 147 grep-gate does **not** flag this — by design, it targets select
    payloads, not type annotations, because a scan wide enough to catch this would redden on prose.
 
+3. **`DEF-147-C` — `queries.my-allocation.test.ts` mock returns fixtures wholesale instead of
+   projecting to selected columns.** The mock (`:267-272`) records the select string but hands back
+   the full fixture regardless, so narrowing the `getMyAllocationDashboard` embed back to bare
+   `daily_returns` would NOT redden that behavioural file (unlike `returns/route.test.ts:296-308`,
+   which projects as PostgREST does). Not a phase gap: the 147-04 SC-1 ledger mutation targeted the
+   resolver-call argument (falsifiable in that harness), and the select-width regression is held by
+   the phase-147 gate's Layer B (verifier confirmed RED under exactly that mutation). Test hygiene
+   only (2026-08-05, booked from 147-VERIFICATION.md).
+   **Fix shape:** make the mock's `maybeSingle`/embed resolution project to the columns named in the
+   recorded select string, mirroring the returns-route harness.
+
 ---
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
