@@ -89,7 +89,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 147-05-PLAN.md — Composer UI: chip states syncing/no-series, tolerance, notes, SC4 matrix (wave 3)
+- [x] 147-05-PLAN.md — Composer UI: chip states syncing/no-series, tolerance, notes, SC4 matrix (wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
@@ -252,7 +252,7 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 147. SCEN-01 engine series | 4/6 | In Progress|  |
+| 147. SCEN-01 engine series | 5/6 | In Progress|  |
 | 148. OWN owner factsheet | 0/? | Not started | - |
 | 149. NAV my-strategies ranking | 0/? | Not started | - |
 | 150. OWN-03 portfolio question | 0/? | Not started | - |
