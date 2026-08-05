@@ -43,8 +43,18 @@
  *
  * Neuter check: point Lane B's payload arm at `buildFactsheetPayloadCached`
  * (i.e. cache the owner render) → the `unstable_cache` call-count-0
- * assertions of tests 4/5/6 redden. Observed output is recorded in
- * `.planning/phases/148-own-owner-factsheet-without-cache-disclosure/148-VALIDATION.md`.
+ * assertions of tests 4/5/6 redden. RUN 2026-08-05, observed:
+ *
+ *   Tests  3 failed | 7 passed (10)
+ *   4. AssertionError: an owner render must never reach the shared, id-keyed
+ *      cache: expected "vi.fn()" to be called +0 times, but got 1 times
+ *   6. AssertionError: a null must never be offered to the shared cache from
+ *      the owner lane: expected "vi.fn()" to be called +0 times, but got 1 times
+ *
+ * Two sibling mutations were run the same way (full evidence in
+ * `.planning/phases/148-own-owner-factsheet-without-cache-disclosure/148-VALIDATION.md`):
+ * swapping the Lane B predicate to `withPublishedOnly` reddens tests 1 & 9, and
+ * param-keying the probe (`user.id` → the route `id`) reddens tests 8 & 9.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
