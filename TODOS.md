@@ -222,6 +222,25 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### Dependency pass — the 9 open dependabot PRs (booked 2026-08-05, founder call)
+- **One campaign, NOT piecemeal merges.** All 9 dependabot PRs are red — and NOT only the
+  TEST-DB infra flake: #657 (npm minor-patch group, 25 updates) genuinely fails
+  `frontend-build`/`frontend-lint`/`contracts`/`deps-cache`. The pile hides real majors:
+  typescript 6→7 (#614), jsdom 30 (#646), jest-dom 7 (#645), actions/setup-node+python+checkout
+  majors (#626/#627/#643), supabase/setup-cli 3 (#612), plus grouped pip (#658) and npm (#657).
+  Branches are 1–3 weeks stale vs main.
+- **Order:** rebase + land the two GROUPS first (pip, then npm — bisect the npm group's build
+  break, it may be one member); then majors ONE at a time with a full local suite + typecheck
+  each (CI's python/e2e-seeded jobs can't be trusted as the only gate while the shared-TEST-DB
+  flake persists). actions/* majors need a workflow-syntax review, not just green CI.
+- **When:** after v1.17 phases or in a maintenance window — never mid-phase.
+- None of the 9 touch the banned-packages list (checked 2026-08-05).
+- Related: #606 (nightly npm-audit p1) is a DEV-ONLY chain — all 4 highs via `@lhci/cli` →
+  old `uuid`; not fixed by the minor-patch group; needs an @lhci/cli bump or override in this
+  same pass. #616 (stale analytics deploy) is NOT a deps issue — it's the Phase 144 TEST-DB
+  flake keeping main CI red so Railway skips deploys; currently harmless (no analytics-service
+  changes in the undeployed delta).
+
 ### Money-path correctness (latent / flag-gated / edge cases)
 - **Unified-backbone CSV-finalize breaks if flag on** — service-role client has no
   `auth.uid()` → 42501 every time when `PROCESS_KEY_UNIFIED_BACKBONE=on`. Skip unified for
@@ -449,6 +468,8 @@ true for 146 and half of 142–145, and **false for 141**.
   that secures nothing.
 
 ### Tech-debt / maintainability (opportunistic, don't force)
+- **149 review IN-01:** `MyStrategiesSection.tsx` comment claims namespaced prefs persistence, but with no `userId` the prefs hook is a persistence no-op on that surface — fix the comment (or pass userId if prefs are wanted there).
+- **149 review IN-02:** `getOwnRowPercentiles` fully computes `publishedMap` only for its key-count; name the future consumer or reduce to a count.
 - God-files: `queries.ts` (3,205 lines), `job_worker.run_sync_trades_job` (688 lines),
   `portfolio.py` (2,423), `exchange.py` (2,777).
 - ~4.6k LOC dead-code sweep (35 files, stale 3,256-line DB-types twin, unused deps); wire knip.
@@ -1295,6 +1316,48 @@ to a real landmine for future callers.
 **Fix shape:** belt-and-suspenders inside the helper, fail-loud —
 `if (!/^[0-9a-f-]{36}$/i.test(authUserId)) throw new Error("withPublishedOrOwner: authUserId is not a uuid")` —
 plus a unit test proving a non-uuid throws (the test must fail if the guard is removed).
+
+### Phase 149 (NAV-01, `/my-strategies`) — deferred items (added 2026-08-05)
+
+All three were routed out of phase 149 by ruling, not by omission. None is user-blocking: the
+surface ships fully functional with each of them open.
+
+**`DEF-149-A` — "Finish setup →" opens the contribution wizard FRESH, with no key preselected.**
+The Delta-5 placeholder rows (`StrategyTable.tsx`, one per active key with no derived strategy)
+fire `onFinishSetup`, which mounts `ContributionWizardOverlay` on its API-key branch. The overlay's
+interface is `{ isOpen, onClose, onSuccess? }` — there is **no preselect seam**, so the owner
+re-picks the key they just clicked. Pretending a key was already chosen would have been worse than
+asking again (no-invented-state), which is why the founder ruling shipped it this way.
+**Fix shape:** one optional prop threaded from `ContributionWizardOverlay` into `WizardClient` and
+down to the key-selection step (e.g. `preselectApiKeyId?: string`), plus a spec proving the step
+mounts with that key already chosen. Both `/my-strategies` mounts (`MyStrategiesSection.tsx` and
+`MyStrategiesEmptyState.tsx`) would pass it; every other caller keeps today's fresh-open behaviour
+by omitting it.
+
+**`DEF-149-B` — two live surfaces now render an `h1` reading "My Strategies".**
+The manager surface `/strategies` and the allocator surface `/my-strategies` share the title. This
+is **benign at runtime** — they are role-disjoint (the allocator never sees `/strategies`, gated by
+`requireRolePage`) and the sidebar entries differ. It is a TEST-AUTHORING landmine (research
+Pitfall 10): any future unit/e2e selector written as a bare `getByRole("heading", { name: /my
+strategies/i })` or `page.getByText("My Strategies")` can silently bind to the wrong surface and
+still pass. **Convention going forward (not a code change):** scope every selector for either
+surface by route, `href`, or `data-testid` — never by bare heading text. The phase-149 Sidebar
+cases already do this (`a[href="/my-strategies"]`).
+
+**`DEF-149-C` — `StrategyGrid` card links dead-end for any FUTURE owner-scoped grid consumer.**
+`StrategyGrid.tsx:52-53` builds `${basePath}/${categorySlug}/${s.id}`, which resolves through
+`getStrategyDetail` (`queries.ts:776`) → `withPublishedOnly` (`queries.ts:833`) → `notFound()`. For an own
+unpublished row that is both a dead end and an existence oracle. Phase 149 resolved it by making
+grid **unreachable** on the owner surface instead — the `effectiveViewMode` derivation forces
+`"table"` and `showViewToggle` hides the toggle (founder ruling; RESEARCH had recommended the prop
+instead). Both halves are pinned (gate pin 7 + `StrategyTable.visibility.test.tsx`). **The debt is
+latent, not live:** it becomes real the moment any surface passes
+`visibility="owner-all-statuses"` *and* wants grid view. **Fix shape then:** a `rowLinkMode` prop
+(`"category-detail" | "factsheet"`) threaded from `StrategyTable` into `StrategyGrid`, defaulting
+to today's category-detail form, plus a `StrategyGrid.test.tsx` case pinning the `/factsheet/{id}`
+href under the owner mode. Note the grid carries a second owner-surface problem that the
+toggle-hide also defers: `StrategyGrid.tsx:79-82` renders `VerifiedBadge` with
+`trustTier={s.trust_tier}`, which is null by construction for an unpublished row.
 
 ---
 

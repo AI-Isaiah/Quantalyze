@@ -25,6 +25,10 @@ import { CustomizeDrawer } from "./CustomizeDrawer";
 import { SimulateImpactButton } from "@/components/discovery/SimulateImpactButton";
 import { formatPercent, formatNumber, formatCurrency } from "@/lib/utils";
 import {
+  isComputedAnalytics,
+  deriveEmptySeriesState,
+} from "@/lib/closed-sets";
+import {
   useDiscoveryPrefs,
   type DiscoveryViewPreferences,
 } from "@/lib/discovery-prefs";
@@ -35,7 +39,23 @@ import type { Strategy, StrategyAnalytics } from "@/lib/types";
 // `percentiles` prop; this component never recomputes them.
 import type { PercentileMap } from "@/lib/queries";
 
-type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
+type StrategyWithAnalytics = Strategy & {
+  analytics: StrategyAnalytics;
+  /**
+   * Phase 149 / NAV-01 — set by `shapeRankingRows` in lib/queries.ts. `false`
+   * means NO `strategy_analytics` row exists for this strategy (the shaper
+   * substituted `EMPTY_ANALYTICS`, whose `computation_status` is a hardcoded
+   * "pending"). That is the ONLY signal distinguishing "the job was never
+   * enqueued" from "a job is genuinely running" — see the chip derivation in
+   * the row map below (checker defect B-1).
+   *
+   * OPTIONAL so public fixtures/pages predating the field still typecheck; an
+   * OMITTED field means "no signal, trust the raw status" and is NOT the same
+   * as `false` (W-C). The owner path can never omit it — plan 04 types the
+   * section prop as `RankedStrategyRow[]`, where it is required.
+   */
+  analyticsPresent?: boolean;
+};
 
 type TableSortKey = SortKey | "name" | "six_month_return";
 
@@ -45,6 +65,16 @@ type PercentileMetric = keyof PercentileMap[string];
 // every column header so the table header reads as a label, not another data
 // row. Sortable headers layer the sort color on top of this.
 const HEADER_LABEL = "text-micro font-mono uppercase tracking-[0.14em]";
+
+// Phase 149 Delta 4 — the 147 chip BASE, copied VERBATIM from
+// CoverageStateChip.tsx:58 (tokens, not the component: importing an
+// allocations-scoped component into the shared discovery table would drag a
+// second chip vocabulary onto /discovery). `rounded-sm` (4px) is DELIBERATE
+// against the adjacent status Badge's `rounded-md` (6px): the two chip
+// families encode different semantics (publication status vs data state) and
+// both radii are established DESIGN.md ladder members. Do NOT harmonize.
+const DATA_STATE_CHIP =
+  "inline-flex items-center rounded-sm px-2 py-0.5 text-fixed-11 font-medium uppercase tracking-wide";
 
 // Maps a sortable column to its getPercentiles() metric key. Columns absent
 // from this map (Strategy name, 6 Month, AUM) have no peer-percentile and never
@@ -107,6 +137,17 @@ const COLUMNS: {
 
 const PAGE_SIZE = 20;
 
+/**
+ * Phase 149 Delta 5 — one row per ACTIVE api_key that has produced no strategy
+ * yet. Server-formatted: `exchangeLabel` already has EXCHANGE_DISPLAY applied
+ * upstream, so this client component never owns exchange naming.
+ */
+export type PlaceholderKeyRow = {
+  id: string;
+  exchangeLabel: string;
+  keyLabel: string;
+};
+
 interface StrategyTableProps {
   strategies: StrategyWithAnalytics[];
   categorySlug: string;
@@ -134,6 +175,54 @@ interface StrategyTableProps {
    * strategies) — renders no suffix at all (honest absence, no fabricated rank).
    */
   percentiles?: PercentileMap;
+  /**
+   * Phase 149 / NAV-01 — which strategy statuses this mount is allowed to
+   * render. The DEFAULT `"published-only"` reproduces byte-for-byte the
+   * behavior /discovery/[slug] and /browse/[slug] have had since 2eef614a: an
+   * in-component `status === "published"` filter ahead of every other predicate.
+   *
+   * `"owner-all-statuses"` is passed ONLY by the owner-scoped /my-strategies
+   * surface, whose SERVER query already narrowed the set to
+   * `user_id = <session id>`. This prop therefore WIDENS NOTHING — it stops the
+   * component re-filtering an already-owner-scoped set, which is why the page
+   * would otherwise render "No strategies match your filters." for every
+   * private/draft row (RESEARCH Pitfall 1).
+   *
+   * Pinned by `src/__tests__/phase-149-my-strategies-parity.test.ts` (per D:
+   * the in-component published filter must be PARAMETERIZED with the published
+   * DEFAULT, so the discovery surfaces are provably unchanged) and behaviorally
+   * by `StrategyTable.visibility.test.tsx`. Same literal-default idiom as
+   * `basePath` above — a closed string union, never a function prop (a function
+   * is non-serializable across the RSC→client boundary).
+   */
+  visibility?: "published-only" | "owner-all-statuses";
+  /**
+   * Phase 149 Delta 5 / NAV-01 — the per-KEY coverage half of the owner
+   * surface. The founder's PROD census is 8 active keys → 4 strategies → 2 keys
+   * with nothing derived from them: without these rows /my-strategies would
+   * silently under-report the account, and the owner would have no way to tell
+   * "this key produced nothing" from "this key does not exist".
+   *
+   * Rendered as UNRANKED subordinate rows below every ranked row. They live
+   * OUTSIDE `filtered`/`paged`/`rank`, so they never shift `#n`, never enter
+   * the pagination counts, and are unaffected by search/filters (they are not
+   * filter results — they are coverage rows).
+   *
+   * The PUBLIC pages (/discovery/[slug], /browse/[slug]) pass NEITHER this nor
+   * `onFinishSetup`, so both branches below are dead there.
+   */
+  placeholderKeys?: PlaceholderKeyRow[];
+  /**
+   * Phase 149 Delta 5 — opens the contribution wizard overlay in the section
+   * that hosts this table. A client→client function prop: RSC pages never pass
+   * it (a function is non-serializable across the RSC boundary), which is
+   * precisely why the wizard is NOT imported here — importing it would drag the
+   * overlay into the shared public discovery bundle.
+   *
+   * The wizard opens FRESH: that overlay has no preselect seam
+   * today, and inventing one is out of this phase's scope (tracked in TODOS.md).
+   */
+  onFinishSetup?: () => void;
 }
 
 // --- Range filter helper ---
@@ -180,6 +269,9 @@ export function StrategyTable({
   userId,
   initialWatchedSet,
   percentiles,
+  visibility = "published-only",
+  placeholderKeys,
+  onFinishSetup,
 }: StrategyTableProps) {
   const reactId = useId();
   const tabIdBase = `watchlist${reactId}`;
@@ -191,6 +283,19 @@ export function StrategyTable({
   const [viewMode, setViewMode] = useState<ViewMode>("table");
   const [advancedFilters, setAdvancedFilters] = useState<AdvancedFilters>(EMPTY_ADVANCED_FILTERS);
   const [page, setPage] = useState(0);
+
+  // Phase 149 / NAV-01 — the SINGLE enforcement point for "grid view is
+  // unreachable on the owner surface". A grid card links to
+  // `${basePath}/${categorySlug}/${id}` (StrategyGrid.tsx:52-55), which resolves
+  // through getStrategyDetail → withPublishedOnly (queries.ts:530) →
+  // notFound() for an own unpublished row — a 404 dead end AND an existence
+  // oracle (RESEARCH Pitfall 3). Founder ruling 2026-08-05: keep grid
+  // DISCOVERY-ONLY and hide the toggle here rather than adding a `rowLinkMode`
+  // passthrough. Deriving (instead of clamping `viewMode` itself) is deliberate:
+  // the prefs-hydration effect below still writes `setViewMode(prefs.view)`, so
+  // a stale persisted `view:"grid"` would otherwise resurrect the dead end.
+  // Public surfaces keep both view modes — this collapses to `viewMode` there.
+  const effectiveViewMode = visibility === "owner-all-statuses" ? "table" : viewMode;
 
   // STATE-03 dense reshape — table-scoped density ("comfortable" = the :root
   // 44px/16px default, "compact" = the [data-strategy-table][data-density="tight"]
@@ -328,7 +433,16 @@ export function StrategyTable({
   }
 
   const filtered = useMemo(() => {
-    let result = strategies.filter((s) => s.status === "published");
+    // Phase 149 / NAV-01 — the in-component publication predicate, now
+    // parameterized rather than deleted (deleting it would widen the SHARED
+    // component for /discovery and /browse, the roadmap's leak trap).
+    // ⚠️ `.slice()` is mandatory on the owner arm: `result.sort(...)` below
+    // mutates in place and `strategies` is in this memo's dep array, so handing
+    // back the prop array would re-order the caller's data.
+    let result =
+      visibility === "published-only"
+        ? strategies.filter((s) => s.status === "published")
+        : strategies.slice();
 
     // Watchlist scope narrows FIRST — restricting to starred strategies
     // before search/advanced/sort/paging avoids paginating across all
@@ -412,8 +526,8 @@ export function StrategyTable({
     }
 
     // Sort - in table mode use column sort, in grid mode use top-bar sort
-    const effectiveSortKey = viewMode === "table" ? tableSortKey : sortKey;
-    const effectiveSortDir = viewMode === "table" ? tableSortDir : sortDir;
+    const effectiveSortKey = effectiveViewMode === "table" ? tableSortKey : sortKey;
+    const effectiveSortDir = effectiveViewMode === "table" ? tableSortDir : sortDir;
 
     result.sort((a, b) => {
       const aVal = getSortValue(a, effectiveSortKey);
@@ -425,10 +539,22 @@ export function StrategyTable({
     });
 
     return result;
-  }, [strategies, search, showExamples, advancedFilters, sortKey, sortDir, tableSortKey, tableSortDir, viewMode, mountedAtMs, scope, watchedSet]);
+  }, [strategies, visibility, search, showExamples, advancedFilters, sortKey, sortDir, tableSortKey, tableSortDir, effectiveViewMode, mountedAtMs, scope, watchedSet]);
 
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
   const paged = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+  // Phase 149 Delta 5 — deliberately derived OUTSIDE `filtered`/`paged`/`rank`
+  // (the UI-SPEC subordination rule): `#n`, `totalPages` and the pagination
+  // footer counts must never read these rows, or a bare key would renumber the
+  // owner's ranked strategies and inflate "Showing 1–N of N".
+  //
+  // They render on the LAST page only, so paging through ranked rows does not
+  // repeat them. `page >= totalPages - 1` also covers the empty-set case
+  // (`totalPages === 0`, since `0 >= -1`), which is exactly the account that
+  // has keys but no strategies at all.
+  const placeholders = placeholderKeys ?? [];
+  const showPlaceholders = placeholders.length > 0 && page >= totalPages - 1;
 
   // STATE-03 scroll-cue gate. Measure the scroll container's overflow whenever
   // the rendered layout can change width: on mount, on viewport resize, and on
@@ -455,7 +581,7 @@ export function StrategyTable({
     }
     window.addEventListener("resize", measure);
     return () => window.removeEventListener("resize", measure);
-  }, [density, page, viewMode, paged.length]);
+  }, [density, page, effectiveViewMode, paged.length]);
 
   // Column count for the "no rows" placeholder. Leading rank column (1) +
   // Strategy + Return% + CAGR + Sharpe + Max DD (5). Priority-collapsed but
@@ -512,6 +638,7 @@ export function StrategyTable({
         onSortDirChange={handleSortDirChange}
         viewMode={viewMode}
         onViewModeChange={setViewMode}
+        showViewToggle={visibility !== "owner-all-statuses"}
         advancedFilters={advancedFilters}
         onAdvancedFiltersChange={(f) => { setAdvancedFilters(f); setPage(0); }}
         leadingSlot={
@@ -544,7 +671,7 @@ export function StrategyTable({
       >
         {showEmptyWatchlist ? (
           <EmptyWatchlist />
-        ) : viewMode === "table" ? (
+        ) : effectiveViewMode === "table" ? (
           <div
             data-strategy-table=""
             data-density={density === "compact" ? "tight" : undefined}
@@ -694,6 +821,42 @@ export function StrategyTable({
                     const volatilityText = formatPercent(s.analytics.volatility);
                     const sixMonthText = formatPercent(s.analytics.six_month_return);
                     const aumText = formatCurrency(s.aum);
+                    // Phase 149 Delta 4 — the ONE chip-state derivation site.
+                    // It closes TWO defects the naive shape carried (checker
+                    // B-1/B-2):
+                    //
+                    // (a) the gate is `isComputedAnalytics` ("this row has no
+                    //     computed metrics"), NEVER `!computed_at`. A LIVE
+                    //     pending/computing row carries a `computed_at`
+                    //     DEFAULT, so a `!computed_at` gate never fires for the
+                    //     very state it was written to catch; and
+                    //     EMPTY_ANALYTICS's `computed_at: ""` is falsy, so that
+                    //     gate ALSO made every absent row chip-eligible forever.
+                    //
+                    // (b) the status is COERCED through `analyticsPresent`, the
+                    //     absent-row signal shapeRankingRows preserves. Reading
+                    //     `computation_status` raw would read EMPTY_ANALYTICS's
+                    //     hardcoded "pending" and spin "Syncing" FOREVER for a
+                    //     strategy whose job was never enqueued. Coercing to
+                    //     null routes it into the shared 16h
+                    //     MISSING_ROW_COMPUTING_WINDOW_MS bound in
+                    //     closed-sets.ts, which terminates the spinner at
+                    //     "No data" (the same coercion precedent as
+                    //     returns/route.ts:310-341).
+                    //
+                    // `=== false`, never truthiness: an OMITTED optional field
+                    // means "no signal — trust the raw status" (W-C); only the
+                    // explicit absent-row `false` coerces. The owner path
+                    // always carries it.
+                    const chipStatus =
+                      s.analyticsPresent === false
+                        ? null
+                        : s.analytics.computation_status ?? null;
+                    const chipState = deriveEmptySeriesState(
+                      chipStatus,
+                      s.created_at ?? null,
+                    );
+                    const hasComputedAnalytics = isComputedAnalytics(chipStatus);
                     return (
                       <tr
                         key={s.id}
@@ -737,6 +900,23 @@ export function StrategyTable({
                                 </svg>
                               </span>
                             )}
+                            {/* Phase 149 Delta 3 — the owner's own non-published
+                                rows say so, muted (absence of publication is a
+                                FACT, not an error: publication is admin-gated
+                                and the owner has no one-click remedy, so amber
+                                would falsely promise one — DESIGN.md
+                                semantic-color gate). NO visibility gate is
+                                needed and none is wanted: a `published-only`
+                                row set can never contain a row this fires on,
+                                so the branch is provably dead on /discovery and
+                                /browse by the DATA, not by a second predicate
+                                that could drift from the first. Muted-only ink
+                                comes from Badge's status maps (Badge.tsx). A
+                                "Published" chip is deliberately absent —
+                                absence of a marker IS "published". */}
+                            {s.status !== "published" && (
+                              <Badge type="status" label={s.status} />
+                            )}
                           </div>
                           <div className="flex items-center gap-2 mt-1">
                             <div className="flex gap-1">
@@ -744,7 +924,42 @@ export function StrategyTable({
                                 <Badge key={t} label={t} />
                               ))}
                             </div>
-                            <SyncBadge computedAt={s.analytics.computed_at} exchange={s.supported_exchanges?.[0]} />
+                            {/* W-B — the PUBLIC path stays unconditional
+                                (byte-identical to today). On the owner surface
+                                an uncomputed row must never claim "Synced …"
+                                beside a Syncing/No data chip: EMPTY_ANALYTICS's
+                                `computed_at: ""` is falsy so absent rows were
+                                already badge-null, but a LIVE job's computed_at
+                                DEFAULT would render BOTH. The SyncBadge
+                                component itself is untouched. */}
+                            {(visibility !== "owner-all-statuses" ||
+                              hasComputedAnalytics) && (
+                              <SyncBadge computedAt={s.analytics.computed_at} exchange={s.supported_exchanges?.[0]} />
+                            )}
+                            {/* Phase 149 Delta 4 — the honest pending chip fills
+                                the slot SyncBadge leaves empty. Gated on
+                                `visibility` so public surfaces are
+                                byte-identical: a PUBLISHED row awaiting a
+                                recompute must not grow a chip on /discovery
+                                (149-UI-SPEC States invariant). Amber = the
+                                system recovers this on its own; muted = honest
+                                steady-state absence. Red is forbidden for
+                                both — absence is not an error. */}
+                            {visibility === "owner-all-statuses" &&
+                              !hasComputedAnalytics &&
+                              (chipState === "computing" ? (
+                                <span
+                                  title="First metrics arrive in ~10–15 min"
+                                  aria-label="Syncing — first metrics arrive in ~10–15 min"
+                                  className={`${DATA_STATE_CHIP} text-warning bg-warning-bg border border-warning-border`}
+                                >
+                                  Syncing
+                                </span>
+                              ) : (
+                                <span className={`${DATA_STATE_CHIP} text-text-muted bg-track`}>
+                                  No data
+                                </span>
+                              ))}
                           </div>
                         </td>
                         {/* Return / 6 Month carry a sign → sign-tinted (green/red)
@@ -826,23 +1041,127 @@ export function StrategyTable({
                             </dl>
                           </details>
                         </td>
+                        {/* Phase 149 / NAV-01 — Simulate Impact is gated on the
+                            row's publication status. VERIFIED
+                            analytics-service/routers/simulator.py:287-290: the
+                            service fetches the candidate filtered to published
+                            status and rejects anything else, so a button on an
+                            own draft/private row would fail on EVERY click.
+                            Rendering nothing beats rendering a button that
+                            cannot work (the no-disabled-buttons UAT direction).
+                            Behavior-invariant on /discovery and /browse, where
+                            the visibility default already guarantees every row
+                            is published. */}
                         <td className="px-4 py-3 text-right group-hover:bg-page/50 transition-colors">
-                          <SimulateImpactButton
-                            candidateStrategyId={s.id}
-                            candidateName={s.name}
-                            portfolioId={portfolioId}
-                          />
+                          {s.status === "published" && (
+                            <SimulateImpactButton
+                              candidateStrategyId={s.id}
+                              candidateName={s.name}
+                              portfolioId={portfolioId}
+                            />
+                          )}
                         </td>
                       </tr>
                     );
                   })}
-                  {paged.length === 0 && (
+                  {/* Phase 149 Delta 5 — three arms, in the order they matter:
+                      (a) the public pages pass NO placeholders, so
+                          `placeholders.length === 0` is always true there and
+                          this reduces to today's `paged.length === 0`
+                          (byte-identical);
+                      (b) on the owner surface, filters that exclude every
+                          ranked row still surface the message — the set really
+                          WAS filtered (`strategies.length > 0`);
+                      (c) a genuinely strategy-less account with bare keys gets
+                          NO message: nothing was filtered, so "No strategies
+                          match your filters." would be a lie. */}
+                  {paged.length === 0 &&
+                    (strategies.length > 0 || placeholders.length === 0) && (
                     <tr>
                       <td colSpan={emptyRowColSpan} className="px-4 py-8 text-center text-text-muted">
                         No strategies match your filters.
                       </td>
                     </tr>
                   )}
+                  {/* Placeholder rows render AFTER the filter-empty message
+                      (checker W-5): they are NOT filter results, they are
+                      key-coverage rows unaffected by search/filters, so the
+                      message about the filtered set belongs above them.
+                      Mirrors the ranked row's td sequence exactly so the
+                      columns align — hover tint and pctSuffix dropped (there is
+                      no data to hover-scan and no rank to compare). */}
+                  {showPlaceholders &&
+                    placeholders.map((p) => (
+                      <tr
+                        key={p.id}
+                        className="bg-surface-subtle border-b border-border last:border-0"
+                        style={{ height: "var(--row-h)" }}
+                      >
+                        <td className="sticky left-0 z-10 w-14 bg-surface-subtle px-2 py-3 text-right align-middle font-mono tabular-nums text-caption text-text-muted">
+                          —
+                        </td>
+                        {/* The owner surface passes no `userId`, so this is
+                            dead today — but rendering it keeps the placeholder
+                            td count equal to the header th count in EVERY
+                            configuration, so a future watchlist-enabled owner
+                            table cannot silently misalign these columns. */}
+                        {showStarColumn && (
+                          <td className="sticky left-14 z-10 w-11 bg-surface-subtle px-2 py-3 align-middle" />
+                        )}
+                        <td
+                          className={`sticky z-10 bg-surface-subtle px-4 py-3 border-r border-border ${showStarColumn ? "left-[6.25rem]" : "left-14"}`}
+                        >
+                          <div className="flex items-center gap-1.5">
+                            {/* No link: no strategy exists, so there is no
+                                factsheet to reach. */}
+                            <span className="text-small text-text-muted">
+                              {p.exchangeLabel} · {p.keyLabel}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 mt-1">
+                            <span className={`${DATA_STATE_CHIP} text-text-muted bg-track`}>
+                              No strategy yet
+                            </span>
+                          </div>
+                        </td>
+                        {/* Every metric cell is an honest em-dash: there is no
+                            run, no series, nothing to average. A 0 / 0.00 /
+                            +0.0% here would be invented data (SC-4). */}
+                        <td className="px-4 py-3 text-right font-metric tabular-nums">
+                          <span className="text-text-muted">—</span>
+                        </td>
+                        <td className="px-4 py-3 text-right font-metric tabular-nums">
+                          <span className="text-text-muted">—</span>
+                        </td>
+                        <td className="px-4 py-3 text-right font-metric tabular-nums">
+                          <span className="text-text-muted">—</span>
+                        </td>
+                        <td className="px-4 py-3 text-right font-metric tabular-nums">
+                          <span className="text-text-muted">—</span>
+                        </td>
+                        <td className="px-4 py-3 text-right font-metric tabular-nums @max-3xl:hidden">
+                          <span className="text-text-muted">—</span>
+                        </td>
+                        <td className="px-4 py-3 text-right font-metric tabular-nums @max-3xl:hidden">
+                          <span className="text-text-muted">—</span>
+                        </td>
+                        <td className="px-4 py-3 text-right font-metric tabular-nums @max-3xl:hidden">
+                          <span className="text-text-muted">—</span>
+                        </td>
+                        <td className="px-4 py-3 @max-3xl:hidden" />
+                        <td className="px-4 py-3 @max-3xl:hidden" />
+                        <td className="px-4 py-3 align-top @3xl:hidden" />
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            type="button"
+                            onClick={onFinishSetup}
+                            className="text-small text-accent underline underline-offset-2"
+                          >
+                            Finish setup →
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
                 </tbody>
               </table>
             </ResponsiveTable>

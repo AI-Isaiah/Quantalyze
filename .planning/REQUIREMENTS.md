@@ -553,10 +553,53 @@ D-14 valve.
   ⚠️ Scope note: this is the first requirement in the OWN set that WRITES. OWN-01/02/04 are read/gate
   changes; this one creates a portfolio position from wizard state, so it needs its own money-path
   review (weights, allocation basis, and what happens when the same strategy is added twice).
+  ⭐ **FOUNDER MODEL REFINEMENT (2026-08-05, evening — SUPERSEDES the 2026-08-04 finalize-form
+  reading above where they differ):** the question and the allocation are TWO SEPARATE STEPS.
+  Verbatim: *"When an allocator adds a key, they have to be asked, whether that is a key with their
+  own capital in it, or a trading team's key that they want to verify. If it is their own capital,
+  it gets marked, and then in holdings tab it can be added to the allocation. A trading team's key
+  can never move into allocation, as an allocator cannot put money into the trading team's
+  account."* So:
+    (1) The wizard (key-add/categorization step) asks the question and stores a persistent
+        OWNERSHIP MARK (own-capital vs team-review) — no amount, no position write in the wizard.
+    (2) The HOLDINGS tab is where a marked own-capital strategy gets ADDED to the allocation
+        (explicit action + amount — the money-path review applies HERE).
+    (3) ⛔ HARD INVARIANT, not a default: a team-review-marked strategy is NEVER allocatable — no
+        code path may create a position from it (an allocator cannot put money into a trading
+        team's account). Structural exclusion, assert it like the visibility gates.
+    (4) Retro path: existing own strategies (Black Swan et al., finalized before the question
+        existed) need the mark to be settable so they become allocatable from Holdings.
+  Discuss-phase may still confirm a wizard-side shortcut ("mark now, allocate here too?") but the
+  canonical allocation surface is Holdings.
+  ⭐ **FOUNDER DIRECTION (2026-08-05 dogfooding, screenshots on record): the categorization/profile
+  step is CULLED TO ESSENTIALS in the same pass.** Verbatim: *"there should be a question in the
+  categorization, whether the strategy is an allocators own strategy with capital or a key from a
+  trading team for review (but just with crisper text). We should also get rid of most questions
+  for now. Like AUM, size of strategy, type of strategy etc. I hate this page, so it should really
+  just have essentials, especially for the allocator."* So: (1) the capital-vs-review question gets
+  crisp copy and lives IN the categorization step; (2) AUM / strategy-size / strategy-type and
+  similar non-essential profile questions are REMOVED (or collapsed behind an optional disclosure)
+  for now — exact cull list is a discuss-phase decision with the founder's bias being aggressive
+  removal. ⚠️ Check what downstream panels consume the culled answers (factsheet fields, discovery
+  filters) — removing a question must not break a consumer; hide the panel per no-invented-data
+  rather than fabricate.
 
 - [ ] **OWN-04**: The wizard preview links to the full factsheet **once that view exists**. Explicitly
   BLOCKED ON OWN-02: adding the link first would point every draft at a `notFound()` — the same
   dead-end class Phase 142.2 existed to delete.
+
+- [ ] **OWN-05** *(added 2026-08-05 — founder dogfooding direction)*: **An allocator can give their
+  OWN private/draft strategies a proper name.** Verbatim: *"For the Allocator, he should for his own
+  strategies have the ability to give strategies proper names. Like that strategy has a name, and as
+  it is private, I should be able to give it its own name."* Today the wizard auto-assigns sentinel
+  codenames ("Alpha Centauri", "Black Swan", "Arctic Fox") and the founder cannot tell his own MT5
+  strategies apart from the key labels he knows them by (MM2/MM3 — the 2026-08-05 holdings-confusion
+  incident). Scope: rename affordance for OWN rows only (owner-authz, `user_id = auth.uid()`),
+  private/draft only or with a defined published-rename policy decided at discuss; surfaces that
+  render the name (my-strategies ranking, Browse drawer own rows, factsheet owner lane, holdings
+  alias) must show the new name coherently. ⚠️ Pseudonymity trap: the PUBLIC codename/disclosure-tier
+  redaction contract (C-0112) must be untouched — renaming is an OWNER-FACING name, never a bypass of
+  codename redaction on public surfaces.
 
 ---
 
@@ -625,6 +668,12 @@ D-14 valve.
   recorded 2026-07-08 as fixed by making description optional). The 10-char minimum is still enforced
   at `:339`, so that fix was narrower than recorded or has regressed. Treat the stored learning as
   STALE and re-derive from source.
+  ⚠️ **SECOND LIVE INSTANCE (founder-hit 2026-08-05):** the validate-key client rosters
+  `KNOWN_CREATE_WITH_KEY_CODES` (`ConnectKeyStep.tsx`) / `KNOWN_ADD_KEY_CODES`
+  (`MultiKeyConnectStep.tsx`) are missing `SERVICE_UNREACHABLE`, `KEY_MISSING_READ_SCOPE`,
+  `KEY_PERMISSION_DENIED` → the server's honest verdict is downgraded to `UNKNOWN` client-side,
+  invisible to Sentry. The derived-sweep MUST cover these rosters too. A 3-member stopgap may land
+  earlier via hotfix; the class fix stays here. See ROADMAP Phase 153 SC2. (Diagnosis 2026-08-05: nothing was persisted server-side; the failure is strictly pre-encrypt/pre-RPC.)
 
 - [ ] **WIZFORM-04** *(founder, verbatim: "clicking twice is not acceptable, especially with this
   mistake message. A user would just not know what to do")*: A **transient infrastructure** failure
@@ -645,6 +694,22 @@ D-14 valve.
   (`src/lib/seam-budgets.invariant.test.ts` recomputes it) — a naive retry multiplies the budget this
   route is explicitly capped on, and there is a circuit breaker (`breaker:railway`) the retries would
   feed. Retrying into an open breaker is how one slow venue takes down every other user's submits.
+
+- [ ] **WIZFORM-05** *(added 2026-08-05 — founder-hit the same day; previously unowned)*: **The MT5
+  validate-key DEADLINE INVERSION is reconciled: an MT5 key validation's honest verdict always
+  arrives inside the budget the client grants the request.** Today it structurally cannot:
+  `SEAM_ROUTE_BUDGETS["validate-key"].timeoutMs` is 30s (`resilient-fetch.ts:537`) while the
+  analytics-service applies `_MT5_PROBE_TIMEOUT_S` (35s) SEPARATELY to three stages of
+  `_validate_mt5_key` (`exchange.py:328/380/456`) — a slow MT5 broker login legitimately takes
+  35–70s+ to fail, so the server's classified verdict lands after the client has already abandoned
+  the request (founder-observed: two 502s at exactly 30s, downgraded to `UNKNOWN` by the WIZFORM-02
+  roster gap). ccxt venues answer fast; only MT5 bites.
+  **Fix shape is a decision, not a mandate:** venue-aware client budget for the MT5 arm, OR a
+  bounded end-to-end Python probe deadline — respecting the seam-budget contract
+  (`seam-budgets.invariant.test.ts` recomputes per-request sums with `encrypt-key`) either way.
+  ⚠️ Distinct from WIZFORM-04 (submit-path retry semantics): this is the validate step's budget
+  arithmetic, not retry policy. (Incident correlation `wizard:0320530a-76d9-4dc0-9b69-f59d5445ad24`;
+  Vercel/Railway logs 2026-08-05 14:47–14:51 UTC; the mt5-gateway was UP throughout — not an outage.)
 
 - [ ] **WIZFORM-03**: Venue-shaped error copy must not be shown for venues it cannot apply to. The
   MT5 submit timeout advises *"switch to a different exchange"* — impossible advice when the account
@@ -990,7 +1055,8 @@ Populated during roadmap creation.
 | MT5-06..10 | Phase 155 (v1.17) | Pending — re-homed from v1.16 Phase 142.3 into v1.17 (originally split out of 142.2 on 2026-08-03 at the D-14 valve); LAST by design — live funded account, real trading day, stable surface |
 | OWN-01 | — | **Already met** (CONTRIB-03, verified in code 2026-08-04) — no phase needed |
 | OWN-02, OWN-04 | Phase 148 (v1.17) | Pending — ⛔ NOT folded into 142.3 (OWN scope fence held); OWN-04 strictly after OWN-02 within the phase; OWN-02's acceptance is ADVERSARIAL — after an owner views their draft, an anon request for the same id must still 404 (public `unstable_cache`d route) |
-| OWN-03 | Phase 150 (v1.17 — own phase, split 2026-08-04 so the money-path review is isolated) | Pending — **current behaviour now ESTABLISHED, not unverified**: portfolio correctly does NOT auto-update. Founder call — the deliverable is a **wizard question** (own-capital vs verifying-a-team), NOT an auto-add. ⚠️ first WRITING requirement in the OWN set → money-path review |
+| OWN-03 | Phase 150 (v1.17 — own phase, split 2026-08-04 so the money-path review is isolated) | Pending — **current behaviour now ESTABLISHED, not unverified**: portfolio correctly does NOT auto-update. Founder call — the deliverable is a **wizard question** (own-capital vs verifying-a-team), NOT an auto-add. ⚠️ first WRITING requirement in the OWN set → money-path review; ⭐ 2026-08-05 founder direction: cull profile step to essentials in the same pass |
+| OWN-05 | Phase 150 (v1.17) | Pending (added 2026-08-05) — allocator renames OWN private/draft strategies; owner-authz only; public codename redaction contract untouched |
 | MT5-13 | **SHIPPED v0.53.0.1** (PR #662, merged `135b6164`) | ✅ Closed 2026-08-04. mt5 branch added to the internal probe (structural read-only triple); permanent probe failures split off `KEY_NETWORK_TIMEOUT` onto `KEY_SCOPE_CHECK_UNAVAILABLE` (no Retry control). Railway `git_sha` confirmed matching before the retry. **MT5-05 discharged the same day** — see OWN-03 for the PROD evidence |
 | MT5-14 | Phase 153 (v1.17) | Pending — re-homed from v1.16 Phase 142.3; MT5 missing from the metadata exchange chips + preselect from the connected key; ⛔ deliberate no-widening pin will red — re-cut it consciously, reasoning updated, same commit |
 | MT5-15 | Phase 155 (v1.17) | Pending — ALL THREE MT5 strategies on PROD are `complete_with_warnings`; ⚠️ NOT investigated. Do not read `MT5-05 ✅` as 'the numbers are audited'. ⛔ MT5-07 does NOT close this |
@@ -1000,6 +1066,7 @@ Populated during roadmap creation.
 | WIZFORM-02 | Phase 153 (v1.17) | Pending — code-less 400 → `UNKNOWN`; 142.2 plan 07's sweep missed this validator |
 | WIZFORM-03 | Phase 153 (v1.17) | Pending — "switch to a different exchange" is impossible advice for MT5 |
 | WIZFORM-04 | Phase 153 (v1.17) | Pending — **blocking UX**; transient seam timeout must not become a user decision; ⛔ ask whether the per-submit re-validation is needed before adding retries |
+| WIZFORM-05 | Phase 153 (v1.17) | Pending (added 2026-08-05) — MT5 validate-key deadline inversion: 30s client budget vs 35s×3-stage server probe; verdict can never arrive |
 | STALE-01 | Phase 154 (v1.17) | Pending — root cause NOT yet established; investigate before planning |
 | MT5-GOAL-01 | Phase 155 (v1.17 — umbrella acceptance gate) | **Umbrella** — no implementation work of its own; MT5 'works' only when SCEN-01 + OWN-02 close. Exists so `MT5-05 ✅` is never read as 'MT5 works' |
 | SCEN-01 | **Phase 147 (v1.17)** | ⛔ **HIGHEST** — ⭐census corrected: `daily_returns` has **NO production writer**; **0 of 27 REAL** strategies populated vs 15/15 demo seeds. Root-caused: the READER is wrong; use the existing `resolveDailyReturnSeries`. ⚠️`returns_series` is a WEALTH INDEX — must be DIFFERENCED, never forwarded raw |
