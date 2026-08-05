@@ -47,6 +47,7 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { deriveSyncFreshness } from "@/lib/sync-freshness/types";
 import { safeFraction } from "./units";
 import { withPublishedOnly } from "./visibility";
+import { scoreAgainstPopulation, type PercentileMap } from "./percentile-core";
 
 /**
  * Load + redact the manager identity for a strategy.
@@ -102,36 +103,36 @@ type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
  */
 export type RankedStrategyRow = StrategyWithAnalytics & { analyticsPresent: boolean };
 
-/** Metric keys we compute percentile ranks for */
-const PERCENTILE_METRICS = [
-  "cagr",
-  "sharpe",
-  "sortino",
-  "calmar",
-  "max_drawdown",
-  "volatility",
-  "cumulative_return",
-] as const;
+// Phase 149 (149-02): PERCENTILE_METRICS / LOWER_IS_BETTER / PercentileMap and
+// the scoring formula itself now live in ./percentile-core — the ONE core both
+// `getPercentiles` and `getOwnRowPercentiles` delegate to (FOUNDER RULING
+// 2026-08-05). Re-exported here so existing importers (StrategyTable, the
+// discovery/browse pages, the tearsheet, the peer-rank route) are unchanged.
+export type { PercentileMap } from "./percentile-core";
 
-type PercentileMetric = (typeof PERCENTILE_METRICS)[number];
-
-/** Metrics where lower values are better — percentile is inverted */
-const LOWER_IS_BETTER: ReadonlySet<string> = new Set(["max_drawdown", "volatility"]);
-
-export type PercentileMap = Record<string, Record<PercentileMetric, number>>;
+/**
+ * The analytics columns BOTH percentile callers project. Hoisted to a module
+ * const so the two projections cannot drift.
+ */
+const PERCENTILE_ANALYTICS_COLUMNS =
+  "cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return";
 
 /**
  * Compute percentile ranks for each published strategy across key metrics.
  * Returns null when fewer than 5 published strategies exist (not enough data).
  *
  * If categorySlug is provided, computes within that category only.
- * Percentile formula: (count of values <= v) / N * 100
- * For lower-is-better metrics: percentile = 100 - raw_percentile
+ * The scoring formula lives in `./percentile-core` (see that file's header for
+ * the count-based rank, the lower-is-better inversion and the max_drawdown
+ * magnitude normalisation). Passing `rows` as BOTH subjects and population is
+ * what preserves this function's pre-extraction behaviour byte-for-byte: every
+ * subject is already a population row, so the core's identity dedupe leaves
+ * each denominator exactly as it was.
  */
 export async function getPercentiles(categorySlug?: string): Promise<PercentileMap | null> {
   const supabase = await createClient();
 
-  const analyticsColumns = "cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return";
+  const analyticsColumns = PERCENTILE_ANALYTICS_COLUMNS;
 
   const query = categorySlug
     ? withPublishedOnly(
@@ -169,43 +170,7 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
 
   if (rows.length < 5) return null;
 
-  const result: PercentileMap = {};
-
-  for (const metric of PERCENTILE_METRICS) {
-    // Collect non-null values for this metric
-    const values: { id: string; val: number }[] = [];
-    for (const row of rows) {
-      const raw = row.analytics[metric];
-      if (raw == null) continue;
-      // max_drawdown is stored as a NEGATIVE percentage (quantstats
-      // convention: -0.30 = 30% peak-to-trough drop). Without Math.abs the
-      // LOWER_IS_BETTER inversion below ranks the WORST drawdown as the
-      // best percentile, because -0.50 < -0.05 numerically. Take the
-      // magnitude so the inversion treats "small drawdown" as "low value
-      // = good" the same way it does for volatility.
-      const v = metric === "max_drawdown" ? Math.abs(raw) : raw;
-      values.push({ id: row.id, val: v });
-    }
-
-    const n = values.length;
-    if (n === 0) continue;
-
-    for (const entry of values) {
-      const countLessOrEqual = values.filter((x) => x.val <= entry.val).length;
-      let percentile = (countLessOrEqual / n) * 100;
-
-      if (LOWER_IS_BETTER.has(metric)) {
-        percentile = 100 - percentile;
-      }
-
-      if (!result[entry.id]) {
-        result[entry.id] = {} as Record<PercentileMetric, number>;
-      }
-      result[entry.id][metric] = Math.round(percentile);
-    }
-  }
-
-  return result;
+  return scoreAgainstPopulation(rows, rows);
 }
 
 // Convenience re-export so callers that already pull from `@/lib/queries` for
@@ -498,6 +463,95 @@ export async function getStrategylessActiveKeys(userId: string): Promise<Strateg
     (strategiesRes.data ?? []) as { id: string; api_key_id: string | null; status: string }[],
     linksRes.data ?? [],
   );
+}
+
+/**
+ * Phase 149 (149-02) — the /my-strategies percentile helper.
+ *
+ * ONE published-universe fetch (I-2 ruling): returns the own-row map, the
+ * published map computed from the SAME population via the SAME core, and the
+ * population size — so the page never makes a second `getPercentiles` call.
+ * `populationSize` is byte-equal to the old
+ * `Object.keys(await getPercentiles()).length`, which is the N the comparison
+ * copy on the page claims.
+ */
+export type OwnRowPercentiles = {
+  ownMap: PercentileMap;
+  publishedMap: PercentileMap;
+  populationSize: number;
+};
+
+/**
+ * Score the owner's OWN rows — drafts and private rows included — against the
+ * PUBLISHED population, without ever joining them to it.
+ *
+ * ⚠️ security_requirement (d) + FOUNDER RULING / W-A 2026-08-05: own rows never
+ * enter the population OTHER rows are scored against. The population query
+ * below is the same un-scoped `withPublishedOnly(...)` shape `getPercentiles`
+ * uses; an own row's value participates ONLY in its own self-inclusive score
+ * (see percentile-core's header). So a draft is told "if published, this would
+ * sit at Pnn" LITERALLY, and it cannot shift any public rank.
+ *
+ * Both `< 5` thresholds mirror `getPercentiles` exactly, so the page's Pnn
+ * presence and its "ranked against N strategies" copy flip together — the page
+ * can never show a rank while claiming there is no comparison set, or vice
+ * versa.
+ *
+ * `getPercentiles` remains the discovery-surface caller; plan 04 calls ONLY
+ * this helper.
+ */
+export async function getOwnRowPercentiles(
+  ownRows: readonly { id: string; analytics: StrategyAnalytics }[],
+): Promise<OwnRowPercentiles | null> {
+  const supabase = await createClient();
+
+  const { data: strategies, error } = await withPublishedOnly(
+    supabase
+      .from("strategies")
+      .select(`id, strategy_analytics (${PERCENTILE_ANALYTICS_COLUMNS})`),
+  );
+
+  if (error) {
+    console.error("[queries.getOwnRowPercentiles] supabase error:", error.message ?? error);
+    captureToSentry(error, { tags: { op: "getOwnRowPercentiles" }, level: "error" });
+    return null;
+  }
+  if (!strategies) return null;
+  if (strategies.length < 5) return null;
+
+  const populationRows: { id: string; analytics: Record<string, number | null> }[] = [];
+  for (const s of strategies) {
+    const a = extractAnalytics((s as Record<string, unknown>).strategy_analytics);
+    if (!a) continue;
+    populationRows.push({
+      id: s.id,
+      analytics: castRow<Record<string, number | null>>(a, "analytics"),
+    });
+  }
+
+  if (populationRows.length < 5) return null;
+
+  // Identity dedupe (W-A) is REFERENCE equality in the core, so an own row that
+  // is ALSO published must be handed to the scorer as the very population row
+  // it already is — otherwise a fresh copy of it would be appended to its own
+  // denominator and the founder would see one rank on /my-strategies and a
+  // different one on /discovery for the same published strategy.
+  const populationById = new Map(populationRows.map((r) => [r.id, r]));
+  const ownSubjects = ownRows.map(
+    (r) =>
+      populationById.get(r.id) ?? {
+        id: r.id,
+        analytics: castRow<Record<string, number | null>>(r.analytics, "analytics"),
+      },
+  );
+
+  const publishedMap = scoreAgainstPopulation(populationRows, populationRows);
+
+  return {
+    ownMap: scoreAgainstPopulation(ownSubjects, populationRows),
+    publishedMap,
+    populationSize: Object.keys(publishedMap).length,
+  };
 }
 
 export async function getPopulatedCategorySlugs(): Promise<string[]> {
