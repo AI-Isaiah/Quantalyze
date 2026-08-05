@@ -553,10 +553,35 @@ D-14 valve.
   ⚠️ Scope note: this is the first requirement in the OWN set that WRITES. OWN-01/02/04 are read/gate
   changes; this one creates a portfolio position from wizard state, so it needs its own money-path
   review (weights, allocation basis, and what happens when the same strategy is added twice).
+  ⭐ **FOUNDER DIRECTION (2026-08-05 dogfooding, screenshots on record): the categorization/profile
+  step is CULLED TO ESSENTIALS in the same pass.** Verbatim: *"there should be a question in the
+  categorization, whether the strategy is an allocators own strategy with capital or a key from a
+  trading team for review (but just with crisper text). We should also get rid of most questions
+  for now. Like AUM, size of strategy, type of strategy etc. I hate this page, so it should really
+  just have essentials, especially for the allocator."* So: (1) the capital-vs-review question gets
+  crisp copy and lives IN the categorization step; (2) AUM / strategy-size / strategy-type and
+  similar non-essential profile questions are REMOVED (or collapsed behind an optional disclosure)
+  for now — exact cull list is a discuss-phase decision with the founder's bias being aggressive
+  removal. ⚠️ Check what downstream panels consume the culled answers (factsheet fields, discovery
+  filters) — removing a question must not break a consumer; hide the panel per no-invented-data
+  rather than fabricate.
 
 - [ ] **OWN-04**: The wizard preview links to the full factsheet **once that view exists**. Explicitly
   BLOCKED ON OWN-02: adding the link first would point every draft at a `notFound()` — the same
   dead-end class Phase 142.2 existed to delete.
+
+- [ ] **OWN-05** *(added 2026-08-05 — founder dogfooding direction)*: **An allocator can give their
+  OWN private/draft strategies a proper name.** Verbatim: *"For the Allocator, he should for his own
+  strategies have the ability to give strategies proper names. Like that strategy has a name, and as
+  it is private, I should be able to give it its own name."* Today the wizard auto-assigns sentinel
+  codenames ("Alpha Centauri", "Black Swan", "Arctic Fox") and the founder cannot tell his own MT5
+  strategies apart from the key labels he knows them by (MM2/MM3 — the 2026-08-05 holdings-confusion
+  incident). Scope: rename affordance for OWN rows only (owner-authz, `user_id = auth.uid()`),
+  private/draft only or with a defined published-rename policy decided at discuss; surfaces that
+  render the name (my-strategies ranking, Browse drawer own rows, factsheet owner lane, holdings
+  alias) must show the new name coherently. ⚠️ Pseudonymity trap: the PUBLIC codename/disclosure-tier
+  redaction contract (C-0112) must be untouched — renaming is an OWNER-FACING name, never a bypass of
+  codename redaction on public surfaces.
 
 ---
 
@@ -1012,7 +1037,8 @@ Populated during roadmap creation.
 | MT5-06..10 | Phase 155 (v1.17) | Pending — re-homed from v1.16 Phase 142.3 into v1.17 (originally split out of 142.2 on 2026-08-03 at the D-14 valve); LAST by design — live funded account, real trading day, stable surface |
 | OWN-01 | — | **Already met** (CONTRIB-03, verified in code 2026-08-04) — no phase needed |
 | OWN-02, OWN-04 | Phase 148 (v1.17) | Pending — ⛔ NOT folded into 142.3 (OWN scope fence held); OWN-04 strictly after OWN-02 within the phase; OWN-02's acceptance is ADVERSARIAL — after an owner views their draft, an anon request for the same id must still 404 (public `unstable_cache`d route) |
-| OWN-03 | Phase 150 (v1.17 — own phase, split 2026-08-04 so the money-path review is isolated) | Pending — **current behaviour now ESTABLISHED, not unverified**: portfolio correctly does NOT auto-update. Founder call — the deliverable is a **wizard question** (own-capital vs verifying-a-team), NOT an auto-add. ⚠️ first WRITING requirement in the OWN set → money-path review |
+| OWN-03 | Phase 150 (v1.17 — own phase, split 2026-08-04 so the money-path review is isolated) | Pending — **current behaviour now ESTABLISHED, not unverified**: portfolio correctly does NOT auto-update. Founder call — the deliverable is a **wizard question** (own-capital vs verifying-a-team), NOT an auto-add. ⚠️ first WRITING requirement in the OWN set → money-path review; ⭐ 2026-08-05 founder direction: cull profile step to essentials in the same pass |
+| OWN-05 | Phase 150 (v1.17) | Pending (added 2026-08-05) — allocator renames OWN private/draft strategies; owner-authz only; public codename redaction contract untouched |
 | MT5-13 | **SHIPPED v0.53.0.1** (PR #662, merged `135b6164`) | ✅ Closed 2026-08-04. mt5 branch added to the internal probe (structural read-only triple); permanent probe failures split off `KEY_NETWORK_TIMEOUT` onto `KEY_SCOPE_CHECK_UNAVAILABLE` (no Retry control). Railway `git_sha` confirmed matching before the retry. **MT5-05 discharged the same day** — see OWN-03 for the PROD evidence |
 | MT5-14 | Phase 153 (v1.17) | Pending — re-homed from v1.16 Phase 142.3; MT5 missing from the metadata exchange chips + preselect from the connected key; ⛔ deliberate no-widening pin will red — re-cut it consciously, reasoning updated, same commit |
 | MT5-15 | Phase 155 (v1.17) | Pending — ALL THREE MT5 strategies on PROD are `complete_with_warnings`; ⚠️ NOT investigated. Do not read `MT5-05 ✅` as 'the numbers are audited'. ⛔ MT5-07 does NOT close this |

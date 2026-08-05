@@ -9,7 +9,7 @@ projects in a scenario, and its factsheet is viewable by the allocator who uploa
 > *"The goal is that MT5 works. And at the moment, maybe it ingests the data, but I cannot use it
 > in the scenario, and I can still not produce a factsheet."*
 
-**Scope:** 29 in-scope requirement IDs — SCEN-01..05, AUM-01..05, NAV-01, OWN-02..04, MT5-06..10,
+**Scope:** 30 in-scope requirement IDs — SCEN-01..05, AUM-01..05, NAV-01, OWN-02..05, MT5-06..10,
 MT5-14, MT5-15, WIZFORM-01..05, WIZCONT-01..02, STALE-01, plus the umbrella acceptance requirement
 MT5-GOAL-01 — per `.planning/REQUIREMENTS.md`. ⛔ OWN-01 excluded (already met — CONTRIB-03,
 verified in code 2026-08-04; do not re-implement). ⛔ SEAM / JOB / RATE / PYAPI* / SEAMCORE /
@@ -184,10 +184,12 @@ Plans:
 
 **Goal**: At allocator finalize the product asks the question it never asked — own capital with an allocation, or a trading team's key being verified — and only an explicit own-capital answer creates a portfolio position
 **Depends on**: Phase 148 (soft — keeps the OWN cluster contiguous, and the created position's strategy is then visible via factsheet/ranking so the write can be verified end-to-end; no hard code dependency)
-**Requirements**: OWN-03
+**Requirements**: OWN-03, OWN-05
 **Success Criteria** (what must be TRUE):
 
-  1. At allocator finalize, the wizard ASKS which of two things this is: (a) my own capital with an allocation — a form needing an amount, offering the portfolio add — or (b) a trading team's key I am verifying — the DEFAULT, which stays a no-op exactly as today.
+  1. At allocator finalize, the wizard ASKS which of two things this is: (a) my own capital with an allocation — a form needing an amount, offering the portfolio add — or (b) a trading team's key I am verifying — the DEFAULT, which stays a no-op exactly as today. Copy is CRISP (founder 2026-08-05) and the question lives in the categorization step.
+  1b. The categorization/profile step is culled to essentials: AUM, strategy-size, strategy-type and similar questions are removed or collapsed behind an optional disclosure (founder 2026-08-05, "just essentials, especially for the allocator") — with every culled answer's downstream consumer checked (hide per no-invented-data, never fabricate).
+  1c. An allocator can rename their OWN private/draft strategies to a proper name (OWN-05); owner-authz only; the public codename/disclosure redaction contract stays byte-untouched; all owner surfaces (my-strategies, Browse own rows, owner factsheet, holdings alias) render the new name coherently.
   2. Choosing (a) creates the portfolio position from wizard state with the stated allocation amount; choosing (b) — or any finalize path that never reaches the question — changes nothing: `status='private'`, portfolio untouched, behaviour-compatible with today.
   3. Auto-add remains refused: no code path adds to the portfolio without the explicit (a) answer — the founder has refused auto-add TWICE.
   4. Adding the same strategy twice has a defined, reviewed behaviour — never a silent duplicate position or a double-count.
