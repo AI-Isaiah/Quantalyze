@@ -1069,7 +1069,7 @@ Placed directly under `<FactsheetPreview …>` at **both** `:1917` (composite) a
 
 | # | Claim | Section | Risk if Wrong |
 |---|-------|---------|---------------|
-| A1 | CONTEXT's "generateMetadata on the owner lane: minimal + `robots: noindex`" is satisfied by **leaving G3 published-only** (the existing fallback already yields `"Strategy"` + generic description + unconditional noindex). An alternative reading is that a distinct owner-lane metadata branch is required. | §1 G3 | Low. If the stricter reading is intended, the fix is a small explicit branch — but the planner should decide deliberately rather than inherit my reading. Flag for confirmation. |
+| A1 | CONTEXT's "generateMetadata on the owner lane: minimal + `robots: noindex`" is satisfied by **leaving G3 published-only** (the existing fallback already yields `"Strategy"` + generic description + unconditional noindex). An alternative reading is that a distinct owner-lane metadata branch is required. | §1 G3 | Low. If the stricter reading is intended, the fix is a small explicit branch — but the planner should decide deliberately rather than inherit my reading. Flag for confirmation. **RATIFIED (planner ruling): generateMetadata stays published-only** — the existing "Strategy" fallback + unconditional noindex satisfy the CONTEXT clause; plans 148-02/148-03 leave G3 untouched and 148-04 assertion 5 pins it. |
 | A2 | The recommended `viewerNotice?: "owner_unpublished"` prop shape. CONTEXT places lane naming/structure under Claude's discretion, so this is a recommendation, not a lock. | §4 | Low — any shape satisfying UI-SPEC:112 (not on the payload) works |
 | A3 | Adding `export const dynamic = "force-dynamic"` to the v2 page is beneficial. The route is *already* dynamic via `cookies()`; the export is belt-and-braces against a future refactor. It is a 1-line, behaviour-neutral addition — but it **is** a change beyond the minimum, so Rule 3 says the planner should decide, not me. | §3e | Low either way; the tearsheet precedent argues for it |
 | A4 | The §3a cache-key staleness finding does **not** clear the founder's blast-radius bar (user-facing or data-integrity only) and should be logged to `TODOS.md` rather than fixed. Judgment call: a 1h-stale factsheet *is* mildly user-facing. | §3a | Medium — if the founder disagrees it becomes a separate small phase, not scope creep here |
@@ -1077,7 +1077,7 @@ Placed directly under `<FactsheetPreview …>` at **both** `:1917` (composite) a
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Does SC2 need an e2e layer, or do unit + structural suffice?**
    - What we know: CONTEXT locks SC2 acceptance to two layers — behaviour and structural — and
@@ -1091,6 +1091,10 @@ Placed directly under `<FactsheetPreview …>` at **both** `:1917` (composite) a
      observation, which is exactly what CONTEXT asked for ("asserted, not observed"). If the
      planner adds e2e, it must seed its own owner+draft pair and assert only on that id (§7c).
 
+   - **RESOLVED (planner ruling):** no e2e layer for SC2 — orchestrator ruling. The two
+     CONTEXT-locked layers ship (behavior spy tests in plan 148-03; structural CI gate in
+     plan 148-04); no Playwright work is planned for this phase.
+
 2. **Should the `factsheet-v2-payload-v6` header comment be corrected in this phase?**
    - What we know: it is factually wrong (§3a) and it is the comment a future engineer will read
      before touching this cache.
@@ -1098,6 +1102,10 @@ Placed directly under `<FactsheetPreview …>` at **both** `:1917` (composite) a
    - Recommendation: **correct the comment, do not change the behaviour.** A comment fix is
      zero-risk and directly serves the phase's own thesis. Log the behavioural staleness to
      `TODOS.md` separately.
+
+   - **RESOLVED (planner ruling):** corrected in-phase — plan 148-02 Task 1 edit 3 replaces
+     the false cache-key comment with the truth; the behavioral staleness itself is logged
+     to TODOS.md in plan 148-02 Task 2 (log-only, blast-radius bar), not fixed.
 
 3. **Does Phase 149 (NAV-01) need the lane predicate exported, or is a parameterized builder enough?**
    - What we know: ROADMAP says 149 "consumes this phase's cache-safe gate — parameterize, do not
@@ -1108,6 +1116,10 @@ Placed directly under `<FactsheetPreview …>` at **both** `:1917` (composite) a
      `withPublishedOrOwner` already exists and browse already uses it. Extracting a "lane helper"
      speculatively would violate Rule 2. The parameterized `fetchAndBuildPayload` is the only
      seam 149 could plausibly want, and it will exist.
+
+   - **RESOLVED (planner ruling):** nothing extra — plan 148-02 delivers only the
+     parameterized `fetchAndBuildPayload`; no speculative lane helper is extracted for
+     Phase 149.
 
 ---
 
