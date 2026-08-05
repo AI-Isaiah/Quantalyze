@@ -402,6 +402,51 @@ function capitalizeExchange(exchange: string): string {
   return exchange.charAt(0).toUpperCase() + exchange.slice(1);
 }
 
+/**
+ * OWN-04 — the route from the wizard preview to the real factsheet.
+ *
+ * ONE component, rendered at BOTH terminal-success sites (single-key and
+ * composite). Extracted rather than pasted twice specifically so the copy and
+ * the `rel`/`target` pair cannot drift between the two branches — the drift
+ * class 148-UI-SPEC:118 forbids.
+ *
+ * ⚠️ It renders inside the success branches ONLY. There is deliberately NO
+ * disabled or greyed variant for `kicking_off` / `waiting_for_complete` /
+ * `gate_failed`: those branches do not render `FactsheetPreview` either, so
+ * absence is structural, not a spinner-gated disable (standing UAT direction).
+ *
+ * ⚠️ Safe to ship because OWN-02's owner lane landed FIRST (phase 148 wave 2):
+ * `/factsheet/{id}/v2` now serves the uploading account its own unpublished
+ * draft, so this link cannot dead-end on `notFound()` for the founder who just
+ * created the strategy. Reordering these two would reintroduce that dead end.
+ *
+ * Style note (Rule 7 — one pattern, not a blend): the two other in-wizard
+ * `target="_blank"` links use `hover:underline` (WizardChrome.tsx:255) and
+ * `rel="noopener"` without `noreferrer` (ConnectKeyStep.tsx:661). The approved
+ * 148-UI-SPEC wins on both counts — a PERSISTENT underline (WCAG 1.4.1, the
+ * DESIGN.md 2026-06-28 decision) and the full `noopener noreferrer`. Those two
+ * divergences are logged in TODOS.md for a separate cleanup pass; they are
+ * deliberately not touched here.
+ */
+function ViewFullFactsheetLink({ strategyId }: { strategyId: string }) {
+  return (
+    <div className="mt-3">
+      <Link
+        href={`/factsheet/${strategyId}/v2`}
+        target="_blank"
+        rel="noopener noreferrer"
+        data-testid="wizard-view-full-factsheet"
+        className="text-small font-medium text-accent underline underline-offset-4 transition-colors duration-150 ease-out hover:text-accent-hover"
+      >
+        View full factsheet →<span className="sr-only"> (opens in new tab)</span>
+      </Link>
+      <p className="mt-1 text-caption text-text-muted">
+        Visible only to you until the strategy is published.
+      </p>
+    </div>
+  );
+}
+
 export function SyncPreviewStep({
   strategyId,
   apiKeyId,
@@ -1921,6 +1966,7 @@ export function SyncPreviewStep({
             computedAt={snapshot.computedAt}
             verificationState="draft"
           />
+          <ViewFullFactsheetLink strategyId={strategyId} />
         </div>
 
         {/* Per-key attribution — signed contribution (89-01 partition), basis-
@@ -2203,6 +2249,10 @@ export function SyncPreviewStep({
             computedAt={snapshot.computedAt}
             verificationState="draft"
           />
+          {/* ABOVE the CTA row below (UI-SPEC:120) — a preview affordance
+              subordinate to the step's primary action, so it must not sit in
+              the button row and must not compete as a second Button. */}
+          <ViewFullFactsheetLink strategyId={strategyId} />
         </div>
 
         <div className="mt-6 flex gap-3">
