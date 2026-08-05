@@ -1,6 +1,30 @@
 # Changelog
 
-## [0.53.1.0] - 2026-08-05
+## [0.53.2.0] - 2026-08-05
+### OWN-02/OWN-04 — the owner can see their own factsheet, and nobody else can
+
+An allocator who uploaded a strategy could not view its factsheet — the public page 404s
+anything unpublished, which is correct for the world and wrong for the owner. The naive fix
+(widening the visibility gate) would have been a disclosure bug: the page is publicly cached,
+and its cache is keyed by strategy id alone, so an owner-rendered draft would have been served
+to anonymous visitors for up to an hour.
+
+**Two lanes now, by construction.** The public lane is byte-identical to before — published-only,
+cached. A new owner lane activates only when the published lookup misses AND the session owns the
+row: it builds the factsheet directly, never reading or writing the shared cache. The cached
+builder's signature cannot even express an owner predicate — a future regression is a type error,
+and a repo-wide CI gate additionally pins the cached callback to the published-only literal
+(mutations at two independent sites proven red). An owner's draft renders with an honest
+"Unpublished — only you can see this" banner — including on the still-computing placeholder —
+and a strategy that is actually published never shows it, even when reached through the owner
+lane during a publish race.
+
+**The wizard finally links somewhere real.** After a successful key sync, "View full factsheet →"
+opens the strategy's actual factsheet in a new tab — a link that cannot dead-end, because the
+owner lane covers exactly the unpublished window the wizard operates in. Publication remains
+admin-only; anonymous and non-owner requests still see published-only on every touched surface.
+
+
 ### SCEN-01 — the scenario engine receives the real series, at every reader
 
 Adding a real strategy to a scenario produced 0.00 everywhere and "0 overlapping days" — the
