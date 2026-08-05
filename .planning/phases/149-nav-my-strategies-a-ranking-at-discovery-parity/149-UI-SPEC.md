@@ -278,3 +278,26 @@ comparison-set line, status markers, and pending chips carry **zero accent**.
 - [x] Dimension 6 Registry Safety: PASS
 
 **Approval:** approved — 2026-08-05
+
+---
+
+## Delta 5 — Placeholder rows for strategy-less keys (added post-approval; founder decision 2026-08-05, PROD census)
+
+One UNRANKED row per active key (`is_active = true`, `disconnected_at IS NULL`) with no
+derived strategy, rendered BELOW all ranked strategy rows:
+
+- **Rank cell:** em-dash `—` (never a number; placeholders are outside the ranking).
+- **Name cell:** `{exchange label} · {key label}` in `text-small text-text-muted` (no link
+  to a factsheet — none exists) + the existing no-data chip family: `No strategy yet`
+  (147 BASE verbatim, muted `text-text-muted bg-track` — absence ≠ error, never red).
+- **Metric cells:** em-dash `—` per the Numbers Contract (no invented data).
+- **Action:** a text link `Finish setup →` (accent, persistent underline,
+  same voice as OWN-04's link) into the contribution wizard with the key preselected.
+- **Subordination:** placeholder rows carry `bg-surface-subtle`; they never interleave with
+  ranked rows and never affect `#n` numbering of ranked rows above.
+- Copy addition to the comparison-set line's paragraph when placeholders exist:
+  `{K} of your keys have no strategy yet.`
+
+Checker status: added after the 6/6 approval by the orchestrator under the founder's
+"Placeholder rows for bare keys" decision; tokens are strict reuse of approved Deltas 3/4 +
+OWN-04 link voice — the plan checker must verify consistency.

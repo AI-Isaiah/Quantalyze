@@ -45,6 +45,26 @@ publication flow; the ranking toggle (deferred — see decisions).
 - Proof case: the founder's account (8 active keys — bybit, okx, deribit ×3, mt5 ×3), none
   visible on any ranking today, all present here.
 
+### Post-research rulings (orchestrator + founder, 2026-08-05)
+- **Predicate (research Open Q1):** the page query uses OWN-ONLY `.eq("user_id", user.id)`
+  at every status — NOT `withPublishedOrOwner` (which is published-OR-own and would render
+  the entire published universe on a "My Strategies" page). RLS sanctions own-row reads
+  (`strategies_read`, migration 20260405061912:28). This is a DOCUMENTED DEVIATION from the
+  ROADMAP's literal wording; its intent ("own including unpublished") is satisfied. 148's
+  gate still powers the row → factsheet links.
+- **Key coverage (founder decision, PROD census 2026-08-05):** founder account = 8 active
+  keys → 4 strategies (1 draft, 3 private; Alpha Centauri carries 3 keys via strategy_keys,
+  three others have direct keys) → 2 keys with NO derived strategy. The table shows ranked
+  strategy rows PLUS one UNRANKED placeholder row per active key with no derived strategy:
+  exchange + label, em-dash metrics (no invented data), honest "No strategy yet" state, link
+  into the wizard. Also fixes the keys-without-strategies account view (PROD reality: one
+  account has 10 active keys, 0 strategies).
+- ⚠️ StrategyTable filters to `status === "published"` IN THE COMPONENT (`StrategyTable.tsx:331`)
+  — the reuse must parameterize this (research Pitfall 1); grid-view links dead-end via
+  `getStrategyDetail` published-only (Pitfall 3) — resolve in-plan.
+- Badge `private` mapping fix improves two existing surfaces (`strategies/page.tsx:177`,
+  `StrategyHeader.tsx:24`) — declared scope, not silent widening.
+
 ### Claude's Discretion
 - Route path and sidebar wiring (MY WORKSPACE section per DESIGN.md nav conventions),
   page-level file layout, how the visibility-predicate parameterization is threaded, test
