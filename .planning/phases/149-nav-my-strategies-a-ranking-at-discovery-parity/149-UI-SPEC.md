@@ -44,7 +44,7 @@ The discovery ranking surface this page must equal, per file:line:
 | Element | Source | Behavior inherited unchanged |
 |---------|--------|------------------------------|
 | Page shell | `discovery/[slug]/page.tsx:53` | `mx-auto max-w-[1920px]` dense-table measure |
-| Table component | `StrategyTable.tsx` | ALL of it: view modes (table/grid), search, advanced filters, examples toggle, pagination (`PAGE_SIZE = 20`), density, scroll cue, per-row `<details>` collapse |
+| Table component | `StrategyTable.tsx` | ALL of it: search, advanced filters, examples toggle, pagination (`PAGE_SIZE = 20`), density, scroll cue, per-row `<details>` collapse. AMENDED 2026-08-05 (149-01 execution): view modes are NOT inherited on the owner surface — the grid is unreachable there (`showViewToggle=false` + `effectiveViewMode` clamp) because `StrategyGrid` links resolve via published-only `getStrategyDetail` and would dead-end on private/draft rows. Discovery keeps table/grid unchanged. Any future owner-scoped consumer of `StrategyGrid` reopens this. |
 | Metric columns | `StrategyTable.tsx:92-106` (`COLUMNS`) | Strategy · Return % · CAGR · Sharpe · Max DD · Volatility · 6 Month · AUM (+ inline sparkline columns); `@max-3xl:hidden` collapse set |
 | Sort | `StrategyTable.tsx:307-321` | Column-header sort, default `sharpe`, same superset `TableSortKey` |
 | Rank presentation | `StrategyTable.tsx:689,703-708` | Leading sticky `#{rank}` cell — `font-mono tabular-nums text-caption text-text-muted`, rank = position in the displayed set under the active sort |
