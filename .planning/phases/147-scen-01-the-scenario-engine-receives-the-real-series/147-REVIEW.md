@@ -53,6 +53,7 @@ Reviewed the four reader-site fixes (returns route, OG route, `getMyAllocationDa
 
 ### WR-01: Wealth-index test fixtures are anchored at 1.0 — a shape the production writer never persists; the CSV↔analytics parity oracle over-promises
 
+**Status:** FIXED — commit `a079638f` (2026-08-05). One production-shaped companion oracle per surface (`R12b` returns route, `O1c` OG route, `SC1b-share` share-resolve, page.test.tsx production-parity test), each pinning N stored points → N−1 returns, day-one absent, start date +1. The share-resolve "1.0 on day 0" writer comment corrected; the byte-identical parity assertion re-scoped as an anchored-fixture property with the companion pinning `analyticsHtml !== csvHtml` on production shape.
 **File:** `src/app/scenario-share/[token]/page.test.tsx:208-216` (also `src/app/scenario-share/[token]/share-resolve.test.ts:913-929`, `src/app/api/strategies/[id]/returns/route.test.ts` (`WEALTH_INDEX`), `src/app/api/og/factsheet/[id]/route.test.tsx:170-175`)
 **Issue:** The production `returns_series` is `(1 + returns).cumprod()` over the returns' own date index (`analytics-service/services/metrics.py:654,775-778`) — its FIRST element is `(1 + r_0)` at day 0, with **no prepended 1.0 base row** (the codebase itself documents this: `metrics.py:1250-1257` "a `(1+r).cumprod()` series whose first value is `(1 + r_0)` … day-0-exclusion semantics"). Every Phase-147 fixture instead prepends an explicit `{value: 1}` anchor one day earlier, so differencing recovers ALL N returns. On production data the resolver yields N−1 returns and **permanently drops day-one's return** (and shifts the derived `start_date` one day later). The code comments acknowledge the N−1 semantics honestly — and dropping day one is arguably the SAFE choice, since `cap_data_points` (`transforms.py:395-399`) truncates to the most recent 5000 points, making blind base-1.0 recovery unsafe on a truncated curve. But:
 - `page.test.tsx:412` asserts `analyticsHtml === csvHtml` byte-for-byte ("the two fixtures carry identical economics by construction") — a parity that production data cannot deliver: an analytics-only leg will differ from its CSV twin by one daily return, one series-length count (`metrics.n`), and one start date.
@@ -63,6 +64,7 @@ This is exactly the self-referential-oracle class the project's testing feedback
 
 ### WR-02: A syncing/empty added leg is double-labelled with CONTRADICTORY captions — "Syncing … arrive in ~10–15 min" in the main list vs "no data — outside window" in the auto-excluded group
 
+**Status:** FIXED — commit `efb1ef77` (2026-08-05). The `autoExcluded` memo now consults the same merged `addedSeriesStateByRef` map and skips rows whose state ≠ `available` (UI-SPEC §2 copy untouched; non-added rows keep pre-147 behavior). Regression pin `SC4-10` proves a `computing` leg never appears in `scenario-auto-excluded-group` while B's genuine coverage-drop row still renders — verified red without the fix, green with it.
 **File:** `src/app/(dashboard)/allocations/components/ScenarioComposer.tsx:3034-3061` (autoExcluded memo), `:476-488` (coverageDropReason), `:5704-5718` (new chip precedence)
 **Issue:** The new chip precedence (147-UI-SPEC §2) carefully guarantees one signal per main-list row, and SC4/UI-SPEC #6 pins that — but only WITHIN the main list. The pre-existing auto-excluded group (`autoExcluded` memo) was not threaded with `series_state`: it admits any SELECTED, not-coverage-eligible strategy whenever a coverage window exists, and an empty-series leg has a `null` span, so `coverageDropReason(null, window)` renders **"no data — outside window"**. Reachable in the exact founder scenario this phase targets (fresh key syncing ~10–15 min, mixed book with a live intersection window): the same strategy renders simultaneously as (a) a main-list row with the amber "Syncing" chip + "First metrics arrive in ~10–15 min — not in the blend yet" and (b) an auto-excluded card claiming "no data — outside window". The two captions contradict — one says data is coming, the other says there is none, and "outside window" is false (there is nothing to be outside a window). Same duplication (consistent copy, but redundant) for the terminal `no-series` state. Numbers are unaffected (the leg contributes nothing either way), so this is a labeling-honesty defect, not a projection defect.
 **Fix:** In the `autoExcluded` memo, consult the same merged `series_state` map and skip (or reword) rows whose state is not `available`, e.g.:
@@ -80,6 +82,8 @@ for (const s of engineSet.strategies) {
 plus a test pinning that a `computing` leg never appears in `scenario-auto-excluded-group`.
 
 ## Info
+
+_Status: all six ACKNOWLEDGED (2026-08-05) — log-only per the founder blast-radius bar (2026-07-29); deliberately not fixed in the review-fix pass. IN-01/IN-02's latent-trap class is already booked as DEF-147-A/B in TODOS.md._
 
 ### IN-01: `daily_returns` payload type is now a guaranteed lie at runtime
 
