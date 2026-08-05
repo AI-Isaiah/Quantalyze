@@ -874,14 +874,14 @@ export function StrategyTable({
                         {/* Phase 149 / NAV-01 — Simulate Impact is gated on the
                             row's publication status. VERIFIED
                             analytics-service/routers/simulator.py:287-290: the
-                            service fetches the candidate with
-                            `.eq("status","published")` and rejects anything
-                            else, so a button on an own draft/private row would
-                            fail on EVERY click. Rendering nothing beats
-                            rendering a button that cannot work (the
-                            no-disabled-buttons UAT direction). Behavior-invariant
-                            on /discovery and /browse, where the visibility
-                            default already guarantees every row is published. */}
+                            service fetches the candidate filtered to published
+                            status and rejects anything else, so a button on an
+                            own draft/private row would fail on EVERY click.
+                            Rendering nothing beats rendering a button that
+                            cannot work (the no-disabled-buttons UAT direction).
+                            Behavior-invariant on /discovery and /browse, where
+                            the visibility default already guarantees every row
+                            is published. */}
                         <td className="px-4 py-3 text-right group-hover:bg-page/50 transition-colors">
                           {s.status === "published" && (
                             <SimulateImpactButton
