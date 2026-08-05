@@ -4,7 +4,7 @@ milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
 stopped_at: Phase 148 UI-SPEC approved
-last_updated: "2026-08-05T14:24:49.509Z"
+last_updated: "2026-08-05T14:24:50.086Z"
 last_activity: 2026-08-05
 progress:
   total_phases: 9
@@ -55,10 +55,10 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: 148 (OWN — Owner factsheet without cache disclosure) — EXECUTING
+Phase: 149 (NAV — My strategies: a ranking at discovery parity) — EXECUTING
 Plan: 1 of 5
-Status: Ready to execute
-Last activity: 2026-08-05 -- Phase 149 planning complete
+Status: Executing Phase 149
+Last activity: 2026-08-05 -- Phase 149 execution started
 
 ### Phase 142.1 scope (inserted 2026-08-02)
 
