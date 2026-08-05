@@ -158,12 +158,12 @@ Plans:
 Plans:
 **Wave 1**
 
-- [ ] 149-01-PLAN.md — StrategyTable `visibility` parameterization (Pitfall 1) + grid-toggle suppression + published-gated Simulate button (Wave 1)
-- [ ] 149-02-PLAN.md — getMyStrategies (own-only predicate, documented deviation) + strategy-less-keys anti-join (both key links) + Badge `private` fix (Wave 1)
+- [x] 149-01-PLAN.md — StrategyTable `visibility` parameterization (Pitfall 1) + grid-toggle suppression + published-gated Simulate button (Wave 1)
+- [x] 149-02-PLAN.md — getMyStrategies (own-only predicate, documented deviation) + strategy-less-keys anti-join (both key links) + Badge `private` fix (Wave 1)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 149-03-PLAN.md — status marker + honest pending chip + Delta-5 placeholder rows (Wave 2)
+- [x] 149-03-PLAN.md — status marker + honest pending chip + Delta-5 placeholder rows (Wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
@@ -292,7 +292,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 147. SCEN-01 engine series | 6/6 | Complete   | 2026-08-05 |
 | 148. OWN owner factsheet | 5/5 | Complete   | 2026-08-05 |
-| 149. NAV my-strategies ranking | 0/? | Not started | - |
+| 149. NAV my-strategies ranking | 3/5 | In Progress|  |
 | 150. OWN-03 portfolio question | 0/? | Not started | - |
 | 151. AUM book + sizing | 0/? | Not started | - |
 | 152. SCEN composer legibility | 0/? | Not started | - |
