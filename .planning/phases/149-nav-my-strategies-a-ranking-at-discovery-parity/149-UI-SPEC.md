@@ -1,7 +1,8 @@
 ---
 phase: 149
 slug: 149-nav-my-strategies-a-ranking-at-discovery-parity
-status: draft
+status: approved
+reviewed_at: 2026-08-05
 shadcn_initialized: false
 preset: none
 created: 2026-08-05
@@ -105,7 +106,9 @@ Structure, top to bottom, inside `mx-auto max-w-[1920px]`:
      semantic color.
    - Copy when `getPercentiles()` returned a map (N = the actual size of the published
      population the map was computed over — the real number, never hardcoded):
-     > `Ranked against {N} published strategies. Private and draft rows are visible only to you and do not affect public rankings.`
+     > `Ranked against {N} published strategies. # is the row's position in this list; Pnn compares the row against those {N} published strategies. Private and draft rows are visible only to you and do not affect public rankings.`
+
+   **Focal point:** the ranking TABLE is the page's visual anchor — title and comparison-set line are subordinate; nothing else on the page may compete with the table for visual weight.
    - Copy when `getPercentiles()` returned null (population < 5 — its min-5 rule):
      > `Percentile ranks appear once 5 strategies are published in the comparison set. Private and draft rows are visible only to you.`
      (States the limitation with the threshold attached — DESIGN.md Voice rule. No
@@ -140,8 +143,17 @@ syncs ~10–15 min before analytics exist — those rows appear immediately, hon
 | `pending` / `computing` / no analytics row (bounded per closed-sets rule) | `Syncing` | `text-warning bg-warning-bg border border-warning-border` | em-dash `—`, untinted (inherited formatter behavior) |
 | terminal (`complete*` / `failed`) with no usable series | `No data` | `text-text-muted bg-track` | em-dash `—`, untinted |
 
-- Chip anatomy matches 147: `text-fixed-11 font-medium`, badge-ladder radius, with a
-  `title` attribute on the `Syncing` chip: `First metrics arrive in ~10–15 min`.
+- Chip anatomy matches 147 BASE VERBATIM: `inline-flex items-center rounded-sm px-2
+  py-0.5 text-fixed-11 font-medium uppercase tracking-wide` (rounded-sm = 4px, the 147
+  literal). DELIBERATE: the adjacent status Badge is `rounded-md` (6px) — the 4px/6px
+  difference between the two chip families is accepted; they encode different semantics
+  (publication status vs data state) and both radii are established members of the
+  DESIGN.md ladder. Do NOT harmonize.
+- The `Syncing` chip carries the note via BOTH `title="First metrics arrive in ~10–15 min"`
+  AND `aria-label="Syncing — first metrics arrive in ~10–15 min"` (not title-only — AT
+  reads the full copy). A visible per-row note line is deliberately omitted: it would break
+  row-height parity with the discovery table (the parity contract outranks the 147
+  scenario-composer precedent, whose rows are not height-locked).
 - Placement: name cell, second line, in the `SyncBadge` slot — `SyncBadge` already
   returns null for a null `computed_at` (`SyncBadge.tsx:28`), so the chip occupies the
   empty slot with no collision. Rows with computed analytics keep `SyncBadge` and get no chip.
@@ -211,13 +223,13 @@ comparison-set line, status markers, and pending chips carry **zero accent**.
 |---------|------|
 | Nav label | `My Strategies` |
 | Page title | `My Strategies` |
-| Comparison-set line (percentiles present) | `Ranked against {N} published strategies. Private and draft rows are visible only to you and do not affect public rankings.` |
+| Comparison-set line (percentiles present) | `Ranked against {N} published strategies. # is the row's position in this list; Pnn compares the row against those {N} published strategies. Private and draft rows are visible only to you and do not affect public rankings.` |
 | Comparison-set line (population < 5) | `Percentile ranks appear once 5 strategies are published in the comparison set. Private and draft rows are visible only to you.` |
 | Primary CTA (empty state only) | `Add a Strategy` — `Button` primary, triggers the SAME `add-strategy` action as the sidebar entry (opens `ContributionWizardOverlay`; a `Link` into the manager-guarded `/strategies` subtree would redirect-bounce the allocator — `Sidebar.tsx:130-136` comment) |
 | Empty state heading | `No strategies yet.` |
 | Empty state body | `Connect an exchange API key or upload a CSV to see your strategies ranked here. First metrics arrive ~10–15 minutes after a key connects.` |
 | Empty state anatomy | Page-level, replaces the table (the inherited in-table "No strategies match your filters." at `StrategyTable.tsx:842` is a *filter* message and is wrong for a genuinely empty set). `border border-border bg-surface rounded-lg px-6 py-8`; heading `text-body font-medium text-text-primary`, body `text-small text-text-secondary`, CTA below. No icon, no illustration (AI-slop ban: no icon-first cheerful empty states) |
-| Syncing chip | `Syncing` + `title="First metrics arrive in ~10–15 min"` |
+| Syncing chip | `Syncing` + `title="First metrics arrive in ~10–15 min"` + `aria-label="Syncing — first metrics arrive in ~10–15 min"` |
 | Terminal-empty chip | `No data` |
 | Error state | none new — page-level load failure renders the existing route `error.tsx` boundary / `ErrorEnvelope` machinery unchanged; no inline error strings |
 | Destructive actions | none in this phase |
@@ -258,11 +270,11 @@ comparison-set line, status markers, and pending chips carry **zero accent**.
 
 ## Checker Sign-Off
 
-- [ ] Dimension 1 Copywriting: PASS
-- [ ] Dimension 2 Visuals: PASS
-- [ ] Dimension 3 Color: PASS
-- [ ] Dimension 4 Typography: PASS
-- [ ] Dimension 5 Spacing: PASS
-- [ ] Dimension 6 Registry Safety: PASS
+- [x] Dimension 1 Copywriting: PASS
+- [x] Dimension 2 Visuals: PASS
+- [x] Dimension 3 Color: PASS
+- [x] Dimension 4 Typography: PASS
+- [x] Dimension 5 Spacing: PASS
+- [x] Dimension 6 Registry Safety: PASS
 
-**Approval:** pending
+**Approval:** approved — 2026-08-05
