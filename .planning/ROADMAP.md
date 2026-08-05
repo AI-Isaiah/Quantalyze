@@ -52,7 +52,7 @@ unpublished strategy; AUM-05 will hit sFOX the day its flag flips. **A fix scope
 ## Phases
 
 - [x] **Phase 147: SCEN-01 — The scenario engine receives the real series** - Fix the READER (never the writer): every added strategy contributes its actual daily returns via the existing `resolveDailyReturnSeries`; wealth-index `returns_series` is differenced, never forwarded raw (completed 2026-08-05)
-- [ ] **Phase 148: OWN — Owner factsheet without cache disclosure** - The owner views the full factsheet of their own unpublished strategy; adversarial anon-404 acceptance on the public `unstable_cache`d route; wizard-preview link that can never dead-end (OWN-04 strictly after OWN-02)
+- [x] **Phase 148: OWN — Owner factsheet without cache disclosure** - The owner views the full factsheet of their own unpublished strategy; adversarial anon-404 acceptance on the public `unstable_cache`d route; wizard-preview link that can never dead-end (OWN-04 strictly after OWN-02) (completed 2026-08-05)
 - [ ] **Phase 149: NAV — "My strategies": a ranking at discovery parity** - Sidebar entry showing every uploaded key + derived strategy incl. `private`/`draft` rows, ranked with the SAME component/query as the external ranking (visibility predicate is the only difference); honest pending states, never zeros
 - [ ] **Phase 150: OWN-03 — The wizard asks whose capital this is** - Own-capital-with-allocation vs verifying-a-team question at allocator finalize; (b) stays the default and a no-op; only an explicit (a) creates the portfolio position (money-path reviewed)
 - [ ] **Phase 151: AUM — A book you can reach and a size you can set** - Direct AUM input, non-ccxt holdings-sync crash fixed as a CLASS (MT5 + latent sFOX), all-or-nothing book gate fixed incl. cross-role contamination, honest refusal copy
@@ -113,7 +113,26 @@ Plans:
   3. The wizard preview links to the full factsheet, and no link shipped in this phase can land on `notFound()` (OWN-04 — strictly after OWN-02 within the phase).
   4. Nothing shipped here widens visibility beyond the owner: anonymous and non-owner authed requests still see published-only on every surface the gate change touches, and publication remains admin-only.
 
-**Plans**: TBD
+**Plans:** 5/5 plans complete
+
+Plans:
+**Wave 1**
+
+- [x] 148-01-PLAN.md — viewerNotice banner capability in FactsheetView (additive prop, byte-neutral, UI-SPEC verbatim)
+- [x] 148-02-PLAN.md — DI seam: fetchAndBuildPayload(id, visibility) required param; cached wrapper stays visibility-free with the withPublishedOnly literal; false cache-key comment corrected; force-dynamic pin
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 148-03-PLAN.md — Lane B owner lane (probe-first, uncached build) + page.owner-lane.test.tsx with unstable_cache SPY (SC1/SC2-A/SC4)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 148-04-PLAN.md — SC2-B structural CI invariant (147-guards clone) + Rule-9 mutations at two sites
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [x] 148-05-PLAN.md — OWN-04 wizard link, both success branches, structurally absent pre-success + phase gate & VALIDATION sign-off
+
 **UI hint**: yes
 **Notes (binding traps)**:
 
@@ -253,7 +272,7 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 147. SCEN-01 engine series | 6/6 | Complete   | 2026-08-05 |
-| 148. OWN owner factsheet | 0/? | Not started | - |
+| 148. OWN owner factsheet | 5/5 | Complete   | 2026-08-05 |
 | 149. NAV my-strategies ranking | 0/? | Not started | - |
 | 150. OWN-03 portfolio question | 0/? | Not started | - |
 | 151. AUM book + sizing | 0/? | Not started | - |

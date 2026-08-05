@@ -84,10 +84,13 @@ import { CHART_CONFIGS } from "./chart-configs";
 const trackSectionToggle = (section: string) => (open: boolean) =>
   trackFactsheetEvent("factsheet_v2_section_toggle", { section, open });
 
-export function FactsheetView({ payload }: { payload: FactsheetPayload }) {
+export function FactsheetView({
+  payload,
+  viewerNotice,
+}: { payload: FactsheetPayload; viewerNotice?: "owner_unpublished" }) {
   return (
     <FactsheetProvider payload={payload}>
-      <FactsheetShell payload={payload} />
+      <FactsheetShell payload={payload} viewerNotice={viewerNotice} />
     </FactsheetProvider>
   );
 }
@@ -97,7 +100,10 @@ export function FactsheetView({ payload }: { payload: FactsheetPayload }) {
  * Oxford Blue / Claret palette overrides via CSS custom property scoping on
  * the article container. Lives inside the provider so it can subscribe.
  */
-function FactsheetShell({ payload }: { payload: FactsheetPayload }) {
+function FactsheetShell({
+  payload,
+  viewerNotice,
+}: { payload: FactsheetPayload; viewerNotice?: "owner_unpublished" }) {
 
   // One-shot view event when the page mounts so adoption of the new
   // surface can be measured cleanly without folding into the v1 funnel.
@@ -137,7 +143,7 @@ function FactsheetShell({ payload }: { payload: FactsheetPayload }) {
       window.removeEventListener("afterprint", afterprint);
     };
   }, []);
-  return <FactsheetBody payload={payload} />;
+  return <FactsheetBody payload={payload} viewerNotice={viewerNotice} />;
 }
 
 export interface FactsheetBodyOptions {
@@ -158,6 +164,20 @@ export interface FactsheetBodyOptions {
    *  site (page.tsx, the Discovery detail page, the Overview EquityChartWidget)
    *  byte-identical. */
   scenarioMode?: boolean;
+  /** Viewer-context notice rendered ABOVE the masthead (default undefined).
+   *  Phase 148 (OWN-02): the v2 page's OWNER lane — and only that lane — passes
+   *  "owner_unpublished" so the owner of an unpublished strategy sees why the
+   *  link 404s for everybody else. Undefined on every existing call site
+   *  (page.tsx:463, AllocationDashboardV2.tsx:162, ScenarioFactsheetChart.tsx:237)
+   *  renders ZERO nodes — no wrapper, no reserved space — so those mounts stay
+   *  byte-identical and the GUARD-02 gate holds.
+   *
+   *  ⛔ This is a RENDER prop, deliberately NOT a field on FactsheetPayload: the
+   *  payload is what the shared public cache serves, so lane state must never
+   *  enter it (UI-SPEC:112 — it would also force the v6→v7 shape bump).
+   *  A string union rather than a boolean so later phases can add notice kinds
+   *  without a second prop. */
+  viewerNotice?: "owner_unpublished";
 }
 
 /**
@@ -175,6 +195,7 @@ export function FactsheetBody({
   hideFooter = false,
   topSlot,
   scenarioMode = false,
+  viewerNotice,
 }: { payload: FactsheetPayload } & FactsheetBodyOptions) {
   const { colorblind, darkMode } = useDisplay();
   // Centralised palette — resolve once, apply as CSS custom properties on
@@ -204,6 +225,11 @@ export function FactsheetBody({
         className="factsheet-v2-shell mx-auto max-w-[1440px] px-4 sm:px-6 lg:px-10 py-6 sm:py-10 lg:py-12"
         style={{ background: "var(--color-page)", ...shellStyle }}
       >
+        {/* Phase 148 (OWN-02): viewer context ("who can see this") precedes
+            document content, so the notice is the article's FIRST child — above
+            the masthead, before any number. NOT `topSlot`, which renders BELOW
+            the masthead (UI-SPEC:97). Absent prop ⇒ zero nodes (GUARD-02). */}
+        {viewerNotice === "owner_unpublished" && <OwnerUnpublishedNotice />}
         {!hideHeader && <FactsheetHeader payload={payload} />}
         {topSlot}
         <KpiStrip />
@@ -559,6 +585,50 @@ function NotEnoughDataPanel({ title, body }: { title: string; body: string }) {
         {title}
       </h3>
       <p className="mt-1 text-micro text-text-muted">{body}</p>
+    </section>
+  );
+}
+
+/**
+ * Phase 148 (OWN-02) — owner-lane visibility notice, rendered ONLY when the v2
+ * page resolved via the owner probe (`viewerNotice="owner_unpublished"`).
+ *
+ * Reuses the NotEnoughDataPanel data-panel treatment (square, flat, hairline
+ * border, subtle surface) with the three UI-SPEC deltas:
+ *   - body is `text-caption` (12px), NOT `text-micro` — 10-11px is too small for
+ *     a load-bearing disclosure (UI-SPEC:66);
+ *   - `role="note"` + `aria-label` (UI-SPEC:110) — NOT `role="alert"` (nothing
+ *     went wrong) and NOT `aria-live` (server-rendered, present at load);
+ *   - `mb-6` before the masthead, and `h2` because it precedes the masthead h1.
+ *
+ * Muted neutral by the DESIGN.md semantic-color gates: never red (a draft is
+ * absence, not failure) and not amber (amber promises a one-click remedy, but
+ * publication is admin-only — the owner has no action that flips it).
+ *
+ * Not dismissible, and it carries no print-hiding class on purpose (UI-SPEC:108):
+ * a draft screenshotted or handed to an LP on paper must still carry its
+ * unpublished status.
+ *
+ * EXPORTED (review WR-02): page.tsx's payload-pending placeholder arm renders
+ * this same component when `lane === "owner"` — a draft mid-recompute is when
+ * an owner is MOST likely to share the URL "for when it's ready", so the
+ * placeholder must carry the disclosure too. One exported component keeps the
+ * UI-SPEC copy single-sourced; do NOT inline a second copy of the banner.
+ */
+export function OwnerUnpublishedNotice() {
+  return (
+    <section
+      role="note"
+      aria-label="Visibility notice"
+      className="mb-6 border border-border bg-surface-subtle px-4 py-3"
+    >
+      <h2 className="text-caption font-semibold uppercase tracking-[0.18em] text-text-primary">
+        Unpublished — only you can see this
+      </h2>
+      <p className="mt-1 text-caption text-text-muted">
+        This factsheet is visible only from the account that uploaded the strategy. Anyone else who
+        opens this link sees a 404 until Quantalyze review publishes it.
+      </p>
     </section>
   );
 }

@@ -1218,6 +1218,84 @@ is closed there. Two adjacent findings were surfaced by the audit and are booked
    **Fix shape:** make the mock's `maybeSingle`/embed resolution project to the columns named in the
    recorded select string, mirroring the returns-route harness.
 
+### Phase 148 (OWN) — factsheet v2 payload cache is id-only-keyed (added 2026-08-05)
+
+**`DEF-148-A` — a fresh `strategy_analytics.computed_at` does NOT bust the factsheet v2
+payload cache, so the factsheet can serve metrics up to 3600s stale.** The page's header
+comment claimed the opposite until phase 148 corrected it; the *behaviour* is unchanged and
+deliberately NOT fixed here.
+
+Mechanics. `src/app/factsheet/[id]/v2/page.tsx` passes `` `${id}::${computedAt}` `` into
+`buildFactsheetPayloadCached`, which splits at `"::"` and **discards everything after the id**
+(`page.tsx:229` pre-148 numbering — the `const [id] = cacheKey.split("::")` line). What actually
+keys the entry is Next's own derivation
+(`node_modules/next/dist/server/web/spec-extension/unstable-cache.js:55,82`):
+`fixedKey = ${cb.toString()}-${keyParts.join(',')}`, then
+`invocationKey = ${fixedKey}-${JSON.stringify(args)}`. Here `cb.toString()` is constant source
+text, `keyParts` is `["factsheet-v2-payload-v6", id]`, and `args` is `[]` because the returned
+function is invoked with no arguments. **Effective key: id only.** `computed_at` never
+participates.
+
+Existing mitigations (why this does not clear the founder's blast-radius bar):
+- `revalidate: 3600` is a hard 1h staleness ceiling.
+- `revalidateTag(\`factsheet-v2:${id}\`, "max")` at
+  `src/app/api/admin/strategy-review/route.ts:501` busts the entry on the admin publish/review
+  flow — the only writer, and the only transition where a stale payload would be user-visible
+  as *wrong* rather than merely *late*.
+
+This is **staleness, not user-facing incorrectness and not data integrity**, so per the founder
+stopping rule it is logged, not fixed (phase 148 orchestrator ruling; RESEARCH §3a consequence 3).
+**Fix shape if it is ever taken:** make `computed_at` a real `keyParts` member (and update the
+`factsheet-v2-payload-v6` bump ledger + the admin revalidator together) — do **not** try to encode
+it in the `cacheKey` string, which is exactly the mechanism that already fails.
+
+⛔ **Load-bearing corollary, do not lose:** because the key is id-only, appending a suffix to the
+`cacheKey` string yields the *same* entry. Any attempt at viewer/lane separation via that string
+would write a viewer-dependent payload into the shared entry and serve it to anonymous readers
+for the full TTL. This is why phase 148's owner lane bypasses the cached wrapper entirely rather
+than "giving the owner lane its own cache key".
+
+### Phase 148 (OWN-04) — two in-wizard link-style divergences from the UI-SPEC treatment (added 2026-08-05)
+
+**`DEF-148-B` — the two pre-existing `target="_blank"` links in the wizard tree do not match the
+now-authoritative link treatment shipped by OWN-04.** Logged only; deliberately **NOT** fixed in
+phase 148 (out of the task's blast radius — Rule 3 / phase-148 orchestrator ruling).
+
+The OWN-04 link (`SyncPreviewStep.tsx`, `ViewFullFactsheetLink`) follows 148-UI-SPEC:122/126:
+`underline underline-offset-4` (persistent) + `rel="noopener noreferrer"`. Two older siblings
+diverge, each in a different way:
+
+| File:line | Divergence | Why the UI-SPEC treatment is the correct one |
+|-----------|-----------|----------------------------------------------|
+| `src/app/(dashboard)/strategies/new/wizard/WizardChrome.tsx:257` | `className="text-accent underline-offset-4 hover:underline"` — underline appears on **hover only** | It is an inline link inside body prose (`<p className="text-caption text-text-muted">Wizard help · …`), distinguished from the surrounding text by the accent teal ALONE until hover. That is the exact `link-in-text-block` shape DESIGN.md's 2026-06-28 decision ruled a WCAG 1.4.1 failure and remediated on `/security`; this instance was not swept in. |
+| `src/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep.tsx:662` | `rel="noopener"` — no `noreferrer` | `noopener` alone closes the reverse-tabnabbing hole but still leaks the full wizard URL (including the draft strategy id path) as `Referer` to `/security`. Same-origin here, so the exposure is low — which is why this is logged, not escalated. |
+
+Fix shape if taken: one sweep, both files, plus a check for any third instance
+(`grep -rn 'hover:underline' src/app/(dashboard)/strategies/new/wizard/` and
+`grep -rn 'rel="noopener"' src`) — a point-fix of these two would leave the class open.
+⚠️ Scope caveat: DESIGN.md's persistent-underline rule applies to **body-prose links only**; nav
+links, button-styled links, and card links keep their existing hover treatment, so a blanket
+`hover:underline` purge would be wrong.
+
+### Phase 148 review IN-01 — `withPublishedOrOwner` uid interpolation lacks shape validation (added 2026-08-05)
+
+**`DEF-148-C` — `withPublishedOrOwner` (`src/lib/visibility.ts:115-125`) builds the PostgREST
+`.or()` group by raw interpolation: `` `status.eq.published,user_id.eq.${authUserId}` ``.**
+Logged only; deliberately **NOT** fixed in phase 148 (pre-existing phase-110 helper — outside the
+founder blast-radius bar for review blocking).
+
+Not exploitable today: every current caller (including both phase-148 `page.tsx` sites) passes the
+session `user.id`, a GoTrue-minted UUID. But the helper's contract ("`authUserId` MUST come from
+the authenticated session") is enforced only by convention — a future caller passing a
+user-influenced string could inject additional PostgREST filter clauses into the OR group
+(e.g. `x,status.eq.draft`), widening visibility. On the admin-client call path introduced in
+phase 148 the injected predicate is the **ONLY** gate, which is what upgrades this from hygiene
+to a real landmine for future callers.
+
+**Fix shape:** belt-and-suspenders inside the helper, fail-loud —
+`if (!/^[0-9a-f-]{36}$/i.test(authUserId)) throw new Error("withPublishedOrOwner: authUserId is not a uuid")` —
+plus a unit test proving a non-uuid throws (the test must fail if the guard is removed).
+
 ---
 
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
