@@ -222,6 +222,25 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### Dependency pass — the 9 open dependabot PRs (booked 2026-08-05, founder call)
+- **One campaign, NOT piecemeal merges.** All 9 dependabot PRs are red — and NOT only the
+  TEST-DB infra flake: #657 (npm minor-patch group, 25 updates) genuinely fails
+  `frontend-build`/`frontend-lint`/`contracts`/`deps-cache`. The pile hides real majors:
+  typescript 6→7 (#614), jsdom 30 (#646), jest-dom 7 (#645), actions/setup-node+python+checkout
+  majors (#626/#627/#643), supabase/setup-cli 3 (#612), plus grouped pip (#658) and npm (#657).
+  Branches are 1–3 weeks stale vs main.
+- **Order:** rebase + land the two GROUPS first (pip, then npm — bisect the npm group's build
+  break, it may be one member); then majors ONE at a time with a full local suite + typecheck
+  each (CI's python/e2e-seeded jobs can't be trusted as the only gate while the shared-TEST-DB
+  flake persists). actions/* majors need a workflow-syntax review, not just green CI.
+- **When:** after v1.17 phases or in a maintenance window — never mid-phase.
+- None of the 9 touch the banned-packages list (checked 2026-08-05).
+- Related: #606 (nightly npm-audit p1) is a DEV-ONLY chain — all 4 highs via `@lhci/cli` →
+  old `uuid`; not fixed by the minor-patch group; needs an @lhci/cli bump or override in this
+  same pass. #616 (stale analytics deploy) is NOT a deps issue — it's the Phase 144 TEST-DB
+  flake keeping main CI red so Railway skips deploys; currently harmless (no analytics-service
+  changes in the undeployed delta).
+
 ### Money-path correctness (latent / flag-gated / edge cases)
 - **Unified-backbone CSV-finalize breaks if flag on** — service-role client has no
   `auth.uid()` → 42501 every time when `PROCESS_KEY_UNIFIED_BACKBONE=on`. Skip unified for
