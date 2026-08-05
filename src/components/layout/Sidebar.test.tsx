@@ -256,6 +256,66 @@ describe("Sidebar workspace — admin view (Phase 109 role-only)", () => {
 });
 
 /**
+ * Phase 149 / NAV-01 — the "My Strategies" workspace entry (UI-SPEC Delta 1).
+ *
+ * ⚠️ Every selector here is scoped by HREF, never by bare text (Pitfall 10):
+ * the manager branch carries a "Strategies" entry and
+ * `(dashboard)/strategies/page.tsx` renders an `<h1>My Strategies</h1>`, so a
+ * `getByText("My Strategies")` would be ambiguous for a `role='both'` account
+ * the moment these surfaces are rendered together.
+ */
+describe("Sidebar workspace — My Strategies entry (Phase 149 NAV-01)", () => {
+  it("renders an <a> to /my-strategies for an allocator, between Decks and Add a Strategy", () => {
+    const { container } = render(
+      <Sidebar populatedSlugs={[]} isAllocator={true} />,
+    );
+
+    const entry = container.querySelector('a[href="/my-strategies"]');
+    expect(entry).not.toBeNull();
+    // This is a PAGE, not an overlay action — so a <Link>, not the
+    // `action: "add-strategy"` <button> shape its neighbour uses.
+    expect(entry!.tagName).toBe("A");
+    expect(entry!.textContent).toContain("My Strategies");
+
+    // UI-SPEC Delta 1 position: after the Recommendations/Compare/Decks block,
+    // directly above the write CTA the founder pointed at (which stays last).
+    const decks = container.querySelector('a[href="/decks"]');
+    expect(decks).not.toBeNull();
+    const addStrategy = screen.getByRole("button", { name: "Add a Strategy" });
+
+    expect(
+      decks!.compareDocumentPosition(entry!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      entry!.compareDocumentPosition(addStrategy) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("does NOT leak the entry to a manager-only session (T-110-16 role-leak pin)", () => {
+    // The page itself is requireRolePage('allocator')-guarded, but a visible
+    // nav entry that redirect-bounces is its own information disclosure: it
+    // tells a manager the surface exists. The push lives INSIDE
+    // showsAllocatorWorkspace so it cannot render here at all.
+    const { container } = render(
+      <Sidebar populatedSlugs={[]} isAllocator={false} isManager={true} />,
+    );
+    expect(container.querySelector('a[href="/my-strategies"]')).toBeNull();
+  });
+
+  it("never renders the entry as a <button> (an action item would navigate nowhere)", () => {
+    const { container } = render(
+      <Sidebar populatedSlugs={[]} isAllocator={true} />,
+    );
+    const buttons = Array.from(container.querySelectorAll("button"));
+    expect(
+      buttons.filter((b) => b.textContent?.trim() === "My Strategies"),
+    ).toEqual([]);
+  });
+});
+
+/**
  * M-0414 (audit-2026-05-07) — the ADMIN nav section itself.
  *
  * Prior tests pass isAdmin={true} only to assert the workspace surfaces
