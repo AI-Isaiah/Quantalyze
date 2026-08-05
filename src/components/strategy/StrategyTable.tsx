@@ -137,6 +137,17 @@ const COLUMNS: {
 
 const PAGE_SIZE = 20;
 
+/**
+ * Phase 149 Delta 5 — one row per ACTIVE api_key that has produced no strategy
+ * yet. Server-formatted: `exchangeLabel` already has EXCHANGE_DISPLAY applied
+ * upstream, so this client component never owns exchange naming.
+ */
+export type PlaceholderKeyRow = {
+  id: string;
+  exchangeLabel: string;
+  keyLabel: string;
+};
+
 interface StrategyTableProps {
   strategies: StrategyWithAnalytics[];
   categorySlug: string;
@@ -185,6 +196,33 @@ interface StrategyTableProps {
    * is non-serializable across the RSC→client boundary).
    */
   visibility?: "published-only" | "owner-all-statuses";
+  /**
+   * Phase 149 Delta 5 / NAV-01 — the per-KEY coverage half of the owner
+   * surface. The founder's PROD census is 8 active keys → 4 strategies → 2 keys
+   * with nothing derived from them: without these rows /my-strategies would
+   * silently under-report the account, and the owner would have no way to tell
+   * "this key produced nothing" from "this key does not exist".
+   *
+   * Rendered as UNRANKED subordinate rows below every ranked row. They live
+   * OUTSIDE `filtered`/`paged`/`rank`, so they never shift `#n`, never enter
+   * the pagination counts, and are unaffected by search/filters (they are not
+   * filter results — they are coverage rows).
+   *
+   * The PUBLIC pages (/discovery/[slug], /browse/[slug]) pass NEITHER this nor
+   * `onFinishSetup`, so both branches below are dead there.
+   */
+  placeholderKeys?: PlaceholderKeyRow[];
+  /**
+   * Phase 149 Delta 5 — opens the contribution wizard overlay in the section
+   * that hosts this table. A client→client function prop: RSC pages never pass
+   * it (a function is non-serializable across the RSC boundary), which is
+   * precisely why the wizard is NOT imported here — importing it would drag the
+   * overlay into the shared public discovery bundle.
+   *
+   * The wizard opens FRESH: that overlay has no preselect seam
+   * today, and inventing one is out of this phase's scope (tracked in TODOS.md).
+   */
+  onFinishSetup?: () => void;
 }
 
 // --- Range filter helper ---
@@ -232,6 +270,8 @@ export function StrategyTable({
   initialWatchedSet,
   percentiles,
   visibility = "published-only",
+  placeholderKeys,
+  onFinishSetup,
 }: StrategyTableProps) {
   const reactId = useId();
   const tabIdBase = `watchlist${reactId}`;
@@ -503,6 +543,18 @@ export function StrategyTable({
 
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
   const paged = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+  // Phase 149 Delta 5 — deliberately derived OUTSIDE `filtered`/`paged`/`rank`
+  // (the UI-SPEC subordination rule): `#n`, `totalPages` and the pagination
+  // footer counts must never read these rows, or a bare key would renumber the
+  // owner's ranked strategies and inflate "Showing 1–N of N".
+  //
+  // They render on the LAST page only, so paging through ranked rows does not
+  // repeat them. `page >= totalPages - 1` also covers the empty-set case
+  // (`totalPages === 0`, since `0 >= -1`), which is exactly the account that
+  // has keys but no strategies at all.
+  const placeholders = placeholderKeys ?? [];
+  const showPlaceholders = placeholders.length > 0 && page >= totalPages - 1;
 
   // STATE-03 scroll-cue gate. Measure the scroll container's overflow whenever
   // the rendered layout can change width: on mount, on viewport resize, and on
@@ -1012,13 +1064,104 @@ export function StrategyTable({
                       </tr>
                     );
                   })}
-                  {paged.length === 0 && (
+                  {/* Phase 149 Delta 5 — three arms, in the order they matter:
+                      (a) the public pages pass NO placeholders, so
+                          `placeholders.length === 0` is always true there and
+                          this reduces to today's `paged.length === 0`
+                          (byte-identical);
+                      (b) on the owner surface, filters that exclude every
+                          ranked row still surface the message — the set really
+                          WAS filtered (`strategies.length > 0`);
+                      (c) a genuinely strategy-less account with bare keys gets
+                          NO message: nothing was filtered, so "No strategies
+                          match your filters." would be a lie. */}
+                  {paged.length === 0 &&
+                    (strategies.length > 0 || placeholders.length === 0) && (
                     <tr>
                       <td colSpan={emptyRowColSpan} className="px-4 py-8 text-center text-text-muted">
                         No strategies match your filters.
                       </td>
                     </tr>
                   )}
+                  {/* Placeholder rows render AFTER the filter-empty message
+                      (checker W-5): they are NOT filter results, they are
+                      key-coverage rows unaffected by search/filters, so the
+                      message about the filtered set belongs above them.
+                      Mirrors the ranked row's td sequence exactly so the
+                      columns align — hover tint and pctSuffix dropped (there is
+                      no data to hover-scan and no rank to compare). */}
+                  {showPlaceholders &&
+                    placeholders.map((p) => (
+                      <tr
+                        key={p.id}
+                        className="bg-surface-subtle border-b border-border last:border-0"
+                        style={{ height: "var(--row-h)" }}
+                      >
+                        <td className="sticky left-0 z-10 w-14 bg-surface-subtle px-2 py-3 text-right align-middle font-mono tabular-nums text-caption text-text-muted">
+                          —
+                        </td>
+                        {/* The owner surface passes no `userId`, so this is
+                            dead today — but rendering it keeps the placeholder
+                            td count equal to the header th count in EVERY
+                            configuration, so a future watchlist-enabled owner
+                            table cannot silently misalign these columns. */}
+                        {showStarColumn && (
+                          <td className="sticky left-14 z-10 w-11 bg-surface-subtle px-2 py-3 align-middle" />
+                        )}
+                        <td
+                          className={`sticky z-10 bg-surface-subtle px-4 py-3 border-r border-border ${showStarColumn ? "left-[6.25rem]" : "left-14"}`}
+                        >
+                          <div className="flex items-center gap-1.5">
+                            {/* No link: no strategy exists, so there is no
+                                factsheet to reach. */}
+                            <span className="text-small text-text-muted">
+                              {p.exchangeLabel} · {p.keyLabel}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 mt-1">
+                            <span className={`${DATA_STATE_CHIP} text-text-muted bg-track`}>
+                              No strategy yet
+                            </span>
+                          </div>
+                        </td>
+                        {/* Every metric cell is an honest em-dash: there is no
+                            run, no series, nothing to average. A 0 / 0.00 /
+                            +0.0% here would be invented data (SC-4). */}
+                        <td className="px-4 py-3 text-right font-metric tabular-nums">
+                          <span className="text-text-muted">—</span>
+                        </td>
+                        <td className="px-4 py-3 text-right font-metric tabular-nums">
+                          <span className="text-text-muted">—</span>
+                        </td>
+                        <td className="px-4 py-3 text-right font-metric tabular-nums">
+                          <span className="text-text-muted">—</span>
+                        </td>
+                        <td className="px-4 py-3 text-right font-metric tabular-nums">
+                          <span className="text-text-muted">—</span>
+                        </td>
+                        <td className="px-4 py-3 text-right font-metric tabular-nums @max-3xl:hidden">
+                          <span className="text-text-muted">—</span>
+                        </td>
+                        <td className="px-4 py-3 text-right font-metric tabular-nums @max-3xl:hidden">
+                          <span className="text-text-muted">—</span>
+                        </td>
+                        <td className="px-4 py-3 text-right font-metric tabular-nums @max-3xl:hidden">
+                          <span className="text-text-muted">—</span>
+                        </td>
+                        <td className="px-4 py-3 @max-3xl:hidden" />
+                        <td className="px-4 py-3 @max-3xl:hidden" />
+                        <td className="px-4 py-3 align-top @3xl:hidden" />
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            type="button"
+                            onClick={onFinishSetup}
+                            className="text-small text-accent underline underline-offset-2"
+                          >
+                            Finish setup →
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
                 </tbody>
               </table>
             </ResponsiveTable>
