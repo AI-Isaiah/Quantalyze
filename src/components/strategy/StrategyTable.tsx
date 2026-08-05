@@ -25,6 +25,10 @@ import { CustomizeDrawer } from "./CustomizeDrawer";
 import { SimulateImpactButton } from "@/components/discovery/SimulateImpactButton";
 import { formatPercent, formatNumber, formatCurrency } from "@/lib/utils";
 import {
+  isComputedAnalytics,
+  deriveEmptySeriesState,
+} from "@/lib/closed-sets";
+import {
   useDiscoveryPrefs,
   type DiscoveryViewPreferences,
 } from "@/lib/discovery-prefs";
@@ -35,7 +39,23 @@ import type { Strategy, StrategyAnalytics } from "@/lib/types";
 // `percentiles` prop; this component never recomputes them.
 import type { PercentileMap } from "@/lib/queries";
 
-type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
+type StrategyWithAnalytics = Strategy & {
+  analytics: StrategyAnalytics;
+  /**
+   * Phase 149 / NAV-01 — set by `shapeRankingRows` in lib/queries.ts. `false`
+   * means NO `strategy_analytics` row exists for this strategy (the shaper
+   * substituted `EMPTY_ANALYTICS`, whose `computation_status` is a hardcoded
+   * "pending"). That is the ONLY signal distinguishing "the job was never
+   * enqueued" from "a job is genuinely running" — see the chip derivation in
+   * the row map below (checker defect B-1).
+   *
+   * OPTIONAL so public fixtures/pages predating the field still typecheck; an
+   * OMITTED field means "no signal, trust the raw status" and is NOT the same
+   * as `false` (W-C). The owner path can never omit it — plan 04 types the
+   * section prop as `RankedStrategyRow[]`, where it is required.
+   */
+  analyticsPresent?: boolean;
+};
 
 type TableSortKey = SortKey | "name" | "six_month_return";
 
@@ -45,6 +65,16 @@ type PercentileMetric = keyof PercentileMap[string];
 // every column header so the table header reads as a label, not another data
 // row. Sortable headers layer the sort color on top of this.
 const HEADER_LABEL = "text-micro font-mono uppercase tracking-[0.14em]";
+
+// Phase 149 Delta 4 — the 147 chip BASE, copied VERBATIM from
+// CoverageStateChip.tsx:58 (tokens, not the component: importing an
+// allocations-scoped component into the shared discovery table would drag a
+// second chip vocabulary onto /discovery). `rounded-sm` (4px) is DELIBERATE
+// against the adjacent status Badge's `rounded-md` (6px): the two chip
+// families encode different semantics (publication status vs data state) and
+// both radii are established DESIGN.md ladder members. Do NOT harmonize.
+const DATA_STATE_CHIP =
+  "inline-flex items-center rounded-sm px-2 py-0.5 text-fixed-11 font-medium uppercase tracking-wide";
 
 // Maps a sortable column to its getPercentiles() metric key. Columns absent
 // from this map (Strategy name, 6 Month, AUM) have no peer-percentile and never
@@ -739,6 +769,42 @@ export function StrategyTable({
                     const volatilityText = formatPercent(s.analytics.volatility);
                     const sixMonthText = formatPercent(s.analytics.six_month_return);
                     const aumText = formatCurrency(s.aum);
+                    // Phase 149 Delta 4 — the ONE chip-state derivation site.
+                    // It closes TWO defects the naive shape carried (checker
+                    // B-1/B-2):
+                    //
+                    // (a) the gate is `isComputedAnalytics` ("this row has no
+                    //     computed metrics"), NEVER `!computed_at`. A LIVE
+                    //     pending/computing row carries a `computed_at`
+                    //     DEFAULT, so a `!computed_at` gate never fires for the
+                    //     very state it was written to catch; and
+                    //     EMPTY_ANALYTICS's `computed_at: ""` is falsy, so that
+                    //     gate ALSO made every absent row chip-eligible forever.
+                    //
+                    // (b) the status is COERCED through `analyticsPresent`, the
+                    //     absent-row signal shapeRankingRows preserves. Reading
+                    //     `computation_status` raw would read EMPTY_ANALYTICS's
+                    //     hardcoded "pending" and spin "Syncing" FOREVER for a
+                    //     strategy whose job was never enqueued. Coercing to
+                    //     null routes it into the shared 16h
+                    //     MISSING_ROW_COMPUTING_WINDOW_MS bound in
+                    //     closed-sets.ts, which terminates the spinner at
+                    //     "No data" (the same coercion precedent as
+                    //     returns/route.ts:310-341).
+                    //
+                    // `=== false`, never truthiness: an OMITTED optional field
+                    // means "no signal — trust the raw status" (W-C); only the
+                    // explicit absent-row `false` coerces. The owner path
+                    // always carries it.
+                    const chipStatus =
+                      s.analyticsPresent === false
+                        ? null
+                        : s.analytics.computation_status ?? null;
+                    const chipState = deriveEmptySeriesState(
+                      chipStatus,
+                      s.created_at ?? null,
+                    );
+                    const hasComputedAnalytics = isComputedAnalytics(chipStatus);
                     return (
                       <tr
                         key={s.id}
@@ -782,6 +848,23 @@ export function StrategyTable({
                                 </svg>
                               </span>
                             )}
+                            {/* Phase 149 Delta 3 — the owner's own non-published
+                                rows say so, muted (absence of publication is a
+                                FACT, not an error: publication is admin-gated
+                                and the owner has no one-click remedy, so amber
+                                would falsely promise one — DESIGN.md
+                                semantic-color gate). NO visibility gate is
+                                needed and none is wanted: a `published-only`
+                                row set can never contain a row this fires on,
+                                so the branch is provably dead on /discovery and
+                                /browse by the DATA, not by a second predicate
+                                that could drift from the first. Muted-only ink
+                                comes from Badge's status maps (Badge.tsx). A
+                                "Published" chip is deliberately absent —
+                                absence of a marker IS "published". */}
+                            {s.status !== "published" && (
+                              <Badge type="status" label={s.status} />
+                            )}
                           </div>
                           <div className="flex items-center gap-2 mt-1">
                             <div className="flex gap-1">
@@ -789,7 +872,42 @@ export function StrategyTable({
                                 <Badge key={t} label={t} />
                               ))}
                             </div>
-                            <SyncBadge computedAt={s.analytics.computed_at} exchange={s.supported_exchanges?.[0]} />
+                            {/* W-B — the PUBLIC path stays unconditional
+                                (byte-identical to today). On the owner surface
+                                an uncomputed row must never claim "Synced …"
+                                beside a Syncing/No data chip: EMPTY_ANALYTICS's
+                                `computed_at: ""` is falsy so absent rows were
+                                already badge-null, but a LIVE job's computed_at
+                                DEFAULT would render BOTH. The SyncBadge
+                                component itself is untouched. */}
+                            {(visibility !== "owner-all-statuses" ||
+                              hasComputedAnalytics) && (
+                              <SyncBadge computedAt={s.analytics.computed_at} exchange={s.supported_exchanges?.[0]} />
+                            )}
+                            {/* Phase 149 Delta 4 — the honest pending chip fills
+                                the slot SyncBadge leaves empty. Gated on
+                                `visibility` so public surfaces are
+                                byte-identical: a PUBLISHED row awaiting a
+                                recompute must not grow a chip on /discovery
+                                (149-UI-SPEC States invariant). Amber = the
+                                system recovers this on its own; muted = honest
+                                steady-state absence. Red is forbidden for
+                                both — absence is not an error. */}
+                            {visibility === "owner-all-statuses" &&
+                              !hasComputedAnalytics &&
+                              (chipState === "computing" ? (
+                                <span
+                                  title="First metrics arrive in ~10–15 min"
+                                  aria-label="Syncing — first metrics arrive in ~10–15 min"
+                                  className={`${DATA_STATE_CHIP} text-warning bg-warning-bg border border-warning-border`}
+                                >
+                                  Syncing
+                                </span>
+                              ) : (
+                                <span className={`${DATA_STATE_CHIP} text-text-muted bg-track`}>
+                                  No data
+                                </span>
+                              ))}
                           </div>
                         </td>
                         {/* Return / 6 Month carry a sign → sign-tinted (green/red)
