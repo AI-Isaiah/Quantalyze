@@ -32,7 +32,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, within } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import { StrategyTable } from "./StrategyTable";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
 import { installFetchMock, restoreFetchMock } from "@/test/helpers/fetch";
@@ -476,5 +476,235 @@ describe("StrategyTable Delta 4 — SC-4a honest pending chip", () => {
     expect(chipIn(row, "No data")).toBeNull();
     // ...and the public SyncBadge render site stays UNCONDITIONAL.
     expect(row.textContent).toMatch(/Synced/);
+  });
+});
+
+// =========================================================================
+// Delta 5 — unranked placeholder rows for strategy-less keys
+// =========================================================================
+
+const PLACEHOLDER_KEYS = [
+  { id: "k1", exchangeLabel: "Deribit", keyLabel: "Zavara main" },
+  { id: "k2", exchangeLabel: "MT5", keyLabel: "Acct 7001" },
+];
+
+const FILTER_EMPTY_COPY = "No strategies match your filters.";
+
+/** Every rendered <tr> in the tbody, in DOM order. */
+function bodyRows(): HTMLElement[] {
+  return Array.from(document.querySelectorAll("tbody tr"));
+}
+
+function placeholderRows(): HTMLElement[] {
+  return bodyRows().filter((tr) =>
+    tr.className.includes("bg-surface-subtle"),
+  );
+}
+
+function indexOfRowContaining(text: string): number {
+  return bodyRows().findIndex((tr) => (tr.textContent ?? "").includes(text));
+}
+
+describe("StrategyTable Delta 5 — unranked placeholder rows for bare keys", () => {
+  it("renders one subordinate placeholder row per bare key BELOW the ranked rows, outside #n numbering", () => {
+    render(
+      <StrategyTable
+        strategies={[privateRow(), draftRow()]}
+        categorySlug="chip-spec"
+        visibility="owner-all-statuses"
+        placeholderKeys={PLACEHOLDER_KEYS}
+        onFinishSetup={() => {}}
+      />,
+    );
+
+    const placeholders = placeholderRows();
+    expect(placeholders).toHaveLength(2);
+
+    // Subordination: they come AFTER every ranked row.
+    const rows = bodyRows();
+    const lastRankedIndex = Math.max(
+      rows.indexOf(rowFor(NAME_PRIVATE)),
+      rows.indexOf(rowFor(NAME_DRAFT)),
+    );
+    for (const p of placeholders) {
+      expect(rows.indexOf(p)).toBeGreaterThan(lastRankedIndex);
+    }
+
+    // Placeholders are OUTSIDE the ranking: em-dash rank cell, never a #.
+    for (const p of placeholders) {
+      expect(cellText(p, 0)).toBe(EM_DASH);
+      expect(cellText(p, 0)).not.toMatch(/#/);
+    }
+
+    // ...and the ranked rows above are numbered as if placeholders did not
+    // exist (they never enter `filtered`, so they cannot shift #n).
+    expect(cellText(rowFor(NAME_PRIVATE), 0)).toMatch(/#[12]/);
+    expect(cellText(rowFor(NAME_DRAFT), 0)).toMatch(/#[12]/);
+    const ranks = [
+      cellText(rowFor(NAME_PRIVATE), 0),
+      cellText(rowFor(NAME_DRAFT), 0),
+    ].sort();
+    expect(ranks).toEqual(["#1", "#2"]);
+  });
+
+  it("W-1: a placeholder row's <td> count equals the header <th> count (column-drift falsifier)", () => {
+    render(
+      <StrategyTable
+        strategies={[privateRow()]}
+        categorySlug="chip-spec"
+        visibility="owner-all-statuses"
+        placeholderKeys={PLACEHOLDER_KEYS}
+        onFinishSetup={() => {}}
+      />,
+    );
+
+    const headerCount = document.querySelectorAll("thead th").length;
+    // No star column on this surface (no userId prop): rank + 8 COLUMNS +
+    // Return spark + Underwater spark + Details + Actions = 13.
+    expect(headerCount).toBe(13);
+    // Guard against a vacuous pass: the loop below must actually iterate.
+    expect(placeholderRows()).toHaveLength(2);
+
+    for (const p of placeholderRows()) {
+      expect(cells(p)).toHaveLength(13);
+      // If a column is ever added to the header, this reddens instead of the
+      // placeholder rows silently misaligning against the ranked rows.
+      expect(cells(p).length).toBe(headerCount);
+    }
+    // Same skeleton as a ranked row on this surface.
+    expect(cells(rowFor(NAME_PRIVATE))).toHaveLength(headerCount);
+  });
+
+  it("names the key as '{exchange} · {label}' with NO factsheet link and a muted 'No strategy yet' chip", () => {
+    render(
+      <StrategyTable
+        strategies={[privateRow()]}
+        categorySlug="chip-spec"
+        visibility="owner-all-statuses"
+        placeholderKeys={PLACEHOLDER_KEYS}
+        onFinishSetup={() => {}}
+      />,
+    );
+
+    const first = placeholderRows()[0];
+    const nameCell = cells(first)[1];
+    expect(nameCell.textContent).toContain("Deribit · Zavara main");
+    // No strategy exists, so there is no factsheet to link to. A link here
+    // would be a dead end (and, for a stranger's guessed id, an oracle).
+    expect(nameCell.querySelector("a")).toBeNull();
+
+    const chip = chipIn(first, "No strategy yet");
+    expect(chip).not.toBeNull();
+    expect(chip!.className).toContain("bg-track");
+    expect(chip!.className).toContain("text-text-muted");
+    expect(chip!.className).not.toContain("text-negative");
+    expect(chip!.className).not.toContain("bg-warning-bg");
+
+    expect(within(placeholderRows()[1]).getByText(/MT5 · Acct 7001/)).toBeInTheDocument();
+  });
+
+  it("renders em-dash, untinted metric cells — never a fabricated zero", () => {
+    render(
+      <StrategyTable
+        strategies={[privateRow()]}
+        categorySlug="chip-spec"
+        visibility="owner-all-statuses"
+        placeholderKeys={PLACEHOLDER_KEYS}
+        onFinishSetup={() => {}}
+      />,
+    );
+
+    // Guard against a vacuous pass: the loop below must actually iterate.
+    expect(placeholderRows()).toHaveLength(2);
+
+    for (const p of placeholderRows()) {
+      for (const i of METRIC_CELL_INDEXES) {
+        expect(cellText(p, i)).toBe(EM_DASH);
+        const tinted = cells(p)[i].querySelector(
+          ".text-positive, .text-negative",
+        );
+        expect(tinted).toBeNull();
+      }
+      expect(p.textContent).not.toContain("0.00");
+      expect(p.textContent).not.toContain("+0.0%");
+    }
+  });
+
+  it("fires onFinishSetup exactly once from a real <button>, not a link into /strategies", () => {
+    const onFinishSetup = vi.fn();
+    render(
+      <StrategyTable
+        strategies={[privateRow()]}
+        categorySlug="chip-spec"
+        visibility="owner-all-statuses"
+        placeholderKeys={PLACEHOLDER_KEYS}
+        onFinishSetup={onFinishSetup}
+      />,
+    );
+
+    const buttons = screen.getAllByRole("button", { name: /Finish setup/ });
+    expect(buttons).toHaveLength(2);
+    // A <Link> into the manager-guarded /strategies subtree would
+    // redirect-bounce an allocator; the wizard opens in place instead.
+    expect(buttons[0].tagName).toBe("BUTTON");
+
+    fireEvent.click(buttons[0]);
+    expect(onFinishSetup).toHaveBeenCalledTimes(1);
+  });
+
+  it("public invariance: with placeholderKeys omitted, zero subordinate rows render", () => {
+    render(
+      <StrategyTable strategies={[publishedRow()]} categorySlug="chip-spec" />,
+    );
+
+    expect(placeholderRows()).toHaveLength(0);
+    expect(screen.queryByText(/Finish setup/)).toBeNull();
+    expect(screen.queryByText("No strategy yet")).toBeNull();
+    expect(bodyRows()).toHaveLength(1);
+  });
+
+  it("a strategy-less account gets placeholders and NO misleading filter message", () => {
+    render(
+      <StrategyTable
+        strategies={[]}
+        categorySlug="chip-spec"
+        visibility="owner-all-statuses"
+        placeholderKeys={PLACEHOLDER_KEYS}
+        onFinishSetup={() => {}}
+      />,
+    );
+
+    // Nothing was filtered out — saying so would be a lie.
+    expect(screen.queryByText(FILTER_EMPTY_COPY)).toBeNull();
+    expect(placeholderRows()).toHaveLength(2);
+  });
+
+  it("W-5: an active filter that matches nothing shows the message ABOVE the placeholders", () => {
+    render(
+      <StrategyTable
+        strategies={[privateRow(), draftRow(), publishedRow()]}
+        categorySlug="chip-spec"
+        visibility="owner-all-statuses"
+        placeholderKeys={PLACEHOLDER_KEYS}
+        onFinishSetup={() => {}}
+      />,
+    );
+
+    fireEvent.change(screen.getByPlaceholderText("Search strategies..."), {
+      target: { value: "zzz-no-such-strategy" },
+    });
+
+    // The ranked set really was filtered to nothing, so the message is honest.
+    const messageIndex = indexOfRowContaining(FILTER_EMPTY_COPY);
+    expect(messageIndex).toBeGreaterThanOrEqual(0);
+
+    // Placeholders are NOT filter results — they are key-coverage rows,
+    // unaffected by search/filters — so they sit BELOW the message.
+    const rows = bodyRows();
+    const placeholders = placeholderRows();
+    expect(placeholders).toHaveLength(2);
+    for (const p of placeholders) {
+      expect(rows.indexOf(p)).toBeGreaterThan(messageIndex);
+    }
   });
 });
