@@ -2152,6 +2152,36 @@ export function ScenarioComposer({
       .map((a) => a.name);
   }, [loadingReturnsIds, scenario.draft.addedStrategies]);
 
+  // Phase 147 / SCEN-01 (RESEARCH P6) — the HYDRATION seam. `fetchAddedReturns`
+  // used to have exactly two call sites, both ADD seams (handleAddStrategy just
+  // below, and the BridgeDrawer onAdd) — so a strategy that entered the draft in
+  // a PREVIOUS session never got fetched. `addedReturnsById` starts empty on
+  // every fresh mount, so a page refresh or an `openSavedScenario` reopen left
+  // every added leg contributing [] again and the SCEN-01 symptom survived the
+  // phase's column fix one F5 later. This effect covers BOTH un-fixed entry
+  // paths (reopen and localStorage-draft hydration) because both land their
+  // strategies in `draft.addedStrategies` on a mount where `addedReturnsById` is
+  // empty.
+  //
+  // It reuses the add seam's guard predicate VERBATIM — not in the book, and not
+  // already resolved — and leans on `fetchAddedReturns`' own `lazyAbortRef`
+  // in-flight guard (:1315) for idempotence. ⛔ Deliberately NO second dedup
+  // mechanism (no ref flag, no mount-once latch): the fetch function already
+  // dedupes, and a parallel mechanism is exactly the drift this phase exists to
+  // prevent.
+  useEffect(() => {
+    for (const a of scenario.draft.addedStrategies) {
+      if (!strategyById.has(a.id) && addedReturnsById[a.id] === undefined) {
+        fetchAddedReturns(a.id);
+      }
+    }
+  }, [
+    scenario.draft.addedStrategies,
+    strategyById,
+    addedReturnsById,
+    fetchAddedReturns,
+  ]);
+
   // UNIFY-04 — the single add seam for catalog adds (empty-state drawer,
   // main-body drawer, Bridge). Appends to the draft via the hook mutator, THEN
   // — when the id is not already in the book (its series isn't in
