@@ -386,6 +386,7 @@ phase (nothing here is a transient/recoverable system state).
 | Mark dialog | title `Mark ownership`; CTAs `Save mark` / `Cancel` |
 | Rename dialog | title `Rename strategy`; field label `Name`; helper `Only you see this name. Public surfaces keep showing the codename.`; CTAs `Save name` / `Cancel`; validation `Enter a name.` / `Keep it under 80 characters.` |
 | Allocate dialog | title `Allocate — {name}` / `Edit allocation — {name}`; field label `Allocation (USD)`; preview `≈ {w}% of your book (${bookEquity})` or `Weight appears once your book equity is known.`; CTAs `Allocate` / `Save allocation` / `Cancel`; validation `Enter an amount above $0.` / `That's above the $1B sanity cap — check the amount.` |
+| Allocate remedy (no portfolio — rev-3) | title `No portfolio yet.` body `Allocations live inside a portfolio. Create one first, then allocate from here.` link `Create a portfolio →` (accent underline, href `/portfolios`) · `Close` (secondary). Renders INSTEAD of the amount form when the allocator has no portfolio (`MyAllocationDashboardPayload.portfolio` null); the row's `Allocate…` action stays clickable (no-disabled-buttons) and no request is made |
 | Not-allocated cell | `— not allocated` |
 | Holdings empty (zero marked, has strategies) | heading `No strategies marked as own capital.` body `Set the mark from My Strategies, or when you connect a new key.` link `Go to My Strategies →` |
 | Holdings empty (zero strategies) | heading `No strategies yet.` body `Connect an exchange API key or upload a CSV to see your strategies here.` |
