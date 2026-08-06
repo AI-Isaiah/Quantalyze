@@ -23,6 +23,9 @@ import {
   StrategyTable,
   type PlaceholderKeyRow,
 } from "@/components/strategy/StrategyTable";
+import { MarkOwnershipDialog } from "@/components/strategy/MarkOwnershipDialog";
+import { RenameStrategyDialog } from "@/components/strategy/RenameStrategyDialog";
+import type { CapitalOwnership } from "@/lib/capital-ownership";
 import type { PercentileMap, RankedStrategyRow } from "@/lib/queries";
 
 interface MyStrategiesSectionProps {
@@ -55,6 +58,22 @@ export function MyStrategiesSection({
   percentiles,
 }: MyStrategiesSectionProps) {
   const [wizardOpen, setWizardOpen] = useState(false);
+  // Phase 150 / OWN-03 + OWN-05 — the two dialogs' targets. Same client-boundary
+  // rule as `onFinishSetup` above (see the header comment): the RSC page cannot
+  // hand StrategyTable a function prop, so the callbacks are minted here.
+  //
+  // Only the fields each dialog needs are captured, not the whole row: a mark
+  // change re-renders the page through router.refresh(), and a stale row object
+  // held in state would be a second, silently diverging copy of the truth.
+  const [markTarget, setMarkTarget] = useState<{
+    id: string;
+    name: string;
+    mark: CapitalOwnership | null;
+  } | null>(null);
+  const [renameTarget, setRenameTarget] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
   const router = useRouter();
 
   return (
@@ -71,7 +90,37 @@ export function MyStrategiesSection({
         visibility="owner-all-statuses"
         placeholderKeys={placeholderKeys}
         onFinishSetup={() => setWizardOpen(true)}
+        onMarkOwnership={(s) =>
+          setMarkTarget({
+            id: s.id,
+            name: s.name,
+            mark: s.capital_ownership ?? null,
+          })
+        }
+        onRename={(s) => setRenameTarget({ id: s.id, name: s.name })}
       />
+      {/* Mounted only while a row is selected, and KEYED by that row's id, so
+          each open starts from that row's own current mark/name rather than
+          inheriting the previously opened row's answer. */}
+      {markTarget && (
+        <MarkOwnershipDialog
+          key={markTarget.id}
+          open
+          onClose={() => setMarkTarget(null)}
+          strategyId={markTarget.id}
+          strategyName={markTarget.name}
+          currentMark={markTarget.mark}
+        />
+      )}
+      {renameTarget && (
+        <RenameStrategyDialog
+          key={renameTarget.id}
+          open
+          onClose={() => setRenameTarget(null)}
+          strategyId={renameTarget.id}
+          currentName={renameTarget.name}
+        />
+      )}
       {/* Opens FRESH — there is no preselect seam on this overlay today
           (founder ruling 2026-08-05; the follow-up is logged in TODOS.md), so
           "Finish setup" starts the wizard on its API-key branch rather than
