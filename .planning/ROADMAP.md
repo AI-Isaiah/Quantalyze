@@ -213,8 +213,8 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 150-06-PLAN.md — my-strategies + factsheet UI: tag, row actions, Mark/Rename dialogs, owner-lane thread (wave 3)
-- [ ] 150-07-PLAN.md — Holdings UI: rows, AllocateDialog, three-arm empty state, unsigned-weight fix + contract pin (wave 3)
+- [x] 150-06-PLAN.md — my-strategies + factsheet UI: tag, row actions, Mark/Rename dialogs, owner-lane thread (wave 3)
+- [x] 150-07-PLAN.md — Holdings UI: rows, AllocateDialog, three-arm empty state, unsigned-weight fix + contract pin (wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
@@ -323,7 +323,7 @@ Plans:
 | 147. SCEN-01 engine series | 6/6 | Complete   | 2026-08-05 |
 | 148. OWN owner factsheet | 5/5 | Complete   | 2026-08-05 |
 | 149. NAV my-strategies ranking | 5/5 | Complete   | 2026-08-05 |
-| 150. OWN-03 portfolio question | 5/8 | In Progress|  |
+| 150. OWN-03 portfolio question | 7/8 | In Progress|  |
 | 151. AUM book + sizing | 0/? | Not started | - |
 | 152. SCEN composer legibility | 0/? | Not started | - |
 | 153. WIZFORM + MT5-14 | 0/? | Not started | - |
