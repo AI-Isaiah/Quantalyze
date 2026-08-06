@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { AlertSeverity, DocType, SupportedExchange } from "./utils";
+import type { CapitalOwnership } from "./capital-ownership";
 import {
   SIGNUP_ROLES,
   exchangeEnum,
@@ -207,6 +208,19 @@ export interface Strategy {
    * Phase 17 / DESIGN-01 polishes the visual; the data wiring is final here.
    */
   trust_tier?: "api_verified" | "csv_uploaded" | "self_reported" | null;
+  /**
+   * Phase 150 / OWN-03 — whose capital is in this key. THREE display states:
+   * `"own_capital"` (accent tag, the only allocatable mark), `"team_review"`
+   * (muted tag, the wizard default), and absent/`null` (legacy rows never
+   * asked — NO tag, and non-allocatable). Deliberately nullable with no DB
+   * default and no backfill; see `@/lib/capital-ownership` and
+   * 150-RESEARCH.md § Schema Findings 1. Never test this field inline —
+   * `isAllocatable()` is the single-source predicate.
+   *
+   * `RankedStrategyRow` (queries.ts) is `Strategy & …`, so the owner-surface
+   * rows inherit this field from here.
+   */
+  capital_ownership?: CapitalOwnership | null;
 }
 
 /**
