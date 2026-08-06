@@ -437,6 +437,11 @@ the absent upper bound.
 `isValidDollar` / `MAX_DOLLAR_VALUE` for the $1B sanity cap rather than minting a
 second dollar validator (grep confirms one definition today).
 
+> ⚠️ **CORRECTED (review round 3 W-3):** `MAX_DOLLAR_VALUE_USD` is $1e12 — the AUM/capacity
+> cap, NOT $1B. The allocation route's bound is `MAGNITUDE_CAPS.MAX_TICKET_SIZE_USD` ($1e9),
+> which is what keeps the approved "$1B sanity cap" copy true. Do NOT reuse `isValidDollar`
+> for the allocation amount (1e12 / accepts-0 convention). Plans 05/07 are authoritative.
+
 **Currency formatter — DO NOT write a new one.** `HoldingsTable.tsx:72-80`:
 
 ```ts
@@ -508,6 +513,11 @@ No explicit `WITH CHECK` — under `FOR ALL` Postgres reuses `USING` as the chec
 INSERT/UPSERT is covered. Note it in the money-path review rather than "fixing" it.
 The route still needs the explicit `portfolios.user_id` pre-check for a clean 404
 (alias route `:116-137` states exactly this rationale).
+
+> ⚠️ **SUPERSEDED (rev-4, D-03-B):** no client portfolio id crosses the boundary anymore —
+> the allocation route resolves (and lazily provisions) the caller's real portfolio
+> server-side from the session, so the client-supplied-portfolio-id ownership pre-check
+> described above does not exist in the final design. Plan 05's contract is authoritative.
 
 **⛔ D-03 CENSUS — every production site that CREATES a `portfolio_strategies` row today.**
 The structural gate must enumerate these, not just the new route:
