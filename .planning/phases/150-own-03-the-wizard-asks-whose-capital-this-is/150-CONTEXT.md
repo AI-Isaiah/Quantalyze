@@ -100,6 +100,17 @@ anything.
   tooltip "share of allocated capital"). `current_weight` remains UNWRITTEN — that pin stays. Rows with
   no `allocated_amount` render `—`. This satisfies the approved mock (`$120,000 · 24.00%`) with zero DB
   write and zero analytics contamination; it supersedes the UI-SPEC's book-equity weight-fallback line.
+- **D-03-B (lazy real-portfolio provisioning — 2026-08-06, round-4 scope addition, founder-flagged):**
+  the allocation route resolves the caller's REAL portfolio (`user_id = auth.uid() AND is_test =
+  false`) and, when absent, CREATES it server-side: `{ user_id: auth.uid(), name: 'Active
+  Allocation', is_test: false }` (the migration-023 real-book seed convention), handling the
+  `portfolios_one_real_per_user` 23505 race by re-selecting and proceeding (the CreatePortfolioForm
+  docblock's own prescription). This is the ONLY `is_test=false` creation path in the repo — the
+  /portfolios form deliberately inserts `is_test: true` and nothing else creates a real portfolio,
+  so without provisioning EVERY allocator's book is portfolio-less and SC 2 is unreachable.
+  Provisioning a container is NOT auto-add: the position write remains behind the explicit
+  `Allocate…` action + amount (SC 3 intact). Supersedes the round-3 no-portfolio remedy modal
+  (that state no longer exists); the client never sends a portfolio id.
 
 ### Claude's Discretion
 - Exact copy of the two-way question (crisp; founder tone), the "More details" disclosure
