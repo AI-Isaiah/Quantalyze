@@ -1059,3 +1059,71 @@ describe("[140.5-03 / SEAMPROSE-02] ConnectKeyStep — the advertised wait reach
     expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
   });
 });
+
+/**
+ * ⚠️ STOPGAP regression (hotfix 2026-08-06, incident 2026-08-05) — see the
+ * `KNOWN_CREATE_WITH_KEY_CODES` roster comment. The server classified a
+ * validate-key failure as `SERVICE_UNREACHABLE`, but the roster did not carry
+ * the code, so the membership check rejected the honest server code and the
+ * wizard rendered the UNKNOWN card ("Try the last action again.", with a
+ * Retry control) for a fault whose own copy says the request never got an
+ * answer. The two verify-key scope codes travel with it. The CLASS fix (a
+ * roster DERIVED from the route contract) stays with Phase 153 / WIZFORM-02.
+ */
+describe("[hotfix 2026-08-06] ConnectKeyStep — server-emitted SERVICE_UNREACHABLE + scope codes render their own copy, never UNKNOWN", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("a 502 body carrying code SERVICE_UNREACHABLE reaches its own envelope state", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { code: "SERVICE_UNREACHABLE", error: "validation never answered" },
+        502,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(
+      envelope,
+      "the server's honest code collapsed to UNKNOWN — the 2026-08-05 " +
+        "incident rendering. The roster must admit SERVICE_UNREACHABLE.",
+    ).toHaveAttribute("data-error-code", "SERVICE_UNREACHABLE");
+    // The copy the user reads — hand-typed literals, not imports.
+    expect(envelope).toHaveTextContent("We could not reach our own service.");
+    expect(envelope).not.toHaveTextContent("Try the last action again.");
+
+    // The funnel sees the specific code too, not UNKNOWN.
+    await vi.waitFor(() => expect(trackMock).toHaveBeenCalled());
+    const payload = trackMock.mock.calls.find(
+      (c) => (c as unknown[])[0] === "wizard_error",
+    )![1] as { code: string };
+    expect(payload.code).toBe("SERVICE_UNREACHABLE");
+  });
+
+  it.each([
+    ["KEY_MISSING_READ_SCOPE", "This key is missing a read permission we need."],
+    ["KEY_PERMISSION_DENIED", "The exchange refused this key's permissions."],
+  ] as const)(
+    "the verify-key scope code %s is admitted and renders its own title",
+    async (code, title) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        jsonResponse({ code, error: "scope refused" }, 400),
+      );
+      render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+      fillKeyAndSecret();
+      fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+      const envelope = await screen.findByTestId("error-envelope");
+      expect(envelope).toHaveAttribute("data-error-code", code);
+      expect(envelope).toHaveTextContent(title);
+    },
+  );
+});

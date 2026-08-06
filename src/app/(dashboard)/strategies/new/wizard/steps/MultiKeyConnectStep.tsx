@@ -242,6 +242,18 @@ const KNOWN_ADD_KEY_CODES: ReadonlySet<WizardErrorCode> =
     "KEY_PROBE_FAILED",
     "KEY_EXCHANGE_UNAVAILABLE",
     "KEY_VENUE_TRANSIENT",
+    // ⚠️ STOPGAP (hotfix 2026-08-06, incident 2026-08-05): same three-code
+    // addition as `KNOWN_CREATE_WITH_KEY_CODES` (see the full incident note
+    // there) — the server put `SERVICE_UNREACHABLE` on the wire, the roster
+    // rejected it, and the step rendered UNKNOWN with a Retry control for a
+    // no-answer fault. The two rosters stay SEPARATE (docblock above) and
+    // take the change together because both routes share the classifier that
+    // emits these codes. Copy for all three verified in `WIZARD_ERROR_COPY`.
+    // CLASS fix (derive the roster from the route contract) = Phase 153 /
+    // WIZFORM-02; do not grow this list further, derive it there.
+    "SERVICE_UNREACHABLE",
+    "KEY_MISSING_READ_SCOPE",
+    "KEY_PERMISSION_DENIED",
   ]);
 
 /**
