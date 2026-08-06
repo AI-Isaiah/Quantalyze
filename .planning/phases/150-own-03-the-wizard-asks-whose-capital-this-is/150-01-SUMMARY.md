@@ -482,3 +482,173 @@ Task 2 checkpoint fully discharged by the orchestrator after the continuation pa
 - `test_weight_snapshot_seed_secdef.sql` vs TEST: ALL PASS.
 
 PROD apply happens automatically at merge to main (that is the intent — it repairs the April-2026 AddToPortfolio/MigrationWizard breakage). Watch item from the first pass (seed-full-app-demo persona/holdings shapes) remains open for the phase-end verification.
+
+## rev-2 (2026-08-06) — migration review: two BLOCKING data-integrity findings closed
+
+`20260806120000_strategies_capital_ownership.sql` was amended **IN PLACE**. It has never
+been merged, so PROD has never seen it; it exists only on this branch and on TEST (applied
+via MCP). Every object in it is written re-runnably (DROP-then-ADD / `CREATE OR REPLACE`)
+precisely so it can be re-applied — verified by applying it three times, twice on top of the
+pre-fix state, self-check green each time. **The orchestrator must re-apply it to TEST
+(`qmnijlgmdhviwzwfyzlc`, never PROD) and re-run the guard test.**
+`20260806130000_seed_weight_snapshot_secdef.sql` is untouched.
+
+### F1 (BLOCKING) — the flip RPC deleted a NON-OWNER caller's own position
+
+`flip_capital_ownership_to_team_review()` DELETEd before it checked anything. Its DELETE is
+scoped to `portfolios WHERE user_id = auth.uid()` — **the caller's book, not the owner's** —
+so caller B invoking `flip(A_strategy)` deleted **B's own position** in it and returned
+`(1, 0)` while the mark UPDATE no-oped against `strategies_update`. The function COMMENT and
+case 7b both claimed a non-owner call was "a total no-op returning (0, 0)"; that was false
+for exactly the caller who held the target. Silent position loss for a bystander.
+
+Fixed with an owner precheck ahead of the DELETE (`SELECT user_id INTO v_owner ...`; NULL or
+a different uid returns `(0, 0)` immediately). The RLS reasoning is written into the body:
+under SECURITY INVOKER a caller can always read their OWN strategy via `strategies_read`, so
+an owner's precheck read never returns NULL, and a non-owner reading a private strategy gets
+NULL — which lands on the same correct no-op arm. The statements' `auth.uid()` predicates are
+retained as defence in depth; they protect the victim and never the caller, which is exactly
+why they could not substitute for the precheck.
+
+### F2 (BLOCKING) — SC 2b was INSERT-only
+
+`strategies_update USING (user_id = auth.uid())` lets the owner PATCH `capital_ownership` to
+`'team_review'` straight through PostgREST — no route, no RPC, nothing to intercept it —
+stranding every live position. That is the precise hole the flip RPC exists to close,
+reachable without ever calling it. A guard callers must volunteer to use is a convention,
+not an invariant.
+
+New **part 3b**: `guard_team_review_mark_no_stranded_positions()` +
+`trg_strategies_team_review_mark_guard`, `BEFORE UPDATE OF capital_ownership ON
+public.strategies`. RAISEs `check_violation` when the mark ENTERS `'team_review'`
+(`OLD IS DISTINCT FROM 'team_review'`) while an **owner-scoped** position exists.
+D-03-A's conventions throughout: `SECURITY DEFINER`, pinned `search_path = public,
+pg_catalog`, `REVOKE ALL ... FROM PUBLIC, anon, authenticated`, `COMMENT` on both function
+and trigger.
+
+**Ordering proof (load-bearing).** The RPC DELETEs the owner's positions FIRST and only then
+UPDATEs the mark, and after the F1 precheck `auth.uid()` IS the owner — so the set the RPC
+deletes is exactly the set this guard counts, the count is 0 by the time the guard fires, and
+the sanctioned flip is admitted. Case 7a is unchanged and stays green. Reordering the two
+statements was mutated (M16) and fails both behaviourally and at the migration self-check.
+
+**The un-mark seed step still passes, and this was measured rather than reasoned about.** The
+guard test's `UPDATE strategies SET capital_ownership = NULL WHERE id = strat_a_legacy` fires
+the trigger (it is column-targeted, and triggers fire regardless of the executing role — the
+seeding role gets no pass), but NULL is not `'team_review'`, so the guard's `IS NOT DISTINCT
+FROM` condition is false and it returns NEW untouched. Mutation M15 (a guard that fires on
+any `capital_ownership` UPDATE) reddens on that exact seed line, which is the falsifiable
+proof that the statement above is about this code and not about a hoped-for behaviour.
+
+### F3 (advisory) — the accepted narrowing is now written down
+
+After a sanctioned flip, THIRD-PARTY positions survive by design. The column COMMENT said
+"NEVER allocatable by anyone", which is narrower at the data layer than stated. Both the
+COMMENT and a new header section (g) now say what is actually guaranteed — *never NEWLY
+allocatable*: no INSERT can mint a position from a `team_review` strategy for anyone, and the
+owner cannot strand their own book by marking one; a row another allocator created BEFORE the
+flip is retained. The rationale is recorded so a future reader cannot "close the gap": the
+alternative is a cross-tenant DELETE in which one allocator's private bookkeeping silently
+rewrites a different allocator's portfolio. Pinned by case 7e.
+
+### Test changes
+
+`supabase/tests/test_capital_ownership_allocation_guard.sql` — five new cases, existing
+assertions unmodified. New fixtures: a portfolio owned by B, and one PUBLISHED `own_capital`
+strategy of A's held by **both** allocators (the shape that makes "the caller's positions"
+and "the owner's positions" distinguishable at all).
+
+| Case | Pins |
+|------|------|
+| 7d | F1. Non-owner flip where the CALLER holds the target → `(0, 0)`, caller's position survives, owner's mark and position untouched. |
+| 7e | F3. Owner's flip → `(1, 1)`, owner's row gone, **third-party row survives**. Doubles as the behavioural ordering proof for part 3b. |
+| 7f | F2. Raw `UPDATE ... = 'team_review'` with a live owner position RAISEs and disturbs nothing; the sanctioned RPC then reaches the same end state on the same row, same session. |
+| 7g | Positive control for part 3b — transitions to `own_capital` and back to NULL with a live position must SUCCEED. |
+| 7h | Structural (7c's twin) — the new guard is `SECURITY DEFINER` with a pinned `search_path`. |
+
+Case 7c's `auth.uid()` threshold moved 2 → 3. The precheck added a third occurrence; at the
+old bar the DELETE's or the UPDATE's predicate could be deleted while the precheck alone kept
+the count at 2, so 7c would have quietly lost half its teeth **as a side effect of the F1
+fix**.
+
+### Verification — ephemeral local Postgres 16, RED → GREEN, both findings
+
+A fresh cluster with a stand-in schema: RLS predicates copied verbatim from
+`20260405061912_rls_policies.sql`, tables and functions owned by a **non-superuser,
+non-BYPASSRLS** role (so a SECURITY DEFINER function's exemption comes from ownership, not a
+superuser shortcut), and both pre-existing `BEFORE UPDATE` triggers on `strategies`
+(`guard_strategies_publish_transition`, `guard_wizard_draft_updates`) installed verbatim from
+`supabase/schema/functions/` — so the new UPDATE-scoped trigger is proven to coexist with
+them rather than in a vacuum.
+
+- **RED (F1), the finding reproduced:** the rev-2 test against the **pre-fix migration at
+  HEAD** →
+  `TEST FAILED (7d): a NON-OWNER flip on a strategy the CALLER holds affected rows
+  (removed=1, updated=0), expected (0, 0)`. (7c reddens first on the same run — the
+  behavioural arm was reached with 7c's threshold temporarily relaxed, so both are proven
+  independently.)
+- **RED (F2):** the amended migration with `trg_strategies_team_review_mark_guard` dropped →
+  `TEST FAILED (7f): a raw UPDATE marked a strategy team_review while the owner's position
+  was live — the position is now stranded and SC 2b is INSERT-only`.
+- **GREEN:** amended migration applies clean, self-check emits *"…INSERT-scoped D-03-A
+  trigger + UPDATE-scoped mark-transition guard + flip RPC with owner precheck and
+  DELETE-before-UPDATE order"*, and both DB files report ALL PASS
+  (`test_capital_ownership_allocation_guard`, `test_capital_ownership_column`).
+- **Re-runnability:** applied over the pre-fix state and then a third time — self-check green
+  each time, guard test ALL PASS after each.
+- `npx tsx scripts/dump-sql-functions.ts --check` → *"SQL function snapshot is current (108
+  functions)"* (107 → 108: the new guard). Regenerated with `npm run schema:functions`, so
+  the path-triggered `sql-function-snapshot.yml` gate stays green.
+
+**Local-cluster limitation, stated rather than glossed:** the stand-in has no
+`weight_snapshots` table or seed triggers, so it cannot re-prove the Deviation-4 landmine.
+That is unchanged by this work and already ALL PASS on TEST. The TEST re-apply and re-run
+remain the authoritative gate.
+
+#### Rule-9 mutation ledger, rev-2 — 8 mutations, 8 caught
+
+| # | Mutation | Caught by | Result |
+|---|----------|-----------|--------|
+| M12 | revert the flip RPC to the pre-fix body (no owner precheck) | case 7d | RED — `(removed=1, updated=0)`. This is the F1 finding itself. |
+| M13 | `DROP TRIGGER trg_strategies_team_review_mark_guard` | case 7f | RED — the raw UPDATE strands the position. This is the F2 finding itself. |
+| M14 | widen part 3b's count from owner-scoped to strategy-wide ("close" F3 at the guard) | case 7e | RED — the OWNER's own flip is refused because a THIRD PARTY holds the strategy. Hostage-taking, caught. |
+| M15 | drop the "transition INTO team_review" condition — guard fires on any `capital_ownership` UPDATE | the seed's un-mark step, then 7g | RED on `UPDATE strategies SET capital_ownership = NULL WHERE id = strat_a_legacy`. The measured proof that the seed step's survival is a property of the code. |
+| M16 | reorder the flip RPC to UPDATE-before-DELETE | migration self-check 5e, and case 7a behaviourally | RED at apply — *"must DELETE the owner's positions BEFORE it UPDATEs the mark, or trg_strategies_team_review_mark_guard rejects the sanctioned flip"*; with the self-check stripped, the RPC raises 23514 against its own guard. |
+| M17 | make the flip's DELETE strategy-wide (the cross-tenant "fix" header (g) forbids) | case 7e (and 7c) | RED — `(removed=2, updated=1)`, expected `(1, 1)`: another allocator's position was destroyed. |
+| M18 | drop the trigger's `OF capital_ownership` column target | migration self-check 5f | RED at apply — *"is not column-targeted on capital_ownership (matched 0 column(s))"*. |
+| M19 | revert part 3b's guard to `SECURITY INVOKER` | case 7h **only** | RED. **Measured blind spot:** with 7h's `prosecdef` predicate neutered, this mutation leaves the ENTIRE suite GREEN — only the owner can reach the guard today and an owner sees their own book either way. 7h is the M6 lesson applied a second time. |
+
+M19 is the honest finding of this pass: a second piece of defence-in-depth that no
+behavioural test could see, found by mutating rather than by assuming, and pinned before it
+could be refactored away.
+
+### rev-2 files and commits
+
+- `supabase/migrations/20260806120000_strategies_capital_ownership.sql` (amended in place),
+  `supabase/schema/functions/flip_capital_ownership_to_team_review.sql`,
+  `supabase/schema/functions/guard_team_review_mark_no_stranded_positions.sql` (new) —
+  commit `27cfdd01`
+- `supabase/tests/test_capital_ownership_allocation_guard.sql` — commit `ab41d319`
+
+No TS/vitest file was touched (Wave 2 owns those concurrently); no other migration was
+touched; `STATE.md` and `ROADMAP.md` were deliberately not updated.
+
+### rev-2 self-check: PASSED
+
+All four claimed files exist on disk with no truncation — migration 613 lines, guard test 764
+lines, the two function snapshots present and `--check`-current at 108 functions. Both claimed
+commits are in `git log` (`27cfdd01`, `ab41d319`). `git diff --diff-filter=D HEAD~2 HEAD`
+reports no deletions. Worktree clean; the ephemeral Postgres cluster lived entirely in the
+session scratchpad and never in the repo.
+
+### Orchestrator to-do after rev-2
+
+1. Re-apply `20260806120000_strategies_capital_ownership.sql` to TEST
+   (`qmnijlgmdhviwzwfyzlc`) via MCP `apply_migration`. It is re-runnable; the self-verify
+   block now also asserts the new trigger's event scope and column target, the flip RPC's
+   owner precheck, and its DELETE-before-UPDATE order.
+2. Re-run `test_capital_ownership_allocation_guard.sql` against TEST (the column test and the
+   weight-snapshot test are unaffected, but re-running all three is cheap).
+3. Wave 2 note: any route or client code that marks a strategy `team_review` must go through
+   `flip_capital_ownership_to_team_review()`. A direct `UPDATE`/PATCH now returns `23514`
+   whenever the owner holds a live position — by design, and the error's HINT names the RPC.
