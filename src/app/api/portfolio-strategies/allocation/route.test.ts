@@ -129,7 +129,10 @@ function strategiesChain(
  * `portfolios` resolve-or-provision.
  *
  * `resolve` is the ORDERED list of maybeSingle results: index 0 is the initial
- * resolve, index 1 the post-23505 re-select. `insert` is the single insert
+ * resolve, index 1 the post-23505 re-select. The LAST entry repeats for any
+ * further calls, because the DB state a second request observes is the state
+ * the first one left — a fixture that exhausted after one call would fake a
+ * portfolio disappearing between two allocates. `insert` is the single insert
  * result. Every insert payload is captured so "ZERO portfolios inserts" is a
  * real assertion, not an absence of evidence.
  */
@@ -155,7 +158,8 @@ function portfoliosChain(opts: {
           return builder;
         },
         maybeSingle: async () => {
-          const data = opts.resolve[resolveIdx] ?? null;
+          const data =
+            opts.resolve[Math.min(resolveIdx, opts.resolve.length - 1)] ?? null;
           resolveIdx += 1;
           return { data, error: opts.resolveError ?? null };
         },
