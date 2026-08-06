@@ -46,6 +46,9 @@ import { formatNumber, formatPercent } from "@/lib/utils";
 // formatter for this surface (shared with the Phase-150 mark/allocate
 // dialogs). Body unchanged — a second money formatter here is forbidden.
 import { formatUsd } from "@/lib/dollar-validation";
+import { OWN_CAPITAL } from "@/lib/capital-ownership";
+import { OwnershipTag } from "@/components/strategy/OwnershipTag";
+import { Button } from "@/components/ui/Button";
 import type { DesignHoldingRow } from "../lib/holdings-adapter";
 import type { StrategyRow } from "../lib/strategies-row-adapter";
 import { BridgeOutcomeBanner } from "./BridgeOutcomeBanner";
@@ -129,6 +132,21 @@ export interface HoldingsTableProps {
    * Sharpe / Max DD / Age) with each row linking to the strategy factsheet.
    */
   strategyRows?: StrategyRow[];
+  /**
+   * Phase 150 / OWN-03 (D-15) — does the viewer have ANY strategies at all?
+   *
+   * The empty-state arm-2/arm-3 discriminator, sourced server-side from
+   * `getMyStrategies` and threaded down as a NAMED signal rather than
+   * re-derived here: "zero own-capital rows" and "zero strategies" are
+   * different facts, and only the panel's data layer knows the second one.
+   * Defaults to `false`, i.e. the more conservative "no strategies yet" arm —
+   * a harness that supplies nothing must not claim the viewer has strategies.
+   */
+  hasAnyStrategies?: boolean;
+  /** Row action — open the Allocate dialog. Absent ⇒ the button does not render. */
+  onAllocate?: (row: StrategyRow) => void;
+  /** Row action — open the Edit-allocation dialog. Absent ⇒ no button. */
+  onEditAllocation?: (row: StrategyRow) => void;
   // ── Legacy props (Phase 08) — required when `rows` is absent.
   holdings?: HoldingRow[];
   showRevoked?: boolean;
@@ -153,7 +171,14 @@ export interface HoldingsTableProps {
 
 export function HoldingsTable(props: HoldingsTableProps) {
   if (props.strategyRows) {
-    return <StrategyRowsTable rows={props.strategyRows} />;
+    return (
+      <StrategyRowsTable
+        rows={props.strategyRows}
+        hasAnyStrategies={props.hasAnyStrategies ?? false}
+        onAllocate={props.onAllocate}
+        onEditAllocation={props.onEditAllocation}
+      />
+    );
   }
   if (props.rows) {
     return (
@@ -215,7 +240,17 @@ function compareStrategyRows(
   return 0;
 }
 
-function StrategyRowsTable({ rows }: { rows: StrategyRow[] }) {
+function StrategyRowsTable({
+  rows,
+  hasAnyStrategies,
+  onAllocate,
+  onEditAllocation,
+}: {
+  rows: StrategyRow[];
+  hasAnyStrategies: boolean;
+  onAllocate?: (row: StrategyRow) => void;
+  onEditAllocation?: (row: StrategyRow) => void;
+}) {
   const [sort, setSort] = useState<{ key: StrategySortKey; dir: SortDir }>({
     key: "allocation",
     dir: "desc",
@@ -247,10 +282,53 @@ function StrategyRowsTable({ rows }: { rows: StrategyRow[] }) {
         </h3>
       </div>
 
+      {/* D-15 — three arms, in the order they matter (the StrategyTable
+          :1067-1085 precedent: arm order is load-bearing, because a message
+          about a subset must never fire while a member of that superset is
+          visibly on screen):
+            (a) ANY union row → the LIST renders. A marked-but-unallocated row
+                and a positioned-but-unmarked row are both honest states, and
+                both are more informative than any sentence about emptiness.
+                This is what kills the pre-150 "No strategies onboarded yet."
+                dead end;
+            (b) zero rows but the viewer HAS strategies → name the remedy and
+                link to where it lives;
+            (c) zero strategies at all → the account-level empty state, with no
+                fabricated promise about allocation. */}
       {sortedRows.length === 0 ? (
-        <p className="px-4 py-6 text-sm text-text-muted">
-          No strategies onboarded yet.
-        </p>
+        <div className="px-4 py-4">
+          <div className="rounded-lg border border-border bg-surface px-6 py-8">
+            {hasAnyStrategies ? (
+              <>
+                <p className="text-body font-medium text-text-primary">
+                  No strategies marked as own capital.
+                </p>
+                <p className="mt-2 text-small text-text-secondary">
+                  Set the mark from My Strategies, or when you connect a new
+                  key.
+                </p>
+                <p className="mt-4">
+                  <Link
+                    href="/my-strategies"
+                    className="text-small font-medium text-accent underline"
+                  >
+                    Go to My Strategies →
+                  </Link>
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-body font-medium text-text-primary">
+                  No strategies yet.
+                </p>
+                <p className="mt-2 text-small text-text-secondary">
+                  Connect an exchange API key or upload a CSV to see your
+                  strategies here.
+                </p>
+              </>
+            )}
+          </div>
+        </div>
       ) : (
         <ResponsiveTable label="Strategies">
         <table className="w-full text-sm" data-table="strategies">
@@ -258,37 +336,67 @@ function StrategyRowsTable({ rows }: { rows: StrategyRow[] }) {
             <tr className="border-b border-border text-left text-micro uppercase tracking-wider text-text-muted">
               <StrategySortableHeader label="Strategy" sortKey="strategy" sort={sort} onSort={toggleSort} />
               <StrategySortableHeader label="Manager" sortKey="manager" sort={sort} onSort={toggleSort} />
-              <StrategySortableHeader label="Weight" sortKey="weight" sort={sort} onSort={toggleSort} align="right" />
+              {/* D-12-B — the denominator is the ALLOCATED OWN-CAPITAL set, not
+                  book equity. Naming it on the header is the difference between
+                  a derived number and an unexplained one. */}
+              <StrategySortableHeader label="Weight" sortKey="weight" sort={sort} onSort={toggleSort} align="right" title="share of allocated capital" />
               <StrategySortableHeader label="Allocation" sortKey="allocation" sort={sort} onSort={toggleSort} align="right" />
               <StrategySortableHeader label="MTD" sortKey="mtd" sort={sort} onSort={toggleSort} align="right" />
               <StrategySortableHeader label="Sharpe" sortKey="sharpe" sort={sort} onSort={toggleSort} align="right" />
               <StrategySortableHeader label="Max DD" sortKey="maxDd" sort={sort} onSort={toggleSort} align="right" />
               <StrategySortableHeader label="Age" sortKey="age" sort={sort} onSort={toggleSort} align="right" />
+              <th scope="col" className="px-4 py-2 text-right font-semibold">
+                Actions
+              </th>
             </tr>
           </thead>
           <tbody>
-            {sortedRows.map((row) => (
+            {sortedRows.map((row) => {
+              // D-03 expressed as ABSENCE, and D-13's UI half in one predicate:
+              // the money affordance exists ONLY for a row the adapter vouched
+              // for as own-capital, and WHICH affordance is derived from the
+              // allocation's null-ness — so one row can never offer both, and
+              // a second position can never be minted from this surface.
+              const isOwnCapital = row.capitalOwnership === OWN_CAPITAL;
+              const isAllocated = row.allocation != null;
+              return (
               <tr
                 key={row.id}
                 className="border-b border-border/50 last:border-0"
                 data-strategy-row={row.id}
               >
                 <td className="px-4 py-2 font-medium text-text-primary">
-                  <Link
-                    href={`/factsheet/${row.id}`}
-                    className="text-accent hover:underline"
-                  >
-                    {row.strategy}
-                  </Link>
+                  <span className="inline-flex items-center gap-1.5">
+                    <Link
+                      href={`/factsheet/${row.id}`}
+                      className="text-accent hover:underline"
+                    >
+                      {row.strategy}
+                    </Link>
+                    {/* Restates why the row is here AND why it is allocatable.
+                        An unmarked row carries no tag — absence is honest. */}
+                    <OwnershipTag mark={isOwnCapital ? OWN_CAPITAL : null} />
+                  </span>
                 </td>
                 <td className="px-4 py-2 text-text-secondary">
                   {row.manager ?? "—"}
                 </td>
                 <td className="px-4 py-2 text-right tabular-nums">
-                  {row.weight == null ? "—" : formatPercent(row.weight)}
+                  {row.weight == null
+                    ? "—"
+                    : formatPercent(row.weight, 2, { signed: false })}
                 </td>
                 <td className="px-4 py-2 text-right tabular-nums">
-                  {formatUsd(row.allocation)}
+                  {isOwnCapital && !isAllocated ? (
+                    <>
+                      <span className="font-metric">—</span>{" "}
+                      <span className="text-caption text-text-muted">
+                        not allocated
+                      </span>
+                    </>
+                  ) : (
+                    formatUsd(row.allocation)
+                  )}
                 </td>
                 <td className="px-4 py-2 text-right tabular-nums">
                   {row.mtd == null ? "—" : formatPercent(row.mtd)}
@@ -302,8 +410,31 @@ function StrategyRowsTable({ rows }: { rows: StrategyRow[] }) {
                 <td className="px-4 py-2 text-right tabular-nums">
                   {formatDays(row.age)}
                 </td>
+                {/* The affordance's EXISTENCE is a pure function of the row
+                    state, never of whether a host happened to wire a handler:
+                    gating the render on `onAllocate` would let a wiring
+                    regression silently delete the phase's primary CTA with
+                    every render test still green. The handler is invoked
+                    optionally; the button is secondary (accent primary lives
+                    inside the dialog, so a column of accent buttons cannot
+                    blow the 10% accent budget). */}
+                <td className="px-4 py-2 text-right">
+                  {isOwnCapital ? (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={() =>
+                        isAllocated ? onEditAllocation?.(row) : onAllocate?.(row)
+                      }
+                    >
+                      {isAllocated ? "Edit allocation…" : "Allocate…"}
+                    </Button>
+                  ) : null}
+                </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
         </ResponsiveTable>
@@ -318,17 +449,21 @@ function StrategySortableHeader({
   sort,
   onSort,
   align,
+  title,
 }: {
   label: string;
   sortKey: StrategySortKey;
   sort: { key: StrategySortKey; dir: SortDir };
   onSort: (key: StrategySortKey) => void;
   align?: "right";
+  /** Optional column tooltip — used to name a derived column's denominator. */
+  title?: string;
 }) {
   const isActive = sort.key === sortKey;
   return (
     <th
       className={`px-4 py-2 font-semibold ${align === "right" ? "text-right" : ""}`}
+      title={title}
       aria-sort={
         isActive ? (sort.dir === "asc" ? "ascending" : "descending") : "none"
       }
