@@ -701,27 +701,32 @@ const strategy =
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Does `current_weight` stay unwritten, and does the founder accept `—` in the Weight column?**
    - What we know: nothing in the repo writes it; two analytics-service consumers default `NULL → 1.0` and would be skewed by a mixed NULL/filled portfolio.
    - What's unclear: whether the approved mock's `$120,000 · 24.00%` is a hard expectation.
    - **Recommendation:** write `allocated_amount` only this phase; record the em-dash Weight cell as an explicit, documented non-goal owned by Phase 151. Surface it at plan review so it is a decision, not a surprise.
+   - **RESOLVED (2026-08-06, plan-check decision B-4 → CONTEXT amendment D-12-B):** the Weight cell is RENDER-DERIVED — `allocated_amount / Σ allocated_amount` across the allocated own-capital row set, unsigned formatPercent, denominator named "share of allocated capital". The approved mock's `$120,000 · 24.00%` renders with zero DB write; `current_weight` stays unwritten (Phase-151 pin intact); rows with no amount render `—`.
 
 2. **Does the rename need to reach the Holdings label (SC 1c), and via which mechanism?**
    - What we know: `displayStrategyName` will never return `name` for these rows; the owner carve-out has a documented in-repo precedent (`browse/route.ts:44-56`).
    - What's unclear: whether the founder reads "holdings alias" in OWN-05 as "the alias column" or as "the label on Holdings".
    - **Recommendation:** implement the adapter owner carve-out. It satisfies the stricter reading, widens disclosure to nobody, and does not couple rename to a position row.
+   - **RESOLVED (Plan 05):** adapter owner carve-out implemented — `ps.alias → s.name → displayStrategyName`, with the browse/route.ts:53 reasoning quoted in the comment.
 
 3. **INSERT-only trigger, or INSERT + `UPDATE OF allocated_amount`?**
    - What we know: an UPDATE-covering trigger breaks the shipped alias write on legacy rows.
    - **Recommendation:** INSERT-only for this phase, with a pgTAP case pinning that the legacy alias UPDATE still succeeds. Revisit if a future surface can move an amount onto an unmarked strategy.
+   - **RESOLVED (Plan 01):** INSERT-only trigger with the pgTAP legacy-alias regression pin. Predicate amended per plan-check decision B-1 (CONTEXT D-03-A): unconditional `team_review` arm + owner-equality conjunct so the shipped third-party insert paths pass; pgTAP third-party regression case added.
 
 4. **Is `capital_ownership` acceptable as a publicly-readable column on published strategies?**
    - **Recommendation:** accept and state it in the migration header (mirroring `strategies_status_private.sql:20-27`, which documents *why no RLS change is needed*). If not acceptable, the fix is projection-level, not RLS-level, and should be its own task.
+   - **RESOLVED (Plan 01 header):** accepted — the conscious-acceptance paragraph is written into the migration header (threat register T-150-04).
 
 5. **Asset-class select: keep collapsed, or hoist when editable?**
    - **Recommendation:** hoist out of the disclosure **only when `!assetClassLocked`** — two lines, preserves the cull for the API-key path, and removes a live Sharpe-inflation vector on the CSV path. If the planner prefers keep-and-accept, it must be written down as an accepted risk, not omitted.
+   - **RESOLVED (Plan 03):** hoisted — the asset-class select renders outside the disclosure when `!assetClassLocked`, inside (inert) when locked.
 
 ---
 

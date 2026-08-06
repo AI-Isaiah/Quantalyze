@@ -79,6 +79,28 @@ anything.
   contract (C-0112) is byte-untouched — public surfaces render codename per disclosure rules
   regardless; the proper name is the owner's label.
 
+### Amendments — 2026-08-06 (orchestrator decisions at plan-check; binding, do not re-litigate)
+- **D-03-A (trigger predicate — third-party allocation paths preserved):** the D-03 trigger RAISEs
+  when `capital_ownership = 'team_review'` (UNCONDITIONAL — SC 2b literally) OR when the strategy's
+  `user_id` equals the inserting portfolio's owner `user_id` AND `capital_ownership IS DISTINCT FROM
+  'own_capital'`. Third-party inserts (strategy owner ≠ portfolio owner: discovery
+  `AddToPortfolio.tsx:54`, manager `MigrationWizard.tsx:72`, `scripts/seed-full-app-demo.ts:1697,1929`)
+  PASS — those strategies are unmarkable by the allocator (owner-authz). A self-owned never-asked
+  (NULL) strategy stays non-allocatable (SC 3). pgTAP carries a third-party-insert regression case
+  (the INSERT-side twin of the alias-UPDATE regression).
+- **D-12-A (Holdings STRATEGIES panel population — union-shaped):** the panel lists
+  (marked own-capital strategies) ∪ (strategies with existing positions). Positions-but-unmarked rows
+  KEEP rendering — no allocated money ever leaves the money surface — but expose no `Allocate…`/`Edit
+  allocation…` affordance (and no Mark affordance where third-party-owned). A read-only PROD
+  `portfolio_strategies` census (Plan 05 verification) replaces the unsupported "PROD has no real user
+  positions" claim, which is deleted everywhere.
+- **D-12-B (Weight cell — render-derived):** the Weight cell renders `allocated_amount /
+  Σ allocated_amount` across the panel's allocated own-capital row set, formatted with the UI-SPEC's
+  unsigned `formatPercent(w, 2, { signed: false })`, with the denominator named honestly (column-header
+  tooltip "share of allocated capital"). `current_weight` remains UNWRITTEN — that pin stays. Rows with
+  no `allocated_amount` render `—`. This satisfies the approved mock (`$120,000 · 24.00%`) with zero DB
+  write and zero analytics contamination; it supersedes the UI-SPEC's book-equity weight-fallback line.
+
 ### Claude's Discretion
 - Exact copy of the two-way question (crisp; founder tone), the "More details" disclosure
   styling per DESIGN.md, mark tag styling, where the mark column/tag sits in the row, dialog
