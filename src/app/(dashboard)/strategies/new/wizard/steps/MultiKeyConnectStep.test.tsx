@@ -1788,3 +1788,76 @@ describe("[140.5-03 / SEAMPROSE-02] MultiKeyConnectStep — the advertised wait 
     expect(wait).toHaveTextContent("90s");
   });
 });
+
+/**
+ * ⚠️ STOPGAP regression (hotfix 2026-08-06, incident 2026-08-05) — see the
+ * `KNOWN_ADD_KEY_CODES` roster comment. Same defect as `ConnectKeyStep`: the
+ * server put `SERVICE_UNREACHABLE` on the wire, the roster rejected it, and
+ * the step rendered the UNKNOWN card with a Retry control for a no-answer
+ * fault. The two verify-key scope codes travel with it. The CLASS fix (a
+ * roster DERIVED from the route contract) stays with Phase 153 / WIZFORM-02.
+ */
+describe("[hotfix 2026-08-06] MultiKeyConnectStep — server-emitted SERVICE_UNREACHABLE + scope codes render their own copy, never UNKNOWN", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function fillPanel1() {
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    const panel1 = screen.getByTestId("key-panel-1");
+    fireEvent.change(within(panel1).getByTestId("key-1-api-key"), {
+      target: { value: "AK_LIVE_key2" },
+    });
+    fireEvent.change(within(panel1).getByTestId("key-1-api-secret"), {
+      target: { value: "SECRET_key2" },
+    });
+    fireEvent.change(within(panel1).getByTestId("key-1-window-start"), {
+      target: { value: "2024-01-01" },
+    });
+    return panel1;
+  }
+
+  it("a 502 body carrying code SERVICE_UNREACHABLE reaches its own envelope state", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { code: "SERVICE_UNREACHABLE", error: "validation never answered" },
+        502,
+      ),
+    );
+    const panel1 = fillPanel1();
+    fireEvent.click(within(panel1).getByTestId("key-1-validate"));
+
+    const envelope = await within(
+      screen.getByTestId("key-panel-1"),
+    ).findByTestId("error-envelope");
+    expect(
+      envelope,
+      "the server's honest code collapsed to UNKNOWN — the 2026-08-05 " +
+        "incident rendering. The roster must admit SERVICE_UNREACHABLE.",
+    ).toHaveAttribute("data-error-code", "SERVICE_UNREACHABLE");
+    // The copy the user reads — hand-typed literals, not imports.
+    expect(envelope).toHaveTextContent("We could not reach our own service.");
+    expect(envelope).not.toHaveTextContent("Try the last action again.");
+  });
+
+  it.each([
+    ["KEY_MISSING_READ_SCOPE", "This key is missing a read permission we need."],
+    ["KEY_PERMISSION_DENIED", "The exchange refused this key's permissions."],
+  ] as const)(
+    "the verify-key scope code %s is admitted and renders its own title",
+    async (code, title) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        jsonResponse({ code, error: "scope refused" }, 400),
+      );
+      const panel1 = fillPanel1();
+      fireEvent.click(within(panel1).getByTestId("key-1-validate"));
+
+      const envelope = await within(
+        screen.getByTestId("key-panel-1"),
+      ).findByTestId("error-envelope");
+      expect(envelope).toHaveAttribute("data-error-code", code);
+      expect(envelope).toHaveTextContent(title);
+    },
+  );
+});
