@@ -35,7 +35,10 @@ import { ContributionWizardOverlay } from "./components/ContributionWizardOverla
 // hydrate immediately on first paint (no skeleton flash for the nudge).
 import { OnboardingBanner } from "./components/OnboardingBanner";
 import { MandateQuickSetCard } from "./components/MandateQuickSetCard";
-import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import type {
+  MyAllocationDashboardPayload,
+  OwnCapitalStrategy,
+} from "@/lib/queries";
 import type { ExposureSectionData } from "./lib/exposure-props";
 import type { FavoriteRow, OptimizerPrefetch } from "./lib/watchlist-read";
 import { useCrossTabStorage } from "@/lib/storage/cross-tab";
@@ -380,6 +383,13 @@ export function AllocationsTabs(
     favorites?: FavoriteRow[];
     optimizer?: OptimizerPrefetch;
     note?: { initialContent: string; initialLastSavedAt: Date | null };
+    // Phase 150 / OWN-03 — ADDITIVE, same precedent as the trio above: two
+    // server reads threaded straight through to HoldingsTabPanel (already
+    // spread via `{...props}`). OPTIONAL here so the pre-existing
+    // AllocationsTabs test call-sites stay byte-unmodified; page.tsx always
+    // supplies both, and the panel renders honest-empty if either is absent.
+    ownCapitalStrategies?: OwnCapitalStrategy[];
+    hasAnyStrategies?: boolean;
   },
 ) {
   const router = useRouter();

@@ -1,7 +1,11 @@
 import { Suspense } from "react";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getMyAllocationDashboard } from "@/lib/queries";
+import {
+  getMyAllocationDashboard,
+  getMyStrategies,
+  getOwnCapitalStrategies,
+} from "@/lib/queries";
 import {
   getLatestExposureSnapshot,
   getNetExposureSeries,
@@ -70,17 +74,45 @@ export default async function MyAllocationPage() {
   // never a client-supplied id). They are NEW Promise.all items threaded as NEW
   // props — `getMyAllocationDashboard`'s polled payload and the `exposure`
   // threading stay byte-untouched (SC-4). Same throw-to-error.tsx discipline.
-  const [payload, snapshot, netSeries, allocationSeries, favorites, optimizer, note] =
-    await Promise.all([
-      getMyAllocationDashboard(user.id),
-      getLatestExposureSnapshot(user.id),
-      getNetExposureSeries(user.id),
-      getAllocationSeries(user.id),
-      getFavoritesWithStrategies(supabase, user.id),
-      getOptimizerPrefetch(supabase, user.id),
-      getDashboardNote(supabase, user.id),
-    ]);
+  // Phase 150 / OWN-03 — TWO more owner-scoped reads join the batch on the same
+  // additive precedent, both feeding the Holdings STRATEGIES panel:
+  //   - `getOwnCapitalStrategies` is the MARKED half of the D-12-A union row
+  //     set. It cannot be a widening of `getMyAllocationDashboard`'s embed,
+  //     which is rooted in `portfolio_strategies` — a marked strategy with no
+  //     position yet has no row there, and that row is precisely the one the
+  //     allocator clicks `Allocate…` on.
+  //   - `getMyStrategies` is the D-15 empty-state arm-2/arm-3 discriminator.
+  //     "Zero own-capital rows" and "zero strategies" are different facts and
+  //     deserve different copy; only this layer knows the second one.
+  // Both take the AUTHENTICATED user.id, and both return `null` (never `[]`) on
+  // a transient failure, so a fetch error cannot masquerade as a definitive
+  // empty state.
+  const [
+    payload,
+    snapshot,
+    netSeries,
+    allocationSeries,
+    favorites,
+    optimizer,
+    note,
+    ownCapitalStrategies,
+    myStrategies,
+  ] = await Promise.all([
+    getMyAllocationDashboard(user.id),
+    getLatestExposureSnapshot(user.id),
+    getNetExposureSeries(user.id),
+    getAllocationSeries(user.id),
+    getFavoritesWithStrategies(supabase, user.id),
+    getOptimizerPrefetch(supabase, user.id),
+    getDashboardNote(supabase, user.id),
+    getOwnCapitalStrategies(user.id),
+    getMyStrategies(user.id),
+  ]);
   const exposure: ExposureSectionData = { snapshot, netSeries, allocationSeries };
+  // Review round 2 W-2 — the outer parentheses are LOAD-BEARING: `?? 0 > 0`
+  // parses as `?? (0 > 0)`, which would make this `myStrategies ?? false` and
+  // send a non-empty list down as `false`.
+  const hasAnyStrategies = ((myStrategies?.length ?? 0) > 0);
 
   // Phase 11 / Plan 03 / D-13 — fire onboarding-funnel events (single-fire
   // via *_emitted_at sentinels on auth.users.raw_user_meta_data). All five
@@ -121,6 +153,8 @@ export default async function MyAllocationPage() {
             favorites={favorites}
             optimizer={optimizer}
             note={note}
+            ownCapitalStrategies={ownCapitalStrategies ?? []}
+            hasAnyStrategies={hasAnyStrategies}
           />
         </AllocationProvider>
       </Suspense>

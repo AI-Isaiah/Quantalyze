@@ -94,18 +94,14 @@ export interface StrategyRow {
 }
 
 export interface StrategyRowAdapterInputs {
+  /** The own-capital MARKED strategies (`getOwnCapitalStrategies`). */
+  strategies: OwnCapitalStrategy[];
   /**
-   * The own-capital MARKED strategies (`getOwnCapitalStrategies`).
-   *
-   * HAND-OFF(150-07): this parameter also accepts legacy POSITION-shaped rows
-   * so the shipped `toStrategyRows({ strategies })` call at
-   * `HoldingsTabPanel.tsx:94` keeps compiling and behaving in wave 2. Plan 07
-   * rewires that call to `{ strategies: marked, positions }` and DELETES both
-   * the union arm and the runtime discrimination below.
+   * This portfolio's `portfolio_strategies` rows. REQUIRED: the union has two
+   * halves and a caller that omits one is asking for a row set that silently
+   * drops allocated money (D-12-A). Pass `[]` to mean "no positions".
    */
-  strategies: OwnCapitalStrategy[] | MyAllocationDashboardPayload["strategies"];
-  /** This portfolio's `portfolio_strategies` rows. */
-  positions?: MyAllocationDashboardPayload["strategies"];
+  positions: MyAllocationDashboardPayload["strategies"];
   /** Injectable "now" for deterministic age math. Defaults to `new Date()`. */
   now?: Date;
 }
@@ -135,34 +131,11 @@ function computeMtd(rawDailyReturns: unknown): number | null {
   return Number.isFinite(mtd) ? mtd : null;
 }
 
-/**
- * HAND-OFF(150-07) — runtime discrimination for the back-compat slack.
- *
- * A position row is the only one of the two shapes carrying `strategy_id`
- * (the marked shape carries the strategy's own `id`), so the key's presence
- * is a sound discriminator. Deleted together with the union arm in Plan 07.
- */
-function isPositionShaped(
-  row: OwnCapitalStrategy | PositionRow,
-): row is PositionRow {
-  return "strategy_id" in row;
-}
-
 export function toStrategyRows(inputs: StrategyRowAdapterInputs): StrategyRow[] {
   const nowMs = (inputs.now ?? new Date()).getTime();
 
-  // HAND-OFF(150-07): split the legacy one-argument call's payload rows out of
-  // `strategies` and into the positions set.
-  const supplied = (inputs.strategies ?? []) as Array<
-    OwnCapitalStrategy | PositionRow
-  >;
-  const marked = supplied.filter(
-    (row): row is OwnCapitalStrategy => !isPositionShaped(row),
-  );
-  const positions: PositionRow[] = [
-    ...(inputs.positions ?? []),
-    ...supplied.filter(isPositionShaped),
-  ];
+  const marked = inputs.strategies ?? [];
+  const positions: PositionRow[] = inputs.positions ?? [];
 
   const markedById = new Map(marked.map((s) => [s.id, s]));
 

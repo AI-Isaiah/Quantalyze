@@ -46,14 +46,23 @@ function makeStrategy(over: {
 
 const NOW = new Date("2026-06-02T00:00:00Z");
 
+// The pre-150 F4b cases below all exercise the POSITION half of the union —
+// they feed `portfolio_strategies` rows. Plan 07 narrowed `strategies` to the
+// marked shape and made `positions` required (the B-3 slack that let a payload
+// row arrive under `strategies` is gone), so each of them names `positions`
+// explicitly. The assertions are unchanged: what a position row renders is
+// exactly what it rendered before this phase.
 describe("toStrategyRows", () => {
   it("returns an empty array for no strategies", () => {
-    expect(toStrategyRows({ strategies: [], now: NOW })).toEqual([]);
+    expect(toStrategyRows({ strategies: [], positions: [], now: NOW })).toEqual(
+      [],
+    );
   });
 
   it("preserves one output row per input strategy (bijection, order kept)", () => {
     const rows = toStrategyRows({
-      strategies: [
+      strategies: [],
+      positions: [
         makeStrategy({ strategy_id: "a" }),
         makeStrategy({ strategy_id: "b" }),
         makeStrategy({ strategy_id: "c" }),
@@ -66,7 +75,8 @@ describe("toStrategyRows", () => {
   describe("strategy name (disclosure-tier redaction preserved)", () => {
     it("alias wins over everything", () => {
       const [row] = toStrategyRows({
-        strategies: [
+        strategies: [],
+        positions: [
           makeStrategy({
             alias: "  My Delta Book  ",
             strategy: { name: "Real Name", codename: "ACME", disclosure_tier: "institutional" },
@@ -79,7 +89,8 @@ describe("toStrategyRows", () => {
 
     it("institutional surfaces the real name when no alias", () => {
       const [row] = toStrategyRows({
-        strategies: [
+        strategies: [],
+        positions: [
           makeStrategy({ strategy: { name: "Helios Basis", disclosure_tier: "institutional" } }),
         ],
         now: NOW,
@@ -89,7 +100,8 @@ describe("toStrategyRows", () => {
 
     it("exploratory falls back to codename, never the real name", () => {
       const [row] = toStrategyRows({
-        strategies: [
+        strategies: [],
+        positions: [
           makeStrategy({
             strategy: { name: "Secret Manager Name", codename: "ACME-7", disclosure_tier: "exploratory" },
           }),
@@ -104,7 +116,8 @@ describe("toStrategyRows", () => {
   describe("manager (org name redaction + codename fallback)", () => {
     it("institutional with server-provided organization_name surfaces it", () => {
       const [row] = toStrategyRows({
-        strategies: [
+        strategies: [],
+        positions: [
           makeStrategy({
             strategy: { organization_name: "Acme Quant LLP", codename: "ACME", disclosure_tier: "institutional" },
           }),
@@ -116,7 +129,8 @@ describe("toStrategyRows", () => {
 
     it("exploratory (organization_name redacted to null server-side) falls back to codename", () => {
       const [row] = toStrategyRows({
-        strategies: [
+        strategies: [],
+        positions: [
           makeStrategy({
             strategy: { organization_name: null, codename: "ACME-7", disclosure_tier: "exploratory" },
           }),
@@ -128,7 +142,8 @@ describe("toStrategyRows", () => {
 
     it("null org and null codename → manager null", () => {
       const [row] = toStrategyRows({
-        strategies: [makeStrategy({ strategy: { organization_name: null, codename: null } })],
+        strategies: [],
+        positions: [makeStrategy({ strategy: { organization_name: null, codename: null } })],
         now: NOW,
       });
       expect(row.manager).toBeNull();
@@ -152,7 +167,8 @@ describe("toStrategyRows", () => {
 
     it("compounds returns within the last observed month", () => {
       const [row] = toStrategyRows({
-        strategies: [withReturns({ "2026-06-01": 0.01, "2026-06-02": 0.02 })],
+        strategies: [],
+        positions: [withReturns({ "2026-06-01": 0.01, "2026-06-02": 0.02 })],
         now: NOW,
       });
       // (1.01 * 1.02) - 1 = 0.0302
@@ -161,7 +177,8 @@ describe("toStrategyRows", () => {
 
     it("only compounds the last observed month, excluding prior months", () => {
       const [row] = toStrategyRows({
-        strategies: [
+        strategies: [],
+        positions: [
           withReturns({
             "2026-05-30": 0.5, // prior month — must be excluded
             "2026-06-01": 0.01,
@@ -176,7 +193,8 @@ describe("toStrategyRows", () => {
     it("anchors on the LAST observed date, not the wall clock", () => {
       // Series ends in April; MTD = April's compounding even though now is June.
       const [row] = toStrategyRows({
-        strategies: [withReturns({ "2026-03-31": 0.9, "2026-04-01": 0.05, "2026-04-02": 0.05 })],
+        strategies: [],
+        positions: [withReturns({ "2026-03-31": 0.9, "2026-04-01": 0.05, "2026-04-02": 0.05 })],
         now: NOW,
       });
       // (1.05 * 1.05) - 1 = 0.1025 (March excluded — different month)
@@ -184,13 +202,18 @@ describe("toStrategyRows", () => {
     });
 
     it("returns null for empty daily_returns", () => {
-      const [row] = toStrategyRows({ strategies: [withReturns({})], now: NOW });
+      const [row] = toStrategyRows({
+        strategies: [],
+        positions: [withReturns({})],
+        now: NOW,
+      });
       expect(row.mtd).toBeNull();
     });
 
     it("returns null when daily_returns is null", () => {
       const [row] = toStrategyRows({
-        strategies: [makeStrategy({ strategy: { strategy_analytics: null } })],
+        strategies: [],
+        positions: [makeStrategy({ strategy: { strategy_analytics: null } })],
         now: NOW,
       });
       expect(row.mtd).toBeNull();
@@ -200,7 +223,8 @@ describe("toStrategyRows", () => {
   describe("age from added_at", () => {
     it("computes whole days since added_at", () => {
       const [row] = toStrategyRows({
-        strategies: [makeStrategy({ added_at: "2026-05-03T00:00:00Z" })],
+        strategies: [],
+        positions: [makeStrategy({ added_at: "2026-05-03T00:00:00Z" })],
         now: NOW, // 2026-06-02 → 30 days
       });
       expect(row.age).toBe(30);
@@ -208,7 +232,8 @@ describe("toStrategyRows", () => {
 
     it("clamps a future added_at (clock skew) to 0, never negative", () => {
       const [row] = toStrategyRows({
-        strategies: [makeStrategy({ added_at: "2026-07-01T00:00:00Z" })],
+        strategies: [],
+        positions: [makeStrategy({ added_at: "2026-07-01T00:00:00Z" })],
         now: NOW,
       });
       expect(row.age).toBe(0);
@@ -217,7 +242,8 @@ describe("toStrategyRows", () => {
 
   it("passes allocation, sharpe, and maxDd through null-safe — and weight is NULL even when current_weight is set", () => {
     const [withVals, withNulls] = toStrategyRows({
-      strategies: [
+      strategies: [],
+      positions: [
         makeStrategy({
           current_weight: 0.42,
           allocated_amount: 128_400,
@@ -585,60 +611,11 @@ describe("toStrategyRows — OWN-05 SC 1c owner-name carve-out", () => {
   });
 });
 
-describe("toStrategyRows — B-3 back-compat slack (HAND-OFF 150-07)", () => {
-  it("the legacy one-argument call still compiles and behaves as today, with weight null as the ONE diff", () => {
-    // HoldingsTabPanel.tsx:94 still calls `toStrategyRows({ strategies })`
-    // with PAYLOAD rows. Plan 07 rewires it and deletes this arm.
-    const rows = toStrategyRows({
-      strategies: [
-        makeStrategy({
-          strategy_id: "legacy",
-          alias: "Legacy Book",
-          current_weight: 0.42,
-          allocated_amount: 128_400,
-          added_at: "2026-05-03T00:00:00Z",
-          strategy: {
-            organization_name: "Helios Capital",
-            disclosure_tier: "institutional",
-            strategy_analytics: {
-              daily_returns: { "2026-06-01": 0.01, "2026-06-02": 0.02 } as never,
-              cagr: null,
-              sharpe: 1.8,
-              volatility: null,
-              max_drawdown: -0.064,
-            },
-          },
-        }),
-      ],
-      now: NOW,
-    });
-
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
-      id: "legacy",
-      strategy: "Legacy Book",
-      manager: "Helios Capital",
-      allocation: 128_400,
-      sharpe: 1.8,
-      maxDd: -0.064,
-      age: 30,
-      // The ONE deliberate diff from the shipped rows.
-      weight: null,
-      capitalOwnership: null,
-    });
-    expect(rows[0].mtd).toBeCloseTo(0.0302, 6);
-  });
-
-  it("routes legacy position-shaped rows into the positions set (discrimination on the strategy_id key)", () => {
-    const legacy = toStrategyRows({
-      strategies: [makeStrategy({ strategy_id: "x", allocated_amount: 9 })],
-      now: NOW,
-    });
-    const explicit = toStrategyRows({
-      strategies: [],
-      positions: [makeStrategy({ strategy_id: "x", allocated_amount: 9 })],
-      now: NOW,
-    });
-    expect(legacy).toEqual(explicit);
-  });
-});
+// The B-3 back-compat slack (`HAND-OFF 150-07`) and the two cases that pinned
+// it are DELETED in Plan 07 Task 3, together with the union parameter type and
+// the runtime `strategy_id`-shape discrimination they exercised. They pinned an
+// INTERIM state — a one-argument `toStrategyRows({ strategies })` call carrying
+// payload rows — which no longer exists: `HoldingsTabPanel` now passes
+// `{ strategies: marked, positions }` explicitly and `positions` is required.
+// A test that survives the deletion of its subject would be asserting about a
+// code path nobody can reach.
