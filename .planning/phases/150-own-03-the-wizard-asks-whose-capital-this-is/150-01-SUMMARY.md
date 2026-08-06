@@ -470,3 +470,15 @@ first pass cited `8c339681` for the summary commit; the hash actually in `git lo
 no deletions. `npx tsx scripts/dump-sql-functions.ts --check` reports the snapshot current.
 No untracked files remain from this pass; the ephemeral Postgres cluster lived entirely in
 the session scratchpad, never in the repo.
+
+## Orchestrator close-out (2026-08-06, post-continuation)
+
+Task 2 checkpoint fully discharged by the orchestrator after the continuation pass:
+
+- `20260806120000_strategies_capital_ownership` applied to TEST (qmnijlgmdhviwzwfyzlc) via MCP `apply_migration` — self-verify block passed (column nullable/no-default, CHECK both members, trigger INSERT-scoped, flip RPC present).
+- `20260806130000_seed_weight_snapshot_secdef` applied to TEST via MCP `apply_migration` — self-verify block passed (both seed functions DEFINER + pinned search_path, owner exempt, 3 deny policies intact, triggers enabled + INSERT-scoped).
+- `test_capital_ownership_column.sql` vs TEST: ALL PASS.
+- `test_capital_ownership_allocation_guard.sql` vs TEST: FAILED pre-fix with the predicted 42501 landmine; ALL PASS post-fix, assertions unmodified.
+- `test_weight_snapshot_seed_secdef.sql` vs TEST: ALL PASS.
+
+PROD apply happens automatically at merge to main (that is the intent — it repairs the April-2026 AddToPortfolio/MigrationWizard breakage). Watch item from the first pass (seed-full-app-demo persona/holdings shapes) remains open for the phase-end verification.
