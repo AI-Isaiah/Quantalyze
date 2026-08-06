@@ -1,7 +1,8 @@
 ---
 phase: 150
 slug: 150-own-03-the-wizard-asks-whose-capital-this-is
-status: draft
+status: approved
+reviewed_at: 2026-08-06
 shadcn_initialized: false
 preset: none
 created: 2026-08-06
