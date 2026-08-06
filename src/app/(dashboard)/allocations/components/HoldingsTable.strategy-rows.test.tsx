@@ -228,8 +228,16 @@ describe("HoldingsTable — strategy-rows render (F4b)", () => {
     // Strategy + Manager carry real identity.
     expect(cells[0]).toContain("Full Book");
     expect(cells[1]).toBe("Helios Capital");
-    // The six metric columns must all be non-dash (the old table was all "—").
-    for (let i = 2; i < 8; i++) {
+    // HAND-OFF(150-07) — the Weight cell (index 2) is EXEMPT from the
+    // non-dash loop for exactly one plan. Under D-12-B the Weight column is
+    // render-derived from `allocated_amount` across the ALLOCATED OWN-CAPITAL
+    // row set, and `current_weight` is no longer read as a display source
+    // (150-05 review round 2 W-1). This fixture is a bare payload row with no
+    // marked-strategy input, so its derived share is genuinely null.
+    // Plan 07 wires the union fixtures (a marked + allocated row) and restores
+    // a real Weight-cell assertion here; the remaining five metric columns
+    // still carry the H-0062/63/64 anti-regression.
+    for (let i = 3; i < 8; i++) {
       expect(cells[i]).not.toBe("—");
       expect(cells[i].trim().length).toBeGreaterThan(0);
     }

@@ -48,6 +48,7 @@ import { deriveSyncFreshness } from "@/lib/sync-freshness/types";
 import { safeFraction } from "./units";
 import { withPublishedOnly } from "./visibility";
 import { scoreAgainstPopulation, type PercentileMap } from "./percentile-core";
+import { OWN_CAPITAL, type CapitalOwnership } from "./capital-ownership";
 
 /**
  * Load + redact the manager identity for a strategy.
@@ -1631,6 +1632,105 @@ export async function getPortfolioStrategies(portfolioId: string) {
     });
   }
   return data ?? [];
+}
+
+/**
+ * Phase 150 / OWN-03 — one of the caller's own-capital-marked strategies.
+ *
+ * The Holdings STRATEGIES panel is UNION-shaped (D-12-A): marked strategies ∪
+ * strategies with an existing position. This type is the FIRST half — a
+ * marked strategy that may have no `portfolio_strategies` row at all, which is
+ * exactly why it cannot be expressed as a widening of the dashboard's
+ * position-rooted embed.
+ *
+ * `strategy_analytics` reuses the dashboard payload's `Pick` verbatim so the
+ * adapter reads the same fields off both halves of the union with no cast.
+ */
+export interface OwnCapitalStrategy {
+  id: string;
+  name: string | null;
+  codename: string | null;
+  disclosure_tier: DisclosureTier;
+  status: string | null;
+  capital_ownership: CapitalOwnership | null;
+  strategy_analytics: Pick<
+    StrategyAnalytics,
+    "daily_returns" | "cagr" | "sharpe" | "volatility" | "max_drawdown"
+  > | null;
+}
+
+/**
+ * Phase 150 / OWN-03 — the caller's own-capital-marked, non-archived
+ * strategies: everything the Holdings panel may offer an `Allocate…` action
+ * for, whether or not money is behind it yet.
+ *
+ * The `.eq("user_id", userId)` tenant gate is kept INLINE with the query (the
+ * `match_decisions` fan-out convention at :3752-3757) so a reviewer cannot
+ * accidentally drop it while editing the projection — this feeds a money
+ * surface, and a missing owner filter would offer another allocator's
+ * strategies as allocatable.
+ *
+ * `capital_ownership` is filtered through the imported `OWN_CAPITAL` constant
+ * rather than an inline string. The phase gate greps this file for the raw
+ * mark value and expects ZERO occurrences, so the value is deliberately not
+ * spelled anywhere here — including in this comment, which the grep also
+ * reads (the 140.2-08 / Plan-02 self-matching-comment lesson). A second
+ * spelling of the domain is the drift `capital-ownership.ts` exists to
+ * prevent (T-150-07).
+ *
+ * The `strategy_analytics` embed carries BOTH `daily_returns` AND
+ * `returns_series`. A bare `daily_returns` reader strands every API-ingested
+ * strategy at `[]` — the repo-wide phase-147 sweep
+ * (`phase-147-series-resolution-guards.test.ts:204`) fails the build on a
+ * single-column select here.
+ *
+ * Error contract mirrors `getMyStrategies`: `null` on a transient DB/RLS
+ * failure — never `[]` — so a caller can distinguish "nothing marked yet"
+ * (empty success) from "fetch failed" and avoid rendering a definitive
+ * empty state to an owner who HAS marked strategies.
+ */
+export async function getOwnCapitalStrategies(
+  userId: string,
+): Promise<OwnCapitalStrategy[] | null> {
+  const supabase = await createClient();
+
+  const { data, error } = await supabase
+    .from("strategies")
+    .select(
+      `
+      id,
+      name,
+      codename,
+      disclosure_tier,
+      status,
+      capital_ownership,
+      strategy_analytics (
+        daily_returns,
+        cagr,
+        sharpe,
+        volatility,
+        max_drawdown,
+        returns_series
+      )
+      `,
+    )
+    .eq("user_id", userId)
+    .eq("capital_ownership", OWN_CAPITAL)
+    .neq("status", "archived");
+
+  if (error) {
+    console.error(
+      "[queries.getOwnCapitalStrategies] supabase error:",
+      error.message ?? error,
+    );
+    captureToSentry(error, {
+      tags: { op: "getOwnCapitalStrategies" },
+      level: "error",
+    });
+    return null;
+  }
+
+  return (data ?? []) as unknown as OwnCapitalStrategy[];
 }
 
 /**
