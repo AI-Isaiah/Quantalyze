@@ -180,6 +180,12 @@ AuditAction = Literal[
     "strategy.delete",
     "strategy.approve",
     "strategy.reject",
+    # --- Phase 150 / OWN-03: owner-declared strategy state (TS-only call
+    # sites -- the capital-ownership mark and the owner rename are both
+    # Next.js route writes). Kept here so the TS<->Python AuditAction parity
+    # test test_action_literal_matches_ts_union stays green.
+    "strategy.ownership_mark",
+    "strategy.rename",
     "api_key.revoke",
     "trades.upload",
     "admin.partner_import",

@@ -413,6 +413,19 @@ export type AuditAction =
   | "strategy.delete"
   | "strategy.approve"
   | "strategy.reject"
+  // --- Phase 150 / OWN-03: owner-declared strategy state ------------------
+  // ownership_mark = the capital-ownership mark was set or changed by its
+  // owner (metadata carries the new mark, plus removed_positions when the
+  // flip to team_review removed the caller-s own live positions via the
+  // one-transaction RPC). rename = the owner relabelled their own
+  // private/draft strategy. Both are money-adjacent owner writes, so they
+  // are attributed rather than silent. Naming shape follows
+  // user_note.strategy.update above.
+  // (Keep this comment free of the semicolon character and of double
+  // quotes -- the Python parity test-s TS union parser captures only up to
+  // the union-s first semicolon.)
+  | "strategy.ownership_mark"
+  | "strategy.rename"
   | "api_key.revoke"
   | "trades.upload"
   | "admin.partner_import"
@@ -617,6 +630,9 @@ export const AUDIT_ACTION_ENTITY_TYPE_MAP = {
   "strategy.delete": "strategy",
   "strategy.approve": "strategy",
   "strategy.reject": "strategy",
+  // Phase 150 / OWN-03 — entity_id is the strategies id for both.
+  "strategy.ownership_mark": "strategy",
+  "strategy.rename": "strategy",
   "api_key.revoke": "api_key",
   // B4c reconciliation: ADR-0023 L149 + the call site both anchor on
   // strategy (entity_id = strategies.id; "trades.upload is a bulk insert,

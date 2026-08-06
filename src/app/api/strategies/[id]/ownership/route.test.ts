@@ -232,14 +232,17 @@ function seedOwnedPortfolio(): void {
   };
 }
 
-/** The caller holds `amount` in this strategy on their own portfolio. */
-function seedLivePosition(...amounts: Array<number | null>): void {
+/** The caller holds `amount` in this strategy on their own portfolio.
+ *  `undefined` seeds a row with the key ABSENT (not present-and-null), which is
+ *  the shape that turns an uncoalesced sum into NaN. */
+function seedLivePosition(...amounts: Array<number | null | undefined>): void {
   seedOwnedPortfolio();
   recorders.results["portfolio_strategies:select"] = {
-    data: amounts.map((allocated_amount) => ({
-      allocated_amount,
-      portfolio_id: PORTFOLIO_ID,
-    })),
+    data: amounts.map((allocated_amount) =>
+      allocated_amount === undefined
+        ? { portfolio_id: PORTFOLIO_ID }
+        : { allocated_amount, portfolio_id: PORTFOLIO_ID },
+    ),
     error: null,
   };
 }
@@ -452,7 +455,7 @@ describe("PATCH /api/strategies/[id]/ownership — flip safety (T-150-16)", () =
 
   it("sums multiple positions and counts a null allocated_amount as 0", async () => {
     // `allocated_amount` is a nullable NUMERIC. A null must not poison the sum
-    // into NaN — the dialog renders this number as the confirm copy.
+    // — the dialog renders this number as the confirm copy.
     seedLivePosition(120_000, null, 30_000);
     const res = await PATCH(makeReq({ mark: "team_review" }), makeCtx());
     expect(res.status).toBe(409);
@@ -460,6 +463,21 @@ describe("PATCH /api/strategies/[id]/ownership — flip safety (T-150-16)", () =
       error: "live_allocation",
       allocated_amount: 150_000,
     });
+  });
+
+  it("counts an ABSENT allocated_amount as 0 rather than reporting NaN", async () => {
+    // Measured blind spot (Rule 9). The null case above CANNOT see a missing
+    // `?? 0`, because JS `sum + null` is `sum + 0` — dropping the coalesce left
+    // that test green. The shape that actually breaks is a row whose key is
+    // absent (a narrowed `.select()` column list, or a PostgREST embed change):
+    // `sum + undefined` is NaN, which serialises to `null` in JSON and would
+    // render the confirm dialog as "remove your $null allocation".
+    seedLivePosition(120_000, undefined);
+    const res = await PATCH(makeReq({ mark: "team_review" }), makeCtx());
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { allocated_amount: number };
+    expect(Number.isFinite(body.allocated_amount)).toBe(true);
+    expect(body.allocated_amount).toBe(120_000);
   });
 
   it("scopes the position lookup to the caller's OWN portfolios", async () => {
