@@ -402,6 +402,191 @@ describe("StrategyTable visibility — the grid view is unreachable on the owner
   });
 });
 
+describe("StrategyTable visibility — Phase 150: the ownership tag is OWNER-ONLY (T-150-39)", () => {
+  // The failure this pair forbids is not hypothetical. Public rows reach this
+  // component with `capital_ownership` POPULATED — `getStrategiesByCategory`
+  // shapes them through `shapeRankingRows`, which spreads the whole strategy
+  // row — so an UNGATED `<OwnershipTag>` mount renders the owner's private
+  // capital declaration to anonymous /browse and /discovery readers. UI-SPEC
+  // invariant 3: public surfaces show zero pixels of this phase for non-owners.
+  //
+  // Both labels are typed here as literals (oracle independence), never
+  // imported from OwnershipTag.tsx.
+  const OWN_CAPITAL_LABEL = "Own capital";
+  const TEAM_REVIEW_LABEL = "Team review";
+
+  /** The SAME row under both recipes: published AND marked own-capital. */
+  const markedPublishedRow = () =>
+    makeStrategy({
+      id: ID_PUBLISHED,
+      name: NAME_PUBLISHED,
+      status: "published",
+      capital_ownership: "own_capital",
+    });
+
+  it("the DEFAULT (public-shape) mount of a published + own_capital row renders NO ownership tag", () => {
+    render(
+      <StrategyTable strategies={[markedPublishedRow()]} categorySlug="vis-spec" />,
+    );
+
+    // The row itself must still render — otherwise this assertion is vacuous
+    // for the wrong reason (a dropped row also has no tag).
+    expect(screen.getByText(NAME_PUBLISHED)).toBeInTheDocument();
+    expect(screen.queryByText(OWN_CAPITAL_LABEL)).toBeNull();
+    expect(screen.queryByText(TEAM_REVIEW_LABEL)).toBeNull();
+  });
+
+  it("the OWNER mount of the SAME row renders it (the gate is not just 'never render')", () => {
+    render(
+      <StrategyTable
+        strategies={[markedPublishedRow()]}
+        categorySlug="vis-spec"
+        visibility="owner-all-statuses"
+      />,
+    );
+
+    const tag = screen.getByText(OWN_CAPITAL_LABEL);
+    expect(tag).toBeInTheDocument();
+    // It lands in the name cell, beside the status marker — not in some other
+    // column that happens to contain the string.
+    expect(within(rowFor(NAME_PUBLISHED)).getByText(OWN_CAPITAL_LABEL)).toBe(tag);
+  });
+
+  it("a team-review row shows the muted tag on the owner mount and nothing on the public one", () => {
+    const teamRow = () =>
+      makeStrategy({
+        id: ID_PUBLISHED,
+        name: NAME_PUBLISHED,
+        status: "published",
+        capital_ownership: "team_review",
+      });
+
+    const owner = render(
+      <StrategyTable
+        strategies={[teamRow()]}
+        categorySlug="vis-spec"
+        visibility="owner-all-statuses"
+      />,
+    );
+    expect(screen.getByText(TEAM_REVIEW_LABEL)).toBeInTheDocument();
+    owner.unmount();
+
+    render(<StrategyTable strategies={[teamRow()]} categorySlug="vis-spec" />);
+    expect(screen.queryByText(TEAM_REVIEW_LABEL)).toBeNull();
+  });
+
+  it("an UNMARKED row renders no tag even on the owner mount — absence is honest", () => {
+    render(
+      <StrategyTable
+        strategies={[publishedRow()]}
+        categorySlug="vis-spec"
+        visibility="owner-all-statuses"
+      />,
+    );
+
+    expect(screen.getByText(NAME_PUBLISHED)).toBeInTheDocument();
+    expect(screen.queryByText(OWN_CAPITAL_LABEL)).toBeNull();
+    expect(screen.queryByText(TEAM_REVIEW_LABEL)).toBeNull();
+  });
+});
+
+describe("StrategyTable visibility — Phase 150: the owner row actions are prop-gated", () => {
+  // Copy typed as literals (UI-SPEC Copywriting Contract).
+  const MARK = "Mark ownership…";
+  const CHANGE = "Change mark…";
+  const RENAME = "Rename…";
+
+  it("the DEFAULT public recipe passes neither callback and renders ZERO action nodes", () => {
+    render(
+      <StrategyTable strategies={[publishedRow()]} categorySlug="vis-spec" />,
+    );
+
+    expect(screen.queryByRole("button", { name: MARK })).toBeNull();
+    expect(screen.queryByRole("button", { name: CHANGE })).toBeNull();
+    expect(screen.queryByRole("button", { name: RENAME })).toBeNull();
+  });
+
+  it("an UNMARKED private row offers `Mark ownership…` and `Rename…`", () => {
+    render(
+      <StrategyTable
+        strategies={[privateRow()]}
+        categorySlug="vis-spec"
+        visibility="owner-all-statuses"
+        onMarkOwnership={() => {}}
+        onRename={() => {}}
+      />,
+    );
+
+    const row = rowFor(NAME_PRIVATE);
+    expect(within(row).getByRole("button", { name: MARK })).toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: RENAME })).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: CHANGE })).toBeNull();
+  });
+
+  it("a MARKED row offers `Change mark…` instead — the retro label names the act", () => {
+    render(
+      <StrategyTable
+        strategies={[
+          makeStrategy({
+            id: ID_DRAFT,
+            name: NAME_DRAFT,
+            status: "draft",
+            capital_ownership: "team_review",
+          }),
+        ]}
+        categorySlug="vis-spec"
+        visibility="owner-all-statuses"
+        onMarkOwnership={() => {}}
+        onRename={() => {}}
+      />,
+    );
+
+    const row = rowFor(NAME_DRAFT);
+    expect(within(row).getByRole("button", { name: CHANGE })).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: MARK })).toBeNull();
+  });
+
+  it("D-17 — a PUBLISHED own row keeps the mark action but the rename affordance is ABSENT, not disabled", () => {
+    render(
+      <StrategyTable
+        strategies={[publishedRow()]}
+        categorySlug="vis-spec"
+        visibility="owner-all-statuses"
+        onMarkOwnership={() => {}}
+        onRename={() => {}}
+      />,
+    );
+
+    const row = rowFor(NAME_PUBLISHED);
+    expect(within(row).getByRole("button", { name: MARK })).toBeInTheDocument();
+    // ABSENT is the contract: a disabled rename would promise a remedy that
+    // does not exist (published rename is deferred), and the route answers 404.
+    expect(within(row).queryByRole("button", { name: RENAME })).toBeNull();
+  });
+
+  it("clicking an action hands the callback the ROW it belongs to", () => {
+    const onMarkOwnership = vi.fn();
+    render(
+      <StrategyTable
+        strategies={[privateRow(), publishedRow()]}
+        categorySlug="vis-spec"
+        visibility="owner-all-statuses"
+        onMarkOwnership={onMarkOwnership}
+      />,
+    );
+
+    within(rowFor(NAME_PRIVATE))
+      .getByRole("button", { name: MARK })
+      .click();
+
+    expect(onMarkOwnership).toHaveBeenCalledTimes(1);
+    expect(onMarkOwnership.mock.calls[0][0]).toMatchObject({
+      id: ID_PRIVATE,
+      name: NAME_PRIVATE,
+    });
+  });
+});
+
 describe("StrategyTable visibility — Simulate Impact is gated on status", () => {
   it("renders the Simulate button ONLY on the published row of an owner-scoped table", () => {
     render(

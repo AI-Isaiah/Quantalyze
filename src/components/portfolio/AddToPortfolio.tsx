@@ -59,6 +59,16 @@ export function AddToPortfolio({ strategyId }: { strategyId: string }) {
     if (error) {
       if (error.code === "23505") {
         setFeedback("Already in portfolio");
+      } else if (error.code === "23514") {
+        // Phase 150 / OWN-03 (W-6). 23514 is a Postgres check_violation, and on
+        // this table there is exactly one: the D-03-A BEFORE INSERT trigger that
+        // refuses a position on a strategy not marked as the owner's own
+        // capital. Reporting the generic failure here would tell the user the
+        // system broke when in fact it declined for a reason they can act on —
+        // the remedy is a mark, and it is one screen away.
+        setFeedback(
+          "This strategy isn't marked as your own capital — mark it in My Strategies first.",
+        );
       } else {
         setFeedback("Failed to add");
       }

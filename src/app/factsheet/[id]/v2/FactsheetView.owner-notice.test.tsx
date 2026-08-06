@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render } from "@testing-library/react";
+import { render, fireEvent } from "@testing-library/react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 import { FactsheetProvider } from "./factsheet-context";
@@ -38,6 +38,13 @@ import { FactsheetBody } from "./FactsheetView";
  */
 
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
+// Phase 150 — the owner masthead mounts RenameStrategyDialog, whose
+// router.refresh() needs an app-router context this harness does not provide.
+// Nothing else in the FactsheetView tree imports next/navigation (verified by
+// grep), so the mock is scoped to exactly the one consumer.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ refresh: vi.fn() }),
+}));
 
 const lsStore = new Map<string, string>();
 const localStorageMock = {
@@ -65,6 +72,23 @@ Object.defineProperty(window, "localStorage", {
   value: localStorageMock,
   configurable: true,
 });
+
+// jsdom implements neither HTMLDialogElement.showModal() nor .close(); the
+// Modal primitive calls both. Repo-standard shim (Modal.test.tsx:23-39).
+if (typeof HTMLDialogElement !== "undefined") {
+  if (!HTMLDialogElement.prototype.showModal) {
+    HTMLDialogElement.prototype.showModal = function showModal() {
+      this.setAttribute("open", "");
+      (this as unknown as { open: boolean }).open = true;
+    };
+  }
+  if (!HTMLDialogElement.prototype.close) {
+    HTMLDialogElement.prototype.close = function close() {
+      this.removeAttribute("open");
+      (this as unknown as { open: boolean }).open = false;
+    };
+  }
+}
 
 // Healthy full-resolution returns series (~300 points → the body is fully
 // populated) — same fixture shape as the GUARD-02 file.
@@ -113,6 +137,107 @@ function renderBody(
     </FactsheetProvider>,
   );
 }
+
+/**
+ * Phase 150 (OWN-03 / OWN-05) — the RENDER half of the owner masthead, sharing
+ * this file's harness because it shares its contract: both features are
+ * lane-derived render props that must produce ZERO nodes when absent, so the
+ * public masthead stays byte-identical.
+ */
+describe("FactsheetHeader — owner masthead: read-only mark + Rename (OWN-03 / OWN-05)", () => {
+  // Literals typed here, never imported from OwnershipTag.tsx / FactsheetView.tsx.
+  const OWN_CAPITAL_LABEL = "Own capital";
+  const TEAM_REVIEW_LABEL = "Team review";
+  const RENAME = "Rename…";
+  const RENAME_DIALOG_TITLE = "Rename strategy";
+
+  function renderHeader(
+    props: {
+      ownershipMark?: "own_capital" | "team_review" | null;
+      renameTarget?: { id: string; name: string };
+    } = {},
+  ) {
+    return render(
+      <FactsheetProvider payload={populatedPayload} persist={false}>
+        <FactsheetBody
+          payload={populatedPayload}
+          hideAllocatorSection
+          hideFooter
+          {...props}
+        />
+      </FactsheetProvider>,
+    );
+  }
+
+  it("renders the mark tag beside the trust-tier line on the owner lane", () => {
+    const { container } = renderHeader({ ownershipMark: "own_capital" });
+
+    const masthead = container.querySelector("header");
+    expect(masthead).not.toBeNull();
+    expect(masthead!.textContent).toContain(OWN_CAPITAL_LABEL);
+  });
+
+  it("renders ZERO tag nodes when the prop is absent — the PUBLIC masthead", () => {
+    // This is the security-relevant half: a published factsheet is read by
+    // anonymous visitors, and the mark is the owner's own declaration about
+    // whose money is in the key. Absent prop ⇒ no node at all.
+    const { container } = renderHeader();
+
+    expect(container.textContent).not.toContain(OWN_CAPITAL_LABEL);
+    expect(container.textContent).not.toContain(TEAM_REVIEW_LABEL);
+    expect(container.textContent).not.toContain(RENAME);
+  });
+
+  it("renders no tag for an UNMARKED owner row — absence is honest, not a default", () => {
+    const { container } = renderHeader({
+      ownershipMark: null,
+      renameTarget: { id: "s-1", name: populatedPayload.strategyName },
+    });
+
+    expect(container.textContent).not.toContain(OWN_CAPITAL_LABEL);
+    expect(container.textContent).not.toContain(TEAM_REVIEW_LABEL);
+    // …while the rename affordance, which does not depend on the mark, is there.
+    expect(container.textContent).toContain(RENAME);
+  });
+
+  it("`Rename…` sits on the H1 baseline row and opens the rename dialog", () => {
+    const { container } = renderHeader({
+      renameTarget: { id: "s-1", name: populatedPayload.strategyName },
+    });
+
+    const h1 = container.querySelector("h1");
+    expect(h1).not.toBeNull();
+    const action = Array.from(container.querySelectorAll("header button")).find(
+      (b) => b.textContent === RENAME,
+    ) as HTMLButtonElement | undefined;
+    expect(action).toBeDefined();
+    // Same parent as the H1 — the baseline row, not a line of its own below it.
+    expect(action!.parentElement).toBe(h1!.parentElement);
+
+    // The dialog is CLOSED until asked. `Modal` is a native <dialog>: its
+    // children are always in the tree and the element's `open` state is what
+    // makes it visible, so open-ness is asserted on the element — a text probe
+    // would be green before the click and prove nothing.
+    const dialog = Array.from(container.querySelectorAll("dialog")).find((d) =>
+      (d.textContent ?? "").includes(RENAME_DIALOG_TITLE),
+    ) as HTMLDialogElement | undefined;
+    expect(dialog).toBeDefined();
+    expect(dialog!.open).toBe(false);
+
+    fireEvent.click(action!);
+    expect(dialog!.open).toBe(true);
+  });
+
+  it("the public masthead keeps its single unwrapped <h1> (no owner wrapper leaks in)", () => {
+    const { container } = renderHeader();
+
+    const h1s = container.querySelectorAll("h1");
+    expect(h1s).toHaveLength(1);
+    // The owner arm wraps the H1 in a flex baseline row; the public arm must
+    // not, or every published factsheet grows a node for a control it lacks.
+    expect(h1s[0].parentElement?.className).toContain("max-w-3xl");
+  });
+});
 
 describe("FactsheetBody — owner-lane visibility notice (OWN-02)", () => {
   it('viewerNotice="owner_unpublished" renders the role=note banner with the verbatim UI-SPEC copy', () => {

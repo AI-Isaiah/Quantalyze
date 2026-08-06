@@ -106,6 +106,39 @@ describe("<AddToPortfolio>", () => {
     expect(screen.queryByText("Failed to add")).not.toBeInTheDocument();
   });
 
+  it("W-6 — a 23514 check_violation says WHY and names the remedy, not 'Failed to add'", async () => {
+    // The only check constraint on this table is the Phase-150 D-03-A trigger:
+    // a position may not be created for a strategy that is not marked as the
+    // owner's own capital. The generic arm would report a system fault for a
+    // decision the user can reverse in one screen.
+    mockInsert.mockResolvedValue({ error: { code: "23514" } });
+
+    render(<AddToPortfolio strategyId={STRATEGY_ID} />);
+    fireEvent.click(screen.getByRole("button", { name: /portfolio/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Aggressive blend" }));
+
+    // Literal oracle, typed here and never imported from the component.
+    expect(
+      await screen.findByText(
+        "This strategy isn't marked as your own capital — mark it in My Strategies first.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Failed to add")).not.toBeInTheDocument();
+  });
+
+  it("every OTHER insert error keeps the existing generic arm byte-identical", async () => {
+    // The 23514 mapping must not widen into "any error is a mark problem":
+    // an unrelated fault still reads as a fault.
+    mockInsert.mockResolvedValue({ error: { code: "42501" } });
+
+    render(<AddToPortfolio strategyId={STRATEGY_ID} />);
+    fireEvent.click(screen.getByRole("button", { name: /portfolio/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Aggressive blend" }));
+
+    expect(await screen.findByText("Failed to add")).toBeInTheDocument();
+    expect(screen.queryByText(/own capital/i)).not.toBeInTheDocument();
+  });
+
   it("shows the empty-state create link when the user owns no portfolios", async () => {
     mockOrder.mockResolvedValue({ data: [], error: null });
 
