@@ -6,6 +6,7 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
 import { STRATEGY_NAMES, canonicalizeExchangeList } from "@/lib/constants";
 import { MAGNITUDE_CAPS, isCryptoExchange } from "@/lib/closed-sets";
+import { isValidDollar } from "@/lib/dollar-validation";
 import { notifyFounderNewStrategy, resolveManagerName } from "@/lib/email";
 import { isUuid } from "@/lib/utils";
 import { postProcessKey } from "@/lib/process-key-client";
@@ -401,12 +402,9 @@ function validatePayload(
   // exposure for a "Verified by Quantalyze" factsheet with no AUM. The
   // contract: client must send a finite number in [0, 1e12), or omit
   // the field (null / undefined) entirely.
+  // Phase 150: the validator itself moved to `@/lib/dollar-validation` so the
+  // allocation route does not mint a second one; behaviour is unchanged.
   const MAX_DOLLAR_VALUE = MAGNITUDE_CAPS.MAX_DOLLAR_VALUE_USD;
-  const isValidDollar = (v: unknown): v is number =>
-    typeof v === "number" &&
-    Number.isFinite(v) &&
-    v >= 0 &&
-    v < MAX_DOLLAR_VALUE;
   const isOmitted = (v: unknown): boolean => v === undefined || v === null;
   if (!isOmitted(aum) && !isValidDollar(aum)) {
     return {

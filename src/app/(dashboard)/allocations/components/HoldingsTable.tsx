@@ -42,6 +42,10 @@ import {
 } from "@/components/notes/HoldingNoteRow";
 import { buildHoldingScopeRef } from "@/lib/notes/scope-ref";
 import { formatNumber, formatPercent } from "@/lib/utils";
+// Phase 150: `formatUsd` was module-private here; it is now the ONE money
+// formatter for this surface (shared with the Phase-150 mark/allocate
+// dialogs). Body unchanged — a second money formatter here is forbidden.
+import { formatUsd } from "@/lib/dollar-validation";
 import type { DesignHoldingRow } from "../lib/holdings-adapter";
 import type { StrategyRow } from "../lib/strategies-row-adapter";
 import { BridgeOutcomeBanner } from "./BridgeOutcomeBanner";
@@ -66,16 +70,6 @@ function formatQuantity(n: number): string {
   return n.toLocaleString(undefined, {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
-  });
-}
-
-function formatUsd(n: number | null): string {
-  if (n == null) return "—";
-  return n.toLocaleString("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
   });
 }
 
