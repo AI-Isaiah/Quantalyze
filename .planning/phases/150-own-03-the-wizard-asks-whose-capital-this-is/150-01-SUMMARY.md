@@ -816,3 +816,7 @@ entered the repo.
    **immutable toward a non-allocatable strategy**. Any "swap the strategy behind this
    allocation" UI must delete and re-add rather than PATCH `strategy_id`, or it will see
    `23514` with the same HINT.
+
+## Orchestrator close-out rev-3 (2026-08-06)
+
+Rev-3 amended migration applied to TEST as `strategies_capital_ownership_rev3` — extended self-verify passed (repoint trigger UPDATE-scoped + column-targeted on strategy_id, mark-transition guard column-targeted, flip RPC precheck + DELETE-before-UPDATE order asserted). Full guard test (cases 1–8 incl. 7d owner-precheck, 7e third-party survival, 7f raw-UPDATE guard, 7g positive control, 7h SECDEF pin, 7i repoint) ran against TEST via MCP: ALL PASS, zero assertion edits. Migration-review campaign closed: round 3 confirmed F1/F2 fixed; its one blocking finding (repoint) is closed by this rev; remaining advisories were folded as doc riders or recorded as deliberate constraints (header (h)).
