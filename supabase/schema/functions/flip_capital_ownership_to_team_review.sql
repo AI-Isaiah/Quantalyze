@@ -29,10 +29,40 @@ AS $$
 DECLARE
   v_removed INTEGER := 0;
   v_updated INTEGER := 0;
+  v_owner   UUID;
 BEGIN
+  -- OWNER PRECHECK — MUST COME BEFORE THE DELETE (rev-2, review finding F1).
+  -- Without it, a NON-OWNER call is not a no-op at all: the DELETE below is
+  -- scoped to the CALLER's portfolios, so caller B invoking flip() on owner A's
+  -- strategy DELETES B's own position in it while the UPDATE no-ops — returning
+  -- (1, 0) and silently destroying a position B never asked to remove. The
+  -- auth.uid() predicates on the two statements make the flip safe for the
+  -- VICTIM; they do nothing for the caller. Only this precheck makes the
+  -- documented "total no-op returning (0, 0)" contract true.
+  --
+  -- SECURITY INVOKER + RLS is fine here: `strategies_read` is
+  -- `status='published' OR user_id=auth.uid()`, so a caller can ALWAYS read
+  -- their OWN strategy — an owner's precheck read never returns NULL. A
+  -- non-owner reading a private strategy gets NULL, which lands on the same
+  -- no-op arm as reading someone else's user_id. Both outcomes are correct.
+  SELECT user_id INTO v_owner FROM public.strategies WHERE id = p_strategy_id;
+  IF v_owner IS NULL OR v_owner IS DISTINCT FROM auth.uid() THEN
+    removed_positions := 0;
+    updated_strategies := 0;
+    RETURN NEXT;
+    RETURN;
+  END IF;
+
   -- Remove the caller's OWN positions in this strategy first. Scoped to
   -- portfolios the caller owns: a flip must never touch another allocator's
-  -- book, even though the mark itself is strategy-global.
+  -- book, even though the mark itself is strategy-global (header (g)).
+  --
+  -- DELETE-BEFORE-UPDATE IS LOAD-BEARING, NOT STYLE: the mark-transition guard
+  -- (part 3b) refuses an UPDATE into 'team_review' while an owner-scoped
+  -- position is live. The precheck above has established auth.uid() = the
+  -- strategy's owner, so this DELETE clears exactly the set that guard counts.
+  -- Reorder these two statements and the sanctioned path starts raising 23514
+  -- against itself.
   DELETE FROM public.portfolio_strategies
    WHERE strategy_id = p_strategy_id
      AND portfolio_id IN (
@@ -40,8 +70,11 @@ BEGIN
      );
   GET DIAGNOSTICS v_removed = ROW_COUNT;
 
-  -- Then set the mark. Owner-scoped: a non-owner call updates zero rows and,
-  -- having also removed zero positions, is a total no-op (T-150-05).
+  -- Then set the mark. The auth.uid() predicate is retained as defence in depth
+  -- even though the precheck already established ownership — it is what keeps
+  -- the statement correct on its own terms if this function is ever made
+  -- SECURITY DEFINER or called from a service-role context, where RLS stops
+  -- helping (guard-test case 7c pins all three occurrences).
   UPDATE public.strategies
      SET capital_ownership = 'team_review'
    WHERE id = p_strategy_id

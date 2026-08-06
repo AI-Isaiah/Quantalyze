@@ -1,11 +1,30 @@
 -- OWN-03 (Phase 150, Plan 01) — the persistent capital-ownership mark on
--- `strategies`, the D-03-A allocation invariant enforced at the TABLE layer, and
--- the transactional mark-flip RPC.
+-- `strategies`, the D-03-A allocation invariant enforced at the TABLE layer on
+-- BOTH the INSERT and the mark-transition side, and the transactional mark-flip
+-- RPC.
 -- 2026-08-06.
+--
+-- rev-2 (2026-08-06, migration review): this file is amended IN PLACE — it has
+-- never been merged, so PROD has never seen it, and every object in it is
+-- written re-runnably (DROP-then-ADD / CREATE OR REPLACE) precisely so it can be
+-- re-applied to TEST. Three findings closed:
+--   F1  the flip RPC's DELETE ran BEFORE any ownership check, so a NON-OWNER
+--       call deleted the CALLER's own position in the target strategy and
+--       returned (1, 0) — the opposite of the "total no-op" its own comment
+--       claimed. Fixed with an owner precheck (part 4).
+--   F2  SC 2b was INSERT-only: a raw PostgREST PATCH of capital_ownership to
+--       'team_review', which `strategies_update` permits the owner outright,
+--       stranded every live position — the exact hole the flip RPC exists to
+--       close, reachable without ever calling it. Fixed with a second,
+--       UPDATE-scoped guard (part 3b, header (d.3)).
+--   F3  the accepted narrowing of "NEVER allocatable" is now stated where a
+--       reader will find it (header (g), column COMMENT) instead of being
+--       implied by two DELETE predicates.
 --
 -- Re-base check (MEMORY `project_cross_cutting_refactor_program`): grepped ALL
 -- of supabase/migrations, src/ and analytics-service/ for `capital_ownership`,
--- `own_capital`, `team_review`, `guard_allocation_requires_own_capital` and
+-- `own_capital`, `team_review`, `guard_allocation_requires_own_capital`,
+-- `guard_team_review_mark_no_stranded_positions` and
 -- `flip_capital_ownership_to_team_review` before writing this file — ZERO
 -- matches. Every object below is greenfield; nothing here replaces a prior
 -- definition, so there is no earlier body to re-base on.
@@ -34,8 +53,9 @@
 --   NULL          -> never asked. Renders NO tag. Non-allocatable when
 --                    self-owned.
 --   'own_capital' -> allocatable. Renders the accent tag.
---   'team_review' -> NEVER allocatable, under any ownership. Renders the muted
---                    tag.
+--   'team_review' -> never NEWLY allocatable, under any ownership (the exact
+--                    strength of that claim at the data layer is (g)). Renders
+--                    the muted tag.
 -- NULL and 'team_review' coincide ONLY inside the allocatable predicate for
 -- self-owned rows; they are distinct everywhere a human looks. A reviewer who
 -- sees three display states and two logic states will be tempted to collapse
@@ -76,6 +96,48 @@
 -- be unsound as INVOKER.
 --
 --
+-- (d.3) THE MARK-TRANSITION GUARD — WHY SC 2b NEEDS A SECOND TRIGGER
+--       (rev-2, migration review finding F2).
+-- --------------------------------------------------------------------
+-- The D-03-A trigger above is INSERT-scoped, so it only ever sees a position
+-- being CREATED. It is blind to the OTHER way into the same stranded state: the
+-- owner UPDATEing `strategies.capital_ownership` to 'team_review' while their
+-- own position is already live. `strategies_update USING (user_id = auth.uid())`
+-- permits exactly that write from a raw PostgREST PATCH — no route, no RPC,
+-- nothing to intercept it — and the result is a live position on a team-review
+-- strategy: the precise hole part 4's flip RPC exists to close. An invariant
+-- that only holds when callers volunteer to use the RPC is not an invariant, it
+-- is a convention. So the TRANSITION is guarded at the table layer too.
+--
+-- `trg_strategies_team_review_mark_guard` is BEFORE UPDATE OF capital_ownership
+-- and RAISEs check_violation when the mark ENTERS 'team_review' (OLD IS
+-- DISTINCT FROM 'team_review') while an OWNER-SCOPED position exists.
+--
+-- ORDERING PROOF — LOAD-BEARING, DO NOT REORDER PART 4's TWO STATEMENTS.
+-- The flip RPC DELETEs the caller's positions FIRST and only then UPDATEs the
+-- mark. Both are scoped to the same set of rows this guard counts (positions in
+-- portfolios owned by the strategy's owner; after part 4's owner precheck,
+-- auth.uid() IS that owner). So by the time the RPC's UPDATE fires this guard,
+-- the owner-scoped count is already 0 and the guard admits it. Swap the two
+-- statements and the sanctioned path becomes unrunnable — pinned by guard-test
+-- case 7a, which must stay green.
+--
+-- SCOPE IS OWNER-SCOPED, DELIBERATELY — the SAME scope the RPC deletes. A
+-- THIRD-PARTY position does not block the owner's flip, because a flip must
+-- never be held hostage by (nor touch) another allocator's book. See (g).
+--
+-- COLUMN-TARGETED (`UPDATE OF capital_ownership`) so every other UPDATE on
+-- `strategies` — rename, publish transition, metrics refresh — never evaluates
+-- it at all. NULL-safe: a transition to NULL or to 'own_capital' is not a
+-- transition INTO 'team_review' and passes untouched (the retro Mark path and
+-- the guard test's own un-mark seed step both depend on that).
+--
+-- SECURITY DEFINER for the same reason as (d.2): the guard must count the
+-- TRUTH. Under INVOKER the count is RLS-filtered by the updating session, so
+-- any future admin or service path that marks a strategy from a context that
+-- cannot see the owner's portfolios would read zero positions and strand them.
+--
+--
 -- (e) NO RLS CHANGE IS NEEDED, AND WHY.
 -- --------------------------------------
 -- Mirrors the 20260716130000_strategies_status_private.sql:20-27 argument.
@@ -101,6 +163,29 @@
 -- this phase renders the mark on a public surface.
 --
 --
+-- (g) ACCEPTED NARROWING — 'team_review' MEANS "NEVER *NEWLY* ALLOCATABLE"
+--     (rev-2, migration review finding F3).
+-- -------------------------------------------------------------------------
+-- After a sanctioned flip, THIRD-PARTY positions in the now-team_review
+-- strategy SURVIVE by design: part 4's DELETE is scoped to the caller's own
+-- portfolios, and (d.3)'s count is scoped to the owner's. So the guarantee this
+-- migration actually makes at the data layer is:
+--   * no INSERT can create a position from a team_review strategy, for ANYONE
+--     (D-03-A arm 1, unconditional); and
+--   * the owner cannot strand their OWN book by marking a strategy while a
+--     position is live (d.3);
+-- it is NOT "zero portfolio_strategies rows referencing it can exist". A row
+-- another allocator created BEFORE the flip is retained.
+--
+-- This narrowing is deliberate, not an oversight. The alternative — deleting
+-- every position in the strategy — is a CROSS-TENANT DELETE in which one
+-- allocator's private bookkeeping decision silently rewrites a different
+-- allocator's portfolio, with no notice and no consent. That is a strictly
+-- worse failure than a stale third-party position, which the third party can
+-- see and remove themselves. Do NOT "fix" this into a global delete; it is
+-- pinned by guard-test case 7e.
+--
+--
 -- Ops: merging supabase/migrations/** to main AUTO-APPLIES to PROD
 -- (MEMORY `project_supabase_migrate_auto_on_push`). Apply to TEST
 -- (qmnijlgmdhviwzwfyzlc) via MCP `apply_migration` BEFORE merge; MCP stamps
@@ -121,7 +206,7 @@ ALTER TABLE public.strategies
   ADD COLUMN IF NOT EXISTS capital_ownership TEXT;
 
 COMMENT ON COLUMN public.strategies.capital_ownership IS
-  'OWN-03 capital-ownership mark, STRATEGY-level (D-04). NULL = never asked: renders no tag, and is NON-ALLOCATABLE for a self-owned strategy — the remedy is the retro Mark dialog on /my-strategies (D-09/D-11), never a backfill. ''own_capital'' = the allocator''s own capital, allocatable. ''team_review'' = a trading team''s key under verification, NEVER allocatable by anyone (SC 2b). Deliberately nullable with no default: defaulting would fabricate a claim about pre-existing strategies.';
+  'OWN-03 capital-ownership mark, STRATEGY-level (D-04). NULL = never asked: renders no tag, and is NON-ALLOCATABLE for a self-owned strategy — the remedy is the retro Mark dialog on /my-strategies (D-09/D-11), never a backfill. ''own_capital'' = the allocator''s own capital, allocatable. ''team_review'' = a trading team''s key under verification: never NEWLY allocatable by anyone (SC 2b) — no INSERT can mint a position from it, and the owner cannot mark one while their own position is live. Pre-existing THIRD-PARTY positions are RETAINED: a flip never touches another allocator''s book (see the migration header (g) for why that narrowing is accepted rather than closed with a cross-tenant delete). Deliberately nullable with no default: defaulting would fabricate a claim about pre-existing strategies.';
 
 -- Pre-flight: fail loud (listing offending values) if any existing row would
 -- violate the new constraint. Vacuously clean on a freshly added column — it is
@@ -226,6 +311,82 @@ COMMENT ON TRIGGER trg_portfolio_strategies_own_capital_only ON public.portfolio
 REVOKE ALL ON FUNCTION public.guard_allocation_requires_own_capital() FROM PUBLIC, anon, authenticated;
 
 -- ==========================================================================
+-- 3b. MARK-TRANSITION GUARD — the other half of SC 2b (header (d.3))
+-- ==========================================================================
+--
+-- Part 3 guards the INSERT. This guards the UPDATE that reaches the identical
+-- stranded state from the other side: a raw PostgREST PATCH of
+-- capital_ownership to 'team_review' while the owner's position is live, which
+-- `strategies_update USING (user_id = auth.uid())` permits outright. Without
+-- this trigger, part 4's RPC is a convention rather than an invariant.
+
+CREATE OR REPLACE FUNCTION public.guard_team_review_mark_no_stranded_positions()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_catalog
+AS $$
+DECLARE
+  v_positions INTEGER;
+BEGIN
+  -- Only the TRANSITION INTO 'team_review' is guarded. IS [NOT] DISTINCT FROM
+  -- rather than `=` so a mark of NULL (the retro un-mark path, and this
+  -- migration's own guard-test seed step) is unambiguously not a match rather
+  -- than a NULL that happens to fall through the IF.
+  IF NEW.capital_ownership IS NOT DISTINCT FROM 'team_review'
+     AND OLD.capital_ownership IS DISTINCT FROM 'team_review' THEN
+
+    -- OWNER-SCOPED, and this scope is load-bearing twice over (header (d.3)):
+    --   * it is EXACTLY the set part 4's RPC deletes, and the RPC deletes
+    --     BEFORE it updates — so by the time the sanctioned path reaches this
+    --     guard the count is 0 and the flip is admitted; and
+    --   * a THIRD-PARTY position therefore does not block an owner's flip,
+    --     which is the accepted narrowing in header (g). Widening this count to
+    --     every position in the strategy would make a flip impossible whenever
+    --     anyone else holds it — hostage-taking by an unrelated allocator.
+    -- SECURITY DEFINER (header (d.3)) so this count is not RLS-filtered by the
+    -- updating session. Unqualified names are deterministic: search_path is
+    -- pinned on the function above.
+    SELECT count(*)
+      INTO v_positions
+      FROM portfolio_strategies ps
+      JOIN portfolios p ON p.id = ps.portfolio_id
+     WHERE ps.strategy_id = NEW.id
+       AND p.user_id = NEW.user_id;
+
+    IF v_positions > 0 THEN
+      RAISE EXCEPTION
+        'strategy % cannot be marked team_review: % of the owner''s position(s) are still live',
+        NEW.id, v_positions
+        USING ERRCODE = 'check_violation',
+              HINT = 'Use flip_capital_ownership_to_team_review(strategy_id), which removes your positions and sets the mark in ONE transaction.';
+    END IF;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+COMMENT ON FUNCTION public.guard_team_review_mark_no_stranded_positions() IS
+  'OWN-03 / SC 2b, UPDATE side: blocks a transition of strategies.capital_ownership INTO ''team_review'' while a position owned by the strategy''s owner is live, closing the raw-PostgREST-PATCH route into a stranded position that the INSERT-scoped D-03-A trigger cannot see. Owner-scoped ON PURPOSE — it is the same set flip_capital_ownership_to_team_review() deletes FIRST, so the sanctioned RPC still passes, and a third-party position never holds an owner''s flip hostage (migration header (g)). SECURITY DEFINER so the count is not RLS-filtered by the updating session.';
+
+-- COLUMN-TARGETED AND UPDATE-SCOPED. `OF capital_ownership` keeps every other
+-- write to `strategies` — rename, publish transition, metrics refresh — from
+-- ever evaluating this function. An INSERT arm would be wrong as well as
+-- useless: a brand-new strategy cannot have a position (the FK forbids it), and
+-- the wizard legitimately CREATES rows already marked team_review.
+DROP TRIGGER IF EXISTS trg_strategies_team_review_mark_guard ON public.strategies;
+CREATE TRIGGER trg_strategies_team_review_mark_guard
+  BEFORE UPDATE OF capital_ownership ON public.strategies
+  FOR EACH ROW
+  EXECUTE FUNCTION public.guard_team_review_mark_no_stranded_positions();
+
+COMMENT ON TRIGGER trg_strategies_team_review_mark_guard ON public.strategies IS
+  'OWN-03 / SC 2b UPDATE side. Fires on UPDATE OF capital_ownership ONLY. Without it, an owner''s raw PostgREST PATCH to team_review strands every live position — the exact hole flip_capital_ownership_to_team_review() exists to close, reachable without ever calling it.';
+
+REVOKE ALL ON FUNCTION public.guard_team_review_mark_no_stranded_positions() FROM PUBLIC, anon, authenticated;
+
+-- ==========================================================================
 -- 4. TRANSACTIONAL MARK-FLIP RPC
 -- ==========================================================================
 --
@@ -251,10 +412,40 @@ AS $$
 DECLARE
   v_removed INTEGER := 0;
   v_updated INTEGER := 0;
+  v_owner   UUID;
 BEGIN
+  -- OWNER PRECHECK — MUST COME BEFORE THE DELETE (rev-2, review finding F1).
+  -- Without it, a NON-OWNER call is not a no-op at all: the DELETE below is
+  -- scoped to the CALLER's portfolios, so caller B invoking flip() on owner A's
+  -- strategy DELETES B's own position in it while the UPDATE no-ops — returning
+  -- (1, 0) and silently destroying a position B never asked to remove. The
+  -- auth.uid() predicates on the two statements make the flip safe for the
+  -- VICTIM; they do nothing for the caller. Only this precheck makes the
+  -- documented "total no-op returning (0, 0)" contract true.
+  --
+  -- SECURITY INVOKER + RLS is fine here: `strategies_read` is
+  -- `status='published' OR user_id=auth.uid()`, so a caller can ALWAYS read
+  -- their OWN strategy — an owner's precheck read never returns NULL. A
+  -- non-owner reading a private strategy gets NULL, which lands on the same
+  -- no-op arm as reading someone else's user_id. Both outcomes are correct.
+  SELECT user_id INTO v_owner FROM public.strategies WHERE id = p_strategy_id;
+  IF v_owner IS NULL OR v_owner IS DISTINCT FROM auth.uid() THEN
+    removed_positions := 0;
+    updated_strategies := 0;
+    RETURN NEXT;
+    RETURN;
+  END IF;
+
   -- Remove the caller's OWN positions in this strategy first. Scoped to
   -- portfolios the caller owns: a flip must never touch another allocator's
-  -- book, even though the mark itself is strategy-global.
+  -- book, even though the mark itself is strategy-global (header (g)).
+  --
+  -- DELETE-BEFORE-UPDATE IS LOAD-BEARING, NOT STYLE: the mark-transition guard
+  -- (part 3b) refuses an UPDATE into 'team_review' while an owner-scoped
+  -- position is live. The precheck above has established auth.uid() = the
+  -- strategy's owner, so this DELETE clears exactly the set that guard counts.
+  -- Reorder these two statements and the sanctioned path starts raising 23514
+  -- against itself.
   DELETE FROM public.portfolio_strategies
    WHERE strategy_id = p_strategy_id
      AND portfolio_id IN (
@@ -262,8 +453,11 @@ BEGIN
      );
   GET DIAGNOSTICS v_removed = ROW_COUNT;
 
-  -- Then set the mark. Owner-scoped: a non-owner call updates zero rows and,
-  -- having also removed zero positions, is a total no-op (T-150-05).
+  -- Then set the mark. The auth.uid() predicate is retained as defence in depth
+  -- even though the precheck already established ownership — it is what keeps
+  -- the statement correct on its own terms if this function is ever made
+  -- SECURITY DEFINER or called from a service-role context, where RLS stops
+  -- helping (guard-test case 7c pins all three occurrences).
   UPDATE public.strategies
      SET capital_ownership = 'team_review'
    WHERE id = p_strategy_id
@@ -277,7 +471,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.flip_capital_ownership_to_team_review(uuid) IS
-  'OWN-03: flips a strategy''s capital_ownership mark to team_review AND removes the caller''s positions in it, in ONE transaction. Closes the stranded-position hole that two sequential PostgREST calls would open. SECURITY INVOKER; both statements carry an explicit auth.uid() predicate, so a non-owner call is a total no-op returning (0, 0).';
+  'OWN-03: flips a strategy''s capital_ownership mark to team_review AND removes the OWNER''s positions in it, in ONE transaction. Closes the stranded-position hole that two sequential PostgREST calls would open. SECURITY INVOKER. A non-owner call is a total no-op returning (0, 0) BECAUSE OF THE OWNER PRECHECK, not because of the statements'' auth.uid() predicates — those are scoped to the CALLER, so without the precheck a non-owner call would delete the CALLER''s own position in the target strategy and return (1, 0). Third-party positions are never touched (migration header (g)); the DELETE runs before the UPDATE so the part-3b mark-transition guard admits the sanctioned flip.';
 
 REVOKE ALL ON FUNCTION public.flip_capital_ownership_to_team_review(uuid) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.flip_capital_ownership_to_team_review(uuid) TO authenticated;
@@ -290,8 +484,11 @@ DO $$
 DECLARE
   def         TEXT;
   fn_def      TEXT;
+  flip_def    TEXT;
   insert_cnt  INTEGER;
   other_cnt   INTEGER;
+  update_cnt  INTEGER;
+  col_cnt     INTEGER;
 BEGIN
   -- 5a. The CHECK constraint exists and admits BOTH values.
   SELECT pg_get_constraintdef(oid) INTO def
@@ -355,17 +552,62 @@ BEGIN
       'OWN-03 migration failed: trigger body is missing the portfolios owner-equality lookup (D-03-A) — a blanket predicate would break the three shipped third-party allocation paths';
   END IF;
 
-  -- 5e. The flip RPC exists.
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_proc p
-    JOIN pg_namespace n ON n.oid = p.pronamespace
-    WHERE n.nspname = 'public'
-      AND p.proname = 'flip_capital_ownership_to_team_review'
-  ) THEN
+  -- 5e. The flip RPC exists, carries the OWNER PRECHECK, and still DELETEs
+  --     BEFORE it UPDATEs. Both properties are load-bearing (header (d.3) and
+  --     the F1 finding): without the precheck a non-owner call deletes the
+  --     CALLER's own position; with the statements reordered the RPC raises
+  --     23514 against the part-3b guard it was built to satisfy.
+  SELECT pg_get_functiondef(p.oid) INTO flip_def
+  FROM pg_proc p
+  JOIN pg_namespace n ON n.oid = p.pronamespace
+  WHERE n.nspname = 'public'
+    AND p.proname = 'flip_capital_ownership_to_team_review';
+  IF flip_def IS NULL THEN
     RAISE EXCEPTION 'OWN-03 migration failed: flip_capital_ownership_to_team_review() not found';
   END IF;
+  IF position('SELECT user_id INTO v_owner' IN flip_def) = 0 THEN
+    RAISE EXCEPTION
+      'OWN-03 migration failed: flip_capital_ownership_to_team_review() lost its owner precheck — a non-owner call would DELETE the caller''s own position in the target strategy and return (1, 0)';
+  END IF;
+  IF position('DELETE FROM public.portfolio_strategies' IN flip_def) = 0
+     OR position('UPDATE public.strategies' IN flip_def) = 0
+     OR position('DELETE FROM public.portfolio_strategies' IN flip_def)
+        > position('UPDATE public.strategies' IN flip_def) THEN
+    RAISE EXCEPTION
+      'OWN-03 migration failed: flip_capital_ownership_to_team_review() must DELETE the owner''s positions BEFORE it UPDATEs the mark, or trg_strategies_team_review_mark_guard rejects the sanctioned flip';
+  END IF;
 
-  RAISE NOTICE 'OWN-03 capital_ownership migration self-check passed (column + CHECK + INSERT-scoped D-03-A trigger + flip RPC).';
+  -- 5f. The mark-transition guard (part 3b) fires on EXACTLY the UPDATE event
+  --     and is COLUMN-TARGETED on capital_ownership. A widened event list or a
+  --     lost column target would make every write to `strategies` pay for this
+  --     guard; a missing trigger reopens the raw-PATCH stranding hole (F2).
+  SELECT
+    count(*) FILTER (WHERE event_manipulation = 'UPDATE'),
+    count(*) FILTER (WHERE event_manipulation <> 'UPDATE')
+    INTO update_cnt, other_cnt
+  FROM information_schema.triggers
+  WHERE trigger_schema = 'public'
+    AND trigger_name = 'trg_strategies_team_review_mark_guard';
+  IF update_cnt < 1 THEN
+    RAISE EXCEPTION
+      'OWN-03 migration failed: trg_strategies_team_review_mark_guard does not fire on UPDATE — a raw PostgREST PATCH of capital_ownership to team_review would strand every live position';
+  END IF;
+  IF other_cnt > 0 THEN
+    RAISE EXCEPTION
+      'OWN-03 migration failed: trg_strategies_team_review_mark_guard fires on % non-UPDATE event(s)', other_cnt;
+  END IF;
+
+  SELECT count(*) INTO col_cnt
+  FROM information_schema.triggered_update_columns
+  WHERE trigger_schema = 'public'
+    AND trigger_name = 'trg_strategies_team_review_mark_guard'
+    AND event_object_column = 'capital_ownership';
+  IF col_cnt <> 1 THEN
+    RAISE EXCEPTION
+      'OWN-03 migration failed: trg_strategies_team_review_mark_guard is not column-targeted on capital_ownership (matched % column(s)) — every rename, publish and metrics UPDATE on strategies would evaluate it', col_cnt;
+  END IF;
+
+  RAISE NOTICE 'OWN-03 capital_ownership migration self-check passed (column + CHECK + INSERT-scoped D-03-A trigger + UPDATE-scoped mark-transition guard + flip RPC with owner precheck and DELETE-before-UPDATE order).';
 END $$;
 
 COMMIT;
