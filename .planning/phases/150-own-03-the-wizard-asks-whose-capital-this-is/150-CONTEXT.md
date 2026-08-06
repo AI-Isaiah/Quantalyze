@@ -183,6 +183,11 @@ anything.
 - Wizard-side "allocate now" shortcut (D-10) — only if the two-step flow proves annoying in
   dogfooding.
 - Role-gated form variants (allocator vs manager forms diverging beyond the capital question).
+- Header "+ Allocation" path-to-existing-strategy affordance (DEFERRED 2026-08-06, plan-check
+  rev-2 orchestrator decision): the header button offers no route to allocate an
+  already-onboarded strategy; arm-2's "Go to My Strategies →" empty-state link is this phase's
+  mitigation. A full affordance needs its own UI-SPEC surface. Booked in root TODOS.md
+  (UX / product polish).
 
 </deferred>
 

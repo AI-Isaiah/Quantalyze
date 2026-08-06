@@ -11,7 +11,7 @@ planned: 2026-08-06
 # Phase 150 — Validation Strategy
 
 > Per-phase validation contract for feedback sampling during execution.
-> Filled at plan time (2026-08-06, revised same day per plan-check decisions B-1/B-2/B-3/B-4, W-1..W-7); Status / Observed columns close during execution (Plan 08 Task 2).
+> Filled at plan time (2026-08-06, revised same day per plan-check decisions B-1/B-2/B-3/B-4, W-1..W-7; rev-2 same day: StrategyTable tag-gate blocker + W-1..W-6); Status / Observed columns close during execution (Plan 08 Task 2).
 
 ---
 
@@ -55,15 +55,15 @@ planned: 2026-08-06
 | 150-04-02 | 04 | 2 | OWN-05 (D-16, D-17, D-18) | T-150-13/14/15 | owner-only + private/draft server-side; reject-not-truncate; B10 clean | route unit | `npx vitest run "src/app/api/strategies/[id]/name/route.test.ts" src/lib/visibility.test.ts --no-file-parallelism` | ❌ W0 | ⬜ pending |
 | 150-05-01 | 05 | 2 | OWN-03 (D-13, D-14, SC 4) | T-150-21/22/23/24/26 | upsert-shaped with literal onConflict assertion; pre-checks 404/409; no current_weight; cap enforced before token burn | route unit | `npx vitest run "src/app/api/portfolio-strategies/allocation/route.test.ts" --no-file-parallelism` | ❌ W0 | ⬜ pending |
 | 150-05-02 | 05 | 2 | OWN-03 (D-12) | — | inline tenant gate; paired series select | static-analysis | `npx vitest run src/__tests__/phase-147-series-resolution-guards.test.ts --no-file-parallelism` | ✅ | ⬜ pending |
-| 150-05-03 | 05 | 2 | OWN-03 + OWN-05 (D-12-A, D-12-B, D-15, SC 1c) | T-150-25 | UNION row set (marked ∪ positioned — no vanished money); allocate-affordance data own-capital-only; derived weight; honest nulls; owner name carve-out; B-3 back-compat slack marked | unit | `npx vitest run "src/app/(dashboard)/allocations/lib/strategies-row-adapter.test.ts" --no-file-parallelism` | ✅ extend | ⬜ pending |
+| 150-05-03 | 05 | 2 | OWN-03 + OWN-05 (D-12-A, D-12-B, D-15, SC 1c) | T-150-25 | UNION row set (marked ∪ positioned — no vanished money); allocate-affordance data own-capital-only; derived weight; honest nulls; owner name carve-out; B-3 back-compat slack marked; W-1 rev-2: positioned row with non-null current_weight yields weight null (legacy source dead) | unit | `npx vitest run "src/app/(dashboard)/allocations/lib/strategies-row-adapter.test.ts" "src/app/(dashboard)/allocations/components/HoldingsTable.strategy-rows.test.tsx" --no-file-parallelism` | ✅ extend | ⬜ pending |
 | 150-06-01 | 06 | 3 | OWN-03 + OWN-05 | T-150-28/30 | fetch-only writes; 409→confirm→confirmed-write arc; validation never disables CTA; shared formatUsd only (W-7) | unit (RTL) | `npx vitest run src/components/strategy/MarkOwnershipDialog.test.tsx src/components/strategy/RenameStrategyDialog.test.tsx --no-file-parallelism` | ❌ W0 | ⬜ pending |
-| 150-06-02 | 06 | 3 | OWN-03 (D-09) + OWN-05 | T-150-29 | 149 pins intact (esp. pin 7 window, pin 2 public negatives) | structural | `npx vitest run src/__tests__/phase-149-my-strategies-parity.test.ts --no-file-parallelism` | ✅ | ⬜ pending |
+| 150-06-02 | 06 | 3 | OWN-03 (D-09) + OWN-05 | T-150-29/39 | 149 pins intact (esp. pin 7 window, pin 2 public negatives); rev-2 blocker: OwnershipTag gated on visibility === "owner-all-statuses" — public mount of a published+own_capital row renders NO tag; W-6: AddToPortfolio 23514 → honest copy | structural + unit (RTL) | `npx vitest run src/__tests__/phase-149-my-strategies-parity.test.ts src/components/strategy/StrategyTable.visibility.test.tsx src/components/portfolio/AddToPortfolio.test.tsx --no-file-parallelism` | ✅ extend | ⬜ pending |
 | 150-06-03 | 06 | 3 | OWN-03 + OWN-05 (SC 1c) | T-150-27 | owner-lane-only render; nothing enters the cached payload; anon still 404s | structural + unit | `npx vitest run src/__tests__/phase-148-owner-lane-cache-isolation.test.ts "src/app/factsheet/[id]/v2/page.owner-lane.test.tsx" --no-file-parallelism` | ✅ extend | ⬜ pending |
 | 150-07-01 | 07 | 3 | OWN-03 (D-12, D-12-A, D-12-B, D-15) | T-150-31/32/33 | render-derived UNSIGNED weight pinned + honest denominator tooltip; never-both-buttons; positions-but-unmarked rows render read-only; three arms in priority order | unit (RTL) | `npx vitest run "src/app/(dashboard)/allocations/components/HoldingsTable.strategy-rows.test.tsx" src/__tests__/format-percent-contract.test.ts --no-file-parallelism` | ✅ extend | ⬜ pending |
 | 150-07-02 | 07 | 3 | OWN-03 (SC 2) | T-150-32/34 | inline validation, no fetch on invalid; share-of-allocated helper line (D-12-B supersedes the book-equity fallback); envelope on write failure | unit (RTL) | `npx vitest run "src/app/(dashboard)/allocations/components/AllocateDialog.test.tsx" --no-file-parallelism` | ❌ W0 | ⬜ pending |
 | 150-07-03 | 07 | 3 | OWN-03 (W-6, B-3) | — | server-fetch wiring, no client reads; getMyStrategies-count empty-arm discriminator; B-3 slack removed | tsc + tree | `npx tsc --noEmit && npx vitest run "src/app/(dashboard)/allocations" --no-file-parallelism` | ✅ | ⬜ pending |
-| 150-08-01 | 08 | 4 | OWN-03 (SC 2b, SC 3) | T-150-35/36 | seven mutation-proven pins (incl. D-03-A both-arms and union-affordance pins); rot-guarded census | static-analysis | `npx vitest run src/__tests__/phase-150-capital-ownership-invariant.test.ts --no-file-parallelism` | ❌ W0 | ⬜ pending |
-| 150-08-02 | 08 | 4 | all | — | full surface green; ledger closed | regression | `npm test && npx tsc --noEmit && npm run lint` | ✅ | ⬜ pending |
+| 150-08-01 | 08 | 4 | OWN-03 (SC 2b, SC 3) | T-150-35/36 | eight mutation-proven pins (incl. D-03-A both-arms, union-affordance, and rev-2 P8 tag-gate pins); rot-guarded census | static-analysis | `npx vitest run src/__tests__/phase-150-capital-ownership-invariant.test.ts --no-file-parallelism` | ❌ W0 | ⬜ pending |
+| 150-08-02 | 08 | 4 | all | — | full surface green; ledger closed | regression | `npm test && npm run test:coverage && npx tsc --noEmit && npm run lint` | ✅ | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -81,7 +81,9 @@ planned: 2026-08-06
 - [ ] `src/__tests__/phase-150-capital-ownership-invariant.test.ts` (Plan 08)
 - [x] Framework install: none — Vitest, Playwright and pgTAP CI wiring all exist
 - [x] `MetadataStep.test.tsx` EXISTS (research A4 corrected at plan time) — extend, not create
-- [x] `HoldingsTable.strategy-rows.test.tsx` EXISTS — Plan 02 keeps it green through the formatUsd lift; Plan 07 extends it
+- [x] `HoldingsTable.strategy-rows.test.tsx` EXISTS — Plan 02 keeps it green through the formatUsd lift; Plan 05 makes the ONE W-1 Weight-cell expectation update; Plan 07 extends it
+- [x] `StrategyTable.visibility.test.tsx` EXISTS — Plan 06 extends with the public-mount no-tag negative case (rev-2 blocker)
+- [x] `AddToPortfolio.test.tsx` EXISTS — Plan 06 extends with the 23514 → honest-copy mapping case (W-6)
 
 ---
 
@@ -119,6 +121,8 @@ planned: 2026-08-06
 | SC-2b (atomic flip) | `ownership/route.ts`: replace the rpc call with sequential `.update()` + `.delete()` | phase-150 gate P6; ownership route RPC-call assertion | ⬜ pending | |
 | money (weight skew) | `allocation/route.ts`: add `current_weight: 0.5` to the upsert payload | phase-150 gate P3; allocation route payload assertion | ⬜ pending | |
 | money (derived-weight honesty — D-12-B) | `strategies-row-adapter.ts`: include non-own-capital allocations in the derived-weight denominator (or emit `0` instead of null for unallocated rows) | adapter derived-weight cases (120k/380k → 0.24/0.76; unmarked-positioned → null; unallocated → null, never 0) | ⬜ pending | |
+| invariant 3 (tag gate — public leak; rev-2 blocker) | `StrategyTable.tsx`: delete the `visibility === "owner-all-statuses" &&` guard from the OwnershipTag mount (render the tag unconditionally) | phase-150 gate P8 pin; `StrategyTable.visibility.test.tsx` public-mount no-tag case (published + own_capital row) | ⬜ pending | |
+| money (legacy weight source dead — W-1) | `strategies-row-adapter.ts`: re-add `weight: ps.current_weight` to the position-row mapping | adapter positioned-row-with-current_weight → `weight: null` case (strategies-row-adapter.test.ts) | ⬜ pending | |
 
 ---
 

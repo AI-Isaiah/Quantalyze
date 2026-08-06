@@ -406,6 +406,12 @@ true for 146 and half of 142–145, and **false for 141**.
   contract-pinning (already the repo's practice), not blanket typing.
 
 ### UX / product polish (founder-requested)
+- **Header "+ Allocation" lacks a path-to-existing-strategy affordance** (deferred 2026-08-06 at
+  Phase-150 plan-check rev-2): the Allocations header button offers no route to allocate an
+  already-onboarded strategy; Phase 150's arm-2 "Go to My Strategies →" empty-state link is the
+  interim mitigation. A full affordance needs its own UI-SPEC surface before build. See
+  150-CONTEXT.md Deferred Ideas.
+
 - **MT5 "Broker server" should not be a masked field, and should be searchable.**
   `ConnectKeyStep.tsx:696` renders the passphrase-slot input as
   `type={showSecret ? "text" : "password"}`, which is right for an OKX passphrase but wrong for
