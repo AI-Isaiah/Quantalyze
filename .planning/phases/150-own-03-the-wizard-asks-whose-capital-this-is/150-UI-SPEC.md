@@ -5,6 +5,7 @@ status: draft
 shadcn_initialized: false
 preset: none
 created: 2026-08-06
+revised: 2026-08-06 (revision 1 — checker blockers + mark-flip invariant hole)
 ---
 
 # Phase 150 — UI Design Contract
@@ -81,6 +82,9 @@ One form for ALL users (D-07); the capital question renders for allocator-role
 sessions only. Approved mock (CONTEXT): capital question first, three fields,
 "▸ More details (optional)" collapsed group.
 
+**Focal point:** the capital question fieldset — the first interactive element
+below the step heading; everything culled recedes behind the disclosure.
+
 ### Step order (top to bottom)
 
 1. Step heading + intro (revised copy — see Copywriting Contract; the current
@@ -102,7 +106,7 @@ sessions only. Approved mock (CONTEXT): capital question first, three fields,
 |----------|-------|
 | Semantics | `fieldset` radiogroup: group label + two radio options + one shared helper line. Real radio semantics (keyboard operable, `aria-checked`); planner picks mechanics (visually-hidden native inputs is the simplest a11y-correct form) |
 | Group label | `Whose capital is in this key?` — DM Sans `text-caption font-medium text-text-primary` (the form-label voice, matching `InlineChipGroup` labels; NOT mono — this is interactive, not data annotation) |
-| Option anatomy | Two full-width stacked option cards (stacked, not segmented: these are sentence-length labels, and the segmented idiom — `MandateSegmentedRadio` — suits short tokens and has click-to-clear, which is wrong here). Card: `rounded-md border px-3 py-2.5 text-body` DM Sans; selected: `border-accent bg-accent/5 text-text-primary font-medium` (the broker-selector active idiom); unselected: `border-border text-text-secondary hover:border-accent/50` |
+| Option anatomy | Two full-width stacked option cards (stacked, not segmented: these are sentence-length labels, and the segmented idiom — `MandateSegmentedRadio` — suits short tokens and has click-to-clear, which is wrong here). Card: `rounded-md border px-4 py-3 text-body` DM Sans — the broker-selector idiom verbatim (`ConnectKeyStep.tsx:642`); selected: `border-accent bg-accent/5 text-text-primary font-medium` (the broker-selector active idiom); unselected: `border-border text-text-secondary hover:border-accent/50` |
 | Option (a) | `My own capital` |
 | Option (b) — DEFAULT | `A trading team's key I'm verifying` — **preselected on mount, always has a value, never null** (D-01). A user who never touches the question submits as team-review — behaviour-compatible with today (SC 2) |
 | Helper line | Below the group, `text-caption text-text-secondary`: `Own-capital strategies can be allocated from the Holdings tab. A team's key can never join your allocation.` — states the consequence AND the hard invariant in the founder's own model; no softening |
@@ -118,7 +122,7 @@ about the finalize CTA changes.
 | Property | Value |
 |----------|-------|
 | Element | Native `<details>`/`<summary>` (keyboard-accessible, works without JS). NOT the `CollapsibleSection` component — its uppercase-mono summary + Hide/Show + localStorage persistence is the factsheet *document-section* voice; this is a *form control* and a wizard step is transient (no persistence wanted) |
-| Summary | `▸ More details (optional)` — the caret is the `CollapsibleSection` CSS-triangle idiom (rotates 90° on open, `var(--color-text-muted)`); label in DM Sans `text-caption font-medium text-text-secondary`, sentence case (interactive voice, NOT mono/uppercase) |
+| Summary | CSS caret (the `CollapsibleSection` CSS-triangle idiom — rotates 90° on open, `var(--color-text-muted)`) + label `More details (optional)`. The caret is CSS, NOT a literal `▸` codepoint in the string. Label in DM Sans `text-caption font-medium text-text-secondary`, sentence case (interactive voice, NOT mono/uppercase) |
 | Default | **collapsed** for all users (D-06); no storageKey |
 | Contents (existing controls move in unchanged, in current order) | Strategy Types · Subtypes · Markets (+ its detected/not-detected micro notes) · Supported exchanges · Asset class select · Leverage range / AUM (USD) / Max capacity (USD) grid |
 | Interior spacing | contents keep `space-y-6`; 16px gap between summary and first control when open |
@@ -194,11 +198,23 @@ inherited unchanged).
 component as the wizard question (ONE component, two mounts — copy stays
 single-sourced), group label variant `Whose capital is this?`, strategy name shown
 as the first body line (`text-body font-medium text-text-primary`); same helper
-line. Footer: `Save` (`Button` primary — accent) + `Cancel` (`Button` secondary).
-Initial selection = current mark; unmarked rows open with **(b) team-review
-preselected** (same safe default — an accidental Save must not mint allocatability).
-This dialog IS the retro path (D-09/D-11): Black Swan, Alpha Centauri, Arctic Fox
-become markable here with zero re-onboarding.
+line. Footer: `Save mark` (`Button` primary — accent) + `Cancel` (`Button`
+secondary). Initial selection = current mark; unmarked rows open with **(b)
+team-review preselected** (same safe default — an accidental save must not mint
+allocatability). This dialog IS the retro path (D-09/D-11): Black Swan, Alpha
+Centauri, Arctic Fox become markable here with zero re-onboarding.
+
+**Flip with a live allocation (D-03 hole, closed):** when the strategy has a live
+`portfolio_strategies` position and the selection flips own-capital → team-review,
+`Save mark` does NOT write immediately. The dialog shows a two-step inline confirm
+(same in-dialog idiom as Remove allocation; no nested modal): heading
+`Remove allocation?`, body `{name} has a ${amount} allocation. A team-review
+strategy cannot hold an allocation — changing the mark removes it.`, primary
+`Change mark and remove allocation` (`Button` primary styled `bg-negative`),
+secondary `Keep own capital` (dismisses the confirm; the mark and position are
+unchanged). The mark flip and the position removal are ONE confirmed write — the
+flip never leaves a position behind (the invariant holds by construction), and a
+position is never removed silently.
 
 **Rename dialog** — title `Rename strategy`; body: `Field` + `Input`, label `Name`,
 prefilled with the current name; helper `text-caption text-text-muted`: `Only you
@@ -235,6 +251,9 @@ Files: `src/app/factsheet/[id]/v2/` (Phase-148 owner lane).
 Files: `src/app/(dashboard)/allocations/HoldingsTabPanel.tsx` → `HoldingsTable`
 `strategyRows` section (+ `lib/strategies-row-adapter.ts`).
 
+**Focal point:** the strategies table — rows plus their per-row actions; the
+empty-state arms replace it wholesale, never sit beside it.
+
 ### Row population — the D-03 invariant expressed as data
 
 The STRATEGIES panel lists **own-capital-marked strategies** (allocated or not) —
@@ -242,7 +261,10 @@ widened from "portfolio strategies only" so unallocated marked rows appear (D-12
 D-15). Team-review-marked and unmarked strategies **never enter the panel's row
 set**: no row, no affordance, nothing to disable. The structural phase gate
 (D-03, phase-149-parity-test shape) pins that no code path renders an allocate
-affordance or creates a position for a non-own-capital strategy.
+affordance or creates a position for a non-own-capital strategy. A mark flip on an
+allocated strategy cannot strand a row here either — the flip removes the position
+in the same confirmed write (Surface 2, Mark dialog), so the panel's population
+rule never silently orphans or hides a live position.
 
 ### Row anatomy (approved mock, made precise)
 
@@ -252,7 +274,7 @@ Max DD / …). Deltas:
 | Row state | Ownership tag | Allocation cell | Weight cell | Action |
 |-----------|--------------|-----------------|-------------|--------|
 | marked, not allocated | `Own capital` tag in the Strategy cell (after the name — restates why the row is here and allocatable) | `— not allocated` → em-dash in `font-metric`, then `not allocated` in `text-caption text-text-muted` DM Sans | `—` (Numbers Contract; untinted) | `Allocate…` — `Button` secondary `size="sm"` |
-| marked, allocated | same tag | `$120,000` — `font-metric tabular-nums`, thousands separators (via the allocations surface-family formatter — never inline `toFixed`) | `24.0%` — unsigned, 1dp (a weight is a share, not a gain; no sign prefix) | `Edit allocation…` — `Button` secondary `size="sm"` |
+| marked, allocated | same tag | `$120,000` — `font-metric tabular-nums`, thousands separators (via the allocations surface-family formatter — never inline `toFixed`) | `24.00%` — unsigned, 2dp, matching the inherited column formatter (`formatPercent(w, 2, { signed: false })`, `HoldingsTable.tsx:739`); a weight is a share, not a gain — no sign prefix | `Edit allocation…` — `Button` secondary `size="sm"` |
 
 - Per-row buttons are SECONDARY (border, transparent) — accent primary lives inside
   the dialog; a column of accent-filled buttons would break the 10% accent budget.
@@ -274,12 +296,12 @@ Max DD / …). Deltas:
 |----------|-------|
 | Title | `Allocate — {name}` / `Edit allocation — {name}` |
 | Field | `Field` + `Input type="number"`, label `Allocation (USD)`; Edit prefills current amount |
-| Live weight preview | Below the field, `text-caption text-text-secondary`: when book equity is known and > 0 → `≈ {w}% of your book (${bookEquity})` (weight unsigned 1dp, equity via the surface formatter); otherwise → `Weight appears once your book equity is known.` (limitation with its condition attached — Voice rule; never a fabricated weight) |
+| Live weight preview | Below the field, `text-caption text-text-secondary`: when book equity is known and > 0 → `≈ {w}% of your book (${bookEquity})` (weight unsigned 2dp, matching the column; equity via the surface formatter); otherwise → `Weight appears once your book equity is known.` (limitation with its condition attached — Voice rule; never a fabricated weight) |
 | Validation (inline at field, red border + caption — never a post-submit terminal envelope; ROADMAP 153 note makes this form IN SCOPE for the inline class) | not a finite number > 0 → `Enter an amount above $0.` · amount > $1,000,000,000 sanity cap → `That's above the $1B sanity cap — check the amount.` |
 | Over-book amounts | NOT blocked (a book can be forward-sized; Phase 151 owns AUM mechanics) — no warning copy in this phase |
 | Primary CTA | `Allocate` / `Save allocation` — `Button` primary (accent), disabled-free: the button stays clickable and submit surfaces the inline field error + focuses the field (no-disabled-buttons direction) |
 | Secondary | `Cancel` |
-| Remove (Edit dialog only) | `Remove allocation…` text action in `text-negative`, below the footer row. Required: without it, a mistaken position has no exit (amount 0 is refused by validation → dead end otherwise). Two-step inline confirm INSIDE the dialog (no nested modal): confirm copy `Remove this allocation? {name} leaves your allocation. The own-capital mark stays.` with `Remove` (`Button` primary styled `bg-negative`) + `Keep` (secondary). The only destructive action in this phase |
+| Remove (Edit dialog only) | `Remove allocation…` text action in `text-negative`, below the footer row. Required: without it, a mistaken position has no exit (amount 0 is refused by validation → dead end otherwise). Two-step inline confirm INSIDE the dialog (no nested modal): confirm copy `Remove this allocation? {name} leaves your allocation. The own-capital mark stays.` with `Remove` (`Button` primary styled `bg-negative`) + `Keep` (secondary). One of two destructive actions in this phase (the other: the Mark dialog's flip-with-live-allocation confirm, Surface 2) |
 | Write failure | canonical `ErrorEnvelope` in dialog body, input preserved (same as Surface 2 dialogs) |
 
 ### Empty states (D-15 — the dead end dies)
@@ -289,7 +311,7 @@ Three arms, in priority order:
 | Condition | Rendering |
 |-----------|-----------|
 | ≥1 own-capital-marked strategy exists | The LIST renders (the not-allocated rows ARE the honest state — this replaces "No strategies onboarded yet" whenever marked strategies exist) |
-| zero marked, but the user HAS strategies | Panel empty state, `border border-border bg-surface px-6 py-8` (149 empty-state anatomy; no icon, no illustration): heading `text-body font-medium text-text-primary` → `No strategies marked as own capital.` body `text-small text-text-secondary` → `Mark a strategy as own capital to allocate to it. Set the mark from My Strategies, or when you connect a new key.` + text link `Go to My Strategies →` (accent, persistent underline — inline-prose link rule) |
+| zero marked, but the user HAS strategies | Panel empty state, `rounded-lg border border-border bg-surface px-6 py-8` (149 empty-state anatomy; no icon, no illustration): heading `text-body font-medium text-text-primary` → `No strategies marked as own capital.` body `text-small text-text-secondary` → `Set the mark from My Strategies, or when you connect a new key.` + text link `Go to My Strategies →` (accent, persistent underline — inline-prose link rule) |
 | zero strategies at all | heading → `No strategies yet.` body → `Connect an exchange API key or upload a CSV to see your strategies here.` (149 voice; no fabricated promise about allocation) |
 
 ---
@@ -302,7 +324,7 @@ members): 2 · 4 · 8 · 12 · 16 · 24 · 32 · 48 · 64.
 | Token | Value | Usage this phase |
 |-------|-------|------------------|
 | sm | 8px | radio-card gap, label→control, cards→helper, chip gaps |
-| md | 16px | disclosure summary→contents, dialog field→preview |
+| md | 16px | disclosure summary→contents, dialog field→preview, option-card padding (`px-4 py-3` = 16/12, both on-ladder) |
 | lg | 24px | wizard form `space-y-6` rhythm, `Modal` padding (`p-6`) |
 | row height | ~44px | table rows (inherited) + disclosure summary min-height (touch floor) |
 
@@ -335,11 +357,11 @@ the inherited `Modal` title and step-heading primitives). No new sizes, no raw p
 | Secondary (30%) | #FFFFFF `bg-surface` | tables, dialogs, form surfaces |
 | Accent (10%) | #1B6B5A | reserved list below |
 | Muted | `text-text-muted` / `bg-badge-other/10` | `Team review` tag, ghost row actions, disclosure caret, "not allocated" text |
-| Negative | #DC2626 | inline validation copy + invalid-field border, and the `Remove allocation` action/confirm ONLY — never on a mark tag, never on an empty state, never on a `—` cell |
+| Negative | #DC2626 | inline validation copy + invalid-field border, and the two destructive confirms ONLY (`Remove allocation` and the Mark dialog's `Change mark and remove allocation`) — never on a mark tag, never on an empty state, never on a `—` cell |
 
 **Accent reserved for (this phase):** the `Own capital` tag ink (`bg-accent/10
 text-accent`), the selected radio option (`border-accent bg-accent/5`), dialog
-primary CTAs (`Save` / `Save name` / `Allocate` / `Save allocation`), the
+primary CTAs (`Save mark` / `Save name` / `Allocate` / `Save allocation`), the
 `Go to My Strategies →` link, and focus rings. Row-level buttons, the `Team review`
 tag, helper lines, and the disclosure carry **zero accent**. Amber: unused this
 phase (nothing here is a transient/recoverable system state).
@@ -357,18 +379,19 @@ phase (nothing here is a transient/recoverable system state).
 | Option (a) | `My own capital` |
 | Option (b) — default | `A trading team's key I'm verifying` |
 | Question helper | `Own-capital strategies can be allocated from the Holdings tab. A team's key can never join your allocation.` |
-| Disclosure summary | `More details (optional)` |
+| Disclosure summary | `More details (optional)` (caret is CSS, not a codepoint) |
 | Mark tags | `Own capital` / `Team review` |
 | Row actions | `Mark ownership…` / `Change mark…` / `Rename…` |
-| Mark dialog | title `Mark ownership`; CTAs `Save` / `Cancel` |
+| Mark dialog | title `Mark ownership`; CTAs `Save mark` / `Cancel` |
 | Rename dialog | title `Rename strategy`; field label `Name`; helper `Only you see this name. Public surfaces keep showing the codename.`; CTAs `Save name` / `Cancel`; validation `Enter a name.` / `Keep it under 80 characters.` |
 | Allocate dialog | title `Allocate — {name}` / `Edit allocation — {name}`; field label `Allocation (USD)`; preview `≈ {w}% of your book (${bookEquity})` or `Weight appears once your book equity is known.`; CTAs `Allocate` / `Save allocation` / `Cancel`; validation `Enter an amount above $0.` / `That's above the $1B sanity cap — check the amount.` |
 | Not-allocated cell | `— not allocated` |
-| Holdings empty (zero marked, has strategies) | heading `No strategies marked as own capital.` body `Mark a strategy as own capital to allocate to it. Set the mark from My Strategies, or when you connect a new key.` link `Go to My Strategies →` |
+| Holdings empty (zero marked, has strategies) | heading `No strategies marked as own capital.` body `Set the mark from My Strategies, or when you connect a new key.` link `Go to My Strategies →` |
 | Holdings empty (zero strategies) | heading `No strategies yet.` body `Connect an exchange API key or upload a CSV to see your strategies here.` |
 | Primary CTA (phase) | `Allocate` (the money action; dialog primary) |
 | Error state | write failures render the canonical `buildEnvelope()` → `ErrorEnvelope` inside the dialog (problem + recoverable retry per envelope contract); field-level problems render inline at the field — no new error strings outside `wizardErrors.ts`/envelope machinery |
-| Destructive confirmation | Remove allocation: `Remove this allocation? {name} leaves your allocation. The own-capital mark stays.` — `Remove` / `Keep` |
+| Destructive confirmation (remove allocation) | `Remove this allocation? {name} leaves your allocation. The own-capital mark stays.` — `Remove` / `Keep` |
+| Destructive confirmation (mark flip with live allocation) | heading `Remove allocation?` body `{name} has a ${amount} allocation. A team-review strategy cannot hold an allocation — changing the mark removes it.` — `Change mark and remove allocation` / `Keep own capital` |
 
 ---
 
@@ -382,6 +405,8 @@ phase (nothing here is a transient/recoverable system state).
 | /my-strategies row | unmarked | no tag; `Mark ownership…` action (retro path) |
 | /my-strategies row | marked | tag per family table; `Change mark…` |
 | /my-strategies row | published own row | `Rename…` absent (not disabled — absent); Simulate Impact inherited |
+| Mark dialog | flip own-capital → team-review, live allocation exists | `Save mark` gates on the inline confirm arm: `Remove allocation?` + consequence body → `Change mark and remove allocation` (destructive-styled) / `Keep own capital`. Flip + position removal are ONE confirmed write — never a silent removal, never an orphaned position (D-03 by construction) |
+| Mark dialog | flip with no live allocation | `Save mark` writes directly — no confirm arm (nothing destructive happens) |
 | Factsheet, owner, private/draft | owner lane | tag (if marked) + `Rename…`; OwnerUnpublishedNotice inherited unchanged |
 | Factsheet, anon/non-owner | invariant | **byte-identical to today**; after owner views a draft, anon still 404s (cache adversarial acceptance) |
 | Holdings panel | marked rows exist, none allocated | list of `— not allocated` rows + `Allocate…` (the honest state IS the list) |
@@ -395,8 +420,10 @@ phase (nothing here is a transient/recoverable system state).
 ## Interaction invariants (assert structurally, phase-gate style)
 
 1. **D-03 as absence:** no component renders an allocate affordance for a strategy
-   whose mark is not own-capital; no route/action creates a position from one.
-   Pin like `phase-149-my-strategies-parity.test.ts` (mutation-proven pins).
+   whose mark is not own-capital; no route/action creates a position from one; and
+   no mark flip can strand one — flipping own-capital → team-review on an allocated
+   strategy removes the position in the same confirmed write, behind an explicit
+   confirm. Pin like `phase-149-my-strategies-parity.test.ts` (mutation-proven pins).
 2. **No disabled buttons for blocked actions:** every blocked action in this phase
    is either ABSENT with a documented reason (published rename, team-review
    allocate) or CLICKABLE with an inline remedy (dialog validation focuses the
