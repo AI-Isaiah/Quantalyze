@@ -551,6 +551,99 @@ describe("WR-01 regression — a PUBLISHED row reached via Lane B renders WITHOU
   });
 });
 
+describe("Phase 150 — the mark and the rename target ride the OWNER LANE only", () => {
+  // The failure this forbids: folding either value into `FactsheetPayload`.
+  // The payload is what `buildFactsheetPayloadCached` stores under an id-keyed
+  // entry that anonymous readers are served for the full TTL, so an owner's
+  // capital declaration inside it would be published by the cache (T-150-27).
+  // These two properties are RENDER props, exactly like `viewerNotice`.
+  it("12. owner + draft → ownershipMark and renameTarget are threaded, and NEITHER is on the payload", async () => {
+    givenOwnerDraft();
+    STATE.ownerRow = {
+      ...signatureRow("Draft Alpha"),
+      status: "draft",
+      capital_ownership: "own_capital",
+    };
+
+    const jsx = await renderPage();
+
+    const props = findViewProps(jsx);
+    expect(props?.ownershipMark).toBe("own_capital");
+    expect(props?.renameTarget).toEqual({
+      id: STRATEGY_ID,
+      name: "Draft Alpha",
+    });
+
+    // The cache was never touched, and the payload carries neither value.
+    expect(vi.mocked(unstable_cache)).toHaveBeenCalledTimes(0);
+    const payload = findPayload(jsx) as unknown as Record<string, unknown>;
+    expect(payload).not.toBeNull();
+    expect(payload).not.toHaveProperty("capitalOwnership");
+    expect(payload).not.toHaveProperty("capital_ownership");
+    expect(payload).not.toHaveProperty("ownershipMark");
+    expect(payload).not.toHaveProperty("renameTarget");
+  });
+
+  it("13. an UNMARKED owner draft threads a null mark — never a fabricated default", async () => {
+    givenOwnerDraft(); // the fixture row carries no capital_ownership at all
+
+    const props = findViewProps(await renderPage());
+
+    expect(props?.ownershipMark).toBeNull();
+    // The rename target is still present: renaming does not depend on the mark.
+    expect(props?.renameTarget).toEqual({
+      id: STRATEGY_ID,
+      name: "Draft Alpha",
+    });
+  });
+
+  it("14. an unrecognised column value fails CLOSED to no mark rather than rendering it", async () => {
+    givenOwnerDraft();
+    STATE.ownerRow = {
+      ...signatureRow("Draft Alpha"),
+      status: "draft",
+      // The column is `text`; a future or garbled value must not reach the tag.
+      capital_ownership: "syndicate_capital",
+    };
+
+    const props = findViewProps(await renderPage());
+
+    expect(props?.ownershipMark).toBeNull();
+  });
+
+  it("15. the PUBLIC lane threads neither, even for the strategy's own authed owner", async () => {
+    // A published row resolves on Lane A, so no owner probe runs at all — the
+    // D-17 rename gate holds here for free (Pattern 5), with no second
+    // predicate that could drift from the route's own status filter.
+    givenPublished();
+    STATE.sessionUser = { id: OWNER_UID };
+
+    const props = findViewProps(await renderPage());
+
+    expect(props?.ownershipMark).toBeUndefined();
+    expect(props?.renameTarget).toBeUndefined();
+  });
+
+  it("16. a PUBLISHED row reached via Lane B threads neither (the WR-01 shape)", async () => {
+    // Lane B can match a published row for ANY authed viewer via its
+    // `status.eq.published` arm. `lane` stays "public" there, so a published
+    // strategy never grows a rename affordance no matter which probe found it.
+    STATE.publishedRow = null;
+    STATE.ownerRow = {
+      ...signatureRow("Phoenix Options"),
+      status: "published",
+      capital_ownership: "own_capital",
+    };
+    STATE.adminRow = adminStrategyRow("published");
+    STATE.sessionUser = { id: OWNER_UID };
+
+    const props = findViewProps(await renderPage());
+
+    expect(props?.ownershipMark).toBeUndefined();
+    expect(props?.renameTarget).toBeUndefined();
+  });
+});
+
 describe("lane order lock — published/cached lane FIRST", () => {
   it("10. published id rendered WITH an authed session → ZERO auth.getUser calls, ZERO .or filters", async () => {
     givenPublished();
