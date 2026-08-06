@@ -364,6 +364,26 @@ describe("toStrategyRows — D-12-A union row set", () => {
     });
     expect(row.capitalOwnership).toBeNull();
   });
+
+  it("fails CLOSED on the POSITIONED arm too — membership alone is not the predicate", () => {
+    // The two halves derive `capitalOwnership` at two separate call sites.
+    // Measured, not assumed: a mutation replacing the positioned arm's
+    // `isAllocatable(...)` with a bare `owned ? … : null` left the suite GREEN
+    // until this case existed, because the case above only exercises the
+    // marked-WITHOUT-position arm.
+    const [row] = toStrategyRows({
+      strategies: [
+        makeMarked({ id: "garbled", capital_ownership: "team_review" }),
+      ],
+      positions: [
+        makeStrategy({ strategy_id: "garbled", allocated_amount: 50_000 }),
+      ],
+      now: NOW,
+    });
+    expect(row.capitalOwnership).toBeNull();
+    // …and therefore it is excluded from the derived-weight denominator.
+    expect(row.weight).toBeNull();
+  });
 });
 
 describe("toStrategyRows — D-12-B render-derived weight", () => {
