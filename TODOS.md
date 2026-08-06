@@ -1391,3 +1391,11 @@ toggle-hide also defers: `StrategyGrid.tsx:79-82` renders `VerifiedBadge` with
   defaults stand, revisit only if the sharing model changes.
 - **No forcing function:** FastAPI / pandas / numpy version lag — upgrade only when a feature
   or advisory blocks.
+
+## Phase 150 review — non-blocking findings (logged 2026-08-06, founder stopping rule)
+
+- [ ] WR-03: guard-test case 7c auth.uid() occurrence-count runs over pg_get_functiondef incl. comments (4 comment hits ≥ 3 threshold) — vacuous as a live-DB control; vitest pin P4 already covers the invariant comment-stripped. Fix: strip comments in 7c or count against exact === 7 total occurrences. (.planning/phases/150-*/150-REVIEW.md)
+- [ ] IN-01: three route docblocks still claim strategies_update has NO WITH CHECK — stale since 20260410225610; migration rev-3 corrected its own copy, routes didn't.
+- [ ] IN-02: allocation route lacks the archived-status gate the marked-set query enforces (query-side filter only).
+- [ ] IN-03: mid-request mark flip surfaces as 500/UNKNOWN instead of the 409 arm (no row refresh) — race window only.
+- [ ] IN-04: MarkOwnershipDialog "Keep own capital" stays clickable while destructive removal is in flight.
