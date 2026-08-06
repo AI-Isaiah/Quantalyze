@@ -2,26 +2,17 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260416125431_rebalance_drift_check_and_trigger.sql
--- --------------------------------------------------------------------------
--- STEP 4: triggers that seed weight_snapshots with NULL target/actual
--- --------------------------------------------------------------------------
--- Two triggers because portfolio_strategies rows are typically inserted
--- AFTER the parent portfolio row (wizard flow). A portfolio-only trigger
--- would fire on an empty link table and miss every strategy.
---
--- Both triggers insert with target_weight=NULL, actual_weight=NULL. The
--- rebalance_drift logic treats NULL target as "skip" — this is the
--- null-target guard's ground truth. A later call (/api/portfolios/<id>
--- PATCH, the weight editor, the nightly worker) overwrites with a real
--- value on its normal schedule.
---
--- Idempotent via ON CONFLICT against weight_snapshots_unique_per_day
--- (migration 035: UNIQUE (portfolio_id, strategy_id, snapshot_date)). If a
--- row for today already exists, the trigger silently no-ops.
-CREATE OR REPLACE FUNCTION seed_weight_snapshot_for_portfolio_strategy()
+-- source migration: 20260806130000_seed_weight_snapshot_secdef.sql
+-- ==========================================================================
+-- 1. seed_weight_snapshot_for_portfolio_strategy() -> SECURITY DEFINER
+-- ==========================================================================
+-- Re-based on 20260416125431_rebalance_drift_check_and_trigger.sql:106-121.
+-- The ONLY change is the `SECURITY DEFINER` line.
+
+CREATE OR REPLACE FUNCTION public.seed_weight_snapshot_for_portfolio_strategy()
 RETURNS TRIGGER
 LANGUAGE plpgsql
+SECURITY DEFINER
 SET search_path = public, pg_catalog
 AS $$
 BEGIN
