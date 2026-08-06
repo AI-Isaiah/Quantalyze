@@ -46,6 +46,7 @@ describe("OwnershipTag", () => {
     expect(tag).toHaveClass("text-text-muted");
     // Semantic-color gate: absence of allocatability is not an error state.
     expect(tag.className).not.toMatch(/negative|warning|amber/);
+    expect(container.textContent).toBe("Team review");
   });
 
   it("renders NOTHING for null — an unmarked legacy row gets no tag", () => {
