@@ -1,6 +1,8 @@
 -- Test for the Phase 150 OWN-03 / D-03-A ALLOCATION INVARIANT:
 --   * 20260806120000_strategies_capital_ownership.sql
 --       part 3  — trg_portfolio_strategies_own_capital_only (BEFORE INSERT)
+--                 trg_portfolio_strategies_own_capital_on_repoint
+--                 (BEFORE UPDATE OF strategy_id) — rev-3, finding F4
 --       part 3b — trg_strategies_team_review_mark_guard
 --                 (BEFORE UPDATE OF capital_ownership) — rev-2, finding F2
 --       part 4  — flip_capital_ownership_to_team_review(uuid)
@@ -85,6 +87,18 @@
 --         pinned search_path. No behavioural case here can see the loss, because
 --         only the owner can reach the guard today and an owner sees their own
 --         book either way (measured — mutation M19 stays green as INVOKER).
+--      rev-3 adds one:
+--      7i (finding F4) — THE REPOINT HOLE. An owner UPDATEs an EXISTING
+--         position's `strategy_id` to point at a team_review (and then at a
+--         self-owned unmarked) strategy. Before the repoint trigger BOTH
+--         UPDATEs succeeded: no INSERT happened, so the D-03-A trigger never
+--         fired, and `strategies.capital_ownership` never changed, so part 3b's
+--         guard never fired either — the forbidden state reached through the
+--         one door neither rev-2 guard watches. The case also re-asserts that
+--         a non-strategy_id UPDATE (the shipped alias write, case 5's shape) on
+--         a legacy unmarked position STILL SUCCEEDS with the new trigger
+--         installed: `UPDATE OF strategy_id` does not fire for a statement
+--         whose SET list does not name that column, so Pitfall 2 stays closed.
 --   8. THIRD-PARTY regression (the INSERT-side twin of case 5): a position for
 --      ANOTHER owner's strategy with a NULL mark MUST SUCCEED, and so must one
 --      for a third-party own_capital strategy. This is the shipped
@@ -101,7 +115,8 @@
 -- Hygiene (shared TEST DB — STATE Phase-142.1 item 5 class): every fixture row
 -- is created inside this test's own transaction with its own generated UUIDs;
 -- every UPDATE/DELETE predicate names those ids (including the rev-2 cases 7f
--- and 7g, which UPDATE `strategies` by fixture id only); there is NO table-wide
+-- and 7g, which UPDATE `strategies` by fixture id only, and the rev-3 case 7i,
+-- whose UPDATEs name a fixture (portfolio_id, strategy_id) pair); there is NO table-wide
 -- mutation anywhere in this file; the transaction ends in ROLLBACK. The
 -- third-party cases need TWO distinct user_ids on their fixture rows — the
 -- trigger reads table COLUMNS (strategies.user_id, portfolios.user_id), not
@@ -138,6 +153,12 @@ DECLARE
   strat_a_flip        UUID;  -- A, own_capital + position -> flip RPC target
   strat_a_shared      UUID;  -- A, published own_capital, held by BOTH A and B
                              --   -> 7d (F1 non-owner flip) + 7e (F3 survival)
+  strat_a_repoint     UUID;  -- A, own_capital + position -> 7i repoint source.
+                             --   Its OWN fixture on purpose: by the time 7i
+                             --   runs, every other A position has been consumed
+                             --   (7a/7e/7f flip theirs away), and a repoint case
+                             --   needs a LIVE, legitimately-allocated row to
+                             --   move. Untouched by cases 1-7h.
 
   strat_b_null        UUID;  -- B, NULL,        published -> third-party, allowed
   strat_b_own         UUID;  -- B, own_capital, published -> third-party, allowed
@@ -215,6 +236,15 @@ BEGIN
   VALUES (uid_a, 'cap-own A shared', 'published', 'own_capital', '{}', '{}', '{}', ARRAY['binance'])
   RETURNING id INTO strat_a_shared;
 
+  -- rev-3 (F4): the repoint case's source row. own_capital and self-owned, so
+  -- its position below is a LEGITIMATE allocation — 7i then tries to move that
+  -- position onto a forbidden strategy, which is the whole point: the row is
+  -- valid where it is and invalid where the UPDATE would put it.
+  INSERT INTO strategies (user_id, name, status, capital_ownership,
+                          strategy_types, subtypes, markets, supported_exchanges)
+  VALUES (uid_a, 'cap-own A repoint source', 'private', 'own_capital', '{}', '{}', '{}', ARRAY['binance'])
+  RETURNING id INTO strat_a_repoint;
+
   -- B's strategies (strategy.user_id <> portfolio.user_id => THIRD-PARTY).
   INSERT INTO strategies (user_id, name, status, capital_ownership,
                           strategy_types, subtypes, markets, supported_exchanges)
@@ -251,6 +281,12 @@ BEGIN
   INSERT INTO portfolio_strategies (portfolio_id, strategy_id, allocated_amount)
   VALUES (port_b, strat_a_shared, 400000);
 
+  -- rev-3 (F4): A's live, legitimately-allocated position that case 7i tries to
+  -- re-point. Seeded here rather than reusing another case's row so 7i cannot
+  -- silently depend on the flip ordering of 7a/7e/7f.
+  INSERT INTO portfolio_strategies (portfolio_id, strategy_id, allocated_amount)
+  VALUES (port_a, strat_a_repoint, 500000);
+
   -- Un-mark the legacy strategy AFTER its position exists — this is exactly the
   -- shape of every pre-existing PROD position: a live row whose strategy the
   -- retro Mark path has not reached. Scoped to this fixture's own id.
@@ -264,9 +300,10 @@ BEGIN
   -- through the IF). Case 7g is the standing positive control for exactly this.
   UPDATE strategies SET capital_ownership = NULL WHERE id = strat_a_legacy;
 
-  RAISE NOTICE 'Seed OK: A=% B=% books=(%, %) (self: own=% team=% null=% legacy=% flip=% shared=%) (third-party: null=% own=% team_pub=% team_priv=%)',
+  RAISE NOTICE 'Seed OK: A=% B=% books=(%, %) (self: own=% team=% null=% legacy=% flip=% shared=% repoint=%) (third-party: null=% own=% team_pub=% team_priv=%)',
     uid_a, uid_b, port_a, port_b, strat_a_own, strat_a_team, strat_a_null, strat_a_legacy,
-    strat_a_flip, strat_a_shared, strat_b_null, strat_b_own, strat_b_team_pub, strat_b_team_priv;
+    strat_a_flip, strat_a_shared, strat_a_repoint,
+    strat_b_null, strat_b_own, strat_b_team_pub, strat_b_team_priv;
 
   -- ======================================================================
   -- Everything below runs as the AUTHENTICATED role with A's JWT — the same
@@ -720,6 +757,103 @@ BEGIN
       'TEST FAILED (7h): guard_team_review_mark_no_stranded_positions() is not SECURITY DEFINER with a pinned search_path — under INVOKER its position count is RLS-filtered by the updating session, and no behavioural case in this file can see the difference';
   END IF;
 
+  -- ----- 7i: REPOINTING an existing position -> RAISEs (rev-3, finding F4) --
+  -- THE THIRD ROUTE INTO THE STRANDED STATE, and the one both rev-2 guards are
+  -- structurally blind to. An owner PATCHes `portfolio_strategies.strategy_id`
+  -- on a LIVE position — permitted outright by `portfolio_strategies_owner`
+  -- FOR ALL USING (portfolio owned by auth.uid()) — moving it onto a
+  -- team_review or self-owned unmarked strategy. No INSERT happens, so the
+  -- BEFORE INSERT D-03-A trigger never fires; `strategies.capital_ownership` is
+  -- never written, so part 3b's mark-transition guard never fires either. The
+  -- end state is byte-for-byte the state case 2a and case 3 prove is forbidden,
+  -- reached by a door neither of them watches. Closed by
+  -- trg_portfolio_strategies_own_capital_on_repoint (BEFORE UPDATE OF
+  -- strategy_id), which REUSES the same guard function.
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_a::text, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+
+  -- Non-vacuity first: if the source row were missing or already moved, both
+  -- UPDATEs below would match ZERO rows and the case would pass without ever
+  -- reaching a trigger.
+  SELECT count(*) INTO row_cnt
+    FROM portfolio_strategies
+   WHERE portfolio_id = port_a AND strategy_id = strat_a_repoint
+     AND allocated_amount = 500000;
+  IF row_cnt <> 1 THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7i setup): the repoint source position is not live as seeded (% rows at 500000) — the UPDATEs below would match nothing and pass vacuously', row_cnt;
+  END IF;
+
+  -- 7i-1: repoint onto a team_review strategy (ARM 1, unconditional).
+  raised := FALSE;
+  BEGIN
+    UPDATE portfolio_strategies
+       SET strategy_id = strat_a_team
+     WHERE portfolio_id = port_a AND strategy_id = strat_a_repoint;
+  EXCEPTION WHEN check_violation THEN
+    raised := TRUE;
+  END;
+  IF NOT raised THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7i): an existing position was RE-POINTED at a team_review strategy — D-03-A is INSERT-scoped again and the invariant is reachable by UPDATE (rev-3 finding F4)';
+  END IF;
+
+  -- 7i-2: repoint onto a SELF-OWNED UNMARKED strategy (ARM 2). Both arms must
+  -- hold on the repoint event, or the hole is only half closed.
+  raised := FALSE;
+  BEGIN
+    UPDATE portfolio_strategies
+       SET strategy_id = strat_a_null
+     WHERE portfolio_id = port_a AND strategy_id = strat_a_repoint;
+  EXCEPTION WHEN check_violation THEN
+    raised := TRUE;
+  END;
+  IF NOT raised THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7i): an existing position was RE-POINTED at a SELF-OWNED UNMARKED strategy — silence is not consent on the UPDATE side either (SC 3)';
+  END IF;
+
+  -- Subtransaction rollback: the original row is exactly where it was.
+  SELECT count(*) INTO row_cnt
+    FROM portfolio_strategies
+   WHERE portfolio_id = port_a AND strategy_id = strat_a_repoint
+     AND allocated_amount = 500000;
+  IF row_cnt <> 1 THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7i): the blocked repoint disturbed the original position (% rows still at (port_a, strat_a_repoint, 500000))', row_cnt;
+  END IF;
+  SELECT count(*) INTO row_cnt
+    FROM portfolio_strategies
+   WHERE portfolio_id = port_a
+     AND strategy_id IN (strat_a_team, strat_a_null);
+  IF row_cnt <> 0 THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7i): % position row(s) landed on a forbidden strategy after the blocked repoint', row_cnt;
+  END IF;
+
+  -- POSITIVE CONTROL — case 5's shape, re-asserted now that the repoint trigger
+  -- exists. `UPDATE OF strategy_id` fires only when the statement's SET list
+  -- NAMES strategy_id, so the shipped alias write on a legacy unmarked position
+  -- must still succeed. If this reddens, the repoint trigger has lost its
+  -- column target and Pitfall 2 is reopened for every pre-existing PROD row.
+  UPDATE portfolio_strategies SET alias = 'rev-3 alias still writable'
+   WHERE portfolio_id = port_a AND strategy_id = strat_a_legacy;
+  SELECT alias INTO alias_now
+    FROM portfolio_strategies
+   WHERE portfolio_id = port_a AND strategy_id = strat_a_legacy;
+  IF alias_now IS DISTINCT FROM 'rev-3 alias still writable' THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7i): the alias UPDATE on a legacy unmarked position stopped working (alias=%) — the repoint trigger must be column-targeted on strategy_id, never a blanket UPDATE arm', COALESCE(alias_now, '<null>');
+  END IF;
+  RESET ROLE;
+
   -- ----- 8: THIRD-PARTY regression — the shipped paths must still work -----
   -- The INSERT-side twin of case 5. AddToPortfolio.tsx:54,
   -- MigrationWizard.tsx:72 and seed-full-app-demo.ts:1697,1929 all insert
@@ -757,7 +891,7 @@ BEGIN
   RESET ROLE;
   PERFORM set_config('request.jwt.claims', NULL, true);
 
-  RAISE NOTICE 'test_capital_ownership_allocation_guard: ALL PASS (D-03-A both arms, SECURITY DEFINER probe, upsert arm, legacy-alias + third-party regressions, composite PK, atomic flip, owner precheck, third-party survival, raw-UPDATE mark-transition guard + its positive control).';
+  RAISE NOTICE 'test_capital_ownership_allocation_guard: ALL PASS (D-03-A both arms, SECURITY DEFINER probe, upsert arm, legacy-alias + third-party regressions, composite PK, atomic flip, owner precheck, third-party survival, raw-UPDATE mark-transition guard + its positive control, repoint guard + its alias positive control).';
 END
 $$;
 
