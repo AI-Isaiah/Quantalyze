@@ -136,6 +136,15 @@ export function SubmitStep({
           // value can publish; the RPC terminal-status guard (plan 110-01
           // T-110-02) is the real enforcement (client field can't be trusted).
           entry_context: entryContext,
+          // Phase 150 / OWN-03 — the capital mark rides the SAME body as
+          // entry_context. Spread-in only when the metadata step actually
+          // asked the question, so a path that never asked sends an ABSENT
+          // field rather than `null`: the route writes nothing, the column
+          // stays NULL, and an unmarked strategy is non-allocatable. Never
+          // assert a mark on the user's behalf.
+          ...(metadata.capitalOwnership
+            ? { capital_ownership: metadata.capitalOwnership }
+            : {}),
         }),
       });
 

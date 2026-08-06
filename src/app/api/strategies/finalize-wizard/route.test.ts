@@ -70,6 +70,19 @@ const STATE = vi.hoisted(() => ({
   // error exercises the non-blocking log branch.
   assetClassUpdates: [] as Array<Record<string, unknown>>,
   assetClassUpdateError: null as { message: string } | null,
+  // Phase 150 / OWN-03 — every user-scoped strategies UPDATE, with the .eq()
+  // filters it carried. `assetClassUpdates` above records only the patch, which
+  // cannot express the T-150-10 mitigation (the mark write must be pinned to
+  // BOTH the finalized id and the caller's user_id — strategies_update RLS has
+  // no WITH CHECK, so an un-scoped patch is the elevation-of-privilege path).
+  strategyUpdates: [] as Array<{
+    patch: Record<string, unknown>;
+    eqs: Array<{ column: string; value: unknown }>;
+  }>,
+  // Forced error / rows for the capital_ownership UPDATE specifically, so the
+  // degradation arm is reachable without disturbing the asset_class write.
+  capitalOwnershipUpdateError: null as { message: string } | null,
+  capitalOwnershipUpdateRows: [{ id: "" }] as Array<{ id: string }> | null,
   // Admin RPC capture (after() block).
   adminRpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
   // H-0330 — forced error returned by admin.rpc('enqueue_compute_job').
@@ -174,16 +187,31 @@ vi.mock("@/lib/supabase/server", () => ({
       // update().eq().eq() (owner-scoped) before finalize. Chainable + awaitable
       // (thenable) so `await update().eq().eq()` resolves; the route treats any
       // error as non-blocking. Records the persisted value for assertions.
-      const buildUpdateChain = () => {
+      //
+      // OWN-03 extends this: `.eq()` now RECORDS its filters (so the mark
+      // write's owner scoping is assertable) and `.select()` is chainable on
+      // an update (the mark write ends `.select("id")` to detect a zero-row
+      // write — the signature of a patch that matched nobody).
+      const buildUpdateChain = (record: {
+        patch: Record<string, unknown>;
+        eqs: Array<{ column: string; value: unknown }>;
+      }) => {
+        const isMarkWrite = "capital_ownership" in record.patch;
+        const settle = () =>
+          isMarkWrite
+            ? {
+                data: STATE.capitalOwnershipUpdateRows,
+                error: STATE.capitalOwnershipUpdateError ?? null,
+              }
+            : { data: null, error: STATE.assetClassUpdateError ?? null };
         const chain = {
-          eq: () => chain,
-          then: (
-            onFulfilled: (v: { data: null; error: unknown }) => unknown,
-          ) =>
-            Promise.resolve({
-              data: null,
-              error: STATE.assetClassUpdateError ?? null,
-            }).then(onFulfilled),
+          eq: (column: string, value: unknown) => {
+            record.eqs.push({ column, value });
+            return chain;
+          },
+          select: () => chain,
+          then: (onFulfilled: (v: unknown) => unknown) =>
+            Promise.resolve(settle()).then(onFulfilled),
         };
         return chain;
       };
@@ -191,7 +219,9 @@ vi.mock("@/lib/supabase/server", () => ({
         select: () => buildEqChain(),
         update: (patch: Record<string, unknown>) => {
           STATE.assetClassUpdates.push(patch);
-          return buildUpdateChain();
+          const record = { patch, eqs: [] as Array<{ column: string; value: unknown }> };
+          STATE.strategyUpdates.push(record);
+          return buildUpdateChain(record);
         },
       };
     },
@@ -466,6 +496,9 @@ beforeEach(async () => {
   STATE.strategySelectEqFilters = [];
   STATE.assetClassUpdates = [];
   STATE.assetClassUpdateError = null;
+  STATE.strategyUpdates = [];
+  STATE.capitalOwnershipUpdateError = null;
+  STATE.capitalOwnershipUpdateRows = [{ id: STRATEGY_ID }];
   STATE.rpcCalls = [];
   STATE.rpcResult = { data: STRATEGY_ID, error: null };
   STATE.adminApiKeyId = API_KEY_ID;
@@ -2939,6 +2972,212 @@ describe("POST /api/strategies/finalize-wizard — TS-33 wizard_session_id reach
       "A client-supplied wizard_session_id displaced the one read from the " +
         "owner-scoped draft row. The caller can now choose the dedupe key.",
     ).toBe(DRAFT_SESSION_ID);
+    fetchSpy.mockRestore();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// Phase 150 / OWN-03 — the capital-ownership mark
+//
+// The wizard now asks whose capital sits behind a key, and the answer is
+// persisted as a strategy-level mark. Three properties are load-bearing:
+//
+//  1. The mark is written by a SEPARATE owner-scoped UPDATE after the finalize
+//     RPC returns — the 13-arg SECURITY DEFINER signature is untouched. A
+//     14th argument would mean a DROP/CREATE of the RPC on the wizard's
+//     critical path, which is the higher-risk change (150-RESEARCH,
+//     Alternatives Considered).
+//  2. That non-atomicity is DELIBERATE and degrades safely: if the mark write
+//     fails, the column stays NULL, and NULL is non-allocatable. A lost mark
+//     costs the user a second click in the Mark dialog; a failed finalize
+//     costs them the whole submission. It must never become a wizard error
+//     arm — the v0.53.3.1 roster invariant means any unknown code renders the
+//     UNKNOWN card.
+//  3. The write is pinned to BOTH the finalized id and the caller's user_id.
+//     strategies_update RLS carries no WITH CHECK, so the explicit predicate
+//     is the actual boundary, not decoration (T-150-10).
+// ══════════════════════════════════════════════════════════════════════════
+describe("POST /api/strategies/finalize-wizard — OWN-03 capital-ownership mark", () => {
+  /** The mark write, if the route made one. */
+  function markWrite() {
+    return STATE.strategyUpdates.find((u) => "capital_ownership" in u.patch);
+  }
+
+  it("persists capital_ownership='own_capital' with an owner-scoped UPDATE after the RPC", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        ...VALID_BODY,
+        entry_context: "contribution",
+        capital_ownership: "own_capital",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    // The finalize itself still happened through the untouched 13-arg RPC.
+    const rpc = STATE.rpcCalls.find(
+      (c) => c.name === "finalize_wizard_strategy",
+    );
+    expect(rpc).toBeDefined();
+    expect(
+      Object.keys(rpc!.args).some((k) => k.includes("capital")),
+      "The mark leaked into the RPC argument list. It must ride a separate " +
+        "UPDATE — the SECURITY DEFINER signature is not to be widened.",
+    ).toBe(false);
+
+    const write = markWrite();
+    expect(write).toBeDefined();
+    expect(write!.patch).toEqual({ capital_ownership: "own_capital" });
+    // T-150-10: both predicates, or the patch could reach another user's row.
+    expect(write!.eqs).toEqual([
+      { column: "id", value: STRATEGY_ID },
+      { column: "user_id", value: USER.id },
+    ]);
+    fetchSpy.mockRestore();
+  });
+
+  it("persists capital_ownership='team_review' the same way", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        ...VALID_BODY,
+        entry_context: "contribution",
+        capital_ownership: "team_review",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const write = markWrite();
+    expect(write).toBeDefined();
+    expect(write!.patch).toEqual({ capital_ownership: "team_review" });
+    expect(write!.eqs).toEqual([
+      { column: "id", value: STRATEGY_ID },
+      { column: "user_id", value: USER.id },
+    ]);
+    fetchSpy.mockRestore();
+  });
+
+  it("writes NOTHING when the body carries no capital_ownership (the column stays NULL)", async () => {
+    // Absence is the manager path and every pre-Phase-150 caller. An absent
+    // field must not be coerced to a default — an unasked user has not
+    // answered, and NULL (non-allocatable) is the honest record of that.
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, entry_context: "contribution" }),
+    );
+    expect(res.status).toBe(200);
+    expect(markWrite()).toBeUndefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("rejects a garbage capital_ownership with 400 BEFORE the RPC runs", async () => {
+    // Closed set mirrored by the DB CHECK. Rejected at the boundary so a
+    // garbled value can never reach the column that gates the money action —
+    // and rejected BEFORE finalize so a bad request cannot half-succeed.
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        ...VALID_BODY,
+        entry_context: "contribution",
+        capital_ownership: "own_capitol",
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    // Same envelope shape as the entry_context garbage arm: a bare `error`
+    // string and NO `code`. Minting a code here would put a string the wizard
+    // roster does not know onto the client, which renders the UNKNOWN card.
+    expect(typeof body.error).toBe("string");
+    expect(body.code).toBeUndefined();
+
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+      "The RPC ran despite an invalid payload — validation is not a gate.",
+    ).toBeUndefined();
+    expect(markWrite()).toBeUndefined();
+  });
+
+  it("still finalizes 200 when the mark UPDATE errors — a lost mark degrades to NULL, never to a failed submit", async () => {
+    // The deliberate non-atomicity. The user's strategy is finalized; only the
+    // mark is missing, and they can set it from the Mark dialog. Turning this
+    // into an error arm would throw away a successful finalize over metadata.
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    STATE.capitalOwnershipUpdateError = { message: "pg went away" };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        ...VALID_BODY,
+        entry_context: "contribution",
+        capital_ownership: "own_capital",
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("private");
+    expect(body.error).toBeUndefined();
+    expect(body.code).toBeUndefined();
+
+    // Silence is the real failure mode here: the mark is gone and nobody
+    // knows. It must be logged with the id needed to find the row.
+    const logged = errSpy.mock.calls.some(
+      (c) =>
+        c.join(" ").includes("capital_ownership") &&
+        c.join(" ").includes(STRATEGY_ID),
+    );
+    expect(
+      logged,
+      "The mark write failed silently — no log line naming the strategy.",
+    ).toBe(true);
+
+    errSpy.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("logs a zero-row mark write (the patch matched nobody)", async () => {
+    // Zero rows means the id+user_id predicate matched nothing: the row moved,
+    // vanished, or was never the caller's. Same safe degradation, but it is a
+    // different and more alarming story than a transport error, so it gets its
+    // own log rather than passing unnoticed.
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    STATE.capitalOwnershipUpdateRows = [];
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        ...VALID_BODY,
+        entry_context: "contribution",
+        capital_ownership: "own_capital",
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(
+      errSpy.mock.calls.some(
+        (c) =>
+          c.join(" ").includes("capital_ownership") &&
+          c.join(" ").includes(STRATEGY_ID),
+      ),
+    ).toBe(true);
+
+    errSpy.mockRestore();
     fetchSpy.mockRestore();
   });
 });
