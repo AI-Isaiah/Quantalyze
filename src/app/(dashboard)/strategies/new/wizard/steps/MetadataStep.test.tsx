@@ -348,4 +348,281 @@ describe("[H-0191] MetadataStep", () => {
       expect(select).not.toBeDisabled();
     });
   });
+
+  // ── Phase 150 / OWN-03 — the capital question + the render-only cull ──────
+  //
+  // Two changes land together in this step and must not contaminate each
+  // other: (1) an allocator-only capital question mounted FIRST, and (2) the
+  // seven "profile" controls receding behind a collapsed disclosure. The
+  // second is a RENDER change only — the payload the step emits must stay
+  // byte-compatible, because every downstream consumer (factsheet panels,
+  // browse pills, mandate-fit chips) keys on field ABSENCE to hide itself.
+  // Deleting a field would silently change what those surfaces show.
+  describe("[OWN-03] capital question + More-details cull", () => {
+    /**
+     * The onComplete payload the step emitted BEFORE this phase, typed in as a
+     * literal oracle rather than derived from the component. This is the whole
+     * proof of "render-only cull": if a culled field is dropped from
+     * MetadataDraft or from handleSubmit's onComplete({...}), this deep-equal
+     * reddens. Values are the mount defaults for `baseProps` (initial=null,
+     * detectedExchange=null) with only the description typed.
+     */
+    const DESCRIPTION = "A market-neutral basis strategy.";
+    const PRE_CHANGE_PAYLOAD = {
+      name: "Alpha Centauri", // STRATEGY_NAMES[0]
+      description: DESCRIPTION,
+      categoryId: "cat-aaa",
+      strategyTypes: [],
+      subtypes: [],
+      markets: [],
+      supportedExchanges: [],
+      leverageRange: "",
+      aum: "",
+      maxCapacity: "",
+      assetClass: "traditional",
+    };
+
+    /** Render, let the category auto-select settle, type a description, submit. */
+    async function submitUntouched(
+      extraProps: Partial<React.ComponentProps<typeof MetadataStep>> = {},
+    ): Promise<MetadataDraft> {
+      const onComplete = vi.fn();
+      render(
+        <MetadataStep {...baseProps} onComplete={onComplete} {...extraProps} />,
+      );
+      const select = (await screen.findByLabelText(
+        "Category",
+      )) as HTMLSelectElement;
+      await waitFor(() => expect(select.value).toBe("cat-aaa"));
+
+      fireEvent.change(screen.getByLabelText("Description"), {
+        target: { value: DESCRIPTION },
+      });
+
+      const submit = screen.getByRole("button", { name: /review and submit/i });
+      await waitFor(() => expect(submit).not.toBeDisabled());
+      fireEvent.click(submit);
+
+      expect(onComplete).toHaveBeenCalledTimes(1);
+      return onComplete.mock.calls[0]![0] as MetadataDraft;
+    }
+
+    // ── The question: presence, ordering, default ──────────────────────────
+
+    it("[D-01] renders the capital question as the FIRST interactive element in the form", async () => {
+      // D-01: the question the product never asked leads the step. Ordering is
+      // the whole point of the founder's direction — a question buried below
+      // three fields is a question most allocators will not read. Asserted
+      // structurally (DOM order), not by eyeballing JSX.
+      render(<MetadataStep {...baseProps} showCapitalQuestion />);
+      await screen.findByLabelText("Category");
+
+      const form = document.querySelector("form")!;
+      const interactive = form.querySelectorAll(
+        "button, input, select, textarea",
+      );
+      expect(interactive[0]).toBe(
+        screen.getByTestId("capital-ownership-own_capital"),
+      );
+
+      // …and the whole fieldset precedes the codename select.
+      const fieldset = form.querySelector("fieldset")!;
+      const codename = screen.getByLabelText("Strategy codename");
+      expect(
+        fieldset.compareDocumentPosition(codename) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    });
+
+    it("[D-01] preselects option (b) team_review on mount — never null", async () => {
+      // The mark always has a value once the question renders. A null third
+      // state would leak an "unanswered" strategy into the allocatable
+      // predicate's input space; the default is the SAFE (non-allocatable) one.
+      render(<MetadataStep {...baseProps} showCapitalQuestion />);
+      await screen.findByLabelText("Category");
+
+      expect(
+        screen.getByTestId("capital-ownership-team_review"),
+      ).toHaveAttribute("aria-checked", "true");
+      expect(screen.getByTestId("capital-ownership-own_capital")).toHaveAttribute(
+        "aria-checked",
+        "false",
+      );
+    });
+
+    it("[D-07] renders ZERO question DOM when showCapitalQuestion is absent", async () => {
+      // D-07 is one form for all users with a RENDER condition, not two forms.
+      // The manager path must not merely hide the question — it must not exist,
+      // so no manager can submit a mark by poking at the DOM.
+      render(<MetadataStep {...baseProps} />);
+      await screen.findByLabelText("Category");
+
+      expect(screen.queryByTestId("capital-ownership-own_capital")).toBeNull();
+      expect(screen.queryByTestId("capital-ownership-team_review")).toBeNull();
+      expect(document.querySelector("form")!.querySelector("fieldset")).toBeNull();
+      expect(
+        screen.queryByText(/Whose capital is in this key\?/i),
+      ).toBeNull();
+    });
+
+    // ── The payload: the render-only-cull proof ───────────────────────────
+
+    it("[D-08] an untouched manager submit is deep-equal to the pre-Phase-150 payload", async () => {
+      // The cull moves controls; it must not remove data. If someone "tidies"
+      // a collapsed field out of MetadataDraft, downstream factsheet panels
+      // silently stop rendering for every future strategy — this is the guard.
+      const draft = await submitUntouched();
+      expect(draft).toEqual(PRE_CHANGE_PAYLOAD);
+      expect("capitalOwnership" in draft).toBe(false);
+    });
+
+    it("[SC 2] an untouched allocator submit adds ONLY capitalOwnership=team_review", async () => {
+      // Behaviour-compatibility with today: a user who never touches the new
+      // question submits exactly what they would have before, plus the safe
+      // default mark. Nothing else about the payload moves.
+      const draft = await submitUntouched({ showCapitalQuestion: true });
+      expect(draft).toEqual({
+        ...PRE_CHANGE_PAYLOAD,
+        capitalOwnership: "team_review",
+      });
+    });
+
+    it("carries own_capital through to the payload once the allocator picks it", async () => {
+      const onComplete = vi.fn();
+      render(
+        <MetadataStep {...baseProps} onComplete={onComplete} showCapitalQuestion />,
+      );
+      const select = (await screen.findByLabelText(
+        "Category",
+      )) as HTMLSelectElement;
+      await waitFor(() => expect(select.value).toBe("cat-aaa"));
+
+      fireEvent.change(screen.getByLabelText("Description"), {
+        target: { value: DESCRIPTION },
+      });
+      fireEvent.click(screen.getByTestId("capital-ownership-own_capital"));
+
+      const submit = screen.getByRole("button", { name: /review and submit/i });
+      await waitFor(() => expect(submit).not.toBeDisabled());
+      fireEvent.click(submit);
+
+      const draft = onComplete.mock.calls[0]![0] as MetadataDraft;
+      expect(draft.capitalOwnership).toBe("own_capital");
+      // The rest of the payload is untouched by answering the question.
+      const { capitalOwnership: _omit, ...rest } = draft;
+      expect(rest).toEqual(PRE_CHANGE_PAYLOAD);
+    });
+
+    // ── The disclosure ────────────────────────────────────────────────────
+
+    it("[D-06] collapses the culled controls behind a closed <details> by default", async () => {
+      render(<MetadataStep {...baseProps} />);
+      await screen.findByLabelText("Category");
+
+      const details = document.querySelector("form details") as HTMLDetailsElement;
+      expect(details).not.toBeNull();
+      expect(details.open).toBe(false);
+      expect(details.querySelector("summary")!.textContent).toContain(
+        "More details (optional)",
+      );
+    });
+
+    it("[D-06] keeps the six culled controls inside the disclosure — collapsed, never deleted", async () => {
+      // Fields are collapsed, never deleted (D-06/D-08). Assert each culled
+      // control is still in the document AND is a descendant of the disclosure.
+      render(<MetadataStep {...baseProps} detectedExchange="binance" />);
+      await screen.findByLabelText("Category");
+
+      const details = document.querySelector("form details") as HTMLDetailsElement;
+      for (const label of [
+        "Strategy Types",
+        "Subtypes",
+        "Markets",
+        "Supported exchanges",
+      ]) {
+        const node = screen.getByText(label);
+        expect(details.contains(node)).toBe(true);
+      }
+      for (const label of ["Leverage range", "AUM (USD)", "Max capacity (USD)"]) {
+        expect(details.contains(screen.getByLabelText(label))).toBe(true);
+      }
+    });
+
+    it("[Pitfall 4] HOISTS the asset-class select OUT of the disclosure when it is editable", async () => {
+      // Money-math guard: on the CSV / unknown-exchange path the select is
+      // editable and defaults to `traditional` (√252). Hiding it behind a
+      // collapsed disclosure makes √252-on-a-crypto-book the likely silent
+      // outcome, which inflates Sharpe. Editable ⇒ visible.
+      render(<MetadataStep {...baseProps} detectedExchange={null} />);
+      const assetClass = await screen.findByLabelText(/Asset class/i);
+      const details = document.querySelector("form details") as HTMLDetailsElement;
+
+      expect(assetClass).not.toBeDisabled();
+      expect(details.contains(assetClass)).toBe(false);
+    });
+
+    it("[Pitfall 4] keeps the asset-class select INSIDE the disclosure when it is locked", async () => {
+      // On a detected crypto exchange the select is disabled and the server
+      // force-derives the same value, so it is purely informational — it
+      // belongs in the disclosure and carries no money-math risk there.
+      render(<MetadataStep {...baseProps} detectedExchange="binance" />);
+      const assetClass = await screen.findByLabelText(/Asset class/i);
+      const details = document.querySelector("form details") as HTMLDetailsElement;
+
+      expect(assetClass).toBeDisabled();
+      expect(details.contains(assetClass)).toBe(true);
+    });
+
+    it("does NOT use CollapsibleSection or any persistence for the disclosure", async () => {
+      // A wizard step is transient: remembering "open" across sessions (what
+      // CollapsibleSection does via localStorage) is wrong here, and its
+      // uppercase-mono Hide/Show voice is the factsheet document-section voice.
+      const source = await import("node:fs").then((fs) =>
+        fs.readFileSync(
+          "src/app/(dashboard)/strategies/new/wizard/steps/MetadataStep.tsx",
+          "utf8",
+        ),
+      );
+      expect(source).not.toContain("CollapsibleSection");
+      expect(source).not.toContain("storageKey");
+      expect(source).not.toContain("useCrossTabStorage");
+    });
+
+    // ── Copy + the untouched submit gate ──────────────────────────────────
+
+    it("uses the role-neutral revised step copy", async () => {
+      // The old heading ("Tell allocators what this strategy is") is
+      // manager-voiced and wrong for the allocator this step is being fixed
+      // for. One role-neutral heading — role-gated form variants are deferred.
+      render(<MetadataStep {...baseProps} showCapitalQuestion />);
+      expect(
+        await screen.findByRole("heading", { name: "Describe this strategy" }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          "Codename, description, and category are all we need. Everything else is optional.",
+        ),
+      ).toBeInTheDocument();
+    });
+
+    it("leaves the submit gate unchanged when the question renders", async () => {
+      // The gate stays exactly `!description.trim() || !categoryId`. Answering
+      // the capital question must NOT become a new precondition (wizard
+      // validation UX belongs to Phase 153) — and since it is preselected,
+      // it never could be. Guard against someone widening the gate.
+      render(<MetadataStep {...baseProps} showCapitalQuestion />);
+      const select = (await screen.findByLabelText(
+        "Category",
+      )) as HTMLSelectElement;
+      await waitFor(() => expect(select.value).toBe("cat-aaa"));
+
+      const submit = screen.getByRole("button", { name: /review and submit/i });
+      expect(submit).toBeDisabled(); // no description yet
+
+      fireEvent.change(screen.getByLabelText("Description"), {
+        target: { value: DESCRIPTION },
+      });
+      await waitFor(() => expect(submit).not.toBeDisabled());
+    });
+  });
 });
