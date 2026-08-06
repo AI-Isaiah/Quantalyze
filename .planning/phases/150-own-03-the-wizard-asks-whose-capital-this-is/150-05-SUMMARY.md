@@ -243,3 +243,7 @@ None.
 ---
 *Phase: 150-own-03-the-wizard-asks-whose-capital-this-is*
 *Completed: 2026-08-06*
+
+## Orchestrator close-out (2026-08-06): PROD census executed
+
+The read-only PROD ownership census (khslejtfbuezsmvmtsdn) ran post-merge of this plan. `capital_ownership` does not exist on PROD yet (lands at merge), so the join ran without it — every PROD position is by definition unmarked today. Result: **29 rows, ALL third-party (`strategy_owner <> portfolio_owner` on every row; 20 is_test=false, 9 is_test=true)**. Zero self-owned positions exist in PROD. Consequences: (1) no existing PROD row is affected by the owner-scoped D-03-A arm; (2) under D-12-A every existing position keeps its row with `capitalOwnership: null` — no money vanishes; (3) demo-seed shapes are all third-party, so seed re-runs clear ARM 2 (closes 150-01's seed watch item).
