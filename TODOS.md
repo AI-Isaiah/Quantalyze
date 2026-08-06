@@ -1399,3 +1399,5 @@ toggle-hide also defers: `StrategyGrid.tsx:79-82` renders `VerifiedBadge` with
 - [ ] IN-02: allocation route lacks the archived-status gate the marked-set query enforces (query-side filter only).
 - [ ] IN-03: mid-request mark flip surfaces as 500/UNKNOWN instead of the 409 arm (no row refresh) — race window only.
 - [ ] IN-04: MarkOwnershipDialog "Keep own capital" stays clickable while destructive removal is in flight.
+- [ ] (verifier INFO) finalize-wizard/route.ts:1339-1342 carries the same stale no-WITH-CHECK claim as IN-01's route docblocks — fix together.
+- [ ] (verifier INFO) MigrationWizard.tsx:72-76 surfaces raw psError.message — give it the W-6 23514→honest-copy mapping AddToPortfolio got. Reachable only for an owner migrating their own unmarked published strategy.
