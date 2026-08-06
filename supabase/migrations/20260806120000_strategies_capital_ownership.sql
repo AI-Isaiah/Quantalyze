@@ -21,6 +21,20 @@
 --       reader will find it (header (g), column COMMENT) instead of being
 --       implied by two DELETE predicates.
 --
+-- rev-3 (2026-08-06, migration re-review): one further BLOCKING finding, F4 —
+-- THE REPOINT HOLE. rev-2 closed two of the three routes into a stranded
+-- position; the third is an UPDATE of `portfolio_strategies.strategy_id`. The
+-- D-03-A trigger was BEFORE INSERT only, and the rev-2 mark-transition guard
+-- watches `strategies.capital_ownership`, so an owner PATCHing an EXISTING
+-- position to RE-POINT it at a team_review (or self-owned unmarked) strategy
+-- passed BOTH guards and minted exactly the state D-03-A forbids — without ever
+-- creating a row. Closed by a SECOND trigger on the SAME function, part 3:
+-- `trg_portfolio_strategies_own_capital_on_repoint`, BEFORE UPDATE OF
+-- strategy_id. Pitfall 2 stays closed: the shipped alias write sets only
+-- `alias`, and a column-targeted `UPDATE OF strategy_id` does not fire for a
+-- statement whose SET list does not name that column (pinned by guard-test
+-- case 5, which is unchanged, and case 7i).
+--
 -- Re-base check (MEMORY `project_cross_cutting_refactor_program`): grepped ALL
 -- of supabase/migrations, src/ and analytics-service/ for `capital_ownership`,
 -- `own_capital`, `team_review`, `guard_allocation_requires_own_capital`,
@@ -99,8 +113,9 @@
 -- (d.3) THE MARK-TRANSITION GUARD — WHY SC 2b NEEDS A SECOND TRIGGER
 --       (rev-2, migration review finding F2).
 -- --------------------------------------------------------------------
--- The D-03-A trigger above is INSERT-scoped, so it only ever sees a position
--- being CREATED. It is blind to the OTHER way into the same stranded state: the
+-- The D-03-A trigger above fires on the position side only — on the INSERT that
+-- CREATES a position and (rev-3, F4) on the UPDATE that RE-POINTS one. It is
+-- blind to the OTHER way into the same stranded state: the
 -- owner UPDATEing `strategies.capital_ownership` to 'team_review' while their
 -- own position is already live. `strategies_update USING (user_id = auth.uid())`
 -- permits exactly that write from a raw PostgREST PATCH — no route, no RPC,
@@ -142,10 +157,19 @@
 -- --------------------------------------
 -- Mirrors the 20260716130000_strategies_status_private.sql:20-27 argument.
 -- `strategies_read` (20260405061912_rls_policies.sql:28-30) is
--- `status='published' OR user_id=auth.uid()`; `strategies_update` (:32) is
--- `user_id=auth.uid()`; `portfolio_strategies_owner` (:67-69) is
--- `portfolio_id IN (SELECT id FROM portfolios WHERE user_id = auth.uid())`.
--- Adding a COLUMN changes none of them, and no policy is created or altered
+-- `status='published' OR user_id=auth.uid()`; `strategies_update` is
+-- `USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid())` — the
+-- policy was REPLACED with an explicit WITH CHECK by
+-- 20260410225610_sec005_follow_ups.sql:102-106, so cite THAT file, not the
+-- original :32 (rev-3 citation re-base); `portfolio_strategies_owner` (:67-69)
+-- is `portfolio_id IN (SELECT id FROM portfolios WHERE user_id = auth.uid())`.
+-- Org-scoped strategies have a SECOND read policy: `strategies_org_read`
+-- (20260409212457_fix_organization_rls_recursion.sql:95) lets any org member
+-- SELECT an org-scoped row REGARDLESS of status, so members can read
+-- capital_ownership on org-scoped UNPUBLISHED strategies too. That widens the
+-- readership of the mark past (f)'s "published rows"; it does not change (f)'s
+-- conclusion, because the value is dispositioned NON-SENSITIVE either way.
+-- Adding a COLUMN changes none of these, and no policy is created or altered
 -- here. Note for the money-path review (do NOT "fix" it in this migration,
 -- Rule 3): `portfolio_strategies_owner` is `FOR ALL USING (...)` with no
 -- explicit WITH CHECK — under FOR ALL, Postgres reuses USING as the check, so
@@ -184,6 +208,26 @@
 -- worse failure than a stale third-party position, which the third party can
 -- see and remove themselves. Do NOT "fix" this into a global delete; it is
 -- pinned by guard-test case 7e.
+--
+--
+-- (h) THERE IS DELIBERATELY NO SERVICE-ROLE FLIP PATH.
+-- -----------------------------------------------------
+-- Nothing in this migration can mark a strategy 'team_review' from a context
+-- without an end user, and that is a design decision, not an omission:
+--   * `flip_capital_ownership_to_team_review()` is SECURITY INVOKER and its
+--     owner precheck compares against `auth.uid()`. In a service-role or cron
+--     context `auth.uid()` IS NULL, so `v_owner IS DISTINCT FROM auth.uid()`
+--     is true for every row and the RPC returns (0, 0) — a silent no-op.
+--   * A raw `UPDATE strategies SET capital_ownership = 'team_review'` from that
+--     same context still fires part 3b's guard, which counts the owner's
+--     positions with SECURITY DEFINER (i.e. WITHOUT RLS help) and RAISEs 23514
+--     while any are live.
+-- So admin, GDPR and backfill work that needs a strategy marked team_review
+-- must DELETE the owner's positions first and only then set the mark; there is
+-- no bypass and no "service arm" to reach for. Do NOT add one: a service-role
+-- flip is precisely the shape that would strand positions invisibly, because
+-- the guard that protects the user path is the guard such an arm would exist to
+-- route around.
 --
 --
 -- Ops: merging supabase/migrations/** to main AUTO-APPLIES to PROD
@@ -288,13 +332,15 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.guard_allocation_requires_own_capital() IS
-  'OWN-03 / D-03-A: blocks creation of a portfolio_strategies row when the strategy is marked team_review (unconditional, SC 2b) or when the strategy is SELF-OWNED and not marked own_capital. Third-party inserts with a NULL or own_capital mark pass, preserving the shipped AddToPortfolio / MigrationWizard / demo-seed paths. SECURITY DEFINER so the mark lookup is not RLS-filtered by the inserting session.';
+  'OWN-03 / D-03-A: blocks a portfolio_strategies row from POINTING AT a strategy that is marked team_review (unconditional, SC 2b) or that is SELF-OWNED and not marked own_capital. Attached to TWO narrow triggers that share this body: trg_portfolio_strategies_own_capital_only (BEFORE INSERT — creation) and trg_portfolio_strategies_own_capital_on_repoint (BEFORE UPDATE OF strategy_id — repoint, rev-3 finding F4). It reads only NEW.strategy_id and NEW.portfolio_id, so the same predicate is correct on both events. Third-party rows with a NULL or own_capital mark pass, preserving the shipped AddToPortfolio / MigrationWizard / demo-seed paths. SECURITY DEFINER so the mark lookup is not RLS-filtered by the writing session.';
 
--- INSERT-SCOPED ONLY. Adding an UPDATE arm here would break the shipped alias
--- write (src/app/api/portfolio-strategies/alias/route.ts:148) on every legacy
--- row whose strategy is unmarked — i.e. every pre-existing PROD position and
--- every demo-seed row (150-RESEARCH § Pitfall 2). The invariant is about
--- CREATING a position, not about touching one.
+-- INSERT + REPOINT (`UPDATE OF strategy_id`) SCOPED — NEVER PLAIN UPDATE.
+-- A blanket UPDATE arm would break the shipped alias write
+-- (src/app/api/portfolio-strategies/alias/route.ts:148) on every legacy row
+-- whose strategy is unmarked — i.e. every pre-existing PROD position and every
+-- demo-seed row (150-RESEARCH § Pitfall 2). So the guard is attached as TWO
+-- narrow triggers rather than one wide one: the invariant is about which
+-- STRATEGY a position points at, not about touching a position.
 DROP TRIGGER IF EXISTS trg_portfolio_strategies_own_capital_only ON public.portfolio_strategies;
 CREATE TRIGGER trg_portfolio_strategies_own_capital_only
   BEFORE INSERT ON public.portfolio_strategies
@@ -302,7 +348,38 @@ CREATE TRIGGER trg_portfolio_strategies_own_capital_only
   EXECUTE FUNCTION public.guard_allocation_requires_own_capital();
 
 COMMENT ON TRIGGER trg_portfolio_strategies_own_capital_only ON public.portfolio_strategies IS
-  'OWN-03 / D-03-A hard invariant at the table layer. Fires on the INSERT event ONLY — an UPDATE arm breaks the shipped alias UPDATE on every legacy row whose strategy is unmarked (150-RESEARCH § Pitfall 2).';
+  'OWN-03 / D-03-A hard invariant at the table layer, CREATE side. Fires on the INSERT event ONLY — a blanket UPDATE arm breaks the shipped alias UPDATE on every legacy row whose strategy is unmarked (150-RESEARCH § Pitfall 2). The repoint side is the companion trigger trg_portfolio_strategies_own_capital_on_repoint.';
+
+-- rev-3, finding F4 — THE REPOINT HOLE, the third route into the stranded
+-- state. The INSERT trigger above sees only rows being CREATED; part 3b's
+-- mark-transition guard watches `strategies.capital_ownership`. Neither fires
+-- when an owner PATCHes `portfolio_strategies.strategy_id` on an EXISTING
+-- position to re-point it at a team_review (or self-owned unmarked) strategy —
+-- which lands exactly the state D-03-A forbids, with no INSERT and no mark
+-- change anywhere. Same function, same predicate, reused verbatim: the guard
+-- reads only NEW.strategy_id and NEW.portfolio_id, both of which are populated
+-- identically on an UPDATE, and it RETURNs NEW, which is correct for a BEFORE
+-- UPDATE row trigger.
+--
+-- COLUMN-TARGETED, and that is what keeps Pitfall 2 closed: Postgres fires an
+-- `UPDATE OF <col>` trigger only when the statement's SET list NAMES that
+-- column. The alias route sets `alias` alone, so this trigger never evaluates
+-- for it — pinned by guard-test case 5 (unchanged) and case 7i.
+--
+-- Upserts are unaffected in either direction: PostgREST's
+-- `ON CONFLICT ... DO UPDATE SET strategy_id = excluded.strategy_id` does name
+-- the column, so this trigger fires on the conflict branch — with the SAME
+-- NEW.strategy_id / NEW.portfolio_id the BEFORE INSERT trigger already
+-- evaluated on the insert ATTEMPT (guard-test case 4). Identical verdict, no
+-- new refusal.
+DROP TRIGGER IF EXISTS trg_portfolio_strategies_own_capital_on_repoint ON public.portfolio_strategies;
+CREATE TRIGGER trg_portfolio_strategies_own_capital_on_repoint
+  BEFORE UPDATE OF strategy_id ON public.portfolio_strategies
+  FOR EACH ROW
+  EXECUTE FUNCTION public.guard_allocation_requires_own_capital();
+
+COMMENT ON TRIGGER trg_portfolio_strategies_own_capital_on_repoint ON public.portfolio_strategies IS
+  'OWN-03 / D-03-A hard invariant at the table layer, REPOINT side (rev-3, finding F4). Fires on UPDATE OF strategy_id ONLY. Without it, an owner could PATCH an existing position''s strategy_id to a team_review or self-owned unmarked strategy and reach the forbidden state without an INSERT and without a mark change — invisible to both the INSERT trigger and the mark-transition guard. The column target is load-bearing: the shipped alias UPDATE sets only `alias`, so this trigger never evaluates for it (150-RESEARCH § Pitfall 2).';
 
 -- Trigger function: never invocable via PostgREST RPC. Revoke from the API
 -- roles too (not just PUBLIC) — matches the guard_strategies_publish_transition
@@ -397,9 +474,20 @@ REVOKE ALL ON FUNCTION public.guard_team_review_mark_no_stranded_positions() FRO
 -- construction, so the pair is atomic.
 --
 -- SECURITY INVOKER (so RLS also applies) AND explicit auth.uid() predicates in
--- both statements. The explicit predicates are load-bearing, not
--- belt-and-braces: `strategies_update` is FOR UPDATE USING (...) with NO
--- WITH CHECK (20260405061912_rls_policies.sql:32).
+-- both statements.
+--
+-- rev-3 CITATION RE-BASE. This paragraph used to justify those predicates by
+-- claiming `strategies_update` has NO WITH CHECK. That is FALSE and has been
+-- since 20260410225610_sec005_follow_ups.sql:102-106, which DROPped and
+-- recreated the policy as `USING (user_id = auth.uid()) WITH CHECK (user_id =
+-- auth.uid())` — the original :32 definition is no longer the live one. The
+-- predicates are kept anyway, on the ground that actually holds: they are what
+-- keeps each statement correct ON ITS OWN TERMS if this function is ever made
+-- SECURITY DEFINER or called from a service-role context, where RLS stops
+-- applying at all and neither USING nor WITH CHECK is evaluated. That is
+-- defence-in-depth against a future edit, not a claim about today's policy —
+-- and guard-test case 7c pins all three occurrences structurally, because no
+-- behavioural test can see their removal while RLS is doing the work.
 
 CREATE OR REPLACE FUNCTION public.flip_capital_ownership_to_team_review(
   p_strategy_id uuid
@@ -515,8 +603,11 @@ BEGIN
       'OWN-03 migration failed: capital_ownership must be nullable with no default (no-invented-data, header (b))';
   END IF;
 
-  -- 5c. The trigger fires on EXACTLY the INSERT event — no UPDATE/DELETE row
-  --     (150-RESEARCH § Pitfall 2 / T-150-06).
+  -- 5c. The CREATE-side trigger fires on EXACTLY the INSERT event — no
+  --     UPDATE/DELETE row (150-RESEARCH § Pitfall 2 / T-150-06). This filters
+  --     on the trigger NAME, so the rev-3 repoint trigger (5g), which shares
+  --     the function but not the name, does not disturb it: a plain UPDATE arm
+  --     on THIS trigger would still break the shipped alias write.
   SELECT
     count(*) FILTER (WHERE event_manipulation = 'INSERT'),
     count(*) FILTER (WHERE event_manipulation <> 'INSERT')
@@ -607,7 +698,40 @@ BEGIN
       'OWN-03 migration failed: trg_strategies_team_review_mark_guard is not column-targeted on capital_ownership (matched % column(s)) — every rename, publish and metrics UPDATE on strategies would evaluate it', col_cnt;
   END IF;
 
-  RAISE NOTICE 'OWN-03 capital_ownership migration self-check passed (column + CHECK + INSERT-scoped D-03-A trigger + UPDATE-scoped mark-transition guard + flip RPC with owner precheck and DELETE-before-UPDATE order).';
+  -- 5g. The rev-3 REPOINT trigger (finding F4) fires on EXACTLY the UPDATE
+  --     event and is COLUMN-TARGETED on strategy_id. Both halves are
+  --     load-bearing in OPPOSITE directions: a missing trigger reopens the
+  --     repoint hole (a position PATCHed onto a team_review strategy with no
+  --     INSERT and no mark change), while a LOST COLUMN TARGET turns it into
+  --     the blanket UPDATE arm that 5c exists to forbid — it would then raise
+  --     on the shipped alias write for every legacy unmarked row.
+  SELECT
+    count(*) FILTER (WHERE event_manipulation = 'UPDATE'),
+    count(*) FILTER (WHERE event_manipulation <> 'UPDATE')
+    INTO update_cnt, other_cnt
+  FROM information_schema.triggers
+  WHERE trigger_schema = 'public'
+    AND trigger_name = 'trg_portfolio_strategies_own_capital_on_repoint';
+  IF update_cnt < 1 THEN
+    RAISE EXCEPTION
+      'OWN-03 migration failed: trg_portfolio_strategies_own_capital_on_repoint does not fire on UPDATE — an owner could re-point an existing position at a team_review strategy and neither the INSERT trigger nor the mark-transition guard would see it';
+  END IF;
+  IF other_cnt > 0 THEN
+    RAISE EXCEPTION
+      'OWN-03 migration failed: trg_portfolio_strategies_own_capital_on_repoint fires on % non-UPDATE event(s)', other_cnt;
+  END IF;
+
+  SELECT count(*) INTO col_cnt
+  FROM information_schema.triggered_update_columns
+  WHERE trigger_schema = 'public'
+    AND trigger_name = 'trg_portfolio_strategies_own_capital_on_repoint'
+    AND event_object_column = 'strategy_id';
+  IF col_cnt <> 1 THEN
+    RAISE EXCEPTION
+      'OWN-03 migration failed: trg_portfolio_strategies_own_capital_on_repoint is not column-targeted on strategy_id (matched % column(s)) — as a blanket UPDATE trigger it would raise on the shipped alias write for every legacy unmarked position (150-RESEARCH § Pitfall 2)', col_cnt;
+  END IF;
+
+  RAISE NOTICE 'OWN-03 capital_ownership migration self-check passed (column + CHECK + INSERT-scoped D-03-A trigger + strategy_id-scoped repoint trigger + UPDATE-scoped mark-transition guard + flip RPC with owner precheck and DELETE-before-UPDATE order).';
 END $$;
 
 COMMIT;

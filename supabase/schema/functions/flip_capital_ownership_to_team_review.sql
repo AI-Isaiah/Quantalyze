@@ -14,9 +14,20 @@
 -- construction, so the pair is atomic.
 --
 -- SECURITY INVOKER (so RLS also applies) AND explicit auth.uid() predicates in
--- both statements. The explicit predicates are load-bearing, not
--- belt-and-braces: `strategies_update` is FOR UPDATE USING (...) with NO
--- WITH CHECK (20260405061912_rls_policies.sql:32).
+-- both statements.
+--
+-- rev-3 CITATION RE-BASE. This paragraph used to justify those predicates by
+-- claiming `strategies_update` has NO WITH CHECK. That is FALSE and has been
+-- since 20260410225610_sec005_follow_ups.sql:102-106, which DROPped and
+-- recreated the policy as `USING (user_id = auth.uid()) WITH CHECK (user_id =
+-- auth.uid())` — the original :32 definition is no longer the live one. The
+-- predicates are kept anyway, on the ground that actually holds: they are what
+-- keeps each statement correct ON ITS OWN TERMS if this function is ever made
+-- SECURITY DEFINER or called from a service-role context, where RLS stops
+-- applying at all and neither USING nor WITH CHECK is evaluated. That is
+-- defence-in-depth against a future edit, not a claim about today's policy —
+-- and guard-test case 7c pins all three occurrences structurally, because no
+-- behavioural test can see their removal while RLS is doing the work.
 
 CREATE OR REPLACE FUNCTION public.flip_capital_ownership_to_team_review(
   p_strategy_id uuid
