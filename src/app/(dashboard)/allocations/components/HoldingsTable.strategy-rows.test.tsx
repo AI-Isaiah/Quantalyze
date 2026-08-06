@@ -699,6 +699,27 @@ describe("HoldingsTabPanel — Allocate… with props.portfolio === null", () =>
     expect(within(row as HTMLElement).getByText("not allocated")).toBeInTheDocument();
   });
 
+  it("[D-12-A] a POSITION still reaches the surface — allocated money never vanishes", () => {
+    // Found by mutation: replacing the panel's `positions: strategies` with
+    // `positions: []` left the whole suite green, because every other panel
+    // case feeds the MARKED half only. That mutation is the D-12-A violation
+    // itself — an allocator's live position disappearing from the money
+    // surface — so it gets its own oracle rather than an inferred one.
+    renderPanel({
+      ownCapitalStrategies: [],
+      strategies: [
+        makeStrategy({ strategy_id: "legacy", allocated_amount: 250_000 }),
+      ],
+    });
+    const row = document.querySelector('[data-strategy-row="legacy"]');
+    expect(row).not.toBeNull();
+    expect(within(row as HTMLElement).getByText("$250,000")).toBeInTheDocument();
+    // …and it carries NO new affordance: it is unmarked (D-12-A read-only arm).
+    expect(
+      within(row as HTMLElement).queryByRole("button", { name: "Allocate…" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("threads the D-15 discriminator, so an owner WITH strategies is never told they have none", () => {
     // The panel is the only place `hasAnyStrategies` is sourced from real data.
     // If it stops threading the prop, HoldingsTable's conservative `?? false`
