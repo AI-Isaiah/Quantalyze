@@ -17,6 +17,8 @@ import {
   canonicalizeExchange,
 } from "@/lib/constants";
 import { isCryptoExchange } from "@/lib/closed-sets";
+import { CapitalOwnershipRadioGroup } from "@/components/strategy/CapitalOwnershipRadioGroup";
+import { TEAM_REVIEW, type CapitalOwnership } from "@/lib/capital-ownership";
 
 /**
  * MetadataStep collects the metadata the founder needs to approve a
@@ -42,6 +44,13 @@ export interface MetadataDraft {
    * exchange (every supported exchange is crypto today) and is user-editable.
    */
   assetClass: string;
+  /**
+   * Phase 150 / OWN-03 — whose capital sits behind this key. Present ONLY when
+   * the capital question rendered (allocator sessions). Absent on every path
+   * that never asked, which persists as a NULL mark: unmarked strategies are
+   * non-allocatable, so the un-asked case degrades to the safe state.
+   */
+  capitalOwnership?: CapitalOwnership;
 }
 
 export interface MetadataStepProps {
@@ -53,6 +62,15 @@ export interface MetadataStepProps {
   detectedMarkets: string[];
   /** Exchange selected at Step 1. */
   detectedExchange: string | null;
+  /**
+   * Phase 150 / OWN-03 (D-01, D-07) — render the capital question. This is a
+   * RENDER condition, not an authorization one: it is derived from the wizard's
+   * entryContext (allocator key-add vs manager submission) so allocators are
+   * asked the question at the moment it is answerable. No privilege attaches to
+   * it — a manager who somehow set it would only be marking their OWN strategy,
+   * which is not a violation. The server re-derives everything that matters.
+   */
+  showCapitalQuestion?: boolean;
   onComplete: (draft: MetadataDraft) => void;
   onBack: () => void;
 }
@@ -62,6 +80,7 @@ export function MetadataStep({
   initial,
   detectedMarkets,
   detectedExchange,
+  showCapitalQuestion = false,
   onComplete,
   onBack,
 }: MetadataStepProps) {
@@ -108,6 +127,14 @@ export function MetadataStep({
   const [assetClass, setAssetClass] = useState<string>(
     assetClassLocked ? "crypto" : (initial?.assetClass ?? "traditional"),
   );
+  // Phase 150 / OWN-03 (D-01) — the capital question is DEFAULTED to
+  // team-review, never null. A user who never touches it submits as
+  // team-review, which is behaviour-compatible with the pre-Phase-150 wizard
+  // (team-review strategies cannot be allocated, exactly as nothing could
+  // before). The safe state is the default; own-capital is always a
+  // deliberate act.
+  const [capitalOwnership, setCapitalOwnership] =
+    useState<CapitalOwnership>(TEAM_REVIEW);
   const [categoryLoadError, setCategoryLoadError] = useState<string | null>(null);
   // Phase 53 / APPLY-02 — inline per-field validation surfacing. The
   // description is the required free-text field; surface its existing
@@ -208,8 +235,42 @@ export function MetadataStep({
       aum,
       maxCapacity,
       assetClass,
+      // OWN-03: spread the mark in ONLY when the question rendered, so paths
+      // that never asked emit an ABSENT key rather than a defaulted one. The
+      // route treats absence as "do not write", leaving the column NULL —
+      // an unmarked strategy, which is non-allocatable. Never send a mark the
+      // user was not shown.
+      ...(showCapitalQuestion ? { capitalOwnership } : {}),
     });
   }
+
+  // #597 — asset class drives Sharpe/Sortino/volatility annualization
+  // (crypto trades 7 days/week → √365; traditional markets weekdays → √252).
+  // Locked to 'crypto' when a crypto exchange is detected (finalize-wizard
+  // force-derives the same); editable for CSV / multi-asset strategies.
+  //
+  // OWN-03 (Pitfall 4) — declared once here because it renders in one of TWO
+  // places depending on `assetClassLocked`; see the placement branch below.
+  // One spelling, so the two placements cannot drift.
+  const assetClassSelect = (
+    <Select
+      label={
+        assetClassLocked
+          ? "Asset class (auto-detected from exchange)"
+          : "Asset class"
+      }
+      options={[
+        { value: "crypto", label: "Crypto (annualize ×√365)" },
+        {
+          value: "traditional",
+          label: "Traditional / equities · FX (annualize ×√252)",
+        },
+      ]}
+      value={assetClass}
+      onChange={(e) => setAssetClass(e.target.value)}
+      disabled={assetClassLocked}
+    />
+  );
 
   return (
     <section aria-labelledby="wizard-metadata-heading">
@@ -217,14 +278,31 @@ export function MetadataStep({
         id="wizard-metadata-heading"
         className="font-sans text-h3 font-semibold text-text-primary"
       >
-        Tell allocators what this strategy is
+        Describe this strategy
       </h2>
+      {/* OWN-03: role-neutral copy. The previous heading ("Tell allocators what
+          this strategy is") is manager-voiced, and this step now serves the
+          allocator adding their own key too — one form for both (D-07), so the
+          copy must not address only one of them. The intro states the honest
+          requirement: three fields, everything else optional. */}
       <p className="mt-2 text-body text-text-secondary">
-        We pre-filled what we could detect from your trades. Fill in the rest so
-        allocators can evaluate the fit.
+        Codename, description, and category are all we need. Everything else is
+        optional.
       </p>
 
       <form onSubmit={handleSubmit} className="mt-8 space-y-6">
+        {/* OWN-03 (D-01) — THE question, first. It leads the step because a
+            question buried under three fields is a question most people never
+            read, and this one decides whether the strategy can ever hold
+            money. */}
+        {showCapitalQuestion && (
+          <CapitalOwnershipRadioGroup
+            label="Whose capital is in this key?"
+            value={capitalOwnership}
+            onChange={setCapitalOwnership}
+          />
+        )}
+
         <Select
           label="Strategy codename"
           options={STRATEGY_NAMES.map((n) => ({ value: n, label: n }))}
@@ -279,91 +357,119 @@ export function MetadataStep({
           </p>
         )}
 
-        <InlineChipGroup
-          label="Strategy Types"
-          items={[...STRATEGY_TYPES]}
-          selected={strategyTypes}
-          onToggle={(item) => toggle(strategyTypes, item, setStrategyTypes)}
-        />
+        {/* OWN-03 (Pitfall 4) — HOISTED when editable. On the CSV /
+            unknown-exchange path this select is live and defaults to
+            'traditional', i.e. √252. Annualizing a crypto book on √252
+            inflates Sharpe, so the one control whose wrong default silently
+            corrupts the money math must never hide behind a collapsed
+            disclosure. When it is LOCKED it is disabled and the server
+            force-derives the same value, so it is purely informational and
+            sits inside the disclosure with the rest. */}
+        {!assetClassLocked && assetClassSelect}
 
-        <InlineChipGroup
-          label="Subtypes"
-          items={[...SUBTYPES]}
-          selected={subtypes}
-          onToggle={(item) => toggle(subtypes, item, setSubtypes)}
-        />
+        {/* OWN-03 (D-05/D-06) — the cull. These seven controls are the
+            "profile" questions: useful, never required, and asking them up
+            front is what made this step feel like paperwork. They are
+            COLLAPSED, never deleted (D-08) — every field stays in
+            MetadataDraft and in the finalize payload, so downstream factsheet
+            panels, browse pills and mandate-fit chips keep their existing
+            hide-on-absence behaviour with zero server change.
 
-        <div>
-          <InlineChipGroup
-            label="Markets"
-            items={[...MARKETS]}
-            selected={markets}
-            onToggle={(item) => toggle(markets, item, setMarkets)}
-          />
-          {detectedMarkets.length === 0 && (
-            <p className="mt-2 text-micro text-text-muted">
-              We could not identify the markets from your trades — please select
-              manually.
-            </p>
-          )}
-          {detectedMarkets.length > 0 && (
-            <p className="mt-2 text-micro text-text-muted">
-              Detected from your trade history: {detectedMarkets.join(", ")}.
-            </p>
-          )}
-        </div>
+            This is a bare native <details>, deliberately NOT the shared
+            collapsible component in components/ui — that one persists its
+            open/closed state to localStorage and speaks the factsheet's
+            uppercase document-section voice, both wrong for a transient form
+            control. Only its CSS caret idiom is borrowed. (That component is
+            not named here on purpose: the acceptance grep for this file runs
+            over this comment too, so naming it would match its own prose.)
+            The closest in-repo precedent at this weight is the bare
+            details/summary "More" cell in StrategyTable. */}
+        <details className="group">
+          <summary className="flex min-h-[44px] cursor-pointer list-none select-none items-center gap-2 rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
+            <span
+              aria-hidden
+              className="inline-block h-2 w-2 transition-transform group-open:rotate-90"
+              style={{
+                borderTop: "4px solid transparent",
+                borderBottom: "4px solid transparent",
+                borderLeft: "5px solid var(--color-text-muted)",
+              }}
+            />
+            <span className="text-caption font-medium text-text-secondary">
+              More details (optional)
+            </span>
+          </summary>
 
-        <InlineChipGroup
-          label="Supported exchanges"
-          items={[...EXCHANGES]}
-          selected={supportedExchanges}
-          onToggle={(item) =>
-            toggle(supportedExchanges, item, setSupportedExchanges)
-          }
-        />
+          <div className="mt-4 space-y-6">
+            <InlineChipGroup
+              label="Strategy Types"
+              items={[...STRATEGY_TYPES]}
+              selected={strategyTypes}
+              onToggle={(item) => toggle(strategyTypes, item, setStrategyTypes)}
+            />
 
-        {/* #597 — asset class drives Sharpe/Sortino/volatility annualization
-            (crypto trades 7 days/week → √365; traditional markets weekdays →
-            √252). Locked to 'crypto' when a crypto exchange is detected
-            (finalize-wizard force-derives the same); editable for CSV /
-            multi-asset strategies. */}
-        <Select
-          label={
-            assetClassLocked
-              ? "Asset class (auto-detected from exchange)"
-              : "Asset class"
-          }
-          options={[
-            { value: "crypto", label: "Crypto (annualize ×√365)" },
-            { value: "traditional", label: "Traditional / equities · FX (annualize ×√252)" },
-          ]}
-          value={assetClass}
-          onChange={(e) => setAssetClass(e.target.value)}
-          disabled={assetClassLocked}
-        />
+            <InlineChipGroup
+              label="Subtypes"
+              items={[...SUBTYPES]}
+              selected={subtypes}
+              onToggle={(item) => toggle(subtypes, item, setSubtypes)}
+            />
 
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-          <Input
-            label="Leverage range"
-            value={leverageRange}
-            onChange={(e) => setLeverageRange(e.target.value)}
-            placeholder="e.g. 1x–5x"
-          />
-          <Input
-            label="AUM (USD)"
-            type="number"
-            value={aum}
-            onChange={(e) => setAum(e.target.value)}
-            placeholder="0"
-          />
-          <Input
-            label="Max capacity (USD)"
-            type="number"
-            value={maxCapacity}
-            onChange={(e) => setMaxCapacity(e.target.value)}
-            placeholder="0"
-          />
-        </div>
+            <div>
+              <InlineChipGroup
+                label="Markets"
+                items={[...MARKETS]}
+                selected={markets}
+                onToggle={(item) => toggle(markets, item, setMarkets)}
+              />
+              {detectedMarkets.length === 0 && (
+                <p className="mt-2 text-micro text-text-muted">
+                  We could not identify the markets from your trades — please
+                  select manually.
+                </p>
+              )}
+              {detectedMarkets.length > 0 && (
+                <p className="mt-2 text-micro text-text-muted">
+                  Detected from your trade history: {detectedMarkets.join(", ")}.
+                </p>
+              )}
+            </div>
+
+            <InlineChipGroup
+              label="Supported exchanges"
+              items={[...EXCHANGES]}
+              selected={supportedExchanges}
+              onToggle={(item) =>
+                toggle(supportedExchanges, item, setSupportedExchanges)
+              }
+            />
+
+            {assetClassLocked && assetClassSelect}
+
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+              <Input
+                label="Leverage range"
+                value={leverageRange}
+                onChange={(e) => setLeverageRange(e.target.value)}
+                placeholder="e.g. 1x–5x"
+              />
+              <Input
+                label="AUM (USD)"
+                type="number"
+                value={aum}
+                onChange={(e) => setAum(e.target.value)}
+                placeholder="0"
+              />
+              <Input
+                label="Max capacity (USD)"
+                type="number"
+                value={maxCapacity}
+                onChange={(e) => setMaxCapacity(e.target.value)}
+                placeholder="0"
+              />
+            </div>
+          </div>
+        </details>
 
         <div className="flex gap-3">
           <Button variant="secondary" type="button" onClick={onBack}>
