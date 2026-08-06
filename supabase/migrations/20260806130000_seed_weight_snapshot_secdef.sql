@@ -120,7 +120,9 @@
 -- cannot be called directly — while clearing the anon/authenticated
 -- SECURITY-DEFINER-executable advisor. Same convention as
 -- `guard_allocation_requires_own_capital()`
--- (20260806120000_strategies_capital_ownership.sql:226) and
+-- (20260806120000_strategies_capital_ownership.sql — cited by function name
+-- deliberately: that file is amended in place across revisions, so a line
+-- number goes stale, as `:226` already did) and
 -- `guard_strategies_publish_transition()` (20260716131000:74).
 --
 --
