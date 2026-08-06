@@ -652,3 +652,154 @@ session scratchpad and never in the repo.
 3. Wave 2 note: any route or client code that marks a strategy `team_review` must go through
    `flip_capital_ownership_to_team_review()`. A direct `UPDATE`/PATCH now returns `23514`
    whenever the owner holds a live position — by design, and the error's HINT names the RPC.
+
+## rev-3 (2026-08-06) — migration re-review: the repoint hole (F4) + four doc riders
+
+`20260806120000_strategies_capital_ownership.sql` was amended **IN PLACE** again. It has
+still never been merged, so PROD has never seen it; it exists on this branch and on TEST.
+**The orchestrator must re-apply it to TEST (`qmnijlgmdhviwzwfyzlc`, never PROD) and re-run
+the guard test.** `20260806130000_seed_weight_snapshot_secdef.sql` gets a citation fix only —
+no object in it changed.
+
+### F4 (BLOCKING, data-integrity) — the REPOINT hole: the third route in
+
+rev-2 closed two of the three doors into a stranded position. The third is an UPDATE of
+`portfolio_strategies.strategy_id`. The D-03-A trigger was `BEFORE INSERT` only, and rev-2's
+mark-transition guard watches `strategies.capital_ownership` — so an owner PATCHing an
+**existing** position to re-point it at a `team_review` (or self-owned unmarked) strategy
+passed **both** guards. `portfolio_strategies_owner FOR ALL USING (portfolio owned by
+auth.uid())` permits that write outright; no INSERT happens and no mark changes, so nothing
+fires. The end state is byte-for-byte what cases 2a and 3 prove is forbidden, reached through
+the one door neither guard watches.
+
+Closed with a second, **column-targeted** trigger that REUSES the same function unchanged:
+
+```sql
+CREATE TRIGGER trg_portfolio_strategies_own_capital_on_repoint
+  BEFORE UPDATE OF strategy_id ON public.portfolio_strategies
+  FOR EACH ROW EXECUTE FUNCTION public.guard_allocation_requires_own_capital();
+```
+
+The guard reads only `NEW.strategy_id` / `NEW.portfolio_id` and RETURNs NEW, both correct on
+a BEFORE UPDATE row trigger — so the predicate is reused verbatim rather than forked.
+
+**Pitfall 2 is NOT reopened, and this was measured, not reasoned about.** Postgres fires an
+`UPDATE OF <col>` trigger only when the statement's SET list NAMES that column; the shipped
+alias write (`api/portfolio-strategies/alias/route.ts:148`) sets `alias` alone. Case 5 is
+unchanged and stays green; mutation M21 (below) reddens on exactly that line the moment the
+column target is dropped. The PostgREST **upsert** shape was probed too: its
+`ON CONFLICT ... DO UPDATE SET strategy_id = excluded.strategy_id` does name the column, so
+the new trigger fires on the conflict branch — with the same NEW values the BEFORE INSERT
+trigger already evaluated on the insert attempt (case 4). Identical verdict, no new refusal;
+a legitimate `own_capital` upsert still succeeds (probed directly).
+
+Self-verify **5g** was added: the repoint trigger fires on exactly the UPDATE event AND is
+column-targeted on `strategy_id`. Both halves are load-bearing in OPPOSITE directions — a
+missing trigger reopens the hole, a lost column target turns it into the blanket UPDATE arm
+that 5c exists to forbid. Existing 5c is untouched and stays valid: it filters on the OTHER
+trigger's NAME, so the new trigger does not disturb its "no non-INSERT event" assertion.
+
+### Doc riders (no behaviour change)
+
+1. **Stale RLS citation re-based.** The part-4 preamble justified the flip RPC's in-body
+   `auth.uid()` predicates by claiming `strategies_update` has NO `WITH CHECK`. **False**, and
+   has been since `20260410225610_sec005_follow_ups.sql:102-106` DROPped and recreated the
+   policy as `USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid())` — the original
+   `20260405061912:32` shape is not the live one. The predicates are kept on the ground that
+   actually holds: they keep each statement correct on its own terms if the function is ever
+   made SECURITY DEFINER or called from a service-role context, where RLS is not evaluated at
+   all. Header (e) re-based the same way. **Test 7c is unchanged** — its premise was already
+   the valid one (RLS masks the predicates' removal behaviourally), only the migration's
+   prose was wrong.
+2. **Header (e)/(f): org members read the mark on UNPUBLISHED org-scoped rows** via
+   `strategies_org_read` (`20260409212457:95`), which is `organization_id IS NOT NULL AND
+   is_org_member(...)` with no status condition. That widens the mark's readership past
+   (f)'s "published rows"; the conclusion is unchanged, because the value is dispositioned
+   NON-SENSITIVE either way.
+3. **New header (h): there is deliberately NO service-role flip path.** The RPC is SECURITY
+   INVOKER and its owner precheck compares to `auth.uid()`, which is NULL without an end
+   user — so a service-role call is a silent (0, 0) no-op; and a raw service-role UPDATE
+   still hits part 3b's SECURITY DEFINER guard. Admin/GDPR/backfill work must delete the
+   owner's positions first. **No service arm was built, and the header says not to add one** —
+   such an arm would exist precisely to route around the guard that protects the user path.
+4. **`20260806130000` line ~123:** the `20260806120000:226` line-number citation went stale
+   when rev-2 moved the REVOKE. Now cited by function name, with the reason (that file is
+   amended in place across revisions, so line numbers rot).
+
+### TS rider
+
+`src/__tests__/portfolio-strategies-alias-rls.test.ts` — the env-gated fallback seed creates a
+**self-owned** published strategy and then inserts a position for it, which is now a `23514`
+under D-03-A. Added `capital_ownership: "own_capital"` to that synthetic insert. This file is
+`HAS_FULL_LIVE`-gated (never runs in CI, per MEMORY `reference_db_test_ci_wiring`) and no wave
+agent owns it. No other TS file was touched — Wave 2's 150-05 agent is live on the
+allocation route, `queries.ts` and the allocations lib/components.
+
+### Verification — ephemeral local Postgres 16, RED → GREEN
+
+Fresh cluster, stand-in schema with the RLS predicates copied verbatim (including the LIVE
+`strategies_update` with its `WITH CHECK`, per rider 1), tables and functions owned by a
+**non-superuser, non-BYPASSRLS** role, and — new this pass — `weight_snapshots` with its three
+deny policies plus the SECURITY DEFINER seed trigger, so case 1 exercises the real AFTER
+INSERT companion write alongside the new BEFORE UPDATE trigger.
+
+- **RED, both arms proven independently against the migration AT HEAD (rev-2, unmodified):**
+  `TEST FAILED (7i): an existing position was RE-POINTED at a team_review strategy` — and with
+  that assertion temporarily neutered, execution reaches
+  `TEST FAILED (7i): an existing position was RE-POINTED at a SELF-OWNED UNMARKED strategy`.
+  Cases 1–7h all passed on that same run, which is what makes the RED specific to F4.
+- **GREEN:** amended migration applies clean (self-check now emits *"…INSERT-scoped D-03-A
+  trigger + strategy_id-scoped repoint trigger + UPDATE-scoped mark-transition guard…"*) and
+  both DB files report ALL PASS.
+- **Re-runnability:** applied over the rev-2 state and again on a fresh database — self-check
+  green each time, guard test ALL PASS after each.
+- **Upsert probe:** a PostgREST-shaped `ON CONFLICT ... DO UPDATE SET strategy_id =
+  excluded.strategy_id` on a legitimate `own_capital` position still succeeds.
+- `npx tsc --noEmit` clean; `npx tsx scripts/dump-sql-functions.ts --check` → *"SQL function
+  snapshot is current (108 functions)"*.
+
+**Snapshot note:** no function BODY changed this pass. `flip_capital_ownership_to_team_review`
+regenerated anyway because the dumper captures the comment block immediately preceding the
+`CREATE`, and rider 1 rewrote that block. The diff is comment-only — verified by reading it —
+and the snapshot is committed alongside the migration so the path-triggered
+`sql-function-snapshot.yml` gate is green at every commit.
+
+**Local-cluster limitation, stated rather than glossed:** the stand-in does not carry the
+pre-existing `BEFORE UPDATE` triggers on `strategies`, which rev-2's harness did. This pass
+adds no trigger on `strategies`, so nothing here depends on that coexistence; the TEST
+re-apply remains the authoritative gate.
+
+#### Rule-9 mutation ledger, rev-3 — 4 mutations, 4 caught
+
+| # | Mutation | Caught by | Result |
+|---|----------|-----------|--------|
+| M20 | `DROP TRIGGER trg_portfolio_strategies_own_capital_on_repoint` | case 7i | RED — the repoint succeeds. This is the F4 finding itself. |
+| M21 | recreate it as a **blanket** `BEFORE UPDATE` (no column target) | case 5 | RED — `strategy … cannot become a position: capital_ownership=unmarked`, raised out of the guard **on case 5's alias UPDATE**. Pitfall 2 reproduced on demand: this is the mutation that would break every pre-existing PROD position's alias write. |
+| M22 | apply the migration with the repoint trigger (and its COMMENT) removed | migration self-check 5g | RED at apply — *"does not fire on UPDATE — an owner could re-point an existing position at a team_review strategy and neither the INSERT trigger nor the mark-transition guard would see it"*. |
+| M23 | move the column target from `strategy_id` to `alias` | migration self-check 5g | RED at apply — *"is not column-targeted on strategy_id (matched 0 column(s))"*. |
+
+M21 is the load-bearing one: it proves the two halves of the guard pull against each other and
+that the existing suite already pins the losing direction. A future reader who "simplifies" the
+two narrow triggers into one wide one reddens case 5 immediately.
+
+### rev-3 files and commits
+
+- `supabase/migrations/20260806120000_strategies_capital_ownership.sql` (amended in place),
+  `supabase/tests/test_capital_ownership_allocation_guard.sql`,
+  `supabase/schema/functions/flip_capital_ownership_to_team_review.sql` — commit `fix(150-01)`
+- `supabase/migrations/20260806130000_seed_weight_snapshot_secdef.sql` — commit `docs(150-01)`
+- `src/__tests__/portfolio-strategies-alias-rls.test.ts` — commit `test(150-01)`
+
+`STATE.md` and `ROADMAP.md` were deliberately not updated (as in rev-2).
+
+### Orchestrator to-do after rev-3
+
+1. Re-apply `20260806120000_strategies_capital_ownership.sql` to TEST
+   (`qmnijlgmdhviwzwfyzlc`) via MCP `apply_migration`. It is re-runnable; self-verify 5g now
+   also asserts the repoint trigger's event scope and column target.
+2. Re-run `test_capital_ownership_allocation_guard.sql` against TEST. The other two files are
+   unaffected, but re-running all three is cheap.
+3. Wave 2 note (extends the rev-2 one): a position's `strategy_id` is now effectively
+   **immutable toward a non-allocatable strategy**. Any "swap the strategy behind this
+   allocation" UI must delete and re-add rather than PATCH `strategy_id`, or it will see
+   `23514` with the same HINT.
