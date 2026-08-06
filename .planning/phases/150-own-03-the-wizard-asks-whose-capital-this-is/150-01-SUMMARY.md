@@ -2,7 +2,7 @@
 phase: 150-own-03-the-wizard-asks-whose-capital-this-is
 plan: 01
 subsystem: database
-tags: [migration, trigger, rls, invariant, own-03, d-03-a, money-path]
+tags: [migration, trigger, rls, invariant, own-03, d-03-a, money-path, prod-bugfix, security-definer]
 status: checkpoint-blocked
 requires: []
 provides:
@@ -10,8 +10,10 @@ provides:
   - "public.guard_allocation_requires_own_capital() — SECURITY DEFINER trigger fn"
   - "trg_portfolio_strategies_own_capital_only — BEFORE INSERT ON public.portfolio_strategies"
   - "public.flip_capital_ownership_to_team_review(uuid) RETURNS TABLE (removed_positions integer, updated_strategies integer)"
+  - "public.seed_weight_snapshot_for_portfolio_strategy() / seed_weight_snapshots_for_portfolio() — repaired to SECURITY DEFINER (PROD bug fix, see Deviation 4)"
 affects:
   - "every portfolio_strategies INSERT path repo-wide (routes, client-direct, seed, raw PostgREST)"
+  - "every authenticated-role INSERT into portfolios and portfolio_strategies — unblocked by the seed-trigger repair (broken in PROD since 2026-04-16)"
 tech-stack:
   added: []
   patterns:
@@ -21,19 +23,26 @@ tech-stack:
 key-files:
   created:
     - supabase/migrations/20260806120000_strategies_capital_ownership.sql
+    - supabase/migrations/20260806130000_seed_weight_snapshot_secdef.sql
     - supabase/tests/test_capital_ownership_column.sql
     - supabase/tests/test_capital_ownership_allocation_guard.sql
-  modified: []
+    - supabase/tests/test_weight_snapshot_seed_secdef.sql
+    - supabase/schema/functions/guard_allocation_requires_own_capital.sql
+    - supabase/schema/functions/flip_capital_ownership_to_team_review.sql
+  modified:
+    - supabase/schema/functions/seed_weight_snapshot_for_portfolio_strategy.sql
+    - supabase/schema/functions/seed_weight_snapshots_for_portfolio.sql
 decisions:
   - "Trigger function is SECURITY DEFINER — under INVOKER the mark lookup is RLS-filtered and the unconditional team_review arm goes blind (Rule 2)"
   - "DB tests are plain PL/pgSQL DO blocks, not pgTAP — the extension is not installed and 0/53 existing files use plan/ok/finish (Rule 11)"
   - "Added structural case 7c pinning the flip RPC's auth.uid() predicates — RLS masks their removal, so the behavioural arm alone is blind (measured, ledger M6)"
+  - "Repaired the weight_snapshots seed triggers to SECURITY DEFINER rather than adding an INSERT policy — the deny policies are the design; a policy would fix the symptom by deleting the invariant (Rule 1/6, PROD bug live since 2026-04-16)"
 metrics:
   tasks_completed: 1
   tasks_total: 2
-  commits: 2
-  mutations_run: 7
-  mutations_caught: 7
+  commits: 4
+  mutations_run: 12
+  mutations_caught: 12
   completed: 2026-08-06
 ---
 
@@ -45,8 +54,12 @@ The OWN-03 ownership mark now exists at the database tier as a nullable, un-back
 including the two shipped browser-direct writes, plus a single-transaction mark-flip RPC
 that closes the stranded-position hole.
 
-**Status: Task 1 complete and committed. Task 2 is a BLOCKING human-action checkpoint —
-the migration is NOT applied anywhere yet.**
+**Status: Task 1 complete and committed. Task 2 (TEST apply) was executed once by the
+orchestrator and is NOW PENDING AGAIN — the column test passed against TEST, the
+allocation-guard test tripped a pre-existing PRODUCTION defect unrelated to this plan's
+own objects, and that defect has been repaired by a second migration
+(`20260806130000_seed_weight_snapshot_secdef.sql`) which is not applied anywhere yet.
+See "Deviation 4" and "Task 2 — status" below.**
 
 ## What Was Built
 
@@ -71,6 +84,16 @@ the migration is NOT applied anywhere yet.**
 
 **Two DB test files** encoding the eight required behaviours plus two additions (2c and 7c,
 below).
+
+**`supabase/migrations/20260806130000_seed_weight_snapshot_secdef.sql`** (deviation — see
+Deviation 4) — repairs a four-month-old production defect that blocks this plan's positive
+control and the whole OWN-03 money path: the two `weight_snapshots` seed trigger functions
+are made `SECURITY DEFINER`, with a self-verifying block asserting the repair landed AND
+that the three `weight_snapshots` write-deny policies survived intact.
+
+**`supabase/tests/test_weight_snapshot_seed_secdef.sql`** — regression test naming that
+invariant directly, so a future revert fails with a message pointing at the real cause
+rather than a raw `42501` out of an unrelated table.
 
 ## Key Decisions
 
@@ -159,6 +182,49 @@ portfolios), and no later migration adds a NOT NULL column to either portfolio t
 M6 is the honest finding here: the suite had a blind spot, it was measured rather than
 assumed, and the fix is committed.
 
+### Verification of the Deviation-4 repair (second execution pass)
+
+A fresh ephemeral **local Postgres 16** cluster was stood up carrying the *landmine* schema
+this time — `weight_snapshots` with its unique-per-day index and all four RLS policies, both
+seed trigger functions verbatim from `20260416125431` as `SECURITY INVOKER`, both triggers
+installed, and the `anon` / `authenticated` / `service_role` roles. Deliberately stricter
+than production on the one axis that matters: the tables and functions are owned by a
+**non-superuser, non-`BYPASSRLS`** role, so the DEFINER context's exemption comes from table
+ownership alone rather than from a superuser shortcut.
+
+- **RED reproduced independently** — the real
+  `test_capital_ownership_allocation_guard.sql`, run unmodified against the INVOKER schema,
+  fails on case 1 with the byte-identical error and CONTEXT chain the orchestrator saw on
+  TEST (`42501 ... PL/pgSQL function seed_weight_snapshot_for_portfolio_strategy()` inside
+  the `portfolio_strategies` INSERT).
+- **GREEN after `20260806130000`** — its self-check emits *"seed_weight_snapshot SECURITY
+  DEFINER repair verified"*, and **all three** DB test files report ALL PASS:
+  `test_capital_ownership_column`, `test_capital_ownership_allocation_guard` (assertions
+  unchanged) and the new `test_weight_snapshot_seed_secdef`.
+- **REVOKE proven harmless empirically:** after `REVOKE ALL ... FROM PUBLIC, anon,
+  authenticated`, `has_function_privilege('authenticated', fn, 'EXECUTE')` is `false` for
+  both functions *and* the `authenticated`-role INSERT still fires the trigger and
+  succeeds — the direct measurement behind the "trigger firing does not check EXECUTE"
+  claim.
+- `npx tsx scripts/dump-sql-functions.ts --check` → *"SQL function snapshot is current (107
+  functions)"*. The generated diff for the seed function is exactly one added line
+  (`SECURITY DEFINER`) plus the source-migration header — the whole point of keeping the
+  bodies byte-identical.
+
+#### Rule-9 mutation ledger, second pass — 5 mutations, 5 caught
+
+| # | Mutation | Caught by | Result |
+|---|----------|-----------|--------|
+| M7 | both seed fns back to `SECURITY INVOKER` | migration self-check 3a | RED at apply — *"public.seed_weight_snapshot_for_portfolio_strategy() is still SECURITY INVOKER — every authenticated INSERT into portfolio_strategies stays broken"* |
+| M8 | `ALTER TABLE weight_snapshots FORCE ROW LEVEL SECURITY` | migration self-check 3b | RED at apply — *"the table owner is NOT exempt, so SECURITY DEFINER does not clear the insert-deny policy"* |
+| M9 | `DROP POLICY weight_snapshots_insert_deny` | migration self-check 3c | RED at apply — *"expected the 3 weight_snapshots write-deny policies to survive intact, found 2"* |
+| M10 | revert **only** the latent fan-out sibling to INVOKER | regression test case 3 | RED — *"public.seed_weight_snapshots_for_portfolio() is SECURITY INVOKER"*. No behavioural case can reach this function; without case 3 the mutation is invisible |
+| M11 | apply the **rejected alternative** — an owner-scoped `weight_snapshots` INSERT policy | regression test case 2 | RED — *"an authenticated session wrote weight_snapshots DIRECTLY"*. This mutation makes case 1 pass, which is exactly why case 2 exists |
+
+M10 and M11 are the load-bearing ones: they pin the two properties the obvious test would
+have missed — the latent half of the defect class, and the difference between fixing the
+bug and deleting the invariant.
+
 ## Deviations from Plan
 
 ### Auto-fixed
@@ -190,6 +256,124 @@ assumed, and the fix is committed.
 - **Fix:** Case 7c pins both predicates via `pg_get_functiondef`.
 - **Commit:** `5e25495e`
 
+**4. [Rule 1 — Bug] Repaired a PRODUCTION defect: the `weight_snapshots` seed triggers ran
+`SECURITY INVOKER` against a table that denies all client writes**
+
+- **Found during:** Task 2. The orchestrator applied `20260806120000` to TEST (clean, with
+  its self-check green) and ran both DB test files. `test_capital_ownership_column.sql`
+  passed. `test_capital_ownership_allocation_guard.sql` failed on **case 1, the positive
+  control**, with an error that has nothing to do with any object this plan created:
+
+  ```
+  ERROR 42501: new row violates row-level security policy for table "weight_snapshots"
+  CONTEXT: SQL statement "INSERT INTO weight_snapshots (...) ON CONFLICT ... DO NOTHING"
+           PL/pgSQL function seed_weight_snapshot_for_portfolio_strategy() line 3
+           SQL statement "INSERT INTO portfolio_strategies ... VALUES (port_a, strat_a_own, 120000)"
+  ```
+
+- **Root cause (two individually-correct migrations, mutually lethal):**
+  `20260416125431_rebalance_drift_check_and_trigger.sql:106-156` installed two `AFTER
+  INSERT` trigger functions — `seed_weight_snapshot_for_portfolio_strategy()` (on
+  `portfolio_strategies`) and `seed_weight_snapshots_for_portfolio()` (on `portfolios`) —
+  that write a companion `weight_snapshots` row. Neither declares a security context, so
+  both are `SECURITY INVOKER` and their write is evaluated under the RLS of the firing
+  session. `20260412094451_weight_snapshots.sql:80-90` denies **all** client writes to
+  `weight_snapshots` (`weight_snapshots_insert_deny FOR INSERT WITH CHECK (false)`, plus
+  update/delete deny). So since **2026-04-16**, every `authenticated`-role INSERT into
+  `portfolio_strategies` has aborted with `42501`. `ON CONFLICT DO NOTHING` does not rescue
+  it — RLS `WITH CHECK` is evaluated before conflict resolution. Service-role writes were
+  unaffected (BYPASSRLS), which is why nothing surfaced for four months.
+
+- **This is live in PROD, not theoretical.** Two shipped components insert
+  `portfolio_strategies` straight from the browser under the user's own JWT —
+  `src/components/portfolio/AddToPortfolio.tsx:54` and
+  `src/components/portfolio/MigrationWizard.tsx:72` — and both have been dead since
+  2026-04-16. Corroborating census on PROD: only 4 `portfolio_strategies` rows with
+  `added_at` after 2026-04-16, the most recent 2026-04-26. Catalog state verified live on
+  BOTH TEST and PROD: `prosecdef = false` for both functions, deny policies identical.
+  This plan's guard test is simply the first automated test ever to insert a
+  `portfolio_strategies` row as the `authenticated` role — every prior DB test wrote as the
+  seeding role, and the predecessor's local stand-in schema had no `weight_snapshots` table
+  at all, which is why the local RED/GREEN pass missed it.
+
+- **Why it could not be deferred (Rule 3, blocking):** with the landmine in place the
+  D-03-A guard is unobservable — the insert dies at `42501` before anyone can tell whether
+  the guard would have admitted it. Plan 05's allocation route inserts into
+  `portfolio_strategies` under the user's context and Wave 2 builds on it, so the phase's
+  entire money path is behind this.
+
+- **Fix:** new forward-only migration
+  `supabase/migrations/20260806130000_seed_weight_snapshot_secdef.sql` making **both** seed
+  functions `SECURITY DEFINER` with the pinned `SET search_path = public, pg_catalog` they
+  already carried. Bodies re-based on `20260416125431` (verified the only defining
+  migration; live TEST bodies match it verbatim) and left **byte-identical except the one
+  added line**, so the `supabase/schema/functions/` diff is a single line.
+
+- **Class, not instance.** `seed_weight_snapshots_for_portfolio()` has the identical defect
+  and is fixed too, even though its fan-out is *latent* today: the
+  `portfolio_strategies.portfolio_id` FK stops a child row pre-dating its parent, so the
+  `INSERT ... SELECT` currently returns zero rows on the ordinary path. A restore, a bulk
+  load or any deferred-FK path turns it into the same `42501`.
+
+- **The deny policies are UNTOUCHED**, and the migration asserts they survived. They are
+  the design: `target_weight` / `actual_weight` are derived allocation history and a
+  client-writable path would let an allocator fabricate it. `SECURITY DEFINER` is exactly
+  the distinction between the database's own bookkeeping write and a client write — the
+  same argument `20260806120000` header §(d.2) already makes for the D-03-A guard.
+  Alternatives rejected in the header: an owner-scoped INSERT policy (fixes the symptom by
+  deleting the invariant), and dropping the seed triggers (silently changes the
+  `rebalance_drift` null-target guard's ground truth).
+
+- **The trigger-ACL trap was checked, not assumed.**
+  `20260516170000_match_decisions_visibility_check_secdef_fix.sql` documents this project's
+  one production-breaking REVOKE incident — a trigger function that `PERFORM`ed a *separate*
+  REVOKEd helper, and a nested function CALL *does* check EXECUTE. It does not apply here:
+  Postgres checks EXECUTE on a trigger function at `CREATE TRIGGER` time, not at fire time,
+  and neither seed body calls another function. Proven empirically on the local cluster —
+  `has_function_privilege('authenticated', ...) = false` after the REVOKE while the trigger
+  still fires and the insert succeeds.
+
+- **No data backfill is needed.** The failing inserts aborted the whole statement, so no
+  `portfolio_strategies` row was ever created without its companion `weight_snapshots` row.
+  Service-role writes during the window succeeded on both tables.
+
+- **Files:** `supabase/migrations/20260806130000_seed_weight_snapshot_secdef.sql`,
+  `supabase/tests/test_weight_snapshot_seed_secdef.sql`,
+  `supabase/schema/functions/seed_weight_snapshot_for_portfolio_strategy.sql`,
+  `supabase/schema/functions/seed_weight_snapshots_for_portfolio.sql`
+- **Commit:** `8a532f01`
+
+**5. [Rule 3 — Blocking] Regenerated the SQL function snapshot; the CI gate was red**
+
+- **Found during:** the Deviation-4 work, running `npx tsx scripts/dump-sql-functions.ts
+  --check`.
+- **Issue:** commit `99285150` added `guard_allocation_requires_own_capital()` and
+  `flip_capital_ownership_to_team_review(uuid)` without running `npm run schema:functions`.
+  The `.github/workflows/sql-function-snapshot.yml` `--check` gate is path-triggered on
+  `supabase/migrations/**` and reported *"SQL function snapshot is stale (2 file(s))"* — so
+  Task 1 as committed would have failed CI.
+- **Fix:** regenerated; gate now reports *"SQL function snapshot is current (107
+  functions)"*.
+- **Files:** `supabase/schema/functions/guard_allocation_requires_own_capital.sql`,
+  `supabase/schema/functions/flip_capital_ownership_to_team_review.sql` (new), plus the two
+  modified seed snapshots.
+- **Commit:** `8a532f01`
+
+**6. [Rule 2 — Missing critical functionality] Added a dedicated regression test for the
+Deviation-4 bug**
+
+- **Issue:** `test_capital_ownership_allocation_guard.sql` case 1 *does* redden if the
+  SECDEF repair is reverted — but with a raw `42501` naming an unrelated table, which reads
+  as "the OWN-03 guard over-blocks" and sends the next reader down the wrong path. It also
+  cannot see two things at all: the latent fan-out sibling (no behavioural case reaches
+  it), and whether the repair was bought by weakening the deny policies.
+- **Fix:** `supabase/tests/test_weight_snapshot_seed_secdef.sql` — four assertions
+  (behavioural seed-on-allocation, direct client write still denied, both functions
+  `prosecdef` + pinned `search_path`, definer genuinely RLS-exempt). Repo convention:
+  every bug gets a regression test that fails without the fix.
+- **Guard-test assertions were NOT modified.** They pass as written after the repair.
+- **Commit:** `8a532f01`
+
 ### Not deviations, but recorded
 
 - The migration uses explicit `BEGIN`/`COMMIT` per the plan (the
@@ -212,29 +396,77 @@ assumed, and the fix is committed.
 - Threat T-150-38 (accepted-with-consequence): a discovery `AddToPortfolio` click on the
   viewer's OWN unmarked/team_review published strategy now raises `23514` and the shipped
   component renders a generic failure. Plan 06 owns the error mapping.
+- **The Deviation-4 landmine is a class signal, not a one-off.** The failure mode is "a
+  `SECURITY INVOKER` trigger writes to a table whose RLS denies the firing role", and it
+  survived four months because no test ever wrote as `authenticated`. A repo-wide sweep for
+  other trigger functions that write to deny-policy tables is worth booking in `TODOS.md` —
+  out of scope here (the scope boundary is this task's own changes), and the two functions
+  in this defect's own class are both fixed.
+- **Worth re-running the demo seed after the TEST apply**, now for two reasons: the D-03-A
+  trigger (already noted above) and this repair, which changes nothing for the seed's
+  service-role writes but is worth confirming end-to-end.
 
 ## Threat Flags
 
-None. No new network endpoint, auth path, file access pattern or trust-boundary schema
-surface beyond what the plan's `<threat_model>` already registers. `capital_ownership`
-being readable by `anon` on published rows is T-150-04, dispositioned `accept` and written
-into the migration header as a decision.
+| Flag | File | Description |
+|------|------|-------------|
+| threat_flag: privilege-context-change | `supabase/migrations/20260806130000_seed_weight_snapshot_secdef.sql` | Two pre-existing trigger functions move from `SECURITY INVOKER` to `SECURITY DEFINER`, i.e. their writes now execute with the function owner's privileges. Mitigated in-file and asserted at apply: pinned `SET search_path = public, pg_catalog` on both; both take no arguments and are `RETURNS TRIGGER` so they cannot be called directly; `REVOKE ALL ... FROM PUBLIC, anon, authenticated`; neither body calls another function or executes dynamic SQL; both write exactly one derived row whose values come from `NEW` and are hard-coded `NULL`. The blast radius is a single INSERT into `weight_snapshots` — the table the trigger already existed to write. |
 
-## Task 2 — NOT DONE (blocking checkpoint)
+The `capital_ownership` column being readable by `anon` on published rows is T-150-04,
+dispositioned `accept` and written into the `20260806120000` header as a decision. No new
+network endpoint, auth path or file access pattern in either migration.
 
-The migration exists in `supabase/migrations/` but is **not applied anywhere**. It must be
-applied to TEST (`qmnijlgmdhviwzwfyzlc`, never PROD `khslejtfbuezsmvmtsdn`) via Supabase MCP
-`apply_migration` from the orchestrator session — MCP tools are stripped from subagents
-(upstream anthropics/claude-code#13898) — and then both test files run against TEST with
-`psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f <file>`.
+## Task 2 — status (ORCHESTRATOR-owned, PENDING again)
 
-The local-cluster run above raises confidence that the SQL is correct and the oracles have
-teeth, but it is **not** a substitute: it ran against a stand-in schema, not the real TEST
-database with its full migration history, its other triggers on `strategies`, and its
-shared-tenant row population.
+MCP tools are stripped from subagents (upstream anthropics/claude-code#13898), so every
+`apply_migration` and every TEST-DB run in this task belongs to the orchestrator session.
+
+**Done in the first checkpoint pass:**
+- `20260806120000_strategies_capital_ownership.sql` applied to TEST
+  (`qmnijlgmdhviwzwfyzlc`) — self-check green (column + CHECK + INSERT-scoped trigger + flip
+  RPC, nullable with no default, fires on exactly INSERT).
+- `test_capital_ownership_column.sql` against TEST → **ALL PASS**.
+- `test_capital_ownership_allocation_guard.sql` against TEST → **failed on the Deviation-4
+  landmine**, not on any object this plan created.
+
+**Still to do (orchestrator):**
+1. Apply `supabase/migrations/20260806130000_seed_weight_snapshot_secdef.sql` to TEST
+   (`qmnijlgmdhviwzwfyzlc`, never PROD `khslejtfbuezsmvmtsdn`) via MCP `apply_migration`.
+   Its self-verifying block fails loud if the repair did not land or if the deny policies
+   were disturbed. MCP stamps `now()`, so the TEST-side timestamp will drift from the
+   `20260806130000` filename — expected.
+2. Re-run all **three** files against TEST:
+   ```
+   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/test_capital_ownership_column.sql
+   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/test_capital_ownership_allocation_guard.sql
+   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f supabase/tests/test_weight_snapshot_seed_secdef.sql
+   ```
+   The guard test's assertions are unchanged; case 1 is expected to pass as written.
+
+The local-cluster runs above raise high confidence that the SQL is correct and the oracles
+have teeth — the RED reproduction is byte-identical to the TEST failure — but they are
+**not** a substitute: they ran against a stand-in schema, not the real TEST database with
+its full migration history, its other triggers on `strategies`, and its shared-tenant row
+population.
+
+⚠️ **PROD note for whoever merges.** `20260806130000` repairs a defect that is live on PROD
+right now. Merging `supabase/migrations/**` to `main` auto-applies to PROD, and in this case
+that is the *intent*, not a side effect: it restores `AddToPortfolio` and `MigrationWizard`,
+which have been failing for real users since 2026-04-16.
 
 ## Self-Check: PASSED
 
-All four claimed files exist on disk; all three claimed commits exist in `git log`
-(`5e25495e`, `99285150`, `8c339681`); worktree clean; no file deletions in either task
-commit; no truncation (371 / 186 / 488 SQL lines, 234 summary lines).
+**First pass (Task 1):** all four claimed files exist on disk; commits `5e25495e`,
+`99285150` in `git log`; worktree clean; no file deletions in either task commit.
+
+**Second pass (Deviation 4 / continuation):** all seven claimed files exist on disk with no
+truncation — `20260806120000` 371 lines, `20260806130000` 355, `test_capital_ownership_column`
+186, `test_capital_ownership_allocation_guard` 488 (byte-identical to `5e25495e`, verified
+by an empty `git diff --stat supabase/tests/` before staging),
+`test_weight_snapshot_seed_secdef` 220, and the two new function snapshots 59 / 55. All four
+claimed commits exist in `git log`: `5e25495e`, `99285150`, `aeed57f3`, `8a532f01`. (The
+first pass cited `8c339681` for the summary commit; the hash actually in `git log` is
+`aeed57f3` — corrected here.) `git diff --diff-filter=D HEAD~1 HEAD` on `8a532f01` reports
+no deletions. `npx tsx scripts/dump-sql-functions.ts --check` reports the snapshot current.
+No untracked files remain from this pass; the ephemeral Postgres cluster lived entirely in
+the session scratchpad, never in the repo.
