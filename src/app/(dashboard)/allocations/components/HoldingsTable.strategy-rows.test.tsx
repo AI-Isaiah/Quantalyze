@@ -417,7 +417,8 @@ describe("HoldingsTable — D-12-A union row states", () => {
     expect(cells[0]).toContain("Fresh Book");
     expect(cells[0]).toContain("Own capital");
     expect(cells[2]).toBe("—");
-    expect(cells[3]).toBe("—not allocated");
+    // UI-SPEC copy, byte-exact: em-dash in the metric voice, then the caption.
+    expect(cells[3]).toBe("— not allocated");
     const row = rowOf(container, "fresh");
     expect(
       within(row).getByRole("button", { name: "Allocate…" }),
