@@ -786,11 +786,24 @@ two narrow triggers into one wide one reddens case 5 immediately.
 
 - `supabase/migrations/20260806120000_strategies_capital_ownership.sql` (amended in place),
   `supabase/tests/test_capital_ownership_allocation_guard.sql`,
-  `supabase/schema/functions/flip_capital_ownership_to_team_review.sql` — commit `fix(150-01)`
-- `supabase/migrations/20260806130000_seed_weight_snapshot_secdef.sql` — commit `docs(150-01)`
-- `src/__tests__/portfolio-strategies-alias-rls.test.ts` — commit `test(150-01)`
+  `supabase/schema/functions/flip_capital_ownership_to_team_review.sql` — commit `07943c30`
+- `supabase/migrations/20260806130000_seed_weight_snapshot_secdef.sql` — commit `54e714f4`
+- `src/__tests__/portfolio-strategies-alias-rls.test.ts` — commit `99c4e123`
+- this summary section — commit `ef2b8474`
 
 `STATE.md` and `ROADMAP.md` were deliberately not updated (as in rev-2).
+
+### rev-3 self-check: PASSED
+
+All five touched files exist on disk with no truncation — migration `20260806120000` 737
+lines (613 before), guard test 898 lines (764 before), `20260806130000` 357 lines, the flip
+snapshot 99 lines, and the alias-RLS vitest file unchanged apart from the single added field.
+All four commits are in `git log` (`07943c30`, `54e714f4`, `99c4e123`, `ef2b8474`).
+`git diff --diff-filter=D --name-only 7ca4f488 HEAD` reports **no deletions**. Worktree clean,
+no untracked files. `npx tsc --noEmit` clean and
+`npx tsx scripts/dump-sql-functions.ts --check` current at 108 functions. The ephemeral
+Postgres cluster lived entirely in the session scratchpad and was torn down; nothing from it
+entered the repo.
 
 ### Orchestrator to-do after rev-3
 
