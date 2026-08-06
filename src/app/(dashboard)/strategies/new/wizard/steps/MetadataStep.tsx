@@ -133,8 +133,16 @@ export function MetadataStep({
   // (team-review strategies cannot be allocated, exactly as nothing could
   // before). The safe state is the default; own-capital is always a
   // deliberate act.
-  const [capitalOwnership, setCapitalOwnership] =
-    useState<CapitalOwnership>(TEAM_REVIEW);
+  //
+  // `initial` wins when it carries an answer: WizardClient feeds the completed
+  // draft back in when the user returns from the Review recap, and resetting to
+  // the default there would silently downgrade an own-capital answer to
+  // team-review on the way to submit. Unlike assetClass — where a DETECTED
+  // exchange must beat the resumed value — nothing here can out-rank the
+  // user's own stated answer.
+  const [capitalOwnership, setCapitalOwnership] = useState<CapitalOwnership>(
+    initial?.capitalOwnership ?? TEAM_REVIEW,
+  );
   const [categoryLoadError, setCategoryLoadError] = useState<string | null>(null);
   // Phase 53 / APPLY-02 — inline per-field validation surfacing. The
   // description is the required free-text field; surface its existing

@@ -513,6 +513,42 @@ describe("[H-0191] MetadataStep", () => {
       expect(rest).toEqual(PRE_CHANGE_PAYLOAD);
     });
 
+    it("restores an already-answered mark when the step is re-entered from Review", async () => {
+      // WizardClient keeps the completed draft in `metadataDraft` and feeds it
+      // back as `initial` when the user returns from the Review recap. If the
+      // question re-mounts at its default instead of the answered value, an
+      // allocator who picked "my own capital", reviewed, then came back to fix
+      // a typo would submit as team-review WITHOUT being told — their strategy
+      // silently becomes non-allocatable. Every other field on this step
+      // already round-trips through `initial`; the mark must too.
+      const answered: MetadataDraft = {
+        name: "Alpha Centauri",
+        description: DESCRIPTION,
+        categoryId: "cat-aaa",
+        strategyTypes: [],
+        subtypes: [],
+        markets: [],
+        supportedExchanges: [],
+        leverageRange: "",
+        aum: "",
+        maxCapacity: "",
+        assetClass: "traditional",
+        capitalOwnership: "own_capital",
+      };
+      render(
+        <MetadataStep {...baseProps} showCapitalQuestion initial={answered} />,
+      );
+      await screen.findByLabelText("Category");
+
+      expect(screen.getByTestId("capital-ownership-own_capital")).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+      expect(
+        screen.getByTestId("capital-ownership-team_review"),
+      ).toHaveAttribute("aria-checked", "false");
+    });
+
     // ── The disclosure ────────────────────────────────────────────────────
 
     it("[D-06] collapses the culled controls behind a closed <details> by default", async () => {
