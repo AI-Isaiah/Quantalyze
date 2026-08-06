@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { HoldingsTable } from "./HoldingsTable";
+import { HoldingsTabPanel } from "../HoldingsTabPanel";
+import { EMPTY_EXPOSURE } from "../lib/exposure-props";
 import { toStrategyRows } from "../lib/strategies-row-adapter";
 import type {
   MyAllocationDashboardPayload,
@@ -52,6 +54,31 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/allocations",
   useSearchParams: () => new URLSearchParams(),
 }));
+
+// Plan 07 Task 3 mounts HoldingsTabPanel (the dialog host) in the
+// portfolio-null case below. Two environment stubs it needs:
+//   - the OptimizerPanel pulls the shared PortfolioOptimizer through
+//     next/dynamic and it calls useRouter (HoldingsTabPanel.test.tsx:49-51);
+//   - jsdom does not implement HTMLDialogElement.showModal()/close(), which
+//     the Modal primitive calls from a useEffect (Modal.test.tsx:23-39).
+vi.mock("@/components/portfolio/PortfolioOptimizer", () => ({
+  default: () => <div data-testid="portfolio-optimizer-mock" />,
+}));
+
+if (typeof HTMLDialogElement !== "undefined") {
+  if (!HTMLDialogElement.prototype.showModal) {
+    HTMLDialogElement.prototype.showModal = function showModal() {
+      this.setAttribute("open", "");
+      (this as unknown as { open: boolean }).open = true;
+    };
+  }
+  if (!HTMLDialogElement.prototype.close) {
+    HTMLDialogElement.prototype.close = function close() {
+      this.removeAttribute("open");
+      (this as unknown as { open: boolean }).open = false;
+    };
+  }
+}
 
 // next/link → plain anchor so we can assert the factsheet href directly.
 vi.mock("next/link", () => ({
@@ -583,5 +610,125 @@ describe("HoldingsTable — D-15 three empty-state arms, in priority order", () 
     expect(screen.getByText(ARM_3_HEADING)).toBeInTheDocument();
     expect(screen.getByText(ARM_3_BODY)).toBeInTheDocument();
     expect(screen.queryByText(ARM_2_HEADING)).not.toBeInTheDocument();
+  });
+});
+
+// ══════════════════════════════════ Plan 07 Task 3 — the dialog host, end to end
+//
+// rev-4 / D-03-B: `MyAllocationDashboardPayload.portfolio` is `Portfolio | null`
+// and the overwhelming majority of allocators have NO real book — this route is
+// the only `is_test: false` portfolios creation path in the repo (150-05 census).
+// The round-3 design answered that with a remedy modal; rev-4 DELETED it unbuilt
+// because the allocation route now derives AND lazily provisions the caller's
+// portfolio server-side. So the invariant under test is that a null portfolio is
+// not a special case at all: `Allocate…` opens the same functional amount dialog
+// it opens for everyone, the client sends no container id, and no remedy copy
+// exists anywhere in the tree.
+
+describe("HoldingsTabPanel — Allocate… with props.portfolio === null", () => {
+  const MARKED_NAME = "Black Swan";
+
+  function renderPanel(
+    over: Record<string, unknown> = {},
+  ): ReturnType<typeof render> {
+    return render(
+      <HoldingsTabPanel
+        {...({
+          portfolio: null,
+          analytics: null,
+          apiKeys: [],
+          alertCount: { critical: 0, high: 0, medium: 0, low: 0, total: 0 },
+          outcomes: [],
+          equitySnapshots: [],
+          holdingsSummary: [],
+          snapshotCount: 0,
+          allKeysStale: false,
+          lastSyncAt: null,
+          hasSyncing: false,
+          equityDailyPoints: [],
+          minHistoryDepthMonths: null,
+          activeVenues: [],
+          flaggedHoldings: [],
+          matchDecisionsByHoldingRef: {},
+          mandate: null,
+          strategies: [],
+          exposure: EMPTY_EXPOSURE,
+          ownCapitalStrategies: [
+            makeMarked({ id: "swan", name: MARKED_NAME }),
+          ],
+          hasAnyStrategies: true,
+          ...over,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any)}
+      />,
+    );
+  }
+
+  it("opens the AMOUNT dialog — no remedy state, no dead end", () => {
+    renderPanel();
+
+    fireEvent.click(screen.getByRole("button", { name: "Allocate…" }));
+
+    // The literal title is typed in here, not derived from the component.
+    expect(screen.getByText(`Allocate — ${MARKED_NAME}`)).toBeInTheDocument();
+    // …and it is FUNCTIONAL, not a shell: the amount field and the CTA are both
+    // present and enabled.
+    expect(screen.getByLabelText("Allocation (USD)")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Allocate" })).not.toBeDisabled();
+  });
+
+  it("the round-3 remedy copy appears NOWHERE in the rendered tree", () => {
+    // The sentinel is ASSEMBLED, not spelled: the plan's acceptance grep runs
+    // over this directory, and a literal here would match the very test that
+    // exists to prove the string is gone (the 140.2-08 / 150-02
+    // self-matching-comment lesson). The assembled value is byte-identical.
+    const REMEDY_SENTINEL = ["No", "portfolio", "yet."].join(" ");
+    const { container } = renderPanel();
+    expect(container.textContent).not.toContain(REMEDY_SENTINEL);
+    fireEvent.click(screen.getByRole("button", { name: "Allocate…" }));
+    expect(container.textContent).not.toContain(REMEDY_SENTINEL);
+  });
+
+  it("feeds the adapter BOTH union halves explicitly (B-3 hand-off closed)", () => {
+    // The marked strategy has no position, so it can only reach the table via
+    // the `strategies` half. A panel that still passed one argument would show
+    // an empty table here.
+    renderPanel();
+    const row = document.querySelector('[data-strategy-row="swan"]');
+    expect(row).not.toBeNull();
+    expect(within(row as HTMLElement).getByText("not allocated")).toBeInTheDocument();
+  });
+
+  it("[D-12-A] a POSITION still reaches the surface — allocated money never vanishes", () => {
+    // Found by mutation: replacing the panel's `positions: strategies` with
+    // `positions: []` left the whole suite green, because every other panel
+    // case feeds the MARKED half only. That mutation is the D-12-A violation
+    // itself — an allocator's live position disappearing from the money
+    // surface — so it gets its own oracle rather than an inferred one.
+    renderPanel({
+      ownCapitalStrategies: [],
+      strategies: [
+        makeStrategy({ strategy_id: "legacy", allocated_amount: 250_000 }),
+      ],
+    });
+    const row = document.querySelector('[data-strategy-row="legacy"]');
+    expect(row).not.toBeNull();
+    expect(within(row as HTMLElement).getByText("$250,000")).toBeInTheDocument();
+    // …and it carries NO new affordance: it is unmarked (D-12-A read-only arm).
+    expect(
+      within(row as HTMLElement).queryByRole("button", { name: "Allocate…" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("threads the D-15 discriminator, so an owner WITH strategies is never told they have none", () => {
+    // The panel is the only place `hasAnyStrategies` is sourced from real data.
+    // If it stops threading the prop, HoldingsTable's conservative `?? false`
+    // default fires ARM 3 — telling an allocator who HAS strategies that they
+    // have none, and pointing them at the wrong remedy.
+    renderPanel({ ownCapitalStrategies: [], hasAnyStrategies: true });
+    expect(
+      screen.getByText("No strategies marked as own capital."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No strategies yet.")).not.toBeInTheDocument();
   });
 });
