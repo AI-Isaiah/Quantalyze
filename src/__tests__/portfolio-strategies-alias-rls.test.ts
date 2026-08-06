@@ -118,6 +118,10 @@ describe("portfolio_strategies.alias RLS — Migration 025 cross-tenant guard (G
           user_id: allocAId,
           name: "G8.B.5 synthetic strategy",
           status: "published",
+          // Self-owned by allocator A, so the D-03-A guard
+          // (20260806120000) refuses the portfolio_strategies insert below
+          // with 23514 unless the strategy is affirmatively marked.
+          capital_ownership: "own_capital",
         })
         .select("id")
         .single();
