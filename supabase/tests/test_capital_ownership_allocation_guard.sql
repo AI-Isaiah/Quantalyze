@@ -1,7 +1,9 @@
 -- Test for the Phase 150 OWN-03 / D-03-A ALLOCATION INVARIANT:
 --   * 20260806120000_strategies_capital_ownership.sql
---       part 3 — trg_portfolio_strategies_own_capital_only (BEFORE INSERT)
---       part 4 — flip_capital_ownership_to_team_review(uuid)
+--       part 3  — trg_portfolio_strategies_own_capital_only (BEFORE INSERT)
+--       part 3b — trg_strategies_team_review_mark_guard
+--                 (BEFORE UPDATE OF capital_ownership) — rev-2, finding F2
+--       part 4  — flip_capital_ownership_to_team_review(uuid)
 --
 -- Why this must be a DB test and not a vitest file
 -- -----------------------------------------------
@@ -50,11 +52,39 @@
 --      (portfolio_id, strategy_id) violates the composite PRIMARY KEY. The
 --      "never a second row" guarantee is STRUCTURAL, not a UI convention.
 --   7. Flip RPC (T-150-02 / T-150-05): ONE call sets the mark to team_review AND
---      removes the caller's positions. A non-owner call is a total no-op — zero
+--      removes the OWNER's positions. A non-owner call is a total no-op — zero
 --      positions removed, zero strategies updated, victim state untouched. Plus
---      a STRUCTURAL sub-case (7c) pinning the explicit auth.uid() predicate on
---      both statements, which the behavioural arm provably cannot see because
---      RLS masks its removal.
+--      a STRUCTURAL sub-case (7c) pinning the explicit auth.uid() predicates,
+--      which the behavioural arm provably cannot see because RLS masks their
+--      removal. rev-2 adds four sub-cases:
+--      7d (finding F1) — the non-owner caller HOLDS a position in the target.
+--         Before the owner precheck, flip() deleted the CALLER's own position
+--         (its DELETE is scoped to the caller's portfolios, not the owner's)
+--         and returned (1, 0) while the mark update no-oped. Case 7b cannot see
+--         this: its caller holds nothing in the victim strategy, so the buggy
+--         DELETE has nothing to hit. Silent position loss for a bystander.
+--      7e (finding F3) — after an OWNER's flip, a THIRD-PARTY position in the
+--         now-team_review strategy SURVIVES. Accepted narrowing, pinned here so
+--         a future reader cannot "close the gap" with a cross-tenant delete
+--         that rewrites another allocator's book (migration header (g)).
+--      7f (finding F2) — a raw `UPDATE strategies SET capital_ownership =
+--         'team_review'`, which `strategies_update USING (user_id = auth.uid())`
+--         permits the owner outright from PostgREST with no route involved,
+--         RAISEs check_violation while a live owner position exists. Without
+--         part 3b, SC 2b was INSERT-only and this PATCH stranded the position —
+--         the exact hole the flip RPC exists to close, reachable without ever
+--         calling it. The case then flips the SAME strategy through the RPC and
+--         requires it to SUCCEED: same end state, one route blocked, the
+--         sanctioned one open.
+--      7g — positive control for part 3b. Transitions to 'own_capital' and back
+--         to NULL on a strategy with a LIVE position must SUCCEED. Without it,
+--         a guard that raised on EVERY capital_ownership update would leave 7f
+--         green while silently killing the retro Mark path (and the seed's own
+--         un-mark step below).
+--      7h — STRUCTURAL, 7c's twin: part 3b's guard is SECURITY DEFINER with a
+--         pinned search_path. No behavioural case here can see the loss, because
+--         only the owner can reach the guard today and an owner sees their own
+--         book either way (measured — mutation M19 stays green as INVOKER).
 --   8. THIRD-PARTY regression (the INSERT-side twin of case 5): a position for
 --      ANOTHER owner's strategy with a NULL mark MUST SUCCEED, and so must one
 --      for a third-party own_capital strategy. This is the shipped
@@ -70,7 +100,8 @@
 --
 -- Hygiene (shared TEST DB — STATE Phase-142.1 item 5 class): every fixture row
 -- is created inside this test's own transaction with its own generated UUIDs;
--- every UPDATE/DELETE predicate names those ids; there is NO table-wide
+-- every UPDATE/DELETE predicate names those ids (including the rev-2 cases 7f
+-- and 7g, which UPDATE `strategies` by fixture id only); there is NO table-wide
 -- mutation anywhere in this file; the transaction ends in ROLLBACK. The
 -- third-party cases need TWO distinct user_ids on their fixture rows — the
 -- trigger reads table COLUMNS (strategies.user_id, portfolios.user_id), not
@@ -98,12 +129,15 @@ DECLARE
   uid_a               UUID := gen_random_uuid();  -- allocator; owns the portfolio
   uid_b               UUID := gen_random_uuid();  -- OTHER owner; the third party
   port_a              UUID;                       -- portfolio owned by A
+  port_b              UUID;                       -- portfolio owned by B (7d/7e)
 
   strat_a_own         UUID;  -- A, own_capital            -> allocatable
   strat_a_team        UUID;  -- A, team_review            -> blocked
   strat_a_null        UUID;  -- A, NULL (never asked)     -> blocked
   strat_a_legacy      UUID;  -- A, own_capital -> NULL after a position exists
   strat_a_flip        UUID;  -- A, own_capital + position -> flip RPC target
+  strat_a_shared      UUID;  -- A, published own_capital, held by BOTH A and B
+                             --   -> 7d (F1 non-owner flip) + 7e (F3 survival)
 
   strat_b_null        UUID;  -- B, NULL,        published -> third-party, allowed
   strat_b_own         UUID;  -- B, own_capital, published -> third-party, allowed
@@ -140,6 +174,13 @@ BEGIN
   VALUES (uid_a, 'cap-own guard book A')
   RETURNING id INTO port_a;
 
+  -- B needs a book of their own: cases 7d and 7e both turn on the distinction
+  -- between "the caller's positions" and "the strategy owner's positions",
+  -- which is invisible while only one allocator holds anything.
+  INSERT INTO portfolios (user_id, name)
+  VALUES (uid_b, 'cap-own guard book B')
+  RETURNING id INTO port_b;
+
   -- A's own strategies (strategy.user_id = portfolio.user_id => SELF-OWNED).
   INSERT INTO strategies (user_id, name, status, capital_ownership,
                           strategy_types, subtypes, markets, supported_exchanges)
@@ -165,6 +206,14 @@ BEGIN
                           strategy_types, subtypes, markets, supported_exchanges)
   VALUES (uid_a, 'cap-own A flip', 'private', 'own_capital', '{}', '{}', '{}', ARRAY['binance'])
   RETURNING id INTO strat_a_flip;
+
+  -- PUBLISHED (so B could discover and allocate to it the way AddToPortfolio
+  -- does) and own_capital, so both the owner's and the third party's positions
+  -- clear the INSERT guard when they are seeded below.
+  INSERT INTO strategies (user_id, name, status, capital_ownership,
+                          strategy_types, subtypes, markets, supported_exchanges)
+  VALUES (uid_a, 'cap-own A shared', 'published', 'own_capital', '{}', '{}', '{}', ARRAY['binance'])
+  RETURNING id INTO strat_a_shared;
 
   -- B's strategies (strategy.user_id <> portfolio.user_id => THIRD-PARTY).
   INSERT INTO strategies (user_id, name, status, capital_ownership,
@@ -194,14 +243,30 @@ BEGIN
   INSERT INTO portfolio_strategies (portfolio_id, strategy_id, allocated_amount)
   VALUES (port_a, strat_a_flip, 250000);
 
+  -- TWO positions in ONE strategy, one per allocator: A's own (self-owned +
+  -- own_capital) and B's third-party (owner <> portfolio owner + own_capital).
+  -- Both clear the INSERT guard. This pair is what makes 7d and 7e falsifiable.
+  INSERT INTO portfolio_strategies (portfolio_id, strategy_id, allocated_amount)
+  VALUES (port_a, strat_a_shared, 300000);
+  INSERT INTO portfolio_strategies (portfolio_id, strategy_id, allocated_amount)
+  VALUES (port_b, strat_a_shared, 400000);
+
   -- Un-mark the legacy strategy AFTER its position exists — this is exactly the
   -- shape of every pre-existing PROD position: a live row whose strategy the
   -- retro Mark path has not reached. Scoped to this fixture's own id.
+  --
+  -- rev-2 NOTE: trg_strategies_team_review_mark_guard (part 3b) fires on this
+  -- statement — the trigger is column-targeted on capital_ownership and fires
+  -- regardless of the executing role, so the seeding context gets no pass. It
+  -- does not raise because the guard is scoped to transitions INTO
+  -- 'team_review', and NULL is not 'team_review' (the function uses IS NOT
+  -- DISTINCT FROM so the comparison is explicit rather than a NULL falling
+  -- through the IF). Case 7g is the standing positive control for exactly this.
   UPDATE strategies SET capital_ownership = NULL WHERE id = strat_a_legacy;
 
-  RAISE NOTICE 'Seed OK: A=% B=% portfolio=% (self: own=% team=% null=% legacy=% flip=%) (third-party: null=% own=% team_pub=% team_priv=%)',
-    uid_a, uid_b, port_a, strat_a_own, strat_a_team, strat_a_null, strat_a_legacy,
-    strat_a_flip, strat_b_null, strat_b_own, strat_b_team_pub, strat_b_team_priv;
+  RAISE NOTICE 'Seed OK: A=% B=% books=(%, %) (self: own=% team=% null=% legacy=% flip=% shared=%) (third-party: null=% own=% team_pub=% team_priv=%)',
+    uid_a, uid_b, port_a, port_b, strat_a_own, strat_a_team, strat_a_null, strat_a_legacy,
+    strat_a_flip, strat_a_shared, strat_b_null, strat_b_own, strat_b_team_pub, strat_b_team_priv;
 
   -- ======================================================================
   -- Everything below runs as the AUTHENTICATED role with A's JWT — the same
@@ -421,27 +486,238 @@ BEGIN
       'TEST FAILED (7b): a NON-OWNER flip removed the victim''s position (% rows remain)', row_cnt;
   END IF;
 
-  -- ----- 7c: BOTH flip statements carry an explicit auth.uid() predicate ---
-  -- Structural, deliberately. Case 7b alone CANNOT catch the removal of these
-  -- predicates: RLS `strategies_update USING (user_id = auth.uid())` and
-  -- `portfolio_strategies_owner USING (...)` independently reduce a non-owner
-  -- flip to zero rows, so deleting the in-body predicates leaves 7b GREEN
-  -- (measured — mutation M6 of this file's ledger). They are defence-in-depth,
-  -- and defence-in-depth that no test can see is defence-in-depth that gets
-  -- deleted in the next refactor. The predicates matter the moment anyone makes
-  -- this function SECURITY DEFINER or calls it from a service-role context,
-  -- where RLS stops helping.
+  -- ----- 7c: ALL THREE flip auth.uid() predicates are present --------------
+  -- Structural, deliberately. Case 7b alone CANNOT catch the removal of the
+  -- statement predicates: RLS `strategies_update USING (user_id = auth.uid())`
+  -- and `portfolio_strategies_owner USING (...)` independently reduce a
+  -- non-owner flip to zero rows, so deleting the in-body predicates leaves 7b
+  -- GREEN (measured — mutation M6 of this file's ledger). They are
+  -- defence-in-depth, and defence-in-depth that no test can see is
+  -- defence-in-depth that gets deleted in the next refactor. They matter the
+  -- moment anyone makes this function SECURITY DEFINER or calls it from a
+  -- service-role context, where RLS stops helping.
+  --
+  -- rev-2: the threshold is 3, not 2. The owner precheck (finding F1) added a
+  -- third `auth.uid()`; leaving the bar at 2 would let the DELETE's or the
+  -- UPDATE's predicate be deleted while the precheck alone kept the count at
+  -- the old bar — i.e. this case would have quietly lost half its teeth as a
+  -- side effect of the F1 fix. The precheck's own presence is additionally
+  -- pinned behaviourally by 7d and structurally by the migration self-check.
   SELECT count(*) INTO row_cnt
   FROM pg_proc p
   JOIN pg_namespace n ON n.oid = p.pronamespace
   WHERE n.nspname = 'public'
     AND p.proname = 'flip_capital_ownership_to_team_review'
     AND (length(pg_get_functiondef(p.oid))
-         - length(replace(pg_get_functiondef(p.oid), 'auth.uid()', ''))) / length('auth.uid()') >= 2;
+         - length(replace(pg_get_functiondef(p.oid), 'auth.uid()', ''))) / length('auth.uid()') >= 3;
   IF row_cnt <> 1 THEN
     RESET ROLE;
     RAISE EXCEPTION
-      'TEST FAILED (7c): flip_capital_ownership_to_team_review does not carry an explicit auth.uid() predicate on BOTH its DELETE and its UPDATE — RLS currently masks the loss, so nothing else in this suite would notice';
+      'TEST FAILED (7c): flip_capital_ownership_to_team_review does not carry all three explicit auth.uid() predicates (owner precheck + DELETE + UPDATE) — RLS currently masks the loss of the statement predicates, so nothing else in this suite would notice';
+  END IF;
+
+  -- ----- 7d: NON-OWNER flip WHEN THE CALLER HOLDS A POSITION (F1) ----------
+  -- The finding case 7b structurally cannot reach. flip()'s DELETE is scoped to
+  -- `portfolios WHERE user_id = auth.uid()` — the CALLER's book, not the
+  -- owner's. So before the owner precheck, B calling flip() on A's strategy
+  -- deleted B's OWN position and returned (1, 0), while the mark update no-oped
+  -- against `strategies_update`. The documented contract said "total no-op
+  -- returning (0, 0)". Silent position loss for a bystander who merely happened
+  -- to hold the strategy someone else was marking.
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_b::text, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+
+  SELECT removed_positions, updated_strategies
+    INTO v_removed, v_updated
+    FROM flip_capital_ownership_to_team_review(strat_a_shared);
+  IF v_removed <> 0 OR v_updated <> 0 THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7d): a NON-OWNER flip on a strategy the CALLER holds affected rows (removed=%, updated=%), expected (0, 0) — the owner precheck is missing and the caller''s own position was destroyed', v_removed, v_updated;
+  END IF;
+  -- B can only see B's own positions under RLS, which is precisely the row at
+  -- risk. Assert it survived while still wearing B's JWT.
+  SELECT count(*) INTO row_cnt
+    FROM portfolio_strategies
+   WHERE portfolio_id = port_b AND strategy_id = strat_a_shared;
+  IF row_cnt <> 1 THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7d): the non-owner caller''s OWN position was deleted by their flip attempt (% rows remain) — flip() deleted from the caller''s book while failing to update the owner''s mark', row_cnt;
+  END IF;
+  RESET ROLE;
+
+  -- Owner-side state, read outside B's RLS: mark untouched, A's position intact.
+  SELECT capital_ownership INTO mark_now FROM strategies WHERE id = strat_a_shared;
+  IF mark_now IS DISTINCT FROM 'own_capital' THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7d): a NON-OWNER flip changed the owner''s mark to %', COALESCE(mark_now, '<null>');
+  END IF;
+  SELECT count(*) INTO row_cnt
+    FROM portfolio_strategies
+   WHERE portfolio_id = port_a AND strategy_id = strat_a_shared;
+  IF row_cnt <> 1 THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7d): a NON-OWNER flip removed the OWNER''s position (% rows remain)', row_cnt;
+  END IF;
+
+  -- ----- 7e: a THIRD-PARTY position SURVIVES the owner's flip (F3) ---------
+  -- Accepted narrowing, migration header (g): 'team_review' means "never NEWLY
+  -- allocatable", not "zero rows referencing it exist". The owner's flip clears
+  -- the owner's book and nothing else, because the alternative is a
+  -- cross-tenant DELETE in which one allocator's bookkeeping silently rewrites
+  -- another's portfolio. Pinned here so nobody "closes the gap".
+  --
+  -- This case doubles as the ORDERING proof for part 3b: the flip's UPDATE into
+  -- 'team_review' is admitted only because its DELETE already cleared the
+  -- owner-scoped count to zero, WHILE B's third-party position is still live —
+  -- i.e. the guard's owner-scoping is what lets a flip happen at all here.
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_a::text, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+
+  SELECT removed_positions, updated_strategies
+    INTO v_removed, v_updated
+    FROM flip_capital_ownership_to_team_review(strat_a_shared);
+  IF v_removed <> 1 OR v_updated <> 1 THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7e): the OWNER''s flip returned (removed=%, updated=%), expected (1, 1) — a third-party position must neither be deleted nor block the flip', v_removed, v_updated;
+  END IF;
+  RESET ROLE;
+
+  SELECT capital_ownership INTO mark_now FROM strategies WHERE id = strat_a_shared;
+  IF mark_now IS DISTINCT FROM 'team_review' THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7e): after the owner''s flip the mark is %, expected team_review — part 3b''s guard must be OWNER-scoped, not strategy-wide, or a third party can hold an owner''s flip hostage', COALESCE(mark_now, '<null>');
+  END IF;
+  SELECT count(*) INTO row_cnt
+    FROM portfolio_strategies
+   WHERE portfolio_id = port_a AND strategy_id = strat_a_shared;
+  IF row_cnt <> 0 THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7e): the owner''s own position survived their flip (% rows)', row_cnt;
+  END IF;
+  SELECT count(*) INTO row_cnt
+    FROM portfolio_strategies
+   WHERE portfolio_id = port_b AND strategy_id = strat_a_shared;
+  IF row_cnt <> 1 THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7e): a THIRD-PARTY position was destroyed by the owner''s flip (% rows remain, expected 1) — a flip must never touch another allocator''s book (migration header (g))', row_cnt;
+  END IF;
+
+  -- ----- 7f: raw UPDATE into team_review with a live position -> RAISEs (F2)
+  -- `strategies_update USING (user_id = auth.uid())` lets the owner PATCH this
+  -- column straight through PostgREST. Before part 3b, that stranded every live
+  -- position on a team-review strategy — the precise hole the flip RPC exists
+  -- to close, reachable without ever calling it, so SC 2b held on the INSERT
+  -- side only. strat_a_own still carries the position minted in case 1.
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_a::text, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+
+  raised := FALSE;
+  BEGIN
+    UPDATE strategies SET capital_ownership = 'team_review' WHERE id = strat_a_own;
+  EXCEPTION WHEN check_violation THEN
+    raised := TRUE;
+  END;
+  IF NOT raised THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7f): a raw UPDATE marked a strategy team_review while the owner''s position was live — the position is now stranded and SC 2b is INSERT-only';
+  END IF;
+  -- Subtransaction rollback: neither the mark nor the position moved.
+  SELECT capital_ownership INTO mark_now FROM strategies WHERE id = strat_a_own;
+  IF mark_now IS DISTINCT FROM 'own_capital' THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7f): the blocked UPDATE still changed the mark to %', COALESCE(mark_now, '<null>');
+  END IF;
+  SELECT count(*) INTO row_cnt
+    FROM portfolio_strategies
+   WHERE portfolio_id = port_a AND strategy_id = strat_a_own;
+  IF row_cnt <> 1 THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7f): the blocked UPDATE disturbed the position (% rows)', row_cnt;
+  END IF;
+
+  -- The SANCTIONED route to the same end state must still be open. Same row,
+  -- same session, one statement later: the guard blocks the write that strands
+  -- and admits the transaction that does not.
+  SELECT removed_positions, updated_strategies
+    INTO v_removed, v_updated
+    FROM flip_capital_ownership_to_team_review(strat_a_own);
+  IF v_removed <> 1 OR v_updated <> 1 THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7f): the flip RPC returned (removed=%, updated=%) on a row the raw UPDATE was refused for, expected (1, 1) — part 3b must not block the sanctioned path (it DELETEs before it UPDATEs)', v_removed, v_updated;
+  END IF;
+  RESET ROLE;
+
+  SELECT capital_ownership INTO mark_now FROM strategies WHERE id = strat_a_own;
+  IF mark_now IS DISTINCT FROM 'team_review' THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7f): after the sanctioned flip the mark is %, expected team_review', COALESCE(mark_now, '<null>');
+  END IF;
+
+  -- ----- 7g: POSITIVE CONTROL for part 3b ----------------------------------
+  -- Transitions that are NOT into 'team_review' must pass even with a live
+  -- position. Without this case a guard that raised on EVERY capital_ownership
+  -- UPDATE would leave 7f green while killing the retro Mark path (D-09/D-11)
+  -- and the un-mark step this very file seeds with. strat_a_legacy is the exact
+  -- shape: NULL mark, live position.
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_a::text, 'role', 'authenticated')::text, true);
+  SET LOCAL ROLE authenticated;
+
+  UPDATE strategies SET capital_ownership = 'own_capital' WHERE id = strat_a_legacy;
+  SELECT capital_ownership INTO mark_now FROM strategies WHERE id = strat_a_legacy;
+  IF mark_now IS DISTINCT FROM 'own_capital' THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7g): marking a strategy own_capital with a live position did not take (mark=%) — part 3b must guard the transition INTO team_review only, or the retro Mark path is dead', COALESCE(mark_now, '<null>');
+  END IF;
+
+  -- ...and back to NULL, the seed's own shape, restated as an assertion.
+  UPDATE strategies SET capital_ownership = NULL WHERE id = strat_a_legacy;
+  SELECT capital_ownership INTO mark_now FROM strategies WHERE id = strat_a_legacy;
+  IF mark_now IS NOT NULL THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7g): un-marking a strategy with a live position did not take (mark=%) — NULL is not team_review and must pass the guard', mark_now;
+  END IF;
+  RESET ROLE;
+
+  -- ----- 7h: part 3b's guard is SECURITY DEFINER with a pinned search_path --
+  -- Structural, for the same reason 7c is (this file's M6 lesson): NO
+  -- behavioural case in this suite can see the loss. Every UPDATE that reaches
+  -- this guard today comes from the OWNER — `strategies_update USING (user_id =
+  -- auth.uid())` permits no one else — and an owner can always read their own
+  -- portfolios, so a SECURITY INVOKER guard counts exactly the same rows and 7f
+  -- stays green (measured, mutation M19). It stops being the same the moment a
+  -- service-role or admin path marks a strategy from a context that cannot see
+  -- the owner's book: INVOKER would read zero positions and strand them, which
+  -- is precisely the failure this trigger exists to prevent.
+  SELECT count(*) INTO row_cnt
+  FROM pg_proc p
+  JOIN pg_namespace n ON n.oid = p.pronamespace
+  WHERE n.nspname = 'public'
+    AND p.proname = 'guard_team_review_mark_no_stranded_positions'
+    AND p.prosecdef
+    AND p.proconfig @> ARRAY['search_path=public, pg_catalog'];
+  IF row_cnt <> 1 THEN
+    RESET ROLE;
+    RAISE EXCEPTION
+      'TEST FAILED (7h): guard_team_review_mark_no_stranded_positions() is not SECURITY DEFINER with a pinned search_path — under INVOKER its position count is RLS-filtered by the updating session, and no behavioural case in this file can see the difference';
   END IF;
 
   -- ----- 8: THIRD-PARTY regression — the shipped paths must still work -----
@@ -481,7 +757,7 @@ BEGIN
   RESET ROLE;
   PERFORM set_config('request.jwt.claims', NULL, true);
 
-  RAISE NOTICE 'test_capital_ownership_allocation_guard: ALL PASS (D-03-A both arms, SECURITY DEFINER probe, upsert arm, legacy-alias + third-party regressions, composite PK, atomic flip).';
+  RAISE NOTICE 'test_capital_ownership_allocation_guard: ALL PASS (D-03-A both arms, SECURITY DEFINER probe, upsert arm, legacy-alias + third-party regressions, composite PK, atomic flip, owner precheck, third-party survival, raw-UPDATE mark-transition guard + its positive control).';
 END
 $$;
 
