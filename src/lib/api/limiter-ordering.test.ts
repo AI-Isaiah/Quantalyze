@@ -80,6 +80,11 @@ const CANONICAL = new Set([
   // load-bearing probe-resistance control (see route + ratelimit.ts comments).
   "scenario/peer-rank/route.ts",
   "portfolio-strategies/alias/route.ts",
+  // Phase 150 / OWN-03 allocation write — both verbs parse the body, guard the
+  // strategy_id shape and (POST) the $1B ticket amount BEFORE checkLimit, so a
+  // 400 never burns a token (B15 validate-then-limit). The money write itself
+  // sits behind the limiter.
+  "portfolio-strategies/allocation/route.ts",
   "preferences/route.ts",
   "simulator/route.ts",
   "strategies/create-with-key/route.ts",

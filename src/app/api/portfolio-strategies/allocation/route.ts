@@ -127,24 +127,22 @@ function parseAmount(raw: unknown): number | null {
   return n;
 }
 
-async function readBody(
-  req: NextRequest,
-  userId: string,
-): Promise<AllocationBody | null> {
-  try {
-    return (await req.json()) as AllocationBody;
-  } catch (err) {
-    // Bind + log (the alias route's G8.B.3 fix): a bare `catch {}` hides
-    // parse failures, oversized bodies and AbortErrors alike.
-    console.error(
-      "[api/portfolio-strategies/allocation] body parse failed:",
-      {
-        message: err instanceof Error ? err.message : String(err),
-        userId,
-      },
-    );
-    return null;
-  }
+/**
+ * Bind + log the parse failure (the alias route's G8.B.3 fix): a bare
+ * `catch {}` hides parse failures, oversized bodies and AbortErrors alike.
+ *
+ * ⚠️ Only the LOGGING is extracted. The `await req.json()` itself stays INLINE
+ * in each verb, deliberately: `limiter-ordering.test.ts:279-296` (the B15
+ * helper-extraction guard) verifies validate-then-limit by locating a body
+ * marker and `checkLimit` in the SAME method segment. Hoisting the parse into
+ * a helper takes this route's ordering check dark without failing anything
+ * else — which is exactly the regression that guard exists to catch.
+ */
+function logBodyParseFailure(err: unknown, userId: string): void {
+  console.error("[api/portfolio-strategies/allocation] body parse failed:", {
+    message: err instanceof Error ? err.message : String(err),
+    userId,
+  });
 }
 
 export async function POST(req: NextRequest) {
@@ -157,8 +155,13 @@ export async function POST(req: NextRequest) {
   } = await supabase.auth.getUser();
   if (!user) return json({ error: "unauthorized" }, 401);
 
-  const body = await readBody(req, user.id);
-  if (!body) return json({ error: "invalid json" }, 400);
+  let body: AllocationBody;
+  try {
+    body = (await req.json()) as AllocationBody;
+  } catch (err) {
+    logBodyParseFailure(err, user.id);
+    return json({ error: "invalid json" }, 400);
+  }
 
   const strategyId =
     typeof body.strategy_id === "string" ? body.strategy_id.trim() : "";
@@ -335,8 +338,13 @@ export async function DELETE(req: NextRequest) {
   } = await supabase.auth.getUser();
   if (!user) return json({ error: "unauthorized" }, 401);
 
-  const body = await readBody(req, user.id);
-  if (!body) return json({ error: "invalid json" }, 400);
+  let body: AllocationBody;
+  try {
+    body = (await req.json()) as AllocationBody;
+  } catch (err) {
+    logBodyParseFailure(err, user.id);
+    return json({ error: "invalid json" }, 400);
+  }
 
   const strategyId =
     typeof body.strategy_id === "string" ? body.strategy_id.trim() : "";
