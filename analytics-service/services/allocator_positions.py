@@ -280,6 +280,29 @@ async def fetch_allocator_holdings(
     completes normally: spot returns [] (deferred) and derivatives render
     (Phase 71).
     """
+    # MT5SYNC-01 (hotfix 2026-08-06): mt5 is a non-ccxt venue — the worker's
+    # _make_exchange_client chokepoint hands this function an Mt5Session
+    # (login/investor_password/server + a blocking RPyC Mt5Client; NO
+    # fetch_balance/fetch_positions surface). v1.15 isinstance-routed the
+    # DERIVE branch only, so the daily poll_allocator_positions fan-out
+    # crashed here at _fetch_spot_rows' fetch_balance with AttributeError
+    # "'Mt5Session' object has no attribute 'fetch_balance'" and the
+    # handler's generic except stamped every MT5 key sync_status='error'
+    # (PROD census 2026-08-05, all 3 founder keys). Holdings ingestion has
+    # NO meaningful MT5 analog today: the read-only gateway client exposes
+    # login/account_info/history_deals_get only (no open-positions read),
+    # and MT5 account equity is already read + persisted by
+    # run_derive_broker_dailies_job's mt5 arm (combine_mt5_deal_ledger)
+    # under the Phase-137 per-terminal lock — a live read HERE would sit
+    # outside that lock discipline. EXPLICIT no-op: zero rows, no warning,
+    # so the handler completes and stamps sync_status='complete' +
+    # last_sync_at. Lazy import mirrors exchange.aclose_exchange's
+    # isinstance chokepoint (keeps this module import-light).
+    from services.mt5_client import Mt5Session
+
+    if isinstance(exchange, Mt5Session):
+        return ([], None)
+
     spot_rows: list[dict[str, Any]] = []
     deriv_rows: list[dict[str, Any]] = []
     warning: str | None = None

@@ -410,6 +410,78 @@ class _Mt5PostReadVerificationError(Exception):
     """
 
 
+async def _fetch_mt5_account_balance(session: Mt5Session) -> float | None:
+    """MT5SYNC-02 (hotfix 2026-08-06) — best-effort account-equity read for
+    ``run_sync_trades_job``'s balance-update arm when the key is mt5.
+
+    REUSES the derive branch's read machinery, never a second MT5 read path:
+    login → account_info through the SAME blocking RPyC ``Mt5Client``, run off
+    the event loop via ``to_thread``, bounded by the SAME
+    ``_MT5_DERIVE_READ_TIMEOUT_S`` ceiling (login+account_info is a strict
+    subset of the derive read that bound covers), and serialized under the
+    SAME Phase-137 per-terminal lock (``_MT5_TERMINAL_LOCKS`` /
+    ``_mt5_terminal_lock_for``) so no call ever touches the ONE shared Wine
+    terminal outside the lock discipline.
+
+    Returns ``account_info().equity`` — balance + floating uPnL of open
+    positions (the v1.8 MT5 convention the derive anchor uses) — as the
+    ``api_keys.account_balance_usdt`` analog (MT5 deposit ccy is USD-family,
+    same convention as the derive branch).
+
+    Error contract mirrors ccxt ``fetch_usdt_balance``'s swallow-with-warning
+    semantics: ANY failure (timeout, transport raise, login rejection,
+    account mismatch, missing/non-finite equity) returns ``None`` so the sync
+    completes without a balance snapshot instead of failing the job — the
+    snapshot is advisory; the follow-on derive job owns the load-bearing
+    equity read (and terminal restart recovery on a wedged pipe). The
+    MT5CONC-02 login bracket IS enforced: a mis-routed terminal presenting a
+    different account can never stamp the WRONG account's equity onto this
+    key.
+    """
+    from services.mt5_client import Mt5AccountMismatchError
+    from services.redact import scrub_freeform_string
+
+    def _read() -> dict[str, Any]:
+        session.client.login(
+            session.login, session.investor_password, session.server
+        )
+        info = session.client.account_info()
+        # STRICT equality; a MISSING "login" field must FAIL LOUD, never
+        # default-match (the derive branch's _assert_expected_login contract).
+        if info.get("login") != session.login:
+            raise Mt5AccountMismatchError(session.login, info.get("login"))
+        return info
+
+    try:
+        async with _mt5_terminal_lock_for(session.client.terminal_key):
+            info = await asyncio.wait_for(
+                asyncio.to_thread(_read), timeout=_MT5_DERIVE_READ_TIMEOUT_S
+            )
+    except (asyncio.TimeoutError, Exception) as exc:  # noqa: BLE001 — best-effort read
+        logger.warning(
+            "sync_trades: mt5 balance read failed — continuing without a "
+            "balance snapshot (exc_class=%s scrubbed=%s)",
+            type(exc).__name__, scrub_freeform_string(str(exc)),
+        )
+        return None
+
+    try:
+        equity = float(info["equity"])
+    except (KeyError, TypeError, ValueError):
+        logger.warning(
+            "sync_trades: mt5 account_info carried a missing/non-numeric "
+            "equity — continuing without a balance snapshot"
+        )
+        return None
+    if not math.isfinite(equity):
+        logger.warning(
+            "sync_trades: mt5 account_info equity is non-finite (NaN/Inf) — "
+            "refusing the poisoned snapshot (mirrors the derive anchor guard)"
+        )
+        return None
+    return equity
+
+
 # ---------------------------------------------------------------------------
 # Circuit breaker: per-exchange cooldown after 429
 # ---------------------------------------------------------------------------
@@ -1318,19 +1390,7 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # strategy_analytics stamp below.
     exchange_dq_flags: dict[str, Any] = {}
     try:
-        trades = await fetch_all_trades(ctx.exchange, since_ms=since_ms)
-        # Drain BEFORE the next exchange call so daily-PnL flags do not
-        # get clobbered by ``fetch_raw_trades``' entry-seam reset on
-        # the same asyncio task.
-        daily_pnl_dq_flags = get_and_clear_last_dq_flags()
-        if daily_pnl_dq_flags:
-            exchange_dq_flags.update(daily_pnl_dq_flags)
-        account_balance = await fetch_usdt_balance(ctx.exchange)
-
-        # --- Phase 2: Raw fill ingestion (gated by feature flag) ---
-        # M-0673: feature flag is module-level constant. Re-reading per job
-        # produced rollout-window inconsistency.
-        #
+        # --- Phase flags (shared by the mt5 and ccxt arms below) ---
         # H-0691: `phase2_failed` tracks BOTH fetch failures (caught below)
         # and persist failures (caught further down). When True, we stamp
         # `strategy_analytics.data_quality_flags.phase2_fill_ingestion_failed`
@@ -1343,6 +1403,48 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # set to the *fetched* count not the *persisted* count; (b) last_sync_at
         # advancing past the unpersisted window permanently; (c) no DQ flag.
         phase1_failed = False
+
+        if isinstance(ctx.exchange, Mt5Session):
+            # MT5SYNC-02 (hotfix 2026-08-06): mt5 is non-ccxt — pre-fix this
+            # arm's ccxt reads crashed on the Mt5Session holder
+            # (fetch_all_trades → fetch_daily_pnl → exchange.id →
+            # AttributeError "'Mt5Session' object has no attribute 'id'",
+            # Sentry QUANTALYZE-K; fetch_usdt_balance's fetch_balance
+            # AttributeError degraded the balance arm on every run). Route:
+            #   * daily-PnL fetch → EXPLICIT no-op (trades=[]). MT5 dailies
+            #     come from the deal LEDGER inside the follow-on
+            #     derive_broker_dailies job (combine_mt5_deal_ledger, the
+            #     SINGLE Phase-136 mt5 read path); no ccxt daily-PnL rows
+            #     exist for mt5, and minting a deals→sync_trades conversion
+            #     here would be a second MT5 read path.
+            #   * raw-fill ingestion (Phase 2) → EXPLICIT no-op. There is no
+            #     fill-based mt5 consumer BY DESIGN (long_fetch
+            #     Mt5Adapter.fetch_raw raises NotImplementedError — a fill
+            #     path would reopen the BYB-02 corruption class).
+            #   * balance-update arm → the Mt5Client login+account_info
+            #     equity read (bounded, per-terminal-locked, best-effort;
+            #     see _fetch_mt5_account_balance).
+            # The shared epilogue below then runs UNCHANGED: sync_trades RPC
+            # skipped (no trades), advance_sync_cursor stamps last_sync_at +
+            # account_balance_usdt, and the derive_broker_dailies follow-on
+            # is enqueued — so a healthy MT5 key completes the sync instead
+            # of dying with an AttributeError.
+            trades: list[dict[str, Any]] = []
+            account_balance = await _fetch_mt5_account_balance(ctx.exchange)
+        else:
+            trades = await fetch_all_trades(ctx.exchange, since_ms=since_ms)
+            # Drain BEFORE the next exchange call so daily-PnL flags do not
+            # get clobbered by ``fetch_raw_trades``' entry-seam reset on
+            # the same asyncio task.
+            daily_pnl_dq_flags = get_and_clear_last_dq_flags()
+            if daily_pnl_dq_flags:
+                exchange_dq_flags.update(daily_pnl_dq_flags)
+            account_balance = await fetch_usdt_balance(ctx.exchange)
+
+        # --- Phase 2: Raw fill ingestion (gated by feature flag) ---
+        # M-0673: feature flag is module-level constant. Re-reading per job
+        # produced rollout-window inconsistency.
+        #
         # Audit-2026-05-07 C-0225 / M-0663 / H-0670 — DQ flags surfaced by
         # ``fetch_raw_trades`` (partial-symbol failures, page-cap truncation,
         # fee-currency mismatch) MUST be drained immediately after the
@@ -1351,7 +1453,10 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # the strategy_analytics stamp loop below cannot merge them into
         # ``data_quality_flags`` — silently dropping the very signals
         # that batch added.
-        if _RAW_TRADE_INGESTION_ENABLED:
+        #
+        # MT5SYNC-02: mt5 is excluded — fetch_raw_trades is ccxt-shaped and
+        # there is no fill-based mt5 consumer (see the mt5 arm above).
+        if _RAW_TRADE_INGESTION_ENABLED and not isinstance(ctx.exchange, Mt5Session):
             try:
                 raw_fills = await fetch_raw_trades(
                     ctx.exchange, strategy_id, ctx.supabase, since_ms=since_ms
