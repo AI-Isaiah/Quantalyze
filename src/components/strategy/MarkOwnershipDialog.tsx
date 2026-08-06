@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
@@ -73,16 +73,23 @@ export function MarkOwnershipDialog({
     null,
   );
 
-  // Re-opening the dialog re-reads the row's current mark and clears any
-  // previous failure. Without this a dialog host that keeps the component
-  // mounted across rows would show the previous row's answer.
-  useEffect(() => {
-    if (!open) return;
+  // Re-opening the dialog, or pointing it at a different row, re-reads that
+  // row's current mark and clears any previous failure — a host that keeps this
+  // component mounted would otherwise show the previously opened row's answer.
+  //
+  // Adjusted DURING RENDER (React's documented "adjust state when a prop
+  // changes" pattern), not in an effect: an effect would paint the stale answer
+  // once and then correct it, which on a two-option safety question is exactly
+  // the frame a user can click.
+  const openSession = `${open}:${strategyId}`;
+  const [lastSession, setLastSession] = useState(openSession);
+  if (openSession !== lastSession) {
+    setLastSession(openSession);
     setMark(currentMark ?? TEAM_REVIEW);
     setStatus("idle");
     setEnvelope(null);
     setPendingRemoval(null);
-  }, [open, currentMark, strategyId]);
+  }
 
   async function submit(confirmRemoveAllocation: boolean) {
     setStatus("loading");

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
@@ -71,15 +71,22 @@ export function RenameStrategyDialog({
   const [status, setStatus] = useState<"idle" | "loading">("idle");
   const [envelope, setEnvelope] = useState<ErrorEnvelopeShape | null>(null);
 
-  // Re-opening re-reads the row's current name and clears any prior failure, so
-  // a host that keeps this mounted across rows never shows the previous name.
-  useEffect(() => {
-    if (!open) return;
+  // Re-opening, or pointing this at a different row, re-reads that row's
+  // current name and clears any prior failure — a host that keeps this mounted
+  // (the factsheet masthead does) would otherwise reopen on the stale input.
+  //
+  // Adjusted DURING RENDER (React's documented "adjust state when a prop
+  // changes" pattern) rather than in an effect, so the field never paints the
+  // previous value for a frame before correcting itself.
+  const openSession = `${open}:${strategyId}`;
+  const [lastSession, setLastSession] = useState(openSession);
+  if (openSession !== lastSession) {
+    setLastSession(openSession);
     setName(currentName);
     setFieldError(null);
     setStatus("idle");
     setEnvelope(null);
-  }, [open, currentName, strategyId]);
+  }
 
   function failField(message: string) {
     setFieldError(message);
