@@ -4,12 +4,12 @@ milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
 stopped_at: Phase 150 UI-SPEC approved
-last_updated: "2026-08-06T07:54:54.570Z"
-last_activity: 2026-08-05
+last_updated: "2026-08-06T12:52:17.106Z"
+last_activity: 2026-08-06
 progress:
   total_phases: 9
   completed_phases: 3
-  total_plans: 16
+  total_plans: 24
   completed_plans: 16
   percent: 33
 ---
@@ -57,8 +57,8 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 Phase: 149 (--complete) — EXECUTING
 Plan: 1 of ?
-Status: Executing Phase 149
-Last activity: 2026-08-05 -- Phase 149 execution started
+Status: Ready to execute
+Last activity: 2026-08-06 -- Phase 150 planning complete
 
 ### Phase 142.1 scope (inserted 2026-08-02)
 
@@ -1186,7 +1186,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session Continuity
 
-**Last activity:** 2026-08-05
+**Last activity:** 2026-08-06
 **Stopped at:** Phase 150 UI-SPEC approved
 **Next step:** run `/gsd:verify-work` on Phase 140.1.1. Nothing is left to execute.
 
