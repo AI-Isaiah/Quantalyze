@@ -935,6 +935,21 @@ export function WizardClient({
                 initial={metadataDraft}
                 detectedMarkets={syncSnapshot.detectedMarkets}
                 detectedExchange={syncSnapshot.exchange}
+                // Phase 150 / OWN-03 (D-01, D-07) — the capital question is
+                // asked on the allocator key-add surface, where "whose capital
+                // is behind this key" is a question the person actually knows
+                // the answer to. This is a trusted CONTEXT SELECTOR, not a
+                // client-trusted privilege flag: it chooses which question to
+                // render, and grants nothing. Compare `entry_context`, which
+                // travels to finalize-wizard as a routing HINT while the RPC's
+                // terminal-status guard does the real enforcement
+                // (route.ts:452-453). Nothing here can publish, move money, or
+                // widen access; a manager who saw this question would only be
+                // marking their own strategy. (The money verb is deliberately
+                // not spelled in this file — the phase gate greps this source
+                // to prove the wizard grew no money shortcut, and prose would
+                // match it.)
+                showCapitalQuestion={entryContext === "contribution"}
                 onComplete={handleMetadataComplete}
                 onBack={() => {
                   setStep("sync_preview");
