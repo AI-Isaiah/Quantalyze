@@ -2,16 +2,20 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260416125431_rebalance_drift_check_and_trigger.sql
--- portfolio-level trigger: fans out over every child row at the moment
--- the portfolio is inserted. Usually this is a no-op (portfolio_strategies
--- rows haven't been inserted yet), but it gives us correctness on the
--- unusual path where a bulk INSERT INTO portfolios ... with existing links
--- happens (e.g., a seed script, a migration, a restore). The per-child
--- trigger above handles the common wizard flow.
-CREATE OR REPLACE FUNCTION seed_weight_snapshots_for_portfolio()
+-- source migration: 20260806130000_seed_weight_snapshot_secdef.sql
+-- ==========================================================================
+-- 2. seed_weight_snapshots_for_portfolio() -> SECURITY DEFINER
+-- ==========================================================================
+-- Re-based on 20260416125431_rebalance_drift_check_and_trigger.sql:135-150.
+-- Same defect class (see header (d), third rejected alternative): latent today
+-- only because the portfolio_strategies FK prevents a child row from pre-dating
+-- its parent, so the fan-out SELECT currently returns zero rows on the ordinary
+-- path. Fixed here so the class is closed, not just the instance that reddened.
+
+CREATE OR REPLACE FUNCTION public.seed_weight_snapshots_for_portfolio()
 RETURNS TRIGGER
 LANGUAGE plpgsql
+SECURITY DEFINER
 SET search_path = public, pg_catalog
 AS $$
 BEGIN
