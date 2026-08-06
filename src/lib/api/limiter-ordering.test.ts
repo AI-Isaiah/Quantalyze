@@ -85,6 +85,13 @@ const CANONICAL = new Set([
   // 400 never burns a token (B15 validate-then-limit). The money write itself
   // sits behind the limiter.
   "portfolio-strategies/allocation/route.ts",
+  // Phase 150 / OWN-03 + OWN-05 owner writes — both PATCH routes validate the
+  // `[id]` segment (isUuid) AND parse + closed-set/length-validate the body
+  // BEFORE checkLimit, so neither a malformed id nor a bad mark/name burns a
+  // token (B15 validate-then-limit). Both keep the body parse INLINE in the
+  // method for the helper-extraction guard below.
+  "strategies/[id]/ownership/route.ts",
+  "strategies/[id]/name/route.ts",
   "preferences/route.ts",
   "simulator/route.ts",
   "strategies/create-with-key/route.ts",
