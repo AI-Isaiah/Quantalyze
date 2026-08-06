@@ -229,6 +229,13 @@ export async function POST(req: NextRequest) {
     // deliberately) and nothing else creates a real portfolio — so without
     // this, every allocator's book is portfolio-less and SC 2 is unreachable.
     // `name` follows migration 023's real-book seed convention.
+    //
+    // @audit-skip: this mint IS audited, on the SAME request's
+    // `allocation.update` event — `metadata.provisioned: true` records it,
+    // anchored on the very portfolio this insert creates. A separate event
+    // would double-count one user action (there is no way to reach this line
+    // except by allocating). The emission lives past the gate's 60-line
+    // window only because the 23505 race arm sits between the two.
     const { data: created, error: insErr } = await supabase
       .from("portfolios")
       .insert({ user_id: user.id, name: "Active Allocation", is_test: false })
