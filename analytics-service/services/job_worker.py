@@ -3457,9 +3457,21 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # must honor the founder go-dark gate too. The DB CHECK admits 'mt5'
             # unconditionally, so after MT5_ENABLED is turned off (an incident
             # rollback) a stored mt5 key would keep firing live RPyC deal reads
-            # here every run. Gate BEFORE any decrypt/login/read. Permanent (the
-            # founder disabled it deliberately — retrying is wrong): fails cleanly
-            # and stops, never a live read while disabled.
+            # here every run. Permanent (the founder disabled it deliberately —
+            # retrying is wrong): fails cleanly and stops, never a live read
+            # while disabled.
+            #
+            # 151 review WR-08 — the previous wording ("gate BEFORE any
+            # decrypt/login/read") overstated the guarantee, and an operator
+            # makes an incident-response decision on it. `_exchange_preflight`
+            # has ALREADY decrypted the credentials and built the session
+            # (`_make_exchange_client` → `_make_mt5_session` → `Mt5Client`,
+            # whose `__init__` opens the RPyC transport) by the time control
+            # reaches here. What this gate stops is every terminal READ —
+            # login / account_info / history_deals_get — not the transport
+            # connect. A true pre-connect gate belongs at `_make_exchange_client`
+            # and would need each caller's disabled-path semantics adjusted with
+            # it (see the matching note in allocator_positions).
             if not mt5_enabled_server():
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,

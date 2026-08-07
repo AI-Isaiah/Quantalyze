@@ -443,11 +443,27 @@ async def _fetch_mt5_account_rows(
     genuine transport / trust failure, so the handler retries and no
     venue-specific exception can reach ``classify_exception``'s ``str(exc)``.
     """
-    # (a) Kill switch FIRST — the derive arm's exact posture (gate before any
-    # decrypt / login / read), so turning MT5_ENABLED off during an incident
-    # stops live RPyC reads on this path too. Routed through the honest-skip
-    # channel rather than an error: the founder disabled it deliberately, and
-    # "not available yet" is the truthful thing to tell the user.
+    # (a) Kill switch FIRST — the derive arm's exact posture, so turning
+    # MT5_ENABLED off during an incident stops live terminal READS on this path
+    # too. Routed through the honest-skip channel rather than an error: the
+    # founder disabled it deliberately, and "not available yet" is the truthful
+    # thing to tell the user.
+    #
+    # 151 review WR-08 — WHAT THIS GATE ACTUALLY STOPS, stated precisely because
+    # an operator makes an incident decision on it. By the time this runs,
+    # `_allocator_key_preflight` has already decrypted the credentials and built
+    # the client through `job_worker._make_exchange_client` →
+    # `_make_mt5_session` → `Mt5Client(...)`, whose `__init__` opens the RPyC
+    # transport to the gateway. So flipping MT5_ENABLED off stops every
+    # login / account_info / deal read against the terminal — the operations
+    # that touch the broker — but NOT the transport connect the preflight
+    # already made. (The derive arm at `job_worker`'s mt5 branch has the same
+    # shape.) Making "no connect while disabled" true would mean gating at the
+    # CONSTRUCTION chokepoint `_make_exchange_client`, which each caller's
+    # disabled-path semantics would have to be taught to expect: the holdings
+    # arm's honest skip here and the derive arm's permanent-fail DispatchResult
+    # both currently depend on a session existing. Deliberately not done in a
+    # review fix pass; logged rather than half-built.
     if not mt5_enabled_server():
         return ([], MT5_DISABLED_DETAIL)
 
