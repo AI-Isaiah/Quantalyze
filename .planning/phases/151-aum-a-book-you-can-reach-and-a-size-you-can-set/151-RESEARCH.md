@@ -162,7 +162,7 @@ plan AUM-01 as that fix); composer legibility (Phase 152).
 | Book-entry eligibility (which keys count) | Frontend Server (SSR `getMyAllocationDashboard` in `src/lib/queries.ts`) | Browser (renders from the payload; **never re-derives** — the SoT-mirror rule) | Eligibility needs `api_keys` + `strategies` + `strategy_keys` + `csv_daily_returns`, all owner-scoped SSR reads. The composer's existing contract is "the client never re-derives eligibility". |
 | Manager-vs-allocator role discrimination | Frontend Server (SSR query) | Database (`strategies.api_key_id`, `strategy_keys`) | Two link forms live in Postgres; the pure predicate (`deriveStrategylessKeys`) already exists and is unit-tested. |
 | Venue-capability dispatch for holdings | Python worker (`analytics-service/services/allocator_positions.py`) | Python worker (`services/job_worker.py` for the MT5 terminal lock) | Credentials, the RPyC terminal, and the sFOX bearer session only exist in the worker process. |
-| MT5 terminal serialization | Python worker (module-level lock registry in `services/job_worker.py`) | — | The registry MUST stay the single module-level dict — see Pitfall 2. |
+| MT5 terminal serialization | Python worker (module-level lock registry in `services/mt5_concurrency.py`) | — | The registry MUST stay the single module-level dict — see Pitfall 2. Extracted from `job_worker.py` to a LEAF module by plan 151-01 so the lazily-imported `allocator_positions.py` can share it without an import cycle. |
 | Human-readable sync copy | Python worker (writes `api_keys.sync_error`) | Browser (`AllocatorSyncStatus` renders it verbatim) | Per 151-UI-SPEC §4 the component is a pass-through; the copy contract is owned by the worker. |
 
 ---
