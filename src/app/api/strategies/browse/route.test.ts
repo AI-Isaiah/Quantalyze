@@ -728,39 +728,142 @@ describe("GET /api/strategies/browse", () => {
   // `backtest_returns` to the emitted object) would leak silently. These
   // tests pin the exhaustive allow-list and the forbidden-key absence.
   // ============================================================
-  it("H-0300a — emitted strategy objects expose ONLY the BrowseStrategyRow allow-list", async () => {
+  // Phase 152 / SCEN-02 + SCEN-05 — the fence is now TWO exhaustive arms, not
+  // one shared list, because the wire shape is no longer uniform: `isOwn` is
+  // emitted on EVERY row (a viewer-relative relationship, `false` discloses
+  // nothing), while `created_at` / `status` are OWNER-ONLY. With a single
+  // shared ALLOWED array the cheapest way to green a future regression is to
+  // append the new keys to it — which passes the test AND destroys the fence
+  // in the same edit, because the third-party arm would then PERMIT the owner
+  // metadata it exists to forbid. Two arms make that fix structurally
+  // impossible without a red test.
+  const ALLOWED_THIRD_PARTY = [
+    "id",
+    "name",
+    "codename",
+    "markets",
+    "strategy_types",
+    "is_example",
+    "isOwn",
+  ].sort();
+  const ALLOWED_OWN = [...ALLOWED_THIRD_PARTY, "created_at", "status"].sort();
+
+  // The session id withAllocatorAuth hands the route (STATE.authUser.id).
+  const FENCE_SESSION_ID = "00000000-0000-0000-0000-000000000001";
+  const OWN_CREATED_AT = "2026-07-20T09:15:00.000Z";
+  // Deliberately distinctive so a whole-payload sweep can prove ANOTHER
+  // owner's creation date reaches no part of the response — a key-set check
+  // alone cannot make that claim (a stray nested copy would slip past it).
+  const THIRD_PARTY_CREATED_AT = "1999-01-01T00:00:00.000Z";
+
+  /**
+   * Two-row own-vs-other fixture (T12f shape). Row 0 is the caller's OWN row;
+   * row 1 belongs to a DIFFERENT owner. BOTH rows carry `created_at` + `status`
+   * because the DB columns are NOT NULL — a harness row that omitted them could
+   * not tell "absent because the route fenced it" from "absent because the
+   * source had nothing to emit", and the conditional emission would be untested.
+   */
+  function seedOwnAndThirdPartyRows(): void {
     STATE.strategyRows = [
       {
-        id: "88888888-8888-4888-8888-888888888888",
-        name: "Two Sigma Equity",
-        codename: "TS-Eq",
-        disclosure_tier: "institutional",
-        markets: ["equity"],
-        strategy_types: ["long-short"],
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        user_id: FENCE_SESSION_ID, // the caller's OWN contribution
+        name: "My Alpha Sleeve",
+        codename: null,
+        disclosure_tier: "exploratory",
+        markets: ["crypto"],
+        strategy_types: ["systematic"],
+        is_example: false,
+        created_at: OWN_CREATED_AT,
+        status: "draft",
+      },
+      {
+        id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        user_id: "22222222-2222-4222-8222-222222222222", // a DIFFERENT owner
+        name: "Someone Elses Secret Book",
+        codename: "Zephyr-9",
+        disclosure_tier: "exploratory",
+        markets: ["fx"],
+        strategy_types: ["macro"],
+        is_example: false,
+        created_at: THIRD_PARTY_CREATED_AT,
+        status: "published",
       },
     ];
+  }
+
+  it("H-0300a-third-party — ANOTHER owner's row exposes ONLY the uniform allow-list (no owner metadata)", async () => {
+    seedOwnAndThirdPartyRows();
     const { GET } = await import("./route");
     const res = await GET(makeRequest());
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.strategies).toHaveLength(1);
+    expect(body.strategies).toHaveLength(2);
+    const other = body.strategies[1];
 
-    // Phase 29 / UNIFY-03 — `is_example` is the provenance tag added to the
-    // BrowseStrategyRow allow-list. The fence still holds exhaustively: any
-    // key NOT in this list (disclosure_tier / backtest_returns / user_id /
-    // any stray co-fetched column) must never reach the wire.
-    const ALLOWED = [
-      "id",
-      "name",
-      "codename",
-      "markets",
-      "strategy_types",
-      "is_example",
-    ].sort();
-    expect(Object.keys(body.strategies[0]).sort()).toEqual(ALLOWED);
-    // Explicit forbidden-key fence — disclosure_tier is fetched but must
-    // never reach the wire.
-    expect(body.strategies[0]).not.toHaveProperty("disclosure_tier");
+    // Exhaustive: any key NOT in this list (disclosure_tier / created_at /
+    // status / user_id / any stray co-fetched column) must never reach the
+    // wire on a row the viewer does not own.
+    expect(Object.keys(other).sort()).toEqual(ALLOWED_THIRD_PARTY);
+    // Explicit forbidden-key fence. `created_at` on a third-party row is a
+    // correlation vector against the pseudonymised catalog (it pins WHEN a
+    // codename first appeared); `status` discloses another owner's private
+    // workflow state. Neither is the viewer's to see.
+    expect(other).not.toHaveProperty("created_at");
+    expect(other).not.toHaveProperty("status");
+    expect(other).not.toHaveProperty("key_count");
+    expect(other).not.toHaveProperty("disclosure_tier");
+    expect(other).not.toHaveProperty("user_id");
+    // Whole-payload sweep — the other owner's creation date appears NOWHERE,
+    // not merely off the top-level row object.
+    expect(JSON.stringify(body)).not.toContain(THIRD_PARTY_CREATED_AT);
+    expect(JSON.stringify(body)).not.toContain("1999-01-01");
+  });
+
+  it("H-0300a-own — the caller's OWN row exposes the allow-list PLUS created_at + status, and nothing else", async () => {
+    seedOwnAndThirdPartyRows();
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.strategies).toHaveLength(2);
+    const own = body.strategies[0];
+
+    // Exhaustive on the OWN arm too — the SCEN-05 disambiguation metadata
+    // widens this arm by exactly two keys and no more.
+    expect(Object.keys(own).sort()).toEqual(ALLOWED_OWN);
+    expect(own).not.toHaveProperty("disclosure_tier");
+    expect(own).not.toHaveProperty("user_id");
+    // Defence-in-depth: the co-fetched user_id drives the comparison only.
+    expect(JSON.stringify(body)).not.toContain(FENCE_SESSION_ID);
+  });
+
+  it("SCEN-02 — isOwn is a strict boolean on EVERY row: true on the caller's own, false on another owner's", async () => {
+    seedOwnAndThirdPartyRows();
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    // `toBe` not `toBeTruthy` — a `undefined`/`null` here renders no "Yours"
+    // chip and would read as "not yours" on the surface that consumes it.
+    expect(body.strategies[0].isOwn).toBe(true);
+    expect(body.strategies[1].isOwn).toBe(false);
+  });
+
+  it("SCEN-05 — created_at/status are emitted on the caller's OWN row only (key ABSENT, not undefined, elsewhere)", async () => {
+    seedOwnAndThirdPartyRows();
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(body.strategies[0].created_at).toBe(OWN_CREATED_AT);
+    expect(body.strategies[0].status).toBe("draft");
+    expect(body.strategies[1]).not.toHaveProperty("created_at");
+    expect(body.strategies[1]).not.toHaveProperty("status");
+    // The other owner's status value must not leak either.
+    expect(JSON.stringify(body.strategies[1])).not.toContain("published");
   });
 
   it("H-0300b — an extra sensitive column on the source row does NOT leak into the response", async () => {
