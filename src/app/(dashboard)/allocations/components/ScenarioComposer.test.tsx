@@ -2451,8 +2451,17 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // T_C_P1933 — P1933 CRITICAL: empty-state add flow + commit must refuse
   //   when scenarioAum=0 (every voluntary_add row would land with
   //   size_at_decision_usd:0 → division-by-zero downstream).
+  //
+  // Phase 151 / AUM-03 (Tests 10 + 12) — REWRITTEN, not replaced: the refusal
+  // SEMANTICS below (no drawer, no callback) are the original guard and are
+  // kept verbatim. What changed is the COPY. The old string told the allocator
+  // to "Connect an exchange API key or toggle on a live holding" — the founder
+  // hit it with four venues already connected, and the live-holding toggle was
+  // deliberately never built (CONSTIT-03). The copy is pinned by EQUALITY
+  // against a literal typed into this test, not a regex: a regex match cannot
+  // catch a sentence that grows a second, false clause.
   // -------------------------------------------------------------------------
-  it("T_C_P1933 (audit-2026-05-07/Block-C/C.1) — refuses commit + surfaces alert when scenarioAum=0 with voluntary_add", () => {
+  it("T_C_P1933 / AUM-03 Tests 10+12 — refuses commit when AUM is unset; copy names ONLY the AUM input (no book to offer) and no never-string", () => {
     // Empty holdings + added-strategy via the empty-state Browse drawer
     // transitions the composer out of the empty-state branch and into the
     // main body with scenarioAum === 0 (no live holdings contribute).
@@ -2494,15 +2503,30 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     });
 
     // Composer now in main-body render. Click Commit — the handler should
-    // refuse and surface an inline role="alert" referencing zero AUM.
+    // refuse and surface an inline role="alert" naming the AUM input.
     fireEvent.click(screen.getByTestId("scenario-footer-commit"));
-    const alerts = screen.getAllByRole("alert");
-    expect(
-      alerts.some((a) => /portfolio AUM is zero/i.test(a.textContent ?? "")),
-    ).toBe(true);
-    // The drawer must NOT have opened (no internal drawer per the
-    // useInternalCommitDrawer={false} prop) and the legacy callback must
-    // NOT have fired either — the commit is refused outright.
+
+    // Test 10 — EXACT copy. No live book here, so "From my book" does not
+    // render and the refusal must not offer it.
+    const banner = screen.getByTestId("scenario-commit-error");
+    expect(banner).toHaveAttribute("role", "alert");
+    expect(banner.textContent).toBe(
+      "Can't record a scenario commit: portfolio AUM is not set. Set portfolio AUM before submitting.",
+    );
+
+    // Test 12 — the never-strings. Both name affordances that do not exist on
+    // this surface: the live-holding toggle was never built (CONSTIT-03), and
+    // telling a connected allocator to connect a key is simply false.
+    const allAlerts = screen
+      .queryAllByRole("alert")
+      .map((a) => a.textContent ?? "")
+      .join(" ");
+    expect(allAlerts).not.toContain("toggle on a live holding");
+    expect(allAlerts).not.toContain("Connect an exchange API key");
+
+    // Retained refusal semantics: the drawer must NOT have opened (no internal
+    // drawer per the useInternalCommitDrawer={false} prop) and the legacy
+    // callback must NOT have fired either — the commit is refused outright.
     expect(onCommitRequested).not.toHaveBeenCalled();
     expect(screen.queryByTestId("commit-drawer-mock")).toBeNull();
   });
@@ -11486,5 +11510,51 @@ describe("ScenarioComposer — AUM-01 Portfolio AUM input", () => {
       expect(drawerAum()).toBe(460_000);
       expect(screen.queryByText(/Overrides live-holdings total/i)).toBeNull();
     }
+  });
+
+  // AUM-03 Test 11 — the SECOND refusal variant. The "From my book" clause is
+  // named ONLY when that segment genuinely renders; offering a control the user
+  // cannot see is the same class of lie as the old "toggle on a live holding".
+  it("AUM-03 Test 11 (book reachable): the refusal offers 'From my book' — but only because the segment actually renders", () => {
+    const { payload } = aumBook([300_000, 160_000]);
+    const onCommitRequested = vi.fn();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        onCommitRequested={onCommitRequested}
+        useInternalCommitDrawer={false}
+      />,
+    );
+
+    // Non-vacuity: the segment IS on screen, so the clause below is honest.
+    expect(
+      screen.getByRole("radio", { name: /From my book/i }),
+    ).toBeInTheDocument();
+
+    // Switch to blank slate (a clean draft switches immediately), which drops
+    // the live holdings — and with them the derived AUM — to nothing. This is
+    // the only way to reach an unset AUM while the book is still reachable.
+    fireEvent.click(screen.getByTestId("scenario-entry-mode-blank"));
+    addStrategy({
+      id: "aum3-strat-11",
+      name: "Blank Slate Strategy",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    expect(aumInput().value).toBe("");
+    expect(drawerAum()).toBe(0);
+
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+
+    const banner = screen.getByTestId("scenario-commit-error");
+    expect(banner.textContent).toBe(
+      'Can\'t record a scenario commit: portfolio AUM is not set. Set portfolio AUM, or switch to "From my book", before submitting.',
+    );
+    expect(banner.textContent).not.toContain("toggle on a live holding");
+    expect(banner.textContent).not.toContain("Connect an exchange API key");
+    expect(onCommitRequested).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("commit-drawer-mock")).toBeNull();
   });
 });
