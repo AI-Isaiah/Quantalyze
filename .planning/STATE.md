@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
-status: ready_to_plan
-stopped_at: Phase 151 complete (7/7) — ready to discuss Phase 152
-last_updated: 2026-08-07T14:57:32.334Z
+status: planning
+stopped_at: Phase 152 UI-SPEC approved
+last_updated: "2026-08-07T15:37:03.108Z"
 last_activity: 2026-08-07
 progress:
   total_phases: 9
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 31
-  completed_plans: 192
-  percent: 44
+  completed_plans: 31
+  percent: 56
 ---
 
 # Project State — Quantalyze
@@ -1187,7 +1187,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session Continuity
 
 **Last activity:** 2026-08-07
-**Stopped at:** Phase 151 UI-SPEC approved
+**Stopped at:** Phase 152 UI-SPEC approved
 **Next step:** run `/gsd:verify-work` on Phase 140.1.1. Nothing is left to execute.
 
 ⚠️ **Env changed and LEFT changed:** `slowapi` was synced **0.1.9 → 0.1.10** (the CI pin at `analytics-service/requirements.txt:226`) and deliberately NOT restored — matching CI is the point, and every #3/#4/#5 mutation row is version-stamped against it. A verifier re-running those cycles on 0.1.9 would not be reproducing this evidence.
