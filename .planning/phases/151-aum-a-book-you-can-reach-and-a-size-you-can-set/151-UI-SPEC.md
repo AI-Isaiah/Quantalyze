@@ -274,3 +274,23 @@ No registries, no third-party blocks, no vetting required.
 - [ ] Dimension 6 Registry Safety: PASS
 
 **Approval:** pending
+
+---
+
+**Post-approval amendments (2026-08-08, founder UAT fix round — founder-directed, not re-reviewed):**
+
+1. **§1 Portfolio AUM field — WHOLE DOLLARS** (founder UAT item 3). The field is seeded from `liveHoldingsSum`, a float sum of custody values, so on the founder's book it displayed `39963.1076231`: eleven digits of false precision on a money input, and a number nobody would type. The field now renders `Math.round(value)`. **Display-only** — the precise value stays in state and every consumer (`sanitizedManualAum ?? liveHoldingsSum`) is unchanged. This is the discipline §2's per-strategy USD input already used (`Math.round(weight × scenarioAum)`, never written back).
+
+   Load-bearing consequence for the WR-04 "a blur is not an edit" guard: the blur comparison moves to the **displayed integer** (`Math.round(parsed) === Number(committedAumText())`), mirroring `commitDollarInput`'s `Math.round(amount) === displayed`. Comparing the rounded display against the raw float would let a user re-entering the unrounded live sum (the number that used to be on screen, and the one they would paste back) commit `manualAumUsd = 39963.1076231` — an override numerically identical to custody, so the disclosure note never appears, that nonetheless freezes the AUM against later syncs and puts `manual_aum_usd` on the commit body, changing the idempotency `request_hash`. That is the full WR-04 harm through a new door.
+
+2. **§2 per-strategy USD input — BOTTOM-UP AUM in blank mode** (founder UAT item 1). §2 specified the dollar cell as a second VIEW of the weight against a fixed AUM (`weight = amount / scenarioAum`). In **blank mode** the input is instead **THE entry point on which weight is built**: there is no live book, so the portfolio's size is whatever the allocator allocates. Editing row *i* to `d_i'` **holds every other row's derived dollar fixed** and resizes the portfolio — `manualAumUsd = Σ_{j≠i} d_j + d_i'` — after which every weight is `d_j / AUM'`.
+
+   **Book mode is unchanged** (§2 as written): the AUM is what custody says the book is worth, overridable, and a dollar edit back-computes a weight within that fixed size. The **AUM field is the other direction in both modes**: editing it holds weights fixed and rescales dollars proportionally.
+
+   This is an EDIT-SEMANTICS change, **not a schema change** — the persisted shape stays (weights + `manualAumUsd`). The one-weight-write-path invariant is preserved: only the denominator handed to `handleWeightChange` changes.
+
+   Two spec-visible consequences:
+   - A weight > 1 is **structurally unreachable** from a blank-mode dollar edit (the typed amount is part of its own denominator), so the "Weight clamped to 1" banner cannot fire there. The guard is not lost — it stays reachable on the book path and on the weight input.
+   - **Not yet addressed:** when the AUM is unset, §2's em-dash + "Set portfolio AUM to size in dollars" state still renders and there is no dollar input to type into, so the "entry point" only becomes live once an AUM exists. Making the input the true cold-start entry point needs new copy for that cell and is logged to TODOS.md.
+
+3. **§1 leverage bound** (founder UAT item 2). The shared contract ceiling `MAX_LEVERAGE` is **200** (raised from 10) for strategy rows. The public factsheet what-if keeps its own narrower `FACTSHEET_MAX_LEVERAGE = 10`; the contract ceiling must remain the widest bound in the system so no surface's stored value is silently reduced on read.
