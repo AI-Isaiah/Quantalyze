@@ -517,6 +517,15 @@ function makePayload(
     perKeyReturnsByApiKeyId: {},
     perKeyDailiesGateSatisfied: true,
     eligibleApiKeyIds: [],
+    // Phase 151 / AUM-04 — the split book-entry gate. This base fixture has no
+    // eligible keys, so the SOME-gate is honestly false (its invariant is
+    // `bookEntryGateSatisfied === contributingApiKeyIds.length > 0` — a
+    // hand-set `true` with zero contributing keys would be a fixture that
+    // cannot occur in production). Tests exercising the relaxed gate override
+    // all three together; see `perKeyUnitsPayload` for a real book.
+    allocatorEligibleApiKeyIds: [],
+    contributingApiKeyIds: [],
+    bookEntryGateSatisfied: false,
     // Phase 11 / 11-05 — onboarding visibility predicate inputs. The
     // composer fixture assumes a connected allocator (synced holdings),
     // so apiKeysCount is non-zero (banner+card never render here).
@@ -6845,6 +6854,12 @@ function perKeyBook(
     ),
     perKeyDailiesGateSatisfied: true,
     eligibleApiKeyIds: units.map((u) => u.id),
+    // Phase 151 / AUM-04 — every unit here is a real allocator key WITH a
+    // series, so all three fields follow unambiguously (no manager keys in
+    // this helper's world).
+    allocatorEligibleApiKeyIds: units.map((u) => u.id),
+    contributingApiKeyIds: units.map((u) => u.id),
+    bookEntryGateSatisfied: units.length > 0,
   };
 }
 

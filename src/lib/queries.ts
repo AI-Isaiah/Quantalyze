@@ -2437,6 +2437,47 @@ export interface MyAllocationDashboardPayload {
    */
   eligibleApiKeyIds: string[];
   // ─────────────────────────────────────────────────────────────────────
+  // Phase 151 / 151-02 (AUM-04) — the SPLIT book-entry gate
+  // ─────────────────────────────────────────────────────────────────────
+  /**
+   * Phase 151 / AUM-04. `eligibleApiKeyIds` MINUS the keys that already feed a
+   * live strategy the owner runs as a MANAGER (`deriveStrategyLinkedKeyIds` —
+   * role, never venue). These are the keys the allocator can actually put in
+   * their own book.
+   *
+   * Read-only; the client must NEVER re-derive it. The discriminator needs two
+   * owner-scoped SSR reads (`strategies` + the `strategy_keys` composite link
+   * table) that the browser has no business making.
+   */
+  allocatorEligibleApiKeyIds: string[];
+  /**
+   * Phase 151 / AUM-04. The subset of `allocatorEligibleApiKeyIds` that has a
+   * non-empty per-key series — i.e. the keys that can actually project. The
+   * partial-book copy ("{N} of {M} keys not yet contributing") is
+   * `contributingApiKeyIds.length` of `allocatorEligibleApiKeyIds.length`; a
+   * manager key belongs to NEITHER count, because it never will contribute.
+   *
+   * Read-only; the client must NEVER re-derive it (the Python backfill owns
+   * which keys have a series — see `isPerKeyDailiesEligibleKey`).
+   */
+  contributingApiKeyIds: string[];
+  /**
+   * Phase 151 / AUM-04. `contributingApiKeyIds.length > 0` — SOME-semantics,
+   * deliberately a SIBLING of the all-or-nothing `perKeyDailiesGateSatisfied`
+   * above rather than a replacement for it.
+   *
+   * ⚠️ These two flags must never be merged. `perKeyDailiesGateSatisfied`
+   * selects the `liveBaselineMetrics` SOURCE: relaxing it to SOME-semantics
+   * would present a 2-of-8-key blend as "your live book" on the Overview KPI
+   * strip — the mixed-basis honesty regression Phase 63 ENGINE-04 hardened
+   * against. This flag answers a different question: "can the allocator reach
+   * their own book at all?" — which, for an owner who is ALSO a manager, the
+   * all-or-nothing flag answers `false` forever.
+   *
+   * Read-only; the client must NEVER re-derive it.
+   */
+  bookEntryGateSatisfied: boolean;
+  // ─────────────────────────────────────────────────────────────────────
   // Phase 11 / 11-05 (onboarding & security readiness — D-02 + D-04)
   // ─────────────────────────────────────────────────────────────────────
   /**
@@ -3243,6 +3284,30 @@ export const getMyAllocationDashboard = cache(
       return res.data;
     };
 
+    // Phase 151 / 151-02 (AUM-04). `strategy_keys` (migration 20260710120000)
+    // is NOT present in the generated `database.types.ts` — the types file
+    // predates the table and has not been regenerated. Narrow ONE builder to
+    // the exact shape used here rather than widening the whole client, so the
+    // owner scope stays a literal `.eq("owner_id", …)` (the
+    // getStrategylessActiveKeys:406-419 precedent, byte-for-byte in shape).
+    // Regenerating database.types.ts is the real fix and remains deferred.
+    type StrategyKeyLinkRow = { strategy_id: string; api_key_id: string };
+    const phase151StrategyKeysTable = (
+      supabase as unknown as {
+        from: (relation: "strategy_keys") => {
+          select: (columns: string) => {
+            eq: (
+              column: string,
+              value: string,
+            ) => PromiseLike<{
+              data: StrategyKeyLinkRow[] | null;
+              error: { message: string } | null;
+            }>;
+          };
+        };
+      }
+    ).from("strategy_keys");
+
     const [
       portfolio,
       phase07EquityRes,
@@ -3285,6 +3350,14 @@ export const getMyAllocationDashboard = cache(
       // fallback (the prod-cutover SAFETY invariant) rather than blanking a
       // working dashboard.
       phase115DerivedRow,
+      // Phase 151 / 151-02 (AUM-04) — the owner's OWN strategies and the
+      // composite `strategy_keys` links, the two halves of the manager-role
+      // discriminator (`deriveStrategyLinkedKeyIds`). Fetched in THIS batch
+      // rather than after the fan-out so the new gate costs zero extra waves.
+      // Both are NON-FATAL by design (never `assertOk`'d): see the degradation
+      // note at the read sites below.
+      phase151OwnStrategiesRes,
+      phase151StrategyKeyLinksRes,
     ] = await Promise.all([
       getRealPortfolio(userId),
       supabase
@@ -3405,6 +3478,21 @@ export const getMyAllocationDashboard = cache(
           computed_at: string | null;
         } | null;
       })(),
+      // Phase 151 / AUM-04 — the owner's own strategies. `.eq("user_id",
+      // userId)` (NOT allocator_id): on this table the owner column is
+      // `user_id`, mirroring getStrategylessActiveKeys:426. `status` is
+      // projected so the W-4 archived filter stays decidable in-memory.
+      supabase
+        .from("strategies")
+        .select("id, api_key_id, status")
+        .eq("user_id", userId),
+      // Phase 151 / AUM-04 — the composite link rows. ⚠️ Owner-column
+      // asymmetry: `strategies` scopes `user_id`, `strategy_keys` scopes
+      // `owner_id`. The literal `.eq("owner_id", userId)` IS the tenant control
+      // here (RLS is the backstop) — see T-151-03.
+      phase151StrategyKeysTable
+        .select("strategy_id, api_key_id")
+        .eq("owner_id", userId),
     ]);
 
     // G-1 fix — normalize outcomes once, use in both !portfolio and
@@ -3756,6 +3844,56 @@ export const getMyAllocationDashboard = cache(
       eligibleKeyIds,
       perKeyReturnsByApiKeyId,
     );
+    // ───────────────────────────────────────────────────────────────────────
+    // Phase 151 / 151-02 (AUM-04) — the SPLIT book-entry gate.
+    //
+    // An owner who is ALSO a manager has keys that feed live strategies. Those
+    // keys will never carry an allocator per-key series, so the all-or-nothing
+    // gate above is pinned false FOREVER and the allocator cannot reach their
+    // own book (founder PROD census 2026-08-05: 8 eligible keys, 6 of them
+    // manager-side, 2 with real series). Subtract the manager keys by ROLE —
+    // `deriveStrategyLinkedKeyIds`, shared with /my-strategies so the two views
+    // of "strategy-linked" cannot drift — and ask a SOME question of what is
+    // left. `perKeyDailiesGateSatisfied` above is deliberately NOT touched:
+    // it still selects the liveBaselineMetrics source, where SOME-semantics
+    // would present a partial blend as the whole live book (Phase 63
+    // ENGINE-04's mixed-basis honesty invariant).
+    //
+    // Degradation: both reads are non-fatal (never assertOk'd — a transient
+    // failure must not blank a working dashboard, and `strategy_keys` can be
+    // missing from the PostgREST schema cache on a pre-migration environment).
+    // On error we fall back to an EMPTY link list, which biases keys toward
+    // ALLOCATOR eligibility: the failure mode is an allocator who can still
+    // reach their book, not one locked out of it — the exact defect AUM-04
+    // exists to fix. The Sentry breadcrumb keeps the fault observable.
+    const phase151LinkReadError =
+      phase151OwnStrategiesRes.error ?? phase151StrategyKeyLinksRes.error;
+    if (phase151LinkReadError) {
+      console.error(
+        "[queries.getMyAllocationDashboard] role-discriminator read failed (book gate degrades to allocator-eligible):",
+        phase151LinkReadError.message ?? phase151LinkReadError,
+      );
+      captureToSentry(phase151LinkReadError, {
+        tags: { op: "getMyAllocationDashboard", reason: "role_discriminator_read_failed" },
+        extra: { userId },
+        level: "warning",
+      });
+    }
+    const strategyLinkedKeyIds = deriveStrategyLinkedKeyIds(
+      (phase151OwnStrategiesRes.data ?? []) as Array<{
+        id: string;
+        api_key_id: string | null;
+        status: string;
+      }>,
+      phase151StrategyKeyLinksRes.data ?? [],
+    );
+    const allocatorEligibleApiKeyIds = eligibleKeyIds.filter(
+      (id) => !strategyLinkedKeyIds.has(id),
+    );
+    const contributingApiKeyIds = allocatorEligibleApiKeyIds.filter(
+      (id) => (perKeyReturnsByApiKeyId[id]?.length ?? 0) > 0,
+    );
+    const bookEntryGateSatisfied = contributingApiKeyIds.length > 0;
     // RT1 (Phase 37 DSRC-03) parity for the live-book BASELINE source.
     // `liveBaselineMetrics` is the "your current live book" reference the Scenario
     // composer lifts (liveBaselineToComputedMetrics) to compare a hypothetical
@@ -3829,6 +3967,14 @@ export const getMyAllocationDashboard = cache(
         perKeyReturnsByApiKeyId,
         perKeyDailiesGateSatisfied,
         eligibleApiKeyIds: eligibleKeyIds,
+        // Phase 151 / AUM-04 — the split book-entry gate (additive; computed
+        // before this !portfolio split). A fresh allocator has no keys, so
+        // these are [] / [] / false — emitted EXPLICITLY rather than left
+        // undefined, because every downstream `?? []` / `?? false` fallback
+        // would mask a missing field instead of failing loudly.
+        allocatorEligibleApiKeyIds,
+        contributingApiKeyIds,
+        bookEntryGateSatisfied,
         // Phase 11 / D-02 + D-04 — onboarding visibility predicate inputs.
         apiKeysCount,
         mandateIsSet,
@@ -4253,6 +4399,12 @@ export const getMyAllocationDashboard = cache(
       perKeyReturnsByApiKeyId,
       perKeyDailiesGateSatisfied,
       eligibleApiKeyIds: eligibleKeyIds,
+      // Phase 151 / AUM-04 — the split book-entry gate (additive). The manager
+      // keys subtracted here are a SUBSET of eligibleApiKeyIds above: the two
+      // deliberately differ for an owner who also runs strategies.
+      allocatorEligibleApiKeyIds,
+      contributingApiKeyIds,
+      bookEntryGateSatisfied,
       // Phase 11 / D-02 + D-04 — onboarding visibility predicate inputs.
       apiKeysCount,
       mandateIsSet,
