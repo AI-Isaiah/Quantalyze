@@ -13091,10 +13091,16 @@ describe("ScenarioComposer — SCEN-03 detail (Phase 152)", () => {
   const D_HALF = "scen03-strat-half";
   const D_K1 = "scen03-key-1";
 
-  /** The pinned metrics-absent copy (UI-SPEC copy table). U+2014 em-dash.
-   *  A literal here, never imported from the component. */
+  /** The pinned metrics-absent copy (UI-SPEC copy table, amendment 6). U+2014
+   *  em-dash. A literal here, never imported from the component.
+   *
+   *  Review WR-02 — the note names THE COMPOSER, not "this view". For a
+   *  drawer-added strategy the metric pair is structurally unreachable (the
+   *  lookup sources cagr/sharpe from the BOOK payload only, and no fetch is
+   *  allowed this phase), so this is that population's permanent metrics
+   *  statement — it must not read as "expand something else and they appear". */
   const ABSENT_NOTE =
-    "Metrics not available in this view — open the factsheet for full detail.";
+    "Metrics not available in the composer — open the factsheet for full detail.";
 
   /** A catalog strategy carrying REAL analytics — this is the BOOK arm of
    *  `addedStrategyMetadataLookup` (`found.strategy.strategy_analytics.*`).
@@ -13287,6 +13293,52 @@ describe("ScenarioComposer — SCEN-03 detail (Phase 152)", () => {
     expect(
       within(p).queryByTestId(`scenario-detail-sharpe-${D_NULL}`),
     ).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Review WR-02 — the note is this population's PERMANENT metrics statement.
+  //
+  // Every other test in this describe seeds the strategy into `payload.strategies`
+  // so the metric pair can be exercised. A real drawer-added strategy is by
+  // construction NOT in the book (that payload is the portfolio_strategies
+  // join), so `addedStrategyMetadataLookup` yields null for both, forever — the
+  // lazy returns route serves only the series, and CONTEXT locks no new fetches.
+  // This test is the only one that reproduces that shape, and it is why the copy
+  // had to name the surface: "not available in this view" invites the reader to
+  // go find the view where they ARE available, and for this population there is
+  // none inside the composer.
+  // -------------------------------------------------------------------------
+  it("WR-02 (drawer-added population): a strategy ABSENT from the book payload shows the absence note naming the composer, and no metric eyebrows", async () => {
+    // The lazy /api/strategies/{id}/returns fetch fires for an id outside the
+    // book. Stub it to a bare series so the panel's metrics arm — not the
+    // network — is what this test observes.
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ daily_returns: D_STRAT_SERIES }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderScen(bookedPayload());
+    const OFF_BOOK = "scen03-not-in-book";
+    add(OFF_BOOK, "Scen03 Off Book");
+    openDetail(OFF_BOOK, "Scen03 Off Book");
+
+    const p = panel(OFF_BOOK)!;
+    // Non-vacuity: the panel really opened and really has in-memory content —
+    // markets come off the added row itself, so they render for an off-book leg.
+    expect(
+      within(p).getByTestId(`scenario-detail-markets-${OFF_BOOK}`).textContent,
+    ).toBe("binance · okx");
+
+    // The metrics arm: no eyebrows, no figures, and the note that names the
+    // surface rather than implying another view inside the composer has them.
+    expect(within(p).queryByTestId(`scenario-detail-cagr-${OFF_BOOK}`)).toBeNull();
+    expect(
+      within(p).queryByTestId(`scenario-detail-sharpe-${OFF_BOOK}`),
+    ).toBeNull();
+    expect(within(p).getByText(ABSENT_NOTE)).toBeInTheDocument();
+    expect(p.textContent).not.toContain("not available in this view");
   });
 
   it("SCEN-03 honesty (ONE metric null): the pair still renders and the missing one is an em-dash, not the absence note", () => {

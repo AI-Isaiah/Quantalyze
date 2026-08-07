@@ -2492,6 +2492,19 @@ export function ScenarioComposer({
    * both, because the lazy `/api/strategies/[id]/returns` route does not return
    * them and CONTEXT locks NO new fetches this phase. Null is rendered as
    * honest absence by the panel — never a fabricated 0.
+   *
+   * ⚠️ Review WR-02 — read that second sentence as the reachability statement it
+   * is, not as an edge case. `strategyById` is built from `payload.strategies`,
+   * which is BOOK-ONLY (the portfolio_strategies join, :1075). A strategy added
+   * from the Browse drawer is BY CONSTRUCTION one the allocator does not already
+   * hold, so for that entire population BOTH values are null and the panel shows
+   * its metrics-absent note every time — the CAGR/SHARPE eyebrows render only
+   * for a leg that is already in the book (e.g. a Bridge candidate the allocator
+   * holds). The pair is deliberately kept rather than deleted, because that
+   * in-book case is live and renders real figures; the note's copy names the
+   * surface so the absent case never reads as "loading" or "click elsewhere".
+   * Widening /api/strategies/[id]/returns to co-serve cagr+sharpe (same row,
+   * same RLS, no new round-trip) is logged in TODOS.md under Phase 152.
    */
   const addedMetricsByRef = useMemo<
     Record<string, { cagr: number | null; sharpe: number | null }>
@@ -6778,11 +6791,24 @@ function CompositionList({
                     )}
                   </div>
                   {/* BOTH missing → one sentence that names the remedy, instead
-                      of two dashes that name nothing. */}
+                      of two dashes that name nothing.
+
+                      Review WR-02 — "in this view" → "in the composer". The
+                      metric pair is STRUCTURALLY unreachable for a
+                      drawer-added strategy: `addedStrategyMetadataLookup`
+                      sources cagr/sharpe from the BOOK payload only
+                      (`payload.strategies` is the portfolio_strategies join),
+                      the lazy /api/strategies/[id]/returns route does not
+                      serve them, and CONTEXT locks no new fetches this phase.
+                      So for the population this panel mostly serves, this note
+                      is the panel's PERMANENT metrics statement — it must name
+                      the surface, not hint that expanding something else here
+                      would reveal the figures. The factsheet remedy is real and
+                      always resolves (OWN-02). */}
                   {metricsAbsent && (
                     <p className="mt-2 text-xs text-text-muted">
-                      Metrics not available in this view — open the factsheet for
-                      full detail.
+                      Metrics not available in the composer — open the factsheet
+                      for full detail.
                     </p>
                   )}
                   {/* The panel's single action and its only accent element
