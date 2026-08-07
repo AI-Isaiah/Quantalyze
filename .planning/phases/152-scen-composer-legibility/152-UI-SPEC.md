@@ -53,7 +53,8 @@ DESIGN.md base-4 ladder (already tokenized; unchanged from 151):
 
 | Token | Value | Usage on this surface |
 |-------|-------|-----------------------|
-| 1 | 4px | chip padding (`py-0.5`), header-row bottom margin (`mb-1`) |
+| 0.5 | 2px | chip vertical padding (`py-0.5`) — arrives ONLY via the locked byte-verbatim `OwnershipTag` anatomy string, not a new spacing decision |
+| 1 | 4px | header-row bottom margin (`mb-1`) |
 | 2 | 8px | control-cluster gaps (`gap-2`) — the header row MUST reuse this exact gap so labels align with the columns |
 | 3 | 12px | row padding (`p-3`), detail-panel padding (`pt-3`), disambiguation-line offset (`mt-1` follows the sibling line's existing recipe) |
 | 4 | 16px | card padding (existing) |
@@ -73,15 +74,23 @@ Surface subset for NEW elements (existing composer/browse text untouched):
 |------|------|--------|-------------|------|
 | Row labels / detail body | 14px (`text-sm`) | 400 | 1.5 | DM Sans |
 | Data values, detail metrics, disambiguation line | 12px (`text-xs`) | 400 | 1.4 | Geist Mono for figures (`font-mono`/`.font-metric`), DM Sans for the disambiguation prose line (matches its sibling codename line) |
-| "Yours" chip | `text-caption` (12–13 fluid) | 500 (`font-medium`) — verbatim family reuse, see note | 1.4 | DM Sans |
+| "Yours" chip | `text-caption` (12–13 fluid) | 500 (`font-medium`) — arrives via the locked anatomy string, see note | 1.4 | DM Sans |
 | Header eyebrow labels / detail eyebrows | 10px (`text-fixed-10`) | 400 | 1.2 | Geist Mono, UPPERCASE, tracking `0.18em` (eyebrow std) |
 
-**Weight note (declared exception, not drift):** new text uses 400/600 only —
-EXCEPT the "Yours" chip, which reuses the Phase-150 `OwnershipTag` ANATOMY string
-byte-verbatim (`inline-flex items-center rounded-md px-2 py-0.5 text-caption
-font-medium`). CONTEXT locks visual consistency with that tag; forking a
-400-weight near-duplicate of an existing family would be the worse deviation.
-No OTHER new element may use 500.
+**Weight note (declared exception, not drift):** ALL new text this phase is
+weight 400. Weight 500 appears ONLY via the byte-verbatim `OwnershipTag` ANATOMY
+string (`inline-flex items-center rounded-md px-2 py-0.5 text-caption
+font-medium`, `OwnershipTag.tsx:35`) reused for the "Yours" chip. This
+consciously supersedes 151's "no new 500-weight text" rule for this one element,
+because CONTEXT locks visual consistency with the Phase-150 mark tag — forking a
+400-weight near-duplicate of an existing badge family would be the worse
+deviation. No other new element may use 500, and nothing new uses 600.
+
+**Size note:** the chip's `text-caption` was evaluated against `text-xs` to keep
+the surface at 4 sizes — but the ANATOMY string pins `text-caption`, so
+byte-verbatim reuse wins: the 5th size arrives via the locked anatomy, not as a
+new sizing decision. Any future change to the chip size must go through
+`OwnershipTag`, not a fork.
 
 Raw-px lint: `no-raw-font-px` is repo-wide `error` — tier classes and
 `--text-fixed-*` tokens only.
@@ -126,7 +135,7 @@ remedy attached, no adjectives where a number exists. `—` (U+2014) for absence
 |---------|------|
 | Primary CTA | "Commit scenario" (existing footer button — unchanged; this phase adds no new primary CTA) |
 | Ownership chip (SCEN-02) | `Yours` — sentence case, matching the OwnershipTag family ("Own capital" / "Team review"); NOT uppercase (uppercase belongs to the `rounded-sm` derived-state chip family) |
-| Header label row (SCEN-04) | Five aligned eyebrow labels, exact copy: `WEIGHT` `USD` `MODE` `LEV` `NOTIONAL` — no separator glyphs (column alignment carries the separation). See Component Contract 3 for why USD is included. |
+| Header label row (SCEN-04) | Five aligned eyebrow labels, exact copy: `WEIGHT` `USD` `MODE` `LEV` `NOTIONAL` — no separator glyphs (column alignment carries the separation). See Component Contract 3 for placement and why USD is included. |
 | Non-derivable notional (SCEN-04) | value `—` + `title="Set portfolio AUM to size in dollars"` + `sr-only` span with the same sentence (151's exact pattern, copy pinned by CONTEXT) |
 | Detail factsheet link (SCEN-03) | "View factsheet →" |
 | Detail metrics-absent note (SCEN-03) | "Metrics not available in this view — open the factsheet for full detail." (muted `text-xs`; renders when BOTH cagr and sharpe are null; individual null values render `—` per Numbers Contract) |
@@ -145,6 +154,11 @@ remedy attached, no adjectives where a number exists. `—` (U+2014) for absence
   metrics-absent note. No spinner, no "loading" — there is nothing to load.
 - The factsheet link always resolves (OWN-02 shipped in 148: owner sees own
   factsheet, published resolves for everyone) — never a `notFound()` dead end.
+
+**Acceptance-phrasing rule (binding on planner):** keyboard-activation criteria
+must be phrased "Enter/Space on the focused strategy-name button" — never "on
+the focused row". The row container is not focusable (see Component Contract 2);
+a row-focus criterion would test an affordance the contract forbids.
 
 ---
 
@@ -192,7 +206,8 @@ remedy attached, no adjectives where a number exists. `—` (U+2014) for absence
 - **Click target + a11y (CONTEXT locks, mechanism pinned here):**
   - The strategy NAME renders as a `<button type="button">` carrying
     `aria-expanded` + `aria-controls="scenario-detail-{id}"` — this is the
-    keyboard-reachable affordance (Enter/Space for free as a real button).
+    keyboard-reachable affordance (Enter/Space activate the focused
+    strategy-name button natively, because it is a real button).
     Do NOT put `role="button"` + `tabIndex` on the row container: it would nest
     the toggle/inputs/remove button inside an interactive role (a11y violation).
   - The row SURFACE additionally toggles on pointer click (`onClick` on the li)
@@ -208,12 +223,17 @@ remedy attached, no adjectives where a number exists. `—` (U+2014) for absence
   - Values: provenance via the existing `TrustTierLabel`; markets /
     strategy_types as `·`-joined DM Sans `text-xs`; CAGR signed 1dp percentage,
     Sharpe 2dp ratio, both `font-mono` right of their eyebrows, via the
-    surface's EXISTING formatter helpers (`formatPercent` / `formatNumber` from
-    `@/lib/utils` — never an inline `toFixed`; one formatter module per surface).
+    surface's formatter module: `formatPercent` (already imported in
+    `ScenarioComposer.tsx`) and `formatNumber` (NEW import from `@/lib/utils` —
+    exists at `utils.ts:27`, already used by `HoldingDetail`) — never an inline
+    `toFixed`; one formatter module per surface.
   - Metrics source: `addedStrategyMetadataLookup` (book strategies carry
     cagr/sharpe; drawer-added carry null → `—` / metrics-absent note).
   - "View factsheet →" link: `href={`/factsheet/${id}`}` (StrategyTable:974
     convention), `text-accent hover:text-accent-hover text-sm`, rendered last.
+    The link is the FOCAL POINT of the expanded state — the panel's single
+    accent element and its only action; everything above it is muted context
+    leading to it.
 - **Not in the detail:** no tabs (HoldingDetail's 3 tabs serve holdings-specific
   jobs — Record outcome / Notes have no composer analog; mirroring the HOST
   idiom, not the tab chrome, is the reuse), no close button beyond re-clicking
@@ -221,19 +241,25 @@ remedy attached, no adjectives where a number exists. `—` (U+2014) for absence
 
 ### 3. Header label row (SCEN-04)
 
-- **Placement:** exactly ONE instance, mounted directly above the first
-  constituent row of the composition list. Never repeated per sub-group
-  (book-holdings rows and added-strategy rows share the same control cluster;
-  one header serves both).
+- **Placement:** exactly ONE instance, mounted directly above the
+  ADDED-STRATEGIES group — i.e. immediately below the `Strategies added · N`
+  separator li (`ScenarioComposer.tsx`, locate by that string) and above the
+  first added-strategy row. Never repeated per sub-group.
+- **Deliberate scope call:** book-holdings (per-key) rows carry NO column
+  labels. Post-151 code has diverged the two row shapes: per-key rows have no
+  dollar input and no remove (`×`) button, added-strategy rows have both — a
+  single header above the first constituent row would drift ~104px off its
+  columns over every book-holdings row. All four SCEN-02..05 elements live on
+  added rows; the header labels the group it actually aligns with.
 - **Anatomy:** the composer mono-eyebrow recipe byte-verbatim:
   `font-mono text-fixed-10 uppercase tracking-[0.18em] text-text-muted`.
 - **Labels + alignment:** `WEIGHT` `USD` `MODE` `LEV` `NOTIONAL`, each label
   sized to its column's fixed width and right-aligned over it, laid out with the
-  SAME `gap-2` flex as the row control cluster plus a trailing spacer matching
-  the remove (`×`) button — widths mirror the live inputs: `w-20` (weight),
-  `w-24` (dollar), mode-toggle width, `w-16` (leverage), `w-20` (notional).
-  Alignment is the contract: a header that drifts off its columns is worse than
-  no header.
+  SAME `gap-2` flex as the added-row control cluster plus a trailing spacer
+  matching the remove (`×`) button — widths mirror the live inputs: `w-20`
+  (weight), `w-24` (dollar), mode-toggle width, `w-16` (leverage), `w-20`
+  (notional). Alignment is the contract: a header that drifts off its columns
+  is worse than no header.
 - **Why five labels, not CONTEXT's four:** CONTEXT pinned the set
   WEIGHT · MODE · LEV · NOTIONAL but delegated exact copy to this spec, and
   Phase 151 shipped a per-row USD allocation input BETWEEN weight and mode. A
@@ -244,8 +270,9 @@ remedy attached, no adjectives where a number exists. `—` (U+2014) for absence
 - **A11y:** the header row is presentational — `aria-hidden="true"`. Every
   control already carries its own accessible name (`sr-only` labels /
   `aria-label`s); announcing the eyebrow strip would duplicate them.
-- **Render rule:** renders whenever ≥1 constituent row renders; hidden with the
-  empty list.
+- **Render rule:** renders whenever ≥1 added-strategy row renders (i.e.
+  whenever the `Strategies added · N` separator renders); hidden when no
+  strategies are added.
 
 ### 4. Honest non-derivable notional (SCEN-04)
 
