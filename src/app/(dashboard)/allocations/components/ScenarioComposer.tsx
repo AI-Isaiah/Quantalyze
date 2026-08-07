@@ -118,7 +118,11 @@ import { InfoBanner } from "@/components/ui/InfoBanner";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
 import { MAX_LEVERAGE, sanitizeLeverageMap } from "@/lib/leverage";
-import { formatCurrency, formatPercent } from "@/lib/utils";
+// Phase 152 SCEN-03 — `formatNumber` joins the pair already in use here for the
+// row-detail panel's Sharpe (HoldingDetail precedent: same module, same null
+// semantics as formatPercent — both return "—" for null/non-finite, so the panel
+// never needs an inline toFixed and can never render a fabricated 0.00).
+import { formatCurrency, formatNumber, formatPercent } from "@/lib/utils";
 // Phase 151 AUM-01 — the ONE money kit for NEW surfaces on this screen
 // (150-UI-SPEC / PATTERNS Correction 4): `isValidDollar` is the shared [0, 1e12)
 // bound and `formatUsd` the shared whole-dollar renderer (null → "—", never $0).
@@ -2474,6 +2478,31 @@ export function ScenarioComposer({
     },
     [addedStrategyMetadataLookup],
   );
+
+  /**
+   * Phase 152 SCEN-03 — ref → the in-memory metrics the row-detail panel shows.
+   *
+   * A NARROW `{cagr, sharpe}` projection of `addedStrategyMetadataLookup`, not
+   * the lookup itself: the lookup's other fields (disclosure_tier, asset_class)
+   * are ENGINE inputs and have no business crossing into a presentation
+   * component (PATTERNS "Presentation-only props never reach the engine"; same
+   * isolation `addedProvenanceByRef` above applies to trust_tier/is_composite).
+   *
+   * Book strategies carry real values; a drawer-added leg carries `null` for
+   * both, because the lazy `/api/strategies/[id]/returns` route does not return
+   * them and CONTEXT locks NO new fetches this phase. Null is rendered as
+   * honest absence by the panel — never a fabricated 0.
+   */
+  const addedMetricsByRef = useMemo<
+    Record<string, { cagr: number | null; sharpe: number | null }>
+  >(() => {
+    const out: Record<string, { cagr: number | null; sharpe: number | null }> =
+      {};
+    for (const [id, meta] of Object.entries(addedStrategyMetadataLookup)) {
+      out[id] = { cagr: meta.cagr, sharpe: meta.sharpe };
+    }
+    return out;
+  }, [addedStrategyMetadataLookup]);
 
   // -------------------------------------------------------------------------
   // Build scenario projection via the series-space adapter + frozen scenario.ts
@@ -5294,6 +5323,7 @@ export function ScenarioComposer({
           mixedPerKeyBook={isMixedPerKeyBook}
           onTogglePerKey={scenario.togglePerKeySource}
           addedProvenanceByRef={addedProvenanceByRef}
+          addedMetricsByRef={addedMetricsByRef}
           onToggle={scenario.toggleHolding}
           onSetWeight={handleWeightChange}
           blendShareByRef={blendShareByRef}
@@ -5696,6 +5726,15 @@ interface CompositionListProps {
    * this map.
    */
   addedProvenanceByRef: Record<string, ProvenanceTier | null>;
+  /**
+   * Phase 152 SCEN-03 — added-strategy id → the in-memory metrics the row's
+   * detail panel renders. A NARROW `{cagr, sharpe}` projection of the parent's
+   * metadata lookup: book strategies carry values, drawer-added legs carry
+   * `null` for both (the returns route does not serve them and CONTEXT locks NO
+   * new fetches this phase). Presentation-only — this map never reaches the
+   * frozen engine, and the panel renders honest absence rather than a 0.
+   */
+  addedMetricsByRef: Record<string, { cagr: number | null; sharpe: number | null }>;
   onToggle: (scopeRef: string) => void;
   onSetWeight: (scopeRef: string, weight: number) => void;
   /**
@@ -5784,6 +5823,7 @@ function CompositionList({
   mixedPerKeyBook,
   onTogglePerKey,
   addedProvenanceByRef,
+  addedMetricsByRef,
   onToggle,
   onSetWeight,
   blendShareByRef,
@@ -5800,6 +5840,34 @@ function CompositionList({
   coverageEligible,
   addedSeriesStateByRef,
 }: CompositionListProps) {
+  /**
+   * Phase 152 SCEN-03 — the id of the ONE added row whose detail panel is open,
+   * or null when every row is collapsed.
+   *
+   * A single `string | null`, deliberately NOT a `Set`: one-open-at-a-time is
+   * owned by the list parent (the HoldingsTable → HoldingDetail idiom this
+   * mirrors). A Set would let two panels stand open, which turns a list of rows
+   * into a stack of expanded cards and loses the comparison the composer exists
+   * for. The toggle is `prev === id ? null : id` — the same functional form the
+   * holdings host uses.
+   *
+   * Only the HOST idiom is reused, not HoldingsTable's a11y: that table toggles
+   * from a `<tr onClick>` carrying aria-expanded, which is pointer-only and
+   * invalid ARIA on a bare row. Here the keyboard-reachable affordance is a real
+   * `<button>` on the strategy name (Enter/Space work natively), and the row
+   * surface is pointer AMPLIFICATION only.
+   */
+  const [expandedAddedId, setExpandedAddedId] = useState<string | null>(null);
+  /** The functional toggle, shared byte-for-byte by the name button and the
+   *  row-surface amplification handler — two call sites, one behaviour. */
+  const toggleAddedDetail = (id: string) =>
+    setExpandedAddedId((prev) => (prev === id ? null : id));
+
+  /** Phase 152 SCEN-03 — the composer's mono-eyebrow recipe, byte-verbatim from
+   *  the PORTFOLIO AUM label (152-UI-SPEC reuse rule: no new visual primitives). */
+  const DETAIL_EYEBROW =
+    "font-mono text-fixed-10 uppercase tracking-[0.18em] text-text-muted";
+
   // WEIGHTS-00 (A1 locked) — the DERIVED, read-only notional string for a row:
   // equity × blend-share × leverage. It is purely informative (a
   // clears-minimum-invest readout) and STRUCTURALLY never a weight input. Any
@@ -6354,12 +6422,32 @@ function CompositionList({
           // Phase 152 SCEN-04 — read the derived notional ONCE so the render
           // below can branch on it without calling the deriver twice.
           const nText = notionalText(a.id);
+          // Phase 152 SCEN-03 — the row's in-memory metrics + whether BOTH are
+          // missing (the only state that earns the absence NOTE; a single miss
+          // is an em-dash beside its live sibling).
+          const metrics = addedMetricsByRef[a.id] ?? {
+            cagr: null,
+            sharpe: null,
+          };
+          const metricsAbsent = metrics.cagr == null && metrics.sharpe == null;
+          const detailOpen = expandedAddedId === a.id;
           return (
             <li
               key={a.id}
               data-scope-ref={a.id}
               data-testid="scenario-constituent-added"
               data-series-state={seriesState}
+              // Phase 152 SCEN-03 — POINTER AMPLIFICATION (152-UI-SPEC Contract
+              // 2). The keyboard-reachable affordance is the strategy-name
+              // BUTTON below; this handler only widens the pointer target to the
+              // whole row. Deliberately NO role="button"/tabIndex on the li —
+              // that would nest the toggle, five inputs and the remove button
+              // inside an interactive role (an a11y violation), which is exactly
+              // why HoldingsTable's `<tr onClick>` idiom is NOT mirrored here.
+              // Every interactive descendant stops propagation (three sites:
+              // the name button, the include/exclude switch, and the
+              // control-cluster wrapper) so a click on a control never toggles.
+              onClick={() => toggleAddedDetail(a.id)}
               className={`flex flex-col gap-2 rounded-md border border-border p-3 ${
                 enabled ? "" : "opacity-50 line-through"
               }`}
@@ -6371,7 +6459,14 @@ function CompositionList({
                   role="switch"
                   aria-checked={enabled}
                   aria-label={`Toggle ${a.name} on/off in scenario`}
-                  onClick={() => onToggle(a.id)}
+                  // Phase 152 SCEN-03 (checker B-2) — the include/exclude switch
+                  // is an EXCLUDED control, but it lives in this LEFT cluster,
+                  // outside the control-cluster stopPropagation wrapper below.
+                  // Without its own stop, excluding a row would also expand it.
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToggle(a.id);
+                  }}
                   className={`flex h-5 w-9 items-center rounded-full transition-colors ${
                     enabled ? "bg-accent" : "bg-border"
                   }`}
@@ -6383,7 +6478,32 @@ function CompositionList({
                     }`}
                   />
                 </button>
-                <span className="text-sm text-text-primary">{a.name}</span>
+                {/* Phase 152 SCEN-03 — the name is the DETAIL AFFORDANCE. A real
+                    <button> (not a div with role/tabIndex) so Enter and Space
+                    activate it natively and the expanded/collapsed state is
+                    announced through aria-expanded + aria-controls. */}
+                <button
+                  type="button"
+                  aria-expanded={detailOpen}
+                  aria-controls={`scenario-detail-${a.id}`}
+                  onClick={(e) => {
+                    // stopPropagation FIRST (checker B-1). This button sits in
+                    // the row's LEFT cluster, OUTSIDE the control-cluster
+                    // wrapper, so its click bubbles to the li's pointer
+                    // amplification handler — which runs the SAME functional
+                    // toggle. Without this line one click toggles twice and nets
+                    // to a no-op: the panel would never open by pointer OR by
+                    // keyboard, since a native button dispatches click for
+                    // Enter/Space. Stopping here (rather than gating the li
+                    // handler on event.target) keeps the li handler a one-liner
+                    // with no DOM introspection to drift.
+                    e.stopPropagation();
+                    toggleAddedDetail(a.id);
+                  }}
+                  className="truncate text-left text-sm text-text-primary transition-colors hover:text-accent"
+                >
+                  {a.name}
+                </button>
                 {/* CONSTIT-02 — per-row provenance badge (api_verified / csv /
                     self_reported / composite). Null → no badge (honest absence). */}
                 <TrustTierLabel
@@ -6417,7 +6537,17 @@ function CompositionList({
                   <CoverageStateChip state={chipState} className="shrink-0" />
                 )}
               </div>
-              <div className="flex items-center gap-2">
+              {/* Phase 152 SCEN-03 — the ONE stopPropagation wrapper over the
+                  control cluster (152-UI-SPEC Contract 2): weight input, dollar
+                  input, mode toggle, target input, leverage input and the remove
+                  button all sit inside it, so editing a number never expands the
+                  row. Deliberately one wrapper rather than six per-control
+                  handlers — a per-control list is a set someone forgets to
+                  extend when a seventh control lands. */}
+              <div
+                className="flex items-center gap-2"
+                onClick={(e) => e.stopPropagation()}
+              >
                 <label className="sr-only" htmlFor={`weight-${a.id}`}>
                   {a.name} weight
                 </label>
@@ -6494,6 +6624,122 @@ function CompositionList({
                 </button>
               </div>
               </div>
+              {/* Phase 152 SCEN-03 — the inline detail panel. Mounted INSIDE the
+                  row li, directly below the main row line, behind an interior
+                  hairline (152-UI-SPEC Contract 2's host anatomy: the li already
+                  supplies bg-surface + p-3, so the panel adds only the rule and
+                  its own top padding — a data panel, not a nested card).
+
+                  Everything it shows is ALREADY IN MEMORY. CONTEXT locks NO new
+                  fetches this phase, which is why there is no loading state and
+                  no error state here: by construction there is nothing to load
+                  and nothing that can fail. Absence is rendered honestly instead
+                  — an em-dash per field, or the metrics note when BOTH figures
+                  are missing.
+
+                  Its own stopPropagation is a deliberate addition beyond
+                  UI-SPEC's enumerated exclusions: the panel is new DOM inside a
+                  clickable li, and a panel that collapses when you click its own
+                  content (selecting a figure to copy, say) defeats its purpose.
+                  The factsheet link inside it stays clickable — stopping
+                  propagation does not prevent the default navigation. */}
+              {detailOpen && (
+                <div
+                  id={`scenario-detail-${a.id}`}
+                  data-testid={`scenario-detail-${a.id}`}
+                  className="mt-2 border-t border-border pt-3"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+                    <div className="flex items-center gap-2">
+                      <span className={DETAIL_EYEBROW}>PROVENANCE</span>
+                      <span
+                        data-testid={`scenario-detail-provenance-${a.id}`}
+                        className="inline-flex items-center text-xs text-text-muted"
+                      >
+                        {/* TrustTierLabel renders NOTHING for a null tier, so a
+                            bare mount would leave a labelled empty space — which
+                            reads as a rendering bug, not as absence. The panel
+                            writes the em-dash itself. */}
+                        {addedProvenanceByRef[a.id] != null ? (
+                          <TrustTierLabel
+                            trustTier={addedProvenanceByRef[a.id]}
+                            className="shrink-0"
+                          />
+                        ) : (
+                          "—"
+                        )}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={DETAIL_EYEBROW}>MARKETS</span>
+                      <span
+                        data-testid={`scenario-detail-markets-${a.id}`}
+                        className="text-xs text-text-primary"
+                      >
+                        {a.markets.length > 0 ? a.markets.join(" · ") : "—"}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={DETAIL_EYEBROW}>TYPES</span>
+                      <span
+                        data-testid={`scenario-detail-types-${a.id}`}
+                        className="text-xs text-text-primary"
+                      >
+                        {a.strategy_types.length > 0
+                          ? a.strategy_types.join(" · ")
+                          : "—"}
+                      </span>
+                    </div>
+                    {/* The metric pair renders whenever ANYTHING is known. Both
+                        formatters return "—" for null, so a half-known row shows
+                        its live figure beside a dash — never a fabricated 0.00,
+                        and never an inline toFixed. */}
+                    {!metricsAbsent && (
+                      <>
+                        <div className="flex items-center gap-2">
+                          <span className={DETAIL_EYEBROW}>CAGR</span>
+                          <span
+                            data-testid={`scenario-detail-cagr-${a.id}`}
+                            className="font-mono text-xs tabular-nums text-text-primary"
+                          >
+                            {formatPercent(metrics.cagr, 1)}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className={DETAIL_EYEBROW}>SHARPE</span>
+                          <span
+                            data-testid={`scenario-detail-sharpe-${a.id}`}
+                            className="font-mono text-xs tabular-nums text-text-primary"
+                          >
+                            {formatNumber(metrics.sharpe, 2)}
+                          </span>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  {/* BOTH missing → one sentence that names the remedy, instead
+                      of two dashes that name nothing. */}
+                  {metricsAbsent && (
+                    <p className="mt-2 text-xs text-text-muted">
+                      Metrics not available in this view — open the factsheet for
+                      full detail.
+                    </p>
+                  )}
+                  {/* The panel's single action and its only accent element
+                      (152-UI-SPEC Contract 2: the link is the focal point,
+                      everything above it is context leading to it). Access
+                      control lives server-side in the factsheet's own two-lane
+                      selection — this is an href for an id the viewer's draft
+                      already contains, never a disclosure. */}
+                  <Link
+                    href={`/factsheet/${a.id}`}
+                    className="mt-3 inline-block text-sm text-accent transition-colors hover:text-accent-hover"
+                  >
+                    View factsheet →
+                  </Link>
+                </div>
+              )}
               {/* Phase 147 / SCEN-01 — the excluded-from-blend note, keyed off
                   the SAME chipState as the chip so a row carries exactly one
                   signal (a manually-excluded row says "Excluded" and stops —
