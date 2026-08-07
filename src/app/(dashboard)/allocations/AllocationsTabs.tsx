@@ -390,6 +390,13 @@ export function AllocationsTabs(
     // supplies both, and the panel renders honest-empty if either is absent.
     ownCapitalStrategies?: OwnCapitalStrategy[];
     hasAnyStrategies?: boolean;
+    /**
+     * Review WR-02 — did EITHER strategies read fail (both return `null`, never
+     * `[]`, on a transient DB/RLS failure)? Threaded so the panel can render a
+     * degraded notice instead of an account-state claim. Optional/defaults to
+     * false for the same reason as the two above; page.tsx always supplies it.
+     */
+    strategiesReadFailed?: boolean;
   },
 ) {
   const router = useRouter();

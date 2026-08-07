@@ -143,6 +143,17 @@ export interface HoldingsTableProps {
    * a harness that supplies nothing must not claim the viewer has strategies.
    */
   hasAnyStrategies?: boolean;
+  /**
+   * Review WR-02 — did either strategies read FAIL (as opposed to returning an
+   * empty account)? `getOwnCapitalStrategies` / `getMyStrategies` both return
+   * `null` on a transient DB/RLS failure, and both `strategyRows` and
+   * `hasAnyStrategies` degrade to the same values a genuinely empty account
+   * produces. Without this signal the table would state "No strategies yet."
+   * about an owner who has plenty — a fabricated claim about the account.
+   * Defaults to `false`: a harness that supplies nothing is not asserting a
+   * failure.
+   */
+  strategiesReadFailed?: boolean;
   /** Row action — open the Allocate dialog. Absent ⇒ the button does not render. */
   onAllocate?: (row: StrategyRow) => void;
   /** Row action — open the Edit-allocation dialog. Absent ⇒ no button. */
@@ -175,6 +186,7 @@ export function HoldingsTable(props: HoldingsTableProps) {
       <StrategyRowsTable
         rows={props.strategyRows}
         hasAnyStrategies={props.hasAnyStrategies ?? false}
+        strategiesReadFailed={props.strategiesReadFailed ?? false}
         onAllocate={props.onAllocate}
         onEditAllocation={props.onEditAllocation}
       />
@@ -243,11 +255,13 @@ function compareStrategyRows(
 function StrategyRowsTable({
   rows,
   hasAnyStrategies,
+  strategiesReadFailed,
   onAllocate,
   onEditAllocation,
 }: {
   rows: StrategyRow[];
   hasAnyStrategies: boolean;
+  strategiesReadFailed: boolean;
   onAllocate?: (row: StrategyRow) => void;
   onEditAllocation?: (row: StrategyRow) => void;
 }) {
@@ -295,7 +309,27 @@ function StrategyRowsTable({
                 link to where it lives;
             (c) zero strategies at all → the account-level empty state, with no
                 fabricated promise about allocation. */}
-      {sortedRows.length === 0 ? (
+      {/* Review WR-02 — the DEGRADED arm, ahead of all three D-15 arms and of
+          the list itself (the my-strategies/page.tsx:123-133 pattern: the
+          notice renders ABOVE whatever did load). A failed read degrades to the
+          same values an empty account produces, so without this the section
+          would make an account-state claim it cannot support — and a positioned
+          row that lost its own-capital tag with the marked set would silently
+          lose its Allocate affordance with no explanation. */}
+      {strategiesReadFailed && (
+        <div className="px-4 pt-4">
+          <div
+            role="status"
+            aria-live="polite"
+            className="rounded-lg border border-border bg-card px-4 py-3 text-small text-text-secondary"
+          >
+            Strategies temporarily unavailable — some of your strategies may not
+            appear, and allocation actions may be hidden. Refresh to retry.
+          </div>
+        </div>
+      )}
+
+      {sortedRows.length === 0 && !strategiesReadFailed && (
         <div className="px-4 py-4">
           <div className="rounded-lg border border-border bg-surface px-6 py-8">
             {hasAnyStrategies ? (
@@ -329,7 +363,9 @@ function StrategyRowsTable({
             )}
           </div>
         </div>
-      ) : (
+      )}
+
+      {sortedRows.length > 0 && (
         <ResponsiveTable label="Strategies">
         <table className="w-full text-sm" data-table="strategies">
           <thead>
