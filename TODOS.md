@@ -1401,3 +1401,4 @@ toggle-hide also defers: `StrategyGrid.tsx:79-82` renders `VerifiedBadge` with
 - [ ] IN-04: MarkOwnershipDialog "Keep own capital" stays clickable while destructive removal is in flight.
 - [ ] (verifier INFO) finalize-wizard/route.ts:1339-1342 carries the same stale no-WITH-CHECK claim as IN-01's route docblocks — fix together.
 - [ ] (verifier INFO) MigrationWizard.tsx:72-76 surfaces raw psError.message — give it the W-6 23514→honest-copy mapping AddToPortfolio got. Reachable only for an owner migrating their own unmarked published strategy.
+- [ ] (WR-02 fix note) `bg-card` is a dead class — no `--color-card` token in globals.css @theme; 7 files repo-wide render transparent notice backgrounds. One cleanup pass wanted.
