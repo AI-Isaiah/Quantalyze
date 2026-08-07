@@ -7245,12 +7245,21 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
 
         final_status = "complete_with_warnings" if warning else "complete"
 
+        # 151 review WR-03 — the LAST-LINE length cap. `sync_error` is rendered
+        # verbatim in the browser and every SIBLING write arm here truncates at
+        # [:500]; this success arm did not, so any producer whose warning
+        # interpolates venue-controlled text (an sFOX book of 100+ unpriced
+        # assets, say) could write a multi-kilobyte string into a user-visible
+        # column — a storage-poison surface as well as unreadable copy. Capping
+        # at the WRITE SITE means no future producer can bypass it by forgetting.
+        capped_warning = warning[:500] if warning else warning
+
         def _update_ok() -> None:
             # Return value discarded by the caller; drop it (see
             # _update_rate_limited / _update_persist_err).
             ctx.supabase.table("api_keys").update({
                 "sync_status": final_status,
-                "sync_error": warning,
+                "sync_error": capped_warning,
                 "last_sync_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", api_key_id).execute()
 

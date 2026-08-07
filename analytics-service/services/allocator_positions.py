@@ -134,6 +134,11 @@ SFOX_UNPRICED_ASSETS_NOTE = (
     "sFOX balances in {assets} can't be valued in USD yet — those balances "
     "were skipped."
 )
+# 151 review WR-03 — how many asset codes the note may NAME before it switches
+# to "and N more". The point is the SENTENCE, not the inventory: the copy lands
+# in a user-visible column rendered verbatim, and the asset codes come from the
+# venue, so an unbounded join is both unreadable and a storage-poison surface.
+_SFOX_MAX_NAMED_ASSETS = 6
 # 151 review CR-03 — the ccxt DERIVATIVE arm's end-user copy. Before this the
 # arm stamped ``str(exc)[:500]`` straight into api_keys.sync_error, which
 # AllocatorSyncStatus renders VERBATIM: a KeyError/TypeError/ccxt parse failure
@@ -799,11 +804,18 @@ async def _fetch_sfox_balance_rows(
             "raw_payload": _cap_raw_payload({"currency": code, "balance": qty}),
         })
 
-    warning = (
-        SFOX_UNPRICED_ASSETS_NOTE.format(assets=", ".join(sorted(unpriced)))
-        if unpriced
-        else None
-    )
+    # 151 review WR-03 — BOUND the enumeration. `unpriced` is unbounded and its
+    # members are VENUE-CONTROLLED text (`entry["currency"]`, allow-listed but up
+    # to 16 chars each), and this string is written to `api_keys.sync_error`,
+    # which AllocatorSyncStatus renders VERBATIM. An account holding 100+ assets
+    # produced a multi-kilobyte wall of tickers where one sentence belongs. Name
+    # a handful and COUNT the rest: the copy stays one readable sentence, and the
+    # allocator still learns the true scale of what was skipped.
+    named = sorted(unpriced)
+    label = ", ".join(named[:_SFOX_MAX_NAMED_ASSETS])
+    if len(named) > _SFOX_MAX_NAMED_ASSETS:
+        label += f" and {len(named) - _SFOX_MAX_NAMED_ASSETS} more"
+    warning = SFOX_UNPRICED_ASSETS_NOTE.format(assets=label) if unpriced else None
     return (rows, warning)
 
 

@@ -255,6 +255,81 @@ async def test_handler_stamps_human_copy_on_transient_failure(
 
 
 # ---------------------------------------------------------------------------
+# Test 3b (151 review WR-03) — the success arm caps sync_error like its siblings
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_handler_caps_the_success_arm_sync_error_length(
+    monkeypatch, api_key_row_factory
+):
+    """WIRING test (Rule 9): the cap must live at the WRITE SITE, not in each
+    producer.
+
+    Every sibling arm in this handler truncates at [:500] before touching
+    `api_keys.sync_error`; the complete_with_warnings success arm did not. That
+    made the column's length a property of whichever producer happened to build
+    the warning — so ONE producer forgetting (or a venue returning more data
+    than expected) writes an unbounded, verbatim-rendered string. Proving it
+    here, with a deliberately over-long warning from a stubbed fetch, is what
+    makes the guarantee producer-independent.
+    """
+    import services.job_worker as jw
+    from services import audit as audit_module
+
+    key_row = api_key_row_factory(
+        id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="sfox"
+    )
+
+    updates: list[tuple[str, dict]] = []
+    mock_supabase = MagicMock()
+
+    def _table(name: str) -> MagicMock:
+        tbl = MagicMock()
+
+        def _update(payload: dict) -> MagicMock:
+            updates.append((name, payload))
+            chain = MagicMock()
+            chain.eq.return_value = chain
+            chain.execute.return_value = MagicMock(data=[{"id": API_KEY_ID}])
+            return chain
+
+        tbl.update.side_effect = _update
+        return tbl
+
+    mock_supabase.table.side_effect = _table
+
+    fake_ctx = jw._ExchangeContext(
+        supabase=mock_supabase,
+        strategy_row=None,
+        key_row=key_row,
+        exchange=MagicMock(),
+    )
+
+    async def _fake_preflight(job, name):
+        return fake_ctx
+
+    over_long = "A" * 2_000
+
+    async def _rows_with_long_warning(exchange_name, exchange, api_key_id=None):
+        return ([], over_long)
+
+    monkeypatch.setattr(jw, "_allocator_key_preflight", _fake_preflight)
+    monkeypatch.setattr(ap, "fetch_allocator_holdings", _rows_with_long_warning)
+    monkeypatch.setattr(audit_module, "log_audit_event", MagicMock())
+
+    await jw.run_poll_allocator_positions_job(
+        {"id": "job-1", "kind": "poll_allocator_positions", "api_key_id": API_KEY_ID}
+    )
+
+    api_key_updates = [p for (name, p) in updates if name == "api_keys"]
+    final = api_key_updates[-1]
+    assert final["sync_status"] == "complete_with_warnings"
+    assert len(final["sync_error"]) == 500, (
+        "the success arm must truncate like every sibling write arm; wrote "
+        f"{len(final['sync_error'])} chars"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test 4 — the leak invariant (T-151-05 / ASVS V7)
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
@@ -1091,6 +1166,64 @@ async def test_sfox_stablecoin_rows_contribute_and_the_rest_skip_honestly(
     assert client.calls == ["get_balances"], (
         f"the CONTEXT-locked read is get_balances and nothing else: {client.calls}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 12b (151 review WR-03) — the unpriced enumeration is BOUNDED
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_sfox_unpriced_note_names_a_handful_and_counts_the_rest(sfox_enabled):
+    """`api_keys.sync_error` is rendered VERBATIM by AllocatorSyncStatus.
+
+    Pre-fix the note joined EVERY unpriced asset code the venue returned, and
+    those codes are venue-controlled text: a 60-asset book produced a wall of
+    tickers in a column meant for one sentence (and, with the write site's
+    missing length cap, a multi-kilobyte row — a storage-poison surface for a
+    misbehaving upstream). The honest shape names a few and COUNTS the rest, so
+    the allocator still learns the true scale of what was skipped.
+    """
+    codes = [f"AST{i:02d}" for i in range(60)]
+    client = _SpecConstrainedSfoxClient(
+        balances=(
+            [{"currency": "USD", "balance": "100"}]
+            + [{"currency": c, "balance": "1"} for c in codes]
+        )
+    )
+
+    rows, warning = await fetch_allocator_holdings("sfox", client, API_KEY_ID)
+
+    # The priceable side is untouched by the copy bound.
+    assert [r["symbol"] for r in rows] == ["USD"]
+    assert warning is not None
+    # HAND-WRITTEN oracle (never recomputed from the impl): the six
+    # alphabetically-first codes, then the count of the remaining 54.
+    assert warning == (
+        "sFOX balances in AST00, AST01, AST02, AST03, AST04, AST05 and 54 more "
+        "can't be valued in USD yet — those balances were skipped."
+    )
+    # The bound is what makes the column safe regardless of book size.
+    assert len(warning) < 200, f"unbounded venue text in user copy: {warning!r}"
+
+
+@pytest.mark.asyncio
+async def test_sfox_unpriced_note_below_the_bound_still_names_every_asset(
+    sfox_enabled,
+):
+    """Control arm: a small book is named IN FULL with no 'and N more' tail, so
+    the bound cannot degenerate into 'the copy never tells you what was
+    skipped'."""
+    client = _SpecConstrainedSfoxClient(
+        balances=[
+            {"currency": "USD", "balance": "100"},
+            {"currency": "BTC", "balance": "1"},
+            {"currency": "ETH", "balance": "2"},
+        ]
+    )
+
+    _rows, warning = await fetch_allocator_holdings("sfox", client, API_KEY_ID)
+
+    assert warning == SFOX_UNPRICED_ASSETS_NOTE.format(assets="BTC, ETH")
+    assert "more" not in warning
 
 
 # ---------------------------------------------------------------------------
