@@ -49,6 +49,7 @@ import {
   setWeightOverride as setWeightPure,
   applyWeightOverrides as applyWeightsPure,
   setWindow as setWindowPure,
+  setManualAum as setManualAumPure,
   type ScenarioDraft,
   type AddedStrategy,
   type HoldingForDefault,
@@ -133,6 +134,15 @@ export interface UseScenarioStateReturn {
    * operates on the default draft the user actually sees.
    */
   setWindow: (window: CoverageWindow) => void;
+  /**
+   * Phase 151 AUM-01 — write the manual portfolio AUM through into the draft so
+   * the localStorage autosave, the save handlers' POST/PUT payload and a reopen
+   * all carry it. `undefined` clears the override (back to the live-holdings
+   * sum). Rebases via `baseOf` like every other mutator. The composer validates
+   * with `isValidDollar` BEFORE calling this and sanitizes again on read — this
+   * is a write-through, not a validator.
+   */
+  setManualAum: (value: number | undefined) => void;
   reset: () => void;
   dismissFingerprintMismatchBanner: () => void;
   /**
@@ -347,6 +357,12 @@ export function useScenarioState(
     },
     [setValue, baseOf],
   );
+  const setManualAum = useCallback(
+    (value: number | undefined) => {
+      setValue((prev) => setManualAumPure(baseOf(prev), value));
+    },
+    [setValue, baseOf],
+  );
   const reset = useCallback(() => {
     // removeStored: removeItem the scoped key + set in-memory to the default
     // WITHOUT re-persisting it (the next user edit persists). Clears the banner.
@@ -443,6 +459,7 @@ export function useScenarioState(
     setWeightOverride,
     applyWeightOverrides,
     setWindow,
+    setManualAum,
     reset,
     dismissFingerprintMismatchBanner,
     hydrateFromSaved,

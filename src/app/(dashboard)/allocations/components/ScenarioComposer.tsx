@@ -119,6 +119,13 @@ import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
 import { MAX_LEVERAGE, sanitizeLeverageMap } from "@/lib/leverage";
 import { formatCurrency, formatPercent } from "@/lib/utils";
+// Phase 151 AUM-01 — the ONE money kit for NEW surfaces on this screen
+// (150-UI-SPEC / PATTERNS Correction 4): `isValidDollar` is the shared [0, 1e12)
+// bound and `formatUsd` the shared whole-dollar renderer (null → "—", never $0).
+// Deliberately NOT the file-local `formatCurrency` — a second money formatter on
+// a money surface is forbidden. Existing formatCurrency sites are left alone
+// (surgical change; migrating them is not this plan's job).
+import { isValidDollar, formatUsd } from "@/lib/dollar-validation";
 import { Button } from "@/components/ui/Button";
 import {
   computeHoldingsFingerprint,
@@ -1180,6 +1187,20 @@ export function ScenarioComposer({
   const windowTouchedRef = useRef(false);
   const [pickerOpen, setPickerOpen] = useState(false);
 
+  // -------------------------------------------------------------------------
+  // Phase 151 AUM-01 — the Portfolio AUM input's text state.
+  //
+  // The DRAFT is the authority (`draft.manualAumUsd`); this holds only the raw
+  // keystrokes between commits, because the user must be able to type through
+  // intermediate states ("5", "50", "500000") that are not yet a value. It is
+  // SEEDED from the draft/live sum while untouched and never re-snapped after —
+  // the exact `windowTouchedRef` idiom (Pitfall 3): a controlled mirror would
+  // re-snap the allocator's override every time a holdings refresh moved the
+  // live sum.
+  // -------------------------------------------------------------------------
+  const [aumInputText, setAumInputText] = useState("");
+  const aumTouchedRef = useRef(false);
+
   function handleWeightChange(scopeRef: string, weight: number) {
     if (!Number.isFinite(weight)) {
       // F-08: log non-finite weight so a regression (broken input component,
@@ -1490,6 +1511,12 @@ export function ScenarioComposer({
     // replaced the draft with the windowless default.) The Phase-57 "sticky by
     // design" rationale covers deselect, not reset.
     resetWindowToDefaultOnReopen();
+    // Phase 151 AUM-01 — release the AUM seed on the SAME seam, for the same
+    // reason as the window: `scenario.reset()` drops `draft.manualAumUsd`, so a
+    // touched input would keep DISPLAYING an override the fresh draft no longer
+    // holds. Un-touching lets the seed effect re-seed from the fresh live sum
+    // (or back to empty in blank mode).
+    aumTouchedRef.current = false;
     // CONSTIT-03 — per-key exclusions now live in `scenario.draft.toggleByScopeRef`
     // and are cleared automatically by `scenario.reset()` (draft → default) /
     // `scenario.hydrateFromSaved()` (draft replaced), so no separate ephemeral-map
@@ -3653,7 +3680,10 @@ export function ScenarioComposer({
     }
     return byRef;
   }, [holdingsSummary]);
-  const scenarioAum = useMemo(() => {
+  // Phase 151 AUM-01 — RENAMED from `scenarioAum` (body byte-unchanged). This is
+  // the DERIVED live-holdings total: what custody says the book is worth. It is
+  // one INPUT to the scenario's AUM now, not the AUM itself.
+  const liveHoldingsSum = useMemo(() => {
     let sum = 0;
     for (const [scopeRef, on] of Object.entries(scenario.draft.toggleByScopeRef)) {
       if (!on) continue;
@@ -3663,6 +3693,84 @@ export function ScenarioComposer({
     }
     return sum;
   }, [scenario.draft.toggleByScopeRef, holdingByRef]);
+
+  // Phase 151 AUM-01 — SANITIZE-ON-READ (the sanitizeLeverageMap precedent at
+  // the decode sites above). The persisted value is untrusted: the codec
+  // deliberately carries no range refine, because a refine failure there routes
+  // to the draft-DELETING reset. So the bound is applied HERE, at the point of
+  // use. `isValidDollar` covers [0, 1e12) and rejects null/NaN/non-numbers; the
+  // extra `> 0` treats a stored 0 as UNSET — a zero is a claim, not an absence
+  // (UI-SPEC), and a 0 AUM must keep tripping the honest commit refusal.
+  const sanitizedManualAum =
+    isValidDollar(scenario.draft.manualAumUsd) && scenario.draft.manualAumUsd > 0
+      ? scenario.draft.manualAumUsd
+      : undefined;
+
+  // Phase 151 AUM-01 — the scenario's portfolio AUM. MANUAL WINS IN BOTH MODES:
+  // in book mode the live sum is a seed the allocator may override (they may be
+  // modelling a different size than custody currently holds), and in blank mode
+  // there is no live sum by construction (holdingsSummary is [] at the entryMode
+  // switch), so the manual value is the ONLY possible source there — which is
+  // exactly why a blank-slate scenario could not size or commit before this.
+  //
+  // Every pre-existing consumer keeps reading `scenarioAum` unchanged: the
+  // drawdown USD scaling, the commit refusal gate, the per-row size gate, the
+  // illustrative-shape note, and the ScenarioCommitDrawer prop.
+  const scenarioAum = sanitizedManualAum ?? liveHoldingsSum;
+
+  // Seed the AUM input ONCE, then never again (windowTouchedRef idiom). Book
+  // mode seeds from the live-holdings total — it is the allocator's real size,
+  // and pre-filling it is what makes the field an OVERRIDE rather than a chore.
+  // Blank mode seeds "" and NEVER "0": a zero is a claim (UI-SPEC), and a
+  // pre-filled 0 would look like an answer to a question the user never
+  // answered. A reopened draft carrying a manual value seeds that instead.
+  useEffect(() => {
+    if (aumTouchedRef.current) return;
+    if (sanitizedManualAum !== undefined) {
+      setAumInputText(String(sanitizedManualAum));
+      return;
+    }
+    setAumInputText(liveHoldingsSum > 0 ? String(liveHoldingsSum) : "");
+  }, [sanitizedManualAum, liveHoldingsSum]);
+
+  // The text the field SHOULD show for the currently-committed state — the one
+  // place the seed rule and the refusal snap-back both read, so the displayed
+  // value can never drift from the draft.
+  const committedAumText = () =>
+    sanitizedManualAum !== undefined
+      ? String(sanitizedManualAum)
+      : liveHoldingsSum > 0
+        ? String(liveHoldingsSum)
+        : "";
+
+  // Commit the typed AUM on blur / Enter (never per keystroke — the :5456
+  // blank-≠-zero recipe this mirrors). Three refusals, none of which write:
+  //   • blank   — "no value entered", never 0 (the `raw.trim() !== ""` guard);
+  //               a benign focus→blur of an empty field commits nothing.
+  //   • invalid — non-finite / negative / >= $1e12 (isValidDollar). Mirrors
+  //               handleWeightChange's fail-loud posture (console.warn + keep
+  //               the previous value) rather than clamping to a number the
+  //               allocator never typed.
+  //   • zero    — an explicit 0 is refused for the same reason it reads as
+  //               unset on the way in: a zero is a claim, not an absence.
+  // Every refusal snaps the text back to the committed value, so the field can
+  // never display a number the draft does not hold (the same displayed-vs-state
+  // divergence the commitError banner exists to prevent for weights).
+  function commitAumInput(raw: string) {
+    if (raw.trim() === "") {
+      setAumInputText(committedAumText());
+      return;
+    }
+    const parsed = Number(raw);
+    if (!isValidDollar(parsed) || parsed <= 0) {
+      console.warn("[ScenarioComposer] refused an invalid portfolio AUM", {
+        raw,
+      });
+      setAumInputText(committedAumText());
+      return;
+    }
+    scenario.setManualAum(parsed);
+  }
 
 
   // -------------------------------------------------------------------------
@@ -4082,6 +4190,64 @@ export function ScenarioComposer({
         Compose a draft portfolio and project KPI / equity / drawdown impact vs
         your live baseline.
       </p>
+
+      {/* Phase 151 AUM-01 — the ONE Portfolio AUM field, present in BOTH entry
+          modes (UI-SPEC §1). Blank mode starts empty; book mode pre-fills from
+          the live-holdings total and stays editable as an override. Weights
+          remain the single source of truth — editing this rescales the DOLLAR
+          figures and changes no return, so `scenarioMetrics` is untouched.
+          Reuses the composer's existing number-input recipe verbatim (no new
+          visual primitive) and the `text-fixed-10` mono eyebrow the PROJECTED
+          pill above already uses — deliberately the FIXED 10px token, not the
+          fluid `text-micro` clamp, so this stays a four-size surface. */}
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <label
+          htmlFor="scenario-aum"
+          className="font-mono text-fixed-10 uppercase tracking-[0.18em] text-text-muted"
+        >
+          PORTFOLIO AUM (USD)
+        </label>
+        <input
+          id="scenario-aum"
+          data-testid="scenario-aum-input"
+          type="number"
+          min="0"
+          step="1"
+          inputMode="numeric"
+          value={aumInputText}
+          onChange={(e) => {
+            // Mark touched on the FIRST keystroke, not at commit time: a
+            // holdings refresh mid-typing must not re-seed the field out from
+            // under the allocator.
+            aumTouchedRef.current = true;
+            setAumInputText(e.target.value);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              commitAumInput((e.target as HTMLInputElement).value);
+            }
+          }}
+          onBlur={(e) => {
+            commitAumInput(e.target.value);
+          }}
+          className="w-32 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs"
+        />
+        {sanitizedManualAum === undefined && liveHoldingsSum <= 0 && (
+          <span className="text-xs text-text-muted">
+            Required to size and commit.
+          </span>
+        )}
+        {sanitizedManualAum !== undefined &&
+          liveHoldingsSum > 0 &&
+          sanitizedManualAum !== liveHoldingsSum && (
+            <span
+              data-testid="scenario-aum-override-note"
+              className="text-xs text-text-muted"
+            >
+              Overrides live-holdings total {formatUsd(liveHoldingsSum)}.
+            </span>
+          )}
+      </div>
 
       {/* IMPACT-01 — coverage caveat. Names the live overlapping-day count
           (scenarioMetrics.n) AND the shortest-history strategy via the

@@ -803,6 +803,34 @@ export function setLeverageOverrides(
   return { ...draft, leverageOverrides: byRef };
 }
 
+/**
+ * Phase 151 AUM-01 — write the MANUAL portfolio AUM onto the draft. `undefined`
+ * CLEARS the override (the draft falls back to the live-holdings sum); the
+ * composer never writes 0, because a zero is a claim, not an absence.
+ *
+ * Shaped on `setWindow`, not on `setLeverageOverrides`: this is a live user
+ * gesture, so it stamps `lastEditedAt` and no-ops on an unchanged value (a
+ * blur that commits the same number must not churn the draft identity and
+ * defeat the downstream memos). Deliberately does NOT validate the range —
+ * `isValidDollar` gates the value at the input boundary before this is called,
+ * and again on read, so this stays a pure spread with no clamp of its own.
+ */
+export function setManualAum(
+  draft: ScenarioDraft,
+  value: number | undefined,
+): ScenarioDraft {
+  if (draft.manualAumUsd === value) return draft;
+  if (value === undefined) {
+    if (!("manualAumUsd" in draft)) return draft;
+    // Drop the key entirely rather than persisting an explicit `undefined` —
+    // JSON.stringify would omit it anyway, so an absent key is the honest
+    // in-memory twin of the persisted shape.
+    const { manualAumUsd: _drop, ...rest } = draft;
+    return { ...rest, lastEditedAt: new Date().toISOString() };
+  }
+  return { ...draft, manualAumUsd: value, lastEditedAt: new Date().toISOString() };
+}
+
 // ---------------------------------------------------------------------------
 // B7 cross-tab storage codec — zod-validated parse + version trichotomy.
 // The cross-tab primitive (useCrossTabStorage) owns the localStorage
