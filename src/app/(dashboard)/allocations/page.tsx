@@ -109,9 +109,30 @@ export default async function MyAllocationPage() {
     getMyStrategies(user.id),
   ]);
   const exposure: ExposureSectionData = { snapshot, netSeries, allocationSeries };
+
+  // Review WR-02 — the null-vs-empty contract both reads document is CONSUMED
+  // here, not collapsed. `null` means the fetch failed; `[]` means the fetch
+  // succeeded and the account really is empty. Only the second may reach the
+  // panel as an account-state claim ("No strategies yet." / "No strategies
+  // marked as own capital.") — the first would tell an owner who HAS marked
+  // strategies that they have none, and would silently strip the Allocate
+  // affordance from positioned rows (the adapter derives `capitalOwnership`
+  // from marked-set membership, so a failed marked-set read reads as unmarked).
+  //
+  // DEGRADED RENDER, not a throw — the sibling `my-strategies/page.tsx:69-73`
+  // idiom (149 review WR-01), which these two queries' own docblocks name:
+  // "a degraded render beats an error boundary here". The competing precedent
+  // in the comment above (throw-to-error.tsx) belongs to the reads that THROW
+  // themselves — the dashboard payload and the three exposure reads, whose
+  // absence leaves nothing to render. Here the rest of the money surface
+  // (equity, exposure, holdings) is intact, and taking it down over a blip in
+  // one auxiliary strategies read is a bigger lie than the strip.
+  const strategiesReadFailed =
+    ownCapitalStrategies === null || myStrategies === null;
   // Review round 2 W-2 — the outer parentheses are LOAD-BEARING: `?? 0 > 0`
   // parses as `?? (0 > 0)`, which would make this `myStrategies ?? false` and
-  // send a non-empty list down as `false`.
+  // send a non-empty list down as `false`. On a failed read this is `false`,
+  // which is why `strategiesReadFailed` outranks it at the render layer.
   const hasAnyStrategies = ((myStrategies?.length ?? 0) > 0);
 
   // Phase 11 / Plan 03 / D-13 — fire onboarding-funnel events (single-fire
@@ -155,6 +176,7 @@ export default async function MyAllocationPage() {
             note={note}
             ownCapitalStrategies={ownCapitalStrategies ?? []}
             hasAnyStrategies={hasAnyStrategies}
+            strategiesReadFailed={strategiesReadFailed}
           />
         </AllocationProvider>
       </Suspense>

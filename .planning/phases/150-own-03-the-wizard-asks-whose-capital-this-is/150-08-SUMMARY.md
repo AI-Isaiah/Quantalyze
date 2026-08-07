@@ -216,5 +216,103 @@ None.
 - ⚠️ `STATE.md` / `ROADMAP.md` deliberately **not** touched — the orchestrator owns those writes.
 
 ---
+
+## Post-Review Fixes (150-REVIEW.md warnings)
+
+Two of the three review Warnings are closed. Both were **user-facing** findings
+on the new money surface, so both cleared the blast-radius bar; WR-03 (a vacuous
+DB-test occurrence count) is a test-hygiene finding and is logged, not fixed.
+
+### WR-01 — MTD stranded at "—" for every API-ingested marked strategy
+
+**Commit:** `c86461ce` — `fix(150-05): resolve the return series in getOwnCapitalStrategies`
+**Files:** `src/lib/queries.ts`, `src/lib/queries.own-capital-strategies.test.ts` (new)
+
+`getOwnCapitalStrategies` selected `returns_series` — which satisfied the
+phase-147 Layer-A grep — and then returned the raw rows, so the Holdings
+STRATEGIES panel read the bare `daily_returns` column. That column is NULL for
+every API-ingested strategy, which is this phase's *primary* persona (the
+capital question is asked at API key-add). The guard's letter passed while its
+intent was defeated. Fix: map each row's analytics through
+`resolveDailyReturnSeries` and emit the resolved series AS `daily_returns`,
+mirroring the dashboard path (`queries.ts:3966-4004`), stripping the raw
+`returns_series` via the same destructure idiom. Adapter, panel and row types
+untouched — one reader, both union halves. RED measured before the fix
+(2 failed / 3 passed, "expected null to be close to 0.05"); the oracle is the
+economics (wealth on the last observed day over wealth at month end), not the
+adapter's own loop.
+
+### WR-02 — a transient read failure rendered as a definitive empty state
+
+**Files:** `src/app/(dashboard)/allocations/page.tsx`,
+`AllocationsTabs.tsx`, `HoldingsTabPanel.tsx`, `components/HoldingsTable.tsx`,
+plus two new specs (`page.strategies-read-failure.test.tsx`,
+`components/HoldingsTable.degraded-strategies-read.test.tsx`).
+
+`getOwnCapitalStrategies` and `getMyStrategies` both return `null` — never `[]`
+— on a transient DB/RLS failure, a contract each docblock states exists *so the
+caller can avoid rendering a definitive empty state to an owner who HAS marked
+strategies*. The sole caller discarded it at both collapse points:
+`ownCapitalStrategies ?? []` (:156) and `(myStrategies?.length ?? 0) > 0`
+(:115). A blip therefore made the owner's marked rows vanish from the money
+surface, stripped the Allocate/Edit affordance from positioned rows (the
+adapter derives `capitalOwnership` from marked-set membership), and — with an
+empty position half — stated **"No strategies yet."** about an account with
+plenty. A fabricated claim about the account, on the money surface.
+
+**Fix — degraded render, not a throw.** The page derives
+`strategiesReadFailed = ownCapitalStrategies === null || myStrategies === null`
+and threads it to the Strategies section, which renders a
+temporarily-unavailable notice **above** whatever did load and suppresses all
+three D-15 empty-state arms. This is the `my-strategies/page.tsx:69-73,123-133`
+idiom established by the 149 review's own WR-01, and it is what these two
+queries' docblocks ask for. The competing precedent in page.tsx's comment
+(throw-to-`error.tsx`) belongs to the reads that **throw themselves** — the
+dashboard payload and the three exposure reads, whose absence leaves nothing to
+render. Here the rest of the money surface (equity, exposure, holdings) is
+intact; taking it down over a blip in one auxiliary read is a bigger lie than
+the strip.
+
+**The affordance is left failing CLOSED and disclosed, not restored.** With the
+marked set unread, `isAllocatable(owned?.capital_ownership ?? null)` is `false`
+and the Allocate button does not render — correctly, since
+`guard_allocation_requires_own_capital` would reject the write anyway. Offering
+an action that is guaranteed to fail is worse than hiding it; the notice names
+the consequence ("allocation actions may be hidden") so the absence is
+explained rather than silent.
+
+**Falsifiers — each collapse point neutered independently and measured RED:**
+
+| Neuter | Result |
+|--------|--------|
+| `page.tsx` reverted to the `?? []` / `?? 0` collapse | 5/5 RED in the page spec |
+| `page.tsx` semantics only (`=== null` → `=== undefined`, prop still emitted) | exactly the 3 null cases RED, **both controls GREEN** |
+| `HoldingsTable.tsx` reverted (render ignores the signal) | 4/5 RED, the fetch-succeeded control GREEN |
+
+The semantic-only neuter is the load-bearing one: it proves the specs pin the
+`null` distinction itself, not merely the presence of a new prop. Every degraded
+case is paired with a fetch-succeeded control asserting the definitive copy is
+still *reachable*, so no case can pass on a page that simply always reports
+failure.
+
+**Verification:** `npx tsc --noEmit` clean; `eslint` clean on all six touched
+files; `vitest run "src/app/(dashboard)/allocations"` +
+`phase-150-capital-ownership-invariant.test.ts` — **123 files / 1705 tests
+passed**, no skips.
+
+### Not fixed
+
+- **WR-03** (DB test case 7c's `auth.uid()` count inflated by in-body comments,
+  `>= 3` unfalsifiable) — test-hygiene, not user-facing or data-integrity, and
+  the equivalent repo-side control (invariant gate P4) already strips comments
+  and pins `=== 3`. Logged for `TODOS.md`, per the stopping rule.
+- **`bg-card` is a dead class** — no `--color-card` token exists in
+  `globals.css`'s `@theme` block, so the notice's background is transparent
+  (its `border-border` hairline still delimits it). Kept deliberately for
+  byte-parity with the `my-strategies` notice this mirrors; 7 files repo-wide
+  share the class and want one cleanup, not a seventh divergence. Cosmetic —
+  out of scope here.
+
+---
 *Phase: 150-own-03-the-wizard-asks-whose-capital-this-is*
-*Completed: 2026-08-06*
+*Completed: 2026-08-06 (review fixes: 2026-08-07)*

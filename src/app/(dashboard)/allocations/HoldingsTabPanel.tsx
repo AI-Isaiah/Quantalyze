@@ -89,6 +89,16 @@ export function HoldingsTabPanel(
      * different facts and only the data layer knows the second one.
      */
     hasAnyStrategies?: boolean;
+    /**
+     * Review WR-02 — did EITHER of the two strategies reads fail? Both return
+     * `null` (never `[]`) on a transient DB/RLS failure, and page.tsx consumes
+     * that distinction here rather than collapsing it: on failure the row set
+     * below is INCOMPLETE (marked rows missing, positioned rows reading as
+     * unmarked), so the table must say so instead of making a claim about the
+     * account. Defaults to false — a harness that supplies nothing is not
+     * asserting a failure.
+     */
+    strategiesReadFailed?: boolean;
   },
 ) {
   const holdingsSummary = useMemo(() => props.holdingsSummary ?? [], [props.holdingsSummary]);
@@ -246,6 +256,7 @@ export function HoldingsTabPanel(
       <HoldingsTable
         strategyRows={strategyRows}
         hasAnyStrategies={props.hasAnyStrategies ?? false}
+        strategiesReadFailed={props.strategiesReadFailed ?? false}
         onAllocate={handleAllocate}
         onEditAllocation={handleEditAllocation}
       />
