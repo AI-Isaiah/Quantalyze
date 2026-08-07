@@ -188,6 +188,11 @@ None. All three fields are computed from real reads on both branches; the `[]` /
 `false` values on the fresh-allocator path are honest empty-success, not
 placeholders.
 
+## Self-Check: PASSED
+
+All four claimed files exist on disk and all six claimed commits resolve in
+`git log`.
+
 ## TDD Gate Compliance
 
 Both tasks ran the full RED → GREEN cycle with the failure observed before any
