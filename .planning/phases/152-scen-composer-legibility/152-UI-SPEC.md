@@ -137,10 +137,10 @@ remedy attached, no adjectives where a number exists. `—` (U+2014) for absence
 | Primary CTA | "Commit scenario" (existing footer button — unchanged; this phase adds no new primary CTA) |
 | Ownership chip (SCEN-02) | `Yours` — sentence case, matching the OwnershipTag family ("Own capital" / "Team review"); NOT uppercase (uppercase belongs to the `rounded-sm` derived-state chip family) |
 | Header label row (SCEN-04) | Five aligned eyebrow labels, exact copy: `WEIGHT` `USD` `MODE` `LEV` `NOTIONAL` — no separator glyphs (column alignment carries the separation). See Component Contract 3 for placement and why USD is included. |
-| Non-derivable notional (SCEN-04) | value `—` + `title="Set portfolio AUM to size in dollars"` + `sr-only` span with the same sentence (151's exact pattern, copy pinned by CONTEXT) |
+| Non-derivable notional (SCEN-04) | value `—` + `title="Notional needs live book equity — not derivable in this scenario"` + `sr-only` span with the same sentence (151's exact pattern). AMENDED 2026-08-07 (D-3, post-approval): the CONTEXT-pinned AUM sentence is cause-inaccurate for this cell — its em-dash is driven by `totalBookEquity == null`, not `scenarioAum`; the AUM sentence stays on the USD cell where it IS accurate. |
 | Detail factsheet link (SCEN-03) | "View factsheet →" |
 | Detail metrics-absent note (SCEN-03) | "Metrics not available in this view — open the factsheet for full detail." (muted `text-xs`; renders when BOTH cagr and sharpe are null; individual null values render `—` per Numbers Contract) |
-| Disambiguation line (SCEN-05) | `Created {Mon D, YYYY} · {N} {key\|keys} · {Status}` — e.g. "Created Aug 4, 2026 · 2 keys · Private". Date via `toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })` (BridgeWidget precedent). Status in product casing (Private / Published / Draft), never a raw DB enum. |
+| Disambiguation line (SCEN-05) | `Created {Mon D, YYYY} · {Status}` — e.g. "Created Aug 4, 2026 · Private". Date via `toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })` (BridgeWidget precedent). Status in product casing (Private / Published / Draft), never a raw DB enum. AMENDED 2026-08-07 (D-1, post-approval): the key-count segment is OMITTED entirely — no `key_count` on the wire (`created_at` alone resolves the founder's case; a second query is not worth a tiebreaker). |
 | Empty state | No new empty state — existing browse/composer empty states unchanged. |
 | Error state | No new error states — the detail renders in-memory data only (NO fetches, locked), so it has no loading and no failure state by construction. |
 | Destructive confirmation | None this phase. |
@@ -211,10 +211,20 @@ a row-focus criterion would test an affordance the contract forbids.
     strategy-name button natively, because it is a real button).
     Do NOT put `role="button"` + `tabIndex` on the row container: it would nest
     the toggle/inputs/remove button inside an interactive role (a11y violation).
-  - The row SURFACE additionally toggles on pointer click (`onClick` on the li)
-    as pointer amplification; the control cluster (toggle, weight, dollar, mode,
-    target, leverage inputs, remove button) stops propagation — one
-    `stopPropagation` wrapper on the cluster container, not per-control.
+  - The row SURFACE additionally toggles on pointer click (`onClick` on the
+    li) as pointer amplification. AMENDED 2026-08-07 (post-approval, checker
+    B-1/B-2): the original "one `stopPropagation` wrapper on the cluster
+    container" premise was wrong — the row's LEFT cluster holds two controls
+    OUTSIDE that wrapper. The exclusion set is THREE parts:
+    (1) ONE `stopPropagation` wrapper on the control cluster (weight, dollar,
+    mode, target, leverage inputs, remove button) — still not per-control;
+    (2) `e.stopPropagation()` inside the strategy-name button's own onClick,
+    before its toggle — otherwise the li amplification re-runs the same
+    functional toggle and one click nets to a no-op (the panel could never
+    open by pointer or keyboard, since native button Enter/Space dispatch
+    click);
+    (3) `stopPropagation` on the include/exclude `role="switch"` toggle, which
+    also sits in the left cluster and is an excluded control.
   - Name hover affordance: `hover:text-accent transition-colors` (StrategyTable
     factsheet-link precedent) so the row reads clickable; row surface may add
     the existing table-row `hover:bg-page/50` tenant. No cursor-only affordance.
@@ -297,10 +307,11 @@ a row-focus criterion would test an affordance the contract forbids.
 - **Anatomy:** the sibling line's recipe verbatim — `mt-1 text-xs
   text-text-muted`, `·` separators. `data-testid="browse-dedup-{id}"` (outside
   the `browse-add-` namespace — the PR #620 automation-contract lesson).
-- **Copy:** `Created {Mon D, YYYY} · {N} {key|keys} · {Status}` (see copy
-  table). If `key_count` is 0/absent, omit that segment rather than render
-  "0 keys" as a claim; `created_at` and status always render (both always exist
-  on an own row).
+- **Copy:** `Created {Mon D, YYYY} · {Status}` (see copy table — AMENDED
+  2026-08-07, D-1: the key-count segment is omitted entirely; `key_count`
+  never reaches the wire). `created_at` and status always render (both always
+  exist on an own row); rows missing the fields (older wire shape) render no
+  line.
 - **DISAMBIGUATE, never hide (locked):** no collapsing, no destructive merge,
   no "(2)" suffix on names. Both rows stay; the line makes the choice
   resolvable at a glance.
@@ -333,3 +344,8 @@ No registries, no third-party blocks, no vetting required.
 - [x] Dimension 6 Registry Safety: PASS
 
 **Approval:** APPROVED 2026-08-07 (gsd-ui-checker, revision 1; Dimension 4 FLAG non-blocking)
+
+**Post-approval amendments (2026-08-07, planner revision 1 — recorded per plan-checker feedback; narrowings/corrections, not re-reviewed):**
+1. Copy table, "Non-derivable notional": CONTEXT's AUM sentence replaced by the cause-accurate "Notional needs live book equity — not derivable in this scenario" (D-3 — the cell's em-dash is driven by `totalBookEquity == null`, not `scenarioAum`; the AUM sentence stays on the USD cell where it is accurate).
+2. Copy table + Contract 5, "Disambiguation line": key-count segment omitted — copy is `Created {Mon D, YYYY} · {Status}` (D-1 — `created_at` alone resolves the founder's real case; no second query). Residual: same-day own-row duplicates stay indistinguishable — logged to TODOS.md by 152-06 T3.
+3. Contract 2, exclusion premise: "one wrapper on the control cluster" corrected to a three-part exclusion set (control-cluster wrapper + strategy-name-button `stopPropagation` + include/exclude switch exclusion) — the left cluster's two controls sit outside the wrapper (checker B-1/B-2; without the button's own stopPropagation the panel can never open).

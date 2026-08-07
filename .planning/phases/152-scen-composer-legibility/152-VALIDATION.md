@@ -43,7 +43,7 @@ planned: 2026-08-07
 | 05-T1 | 152-05 | 3 | SCEN-02 | T-152-05-01 | isOwn mapped at BOTH twin seams (two renders, two payloads); Bridge seam deliberately absent | component | `npx vitest run "src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx" -t "SCEN-02" --no-file-parallelism` | ✅ extend | ⬜ pending |
 | 05-T2 | 152-05 | 3 | SCEN-02 | T-152-05-02 | chip gate `=== true`; false/null/absent each render NO node | component | same as 05-T1 | ✅ extend | ⬜ pending |
 | 06-T1 | 152-06 | 4 | SCEN-03 | T-152-06-01/02 | one-open-at-a-time inline detail; in-memory only (no fetch); null metrics → honest note, never 0.00; href exactly /factsheet/{id} | component | `npx vitest run "src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx" -t "SCEN-03" --no-file-parallelism` | ✅ extend | ⬜ pending |
-| 06-T2 | 152-06 | 4 | SCEN-03 | T-152-06-01 | Enter/Space on the focused strategy-name button; five control exclusions; panel-click no-collapse; axe scans EXPANDED panel; SC2 falsifier observed | component + e2e(CI) | same as 06-T1; `npx playwright test e2e/composer-axe.spec.ts` (CI seeded) | ✅ extend | ⬜ pending |
+| 06-T2 | 152-06 | 4 | SCEN-03 | T-152-06-01 | Enter/Space on the focused strategy-name button; six control exclusions (incl. the include/exclude switch — B-2); panel-click no-collapse; axe scans EXPANDED panel; SC2 falsifier observed | component + e2e(CI) | same as 06-T1; `npx playwright test e2e/composer-axe.spec.ts` (CI seeded) | ✅ extend | ⬜ pending |
 | 06-T3 | 152-06 | 4 | all | — | phase gates: lint + typecheck + full `npm test` + blocking `npm run test:coverage`; ledger fully observed | gates | `npm run test:coverage` | ✅ | ⬜ pending |
 
 ---
@@ -69,6 +69,19 @@ sr-only drop (within-cell probe), testid rename into `browse-add-` (namespace
 test), un-normalized collision key (case/whitespace test).
 
 ---
+
+## Oracle Independence
+
+The rules below — and every falsifier fixture — pin expectations as
+independent literals or invariants: a test never recomputes its oracle with
+the implementation's own formula (the money-math lesson: self-referential
+oracles let three bugs survive six passes). Copy oracles (titles, notes, the
+dedup line) are byte-literals in the tests.
+
+**One deliberate exception:** 152-04 T2's dedup date. The preferred oracle is
+the literal "Aug 4, 2026" / "Jul 20, 2026" (noon-UTC fixtures are
+timezone-safe and Node ships full-icu); recomputing via the same
+`toLocaleDateString` call is permitted only as a secondary wiring pin.
 
 ## Binding Oracle Rules
 

@@ -1116,7 +1116,20 @@ extension of an existing describe block.**
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+All three resolved at planning (2026-08-07) — one-line resolutions, owning
+artifacts pointed:
+
+1. → RESOLVED: yes — D-3 in `152-03-PLAN.md` pins the cause-accurate sentence
+   ("Notional needs live book equity — not derivable in this scenario"); the
+   CONTEXT AUM sentence stays on the USD cell.
+2. → RESOLVED: yes — `152-06-PLAN.md` Task 2 expands the panel before
+   `analyze()` in `composer-axe.spec.ts`.
+3. → RESOLVED: no — `152-VALIDATION.md` Wave 0 grep closed it at planning
+   (zero `.strict()` schemas; the wire add cannot 400).
+
+Original questions as researched:
 
 1. **Does the notional em-dash deserve its own remedy sentence?** (D-3)
    - What we know: the USD cell's em-dash is caused by `scenarioAum <= 0`; the notional
