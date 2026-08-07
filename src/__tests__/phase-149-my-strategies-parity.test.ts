@@ -518,8 +518,14 @@ describe("NAV-01 — the server predicates each stay exactly as narrow as their 
     // Eligibility is the SHARED predicate, not a re-derived copy of
     // `is_active && sync_status !== "revoked" && disconnected_at == null`.
     expect(pure).toContain("isPerKeyDailiesEligibleKey");
-    // W-4: the owner archived it, so its key must reappear as a placeholder.
-    expect(pure).toContain('"archived"');
+    // W-4 lives in the coverage discriminator since Phase 151-02 extracted it
+    // (`deriveStrategyLinkedKeyIds`, shared with the allocator book gate). Pin
+    // the delegation AND the literal in the discriminator — archived ≠ coverage
+    // must hold on the census path, wherever the filter physically sits.
+    expect(pure).toContain("deriveStrategyLinkedKeyIds(");
+    const discriminator = functionBody(queriesSrc, "deriveStrategyLinkedKeyIds");
+    expect(discriminator).not.toBe("");
+    expect(discriminator).toContain('"archived"');
   });
 });
 
