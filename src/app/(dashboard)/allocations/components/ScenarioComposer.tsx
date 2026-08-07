@@ -164,6 +164,10 @@ import { CustomRangePicker } from "./CustomRangePicker";
 import { BlendHeader } from "./BlendHeader";
 import { CoverageStateChip } from "./CoverageStateChip";
 import type { CoverageState } from "./CoverageStateChip";
+// Phase 152 SCEN-02 — the SHARED ownership chip (152-04), not a local span:
+// the browse drawer's own rows render this same leaf, and two hand-rolled
+// chips for one claim drift.
+import { YoursChip } from "./YoursChip";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import type { ProvenanceTier } from "@/lib/design-tokens/trust-tier";
 import { deriveProvenance } from "../lib/provenance";
@@ -4077,6 +4081,13 @@ export function ScenarioComposer({
               name: s.name,
               markets: s.markets,
               strategy_types: s.strategy_types,
+              // Phase 152 SCEN-02 — TWIN SEAM A (empty-state mount). Its
+              // byte-identical twin is the main-body <StrategyBrowseDrawer>
+              // below; edit BOTH or an allocator who adds from the blank slate
+              // silently loses the ownership bit. Straight pass-through: the
+              // drawer forwards what GET /api/strategies/browse said, and
+              // absent stays absent (never coerced to false or true).
+              isOwn: s.isOwn,
             })
           }
           onAddOwn={() => {
@@ -5421,6 +5432,13 @@ export function ScenarioComposer({
             name: s.name,
             markets: s.markets,
             strategy_types: s.strategy_types,
+            // Phase 152 SCEN-02 — TWIN SEAM B (main-body mount). Its
+            // byte-identical twin is the empty-state <StrategyBrowseDrawer>
+            // above; edit BOTH or an allocator with a live book silently loses
+            // the ownership bit. Straight pass-through: the drawer forwards
+            // what GET /api/strategies/browse said, and absent stays absent
+            // (never coerced to false or true).
+            isOwn: s.isOwn,
           })
         }
         onAddOwn={() => {
@@ -5456,6 +5474,12 @@ export function ScenarioComposer({
             name: candidate.name,
             markets: candidate.markets,
             strategy_types: candidate.strategy_types,
+            // Phase 152 SCEN-02 — deliberately NO isOwn: a Bridge candidate
+            // comes from the match engine and carries no ownership signal;
+            // absent = no chip (never fabricate ownership — CONTEXT lock).
+            // This is the THIRD add seam and the one that must NOT match the
+            // twins above; if a future edit "completes the set" here, it turns
+            // a match-engine suggestion into a claim the user authored it.
           });
           // UNIFY-04 — a Bridge candidate is also a catalog strategy not in the
           // book; lazy-fetch its series so the projection moves on add.
@@ -6366,6 +6390,29 @@ function CompositionList({
                   trustTier={addedProvenanceByRef[a.id] ?? null}
                   className="shrink-0"
                 />
+                {/* Phase 152 SCEN-02 — ownership is a persistent FACT, so it
+                    wears the rounded-md badge family (the uppercase rounded-sm
+                    family next to it is DERIVED state that changes on its own;
+                    ownership never does). Placed after provenance and before
+                    coverage: identity facts first, derived state last.
+
+                    The gate is `=== true`, never `!== false` and never bare
+                    truthiness. `false`, `null` and an ABSENT key are three
+                    different wire shapes — a legacy persisted draft written
+                    before 152-02 declared the field carries no `isOwn` at all,
+                    and a `!== false` gate would decorate every one of those
+                    rows with a claim the wire never made. Absence is honest;
+                    such rows go un-marked until the next browse/add refreshes
+                    them (CONTEXT lock: never fabricate ownership).
+
+                    Same YoursChip component the browse drawer renders (152-04)
+                    — one recipe, so the two surfaces cannot drift. */}
+                {a.isOwn === true && (
+                  <YoursChip
+                    data-testid={`scenario-yours-${a.id}`}
+                    className="shrink-0"
+                  />
+                )}
                 {chipState && (
                   <CoverageStateChip state={chipState} className="shrink-0" />
                 )}
