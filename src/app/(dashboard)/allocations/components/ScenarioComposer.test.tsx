@@ -11907,4 +11907,30 @@ describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
     expect(after?.n).toBe(before?.n);
     expect(computeScenarioStateArgs.length).toBe(callsBeforeAum);
   });
+
+  // Test 12 — the COMMIT-PERSISTENCE seam. The composer hands the drawer
+  // `sanitizedManualAum`, NOT `scenarioAum`: only a genuinely manual value may
+  // cross to the server as a client assertion. A book-mode commit that never
+  // touched the AUM field must omit the field entirely so its audit row stays
+  // on the SERVER-recomputed path (NEW-C18-04) rather than being re-labelled a
+  // client assertion carrying the live-holdings sum.
+  it("AUM-01 Test 12 (drawer threading): a manual AUM reaches the drawer; an untouched book-mode AUM does not", () => {
+    function drawerManualAum(): number | undefined {
+      return vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]
+        ?.manualAumUsd;
+    }
+
+    // Book mode, nothing typed: the live sum sizes the scenario locally, but
+    // NOTHING is asserted to the server.
+    renderUsd(mixedBookPayload());
+    add(D_A, "Dollar Strat A");
+    expect(
+      vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.scenarioAum,
+    ).toBe(60_000);
+    expect(drawerManualAum()).toBeUndefined();
+
+    // …and the moment the allocator overrides it, the assertion travels.
+    setAum("2000000");
+    expect(drawerManualAum()).toBe(2_000_000);
+  });
 });
