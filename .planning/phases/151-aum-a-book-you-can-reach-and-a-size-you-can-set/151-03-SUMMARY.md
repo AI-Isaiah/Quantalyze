@@ -292,3 +292,9 @@ the MT5 read reuses the existing gateway facade and the existing
 | 1 (GREEN) | `d02d63dc` | `feat(151-03)`: dispatch non-ccxt venues at the ONE chokepoint |
 | 2 (RED) | `c00561d5` | `test(151-03)`: failing tests for the MT5 account-equity branch |
 | 2 (GREEN) | `96279521` | `feat(151-03)`: MT5 accounts contribute their equity |
+| — | `a1adcb1f` | `docs(151-03)`: this summary |
+
+## Self-Check: PASSED
+
+All four key files exist on disk; all five commits present in `git log`; working
+tree clean; no mutation residue (`grep -rn "MUTANT\|mutantvenue"` → 0).
