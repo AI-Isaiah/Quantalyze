@@ -5921,24 +5921,38 @@ function CompositionList({
    * draft.
    *
    * The state is keyed by strategy id, not by position, so removing an EXPANDED
-   * row via the `×` button left the id held. Adding the same strategy back in
-   * the same session then mounted its row with the detail panel already open and
+   * row left the id held. Adding the same strategy back in the same session then
+   * mounted its row with the detail panel already open and
    * `aria-expanded="true"` on first render — a state no user gesture asked for,
    * that the one-open-at-a-time contract did not intend, and that a screen
    * reader announces as expanded on first encounter.
    *
-   * Scoped to disappearance only: an id that is still in the draft is left
-   * alone, so a re-render (weight edit, toggle, autosave) never collapses an
-   * open panel.
+   * ⚠️ Deliberately React's "adjust state during render" idiom, NOT a
+   * `useEffect` that watches `draft.addedStrategies`. That effect is a
+   * `react-hooks/set-state-in-effect` lint ERROR in this repo — and it would be
+   * the worse mechanism anyway: it commits the stale-open render FIRST and
+   * corrects it on a second pass, so the pre-expanded panel really exists in the
+   * DOM (long enough for a screen reader to reach it) before collapsing.
+   * Adjusting here re-runs the component before anything commits, so the wrong
+   * state is never observable.
+   *
+   * Deliberately not a release on the remove handler either: that closes only
+   * the `×` seam. Any path that drops a row while this list stays mounted (a
+   * draft reset, a saved-scenario open) leaves the same stale id behind. ONE
+   * condition on the row's ABSENCE covers every such path — the project's
+   * "close the whole class, not the point case" rule.
+   *
+   * The `!= null` guard is the loop fence: after the write the condition is
+   * false, so this settles in one extra pass. An id still in the draft is
+   * untouched, so an unrelated re-render (weight edit, toggle, autosave) never
+   * collapses an open panel.
    */
-  useEffect(() => {
-    if (
-      expandedAddedId != null &&
-      !draft.addedStrategies.some((a) => a.id === expandedAddedId)
-    ) {
-      setExpandedAddedId(null);
-    }
-  }, [draft.addedStrategies, expandedAddedId]);
+  if (
+    expandedAddedId != null &&
+    !draft.addedStrategies.some((a) => a.id === expandedAddedId)
+  ) {
+    setExpandedAddedId(null);
+  }
 
   /** Phase 152 SCEN-03 — the composer's mono-eyebrow recipe, byte-verbatim from
    *  the PORTFOLIO AUM label (152-UI-SPEC reuse rule: no new visual primitives). */
