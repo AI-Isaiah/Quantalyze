@@ -1579,6 +1579,98 @@ describe("T_R24 — B11 / NEW-C18-10 portfolio-fingerprint precondition", () => 
     );
   });
 
+  // 151 review CR-01 — THE DEAD END THIS CLOSES. A blank-slate draft is seeded
+  // from `[]`, so its `init_holdings_fingerprint` is the EMPTY STRING. `""` is
+  // not nullish, so it used to reach the RPC, whose precondition read it as the
+  // empty token SET and compared it against the allocator's REAL holdings —
+  // every blank-mode commit by an allocator WITH a live book 409'd
+  // `portfolio_fingerprint_stale`, with remedy copy ("Refresh to load the
+  // latest holdings") that no refresh could ever satisfy. The phase's headline
+  // flow (blank slate → manual AUM → commit) was structurally impossible.
+  //
+  // The oracle is ECONOMIC, not implementation-shaped: an empty fingerprint
+  // means "this draft has NO holdings basis", so there is nothing for the
+  // optimistic-concurrency precondition to be stale against and it must be
+  // SKIPPED — which is exactly `p_portfolio_fingerprint: null`.
+  it("CR-01: an EMPTY init_holdings_fingerprint skips the precondition (null) — a blank-slate manual-AUM commit COMPLETES for an allocator WITH holdings", async () => {
+    // Non-vacuity: this allocator genuinely HAS holdings, so a forwarded `""`
+    // would diverge from the server token set and 409. Pre-fix this test's
+    // request is precisely the founder's blank-slate commit.
+    holdingsFixture = [
+      {
+        venue: "binance",
+        symbol: "BTC",
+        holding_type: "spot",
+        value_usd: 460_000,
+        asof: "2026-08-07",
+      },
+    ];
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          {
+            index: 0,
+            match_decision_id: "md-1",
+            bridge_outcome_id: "bo-1",
+            kind: "voluntary_add",
+          },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(
+      mkReq({
+        diffs: [{ ...VALID_VA, percent_allocated: 25 }],
+        init_holdings_fingerprint: "",
+        manual_aum_usd: 2_000_000,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({ p_portfolio_fingerprint: null }),
+    );
+  });
+
+  // The other half of the same invariant: the anti-stale guarantee is NOT
+  // weakened for a draft that DOES have a holdings basis. A book-authored draft
+  // carries a non-empty fingerprint, so its precondition still runs verbatim —
+  // a fix that normalised every fingerprint away would pass the test above and
+  // fail this one.
+  it("CR-01 (guarantee preserved): a NON-empty fingerprint still reaches the RPC verbatim", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          {
+            index: 0,
+            match_decision_id: "md-1",
+            bridge_outcome_id: "bo-1",
+            kind: "voluntary_remove",
+          },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(
+      mkReq({
+        diffs: [VALID_VR],
+        init_holdings_fingerprint: "BTC:binance:spot|ETH:binance:spot",
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({
+        p_portfolio_fingerprint: "BTC:binance:spot|ETH:binance:spot",
+      }),
+    );
+  });
+
   it("RPC ok:false + code=portfolio_fingerprint_stale → 409 (no Retry-After), no audit", async () => {
     // The holdings changed since the draft was built; the RPC recomputed the
     // current fingerprint, found divergence, and committed nothing. The route

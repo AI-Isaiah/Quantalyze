@@ -545,6 +545,12 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
   // INSERT ... ON CONFLICT DO NOTHING on scenario_commit_idempotency, in
   // the SAME transaction as the match_decisions inserts. This is the only
   // place a concurrent retry can be deterministically deduped.
+  // 151 review CR-01 — see the p_portfolio_fingerprint note below. Absent OR
+  // empty ⇒ no holdings basis ⇒ no optimistic-concurrency precondition.
+  const rawFingerprint = parsed.data.init_holdings_fingerprint;
+  const portfolioFingerprint =
+    rawFingerprint == null || rawFingerprint === "" ? null : rawFingerprint;
+
   const { data: rpcData, error: rpcErr } = await supabase.rpc(
     "commit_scenario_batch",
     {
@@ -555,7 +561,23 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
       // B11 / NEW-C18-10: forward the draft's holdings fingerprint so the RPC
       // can reject a stale-draft commit server-side. null => RPC skips the
       // precondition (backward-compatible); the live client always supplies it.
-      p_portfolio_fingerprint: parsed.data.init_holdings_fingerprint ?? null,
+      //
+      // 151 review CR-01 — an EMPTY fingerprint is "this draft has NO holdings
+      // basis", NOT "this allocator holds zero positions". A blank-slate draft
+      // is seeded from `[]`, so `computeHoldingsFingerprint([])` is `""` — and
+      // `""` is not nullish, so it used to reach the RPC, whose precondition
+      // read it as the empty token SET and rejected every blank-mode commit by
+      // an allocator WITH holdings (409 `portfolio_fingerprint_stale`, remedy
+      // copy "Refresh to load the latest holdings" that no refresh can satisfy).
+      // Normalising here — at the boundary that owns the RPC contract — closes
+      // it for stale client bundles too, and is behaviour-neutral for a genuine
+      // zero-holdings allocator (server tokens are empty either way, so the
+      // precondition it skips could only have passed).
+      //
+      // This does NOT weaken the anti-stale guarantee for BOOK-mode commits:
+      // a book-authored draft carries a non-empty fingerprint by construction
+      // (it was seeded from >= 1 holding), so its precondition still runs.
+      p_portfolio_fingerprint: portfolioFingerprint,
     },
   );
 

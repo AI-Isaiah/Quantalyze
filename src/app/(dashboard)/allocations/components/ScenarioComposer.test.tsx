@@ -11557,6 +11557,69 @@ describe("ScenarioComposer — AUM-01 Portfolio AUM input", () => {
     expect(onCommitRequested).not.toHaveBeenCalled();
     expect(screen.queryByTestId("commit-drawer-mock")).toBeNull();
   });
+
+  // 151 review CR-01 — the headline flow's dead end. In blank mode the draft is
+  // seeded from `[]`, so its `init_holdings_fingerprint` is the EMPTY STRING.
+  // The drawer forwards the prop whenever it is `!== null`, and the RPC's
+  // optimistic-concurrency precondition reads an empty fingerprint as the empty
+  // token SET — so for an allocator who HAS holdings every blank-mode commit
+  // came back 409 with remedy copy ("Refresh to load the latest holdings") that
+  // no refresh could satisfy. Freezing `null` instead is the explicit "this
+  // draft has no holdings basis to be stale against".
+  it("AUM-01 / CR-01: a BLANK-mode commit by an allocator WITH a live book freezes a NULL fingerprint — never the empty string that 409s", () => {
+    // The FORCE-blanked shape the review pins as reachable: live holdings, but
+    // ZERO contributing keys, so `canEnterBook` is false and the composer
+    // initializes BLANK — the draft is seeded from `[]` and its fingerprint is
+    // the empty string, while the SERVER still has this allocator's holdings.
+    const { payload: book } = aumBook([300_000, 160_000]);
+    const payload = {
+      ...book,
+      perKeyDailiesGateSatisfied: false,
+      contributingApiKeyIds: [],
+      bookEntryGateSatisfied: false,
+    };
+    renderAum1(payload);
+
+    // Non-vacuity part 1: the allocator genuinely HAS a live book (so a
+    // forwarded "" would diverge from the server's token set), and the composer
+    // really is in forced-blank mode (the derived sum is gated away to 0).
+    expect(payload.holdingsSummary.length).toBeGreaterThan(0);
+    expect(drawerAum()).toBe(0);
+
+    addStrategy({
+      id: "aum1-strat-cr01",
+      name: "Blank Slate Strategy",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    setAum("1000000");
+    expect(drawerAum()).toBe(1_000_000);
+
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+    const props = vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0];
+    // Non-vacuity part 2: the commit really opened (diffs were built), so the
+    // fingerprint assertion below is about a REAL commit, not a refused one.
+    expect(props?.diffs?.length).toBeGreaterThan(0);
+    expect(props?.initHoldingsFingerprint).toBeNull();
+  });
+
+  // The other half: a BOOK-mode commit still freezes the real fingerprint, so
+  // the anti-stale precondition keeps protecting the case it was written for.
+  it("AUM-01 / CR-01 (guarantee preserved): a BOOK-mode commit still freezes the live-book fingerprint", () => {
+    const { payload } = aumBook([300_000, 160_000]);
+    renderAum1(payload);
+    addStrategy({
+      id: "aum1-strat-cr01b",
+      name: "Book Mode Strategy",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+    const props = vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0];
+    expect(props?.diffs?.length).toBeGreaterThan(0);
+    expect(props?.initHoldingsFingerprint).toBeTruthy();
+  });
 });
 
 // ---------------------------------------------------------------------------

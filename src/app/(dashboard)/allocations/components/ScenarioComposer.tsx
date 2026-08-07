@@ -3939,7 +3939,20 @@ export function ScenarioComposer({
     // correspond to. Capturing it HERE (not at POST time) is load-bearing — a
     // holdings refresh during drawer-dwell must not retroactively make the
     // stale commit look current.
-    setCommitFingerprint(scenario.draft.init_holdings_fingerprint);
+    // 151 review CR-01 — an EMPTY fingerprint is "this draft was NOT authored
+    // against a holdings basis" (blank mode seeds `[]`, so
+    // computeHoldingsFingerprint([]) === ""), never "this allocator holds
+    // nothing". Sending "" made the RPC precondition compare the empty token
+    // set against the allocator's REAL holdings and 409 every blank-mode
+    // commit — the phase's headline flow (blank slate + a manual AUM + commit)
+    // was a dead end for anyone with a live book. `null` is the explicit "no
+    // basis to be stale against"; a book-authored draft still sends its real
+    // fingerprint, so the anti-stale guarantee is untouched where it applies.
+    setCommitFingerprint(
+      scenario.draft.init_holdings_fingerprint === ""
+        ? null
+        : scenario.draft.init_holdings_fingerprint,
+    );
     if (useInternalCommitDrawer) {
       setCommitDrawerOpen(true);
     } else {
