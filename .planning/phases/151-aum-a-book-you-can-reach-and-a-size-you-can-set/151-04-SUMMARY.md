@@ -299,5 +299,14 @@ existing `allocator_holdings` DDL. Dispositions from the plan's register:
 | 1 (RED) | `48e31e9e` | `test(151-04)`: failing tests for the sFOX balance branch |
 | 1 (GREEN) | `dc280e34` | `feat(151-04)`: sFOX accounts contribute their priceable balances |
 | 2 | `f900f754` | `test(151-04)`: close the non-ccxt class with one parametrized proof |
+| — | `e9002fb0` | `docs(151-04)`: this summary |
+
+## Self-Check: PASSED
+
+Both modified source files exist on disk (`allocator_positions.py`,
+`test_allocator_positions_non_ccxt.py`); `TODOS.md` carries both deferred lines;
+all four commits present in `git log`; working tree clean; SUMMARY 303 lines
+(not truncated); no mutation residue (`grep -rn "MUTANT" services/ tests/` → 0);
+`STATE.md` / `ROADMAP.md` untouched.
 </content>
 </invoke>
