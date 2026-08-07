@@ -1645,6 +1645,14 @@ export async function getPortfolioStrategies(portfolioId: string) {
  *
  * `strategy_analytics` reuses the dashboard payload's `Pick` verbatim so the
  * adapter reads the same fields off both halves of the union with no cast.
+ *
+ * Review WR-01 — `daily_returns` on this payload is the RESOLVED series, under
+ * the SAME field name the dashboard half emits (queries.ts:3966-4004): an
+ * API-ingested strategy has `daily_returns = NULL` in the DB and its real track
+ * in `returns_series`, so the raw column would strand every such row at `[]`.
+ * The raw `returns_series` is stripped before returning — resolved here means
+ * no downstream reader needs it, and shipping both invites a second resolution
+ * mechanism (phase-147 SC2).
  */
 export interface OwnCapitalStrategy {
   id: string;
@@ -1683,6 +1691,13 @@ export interface OwnCapitalStrategy {
  * strategy at `[]` — the repo-wide phase-147 sweep
  * (`phase-147-series-resolution-guards.test.ts:204`) fails the build on a
  * single-column select here.
+ *
+ * Review WR-01 — selecting both columns is necessary but NOT sufficient: the
+ * rows are mapped through `resolveDailyReturnSeries` below and the resolved
+ * series is emitted AS `daily_returns`, mirroring the dashboard path
+ * (:3966-4004). Returning the raw rows satisfied the grep while leaving the
+ * MTD column blank for every marked-but-unallocated API-key strategy — this
+ * phase's primary persona, since the capital question is asked at key-add.
  *
  * Error contract mirrors `getMyStrategies`: `null` on a transient DB/RLS
  * failure — never `[]` — so a caller can distinguish "nothing marked yet"
@@ -1730,7 +1745,35 @@ export async function getOwnCapitalStrategies(
     return null;
   }
 
-  return (data ?? []) as unknown as OwnCapitalStrategy[];
+  // Review WR-01 — resolve the series HERE, server-side, and emit it under the
+  // SAME `daily_returns` field name, so the adapter's single reader works for
+  // BOTH halves of the D-12-A union with no branch of its own. The raw
+  // `returns_series` is stripped by the `_rs` destructure (the :3988 idiom).
+  // PostgREST returns a one-to-one embed as an object but a one-to-many embed
+  // as an array; the dashboard path (:3941) tolerates both and so does this.
+  return (data ?? []).map((row) => {
+    const rowObj = row as unknown as Record<string, unknown>;
+    const rawAnalytics = rowObj.strategy_analytics;
+    const analyticsObj = (Array.isArray(rawAnalytics)
+      ? rawAnalytics[0]
+      : rawAnalytics) as Record<string, unknown> | null | undefined;
+
+    let strategy_analytics: OwnCapitalStrategy["strategy_analytics"] = null;
+    if (analyticsObj) {
+      const { returns_series: _rs, ...analyticsRest } = analyticsObj;
+      const analyticsForPayload: Record<string, unknown> = {
+        ...analyticsRest,
+        daily_returns: resolveDailyReturnSeries(
+          analyticsObj.daily_returns,
+          analyticsObj.returns_series,
+        ),
+      };
+      strategy_analytics =
+        analyticsForPayload as OwnCapitalStrategy["strategy_analytics"];
+    }
+
+    return { ...rowObj, strategy_analytics } as unknown as OwnCapitalStrategy;
+  });
 }
 
 /**
