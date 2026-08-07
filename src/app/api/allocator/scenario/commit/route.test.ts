@@ -1856,6 +1856,65 @@ describe("AUM-01 — manual_aum_usd client-asserted AUM sidecar", () => {
     expect(meta.size_at_decision_usd_client).toBe(VALID_VA.size_at_decision_usd);
   });
 
+  // Test 12 — SP-W1 / F-1: UNKNOWN ≠ ABSENT. A FAILED allocator_holdings SELECT
+  // with a manual AUM present must still stamp `lookup_failed`. Pre-fix the
+  // manual arm was ordered FIRST, so during any Supabase degradation (the
+  // documented PostgREST 504 / wedged-pool condition) every audit row was sized
+  // from the unverified client number under `client_manual_aum` and the
+  // `lookup_failed` marker was unreachable — silently breaking the route's own
+  // observability promise ("mark every per-row audit with lookup_failed so the
+  // sparse path is observable in forensic queries") and turning the sentinel's
+  // documented meaning ("blank-slate — no holdings snapshot at all") into a lie
+  // for an allocator whose real book a DB blip merely hid.
+  //
+  // Falsify: restore the old arm order and this goes RED on both assertions.
+  it("Test 12 (SP-W1): a FAILED holdings lookup outranks manual_aum_usd — the sentinel stays lookup_failed and no unverified size is recorded", async () => {
+    // The server could not READ the book. It does NOT know the book is empty.
+    holdingsErrorFixture = { message: "connection refused (test)" };
+    okAdd();
+
+    const res = await POST(
+      mkReq({
+        diffs: [
+          { ...VALID_VA, percent_allocated: 25, size_at_decision_usd: 500_000 },
+        ],
+        manual_aum_usd: 2_000_000,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    // The forensic marker survives — this is the whole point.
+    expect(meta._size_source).toBe("lookup_failed");
+    // And no unverified magnitude is passed off as a recomputed one.
+    expect(meta.size_at_decision_usd).toBeNull();
+    // The client's own number still rides its own labelled column.
+    expect(meta.size_at_decision_usd_client).toBe(500_000);
+  });
+
+  // Test 12b — NON-VACUITY CONTROL. The very same body against a SUCCESSFUL,
+  // verified-empty lookup still reaches the blank-slate arm, so Test 12 pins the
+  // lookup-health precedence and not "the manual arm stopped working".
+  it("Test 12b (control): the same body on a verified-EMPTY book still sizes under client_manual_aum", async () => {
+    holdingsFixture = [];
+    holdingsErrorFixture = null;
+    okAdd();
+
+    const res = await POST(
+      mkReq({
+        diffs: [
+          { ...VALID_VA, percent_allocated: 25, size_at_decision_usd: 500_000 },
+        ],
+        manual_aum_usd: 2_000_000,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    expect(meta._size_source).toBe("client_manual_aum");
+    expect(meta.size_at_decision_usd).toBe(500_000);
+  });
+
   // T-151-21 — idempotency drift. The request_hash binds an Idempotency-Key to
   // the exact bytes of the body, so a field added UNCONDITIONALLY on the client
   // would change the hash for every caller. Two identical field-less bodies

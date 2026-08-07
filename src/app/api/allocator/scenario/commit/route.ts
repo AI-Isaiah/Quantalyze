@@ -925,6 +925,24 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
             // very field added below.
             serverSizeUsd = (inputDiff.percent_allocated * serverAumUsd) / 100;
             sizeSource = "server_aum";
+          } else if (!holdingsLookupOk) {
+            // 151 specialist SP-W1 / F-1 — UNKNOWN ≠ ABSENT, and this arm must
+            // outrank the client-asserted one below. `holdingsLookupOk` false
+            // means the server could NOT READ the allocator's holdings (a
+            // PostgREST 504 / wedged pool is a documented recurring condition
+            // here), not that there are none. Pre-fix the manual arm sat first,
+            // so a commit carrying `manual_aum_usd` during any Supabase
+            // degradation sized every audit row from the unverified client
+            // number and stamped `client_manual_aum` — making `lookup_failed`
+            // UNREACHABLE and silently breaking the :806 observability promise
+            // ("mark every per-row audit with lookup_failed so the sparse path
+            // is observable in forensic queries"). A dispute review filtering
+            // `lookup_failed` found nothing, and the sentinel's own documented
+            // meaning ("blank-slate — no holdings snapshot at all") became a lie
+            // for a book a DB blip merely hid. No size is derived here: the
+            // magnitude is unverifiable, and recording an unverified one under a
+            // failure sentinel would re-import the same confusion.
+            sizeSource = "lookup_failed";
           } else if (manualAumUsd != null) {
             // Phase 151 AUM-01 — the blank-slate case: the allocator has no
             // holdings snapshot at all (the primary use case), so pre-151 this
@@ -932,10 +950,10 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
             // (no_holdings_snapshot / null size). Size it from the number the
             // allocator actually typed, under a sentinel that says exactly
             // what it is: a CLIENT assertion, not a server-verified figure.
+            // Reached only on a SUCCESSFUL, verified-empty lookup (SP-W1), so
+            // the sentinel now means exactly what it claims.
             serverSizeUsd = (inputDiff.percent_allocated * manualAumUsd) / 100;
             sizeSource = "client_manual_aum";
-          } else if (!holdingsLookupOk) {
-            sizeSource = "lookup_failed";
           } else if (holdingsEmptyOk) {
             sizeSource = "no_holdings_snapshot";
           }
