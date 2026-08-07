@@ -3145,6 +3145,15 @@ describe("POST /api/strategies/finalize-wizard — OWN-03 capital-ownership mark
       "The mark write failed silently — no log line naming the strategy.",
     ).toBe(true);
 
+    // 151 specialist F-3 — server-side logging is NOT enough. The user who
+    // explicitly answered the capital question got a plain success screen while
+    // their answer was dropped; the consequence (an unmarked strategy is
+    // non-allocatable, so `Allocate…` never appears) surfaced days later as an
+    // unexplained absence, and the documented remedy was discoverable only by
+    // someone who already knew. The 200 body now carries a non-error sidecar so
+    // the client can say so, without discarding the finalize.
+    expect(body.capital_ownership_persisted).toBe(false);
+
     errSpy.mockRestore();
     fetchSpy.mockRestore();
   });
@@ -3176,8 +3185,38 @@ describe("POST /api/strategies/finalize-wizard — OWN-03 capital-ownership mark
           c.join(" ").includes(STRATEGY_ID),
       ),
     ).toBe(true);
+    // F-3 — the zero-row arm loses the mark just as completely as a transport
+    // error, so it must carry the same user-facing signal.
+    expect((await res.json()).capital_ownership_persisted).toBe(false);
 
     errSpy.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  // F-3 NON-VACUITY CONTROL. The sidecar is emitted ONLY on failure, so every
+  // existing caller's response bytes are unchanged and "the flag is absent"
+  // honestly means "nothing was lost". Without this control the two assertions
+  // above would also pass against a field hardcoded to false.
+  it("omits the capital_ownership_persisted sidecar entirely when the mark LANDS", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        ...VALID_BODY,
+        entry_context: "contribution",
+        capital_ownership: "own_capital",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    // Non-vacuity: the write really happened on this path.
+    expect(markWrite()!.patch).toEqual({ capital_ownership: "own_capital" });
+    expect("capital_ownership_persisted" in body).toBe(false);
+
     fetchSpy.mockRestore();
   });
 });

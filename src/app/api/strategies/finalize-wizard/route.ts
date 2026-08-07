@@ -1340,6 +1340,21 @@ async function runLegacyFinalize(args: {
   // strategies_update RLS policy has no WITH CHECK clause, so the `user_id`
   // filter is the actual thing standing between this patch and another
   // owner's row (T-150-10).
+  // 151 specialist F-3 — the SERVER posture above is sound (never fail the
+  // finalize over metadata), but the RESPONSE was a plain success with no
+  // signal at all: a user who explicitly answered "my own capital" got the
+  // normal success screen while their answer was dropped, and the consequence
+  // (a NULL-marked strategy is non-allocatable, so `Allocate…` never appears
+  // on the Holdings tab) surfaced days later as an unexplained absence. The
+  // documented remedy ("set it from the Mark dialog") is discoverable only by
+  // someone who already knows the mark failed. That is user-visible data loss
+  // reported to the user as success.
+  //
+  // The honest minimum: a NON-ERROR sidecar in the 200 body. It is emitted ONLY
+  // on failure, so every existing caller's response bytes are unchanged and the
+  // never-fail-the-finalize contract is intact — a client that asked for a mark
+  // and sees no flag got one.
+  let capitalOwnershipPersisted = true;
   if (fields.capitalOwnership !== undefined) {
     // @audit-skip: strategy-level metadata written as part of the already-
     // audited finalization (mirrors the asset_class persist above).
@@ -1350,6 +1365,7 @@ async function runLegacyFinalize(args: {
       .eq("user_id", user.id)
       .select("id");
     if (markErr) {
+      capitalOwnershipPersisted = false;
       console.error(
         `[strategies/finalize-wizard] capital_ownership persist failed for ${resolvedId} ` +
           `(non-blocking; mark stays NULL = non-allocatable): ${scrubSeamError(markErr)}`,
@@ -1360,6 +1376,7 @@ async function runLegacyFinalize(args: {
         extra: { strategy_id: resolvedId },
       });
     } else if (Array.isArray(markRows) && markRows.length === 0) {
+      capitalOwnershipPersisted = false;
       // Zero rows with no error means the id+user_id predicate matched
       // nothing. Different story from a transport failure and a louder one:
       // the finalized row is not the caller's, or is already gone.
@@ -1591,6 +1608,12 @@ async function runLegacyFinalize(args: {
       // CONTRIB-02 — return the ACTUAL terminal status the RPC wrote ('private'
       // on the contribution branch, 'pending_review' for the manager flow).
       status: terminalStatus,
+      // 151 specialist F-3 — present ONLY when the caller asked for a capital
+      // mark and it did not land. The finalize still succeeded; this says the
+      // ONE metadata field was dropped, so the strategy is unmarked (therefore
+      // non-allocatable) and the user must set it from the Mark dialog. Absent
+      // ⇒ nothing was lost.
+      ...(capitalOwnershipPersisted ? {} : { capital_ownership_persisted: false }),
     },
     { headers: NO_STORE_HEADERS },
   );
