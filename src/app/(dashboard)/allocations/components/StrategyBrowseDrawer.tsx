@@ -53,6 +53,32 @@ export interface StrategyBrowseRow {
    * provenance tag rendered next to the row name. Optional + absent → no tag.
    */
   is_example?: boolean;
+  /**
+   * Phase 152 (SCEN-02) — viewer-relative ownership bit, computed server-side
+   * from the requesting session (`route.ts:296`) and emitted on EVERY row,
+   * `false` included. `true` means the requesting allocator owns this row, so
+   * the drawer renders the muted "Yours" chip and the composer keeps the bit on
+   * the added strategy. Optional here (not `boolean`) because the field is
+   * absent from the PRE-152 wire shape: absent → UNKNOWN → no chip, never a
+   * fabricated ownership claim. Not a disclosure widening — it describes the
+   * viewer's RELATIONSHIP to a row, never another owner's data.
+   */
+  isOwn?: boolean;
+  /**
+   * Phase 152 (SCEN-05) — OWNER-ONLY creation timestamp (ISO). The route emits
+   * this key only when `isOwn === true`, so it is absent on third-party rows
+   * (a creation date is a correlation vector against the pseudonymised
+   * codename). It feeds the duplicate-disambiguation line; absent → no line.
+   */
+  created_at?: string;
+  /**
+   * Phase 152 (SCEN-05) — OWNER-ONLY raw `strategies.status` enum (`draft` /
+   * `pending_review` / `published` / `archived` / `private`), emitted under the
+   * same `isOwn === true` condition. The client product-cases it for display —
+   * the raw enum never reaches the DOM. Absent → the disambiguation line omits
+   * the status segment rather than claiming a state.
+   */
+  status?: string;
 }
 
 /**
@@ -66,6 +92,14 @@ export interface AddedStrategy {
   name: string;
   markets: string[];
   strategy_types: string[];
+  /**
+   * Phase 152 (SCEN-02) — the ownership bit carried across the drawer seam so
+   * the composer row can render the "Yours" chip on a browse-added strategy.
+   * Optional and pass-through: `true` iff the wire said so, `undefined` when
+   * the wire was silent. `scenario-state.ts` declares the persisted twin as
+   * `z.boolean().nullish()`, so an absent value survives the codec unchanged.
+   */
+  isOwn?: boolean;
 }
 
 export interface StrategyBrowseDrawerProps {
@@ -336,6 +370,13 @@ export function StrategyBrowseDrawer({
       name: s.name,
       markets: s.markets,
       strategy_types: s.strategy_types,
+      // Phase 152 (SCEN-02) — construction site 4-of-4 for an AddedStrategy
+      // payload, and the only one this file's suite can reach: the composer
+      // suite module-mocks this drawer away, so a drop here reddens NO test
+      // over there. Straight pass-through by design — `undefined` stays
+      // `undefined` (never `?? false`, never a default): a fabricated boolean
+      // would render a "Yours" chip, or deny one, on no evidence.
+      isOwn: s.isOwn,
     });
     setRecentlyAdded((prev) => {
       const next = new Set(prev);

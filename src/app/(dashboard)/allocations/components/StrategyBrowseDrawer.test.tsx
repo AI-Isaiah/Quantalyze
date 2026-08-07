@@ -731,3 +731,74 @@ describe("StrategyBrowseDrawer — prominent 'Connect a key' CTA (CONNECT-01)", 
     ).toHaveLength(0);
   });
 });
+
+/**
+ * Phase 152 / SCEN-02 — the ownership bit survives the drawer seam.
+ *
+ * `handleAdd` is the FOURTH construction site of an `AddedStrategy` payload in
+ * this codebase (the other three live in ScenarioComposer). It is the only one
+ * unreachable from `ScenarioComposer.test.tsx`, because that suite module-mocks
+ * this drawer away — so if `isOwn` is dropped here, every composer-side test
+ * still passes and the chip silently never renders for browse-added rows.
+ * These two tests are the only place that can fail.
+ *
+ * The pair is deliberately two-sided: `true` proves the bit is carried, and the
+ * legacy row proves the drawer does NOT invent a boolean when the wire is
+ * silent. A one-sided "carries true" test passes against an implementation that
+ * hardcodes `isOwn: true`.
+ */
+describe("StrategyBrowseDrawer — SCEN-02 isOwn on the onAdd payload (Phase 152)", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("an own row (isOwn: true on the wire) hands onAdd a payload with isOwn === true", async () => {
+    const ownRow: StrategyBrowseRow = {
+      id: "s-own-1",
+      name: "Alpha Centauri",
+      codename: null,
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+      isOwn: true,
+    };
+    const onAdd = vi.fn();
+    renderDrawer({ onAdd, fetchStrategies: async () => [ownRow] });
+    await flush();
+
+    fireEvent.click(screen.getByTestId("browse-add-s-own-1"));
+
+    expect(onAdd).toHaveBeenCalledTimes(1);
+    const payload = onAdd.mock.calls[0][0] as AddedStrategy;
+    // Assert the VALUE, not merely that the payload decodes/matches: an
+    // implementation that omits the key entirely still satisfies a
+    // toMatchObject on the other four fields (152-02's measured vacuity lesson).
+    expect(payload.isOwn).toBe(true);
+    expect(payload).toMatchObject({ id: "s-own-1", name: "Alpha Centauri" });
+  });
+
+  it("a legacy row with no isOwn key hands onAdd isOwn === undefined (never fabricates ownership)", async () => {
+    // The pre-152 wire shape. CONTEXT lock: absence is honest — undefined must
+    // pass through as undefined, never be coerced to false (which would read as
+    // a positive "not yours" claim) and never defaulted to true.
+    const legacyRow: StrategyBrowseRow = {
+      id: "s-legacy-1",
+      name: "Legacy Strat",
+      codename: "LEG-1",
+      markets: ["okx"],
+      strategy_types: ["momentum"],
+    };
+    const onAdd = vi.fn();
+    renderDrawer({ onAdd, fetchStrategies: async () => [legacyRow] });
+    await flush();
+
+    fireEvent.click(screen.getByTestId("browse-add-s-legacy-1"));
+
+    expect(onAdd).toHaveBeenCalledTimes(1);
+    const payload = onAdd.mock.calls[0][0] as AddedStrategy;
+    expect(payload.isOwn).toBeUndefined();
+  });
+});
