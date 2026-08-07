@@ -26,6 +26,12 @@ findings:
   info: 9
   total: 20
 status: issues_found
+fix_pass:
+  fixed_at: 2026-08-07
+  scope: critical + warning (Info deferred to TODOS.md triage)
+  critical_fixed: 3
+  warning_fixed: 8
+  info_fixed: 0
 ---
 
 # Phase 151: Code Review Report
@@ -72,6 +78,17 @@ No `<structural_findings>` block was supplied for this review.
 ## Critical Issues
 
 ### CR-01: Blank-mode commit with a manual AUM is permanently rejected 409 — the phase's headline flow is a dead end
+
+**STATUS: FIXED** — `754a6009`. Closed at BOTH layers: the composer freezes
+`null` when the draft carries no holdings basis (explicit intent at the source),
+and the route normalises an empty `init_holdings_fingerprint` to `null` before
+the RPC (the boundary that owns the RPC contract — this also covers a stale
+client bundle still sending `""`). The precondition is UNWEAKENED for book-mode
+commits: a book-authored draft carries a non-empty fingerprint by construction.
+Regression cover: route-level (an empty fingerprint reaches the RPC as `null`
+and a blank-slate manual-AUM commit 200s for an allocator WITH holdings) +
+composer-level (a force-blanked allocator freezes `null`; a book-mode commit
+still freezes the live fingerprint). Both falsified by mutation.
 
 **File:** `src/app/(dashboard)/allocations/components/ScenarioComposer.tsx:3942`, `src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.tsx:551-561`, `supabase/migrations/20260601120000_commit_scenario_batch_fingerprint_precondition.sql:240-262`
 
@@ -133,6 +150,26 @@ asserts the body carries no `init_holdings_fingerprint`.
 ---
 
 ### CR-02: The split book-entry gate was repointed at only three of six consumers — a saved book scenario reopens BLANK with EMPTY membership
+
+**STATUS: FIXED** — `9e9694e1` (also discharges DEF-151-05-B). All three seams
+repointed onto `bookEntryGateSatisfied` + `contributingApiKeyIds`
+(`targetEntryMode`, `memberKeyIdsForSave`, the reopen membership derive), plus
+the two neighbours the finding flagged: `memberKeyIdsForUpdate`'s
+"unrepresentable" guard moves in lockstep, and `ScenarioComparePanel`'s narrowed
+payload gained both fields (WR-07's second half) so compare and the composer can
+no longer disagree about membership. `liveBaselineMetrics` stays FROZEN on the
+all-or-nothing gate as 151-02/151-05 directed.
+
+**Recorded conflict (Rule 7):** 151-05's acceptance criterion froze the
+MEMBER-04 stamp ("ZERO changes on the MEMBER-04 lines"), and `AUM-04 Test 4`
+pinned `[]` for a partial book. That pin encoded the DEFECT: a book-mode save
+that persists `[]` claims to be blank-authored, and compare's selector
+(`memberKeyIds.length > 0`) then computes it added-only while the composer
+blends it per-key. The test was rewritten to pin the ECONOMIC invariant instead
+— the stamp equals the engine's own observed unit set — with the
+zero-contributing control arm kept. For a pre-split allocator (no manager keys,
+all-or-nothing gate true) the two id sets are identical, so nothing changes for
+the existing population.
 
 **File:** `src/app/(dashboard)/allocations/components/ScenarioComposer.tsx:1701-1710`, `:1735-1738`, `:2024-2027`
 
@@ -198,6 +235,18 @@ freezes membership on every Update.
 
 ### CR-03: A raw Python exception string still reaches the user-visible `sync_error`, contradicting the module's own AUM-02 invariant
 
+**STATUS: FIXED** — `480fd18f`. The ccxt derivative arm now returns
+`DERIVATIVE_FETCH_FAILED_NOTE` (venue named in product casing) and the exception
+text reaches only the log/Sentry chain, with its TYPE in the log line for triage.
+Partial success is preserved (spot rows still persist). The leak test was
+extended in BOTH directions asked for: a behavioural arm drives a ccxt venue
+whose `fetch_positions` raises the PROD defect's own message, and a CLASS-level
+AST gate fails on ANY except-arm in the module that builds a value from the raw
+exception outside of logging — including one written tomorrow. Pre-existing
+`test_partial_success_emits_warnings` had PINNED the leak (`"down" in warning`);
+its oracle was moved to the copy contract, with the partial-success contract
+unchanged.
+
 **File:** `analytics-service/services/allocator_positions.py:856-859` (invariant declared at `:101-116`)
 
 **Issue:**
@@ -245,6 +294,10 @@ Extend `test_user_visible_copy_never_leaks_python_internals` to drive a ccxt ven
 
 ### WR-01: MT5 equity row is written with no non-positive guard — a zero or negative account equity becomes a holding
 
+**STATUS: FIXED** — `7df6a9cc`. `equity <= 0` emits no row (parity with the
+ccxt spot path's `> 0` filter), parametrized over negative AND zero so it is a
+rule rather than a special case, with a smallest-positive control arm.
+
 **File:** `analytics-service/services/allocator_positions.py:540-591`
 
 **Issue:** `equity` is checked for `math.isfinite` only. The ccxt spot path filters
@@ -271,6 +324,11 @@ if equity <= 0:
 ---
 
 ### WR-02: A missing/non-numeric `balance` kills an otherwise-healthy MT5 equity sync
+
+**STATUS: FIXED** — `e9b7f46b`. Fail-loud on `equity` only; `balance` degrades
+to an optional `None` diagnostic in `raw_payload`. Cover: omitted /
+non-numeric / NaN balance still emits the row, a present balance is still
+reported, and a missing EQUITY still raises the transient.
 
 **File:** `analytics-service/services/allocator_positions.py:531-539`
 
@@ -301,6 +359,12 @@ balance = float(raw_balance) if isinstance(raw_balance, (int, float)) else None
 ---
 
 ### WR-03: `SFOX_UNPRICED_ASSETS_NOTE` writes an unbounded, venue-controlled string into a verbatim-rendered column
+
+**STATUS: FIXED** — `ced26f89`. The note names at most six assets and counts
+the rest (`_SFOX_MAX_NAMED_ASSETS`), and the success arm's `_update_ok` now
+caps `sync_error` at `[:500]` like every sibling write arm — so the bound is a
+property of the WRITE SITE, not of whichever producer built the warning. Cover
+includes a worker-level wiring test with an over-long stubbed warning.
 
 **File:** `analytics-service/services/allocator_positions.py:755-760`, `analytics-service/services/job_worker.py:7248-7255`
 
@@ -333,6 +397,14 @@ can bypass it.
 ---
 
 ### WR-04: A bare focus→blur on the Portfolio AUM field silently converts the derived live sum into a persisted manual override
+
+**STATUS: FIXED** — `3b8ad41a`. Unchanged-value guard, compared NUMERICALLY
+(so `"460000.00"` is recognised) then snapped to the canonical text. The
+behavioural oracle is the one that matters: after a bare blur the AUM still
+TRACKS custody across a holdings refresh, no override note appears, and no
+`manual_aum_usd` reaches the drawer (so the idempotency `request_hash` is
+unchanged). Control arm proves a real edit still commits and re-blurring it is
+idempotent.
 
 **File:** `src/app/(dashboard)/allocations/components/ScenarioComposer.tsx:3785-3798`, `:4259-4261`
 
@@ -367,6 +439,13 @@ function commitAumInput(raw: string) {
 ---
 
 ### WR-05: A bare focus→blur on a per-strategy dollar field rewrites the weight vector
+
+**STATUS: FIXED** — `ffddd9d8`. Skips the write when the parsed amount equals
+the DISPLAYED integer. Both consequences are pinned: no `userWeightOverrides`
+stamp on a mixed-book derived-blend row, and no movement of the weight vector at
+a modelling AUM where whole-dollar rounding is lossy ($1,000 over three legs).
+The v1.11 landmine is intact — the real-edit control still routes through the
+one `handleWeightChange` path.
 
 **File:** `src/app/(dashboard)/allocations/components/ScenarioComposer.tsx:5740-5771`, `:5824-5826`
 
@@ -406,6 +485,10 @@ if (isValidDollar(amount)) {
 
 ### WR-06: `manualAumUsd` is invisible to `diffCount` — an AUM-only edit reports "0 changes" and bypasses the dirty-draft guard
 
+**STATUS: FIXED** — `70ac9e5d`. Counted against the default draft. Cover: AUM
+alone counts 1, clearing it returns to 0 (the count tracks the FIELD, not a
+one-way flag), and it composes with a toggle rather than replacing it.
+
 **File:** `src/app/(dashboard)/allocations/hooks/useScenarioState.ts:405-448`
 
 **Issue:** `diffCount` counts toggle deltas, added strategies and `userWeightOverrides`.
@@ -427,6 +510,12 @@ if (draft.manualAumUsd !== defaultDraft.manualAumUsd) count++;
 
 ### WR-07: `memberKeyIdsForSave` stamps the role-BLIND `eligibleApiKeyIds` while the engine now blends `contributingApiKeyIds`
 
+**STATUS: FIXED** — `9e9694e1` (with CR-02). Both halves: the composer stamp
+now names `contributingApiKeyIds`, and `ScenarioComparePanel`'s narrowed payload
+(`AllocationsTabs`) carries `bookEntryGateSatisfied` + `contributingApiKeyIds`,
+so the compare live-book leg and the underived-column derive read the same two
+signals the composer does.
+
 **File:** `src/app/(dashboard)/allocations/components/ScenarioComposer.tsx:2024-2027`
 
 **Issue:** Independent of CR-02, even when `perKeyDailiesGateSatisfied === true` the save
@@ -446,6 +535,20 @@ role-blind set and diverge from the composer.
 ---
 
 ### WR-08: The MT5 kill-switch does NOT gate "before any decrypt / login" on the holdings path
+
+**STATUS: FIXED (remedy 2 of the two offered)** — `d7cbe1f8`. The false claim
+is gone from BOTH sites (holdings arm + the derive arm that carried the same
+wording): the comments now state precisely that the gate stops every terminal
+READ (login / account_info / history_deals_get) but NOT the RPyC transport the
+preflight already opened, and name `_make_exchange_client` as where a true
+pre-connect gate would live.
+
+**Residual, deliberately not built here (for TODOS triage):** gating at the
+construction chokepoint changes the disabled-path SEMANTICS of two job kinds —
+the holdings arm's honest skip (`complete_with_warnings`) and the derive arm's
+permanent-fail `DispatchResult` both currently depend on a session existing. A
+half-built version would trade a documentation inaccuracy for a behavioural
+regression in an incident path.
 
 **File:** `analytics-service/services/allocator_positions.py:429-434`
 
@@ -473,6 +576,9 @@ if exchange_name == "mt5":
 — or correct the comment to say the gate stops the *reads*, not the connection.
 
 ## Info
+
+**STATUS: NOT FIXED — out of scope for this fix pass by instruction.** The nine
+Info findings below are logged for TODOS.md triage by the orchestrator.
 
 ### IN-01: `_mt5_bounded_restart` logs a hardcoded `derive_broker_dailies:` prefix from the holdings path
 
@@ -561,6 +667,7 @@ an explicit `el.value` write, which `commitDollarInput` already performs.
 
 ---
 
+_Fix pass: 2026-08-07 (gsd-code-fixer) — 3 critical + 8 warning findings fixed_
 _Reviewed: 2026-08-07_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_

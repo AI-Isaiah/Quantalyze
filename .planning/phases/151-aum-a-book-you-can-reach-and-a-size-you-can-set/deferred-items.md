@@ -39,7 +39,40 @@ and `npm run lint` are clean; the whole `src/app/(dashboard)/allocations` suite
 
 ---
 
-## DEF-151-05-B — a reopened BOOK draft still lands in BLANK mode under a partial book (owner: phase close / 151-06+)
+## DEF-151-05-B — ✅ RESOLVED at phase close (code-review fix pass, 2026-08-07)
+
+**Closed by:** commit `9e9694e1` — `fix(151): CR-02+WR-07 repoint the reopen/stamp
+seams at the split gate and stamp what the engine blends`.
+
+The code review reached the same seam independently and raised it as BLOCKER
+CR-02, with a wider blast radius than this item recorded: leaving the stamp
+frozen alongside the mode-sync also made a partial-book BOOK save persist
+`memberKeyIds: []` — the schema's meaning for "blank-authored" — which
+`scenario-compare` reads as its per-key selector, so the compare column and the
+composer projected the SAME saved portfolio differently.
+
+What moved (all three seams named below, plus their two neighbours):
+
+* `targetEntryMode` → `bookEntryGateSatisfied` (this item's subject).
+* `memberKeyIdsForSave` → `bookEntryGateSatisfied` + `contributingApiKeyIds`
+  (review WR-07: stamp what the engine BLENDS, not the role-blind eligible set).
+* the reopen `deriveMembershipFromGate` → the same two signals.
+* `memberKeyIdsForUpdate`'s "unrepresentable" guard → `!bookEntryGateSatisfied`,
+  in lockstep with the mode-sync.
+* `ScenarioComparePanel`'s narrowed payload gained both fields so compare and the
+  composer can no longer disagree about membership.
+
+`liveBaselineMetrics` (queries-side) stays FROZEN on the all-or-nothing gate, as
+151-02/151-05 directed: a partial blend must never present as the whole book.
+
+Regression cover: `AUM-04 Test 4` (rewritten — the stamp equals the engine's own
+observed unit set), `Test 4b` (a saved book draft reopens in BOOK mode under a
+partial book) and `Test 4c` (an underived draft derives the contributing keys).
+The analysis this item left for its successor was verified before acting on it.
+
+---
+
+## DEF-151-05-B (original entry) — a reopened BOOK draft still lands in BLANK mode under a partial book
 
 **Found during:** 151-05 Task 2, writing Test 10
 **Status:** presentation-only; the data-integrity half was CLOSED inside 151-05
