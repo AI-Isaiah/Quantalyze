@@ -32,6 +32,7 @@ import {
   type AllocatorMandateForFit,
   type MandateFitTier,
 } from "../lib/mandate-fit";
+import { YoursChip } from "./YoursChip";
 
 export type { AllocatorMandateForFit } from "../lib/mandate-fit";
 
@@ -643,6 +644,26 @@ export function StrategyBrowseDrawer({
                           >
                             Example
                           </span>
+                        )}
+                        {/* Phase 152 (SCEN-02, D-4) — ownership chip on the
+                            viewer's OWN rows. Parity with the composer-row chip
+                            (152-05) via the SAME component: one recipe, two
+                            sites, so ownership can never look like two
+                            different things.
+
+                            It is NOT a substitute for the SCEN-05 dedup line
+                            below — both rows of the founder's duplicate are own
+                            rows, so a chip on each disambiguates nothing.
+
+                            Gate is `=== true`, never `!== false`: on the pre-152
+                            wire shape `isOwn` is absent, and absent means
+                            UNKNOWN, not "not yours". Testid sits outside the
+                            `browse-add-` family (PR #620). */}
+                        {s.isOwn === true && (
+                          <YoursChip
+                            data-testid={`browse-yours-${s.id}`}
+                            className="shrink-0"
+                          />
                         )}
                       </div>
                       <div className="mt-1 text-xs text-text-muted">

@@ -1066,3 +1066,98 @@ describe("StrategyBrowseDrawer — SCEN-05 own-vs-own dedup line (Phase 152)", (
     }
   });
 });
+
+/**
+ * Phase 152 / SCEN-02 (D-4) — the "Yours" chip on own browse rows.
+ *
+ * Parity with the composer row (152-05) through the SAME `YoursChip` component,
+ * not a second recipe — one place to change the anatomy, one place to get it
+ * wrong. The chip is NOT a substitute for the SCEN-05 dedup line: both rows of
+ * the founder's duplicate are own rows, so a chip on each disambiguates nothing.
+ *
+ * The className assertions are LOCKED honesty tokens, not styling trivia. The
+ * `rounded-md` family is the persistent-fact family (Phase-150: identity is
+ * carried by ink, not shape); the uppercase `rounded-sm` family means DERIVED
+ * state that can change on its own, which ownership never does. And the ink is
+ * the muted `bg-badge-other/10` — accent would read as "verified / action",
+ * dressing a mere ownership fact as the mark that unlocks the money action.
+ */
+describe("StrategyBrowseDrawer — SCEN-02 'Yours' chip on own rows (Phase 152, D-4)", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  const OWN_AND_THIRD_PARTY: StrategyBrowseRow[] = [
+    {
+      id: "s-chip-own",
+      name: "My Own Strat",
+      codename: null,
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+      isOwn: true,
+    },
+    {
+      id: "s-chip-tp",
+      name: "Someone Elses Strat",
+      codename: "TP-9",
+      markets: ["okx"],
+      strategy_types: ["momentum"],
+      isOwn: false,
+    },
+  ];
+
+  it("an own row renders the chip with the locked anatomy and muted ink; a third-party row does not", async () => {
+    renderDrawer({ fetchStrategies: async () => OWN_AND_THIRD_PARTY });
+    await flush();
+
+    const chip = screen.getByTestId("browse-yours-s-chip-own");
+    expect(chip.textContent).toBe("Yours");
+    // Persistent-fact badge family.
+    expect(chip.className).toContain("rounded-md");
+    expect(chip.className).toContain("bg-badge-other/10");
+    expect(chip.className).toContain("text-text-muted");
+    // NOT the derived-state family, NOT the accent "verified/action" ink.
+    expect(chip.className).not.toContain("rounded-sm");
+    expect(chip.className).not.toContain("uppercase");
+    expect(chip.className).not.toContain("bg-accent");
+    expect(chip.className).not.toContain("text-accent");
+
+    // Discriminating: gates on isOwn, not on every row.
+    expect(screen.queryByTestId("browse-yours-s-chip-tp")).toBeNull();
+  });
+
+  it("a row with isOwn ABSENT renders no chip — the gate is `=== true`, never `!== false`", async () => {
+    // The pre-152 wire shape. Absence is UNKNOWN, and an unknown ownership
+    // claim rendered as "Yours" is a fabrication; a `!== false` gate would
+    // make exactly that mistake and pass every other test in this block.
+    const legacy: StrategyBrowseRow[] = [
+      {
+        id: "s-chip-legacy",
+        name: "Legacy Strat",
+        codename: "LEG-2",
+        markets: ["okx"],
+        strategy_types: ["momentum"],
+      },
+    ];
+    renderDrawer({ fetchStrategies: async () => legacy });
+    await flush();
+
+    expect(screen.getByText("Legacy Strat")).toBeInTheDocument();
+    expect(screen.queryByTestId("browse-yours-s-chip-legacy")).toBeNull();
+    expect(document.querySelectorAll('[data-testid^="browse-yours-"]')).toHaveLength(0);
+  });
+
+  it("keeps the chip OUT of the browse-add-* automation namespace", async () => {
+    renderDrawer({ fetchStrategies: async () => OWN_AND_THIRD_PARTY });
+    await flush();
+    const chip = screen.getByTestId("browse-yours-s-chip-own");
+    expect(chip.getAttribute("data-testid") ?? "").not.toMatch(/^browse-add-/);
+    // A chip is not an action — the strategy-add selector still resolves only
+    // to the two Add buttons.
+    expect(document.querySelectorAll('[data-testid^="browse-add-"]')).toHaveLength(2);
+  });
+});
