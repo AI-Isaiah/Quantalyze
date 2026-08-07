@@ -240,7 +240,17 @@ Plans:
   3. The founder's own book (~$460k, 8 active keys of which 3 deribit + 3 mt5 carry zero per-key dailies) reaches "From my book" — the gate is no longer all-or-nothing over every eligible key, and MANAGER-side MT5 keys no longer pin the ALLOCATOR's book gate false permanently (cross-role contamination) (AUM-04).
   4. The AUM-zero refusal copy names only affordances that actually exist — never the deliberately-never-built live-holding toggle (AUM-03).
 
-**Plans**: TBD
+**Plans**: 7 plans
+
+Plans:
+- [ ] 151-01-PLAN.md — Extract MT5 terminal-concurrency machinery into services/mt5_concurrency.py (leaf; the ONE lock registry)
+- [ ] 151-02-PLAN.md — Split the book gate SSR-side: deriveStrategyLinkedKeyIds + 3 additive payload fields on both branches
+- [ ] 151-03-PLAN.md — Non-ccxt venue dispatch + MT5 account-equity branch (kill switch, shared lock, honest skips, transient human copy)
+- [ ] 151-04-PLAN.md — sFOX branch + parametrized class-closure proof (mt5+sfox+unknown) + non-collapse oracle
+- [ ] 151-05-PLAN.md — Composer gate repoint: partial book reaches "From my book"; contributing-only rows + partial-book note
+- [ ] 151-06-PLAN.md — manualAumUsd draft field + Portfolio AUM input + AUM-03 refusal copy
+- [ ] 151-07-PLAN.md — Per-strategy dollar input via handleWeightChange + manual_aum_usd commit persistence (client_manual_aum sentinel)
+
 **UI hint**: yes
 **Notes (binding traps)**:
 
@@ -324,7 +334,7 @@ Plans:
 | 148. OWN owner factsheet | 5/5 | Complete   | 2026-08-05 |
 | 149. NAV my-strategies ranking | 5/5 | Complete   | 2026-08-05 |
 | 150. OWN-03 portfolio question | 8/8 | Complete    | 2026-08-07 |
-| 151. AUM book + sizing | 0/? | Not started | - |
+| 151. AUM book + sizing | 0/7 | Not started | - |
 | 152. SCEN composer legibility | 0/? | Not started | - |
 | 153. WIZFORM + MT5-14 | 0/? | Not started | - |
 | 154. WIZCONT + STALE | 0/? | Not started | - |
