@@ -151,6 +151,10 @@ None. No new network endpoint, auth path, file access pattern, or schema change.
 | 1 | `a85a1100` | `refactor(151-01)`: extract the registry into the leaf; repoint stale pointers |
 | 2 | `adcea6af` | `test(151-01)`: pin the ONE registry by object identity |
 
+## Self-Check: PASSED
+
+All three created files exist on disk; all three commits (`a85a1100`, `adcea6af`, `ce3ba0a8`) present in `git log`; working tree clean.
+
 ## Notes for Plan 151-03
 
 Import the registry as `from services.mt5_concurrency import _mt5_terminal_lock_for` inside `allocator_positions.py`. Do **not** re-declare a terminal-lock dict there — `test_registry_object_is_shared_across_modules` only pins job_worker↔leaf identity, so a third registry in `allocator_positions` would not be caught by it. Consider extending that test with an `allocator_positions` arm when 151-03 lands.
