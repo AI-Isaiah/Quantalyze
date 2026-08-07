@@ -29,7 +29,10 @@ from unittest.mock import MagicMock
 import pytest
 
 import services.job_worker as jw
-from services.allocator_positions import fetch_allocator_holdings
+from services.allocator_positions import (
+    UNSUPPORTED_VENUE_NOTE,
+    fetch_allocator_holdings,
+)
 from services.job_worker import DispatchOutcome
 from services.mt5_client import Mt5Client, Mt5Session
 
@@ -112,23 +115,26 @@ def _session(transport: _FakeMt5Transport) -> Mt5Session:
 
 
 # ---------------------------------------------------------------------------
-# 1 — fetch_allocator_holdings: mt5 is an EXPLICIT no-op, never AttributeError
+# 1 — fetch_allocator_holdings: mt5 dispatches away from ccxt, never crashes
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_fetch_allocator_holdings_mt5_session_explicit_noop():
-    """Pre-fix: AttributeError "'Mt5Session' object has no attribute
+async def test_fetch_allocator_holdings_mt5_session_never_reaches_ccxt_body():
+    """Pre-hotfix: AttributeError "'Mt5Session' object has no attribute
     'fetch_balance'" from _fetch_spot_rows — the exact PROD sync_error.
-    Post-fix: explicit ([], None) no-op with ZERO terminal IPC (the holdings
-    poll must never open a live RPyC read outside the derive path's lock
-    discipline)."""
+
+    The hotfix returned a silent ([], None) no-op. Phase 151 (AUM-02) replaced
+    that with venue dispatch: mt5 is a NON_CCXT_VENUES member, so it can never
+    reach the ccxt body, and until its fetcher is registered it skips with
+    END-USER copy instead of pretending to have synced. Zero terminal IPC
+    either way — nothing here opens an RPyC read."""
     transport = _FakeMt5Transport(account=_account())
 
     rows, warning = await fetch_allocator_holdings("mt5", _session(transport))
 
     assert rows == []
-    assert warning is None
+    assert warning == UNSUPPORTED_VENUE_NOTE.format(venue="MT5")
     assert transport.calls == [], (
-        "mt5 holdings no-op must not perform any terminal IPC; "
+        "the mt5 holdings skip must not perform any terminal IPC; "
         f"observed {transport.calls}"
     )
 
@@ -140,9 +146,14 @@ async def test_fetch_allocator_holdings_mt5_session_explicit_noop():
 async def test_run_poll_allocator_positions_job_mt5_reaches_complete(
     monkeypatch, api_key_row_factory
 ):
-    """The daily fan-out handler must complete for a healthy MT5 key:
-    sync_status='complete' + last_sync_at stamped — never the pre-fix
-    sync_status='error' with the fetch_balance AttributeError."""
+    """The daily fan-out handler must reach a SUCCESS status for a healthy MT5
+    key — never the pre-hotfix sync_status='error' with the fetch_balance
+    AttributeError.
+
+    Phase 151 (AUM-02) sharpened the success shape: an honest skip rides the
+    EXISTING warning channel, so the handler stamps
+    sync_status='complete_with_warnings' + last_sync_at with end-user copy in
+    sync_error (rendered verbatim under the amber "Synced (warnings)" pill)."""
     from services import audit as audit_module
 
     key_row = api_key_row_factory(
@@ -195,8 +206,8 @@ async def test_run_poll_allocator_positions_job_mt5_reaches_complete(
     api_key_updates = [p for (name, p) in updates if name == "api_keys"]
     assert api_key_updates, "expected an api_keys status update"
     final = api_key_updates[-1]
-    assert final["sync_status"] == "complete"
-    assert final.get("sync_error") is None
+    assert final["sync_status"] == "complete_with_warnings"
+    assert final.get("sync_error") == UNSUPPORTED_VENUE_NOTE.format(venue="MT5")
     assert final.get("last_sync_at"), "last_sync_at must be stamped on success"
 
 

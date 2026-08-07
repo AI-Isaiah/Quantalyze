@@ -31,16 +31,22 @@ Key design decisions (from plan 06-02 + VOICES-ACCEPTED.md):
 * Exception → sync_status mapping lives HERE (not in job_worker.py) so the
   handler's error-UX logic is co-located with the worker concern it serves
   and can be unit-tested without importing the whole job_worker stack.
+
+* Venue-capability dispatch (Phase 151 / AUM-02): ``fetch_allocator_holdings``
+  branches on the venue STRING before any fetch, mirroring the construction
+  chokepoint ``job_worker._make_exchange_client``. See that function's docstring
+  for why the decision is made on the venue name and never on ``hasattr`` /
+  ``isinstance``.
 """
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import ccxt.async_support as ccxt
 from supabase import Client
 
-from services.closed_sets import STABLECOINS
+from services.closed_sets import NON_CCXT_VENUES, STABLECOINS
 from services.db import db_execute
 from services.positions import fetch_positions
 
@@ -52,6 +58,70 @@ from services.positions import fetch_positions
 # a $1-pegged stablecoin, so marking it at 1.0 is strictly more correct than
 # fetching an FDUSD/USDT ticker.
 RAW_PAYLOAD_CAP_BYTES: int = 4096  # D-02 / ~4KB JSONB cap
+
+
+# ---------------------------------------------------------------------------
+# AUM-02 — worker-written sync_error copy is END-USER copy.
+#
+# Anything this module returns as a ``warning`` (or carries in an
+# AllocatorHoldingsSyncTransientError) lands in ``api_keys.sync_error`` and is
+# rendered VERBATIM in the browser by AllocatorSyncStatus — there is no
+# frontend translation layer. So these strings follow the 151-UI-SPEC copy
+# class: ONE sentence, "{what happened} — {what happens next or what to do}",
+# joined by a U+2014 em dash, no jargon, and NEVER a Python type/method name or
+# a raw exception string. The PROD defect this replaces was literally
+# "'Mt5Session' object has no attribute 'fetch_balance'" shown to a user.
+#
+# Venue names render in product casing via _venue_display below. There is
+# deliberately NO shared Python EXCHANGE_DISPLAY map to import (151-PATTERNS
+# Correction 2 — the TS one has no Python counterpart, and inventing an
+# exported one here would be a second source of truth for venue labels).
+# ---------------------------------------------------------------------------
+UNSUPPORTED_VENUE_NOTE = (
+    "Holdings sync isn't supported for {venue} yet — this key was skipped."
+)
+MT5_NON_USD_NOTE = (
+    "MT5 account currency is {ccy} — USD conversion isn't supported yet, so "
+    "this account was skipped."
+)
+MT5_UNREACHABLE_NOTE = "MT5 terminal unreachable — sync will retry automatically."
+MT5_MISSING_ACCOUNT_REF_NOTE = (
+    "MT5 holdings sync couldn't identify this account — sync will retry "
+    "automatically."
+)
+
+# Product casing for the two venues this module names in copy. Kept LOCAL and
+# private (see the note above): a two-entry display helper, not a registry.
+_VENUE_DISPLAY: dict[str, str] = {"mt5": "MT5", "sfox": "sFOX"}
+
+
+def _venue_display(venue: str) -> str:
+    """Render a venue code in product casing for END-USER copy.
+
+    Falls back to title case for a venue with no registered label, so a future
+    venue still produces readable copy ("testvenue" → "Testvenue") rather than
+    a raw lowercase code.
+    """
+    return _VENUE_DISPLAY.get(venue, venue.title())
+
+
+class AllocatorHoldingsSyncTransientError(Exception):
+    """A genuine, RETRY-WORTHY venue transport failure during a holdings fetch.
+
+    ``str(self)`` IS end-user copy: the job_worker handler has a DEDICATED
+    ``except`` arm for this type that stamps the message verbatim into
+    ``api_keys.sync_error`` with ``sync_status='error'`` and
+    ``error_kind='transient'`` (so the job retries via the DB backoff).
+
+    It exists so a venue-specific exception (``Mt5ClientError``,
+    ``Mt5AccountMismatchError``, a future ``SfoxApiError``) can be converted to
+    human copy INSIDE its venue branch and can never reach the handler's generic
+    ``except Exception`` arm, whose ``classify_exception`` fall-through stamps
+    ``str(exc)`` — the exact arm that put a raw Python AttributeError in front of
+    three founder accounts (AUM-02).
+
+    Callers MUST pass a fixed copy constant, never an interpolated exception.
+    """
 
 
 def _extract_bybit_unified_walletbalances(info: dict[str, Any]) -> dict[str, float]:
@@ -265,43 +335,77 @@ async def _fetch_derivative_rows(exchange_name: str, exchange: Any) -> list[dict
     return rows
 
 
+# The signature every non-ccxt holdings fetcher implements. It mirrors
+# fetch_allocator_holdings' own contract — ``(rows, warning)`` — so a venue
+# branch can emit rows, an honest skip, or (by raising
+# AllocatorHoldingsSyncTransientError) a human-copy retry.
+_NonCcxtHoldingsFetcher = Callable[
+    [str, Any, str | None], Awaitable[tuple[list[dict[str, Any]], str | None]]
+]
+
+# AUM-02 — the venue → holdings-fetcher table. Keyed on the venue STRING,
+# mirroring job_worker._make_exchange_client (the construction chokepoint this
+# is the consumer half of). A venue in NON_CCXT_VENUES but absent HERE is an
+# honest SKIP, never a crash — that gap is the whole class fix. Plan 151-04
+# registers "sfox".
+_NON_CCXT_HOLDINGS_FETCHERS: dict[str, _NonCcxtHoldingsFetcher] = {}
+
+
 async def fetch_allocator_holdings(
-    exchange_name: str, exchange: Any
+    exchange_name: str, exchange: Any, api_key_id: str | None = None
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """D-01: fetch BOTH spot and derivatives in a single sync.
+    """D-01 + AUM-02: the ONE holdings chokepoint — dispatch, then fetch.
 
-    Returns ``(rows, warning)`` where ``warning`` is None on full success
-    and a sanitized string when the derivative side failed with a
-    non-auth / non-rate-limit exception but spot succeeded (partial
-    success → the handler writes sync_status='complete_with_warnings').
+    The sfox-vs-mt5-vs-ccxt HOLDINGS decision lives in exactly ONE place: here.
+    (Its construction counterpart is ``job_worker._make_exchange_client``; the
+    two must stay in lockstep via ``closed_sets.NON_CCXT_VENUES``.) Dispatch is
+    on the venue STRING — never ``isinstance``/``hasattr``, because a duck-typed
+    probe silently re-opens this bug class the moment a future client grows a
+    same-named method with different semantics, and because the venue name is
+    already in hand at the only call site (``ctx.key_row["exchange"]``).
 
-    On auth / rate-limit failures the method re-raises so the handler can map
+    ``api_key_id`` is threaded through for account-level venues, whose row needs
+    an account-scoped ``symbol`` token: ``allocator_holdings`` is UNIQUE on
+    (allocator_id, venue, symbol, asof) with NO api_key_id in the key, so two
+    accounts on one venue writing the same symbol would upsert over each other
+    and AUM would silently reflect one of them.
+
+    Returns ``(rows, warning)`` where ``warning`` is None on full success and a
+    string otherwise. The handler maps a non-None warning to
+    sync_status='complete_with_warnings' and writes it to
+    ``api_keys.sync_error`` — which the UI renders VERBATIM, so every warning
+    this function returns must be end-user copy.
+
+    On auth / rate-limit failures the ccxt path re-raises so the handler can map
     to sync_status ('revoked' / 'rate_limited' / 'error') per D-07. Deribit
     completes normally: spot returns [] (deferred) and derivatives render
     (Phase 71).
     """
-    # MT5SYNC-01 (hotfix 2026-08-06): mt5 is a non-ccxt venue — the worker's
-    # _make_exchange_client chokepoint hands this function an Mt5Session
-    # (login/investor_password/server + a blocking RPyC Mt5Client; NO
-    # fetch_balance/fetch_positions surface). v1.15 isinstance-routed the
-    # DERIVE branch only, so the daily poll_allocator_positions fan-out
-    # crashed here at _fetch_spot_rows' fetch_balance with AttributeError
-    # "'Mt5Session' object has no attribute 'fetch_balance'" and the
-    # handler's generic except stamped every MT5 key sync_status='error'
-    # (PROD census 2026-08-05, all 3 founder keys). Holdings ingestion has
-    # NO meaningful MT5 analog today: the read-only gateway client exposes
-    # login/account_info/history_deals_get only (no open-positions read),
-    # and MT5 account equity is already read + persisted by
-    # run_derive_broker_dailies_job's mt5 arm (combine_mt5_deal_ledger)
-    # under the Phase-137 per-terminal lock — a live read HERE would sit
-    # outside that lock discipline. EXPLICIT no-op: zero rows, no warning,
-    # so the handler completes and stamps sync_status='complete' +
-    # last_sync_at. Lazy import mirrors exchange.aclose_exchange's
-    # isinstance chokepoint (keeps this module import-light).
-    from services.mt5_client import Mt5Session
-
-    if isinstance(exchange, Mt5Session):
-        return ([], None)
+    # ── AUM-02 venue dispatch (supersedes the MT5SYNC-01 hotfix no-op) ───────
+    # MT5SYNC-01 (hotfix PR #667, 2026-08-06) stopgapped the PROD crash with an
+    # isinstance(Mt5Session) no-op returning ([], None), on the reasoning that
+    # holdings ingestion had no MT5 analog and that a live read here would sit
+    # outside the derive path's lock discipline. Phase 151 supersedes BOTH
+    # premises: there IS an analog (account_info().equity is exactly the
+    # account-level USD anchor an allocator's book needs — and without it three
+    # funded MT5 accounts contribute ZERO to AUM), and the terminal lock is now
+    # importable from the leaf ``services.mt5_concurrency`` (plan 151-01), so a
+    # holdings read shares the ONE registry the derive job serializes on. The
+    # hotfix's real achievement — never let a raw AttributeError reach
+    # sync_error — is preserved and generalized here: an unregistered non-ccxt
+    # venue skips with END-USER copy instead of no-op-completing silently.
+    fetcher = _NON_CCXT_HOLDINGS_FETCHERS.get(exchange_name)
+    if fetcher is not None:
+        return await fetcher(exchange_name, exchange, api_key_id)
+    if exchange_name in NON_CCXT_VENUES:
+        # Buildable by _make_exchange_client, but no holdings fetcher yet: skip
+        # HONESTLY through the existing warning channel (zero new plumbing —
+        # the handler already maps a warning to complete_with_warnings). NOTE:
+        # a skip still reaches DONE, so `stamp_first_sync_success` fires for a
+        # key that synced nothing. Conscious, accepted call: that RPC only gates
+        # a one-shot PostHog onboarding event, and treating an honest skip as a
+        # failure would be worse UX than a slightly early onboarding ping.
+        return ([], UNSUPPORTED_VENUE_NOTE.format(venue=_venue_display(exchange_name)))
 
     spot_rows: list[dict[str, Any]] = []
     deriv_rows: list[dict[str, Any]] = []

@@ -7099,6 +7099,7 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
     through without touching api_keys (the job stays queued).
     """
     from services.allocator_positions import (
+        AllocatorHoldingsSyncTransientError,
         fetch_allocator_holdings,
         persist_allocator_holdings,
         _map_exception_to_sync_status,
@@ -7117,7 +7118,9 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
 
     try:
         try:
-            rows, warning = await fetch_allocator_holdings(venue, ctx.exchange)
+            rows, warning = await fetch_allocator_holdings(
+                venue, ctx.exchange, api_key_id=api_key_id
+            )
         except ccxt.RateLimitExceeded as exc:
             await _stamp_429(ctx.supabase, ctx.key_row, exc)
             error_kind, msg = classify_exception(exc)
@@ -7152,6 +7155,44 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
                 outcome=DispatchOutcome.FAILED,
                 error_message=sanitized,
                 error_kind=error_kind,
+            )
+        except AllocatorHoldingsSyncTransientError as exc:
+            # AUM-02 — THE arm that keeps raw Python out of a user-visible
+            # column. It MUST precede the generic `except Exception` below:
+            # that arm's classify_exception fall-through returns str(exc), and
+            # it is exactly where the PROD AttributeError
+            # ("'Mt5Session' object has no attribute 'fetch_balance'") got
+            # stamped onto all three founder MT5 keys. A non-ccxt venue branch
+            # converts its venue-specific exception to END-USER copy and raises
+            # this type; str(exc) IS that copy, so we stamp it verbatim.
+            # Classified TRANSIENT (never 'permanent'): an unreachable terminal
+            # or a blipping broker API self-heals, so the DB backoff must retry
+            # rather than burn the key to a permanent error state.
+            # The [:500] cap mirrors the sibling arms (copy is far shorter).
+            human_copy = str(exc)[:500]
+
+            def _update_transient() -> None:
+                # Return value discarded by the caller (see _update_err).
+                ctx.supabase.table("api_keys").update(
+                    {"sync_status": "error", "sync_error": human_copy}
+                ).eq("id", api_key_id).execute()
+
+            try:
+                await db_execute(_update_transient)
+            except Exception as upd_exc:  # noqa: BLE001
+                logger.warning(
+                    "poll_allocator_positions: failed to stamp sync_status='error' "
+                    "for api_key %s: %s",
+                    api_key_id, upd_exc,
+                )
+            _emit_audit(
+                allocator_id, api_key_id, "allocator.holdings.sync_failed",
+                {"error_kind": "transient", "sanitized_message": human_copy},
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=human_copy,
+                error_kind="transient",
             )
         except Exception as exc:  # noqa: BLE001
             error_kind, msg = classify_exception(exc)
