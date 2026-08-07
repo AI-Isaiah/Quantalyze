@@ -6191,9 +6191,88 @@ function CompositionList({
           );
         })}
         {draft.addedStrategies.length > 0 && (
-          <li className="mt-2 px-1 text-xs uppercase tracking-wider text-text-muted">
-            Strategies added · {draft.addedStrategies.length}
-          </li>
+          <>
+            <li className="mt-2 px-1 text-xs uppercase tracking-wider text-text-muted">
+              Strategies added · {draft.addedStrategies.length}
+            </li>
+            {/* Phase 152 SCEN-04 — the column-label strip. The founder's
+                verbatim complaint was "What do the numbers actually mean?": the
+                added row is five unlabelled numeric columns. ONE strip labels
+                the group it aligns with (152-UI-SPEC Contract 3) — per-key rows
+                deliberately get none, because post-151 they have neither a
+                dollar input nor a remove button and a shared header would drift
+                ~104px off their columns.
+
+                aria-hidden: presentational only. Every control below already
+                carries its own accessible name (sr-only <label> / aria-label),
+                so announcing the eyebrow strip would double-label the whole
+                group rather than add information.
+
+                Pitfall 3 (accepted limitation, UI-SPEC Contract 3): the strip is
+                sized for the DEFAULT Leverage mode. A row switched to Target
+                max-DD injects an extra w-16 drawdown sub-control and drifts the
+                labels on THAT row only — do not "fix" this per-row; a
+                conditional header would relabel columns as the user toggles. */}
+            <li
+              aria-hidden="true"
+              data-testid="scenario-added-header"
+              // Reproduces the row's horizontal inset (rows are `p-3 border`, so
+              // 12px padding + 1px border) without drawing a rule — vertical
+              // spacing comes from the ul's gap-2 plus mb-1.
+              className="mb-1 border border-transparent px-3"
+            >
+              <div className="flex w-full items-center justify-between gap-3">
+                {/* Spacer over the name cluster — the labels describe the
+                    numeric columns only. */}
+                <span />
+                <div className="flex items-center gap-2 font-mono text-fixed-10 uppercase tracking-[0.18em] text-text-muted">
+                  <span
+                    data-testid="scenario-added-header-label"
+                    className="w-20 text-right"
+                  >
+                    WEIGHT
+                  </span>
+                  <span
+                    data-testid="scenario-added-header-label"
+                    className="w-24 text-right"
+                  >
+                    USD
+                  </span>
+                  {/* MODE has no fixed width — the toggle is content-sized. The
+                      invisible-sizer idiom reproduces the DEFAULT toggle's box
+                      byte-for-byte (renderModeToggle's border/padding/type
+                      classes around an invisible "Leverage") and overlays the
+                      label, so the column cannot drift from the live control. */}
+                  <span className="relative shrink-0 rounded border border-transparent px-2 py-1 font-metric text-fixed-11 uppercase tracking-wider">
+                    <span className="invisible">Leverage</span>
+                    <span
+                      data-testid="scenario-added-header-label"
+                      className="absolute inset-0 flex items-center justify-center font-mono text-fixed-10 uppercase tracking-[0.18em] text-text-muted"
+                    >
+                      MODE
+                    </span>
+                  </span>
+                  <span
+                    data-testid="scenario-added-header-label"
+                    className="w-16 text-right"
+                  >
+                    LEV
+                  </span>
+                  <span
+                    data-testid="scenario-added-header-label"
+                    className="w-20 text-right"
+                  >
+                    NOTIONAL
+                  </span>
+                  {/* Trailing spacer sized like the remove (×) button so every
+                      label stays over its own column. */}
+                  <span className="invisible rounded-md border border-transparent px-2 py-1 text-xs">
+                    ×
+                  </span>
+                </div>
+              </div>
+            </li>
+          </>
         )}
         {draft.addedStrategies.map((a) => {
           const enabled = draft.toggleByScopeRef[a.id] !== false;

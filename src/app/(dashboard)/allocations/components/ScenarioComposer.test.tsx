@@ -12232,3 +12232,173 @@ describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
     expect(drawerManualAum()).toBe(2_000_000);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 152 / SCEN-04 — "What do the numbers actually mean?" (founder verbatim).
+//
+// The composer's added-strategy row is five unlabelled numeric columns. This
+// block pins ONE aria-hidden mono-eyebrow header strip above the ADDED group,
+// labelling those columns: WEIGHT · USD · MODE · LEV · NOTIONAL (UI-SPEC's
+// correction of CONTEXT's four labels — Phase 151 shipped a per-row USD input
+// BETWEEN weight and mode, so a four-label header would silently label the
+// dollar column as part of WEIGHT).
+//
+// The strip carries no data and adds no affordance, so every assertion below is
+// a RENDER RULE (renders iff ≥1 added row, exactly once, in the right sibling
+// slot) or exact COPY — never a visual property, which no jsdom test can honour.
+// The aria-hidden assertion is load-bearing rather than cosmetic: every control
+// in the row already carries its own sr-only label / aria-label, so an
+// announced eyebrow strip would double-label the whole group.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — SCEN-04 header (Phase 152)", () => {
+  const S_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-05-${String(i + 1).padStart(2, "0")}`,
+  );
+  const S_KEY_SERIES = S_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const S_STRAT_SERIES = S_DATES.map((date, i) => ({
+    date,
+    value: [0.01, -0.008, 0.012][i % 3],
+  }));
+
+  const S_A = "scen04-strat-a";
+  const S_B = "scen04-strat-b";
+  const S_K1 = "scen04-key-1";
+
+  /** A LIVE per-key book (so per-key constituent rows genuinely render) plus two
+   *  catalogued strategies available to add. The book matters: the zero-added
+   *  case must prove the header is absent while OTHER rows are on screen — an
+   *  empty list would make that assertion vacuous. */
+  function bookedPayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      ...perKeyBook([{ id: S_K1, returns: S_KEY_SERIES, valueUsd: 60_000 }]),
+      apiKeys: [winApiKey(S_K1)],
+      strategies: [
+        catalogStrategy(S_A, "Scen04 Strat A", S_STRAT_SERIES),
+        catalogStrategy(S_B, "Scen04 Strat B", S_STRAT_SERIES),
+      ],
+    });
+  }
+
+  function renderScen(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  function add(id: string, name: string) {
+    addStrategy({
+      id,
+      name,
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+  }
+
+  // Re-install the CAPTURING browse-drawer mock (every top-level describe owns
+  // its own — the file-level `vi.clearAllMocks()` wipes the implementation, and
+  // without it `addStrategy` has no captured `onAdd` to call).
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  it("SCEN-04 header (render rule, absent): zero added strategies renders NO header — even while per-key rows are on screen", () => {
+    renderScen(bookedPayload());
+
+    // Non-vacuity: the list really is rendering rows, just not added ones.
+    expect(
+      document.querySelectorAll('[data-testid="scenario-constituent-added"]'),
+    ).toHaveLength(0);
+    expect(
+      document.querySelectorAll(`[data-scope-ref="${S_K1}"]`).length,
+    ).toBeGreaterThan(0);
+
+    expect(screen.queryByTestId("scenario-added-header")).toBeNull();
+    // The separator the header shares a guard with is absent too — the two
+    // render together or not at all.
+    expect(screen.queryByText(/Strategies added ·/)).toBeNull();
+  });
+
+  it("SCEN-04 header (render rule, exactly once): two added strategies still render a SINGLE header, never one per row", () => {
+    renderScen(bookedPayload());
+    add(S_A, "Scen04 Strat A");
+    add(S_B, "Scen04 Strat B");
+
+    // Non-vacuity: two added rows are genuinely on screen.
+    expect(
+      screen.getAllByTestId("scenario-constituent-added"),
+    ).toHaveLength(2);
+    expect(screen.getAllByTestId("scenario-added-header")).toHaveLength(1);
+  });
+
+  it("SCEN-04 header (a11y): the strip is aria-hidden so it never double-labels controls that already name themselves", () => {
+    renderScen(bookedPayload());
+    add(S_A, "Scen04 Strat A");
+
+    const header = screen.getByTestId("scenario-added-header");
+    expect(header.getAttribute("aria-hidden")).toBe("true");
+    // The labels are consequently unreachable through the accessible tree:
+    // "WEIGHT" as an accessible name belongs to nothing.
+    expect(screen.queryByLabelText("WEIGHT")).toBeNull();
+  });
+
+  it("SCEN-04 header (copy): exactly five labels — WEIGHT, USD, MODE, LEV, NOTIONAL — in DOM order, with no separator glyphs", () => {
+    renderScen(bookedPayload());
+    add(S_A, "Scen04 Strat A");
+
+    const header = screen.getByTestId("scenario-added-header");
+    const labels = within(header)
+      .getAllByTestId("scenario-added-header-label")
+      .map((el) => el.textContent);
+    expect(labels).toEqual(["WEIGHT", "USD", "MODE", "LEV", "NOTIONAL"]);
+    // Column alignment carries the separation (UI-SPEC Contract 3) — an
+    // interpunct between labels would be a second, competing separator.
+    expect(labels.join("")).not.toContain("·");
+  });
+
+  it("SCEN-04 header (placement): the strip sits AFTER the 'Strategies added ·' separator and BEFORE the first added row", () => {
+    renderScen(bookedPayload());
+    add(S_A, "Scen04 Strat A");
+
+    const header = screen.getByTestId("scenario-added-header");
+    const separator = header.previousElementSibling;
+    const firstRow = header.nextElementSibling;
+
+    expect(separator?.textContent).toContain("Strategies added ·");
+    expect(firstRow?.getAttribute("data-testid")).toBe(
+      "scenario-constituent-added",
+    );
+    // Belt-and-braces on the ordering, independent of sibling walking.
+    expect(
+      separator!.compareDocumentPosition(header) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      header.compareDocumentPosition(firstRow!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+});
