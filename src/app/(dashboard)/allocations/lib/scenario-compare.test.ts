@@ -763,6 +763,51 @@ describe("MEMBER-02 membership selector (F5 closure)", () => {
     expect(m.member_ids).toEqual(["key-A"]);
   });
 
+  // -----------------------------------------------------------------------
+  // SP-W2 (151 specialist) — the compute-time intersection must use the
+  // ROLE-AWARE contributing set, not the role-blind eligible set.
+  //
+  // WR-07 repointed the two membership DERIVATIONS onto contributingApiKeyIds
+  // but left this intersection on eligibleApiKeyIds. The population it bites:
+  // an owner-MANAGER whose keys all carry a per-key series (so the pre-151
+  // all-or-nothing gate was TRUE) and who saved a book scenario before the
+  // phase — its persisted memberKeyIds is the whole role-blind eligible set,
+  // manager keys included. Post-151 the composer reopens it blending only the
+  // contributing keys while this panel, on the SAME screen, blends the manager
+  // keys too: two projections of one portfolio.
+  //
+  // Here "key-B" stands for the MANAGER-side key (eligible, has a series, but
+  // feeds a live strategy → excluded from the allocator's own book).
+  // -----------------------------------------------------------------------
+  it("SP-W2: a pre-151 saved draft whose membership includes a MANAGER-side key blends only the CONTRIBUTING keys", () => {
+    const m = computeMetricsForDraft(
+      // The persisted membership a pre-split save produced: the whole
+      // role-blind eligible set.
+      draft({ memberKeyIds: ["key-A", "key-B"] }),
+      {
+        ...perKeyInputs(["key-A", "key-B"]),
+        // The role-aware basis: "key-B" is manager-side, so the composer's
+        // engine does not blend it.
+        contributingApiKeyIds: ["key-A"],
+      },
+    );
+    // Compare now names the SAME constituent set the composer projects.
+    expect(m.member_count).toBe(1);
+    expect(m.member_ids).toEqual(["key-A"]);
+    // Non-vacuous: the surviving allocator key really computed.
+    expect(m.twr).not.toBeNull();
+  });
+
+  it("SP-W2 control: a caller that supplies NO contributing set keeps the role-blind eligible behaviour (back-compat)", () => {
+    const m = computeMetricsForDraft(
+      draft({ memberKeyIds: ["key-A", "key-B"] }),
+      // contributingApiKeyIds ABSENT — the narrow-payload / pre-split caller.
+      perKeyInputs(["key-A", "key-B"]),
+    );
+    expect(m.member_count).toBe(2);
+    expect(m.member_ids).toEqual(expect.arrayContaining(["key-A", "key-B"]));
+  });
+
   it("golden: the Atlas-class book-only 40-day blend is preserved for an upgraded/derived-membership column", () => {
     // The upgraded-book column the panel models by deriving membership = all
     // eligible ids. Its RETURN-space metrics (twr, member set, bounds) must equal

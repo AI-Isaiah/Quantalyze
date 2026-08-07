@@ -229,6 +229,11 @@ function deriveCompareInputs(
     addedStrategyMetadataLookup,
     perKeyReturnsByApiKeyId: payload.perKeyReturnsByApiKeyId,
     eligibleApiKeyIds: payload.eligibleApiKeyIds,
+    // SP-W2 — the ROLE-AWARE basis the compute-time membership intersection
+    // uses, so a saved draft's persisted members are narrowed to what the
+    // composer's engine actually blends. Without it a pre-151 book draft made
+    // this panel blend the owner's manager-side keys the composer excludes.
+    contributingApiKeyIds: payload.contributingApiKeyIds,
     equityByApiKeyId,
     perKeyDailiesGateSatisfied: payload.perKeyDailiesGateSatisfied,
   };
