@@ -17,7 +17,34 @@ findings:
   info: 7
   total: 14
 status: issues_found
+fixed_at: 2026-08-07
+fix_scope: critical_warning
+fixed: 7
+skipped: 0
+info_deferred: 7
 ---
+
+> **Fix pass 2026-08-07.** All 7 in-scope findings (CR-01 + WR-01..WR-06) are
+> FIXED, each in its own commit with a regression test verified RED against the
+> pre-fix code. Info findings (IN-01..IN-07) were deliberately NOT fixed — they
+> are logged for TODOS.md triage per the project's stopping rule (reviews block
+> only on user-facing or data-integrity impact). Per-finding status is recorded
+> inline below.
+>
+> Gates after the pass: `npm run typecheck` clean; `npm run lint` clean (the one
+> remaining warning is pre-existing, in the untouched `EquityChart.tsx`); full
+> vitest 11,231 passed / 0 failed; coverage 85.99 / 80.44 / 82.76 / 88.05
+> against the 82 / 80 / 74 / 72 gate.
+>
+> | Finding | Status | Commit |
+> |---------|--------|--------|
+> | CR-01 | fixed | `6a42f994` |
+> | WR-01 | fixed | `1fdaae0a` |
+> | WR-02 | fixed (honest-copy side; route enrichment deferred to TODOS.md) | `d1a3b250` |
+> | WR-03 | fixed | `a089b759` → superseded by `de61e38b` |
+> | WR-04 | fixed | `b3a2a824` |
+> | WR-05 | fixed | `913df59c` |
+> | WR-06 | fixed (same change as CR-01) | `6a42f994` |
 
 # Phase 152: Code Review Report
 
@@ -69,6 +96,18 @@ code path (WR-02).
 ## Critical Issues
 
 ### CR-01: The notional em-dash note names a cause that is usually not the cause
+
+**Status: FIXED** — `6a42f994` (with WR-06; one change, per the whole-class rule).
+`notionalCell` now returns the cause from the same expression that returns the
+text, and the renderer indexes `NOTIONAL_NOTE_BY_CAUSE` with it: `equity` /
+`not-in-blend` / `indeterminate`. The degenerate-product branch got its own
+sentence rather than being folded into `not-in-blend` — naming a blocker we
+cannot prove is the same defect in miniature. Two new tests exercise an excluded
+row against a LIVE $60k book (the state the old suite could not reach — it only
+ever used a book-less payload) and assert the note does NOT mention book equity;
+a third pins the equity sentence for its own cause as the over-correction
+falsifier. Verified RED by collapsing the causes back to one string (2 failures).
+152-UI-SPEC amendments 4 + 5 record the copy.
 
 **File:** `src/app/(dashboard)/allocations/components/ScenarioComposer.tsx:5918-5919`
 (the string), `:6602-6615` (the `title` + `sr-only` render), `:5877-5888` (the deriver)
@@ -154,6 +193,16 @@ branch against a live book.
 
 ### WR-01: `isOwn` can never reach a strategy already in the draft — the comment claims a refresh path that does not exist
 
+**Status: FIXED** — `1fdaae0a`. Took the second route (make the intent real), with
+the review's three constraints held: only `isOwn` is reconciled (no weight,
+toggle or ordering, so M9's rescale guard is intact), `strategy.isOwn == null`
+returns the draft untouched so an absent bit can never ERASE a known one, and
+`lastEditedAt` is not bumped so the backfill cannot inflate `diffCount`. The
+composer's chip comment was corrected to describe the path that now exists.
+Tests: three unit tests (backfill / no-erase / unchanged-is-a-reference-no-op)
+plus a composer-seam test that the chip actually appears on re-add. Verified RED
+by restoring the bare `return draft` (2 failures).
+
 **File:** `src/app/(dashboard)/allocations/components/ScenarioComposer.tsx:6524-6527`;
 mechanism at `src/app/(dashboard)/allocations/lib/scenario-state.ts:501`
 
@@ -199,6 +248,24 @@ if (existing) {
 
 ### WR-02: the detail panel's CAGR / SHARPE are unreachable for every drawer-added strategy — the dominant path
 
+**Status: FIXED (honest-copy side; route enrichment deferred)** — `d1a3b250`.
+The "widen the returns route" option is unavailable: CONTEXT locks no new fetches
+this phase, so it is logged in TODOS.md under Phase 152 with the full mechanism.
+The "drop the metric pair" option was REJECTED on evidence: the pair is not dead
+code globally, only on the drawer-added path — `strategyById` finds an in-book
+leg (e.g. a Bridge candidate the allocator holds), and those rows render real
+figures, so deleting the pair would be a regression. What was left was the honest
+-copy half: "Metrics not available in this view" invited the reader to go find
+the view where they ARE available, and inside the composer there is none, so the
+note now names the surface. `"Metrics appear once this strategy is in your book"`
+was considered and rejected — a book strategy with null `strategy_analytics` (the
+suite's own `D_NULL` case) makes it a promise that does not always hold, i.e. the
+same dishonest-remedy class as CR-01. The `addedMetricsByRef` doc comment now
+states the reachability outright so the next reader does not assume the figures
+render. Test: the first case in the suite that adds a strategy ABSENT from the
+book payload — the real drawer-added shape — pinning no eyebrows, no figures, the
+new note, and the absence of the old wording. 152-UI-SPEC amendment 6 records it.
+
 **File:** `src/app/(dashboard)/allocations/components/ScenarioComposer.tsx:2496-2506`
 (`addedMetricsByRef`), source at `:2429-2431`, render at `:6693-6727`
 
@@ -231,6 +298,21 @@ keep the note as the panel's honest metrics statement. Do not leave both.
 
 ### WR-03: `expandedAddedId` is never cleared on remove — a re-added strategy mounts pre-expanded
 
+**Status: FIXED, with the suggested mechanism REJECTED** — `a089b759`, superseded
+by `de61e38b`. The fix hint's `useEffect` is a `react-hooks/set-state-in-effect`
+lint ERROR in this repo, so it could not ship (`npm run lint` rejects it); the
+first commit shipped it before the full gate ran and the second replaces it. It
+was also the worse mechanism on its own terms: an effect commits the stale-open
+render FIRST and corrects on a second pass, so the pre-expanded panel really
+exists in the DOM — long enough for a screen reader to reach it, which is the
+harm the finding names — before collapsing. React's adjust-during-render idiom
+re-runs the component before anything commits, so the wrong state is never
+observable. A release on the remove handler was also rejected: it closes only the
+`×` seam, while a condition on the row's ABSENCE also covers a draft reset and a
+saved-scenario open. Tests: release-on-remove, plus an over-correction falsifier
+that an open panel SURVIVES an unrelated weight edit. Verified RED by deleting
+the guard.
+
 **File:** `src/app/(dashboard)/allocations/components/ScenarioComposer.tsx:5860`
 
 **Issue:** `expandedAddedId` is `CompositionList`-local state keyed by strategy id. When
@@ -255,6 +337,15 @@ useEffect(() => {
 
 ### WR-04: `new Date(created_at)` is unguarded — a malformed timestamp renders "Created Invalid Date"
 
+**Status: FIXED** — `b3a2a824`. Applied as suggested; the parse was hoisted to
+the row's `map` body so the render gates on a real `Date | null`, and the
+misleading inline comment was rewritten. The collision is still DETECTED for the
+bad row (name matching does not depend on the timestamp) — it loses its line, it
+does not vanish from the results, which the test pins. Tests: unparseable and
+empty-string arms, each with a good sibling for non-vacuity, plus a
+`?? new Date(0)` falsifier (no "Jan 1, 1970"). Verified RED by dropping the
+`isNaN` check (2 failures).
+
 **File:** `src/app/(dashboard)/allocations/components/StrategyBrowseDrawer.tsx:694-712`
 
 **Issue:** The gate is `typeof s.created_at === "string"`. The inline comment claims this
@@ -276,6 +367,20 @@ const createdValid = createdAt != null && !Number.isNaN(createdAt.getTime());
 ```
 
 ### WR-05: `AddedStrategy` is declared twice across the seam this phase widened, with divergent `isOwn` types
+
+**Status: FIXED, via the finding's fallback route** — `913df59c`. The plain
+`import type { AddedStrategy } … ; export type { AddedStrategy }` does not
+compile: the drawer holds a raw wire `string` id and the persisted type brands it
+(`StrategyForBuilderId`). Took the escape hatch the finding itself offers —
+`export type AddedStrategy = Omit<PersistedAddedStrategy, "id"> & { id: string }`
+— so the id widening is the ONLY difference and every other field, present and
+future, flows from one declaration. Type-only import, so nothing from
+scenario-state reaches the drawer's runtime bundle. Guard: a MUTUAL assignability
+assertion in the drawer test file (`npm run typecheck` covers test files). Mutual
+on purpose — a one-way check passes against the exact drift this fixes, since
+`boolean | undefined` IS assignable to `boolean | null | undefined`. Verified RED
+by forking the declaration back to the hand-written interface (TS2322 at the
+guard).
 
 **Files:** `src/app/(dashboard)/allocations/components/StrategyBrowseDrawer.tsx:89-104`
 (`isOwn?: boolean`) vs `src/app/(dashboard)/allocations/lib/scenario-state.ts:96-116`
@@ -303,6 +408,15 @@ export a `Pick<>`-based payload type from `scenario-state.ts` and use it on both
 
 ### WR-06: the per-key half of the same list still shows an unexplained em-dash — the SCEN-04 fix stopped halfway
 
+**Status: FIXED** — `6a42f994`, the SAME commit as CR-01, exactly as the finding
+asks. Both row kinds now render through one `renderNotional(ref)` helper, so the
+two halves cannot drift again; the per-key row's em-dash causes were verified to
+be the same three (an excluded key drops out of `blendShareByRef` and reads "not
+in the blend"; `totalBookEquity` is summed over `dataSourceKeys` irrespective of
+toggle state, so exclusion does not null it). Tests: a per-key excluded-row case
+asserting the title is no longer the DERIVED sentence and that the sr-only text
+is present, plus a per-key DERIVED case keeping the original title byte-verbatim.
+
 **File:** `src/app/(dashboard)/allocations/components/ScenarioComposer.tsx:6284-6291`
 (per-key) vs `:6600-6615` (added)
 
@@ -322,6 +436,12 @@ cause-derived string.
 ---
 
 ## Info
+
+**Status for IN-01..IN-07: NOT FIXED — deliberately.** Per the project's stopping
+rule (reviews block only on user-facing or data-integrity impact), Info findings
+are triage material for TODOS.md, not fix-pass scope. None was touched by this
+pass. Note that IN-04 (the stale `:5787-5792` line citation in the SCEN-04
+comment) was resolved incidentally: CR-01 replaced that comment block wholesale.
 
 ### IN-01: `isOwn` breaks the wire's snake_case convention
 
