@@ -40,16 +40,46 @@ Key design decisions (from plan 06-02 + VOICES-ACCEPTED.md):
 """
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import Any, Awaitable, Callable
+import logging
+import math
+import re
+from typing import Any, Awaitable, Callable, cast
 
 import ccxt.async_support as ccxt
 from supabase import Client
 
-from services.closed_sets import NON_CCXT_VENUES, STABLECOINS
+from services.closed_sets import (
+    MT5_DISABLED_DETAIL,
+    NON_CCXT_VENUES,
+    STABLECOINS,
+    mt5_enabled_server,
+)
 from services.db import db_execute
+from services.mt5_client import (
+    Mt5AccountMismatchError,
+    Mt5ClientError,
+    Mt5Session,
+)
+# MT5CONC-02 — the ONE terminal-lock registry, imported from the leaf module
+# plan 151-01 extracted it into. NEVER re-declare a terminal-lock dict here: a
+# second registry hands out perfectly functional Locks while the derive job and
+# this holdings read hold DIFFERENT ones for the same Wine terminal, so both
+# enter its IPC region concurrently and every lock "works" (151-RESEARCH
+# Pitfall 2). `_MT5_DERIVE_READ_TIMEOUT_S` is deliberately REUSED rather than
+# given its own env knob: the holdings read (login → account_info) is strictly
+# shorter than the derive read that bound was sized for, and a second knob
+# would be a second thing to retune when the rpyc bound moves.
+from services.mt5_concurrency import (
+    _MT5_DERIVE_READ_TIMEOUT_S,
+    _mt5_bounded_restart,
+    _mt5_terminal_lock_for,
+)
 from services.positions import fetch_positions
 
+
+logger = logging.getLogger("quantalyze.analytics.allocator_positions")
 
 # B8b: STABLECOINS (the "treat as cash, mark at $1, skip the ticker fetch" set)
 # is single-sourced from services.closed_sets so it can't fork from the equity-
@@ -335,6 +365,217 @@ async def _fetch_derivative_rows(exchange_name: str, exchange: Any) -> list[dict
     return rows
 
 
+# A plain currency CODE and nothing else. The currency arrives from the broker's
+# terminal and is interpolated into MT5_NON_USD_NOTE — i.e. into
+# ``api_keys.sync_error``, which the browser renders VERBATIM. Anything that is
+# not a bare alphabetic code renders as "unknown" rather than being echoed
+# (T-151-05 / ASVS V7): the copy channel is not a place to pass through
+# third-party text.
+_CURRENCY_CODE_RE = re.compile(r"[A-Za-z]{2,10}")
+
+# The account-scoped ``symbol`` token must satisfy the commit route's
+# HOLDING_REF_RE alphabet (route.ts:81) because holdings fingerprints are
+# ``symbol:venue:holding_type`` — a colon/slash/space in the token would break
+# the ref parse far downstream, long after this write.
+_HOLDING_SYMBOL_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+
+async def _fetch_mt5_account_rows(
+    exchange_name: str, exchange: Any, api_key_id: str | None
+) -> tuple[list[dict[str, Any]], str | None]:
+    """AUM-02 — ONE account-equity holdings row for an MT5 account.
+
+    MT5 has no per-asset holdings to enumerate: the read-only gateway facade
+    exposes no open-positions read, and the economically meaningful figure is
+    ``account_info().equity`` — balance PLUS the floating uPnL of open
+    positions, i.e. the account's mark-to-market value. That single number is
+    exactly what an allocator's book needs from this venue, so this branch
+    emits exactly one row for it. Using ``balance`` instead would silently drop
+    open-position P&L from AUM.
+
+    Mirrors the derive arm's terminal discipline (``job_worker``'s mt5 branch)
+    minus the deal ledger: kill switch → shared per-terminal lock → bounded
+    off-loop read → login bracket → fail-loud extraction.
+
+    LOGIN BRACKET — PRE only, deliberately. The derive arm brackets pre AND
+    post because it does a second economic read (``history_deals_get``) after
+    the first assertion, so the account could change between them. Here there
+    is exactly ONE economic read, and the login assertion is made on the very
+    same ``account_info`` payload that supplies the equity — a mid-read account
+    switch therefore cannot produce a wrong-account figure. A POST re-read would
+    add a second terminal round-trip and a second failure mode for no additional
+    guarantee.
+
+    Raises ``AllocatorHoldingsSyncTransientError`` (str = end-user copy) on any
+    genuine transport / trust failure, so the handler retries and no
+    venue-specific exception can reach ``classify_exception``'s ``str(exc)``.
+    """
+    # (a) Kill switch FIRST — the derive arm's exact posture (gate before any
+    # decrypt / login / read), so turning MT5_ENABLED off during an incident
+    # stops live RPyC reads on this path too. Routed through the honest-skip
+    # channel rather than an error: the founder disabled it deliberately, and
+    # "not available yet" is the truthful thing to tell the user.
+    if not mt5_enabled_server():
+        return ([], MT5_DISABLED_DETAIL)
+
+    # The row needs an account-scoped symbol; without the key id there is no
+    # safe token to write (see the symbol note below). Defensive only —
+    # api_keys.id is NOT NULL and the handler always passes it.
+    if not api_key_id:
+        raise AllocatorHoldingsSyncTransientError(MT5_MISSING_ACCOUNT_REF_NOTE)
+
+    # venue == "mt5" ⇒ the preflight built an Mt5Session. cast() narrows the
+    # ccxt.Exchange | SfoxClient | Mt5Session union for mypy --strict, which is
+    # why there is no silencing comment here — and note this is a TYPE
+    # assertion derived from the venue string, not a runtime isinstance
+    # dispatch.
+    session = cast(Mt5Session, exchange)
+
+    def _assert_expected_login(info: dict[str, Any]) -> None:
+        # MT5CONC-02: the live terminal's account MUST be this key's account.
+        # STRICT equality — a MISSING "login" field (info.get → None) FAILS
+        # LOUD rather than default-matching, because a terminal that cannot
+        # say which account it is on is exactly the case where a wrong-account
+        # equity figure would slip into someone's AUM.
+        actual_login = info.get("login")
+        if actual_login != session.login:
+            raise Mt5AccountMismatchError(session.login, actual_login)
+
+    def _mt5_read() -> dict[str, Any]:
+        # Blocking RPyC — runs OFF the event loop via to_thread below.
+        session.client.login(
+            session.login, session.investor_password, session.server
+        )
+        info = session.client.account_info()  # None → typed raise, never {}
+        _assert_expected_login(info)
+        return info
+
+    # MT5CONC-02 / WEDGE-01: serialize the ENTIRE terminal-IPC region — the
+    # bounded read AND the restart each except arm performs — on the ONE shared
+    # per-terminal lock, so this job kind can never interleave with the derive
+    # job against the same Wine terminal. The post-read work (currency gate,
+    # extraction, row build) stays OUTSIDE the lock: it is pure computation and
+    # holding the terminal through it would serialize work that needs no
+    # terminal.
+    async with _mt5_terminal_lock_for(session.client.terminal_key):
+        try:
+            info = await asyncio.wait_for(
+                asyncio.to_thread(_mt5_read), timeout=_MT5_DERIVE_READ_TIMEOUT_S
+            )
+        except asyncio.TimeoutError as exc:
+            # A blocked RPyC/Wine pipe does NOT self-unblock, so actively (and
+            # boundedly) restart the terminal before the transient, or every
+            # retry inherits the same wedge and burns to failed_final.
+            logger.warning(
+                "poll_allocator_positions: mt5 holdings read exceeded its "
+                "wall-clock bound — classified transient, restarting the "
+                "terminal (FLIPRETRY-01 / MT5CONC-01)"
+            )
+            await _mt5_bounded_restart(session.client)
+            raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
+        except Mt5AccountMismatchError as exc:
+            # A mis-routed / stale terminal is an INFRA fault, never user blame:
+            # nothing is returned, nothing is persisted, and the restart heals
+            # exactly the stale pipe that causes it. The mismatch detail (two
+            # int logins) reaches the log and the exception chain, never the
+            # user-visible copy.
+            logger.warning(
+                "poll_allocator_positions: mt5 login bracket rejected a "
+                "mismatched terminal account (%s) — classified transient, "
+                "restarting the terminal; NO row emitted (MT5CONC-02)",
+                str(exc),
+            )
+            await _mt5_bounded_restart(session.client)
+            raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
+        except Mt5ClientError as exc:
+            # The key already validated at connect, so a read-time client error
+            # is a transport/terminal condition, not a credential verdict:
+            # retry. Its text is already secret-scrubbed at construction, but it
+            # is still INTERNAL text — only the fixed copy constant is surfaced.
+            logger.warning(
+                "poll_allocator_positions: mt5 holdings read hit a client "
+                "error — classified transient, retrying"
+            )
+            raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
+
+    # (f) Currency gate — [A3] fail-loud. An account denominated in anything but
+    # USD cannot be valued here without an FX rate we do not have, and silently
+    # treating it as USD IS a fabricated rate of 1.0 inside an AUM total. A
+    # missing/blank currency is the same problem wearing a different hat: we do
+    # not know the denomination, so we do not guess. Honest skip either way.
+    raw_ccy = info.get("currency")
+    ccy = raw_ccy.strip().upper() if isinstance(raw_ccy, str) else ""
+    if not _CURRENCY_CODE_RE.fullmatch(ccy):
+        return ([], MT5_NON_USD_NOTE.format(ccy="unknown"))
+    if ccy != "USD":
+        return ([], MT5_NON_USD_NOTE.format(ccy=ccy))
+
+    # (g) Extraction with the derive arm's fail-loud discipline: a NaN/Inf or
+    # non-numeric equity would sail past every downstream denominator guard as a
+    # silently poisoned AUM figure. Refuse the anchor rather than publish it.
+    try:
+        equity = float(info["equity"])
+        balance = float(info["balance"])
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.warning(
+            "poll_allocator_positions: mt5 account_info missing/non-numeric "
+            "equity/balance — refusing to emit a row"
+        )
+        raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
+    if not (math.isfinite(equity) and math.isfinite(balance)):
+        logger.warning(
+            "poll_allocator_positions: mt5 equity/balance non-finite — refusing "
+            "a poisoned anchor"
+        )
+        raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE)
+
+    # (h) THE row. `symbol` is ACCOUNT-SCOPED because allocator_holdings is
+    # UNIQUE (allocator_id, venue, symbol, asof) with NO api_key_id in the key:
+    # a per-venue constant token (e.g. the currency) would make the founder's
+    # three MT5 accounts upsert over each other, so AUM would report ONE of them
+    # and the surviving row's api_key_id attribution would flip between syncs
+    # (151-RESEARCH Pitfall 1).
+    #
+    # The token is the api_key_id prefix, NOT the broker login: the symbol is
+    # user-visible in the Holdings tab and rides inside commit scope-refs, and a
+    # broker account number does not belong in either (T-151-06 / ASVS V8).
+    #
+    # ⚠️ Changing this token later ORPHANS every row written under the old one
+    # (they key on symbol) — it is a data-migration decision, not a rename.
+    symbol = f"ACCOUNT-{api_key_id[:8]}"
+    if not _HOLDING_SYMBOL_RE.fullmatch(symbol):
+        # Unreachable for a UUID key id; a loud refusal beats writing a token
+        # the commit route's ref parser would later reject.
+        raise AllocatorHoldingsSyncTransientError(MT5_MISSING_ACCOUNT_REF_NOTE)
+
+    return (
+        [
+            {
+                "venue": exchange_name,
+                "symbol": symbol,
+                # A USD account balance is cash-equivalent: quantity IS the USD
+                # amount and the mark is 1.0, the same convention the ccxt spot
+                # path uses for stablecoins.
+                "holding_type": "spot",
+                "side": "flat",
+                "quantity": equity,
+                "value_usd": equity,
+                "mark_price": 1.0,
+                # No basis, and no derivative uPnL to report: None is the
+                # conforming value. A 0.0 here would read downstream as a real
+                # measured zero rather than "not applicable".
+                "entry_price": None,
+                "unrealized_pnl_usd": None,
+                "cost_basis_usd": None,
+                "raw_payload": _cap_raw_payload(
+                    {"currency": ccy, "equity": equity, "balance": balance}
+                ),
+            }
+        ],
+        None,
+    )
+
+
 # The signature every non-ccxt holdings fetcher implements. It mirrors
 # fetch_allocator_holdings' own contract — ``(rows, warning)`` — so a venue
 # branch can emit rows, an honest skip, or (by raising
@@ -348,7 +589,9 @@ _NonCcxtHoldingsFetcher = Callable[
 # is the consumer half of). A venue in NON_CCXT_VENUES but absent HERE is an
 # honest SKIP, never a crash — that gap is the whole class fix. Plan 151-04
 # registers "sfox".
-_NON_CCXT_HOLDINGS_FETCHERS: dict[str, _NonCcxtHoldingsFetcher] = {}
+_NON_CCXT_HOLDINGS_FETCHERS: dict[str, _NonCcxtHoldingsFetcher] = {
+    "mt5": _fetch_mt5_account_rows,
+}
 
 
 async def fetch_allocator_holdings(

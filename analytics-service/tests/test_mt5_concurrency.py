@@ -55,7 +55,21 @@ def test_registry_object_is_shared_across_modules() -> None:
     """A re-declared ``_MT5_TERMINAL_LOCKS = {}`` in job_worker would give the
     derive arm a private registry while allocator_positions used the leaf's — two
     registries, zero serialization of the ONE shared terminal (MT5CONC-02)."""
+    from services import allocator_positions as ap
+
     assert jw._MT5_TERMINAL_LOCKS is mt5_concurrency._MT5_TERMINAL_LOCKS
+
+    # Plan 151-03 arm: allocator_positions is the SECOND consumer — the whole
+    # reason the registry was extracted into a leaf. Pin its binding too, since
+    # the job_worker↔leaf assertions above stay green under a THIRD registry
+    # declared here.
+    assert ap._mt5_terminal_lock_for is mt5_concurrency._mt5_terminal_lock_for
+    assert ap._mt5_bounded_restart is mt5_concurrency._mt5_bounded_restart
+    assert ap._MT5_DERIVE_READ_TIMEOUT_S == mt5_concurrency._MT5_DERIVE_READ_TIMEOUT_S
+    assert not hasattr(ap, "_MT5_TERMINAL_LOCKS"), (
+        "allocator_positions must IMPORT the registry, never declare its own — "
+        "a second dict serializes nothing (151-RESEARCH Pitfall 2)"
+    )
 
     # A mutation through either name must be visible through the other — this is
     # what "same object" MEANS operationally, and it is the property a copied
