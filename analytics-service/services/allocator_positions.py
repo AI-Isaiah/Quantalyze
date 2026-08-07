@@ -557,6 +557,21 @@ async def _fetch_mt5_account_rows(
         )
         raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE)
 
+    # 151 review WR-01 — POSITIVITY, at parity with the ccxt spot path's
+    # `float(qty) > 0` filter (_fetch_spot_rows). Finiteness alone is not enough:
+    # a stopped-out MT5 account can report NEGATIVE equity (a real broker state),
+    # and that row would carry a negative `value_usd` that silently DEFLATES the
+    # allocator's AUM — including the commit route's server-side audit recompute.
+    # A zero-equity account is the twin problem: emitting `0.0` publishes a
+    # measured zero, which this branch argues against a few lines below. A flat
+    # or negative account contributes no holdings, so it emits no row.
+    if equity <= 0:
+        logger.info(
+            "poll_allocator_positions: mt5 account equity is not positive — no "
+            "row emitted (parity with the ccxt spot path's > 0 filter)"
+        )
+        return ([], None)
+
     # (h) THE row. `symbol` is ACCOUNT-SCOPED because allocator_holdings is
     # UNIQUE (allocator_id, venue, symbol, asof) with NO api_key_id in the key:
     # a per-venue constant token (e.g. the currency) would make the founder's

@@ -646,6 +646,54 @@ async def test_mt5_symbol_is_account_scoped(mt5_enabled):
 
 
 # ---------------------------------------------------------------------------
+# Test 7b (151 review WR-01) — a non-positive account equity emits NO row
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+@pytest.mark.parametrize("equity", [-4_200.0, 0.0])
+async def test_mt5_non_positive_equity_emits_no_row(mt5_enabled, equity):
+    """ECONOMIC ORACLE: AUM is a sum, so a NEGATIVE row is subtraction.
+
+    A stopped-out MT5 account reporting negative equity is a real broker state.
+    Pre-fix only `math.isfinite` was checked, so that account wrote a row with a
+    negative `value_usd` which silently DEFLATED the allocator's AUM — including
+    the commit route's server-side audit recompute, where it would understate
+    the size recorded against a real mandate decision. A zero writes a measured
+    `$0`, which this branch elsewhere argues is a claim, not an absence.
+
+    The ccxt spot path has filtered `float(qty) > 0` since Phase 06; this is the
+    same rule, and the parametrization is what makes it a RULE rather than a
+    negative-number special case.
+    """
+    transport = _RecordingMt5Transport(account=_account(equity=equity))
+
+    rows, warning = await fetch_allocator_holdings(
+        "mt5", _session(transport), API_KEY_ID
+    )
+
+    assert rows == [], f"a non-positive equity must contribute no holdings: {rows}"
+    # Not an ERROR either: nothing failed, the account simply holds nothing.
+    assert warning is None
+    # NON-VACUITY: the read really happened (this is not an early bail on some
+    # unrelated gate), so the emptiness is the positivity rule's doing.
+    assert "account_info" in transport.calls
+
+
+@pytest.mark.asyncio
+async def test_mt5_positive_equity_still_emits_its_row(mt5_enabled):
+    """The positivity guard's control arm: the smallest positive equity still
+    contributes, so WR-01's filter cannot degenerate into 'MT5 never syncs'."""
+    transport = _RecordingMt5Transport(account=_account(equity=0.01))
+
+    rows, warning = await fetch_allocator_holdings(
+        "mt5", _session(transport), API_KEY_ID
+    )
+
+    assert warning is None
+    assert len(rows) == 1
+    assert rows[0]["value_usd"] == 0.01
+
+
+# ---------------------------------------------------------------------------
 # Test 8 — non-USD / unknown currency skips honestly, never assumed USD
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
