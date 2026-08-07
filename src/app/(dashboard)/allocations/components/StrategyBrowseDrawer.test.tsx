@@ -802,3 +802,267 @@ describe("StrategyBrowseDrawer — SCEN-02 isOwn on the onAdd payload (Phase 152
     expect(payload.isOwn).toBeUndefined();
   });
 });
+
+/**
+ * Phase 152 / SCEN-05 — own-vs-own duplicate disambiguation line.
+ *
+ * The founder holds two private strategies both named "Alpha Centauri",
+ * created 15 days apart. In the browse list they are pixel-identical, so the
+ * choice is a coin flip. The line makes it resolvable — and DISAMBIGUATES
+ * rather than hides: no collapsing, no merge, no "(2)" suffix.
+ *
+ * It is a TIEBREAKER, not a metadata dump. Hence three independent gates, each
+ * separately falsifiable below:
+ *   - `isOwn === true` — a third party's creation date is a correlation vector
+ *     against the pseudonymised codename and must never render (nor, per
+ *     152-01, ever reach the wire — two independent fences).
+ *   - a detected COLLISION over the FILTERED rows (D-2) — a unique row gets no
+ *     line, and narrowing the filter to one row clears it.
+ *   - `created_at` present — the pre-152 wire shape renders no line rather than
+ *     an "Created Invalid Date" claim.
+ *
+ * Date oracles are LITERALS, not recomputations of the implementation's own
+ * `toLocaleDateString` call (Oracle Independence, 152-VALIDATION.md). The
+ * fixtures sit at 12:00:00Z so the calendar date is stable across CI (UTC) and
+ * local machines, and Node ships full-icu so "en-US" month names agree.
+ */
+describe("StrategyBrowseDrawer — SCEN-05 own-vs-own dedup line (Phase 152)", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  // The founder's real case: two private own rows, same name, 15 days apart.
+  const COLLIDING_OWN: StrategyBrowseRow[] = [
+    {
+      id: "s-ac-new",
+      name: "Alpha Centauri",
+      codename: "AC-NEW",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+      isOwn: true,
+      created_at: "2026-08-04T12:00:00.000Z",
+      status: "private",
+    },
+    {
+      id: "s-ac-old",
+      name: "Alpha Centauri",
+      codename: "AC-OLD",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+      isOwn: true,
+      created_at: "2026-07-20T12:00:00.000Z",
+      status: "private",
+    },
+  ];
+
+  it("two colliding own rows BOTH render the line with the literal created date and product-cased status", async () => {
+    renderDrawer({ fetchStrategies: async () => COLLIDING_OWN });
+    await flush();
+
+    expect(screen.getByTestId("browse-dedup-s-ac-new").textContent).toBe(
+      "Created Aug 4, 2026 · Private",
+    );
+    expect(screen.getByTestId("browse-dedup-s-ac-old").textContent).toBe(
+      "Created Jul 20, 2026 · Private",
+    );
+  });
+
+  it("a UNIQUE own row renders no line — the line is a tiebreaker, not a metadata dump", async () => {
+    // Same row shape as the colliding fixture (own, created_at, status all
+    // present) — the ONLY difference is that no second own row shares its
+    // name. An implementation that rendered the line on every own row with
+    // metadata would pass every other test in this block and fail here.
+    const soloOwn: StrategyBrowseRow[] = [
+      { ...COLLIDING_OWN[0], id: "s-solo", name: "Solitary Alpha" },
+    ];
+    renderDrawer({ fetchStrategies: async () => soloOwn });
+    await flush();
+
+    expect(screen.getByText("Solitary Alpha")).toBeInTheDocument();
+    expect(screen.queryByTestId("browse-dedup-s-solo")).toBeNull();
+    expect(document.querySelectorAll('[data-testid^="browse-dedup-"]')).toHaveLength(0);
+  });
+
+  it("two THIRD-PARTY rows with identical labels render no line, even when the wire leaks created_at/status", async () => {
+    // Defence in depth: the 152-01 route never emits created_at/status for a
+    // third-party row, so this fixture is a deliberately HOSTILE wire shape.
+    // The render gate must refuse it on `isOwn` alone — the drawer does not get
+    // to assume the route upstream stayed correct.
+    const thirdParty: StrategyBrowseRow[] = [
+      {
+        id: "s-tp-1",
+        name: "Shared Label",
+        codename: "TP-1",
+        markets: ["okx"],
+        strategy_types: ["momentum"],
+        isOwn: false,
+        created_at: "2026-08-04T12:00:00.000Z",
+        status: "published",
+      },
+      {
+        id: "s-tp-2",
+        name: "Shared Label",
+        codename: "TP-2",
+        markets: ["okx"],
+        strategy_types: ["momentum"],
+        isOwn: false,
+        created_at: "2026-07-20T12:00:00.000Z",
+        status: "published",
+      },
+    ];
+    renderDrawer({ fetchStrategies: async () => thirdParty });
+    await flush();
+
+    expect(document.querySelectorAll('[data-testid^="browse-dedup-"]')).toHaveLength(0);
+    // The leaked dates must not surface anywhere in the drawer either.
+    const body = document.body.textContent ?? "";
+    expect(body).not.toContain("Aug 4, 2026");
+    expect(body).not.toContain("Jul 20, 2026");
+  });
+
+  it("a lone own row whose name matches TWO third-party rows gets no line — collisions are counted own-only", async () => {
+    // SC4 falsifier target. The gate under test here is the COLLISION BUILDER,
+    // not the render gate: with `isOwn === true` dropped from pass 1, the
+    // normalized name "shared label" counts 3 and the own row — which passes
+    // every render-gate term on its own merits — starts claiming a duplicate
+    // that does not exist among its own strategies. Only ONE own row carries
+    // this name, so the honest answer is no line anywhere.
+    const mixed: StrategyBrowseRow[] = [
+      {
+        id: "s-mix-own",
+        name: "Shared Label",
+        codename: "MIX-OWN",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+        isOwn: true,
+        created_at: "2026-08-04T12:00:00.000Z",
+        status: "private",
+      },
+      {
+        id: "s-mix-tp-1",
+        name: "Shared Label",
+        codename: "MIX-TP-1",
+        markets: ["okx"],
+        strategy_types: ["momentum"],
+        isOwn: false,
+      },
+      {
+        id: "s-mix-tp-2",
+        name: "Shared Label",
+        codename: "MIX-TP-2",
+        markets: ["okx"],
+        strategy_types: ["momentum"],
+        isOwn: false,
+      },
+    ];
+    renderDrawer({ fetchStrategies: async () => mixed });
+    await flush();
+
+    expect(screen.queryByTestId("browse-dedup-s-mix-own")).toBeNull();
+    expect(document.querySelectorAll('[data-testid^="browse-dedup-"]')).toHaveLength(0);
+  });
+
+  it("collision matching is normalized — trailing whitespace and case differences still collide", async () => {
+    const normalizedPair: StrategyBrowseRow[] = [
+      { ...COLLIDING_OWN[0], id: "s-norm-a", name: "alpha centauri " },
+      { ...COLLIDING_OWN[1], id: "s-norm-b", name: "Alpha Centauri" },
+    ];
+    renderDrawer({ fetchStrategies: async () => normalizedPair });
+    await flush();
+
+    // A raw-string collision key would see two distinct names and render nothing.
+    expect(screen.getByTestId("browse-dedup-s-norm-a").textContent).toBe(
+      "Created Aug 4, 2026 · Private",
+    );
+    expect(screen.getByTestId("browse-dedup-s-norm-b").textContent).toBe(
+      "Created Jul 20, 2026 · Private",
+    );
+  });
+
+  it("narrowing the filter so only ONE colliding row survives clears its line (D-2: scope is the filtered result)", async () => {
+    renderDrawer({ fetchStrategies: async () => COLLIDING_OWN });
+    await flush();
+    // Both lines present before the filter narrows.
+    expect(screen.getByTestId("browse-dedup-s-ac-new")).toBeInTheDocument();
+    expect(screen.getByTestId("browse-dedup-s-ac-old")).toBeInTheDocument();
+
+    // The two rows share a name, so narrow by CODENAME (the search matches
+    // either) to leave exactly one of them visible.
+    const search = screen.getByPlaceholderText("Search by name or codename");
+    fireEvent.change(search, { target: { value: "AC-NEW" } });
+
+    expect(screen.getByText("Alpha Centauri")).toBeInTheDocument();
+    expect(screen.queryByTestId("browse-dedup-s-ac-old")).toBeNull();
+    // The survivor no longer has anything to be disambiguated FROM — a
+    // collision set computed over `strategies` instead of `filtered` would
+    // leave this line stranded on a row that is now unambiguous.
+    expect(screen.queryByTestId("browse-dedup-s-ac-new")).toBeNull();
+  });
+
+  it("a colliding own row MISSING created_at renders no line, while its sibling keeps one", async () => {
+    // Older wire shape. UI-SPEC honesty invariant: render nothing rather than
+    // "Created Invalid Date". Discriminating in both directions — the sibling
+    // proves the collision itself was still detected.
+    const partial: StrategyBrowseRow[] = [
+      { ...COLLIDING_OWN[0], id: "s-has-date" },
+      {
+        id: "s-no-date",
+        name: "Alpha Centauri",
+        codename: "AC-LEGACY",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+        isOwn: true,
+      },
+    ];
+    renderDrawer({ fetchStrategies: async () => partial });
+    await flush();
+
+    expect(screen.getByTestId("browse-dedup-s-has-date").textContent).toBe(
+      "Created Aug 4, 2026 · Private",
+    );
+    expect(screen.queryByTestId("browse-dedup-s-no-date")).toBeNull();
+    expect(document.body.textContent ?? "").not.toContain("Invalid Date");
+  });
+
+  it("renders the raw status enum product-cased, and omits the segment entirely when status is absent", async () => {
+    const statusPair: StrategyBrowseRow[] = [
+      { ...COLLIDING_OWN[0], id: "s-st-review", status: "pending_review" },
+      { ...COLLIDING_OWN[1], id: "s-st-none", status: undefined },
+    ];
+    renderDrawer({ fetchStrategies: async () => statusPair });
+    await flush();
+
+    // Underscores → spaces, first letter capitalized. The raw DB enum is a
+    // second vocabulary the allocator never agreed to read.
+    expect(screen.getByTestId("browse-dedup-s-st-review").textContent).toBe(
+      "Created Aug 4, 2026 · Pending review",
+    );
+    expect(document.body.textContent ?? "").not.toContain("pending_review");
+    // No status → no dangling separator (the sibling codename line's
+    // conditional-separator idiom).
+    expect(screen.getByTestId("browse-dedup-s-st-none").textContent).toBe(
+      "Created Jul 20, 2026",
+    );
+  });
+
+  it("keeps the dedup line OUT of the browse-add-* automation namespace (PR #620 contract)", async () => {
+    renderDrawer({ fetchStrategies: async () => COLLIDING_OWN });
+    await flush();
+
+    const dedupNodes = document.querySelectorAll('[data-testid^="browse-dedup-"]');
+    expect(dedupNodes).toHaveLength(2);
+    for (const el of dedupNodes) {
+      expect(el.getAttribute("data-testid") ?? "").not.toMatch(/^browse-add-/);
+    }
+    // The strategy-add first-match selector still resolves ONLY to Add buttons.
+    const addNodes = document.querySelectorAll('[data-testid^="browse-add-"]');
+    expect(addNodes).toHaveLength(2);
+    for (const el of addNodes) {
+      expect(el.tagName).toBe("BUTTON");
+    }
+  });
+});

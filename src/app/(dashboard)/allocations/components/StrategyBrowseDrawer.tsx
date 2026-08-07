@@ -137,6 +137,26 @@ const TIER_BG: Record<MandateFitTier, string> = {
   red: "rgba(220,38,38,0.10)",
 };
 
+/**
+ * Phase 152 (SCEN-05) — collision key for the own-vs-own duplicate line. Trim +
+ * lowercase so "alpha centauri " and "Alpha Centauri" are recognised as the same
+ * name: a raw-string key would leave the founder's real pair undisambiguated the
+ * moment one of them carries a stray trailing space.
+ */
+const normalizeStrategyName = (name: string) => name.trim().toLowerCase();
+
+/**
+ * Phase 152 (SCEN-05) — render casing for the raw `strategies.status` enum
+ * (`draft` / `pending_review` / `published` / `archived` / `private`). The route
+ * ships the DB value verbatim rather than inventing a second vocabulary, so the
+ * product casing happens here: underscores to spaces, first letter capitalized.
+ * The raw enum must never reach the DOM (UI-SPEC copy contract).
+ */
+function productCaseStatus(raw: string): string {
+  const spaced = raw.replace(/_/g, " ");
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
+
 // M-0107 — memoized filter pill. With a stable `onToggle` (useCallback in the
 // parent) it re-renders only when its own `pressed` flips, so a search
 // keystroke no longer re-renders the entire market/type pill grid.
@@ -337,6 +357,33 @@ export function StrategyBrowseDrawer({
         .map((s) => ({ s, tier: computeMandateFitApprox(s, allocatorMandate) })),
     [strategies, q, activeMarkets, activeTypes, allocatorMandate],
   );
+
+  // Phase 152 (SCEN-05) — the set of normalized names held by TWO OR MORE of
+  // the viewer's OWN rows.
+  //
+  // D-2: the scope is `filtered`, NOT `strategies`. The line exists to break a
+  // tie the allocator can actually see, so narrowing the search until only one
+  // of the two "Alpha Centauri" rows survives must clear it — a collision set
+  // computed over the full fetch would strand the line on a row that is no
+  // longer ambiguous, turning a tiebreaker into a metadata dump.
+  //
+  // Own-only by construction (`s.isOwn === true` in pass 1): two third-party
+  // rows sharing a pseudonymised label are not the viewer's problem to resolve,
+  // and their creation dates are a correlation vector the codename exists to
+  // hide. Two O(n) passes — count, then threshold — never a quadratic scan.
+  const ownNameCollisions = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const { s } of filtered) {
+      if (s.isOwn !== true) continue;
+      const key = normalizeStrategyName(s.name);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const collisions = new Set<string>();
+    for (const [key, count] of counts) {
+      if (count >= 2) collisions.add(key);
+    }
+    return collisions;
+  }, [filtered]);
 
   // M-0107 — stable per-kind toggle handlers (functional setState, no Set dep)
   // so the memoized FilterPill children re-render only when their own `pressed`
@@ -603,6 +650,47 @@ export function StrategyBrowseDrawer({
                         {s.codename && s.markets.length > 0 ? " · " : ""}
                         {s.markets.join(" · ")}
                       </div>
+                      {/* Phase 152 (SCEN-05) — own-vs-own duplicate
+                          disambiguation. A second sibling of the codename line
+                          above, same recipe, muted: a duplicate name is a fact
+                          to resolve, not an error, so no warning tint.
+
+                          Three independent gates, all required. `isOwn === true`
+                          (never `!== false`) is defence in depth — the route
+                          already withholds created_at/status from third-party
+                          rows, and neither fence trusts the other. The
+                          `created_at` typeof check keeps the pre-152 wire shape
+                          rendering NOTHING rather than "Created Invalid Date".
+
+                          D-1: there is deliberately no "{N} keys" segment. It
+                          would cost a second query per drawer open, and
+                          created_at alone already resolves the founder's real
+                          case (two private rows 15 days apart) — UI-SPEC's own
+                          omit-when-absent branch over inventing a claim.
+
+                          Testid is OUTSIDE the `browse-add-` family — see the
+                          PR #620 rationale below. */}
+                      {s.isOwn === true &&
+                        typeof s.created_at === "string" &&
+                        ownNameCollisions.has(
+                          normalizeStrategyName(s.name),
+                        ) && (
+                          <div
+                            className="mt-1 text-xs text-text-muted"
+                            data-testid={`browse-dedup-${s.id}`}
+                          >
+                            {`Created ${new Date(
+                              s.created_at,
+                            ).toLocaleDateString("en-US", {
+                              month: "short",
+                              day: "numeric",
+                              year: "numeric",
+                            })}`}
+                            {typeof s.status === "string" && s.status.length > 0
+                              ? ` · ${productCaseStatus(s.status)}`
+                              : ""}
+                          </div>
+                        )}
                       <span
                         className={`mt-2 inline-block rounded px-2 py-0.5 text-fixed-11 font-medium ${TIER_CLASS[tier]}`}
                         style={{ background: TIER_BG[tier] }}
