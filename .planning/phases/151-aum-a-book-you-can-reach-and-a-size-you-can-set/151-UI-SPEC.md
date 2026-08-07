@@ -1,7 +1,8 @@
 ---
 phase: 151
 slug: aum-a-book-you-can-reach-and-a-size-you-can-set
-status: draft
+status: approved
+reviewed_at: 2026-08-07
 shadcn_initialized: false
 preset: none
 created: 2026-08-07
@@ -18,6 +19,10 @@ created: 2026-08-07
 > (human-readable sync copy — never a raw Python exception).
 > Sources: 151-CONTEXT.md (locked decisions), DESIGN.md (binding token system),
 > ROADMAP Phase 151 SCs, REQUIREMENTS AUM-01..05, live composer code.
+>
+> Focal point: the Portfolio AUM input is the primary anchor of the composer summary
+> region; the per-strategy dollar inputs are secondary and read as a column. This is a
+> surgical change to an existing dense screen — conform to its existing hierarchy.
 
 ---
 
@@ -45,7 +50,7 @@ DESIGN.md base-4 ladder (already tokenized; do not re-derive):
 
 | Token | Value | Usage on this surface |
 |-------|-------|-----------------------|
-| 0.5 | 2px | hairline offsets |
+| 0.5 | 2px | hairline offsets — NOT used by any new element this phase; no license for off-grid offsets |
 | 1 | 4px | input inner padding (`py-1`), chip padding |
 | 2 | 8px | intra-row control gaps (`gap-2`), input horizontal padding (`px-2`) |
 | 3 | 12px | constituent-row padding (`p-3`), inter-control gaps (`gap-3`) |
@@ -70,7 +75,7 @@ Surface subset for NEW elements (existing composer text untouched — surgical c
 | Body / row labels | 14px (`text-sm`) | 400 | 1.5 | DM Sans |
 | Data values & inputs (AUM input, dollar input, notional) | 12px (`text-xs`) | 400 | 1.4 | Geist Mono, `tabular-nums`, right-aligned |
 | Section heading (existing `Scenario portfolio` h2) | 24px (`text-2xl`) | 600 | 1.2 | DM Sans (pre-existing; do not restyle) |
-| Micro label / data eyebrow (AUM input label) | 10–11px (`text-fixed-10` / micro tier) | 400 | 1.2 | Geist Mono, UPPERCASE, tracking `0.18em` (eyebrow std) |
+| Micro label / data eyebrow (AUM input label) | 10px (exactly `text-fixed-10` — no 11px variant; keep this a 4-size surface) | 400 | 1.2 | Geist Mono, UPPERCASE, tracking `0.18em` (eyebrow std) |
 
 Weights: exactly two for new elements — **400 regular** and **600 semibold**.
 (Pre-existing `font-medium` (500) sites on the footer buttons are untouched;
@@ -211,7 +216,9 @@ helper, which suits honest skips better than a red "Sync failed".
   `setWeightOverride` path so the clamp + clamp banner ("Weight clamped to 1 — …")
   are reused verbatim, not duplicated.
 - **AUM unset (≤ 0):** the field renders as a read-only `—` with
-  `title="Set portfolio AUM to size in dollars"` — an honest non-derivable state,
+  `title="Set portfolio AUM to size in dollars"` PLUS an `sr-only` span carrying the
+  same sentence (`title` alone is unreachable by keyboard/touch and not announced by
+  all screen readers) — an honest non-derivable state,
   never a silently disabled input and never `$0`.
 - **⚠️ v1.11 weight-basis landmines (binding):** a sole-unit weight edit REFUSES,
   never renormalizes — the dollar input inherits that refusal because it routes
