@@ -12903,3 +12903,323 @@ describe("ScenarioComposer — SCEN-02 seams + chip (Phase 152)", () => {
     ).toBeTruthy();
   });
 });
+
+// ===========================================================================
+// Phase 152 / SCEN-03 — the composer row stops being a dead end.
+//
+// Clicking the strategy NAME (a real <button>, so Enter/Space work natively)
+// expands ONE inline detail panel below the row: provenance / markets / types /
+// CAGR / Sharpe, then a "View factsheet →" link. The panel is a pure projection
+// of data ALREADY in memory — CONTEXT locks NO new fetches this phase, so there
+// is no loading state and no failure state to test; there is only honest
+// absence.
+//
+// Two hazards drive the shape of this block:
+//
+//   B-1 (the double-toggle). The row <li> also toggles on pointer click
+//   (amplification), and the name button lives in the row's LEFT cluster, which
+//   sits OUTSIDE the control-cluster stopPropagation wrapper. Without the
+//   button's own `e.stopPropagation()` both handlers run the SAME functional
+//   toggle and one click nets to a no-op — the panel could never open, by
+//   pointer OR keyboard (a native button dispatches click for Enter/Space). So
+//   the expand test asserts the panel is open AFTER ONE click, never after two.
+//
+//   Fabrication. `formatPercent`/`formatNumber` return "—" for null, so a
+//   drawer-added leg with no analytics must never render "+0.0%" / "0.00". The
+//   honesty test pins the exact note AND sweeps the panel's text for a
+//   zero-shaped figure — an implementation that swapped the null-guard for
+//   `?? 0` would satisfy a note-only assertion.
+//
+// Oracle rule: the formatter outputs are pinned as LITERALS ("+23.4%", "1.87"),
+// never re-derived by calling the formatter in the test — an oracle that runs
+// the implementation's own formula cannot fail when that formula drifts.
+// ===========================================================================
+describe("ScenarioComposer — SCEN-03 detail (Phase 152)", () => {
+  const D_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-05-${String(i + 1).padStart(2, "0")}`,
+  );
+  const D_KEY_SERIES = D_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const D_STRAT_SERIES = D_DATES.map((date, i) => ({
+    date,
+    value: [0.01, -0.008, 0.012][i % 3],
+  }));
+
+  /** Book strategy WITH analytics (real cagr + sharpe). */
+  const D_A = "scen03-strat-a";
+  /** Second book strategy WITH analytics — the one-open-at-a-time partner. */
+  const D_B = "scen03-strat-b";
+  /** Strategy whose analytics are BOTH null — the metrics-absent arm. */
+  const D_NULL = "scen03-strat-null";
+  /** Strategy with a sharpe but NO cagr — the single-null arm. */
+  const D_HALF = "scen03-strat-half";
+  const D_K1 = "scen03-key-1";
+
+  /** The pinned metrics-absent copy (UI-SPEC copy table). U+2014 em-dash.
+   *  A literal here, never imported from the component. */
+  const ABSENT_NOTE =
+    "Metrics not available in this view — open the factsheet for full detail.";
+
+  /** A catalog strategy carrying REAL analytics — this is the BOOK arm of
+   *  `addedStrategyMetadataLookup` (`found.strategy.strategy_analytics.*`).
+   *  `catalogStrategy` defaults cagr/sharpe to null, which is exactly the
+   *  drawer-added state, so the absent arm needs no override. */
+  function withMetrics(
+    id: string,
+    name: string,
+    cagr: number | null,
+    sharpe: number | null,
+    trustTier?: string,
+  ) {
+    const base = catalogStrategy(id, name, D_STRAT_SERIES);
+    return {
+      ...base,
+      strategy: {
+        ...base.strategy,
+        ...(trustTier ? { trust_tier: trustTier } : {}),
+        strategy_analytics: { ...base.strategy.strategy_analytics, cagr, sharpe },
+      },
+    };
+  }
+
+  /** A live per-key book so the composer takes its COMPOSED branch, plus four
+   *  catalogued strategies. Every id under test is IN the catalog on purpose:
+   *  an id absent from `payload.strategies` triggers the lazy
+   *  `/api/strategies/{id}/returns` fetch, which is orthogonal to this panel
+   *  (the panel reads the in-memory lookup, whose null pair is byte-identical
+   *  whether it came from a drawer-add or from a book row with no analytics). */
+  function bookedPayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      ...perKeyBook([{ id: D_K1, returns: D_KEY_SERIES, valueUsd: 60_000 }]),
+      apiKeys: [winApiKey(D_K1)],
+      strategies: [
+        withMetrics(D_A, "Scen03 Strat A", 0.234, 1.87, "csv_uploaded"),
+        withMetrics(D_B, "Scen03 Strat B", 0.051, 0.62),
+        withMetrics(D_NULL, "Scen03 Strat Null", null, null),
+        withMetrics(D_HALF, "Scen03 Strat Half", null, 1.25),
+      ],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+  }
+
+  function renderScen(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  function add(id: string, name: string) {
+    addStrategy({
+      id,
+      name,
+      markets: ["binance", "okx"],
+      strategy_types: ["momentum"],
+    });
+  }
+
+  function addedRow(id: string): HTMLElement {
+    const el = document.querySelector(`[data-scope-ref="${id}"]`);
+    expect(el).not.toBeNull();
+    return el as HTMLElement;
+  }
+
+  /** The strategy-NAME button. Exact-string name matching keeps this off the
+   *  mode toggle, whose aria-label merely STARTS with the strategy name. */
+  function nameButton(id: string, name: string): HTMLElement {
+    return within(addedRow(id)).getByRole("button", { name });
+  }
+
+  function openDetail(id: string, name: string) {
+    fireEvent.click(nameButton(id, name));
+  }
+
+  function panel(id: string): HTMLElement | null {
+    return screen.queryByTestId(`scenario-detail-${id}`);
+  }
+
+  /** Panels carry an `id` (for aria-controls); the field spans inside them do
+   *  not. Counting on `[id^=...]` therefore counts PANELS, not fields — which
+   *  is what makes the one-open-at-a-time assertion discriminating. */
+  function openPanelCount(): number {
+    return document.querySelectorAll('[id^="scenario-detail-"]').length;
+  }
+
+  // Re-install the CAPTURING browse-drawer mock (the file-level
+  // `vi.clearAllMocks()` wipes the implementation and every top-level describe
+  // owns its own — without it `addStrategy` has no captured onAdd to call).
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  it("SCEN-03 expand: ONE click on the strategy-name button opens the detail and LEAVES it open; a second click collapses it", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+
+    // Collapsed by default — the panel is not merely hidden, it is unmounted.
+    expect(panel(D_A)).toBeNull();
+
+    openDetail(D_A, "Scen03 Strat A");
+    // THE B-1 ASSERTION. If the button's click bubbles into the row <li>'s
+    // pointer-amplification handler, the same functional toggle runs twice and
+    // this ONE click nets to a no-op — the panel would be null here and could
+    // never be opened by any means.
+    expect(panel(D_A)).toBeInTheDocument();
+
+    openDetail(D_A, "Scen03 Strat A");
+    expect(panel(D_A)).toBeNull();
+  });
+
+  it("SCEN-03 one-open-at-a-time: opening row B closes row A (a single string|null, never a Set)", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    add(D_B, "Scen03 Strat B");
+
+    openDetail(D_A, "Scen03 Strat A");
+    expect(panel(D_A)).toBeInTheDocument();
+    expect(panel(D_B)).toBeNull();
+
+    openDetail(D_B, "Scen03 Strat B");
+    expect(panel(D_A)).toBeNull();
+    expect(panel(D_B)).toBeInTheDocument();
+    // A Set-based state would leave BOTH mounted and still satisfy the
+    // "B is present" line above on its own.
+    expect(openPanelCount()).toBe(1);
+  });
+
+  it("SCEN-03 metrics (book strategy): renders the formatter's OWN renderings — signed 1dp CAGR, 2dp Sharpe — as pinned literals", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    openDetail(D_A, "Scen03 Strat A");
+
+    const p = panel(D_A)!;
+    // 0.234 → formatPercent(v, 1) → "+23.4%" (signed by default).
+    expect(
+      within(p).getByTestId(`scenario-detail-cagr-${D_A}`).textContent,
+    ).toBe("+23.4%");
+    // 1.87 → formatNumber(v, 2) → "1.87".
+    expect(
+      within(p).getByTestId(`scenario-detail-sharpe-${D_A}`).textContent,
+    ).toBe("1.87");
+    // Eyebrow labels are present so the figures are legible without the row.
+    expect(within(p).getByText("CAGR")).toBeInTheDocument();
+    expect(within(p).getByText("SHARPE")).toBeInTheDocument();
+    // A metrics-bearing row must NOT carry the absence note.
+    expect(within(p).queryByText(ABSENT_NOTE)).toBeNull();
+    // Markets / types come off the ADDED row itself (in-memory), `·`-joined.
+    expect(
+      within(p).getByTestId(`scenario-detail-markets-${D_A}`).textContent,
+    ).toBe("binance · okx");
+    expect(
+      within(p).getByTestId(`scenario-detail-types-${D_A}`).textContent,
+    ).toBe("momentum");
+  });
+
+  it("SCEN-03 honesty (both metrics null): renders the exact absence note and NO fabricated zero figure", () => {
+    renderScen(bookedPayload());
+    add(D_NULL, "Scen03 Strat Null");
+    openDetail(D_NULL, "Scen03 Strat Null");
+
+    const p = panel(D_NULL)!;
+    expect(within(p).getByText(ABSENT_NOTE)).toBeInTheDocument();
+    // The falsifier for a `?? 0` "fix": a zero-shaped figure anywhere in the
+    // panel means the surface invented a metric it does not have.
+    expect(p.textContent).not.toMatch(/0\.00/);
+    expect(p.textContent).not.toMatch(/[+-]?0\.0%/);
+    // And the metric blocks themselves are absent — a "—" pair plus the note
+    // would be two competing statements of the same absence.
+    expect(within(p).queryByTestId(`scenario-detail-cagr-${D_NULL}`)).toBeNull();
+    expect(
+      within(p).queryByTestId(`scenario-detail-sharpe-${D_NULL}`),
+    ).toBeNull();
+  });
+
+  it("SCEN-03 honesty (ONE metric null): the pair still renders and the missing one is an em-dash, not the absence note", () => {
+    renderScen(bookedPayload());
+    add(D_HALF, "Scen03 Strat Half");
+    openDetail(D_HALF, "Scen03 Strat Half");
+
+    const p = panel(D_HALF)!;
+    // The note is for a TOTAL absence; a half-known row still has something to
+    // say, so it says it and dashes the rest (Numbers Contract).
+    expect(within(p).queryByText(ABSENT_NOTE)).toBeNull();
+    expect(
+      within(p).getByTestId(`scenario-detail-cagr-${D_HALF}`).textContent,
+    ).toBe("—");
+    expect(
+      within(p).getByTestId(`scenario-detail-sharpe-${D_HALF}`).textContent,
+    ).toBe("1.25");
+  });
+
+  it("SCEN-03 provenance: a tiered row renders the shared TrustTierLabel; an untiered one renders an explicit em-dash", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A"); // trust_tier csv_uploaded
+    add(D_NULL, "Scen03 Strat Null"); // no trust tier at all
+
+    // Positive arm first — without it the em-dash assertion below would pass
+    // against a panel that renders no provenance row whatsoever.
+    openDetail(D_A, "Scen03 Strat A");
+    const tiered = within(panel(D_A)!).getByTestId(
+      `scenario-detail-provenance-${D_A}`,
+    );
+    expect(within(tiered).getByTestId("trust-tier-label")).toBeInTheDocument();
+    expect(tiered.textContent).not.toBe("—");
+
+    openDetail(D_NULL, "Scen03 Strat Null");
+    const untiered = within(panel(D_NULL)!).getByTestId(
+      `scenario-detail-provenance-${D_NULL}`,
+    );
+    // TrustTierLabel returns null for a null tier — a labelled empty space is
+    // not honest absence, so the panel writes the dash itself.
+    expect(untiered.textContent).toBe("—");
+    expect(within(untiered).queryByTestId("trust-tier-label")).toBeNull();
+  });
+
+  it("SCEN-03 factsheet link: href is exactly /factsheet/{id} and the text is the pinned CTA", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    openDetail(D_A, "Scen03 Strat A");
+
+    const link = within(panel(D_A)!).getByRole("link", {
+      name: "View factsheet →",
+    });
+    // getAttribute, not `.href`: jsdom resolves the property to an absolute URL,
+    // which would still pass against a wrong base path.
+    expect(link.getAttribute("href")).toBe(`/factsheet/${D_A}`);
+  });
+
+  it("SCEN-03 wiring: the name button's aria-controls names the panel's own id", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    openDetail(D_A, "Scen03 Strat A");
+
+    const btn = nameButton(D_A, "Scen03 Strat A");
+    const p = panel(D_A)!;
+    expect(btn.getAttribute("aria-controls")).toBe(`scenario-detail-${D_A}`);
+    // The controls target must EXIST under that id — an aria-controls pointing
+    // at nothing is a broken relationship a screen reader silently drops.
+    expect(p.getAttribute("id")).toBe(btn.getAttribute("aria-controls"));
+  });
+});
