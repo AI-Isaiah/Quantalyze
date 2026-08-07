@@ -129,6 +129,26 @@ const state = vi.hoisted(() => ({
     kind: string;
     payload: Record<string, unknown>;
   }>,
+  // Phase 151 / 151-02 (AUM-04) — the owner's own strategies, read by
+  // getMyAllocationDashboard to derive the manager-role discriminator.
+  // Scoped `user_id` (NOT owner_id — the columns are asymmetric across the
+  // two tables, and the mock's generic eq filter makes that asymmetry
+  // load-bearing rather than decorative).
+  strategies: [] as Array<{
+    id: string;
+    user_id: string;
+    api_key_id: string | null;
+    status: string;
+  }>,
+  // Phase 151 / 151-02 (AUM-04) — the composite link table (migration
+  // 20260710120000). Rows carry `owner_id`, so a builder that scopes
+  // `.eq("user_id", …)` matches ZERO rows here and the six manager keys stay
+  // un-excluded — that is the mutation falsifier for the new read's scoping.
+  strategyKeys: [] as Array<{
+    owner_id: string;
+    strategy_id: string;
+    api_key_id: string;
+  }>,
 }));
 
 function resetState() {
@@ -144,6 +164,8 @@ function resetState() {
   state.allocatorHoldings = [];
   state.csvDailyReturns = [];
   state.allocatorEquityDerived = [];
+  state.strategies = [];
+  state.strategyKeys = [];
   chainAudit.entries.length = 0;
 }
 
@@ -257,6 +279,13 @@ function buildChain(table: string) {
       case "allocator_equity_derived":
         return applyFilters(
           state.allocatorEquityDerived as Array<Record<string, unknown>>,
+        );
+      // Phase 151 / AUM-04 — the two role-discriminator reads.
+      case "strategies":
+        return applyFilters(state.strategies as Array<Record<string, unknown>>);
+      case "strategy_keys":
+        return applyFilters(
+          state.strategyKeys as Array<Record<string, unknown>>,
         );
       default:
         return [];
@@ -3051,5 +3080,206 @@ describe("115.1 equity display-repoint", () => {
         curve: [{ date: "2026-03-10", equity_usd: 100 }],
       }),
     ).toEqual([{ date: "2026-03-10", value: 100 }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 151 / 151-02 Task 2 (AUM-04) — the SPLIT book-entry gate
+// ---------------------------------------------------------------------------
+/**
+ * The economics under test: an allocator whose OWN book is 2 keys out of 8 must
+ * be able to reach that book. The other 6 keys are MANAGER-side — they feed
+ * live strategies the owner runs for other people — and they will NEVER have an
+ * allocator per-key series, so the all-or-nothing `perKeyDailiesGateSatisfied`
+ * is pinned false FOREVER on the founder's own PROD account.
+ *
+ * The fix is a SPLIT, not a mutation. `perKeyDailiesGateSatisfied` still has
+ * five consumers, and the one that matters here selects `liveBaselineMetrics`:
+ * relaxing it in place would present a 2-of-8-key blend as "your live book" on
+ * the Overview KPI strip — the exact honesty regression Phase 63 ENGINE-04
+ * hardened against. So the fixtures below assert BOTH halves in the SAME
+ * fixture: new gate true, old gate false, baseline still the honest emptyDefault.
+ */
+const AUM04_STRATEGIES = [
+  // Every row carries `api_key_id: null` ON PURPOSE. The six manager keys are
+  // reachable ONLY through `strategy_keys`, so these tests fail if the new
+  // composite read is missing, mis-scoped, or never fires.
+  { id: "mt5-a", user_id: "user-1", api_key_id: null, status: "private" },
+  { id: "mt5-b", user_id: "user-1", api_key_id: null, status: "published" },
+  { id: "mt5-c", user_id: "user-1", api_key_id: null, status: "draft" },
+  { id: "alpha", user_id: "user-1", api_key_id: null, status: "private" },
+];
+
+const AUM04_LINKS = [
+  { owner_id: "user-1", strategy_id: "mt5-a", api_key_id: "k-mt5-1" },
+  { owner_id: "user-1", strategy_id: "mt5-b", api_key_id: "k-mt5-2" },
+  { owner_id: "user-1", strategy_id: "mt5-c", api_key_id: "k-mt5-3" },
+  { owner_id: "user-1", strategy_id: "alpha", api_key_id: "k-deribit-1" },
+  { owner_id: "user-1", strategy_id: "alpha", api_key_id: "k-deribit-2" },
+  { owner_id: "user-1", strategy_id: "alpha", api_key_id: "k-deribit-3" },
+];
+
+function aum04Key(id: string, exchange: string) {
+  return {
+    id,
+    user_id: "user-1",
+    exchange,
+    label: `Key ${id}`,
+    is_active: true,
+    sync_status: "synced",
+    last_sync_at: "2026-05-08T00:00:00Z",
+    account_balance_usdt: 10_000,
+    created_at: "2026-01-01T00:00:00Z",
+    disconnected_at: null,
+  };
+}
+
+/**
+ * The founder's PROD census key order, deliberately INTERLEAVED (allocator key,
+ * manager keys, allocator key, manager keys) so a regression that returns a
+ * prefix slice instead of a filtered subset cannot pass.
+ */
+const AUM04_KEYS = [
+  aum04Key("k-bybit", "bybit"),
+  aum04Key("k-deribit-1", "deribit"),
+  aum04Key("k-deribit-2", "deribit"),
+  aum04Key("k-deribit-3", "deribit"),
+  aum04Key("k-okx", "okx"),
+  aum04Key("k-mt5-1", "mt5"),
+  aum04Key("k-mt5-2", "mt5"),
+  aum04Key("k-mt5-3", "mt5"),
+];
+
+const AUM04_DATES = Array.from(
+  { length: 12 },
+  (_, i) => `2026-05-${String(i + 1).padStart(2, "0")}`,
+);
+
+function seedSeriesFor(apiKeyIds: string[]) {
+  state.csvDailyReturns = apiKeyIds.flatMap((api_key_id) =>
+    AUM04_DATES.map((date, i) => ({
+      api_key_id,
+      allocator_id: "user-1",
+      date,
+      daily_return: i % 2 === 0 ? 0.01 : -0.005,
+    })),
+  );
+}
+
+describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)", () => {
+  beforeEach(resetState);
+
+  it("founder census END-TO-END: 6 manager keys excluded via the strategy_keys read → book gate TRUE while the old all-or-nothing gate stays FALSE", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = AUM04_KEYS;
+    state.strategies = AUM04_STRATEGIES;
+    state.strategyKeys = AUM04_LINKS;
+    // Only the allocator's own two keys have a per-key series.
+    seedSeriesFor(["k-bybit", "k-okx"]);
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    // All 8 keys are eligible for the per-key basis — the manager keys are NOT
+    // filtered out by the old predicate, which is precisely why the old gate is
+    // stuck false.
+    expect(result.eligibleApiKeyIds).toHaveLength(8);
+    expect(result.perKeyDailiesGateSatisfied).toBe(false);
+
+    // The split: the allocator can reach their own 2-key book.
+    expect(result.allocatorEligibleApiKeyIds).toEqual(["k-bybit", "k-okx"]);
+    expect(result.contributingApiKeyIds).toEqual(["k-bybit", "k-okx"]);
+    expect(result.bookEntryGateSatisfied).toBe(true);
+  });
+
+  it("partial allocator book: 2 allocator keys, 1 with a series → gate TRUE with exactly 1 contributing key", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = AUM04_KEYS;
+    state.strategies = AUM04_STRATEGIES;
+    state.strategyKeys = AUM04_LINKS;
+    seedSeriesFor(["k-bybit"]);
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    // The "{N} of {M}" copy downstream reads these two arrays; M counts only
+    // ALLOCATOR-eligible keys, because a manager key will never contribute.
+    expect(result.allocatorEligibleApiKeyIds).toEqual(["k-bybit", "k-okx"]);
+    expect(result.contributingApiKeyIds).toEqual(["k-bybit"]);
+    expect(result.bookEntryGateSatisfied).toBe(true);
+  });
+
+  it("no contributing keys: allocator-eligible keys exist but none has a series → gate FALSE", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = AUM04_KEYS;
+    state.strategies = AUM04_STRATEGIES;
+    state.strategyKeys = AUM04_LINKS;
+    // A manager key HAS a series (an allocator-side backfill artefact); it must
+    // not open the gate, because it is not the allocator's own book.
+    seedSeriesFor(["k-deribit-1"]);
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.allocatorEligibleApiKeyIds).toEqual(["k-bybit", "k-okx"]);
+    expect(result.contributingApiKeyIds).toEqual([]);
+    expect(result.bookEntryGateSatisfied).toBe(false);
+  });
+
+  it("!portfolio branch: a fresh allocator gets [] / [] / false — never undefined", async () => {
+    // A field emitted on only ONE return branch is `undefined` here, and every
+    // downstream `?? []` / `?? false` fallback would silently mask it.
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.portfolio).toBeNull();
+    expect(result).toHaveProperty("allocatorEligibleApiKeyIds");
+    expect(result).toHaveProperty("contributingApiKeyIds");
+    expect(result).toHaveProperty("bookEntryGateSatisfied");
+    expect(result.allocatorEligibleApiKeyIds).toEqual([]);
+    expect(result.contributingApiKeyIds).toEqual([]);
+    expect(result.bookEntryGateSatisfied).toBe(false);
+  });
+
+  it("consumer freeze: with the new gate TRUE, liveBaselineMetrics is STILL the honest emptyDefault (old gate untouched)", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = AUM04_KEYS;
+    state.strategies = AUM04_STRATEGIES;
+    state.strategyKeys = AUM04_LINKS;
+    state.allocatorHoldings = [
+      {
+        allocator_id: "user-1",
+        symbol: "BTC",
+        quantity: 1,
+        mark_price: 50_000,
+        value_usd: 50_000,
+        venue: "bybit",
+        holding_type: "spot",
+        asof: AUM04_DATES[AUM04_DATES.length - 1],
+        api_key_id: "k-bybit",
+      },
+    ];
+    seedSeriesFor(["k-bybit", "k-okx"]);
+
+    const { getMyAllocationDashboard, emptyLiveBaselineMetrics } = await import(
+      "./queries"
+    );
+    const result = await getMyAllocationDashboard("user-1");
+
+    // Pre-condition: this is the fixture where the two gates DISAGREE.
+    expect(result.bookEntryGateSatisfied).toBe(true);
+    expect(result.perKeyDailiesGateSatisfied).toBe(false);
+
+    // The invariant: the Overview KPI strip must NOT present a 2-of-8-key blend
+    // as "your live book". AUM is preserved from holdings; every metric is null
+    // (the honest em-dash). If the new gate ever gets wired into the baseline
+    // ternary, sharpe/ytdTwr go non-null here and this goes RED.
+    expect(result.liveBaselineMetrics).toEqual(
+      emptyLiveBaselineMetrics(result.holdingsSummary),
+    );
+    expect(result.liveBaselineMetrics.aum).toBeGreaterThan(0);
+    expect(result.liveBaselineMetrics.sharpe).toBeNull();
+    expect(result.liveBaselineMetrics.ytdTwr).toBeNull();
+    expect(result.liveBaselineMetrics.equity).toEqual([]);
   });
 });
