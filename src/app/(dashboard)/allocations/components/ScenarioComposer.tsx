@@ -4077,6 +4077,13 @@ export function ScenarioComposer({
               name: s.name,
               markets: s.markets,
               strategy_types: s.strategy_types,
+              // Phase 152 SCEN-02 — TWIN SEAM A (empty-state mount). Its
+              // byte-identical twin is the main-body <StrategyBrowseDrawer>
+              // below; edit BOTH or an allocator who adds from the blank slate
+              // silently loses the ownership bit. Straight pass-through: the
+              // drawer forwards what GET /api/strategies/browse said, and
+              // absent stays absent (never coerced to false or true).
+              isOwn: s.isOwn,
             })
           }
           onAddOwn={() => {
@@ -5421,6 +5428,13 @@ export function ScenarioComposer({
             name: s.name,
             markets: s.markets,
             strategy_types: s.strategy_types,
+            // Phase 152 SCEN-02 — TWIN SEAM B (main-body mount). Its
+            // byte-identical twin is the empty-state <StrategyBrowseDrawer>
+            // above; edit BOTH or an allocator with a live book silently loses
+            // the ownership bit. Straight pass-through: the drawer forwards
+            // what GET /api/strategies/browse said, and absent stays absent
+            // (never coerced to false or true).
+            isOwn: s.isOwn,
           })
         }
         onAddOwn={() => {
@@ -5456,6 +5470,12 @@ export function ScenarioComposer({
             name: candidate.name,
             markets: candidate.markets,
             strategy_types: candidate.strategy_types,
+            // Phase 152 SCEN-02 — deliberately NO isOwn: a Bridge candidate
+            // comes from the match engine and carries no ownership signal;
+            // absent = no chip (never fabricate ownership — CONTEXT lock).
+            // This is the THIRD add seam and the one that must NOT match the
+            // twins above; if a future edit "completes the set" here, it turns
+            // a match-engine suggestion into a claim the user authored it.
           });
           // UNIFY-04 — a Bridge candidate is also a catalog strategy not in the
           // book; lazy-fetch its series so the projection moves on add.

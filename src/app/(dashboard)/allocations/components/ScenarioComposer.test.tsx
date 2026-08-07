@@ -12584,3 +12584,194 @@ describe("ScenarioComposer — SCEN-04 honest notional (Phase 152)", () => {
     expect(perKeyCell!.textContent).not.toContain(NOTIONAL_NOTE);
   });
 });
+
+// ===========================================================================
+// Phase 152 / SCEN-02 — the composer's TWO Browse add seams and the "Yours"
+// chip they feed.
+//
+// Why two `it`s with different payloads rather than two adds in one render:
+// `browseOnAdd` is a single module-scoped variable that the capturing drawer
+// mock OVERWRITES on every render, and exactly ONE StrategyBrowseDrawer mounts
+// per branch — the empty-state twin lives inside the blank-slate early return,
+// the main-body twin in the composed one. A second invocation inside one render
+// therefore re-enters the SAME seam; it proves nothing about the other. The two
+// literals are byte-identical, which makes a one-of-two edit the most likely
+// defect in this phase and a single-render test the one that would miss it.
+// ===========================================================================
+describe("ScenarioComposer — SCEN-02 seams + chip (Phase 152)", () => {
+  const S_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-05-${String(i + 1).padStart(2, "0")}`,
+  );
+  const S_KEY_SERIES = S_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const S_STRAT_SERIES = S_DATES.map((date, i) => ({
+    date,
+    value: [0.01, -0.008, 0.012][i % 3],
+  }));
+
+  const OWN_ID = "scen02-own";
+  const OTHER_ID = "scen02-other";
+  const S_K1 = "scen02-key-1";
+
+  /** No book at all → the composer takes its empty-state early return, so the
+   *  ONLY drawer that mounts is the empty-state twin (Seam A). */
+  function blankSlatePayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      holdingsSummary: [],
+      apiKeys: [],
+      perKeyReturnsByApiKeyId: {},
+      perKeyDailiesGateSatisfied: false,
+      eligibleApiKeyIds: [],
+      allocatorEligibleApiKeyIds: [],
+      contributingApiKeyIds: [],
+      bookEntryGateSatisfied: false,
+      strategies: [
+        catalogStrategy(OWN_ID, "Scen02 Own", S_STRAT_SERIES),
+        catalogStrategy(OTHER_ID, "Scen02 Other", S_STRAT_SERIES),
+      ],
+    });
+  }
+
+  /** A live book → the empty-state return is skipped, so the ONLY drawer that
+   *  mounts is the main-body twin (Seam B). */
+  function bookedPayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      ...perKeyBook([{ id: S_K1, returns: S_KEY_SERIES, valueUsd: 60_000 }]),
+      apiKeys: [winApiKey(S_K1)],
+      strategies: [
+        catalogStrategy(OWN_ID, "Scen02 Own", S_STRAT_SERIES),
+        catalogStrategy(OTHER_ID, "Scen02 Other", S_STRAT_SERIES),
+      ],
+    });
+  }
+
+  function renderScen(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  /** Deliberately NOT the shared `addStrategy` helper: its `AddStrategyInput`
+   *  has no `isOwn`, and widening it would let a future test pass the field
+   *  everywhere by accident. These seam tests must control the payload shape
+   *  exactly — including the absent-key case, which is the never-fabricate
+   *  falsifier and cannot be expressed as `isOwn: undefined` on a typed helper
+   *  without the reader wondering which one is under test. */
+  function addRaw(s: {
+    id: string;
+    name: string;
+    markets: string[];
+    strategy_types: string[];
+    isOwn?: boolean | null;
+  }): void {
+    expect(browseOnAdd).not.toBeNull();
+    act(() => {
+      browseOnAdd!(s);
+    });
+  }
+
+  function addOwn(id: string, name: string) {
+    addRaw({
+      id,
+      name,
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+      isOwn: true,
+    });
+  }
+
+  /** The legacy / Bridge payload shape — the `isOwn` KEY is absent entirely,
+   *  not present-and-undefined. */
+  function addWithoutOwnership(id: string, name: string) {
+    addRaw({
+      id,
+      name,
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+  }
+
+  function addedRow(id: string): HTMLElement {
+    const el = document.querySelector(`[data-scope-ref="${id}"]`);
+    expect(el).not.toBeNull();
+    return el as HTMLElement;
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  it("SCEN-02 seam A (empty-state drawer mount): an own strategy added from the blank slate carries isOwn into the draft and shows the Yours chip", () => {
+    renderScen(blankSlatePayload());
+    // Non-vacuity / seam identity: the blank-slate card is on screen, so the
+    // captured onAdd belongs to the EMPTY-STATE twin. Without this line the
+    // test could silently be re-testing Seam B.
+    expect(screen.getByText("Start a portfolio")).toBeInTheDocument();
+
+    addOwn(OWN_ID, "Scen02 Own");
+
+    const chip = within(addedRow(OWN_ID)).getByTestId(
+      `scenario-yours-${OWN_ID}`,
+    );
+    expect(chip).toHaveTextContent("Yours");
+  });
+
+  it("SCEN-02 seam B (main-body drawer mount): an own strategy added over a live book carries isOwn into the draft and shows the Yours chip", () => {
+    renderScen(bookedPayload());
+    // Non-vacuity / seam identity: the blank-slate card is ABSENT, so the only
+    // drawer that mounted is the MAIN-BODY twin. This run cannot be exercising
+    // Seam A, which is what makes it a second, independent proof.
+    expect(screen.queryByText("Start a portfolio")).toBeNull();
+
+    addOwn(OWN_ID, "Scen02 Own");
+
+    const chip = within(addedRow(OWN_ID)).getByTestId(
+      `scenario-yours-${OWN_ID}`,
+    );
+    expect(chip).toHaveTextContent("Yours");
+  });
+
+  it("SCEN-02 never fabricates: a payload with NO isOwn key (Bridge candidate / legacy persisted draft) shows no chip, while an own sibling in the SAME list does", () => {
+    renderScen(bookedPayload());
+    addOwn(OWN_ID, "Scen02 Own");
+    addWithoutOwnership(OTHER_ID, "Scen02 Other");
+
+    // The own row still claims ownership …
+    expect(
+      within(addedRow(OWN_ID)).getByTestId(`scenario-yours-${OWN_ID}`),
+    ).toBeInTheDocument();
+    // … and the signal-less row does not.
+    expect(
+      within(addedRow(OTHER_ID)).queryByTestId(`scenario-yours-${OTHER_ID}`),
+    ).toBeNull();
+    // The paired count is the real falsifier: an implementation that renders
+    // the chip unconditionally (or gates on `!== false`) puts TWO on screen and
+    // still satisfies the positive assertion above on its own.
+    expect(
+      document.querySelectorAll('[data-testid^="scenario-yours-"]'),
+    ).toHaveLength(1);
+  });
+});
