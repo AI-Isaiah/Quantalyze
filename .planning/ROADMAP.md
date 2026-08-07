@@ -344,7 +344,7 @@ Plans:
 | 149. NAV my-strategies ranking | 5/5 | Complete   | 2026-08-05 |
 | 150. OWN-03 portfolio question | 8/8 | Complete    | 2026-08-07 |
 | 151. AUM book + sizing | 7/7 | Complete    | 2026-08-07 |
-| 152. SCEN composer legibility | 6/6 | Complete   | 2026-08-07 |
+| 152. SCEN composer legibility | 6/6 | Complete    | 2026-08-07 |
 | 153. WIZFORM + MT5-14 | 0/? | Not started | - |
 | 154. WIZCONT + STALE | 0/? | Not started | - |
 | 155. MT5-VERIFY + acceptance | 0/? | Not started | - |

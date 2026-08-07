@@ -802,7 +802,7 @@ All five found in one live founder session, composing a scenario from a just-upl
   Rule 7: use that resolver, do not mint a third mechanism. The composer then blends the same series
   those pages render.
 
-- [ ] **SCEN-02**: In the scenario composition list, a strategy **the allocator uploaded themselves**
+- [x] **SCEN-02**: In the scenario composition list, a strategy **the allocator uploaded themselves**
   is visually distinguishable from a third-party published one.
   **Today there is no such marker anywhere** (verified in code): the added-strategy row
   (`ScenarioComposer.tsx:5558-5686`) renders a toggle, the name, a `TrustTierLabel` (data
@@ -816,7 +816,7 @@ All five found in one live founder session, composing a scenario from a just-upl
   that type is zod-validated AND PERSISTED (`SCENARIO_SCHEMA_VERSION = 4`), so a new field is a
   schema-version decision.
 
-- [ ] **SCEN-03**: A strategy row in the scenario is **clickable**, opening richer detail (and, once
+- [x] **SCEN-03**: A strategy row in the scenario is **clickable**, opening richer detail (and, once
   OWN-02 exists, the full factsheet). Today rows are **not clickable at all** — no `onClick`, no
   `href`, no drawer, no expansion (`ScenarioComposer.tsx:5588-5595`). The Holdings tab already has
   this affordance (`HoldingsTable.tsx:468` → `HoldingDetail`), so the composer is the outlier.
@@ -825,13 +825,13 @@ All five found in one live founder session, composing a scenario from a just-upl
   strategies they are null — the returns route does not return them — so a richer row is NOT uniformly
   free. ⛔ Depends on OWN-02 for the factsheet link (same dead-end trap as OWN-04).
 
-- [ ] **SCEN-04**: The numbers on a scenario row are **labelled**. Founder, looking at a live row:
+- [x] **SCEN-04**: The numbers on a scenario row are **labelled**. Founder, looking at a live row:
   *"What do the numbers actually mean?"* The row renders `1.000`, a `LEVERAGE` toggle, `1`, and `—`
   with no column headers and no inline labels (`ScenarioComposer.tsx:5630-5672`). They are weight,
   mode, leverage, and notional; the last is an em-dash whenever it is non-derivable, which reads as
   "broken" rather than "not applicable".
 
-- [ ] **SCEN-05**: The strategy browser does not show **duplicate rows for the same strategy**.
+- [x] **SCEN-05**: The strategy browser does not show **duplicate rows for the same strategy**.
   Observed live: **two identical "Alpha Centauri" entries**, indistinguishable in the list. Both are
   real, owned, `status='private'` rows (`8d382aaf`, created 2026-08-04; `081f2912`, created
   2026-07-20) — so this is not a rendering bug, it is the accumulated cost of re-running the wizard.
