@@ -12062,6 +12062,80 @@ describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
     expect(weightInput(D_K1).value).toBe("1.000");
   });
 
+  // 151 review WR-05 — A BLUR IS NOT AN EDIT (the dollar twin of WR-04).
+  //
+  // The field displays `round(weight × AUM)`, so committing the DISPLAYED
+  // figure writes `round(w·A)/A` back — a lossy round-trip that moves the
+  // weight by up to `0.5 / AUM` and, through `handleWeightChange`, rescales
+  // every other constituent. And because an added row in a mixed book renders
+  // its DERIVED blend share, that write also STAMPS `userWeightOverrides`,
+  // pinning a row that was riding the blend. Both by a keyboard tab.
+  it("AUM-01 / WR-05: a bare focus→blur on a dollar field never stamps a user weight override", async () => {
+    renderUsd(mixedBookPayload());
+    add(D_A, "Dollar Strat A");
+    // Non-vacuity: the row renders a real dollar figure (AUM = the live book),
+    // so the blur below genuinely reaches commitDollarInput.
+    expect(Number(dollarInput(D_A).value)).toBeGreaterThan(0);
+
+    const el = dollarInput(D_A);
+    act(() => {
+      fireEvent.focus(el);
+      fireEvent.blur(el);
+    });
+
+    await waitFor(() => {
+      expect(
+        lsStore.get(`allocations.scenario_v0_15.${ALLOCATOR_A}`),
+      ).toBeTruthy();
+    });
+    const persisted = JSON.parse(
+      lsStore.get(`allocations.scenario_v0_15.${ALLOCATOR_A}`) as string,
+    ) as ScenarioDraft;
+    // `userWeightOverrides` is the user-gesture stamp — the thing that pins a
+    // derived-blend row to an explicit weight forever.
+    expect(persisted.userWeightOverrides?.[D_A]).toBeUndefined();
+  });
+
+  it("AUM-01 / WR-05: a bare focus→blur on a dollar field never moves the weight vector (the lossy round-trip)", () => {
+    const D_C = "usd1-strat-c";
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    add(D_B, "Dollar Strat B");
+    add(D_C, "Dollar Strat C");
+    // A modelling AUM small enough that whole-dollar rounding is LOSSY: three
+    // equal legs of $1,000 are $333.33 each, and the field shows 333.
+    setAum("1000");
+    const before = [D_A, D_B, D_C].map((r) => weightInput(r).value);
+    expect(dollarInput(D_A).value).toBe("333");
+
+    const el = dollarInput(D_A);
+    act(() => {
+      fireEvent.focus(el);
+      fireEvent.blur(el);
+    });
+
+    // Pre-fix: 333/1000 = 0.333 was written back and the other two legs were
+    // rescaled to absorb the lost third of a cent.
+    expect([D_A, D_B, D_C].map((r) => weightInput(r).value)).toEqual(before);
+  });
+
+  it("AUM-01 / WR-05 (control): a REAL dollar edit still writes through the one weight path", async () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    add(D_B, "Dollar Strat B");
+    setAum("1000000");
+
+    setDollar(D_A, "250000");
+
+    expect(weightInput(D_A).value).toBe("0.250");
+    await waitFor(() => {
+      const persisted = JSON.parse(
+        lsStore.get(`allocations.scenario_v0_15.${ALLOCATOR_A}`) as string,
+      ) as ScenarioDraft;
+      expect(persisted.userWeightOverrides?.[D_A]).toBe(0.25);
+    });
+  });
+
   // Test 6 — AUM UNSET. A non-derivable dollar figure is the em-dash, never a
   // silently disabled input and never $0 (DESIGN.md Numbers Contract). The
   // `title` is duplicated into an sr-only span because a title alone is

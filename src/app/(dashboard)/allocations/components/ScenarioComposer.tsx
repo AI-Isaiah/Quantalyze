@@ -5826,6 +5826,20 @@ function CompositionList({
     if (raw.trim() !== "") {
       const amount = Number(raw);
       if (isValidDollar(amount)) {
+        // 151 review WR-05 — A BLUR IS NOT AN EDIT. The field displays
+        // `Math.round(weight × AUM)`, so committing the DISPLAYED figure writes
+        // `round(w·A)/A` back: a lossy round-trip that moves the weight by up to
+        // `0.5 / AUM`. Immaterial at $460k, visible at a modelling AUM of a few
+        // thousand (the field accepts any positive value under $1e12) — and
+        // `handleWeightChange` rescales every OTHER constituent to match. Worse,
+        // in a MIXED book `weightValue` is the DERIVED blend share, so the write
+        // stamps `userWeightOverrides[ref]` and permanently pins a row that was
+        // riding the blend — by a keyboard tab. Compare against the rendered
+        // integer (what the user is looking at), not against the float.
+        if (Math.round(amount) === displayed) {
+          el.value = String(displayed);
+          return;
+        }
         // THE one weight-write path. `scenarioAum > 0` is guaranteed: the
         // em-dash branch below is the only other render, so no division by zero
         // and no NaN can reach handleWeightChange from here.
