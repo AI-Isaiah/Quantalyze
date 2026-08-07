@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
-status: executing
-stopped_at: Phase 151 UI-SPEC approved
-last_updated: "2026-08-07T09:03:00.116Z"
+status: ready_to_plan
+stopped_at: Phase 151 complete (7/7) — ready to discuss Phase 152
+last_updated: 2026-08-07T14:57:32.334Z
 last_activity: 2026-08-07
 progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 31
-  completed_plans: 24
+  completed_plans: 192
   percent: 44
 ---
 
@@ -55,9 +55,9 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: 151 (AUM — A book you can reach and a size you can set) — EXECUTING
-Plan: 1 of 7
-Status: Executing Phase 151
+Phase: 152
+Plan: Not started
+Status: Ready to plan
 Last activity: 2026-08-07 -- Phase 151 execution started
 
 ### Phase 142.1 scope (inserted 2026-08-02)

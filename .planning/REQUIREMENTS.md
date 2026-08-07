@@ -842,7 +842,7 @@ All five found in one live founder session, composing a scenario from a just-upl
 
 ### AUM — An allocator can size a hypothetical book (founder call 2026-08-04, verbatim)
 
-- [ ] **AUM-01** ⛔ **DESIGN FLAW, founder-stated**: The allocator can **set AUM directly**, and
+- [x] **AUM-01** ⛔ **DESIGN FLAW, founder-stated**: The allocator can **set AUM directly**, and
   weights follow from it. Founder verbatim: *"I should be able to change AUM, and then the weight
   changes. That is it. Currently, I have only strategies that are not in my book, which consequently
   leads then to no AUM, and no computation at all. You see how silly that is?"*
@@ -860,7 +860,7 @@ All five found in one live founder session, composing a scenario from a just-upl
   dollar figures and gates the commit. **The 0.00s the founder saw were SCEN-01, not this.** Shipping
   AUM-01 alone would leave the screen showing zeros — do not let it be planned as the fix for that.
 
-- [ ] **AUM-02** ⛔ **NOT A FENCE — A CRASH. Investigated 2026-08-04, initial framing was WRONG.**
+- [x] **AUM-02** ⛔ **NOT A FENCE — A CRASH. Investigated 2026-08-04, initial framing was WRONG.**
   An **MT5 account's equity can contribute to AUM**. Today it cannot, ever, and the reason is not a
   deliberate venue decision: **the holdings sync is still ccxt-only and dies on the first call.**
   **PROD smoking gun** (verified directly, twice): api_key `46293712-59e6-46c0-8204-5dd32afe2503`
@@ -897,7 +897,7 @@ All five found in one live founder session, composing a scenario from a just-upl
   `AttributeError` into the user-visible `sync_error`. Ship only as an explicit interim decision — it
   papers over the gap.
 
-- [ ] **AUM-05** *(split out of AUM-02 so it cannot be lost when that item is scoped to MT5)*: **sFOX
+- [x] **AUM-05** *(split out of AUM-02 so it cannot be lost when that item is scoped to MT5)*: **sFOX
   will crash the holdings sync the same way MT5 does, the first day a real key exists.** `SfoxClient`
   exposes `get_balances()` (`sfox_client.py:272`), not the ccxt `fetch_balance()` that
   `_fetch_spot_rows` calls unconditionally (`allocator_positions.py:154`) — so a live sFOX key will
@@ -910,7 +910,7 @@ All five found in one live founder session, composing a scenario from a just-upl
   🔗 The sFOX go-live gate is tracked separately (worker egress IPs, founder flag) — this must be
   closed BEFORE that flip, not discovered by it.
 
-- [ ] **AUM-03** ⛔ **WORSE THAN FILED — the copy names a control THAT DOES NOT EXIST.** The AUM-zero
+- [x] **AUM-03** ⛔ **WORSE THAN FILED — the copy names a control THAT DOES NOT EXIST.** The AUM-zero
   refusal must name an affordance the user can find. Current copy: *"Can't record a scenario commit:
   portfolio AUM is zero. Connect an exchange API key or toggle on a live holding before submitting."*
   (`ScenarioComposer.tsx:3559`).
@@ -923,7 +923,7 @@ All five found in one live founder session, composing a scenario from a just-upl
   the UI"* (`:3542-3544`). Same class as WIZFORM-03, but stronger: this instructs the user to use a
   control that was deliberately never built.
 
-- [ ] **AUM-04** ⛔ **ROOT CAUSE of the founder's AUM=0 — blank slate was FORCED, not chosen.**
+- [x] **AUM-04** ⛔ **ROOT CAUSE of the founder's AUM=0 — blank slate was FORCED, not chosen.**
   An allocator with a live book can always reach it. Today one all-or-nothing gate can hide it
   entirely, with no explanation.
   **Mechanism:** blank mode does not merely toggle holdings off, it **removes them from the draft**
