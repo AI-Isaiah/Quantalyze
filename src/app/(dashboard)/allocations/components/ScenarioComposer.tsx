@@ -5210,6 +5210,7 @@ export function ScenarioComposer({
           onSetWeight={handleWeightChange}
           blendShareByRef={blendShareByRef}
           totalBookEquity={totalBookEquity}
+          scenarioAum={scenarioAum}
           leverageByRef={leverageByRef}
           onSetLeverage={handleLeverageChange}
           targetModeByRef={targetModeByRef}
@@ -5604,6 +5605,16 @@ interface CompositionListProps {
    * em-dash `—` (Numbers Contract), never a fabricated $0.
    */
   totalBookEquity: number | null;
+  /**
+   * Phase 151 AUM-01 — the scenario's portfolio AUM (`sanitizedManualAum ??
+   * liveHoldingsSum`). The base for the per-strategy DOLLAR input: a row's
+   * allocation in dollars is `weight × scenarioAum`, and a typed amount
+   * back-computes `weight = amount / scenarioAum`. `<= 0` (nothing set, no
+   * live book) → the dollar cell renders the em-dash read-only state and NO
+   * division executes. Distinct from `totalBookEquity`, which bases the
+   * derived Notional column (a DIFFERENT number — equity × share × leverage).
+   */
+  scenarioAum: number;
   /** R4 — ref → leverage multiplier (default 1.0 when absent). */
   leverageByRef: Record<string, number>;
   onSetLeverage: (scopeRef: string, leverage: number) => void;
@@ -5670,6 +5681,7 @@ function CompositionList({
   onSetWeight,
   blendShareByRef,
   totalBookEquity,
+  scenarioAum,
   leverageByRef,
   onSetLeverage,
   targetModeByRef,
@@ -5698,6 +5710,118 @@ function CompositionList({
     }
     const notional = share * totalBookEquity * (leverageByRef[ref] ?? 1);
     return Number.isFinite(notional) ? formatCurrency(notional) : "—";
+  };
+
+  // -------------------------------------------------------------------------
+  // Phase 151 AUM-01 — the per-strategy DOLLAR input ("allocate $500k to this
+  // strategy"). It is a second VIEW of the weight, NEVER a second weight-WRITE
+  // path.
+  //
+  // ⚠️ v1.11 weight-basis landmines (binding): the commit below calls
+  // `onSetWeight` — the composer's ONE `handleWeightChange` — so the >1 clamp
+  // and its "Weight clamped to 1 …" banner, the mixed-book engine-unit basis
+  // choice, and the sole-unit refusal ("A single constituent is always 100%.")
+  // are all INHERITED. Forking a second weight-write path for dollars (a direct
+  // setWeightOverride / applyWeightOverrides call from here) is the named defect
+  // class — a typed fraction that renders as ~0% against raw per-key equity
+  // dollars, and a poisoned override that survives exclude/re-include.
+  //
+  // The adjacent Notional span is a DIFFERENT number (equity × share × leverage)
+  // and is untouched by any of this.
+  // -------------------------------------------------------------------------
+  const AUM_UNSET_REMEDY = "Set portfolio AUM to size in dollars";
+
+  const commitDollarInput = (
+    ref: string,
+    el: HTMLInputElement,
+    displayed: number,
+  ) => {
+    const raw = el.value;
+    // Blank ≠ zero (the composer's shared blank-guard, mirrored from the
+    // target-DD and AUM inputs): a benign focus→blur of an emptied field
+    // commits nothing rather than committing a Number("") === 0.
+    if (raw.trim() !== "") {
+      const amount = Number(raw);
+      if (isValidDollar(amount)) {
+        // THE one weight-write path. `scenarioAum > 0` is guaranteed: the
+        // em-dash branch below is the only other render, so no division by zero
+        // and no NaN can reach handleWeightChange from here.
+        onSetWeight(ref, amount / scenarioAum);
+      } else {
+        // Fail-loud + keep the previous value, mirroring handleWeightChange's
+        // non-finite posture — never clamp to a number the allocator never
+        // typed.
+        console.warn(
+          "[ScenarioComposer] refused an invalid dollar allocation",
+          { ref, raw },
+        );
+      }
+    }
+    // Snap the text back to the DERIVED figure so the field can never display a
+    // number the draft does not hold. Correct in both branches: when the commit
+    // moves the derived dollar, the `key` remount replaces this with the fresh
+    // defaultValue; when it does not move, `displayed` IS the post-commit value.
+    el.value = String(displayed);
+  };
+
+  const renderDollarInput = (
+    ref: string,
+    labelText: string,
+    weightValue: number,
+    disabled: boolean,
+  ) => {
+    // AUM unset — an honest non-derivable state, the notionalText recipe: the
+    // em-dash, never a silently disabled input and never a fabricated $0. The
+    // title is duplicated into an sr-only span because a title alone is
+    // unreachable by keyboard/touch and is not announced by every screen reader
+    // (UI-SPEC §2). No division executes on this branch.
+    if (!Number.isFinite(scenarioAum) || scenarioAum <= 0) {
+      return (
+        <span
+          data-testid="scenario-constituent-usd-unset"
+          title={AUM_UNSET_REMEDY}
+          className="w-24 text-right font-mono text-xs text-text-muted"
+        >
+          —<span className="sr-only">{AUM_UNSET_REMEDY}</span>
+        </span>
+      );
+    }
+    // Display rounds to whole dollars (UI-SPEC); the rounded value is NEVER
+    // written back — the stored weight changes only on a user edit, so a
+    // re-render can never drift the draft.
+    const displayed = Math.round(weightValue * scenarioAum);
+    return (
+      <>
+        <label className="sr-only" htmlFor={`alloc-usd-${ref}`}>
+          {labelText} allocation (USD)
+        </label>
+        <input
+          // Re-key on the derived dollar: a weight or AUM change refreshes the
+          // field, while keystrokes between commits are left alone (the
+          // uncontrolled half of the composer's blur/Enter recipe — a controlled
+          // mirror would fight the user mid-type).
+          key={displayed}
+          id={`alloc-usd-${ref}`}
+          data-testid="scenario-constituent-dollar"
+          type="number"
+          min="0"
+          step="1"
+          inputMode="numeric"
+          defaultValue={String(displayed)}
+          disabled={disabled}
+          title="Allocation in dollars = weight × portfolio AUM. Commits on blur/Enter and back-computes the weight."
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              commitDollarInput(ref, e.target as HTMLInputElement, displayed);
+            }
+          }}
+          onBlur={(e) => {
+            commitDollarInput(ref, e.target, displayed);
+          }}
+          className="w-24 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
+        />
+      </>
+    );
   };
 
   // WEIGHTS-03/04 (Phase 113) — the shared Target-max-DD row surface. ONE
@@ -6070,6 +6194,10 @@ function CompositionList({
                   onChange={(e) => onSetWeight(a.id, Number(e.target.value))}
                   className="w-20 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
                 />
+                {/* AUM-01 — the same weight, expressed in dollars. Routes back
+                    through onSetWeight (handleWeightChange), so every guard is
+                    inherited; em-dash when AUM is unset. */}
+                {renderDollarInput(a.id, a.name, weight, !enabled)}
                 {/* WEIGHTS-03 — per-row mode toggle + (Target mode) drawdown
                     input; the leverage input below goes READ-ONLY in Target mode
                     (never disabled — the derived L stays visible). */}
