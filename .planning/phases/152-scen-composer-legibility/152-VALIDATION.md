@@ -1,16 +1,17 @@
 ---
 phase: 152
 slug: scen-composer-legibility
-status: draft
-nyquist_compliant: false
-wave_0_complete: false
+status: planned
+nyquist_compliant: true
+wave_0_complete: true
 created: 2026-08-07
+planned: 2026-08-07
 ---
 
 # Phase 152 — Validation Strategy
 
 > Per-phase validation contract. Details in 152-RESEARCH.md `## Validation Architecture`;
-> the planner fills the per-task map + falsifiability ledger.
+> per-task map + falsifiability ledger filled by the planner (2026-08-07).
 
 ---
 
@@ -28,11 +29,44 @@ created: 2026-08-07
 
 ## Per-Task Verification Map
 
-*(Planner fills task rows.)*
-
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| TBD | — | — | SCEN-02..05 | — | — | — | — | — | ⬜ pending |
+| 01-T1 | 152-01 | 1 | SCEN-02/05 | T-152-01-01 | H-0300 fence: TWO exhaustive arms; third-party rows never carry created_at/status; whole-payload sweep | unit | `npx vitest run src/app/api/strategies/browse/route.test.ts -t "H-0300"` | ✅ extend | ⬜ pending |
+| 01-T2 | 152-01 | 1 | SCEN-02/05 | T-152-01-02/03 | isOwn strict-boolean on every row; own-only conditional emission; user-scoped client untouched | unit | `npx vitest run src/app/api/strategies/browse/route.test.ts` | ✅ extend | ⬜ pending |
+| 02-T1 | 152-02 | 1 | SCEN-02 | T-152-02-01 | populated-fixture strip guard (BOTH schemas); v4-without-isOwn decodes ok; isOwn:null never resets; version stays 4 | unit | `npx vitest run "src/app/(dashboard)/allocations/lib/scenario-state.test.ts" -t "isOwn" --no-file-parallelism` | ✅ extend | ⬜ pending |
+| 02-T2 | 152-02 | 1 | SCEN-02 | T-152-02-01 | `isOwn: z.boolean().nullish()` on the NESTED schema; no refine; no version bump; SC1 falsifier observed | unit | same as 02-T1 (full file) | ✅ extend | ⬜ pending |
+| 03-T1 | 152-03 | 1 | SCEN-04 | T-152-03-02 | header renders iff ≥1 added row, exactly once, aria-hidden, exact 5 labels, non-row li breaks no list machinery | component | `npx vitest run "src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx" -t "SCEN-04 header" --no-file-parallelism` | ✅ extend | ⬜ pending |
+| 03-T2 | 152-03 | 1 | SCEN-04 | T-152-03-01 | cause-accurate title + sr-only on the ADDED-row non-derivable branch ONLY; derived title byte-verbatim; per-key span untouched; SC3 falsifier observed | component | `npx vitest run "src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx" -t "honest notional" --no-file-parallelism` | ✅ extend | ⬜ pending |
+| 04-T1 | 152-04 | 2 | SCEN-02 | T-152-04-02 | handleAdd (site 4/4) passes isOwn true / undefined honestly — never fabricates | component | `npx vitest run "src/app/(dashboard)/allocations/components/StrategyBrowseDrawer.test.tsx" -t "isOwn" --no-file-parallelism` | ✅ extend | ⬜ pending |
+| 04-T2 | 152-04 | 2 | SCEN-05 | T-152-04-01 | dedup line only on FILTERED own-vs-own collisions; third-party rows never; missing created_at → no line; timezone-stable date; testid outside browse-add-; SC4 falsifier observed | component | `npx vitest run "src/app/(dashboard)/allocations/components/StrategyBrowseDrawer.test.tsx" -t "dedup" --no-file-parallelism` | ✅ extend | ⬜ pending |
+| 04-T3 | 152-04 | 2 | SCEN-02 | T-152-04-02 | YoursChip closed leaf (no OwnershipTag widening, no Badge); own rows only; locked honesty tokens | component | `npx vitest run "src/app/(dashboard)/allocations/components/StrategyBrowseDrawer.test.tsx" --no-file-parallelism` | ✅ extend + new component | ⬜ pending |
+| 05-T1 | 152-05 | 3 | SCEN-02 | T-152-05-01 | isOwn mapped at BOTH twin seams (two renders, two payloads); Bridge seam deliberately absent | component | `npx vitest run "src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx" -t "SCEN-02" --no-file-parallelism` | ✅ extend | ⬜ pending |
+| 05-T2 | 152-05 | 3 | SCEN-02 | T-152-05-02 | chip gate `=== true`; false/null/absent each render NO node | component | same as 05-T1 | ✅ extend | ⬜ pending |
+| 06-T1 | 152-06 | 4 | SCEN-03 | T-152-06-01/02 | one-open-at-a-time inline detail; in-memory only (no fetch); null metrics → honest note, never 0.00; href exactly /factsheet/{id} | component | `npx vitest run "src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx" -t "SCEN-03" --no-file-parallelism` | ✅ extend | ⬜ pending |
+| 06-T2 | 152-06 | 4 | SCEN-03 | T-152-06-01 | Enter/Space on the focused strategy-name button; five control exclusions; panel-click no-collapse; axe scans EXPANDED panel; SC2 falsifier observed | component + e2e(CI) | same as 06-T1; `npx playwright test e2e/composer-axe.spec.ts` (CI seeded) | ✅ extend | ⬜ pending |
+| 06-T3 | 152-06 | 4 | all | — | phase gates: lint + typecheck + full `npm test` + blocking `npm run test:coverage`; ledger fully observed | gates | `npm run test:coverage` | ✅ | ⬜ pending |
+
+---
+
+## Falsifiability Ledger
+
+One row per ROADMAP Success Criterion. Each mutation is applied to PRODUCTION
+source, the named test must go RED, then the mutation is reverted and green
+re-observed. The owning task records the observation.
+
+| SC | Requirement | Production-source mutation | Test that must go RED | Owner | Observed |
+|----|-------------|----------------------------|------------------------|-------|----------|
+| SC1 — ownership wired through the persisted schema | SCEN-02 | Delete `isOwn` from `addedStrategySchema` (leave the TS interface) | strip-guard `parsed.data.addedStrategies[0].isOwn` (scenario-state.test.ts, populated fixture) | 152-02 T2 | ⬜ |
+| SC2 — row opens richer detail | SCEN-03 | Neuter the name-button toggle (onClick sets `null` unconditionally) | SCEN-03 expand test + "Enter/Space on the focused strategy-name button" tests | 152-06 T2 | ⬜ |
+| SC3 — numbers labelled, notional honest | SCEN-04 | Apply the remedy `title` to the DERIVED notional branch too (unconditional title) | derived-title-byte-verbatim test (SCEN-04 honest notional describe) | 152-03 T2 | ⬜ |
+| SC4 — no unresolvable browse duplicate | SCEN-05 | Drop the `isOwn === true` term from the collision-set builder | two-third-party-rows-get-no-line test (StrategyBrowseDrawer dedup describe) | 152-04 T2 | ⬜ |
+
+Additional design-time falsifiers (not separately observed — enforced by test
+construction, see RESEARCH `### Falsifiers`): `.nullish()`→`.boolean()` (null
+tolerance), single-seam revert (two-render seam tests), `!== false` chip gate
+(absent-state test), Set-based expansion state (one-open-at-a-time test),
+sr-only drop (within-cell probe), testid rename into `browse-add-` (namespace
+test), un-normalized collision key (case/whitespace test).
 
 ---
 
@@ -53,18 +87,24 @@ created: 2026-08-07
 - **SCEN-04:** header li renders ONLY above the added-strategies group; per-key rows
   gain no header (alignment scope call). Arrow-key/list-nav (if any) skips the
   non-interactive header li. Em-dash title+sr-only copy is CAUSE-ACCURATE (driven by
-  `totalBookEquity == null`, NOT scenarioAum — research Open Q1).
+  `totalBookEquity == null`, NOT scenarioAum — research Open Q1; resolved D-3, pinned
+  copy in 152-03-PLAN.md).
 - **SCEN-05:** disambiguation secondary line renders ONLY when an OWN row's name
   collides with another OWN row in the same result; third-party rows never emit or
   render owner metadata. `created_at` alone resolves the founder's real case (15 days
-  apart); omit-when-absent per UI-SPEC.
+  apart); omit-when-absent per UI-SPEC (D-1: no key_count segment at all).
 
 ---
 
 ## Wave 0 Requirements
 
-- [ ] Grep `addedStrategies` across `src/app/api/**` + `analytics-service/**` for any
+- [x] Grep `addedStrategies` across `src/app/api/**` + `analytics-service/**` for any
       `.strict()` schema that would REJECT (not strip) the new field.
+      **CLOSED at planning (2026-08-07):** zero `.strict()`/`strictObject` hits under
+      `src/app/api/allocator/` and `allocations/lib/`; zero `addedStrategies`
+      references in `analytics-service/**`; the only non-schema server reader is
+      `share/route.ts` (structural `Array.isArray` check, key-indifferent). Matches
+      PATTERNS Mapper Note 3. The wire add cannot turn into a 400.
 
 ---
 
@@ -74,3 +114,4 @@ created: 2026-08-07
 |----------|-------------|------------|-------------------|
 | Two Alpha Centauri rows distinguishable at a glance | SCEN-05 | PROD data state | Founder account → Browse: both rows show created dates; choice resolvable |
 | Founder can answer "what do the numbers mean" | SCEN-04 | Founder-eyes | Composer added rows show WEIGHT/USD/MODE/LEV/NOTIONAL header |
+| Header alignment over live columns (incl. Target-mode drift acceptance) | SCEN-04 | Pixel alignment not jsdom-measurable | Composer with ≥1 added row: labels sit over their columns in default Leverage mode; a Target-mode row drifts on that row only (accepted, Pitfall 3) |
