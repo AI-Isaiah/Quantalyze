@@ -277,7 +277,7 @@ Plans:
 - [x] 152-02-PLAN.md — Draft-schema wire: isOwn on the NESTED addedStrategySchema, populated-fixture strip guard
 - [x] 152-03-PLAN.md — SCEN-04: header label li (WEIGHT USD MODE LEV NOTIONAL) + cause-accurate honest notional
 - [x] 152-04-PLAN.md — Drawer: isOwn through handleAdd, own-vs-own dedup line (Created date · Status), shared YoursChip + browse parity
-- [ ] 152-05-PLAN.md — Composer: isOwn at both twin seams (Bridge deliberately absent) + Yours chip on the added row
+- [x] 152-05-PLAN.md — Composer: isOwn at both twin seams (Bridge deliberately absent) + Yours chip on the added row
 - [ ] 152-06-PLAN.md — SCEN-03: inline detail expansion + factsheet link + axe expanded-panel coverage + phase-final gates
 
 **UI hint**: yes
@@ -344,7 +344,7 @@ Plans:
 | 149. NAV my-strategies ranking | 5/5 | Complete   | 2026-08-05 |
 | 150. OWN-03 portfolio question | 8/8 | Complete    | 2026-08-07 |
 | 151. AUM book + sizing | 7/7 | Complete    | 2026-08-07 |
-| 152. SCEN composer legibility | 4/6 | In Progress|  |
+| 152. SCEN composer legibility | 5/6 | In Progress|  |
 | 153. WIZFORM + MT5-14 | 0/? | Not started | - |
 | 154. WIZCONT + STALE | 0/? | Not started | - |
 | 155. MT5-VERIFY + acceptance | 0/? | Not started | - |
