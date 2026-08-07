@@ -53,8 +53,10 @@ from supabase import Client
 from services.closed_sets import (
     MT5_DISABLED_DETAIL,
     NON_CCXT_VENUES,
+    SFOX_DISABLED_DETAIL,
     STABLECOINS,
     mt5_enabled_server,
+    sfox_enabled_server,
 )
 from services.db import db_execute
 from services.mt5_client import (
@@ -77,6 +79,12 @@ from services.mt5_concurrency import (
     _mt5_terminal_lock_for,
 )
 from services.positions import fetch_positions
+from services.sfox_client import (
+    SFOX_DEFAULT_RATE_INTERVAL_S,
+    SFOX_REQUEST_TIMEOUT_S,
+    SfoxApiError,
+    SfoxClient,
+)
 
 
 logger = logging.getLogger("quantalyze.analytics.allocator_positions")
@@ -118,6 +126,13 @@ MT5_UNREACHABLE_NOTE = "MT5 terminal unreachable — sync will retry automatical
 MT5_MISSING_ACCOUNT_REF_NOTE = (
     "MT5 holdings sync couldn't identify this account — sync will retry "
     "automatically."
+)
+SFOX_FETCH_FAILED_NOTE = (
+    "Couldn't fetch balances from sFOX — sync will retry automatically."
+)
+SFOX_UNPRICED_ASSETS_NOTE = (
+    "sFOX balances in {assets} can't be valued in USD yet — those balances "
+    "were skipped."
 )
 
 # Product casing for the two venues this module names in copy. Kept LOCAL and
@@ -576,6 +591,175 @@ async def _fetch_mt5_account_rows(
     )
 
 
+# A plain ASSET code and nothing else. sFOX's `currency` is VENUE-controlled
+# text that reaches BOTH a user-visible warning (SFOX_UNPRICED_ASSETS_NOTE →
+# api_keys.sync_error, rendered verbatim) and the row's ``symbol`` column (which
+# rides inside commit scope-refs). The alphabet is exactly _HOLDING_SYMBOL_RE's
+# plus a length bound, so a code that passes here is HOLDING_REF_RE-safe by
+# construction and there is no second, forkable symbol check. Anything else is
+# named "unknown" rather than echoed (T-151-10 / ASVS V7) — the same allow-list
+# posture the MT5 currency gate takes, for the same reason: the copy channel is
+# not a place to pass through third-party text.
+_SFOX_ASSET_CODE_RE = re.compile(r"[A-Za-z0-9_-]{1,16}")
+
+# Outer wall-clock bound on the balances read. SfoxClient already bounds the
+# HTTP transport at SFOX_REQUEST_TIMEOUT_S; this wait_for is the belt for
+# everything OUTSIDE that bound — chiefly `_rate_gate`'s min-interval sleep — so
+# a wedged client can never hold the SEQUENTIAL worker loop past a known ceiling
+# (T-151-12 / WEDGE-01). DERIVED from the client's own constants rather than
+# given a new env knob: a second knob would be a second thing to retune when the
+# transport bound moves, and this must always sit strictly ABOVE it or the outer
+# bound would pre-empt the transport's own timeout.
+_SFOX_HOLDINGS_READ_TIMEOUT_S = SFOX_REQUEST_TIMEOUT_S + SFOX_DEFAULT_RATE_INTERVAL_S
+
+
+async def _fetch_sfox_balance_rows(
+    exchange_name: str, exchange: Any, api_key_id: str | None
+) -> tuple[list[dict[str, Any]], str | None]:
+    """AUM-05 — spot holdings rows for an sFOX account, priceable assets only.
+
+    `SfoxClient` is a GET-only facade with FOUR read methods, none of them the
+    ccxt balance call the module docstring above names — so handing an sFOX
+    client to the ccxt body is byte-identical to the MT5 PROD defect this phase
+    closes, invisible today only because sFOX is dark behind ``SFOX_ENABLED``
+    with zero stored keys. This branch exists so the venue is proven correct
+    BEFORE its go-live flip rather than by it.
+
+    PRICING — the honest bound. ``get_balances()`` returns per-asset STRING
+    quantities with NO USD valuation field, and the facade has no ticker
+    endpoint, so a non-stable asset CANNOT be priced here without a cross-venue
+    price source we do not have. USD and members of ``STABLECOINS`` are
+    cash-equivalent and mark at 1.0 (exactly what the ccxt spot path does for
+    the same set); every other asset is SKIPPED and NAMED in the warning. A
+    fabricated rate inside an AUM total is the one outcome that must never
+    happen (T-151-11 / no-invented-data).
+
+    ``get_balances`` is the CONTEXT-locked read. ``get_balance_history``'s daily
+    ``usd_value`` would give an account-level NAV anchor with no pricing problem
+    at all (structurally what MT5's ``account_info().equity`` is), but it is a
+    different method than the one locked — logged in TODOS.md as a deferred
+    improvement for the sFOX go-live phase (151-RESEARCH Open Q2), not taken
+    here.
+
+    ``symbol`` is the asset code, matching the ccxt spot path's convention
+    (``_fetch_spot_rows`` writes the bare currency code). It is deliberately NOT
+    account-scoped the way the MT5 row is: MT5 has no per-asset symbol at all,
+    so its row needed an account token to avoid collapsing under the
+    (allocator_id, venue, symbol, asof) unique index, whereas a per-asset venue
+    shares the ccxt path's long-standing behaviour of aggregating an allocator's
+    keys per asset. Diverging here would fork the holdings shape by venue.
+
+    Raises ``AllocatorHoldingsSyncTransientError`` (str = end-user copy) on a
+    transport failure, so the handler retries and no ``SfoxApiError`` text can
+    reach ``classify_exception``'s ``str(exc)``.
+    """
+    # (a) Kill switch FIRST — before any network call, the MT5 arm's exact
+    # posture. sFOX is dark until the founder flips SFOX_ENABLED on the worker,
+    # and the honest-skip channel tells the user the truth ("not yet
+    # available") rather than stamping an error on a healthy key.
+    if not sfox_enabled_server():
+        return ([], SFOX_DISABLED_DETAIL)
+
+    # venue == "sfox" ⇒ the preflight built a SfoxClient (job_worker's
+    # _make_exchange_client). A TYPE assertion derived from the venue string —
+    # never a runtime isinstance/hasattr dispatch, which is the duck-typed probe
+    # this whole class fix exists to avoid.
+    client = cast(SfoxClient, exchange)
+
+    try:
+        balances = await asyncio.wait_for(
+            client.get_balances(), timeout=_SFOX_HOLDINGS_READ_TIMEOUT_S
+        )
+    except (SfoxApiError, asyncio.TimeoutError) as exc:
+        # SfoxApiError's detail is already secret-scrubbed at construction, but
+        # it is still INTERNAL text (upstream bodies, status codes). Only the
+        # fixed copy constant is surfaced; the detail survives in the log and in
+        # the exception chain for Sentry.
+        logger.warning(
+            "poll_allocator_positions: sfox balances read failed — classified "
+            "transient, retrying (%s)",
+            type(exc).__name__,
+        )
+        raise AllocatorHoldingsSyncTransientError(SFOX_FETCH_FAILED_NOTE) from exc
+
+    rows: list[dict[str, Any]] = []
+    unpriced: set[str] = set()
+
+    for entry in balances:
+        if not isinstance(entry, dict):
+            # The row shape is pinned by tests/test_sfox_client.py; a non-dict
+            # element is a contract violation we cannot read, so it becomes the
+            # anonymous "unknown" entry rather than disappearing silently.
+            unpriced.add("unknown")
+            continue
+
+        raw_ccy = entry.get("currency")
+        code = raw_ccy.strip().upper() if isinstance(raw_ccy, str) else ""
+        if not _SFOX_ASSET_CODE_RE.fullmatch(code):
+            # We cannot name it and we cannot safely write it as a symbol, so
+            # it becomes the anonymous "unknown" entry in the warning rather
+            # than either an echoed hostile string or a silent disappearance.
+            code = ""
+
+        # Annotated Any: `.get` on a dict[str, Any] widens to `Any | None`, and
+        # the float() below is deliberately allowed to see whatever the venue
+        # sent — the except arm right beneath it IS the shape check.
+        raw_qty: Any = entry.get("balance")
+        try:
+            qty = float(raw_qty)
+        except (TypeError, ValueError):
+            qty = math.nan
+        if not math.isfinite(qty):
+            # [A3] A null/NaN/garbage quantity has no honest USD value. Skip and
+            # NAME it — coercing to 0.0 would be a fabricated zero inside an AUM
+            # total. Deliberately NOT a hard failure (unlike the MT5 arm, whose
+            # single row IS the whole contribution): failing the key here would
+            # drop the rest of a healthy book over one malformed asset.
+            logger.warning(
+                "poll_allocator_positions: sfox balance for %s was not a finite "
+                "number — skipping that asset, not valuing it",
+                code or "unknown",
+            )
+            unpriced.add(code or "unknown")
+            continue
+        if qty <= 0:
+            # A zero balance is not skipped MONEY — naming it would tell the
+            # user their BTC was dropped when they hold no BTC.
+            continue
+        if not code:
+            unpriced.add("unknown")
+            continue
+        if code not in STABLECOINS:
+            unpriced.add(code)
+            continue
+
+        rows.append({
+            "venue": exchange_name,
+            "symbol": code,
+            "holding_type": "spot",
+            "side": "flat",
+            "quantity": qty,
+            # Cash-equivalent: the mark is exactly 1.0, so the USD value IS the
+            # quantity — the same convention _fetch_spot_rows applies to this
+            # very set of assets.
+            "value_usd": qty,
+            "mark_price": 1.0,
+            # No basis and no derivative uPnL to report: None is the conforming
+            # value; a 0.0 would read downstream as a real measured zero.
+            "entry_price": None,
+            "unrealized_pnl_usd": None,
+            "cost_basis_usd": None,
+            "raw_payload": _cap_raw_payload({"currency": code, "balance": qty}),
+        })
+
+    warning = (
+        SFOX_UNPRICED_ASSETS_NOTE.format(assets=", ".join(sorted(unpriced)))
+        if unpriced
+        else None
+    )
+    return (rows, warning)
+
+
 # The signature every non-ccxt holdings fetcher implements. It mirrors
 # fetch_allocator_holdings' own contract — ``(rows, warning)`` — so a venue
 # branch can emit rows, an honest skip, or (by raising
@@ -587,10 +771,13 @@ _NonCcxtHoldingsFetcher = Callable[
 # AUM-02 — the venue → holdings-fetcher table. Keyed on the venue STRING,
 # mirroring job_worker._make_exchange_client (the construction chokepoint this
 # is the consumer half of). A venue in NON_CCXT_VENUES but absent HERE is an
-# honest SKIP, never a crash — that gap is the whole class fix. Plan 151-04
-# registers "sfox".
+# honest SKIP, never a crash — that gap is the whole class fix. Both venues the
+# factory can build are registered here as of 151-04; the skip arm remains the
+# standing contract for the NEXT venue added to the factory, so its first sync
+# is an honest skip rather than an AttributeError in front of a user.
 _NON_CCXT_HOLDINGS_FETCHERS: dict[str, _NonCcxtHoldingsFetcher] = {
     "mt5": _fetch_mt5_account_rows,
+    "sfox": _fetch_sfox_balance_rows,
 }
 
 
