@@ -11550,6 +11550,67 @@ describe("ScenarioComposer — AUM-01 Portfolio AUM input", () => {
     expect(drawerAum()).toBe(500_000);
   });
 
+  // 151 review WR-04 — a blur that commits the value already displayed is not
+  // an edit. Book mode SEEDS the field with the derived live-holdings sum, so
+  // without this guard a bare focus→blur (a keyboard user tabbing through the
+  // form) silently converted the DERIVED size into a persisted manual OVERRIDE.
+  it("AUM-01 / WR-04: a bare focus→blur does NOT turn the derived live sum into a manual override", () => {
+    const { payload, holdings } = aumBook([300_000, 160_000]);
+    const { rerender } = renderAum1(payload);
+    expect(aumInput().value).toBe("460000");
+
+    // The gesture: focus and blur, no keystroke.
+    const el = aumInput();
+    fireEvent.focus(el);
+    fireEvent.blur(el);
+
+    // (a) No override note — the composer still considers the AUM derived.
+    expect(screen.queryByText(/Overrides live-holdings total/i)).toBeNull();
+    // (b) No manual value reaches the commit drawer, so the commit body (and
+    // with it the idempotency request_hash) is unchanged for this caller.
+    expect(
+      vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.manualAumUsd,
+    ).toBeUndefined();
+    // (c) THE BEHAVIOURAL PROOF: the AUM still TRACKS custody. A holdings
+    // refresh that doubles the book moves the scenario AUM; a frozen manual
+    // override would pin it at 460,000.
+    rerender(
+      <ScenarioComposer
+        payload={{
+          ...payload,
+          holdingsSummary: holdings.map((h) => ({
+            ...h,
+            value_usd: h.value_usd * 2,
+          })),
+        }}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(drawerAum()).toBe(920_000);
+  });
+
+  it("AUM-01 / WR-04 (control): a REAL edit still commits, and re-blurring the same number is idempotent", () => {
+    const { payload } = aumBook([300_000, 160_000]);
+    renderAum1(payload);
+
+    setAum("500000");
+    expect(drawerAum()).toBe(500_000);
+    expect(
+      screen.getByText("Overrides live-holdings total $460,000."),
+    ).toBeInTheDocument();
+
+    // Blurring the SAME committed value again changes nothing (and must not
+    // clear the override the user really made).
+    const el = aumInput();
+    fireEvent.focus(el);
+    fireEvent.blur(el);
+    expect(drawerAum()).toBe(500_000);
+    expect(
+      screen.getByText("Overrides live-holdings total $460,000."),
+    ).toBeInTheDocument();
+  });
+
   it("AUM-01 Test 8 (metrics invariance — AUM-01 is NOT the SCEN-01 fix): editing AUM leaves scenarioMetrics identical", () => {
     const { payload } = aumBook([300_000, 160_000]);
     renderAum1(payload);

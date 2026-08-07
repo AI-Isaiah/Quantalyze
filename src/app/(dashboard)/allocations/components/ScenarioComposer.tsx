@@ -3843,6 +3843,22 @@ export function ScenarioComposer({
       setAumInputText(committedAumText());
       return;
     }
+    // 151 review WR-04 — A BLUR IS NOT AN EDIT. In book mode the field is
+    // SEEDED with the derived live-holdings sum, so tabbing through the form
+    // without touching it used to write `manualAumUsd = liveHoldingsSum` and
+    // silently convert a DERIVED size into a persisted manual OVERRIDE: the AUM
+    // then froze (a later holdings sync moved the live sum while the scenario
+    // stayed pinned), the "Overrides live-holdings total $X" note appeared for
+    // an override nobody made, and the drawer started sending `manual_aum_usd`
+    // — changing the commit body bytes, and therefore the idempotency
+    // `request_hash`, for a caller the design deliberately left unchanged
+    // (T-151-21). Compared NUMERICALLY so "460000.00" is recognised as the same
+    // value, then snapped to the canonical text.
+    const committed = committedAumText();
+    if (committed !== "" && parsed === Number(committed)) {
+      setAumInputText(committed);
+      return;
+    }
     scenario.setManualAum(parsed);
   }
 
