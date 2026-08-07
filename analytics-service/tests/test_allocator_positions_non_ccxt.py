@@ -289,6 +289,116 @@ async def test_user_visible_copy_never_leaks_python_internals(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Test 4c (151 review CR-03) — the leak invariant, BEHAVIOURAL, on the CCXT arm
+#
+# The enumerate-the-constants test above is necessary but not sufficient: it can
+# only see strings someone remembered to add to its list, so it stayed GREEN
+# while `fetch_allocator_holdings`' ccxt derivative arm stamped
+# `str(exc)[:500]` — a raw Python exception — into `api_keys.sync_error` for
+# binance/bybit/okx/deribit. This drives the real code path with a poisoned
+# exception and asserts on the string the worker would WRITE.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_ccxt_derivative_failure_never_leaks_the_exception_text():
+    """A derivative-side failure on a CCXT venue surfaces END-USER copy.
+
+    The exception message here is deliberately the PROD defect's own text, so a
+    regression that re-introduces `str(exc)` fails on the exact string three
+    founder accounts were shown.
+    """
+    exchange = AsyncMock()
+    exchange.id = "binance"
+    exchange.fetch_balance = AsyncMock(return_value={"total": {"USDT": 1000.0}})
+    exchange.fetch_positions = AsyncMock(
+        side_effect=AttributeError(
+            "'Mt5Session' object has no attribute 'fetch_positions'"
+        )
+    )
+
+    rows, warning = await fetch_allocator_holdings("binance", exchange)
+
+    # PARTIAL SUCCESS is preserved: the spot side still persists. (A "fix" that
+    # simply re-raised would pass every leak assertion below and silently cost
+    # the allocator their whole spot book.)
+    assert [r["symbol"] for r in rows] == ["USDT"]
+
+    assert warning is not None
+    for banned in BANNED_INTERNALS:
+        assert banned not in warning, (
+            f"{banned!r} leaked into the user-visible sync_error {warning!r}"
+        )
+    assert "—" in warning, f"missing the em-dash copy pattern: {warning!r}"
+    assert "Binance" in warning, (
+        "the copy must name the venue in product casing, not a raw code"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 4d (151 review CR-03) — the CLASS gate: no arm may write `str(exc)`
+#
+# Tests 4 and 4c both prove things about arms that EXIST today. This one is the
+# class-level closure the review asked for: it bites on ANY except-arm in the
+# module that builds a value from the raw exception text outside of logging —
+# including one added tomorrow, for a venue nobody has written yet.
+#
+# Logging is exempt BY CONSTRUCTION, not by allow-list: `logger.*(...)` calls
+# are where the exception text BELONGS (they reach engineers, never the browser).
+# ---------------------------------------------------------------------------
+def test_no_except_arm_builds_user_copy_from_the_raw_exception():
+    """`str(exc)` may reach the log chain and nothing else.
+
+    `api_keys.sync_error` is rendered VERBATIM by AllocatorSyncStatus, and every
+    non-logging value an except-arm produces in this module is a candidate for
+    that column (a returned `warning`, an
+    `AllocatorHoldingsSyncTransientError(...)` message, an f-string built from
+    either). Interpolating the exception is therefore the defect, independent of
+    which arm does it.
+    """
+    tree = ast.parse(inspect.getsource(ap))
+
+    def _is_logger_call(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "logger"
+        )
+
+    offenders: list[str] = []
+    for handler in (n for n in ast.walk(tree) if isinstance(n, ast.ExceptHandler)):
+        if handler.name is None:
+            continue
+        bound = handler.name
+        for stmt in handler.body:
+            # Skip whole statements that ARE a logger call — the exception text
+            # is welcome there.
+            if isinstance(stmt, ast.Expr) and _is_logger_call(stmt.value):
+                continue
+            for node in ast.walk(stmt):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "str"
+                    and any(
+                        isinstance(a, ast.Name) and a.id == bound for a in node.args
+                    )
+                ):
+                    offenders.append(f"line {node.lineno}: str({bound}) outside logging")
+                # An f-string interpolating the bound exception is the same leak
+                # wearing different syntax.
+                if isinstance(node, ast.FormattedValue) and (
+                    isinstance(node.value, ast.Name) and node.value.id == bound
+                ):
+                    offenders.append(f"line {node.lineno}: f-string {{{bound}}}")
+
+    assert offenders == [], (
+        "allocator_positions except-arms may pass the raw exception to logging "
+        "ONLY — every other use can reach api_keys.sync_error, which the browser "
+        f"renders verbatim (AUM-02). Offenders: {offenders}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test 4b — the single-source drift gate
 # ---------------------------------------------------------------------------
 def test_non_ccxt_venues_agrees_with_exchange_client_factory():

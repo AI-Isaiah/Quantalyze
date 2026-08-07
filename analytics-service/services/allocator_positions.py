@@ -134,10 +134,23 @@ SFOX_UNPRICED_ASSETS_NOTE = (
     "sFOX balances in {assets} can't be valued in USD yet — those balances "
     "were skipped."
 )
+# 151 review CR-03 — the ccxt DERIVATIVE arm's end-user copy. Before this the
+# arm stamped ``str(exc)[:500]`` straight into api_keys.sync_error, which
+# AllocatorSyncStatus renders VERBATIM: a KeyError/TypeError/ccxt parse failure
+# inside fetch_positions reached the allocator as raw Python text. That is the
+# very defect class this module's AUM-02 invariant above declares impossible,
+# still live for binance/bybit/okx/deribit. The exception text now lives ONLY in
+# the log / Sentry chain.
+DERIVATIVE_FETCH_FAILED_NOTE = (
+    "Couldn't read open positions from {venue} — spot balances synced and "
+    "positions will retry automatically."
+)
 
-# Product casing for the two venues this module names in copy. Kept LOCAL and
-# private (see the note above): a two-entry display helper, not a registry.
-_VENUE_DISPLAY: dict[str, str] = {"mt5": "MT5", "sfox": "sFOX"}
+# Product casing for the venues this module names in copy. Kept LOCAL and
+# private (see the note above): a small display helper, not a registry. Only
+# codes whose product casing differs from ``.title()`` need an entry — "binance"
+# / "bybit" / "deribit" render correctly from the fallback.
+_VENUE_DISPLAY: dict[str, str] = {"mt5": "MT5", "sfox": "sFOX", "okx": "OKX"}
 
 
 def _venue_display(venue: str) -> str:
@@ -854,9 +867,25 @@ async def fetch_allocator_holdings(
     ):
         raise
     except Exception as exc:  # noqa: BLE001
-        # Partial success: persist spot, surface the derivative-side error
-        # as sync_status='complete_with_warnings' via the handler.
-        warning = str(exc)[:500]
+        # Partial success: persist spot, surface the derivative-side failure as
+        # sync_status='complete_with_warnings' via the handler.
+        #
+        # 151 review CR-03 — the warning is END-USER copy (it is rendered
+        # verbatim by AllocatorSyncStatus), so it is the fixed copy constant and
+        # never ``str(exc)``. The diagnosis stays in the log + the exception
+        # chain, which is where an engineer reads it; the exception TYPE is
+        # named in the log line so triage does not need the traceback to
+        # classify it.
+        logger.warning(
+            "fetch_allocator_holdings: derivative-side read failed for %s (%s) "
+            "— spot rows persisted, surfacing end-user copy (AUM-02)",
+            exchange_name,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        warning = DERIVATIVE_FETCH_FAILED_NOTE.format(
+            venue=_venue_display(exchange_name)
+        )
 
     return (spot_rows + deriv_rows, warning)
 

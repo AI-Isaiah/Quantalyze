@@ -252,7 +252,16 @@ async def test_stablecoin_mark_price_is_one(monkeypatch):
 async def test_partial_success_emits_warnings(monkeypatch):
     """RESEARCH Q2: if fetch_balance succeeds and fetch_positions raises
     a non-auth non-429 exception, we persist spot and return a warning
-    string. The handler surfaces this as sync_status='complete_with_warnings'."""
+    string. The handler surfaces this as sync_status='complete_with_warnings'.
+
+    151 review CR-03 — the ORACLE MOVED. This test used to assert the venue's
+    exception text ("down") appeared in the warning, i.e. it PINNED the leak:
+    `warning` is written to `api_keys.sync_error`, which AllocatorSyncStatus
+    renders VERBATIM, so echoing `str(exc)` put raw Python in front of an
+    allocator (the PROD "'Mt5Session' object has no attribute 'fetch_balance'"
+    class). The partial-success CONTRACT — spot persists, derivatives don't, a
+    warning is raised — is unchanged and still asserted below; only the string's
+    audience changed."""
     mock_exchange = AsyncMock()
     mock_exchange.id = "binance"
     mock_exchange.fetch_balance = AsyncMock(return_value={
@@ -268,7 +277,15 @@ async def test_partial_success_emits_warnings(monkeypatch):
     monkeypatch.setattr(ap, "fetch_positions", _down)
 
     rows, warning = await fetch_allocator_holdings("binance", mock_exchange)
-    assert warning is not None and "down" in warning
+    assert warning is not None
+    # END-USER copy, not the exception: names the venue in product casing, says
+    # what happened and what happens next, and carries none of the venue's own
+    # error text.
+    assert warning == (
+        "Couldn't read open positions from Binance — spot balances synced and "
+        "positions will retry automatically."
+    )
+    assert "down" not in warning
     # Spot row persisted even though derivative side failed
     assert any(r["holding_type"] == "spot" and r["symbol"] == "USDT" for r in rows)
     # Zero derivative rows (the fetch raised)
