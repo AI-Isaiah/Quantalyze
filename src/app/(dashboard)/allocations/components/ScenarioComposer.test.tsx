@@ -13276,6 +13276,59 @@ describe("ScenarioComposer — SCEN-03 detail (Phase 152)", () => {
     ).toBe("momentum");
   });
 
+  // -------------------------------------------------------------------------
+  // Review WR-03 — `expandedAddedId` must not outlive the row it names.
+  //
+  // The state is keyed by strategy id, not by position, so removing an EXPANDED
+  // row left the id held. Re-adding the same strategy in the same session then
+  // mounted its row PRE-EXPANDED with aria-expanded="true" and no user gesture —
+  // which a screen reader announces as expanded on first encounter.
+  //
+  // The second assertion pair is the falsifier for an over-broad fix: clearing
+  // the id on any draft change (rather than on the row's disappearance) would
+  // collapse an open panel on every weight edit, so the last block edits a
+  // weight and requires the panel to survive.
+  // -------------------------------------------------------------------------
+  it("WR-03: removing an expanded row releases the id — re-adding it mounts COLLAPSED, not pre-expanded", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    openDetail(D_A, "Scen03 Strat A");
+    expect(panel(D_A)).not.toBeNull();
+
+    // Remove the expanded row via its own × button.
+    fireEvent.click(
+      within(addedRow(D_A)).getByRole("button", {
+        name: "Remove from scenario",
+      }),
+    );
+    expect(document.querySelector(`[data-scope-ref="${D_A}"]`)).toBeNull();
+
+    // Add it straight back. Nothing has been clicked to open anything.
+    add(D_A, "Scen03 Strat A");
+    expect(panel(D_A)).toBeNull();
+    expect(
+      nameButton(D_A, "Scen03 Strat A").getAttribute("aria-expanded"),
+    ).toBe("false");
+    // Belt and braces: no panel anywhere, so the row did not merely re-key.
+    expect(openPanelCount()).toBe(0);
+  });
+
+  it("WR-03 (over-correction falsifier): an open panel SURVIVES an unrelated draft change to the same row", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    openDetail(D_A, "Scen03 Strat A");
+    expect(panel(D_A)).not.toBeNull();
+
+    // A weight edit rewrites `draft.addedStrategies`' containing draft. Clearing
+    // the id on any draft change would collapse the panel here.
+    const weightInput = within(addedRow(D_A)).getByLabelText(
+      "Scen03 Strat A weight",
+    );
+    fireEvent.change(weightInput, { target: { value: "0.400" } });
+
+    expect(panel(D_A)).not.toBeNull();
+  });
+
   it("SCEN-03 honesty (both metrics null): renders the exact absence note and NO fabricated zero figure", () => {
     renderScen(bookedPayload());
     add(D_NULL, "Scen03 Strat Null");

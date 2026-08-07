@@ -5916,6 +5916,30 @@ function CompositionList({
   const toggleAddedDetail = (id: string) =>
     setExpandedAddedId((prev) => (prev === id ? null : id));
 
+  /**
+   * Phase 152 review WR-03 — release the id when the row it names leaves the
+   * draft.
+   *
+   * The state is keyed by strategy id, not by position, so removing an EXPANDED
+   * row via the `×` button left the id held. Adding the same strategy back in
+   * the same session then mounted its row with the detail panel already open and
+   * `aria-expanded="true"` on first render — a state no user gesture asked for,
+   * that the one-open-at-a-time contract did not intend, and that a screen
+   * reader announces as expanded on first encounter.
+   *
+   * Scoped to disappearance only: an id that is still in the draft is left
+   * alone, so a re-render (weight edit, toggle, autosave) never collapses an
+   * open panel.
+   */
+  useEffect(() => {
+    if (
+      expandedAddedId != null &&
+      !draft.addedStrategies.some((a) => a.id === expandedAddedId)
+    ) {
+      setExpandedAddedId(null);
+    }
+  }, [draft.addedStrategies, expandedAddedId]);
+
   /** Phase 152 SCEN-03 — the composer's mono-eyebrow recipe, byte-verbatim from
    *  the PORTFOLIO AUM label (152-UI-SPEC reuse rule: no new visual primitives). */
   const DETAIL_EYEBROW =
