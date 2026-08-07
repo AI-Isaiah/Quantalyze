@@ -42,8 +42,8 @@ planned: 2026-08-07
 | 04-T3 | 152-04 | 2 | SCEN-02 | T-152-04-02 | YoursChip closed leaf (no OwnershipTag widening, no Badge); own rows only; locked honesty tokens | component | `npx vitest run "src/app/(dashboard)/allocations/components/StrategyBrowseDrawer.test.tsx" --no-file-parallelism` | ✅ extend + new component | ⬜ pending |
 | 05-T1 | 152-05 | 3 | SCEN-02 | T-152-05-01 | isOwn mapped at BOTH twin seams (two renders, two payloads); Bridge seam deliberately absent | component | `npx vitest run "src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx" -t "SCEN-02" --no-file-parallelism` | ✅ extend | ✅ green |
 | 05-T2 | 152-05 | 3 | SCEN-02 | T-152-05-02 | chip gate `=== true`; false/null/absent each render NO node | component | same as 05-T1 | ✅ extend | ✅ green |
-| 06-T1 | 152-06 | 4 | SCEN-03 | T-152-06-01/02 | one-open-at-a-time inline detail; in-memory only (no fetch); null metrics → honest note, never 0.00; href exactly /factsheet/{id} | component | `npx vitest run "src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx" -t "SCEN-03" --no-file-parallelism` | ✅ extend | ⬜ pending |
-| 06-T2 | 152-06 | 4 | SCEN-03 | T-152-06-01 | Enter/Space on the focused strategy-name button; six control exclusions (incl. the include/exclude switch — B-2); panel-click no-collapse; axe scans EXPANDED panel; SC2 falsifier observed | component + e2e(CI) | same as 06-T1; `npx playwright test e2e/composer-axe.spec.ts` (CI seeded) | ✅ extend | ⬜ pending |
+| 06-T1 | 152-06 | 4 | SCEN-03 | T-152-06-01/02 | one-open-at-a-time inline detail; in-memory only (no fetch); null metrics → honest note, never 0.00; href exactly /factsheet/{id} | component | `npx vitest run "src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx" -t "SCEN-03" --no-file-parallelism` | ✅ extend | ✅ done (8 tests RED→GREEN, 8d37a173) |
+| 06-T2 | 152-06 | 4 | SCEN-03 | T-152-06-01 | Enter/Space on the focused strategy-name button; six control exclusions (incl. the include/exclude switch — B-2); panel-click no-collapse; axe scans EXPANDED panel; SC2 falsifier observed | component + e2e(CI) | same as 06-T1; `npx playwright test e2e/composer-axe.spec.ts` (CI seeded) | ✅ extend | ✅ done (10 more tests; SC2 + two exclusion falsifiers observed) |
 | 06-T3 | 152-06 | 4 | all | — | phase gates: lint + typecheck + full `npm test` + blocking `npm run test:coverage`; ledger fully observed | gates | `npm run test:coverage` | ✅ | ⬜ pending |
 
 ---
@@ -57,7 +57,7 @@ re-observed. The owning task records the observation.
 | SC | Requirement | Production-source mutation | Test that must go RED | Owner | Observed |
 |----|-------------|----------------------------|------------------------|-------|----------|
 | SC1 — ownership wired through the persisted schema | SCEN-02 | Delete `isOwn` from `addedStrategySchema` (leave the TS interface) | strip-guard `parsed.data.addedStrategies[0].isOwn` (scenario-state.test.ts, populated fixture) | 152-02 T2 | Observed ✅ RED then GREEN (2026-08-07) |
-| SC2 — row opens richer detail | SCEN-03 | Neuter the name-button toggle (onClick sets `null` unconditionally) | SCEN-03 expand test + "Enter/Space on the focused strategy-name button" tests | 152-06 T2 | ⬜ |
+| SC2 — row opens richer detail | SCEN-03 | Neuter the name-button toggle (onClick sets `null` unconditionally) | SCEN-03 expand test + "Enter/Space on the focused strategy-name button" tests | 152-06 T2 | ✅ Observed 2026-08-07 — `setExpandedAddedId(null)` in place of the toggle → **18/18 SCEN-03 RED**, including "ONE click … LEAVES it open" and both "Enter/Space on the focused strategy-name button" tests; reverted from a scratchpad snapshot (md5 identical both directions) → 289/289 green |
 | SC3 — numbers labelled, notional honest | SCEN-04 | Apply the remedy `title` to the DERIVED notional branch too (unconditional title) | derived-title-byte-verbatim test (SCEN-04 honest notional describe) | 152-03 T2 | ✅ Observed 2026-08-07 — `title={NOTIONAL_UNAVAILABLE_NOTE}` unconditional → "SCEN-04 honest notional (derived)" RED (`expected 'Notional needs live book equity…' to be 'Notional = equity × blend share…'`); reverted → 263/263 green |
 | SC4 — no unresolvable browse duplicate | SCEN-05 | Drop the `isOwn === true` term from the collision-set builder | "a lone own row whose name matches TWO third-party rows gets no line" (StrategyBrowseDrawer SCEN-05 dedup describe) | 152-04 T2 | ✅ Observed 2026-08-07 — dropping `if (s.isOwn !== true) continue;` from pass 1 → RED (`browse-dedup-s-mix-own` rendered "Created Aug 4, 2026 · Private" where the test expects null); reverted from a scratchpad snapshot (sha verified identical) → 40/40 green |
 
@@ -79,6 +79,24 @@ tolerance), single-seam revert (two-render seam tests), `!== false` chip gate
 (absent-state test), Set-based expansion state (one-open-at-a-time test),
 sr-only drop (within-cell probe), testid rename into `browse-add-` (namespace
 test), un-normalized collision key (case/whitespace test).
+
+**Two extra SCEN-03 exclusion falsifiers observed (152-06 T2, 2026-08-07).** The
+six control-exclusion assertions were written AFTER their implementation landed
+in T1, so they were measured rather than assumed:
+
+- **Dropping the include/exclude switch's own `e.stopPropagation()` (checker
+  B-2)** → **exactly 1 RED**, the switch exclusion test, everything else green.
+  This is the discriminating result: the switch sits in the row's LEFT cluster,
+  outside the control-cluster wrapper, so no other exclusion could have covered
+  it.
+- **Dropping the control-cluster wrapper's `stopPropagation`** → **exactly 5
+  RED** (weight, dollar, mode, leverage, remove) and the switch test still green
+  — the complementary partition, confirming the two mechanisms are disjoint and
+  that all six assertions are load-bearing rather than five of them riding on
+  one guard.
+
+Both mutations were reverted from the same scratchpad snapshot (md5 identical
+both directions) and the full 289-test file re-observed green after each.
 
 ---
 

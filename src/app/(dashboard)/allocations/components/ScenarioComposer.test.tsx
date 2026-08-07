@@ -46,6 +46,11 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+// Phase 152 SCEN-03 — the detail affordance is a NATIVE <button>, so Enter and
+// Space must be exercised through the real activation path. `fireEvent.keyDown`
+// would dispatch a key event the source deliberately does not listen for and
+// would pass against a component with no keyboard support at all.
+import userEvent from "@testing-library/user-event";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { isoDayFromDate } from "@/lib/dateday";
 
@@ -13221,5 +13226,195 @@ describe("ScenarioComposer — SCEN-03 detail (Phase 152)", () => {
     // The controls target must EXIST under that id — an aria-controls pointing
     // at nothing is a broken relationship a screen reader silently drops.
     expect(p.getAttribute("id")).toBe(btn.getAttribute("aria-controls"));
+  });
+
+  // -------------------------------------------------------------------------
+  // Keyboard reach. The affordance is a REAL <button>, so Enter and Space are
+  // native — there is no onKeyDown in the source and there must not be one. The
+  // tests therefore drive the browser's own activation path via user-event
+  // (fireEvent.keyDown would dispatch a key event that nothing listens for and
+  // pass against a component with no keyboard support at all).
+  //
+  // The criteria are phrased "on the focused strategy-name BUTTON", never "on
+  // the focused row" (152-UI-SPEC acceptance-phrasing rule): the row container
+  // is deliberately not focusable, so a row-focus criterion would pin an
+  // affordance the contract forbids.
+  // -------------------------------------------------------------------------
+
+  it("SCEN-03 keyboard: Enter on the focused strategy-name button toggles the detail", async () => {
+    const user = userEvent.setup();
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+
+    nameButton(D_A, "Scen03 Strat A").focus();
+    expect(nameButton(D_A, "Scen03 Strat A")).toHaveFocus();
+
+    await user.keyboard("{Enter}");
+    expect(panel(D_A)).toBeInTheDocument();
+    await user.keyboard("{Enter}");
+    expect(panel(D_A)).toBeNull();
+  });
+
+  it("SCEN-03 keyboard: Space on the focused strategy-name button toggles the detail", async () => {
+    const user = userEvent.setup();
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+
+    nameButton(D_A, "Scen03 Strat A").focus();
+    expect(nameButton(D_A, "Scen03 Strat A")).toHaveFocus();
+
+    await user.keyboard(" ");
+    expect(panel(D_A)).toBeInTheDocument();
+    await user.keyboard(" ");
+    expect(panel(D_A)).toBeNull();
+  });
+
+  it("SCEN-03 keyboard: aria-expanded tracks the panel — 'false' collapsed, 'true' expanded", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+
+    expect(
+      nameButton(D_A, "Scen03 Strat A").getAttribute("aria-expanded"),
+    ).toBe("false");
+    openDetail(D_A, "Scen03 Strat A");
+    expect(
+      nameButton(D_A, "Scen03 Strat A").getAttribute("aria-expanded"),
+    ).toBe("true");
+    openDetail(D_A, "Scen03 Strat A");
+    expect(
+      nameButton(D_A, "Scen03 Strat A").getAttribute("aria-expanded"),
+    ).toBe("false");
+  });
+
+  // -------------------------------------------------------------------------
+  // Control exclusions. The row <li> toggles on pointer click (amplification),
+  // so every interactive descendant must stop propagation or the composer
+  // becomes unusable — every weight edit would expand or collapse a panel under
+  // the user's cursor.
+  //
+  // FIVE of the six controls are asserted in BOTH directions (a collapsed panel
+  // must not open, an open one must not close). One direction alone is weak:
+  // "still closed" passes trivially against a component whose panel never opens,
+  // and "still open" passes against one that never closes.
+  // -------------------------------------------------------------------------
+
+  /** Click `getControl()` with the panel collapsed and again with it expanded;
+   *  neither click may change the panel's presence. The control is re-queried
+   *  each time because some of them (the switch) re-render their own row. */
+  function expectExcluded(
+    id: string,
+    name: string,
+    getControl: () => HTMLElement,
+  ) {
+    expect(panel(id)).toBeNull();
+    fireEvent.click(getControl());
+    expect(panel(id)).toBeNull();
+
+    openDetail(id, name);
+    expect(panel(id)).toBeInTheDocument();
+    fireEvent.click(getControl());
+    expect(panel(id)).toBeInTheDocument();
+  }
+
+  /** Set the portfolio AUM through the AUM-01 input (commits on blur) so the
+   *  per-row dollar cell renders as an INPUT rather than its em-dash
+   *  read-only state — otherwise the dollar exclusion would test nothing. */
+  function setAum(raw: string) {
+    const el = screen.getByTestId("scenario-aum-input") as HTMLInputElement;
+    act(() => {
+      fireEvent.change(el, { target: { value: raw } });
+      fireEvent.blur(el);
+    });
+  }
+
+  it("SCEN-03 exclusion (weight input): clicking the weight field never toggles the detail", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    expectExcluded(D_A, "Scen03 Strat A", () => {
+      const el = document.getElementById(`weight-${D_A}`);
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+  });
+
+  it("SCEN-03 exclusion (dollar input): clicking the USD field never toggles the detail", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    setAum("1000000");
+    // Non-vacuity: the dollar INPUT genuinely rendered (unset AUM renders a
+    // read-only em-dash instead, which would make the click meaningless).
+    expect(document.getElementById(`alloc-usd-${D_A}`)).not.toBeNull();
+
+    expectExcluded(D_A, "Scen03 Strat A", () => {
+      const el = document.getElementById(`alloc-usd-${D_A}`);
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+  });
+
+  it("SCEN-03 exclusion (mode toggle): clicking the Leverage/Target mode toggle never toggles the detail", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    expectExcluded(D_A, "Scen03 Strat A", () =>
+      within(addedRow(D_A)).getByTestId("scenario-leverage-mode-toggle"),
+    );
+  });
+
+  it("SCEN-03 exclusion (leverage input): clicking the leverage field never toggles the detail", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    expectExcluded(D_A, "Scen03 Strat A", () => {
+      const el = document.getElementById(`leverage-${D_A}`);
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+  });
+
+  it("SCEN-03 exclusion (include/exclude switch): the on/off toggle never toggles the detail — it sits OUTSIDE the control-cluster wrapper", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    // Checker B-2: this switch lives in the row's LEFT cluster, so the ONE
+    // stopPropagation wrapper around the numeric controls does not cover it. It
+    // needs its own — without it, excluding a row also expands it.
+    expectExcluded(D_A, "Scen03 Strat A", () =>
+      within(addedRow(D_A)).getByRole("switch", {
+        name: "Toggle Scen03 Strat A on/off in scenario",
+      }),
+    );
+  });
+
+  it("SCEN-03 exclusion (remove button): removing row B while row A is expanded leaves A's panel open", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    add(D_B, "Scen03 Strat B");
+
+    openDetail(D_A, "Scen03 Strat A");
+    expect(panel(D_A)).toBeInTheDocument();
+
+    fireEvent.click(
+      within(addedRow(D_B)).getByRole("button", { name: "Remove from scenario" }),
+    );
+
+    // B is gone …
+    expect(document.querySelector(`[data-scope-ref="${D_B}"]`)).toBeNull();
+    // … and A's panel survived: the remove click neither collapsed A (a bubbled
+    // toggle on B's row would not have, but an unscoped one would) nor left a
+    // second panel behind.
+    expect(panel(D_A)).toBeInTheDocument();
+    expect(openPanelCount()).toBe(1);
+  });
+
+  it("SCEN-03 panel click: clicking INSIDE the open panel does not collapse it", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    openDetail(D_A, "Scen03 Strat A");
+
+    // The panel is new DOM inside the clickable row; without its own
+    // stopPropagation, selecting a figure in it would collapse the thing you
+    // were reading.
+    fireEvent.click(
+      within(panel(D_A)!).getByTestId(`scenario-detail-markets-${D_A}`),
+    );
+    expect(panel(D_A)).toBeInTheDocument();
   });
 });
