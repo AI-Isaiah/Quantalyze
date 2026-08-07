@@ -11558,3 +11558,353 @@ describe("ScenarioComposer — AUM-01 Portfolio AUM input", () => {
     expect(screen.queryByTestId("commit-drawer-mock")).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 151 / AUM-01 — the per-strategy DOLLAR input ("allocate $500k to this
+// strategy" — the founder's literal sentence, made expressible).
+//
+// Dollars are a second VIEW of the weight, never a second weight-WRITE path.
+// Every commit routes through the composer's ONE `handleWeightChange`, so the
+// >1 clamp + its banner, the mixed-book engine-unit basis choice and the
+// sole-unit refusal are INHERITED rather than re-implemented (the v1.11
+// weight-basis landmines).
+//
+// Oracles are ECONOMIC and HAND-COMPUTED (151-VALIDATION "Binding Oracle
+// Rules"): `dollar = weight × AUM` and `weight = dollar / AUM` must round-trip
+// on the COMPOSED state. No assertion below recomputes `weight × AUM` from the
+// implementation's own formula — every expected figure is a literal typed here.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
+  const D_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-05-${String(i + 1).padStart(2, "0")}`,
+  );
+  const D_KEY_SERIES = D_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const D_STRAT_SERIES = D_DATES.map((date, i) => ({
+    date,
+    value: [0.01, -0.008, 0.012][i % 3],
+  }));
+
+  const D_A = "usd1-strat-a";
+  const D_B = "usd1-strat-b";
+  const D_K1 = "usd1-key-1";
+
+  /** A no-book allocator — blank mode by construction, so the live-holdings sum
+   *  is 0 and the manual AUM input is the ONLY possible source of size. */
+  function blankSlatePayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      holdingsSummary: [],
+      apiKeys: [],
+      perKeyReturnsByApiKeyId: {},
+      perKeyDailiesGateSatisfied: false,
+      eligibleApiKeyIds: [],
+      allocatorEligibleApiKeyIds: [],
+      contributingApiKeyIds: [],
+      bookEntryGateSatisfied: false,
+    });
+  }
+
+  /** A MIXED book: one per-key engine unit (K1) plus a catalogued added
+   *  strategy, so `isMixedPerKeyBook` is true and a weight edit takes the
+   *  engine-unit-basis branch of handleWeightChange. */
+  function mixedBookPayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      ...perKeyBook([{ id: D_K1, returns: D_KEY_SERIES, valueUsd: 60_000 }]),
+      apiKeys: [winApiKey(D_K1)],
+      strategies: [catalogStrategy(D_A, "Dollar Strat A", D_STRAT_SERIES)],
+    });
+  }
+
+  function renderUsd(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  function add(id: string, name: string) {
+    addStrategy({
+      id,
+      name,
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+  }
+
+  /** Set the portfolio AUM through the AUM-01 input (commits on blur). */
+  function setAum(raw: string) {
+    const el = screen.getByTestId("scenario-aum-input") as HTMLInputElement;
+    act(() => {
+      fireEvent.change(el, { target: { value: raw } });
+      fireEvent.blur(el);
+    });
+  }
+
+  function weightInput(ref: string): HTMLInputElement {
+    const el = document.getElementById(`weight-${ref}`);
+    expect(el).not.toBeNull();
+    return el as HTMLInputElement;
+  }
+  function dollarInput(ref: string): HTMLInputElement {
+    const el = document.getElementById(`alloc-usd-${ref}`);
+    expect(el).not.toBeNull();
+    return el as HTMLInputElement;
+  }
+  /** Type an amount into a row's dollar field and commit it (blur). */
+  function setDollar(ref: string, raw: string) {
+    const el = dollarInput(ref);
+    act(() => {
+      fireEvent.change(el, { target: { value: raw } });
+      fireEvent.blur(el);
+    });
+  }
+  /** The per-row sizes the commit pipeline would record — read at the drawer,
+   *  the established commit-boundary oracle in this file. */
+  function committedSizes(): Record<string, number> {
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+    const diffs = vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.diffs;
+    const out: Record<string, number> = {};
+    for (const d of diffs ?? []) {
+      if (d.kind === "voluntary_add") {
+        out[d.strategy_id] = d.size_at_decision_usd;
+      }
+    }
+    return out;
+  }
+  function alertText(): string {
+    return screen
+      .queryAllByRole("alert")
+      .map((a) => a.textContent ?? "")
+      .join(" ");
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  // Test 1 — THE FOUNDER'S SENTENCE. Invertibility (oracle 2): typing a dollar
+  // amount back-computes the weight, and the weight the commit pipeline sizes
+  // from reproduces exactly the dollars that were typed.
+  it("AUM-01 Test 1 (invertibility): typing a $500,000 dollar allocation against a $2,000,000 AUM sets weight 0.250 and commits a $500,000 size", () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    setAum("2000000");
+
+    // Non-vacuity: a lone added strategy starts at the whole book, so the field
+    // opens at the full AUM — the starting state is a real size, not a blank.
+    expect(dollarInput(D_A).value).toBe("2000000");
+    expect(weightInput(D_A).value).toBe("1.000");
+
+    setDollar(D_A, "500000");
+
+    // 500,000 / 2,000,000 = 0.25 — hand-computed, never recomputed here.
+    expect(weightInput(D_A).value).toBe("0.250");
+    expect(dollarInput(D_A).value).toBe("500000");
+    // …and the number the audit trail would record is the number typed.
+    expect(committedSizes()[D_A]).toBe(500_000);
+  });
+
+  // Test 2 — CONSERVATION (oracle 1): the dollar column is a partition of the
+  // AUM. Two weights summing to 1 must render two dollar figures summing to the
+  // AUM, to the cent.
+  it("AUM-01 Test 2 (conservation): weights 0.25 / 0.75 over a $1,000,000 AUM render a dollar column of 250,000 and 750,000", () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    add(D_B, "Dollar Strat B");
+    setAum("1000000");
+
+    // Drive the WEIGHT input (not the dollar one) so the dollar column is a
+    // pure read-out here — the reverse direction of Test 1.
+    fireEvent.change(weightInput(D_A), { target: { value: "0.25" } });
+    expect(weightInput(D_A).value).toBe("0.250");
+    expect(weightInput(D_B).value).toBe("0.750");
+
+    const a = Number(dollarInput(D_A).value);
+    const b = Number(dollarInput(D_B).value);
+    expect(a).toBe(250_000);
+    expect(b).toBe(750_000);
+    expect(Math.abs(a + b - 1_000_000)).toBeLessThan(0.01);
+  });
+
+  // Test 3 — THE WIRING FALSIFIER (151-VALIDATION SC1 ledger row). The dollar
+  // edit must write the weight through `handleWeightChange` and nothing else.
+  // `userWeightOverrides` is the observable: `setWeightOverride` /
+  // `applyWeightOverrides` are its ONLY writers and handleWeightChange is the
+  // composer's only caller of either, so a stamped entry proves the gesture
+  // travelled the one path. Neutering handleWeightChange (an early `return`)
+  // turns this RED — observed once during 151-07 Task 1, then reverted.
+  it("AUM-01 Test 3 (wiring falsifier): the dollar edit writes the weight through handleWeightChange — the ONE weight-write path", async () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    setAum("2000000");
+
+    setDollar(D_A, "500000");
+
+    expect(weightInput(D_A).value).toBe("0.250");
+    await waitFor(() => {
+      const raw = lsStore.get(`allocations.scenario_v0_15.${ALLOCATOR_A}`);
+      expect(raw).toBeTruthy();
+      const persisted = JSON.parse(raw as string) as ScenarioDraft;
+      // The user-gesture stamp: only the weight-write path sets this.
+      expect(persisted.userWeightOverrides?.[D_A]).toBe(0.25);
+      expect(persisted.weightOverrides[D_A]).toBe(0.25);
+    });
+  });
+
+  // Test 4 — CLAMP INHERITANCE. An amount larger than the whole book is a
+  // weight > 1; the dollar path must surface the EXISTING banner verbatim
+  // rather than clamping silently or minting a second message.
+  it("AUM-01 Test 4 (clamp inheritance): a dollar amount above AUM fires the existing clamp banner and lands the weight at 1", () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    add(D_B, "Dollar Strat B");
+    setAum("1000000");
+    // Non-vacuity: two rows share the book, so a clamp to 1 is a real move.
+    expect(weightInput(D_A).value).toBe("0.500");
+
+    setDollar(D_A, "5000000");
+
+    expect(screen.getByTestId("scenario-commit-error").textContent).toBe(
+      "Weight clamped to 1 — the maximum allocation is 100% of portfolio AUM.",
+    );
+    expect(weightInput(D_A).value).toBe("1.000");
+    expect(weightInput(D_B).value).toBe("0.000");
+  });
+
+  // Test 5 — GUARD INHERITANCE in a MIXED book (a selected per-key engine unit
+  // alongside the added strategy).
+  //
+  // 5a: the dollar edit takes handleWeightChange's ENGINE-UNIT-BASIS branch, so
+  //     the typed fraction REPRODUCES. This is exactly the v1.11 CR-01 failure
+  //     the basis choice exists to prevent — under `enabledIdsOf` the typed 0.25
+  //     renders as ~0% because it competes with raw per-key equity dollars.
+  // 5b: the sole-unit REFUSAL ("A single constituent is always 100%.") is live
+  //     on that same shared path and writes NOTHING (refuse, never renormalize).
+  //     Note the refusal is structurally UNREACHABLE from a dollar edit: the
+  //     dollar input lives only on added rows (UI-SPEC §2), and the refusal only
+  //     fires when the SOLE selected engine unit is the edited ref while the
+  //     book is mixed — a state that requires a selected per-key unit, which
+  //     would itself make `otherIds` non-empty. It is therefore pinned where it
+  //     IS reachable, on the shared function the dollar path calls.
+  it("AUM-01 Test 5 (mixed-book basis + sole-unit refusal): the dollar edit renormalizes over the engine basis, and the shared path still refuses a sole constituent", () => {
+    renderUsd(mixedBookPayload());
+    add(D_A, "Dollar Strat A");
+    setAum("2000000");
+
+    // 5a — 500,000 / 2,000,000 = 0.25 typed; the remaining 0.75 goes to the
+    // per-key unit. Both are hand-computed.
+    setDollar(D_A, "500000");
+    expect(weightInput(D_A).value).toBe("0.250");
+    expect(weightInput(D_K1).value).toBe("0.750");
+    expect(dollarInput(D_A).value).toBe("500000");
+
+    // 5b — collapse the basis to a single constituent (no added row), then edit
+    // the sole remaining unit's weight on the SAME handler.
+    cleanup();
+    lsStore.clear();
+    renderUsd(mixedBookPayload());
+    expect(weightInput(D_K1).value).toBe("1.000");
+    // No added strategy ⇒ no dollar input on screen: the sole-unit state and a
+    // dollar edit cannot coexist (see the note above).
+    expect(screen.queryAllByTestId("scenario-constituent-dollar")).toHaveLength(
+      0,
+    );
+
+    fireEvent.change(weightInput(D_K1), { target: { value: "0.5" } });
+    expect(alertText()).toContain("A single constituent is always 100%.");
+    expect(weightInput(D_K1).value).toBe("1.000");
+  });
+
+  // Test 6 — AUM UNSET. A non-derivable dollar figure is the em-dash, never a
+  // silently disabled input and never $0 (DESIGN.md Numbers Contract). The
+  // `title` is duplicated into an sr-only span because a title alone is
+  // unreachable by keyboard/touch (UI-SPEC §2). No division executes.
+  it("AUM-01 Test 6 (AUM unset): the dollar cell is a read-only em-dash carrying the remedy in text, not a $0 and not a NaN", () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+
+    // Non-vacuity: this is the AUM-unset state (no live book, nothing typed).
+    expect(
+      (screen.getByTestId("scenario-aum-input") as HTMLInputElement).value,
+    ).toBe("");
+    expect(screen.queryAllByTestId("scenario-constituent-dollar")).toHaveLength(
+      0,
+    );
+
+    const cell = screen.getByTestId("scenario-constituent-usd-unset");
+    expect(cell.tagName).toBe("SPAN");
+    expect(cell.getAttribute("title")).toBe(
+      "Set portfolio AUM to size in dollars",
+    );
+    expect(cell.textContent).toContain("—");
+    expect(
+      within(cell).getByText("Set portfolio AUM to size in dollars"),
+    ).toBeInTheDocument();
+    // No fabricated zero, no NaN leaking out of a divide-by-zero.
+    expect(
+      screen.getByTestId("scenario-constituent-list").textContent,
+    ).not.toMatch(/NaN/);
+
+    // …and the state is genuinely reversible: setting an AUM turns the em-dash
+    // into a real editable field.
+    setAum("400000");
+    expect(screen.queryByTestId("scenario-constituent-usd-unset")).toBeNull();
+    expect(dollarInput(D_A).value).toBe("400000");
+  });
+
+  // Test 7 — METRICS INVARIANCE re-checked on the COMPOSED state after this
+  // task's wiring (oracle 3). A dollar edit changes WEIGHTS, so the engine
+  // legitimately re-runs; a pure AUM change must still leave scenarioMetrics
+  // byte-identical and must not re-invoke the engine at all. AUM rescales
+  // DOLLARS, never returns — that is what keeps AUM-01 distinct from SCEN-01.
+  it("AUM-01 Test 7 (metrics invariance after the dollar wiring): a dollar edit moves weights, a pure AUM change moves nothing", () => {
+    renderUsd(mixedBookPayload());
+    add(D_A, "Dollar Strat A");
+    setAum("2000000");
+
+    const callsBeforeDollar = computeScenarioStateArgs.length;
+    setDollar(D_A, "500000");
+    // Non-vacuity: the weight edit really reached the engine.
+    expect(computeScenarioStateArgs.length).toBeGreaterThan(callsBeforeDollar);
+
+    const before = lastKpiScenarioMetrics();
+    expect(before?.n ?? 0).toBeGreaterThan(0);
+    expect(before?.sharpe).not.toBeNull();
+    const callsBeforeAum = computeScenarioStateArgs.length;
+
+    setAum("9000000");
+    // The AUM edit landed (otherwise the invariance below is vacuous):
+    // 0.25 × 9,000,000 = 2,250,000, hand-computed.
+    expect(dollarInput(D_A).value).toBe("2250000");
+
+    const after = lastKpiScenarioMetrics();
+    expect(after?.sharpe).toBe(before?.sharpe);
+    expect(after?.cagr).toBe(before?.cagr);
+    expect(after?.max_drawdown).toBe(before?.max_drawdown);
+    expect(after?.n).toBe(before?.n);
+    expect(computeScenarioStateArgs.length).toBe(callsBeforeAum);
+  });
+});
