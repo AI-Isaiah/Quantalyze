@@ -22,15 +22,15 @@ result: [pending]
 
 ### 3. ⚠️ HIGHEST RISK — zero-portfolio allocator allocates
 expected: An allocator with NO real portfolio allocates to a marked own-capital strategy from Holdings; the lazy-provisioning arm mints the is_test=false portfolio (RLS INSERT check, partial unique index, and the SECDEF seed-trigger repair all hold at runtime); the position and its weight_snapshots companion row land.
-result: [pending]
+result: pass — browser-driven 2026-08-07 (localhost dev server against TEST DB, fresh sentinel allocator with zero portfolios). Holdings STRATEGIES panel rendered the marked strategy with the Own-capital tag, honest em-dashes and "— not allocated"; AllocateDialog accepted $250,000; row flipped to 100.00% / $250,000 / 0d / "Edit allocation…". DB verified: is_test=false portfolio minted by lazy provisioning, position row landed through the D-03-A trigger, weight_snapshots companion row seeded (the write that 42501'd before migration 20260806130000). Evidence: .gstack/qa-reports/screenshots/uat3-*.png
 
 ### 4. Flip own→team with a live allocation
 expected: Marking a strategy team_review while a position is live shows the 409 confirm arm naming the amount; confirming runs ONE transaction (position removed + mark set); cancel leaves everything untouched; no silent removal.
-result: [pending]
+result: pass — browser-driven 2026-08-07. Mark dialog on /my-strategies row; picking the team option surfaced the confirm arm naming the exact $250,000 allocation with the destructive action styled red and a safe default; confirming flipped the mark AND removed the position in one RPC transaction (DB: capital_ownership=team_review, 0 positions). Row re-rendered with the muted Team-review tag. Evidence: .gstack/qa-reports/screenshots/uat4-*.png
 
 ### 5. Rename coherence + pseudonymity + published absence
 expected: Owner rename of a private/draft strategy renders coherently on my-strategies, own Browse rows, owner factsheet and holdings alias; public codename/disclosure redaction is byte-untouched; a published strategy shows no rename affordance; anon-after-owner-view cache isolation holds.
-result: [pending]
+result: pass (core arc) — browser-driven 2026-08-07. Rename dialog states the pseudonymity contract in its own copy ("Only you see this name. Public surfaces keep showing the codename."); rename persisted (DB: name updated, codename untouched, status private) and renders on /my-strategies. Published-absence + cache-isolation arms rest on the verifier's code-level confirmation (rename route 404s non-private/draft; lane state kept out of the shared public cache) — no published fixture was owned by the UAT user. Minor observation: the row needed a reload to show the new name on the dev server.
 
 ### 6. TEST database state
 expected: Both migrations applied to TEST and the three DB test files green there.
@@ -39,9 +39,9 @@ result: pass — resolved by orchestrator evidence 2026-08-06/07: `apply_migrati
 ## Summary
 
 total: 6
-passed: 1
+passed: 4
 issues: 0
-pending: 5
+pending: 2
 skipped: 0
 blocked: 0
 
