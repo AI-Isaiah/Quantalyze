@@ -839,13 +839,36 @@ export function ScenarioComposer({
   // initial draft renders by gating which holdings flow into the hook/adapter/
   // composition below. The frozen adapter + engine path is untouched.
   const hasLiveBook = rawHoldingsSummary.length > 0;
-  // ENGINE-03 (Phase 63) — book mode requires BOTH a live book AND the per-key
-  // dailies gate. A gate=false holder has no per-source engine behind a book
-  // mode, so book entry is unavailable and the composer initializes to BLANK
-  // (added-only) with the DSRC-02 note repointed below so it still renders (D1
-  // locked; Pitfall 2). Landing this before the ENGINE-01 holdings-path deletion
-  // means no intermediate state ever shows a gate=false book mode with no engine.
-  const canEnterBook = hasLiveBook && payload.perKeyDailiesGateSatisfied;
+  // Phase 151 AUM-04 — book entry now keys on the SPLIT gate.
+  //
+  //   `bookEntryGateSatisfied` is SOME-semantics: >= 1 ALLOCATOR-eligible key
+  //   has a per-key series. Manager-side keys (linked to one of the owner's own
+  //   strategies) are subtracted SSR-side, so a manager's keys can no longer pin
+  //   the gate shut on the book they also allocate from. This is a SoT mirror —
+  //   the client reads the flag verbatim and never re-derives eligibility.
+  //
+  //   ENGINE-03's `perKeyDailiesGateSatisfied` (all-or-nothing) is UNCHANGED and
+  //   still governs `liveBaselineMetrics` (queries-side) and the MEMBER-04
+  //   derive/stamp below. Do NOT repoint those: a partial blend must never
+  //   present as the whole live book, and the membership stamp's contract is
+  //   "the eligible per-key ids under the all-or-nothing gate" (RESEARCH
+  //   Pitfall 3). Exactly three consumers move to the new flag — this one, the
+  //   mode-switch handler, and `usePerKeySources`.
+  //
+  //   Root cause: an owner-manager's ~$460k book (8 keys, 6 strategy-linked)
+  //   pinned the old gate FALSE, so blank slate was FORCED, not chosen.
+  const canEnterBook = hasLiveBook && (payload.bookEntryGateSatisfied ?? false);
+  // Pitfall 5 (recorded asymmetry): AUM is CUSTODY — the holdings of every
+  // active key, manager-side included — while this gate is MODELLING CAPABILITY
+  // (allocator keys that have a per-key history). The two sets deliberately
+  // differ, so no copy on this surface may claim the AUM is "from these N keys".
+  //
+  // Deliberate narrowing (RESEARCH Open Q4): a book with ZERO contributing keys
+  // still initializes BLANK. CONTEXT's "never force-initializes to blank" is
+  // narrowed to the >= 1 contributing case — an engineless "From my book" (an
+  // empty per-key unit set) is a worse dead end than blank mode, and 151-06's
+  // manual AUM input removes blank mode's residual harm (it can then size and
+  // commit). Any partial book — even 1 of 8 keys — reaches book mode.
   const [entryMode, setEntryMode] = useState<"book" | "blank">(
     canEnterBook ? "book" : "blank",
   );
@@ -1504,11 +1527,14 @@ export function ScenarioComposer({
   const handleEntryModeSelect = useCallback(
     (mode: "book" | "blank") => {
       if (mode === entryMode) return;
-      // ENGINE-03 — refuse book entry when the per-key gate is not satisfied.
-      // The book segment is hidden in that case (see the radiogroup below), so
-      // this is defense-in-depth: no code path (arrow-key, a future re-show)
-      // can land the composer in an engineless book mode.
-      if (mode === "book" && !payload.perKeyDailiesGateSatisfied) return;
+      // ENGINE-03 — refuse book entry when the book gate is not satisfied. The
+      // book segment is hidden in that case (see the radiogroup below), so this
+      // is defense-in-depth: no code path (arrow-key, a future re-show) can land
+      // the composer in an engineless book mode.
+      // Phase 151 AUM-04 — repointed to the SPLIT gate, canEnterBook-adjacent:
+      // this guard and `canEnterBook` must agree or a partial book would render
+      // a segment its own click handler refuses.
+      if (mode === "book" && !(payload.bookEntryGateSatisfied ?? false)) return;
       if (scenario.diffCount > 0) {
         setPendingMode(mode);
         setResetModalOpen(true);
@@ -1516,7 +1542,7 @@ export function ScenarioComposer({
       }
       setEntryMode(mode);
     },
-    [entryMode, scenario.diffCount, payload.perKeyDailiesGateSatisfied],
+    [entryMode, scenario.diffCount, payload.bookEntryGateSatisfied],
   );
 
   // Open a saved scenario. The row's persisted draft is decoded through the
@@ -2389,22 +2415,34 @@ export function ScenarioComposer({
     // in eligibleApiKeyIds. Without this filter that key would ride the engine
     // with no toggle row, letting "exclude all sources → honest empty" be
     // falsely satisfied by an undisclosed, untoggleable source.
-    const eligible = new Set(payload.eligibleApiKeyIds ?? []);
+    // Phase 151 AUM-04 — narrowed from `eligibleApiKeyIds` to
+    // `contributingApiKeyIds` so this invariant SURVIVES the row narrowing
+    // above. The legacy eligible set is role-BLIND: it still carries the owner's
+    // MANAGER-side keys, and those DO have a per-key series (that is what makes
+    // them manager-side). Left on the eligible set, they would ride the engine
+    // with no toggle row — the undisclosed, untoggleable source this filter
+    // exists to prevent. `contributingApiKeyIds` is `allocatorEligible ∩
+    // has-series`, so this drops exactly the manager keys and nothing else.
+    const contributing = new Set(payload.contributingApiKeyIds ?? []);
     const eligibleOnly = Object.fromEntries(
-      Object.entries(all).filter(([id]) => eligible.has(id)),
+      Object.entries(all).filter(([id]) => contributing.has(id)),
     );
     return buildPerKeyStrategyForBuilderSet(eligibleOnly, equityByApiKeyId);
   }, [
     payload.perKeyReturnsByApiKeyId,
-    payload.eligibleApiKeyIds,
+    payload.contributingApiKeyIds,
     equityByApiKeyId,
   ]);
 
-  // The per-key path is active only in book mode + D3 gate satisfied. When
+  // The per-key path is active only in book mode + the book gate satisfied. When
   // active, the per-key strategy set feeds the projectionState/engine pipeline;
   // otherwise the added-only set does.
+  // Phase 151 AUM-04 (RESEARCH Open Q4) — repointed to the SPLIT gate: a book
+  // mode running the ADDED-ONLY engine would be a "From my book" with none of
+  // the book in it, which is a worse dead end than the refusal. Book mode and
+  // the per-key engine must be reachable together or not at all.
   const usePerKeySources =
-    entryMode === "book" && payload.perKeyDailiesGateSatisfied;
+    entryMode === "book" && (payload.bookEntryGateSatisfied ?? false);
 
   // The strategy set actually fed to the engine this render — the per-key units
   // (merged with added units) when the per-source path is active, else the
@@ -2478,29 +2516,61 @@ export function ScenarioComposer({
   // when it is most needed. Keying on the RAW book (hasLiveBook) keeps the calm
   // note rendered for the forced-blank holder while the `!gate && eligible > 0`
   // conjuncts still suppress it for gate-satisfied books and no-key books.
+  // Phase 151 AUM-04 — the fallback now owns ONLY the zero-contributing state.
+  // Under a PARTIAL book its central sentence ("this projection blends your
+  // whole book") is false: the projection blends exactly the contributing keys.
+  // That state is owned by the partial-book note rendered below the charts.
   const showDataSourcesFallback =
     hasLiveBook &&
     !payload.perKeyDailiesGateSatisfied &&
+    !(payload.bookEntryGateSatisfied ?? false) &&
     (payload.eligibleApiKeyIds ?? []).length > 0;
 
   // The connected exchange keys eligible for per-source toggling — payload
   // apiKeys filtered to the SSR-computed eligible-key id set (SoT mirror; the
   // client never re-derives eligibility, RESEARCH §SoT-mirror). One row per key.
+  // Phase 151 AUM-04 (Pitfall 4) — NARROWED from `eligibleApiKeyIds` to
+  // `contributingApiKeyIds`. A non-contributing key has no per-key series and so
+  // no engine unit: rendering its toggle row would show a dead 0.000 weight the
+  // allocator cannot move. It would also skew the notional basis — `bookEquity`
+  // below sums `equityByApiKeyId` over exactly this set, so the basis narrows
+  // WITH the rows and stays consistent with what the engine actually blends.
   const dataSourceKeys = useMemo(() => {
-    const eligible = payload.eligibleApiKeyIds ?? [];
-    return (payload.apiKeys ?? []).filter((k) => eligible.includes(k.id));
-  }, [payload.apiKeys, payload.eligibleApiKeyIds]);
+    const contributing = payload.contributingApiKeyIds ?? [];
+    return (payload.apiKeys ?? []).filter((k) => contributing.includes(k.id));
+  }, [payload.apiKeys, payload.contributingApiKeyIds]);
 
-  // WEIGHTS-02 (Phase 112, Pitfall 1) — the eligible per-key `api_key_id`s that
-  // render a leverage input this render. Folded into `pruneLeverageToDraftRefs`
-  // at both Save call sites so a leverage-only edit on an INCLUDED per-key source
-  // (no weightOverride, no toggle entry) is NOT dropped at Save. Empty when the
-  // per-key path is inactive — no per-key leverage input renders, so the Save
-  // prune keeps its original stale-dropping behavior exactly.
+  // WEIGHTS-02 (Phase 112, Pitfall 1) — the per-key `api_key_id`s whose stored
+  // leverage must survive Save. Folded into `pruneLeverageToDraftRefs` at both
+  // Save call sites so a leverage-only edit on an INCLUDED per-key source (no
+  // weightOverride, no toggle entry) is NOT dropped at Save.
+  //
+  // Phase 151 AUM-04 — DELIBERATELY NOT narrowed with `dataSourceKeys`, and
+  // deliberately decoupled from `usePerKeySources`. The keep-set stays on the
+  // allocator-ELIGIBLE basis because "not YET contributing" is TEMPORARY: the
+  // key gets its series on the next sync, and the row returns. Narrowing the
+  // keep-set to the contributing set — or emptying it whenever the per-key path
+  // is momentarily inactive (a reopened book draft syncs to blank mode while
+  // `targetEntryMode` stays frozen on the old all-or-nothing gate) — would
+  // silently destroy leverage the allocator saved. That is the exact
+  // Phase-112 / WEIGHTS-02 defect class, and silent destruction must be
+  // impossible. Preserving an entry keyed to a LIVE allocator key is never
+  // stranding: `allocatorEligibleApiKeyIds` is by construction not stale.
   const eligiblePerKeyIds = useMemo(
-    () => (usePerKeySources ? dataSourceKeys.map((k) => k.id) : []),
-    [usePerKeySources, dataSourceKeys],
+    () => payload.allocatorEligibleApiKeyIds ?? [],
+    [payload.allocatorEligibleApiKeyIds],
   );
+
+  // Phase 151 AUM-04 — the partial-book note's counts. M = the allocator's own
+  // eligible keys, N = those without a per-key series yet. MANAGER-side keys are
+  // in NEITHER count: they are absent from `allocatorEligibleApiKeyIds` by
+  // construction, and "not yet contributing" must never describe a key that will
+  // never contribute (UI-SPEC partial-book invariant). Reading the role-blind
+  // `eligibleApiKeyIds` or `apiKeys` here would turn the founder's "0 of 2" into
+  // a bewildering "6 of 8".
+  const allocatorEligibleCount = (payload.allocatorEligibleApiKeyIds ?? []).length;
+  const notYetContributing =
+    allocatorEligibleCount - (payload.contributingApiKeyIds ?? []).length;
 
   // WEIGHTS-00 (A1 locked) — the allocator's real book equity: Σ equityByApiKeyId
   // (the canonical D2 per-key equity, NEVER re-derived from value_usd) over the
@@ -2525,6 +2595,11 @@ export function ScenarioComposer({
   // CONSTIT-03 — derived from the unified `toggleByScopeRef` channel (default
   // included), so re-including any source instantly flips this back to false and
   // restores the projection.
+  // Phase 151 AUM-04 — this trigger narrows WITH `dataSourceKeys` (accepted, not
+  // incidental): "every source excluded" must mean every source the allocator
+  // can actually see and toggle. A non-contributing key has no row and no toggle,
+  // so counting it here would make the honest-empty card unreachable — the
+  // untoggleable-source failure mode, mirrored.
   const hasLiveAddedStrategy = scenario.draft.addedStrategies.some(
     (s) => scenario.draft.toggleByScopeRef[s.id] !== false,
   );
@@ -4904,6 +4979,26 @@ export function ScenarioComposer({
           scoped storageKey (independent of the factsheet `factsheet-collapse:`
           namespace) persists the choice across reloads. No onToggle — composer
           collapse analytics are out of scope this phase. */}
+      {/* Phase 151 AUM-04 — the partial-book note. Book mode renders toggle rows
+          for CONTRIBUTING keys only; this says so plainly rather than leaving the
+          allocator to wonder where their other keys went (never silent).
+          UI-SPEC color gate: MUTED, never amber, never red — a key with no
+          per-key history is an honest steady state, not a recoverable transient
+          and not a failure. Plain static text with no role="alert" and no
+          aria-live: steady-state disclosure, not an event.
+          Placed OUTSIDE the CollapsibleSection, immediately above the list it
+          describes: inside, a collapsed section would hide it and break the
+          never-silent invariant. */}
+      {entryMode === "book" && notYetContributing > 0 && (
+        <div
+          data-testid="scenario-partial-book-note"
+          className="mt-2 text-xs text-text-muted"
+        >
+          {notYetContributing} of {allocatorEligibleCount} keys not yet
+          contributing — no per-key history yet.
+        </div>
+      )}
+
       <CollapsibleSection
         id="composer-composition-controls"
         title="Strategies & weights"
