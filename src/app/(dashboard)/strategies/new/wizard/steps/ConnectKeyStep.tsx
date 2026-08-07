@@ -295,6 +295,23 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
     "KEY_PROBE_FAILED",
     "KEY_EXCHANGE_UNAVAILABLE",
     "KEY_VENUE_TRANSIENT",
+    // ⚠️ STOPGAP (hotfix 2026-08-06, incident 2026-08-05): the server
+    // classified a validate-key failure as `SERVICE_UNREACHABLE`, but this
+    // roster did not carry it, so the membership check rejected the honest
+    // code and the wizard rendered UNKNOWN ("Try the last action again", with
+    // a Retry control) for a fault whose own copy says the request never got
+    // an answer. The two scope codes travel with it: the verify-key seam maps
+    // MISSING_SCOPE / PERMISSION_DENIED onto them and both routes can put
+    // them on the wire the same way. All three have copy in
+    // `WIZARD_ERROR_COPY` (verified: SERVICE_UNREACHABLE,
+    // KEY_MISSING_READ_SCOPE, KEY_PERMISSION_DENIED entries exist in
+    // `wizardErrors.ts`). This is exactly the hand-typed allow-list edit the
+    // docblock above warns about — the CLASS fix (a roster DERIVED from the
+    // route contract instead of hand-maintained) stays with Phase 153 /
+    // WIZFORM-02; do not grow this list further, derive it there.
+    "SERVICE_UNREACHABLE",
+    "KEY_MISSING_READ_SCOPE",
+    "KEY_PERMISSION_DENIED",
   ]);
 
 export interface ConnectKeySuccess {

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.53.3.1] - 2026-08-06
+### Hotfix — MT5 keys sync again, and the wizard stops saying "we could not classify this failure"
+
+Every MT5 key on production sat at a permanent sync error: the daily allocator-positions
+sweep and the trade-sync job both called exchange-shaped methods (`fetch_balance`, `.id`)
+on the MT5 session object, which has none of them — v1.15 routed the analytics derive
+branch for MT5 but never the key-sync path. Both jobs now route MT5 explicitly: account
+equity is read through the MT5 gateway under the per-terminal lock (with the login bracket
+that prevents a mis-routed terminal from stamping the wrong account's equity), and the
+sub-steps with no MT5 analog are explicit, commented no-ops instead of crashes. A healthy
+MT5 key can reach `sync_status='complete'` again; seven wiring regressions pin it, RED-first
+against both production error signatures.
+
+Also: the wizard's known-code rosters learned `SERVICE_UNREACHABLE`,
+`KEY_MISSING_READ_SCOPE`, and `KEY_PERMISSION_DENIED` — the server's honest verdicts now
+render their real copy instead of the dead-end "could not classify" card (stopgap; the
+derived-roster class fix remains Phase 153/WIZFORM-02).
+
 ## [0.53.3.0] - 2026-08-05
 ### NAV-01 — "My strategies": the allocator's own ranking, at discovery parity
 

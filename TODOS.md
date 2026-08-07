@@ -367,6 +367,8 @@ true for 146 and half of 142–145, and **false for 141**.
   any high row is pending, so a blanket change is not safe.
   Second, independent fix worth doing: TEST `api_keys` grow without bound (1,900 and
   climbing). Fewer fixture keys = a smaller daily fan-out.
+- **CI speed/flake (founder 2026-08-05, watched python at 20min/12%) — 4TH MECHANISM FOUND: a WEDGED PostgREST pool.** All-day 504s on TEST (every CI cluster: 07:45, ~11:00, 18:0x, 19:2x) were PGRST003 while Postgres sat at 14/60 connections nearly idle and the same DELETE ran instantly via direct SQL — PostgREST's own pool slots were leaked/wedged after the morning's 2,144-job backlog connection storm, and the state persists until PostgREST's connections are recycled. REMEDY (proven 2026-08-05): `select pg_terminate_backend(pid) from pg_stat_activity where application_name='postgrest' and backend_type='client backend'` → PostgREST rebuilds the pool → instant 200s. Contributing causes booked: python + e2e-seeded run CONCURRENTLY (workflow `needs:` sequencing fix); daily backlog (purged 2,144 `derive-dailies-%` pending, cron untouched). Real fix (Phase 144, owner): per-run isolated DB. Also: e2e-seeded's seed should FAIL FAST with a "PostgREST wedged?" hint on PGRST003 rather than burning the run.
+- **Workflow `needs:` sequencing fix** — `python` + `e2e-seeded` run CONCURRENTLY against the one shared TEST DB (a contributing cause booked under the wedged-PostgREST 4th mechanism above); sequence them via `needs:` in `.github/workflows/ci.yml` so the two DB-heavy jobs never overlap.
 - 44 live-DB vitest files + ~112 python tests are green-skipped in CI while migrations
   auto-apply to prod.
 - pytest 80% gate measures only `services/` (routers/ ~7.8k LOC + `main_worker.py` uncovered).
