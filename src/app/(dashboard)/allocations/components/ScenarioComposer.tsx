@@ -709,6 +709,32 @@ function dataSourceLabel(k: { exchange: string; label: string; id: string }): {
 const SAVE_ERROR_GENERIC =
   "Couldn't save this portfolio. Check your connection and try again.";
 
+/**
+ * Phase 151 AUM-03 — the AUM-zero commit refusal, in two variants.
+ *
+ * A refusal is only useful if the remedy it names EXISTS. The string these
+ * replaced offered two remedies, and BOTH were lies:
+ *   • the live-holding toggle — that control was DELIBERATELY never built
+ *     (CONSTIT-03: live holdings are read-only context; every interactive
+ *     gesture lives on added-strategy rows). The user could search the screen
+ *     forever and never find it.
+ *   • the connect-a-key instruction — the founder hit this refusal with FOUR
+ *     venues already connected, so it was not just useless, it was false about
+ *     the state of their account.
+ *
+ * Both phrasings are permanent never-strings on this surface and are asserted
+ * absent by a repo grep-gate (AUM-03), which is why this comment paraphrases
+ * them rather than quoting them. Both variants below name only real
+ * affordances: the AUM input this phase adds, plus the "From my book" segment
+ * in the variant used when that segment actually renders (`canEnterBook`).
+ * Kept as module consts so the copy is pinned in ONE place and the tests can
+ * assert it by equality.
+ */
+const AUM_REFUSAL_NO_BOOK =
+  "Can't record a scenario commit: portfolio AUM is not set. Set portfolio AUM before submitting.";
+const AUM_REFUSAL_BOOK_REACHABLE =
+  'Can\'t record a scenario commit: portfolio AUM is not set. Set portfolio AUM, or switch to "From my book", before submitting.';
+
 /** A single zod issue as it arrives in the save route's 400 body
  *  (`{ error: "Invalid request body", issues }` — saved/route.ts:102-106). */
 type SaveIssue = { code?: string; path?: (string | number)[] };
@@ -3856,8 +3882,11 @@ export function ScenarioComposer({
     // guarantee a finite, non-negative product below.
     const hasVoluntaryAdds = scenario.draft.addedStrategies.length > 0;
     if (hasVoluntaryAdds && (!Number.isFinite(scenarioAum) || scenarioAum <= 0)) {
+      // Phase 151 AUM-03 — name only affordances that EXIST on this screen. The
+      // book clause is offered only when the segment genuinely renders, so the
+      // refusal can never point at a control the allocator cannot see.
       setCommitError(
-        "Can't record a scenario commit: portfolio AUM is zero. Connect an exchange API key or toggle on a live holding before submitting.",
+        canEnterBook ? AUM_REFUSAL_BOOK_REACHABLE : AUM_REFUSAL_NO_BOOK,
       );
       return;
     }
