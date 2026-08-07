@@ -619,6 +619,19 @@ export function StrategyBrowseDrawer({
             {filtered.map(({ s, tier }) => {
               const dimmed = permanentlyDimmed.has(s.id);
               const justAdded = recentlyAdded.has(s.id);
+              // Phase 152 (SCEN-05) / review WR-04 — the OWNER-ONLY creation
+              // timestamp, PARSED here so the render below can gate on a real
+              // Date. `null` covers both an absent key (pre-152 wire shape) and
+              // a present-but-unparseable string; neither may reach
+              // `toLocaleDateString`, which renders the literal "Invalid Date"
+              // rather than throwing.
+              const parsedCreatedAt =
+                typeof s.created_at === "string" ? new Date(s.created_at) : null;
+              const createdAt =
+                parsedCreatedAt != null &&
+                !Number.isNaN(parsedCreatedAt.getTime())
+                  ? parsedCreatedAt
+                  : null;
               return (
                 <li
                   key={s.id}
@@ -679,9 +692,23 @@ export function StrategyBrowseDrawer({
                           Three independent gates, all required. `isOwn === true`
                           (never `!== false`) is defence in depth — the route
                           already withholds created_at/status from third-party
-                          rows, and neither fence trusts the other. The
-                          `created_at` typeof check keeps the pre-152 wire shape
-                          rendering NOTHING rather than "Created Invalid Date".
+                          rows, and neither fence trusts the other.
+
+                          Review WR-04 — the third gate is a PARSE, not a
+                          `typeof`. The typeof check alone covered an ABSENT
+                          key (the pre-152 wire shape) but not a
+                          present-and-unparseable string, which flowed straight
+                          into `new Date(…).toLocaleDateString(…)` and rendered
+                          the literal text "Created Invalid Date". The
+                          first-party route only emits Postgres ISO timestamps,
+                          so that was not reachable today — it becomes reachable
+                          the moment a second producer (a fixture, a cached
+                          payload, a future aggregated endpoint) feeds
+                          `strategies` into this drawer, and the comment would
+                          have told the next reader it was already handled.
+                          `createdAt` is now the parsed Date or null, and null
+                          renders NO line — the same omit-when-absent branch the
+                          status segment uses.
 
                           D-1: there is deliberately no "{N} keys" segment. It
                           would cost a second query per drawer open, and
@@ -692,7 +719,7 @@ export function StrategyBrowseDrawer({
                           Testid is OUTSIDE the `browse-add-` family — see the
                           PR #620 rationale below. */}
                       {s.isOwn === true &&
-                        typeof s.created_at === "string" &&
+                        createdAt != null &&
                         ownNameCollisions.has(
                           normalizeStrategyName(s.name),
                         ) && (
@@ -700,9 +727,7 @@ export function StrategyBrowseDrawer({
                             className="mt-1 text-xs text-text-muted"
                             data-testid={`browse-dedup-${s.id}`}
                           >
-                            {`Created ${new Date(
-                              s.created_at,
-                            ).toLocaleDateString("en-US", {
+                            {`Created ${createdAt.toLocaleDateString("en-US", {
                               month: "short",
                               day: "numeric",
                               year: "numeric",

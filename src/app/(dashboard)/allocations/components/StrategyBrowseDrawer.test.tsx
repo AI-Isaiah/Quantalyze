@@ -1028,6 +1028,57 @@ describe("StrategyBrowseDrawer — SCEN-05 own-vs-own dedup line (Phase 152)", (
     expect(document.body.textContent ?? "").not.toContain("Invalid Date");
   });
 
+  // -------------------------------------------------------------------------
+  // Review WR-04 — the ABSENT-key test above is not the whole hazard.
+  //
+  // The shipped gate was `typeof s.created_at === "string"`, which covers an
+  // absent key but waves through a present-and-UNPARSEABLE one: it flowed
+  // straight into `new Date(…).toLocaleDateString(…)`, which does not throw —
+  // it renders the literal text "Created Invalid Date" at the allocator. Not
+  // reachable from the first-party route (Postgres ISO timestamps only), but
+  // reachable the moment a second producer feeds `strategies` into this drawer,
+  // and the inline comment claimed it was already handled.
+  //
+  // The sibling arm is what makes this discriminating: the collision must still
+  // be DETECTED (name matching does not depend on the timestamp) — the bad row
+  // loses its line, it does not silently disappear from the results.
+  // -------------------------------------------------------------------------
+  it("WR-04: a colliding own row with an UNPARSEABLE created_at renders no line — never 'Created Invalid Date'", async () => {
+    const malformed: StrategyBrowseRow[] = [
+      { ...COLLIDING_OWN[0], id: "s-good-date" },
+      { ...COLLIDING_OWN[1], id: "s-bad-date", created_at: "not-a-timestamp" },
+    ];
+    renderDrawer({ fetchStrategies: async () => malformed });
+    await flush();
+
+    // The good sibling proves the collision was detected at all.
+    expect(screen.getByTestId("browse-dedup-s-good-date").textContent).toBe(
+      "Created Aug 4, 2026 · Private",
+    );
+    expect(screen.queryByTestId("browse-dedup-s-bad-date")).toBeNull();
+    // The literal string the pre-fix code rendered.
+    expect(document.body.textContent ?? "").not.toContain("Invalid Date");
+    // …and the row itself is still on screen and still addable — a malformed
+    // metadata field must not cost the allocator the strategy.
+    expect(screen.getByTestId("browse-add-s-bad-date")).toBeInTheDocument();
+  });
+
+  it("WR-04: an EMPTY-STRING created_at renders no line either (new Date('') is Invalid Date, not epoch)", async () => {
+    const emptyish: StrategyBrowseRow[] = [
+      { ...COLLIDING_OWN[0], id: "s-ok" },
+      { ...COLLIDING_OWN[1], id: "s-empty", created_at: "" },
+    ];
+    renderDrawer({ fetchStrategies: async () => emptyish });
+    await flush();
+
+    expect(screen.getByTestId("browse-dedup-s-ok")).toBeInTheDocument();
+    expect(screen.queryByTestId("browse-dedup-s-empty")).toBeNull();
+    expect(document.body.textContent ?? "").not.toContain("Invalid Date");
+    // The falsifier for a `?? new Date(0)` style "fix": the epoch date must not
+    // appear anywhere.
+    expect(document.body.textContent ?? "").not.toContain("Jan 1, 1970");
+  });
+
   it("renders the raw status enum product-cased, and omits the segment entirely when status is absent", async () => {
     const statusPair: StrategyBrowseRow[] = [
       { ...COLLIDING_OWN[0], id: "s-st-review", status: "pending_review" },
