@@ -35,12 +35,26 @@ Required tests (numbered per 151-03-PLAN):
   15. test_sfox_fetch_failure_raises_transient_human_copy
   16. test_sfox_empty_book_is_not_an_error
 
+  151-04 Task 2 — the CLASS-closure proof (AUM-02 + AUM-05)
+  17. test_non_ccxt_venue_class_is_closed          [parametrized: mt5 / sfox /
+                                                    an unknown venue]
+  18. test_two_accounts_under_one_allocator_do_not_collapse_on_upsert
+  19. test_ccxt_venue_is_untouched_by_the_dispatch  [the control arm]
+
 AUM-05 — why the sFOX branch is proven by TEST and not by a live probe: sFOX
 is dark behind `SFOX_ENABLED` with zero stored keys, so "the same test shape
 passes for sFOX BEFORE its go-live flip" is the ONLY way this venue's holdings
 path can be known-good on the day the founder flips it. `SfoxClient` exposes
 `get_balances()`, not ccxt's `fetch_balance()` — a byte-identical latent crash
 to the MT5 PROD defect above, invisible only because the flag is off.
+
+Test 17 is the reason this file is shaped the way it is. The ROADMAP binding
+trap for this phase is fixing the MT5 INSTANCE rather than the venue CLASS: a
+per-venue test suite proves each venue works and proves NOTHING about the next
+one. ONE parametrized body over mt5 + sfox + a venue that does not exist is
+what makes "no non-ccxt venue can put Python internals in front of a user" a
+class-level fact — and it is why the third arm is a made-up venue name, which
+by construction cannot have been special-cased.
 
 Fakes are SPEC-CONSTRAINED on purpose (151-PATTERNS Correction 3): an
 `AsyncMock`/`MagicMock` synthesizes any attribute, which would make a
@@ -60,6 +74,8 @@ import pytest
 
 import services.allocator_positions as ap
 from services.allocator_positions import (
+    MT5_NON_USD_NOTE,
+    SFOX_UNPRICED_ASSETS_NOTE,
     UNSUPPORTED_VENUE_NOTE,
     fetch_allocator_holdings,
 )
@@ -84,7 +100,16 @@ BANNED_INTERNALS = (
     "AttributeError",
     "object has no attribute",
     "Mt5Session",
+    "SfoxClient",
     "fetch_balance",
+    "fetch_positions",
+)
+
+# The ccxt surface no non-ccxt client may ever be asked for. Handing a
+# non-ccxt client to the ccxt body IS the AUM-02 defect, so "these names were
+# never invoked" is the structural half of the class proof.
+CCXT_METHOD_NAMES = frozenset(
+    {"fetch_balance", "fetch_positions", "fetch_tickers", "fetch_ticker"}
 )
 
 
@@ -1003,6 +1028,24 @@ async def test_sfox_unparseable_balance_is_skipped_not_valued(sfox_enabled):
 
 
 @pytest.mark.asyncio
+async def test_sfox_malformed_row_is_named_not_dropped(sfox_enabled):
+    """A non-dict element violates the row shape pinned by
+    tests/test_sfox_client.py. It cannot be read, so it must not disappear
+    silently — an asset the user holds that the sync quietly forgot is worse
+    than one it names as skipped."""
+    from services.allocator_positions import SFOX_UNPRICED_ASSETS_NOTE
+
+    client = _SpecConstrainedSfoxClient(
+        balances=[{"currency": "USD", "balance": "7"}, "not-a-row"]
+    )
+
+    rows, warning = await fetch_allocator_holdings("sfox", client, API_KEY_ID)
+
+    assert [r["symbol"] for r in rows] == ["USD"]
+    assert warning == SFOX_UNPRICED_ASSETS_NOTE.format(assets="unknown")
+
+
+@pytest.mark.asyncio
 async def test_sfox_read_is_wall_clock_bounded(sfox_enabled, monkeypatch):
     """T-151-12 / WEDGE-01: the worker loop is SEQUENTIAL. A stalled sFOX read
     must hit a known ceiling and classify transient, never hold the loop."""
@@ -1020,3 +1063,230 @@ async def test_sfox_read_is_wall_clock_bounded(sfox_enabled, monkeypatch):
         await fetch_allocator_holdings("sfox", client, API_KEY_ID)
 
     assert str(excinfo.value) == SFOX_FETCH_FAILED_NOTE
+
+
+# ===========================================================================
+# 151-04 Task 2 — the CLASS-closure proof
+# ===========================================================================
+#
+# Each probe returns (client, get_calls). Every arm is deliberately steered at
+# its branch's WARNING path: the warning is the string that actually reaches
+# `api_keys.sync_error`, so an arm that only exercised the happy path would
+# assert the leak invariant against copy no user ever sees.
+
+# A venue that DOES NOT EXIST. Chosen so the arm cannot have been special-cased
+# anywhere in the production code — the only thing that can make it pass is the
+# generic skip arm, which is what "the class is closed" means.
+UNKNOWN_VENUE = "kraken-futures-hypothetical"
+
+
+def _mt5_class_probe():
+    """MT5 arm: a EUR account — the branch's honest-skip path."""
+    transport = _RecordingMt5Transport(account=_account(currency="EUR"))
+    return _session(transport), (lambda: list(transport.calls))
+
+
+def _sfox_class_probe():
+    """sFOX arm: a non-priceable asset — the branch's honest-skip path."""
+    client = _SpecConstrainedSfoxClient(
+        balances=[{"currency": "btc", "balance": "0.5"}]
+    )
+    return client, (lambda: list(client.calls))
+
+
+def _unknown_class_probe():
+    """Unknown-venue arm: buildable by a future factory branch, no fetcher."""
+    client = _SpecConstrainedClient()
+    return client, (lambda: [])
+
+
+CLASS_PROBES = [
+    ("mt5", _mt5_class_probe, MT5_NON_USD_NOTE.format(ccy="EUR")),
+    ("sfox", _sfox_class_probe, SFOX_UNPRICED_ASSETS_NOTE.format(assets="BTC")),
+    (
+        UNKNOWN_VENUE,
+        _unknown_class_probe,
+        UNSUPPORTED_VENUE_NOTE.format(venue=UNKNOWN_VENUE.title()),
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
+# Test 17 — THE class proof: one body, every non-ccxt venue
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "venue,make_probe,expected_warning",
+    CLASS_PROBES,
+    ids=["mt5", "sfox", "unknown-venue"],
+)
+async def test_non_ccxt_venue_class_is_closed(
+    venue, make_probe, expected_warning, monkeypatch, mt5_enabled, sfox_enabled
+):
+    """THE class proof (AUM-02 + AUM-05). ONE test body over every non-ccxt
+    venue — the live ones AND a venue that does not exist — asserting the three
+    properties that together mean this defect class is closed:
+
+      (a) the call either returns or raises ONLY
+          AllocatorHoldingsSyncTransientError (any other exception type escapes
+          to the handler's generic arm, which is what stamped the PROD
+          AttributeError);
+      (b) no ccxt method is ever invoked on the venue's client (the fakes are
+          spec-constrained, so an attempt fails LOUD rather than being
+          synthesized);
+      (c) nothing the user can see — the returned warning or the raised
+          exception's str() — contains a Python internal.
+
+    The acceptance sentence this file exists to satisfy: "the same test shape
+    passes for sFOX BEFORE its go-live flip". sFOX has no live key and no live
+    API to observe, so a per-venue suite written after each flip would learn
+    about the next venue's crash from a user's sync_error, exactly as MT5 did.
+    """
+    monkeypatch.setattr(
+        ap, "NON_CCXT_VENUES", NON_CCXT_VENUES | {venue}, raising=True
+    )
+    client, get_calls = make_probe()
+
+    warning: str | None = None
+    raised: Exception | None = None
+    # (a) Only the purpose-built transient may escape. Any other exception type
+    # propagates out of this `try` and fails the test — deliberately NOT caught,
+    # because "it raised something" is the defect, and swallowing it here would
+    # reproduce the bug the module exists to prevent.
+    try:
+        rows, warning = await fetch_allocator_holdings(venue, client, API_KEY_ID)
+    except ap.AllocatorHoldingsSyncTransientError as exc:
+        raised = exc
+    else:
+        assert isinstance(rows, list)
+
+    # (b) STRUCTURAL: the ccxt surface is not even present on these clients, so
+    # the ccxt body could not have run against them silently.
+    for name in CCXT_METHOD_NAMES:
+        assert name not in dir(type(client)), (
+            f"{venue}: the probe grew a ccxt surface ({name}) — the "
+            "'never reached the ccxt body' assertion would be vacuous"
+        )
+    # ...and BEHAVIOURAL: nothing ccxt-shaped was actually called.
+    assert CCXT_METHOD_NAMES.isdisjoint(get_calls()), (
+        f"{venue}: a ccxt method was invoked on a non-ccxt client: {get_calls()}"
+    )
+
+    # (c) THE greppable UI-SPEC invariant (T-151-05 / T-151-10 / ASVS V7).
+    user_visible = [s for s in (warning, str(raised) if raised else None) if s]
+    assert user_visible, f"{venue}: the arm produced no user-visible outcome"
+    for copy in user_visible:
+        for banned in BANNED_INTERNALS:
+            assert banned not in copy, (
+                f"{venue}: {banned!r} leaked into user copy {copy!r}"
+            )
+        assert "—" in copy, f"{venue}: missing the em-dash copy pattern: {copy!r}"
+
+    # And the arm reached ITS OWN branch, not a neighbour's. Without this the
+    # whole parametrization would stay green with a venue's fetcher deleted —
+    # the generic skip arm produces banned-substring-clean copy too.
+    assert warning == expected_warning, (
+        f"{venue}: expected its own branch's copy, got {warning!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 18 — ECONOMIC ORACLE 5: two accounts, two rows, no collapse
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_two_accounts_under_one_allocator_do_not_collapse_on_upsert(
+    mt5_enabled,
+):
+    """T-151-07 / Pitfall 1, proven at the WIRING (Rule 9), not on a helper.
+
+    `allocator_holdings` is UNIQUE on (allocator_id, venue, symbol, asof) with
+    NO api_key_id in the key. The founder runs THREE MT5 accounts under one
+    allocator: if their rows shared a symbol, the upsert's ON CONFLICT would
+    converge them to ONE row and AUM would report a single account's equity
+    while the survivor's attribution flipped between syncs. So this drives the
+    real `persist_allocator_holdings` against a mock supabase and asserts on
+    the captured payload."""
+    rows_a, warn_a = await fetch_allocator_holdings(
+        "mt5",
+        _session(_RecordingMt5Transport(account=_account(equity=111111.11))),
+        API_KEY_ID,
+    )
+    rows_b, warn_b = await fetch_allocator_holdings(
+        "mt5",
+        _session(_RecordingMt5Transport(account=_account(equity=222222.22))),
+        OTHER_API_KEY_ID,
+    )
+
+    assert warn_a is None and warn_b is None
+    assert rows_a[0]["symbol"] != rows_b[0]["symbol"], (
+        "two funded accounts must produce two DISTINCT symbols"
+    )
+
+    captured: dict[str, object] = {}
+    mock_supabase = MagicMock()
+
+    def _upsert(rows, on_conflict=None):  # noqa: ANN001
+        captured["rows"] = rows
+        captured["on_conflict"] = on_conflict
+        chain = MagicMock()
+        chain.execute.return_value = MagicMock(data=rows)
+        return chain
+
+    table = MagicMock()
+    table.upsert.side_effect = _upsert
+    mock_supabase.table.return_value = table
+
+    written = await ap.persist_allocator_holdings(
+        mock_supabase,
+        rows_a + rows_b,
+        allocator_id=ALLOCATOR_ID,
+        api_key_id=API_KEY_ID,
+        asof_date="2026-08-07",
+    )
+
+    assert written == 2
+    upserted = captured["rows"]
+    assert isinstance(upserted, list) and len(upserted) == 2, (
+        f"both accounts must survive to the upsert: {upserted}"
+    )
+
+    # HAND LITERALS (economic-oracle discipline): never recomputed from the
+    # implementation, so a branch that summed, averaged or dropped one account
+    # turns this RED instead of agreeing with itself.
+    assert sorted(r["value_usd"] for r in upserted) == [111111.11, 222222.22]
+
+    # The conflict target is what actually decides collapse — so assert the two
+    # rows differ in the KEY TUPLE, not merely in some field.
+    assert captured["on_conflict"] == "allocator_id,venue,symbol,asof"
+    keys = {
+        (r["allocator_id"], r["venue"], r["symbol"], r["asof"]) for r in upserted
+    }
+    assert len(keys) == 2, (
+        f"both rows landed on ONE conflict key — the upsert would keep one: {keys}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 19 — the control arm: a ccxt venue is untouched by all of the above
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_ccxt_venue_is_untouched_by_the_dispatch(mt5_enabled, sfox_enabled):
+    """The class fix is ADDITIVE by construction: the dispatch is a prepend,
+    and a venue in neither the fetcher table nor NON_CCXT_VENUES still falls
+    through to the byte-unchanged ccxt body. Without this control arm the
+    parametrized proof above could be satisfied by a dispatch that swallowed
+    every venue — including the ones that sync fine today."""
+    assert "binance" not in NON_CCXT_VENUES
+    assert "binance" not in ap._NON_CCXT_HOLDINGS_FETCHERS
+
+    exchange = AsyncMock()
+    exchange.id = "binance"
+    exchange.fetch_balance = AsyncMock(return_value={"total": {"USDT": 4200.0}})
+    exchange.fetch_positions = AsyncMock(return_value=[])
+
+    rows, warning = await fetch_allocator_holdings("binance", exchange, API_KEY_ID)
+
+    exchange.fetch_balance.assert_awaited_once()
+    assert warning is None
+    assert [r["symbol"] for r in rows] == ["USDT"]
+    assert rows[0]["value_usd"] == 4200.0
