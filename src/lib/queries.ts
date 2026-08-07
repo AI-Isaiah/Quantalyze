@@ -318,6 +318,51 @@ export async function getMyStrategies(
 export type StrategylessKey = { id: string; exchange: SupportedExchange; label: string };
 
 /**
+ * Phase 151 (151-02, AUM-04) — THE manager-role discriminator: which of the
+ * owner's keys are already feeding a LIVE strategy they run as a MANAGER?
+ *
+ * ⚠️ ROLE, never VENUE. `exchange === "mt5"` is the named wrong-fix class
+ * (ROADMAP + CONTEXT). The founder's three deribit keys are equally
+ * manager-side (they hang off the Alpha Centauri composite), and a future
+ * manager-side bybit key would slip straight through a venue test.
+ *
+ * ⚠️ Coverage must consider BOTH link forms. `strategies.api_key_id` is the
+ * direct link; `strategy_keys` (migration 20260710120000) is the composite
+ * link, where N keys map to 1 strategy — the Alpha Centauri composite carries
+ * its 3 keys that way and has `api_key_id: null`.
+ *
+ * ⚠️ W-4 ruling (2026-08-05): archived strategies are NOT coverage. The owner
+ * archived them, so their keys are the owner's to use again.
+ *
+ * Extracted from `deriveStrategylessKeys` and SHARED with the allocator book
+ * gate in `getMyAllocationDashboard` so the two views of "strategy-linked"
+ * come from ONE join and cannot drift: /my-strategies subtracts this set to
+ * decide which keys get a "No strategy yet" placeholder; AUM-04 subtracts the
+ * SAME set to decide which keys can enter the allocator's book.
+ */
+export function deriveStrategyLinkedKeyIds(
+  ownStrategies: readonly { id: string; api_key_id: string | null; status: string }[],
+  strategyKeyLinks: readonly { strategy_id: string; api_key_id: string }[],
+): Set<string> {
+  // W-4: archived ≠ coverage.
+  const live = ownStrategies.filter((s) => s.status !== "archived");
+  const liveIds = new Set(live.map((s) => s.id));
+
+  return new Set<string>([
+    ...live
+      .map((s) => s.api_key_id)
+      .filter((id): id is string => id != null),
+    // A key may hold TWO disjoint windows on the same composite (there is no
+    // (strategy_id, api_key_id) uniqueness constraint) — the Set de-dupes.
+    // Links whose strategy is archived or not the owner's are dropped by the
+    // liveIds membership check.
+    ...strategyKeyLinks
+      .filter((l) => liveIds.has(l.strategy_id))
+      .map((l) => l.api_key_id),
+  ]);
+}
+
+/**
  * @internal Exported for unit testing only (the `isPerKeyDailiesEligibleKey`
  * precedent) — see `queries.my-strategies.test.ts`.
  *
@@ -347,22 +392,7 @@ export function deriveStrategylessKeys(
   ownStrategies: readonly { id: string; api_key_id: string | null; status: string }[],
   strategyKeyLinks: readonly { strategy_id: string; api_key_id: string }[],
 ): StrategylessKey[] {
-  // W-4: archived ≠ coverage.
-  const live = ownStrategies.filter((s) => s.status !== "archived");
-  const liveIds = new Set(live.map((s) => s.id));
-
-  const covered = new Set<string>([
-    ...live
-      .map((s) => s.api_key_id)
-      .filter((id): id is string => id != null),
-    // A key may hold TWO disjoint windows on the same composite (there is no
-    // (strategy_id, api_key_id) uniqueness constraint) — the Set de-dupes.
-    // Links whose strategy is archived or not the owner's are dropped by the
-    // liveIds membership check.
-    ...strategyKeyLinks
-      .filter((l) => liveIds.has(l.strategy_id))
-      .map((l) => l.api_key_id),
-  ]);
+  const covered = deriveStrategyLinkedKeyIds(ownStrategies, strategyKeyLinks);
 
   return keys
     .filter(isPerKeyDailiesEligibleKey)
