@@ -5814,6 +5814,18 @@ function CompositionList({
   // -------------------------------------------------------------------------
   const AUM_UNSET_REMEDY = "Set portfolio AUM to size in dollars";
 
+  // Phase 152 SCEN-04 (decision D-3) — the added row's non-derivable NOTIONAL
+  // sentence. Deliberately NOT the AUM sentence above, even though CONTEXT
+  // pinned it: this cell's em-dash is caused by `totalBookEquity == null` (or a
+  // missing blend share) at :5787-5792 — never by `scenarioAum`, which is a
+  // DIFFERENT number by construction (see the CompositionListProps note). Telling
+  // a book-less allocator to "set portfolio AUM" would name a remedy that cannot
+  // make this cell derivable — a dishonest remedy, the exact defect class this
+  // phase exists to remove. The AUM sentence stays on the USD cell, where it is
+  // true. Resolved at planning time; do not re-unify the two strings.
+  const NOTIONAL_UNAVAILABLE_NOTE =
+    "Notional needs live book equity — not derivable in this scenario";
+
   const commitDollarInput = (
     ref: string,
     el: HTMLInputElement,
@@ -6315,6 +6327,9 @@ function CompositionList({
                 : coverageEligible[a.id]
                   ? "in-blend"
                   : null;
+          // Phase 152 SCEN-04 — read the derived notional ONCE so the render
+          // below can branch on it without calling the deriver twice.
+          const nText = notionalText(a.id);
           return (
             <li
               key={a.id}
@@ -6398,13 +6413,29 @@ function CompositionList({
                   className="w-16 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50 read-only:bg-surface-muted read-only:text-text-muted"
                 />
                 {/* WEIGHTS-00 notional — DERIVED read-only text (equity × L),
-                    never a weight input. Em-dash when non-derivable. */}
+                    never a weight input. Em-dash when non-derivable.
+                    Phase 152 SCEN-04 — the em-dash branch now explains itself:
+                    the title names the actual cause (D-3) and is DUPLICATED into
+                    an sr-only span, because a title alone is unreachable by
+                    keyboard/touch and is not announced by every screen reader
+                    (151's renderDollarInput pattern). The DERIVED branch keeps
+                    its original sentence byte-verbatim — a remedy note on a cell
+                    that already shows a number would be noise. */}
                 <span
                   data-testid="scenario-constituent-notional"
-                  title="Notional = equity × blend share × leverage — derived, informative only (minimum-investment check); never a weight input"
+                  title={
+                    nText === "—"
+                      ? NOTIONAL_UNAVAILABLE_NOTE
+                      : "Notional = equity × blend share × leverage — derived, informative only (minimum-investment check); never a weight input"
+                  }
                   className="w-20 text-right font-mono text-xs text-text-muted"
                 >
-                  {notionalText(a.id)}
+                  {nText}
+                  {nText === "—" && (
+                    <span className="sr-only">
+                      {NOTIONAL_UNAVAILABLE_NOTE}
+                    </span>
+                  )}
                 </span>
                 <button
                   type="button"
