@@ -130,6 +130,10 @@ function basePayload(
     perKeyReturnsByApiKeyId: {},
     perKeyDailiesGateSatisfied: false,
     eligibleApiKeyIds: [],
+    // Phase 151 / AUM-04 — the split book-entry gate (empty/false defaults).
+    allocatorEligibleApiKeyIds: [],
+    contributingApiKeyIds: [],
+    bookEntryGateSatisfied: false,
     apiKeysCount: 0,
     mandateIsSet: false,
     ...overrides,
