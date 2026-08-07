@@ -1,11 +1,12 @@
 ---
 phase: 152
 slug: scen-composer-legibility
-status: planned
+status: complete
 nyquist_compliant: true
 wave_0_complete: true
 created: 2026-08-07
 planned: 2026-08-07
+completed: 2026-08-07
 ---
 
 # Phase 152 — Validation Strategy
@@ -31,20 +32,38 @@ planned: 2026-08-07
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| 01-T1 | 152-01 | 1 | SCEN-02/05 | T-152-01-01 | H-0300 fence: TWO exhaustive arms; third-party rows never carry created_at/status; whole-payload sweep | unit | `npx vitest run src/app/api/strategies/browse/route.test.ts -t "H-0300"` | ✅ extend | ⬜ pending |
-| 01-T2 | 152-01 | 1 | SCEN-02/05 | T-152-01-02/03 | isOwn strict-boolean on every row; own-only conditional emission; user-scoped client untouched | unit | `npx vitest run src/app/api/strategies/browse/route.test.ts` | ✅ extend | ⬜ pending |
-| 02-T1 | 152-02 | 1 | SCEN-02 | T-152-02-01 | populated-fixture strip guard (BOTH schemas); v4-without-isOwn decodes ok; isOwn:null never resets; version stays 4 | unit | `npx vitest run "src/app/(dashboard)/allocations/lib/scenario-state.test.ts" -t "isOwn" --no-file-parallelism` | ✅ extend | ⬜ pending |
-| 02-T2 | 152-02 | 1 | SCEN-02 | T-152-02-01 | `isOwn: z.boolean().nullish()` on the NESTED schema; no refine; no version bump; SC1 falsifier observed | unit | same as 02-T1 (full file) | ✅ extend | ⬜ pending |
+| 01-T1 | 152-01 | 1 | SCEN-02/05 | T-152-01-01 | H-0300 fence: TWO exhaustive arms; third-party rows never carry created_at/status; whole-payload sweep | unit | `npx vitest run src/app/api/strategies/browse/route.test.ts -t "H-0300"` | ✅ extend | ✅ green (3 passed, re-observed 152-06 T3) |
+| 01-T2 | 152-01 | 1 | SCEN-02/05 | T-152-01-02/03 | isOwn strict-boolean on every row; own-only conditional emission; user-scoped client untouched | unit | `npx vitest run src/app/api/strategies/browse/route.test.ts` | ✅ extend | ✅ green (31 passed, re-observed 152-06 T3) |
+| 02-T1 | 152-02 | 1 | SCEN-02 | T-152-02-01 | populated-fixture strip guard (BOTH schemas); v4-without-isOwn decodes ok; isOwn:null never resets; version stays 4 | unit | `npx vitest run "src/app/(dashboard)/allocations/lib/scenario-state.test.ts" -t "isOwn" --no-file-parallelism` | ✅ extend | ✅ green (4 passed, re-observed 152-06 T3) |
+| 02-T2 | 152-02 | 1 | SCEN-02 | T-152-02-01 | `isOwn: z.boolean().nullish()` on the NESTED schema; no refine; no version bump; SC1 falsifier observed | unit | same as 02-T1 (full file) | ✅ green (SC1 observed, see ledger) |
 | 03-T1 | 152-03 | 1 | SCEN-04 | T-152-03-02 | header renders iff ≥1 added row, exactly once, aria-hidden, exact 5 labels, non-row li breaks no list machinery | component | `npx vitest run "src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx" -t "SCEN-04 header" --no-file-parallelism` | ✅ extend | ✅ done (5 tests, b7427750) |
 | 03-T2 | 152-03 | 1 | SCEN-04 | T-152-03-01 | cause-accurate title + sr-only on the ADDED-row non-derivable branch ONLY; derived title byte-verbatim; per-key span untouched; SC3 falsifier observed | component | `npx vitest run "src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx" -t "honest notional" --no-file-parallelism` | ✅ extend | ✅ done (3 tests + SC3 observed, 25c31f7c) |
-| 04-T1 | 152-04 | 2 | SCEN-02 | T-152-04-02 | handleAdd (site 4/4) passes isOwn true / undefined honestly — never fabricates | component | `npx vitest run "src/app/(dashboard)/allocations/components/StrategyBrowseDrawer.test.tsx" -t "isOwn" --no-file-parallelism` | ✅ extend | ⬜ pending |
-| 04-T2 | 152-04 | 2 | SCEN-05 | T-152-04-01 | dedup line only on FILTERED own-vs-own collisions; third-party rows never; missing created_at → no line; timezone-stable date; testid outside browse-add-; SC4 falsifier observed | component | `npx vitest run "src/app/(dashboard)/allocations/components/StrategyBrowseDrawer.test.tsx" -t "dedup" --no-file-parallelism` | ✅ extend | ⬜ pending |
-| 04-T3 | 152-04 | 2 | SCEN-02 | T-152-04-02 | YoursChip closed leaf (no OwnershipTag widening, no Badge); own rows only; locked honesty tokens | component | `npx vitest run "src/app/(dashboard)/allocations/components/StrategyBrowseDrawer.test.tsx" --no-file-parallelism` | ✅ extend + new component | ⬜ pending |
+| 04-T1 | 152-04 | 2 | SCEN-02 | T-152-04-02 | handleAdd (site 4/4) passes isOwn true / undefined honestly — never fabricates | component | `npx vitest run "src/app/(dashboard)/allocations/components/StrategyBrowseDrawer.test.tsx" -t "isOwn" --no-file-parallelism` | ✅ extend | ✅ green (3 passed, re-observed 152-06 T3) |
+| 04-T2 | 152-04 | 2 | SCEN-05 | T-152-04-01 | dedup line only on FILTERED own-vs-own collisions; third-party rows never; missing created_at → no line; timezone-stable date; testid outside browse-add-; SC4 falsifier observed | component | `npx vitest run "src/app/(dashboard)/allocations/components/StrategyBrowseDrawer.test.tsx" -t "dedup" --no-file-parallelism` | ✅ extend | ✅ green (9 passed; SC4 observed, see ledger) |
+| 04-T3 | 152-04 | 2 | SCEN-02 | T-152-04-02 | YoursChip closed leaf (no OwnershipTag widening, no Badge); own rows only; locked honesty tokens | component | `npx vitest run "src/app/(dashboard)/allocations/components/StrategyBrowseDrawer.test.tsx" --no-file-parallelism` | ✅ extend + new component | ✅ green (43 passed, re-observed 152-06 T3) |
 | 05-T1 | 152-05 | 3 | SCEN-02 | T-152-05-01 | isOwn mapped at BOTH twin seams (two renders, two payloads); Bridge seam deliberately absent | component | `npx vitest run "src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx" -t "SCEN-02" --no-file-parallelism` | ✅ extend | ✅ green |
 | 05-T2 | 152-05 | 3 | SCEN-02 | T-152-05-02 | chip gate `=== true`; false/null/absent each render NO node | component | same as 05-T1 | ✅ extend | ✅ green |
 | 06-T1 | 152-06 | 4 | SCEN-03 | T-152-06-01/02 | one-open-at-a-time inline detail; in-memory only (no fetch); null metrics → honest note, never 0.00; href exactly /factsheet/{id} | component | `npx vitest run "src/app/(dashboard)/allocations/components/ScenarioComposer.test.tsx" -t "SCEN-03" --no-file-parallelism` | ✅ extend | ✅ done (8 tests RED→GREEN, 8d37a173) |
 | 06-T2 | 152-06 | 4 | SCEN-03 | T-152-06-01 | Enter/Space on the focused strategy-name button; six control exclusions (incl. the include/exclude switch — B-2); panel-click no-collapse; axe scans EXPANDED panel; SC2 falsifier observed | component + e2e(CI) | same as 06-T1; `npx playwright test e2e/composer-axe.spec.ts` (CI seeded) | ✅ extend | ✅ done (10 more tests; SC2 + two exclusion falsifiers observed) |
-| 06-T3 | 152-06 | 4 | all | — | phase gates: lint + typecheck + full `npm test` + blocking `npm run test:coverage`; ledger fully observed | gates | `npm run test:coverage` | ✅ | ⬜ pending |
+| 06-T3 | 152-06 | 4 | all | — | phase gates: lint + typecheck + full `npm test` + blocking `npm run test:coverage`; ledger fully observed | gates | `npm run test:coverage` | ✅ | ✅ green (see Phase Gates below) |
+
+---
+
+## Phase Gates (152-06 T3, observed 2026-08-07)
+
+| Gate | Command | Result |
+|------|---------|--------|
+| Lint | `npm run lint` | exit 0 — 0 errors, 1 pre-existing warning (`EquityChart.tsx:1119` exhaustive-deps, untouched by this phase); admin-route + route-contract manifests OK |
+| Typecheck | `npm run typecheck` | exit 0 |
+| Full suite | `npm test` | **11218 passed / 287 skipped / 0 failed** (784 files) |
+| Coverage (blocking 82/80/74/72) | `npm run test:coverage` | exit 0 — **lines 88.04 / statements 85.98 / functions 82.75 / branches 80.43**, every threshold cleared with margin (the tightest is branches, +8.43 over the 72 floor) |
+| New skips | `grep -c "it.skip\|describe.skip"` on the touched test files | 0 in `ScenarioComposer.test.tsx`, 0 in `composer-axe.spec.ts` — this phase introduced none |
+| Threshold edits | `git diff vitest.config.ts` | empty — the gate was met, not moved |
+
+⚠️ **Advisory framing (repo policy).** Branch protection is deferred until
+paying clients, so every one of these gates is advisory at merge time. They are
+evidence that a regression *would have been caught*, never a claim that anything
+*was stopped*.
 
 ---
 
