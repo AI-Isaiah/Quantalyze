@@ -530,7 +530,7 @@ D-14 valve.
   adversarial, not happy-path: **after an owner has viewed their draft, an anon request for the same
   id must still 404.**
 
-- [ ] **OWN-03**: If the strategy is genuinely the allocator's own, it can be **added to their
+- [x] **OWN-03**: If the strategy is genuinely the allocator's own, it can be **added to their
   portfolio** (not only a scenario).
   ✅ **CURRENT BEHAVIOUR ESTABLISHED 2026-08-04** by the live MT5-05 run, so the "verify before
   planning" caveat is discharged: a contribution-wizard finalize lands `status='private'` and the
@@ -588,7 +588,7 @@ D-14 valve.
   BLOCKED ON OWN-02: adding the link first would point every draft at a `notFound()` — the same
   dead-end class Phase 142.2 existed to delete.
 
-- [ ] **OWN-05** *(added 2026-08-05 — founder dogfooding direction)*: **An allocator can give their
+- [x] **OWN-05** *(added 2026-08-05 — founder dogfooding direction)*: **An allocator can give their
   OWN private/draft strategies a proper name.** Verbatim: *"For the Allocator, he should for his own
   strategies have the ability to give strategies proper names. Like that strategy has a name, and as
   it is private, I should be able to give it its own name."* Today the wizard auto-assigns sentinel

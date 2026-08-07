@@ -323,7 +323,7 @@ Plans:
 | 147. SCEN-01 engine series | 6/6 | Complete   | 2026-08-05 |
 | 148. OWN owner factsheet | 5/5 | Complete   | 2026-08-05 |
 | 149. NAV my-strategies ranking | 5/5 | Complete   | 2026-08-05 |
-| 150. OWN-03 portfolio question | 8/8 | Complete   | 2026-08-06 |
+| 150. OWN-03 portfolio question | 8/8 | Complete    | 2026-08-07 |
 | 151. AUM book + sizing | 0/? | Not started | - |
 | 152. SCEN composer legibility | 0/? | Not started | - |
 | 153. WIZFORM + MT5-14 | 0/? | Not started | - |
