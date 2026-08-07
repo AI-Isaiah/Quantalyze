@@ -5696,6 +5696,46 @@ type PerKeySource = MyAllocationDashboardPayload["apiKeys"][number];
  *  so CompositionList's props stay referentially stable across renders. */
 const EMPTY_PER_KEY_SOURCES: PerKeySource[] = [];
 
+/** WEIGHTS-00 — the sentence a DERIVED notional carries. Byte-verbatim from the
+ *  pre-152 tree: a cell that already shows a number explains what the number is,
+ *  never a remedy. */
+const NOTIONAL_DERIVED_NOTE =
+  "Notional = equity × blend share × leverage — derived, informative only (minimum-investment check); never a weight input";
+
+/**
+ * Phase 152 SCEN-04 (decision D-3, corrected by review CR-01) — the em-dash
+ * sentences, ONE PER CAUSE.
+ *
+ * SCEN-04 shipped a single string for all three causes, which made the note a
+ * DIAGNOSIS that was wrong in the most common em-dash state. The set below is
+ * cause-accurate by construction: `notionalCell` returns the cause from the same
+ * expression that returns the text, and the renderer indexes this map with it.
+ *
+ * None of these is the AUM sentence (`AUM_UNSET_REMEDY`), and re-unifying them
+ * with it is the named regression: this cell's em-dash is never caused by
+ * `scenarioAum`, so "set portfolio AUM" would name a remedy that cannot make the
+ * cell derivable. The AUM sentence stays on the USD cell, where it is true.
+ */
+const NOTIONAL_NOTE_BY_CAUSE = {
+  /** `totalBookEquity == null` — there is no live book equity to size against.
+   *  True for a book-less allocator and for a degenerate Σ ≤ 0 book. */
+  equity: "Notional needs live book equity — not derivable in this scenario",
+  /** The ref is absent from `blendShareByRef`: the row is toggled OFF, or the
+   *  selected weight mass is 0 so the map is empty for EVERY row, or the ref is
+   *  not in this render's engine set. In all three the row genuinely carries no
+   *  blend share, and re-including it (or giving the selected set a non-zero
+   *  weight) is a remedy that CAN make the cell derivable. */
+  "not-in-blend":
+    "Notional needs a blend share — this row is not in the blend",
+  /** Finite equity and share, non-finite product — reachable only through a
+   *  non-finite leverage, which the validated inputs do not produce. A bare
+   *  statement of fact rather than a guessed remedy: naming a blocker we cannot
+   *  prove is the very thing CR-01 is about. */
+  indeterminate: "Notional is not derivable for this row",
+} as const;
+
+type NotionalCause = keyof typeof NOTIONAL_NOTE_BY_CAUSE;
+
 interface CompositionListProps {
   draft: ReturnType<typeof useScenarioState>["draft"];
   /**
@@ -5868,23 +5908,68 @@ function CompositionList({
   const DETAIL_EYEBROW =
     "font-mono text-fixed-10 uppercase tracking-[0.18em] text-text-muted";
 
-  // WEIGHTS-00 (A1 locked) — the DERIVED, read-only notional string for a row:
+  // WEIGHTS-00 (A1 locked) — the DERIVED, read-only notional for a row:
   // equity × blend-share × leverage. It is purely informative (a
   // clears-minimum-invest readout) and STRUCTURALLY never a weight input. Any
   // factor missing/non-finite (no book equity; an EXCLUDED row absent from
-  // blendShareByRef; a degenerate share) → `null` → em-dash `—` per the Numbers
-  // Contract — never 0, never a fabricated dollar figure an LP could act on.
-  const notionalText = (ref: string): string => {
+  // blendShareByRef; a degenerate share) → em-dash `—` per the Numbers Contract
+  // — never 0, never a fabricated dollar figure an LP could act on.
+  //
+  // Phase 152 review CR-01 — the returned `cause` is the HONESTY INVARIANT, not
+  // decoration. The em-dash has three independent causes and they demand three
+  // different sentences. Pinning one string (the shipped
+  // "Notional needs live book equity …") told an allocator who HAS a live book
+  // that the blocker was missing equity whenever they simply toggled the row
+  // off — a false blocker whose implied remedy (get a live book) CANNOT make the
+  // cell derivable. That is the exact defect class this phase exists to remove,
+  // committed against a different cause. The cause is therefore derived HERE, in
+  // the same expression that produces the text, so an edit to one can never
+  // leave the other behind.
+  const notionalCell = (
+    ref: string,
+  ): { text: string; cause: NotionalCause | null } => {
+    // Precedence mirrors the original guard's `||` order: no book equity is the
+    // structural blocker and outranks a per-row blend-share miss.
+    if (totalBookEquity == null) return { text: "—", cause: "equity" };
     const share = blendShareByRef[ref];
-    if (
-      totalBookEquity == null ||
-      typeof share !== "number" ||
-      !Number.isFinite(share)
-    ) {
-      return "—";
+    if (typeof share !== "number" || !Number.isFinite(share)) {
+      return { text: "—", cause: "not-in-blend" };
     }
     const notional = share * totalBookEquity * (leverageByRef[ref] ?? 1);
-    return Number.isFinite(notional) ? formatCurrency(notional) : "—";
+    return Number.isFinite(notional)
+      ? { text: formatCurrency(notional), cause: null }
+      : { text: "—", cause: "indeterminate" };
+  };
+
+  /**
+   * Phase 152 SCEN-04 (review CR-01 + WR-06) — the notional span, rendered by
+   * BOTH row kinds (per-key and added) from this ONE helper.
+   *
+   * WR-06: SCEN-04 originally explained the em-dash on added rows only, leaving
+   * the identical em-dash on the per-key half of the same list un-explained —
+   * the original "what does this mean?" complaint still standing immediately
+   * above the rows that now answered it. Both call sites now route through here,
+   * so the two halves cannot drift again.
+   *
+   * The sentence is duplicated into `sr-only` text because a `title` alone is
+   * unreachable by keyboard/touch and is not announced by every screen reader
+   * (151's renderDollarInput pattern). The DERIVED branch keeps its original
+   * sentence byte-verbatim and grows NO sr-only text — a remedy note on a cell
+   * that already shows a number would be noise.
+   */
+  const renderNotional = (ref: string) => {
+    const { text, cause } = notionalCell(ref);
+    const note = cause == null ? NOTIONAL_DERIVED_NOTE : NOTIONAL_NOTE_BY_CAUSE[cause];
+    return (
+      <span
+        data-testid="scenario-constituent-notional"
+        title={note}
+        className="w-20 text-right font-mono text-xs text-text-muted"
+      >
+        {text}
+        {cause != null && <span className="sr-only">{note}</span>}
+      </span>
+    );
   };
 
   // -------------------------------------------------------------------------
@@ -5906,17 +5991,6 @@ function CompositionList({
   // -------------------------------------------------------------------------
   const AUM_UNSET_REMEDY = "Set portfolio AUM to size in dollars";
 
-  // Phase 152 SCEN-04 (decision D-3) — the added row's non-derivable NOTIONAL
-  // sentence. Deliberately NOT the AUM sentence above, even though CONTEXT
-  // pinned it: this cell's em-dash is caused by `totalBookEquity == null` (or a
-  // missing blend share) at :5787-5792 — never by `scenarioAum`, which is a
-  // DIFFERENT number by construction (see the CompositionListProps note). Telling
-  // a book-less allocator to "set portfolio AUM" would name a remedy that cannot
-  // make this cell derivable — a dishonest remedy, the exact defect class this
-  // phase exists to remove. The AUM sentence stays on the USD cell, where it is
-  // true. Resolved at planning time; do not re-unify the two strings.
-  const NOTIONAL_UNAVAILABLE_NOTE =
-    "Notional needs live book equity — not derivable in this scenario";
 
   const commitDollarInput = (
     ref: string,
@@ -6280,14 +6354,14 @@ function CompositionList({
                   className="w-16 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50 read-only:bg-surface-muted read-only:text-text-muted"
                 />
                 {/* WEIGHTS-00 notional — DERIVED read-only text (equity × L),
-                    never a weight input. Em-dash when non-derivable. */}
-                <span
-                  data-testid="scenario-constituent-notional"
-                  title="Notional = equity × blend share × leverage — derived, informative only (minimum-investment check); never a weight input"
-                  className="w-20 text-right font-mono text-xs text-text-muted"
-                >
-                  {notionalText(k.id)}
-                </span>
+                    never a weight input. Em-dash when non-derivable.
+                    Phase 152 review WR-06 — the per-key half of the list now
+                    explains its em-dash through the SAME renderer the added
+                    rows use, with ITS cause-accurate sentence (an excluded key
+                    reads "not in the blend", not "needs live book equity").
+                    Before this, SCEN-04's explanation stopped halfway down the
+                    list. */}
+                {renderNotional(k.id)}
               </div>
               </div>
               {renderSolveState(k.id)}
@@ -6419,9 +6493,6 @@ function CompositionList({
                 : coverageEligible[a.id]
                   ? "in-blend"
                   : null;
-          // Phase 152 SCEN-04 — read the derived notional ONCE so the render
-          // below can branch on it without calling the deriver twice.
-          const nText = notionalText(a.id);
           // Phase 152 SCEN-03 — the row's in-memory metrics + whether BOTH are
           // missing (the only state that earns the absence NOTE; a single miss
           // is an em-dash beside its live sibling).
@@ -6591,29 +6662,11 @@ function CompositionList({
                 />
                 {/* WEIGHTS-00 notional — DERIVED read-only text (equity × L),
                     never a weight input. Em-dash when non-derivable.
-                    Phase 152 SCEN-04 — the em-dash branch now explains itself:
-                    the title names the actual cause (D-3) and is DUPLICATED into
-                    an sr-only span, because a title alone is unreachable by
-                    keyboard/touch and is not announced by every screen reader
-                    (151's renderDollarInput pattern). The DERIVED branch keeps
-                    its original sentence byte-verbatim — a remedy note on a cell
-                    that already shows a number would be noise. */}
-                <span
-                  data-testid="scenario-constituent-notional"
-                  title={
-                    nText === "—"
-                      ? NOTIONAL_UNAVAILABLE_NOTE
-                      : "Notional = equity × blend share × leverage — derived, informative only (minimum-investment check); never a weight input"
-                  }
-                  className="w-20 text-right font-mono text-xs text-text-muted"
-                >
-                  {nText}
-                  {nText === "—" && (
-                    <span className="sr-only">
-                      {NOTIONAL_UNAVAILABLE_NOTE}
-                    </span>
-                  )}
-                </span>
+                    Phase 152 SCEN-04 — the em-dash branch explains itself: the
+                    title names the ACTUAL cause (review CR-01: one sentence per
+                    cause, not one sentence for all three) and is duplicated into
+                    an sr-only span. Same renderer as the per-key rows above. */}
+                {renderNotional(a.id)}
                 <button
                   type="button"
                   aria-label="Remove from scenario"

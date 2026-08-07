@@ -12423,23 +12423,37 @@ describe("ScenarioComposer — SCEN-04 header (Phase 152)", () => {
 // makes it read "not applicable, and here is why".
 //
 // The sentence is CAUSE-ACCURATE by decision D-3, and that is the whole point of
-// the pair of tests below. This cell's em-dash is driven by
-// `totalBookEquity == null` (or a missing blend share) — NOT by `scenarioAum`.
-// Shipping CONTEXT's "Set portfolio AUM to size in dollars" here would tell a
-// book-less allocator to type a number that CANNOT make the cell derivable: a
-// dishonest remedy, which is precisely the defect class this phase exists to
-// remove. That sentence stays on the USD cell, where it is true.
+// the tests below. Shipping CONTEXT's "Set portfolio AUM to size in dollars"
+// here would tell a book-less allocator to type a number that CANNOT make the
+// cell derivable: a dishonest remedy, which is precisely the defect class this
+// phase exists to remove. That sentence stays on the USD cell, where it is true.
+//
+// ⚠️ Review CR-01 — "cause-accurate" means ONE SENTENCE PER CAUSE, and the
+// original suite could not see the difference. The em-dash has three independent
+// causes (no live book equity / the ref carries no blend share / a degenerate
+// product) and SCEN-04 pinned the equity sentence for all of them. The suite
+// only ever exercised a BOOK-LESS payload, so the most common em-dash state — a
+// row toggled OFF while the allocator HAS a live book — rendered "Notional needs
+// live book equity" to someone holding $60,000 of it, and no test could fail.
+// The excluded-row tests below are the ones that close that hole: they assert
+// the note does NOT mention book equity, on a payload where book equity exists.
 //
 // The derived-branch test is the FALSIFIER for "patched the wrong branch": it
-// pins the original derived title byte-for-byte, so widening the remedy title to
-// cover both states goes RED.
+// pins the original derived title byte-for-byte, so widening any remedy title to
+// cover the derived state goes RED.
 // ---------------------------------------------------------------------------
 describe("ScenarioComposer — SCEN-04 honest notional (Phase 152)", () => {
-  /** The pinned copy (D-3). U+2014 em-dash, matching the file's Numbers
-   *  Contract. Typed here as a literal, never imported from the component —
-   *  an oracle that reads the implementation's own constant asserts nothing. */
+  /** The pinned copy (D-3), for the `totalBookEquity == null` cause ONLY.
+   *  U+2014 em-dash, matching the file's Numbers Contract. Typed here as a
+   *  literal, never imported from the component — an oracle that reads the
+   *  implementation's own constant asserts nothing. */
   const NOTIONAL_NOTE =
     "Notional needs live book equity — not derivable in this scenario";
+  /** Review CR-01 — the pinned copy for the "ref absent from blendShareByRef"
+   *  cause: an excluded row, or a selected weight mass of 0. A literal, byte
+   *  for byte. */
+  const NOT_IN_BLEND_NOTE =
+    "Notional needs a blend share — this row is not in the blend";
   /** The pre-existing DERIVED title, byte-verbatim from the shipped tree. */
   const DERIVED_TITLE =
     "Notional = equity × blend share × leverage — derived, informative only (minimum-investment check); never a weight input";
@@ -12577,7 +12591,7 @@ describe("ScenarioComposer — SCEN-04 honest notional (Phase 152)", () => {
     expect(within(cell).queryByText(NOTIONAL_NOTE)).toBeNull();
   });
 
-  it("SCEN-04 honest notional (scope): the PER-KEY notional span is untouched — same original title, no remedy note", () => {
+  it("SCEN-04 honest notional (derived, per-key): a DERIVABLE per-key notional keeps the original title and grows no remedy note", () => {
     renderScen(bookedPayload());
     add(N_A, "Scen04N Strat A");
 
@@ -12585,8 +12599,99 @@ describe("ScenarioComposer — SCEN-04 honest notional (Phase 152)", () => {
       `[data-scope-ref="${N_K1}"] [data-testid="scenario-constituent-notional"]`,
     );
     expect(perKeyCell).not.toBeNull();
+    // Non-vacuity: this is genuinely the derived branch.
+    expect(perKeyCell!.textContent).toContain("$");
     expect(perKeyCell!.getAttribute("title")).toBe(DERIVED_TITLE);
     expect(perKeyCell!.textContent).not.toContain(NOTIONAL_NOTE);
+    expect(perKeyCell!.textContent).not.toContain(NOT_IN_BLEND_NOTE);
+  });
+
+  // -------------------------------------------------------------------------
+  // Review CR-01 / WR-06 — the excluded-row arm, WITH a live book.
+  //
+  // These are the tests the shipped SCEN-04 could not have: every prior notional
+  // test either had no book (so "needs live book equity" was true) or was
+  // derivable (so no note rendered). Toggling a row OFF against a $60,000 book
+  // is the dominant em-dash state in real use — exclusion is a first-class
+  // gesture with its own chip — and it is exactly where the single pinned
+  // sentence lied.
+  //
+  // The load-bearing assertion in each is the NEGATIVE one: the note must not
+  // mention book equity. Reverting the fix (one string for all causes) turns it
+  // RED; a fix that merely reworded the equity sentence would not satisfy it.
+  // -------------------------------------------------------------------------
+
+  /** The row's include/exclude `role="switch"`, scoped by data-scope-ref so the
+   *  per-key and added switches can never be confused for one another. */
+  function rowSwitch(ref: string): HTMLElement {
+    const el = document.querySelector(
+      `[data-scope-ref="${ref}"] [role="switch"]`,
+    );
+    expect(el).not.toBeNull();
+    return el as HTMLElement;
+  }
+
+  it("SCEN-04 honest notional (CR-01, added row excluded): with a LIVE book, an excluded row's note names the blend share — never book equity", () => {
+    renderScen(bookedPayload());
+    add(N_A, "Scen04N Strat A");
+
+    // Precondition: with the row included the cell DERIVES, which proves the
+    // book equity this test depends on is genuinely live.
+    expect(addedNotionalCell(N_A).textContent).toContain("$");
+
+    fireEvent.click(rowSwitch(N_A));
+
+    const cell = addedNotionalCell(N_A);
+    expect(cell.textContent).toContain("—");
+    // The false diagnosis this fix removes: the allocator HAS $60,000 of book
+    // equity on screen. Naming it as the blocker is a lie whose implied remedy
+    // (get a live book) cannot make the cell derivable.
+    expect(cell.getAttribute("title")).not.toBe(NOTIONAL_NOTE);
+    expect(cell.textContent).not.toContain("live book equity");
+    // …and the cause it DOES name is the real one, with a reachable remedy
+    // (re-include the row).
+    expect(cell.getAttribute("title")).toBe(NOT_IN_BLEND_NOTE);
+    expect(within(cell).getByText(NOT_IN_BLEND_NOTE)).toBeInTheDocument();
+  });
+
+  it("SCEN-04 honest notional (WR-06, per-key row excluded): the PER-KEY em-dash explains itself too, with its own cause-accurate sentence", () => {
+    renderScen(bookedPayload());
+    add(N_A, "Scen04N Strat A");
+
+    const perKeyCell = () => {
+      const el = document.querySelector(
+        `[data-scope-ref="${N_K1}"] [data-testid="scenario-constituent-notional"]`,
+      );
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    };
+    // Precondition: derivable while included.
+    expect(perKeyCell().textContent).toContain("$");
+
+    fireEvent.click(rowSwitch(N_K1));
+
+    const cell = perKeyCell();
+    expect(cell.textContent).toContain("—");
+    // WR-06: before the fix this half of the list kept the DERIVED sentence on a
+    // cell showing no number at all — the original "what does this mean?"
+    // complaint, left standing directly above the rows that answered it.
+    expect(cell.getAttribute("title")).not.toBe(DERIVED_TITLE);
+    expect(cell.getAttribute("title")).toBe(NOT_IN_BLEND_NOTE);
+    // Same title+sr-only treatment as the added row — a title alone is
+    // unreachable by keyboard/touch.
+    expect(within(cell).getByText(NOT_IN_BLEND_NOTE)).toBeInTheDocument();
+    expect(cell.textContent).not.toContain("live book equity");
+  });
+
+  it("SCEN-04 honest notional (CR-01, book-less row): the equity sentence survives — it is still the right one for ITS cause", () => {
+    // The falsifier for over-correction: a fix that replaced the equity sentence
+    // everywhere (rather than branching on the cause) turns this RED.
+    renderScen(blankSlatePayload());
+    add(N_A, "Scen04N Strat A");
+
+    const cell = addedNotionalCell(N_A);
+    expect(cell.getAttribute("title")).toBe(NOTIONAL_NOTE);
+    expect(cell.getAttribute("title")).not.toBe(NOT_IN_BLEND_NOTE);
   });
 });
 
