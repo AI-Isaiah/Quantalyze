@@ -5897,6 +5897,13 @@ describe("ScenarioComposer — Phase 112 per-key weights + leverage (RED scaffol
   // (f) — with NO book equity (added-only mode) the notional is non-derivable, so
   // every notional cell shows the em-dash `—` (DESIGN.md Numbers Contract), never
   // a fabricated $0.
+  //
+  // Phase 152 SCEN-04 relaxed the equality to `toContain`: the added row's
+  // em-dash now carries an sr-only sentence explaining WHY it is non-derivable,
+  // so the cell's textContent is "—" plus that sentence. The assertion's INTENT
+  // is unchanged and still falsifiable — a fabricated $0 or a real dollar figure
+  // fails both lines below. The sentence itself is pinned by the
+  // "SCEN-04 honest notional" block.
   it("(f) — added-only mode (no book equity) renders the notional as an em-dash, never $0", () => {
     renderAddedOnly();
     addStrategy({
@@ -5907,8 +5914,8 @@ describe("ScenarioComposer — Phase 112 per-key weights + leverage (RED scaffol
     });
     const cell = notionalCellFor(A_ID);
     expect(cell).not.toBeNull();
-    expect(cell!.textContent).toBe("—");
-    expect(cell!.textContent).not.toContain("$0");
+    expect(cell!.textContent).toContain("—");
+    expect(cell!.textContent).not.toMatch(/\$/);
   });
 
   // (g) — the leverage-invariance honesty caveat renders exactly when a selected
@@ -12230,5 +12237,350 @@ describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
     // …and the moment the allocator overrides it, the assertion travels.
     setAum("2000000");
     expect(drawerManualAum()).toBe(2_000_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 152 / SCEN-04 — "What do the numbers actually mean?" (founder verbatim).
+//
+// The composer's added-strategy row is five unlabelled numeric columns. This
+// block pins ONE aria-hidden mono-eyebrow header strip above the ADDED group,
+// labelling those columns: WEIGHT · USD · MODE · LEV · NOTIONAL (UI-SPEC's
+// correction of CONTEXT's four labels — Phase 151 shipped a per-row USD input
+// BETWEEN weight and mode, so a four-label header would silently label the
+// dollar column as part of WEIGHT).
+//
+// The strip carries no data and adds no affordance, so every assertion below is
+// a RENDER RULE (renders iff ≥1 added row, exactly once, in the right sibling
+// slot) or exact COPY — never a visual property, which no jsdom test can honour.
+// The aria-hidden assertion is load-bearing rather than cosmetic: every control
+// in the row already carries its own sr-only label / aria-label, so an
+// announced eyebrow strip would double-label the whole group.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — SCEN-04 header (Phase 152)", () => {
+  const S_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-05-${String(i + 1).padStart(2, "0")}`,
+  );
+  const S_KEY_SERIES = S_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const S_STRAT_SERIES = S_DATES.map((date, i) => ({
+    date,
+    value: [0.01, -0.008, 0.012][i % 3],
+  }));
+
+  const S_A = "scen04-strat-a";
+  const S_B = "scen04-strat-b";
+  const S_K1 = "scen04-key-1";
+
+  /** A LIVE per-key book (so per-key constituent rows genuinely render) plus two
+   *  catalogued strategies available to add. The book matters: the zero-added
+   *  case must prove the header is absent while OTHER rows are on screen — an
+   *  empty list would make that assertion vacuous. */
+  function bookedPayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      ...perKeyBook([{ id: S_K1, returns: S_KEY_SERIES, valueUsd: 60_000 }]),
+      apiKeys: [winApiKey(S_K1)],
+      strategies: [
+        catalogStrategy(S_A, "Scen04 Strat A", S_STRAT_SERIES),
+        catalogStrategy(S_B, "Scen04 Strat B", S_STRAT_SERIES),
+      ],
+    });
+  }
+
+  function renderScen(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  function add(id: string, name: string) {
+    addStrategy({
+      id,
+      name,
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+  }
+
+  // Re-install the CAPTURING browse-drawer mock (every top-level describe owns
+  // its own — the file-level `vi.clearAllMocks()` wipes the implementation, and
+  // without it `addStrategy` has no captured `onAdd` to call).
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  it("SCEN-04 header (render rule, absent): zero added strategies renders NO header — even while per-key rows are on screen", () => {
+    renderScen(bookedPayload());
+
+    // Non-vacuity: the list really is rendering rows, just not added ones.
+    expect(
+      document.querySelectorAll('[data-testid="scenario-constituent-added"]'),
+    ).toHaveLength(0);
+    expect(
+      document.querySelectorAll(`[data-scope-ref="${S_K1}"]`).length,
+    ).toBeGreaterThan(0);
+
+    expect(screen.queryByTestId("scenario-added-header")).toBeNull();
+    // The separator the header shares a guard with is absent too — the two
+    // render together or not at all.
+    expect(screen.queryByText(/Strategies added ·/)).toBeNull();
+  });
+
+  it("SCEN-04 header (render rule, exactly once): two added strategies still render a SINGLE header, never one per row", () => {
+    renderScen(bookedPayload());
+    add(S_A, "Scen04 Strat A");
+    add(S_B, "Scen04 Strat B");
+
+    // Non-vacuity: two added rows are genuinely on screen.
+    expect(
+      screen.getAllByTestId("scenario-constituent-added"),
+    ).toHaveLength(2);
+    expect(screen.getAllByTestId("scenario-added-header")).toHaveLength(1);
+  });
+
+  it("SCEN-04 header (a11y): the strip is aria-hidden so it never double-labels controls that already name themselves", () => {
+    renderScen(bookedPayload());
+    add(S_A, "Scen04 Strat A");
+
+    const header = screen.getByTestId("scenario-added-header");
+    expect(header.getAttribute("aria-hidden")).toBe("true");
+    // The labels are consequently unreachable through the accessible tree:
+    // "WEIGHT" as an accessible name belongs to nothing.
+    expect(screen.queryByLabelText("WEIGHT")).toBeNull();
+  });
+
+  it("SCEN-04 header (copy): exactly five labels — WEIGHT, USD, MODE, LEV, NOTIONAL — in DOM order, with no separator glyphs", () => {
+    renderScen(bookedPayload());
+    add(S_A, "Scen04 Strat A");
+
+    const header = screen.getByTestId("scenario-added-header");
+    const labels = within(header)
+      .getAllByTestId("scenario-added-header-label")
+      .map((el) => el.textContent);
+    expect(labels).toEqual(["WEIGHT", "USD", "MODE", "LEV", "NOTIONAL"]);
+    // Column alignment carries the separation (UI-SPEC Contract 3) — an
+    // interpunct between labels would be a second, competing separator.
+    expect(labels.join("")).not.toContain("·");
+  });
+
+  it("SCEN-04 header (placement): the strip sits AFTER the 'Strategies added ·' separator and BEFORE the first added row", () => {
+    renderScen(bookedPayload());
+    add(S_A, "Scen04 Strat A");
+
+    const header = screen.getByTestId("scenario-added-header");
+    const separator = header.previousElementSibling;
+    const firstRow = header.nextElementSibling;
+
+    expect(separator?.textContent).toContain("Strategies added ·");
+    expect(firstRow?.getAttribute("data-testid")).toBe(
+      "scenario-constituent-added",
+    );
+    // Belt-and-braces on the ordering, independent of sibling walking.
+    expect(
+      separator!.compareDocumentPosition(header) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      header.compareDocumentPosition(firstRow!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 152 / SCEN-04 — the honest non-derivable NOTIONAL on the added row.
+//
+// An unexplained `—` reads "broken". 151's em-dash pattern (title + a duplicated
+// sr-only sentence, because a title alone is unreachable by keyboard/touch)
+// makes it read "not applicable, and here is why".
+//
+// The sentence is CAUSE-ACCURATE by decision D-3, and that is the whole point of
+// the pair of tests below. This cell's em-dash is driven by
+// `totalBookEquity == null` (or a missing blend share) — NOT by `scenarioAum`.
+// Shipping CONTEXT's "Set portfolio AUM to size in dollars" here would tell a
+// book-less allocator to type a number that CANNOT make the cell derivable: a
+// dishonest remedy, which is precisely the defect class this phase exists to
+// remove. That sentence stays on the USD cell, where it is true.
+//
+// The derived-branch test is the FALSIFIER for "patched the wrong branch": it
+// pins the original derived title byte-for-byte, so widening the remedy title to
+// cover both states goes RED.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — SCEN-04 honest notional (Phase 152)", () => {
+  /** The pinned copy (D-3). U+2014 em-dash, matching the file's Numbers
+   *  Contract. Typed here as a literal, never imported from the component —
+   *  an oracle that reads the implementation's own constant asserts nothing. */
+  const NOTIONAL_NOTE =
+    "Notional needs live book equity — not derivable in this scenario";
+  /** The pre-existing DERIVED title, byte-verbatim from the shipped tree. */
+  const DERIVED_TITLE =
+    "Notional = equity × blend share × leverage — derived, informative only (minimum-investment check); never a weight input";
+
+  const N_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-05-${String(i + 1).padStart(2, "0")}`,
+  );
+  const N_KEY_SERIES = N_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const N_STRAT_SERIES = N_DATES.map((date, i) => ({
+    date,
+    value: [0.01, -0.008, 0.012][i % 3],
+  }));
+
+  const N_A = "scen04n-strat-a";
+  const N_K1 = "scen04n-key-1";
+
+  /** No book at all → `usePerKeySources` false → `totalBookEquity` null → the
+   *  notional is structurally non-derivable. Also the ONLY row on screen, so
+   *  the single `scenario-constituent-notional` testid is unambiguous. */
+  function blankSlatePayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      holdingsSummary: [],
+      apiKeys: [],
+      perKeyReturnsByApiKeyId: {},
+      perKeyDailiesGateSatisfied: false,
+      eligibleApiKeyIds: [],
+      allocatorEligibleApiKeyIds: [],
+      contributingApiKeyIds: [],
+      bookEntryGateSatisfied: false,
+      strategies: [catalogStrategy(N_A, "Scen04N Strat A", N_STRAT_SERIES)],
+    });
+  }
+
+  /** A live $60,000 book, so the added leg joins the blend and its notional
+   *  genuinely derives (equity × share × leverage). */
+  function bookedPayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      ...perKeyBook([{ id: N_K1, returns: N_KEY_SERIES, valueUsd: 60_000 }]),
+      apiKeys: [winApiKey(N_K1)],
+      strategies: [catalogStrategy(N_A, "Scen04N Strat A", N_STRAT_SERIES)],
+    });
+  }
+
+  function renderScen(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  function add(id: string, name: string) {
+    addStrategy({
+      id,
+      name,
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+  }
+
+  /** The ADDED row's notional cell, scoped by data-scope-ref — never a bare
+   *  getByTestId: the same testid also lives on every per-key row. */
+  function addedNotionalCell(ref: string): HTMLElement {
+    const el = document.querySelector(
+      `[data-scope-ref="${ref}"] [data-testid="scenario-constituent-notional"]`,
+    );
+    expect(el).not.toBeNull();
+    return el as HTMLElement;
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  it("SCEN-04 honest notional (non-derivable): the em-dash carries a CAUSE-ACCURATE title and the same sentence in sr-only text", () => {
+    renderScen(blankSlatePayload());
+    add(N_A, "Scen04N Strat A");
+
+    // Non-vacuity + scope proof: with no book there is exactly ONE notional
+    // cell on screen, and it belongs to the added row.
+    expect(
+      screen.queryAllByTestId("scenario-constituent-notional"),
+    ).toHaveLength(1);
+
+    const cell = addedNotionalCell(N_A);
+    expect(cell.tagName).toBe("SPAN");
+    expect(cell.textContent).toContain("—");
+    expect(cell.getAttribute("title")).toBe(NOTIONAL_NOTE);
+    // The title alone is unreachable by keyboard/touch — the sentence must also
+    // exist as text inside the cell (151's pattern).
+    expect(within(cell).getByText(NOTIONAL_NOTE)).toBeInTheDocument();
+
+    // …and it names the RIGHT remedy: the AUM sentence would be a lie here,
+    // because typing an AUM cannot make this cell derivable.
+    expect(cell.getAttribute("title")).not.toBe(
+      "Set portfolio AUM to size in dollars",
+    );
+  });
+
+  it("SCEN-04 honest notional (derived): the derivable cell keeps its original title byte-verbatim and grows no remedy note", () => {
+    renderScen(bookedPayload());
+    add(N_A, "Scen04N Strat A");
+
+    const cell = addedNotionalCell(N_A);
+    // Non-vacuity: this really IS the derived branch — a dollar figure, not the
+    // em-dash the other test asserts.
+    expect(cell.textContent).not.toContain("—");
+    expect(cell.textContent).toContain("$");
+
+    // The falsifier for "patched the wrong branch": widening the remedy title
+    // to cover both states turns this line RED.
+    expect(cell.getAttribute("title")).toBe(DERIVED_TITLE);
+    expect(within(cell).queryByText(NOTIONAL_NOTE)).toBeNull();
+  });
+
+  it("SCEN-04 honest notional (scope): the PER-KEY notional span is untouched — same original title, no remedy note", () => {
+    renderScen(bookedPayload());
+    add(N_A, "Scen04N Strat A");
+
+    const perKeyCell = document.querySelector(
+      `[data-scope-ref="${N_K1}"] [data-testid="scenario-constituent-notional"]`,
+    );
+    expect(perKeyCell).not.toBeNull();
+    expect(perKeyCell!.getAttribute("title")).toBe(DERIVED_TITLE);
+    expect(perKeyCell!.textContent).not.toContain(NOTIONAL_NOTE);
   });
 });
