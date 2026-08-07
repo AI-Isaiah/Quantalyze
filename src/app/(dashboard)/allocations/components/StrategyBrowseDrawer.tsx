@@ -33,6 +33,9 @@ import {
   type MandateFitTier,
 } from "../lib/mandate-fit";
 import { YoursChip } from "./YoursChip";
+// Review WR-05 — the ONE declaration of the added-strategy shape. Type-only, so
+// nothing from scenario-state.ts reaches this component's runtime bundle.
+import type { AddedStrategy as PersistedAddedStrategy } from "../lib/scenario-state";
 
 export type { AllocatorMandateForFit } from "../lib/mandate-fit";
 
@@ -83,25 +86,28 @@ export interface StrategyBrowseRow {
 }
 
 /**
- * Structural contract for the onAdd callback payload — matches the shape
- * Plan 01's scenario-state.ts `AddedStrategy` expects (id + name + markets
- * + strategy_types). The composer (Plan 06) wires this directly to the
+ * The onAdd callback payload — DERIVED from `scenario-state.ts`'s
+ * `AddedStrategy`, which the composer feeds straight into the
  * `addStrategyBrowse` mutator.
+ *
+ * Review WR-05 — this used to be a hand-written near-copy of the persisted
+ * interface: same name, same four fields, but `isOwn?: boolean` here against
+ * `isOwn?: boolean | null` there. The assignment happened to compile
+ * (`boolean | undefined` is assignable to `boolean | null | undefined`), which
+ * is exactly what made it a silent drift surface — the direction that does NOT
+ * compile was one refactor away, and a field added to one and not the other
+ * would have errored nowhere. This file's own comment had to cross-reference
+ * the other file to explain its nullability, which was the tell.
+ *
+ * The ONLY intended difference is the id's brand: `StrategyForBuilderId` is
+ * minted inside scenario-state's mutators, and the drawer holds a raw wire
+ * string, so the id is widened here and the composer casts at its two add
+ * seams (the existing construction boundary). Every other field — present and
+ * future — now flows from the single declaration.
  */
-export interface AddedStrategy {
+export type AddedStrategy = Omit<PersistedAddedStrategy, "id"> & {
   id: string;
-  name: string;
-  markets: string[];
-  strategy_types: string[];
-  /**
-   * Phase 152 (SCEN-02) — the ownership bit carried across the drawer seam so
-   * the composer row can render the "Yours" chip on a browse-added strategy.
-   * Optional and pass-through: `true` iff the wire said so, `undefined` when
-   * the wire was silent. `scenario-state.ts` declares the persisted twin as
-   * `z.boolean().nullish()`, so an absent value survives the codec unchanged.
-   */
-  isOwn?: boolean;
-}
+};
 
 export interface StrategyBrowseDrawerProps {
   isOpen: boolean;

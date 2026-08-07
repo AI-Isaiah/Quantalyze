@@ -26,6 +26,34 @@ import {
   type AllocatorMandateForFit,
   type AddedStrategy,
 } from "./StrategyBrowseDrawer";
+// Review WR-05 — the persisted twin, imported so the drift guard below can
+// compare the two shapes. Type-only: nothing from scenario-state.ts runs here.
+import type { AddedStrategy as PersistedAddedStrategy } from "../lib/scenario-state";
+
+// ---------------------------------------------------------------------------
+// Review WR-05 — COMPILE-TIME drift guard for the drawer/scenario-state seam.
+//
+// These two aliases used to be independent hand-written interfaces with the same
+// name and a divergent `isOwn` (`boolean` vs `boolean | null`). The assignment
+// compiled because `boolean | undefined` IS assignable to
+// `boolean | null | undefined` — which is exactly what made it dangerous: the
+// reverse direction did not compile and was one refactor away, and a field added
+// to one side and not the other would have errored nowhere.
+//
+// The check is MUTUAL on purpose. A one-way assertion would have passed against
+// the very drift WR-05 found. `npm run typecheck` covers test files, so a future
+// fork of the two shapes fails the build here rather than at a call site.
+//
+// The id is deliberately excluded: the persisted side brands it
+// (`StrategyForBuilderId`, minted inside scenario-state's mutators) and the
+// drawer holds a raw wire string. That difference is the contract, not drift.
+// ---------------------------------------------------------------------------
+type WR05DrawerBody = Omit<AddedStrategy, "id">;
+type WR05PersistedBody = Omit<PersistedAddedStrategy, "id">;
+const WR05_DRAWER_TO_PERSISTED: WR05PersistedBody =
+  null as unknown as WR05DrawerBody;
+const WR05_PERSISTED_TO_DRAWER: WR05DrawerBody =
+  null as unknown as WR05PersistedBody;
 
 const FIVE_STRATS: StrategyBrowseRow[] = [
   {
@@ -826,6 +854,18 @@ describe("StrategyBrowseDrawer — SCEN-02 isOwn on the onAdd payload (Phase 152
  * fixtures sit at 12:00:00Z so the calendar date is stable across CI (UTC) and
  * local machines, and Node ships full-icu so "en-US" month names agree.
  */
+describe("StrategyBrowseDrawer — WR-05 type-seam drift guard", () => {
+  it("the drawer's AddedStrategy body is MUTUALLY assignable with the persisted twin's", () => {
+    // The real assertion is the pair of annotated `const`s at the top of this
+    // file: they are checked by `npm run typecheck`, and a fork of the two
+    // shapes (a new field on one side, or a nullability change like the
+    // `boolean` vs `boolean | null` divergence WR-05 found) fails to compile
+    // there. This body exists so the guard is a named, discoverable test rather
+    // than two floating declarations a cleanup pass would delete as dead.
+    expect(WR05_DRAWER_TO_PERSISTED).toBe(WR05_PERSISTED_TO_DRAWER);
+  });
+});
+
 describe("StrategyBrowseDrawer — SCEN-05 own-vs-own dedup line (Phase 152)", () => {
   beforeEach(() => {
     vi.useRealTimers();
