@@ -1,7 +1,7 @@
 ---
 phase: 151
 slug: aum-a-book-you-can-reach-and-a-size-you-can-set
-status: planned
+status: executed
 nyquist_compliant: true
 wave_0_complete: false
 created: 2026-08-07
@@ -153,3 +153,13 @@ Deliberate exceptions (self-reference accepted, with reason):
 | MT5 holdings row appears after sync on PROD | AUM-02 | Live terminal + cron | After 04:00 cron or "Sync now": mt5 key shows holdings row, `sync_status` ≠ error, no AttributeError in `sync_error` |
 | Stale PROD `sync_error` on key `46293712-…` clears | AUM-02 | Stale stored value only changes on next successful sync (RESEARCH Runtime State Inventory) | Post-deploy: trigger "Sync now" (or wait one cron), re-check the column |
 | Assumption A1 check (the 2 bare keys are bybit+okx) | AUM-04 | PROD census | If a zero-dailies key is allocator-only, the ≥1 relaxation (shipped) carries the founder's book instead of the exclusion alone — both are in-phase, so no action either way |
+
+---
+
+## Ledger close-out (2026-08-07, orchestrator)
+
+All 15 per-task rows and the Falsifiability Ledger were discharged during execution;
+the Observed-RED evidence was recorded in each plan's SUMMARY (§ self-check — RED commit
+hashes + failure counts, incl. two mutation falsifiers) rather than back-filled here.
+Verifier confirmed 30/30 must-haves with suites green (151-VERIFICATION.md). The four
+PROD-gated manual rows moved to 151-HUMAN-UAT.md.
