@@ -15,7 +15,20 @@ import { BasisProvider, useBasis, useBasisMetrics, useBasisOrCash, useBasisSerie
 // ControlBar input AND the KpiStrip's levered-view gate. The KpiStrip now reads the
 // leverage-composed useBasisSeriesView (plan 01), so the derived metrics hooks are gone.
 import { LeverageProvider, useLeverage } from "./leverage-context";
-import { MAX_LEVERAGE } from "@/lib/leverage";
+/**
+ * 151 UAT — the shared CONTRACT ceiling (`MAX_LEVERAGE`, src/lib/leverage.ts)
+ * was raised 10 → 200 for the Scenario Composer's strategy rows, which is what
+ * the founder asked for. This PUBLIC, anonymous what-if projection was NOT in
+ * that ask, so it keeps its own, narrower input bound.
+ *
+ * That direction is the safe one and only that direction: the sanitizer's
+ * ceiling stays the WIDEST bound in the system, so nothing a viewer can set
+ * here is ever silently reduced on read. (Do not invert this — a surface bound
+ * ABOVE the contract ceiling would be silently truncated by
+ * `sanitizeLeverage`.) The value below is the pre-151 `MAX_LEVERAGE`, so this
+ * surface's behaviour and copy are byte-unchanged.
+ */
+const FACTSHEET_MAX_LEVERAGE = 10;
 import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
 import { SMOOTHED_MTM_UI_ENABLED } from "@/lib/closed-sets";
 import { ComparatorPicker } from "./ComparatorPicker";
@@ -1371,7 +1384,7 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
   const onLeverageChange = (raw: number) => {
     if (!Number.isFinite(raw)) {
       setLeverageMsg(
-        `Invalid leverage — enter a number between 0 and ${MAX_LEVERAGE}. The previous value was kept.`,
+        `Invalid leverage — enter a number between 0 and ${FACTSHEET_MAX_LEVERAGE}. The previous value was kept.`,
       );
       return;
     }
@@ -1379,12 +1392,12 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
       setLeverageMsg(
         "Leverage can't be negative — shorting isn't included in this what-if. Clamped to 0.",
       );
-    } else if (raw > MAX_LEVERAGE) {
-      setLeverageMsg(`Leverage clamped to ${MAX_LEVERAGE}× — the maximum in this what-if projection.`);
+    } else if (raw > FACTSHEET_MAX_LEVERAGE) {
+      setLeverageMsg(`Leverage clamped to ${FACTSHEET_MAX_LEVERAGE}× — the maximum in this what-if projection.`);
     } else {
       setLeverageMsg(null);
     }
-    setLeverage(Math.min(MAX_LEVERAGE, Math.max(0, raw)));
+    setLeverage(Math.min(FACTSHEET_MAX_LEVERAGE, Math.max(0, raw)));
   };
   const resetLeverage = () => {
     setLeverage(1);
@@ -1417,7 +1430,7 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
               type="number"
               step="0.1"
               min="0"
-              max={MAX_LEVERAGE}
+              max={FACTSHEET_MAX_LEVERAGE}
               value={leverage.toString()}
               title="Leverage multiplier (1× = unlevered; excludes borrow / funding cost)"
               aria-label="Leverage multiplier (1× = unlevered; excludes borrow / funding cost)"

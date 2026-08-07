@@ -7,6 +7,7 @@ import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
 // to assert the suppression.
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 import { captureToSentry } from "@/lib/sentry-capture";
+import { MAX_LEVERAGE } from "@/lib/leverage";
 import type { ScenarioDraft, AddedStrategy } from "./scenario-state";
 import {
   buildAddedOnlySet,
@@ -450,16 +451,33 @@ describe("computeMetricsForDraft", () => {
   it("LOW-1 — a corrupt persisted leverage (999) is clamped but emits NO Sentry warning on the compare path (quota-safe)", () => {
     vi.mocked(captureToSentry).mockClear();
     const dates = buildDates("2024-01-02", 80);
+    // 151 UAT — the returns are scaled down (0.1%/0.08% instead of 1%/0.8%)
+    // because MAX_LEVERAGE moved 10 → 200. At 200× the original series RUINS
+    // (a −0.8% day becomes −160%, so cumulative wealth goes negative and the
+    // engine honestly returns null metrics), which would make the
+    // "still computes honestly" non-vacuity assertion below fail for a reason
+    // that has nothing to do with what this test is about. A gentler series
+    // keeps the clamp observable AND the projection real.
     const inputs = perKeyLiveInputs(
-      { "key-A": altReturns(dates, 0.01, -0.008) },
+      { "key-A": altReturns(dates, 0.001, -0.0008) },
       { "key-A": 5000 },
     );
-    // 999 → clamped to 10 at read; the metrics still compute honestly.
+    // 999 → clamped to MAX_LEVERAGE at read; the metrics still compute honestly.
     const m = computeMetricsForDraft(
       draft({ memberKeyIds: ["key-A"], leverageOverrides: { "key-A": 999 } }),
       inputs,
     );
     expect(m.twr).not.toBeNull();
+    // The clamp really happened: 999 projects identically to the ceiling, and
+    // NOT identically to an unclamped 999 (which would ruin → null metrics).
+    const atCeiling = computeMetricsForDraft(
+      draft({
+        memberKeyIds: ["key-A"],
+        leverageOverrides: { "key-A": MAX_LEVERAGE },
+      }),
+      inputs,
+    );
+    expect(m.twr).toBe(atCeiling.twr);
     // …but the coercion signal is suppressed on this read-twice compare path.
     expect(captureToSentry).not.toHaveBeenCalled();
   });

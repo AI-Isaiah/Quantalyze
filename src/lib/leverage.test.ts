@@ -38,14 +38,23 @@ describe("sanitizeLeverage — read-side clamp (mirrors engine lev(), adds MAX c
     expect(sanitizeLeverage(0.5)).toBe(0.5);
     expect(sanitizeLeverage(1)).toBe(1);
     expect(sanitizeLeverage(10)).toBe(10);
+    // 151 UAT — the band now reaches the raised contract ceiling. A value the
+    // founder actually types for a strategy row (50×) must pass through
+    // UNTOUCHED; under the old bound it silently came back as 10× on every
+    // reopen, share-resolve and compare.
+    expect(sanitizeLeverage(50)).toBe(50);
+    expect(sanitizeLeverage(MAX_LEVERAGE)).toBe(MAX_LEVERAGE);
   });
 
   it("above MAX → MAX (read-side ceiling the engine lev() does not have)", () => {
-    expect(sanitizeLeverage(11)).toBe(10);
+    expect(sanitizeLeverage(MAX_LEVERAGE + 1)).toBe(MAX_LEVERAGE);
   });
 
-  it("MAX_LEVERAGE is 10", () => {
-    expect(MAX_LEVERAGE).toBe(10);
+  // The one deliberate LITERAL in this file: the ceiling's VALUE is the thing
+  // under test, so deriving it from the constant would make the assertion
+  // self-referential and unable to catch an unintended change.
+  it("MAX_LEVERAGE is 200 (151 UAT — raised from 10 for the composer's strategy rows)", () => {
+    expect(MAX_LEVERAGE).toBe(200);
   });
 });
 
@@ -54,12 +63,14 @@ describe("sanitizeLeverageMap — LEV-02 rehydrate helper (per-entry sanitize on
     expect(sanitizeLeverageMap(undefined)).toEqual({});
   });
 
-  it("sanitizes every entry independently (NaN/-3 → 1, 999 → 10, 2 identity)", () => {
-    expect(sanitizeLeverageMap({ a: 2, b: NaN, c: -3, d: 999 })).toEqual({
+  it("sanitizes every entry independently (NaN/-3 → 1, 999 → MAX, 2 identity)", () => {
+    expect(sanitizeLeverageMap({ a: 2, b: NaN, c: -3, d: 999, e: 50 })).toEqual({
       a: 2,
       b: 1,
       c: 1,
-      d: 10,
+      d: MAX_LEVERAGE,
+      // 151 UAT — an in-band high multiplier is IDENTITY, not a coercion.
+      e: 50,
     });
   });
 });
@@ -76,13 +87,21 @@ describe("SFH-2 — a REAL coercion is Sentry-visible; the identity path is sile
     expect(captureToSentry).not.toHaveBeenCalled();
   });
 
-  it("logs a warning with an errorId + input/output when a finite value is clamped down (999 → 10)", () => {
+  it("logs a warning with an errorId + input/output when a finite value is clamped down (999 → MAX)", () => {
     sanitizeLeverage(999);
     expect(captureToSentry).toHaveBeenCalledTimes(1);
     const [, options] = vi.mocked(captureToSentry).mock.calls[0];
     expect(options.tags.errorId).toBe("LEV_SANITIZE_COERCION");
     expect(options.level).toBe("warning");
-    expect(options.extra).toMatchObject({ input: 999, output: 10 });
+    expect(options.extra).toMatchObject({ input: 999, output: MAX_LEVERAGE });
+  });
+
+  it("151 UAT — an in-band 50× is NOT a coercion, so it emits nothing", () => {
+    // Under the old 10× ceiling this logged a LEV_SANITIZE_COERCION every time
+    // the founder's own draft was read. Non-vacuity for the clamp tests above.
+    sanitizeLeverage(50);
+    sanitizeLeverageMap({ row: 50 });
+    expect(captureToSentry).not.toHaveBeenCalled();
   });
 
   it("logs when a negative value is coerced to 1 (−5 → 1)", () => {
@@ -106,19 +125,25 @@ describe("SFH-2 — a REAL coercion is Sentry-visible; the identity path is sile
     expect(captureToSentry).toHaveBeenCalledTimes(1);
     const [, options] = vi.mocked(captureToSentry).mock.calls[0];
     expect(options.tags.source).toBe("sanitizeLeverageMap");
-    expect(options.extra).toMatchObject({ key: "bad", input: 999, output: 10 });
+    expect(options.extra).toMatchObject({
+      key: "bad",
+      input: 999,
+      output: MAX_LEVERAGE,
+    });
   });
 
   it("LOW-1 — signal:false SUPPRESSES the Sentry warning on a real coercion (value still clamps)", () => {
     // The clamp behavior is IDENTICAL — only the emission is gated.
-    expect(sanitizeLeverage(999, { source: "public", signal: false })).toBe(10);
+    expect(sanitizeLeverage(999, { source: "public", signal: false })).toBe(
+      MAX_LEVERAGE,
+    );
     expect(sanitizeLeverage(-5, { source: "public", signal: false })).toBe(1);
     expect(captureToSentry).not.toHaveBeenCalled();
   });
 
   it("LOW-1 — sanitizeLeverageMap({ signal:false }) suppresses on every entry (public share / read-twice compare path)", () => {
     expect(sanitizeLeverageMap({ a: 999, b: -5, c: 2 }, { signal: false })).toEqual({
-      a: 10,
+      a: MAX_LEVERAGE,
       b: 1,
       c: 2,
     });

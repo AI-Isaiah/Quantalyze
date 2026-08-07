@@ -3578,7 +3578,11 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     act(() => {
       fireEvent.change(lev, { target: { value: "999" } });
     });
-    expect(screen.getByRole("alert").textContent).toMatch(/clamped to 10/i);
+    // 151 UAT — derived, not a literal: the cap moved 10 → 200 and a hardcoded
+    // "clamped to 10" here would pin the OLD bound.
+    expect(screen.getByRole("alert").textContent).toMatch(
+      new RegExp(`clamped to ${MAX_LEVERAGE}`, "i"),
+    );
   });
 
   it("R3 guard — the projection renders NO peer/allocator/comparator factsheet panels (no false precision on a hypothetical blend)", () => {
@@ -5998,6 +6002,45 @@ describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () 
     );
   }
 
+  // -------------------------------------------------------------------------
+  // 151 UAT — the INFEASIBILITY fixture, forced by the leverage cap moving
+  // 10 → 200.
+  //
+  // K1's series (one −5% day among zeros) gives |dd(L)| = 0.05·L, so under the
+  // OLD 10× ceiling a 99% target was genuinely unreachable (dd caps at 50%).
+  // Under a 200× ceiling that same series RUINS at L=20 (wealth 1 − 0.05·20 =
+  // 0), the solver ruin-clamps its domain just below it, and |dd| there is
+  // ~99.95% — so every target in (0,1) is now reachable and the old fixture can
+  // no longer express infeasibility at all. That is the intended consequence of
+  // the founder's decision, not a regression.
+  //
+  // K1_SHALLOW keeps the SHAPE (one down day among zeros) and only scales the
+  // magnitude: a single −0.05% day → |dd(L)| = 0.0005·L → 10% at the 200×
+  // ceiling, with no ruin anywhere in the domain (wealth stays 0.9). A 99%
+  // target is therefore honestly unreachable, and the tests keep testing the
+  // thing they were written to test.
+  // -------------------------------------------------------------------------
+  const K1_SHALLOW = P113_DATES.map((date, i) => ({
+    date,
+    value: i === 6 ? -0.0005 : 0,
+  }));
+
+  function render113Shallow() {
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          ...perKeyBook([
+            { id: K1, returns: K1_SHALLOW, valueUsd: 60_000 },
+            { id: K2, returns: K2_SERIES, valueUsd: 40_000 },
+          ]),
+          apiKeys: [winApiKey(K1), winApiKey(K2)],
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
   /** The constituent row element for a per-key ref (carries data-scope-ref). */
   function rowByRef(ref: string): HTMLElement {
     const el = document.querySelector(
@@ -6129,13 +6172,15 @@ describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () 
     expect(note.textContent).toMatch(/[−-]?\d+\.\d{2}%/);
   });
 
-  // (k) INFEASIBLE HONESTY — an unreachable target (99% on the mild series capped
-  // by MAX_LEVERAGE) renders honest "unreachable at {L}×" copy + an em-dash where
+  // (k) INFEASIBLE HONESTY — an unreachable target (99% on the SHALLOW series
+  // capped by MAX_LEVERAGE) renders honest "unreachable at {L}×" copy + an em-dash where
   // a derived value would sit, and leaves the leverage input UNCHANGED (no
   // fabricated L — the clamp-and-lie failure mode is RED-proofed). RED: the toggle
   // does not exist.
   it("(k) RED — an unreachable target renders honest 'unreachable at …×' + em-dash and does NOT fabricate a leverage", () => {
-    render113();
+    // 151 UAT — the SHALLOW fixture: infeasibility must be expressed against the
+    // 200× ceiling (see K1_SHALLOW).
+    render113Shallow();
     const toggle = within(rowByRef(K1)).queryByTestId(
       "scenario-leverage-mode-toggle",
     );
@@ -6383,7 +6428,7 @@ describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () 
   // cleared only on `result.ok`. The range error stays only for out-of-range input.
   // -------------------------------------------------------------------------
   it("F3 a valid-but-infeasible commit clears a prior range-error banner and shows only the honest infeasible state", () => {
-    render113();
+    render113Shallow();
     act(() => {
       fireEvent.click(
         within(rowByRef(K1)).getByTestId("scenario-leverage-mode-toggle"),
@@ -6400,9 +6445,9 @@ describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () 
     });
     expect(screen.getByTestId("scenario-commit-error")).not.toBeNull();
 
-    // 2) Commit a VALID but INFEASIBLE target (99% on K1's 5% base exceeds
-    //    MAX_LEVERAGE). The prior range banner MUST clear; the honest infeasible
-    //    state renders in its place.
+    // 2) Commit a VALID but INFEASIBLE target (99% against K1_SHALLOW's 0.05%
+    //    base needs ~1980×, far past MAX_LEVERAGE). The prior range banner MUST
+    //    clear; the honest infeasible state renders in its place.
     act(() => {
       fireEvent.change(target, { target: { value: "99" } });
       fireEvent.blur(target);
@@ -6562,13 +6607,16 @@ describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () 
   // stale range error is still cleared beside the honest infeasible state).
   // -------------------------------------------------------------------------
   it("RT113-02 an infeasible target commit preserves an unrelated leverage-clamp banner (clears only a stale target-range error)", () => {
-    render113();
+    render113Shallow();
     // Over-max leverage on K2 (Leverage mode) → the shared clamp banner.
+    // 151 UAT — derived from MAX_LEVERAGE, not a literal: the cap was raised to
+    // 200 and the old hardcoded `50` is now comfortably IN-BAND, so it would
+    // silently stop producing the banner this test needs as its precondition.
     const k2Lev = document.getElementById(
       `leverage-${K2}`,
     ) as HTMLInputElement;
     act(() => {
-      fireEvent.change(k2Lev, { target: { value: "50" } });
+      fireEvent.change(k2Lev, { target: { value: String(MAX_LEVERAGE + 1) } });
     });
     expect(screen.getByTestId("scenario-commit-error").textContent).toMatch(
       /Leverage clamped/i,
@@ -6598,6 +6646,54 @@ describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () 
     expect(
       within(rowByRef(K1)).getByTestId("scenario-target-dd-state").textContent,
     ).toMatch(/unreachable at .*×/i);
+  });
+
+  // -------------------------------------------------------------------------
+  // 151 UAT (founder, 2026-08-07) — the strategy-row leverage cap is 200×.
+  //
+  // The old 10× bound was not just an input limit: `sanitizeLeverage` clamps on
+  // READ, so a saved 50× came back as 10× on every reopen, share-resolve and
+  // compare, with only a Sentry breadcrumb. These pin BOTH ends — an in-band
+  // high multiplier is accepted and stored verbatim, and the clamp still fires
+  // (at the new bound) so the ceiling is not simply gone.
+  // -------------------------------------------------------------------------
+  it("151 UAT: a strategy row accepts a 50× leverage — the value is stored, not clamped", () => {
+    render113();
+    const k2Lev = document.getElementById(
+      `leverage-${K2}`,
+    ) as HTMLInputElement;
+    // The input's declared bound moved with the contract.
+    expect(k2Lev.getAttribute("max")).toBe(String(MAX_LEVERAGE));
+    expect(Number(k2Lev.getAttribute("max"))).toBe(200);
+
+    act(() => {
+      fireEvent.change(k2Lev, { target: { value: "50" } });
+    });
+
+    // Stored verbatim — under the old cap this displayed 10 and banner'd.
+    expect(
+      (document.getElementById(`leverage-${K2}`) as HTMLInputElement).value,
+    ).toBe("50");
+    expect(screen.queryByTestId("scenario-commit-error")).toBeNull();
+  });
+
+  it("151 UAT: the ceiling still exists — above 200× clamps, visibly, at the new bound", () => {
+    render113();
+    const k2Lev = document.getElementById(
+      `leverage-${K2}`,
+    ) as HTMLInputElement;
+
+    act(() => {
+      fireEvent.change(k2Lev, { target: { value: "250" } });
+    });
+
+    expect(
+      (document.getElementById(`leverage-${K2}`) as HTMLInputElement).value,
+    ).toBe(String(MAX_LEVERAGE));
+    // The clamp is never silent, and the copy names the bound it enforced.
+    expect(screen.getByTestId("scenario-commit-error").textContent).toContain(
+      `Leverage clamped to ${MAX_LEVERAGE}×`,
+    );
   });
 });
 
