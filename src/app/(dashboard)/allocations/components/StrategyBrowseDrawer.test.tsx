@@ -731,3 +731,433 @@ describe("StrategyBrowseDrawer — prominent 'Connect a key' CTA (CONNECT-01)", 
     ).toHaveLength(0);
   });
 });
+
+/**
+ * Phase 152 / SCEN-02 — the ownership bit survives the drawer seam.
+ *
+ * `handleAdd` is the FOURTH construction site of an `AddedStrategy` payload in
+ * this codebase (the other three live in ScenarioComposer). It is the only one
+ * unreachable from `ScenarioComposer.test.tsx`, because that suite module-mocks
+ * this drawer away — so if `isOwn` is dropped here, every composer-side test
+ * still passes and the chip silently never renders for browse-added rows.
+ * These two tests are the only place that can fail.
+ *
+ * The pair is deliberately two-sided: `true` proves the bit is carried, and the
+ * legacy row proves the drawer does NOT invent a boolean when the wire is
+ * silent. A one-sided "carries true" test passes against an implementation that
+ * hardcodes `isOwn: true`.
+ */
+describe("StrategyBrowseDrawer — SCEN-02 isOwn on the onAdd payload (Phase 152)", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("an own row (isOwn: true on the wire) hands onAdd a payload with isOwn === true", async () => {
+    const ownRow: StrategyBrowseRow = {
+      id: "s-own-1",
+      name: "Alpha Centauri",
+      codename: null,
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+      isOwn: true,
+    };
+    const onAdd = vi.fn();
+    renderDrawer({ onAdd, fetchStrategies: async () => [ownRow] });
+    await flush();
+
+    fireEvent.click(screen.getByTestId("browse-add-s-own-1"));
+
+    expect(onAdd).toHaveBeenCalledTimes(1);
+    const payload = onAdd.mock.calls[0][0] as AddedStrategy;
+    // Assert the VALUE, not merely that the payload decodes/matches: an
+    // implementation that omits the key entirely still satisfies a
+    // toMatchObject on the other four fields (152-02's measured vacuity lesson).
+    expect(payload.isOwn).toBe(true);
+    expect(payload).toMatchObject({ id: "s-own-1", name: "Alpha Centauri" });
+  });
+
+  it("a legacy row with no isOwn key hands onAdd isOwn === undefined (never fabricates ownership)", async () => {
+    // The pre-152 wire shape. CONTEXT lock: absence is honest — undefined must
+    // pass through as undefined, never be coerced to false (which would read as
+    // a positive "not yours" claim) and never defaulted to true.
+    const legacyRow: StrategyBrowseRow = {
+      id: "s-legacy-1",
+      name: "Legacy Strat",
+      codename: "LEG-1",
+      markets: ["okx"],
+      strategy_types: ["momentum"],
+    };
+    const onAdd = vi.fn();
+    renderDrawer({ onAdd, fetchStrategies: async () => [legacyRow] });
+    await flush();
+
+    fireEvent.click(screen.getByTestId("browse-add-s-legacy-1"));
+
+    expect(onAdd).toHaveBeenCalledTimes(1);
+    const payload = onAdd.mock.calls[0][0] as AddedStrategy;
+    expect(payload.isOwn).toBeUndefined();
+  });
+});
+
+/**
+ * Phase 152 / SCEN-05 — own-vs-own duplicate disambiguation line.
+ *
+ * The founder holds two private strategies both named "Alpha Centauri",
+ * created 15 days apart. In the browse list they are pixel-identical, so the
+ * choice is a coin flip. The line makes it resolvable — and DISAMBIGUATES
+ * rather than hides: no collapsing, no merge, no "(2)" suffix.
+ *
+ * It is a TIEBREAKER, not a metadata dump. Hence three independent gates, each
+ * separately falsifiable below:
+ *   - `isOwn === true` — a third party's creation date is a correlation vector
+ *     against the pseudonymised codename and must never render (nor, per
+ *     152-01, ever reach the wire — two independent fences).
+ *   - a detected COLLISION over the FILTERED rows (D-2) — a unique row gets no
+ *     line, and narrowing the filter to one row clears it.
+ *   - `created_at` present — the pre-152 wire shape renders no line rather than
+ *     an "Created Invalid Date" claim.
+ *
+ * Date oracles are LITERALS, not recomputations of the implementation's own
+ * `toLocaleDateString` call (Oracle Independence, 152-VALIDATION.md). The
+ * fixtures sit at 12:00:00Z so the calendar date is stable across CI (UTC) and
+ * local machines, and Node ships full-icu so "en-US" month names agree.
+ */
+describe("StrategyBrowseDrawer — SCEN-05 own-vs-own dedup line (Phase 152)", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  // The founder's real case: two private own rows, same name, 15 days apart.
+  const COLLIDING_OWN: StrategyBrowseRow[] = [
+    {
+      id: "s-ac-new",
+      name: "Alpha Centauri",
+      codename: "AC-NEW",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+      isOwn: true,
+      created_at: "2026-08-04T12:00:00.000Z",
+      status: "private",
+    },
+    {
+      id: "s-ac-old",
+      name: "Alpha Centauri",
+      codename: "AC-OLD",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+      isOwn: true,
+      created_at: "2026-07-20T12:00:00.000Z",
+      status: "private",
+    },
+  ];
+
+  it("two colliding own rows BOTH render the line with the literal created date and product-cased status", async () => {
+    renderDrawer({ fetchStrategies: async () => COLLIDING_OWN });
+    await flush();
+
+    expect(screen.getByTestId("browse-dedup-s-ac-new").textContent).toBe(
+      "Created Aug 4, 2026 · Private",
+    );
+    expect(screen.getByTestId("browse-dedup-s-ac-old").textContent).toBe(
+      "Created Jul 20, 2026 · Private",
+    );
+  });
+
+  it("a UNIQUE own row renders no line — the line is a tiebreaker, not a metadata dump", async () => {
+    // Same row shape as the colliding fixture (own, created_at, status all
+    // present) — the ONLY difference is that no second own row shares its
+    // name. An implementation that rendered the line on every own row with
+    // metadata would pass every other test in this block and fail here.
+    const soloOwn: StrategyBrowseRow[] = [
+      { ...COLLIDING_OWN[0], id: "s-solo", name: "Solitary Alpha" },
+    ];
+    renderDrawer({ fetchStrategies: async () => soloOwn });
+    await flush();
+
+    expect(screen.getByText("Solitary Alpha")).toBeInTheDocument();
+    expect(screen.queryByTestId("browse-dedup-s-solo")).toBeNull();
+    expect(document.querySelectorAll('[data-testid^="browse-dedup-"]')).toHaveLength(0);
+  });
+
+  it("two THIRD-PARTY rows with identical labels render no line, even when the wire leaks created_at/status", async () => {
+    // Defence in depth: the 152-01 route never emits created_at/status for a
+    // third-party row, so this fixture is a deliberately HOSTILE wire shape.
+    // The render gate must refuse it on `isOwn` alone — the drawer does not get
+    // to assume the route upstream stayed correct.
+    const thirdParty: StrategyBrowseRow[] = [
+      {
+        id: "s-tp-1",
+        name: "Shared Label",
+        codename: "TP-1",
+        markets: ["okx"],
+        strategy_types: ["momentum"],
+        isOwn: false,
+        created_at: "2026-08-04T12:00:00.000Z",
+        status: "published",
+      },
+      {
+        id: "s-tp-2",
+        name: "Shared Label",
+        codename: "TP-2",
+        markets: ["okx"],
+        strategy_types: ["momentum"],
+        isOwn: false,
+        created_at: "2026-07-20T12:00:00.000Z",
+        status: "published",
+      },
+    ];
+    renderDrawer({ fetchStrategies: async () => thirdParty });
+    await flush();
+
+    expect(document.querySelectorAll('[data-testid^="browse-dedup-"]')).toHaveLength(0);
+    // The leaked dates must not surface anywhere in the drawer either.
+    const body = document.body.textContent ?? "";
+    expect(body).not.toContain("Aug 4, 2026");
+    expect(body).not.toContain("Jul 20, 2026");
+  });
+
+  it("a lone own row whose name matches TWO third-party rows gets no line — collisions are counted own-only", async () => {
+    // SC4 falsifier target. The gate under test here is the COLLISION BUILDER,
+    // not the render gate: with `isOwn === true` dropped from pass 1, the
+    // normalized name "shared label" counts 3 and the own row — which passes
+    // every render-gate term on its own merits — starts claiming a duplicate
+    // that does not exist among its own strategies. Only ONE own row carries
+    // this name, so the honest answer is no line anywhere.
+    const mixed: StrategyBrowseRow[] = [
+      {
+        id: "s-mix-own",
+        name: "Shared Label",
+        codename: "MIX-OWN",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+        isOwn: true,
+        created_at: "2026-08-04T12:00:00.000Z",
+        status: "private",
+      },
+      {
+        id: "s-mix-tp-1",
+        name: "Shared Label",
+        codename: "MIX-TP-1",
+        markets: ["okx"],
+        strategy_types: ["momentum"],
+        isOwn: false,
+      },
+      {
+        id: "s-mix-tp-2",
+        name: "Shared Label",
+        codename: "MIX-TP-2",
+        markets: ["okx"],
+        strategy_types: ["momentum"],
+        isOwn: false,
+      },
+    ];
+    renderDrawer({ fetchStrategies: async () => mixed });
+    await flush();
+
+    expect(screen.queryByTestId("browse-dedup-s-mix-own")).toBeNull();
+    expect(document.querySelectorAll('[data-testid^="browse-dedup-"]')).toHaveLength(0);
+  });
+
+  it("collision matching is normalized — trailing whitespace and case differences still collide", async () => {
+    const normalizedPair: StrategyBrowseRow[] = [
+      { ...COLLIDING_OWN[0], id: "s-norm-a", name: "alpha centauri " },
+      { ...COLLIDING_OWN[1], id: "s-norm-b", name: "Alpha Centauri" },
+    ];
+    renderDrawer({ fetchStrategies: async () => normalizedPair });
+    await flush();
+
+    // A raw-string collision key would see two distinct names and render nothing.
+    expect(screen.getByTestId("browse-dedup-s-norm-a").textContent).toBe(
+      "Created Aug 4, 2026 · Private",
+    );
+    expect(screen.getByTestId("browse-dedup-s-norm-b").textContent).toBe(
+      "Created Jul 20, 2026 · Private",
+    );
+  });
+
+  it("narrowing the filter so only ONE colliding row survives clears its line (D-2: scope is the filtered result)", async () => {
+    renderDrawer({ fetchStrategies: async () => COLLIDING_OWN });
+    await flush();
+    // Both lines present before the filter narrows.
+    expect(screen.getByTestId("browse-dedup-s-ac-new")).toBeInTheDocument();
+    expect(screen.getByTestId("browse-dedup-s-ac-old")).toBeInTheDocument();
+
+    // The two rows share a name, so narrow by CODENAME (the search matches
+    // either) to leave exactly one of them visible.
+    const search = screen.getByPlaceholderText("Search by name or codename");
+    fireEvent.change(search, { target: { value: "AC-NEW" } });
+
+    expect(screen.getByText("Alpha Centauri")).toBeInTheDocument();
+    expect(screen.queryByTestId("browse-dedup-s-ac-old")).toBeNull();
+    // The survivor no longer has anything to be disambiguated FROM — a
+    // collision set computed over `strategies` instead of `filtered` would
+    // leave this line stranded on a row that is now unambiguous.
+    expect(screen.queryByTestId("browse-dedup-s-ac-new")).toBeNull();
+  });
+
+  it("a colliding own row MISSING created_at renders no line, while its sibling keeps one", async () => {
+    // Older wire shape. UI-SPEC honesty invariant: render nothing rather than
+    // "Created Invalid Date". Discriminating in both directions — the sibling
+    // proves the collision itself was still detected.
+    const partial: StrategyBrowseRow[] = [
+      { ...COLLIDING_OWN[0], id: "s-has-date" },
+      {
+        id: "s-no-date",
+        name: "Alpha Centauri",
+        codename: "AC-LEGACY",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+        isOwn: true,
+      },
+    ];
+    renderDrawer({ fetchStrategies: async () => partial });
+    await flush();
+
+    expect(screen.getByTestId("browse-dedup-s-has-date").textContent).toBe(
+      "Created Aug 4, 2026 · Private",
+    );
+    expect(screen.queryByTestId("browse-dedup-s-no-date")).toBeNull();
+    expect(document.body.textContent ?? "").not.toContain("Invalid Date");
+  });
+
+  it("renders the raw status enum product-cased, and omits the segment entirely when status is absent", async () => {
+    const statusPair: StrategyBrowseRow[] = [
+      { ...COLLIDING_OWN[0], id: "s-st-review", status: "pending_review" },
+      { ...COLLIDING_OWN[1], id: "s-st-none", status: undefined },
+    ];
+    renderDrawer({ fetchStrategies: async () => statusPair });
+    await flush();
+
+    // Underscores → spaces, first letter capitalized. The raw DB enum is a
+    // second vocabulary the allocator never agreed to read.
+    expect(screen.getByTestId("browse-dedup-s-st-review").textContent).toBe(
+      "Created Aug 4, 2026 · Pending review",
+    );
+    expect(document.body.textContent ?? "").not.toContain("pending_review");
+    // No status → no dangling separator (the sibling codename line's
+    // conditional-separator idiom).
+    expect(screen.getByTestId("browse-dedup-s-st-none").textContent).toBe(
+      "Created Jul 20, 2026",
+    );
+  });
+
+  it("keeps the dedup line OUT of the browse-add-* automation namespace (PR #620 contract)", async () => {
+    renderDrawer({ fetchStrategies: async () => COLLIDING_OWN });
+    await flush();
+
+    const dedupNodes = document.querySelectorAll('[data-testid^="browse-dedup-"]');
+    expect(dedupNodes).toHaveLength(2);
+    for (const el of dedupNodes) {
+      expect(el.getAttribute("data-testid") ?? "").not.toMatch(/^browse-add-/);
+    }
+    // The strategy-add first-match selector still resolves ONLY to Add buttons.
+    const addNodes = document.querySelectorAll('[data-testid^="browse-add-"]');
+    expect(addNodes).toHaveLength(2);
+    for (const el of addNodes) {
+      expect(el.tagName).toBe("BUTTON");
+    }
+  });
+});
+
+/**
+ * Phase 152 / SCEN-02 (D-4) — the "Yours" chip on own browse rows.
+ *
+ * Parity with the composer row (152-05) through the SAME `YoursChip` component,
+ * not a second recipe — one place to change the anatomy, one place to get it
+ * wrong. The chip is NOT a substitute for the SCEN-05 dedup line: both rows of
+ * the founder's duplicate are own rows, so a chip on each disambiguates nothing.
+ *
+ * The className assertions are LOCKED honesty tokens, not styling trivia. The
+ * `rounded-md` family is the persistent-fact family (Phase-150: identity is
+ * carried by ink, not shape); the uppercase `rounded-sm` family means DERIVED
+ * state that can change on its own, which ownership never does. And the ink is
+ * the muted `bg-badge-other/10` — accent would read as "verified / action",
+ * dressing a mere ownership fact as the mark that unlocks the money action.
+ */
+describe("StrategyBrowseDrawer — SCEN-02 'Yours' chip on own rows (Phase 152, D-4)", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  const OWN_AND_THIRD_PARTY: StrategyBrowseRow[] = [
+    {
+      id: "s-chip-own",
+      name: "My Own Strat",
+      codename: null,
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+      isOwn: true,
+    },
+    {
+      id: "s-chip-tp",
+      name: "Someone Elses Strat",
+      codename: "TP-9",
+      markets: ["okx"],
+      strategy_types: ["momentum"],
+      isOwn: false,
+    },
+  ];
+
+  it("an own row renders the chip with the locked anatomy and muted ink; a third-party row does not", async () => {
+    renderDrawer({ fetchStrategies: async () => OWN_AND_THIRD_PARTY });
+    await flush();
+
+    const chip = screen.getByTestId("browse-yours-s-chip-own");
+    expect(chip.textContent).toBe("Yours");
+    // Persistent-fact badge family.
+    expect(chip.className).toContain("rounded-md");
+    expect(chip.className).toContain("bg-badge-other/10");
+    expect(chip.className).toContain("text-text-muted");
+    // NOT the derived-state family, NOT the accent "verified/action" ink.
+    expect(chip.className).not.toContain("rounded-sm");
+    expect(chip.className).not.toContain("uppercase");
+    expect(chip.className).not.toContain("bg-accent");
+    expect(chip.className).not.toContain("text-accent");
+
+    // Discriminating: gates on isOwn, not on every row.
+    expect(screen.queryByTestId("browse-yours-s-chip-tp")).toBeNull();
+  });
+
+  it("a row with isOwn ABSENT renders no chip — the gate is `=== true`, never `!== false`", async () => {
+    // The pre-152 wire shape. Absence is UNKNOWN, and an unknown ownership
+    // claim rendered as "Yours" is a fabrication; a `!== false` gate would
+    // make exactly that mistake and pass every other test in this block.
+    const legacy: StrategyBrowseRow[] = [
+      {
+        id: "s-chip-legacy",
+        name: "Legacy Strat",
+        codename: "LEG-2",
+        markets: ["okx"],
+        strategy_types: ["momentum"],
+      },
+    ];
+    renderDrawer({ fetchStrategies: async () => legacy });
+    await flush();
+
+    expect(screen.getByText("Legacy Strat")).toBeInTheDocument();
+    expect(screen.queryByTestId("browse-yours-s-chip-legacy")).toBeNull();
+    expect(document.querySelectorAll('[data-testid^="browse-yours-"]')).toHaveLength(0);
+  });
+
+  it("keeps the chip OUT of the browse-add-* automation namespace", async () => {
+    renderDrawer({ fetchStrategies: async () => OWN_AND_THIRD_PARTY });
+    await flush();
+    const chip = screen.getByTestId("browse-yours-s-chip-own");
+    expect(chip.getAttribute("data-testid") ?? "").not.toMatch(/^browse-add-/);
+    // A chip is not an action — the strategy-add selector still resolves only
+    // to the two Add buttons.
+    expect(document.querySelectorAll('[data-testid^="browse-add-"]')).toHaveLength(2);
+  });
+});

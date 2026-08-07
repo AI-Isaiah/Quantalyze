@@ -32,6 +32,7 @@ import {
   type AllocatorMandateForFit,
   type MandateFitTier,
 } from "../lib/mandate-fit";
+import { YoursChip } from "./YoursChip";
 
 export type { AllocatorMandateForFit } from "../lib/mandate-fit";
 
@@ -53,6 +54,32 @@ export interface StrategyBrowseRow {
    * provenance tag rendered next to the row name. Optional + absent → no tag.
    */
   is_example?: boolean;
+  /**
+   * Phase 152 (SCEN-02) — viewer-relative ownership bit, computed server-side
+   * from the requesting session (`route.ts:296`) and emitted on EVERY row,
+   * `false` included. `true` means the requesting allocator owns this row, so
+   * the drawer renders the muted "Yours" chip and the composer keeps the bit on
+   * the added strategy. Optional here (not `boolean`) because the field is
+   * absent from the PRE-152 wire shape: absent → UNKNOWN → no chip, never a
+   * fabricated ownership claim. Not a disclosure widening — it describes the
+   * viewer's RELATIONSHIP to a row, never another owner's data.
+   */
+  isOwn?: boolean;
+  /**
+   * Phase 152 (SCEN-05) — OWNER-ONLY creation timestamp (ISO). The route emits
+   * this key only when `isOwn === true`, so it is absent on third-party rows
+   * (a creation date is a correlation vector against the pseudonymised
+   * codename). It feeds the duplicate-disambiguation line; absent → no line.
+   */
+  created_at?: string;
+  /**
+   * Phase 152 (SCEN-05) — OWNER-ONLY raw `strategies.status` enum (`draft` /
+   * `pending_review` / `published` / `archived` / `private`), emitted under the
+   * same `isOwn === true` condition. The client product-cases it for display —
+   * the raw enum never reaches the DOM. Absent → the disambiguation line omits
+   * the status segment rather than claiming a state.
+   */
+  status?: string;
 }
 
 /**
@@ -66,6 +93,14 @@ export interface AddedStrategy {
   name: string;
   markets: string[];
   strategy_types: string[];
+  /**
+   * Phase 152 (SCEN-02) — the ownership bit carried across the drawer seam so
+   * the composer row can render the "Yours" chip on a browse-added strategy.
+   * Optional and pass-through: `true` iff the wire said so, `undefined` when
+   * the wire was silent. `scenario-state.ts` declares the persisted twin as
+   * `z.boolean().nullish()`, so an absent value survives the codec unchanged.
+   */
+  isOwn?: boolean;
 }
 
 export interface StrategyBrowseDrawerProps {
@@ -102,6 +137,26 @@ const TIER_BG: Record<MandateFitTier, string> = {
   yellow: "rgba(217,119,6,0.10)",
   red: "rgba(220,38,38,0.10)",
 };
+
+/**
+ * Phase 152 (SCEN-05) — collision key for the own-vs-own duplicate line. Trim +
+ * lowercase so "alpha centauri " and "Alpha Centauri" are recognised as the same
+ * name: a raw-string key would leave the founder's real pair undisambiguated the
+ * moment one of them carries a stray trailing space.
+ */
+const normalizeStrategyName = (name: string) => name.trim().toLowerCase();
+
+/**
+ * Phase 152 (SCEN-05) — render casing for the raw `strategies.status` enum
+ * (`draft` / `pending_review` / `published` / `archived` / `private`). The route
+ * ships the DB value verbatim rather than inventing a second vocabulary, so the
+ * product casing happens here: underscores to spaces, first letter capitalized.
+ * The raw enum must never reach the DOM (UI-SPEC copy contract).
+ */
+function productCaseStatus(raw: string): string {
+  const spaced = raw.replace(/_/g, " ");
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
 
 // M-0107 — memoized filter pill. With a stable `onToggle` (useCallback in the
 // parent) it re-renders only when its own `pressed` flips, so a search
@@ -304,6 +359,33 @@ export function StrategyBrowseDrawer({
     [strategies, q, activeMarkets, activeTypes, allocatorMandate],
   );
 
+  // Phase 152 (SCEN-05) — the set of normalized names held by TWO OR MORE of
+  // the viewer's OWN rows.
+  //
+  // D-2: the scope is `filtered`, NOT `strategies`. The line exists to break a
+  // tie the allocator can actually see, so narrowing the search until only one
+  // of the two "Alpha Centauri" rows survives must clear it — a collision set
+  // computed over the full fetch would strand the line on a row that is no
+  // longer ambiguous, turning a tiebreaker into a metadata dump.
+  //
+  // Own-only by construction (`s.isOwn === true` in pass 1): two third-party
+  // rows sharing a pseudonymised label are not the viewer's problem to resolve,
+  // and their creation dates are a correlation vector the codename exists to
+  // hide. Two O(n) passes — count, then threshold — never a quadratic scan.
+  const ownNameCollisions = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const { s } of filtered) {
+      if (s.isOwn !== true) continue;
+      const key = normalizeStrategyName(s.name);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const collisions = new Set<string>();
+    for (const [key, count] of counts) {
+      if (count >= 2) collisions.add(key);
+    }
+    return collisions;
+  }, [filtered]);
+
   // M-0107 — stable per-kind toggle handlers (functional setState, no Set dep)
   // so the memoized FilterPill children re-render only when their own `pressed`
   // flips, not on every keystroke.
@@ -336,6 +418,13 @@ export function StrategyBrowseDrawer({
       name: s.name,
       markets: s.markets,
       strategy_types: s.strategy_types,
+      // Phase 152 (SCEN-02) — construction site 4-of-4 for an AddedStrategy
+      // payload, and the only one this file's suite can reach: the composer
+      // suite module-mocks this drawer away, so a drop here reddens NO test
+      // over there. Straight pass-through by design — `undefined` stays
+      // `undefined` (never `?? false`, never a default): a fabricated boolean
+      // would render a "Yours" chip, or deny one, on no evidence.
+      isOwn: s.isOwn,
     });
     setRecentlyAdded((prev) => {
       const next = new Set(prev);
@@ -556,12 +645,73 @@ export function StrategyBrowseDrawer({
                             Example
                           </span>
                         )}
+                        {/* Phase 152 (SCEN-02, D-4) — ownership chip on the
+                            viewer's OWN rows. Parity with the composer-row chip
+                            (152-05) via the SAME component: one recipe, two
+                            sites, so ownership can never look like two
+                            different things.
+
+                            It is NOT a substitute for the SCEN-05 dedup line
+                            below — both rows of the founder's duplicate are own
+                            rows, so a chip on each disambiguates nothing.
+
+                            Gate is `=== true`, never `!== false`: on the pre-152
+                            wire shape `isOwn` is absent, and absent means
+                            UNKNOWN, not "not yours". Testid sits outside the
+                            `browse-add-` family (PR #620). */}
+                        {s.isOwn === true && (
+                          <YoursChip
+                            data-testid={`browse-yours-${s.id}`}
+                            className="shrink-0"
+                          />
+                        )}
                       </div>
                       <div className="mt-1 text-xs text-text-muted">
                         {s.codename ?? ""}
                         {s.codename && s.markets.length > 0 ? " · " : ""}
                         {s.markets.join(" · ")}
                       </div>
+                      {/* Phase 152 (SCEN-05) — own-vs-own duplicate
+                          disambiguation. A second sibling of the codename line
+                          above, same recipe, muted: a duplicate name is a fact
+                          to resolve, not an error, so no warning tint.
+
+                          Three independent gates, all required. `isOwn === true`
+                          (never `!== false`) is defence in depth — the route
+                          already withholds created_at/status from third-party
+                          rows, and neither fence trusts the other. The
+                          `created_at` typeof check keeps the pre-152 wire shape
+                          rendering NOTHING rather than "Created Invalid Date".
+
+                          D-1: there is deliberately no "{N} keys" segment. It
+                          would cost a second query per drawer open, and
+                          created_at alone already resolves the founder's real
+                          case (two private rows 15 days apart) — UI-SPEC's own
+                          omit-when-absent branch over inventing a claim.
+
+                          Testid is OUTSIDE the `browse-add-` family — see the
+                          PR #620 rationale below. */}
+                      {s.isOwn === true &&
+                        typeof s.created_at === "string" &&
+                        ownNameCollisions.has(
+                          normalizeStrategyName(s.name),
+                        ) && (
+                          <div
+                            className="mt-1 text-xs text-text-muted"
+                            data-testid={`browse-dedup-${s.id}`}
+                          >
+                            {`Created ${new Date(
+                              s.created_at,
+                            ).toLocaleDateString("en-US", {
+                              month: "short",
+                              day: "numeric",
+                              year: "numeric",
+                            })}`}
+                            {typeof s.status === "string" && s.status.length > 0
+                              ? ` · ${productCaseStatus(s.status)}`
+                              : ""}
+                          </div>
+                        )}
                       <span
                         className={`mt-2 inline-block rounded px-2 py-0.5 text-fixed-11 font-medium ${TIER_CLASS[tier]}`}
                         style={{ background: TIER_BG[tier] }}

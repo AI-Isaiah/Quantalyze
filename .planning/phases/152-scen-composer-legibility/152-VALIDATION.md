@@ -59,7 +59,19 @@ re-observed. The owning task records the observation.
 | SC1 — ownership wired through the persisted schema | SCEN-02 | Delete `isOwn` from `addedStrategySchema` (leave the TS interface) | strip-guard `parsed.data.addedStrategies[0].isOwn` (scenario-state.test.ts, populated fixture) | 152-02 T2 | Observed ✅ RED then GREEN (2026-08-07) |
 | SC2 — row opens richer detail | SCEN-03 | Neuter the name-button toggle (onClick sets `null` unconditionally) | SCEN-03 expand test + "Enter/Space on the focused strategy-name button" tests | 152-06 T2 | ⬜ |
 | SC3 — numbers labelled, notional honest | SCEN-04 | Apply the remedy `title` to the DERIVED notional branch too (unconditional title) | derived-title-byte-verbatim test (SCEN-04 honest notional describe) | 152-03 T2 | ✅ Observed 2026-08-07 — `title={NOTIONAL_UNAVAILABLE_NOTE}` unconditional → "SCEN-04 honest notional (derived)" RED (`expected 'Notional needs live book equity…' to be 'Notional = equity × blend share…'`); reverted → 263/263 green |
-| SC4 — no unresolvable browse duplicate | SCEN-05 | Drop the `isOwn === true` term from the collision-set builder | two-third-party-rows-get-no-line test (StrategyBrowseDrawer dedup describe) | 152-04 T2 | ⬜ |
+| SC4 — no unresolvable browse duplicate | SCEN-05 | Drop the `isOwn === true` term from the collision-set builder | "a lone own row whose name matches TWO third-party rows gets no line" (StrategyBrowseDrawer SCEN-05 dedup describe) | 152-04 T2 | ✅ Observed 2026-08-07 — dropping `if (s.isOwn !== true) continue;` from pass 1 → RED (`browse-dedup-s-mix-own` rendered "Created Aug 4, 2026 · Private" where the test expects null); reverted from a scratchpad snapshot (sha verified identical) → 40/40 green |
+
+**SC4 target correction (152-04 execution, 2026-08-07).** The plan named the
+"two third-party rows get no line" test as the SC4 RED target. That test cannot
+go RED under a builder-only mutation: the RENDER gate independently carries
+`s.isOwn === true`, so third-party rows render nothing whether or not the
+builder counts them — the mutation would have been observed GREEN and proven
+nothing. A discriminating fixture was added instead — **one own row plus two
+third-party rows all sharing a name** — where the own row passes every render-gate
+term on its own merits and only the builder's own-only count keeps its line off.
+Both tests are retained: the third-party pair (carrying a deliberately hostile
+`created_at`/`status` the route would never emit) pins the render gate, and the
+mixed fixture pins the builder.
 
 Additional design-time falsifiers (not separately observed — enforced by test
 construction, see RESEARCH `### Falsifiers`): `.nullish()`→`.boolean()` (null
