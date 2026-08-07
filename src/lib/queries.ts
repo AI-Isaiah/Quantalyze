@@ -3482,6 +3482,12 @@ export const getMyAllocationDashboard = cache(
       // userId)` (NOT allocator_id): on this table the owner column is
       // `user_id`, mirroring getStrategylessActiveKeys:426. `status` is
       // projected so the W-4 archived filter stays decidable in-memory.
+      // ⚠️ The `.eq` is LOAD-BEARING, not defence-in-depth: `strategies_read`
+      // RLS is `status='published' OR user_id = auth.uid()` (migration
+      // 20260405061912:28), so dropping it would return the entire PUBLISHED
+      // universe and mark every allocator key that any manager anywhere has
+      // linked as manager-side — closing this allocator's book gate on keys
+      // they own. Own-only, always.
       supabase
         .from("strategies")
         .select("id, api_key_id, status")
