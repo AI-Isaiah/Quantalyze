@@ -364,6 +364,83 @@ describe("T_D10 — fetch fires the right URL/body on pre-flight Submit", () => 
     vi.unstubAllGlobals();
   });
 
+  // Phase 151 / AUM-01 — `manual_aum_usd`. The allocator's manually-entered
+  // portfolio AUM, forwarded so a blank-slate commit (no allocator_holdings
+  // rows on the server) can still size its audit row. It rides the SAME
+  // conditional-spread discipline as init_holdings_fingerprint above: adding a
+  // key unconditionally would change the body bytes — and therefore the
+  // idempotency request_hash — for every caller that never sets it (T-151-21).
+  //
+  // The value is CLIENT-ASSERTED. The route labels it `client_manual_aum` and
+  // never lets it outrank a server-verified figure (NEW-C18-04).
+  it("includes manual_aum_usd in the body when the prop is supplied", async () => {
+    const fetchSpy = vi.fn(
+      async (_url: string, _init: { method: string; body: string }) =>
+        new Response(
+          JSON.stringify({ recorded: 1, results: [{ index: 0 }], errors: [] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={NOOP}
+        manualAumUsd={2_000_000}
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(body.manual_aum_usd).toBe(2_000_000);
+
+    vi.unstubAllGlobals();
+  });
+
+  it("OMITS manual_aum_usd from the body when the prop is absent (request_hash unchanged for every existing caller)", async () => {
+    const fetchSpy = vi.fn(
+      async (_url: string, _init: { method: string; body: string }) =>
+        new Response(
+          JSON.stringify({ recorded: 1, results: [{ index: 0 }], errors: [] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(
+      <ScenarioCommitDrawer
+        isOpen
+        onClose={NOOP}
+        diffs={[VR_DIFF]}
+        onSubmitSuccess={NOOP}
+        // manualAumUsd omitted -> the key must not appear in the body at all.
+        // A book-mode commit that never touched the AUM field lands here, and
+        // its audit must stay on the SERVER path.
+      />,
+    );
+    fillRequiredInputs([VR_DIFF]);
+    fireEvent.click(screen.getByTestId("commit-drawer-submit"));
+    const preflightBtns = screen.getAllByRole("button", { name: /^Submit$/i });
+    fireEvent.click(preflightBtns[preflightBtns.length - 1]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect("manual_aum_usd" in body).toBe(false);
+
+    vi.unstubAllGlobals();
+  });
+
   // B11 / NEW-C18-10: a 409 portfolio_fingerprint_stale response must render the
   // route's reload guidance (NOT a "malformed response" error), must NOT fire
   // onSubmitSuccess, and must disable the in-drawer retry (the frozen draft

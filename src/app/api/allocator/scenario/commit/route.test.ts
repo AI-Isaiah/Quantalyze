@@ -1611,3 +1611,179 @@ describe("T_R24 — B11 / NEW-C18-10 portfolio-fingerprint precondition", () => 
     expect(emit).not.toHaveBeenCalled();
   });
 });
+
+// ===========================================================================
+// Phase 151 / AUM-01 — `manual_aum_usd`, the client-asserted AUM sidecar.
+//
+// A blank-slate scenario has NO allocator_holdings rows, so the NEW-C18-04
+// audit recompute had no denominator: every commit from the primary use case
+// landed as `_size_source: "no_holdings_snapshot"` with a NULL size — a
+// financial audit row that recorded the decision but not its magnitude.
+//
+// The fix is ADDITIVE and deliberately labelled. `manual_aum_usd` is a
+// CLIENT-ASSERTED number: it may size the audit row only under its own
+// `client_manual_aum` sentinel, and it NEVER outranks the server-recomputed
+// figure when allocator_holdings can supply one (NEW-C18-04 preserved).
+// ===========================================================================
+
+describe("AUM-01 — manual_aum_usd client-asserted AUM sidecar", () => {
+  function getAuditMetadata(call: number): Record<string, unknown> {
+    const calls = (emit as unknown as { mock: { calls: unknown[][] } })
+      .mock.calls as Array<[unknown, { metadata: Record<string, unknown> }]>;
+    return calls[call][1].metadata;
+  }
+  function okAdd() {
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          {
+            index: 0,
+            match_decision_id: "md-1",
+            bridge_outcome_id: "bo-1",
+            kind: "voluntary_add",
+          },
+        ],
+      },
+      error: null,
+    });
+  }
+
+  // Test 8 — THE FIELD MUST BE DECLARED (assumption A5). `CommitBodySchema` is
+  // a non-strict z.object, so an UNDECLARED key is silently STRIPPED: the route
+  // would 200 and the audit would still say "no_holdings_snapshot", with no
+  // error anywhere to explain the loss. Declaring it is what makes it arrive —
+  // and declaring it is also what bounds it (T-151-19).
+  it("Test 8a: a declared manual_aum_usd survives parsing and reaches the audit builder", async () => {
+    holdingsFixture = [];
+    okAdd();
+    const res = await POST(
+      mkReq({
+        diffs: [{ ...VALID_VA, percent_allocated: 25 }],
+        manual_aum_usd: 2_000_000,
+      }),
+    );
+    expect(res.status).toBe(200);
+    // Not stripped: the sentinel can only be reached by a value that arrived.
+    expect(getAuditMetadata(0)._size_source).toBe("client_manual_aum");
+  });
+
+  it("Test 8b: out-of-bounds manual_aum_usd is rejected with 400 (client-controlled number at a trust boundary)", async () => {
+    // -1 (a typo or a hostile payload), 0 (a zero is a claim, not a size),
+    // `null` (what JSON.stringify writes for a NaN), and 1e12 (the
+    // MAGNITUDE_CAPS.MAX_DOLLAR_VALUE_USD ceiling, exclusive) all refuse.
+    for (const bad of [-1, 0, null, 1e12, "2000000"]) {
+      const res = await POST(
+        mkReq({ diffs: [VALID_VA], manual_aum_usd: bad }),
+      );
+      expect(res.status).toBe(400);
+      // A refused body must not have committed anything.
+      expect(mockRpc).not.toHaveBeenCalled();
+    }
+  });
+
+  // Test 9 — THE HOLE THIS CLOSES. Blank-mode commit: zero holdings rows, a
+  // manual AUM, a 25% add. Pre-fix this audited as no_holdings_snapshot / null.
+  it("Test 9 (blank-mode commit): zero holdings + manual AUM sizes the audit row under the client_manual_aum sentinel", async () => {
+    holdingsFixture = [];
+    okAdd();
+
+    const res = await POST(
+      mkReq({
+        diffs: [
+          { ...VALID_VA, percent_allocated: 25, size_at_decision_usd: 500_000 },
+        ],
+        manual_aum_usd: 2_000_000,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    // 25% of 2,000,000 = 500,000 — hand-computed.
+    expect(meta.size_at_decision_usd).toBe(500_000);
+    expect(meta._size_source).toBe("client_manual_aum");
+    // The client sidecar column is untouched by this phase.
+    expect(meta.size_at_decision_usd_client).toBe(500_000);
+  });
+
+  // Test 10 — SERVER TRUTH PRECEDENCE (NEW-C18-04, T-151-18). When
+  // allocator_holdings CAN supply a denominator, the server's recompute wins
+  // and the client's assertion is ignored entirely. Flipping the branch order
+  // to prefer the client value turns this RED — the SC1 falsifier-ledger
+  // mutation, observed once during 151-07 Task 2 and reverted.
+  it("Test 10 (server truth precedence): a real holdings snapshot outranks manual_aum_usd — the sentinel stays server_aum", async () => {
+    // 80k + 120k = 200,000 of real, server-verified AUM.
+    holdingsFixture = [
+      {
+        venue: "binance",
+        symbol: "BTC",
+        holding_type: "spot",
+        value_usd: 80_000,
+        asof: "2026-08-07",
+      },
+      {
+        venue: "binance",
+        symbol: "ETH",
+        holding_type: "spot",
+        value_usd: 120_000,
+        asof: "2026-08-07",
+      },
+    ];
+    okAdd();
+
+    const res = await POST(
+      mkReq({
+        diffs: [
+          { ...VALID_VA, percent_allocated: 5, size_at_decision_usd: 100_000 },
+        ],
+        // A client asserting a 10× larger book than custody shows.
+        manual_aum_usd: 2_000_000,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    expect(meta._size_source).toBe("server_aum");
+    // 5% × 200,000 = 10,000 (server). NOT 5% × 2,000,000 = 100,000 (client).
+    expect(meta.size_at_decision_usd).toBe(10_000);
+    expect(meta.size_at_decision_usd_client).toBe(100_000);
+  });
+
+  // Test 11 — ABSENT FIELD ⇒ PRE-151 BEHAVIOUR, byte-identical. Every caller
+  // that never learns about this field keeps the audit path it has today.
+  it("Test 11 (absent field): no manual_aum_usd + empty holdings audits exactly as it did before the phase", async () => {
+    holdingsFixture = [];
+    okAdd();
+
+    const res = await POST(mkReq({ diffs: [VALID_VA] }));
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    expect(meta._size_source).toBe("no_holdings_snapshot");
+    expect(meta.size_at_decision_usd).toBeNull();
+    expect(meta.size_at_decision_usd_client).toBe(VALID_VA.size_at_decision_usd);
+  });
+
+  // T-151-21 — idempotency drift. The request_hash binds an Idempotency-Key to
+  // the exact bytes of the body, so a field added UNCONDITIONALLY on the client
+  // would change the hash for every caller. Two identical field-less bodies
+  // must still hash to the same value the pre-phase body did; the drawer's
+  // conditional spread is what guarantees the bytes (pinned in the drawer's own
+  // suite), and this pins that the ROUTE reads the same shape either way.
+  it("T-151-21: the same key + the same field-less body is the same logical request (hash unchanged)", async () => {
+    holdingsFixture = [];
+    const body = { diffs: [VALID_VA] };
+    okAdd();
+    const res1 = await POST(mkReqWithIdempotency(body, "abcdefghijklmnopqrstuvwx"));
+    expect(res1.status).toBe(200);
+    const hash1 = mockRpc.mock.calls[0][1].p_request_hash;
+
+    okAdd();
+    const res2 = await POST(mkReqWithIdempotency(body, "abcdefghijklmnopqrstuvwx"));
+    expect(res2.status).toBe(200);
+    const hash2 = mockRpc.mock.calls[1][1].p_request_hash;
+
+    expect(hash1).toEqual(expect.any(String));
+    expect(hash2).toBe(hash1);
+  });
+});
