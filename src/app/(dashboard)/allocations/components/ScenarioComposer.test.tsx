@@ -12599,6 +12599,96 @@ describe("ScenarioComposer — SCEN-04 header (Phase 152)", () => {
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
+
+  // -------------------------------------------------------------------------
+  // 151/152 UAT (founder, 2026-08-07) — the PER-KEY column-label strip.
+  //
+  // This SUPERSEDES the 152 scope call that per-key rows "deliberately get
+  // none". On the founder's deribit book those rows read `0.000` and `1` with
+  // nothing on screen to say what either number was — the same complaint
+  // SCEN-04 fixed for added rows, one row-type short.
+  //
+  // Phase 152 declined a SHARED header for a real reason (the two row types
+  // have different column sets, so one strip would drift ~104px), and that
+  // reason still stands — hence a SECOND variant sized to the per-key cluster:
+  // WEIGHT · MODE · LEV · NOTIONAL, with NO USD column and NO trailing ×
+  // spacer, because a per-key row has neither control.
+  // -------------------------------------------------------------------------
+  it("151 UAT per-key header (copy): exactly four labels — WEIGHT, MODE, LEV, NOTIONAL — in DOM order, and NO USD", () => {
+    renderScen(bookedPayload());
+
+    const header = screen.getByTestId("scenario-perkey-header");
+    const labels = within(header)
+      .getAllByTestId("scenario-perkey-header-label")
+      .map((el) => el.textContent);
+    // USD is the added-row-only column: a per-key row has no dollar input, so
+    // labelling one would point at nothing.
+    expect(labels).toEqual(["WEIGHT", "MODE", "LEV", "NOTIONAL"]);
+    expect(labels).not.toContain("USD");
+    // Column alignment carries the separation — no competing separator glyph.
+    expect(labels.join("")).not.toContain("·");
+  });
+
+  it("151 UAT per-key header (render rule): renders once above the per-key group, and NOT when there are no per-key rows", () => {
+    renderScen(bookedPayload());
+    // Non-vacuity: per-key rows really are on screen.
+    expect(
+      document.querySelectorAll(`[data-scope-ref="${S_K1}"]`).length,
+    ).toBeGreaterThan(0);
+    expect(screen.getAllByTestId("scenario-perkey-header")).toHaveLength(1);
+
+    // The strip sits immediately BEFORE the first per-key row.
+    const header = screen.getByTestId("scenario-perkey-header");
+    expect(header.nextElementSibling?.getAttribute("data-testid")).toBe(
+      "scenario-constituent-perkey",
+    );
+
+    // A book-less (blank-mode) allocator has no per-key rows → no strip.
+    cleanup();
+    renderScen(
+      makePayload({
+        holdingsSummary: [],
+        apiKeys: [],
+        perKeyReturnsByApiKeyId: {},
+        perKeyDailiesGateSatisfied: false,
+        eligibleApiKeyIds: [],
+        allocatorEligibleApiKeyIds: [],
+        contributingApiKeyIds: [],
+        bookEntryGateSatisfied: false,
+      }),
+    );
+    expect(screen.queryByTestId("scenario-perkey-header")).toBeNull();
+  });
+
+  it("151 UAT per-key header (a11y): aria-hidden, so it never double-labels controls that already name themselves", () => {
+    renderScen(bookedPayload());
+
+    const header = screen.getByTestId("scenario-perkey-header");
+    expect(header.getAttribute("aria-hidden")).toBe("true");
+    // The per-key weight/leverage inputs carry their own sr-only labels, so the
+    // eyebrow must not become a competing accessible name.
+    expect(screen.queryByLabelText("WEIGHT")).toBeNull();
+    expect(screen.queryByLabelText("LEV")).toBeNull();
+  });
+
+  it("151 UAT per-key header (independence): the added header still renders its own five labels alongside it", () => {
+    renderScen(bookedPayload());
+    add(S_A, "Scen04 Strat A");
+
+    // Both strips coexist, each sized to its own cluster — the drift the 152
+    // scope call was protecting against is avoided by having TWO, not by having
+    // none.
+    expect(
+      within(screen.getByTestId("scenario-perkey-header"))
+        .getAllByTestId("scenario-perkey-header-label")
+        .map((el) => el.textContent),
+    ).toEqual(["WEIGHT", "MODE", "LEV", "NOTIONAL"]);
+    expect(
+      within(screen.getByTestId("scenario-added-header"))
+        .getAllByTestId("scenario-added-header-label")
+        .map((el) => el.textContent),
+    ).toEqual(["WEIGHT", "USD", "MODE", "LEV", "NOTIONAL"]);
+  });
 });
 
 // ---------------------------------------------------------------------------

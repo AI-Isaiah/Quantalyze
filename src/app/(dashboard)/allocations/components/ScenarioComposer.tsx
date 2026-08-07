@@ -6326,6 +6326,73 @@ function CompositionList({
             symbol/coin (Pitfall 3, CONSTIT-04 grep gate). A per-key source still
             has NO remove button (it is toggled, not removed). Per-coin holdings
             are NOT rendered — they live on the Holdings tab (CONSTIT-03). */}
+        {/* 151/152 UAT (founder, 2026-08-07) — the PER-KEY column-label strip.
+            This SUPERSEDES the 152 scope call that per-key rows "deliberately
+            get none": on the founder's deribit book the row read `0.000` and
+            `1` with nothing to say what either number was. Phase 152 declined a
+            SHARED header because the two row types have different column sets
+            (a per-key row has no dollar input and no remove button, so one strip
+            would drift ~104px); the answer is a SECOND variant sized to THIS
+            cluster — WEIGHT (w-20) · MODE (invisible-sizer) · LEV (w-16) ·
+            NOTIONAL (w-20), no USD column and no trailing × spacer.
+
+            Same recipe as `scenario-added-header` otherwise: the mono eyebrow,
+            the row's horizontal inset without a rule, and aria-hidden (every
+            control below already carries its own accessible name, so announcing
+            the strip would double-label the group).
+
+            Pitfall 3 carries over verbatim: the strip is sized for the DEFAULT
+            Leverage mode. A row switched to Target max-DD injects an extra w-16
+            drawdown sub-control and drifts the labels on THAT row only — do not
+            "fix" per-row; a conditional header would relabel columns as the user
+            toggles. */}
+        {perKeySources.length > 0 && (
+          <li
+            aria-hidden="true"
+            data-testid="scenario-perkey-header"
+            className="mb-1 border border-transparent px-3"
+          >
+            <div className="flex w-full items-center justify-between gap-3">
+              {/* Spacer over the name cluster — the labels describe the numeric
+                  columns only. */}
+              <span />
+              <div className="flex items-center gap-2 font-mono text-fixed-10 uppercase tracking-[0.18em] text-text-muted">
+                <span
+                  data-testid="scenario-perkey-header-label"
+                  className="w-20 text-right"
+                >
+                  WEIGHT
+                </span>
+                {/* MODE has no fixed width — the toggle is content-sized. The
+                    invisible-sizer idiom reproduces the DEFAULT toggle's box
+                    byte-for-byte (renderModeToggle's border/padding/type classes
+                    around an invisible "Leverage") and overlays the label, so
+                    the column cannot drift from the live control. */}
+                <span className="relative shrink-0 rounded border border-transparent px-2 py-1 font-metric text-fixed-11 uppercase tracking-wider">
+                  <span className="invisible">Leverage</span>
+                  <span
+                    data-testid="scenario-perkey-header-label"
+                    className="absolute inset-0 flex items-center justify-center font-mono text-fixed-10 uppercase tracking-[0.18em] text-text-muted"
+                  >
+                    MODE
+                  </span>
+                </span>
+                <span
+                  data-testid="scenario-perkey-header-label"
+                  className="w-16 text-right"
+                >
+                  LEV
+                </span>
+                <span
+                  data-testid="scenario-perkey-header-label"
+                  className="w-20 text-right"
+                >
+                  NOTIONAL
+                </span>
+              </div>
+            </div>
+          </li>
+        )}
         {perKeySources.map((k) => {
           const included = draft.toggleByScopeRef[k.id] !== false;
           const { exchange, nickname, maskedTail } = dataSourceLabel(k);
