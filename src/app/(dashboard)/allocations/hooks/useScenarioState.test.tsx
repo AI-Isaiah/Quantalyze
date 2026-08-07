@@ -535,6 +535,58 @@ describe("useScenarioState", () => {
     expect(result.current.diffCount).toBe(1);
   });
 
+  // 151 review WR-06 — `manualAumUsd` is a persisted, commit-affecting draft
+  // field that diffCount counted NOWHERE. Two consequences, both user-facing:
+  // the footer chip reported "0 changes" for a real unsaved edit, and the
+  // composer's `if (scenario.diffCount > 0)` mode-switch guard — whose entire
+  // purpose is "a mode switch can never silently wipe in-progress edits" —
+  // let the switch through, discarding the AUM with no confirmation.
+  it("WR-06 — setting a manual portfolio AUM alone increments diffCount (an unsaved edit is never reported as zero changes)", () => {
+    const { result } = renderHook(() =>
+      useScenarioState({ holdingsSummary: HOLDINGS_3, allocatorId: ALLOCATOR_A }),
+    );
+    expect(result.current.diffCount).toBe(0);
+
+    act(() => {
+      result.current.setManualAum(2_000_000);
+    });
+
+    expect(result.current.draft.manualAumUsd).toBe(2_000_000);
+    expect(result.current.diffCount).toBe(1);
+  });
+
+  it("WR-06 — clearing the manual AUM returns diffCount to zero (the count tracks the FIELD, not a one-way flag)", () => {
+    const { result } = renderHook(() =>
+      useScenarioState({ holdingsSummary: HOLDINGS_3, allocatorId: ALLOCATOR_A }),
+    );
+    act(() => {
+      result.current.setManualAum(2_000_000);
+    });
+    expect(result.current.diffCount).toBe(1);
+
+    act(() => {
+      result.current.setManualAum(undefined);
+    });
+
+    expect(result.current.diffCount).toBe(0);
+  });
+
+  it("WR-06 — the AUM count composes with the others rather than replacing them (AUM + one toggle = 2)", () => {
+    const { result } = renderHook(() =>
+      useScenarioState({ holdingsSummary: HOLDINGS_3, allocatorId: ALLOCATOR_A }),
+    );
+    act(() => {
+      result.current.toggleHolding(REF_BTC);
+    });
+    expect(result.current.diffCount).toBe(1);
+
+    act(() => {
+      result.current.setManualAum(750_000);
+    });
+
+    expect(result.current.diffCount).toBe(2);
+  });
+
   // H-0126 (was H-0124, FLIPPED by B7a-2) — `setWeightOverride` now records the
   // user-touched ref in `userWeightOverrides` (the only writer of that map), so
   // a PURE-REBALANCE (weight edits with no toggle/add) increments diffCount and
