@@ -1053,6 +1053,17 @@ export function ScenarioComposer({
     setLeverageByRef({});
     setTargetModeByRef({});
     setSolveResultByRef({});
+    // 151 UAT / specialist SP-C1 — the AUM seed gate is a FOURTH per-open twin
+    // and belongs on this one seam, not at each call site. It was released only
+    // in `handleReset`, so `openSavedScenario` (which re-seeds every other twin:
+    // leverage here, the window via resetWindowToDefaultOnReopen) left it set.
+    // `hydrateFromSaved` REPLACES the draft, so a touched input kept DISPLAYING
+    // the previous draft's override while every dollar figure on screen came
+    // from the reopened draft — and a bare focus→blur (the WR-04 gesture, which
+    // compares against the COMMITTED text, not the displayed one) then wrote the
+    // stale figure onto the reopened scenario, which "Update portfolio"
+    // persisted. Folded in here so no future open seam can forget it.
+    aumTouchedRef.current = false;
   }, []);
 
   // CONSTIT-03 (Phase 111, locked 2026-07-16) — per-key data-source
@@ -1552,12 +1563,13 @@ export function ScenarioComposer({
     // replaced the draft with the windowless default.) The Phase-57 "sticky by
     // design" rationale covers deselect, not reset.
     resetWindowToDefaultOnReopen();
-    // Phase 151 AUM-01 — release the AUM seed on the SAME seam, for the same
+    // Phase 151 AUM-01 — the AUM seed is released on the SAME seam, for the same
     // reason as the window: `scenario.reset()` drops `draft.manualAumUsd`, so a
     // touched input would keep DISPLAYING an override the fresh draft no longer
     // holds. Un-touching lets the seed effect re-seed from the fresh live sum
-    // (or back to empty in blank mode).
-    aumTouchedRef.current = false;
+    // (or back to empty in blank mode). The write itself now lives in
+    // `resetAllTransientState()` (called below) so the two saved-scenario opens
+    // get it too — see SP-C1 there.
     // CONSTIT-03 — per-key exclusions now live in `scenario.draft.toggleByScopeRef`
     // and are cleared automatically by `scenario.reset()` (draft → default) /
     // `scenario.hydrateFromSaved()` (draft replaced), so no separate ephemeral-map
