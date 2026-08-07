@@ -174,8 +174,11 @@ import {
   getMyWatchlist,
   getStrategyDetailV2,
   derivePhase07Fields,
+  deriveStrategyLinkedKeyIds,
+  deriveStrategylessKeys,
 } from "./queries";
 import { equitySnapshotsToDailyPoints } from "@/lib/allocation-helpers";
+import type { SupportedExchange } from "./utils";
 
 const baseStrategy = {
   id: "strat_123",
@@ -1231,5 +1234,167 @@ describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLI
     );
     // computed_at is suppressed when the curve is not shown.
     expect(result.derivedCurveComputedAt).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 151 / 151-02 Task 1 (AUM-04) — `deriveStrategyLinkedKeyIds`
+// ---------------------------------------------------------------------------
+/**
+ * This is THE manager-role discriminator for the allocator book gate. The
+ * question it answers is a ROLE question — "is this key already feeding a live
+ * strategy the owner runs as a manager?" — never a VENUE question. An
+ * `exchange === "mt5"` predicate is the named wrong-fix class (ROADMAP +
+ * CONTEXT): the founder's three deribit keys are equally manager-side (they
+ * hang off the Alpha Centauri composite), and a future manager-side bybit key
+ * would slip straight through a venue test.
+ *
+ * The fixtures below are the founder's PROD census (2026-08-05): 8 active keys
+ * → 4 live strategies → exactly 2 bare allocator keys. Three strategies carry
+ * their key directly (`strategies.api_key_id`); Alpha Centauri carries three
+ * keys through `strategy_keys` and has `api_key_id: null`. An `api_key_id`-only
+ * implementation returns 3 members instead of 6 and the census test goes RED —
+ * and, because AUM-04 SUBTRACTS this set from the allocator's eligible keys, a
+ * discriminator that over-covers would silently close the book gate on keys the
+ * allocator can legitimately reach.
+ */
+type CensusKeyFixture = {
+  id: string;
+  exchange: SupportedExchange;
+  label: string;
+  is_active: boolean;
+  sync_status: string | null;
+  disconnected_at: string | null;
+};
+
+/** An eligible key per `isPerKeyDailiesEligibleKey`. */
+function censusKey(id: string, exchange: SupportedExchange): CensusKeyFixture {
+  return {
+    id,
+    exchange,
+    label: `Key ${id}`,
+    is_active: true,
+    sync_status: "connected",
+    disconnected_at: null,
+  };
+}
+
+const CENSUS_KEYS: CensusKeyFixture[] = [
+  censusKey("k-bybit", "bybit"),
+  censusKey("k-okx", "okx"),
+  censusKey("k-deribit-1", "deribit"),
+  censusKey("k-deribit-2", "deribit"),
+  censusKey("k-deribit-3", "deribit"),
+  censusKey("k-mt5-1", "mt5"),
+  censusKey("k-mt5-2", "mt5"),
+  censusKey("k-mt5-3", "mt5"),
+];
+
+const CENSUS_STRATEGIES: Array<{
+  id: string;
+  api_key_id: string | null;
+  status: string;
+}> = [
+  { id: "mt5-a", api_key_id: "k-mt5-1", status: "private" },
+  { id: "mt5-b", api_key_id: "k-mt5-2", status: "published" },
+  { id: "mt5-c", api_key_id: "k-mt5-3", status: "draft" },
+  // Alpha Centauri — the 3-key deribit composite (no direct column).
+  { id: "alpha", api_key_id: null, status: "private" },
+];
+
+const CENSUS_LINKS: Array<{ strategy_id: string; api_key_id: string }> = [
+  { strategy_id: "alpha", api_key_id: "k-deribit-1" },
+  { strategy_id: "alpha", api_key_id: "k-deribit-2" },
+  { strategy_id: "alpha", api_key_id: "k-deribit-3" },
+];
+
+describe("deriveStrategyLinkedKeyIds — the shared manager-role discriminator (Phase 151 / AUM-04)", () => {
+  it("covers BOTH link forms: the direct api_key_id column AND a strategy_keys row", () => {
+    const covered = deriveStrategyLinkedKeyIds(
+      [
+        { id: "s1", api_key_id: "k1", status: "active" },
+        // The composite: no direct column, reachable only via strategy_keys.
+        { id: "s2", api_key_id: null, status: "private" },
+      ],
+      [{ strategy_id: "s2", api_key_id: "k2" }],
+    );
+
+    expect(covered.has("k1")).toBe(true);
+    expect(covered.has("k2")).toBe(true);
+    expect(covered.size).toBe(2);
+  });
+
+  it("archived is NOT coverage (W-4 ruling) — via either link form", () => {
+    // Direct link to an archived strategy.
+    const direct = deriveStrategyLinkedKeyIds(
+      [{ id: "s1", api_key_id: "k1", status: "archived" }],
+      [],
+    );
+    expect(direct.has("k1")).toBe(false);
+
+    // Composite link to an archived strategy.
+    const composite = deriveStrategyLinkedKeyIds(
+      [{ id: "alpha", api_key_id: null, status: "archived" }],
+      [{ strategy_id: "alpha", api_key_id: "k4" }],
+    );
+    expect(composite.has("k4")).toBe(false);
+
+    // Controls: the byte-identical fixtures at a LIVE status ARE coverage —
+    // without this pair both assertions above would also pass on an
+    // implementation that ignored every strategy row.
+    expect(
+      deriveStrategyLinkedKeyIds(
+        [{ id: "s1", api_key_id: "k1", status: "private" }],
+        [],
+      ).has("k1"),
+    ).toBe(true);
+    expect(
+      deriveStrategyLinkedKeyIds(
+        [{ id: "alpha", api_key_id: null, status: "private" }],
+        [{ strategy_id: "alpha", api_key_id: "k4" }],
+      ).has("k4"),
+    ).toBe(true);
+  });
+
+  it("drops a strategy_keys row whose strategy_id is not in the live-strategy set", () => {
+    // Defence in depth: the reads are owner-scoped, but a dangling link must
+    // never suppress a key's allocator eligibility.
+    const covered = deriveStrategyLinkedKeyIds(
+      [{ id: "s1", api_key_id: null, status: "private" }],
+      [{ strategy_id: "someone-elses", api_key_id: "k1" }],
+    );
+
+    expect(covered.has("k1")).toBe(false);
+    expect(covered.size).toBe(0);
+  });
+
+  it("founder census: 6 of 8 keys are manager-side; the bybit + okx allocator keys are NOT", () => {
+    const covered = deriveStrategyLinkedKeyIds(CENSUS_STRATEGIES, CENSUS_LINKS);
+
+    expect(covered.size).toBe(6);
+    expect([...covered].sort()).toEqual([
+      "k-deribit-1",
+      "k-deribit-2",
+      "k-deribit-3",
+      "k-mt5-1",
+      "k-mt5-2",
+      "k-mt5-3",
+    ]);
+    // The falsifier that matters for AUM-04: the allocator's own two keys must
+    // survive the subtraction, or the book gate can never open.
+    expect(covered.has("k-bybit")).toBe(false);
+    expect(covered.has("k-okx")).toBe(false);
+  });
+
+  it("no drift: deriveStrategylessKeys still returns exactly the 2 bare census keys after the extraction", () => {
+    // The extraction changed ZERO behavior for the /my-strategies consumer —
+    // both views of "strategy-linked" now come from one join and cannot drift.
+    const result = deriveStrategylessKeys(
+      CENSUS_KEYS,
+      CENSUS_STRATEGIES,
+      CENSUS_LINKS,
+    );
+
+    expect(result.map((k) => k.id)).toEqual(["k-bybit", "k-okx"]);
   });
 });
