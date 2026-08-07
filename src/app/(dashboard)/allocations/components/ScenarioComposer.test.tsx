@@ -11025,4 +11025,191 @@ describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () 
     await saveNewAum4("No contributing keys", fetchMock, 2);
     expect(aum4SavedDraft(fetchMock, 1).memberKeyIds).toEqual([]);
   });
+
+  // --- Task 2: the narrowed row basis + the partial-book note ---------------
+
+  const FOUR = ["key-a", "key-b", "key-c", "key-d"];
+  const SIX_MANAGER = ["mgr-1", "mgr-2", "mgr-3", "mgr-4", "mgr-5", "mgr-6"];
+  /** The UI-SPEC copy template, typed out here rather than imported — an oracle
+   *  that reads the source's own string would pass against any string. */
+  const PARTIAL_NOTE_COPY =
+    "2 of 4 keys not yet contributing — no per-key history yet.";
+
+  it("AUM-04 Test 5: only CONTRIBUTING keys get a toggle row — a non-contributing key renders no dead 0.000 row (Pitfall 4)", () => {
+    const { payload } = partialBook({
+      allocatorEligible: FOUR,
+      contributing: ["key-a", "key-b"],
+    });
+    renderAum4(payload);
+
+    const rows = screen.getAllByTestId("scenario-constituent-perkey");
+    expect(rows).toHaveLength(2);
+    expect(
+      rows.map((r) => r.getAttribute("data-scope-ref")).sort(),
+    ).toEqual(["key-a", "key-b"]);
+    // A non-contributing key has NO engine unit, so a toggle row for it would
+    // show a dead 0.000 weight and skew the bookEquity basis (which sums over
+    // exactly this set). Its weight/leverage inputs must not exist at all.
+    expect(document.querySelector("#weight-key-c")).toBeNull();
+    expect(document.querySelector("#leverage-key-c")).toBeNull();
+    expect(document.querySelector("#weight-key-d")).toBeNull();
+  });
+
+  it("AUM-04 Test 5b: the ENGINE basis equals the toggle-row basis — a manager key with a per-key series never rides the projection undisclosed (DSRC-03)", () => {
+    const { payload } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+      managerKeys: ["mgr-1", "mgr-2"],
+    });
+    renderAum4(payload);
+
+    expect(
+      screen
+        .getAllByTestId("scenario-constituent-perkey")
+        .map((r) => r.getAttribute("data-scope-ref")),
+    ).toEqual(["key-a"]);
+    // DSRC-03's stated invariant: blend ONLY the keys that get a toggle row.
+    // The manager keys ARE in the role-blind `eligibleApiKeyIds` AND do carry a
+    // per-key series, so an engine still filtering on the legacy eligible set
+    // would blend two undisclosed, untoggleable sources into the projection.
+    const engineKeyUnits = new Set<string>();
+    for (const call of computeScenarioStateArgs) {
+      for (const id of call.strategyIds) {
+        if (id.startsWith("key-") || id.startsWith("mgr-")) {
+          engineKeyUnits.add(id);
+        }
+      }
+    }
+    expect([...engineKeyUnits].sort()).toEqual(["key-a"]);
+  });
+
+  it("AUM-04 Test 6: the partial-book note carries the exact UI-SPEC copy in MUTED steady-state styling — never amber, never role=alert", () => {
+    const { payload } = partialBook({
+      allocatorEligible: FOUR,
+      contributing: ["key-a", "key-b"],
+    });
+    renderAum4(payload);
+
+    const note = screen.getByTestId("scenario-partial-book-note");
+    expect(note.textContent).toBe(PARTIAL_NOTE_COPY);
+    // UI-SPEC color gate: a key with no per-key history is an honest STEADY
+    // STATE — not a recoverable transient (amber) and not a failure (red).
+    expect(note.className).toContain("text-text-muted");
+    expect(note.className).not.toMatch(/warning|amber|danger|destructive/i);
+    // Steady-state disclosure, not an event: plain static text.
+    expect(note).not.toHaveAttribute("role");
+    expect(note).not.toHaveAttribute("aria-live");
+  });
+
+  it("AUM-04 Test 7: manager keys are in NEITHER count — six strategy-linked keys never turn '2 of 4' into '2 of 10'", () => {
+    const { payload } = partialBook({
+      allocatorEligible: FOUR,
+      contributing: ["key-a", "key-b"],
+      managerKeys: SIX_MANAGER,
+    });
+    // The role-BLIND legacy set carries all ten; the note must read neither it
+    // nor payload.apiKeys. "Not yet contributing" must never describe a key that
+    // will never contribute (UI-SPEC partial-book invariant).
+    expect(payload.eligibleApiKeyIds).toHaveLength(10);
+    expect(payload.apiKeys).toHaveLength(10);
+
+    renderAum4(payload);
+
+    expect(
+      screen.getByTestId("scenario-partial-book-note").textContent,
+    ).toBe(PARTIAL_NOTE_COPY);
+  });
+
+  it("AUM-04 Test 8: the note is absent when every allocator key contributes, and absent in blank mode (book-mode-only, never silent otherwise)", () => {
+    const { payload: full } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a", "key-b"],
+    });
+    renderAum4(full);
+    expect(
+      screen.queryByTestId("scenario-partial-book-note"),
+    ).not.toBeInTheDocument();
+
+    cleanup();
+    lsStore.clear();
+
+    const { payload: partial } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+    });
+    renderAum4(partial);
+    // Non-vacuity: the same fixture DOES show the note in book mode …
+    expect(
+      screen.getByTestId("scenario-partial-book-note"),
+    ).toBeInTheDocument();
+    // … and switching to blank retires it (a clean draft switches immediately).
+    fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
+    expect(
+      screen.queryByTestId("scenario-partial-book-note"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("AUM-04 Test 9: the old whole-book-blend fallback yields to the partial-book note — it renders ONLY when no key contributes", () => {
+    const { payload: partial } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+    });
+    renderAum4(partial);
+    // Its copy ("this projection blends your whole book") is FALSE under a
+    // partial book — the projection blends exactly the contributing keys.
+    expect(
+      screen.queryByTestId("scenario-constituent-fallback"),
+    ).not.toBeInTheDocument();
+
+    cleanup();
+    lsStore.clear();
+
+    const { payload: none } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: [],
+    });
+    renderAum4(none);
+    expect(
+      screen.getByTestId("scenario-constituent-fallback"),
+    ).toBeInTheDocument();
+  });
+
+  it("AUM-04 Test 10 (WEIGHTS-02 class): a stored leverage override on a NOT-YET-contributing allocator key SURVIVES Save", async () => {
+    const fetchMock = aum4OkSave();
+    vi.stubGlobal("fetch", fetchMock);
+    const { payload, holdings } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+    });
+    renderAum4(payload);
+    expect(registeredOpen).not.toBeNull();
+
+    // A saved draft authored against the SAME live book (fingerprint matches →
+    // not drifted → its leverage seeds) carrying an override on key-b, the
+    // allocator-eligible key that has no per-key series YET.
+    const savedRow = {
+      ...defaultDraftFromHoldings(
+        holdings as Parameters<typeof defaultDraftFromHoldings>[0],
+      ),
+      leverageOverrides: { "key-b": 2 },
+    };
+    act(() => {
+      registeredOpen!({ id: "row-1", name: "Partial book", draft: savedRow });
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Update portfolio/i }));
+    await waitFor(() => {
+      expect(aum4SaveCalls(fetchMock)).toHaveLength(1);
+    });
+
+    // "Not YET contributing" is TEMPORARY — the key gets its series on the next
+    // sync. Narrowing the prune keep-set to the contributing set would silently
+    // drop the allocator's saved leverage at Save: the exact Phase-112 /
+    // WEIGHTS-02 defect class. key-b is in NONE of the prune's other three keep
+    // signals (it is not an added strategy, and the holdings-seeded draft keys
+    // its toggles/weights by holding ref), so eligibility is the only thing
+    // keeping it — this assertion is non-vacuous.
+    expect(aum4SavedDraft(fetchMock, 0).leverageOverrides).toEqual({
+      "key-b": 2,
+    });
+  });
 });
