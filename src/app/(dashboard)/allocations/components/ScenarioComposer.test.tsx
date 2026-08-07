@@ -11016,29 +11016,55 @@ describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () 
     ).toBe(true);
   });
 
-  it("AUM-04 Test 4: the MEMBER-04 stamp stays FROZEN on the OLD all-or-nothing gate — a partial book stamps [] exactly as a both-gates-false book does", async () => {
+  // 151 review CR-02 + WR-07 SUPERSEDE 151-05's freeze of this seam.
+  //
+  // The freeze was recorded as DEF-151-05-B ("a reopened BOOK draft still lands
+  // in BLANK mode under a partial book") and deliberately surfaced rather than
+  // fixed, because 151-05 ran in a parallel worktree. Its cost, once book mode
+  // became REACHABLE under a partial book, is a user-visible regression:
+  //   • a BOOK save persisted `memberKeyIds: []` — the schema's meaning for
+  //     "blank-authored, no book members" — so the saved row lied about what it
+  //     models, and `scenario-compare`'s selector (`memberKeyIds.length > 0`)
+  //     computed it added-only while the composer blended it per-key;
+  //   • reopening it computed `targetEntryMode = "blank"` and silently dropped
+  //     the book off screen.
+  // The invariant the pair below pins is ECONOMIC, not structural: THE SAVED
+  // MEMBERSHIP NAMES EXACTLY THE KEYS THE ENGINE BLENDS.
+  it("AUM-04 Test 4 (rev. CR-02/WR-07): a partial-book BOOK save stamps the CONTRIBUTING keys — what the engine blends — and a no-engine book still stamps []", async () => {
     const fetchMock = aum4OkSave();
     vi.stubGlobal("fetch", fetchMock);
 
-    // (a) The partial book: the NEW gate is true, the OLD one false.
+    // (a) The partial book: the NEW gate is true, the OLD one false. A manager
+    // key is present so "contributing" and the role-blind "eligible" DIFFER —
+    // stamping the legacy set would over-claim `mgr-1` here.
     const { payload: partial } = partialBook({
       allocatorEligible: ["key-a", "key-b"],
       contributing: ["key-a"],
+      managerKeys: ["mgr-1"],
     });
+    expect(partial.perKeyDailiesGateSatisfied).toBe(false);
+    expect(partial.eligibleApiKeyIds).toEqual(["key-a", "key-b", "mgr-1"]);
     renderAum4(partial);
     // NON-VACUITY: the session IS in book mode, so the stamp's `entryMode ===
-    // "book"` conjunct is SATISFIED — only the frozen
-    // `perKeyDailiesGateSatisfied` conjunct keeps the stamp empty. Repointing
-    // the stamp to `bookEntryGateSatisfied` would stamp the eligible ids here.
+    // "book"` conjunct is satisfied and the id SET is the thing under test.
     expect(screen.getByRole("radio", { name: /From my book/i })).toHaveAttribute(
       "aria-checked",
       "true",
     );
     await saveNewAum4("Partial book", fetchMock, 1);
-    expect(aum4SavedDraft(fetchMock, 0).memberKeyIds).toEqual([]);
+    // The engine's own basis, asserted independently of the stamp: only key-a
+    // reached computeScenario as a unit. The stamp must equal THAT.
+    const engineUnits = new Set<string>();
+    for (const call of computeScenarioStateArgs) {
+      for (const id of call.strategyIds) {
+        if (id.startsWith("key-") || id.startsWith("mgr-")) engineUnits.add(id);
+      }
+    }
+    expect([...engineUnits].sort()).toEqual(["key-a"]);
+    expect(aum4SavedDraft(fetchMock, 0).memberKeyIds).toEqual(["key-a"]);
 
-    // (b) The control: BOTH gates false. The stamp must be IDENTICAL — the new
-    // flag alone changes nothing about membership.
+    // (b) The control: ZERO contributing keys — no per-source engine at all, so
+    // book mode is unreachable and the stamp is [] (the F5 blank closure).
     cleanup();
     lsStore.clear();
     const { payload: noBook } = partialBook({
@@ -11048,6 +11074,80 @@ describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () 
     renderAum4(noBook);
     await saveNewAum4("No contributing keys", fetchMock, 2);
     expect(aum4SavedDraft(fetchMock, 1).memberKeyIds).toEqual([]);
+  });
+
+  it("AUM-04 Test 4b (CR-02, discharges DEF-151-05-B): a saved BOOK draft REOPENS in book mode under a partial book — it no longer loses its book", () => {
+    const { payload, holdings } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+    });
+    renderAum4(payload);
+    expect(registeredOpen).not.toBeNull();
+
+    // A book-authored draft: same live-book fingerprint (→ not drifted), and
+    // membership naming the contributing key.
+    const savedBook = {
+      ...defaultDraftFromHoldings(
+        holdings as Parameters<typeof defaultDraftFromHoldings>[0],
+      ),
+      memberKeyIds: ["key-a"],
+    };
+    // Start the session in BLANK so the reopen has to MOVE the mode — otherwise
+    // the assertion would pass on the initial mode and prove nothing.
+    fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
+    expect(screen.getByRole("radio", { name: /Blank slate/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+
+    act(() => {
+      registeredOpen!({ id: "book-row", name: "My book", draft: savedBook });
+    });
+
+    // Pre-fix: `targetEntryMode` read the all-or-nothing flag (false here), so
+    // the reopen stayed BLANK, `holdingsSummary` was gated to [] and the book
+    // rows vanished.
+    expect(screen.getByRole("radio", { name: /From my book/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(
+      screen
+        .getAllByTestId("scenario-constituent-perkey")
+        .map((r) => r.getAttribute("data-scope-ref")),
+    ).toEqual(["key-a"]);
+  });
+
+  it("AUM-04 Test 4c (CR-02): an UNDERIVED draft reopened under a partial book derives membership = the contributing keys, never [] and never the manager keys", async () => {
+    const fetchMock = aum4OkSave();
+    vi.stubGlobal("fetch", fetchMock);
+    const { payload, holdings } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+      managerKeys: ["mgr-1"],
+    });
+    renderAum4(payload);
+
+    // The shape a v2/v3 upgrade (or a round-tripped underived v4) decodes to.
+    const underived = {
+      ...defaultDraftFromHoldings(
+        holdings as Parameters<typeof defaultDraftFromHoldings>[0],
+      ),
+      memberKeyIds: undefined,
+    };
+    act(() => {
+      registeredOpen!({ id: "upgraded", name: "Upgraded", draft: underived });
+    });
+
+    // The DERIVE's real observable: the WORKING draft is self-describing
+    // immediately, so the localStorage persist carries it before any save.
+    await waitFor(() => {
+      const raw = lsStore.get(`allocations.scenario_v0_15.${ALLOCATOR_A}`);
+      expect(raw).toBeTruthy();
+      expect((JSON.parse(raw as string) as ScenarioDraft).memberKeyIds).toEqual([
+        "key-a",
+      ]);
+    });
   });
 
   // --- Task 2: the narrowed row basis + the partial-book note ---------------

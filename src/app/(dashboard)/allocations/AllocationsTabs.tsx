@@ -1159,6 +1159,13 @@ function ScenarioTabContent({
     perKeyReturnsByApiKeyId: props.perKeyReturnsByApiKeyId,
     eligibleApiKeyIds: props.eligibleApiKeyIds,
     perKeyDailiesGateSatisfied: props.perKeyDailiesGateSatisfied,
+    // Phase 151 AUM-04 / review WR-07 — the split gate + the contributing set.
+    // Without these the panel's membership seams fall back to the role-blind
+    // eligible set and the all-or-nothing flag, and compare diverges from the
+    // composer for exactly the owner-manager / partial-book population this
+    // phase exists to serve.
+    bookEntryGateSatisfied: props.bookEntryGateSatisfied,
+    contributingApiKeyIds: props.contributingApiKeyIds,
   };
 
   return (

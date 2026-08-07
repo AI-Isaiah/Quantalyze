@@ -881,12 +881,19 @@ export function ScenarioComposer({
   //   the client reads the flag verbatim and never re-derives eligibility.
   //
   //   ENGINE-03's `perKeyDailiesGateSatisfied` (all-or-nothing) is UNCHANGED and
-  //   still governs `liveBaselineMetrics` (queries-side) and the MEMBER-04
-  //   derive/stamp below. Do NOT repoint those: a partial blend must never
-  //   present as the whole live book, and the membership stamp's contract is
-  //   "the eligible per-key ids under the all-or-nothing gate" (RESEARCH
-  //   Pitfall 3). Exactly three consumers move to the new flag — this one, the
-  //   mode-switch handler, and `usePerKeySources`.
+  //   still governs `liveBaselineMetrics` (queries-side). Do NOT repoint that
+  //   one: a partial blend must never present as the whole live book.
+  //
+  //   151 review CR-02 — the MEMBER-04 reopen/stamp seams DID move (they were
+  //   frozen by 151-05's plan and surfaced as DEF-151-05-B instead). Leaving
+  //   them on the old flag was a user-visible regression the moment book mode
+  //   became reachable under a partial book: a saved BOOK scenario reopened in
+  //   BLANK mode and persisted EMPTY membership, which compare reads as
+  //   "blank-authored" (`memberKeyIds.length > 0` is its per-key selector) — so
+  //   one screen showed two different projections of one portfolio. The
+  //   membership stamp's contract is now "the ids the engine ACTUALLY blends"
+  //   (review WR-07), which is `contributingApiKeyIds`, not the role-BLIND
+  //   `eligibleApiKeyIds` that still carries the owner's manager-side keys.
   //
   //   Root cause: an owner-manager's ~$460k book (8 keys, 6 strategy-linked)
   //   pinned the old gate FALSE, so blank slate was FORCED, not chosen.
@@ -1698,13 +1705,20 @@ export function ScenarioComposer({
       // (membership already defined) hydrates UNCHANGED — its dropped members are
       // intersected out at compute and disclosed below. This is the gate-only
       // DERIVE, distinct from the entryMode-aware STAMP on the SAVE path.
+      //
+      // 151 review CR-02 — repointed onto the SPLIT gate + the CONTRIBUTING set.
+      // Under a partial book the old flag is false, so an underived draft was
+      // stamped `[]` — the schema's meaning for "blank-authored, no book
+      // members" — even though the composer was about to blend the contributing
+      // keys per-key. The derive must name what the engine actually blends, or
+      // the reopened draft describes a portfolio it does not model.
       const hydratedValue =
         decoded.value.memberKeyIds === undefined
           ? setMemberKeyIds(
               decoded.value,
               deriveMembershipFromGate(
-                payload.perKeyDailiesGateSatisfied ?? false,
-                payload.eligibleApiKeyIds ?? [],
+                payload.bookEntryGateSatisfied ?? false,
+                payload.contributingApiKeyIds ?? [],
               ),
             )
           : decoded.value;
@@ -1714,10 +1728,18 @@ export function ScenarioComposer({
       // stale session mode. A draft whose fingerprint matches the LIVE book was
       // authored in book mode (seeded from holdings); one carrying the empty-
       // holdings fingerprint was authored blank (added-only, `[]` seed). Book is
-      // only representable when the per-key gate is satisfied (it needs a per-
-      // source engine), so a book-authored draft under a gate-off session stays
-      // blank — the pinned forced-blank reopen (CR-01 case (a)) — and its
-      // persisted membership is then protected on save by `memberKeyIdsForUpdate`.
+      // only representable when a per-source engine exists, so a book-authored
+      // draft under an engineless session stays blank — the pinned forced-blank
+      // reopen (CR-01 case (a)) — and its persisted membership is then protected
+      // on save by `memberKeyIdsForUpdate`.
+      //
+      // 151 review CR-02 (discharges DEF-151-05-B) — "a per-source engine
+      // exists" is `bookEntryGateSatisfied`, NOT the all-or-nothing flag: a
+      // PARTIAL book has a per-source engine over its contributing keys, and
+      // `usePerKeySources` already runs on exactly that gate. Left frozen, a
+      // partial-book allocator who saved a BOOK draft reopened it in BLANK mode
+      // — `holdingsSummary` gated to `[]`, their book rows gone — while the
+      // engine basis and the membership stamp disagreed with what was on screen.
       //
       // Keyed on the FINGERPRINT, deliberately NOT the membership: a book draft
       // can legitimately carry EMPTY membership (a pre-STAMP save, or a book save
@@ -1733,7 +1755,7 @@ export function ScenarioComposer({
         liveBookFingerprint !== "" &&
         decoded.value.init_holdings_fingerprint === liveBookFingerprint;
       const targetEntryMode: "book" | "blank" =
-        draftIsBookAuthored && (payload.perKeyDailiesGateSatisfied ?? false)
+        draftIsBookAuthored && (payload.bookEntryGateSatisfied ?? false)
           ? "book"
           : "blank";
 
@@ -1911,12 +1933,16 @@ export function ScenarioComposer({
     // fingerprint. v1.6 MEMBER-04 also reads the live gate + eligible set
     // (DERIVE-AND-STAMP + ineligible disclosure), so re-create when they change —
     // a stale eligible set would misjudge dropped members.
+    // 151 review CR-02 — the mode-sync + DERIVE now read the SPLIT gate and the
+    // contributing set, so both join the dep list. `eligibleApiKeyIds` stays: it
+    // is still the basis of the ineligible-member disclosure below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       rawHoldingsSummary,
       holdingsSummary,
       scenario.hydrateFromSaved,
-      payload.perKeyDailiesGateSatisfied,
+      payload.bookEntryGateSatisfied,
+      payload.contributingApiKeyIds,
       payload.eligibleApiKeyIds,
     ],
   );
@@ -2014,16 +2040,31 @@ export function ScenarioComposer({
   }
 
   // MEMBER-04 (STAMP — entryMode-aware). The membership a NEW save persists.
-  // Book mode + the per-key gate satisfied ⇒ the eligible per-key ids; anything
-  // else (blank mode, OR a book without the gate) ⇒ [] EVEN when the gate is
-  // true — the F5 STAMP closure: a blank draft must never inherit the book
-  // members. This is DELIBERATELY the entryMode-aware rule, NOT the gate-only
+  // Book mode + a per-source engine ⇒ the ids that engine blends; anything else
+  // (blank mode, OR a book with no engine) ⇒ [] EVEN when the gate is true — the
+  // F5 STAMP closure: a blank draft must never inherit the book members. This is
+  // DELIBERATELY the entryMode-aware rule, NOT the gate-only
   // `deriveMembershipFromGate` (which ignores entryMode and is the upgrade-READ
   // rule); using derive here would re-open F5 by stamping book members onto a
   // blank draft whenever the live gate happens to be satisfied.
+  //
+  // 151 review CR-02 + WR-07 — the stamp names WHAT THE ENGINE BLENDS, on the
+  // same two signals `usePerKeySources` runs on:
+  //   • the gate is `bookEntryGateSatisfied` (not the all-or-nothing flag), so a
+  //     partial-book BOOK save stops persisting `[]`, the schema's meaning for
+  //     "blank-authored" — a saved row that lied about what it models, and which
+  //     compare then computed added-only while the composer blended per-key.
+  //   • the id set is `contributingApiKeyIds` (not the role-BLIND
+  //     `eligibleApiKeyIds`), which by construction still carries the owner's
+  //     MANAGER-side keys. Those keys are not engine units (151 AUM-04 narrowed
+  //     `perKeyAdapterOutput` to the contributing set), so stamping them would
+  //     over-claim membership the projection never blended — and the phase's own
+  //     partial-book note says a manager key "belongs to NEITHER count".
+  // For a pre-split allocator (no manager keys, all-or-nothing gate true) the
+  // two sets are identical, so nothing changes for the existing population.
   const memberKeyIdsForSave =
-    entryMode === "book" && payload.perKeyDailiesGateSatisfied
-      ? (payload.eligibleApiKeyIds ?? [])
+    entryMode === "book" && (payload.bookEntryGateSatisfied ?? false)
+      ? (payload.contributingApiKeyIds ?? [])
       : [];
 
   // F-1 (red-team) — the membership an UPDATE (PUT) of the loaded scenario
@@ -2031,18 +2072,25 @@ export function ScenarioComposer({
   // draft, `memberKeyIdsForSave` (the entryMode-aware stamp) already matches
   // what is modeled, so an Update round-trips membership faithfully. The ONE
   // exception is the ~0-user edge the mode-sync cannot represent: a reopened
-  // BOOK draft whose per-key gate is NOT satisfied. Book mode is unrenderable
-  // (no per-source engine), so the session is forced to blank and the blank
-  // stamp would be `[]` — silently converting the persisted book draft to
-  // blank-authored. Preserve the working draft's OWN existing membership
-  // instead: silent membership destruction must be impossible. Guarded on the
-  // gate (not on entryMode) so a genuinely blank-authored draft in a gate-off
-  // session — existing membership `[]` — still saves `[]`, never resurrecting
-  // members. NEW saves (POST) keep using `memberKeyIdsForSave` (MEMBER-04's
-  // entryMode-aware STAMP contract); this only affects the reopen→Update seam.
+  // BOOK draft with NO per-source engine. Book mode is unrenderable there, so
+  // the session is forced to blank and the blank stamp would be `[]` — silently
+  // converting the persisted book draft to blank-authored. Preserve the working
+  // draft's OWN existing membership instead: silent membership destruction must
+  // be impossible. Guarded on the gate (not on entryMode) so a genuinely
+  // blank-authored draft in a gate-off session — existing membership `[]` —
+  // still saves `[]`, never resurrecting members. NEW saves (POST) keep using
+  // `memberKeyIdsForSave` (MEMBER-04's entryMode-aware STAMP contract); this
+  // only affects the reopen→Update seam.
+  //
+  // 151 review CR-02 — repointed to the SPLIT gate, in lockstep with the
+  // mode-sync above. "Unrepresentable" now means `!bookEntryGateSatisfied`: with
+  // the book gate TRUE and the all-or-nothing flag false (the partial book this
+  // phase enables) the reopen lands in BOOK mode and the stamp is honest, so
+  // freezing membership there would instead pin a stale member set — a key that
+  // has since earned its per-key series would never join the saved membership.
   const memberKeyIdsForUpdate =
     (scenario.draft.memberKeyIds ?? []).length > 0 &&
-    !payload.perKeyDailiesGateSatisfied
+    !(payload.bookEntryGateSatisfied ?? false)
       ? (scenario.draft.memberKeyIds ?? [])
       : memberKeyIdsForSave;
 
