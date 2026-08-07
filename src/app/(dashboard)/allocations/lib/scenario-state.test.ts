@@ -1038,6 +1038,93 @@ describe("LEV-02 leverageOverrides", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Phase 151 / AUM-01 — the manual portfolio-AUM draft field.
+//
+// The whole point of these four behaviours is the DRAFT-DELETING RESET hazard
+// (Phase-59 Pitfall 1): `scenarioDraftSchema` is safeParsed on EVERY codec
+// decode branch, so any way this field can fail safeParse is a way to silently
+// DELETE the user's entire saved scenario over one bad number. Hence: optional,
+// additive, no schema_version bump, no range refine, and `null` (what
+// `JSON.stringify` writes for a NaN) tolerated. Range is enforced on READ via
+// isValidDollar at the composer, never here.
+// ---------------------------------------------------------------------------
+describe("AUM-01 manualAumUsd (Phase 151)", () => {
+  const codec = scenarioDraftCodec(defaultDraftFromHoldings(HOLDINGS_2));
+
+  const v4Draft = (): ScenarioDraft => ({
+    schema_version: SCENARIO_SCHEMA_VERSION,
+    init_holdings_fingerprint: "fp",
+    toggleByScopeRef: { "holding:binance:BTC:spot": true },
+    addedStrategies: [],
+    weightOverrides: { "holding:binance:BTC:spot": 1 },
+    memberKeyIds: [],
+    lastEditedAt: "2026-08-07T00:00:00.000Z",
+  });
+
+  it("Test 1 (backward decode) — a v4 blob WITHOUT manualAumUsd decodes ok, never reset", () => {
+    const legacy = v4Draft();
+    expect("manualAumUsd" in legacy).toBe(false);
+    const r = codec.decode(JSON.stringify(legacy));
+    // The falsifier: a REQUIRED field (or a refine) here would return "reset"
+    // and hand back defaultDraft — every pre-151 draft deleted on first read.
+    expect(r.outcome).toBe("ok");
+    expect(r.value.manualAumUsd).toBeUndefined();
+    expect(r.value.weightOverrides).toEqual(legacy.weightOverrides);
+  });
+
+  it("Test 2 (round-trip) — manualAumUsd 500000 survives encode → decode exactly", () => {
+    const withAum: ScenarioDraft = { ...v4Draft(), manualAumUsd: 500_000 };
+    const r = codec.decode(codec.encode(withAum));
+    expect(r.outcome).toBe("ok");
+    expect(r.value.manualAumUsd).toBe(500_000);
+  });
+
+  it("Test 3 (no refine) — out-of-range (-5, 1e13) and NaN-as-null still DECODE ok; sanitizing is the reader's job", () => {
+    // -5: a client typo. 1e13: above the isValidDollar ceiling (1e12).
+    for (const bad of [-5, 1e13]) {
+      const r = codec.decode(
+        JSON.stringify({ ...v4Draft(), manualAumUsd: bad }),
+      );
+      expect(r.outcome).toBe("ok");
+      expect(r.value.manualAumUsd).toBe(bad);
+    }
+    // NaN is not representable in JSON — `JSON.stringify` emits `null`. A bare
+    // `z.number()` REJECTS null → safeParse fails → the codec's schema_invalid
+    // reset → the whole scenario is deleted. It must decode ok instead.
+    const raw = JSON.stringify({ ...v4Draft(), manualAumUsd: NaN });
+    expect(raw).toContain('"manualAumUsd":null');
+    const r = codec.decode(raw);
+    expect(r.outcome).toBe("ok");
+    expect(r.value.addedStrategies).toEqual([]);
+  });
+
+  it("Test 4 (strip-guard) — the whole-draft z.object parse RETAINS manualAumUsd (declared, not stripped)", () => {
+    // z.object STRIPS unknown keys and the save route persists `parsed.data.draft`,
+    // so an UNDECLARED field means a POSTed manual AUM is silently dropped on the
+    // way to the DB. This is the seam that proves the declaration exists.
+    const parsed = scenarioDraftSchema.safeParse({
+      ...v4Draft(),
+      manualAumUsd: 250_000,
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.manualAumUsd).toBe(250_000);
+    // And through the SAVE-boundary schema the two save routes use.
+    const saved = scenarioDraftSaveSchema.safeParse({
+      ...v4Draft(),
+      manualAumUsd: 250_000,
+    });
+    expect(saved.success).toBe(true);
+    if (!saved.success) return;
+    expect(saved.data.manualAumUsd).toBe(250_000);
+  });
+
+  it("Test 5 (version discipline) — SCENARIO_SCHEMA_VERSION is still 4 (optional + additive = no bump)", () => {
+    expect(SCENARIO_SCHEMA_VERSION).toBe(4);
+  });
+});
+
 describe("renormalizeWeights", () => {
   it("T1.8 already-summing-to-1 weights pass through unchanged", () => {
     const result = renormalizeWeights({ a: 0.6, b: 0.4, c: 0.5 }, ["a", "b"]);
