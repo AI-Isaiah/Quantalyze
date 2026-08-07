@@ -10704,3 +10704,301 @@ describe("ScenarioComposer — Phase 147 SCEN-01 hydration re-fetch (P6)", () =>
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 151 / AUM-04 — the SPLIT book-entry gate.
+//
+// 151-02 added three additive payload fields BESIDE the untouched all-or-nothing
+// `perKeyDailiesGateSatisfied`:
+//   allocatorEligibleApiKeyIds — eligible keys MINUS strategy-linked (manager) keys
+//   contributingApiKeyIds      — the allocator-eligible subset that HAS a per-key series
+//   bookEntryGateSatisfied     — contributingApiKeyIds.length > 0 (SOME-semantics)
+//
+// This plan repoints exactly THREE composer consumers onto the new gate
+// (canEnterBook, the mode-switch handler, usePerKeySources) and narrows the
+// per-key toggle-row basis to the contributing set. Everything else — the
+// liveBaselineMetrics selection (queries-side) and the MEMBER-04 derive/stamp —
+// stays FROZEN on the old flag (RESEARCH Pitfall 3), and Test 4 pins that.
+//
+// Root cause being closed: the founder's ~$460k book (8 keys, 6 of them
+// strategy-linked manager keys with no allocator per-key series) pinned the
+// all-or-nothing gate FALSE, so the composer FORCE-initialized to blank and the
+// "From my book" segment never rendered. Blank slate was forced, not chosen.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () => {
+  const AUM4_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-03-${String(i + 1).padStart(2, "0")}`,
+  );
+  const AUM4_SERIES_A = AUM4_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const AUM4_SERIES_B = AUM4_DATES.map((date, i) => ({
+    date,
+    value: [-0.01, 0.02, -0.005, 0.015][i % 4],
+  }));
+  // Distinct symbol per key so every holding gets a unique scopeRef; the per-key
+  // engine keys on api_key_id, never on the symbol.
+  const AUM4_SYMS = [
+    "BTC",
+    "ETH",
+    "SOL",
+    "XRP",
+    "ADA",
+    "DOT",
+    "LTC",
+    "BCH",
+    "AVAX",
+    "LINK",
+  ];
+  const AUM4_VENUES = ["binance", "okx", "bybit", "deribit"];
+
+  function aum4Key(id: string, idx: number) {
+    return {
+      id,
+      exchange: AUM4_VENUES[idx % AUM4_VENUES.length],
+      label: `Desk ${idx + 1}`,
+      is_active: true,
+      sync_status: null,
+      last_sync_at: null,
+      account_balance_usdt: null,
+      created_at: "2026-01-01T00:00:00Z",
+      sync_error: null,
+      last_429_at: null,
+      disconnected_at: null,
+    };
+  }
+
+  function aum4Holdings(keyIds: string[]) {
+    return keyIds.map((id, idx) => ({
+      ...HOLDING_BTC,
+      symbol: AUM4_SYMS[idx % AUM4_SYMS.length],
+      venue: AUM4_VENUES[idx % AUM4_VENUES.length],
+      value_usd: 50_000,
+      api_key_id: id,
+    }));
+  }
+
+  /** A PARTIAL book. `allocatorEligible` are the allocator's own keys;
+   *  `contributing` is the subset with a per-key series; `managerKeys` are
+   *  strategy-linked keys — present on `apiKeys` AND in the role-BLIND legacy
+   *  `eligibleApiKeyIds`, but absent from `allocatorEligibleApiKeyIds`.
+   *
+   *  Manager keys deliberately DO carry a per-key series: that is what makes
+   *  them manager-side (they back a published strategy), and it is precisely why
+   *  neither a venue predicate nor the legacy eligible set can separate them.
+   *  The OLD all-or-nothing gate is computed honestly from this fixture's own
+   *  world (every eligible key has a series), never hand-set. */
+  function partialBook(opts: {
+    allocatorEligible: string[];
+    contributing: string[];
+    managerKeys?: string[];
+    overrides?: Partial<MyAllocationDashboardPayload>;
+  }): { payload: MyAllocationDashboardPayload; holdings: ReturnType<typeof aum4Holdings> } {
+    const managerKeys = opts.managerKeys ?? [];
+    const allKeys = [...opts.allocatorEligible, ...managerKeys];
+    const withSeries = new Set([...opts.contributing, ...managerKeys]);
+    const holdings = aum4Holdings(allKeys);
+    const payload = makePayload({
+      apiKeys: allKeys.map((id, idx) => aum4Key(id, idx)),
+      holdingsSummary: holdings,
+      perKeyReturnsByApiKeyId: Object.fromEntries(
+        allKeys
+          .filter((id) => withSeries.has(id))
+          .map((id, i) => [id, i % 2 === 0 ? AUM4_SERIES_A : AUM4_SERIES_B]),
+      ),
+      perKeyDailiesGateSatisfied: allKeys.every((id) => withSeries.has(id)),
+      eligibleApiKeyIds: allKeys,
+      allocatorEligibleApiKeyIds: opts.allocatorEligible,
+      contributingApiKeyIds: opts.contributing,
+      bookEntryGateSatisfied: opts.contributing.length > 0,
+      ...opts.overrides,
+    });
+    return { payload, holdings };
+  }
+
+  const AUM4_SAVE_URL_RE = /\/api\/allocator\/scenario\/saved/;
+  function aum4SaveCalls(
+    fetchMock: ReturnType<typeof vi.fn>,
+  ): Array<[string, RequestInit | undefined]> {
+    return fetchMock.mock.calls.filter((c) =>
+      AUM4_SAVE_URL_RE.test(String(c[0])),
+    ) as Array<[string, RequestInit | undefined]>;
+  }
+  /** The parsed draft on the nth captured save request body. */
+  function aum4SavedDraft(
+    fetchMock: ReturnType<typeof vi.fn>,
+    n = 0,
+  ): ScenarioDraft {
+    const init = aum4SaveCalls(fetchMock)[n][1] as RequestInit;
+    return JSON.parse(init.body as string).draft as ScenarioDraft;
+  }
+  function aum4OkSave(): ReturnType<typeof vi.fn> {
+    return vi.fn(async (url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ id: "aum4-new-id", name: "AUM4" }),
+      };
+    });
+  }
+
+  let registeredOpen:
+    | ((row: { id: string; name: string; draft: unknown }) => void)
+    | null = null;
+
+  function renderAum4(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          registeredOpen = open as typeof registeredOpen;
+        }}
+      />,
+    );
+  }
+
+  /** Save a brand-new scenario through the real toolbar → name → Save gesture. */
+  async function saveNewAum4(
+    name: string,
+    fetchMock: ReturnType<typeof vi.fn>,
+    expectedCalls = 1,
+  ) {
+    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: name },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+    await waitFor(() => {
+      expect(aum4SaveCalls(fetchMock)).toHaveLength(expectedCalls);
+    });
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    registeredOpen = null;
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  // --- Task 1: the gate repoint ---------------------------------------------
+
+  it("AUM-04 Test 1: a PARTIAL book reaches BOOK mode — the old all-or-nothing gate refuses, the new split gate admits, forced-blank is gone", () => {
+    const { payload } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+    });
+    // The fixture IS the defect's shape: the OLD gate says no, the NEW gate says yes.
+    expect(payload.perKeyDailiesGateSatisfied).toBe(false);
+    expect(payload.bookEntryGateSatisfied).toBe(true);
+
+    renderAum4(payload);
+
+    const bookSegment = screen.getByRole("radio", { name: /From my book/i });
+    expect(bookSegment).toBeInTheDocument();
+    // Initial entryMode is BOOK — the composer never force-initializes to blank
+    // when the book is reachable (CONTEXT lock, UI-SPEC §3 "No forced blank").
+    expect(bookSegment).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("AUM-04 Test 2: ZERO contributing keys still initialize BLANK and keep the calm no-contributing note (deliberate Open-Q4 narrowing)", () => {
+    const { payload } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: [],
+    });
+    expect(payload.bookEntryGateSatisfied).toBe(false);
+
+    renderAum4(payload);
+
+    // RECORDED NARROWING (not an oversight): CONTEXT's "never force-initializes
+    // to blank" is narrowed on RESEARCH Open-Q4 grounds to the >= 1 contributing
+    // case. An engineless "From my book" (zero per-key units) is a worse dead end
+    // than blank mode, and 151-06's manual AUM input removes blank mode's
+    // residual harm — it can then size and commit.
+    expect(
+      screen.queryByRole("radio", { name: /From my book/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Blank slate/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    // The zero-contributing case KEEPS the pre-existing calm fallback note.
+    expect(
+      screen.getByTestId("scenario-constituent-fallback"),
+    ).toBeInTheDocument();
+  });
+
+  it("AUM-04 Test 3: under a partial book the PER-KEY engine feeds the projection (usePerKeySources), not the added-only set", () => {
+    const { payload } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+    });
+    renderAum4(payload);
+
+    // Observable 1 — the per-key constituent rows render at all
+    // (showDataSources === usePerKeySources).
+    expect(
+      screen.getAllByTestId("scenario-constituent-perkey").length,
+    ).toBeGreaterThan(0);
+    // Observable 2 — the contributing key actually reached the ENGINE as a unit.
+    // An added-only set would carry no api_key_id-keyed strategy at all.
+    expect(
+      computeScenarioStateArgs.some((a) => a.strategyIds.includes("key-a")),
+    ).toBe(true);
+  });
+
+  it("AUM-04 Test 4: the MEMBER-04 stamp stays FROZEN on the OLD all-or-nothing gate — a partial book stamps [] exactly as a both-gates-false book does", async () => {
+    const fetchMock = aum4OkSave();
+    vi.stubGlobal("fetch", fetchMock);
+
+    // (a) The partial book: the NEW gate is true, the OLD one false.
+    const { payload: partial } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+    });
+    renderAum4(partial);
+    // NON-VACUITY: the session IS in book mode, so the stamp's `entryMode ===
+    // "book"` conjunct is SATISFIED — only the frozen
+    // `perKeyDailiesGateSatisfied` conjunct keeps the stamp empty. Repointing
+    // the stamp to `bookEntryGateSatisfied` would stamp the eligible ids here.
+    expect(screen.getByRole("radio", { name: /From my book/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await saveNewAum4("Partial book", fetchMock, 1);
+    expect(aum4SavedDraft(fetchMock, 0).memberKeyIds).toEqual([]);
+
+    // (b) The control: BOTH gates false. The stamp must be IDENTICAL — the new
+    // flag alone changes nothing about membership.
+    cleanup();
+    lsStore.clear();
+    const { payload: noBook } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: [],
+    });
+    renderAum4(noBook);
+    await saveNewAum4("No contributing keys", fetchMock, 2);
+    expect(aum4SavedDraft(fetchMock, 1).memberKeyIds).toEqual([]);
+  });
+});
