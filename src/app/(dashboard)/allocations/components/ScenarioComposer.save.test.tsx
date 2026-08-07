@@ -197,7 +197,7 @@ let registeredOpen: ((row: SavedScenarioRow) => void) | null = null;
 function makePayload(
   overrides: Partial<MyAllocationDashboardPayload> = {},
 ): MyAllocationDashboardPayload {
-  return {
+  const base = {
     portfolio: null,
     analytics: null,
     strategies: [],
@@ -245,6 +245,26 @@ function makePayload(
     mandateIsSet: false,
     ...overrides,
   } as MyAllocationDashboardPayload;
+
+  // Phase 151 / AUM-04 — LEGACY-EQUIVALENT defaults for the split book-entry
+  // gate. This builder casts its literal, so 151-02's three additive fields were
+  // never forced onto it by the typechecker and arrive `undefined` — which the
+  // composer's `?? false` reads as "no reachable book", silently dropping every
+  // gate-true fixture in this file into blank mode. In a pre-split world every
+  // eligible key is an allocator key and the all-or-nothing gate is true iff
+  // they all contribute, so this mapping reproduces the old behaviour exactly.
+  // An explicit override always wins (`??` falls through on undefined only).
+  const legacyEligible = base.eligibleApiKeyIds ?? [];
+  return {
+    ...base,
+    allocatorEligibleApiKeyIds:
+      overrides.allocatorEligibleApiKeyIds ?? legacyEligible,
+    contributingApiKeyIds:
+      overrides.contributingApiKeyIds ??
+      (base.perKeyDailiesGateSatisfied ? legacyEligible : []),
+    bookEntryGateSatisfied:
+      overrides.bookEntryGateSatisfied ?? base.perKeyDailiesGateSatisfied,
+  };
 }
 
 function renderComposer() {

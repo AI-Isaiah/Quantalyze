@@ -839,13 +839,36 @@ export function ScenarioComposer({
   // initial draft renders by gating which holdings flow into the hook/adapter/
   // composition below. The frozen adapter + engine path is untouched.
   const hasLiveBook = rawHoldingsSummary.length > 0;
-  // ENGINE-03 (Phase 63) — book mode requires BOTH a live book AND the per-key
-  // dailies gate. A gate=false holder has no per-source engine behind a book
-  // mode, so book entry is unavailable and the composer initializes to BLANK
-  // (added-only) with the DSRC-02 note repointed below so it still renders (D1
-  // locked; Pitfall 2). Landing this before the ENGINE-01 holdings-path deletion
-  // means no intermediate state ever shows a gate=false book mode with no engine.
-  const canEnterBook = hasLiveBook && payload.perKeyDailiesGateSatisfied;
+  // Phase 151 AUM-04 — book entry now keys on the SPLIT gate.
+  //
+  //   `bookEntryGateSatisfied` is SOME-semantics: >= 1 ALLOCATOR-eligible key
+  //   has a per-key series. Manager-side keys (linked to one of the owner's own
+  //   strategies) are subtracted SSR-side, so a manager's keys can no longer pin
+  //   the gate shut on the book they also allocate from. This is a SoT mirror —
+  //   the client reads the flag verbatim and never re-derives eligibility.
+  //
+  //   ENGINE-03's `perKeyDailiesGateSatisfied` (all-or-nothing) is UNCHANGED and
+  //   still governs `liveBaselineMetrics` (queries-side) and the MEMBER-04
+  //   derive/stamp below. Do NOT repoint those: a partial blend must never
+  //   present as the whole live book, and the membership stamp's contract is
+  //   "the eligible per-key ids under the all-or-nothing gate" (RESEARCH
+  //   Pitfall 3). Exactly three consumers move to the new flag — this one, the
+  //   mode-switch handler, and `usePerKeySources`.
+  //
+  //   Root cause: an owner-manager's ~$460k book (8 keys, 6 strategy-linked)
+  //   pinned the old gate FALSE, so blank slate was FORCED, not chosen.
+  const canEnterBook = hasLiveBook && (payload.bookEntryGateSatisfied ?? false);
+  // Pitfall 5 (recorded asymmetry): AUM is CUSTODY — the holdings of every
+  // active key, manager-side included — while this gate is MODELLING CAPABILITY
+  // (allocator keys that have a per-key history). The two sets deliberately
+  // differ, so no copy on this surface may claim the AUM is "from these N keys".
+  //
+  // Deliberate narrowing (RESEARCH Open Q4): a book with ZERO contributing keys
+  // still initializes BLANK. CONTEXT's "never force-initializes to blank" is
+  // narrowed to the >= 1 contributing case — an engineless "From my book" (an
+  // empty per-key unit set) is a worse dead end than blank mode, and 151-06's
+  // manual AUM input removes blank mode's residual harm (it can then size and
+  // commit). Any partial book — even 1 of 8 keys — reaches book mode.
   const [entryMode, setEntryMode] = useState<"book" | "blank">(
     canEnterBook ? "book" : "blank",
   );
@@ -1504,11 +1527,14 @@ export function ScenarioComposer({
   const handleEntryModeSelect = useCallback(
     (mode: "book" | "blank") => {
       if (mode === entryMode) return;
-      // ENGINE-03 — refuse book entry when the per-key gate is not satisfied.
-      // The book segment is hidden in that case (see the radiogroup below), so
-      // this is defense-in-depth: no code path (arrow-key, a future re-show)
-      // can land the composer in an engineless book mode.
-      if (mode === "book" && !payload.perKeyDailiesGateSatisfied) return;
+      // ENGINE-03 — refuse book entry when the book gate is not satisfied. The
+      // book segment is hidden in that case (see the radiogroup below), so this
+      // is defense-in-depth: no code path (arrow-key, a future re-show) can land
+      // the composer in an engineless book mode.
+      // Phase 151 AUM-04 — repointed to the SPLIT gate, canEnterBook-adjacent:
+      // this guard and `canEnterBook` must agree or a partial book would render
+      // a segment its own click handler refuses.
+      if (mode === "book" && !(payload.bookEntryGateSatisfied ?? false)) return;
       if (scenario.diffCount > 0) {
         setPendingMode(mode);
         setResetModalOpen(true);
@@ -1516,7 +1542,7 @@ export function ScenarioComposer({
       }
       setEntryMode(mode);
     },
-    [entryMode, scenario.diffCount, payload.perKeyDailiesGateSatisfied],
+    [entryMode, scenario.diffCount, payload.bookEntryGateSatisfied],
   );
 
   // Open a saved scenario. The row's persisted draft is decoded through the
@@ -2400,11 +2426,15 @@ export function ScenarioComposer({
     equityByApiKeyId,
   ]);
 
-  // The per-key path is active only in book mode + D3 gate satisfied. When
+  // The per-key path is active only in book mode + the book gate satisfied. When
   // active, the per-key strategy set feeds the projectionState/engine pipeline;
   // otherwise the added-only set does.
+  // Phase 151 AUM-04 (RESEARCH Open Q4) — repointed to the SPLIT gate: a book
+  // mode running the ADDED-ONLY engine would be a "From my book" with none of
+  // the book in it, which is a worse dead end than the refusal. Book mode and
+  // the per-key engine must be reachable together or not at all.
   const usePerKeySources =
-    entryMode === "book" && payload.perKeyDailiesGateSatisfied;
+    entryMode === "book" && (payload.bookEntryGateSatisfied ?? false);
 
   // The strategy set actually fed to the engine this render — the per-key units
   // (merged with added units) when the per-source path is active, else the

@@ -464,7 +464,7 @@ function addStrategy(s: AddStrategyInput): void {
 function makePayload(
   overrides: Partial<MyAllocationDashboardPayload> = {},
 ): MyAllocationDashboardPayload {
-  return {
+  const base: MyAllocationDashboardPayload = {
     portfolio: null,
     analytics: null,
     strategies: [],
@@ -517,12 +517,9 @@ function makePayload(
     perKeyReturnsByApiKeyId: {},
     perKeyDailiesGateSatisfied: true,
     eligibleApiKeyIds: [],
-    // Phase 151 / AUM-04 — the split book-entry gate. This base fixture has no
-    // eligible keys, so the SOME-gate is honestly false (its invariant is
-    // `bookEntryGateSatisfied === contributingApiKeyIds.length > 0` — a
-    // hand-set `true` with zero contributing keys would be a fixture that
-    // cannot occur in production). Tests exercising the relaxed gate override
-    // all three together; see `perKeyUnitsPayload` for a real book.
+    // Phase 151 / AUM-04 — the split book-entry gate. Placeholders only: the
+    // real values are DERIVED below from the (possibly overridden) legacy
+    // fields, so a fixture that predates the split keeps its legacy behaviour.
     allocatorEligibleApiKeyIds: [],
     contributingApiKeyIds: [],
     bookEntryGateSatisfied: false,
@@ -532,6 +529,33 @@ function makePayload(
     apiKeysCount: 1,
     mandateIsSet: false,
     ...overrides,
+  };
+
+  // Phase 151 / AUM-04 — LEGACY-EQUIVALENT defaults for the three split-gate
+  // fields, so the ~200 fixtures written before the split keep behaving exactly
+  // as they did when `canEnterBook` / `usePerKeySources` read the old
+  // all-or-nothing flag. In a pre-split world every eligible key is an allocator
+  // key (no manager-role notion existed) and the all-or-nothing gate is true iff
+  // they all contribute — which is precisely this mapping:
+  //     allocatorEligible = eligible
+  //     contributing      = gate ? eligible : []
+  //     bookEntryGate     = gate
+  // An explicit override always wins (`??` only falls through on undefined), so
+  // the AUM-04 suite's partial-book fixtures set all three deliberately.
+  //
+  // Note the base fixture's `gate: true` + `eligibleApiKeyIds: []` combination
+  // reproduces the OLD flag's own vacuous truth (`allActiveKeysHavePerKeyDailies([])`),
+  // not a production-reachable state; `perKeyBook` is the real-book helper.
+  const legacyEligible = base.eligibleApiKeyIds ?? [];
+  return {
+    ...base,
+    allocatorEligibleApiKeyIds:
+      overrides.allocatorEligibleApiKeyIds ?? legacyEligible,
+    contributingApiKeyIds:
+      overrides.contributingApiKeyIds ??
+      (base.perKeyDailiesGateSatisfied ? legacyEligible : []),
+    bookEntryGateSatisfied:
+      overrides.bookEntryGateSatisfied ?? base.perKeyDailiesGateSatisfied,
   };
 }
 
