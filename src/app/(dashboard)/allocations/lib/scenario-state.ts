@@ -101,6 +101,18 @@ export interface AddedStrategy {
   name: string;
   markets: string[];
   strategy_types: string[];
+  /**
+   * Phase 152 SCEN-02 — the server-computed ownership bit carried over from
+   * `GET /api/strategies/browse` (is this added strategy the allocator's OWN
+   * strategy?). Purely a legibility signal for the composer's chip; it is never
+   * an authority claim and never re-enters the server as one.
+   *
+   * ABSENT or `null` means UNKNOWN, not "not owned": legacy pre-152 drafts and
+   * Bridge-added candidates (which never pass through browse) carry no bit, and
+   * the reader must render NO chip in that case — never fabricate ownership
+   * (CONTEXT lock). Optional + additive, so no `SCENARIO_SCHEMA_VERSION` bump.
+   */
+  isOwn?: boolean | null;
 }
 
 export interface ScenarioDraft {
@@ -847,6 +859,20 @@ const addedStrategySchema = z.object({
   name: z.string(),
   markets: z.array(z.string()),
   strategy_types: z.array(z.string()),
+  // Phase 152 SCEN-02 — the browse-computed ownership bit. Optional + additive
+  // so every pre-152 draft validates; no schema_version bump.
+  // ⚠️ LOAD-BEARING (same trap as leverageOverrides / manualAumUsd on the draft
+  // schema below, but NESTED): `z.object` STRIPS unknown keys and
+  // saved/route.ts persists `parsed.data.draft`, so WITHOUT this declaration the
+  // ownership bit is silently dropped on EVERY localStorage round-trip and every
+  // save POST — the chip renders in dev and vanishes on the first refresh.
+  // `.nullish()` rather than `.optional()`: `JSON.stringify` writes `null` for
+  // values it cannot represent, and a bare `z.boolean()` would REJECT that null
+  // → schema_invalid → the codec's draft-deleting reset → the user's whole
+  // scenario gone over one persisted null. DELIBERATELY NO refine for the same
+  // reason — a refine failure on this shared schema routes the codec to that
+  // reset. Absence/null is resolved on READ at the composer (no chip).
+  isOwn: z.boolean().nullish(),
 });
 
 /**

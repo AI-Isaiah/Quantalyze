@@ -56,7 +56,7 @@ re-observed. The owning task records the observation.
 
 | SC | Requirement | Production-source mutation | Test that must go RED | Owner | Observed |
 |----|-------------|----------------------------|------------------------|-------|----------|
-| SC1 — ownership wired through the persisted schema | SCEN-02 | Delete `isOwn` from `addedStrategySchema` (leave the TS interface) | strip-guard `parsed.data.addedStrategies[0].isOwn` (scenario-state.test.ts, populated fixture) | 152-02 T2 | ⬜ |
+| SC1 — ownership wired through the persisted schema | SCEN-02 | Delete `isOwn` from `addedStrategySchema` (leave the TS interface) | strip-guard `parsed.data.addedStrategies[0].isOwn` (scenario-state.test.ts, populated fixture) | 152-02 T2 | Observed ✅ RED then GREEN (2026-08-07) |
 | SC2 — row opens richer detail | SCEN-03 | Neuter the name-button toggle (onClick sets `null` unconditionally) | SCEN-03 expand test + "Enter/Space on the focused strategy-name button" tests | 152-06 T2 | ⬜ |
 | SC3 — numbers labelled, notional honest | SCEN-04 | Apply the remedy `title` to the DERIVED notional branch too (unconditional title) | derived-title-byte-verbatim test (SCEN-04 honest notional describe) | 152-03 T2 | ⬜ |
 | SC4 — no unresolvable browse duplicate | SCEN-05 | Drop the `isOwn === true` term from the collision-set builder | two-third-party-rows-get-no-line test (StrategyBrowseDrawer dedup describe) | 152-04 T2 | ⬜ |
