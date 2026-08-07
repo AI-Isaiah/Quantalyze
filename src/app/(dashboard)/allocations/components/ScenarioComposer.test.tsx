@@ -2451,8 +2451,17 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // T_C_P1933 — P1933 CRITICAL: empty-state add flow + commit must refuse
   //   when scenarioAum=0 (every voluntary_add row would land with
   //   size_at_decision_usd:0 → division-by-zero downstream).
+  //
+  // Phase 151 / AUM-03 (Tests 10 + 12) — REWRITTEN, not replaced: the refusal
+  // SEMANTICS below (no drawer, no callback) are the original guard and are
+  // kept verbatim. What changed is the COPY. The old string told the allocator
+  // to "Connect an exchange API key or toggle on a live holding" — the founder
+  // hit it with four venues already connected, and the live-holding toggle was
+  // deliberately never built (CONSTIT-03). The copy is pinned by EQUALITY
+  // against a literal typed into this test, not a regex: a regex match cannot
+  // catch a sentence that grows a second, false clause.
   // -------------------------------------------------------------------------
-  it("T_C_P1933 (audit-2026-05-07/Block-C/C.1) — refuses commit + surfaces alert when scenarioAum=0 with voluntary_add", () => {
+  it("T_C_P1933 / AUM-03 Tests 10+12 — refuses commit when AUM is unset; copy names ONLY the AUM input (no book to offer) and no never-string", () => {
     // Empty holdings + added-strategy via the empty-state Browse drawer
     // transitions the composer out of the empty-state branch and into the
     // main body with scenarioAum === 0 (no live holdings contribute).
@@ -2494,15 +2503,30 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     });
 
     // Composer now in main-body render. Click Commit — the handler should
-    // refuse and surface an inline role="alert" referencing zero AUM.
+    // refuse and surface an inline role="alert" naming the AUM input.
     fireEvent.click(screen.getByTestId("scenario-footer-commit"));
-    const alerts = screen.getAllByRole("alert");
-    expect(
-      alerts.some((a) => /portfolio AUM is zero/i.test(a.textContent ?? "")),
-    ).toBe(true);
-    // The drawer must NOT have opened (no internal drawer per the
-    // useInternalCommitDrawer={false} prop) and the legacy callback must
-    // NOT have fired either — the commit is refused outright.
+
+    // Test 10 — EXACT copy. No live book here, so "From my book" does not
+    // render and the refusal must not offer it.
+    const banner = screen.getByTestId("scenario-commit-error");
+    expect(banner).toHaveAttribute("role", "alert");
+    expect(banner.textContent).toBe(
+      "Can't record a scenario commit: portfolio AUM is not set. Set portfolio AUM before submitting.",
+    );
+
+    // Test 12 — the never-strings. Both name affordances that do not exist on
+    // this surface: the live-holding toggle was never built (CONSTIT-03), and
+    // telling a connected allocator to connect a key is simply false.
+    const allAlerts = screen
+      .queryAllByRole("alert")
+      .map((a) => a.textContent ?? "")
+      .join(" ");
+    expect(allAlerts).not.toContain("toggle on a live holding");
+    expect(allAlerts).not.toContain("Connect an exchange API key");
+
+    // Retained refusal semantics: the drawer must NOT have opened (no internal
+    // drawer per the useInternalCommitDrawer={false} prop) and the legacy
+    // callback must NOT have fired either — the commit is refused outright.
     expect(onCommitRequested).not.toHaveBeenCalled();
     expect(screen.queryByTestId("commit-drawer-mock")).toBeNull();
   });
@@ -11211,5 +11235,326 @@ describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () 
     expect(aum4SavedDraft(fetchMock, 0).leverageOverrides).toEqual({
       "key-b": 2,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 151 / AUM-01 — the direct Portfolio AUM input.
+//
+// AUM was DERIVED-ONLY before this plan: the sum of the toggled-on live
+// holdings. A blank-slate scenario — the primary use case — therefore had an
+// AUM of exactly 0 and structurally could not size or commit.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — AUM-01 Portfolio AUM input", () => {
+  const A1_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-04-${String(i + 1).padStart(2, "0")}`,
+  );
+  const A1_SERIES_A = A1_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const A1_SERIES_B = A1_DATES.map((date, i) => ({
+    date,
+    value: [-0.01, 0.02, -0.005, 0.015][i % 4],
+  }));
+  const A1_SYMS = ["BTC", "ETH", "SOL", "XRP"];
+  const A1_VENUES = ["binance", "okx", "bybit", "deribit"];
+
+  function a1Key(id: string, idx: number) {
+    return {
+      id,
+      exchange: A1_VENUES[idx % A1_VENUES.length],
+      label: `Desk ${idx + 1}`,
+      is_active: true,
+      sync_status: null,
+      last_sync_at: null,
+      account_balance_usdt: null,
+      created_at: "2026-01-01T00:00:00Z",
+      sync_error: null,
+      last_429_at: null,
+      disconnected_at: null,
+    };
+  }
+
+  /** A fully-contributing live book: one holding per key, so the derived
+   *  live-holdings sum is exactly `sum(values)`. */
+  function aumBook(values: number[]) {
+    const keyIds = values.map((_, i) => `aum1-key-${i}`);
+    const holdings = values.map((v, i) => ({
+      ...HOLDING_BTC,
+      symbol: A1_SYMS[i % A1_SYMS.length],
+      venue: A1_VENUES[i % A1_VENUES.length],
+      value_usd: v,
+      api_key_id: keyIds[i],
+    }));
+    const payload = makePayload({
+      apiKeys: keyIds.map((id, i) => a1Key(id, i)),
+      holdingsSummary: holdings,
+      perKeyReturnsByApiKeyId: Object.fromEntries(
+        keyIds.map((id, i) => [id, i % 2 === 0 ? A1_SERIES_A : A1_SERIES_B]),
+      ),
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: keyIds,
+      allocatorEligibleApiKeyIds: keyIds,
+      contributingApiKeyIds: keyIds,
+      bookEntryGateSatisfied: true,
+    });
+    return { payload, holdings, keyIds };
+  }
+
+  /** A no-book allocator — blank mode by construction (hasLiveBook false), so
+   *  the live-holdings sum is 0 and manual AUM is the ONLY possible source. */
+  function blankSlate(
+    overrides: Partial<MyAllocationDashboardPayload> = {},
+  ): MyAllocationDashboardPayload {
+    return makePayload({
+      holdingsSummary: [],
+      apiKeys: [],
+      perKeyReturnsByApiKeyId: {},
+      perKeyDailiesGateSatisfied: false,
+      eligibleApiKeyIds: [],
+      allocatorEligibleApiKeyIds: [],
+      contributingApiKeyIds: [],
+      bookEntryGateSatisfied: false,
+      ...overrides,
+    });
+  }
+
+  function renderAum1(payload: MyAllocationDashboardPayload) {
+    return render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  function aumInput(): HTMLInputElement {
+    return screen.getByTestId("scenario-aum-input") as HTMLInputElement;
+  }
+  /** Type + blur — the composer commits the value on blur/Enter, never per key. */
+  function setAum(raw: string) {
+    const el = aumInput();
+    fireEvent.change(el, { target: { value: raw } });
+    fireEvent.blur(el);
+  }
+  /** The scenarioAum every downstream consumer reads, observed at its
+   *  commit-boundary consumer (the established oracle in this file). */
+  function drawerAum(): number | undefined {
+    return vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.scenarioAum;
+  }
+  function alertText(): string {
+    return screen
+      .queryAllByRole("alert")
+      .map((a) => a.textContent ?? "")
+      .join(" ");
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  it("AUM-01 Test 5 (blank-mode sizing): typing an AUM sizes the scenario — the commit AUM gate clears and the illustrative note goes away", () => {
+    renderAum1(blankSlate());
+    addStrategy({
+      id: "aum1-strat-5",
+      name: "Blank Slate Strategy",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    // The defect's shape: no live book → derived AUM is 0 → the chart discloses
+    // it is illustrative and the commit gate refuses. Non-vacuity for below.
+    expect(drawerAum()).toBe(0);
+    expect(screen.getByText(/Illustrative shape only/i)).toBeInTheDocument();
+
+    setAum("1000000");
+
+    // The manual value is now THE portfolio AUM for every scenarioAum consumer.
+    expect(drawerAum()).toBe(1_000_000);
+    // Recorded UI-SPEC decision: the illustrative note keys off scenarioAum <= 0
+    // and clears itself once AUM is set (the persistent PROJECTED pill still
+    // carries the hypothetical disclosure).
+    expect(screen.queryByText(/Illustrative shape only/i)).toBeNull();
+
+    // And the commit no longer trips the AUM gate.
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+    expect(alertText()).not.toMatch(/portfolio AUM is not set/);
+  });
+
+  it("AUM-01 Test 6 (a zero is a claim): blank mode starts EMPTY, never pre-filled 0, and says what the field is for", () => {
+    renderAum1(blankSlate());
+    addStrategy({
+      id: "aum1-strat-6",
+      name: "Blank Slate Strategy",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    expect(aumInput().value).toBe("");
+    expect(screen.getByText("Required to size and commit.")).toBeInTheDocument();
+  });
+
+  it("AUM-01 Test 7 (book seed + override note + no re-snap): pre-fills from the live sum, an edit overrides it, and a holdings refresh does not clobber the edit", () => {
+    const { payload, holdings } = aumBook([300_000, 160_000]);
+    const { rerender } = renderAum1(payload);
+
+    // Book mode pre-fills from the live-holdings total.
+    expect(aumInput().value).toBe("460000");
+    expect(drawerAum()).toBe(460_000);
+    // No divergence yet → no override note.
+    expect(screen.queryByText(/Overrides live-holdings total/i)).toBeNull();
+
+    setAum("500000");
+    expect(drawerAum()).toBe(500_000);
+    expect(
+      screen.getByText("Overrides live-holdings total $460,000."),
+    ).toBeInTheDocument();
+
+    // A holdings VALUE refresh (same symbol/venue/type set → SAME fingerprint,
+    // so no drift and no draft rebase) must NOT re-snap the input back to the
+    // live sum — that is the windowTouchedRef seed idiom, not a controlled value.
+    rerender(
+      <ScenarioComposer
+        payload={{
+          ...payload,
+          holdingsSummary: holdings.map((h) => ({
+            ...h,
+            value_usd: h.value_usd * 2,
+          })),
+        }}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(aumInput().value).toBe("500000");
+    expect(drawerAum()).toBe(500_000);
+  });
+
+  it("AUM-01 Test 8 (metrics invariance — AUM-01 is NOT the SCEN-01 fix): editing AUM leaves scenarioMetrics identical", () => {
+    const { payload } = aumBook([300_000, 160_000]);
+    renderAum1(payload);
+
+    const before = lastKpiScenarioMetrics();
+    // Non-vacuity: the engine actually produced a blend, so "identical" is a
+    // claim about real numbers, not about two empty metric objects.
+    expect(before?.n ?? 0).toBeGreaterThan(0);
+    expect(before?.sharpe).not.toBeNull();
+    const engineCallsBefore = computeScenarioStateArgs.length;
+
+    setAum("5000000");
+    // The edit really landed (otherwise the invariance below is vacuous).
+    expect(drawerAum()).toBe(5_000_000);
+
+    const after = lastKpiScenarioMetrics();
+    expect(after?.sharpe).toBe(before?.sharpe);
+    expect(after?.cagr).toBe(before?.cagr);
+    expect(after?.max_drawdown).toBe(before?.max_drawdown);
+    expect(after?.n).toBe(before?.n);
+    // The sharp falsifier: adding scenarioAum to the scenarioMetrics dep array
+    // would re-invoke the engine on every AUM edit. Weights are the single
+    // source of truth; AUM rescales DOLLARS, never returns.
+    expect(computeScenarioStateArgs.length).toBe(engineCallsBefore);
+  });
+
+  it("AUM-01 Test 9 (sanitize on read): a corrupt persisted manualAumUsd reads as UNSET — never a negative, over-cap or null AUM", () => {
+    const { payload, holdings } = aumBook([300_000, 160_000]);
+    const storageKey = `allocations.scenario_v0_15.${ALLOCATOR_A}`;
+    const seed = (manualAumUsd: number | null) => {
+      cleanup();
+      lsStore.clear();
+      vi.mocked(ScenarioCommitDrawer).mockClear();
+      lsStore.set(
+        storageKey,
+        JSON.stringify({
+          ...defaultDraftFromHoldings(
+            holdings as Parameters<typeof defaultDraftFromHoldings>[0],
+          ),
+          manualAumUsd,
+        }),
+      );
+      renderAum1(payload);
+    };
+
+    // POSITIVE CONTROL — the seeding mechanism genuinely reaches the composer
+    // (same fingerprint → adopted, not reset), so the refusals below are real.
+    seed(750_000);
+    expect(aumInput().value).toBe("750000");
+    expect(drawerAum()).toBe(750_000);
+
+    // -5 (a client typo), 2e12 (above the isValidDollar 1e12 ceiling) and null
+    // (what JSON.stringify writes for a NaN) all sanitize to UNSET on read, so
+    // the composer falls back to the live-holdings sum.
+    for (const corrupt of [-5, 2e12, null]) {
+      seed(corrupt);
+      expect(aumInput().value).toBe("460000");
+      expect(drawerAum()).toBe(460_000);
+      expect(screen.queryByText(/Overrides live-holdings total/i)).toBeNull();
+    }
+  });
+
+  // AUM-03 Test 11 — the SECOND refusal variant. The "From my book" clause is
+  // named ONLY when that segment genuinely renders; offering a control the user
+  // cannot see is the same class of lie as the old "toggle on a live holding".
+  it("AUM-03 Test 11 (book reachable): the refusal offers 'From my book' — but only because the segment actually renders", () => {
+    const { payload } = aumBook([300_000, 160_000]);
+    const onCommitRequested = vi.fn();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        onCommitRequested={onCommitRequested}
+        useInternalCommitDrawer={false}
+      />,
+    );
+
+    // Non-vacuity: the segment IS on screen, so the clause below is honest.
+    expect(
+      screen.getByRole("radio", { name: /From my book/i }),
+    ).toBeInTheDocument();
+
+    // Switch to blank slate (a clean draft switches immediately), which drops
+    // the live holdings — and with them the derived AUM — to nothing. This is
+    // the only way to reach an unset AUM while the book is still reachable.
+    fireEvent.click(screen.getByTestId("scenario-entry-mode-blank"));
+    addStrategy({
+      id: "aum3-strat-11",
+      name: "Blank Slate Strategy",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    expect(aumInput().value).toBe("");
+    expect(drawerAum()).toBe(0);
+
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+
+    const banner = screen.getByTestId("scenario-commit-error");
+    expect(banner.textContent).toBe(
+      'Can\'t record a scenario commit: portfolio AUM is not set. Set portfolio AUM, or switch to "From my book", before submitting.',
+    );
+    expect(banner.textContent).not.toContain("toggle on a live holding");
+    expect(banner.textContent).not.toContain("Connect an exchange API key");
+    expect(onCommitRequested).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("commit-drawer-mock")).toBeNull();
   });
 });

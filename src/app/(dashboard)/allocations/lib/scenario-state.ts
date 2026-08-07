@@ -142,6 +142,23 @@ export interface ScenarioDraft {
    */
   window?: CoverageWindow;
   /**
+   * Phase 151 AUM-01 — the MANUAL portfolio-AUM override, in whole USD.
+   *
+   * Optional + additive, so SCENARIO_SCHEMA_VERSION stays 4
+   * (userWeightOverrides / window / leverageOverrides precedent): a pre-151
+   * draft omits it and reads `undefined`, which the composer resolves to the
+   * live-holdings sum. In blank mode there is no live sum by construction, so
+   * this is the ONLY source of AUM there — that is the whole point of the field.
+   *
+   * DELIBERATELY no zod range refine (the leverageOverrides rule): a refine
+   * FAILURE on the shared `scenarioDraftSchema` routes the codec to the
+   * draft-DELETING reset, so one out-of-range persisted number would destroy the
+   * user's whole scenario. The bound is applied on READ at the composer via
+   * `isValidDollar` (`@/lib/dollar-validation`, [0, 1e12)), which also treats a
+   * corrupt `null` (what JSON.stringify writes for NaN) as unset.
+   */
+  manualAumUsd?: number;
+  /**
    * v1.6 MEMBER-01 — the EXPLICIT saved series membership: the api_key ids whose
    * strategies constitute this draft's book. REQUIRED at schema_version 4; an
    * empty array means blank-authored (no book members). The non-destructive
@@ -786,6 +803,34 @@ export function setLeverageOverrides(
   return { ...draft, leverageOverrides: byRef };
 }
 
+/**
+ * Phase 151 AUM-01 — write the MANUAL portfolio AUM onto the draft. `undefined`
+ * CLEARS the override (the draft falls back to the live-holdings sum); the
+ * composer never writes 0, because a zero is a claim, not an absence.
+ *
+ * Shaped on `setWindow`, not on `setLeverageOverrides`: this is a live user
+ * gesture, so it stamps `lastEditedAt` and no-ops on an unchanged value (a
+ * blur that commits the same number must not churn the draft identity and
+ * defeat the downstream memos). Deliberately does NOT validate the range —
+ * `isValidDollar` gates the value at the input boundary before this is called,
+ * and again on read, so this stays a pure spread with no clamp of its own.
+ */
+export function setManualAum(
+  draft: ScenarioDraft,
+  value: number | undefined,
+): ScenarioDraft {
+  if (draft.manualAumUsd === value) return draft;
+  if (value === undefined) {
+    if (!("manualAumUsd" in draft)) return draft;
+    // Drop the key entirely rather than persisting an explicit `undefined` —
+    // JSON.stringify would omit it anyway, so an absent key is the honest
+    // in-memory twin of the persisted shape.
+    const { manualAumUsd: _drop, ...rest } = draft;
+    return { ...rest, lastEditedAt: new Date().toISOString() };
+  }
+  return { ...draft, manualAumUsd: value, lastEditedAt: new Date().toISOString() };
+}
+
 // ---------------------------------------------------------------------------
 // B7 cross-tab storage codec — zod-validated parse + version trichotomy.
 // The cross-tab primitive (useCrossTabStorage) owns the localStorage
@@ -872,6 +917,19 @@ export const scenarioDraftSchema = z.object({
   // clamp happens on READ (sanitizeLeverage, plan 90.5-04); `boundedRecord`
   // already caps entry count (the DoS guard).
   leverageOverrides: boundedRecord(z.number(), "leverageOverrides").optional(),
+  // Phase 151 AUM-01 — the manual portfolio-AUM override (whole USD). Optional +
+  // additive so every pre-151 draft validates; no schema_version bump.
+  // ⚠️ LOAD-BEARING (same trap as leverageOverrides above): `z.object` STRIPS
+  // unknown keys and saved/route.ts persists `parsed.data.draft`, so WITHOUT this
+  // declaration a POSTed manual AUM is silently dropped on the way to the DB.
+  // DELIBERATELY NO `.min/.max` range refine — a refine failure on this shared
+  // schema routes the codec to the draft-deleting reset (data loss over one
+  // out-of-range value). `.nullish()` rather than `.optional()` for the same
+  // reason: `JSON.stringify` writes `null` for a NaN, and a bare `z.number()`
+  // would REJECT that null → schema_invalid → the user's whole scenario deleted.
+  // The [0, 1e12) bound and the null are both resolved on READ by `isValidDollar`
+  // at the composer (the sanitize-on-read precedent, sanitizeLeverageMap).
+  manualAumUsd: z.number().nullish(),
   // v1.5 PERSIST-01 — the saved coverage window. Optional so v2 (windowless)
   // drafts still validate. Each bound must be an exact `YYYY-MM-DD` ISO day
   // (pre-landing review I5): every first-party writer emits that shape, so a
