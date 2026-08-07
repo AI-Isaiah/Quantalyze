@@ -5414,6 +5414,12 @@ export function ScenarioComposer({
         onClose={() => setCommitDrawerOpen(false)}
         diffs={commitDiffs}
         scenarioAum={scenarioAum}
+        // Phase 151 AUM-01 — the MANUAL value only, never `scenarioAum`. A
+        // book-mode commit that never touched the AUM field passes undefined,
+        // so the drawer omits the key and the audit row stays on the
+        // server-recomputed path (NEW-C18-04) instead of being re-labelled a
+        // client assertion carrying the live-holdings sum.
+        manualAumUsd={sanitizedManualAum}
         // B11 / NEW-C18-10: the holdings fingerprint frozen with these diffs.
         initHoldingsFingerprint={commitFingerprint}
         onSubmitSuccess={() => {

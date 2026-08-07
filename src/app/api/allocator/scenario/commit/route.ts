@@ -54,6 +54,9 @@ import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/r
 import { emit, type AuditEvent } from "@/lib/audit";
 import { stampOutcomeMarker } from "@/lib/analytics/onboarding-funnel";
 import { holdingScopeKey } from "@/lib/keys";
+// Phase 151 AUM-01 — the shared dollar ceiling for the client-asserted
+// manual_aum_usd bound (distinct from MAX_TICKET_SIZE_USD).
+import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 
 export const runtime = "nodejs";
 
@@ -160,6 +163,29 @@ export const CommitBodySchema = z.object({
   // the live client always sends it. .max() bounds a hostile payload — the
   // longest realistic fingerprint is ~50 holdings * ~30 chars.
   init_holdings_fingerprint: z.string().max(200_000).optional(),
+  // Phase 151 AUM-01 — the allocator's manually-entered portfolio AUM.
+  //
+  // ADDITIVE and OPTIONAL: absent ⇒ pre-151 behaviour, byte-for-byte (the
+  // client sends the key only when a manual value exists, so the idempotency
+  // request_hash is unchanged for every existing caller — T-151-21).
+  //
+  // It MUST be declared here or it never arrives: `z.object` is non-strict, so
+  // an undeclared key is silently STRIPPED — the route would 200 and the audit
+  // would still record "no holdings snapshot", with no error anywhere to
+  // explain the loss (assumption A5).
+  //
+  // It is a CLIENT-ASSERTED number crossing a trust boundary (T-151-19), so it
+  // is bounded server-side to the same [0, 1e12) window `isValidDollar` applies
+  // on the client: positive (a zero is a claim, not a size) and under
+  // MAGNITUDE_CAPS.MAX_DOLLAR_VALUE_USD. `.finite()` is belt-and-braces — Zod
+  // v4's `z.number()` already rejects NaN/Infinity — but it states the intent
+  // at the boundary where a hostile payload arrives.
+  manual_aum_usd: z
+    .number()
+    .positive()
+    .lt(MAGNITUDE_CAPS.MAX_DOLLAR_VALUE_USD)
+    .finite()
+    .optional(),
 });
 
 // Post-normalisation shape of a voluntary_modify diff. After the
@@ -719,6 +745,11 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
   // Skipped on cached replays (the original commit already emitted the
   // server-side number; replays produce no new audit rows).
   let serverAumUsd = 0;
+  // Phase 151 AUM-01 — the CLIENT-ASSERTED portfolio AUM, present only when
+  // the allocator typed one. Used ONLY as the fallback denominator below, and
+  // only under its own `client_manual_aum` sentinel; `size_at_decision_usd_client`
+  // and the server-truth arm are untouched by it.
+  const manualAumUsd = parsed.data.manual_aum_usd;
   const holdingValueByRef = new Map<string, number>();
   // Hoisted so the per-row audit loop below can distinguish
   // lookup_failed (Supabase error) from no_holdings_snapshot (legitimate
@@ -830,7 +861,12 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
         | "client_unverified"
         | "lookup_failed"
         | "ref_not_found"
-        | "no_holdings_snapshot" =
+        | "no_holdings_snapshot"
+        // Phase 151 AUM-01 — size derived from the CLIENT-ASSERTED
+        // manual_aum_usd because the server had no holdings snapshot to
+        // recompute from. Never a server-verified figure; see the enumeration
+        // comment on the audit metadata below.
+        | "client_manual_aum" =
         "client_unverified";
       // Distinguish "Supabase errored" (lookup_failed) from "allocator
       // legitimately has no holdings yet" (no_holdings_snapshot). The
@@ -860,8 +896,22 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
           inputDiff.kind === "bridge_recommended"
         ) {
           if (serverAumUsd > 0) {
+            // SERVER TRUTH FIRST, unconditionally (NEW-C18-04, T-151-18). When
+            // allocator_holdings can supply a denominator it wins outright —
+            // a client-asserted manual AUM must NEVER outrank a figure the
+            // server verified, or the audit-trust fix would be undone by the
+            // very field added below.
             serverSizeUsd = (inputDiff.percent_allocated * serverAumUsd) / 100;
             sizeSource = "server_aum";
+          } else if (manualAumUsd != null) {
+            // Phase 151 AUM-01 — the blank-slate case: the allocator has no
+            // holdings snapshot at all (the primary use case), so pre-151 this
+            // financial audit row recorded the decision but not its magnitude
+            // (no_holdings_snapshot / null size). Size it from the number the
+            // allocator actually typed, under a sentinel that says exactly
+            // what it is: a CLIENT assertion, not a server-verified figure.
+            serverSizeUsd = (inputDiff.percent_allocated * manualAumUsd) / 100;
+            sizeSource = "client_manual_aum";
           } else if (!holdingsLookupOk) {
             sizeSource = "lookup_failed";
           } else if (holdingsEmptyOk) {
@@ -887,7 +937,7 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
             // NEW-C18-04: server-recomputed authoritative figure.
             // Pre-fix this was the unverified client number; a malicious
             // allocator could inflate or deflate it without bound. Now
-            // the `_size_source` sentinel below distinguishes six states:
+            // the `_size_source` sentinel below distinguishes seven states:
             //   server_holding        — voluntary_remove uses holdings.value_usd
             //   server_aum            — other arms recompute pct × total_aum
             //   ref_not_found         — voluntary_remove's holding_ref absent
@@ -895,6 +945,11 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
             //   no_holdings_snapshot  — lookup ran, returned zero rows
             //   lookup_failed         — allocator_holdings SELECT errored
             //   client_unverified     — no inputDiff (shouldn't happen)
+            //   client_manual_aum     — size computed from the CLIENT-ASSERTED
+            //                           manual AUM (blank-mode scenario; no
+            //                           holdings snapshot). NEVER a
+            //                           server-verified figure — forensic
+            //                           readers must filter it as untrusted.
             size_at_decision_usd: serverSizeUsd,
             size_at_decision_usd_client: inputDiff.size_at_decision_usd,
             _size_source: sizeSource,
