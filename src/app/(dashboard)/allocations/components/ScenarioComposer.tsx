@@ -3858,21 +3858,28 @@ export function ScenarioComposer({
   // answered. A reopened draft carrying a manual value seeds that instead.
   useEffect(() => {
     if (aumTouchedRef.current) return;
-    if (sanitizedManualAum !== undefined) {
-      setAumInputText(String(sanitizedManualAum));
-      return;
-    }
-    setAumInputText(liveHoldingsSum > 0 ? String(liveHoldingsSum) : "");
+    setAumInputText(committedAumText());
+    // committedAumText is a render-local closure over exactly these two values.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sanitizedManualAum, liveHoldingsSum]);
+
+  // 151 UAT (founder, 2026-08-07) — WHOLE DOLLARS. The live-holdings sum is a
+  // float sum of custody values, so the seeded field read `39963.1076231` on
+  // the founder's book: eleven digits of false precision on a money input, and
+  // a number nobody would type. Round for DISPLAY only; the precise value stays
+  // in state (`sanitizedManualAum ?? liveHoldingsSum` is what every consumer
+  // reads, unchanged) — the exact discipline the per-strategy USD input already
+  // uses (`Math.round(weight × scenarioAum)`, never written back).
+  const displayDollars = (n: number) => String(Math.round(n));
 
   // The text the field SHOULD show for the currently-committed state — the one
   // place the seed rule and the refusal snap-back both read, so the displayed
   // value can never drift from the draft.
   const committedAumText = () =>
     sanitizedManualAum !== undefined
-      ? String(sanitizedManualAum)
+      ? displayDollars(sanitizedManualAum)
       : liveHoldingsSum > 0
-        ? String(liveHoldingsSum)
+        ? displayDollars(liveHoldingsSum)
         : "";
 
   // Commit the typed AUM on blur / Enter (never per keystroke — the :5456
@@ -3910,10 +3917,18 @@ export function ScenarioComposer({
     // an override nobody made, and the drawer started sending `manual_aum_usd`
     // — changing the commit body bytes, and therefore the idempotency
     // `request_hash`, for a caller the design deliberately left unchanged
-    // (T-151-21). Compared NUMERICALLY so "460000.00" is recognised as the same
-    // value, then snapped to the canonical text.
+    // (T-151-21).
+    //
+    // 151 UAT — compared against the DISPLAYED WHOLE-DOLLAR figure, not the raw
+    // float. The field now shows `round(liveHoldingsSum)`, so an exact-float
+    // comparison would weigh a bare blur of the seeded text ("39963") against
+    // 39963.1076231, call it an edit, and write the rounded number as a manual
+    // OVERRIDE — re-opening the very hole WR-04 closed, through the same
+    // no-keystroke gesture. Compare what the user is LOOKING AT, exactly as
+    // `commitDollarInput` does for the per-strategy field (`Math.round(amount)
+    // === displayed`). "460000.00" is still recognised as the same value.
     const committed = committedAumText();
-    if (committed !== "" && parsed === Number(committed)) {
+    if (committed !== "" && Math.round(parsed) === Number(committed)) {
       setAumInputText(committed);
       return;
     }

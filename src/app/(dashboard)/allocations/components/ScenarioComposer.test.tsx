@@ -11623,6 +11623,96 @@ describe("ScenarioComposer — AUM-01 Portfolio AUM input", () => {
     ).toBeInTheDocument();
   });
 
+  // -------------------------------------------------------------------------
+  // 151 UAT (founder, 2026-08-07) — WHOLE DOLLARS in the Portfolio AUM field.
+  //
+  // The founder's book summed to a float, so the seeded field read
+  // `39963.1076231`: eleven digits of false precision on a money input, and a
+  // number nobody would type. The per-strategy USD input already rounds for
+  // display; this mirrors it.
+  //
+  // The load-bearing half is the INTERACTION with WR-04. Rounding the display
+  // while comparing the blur against the raw float would make a bare focus→blur
+  // weigh "39963" against 39963.1076231, call it an edit, and persist the
+  // rounded number as a manual OVERRIDE — re-opening exactly the hole WR-04
+  // closed, through the same no-keystroke gesture.
+  // -------------------------------------------------------------------------
+  it("151 UAT: the seeded Portfolio AUM displays WHOLE dollars while state keeps the precise value", () => {
+    // A float book — the founder's shape (sums to 39963.1076231).
+    const { payload } = aumBook([21_000.5076231, 18_962.6]);
+    renderAum1(payload);
+
+    // What the founder saw: 39963.1076231. What they must see now:
+    expect(aumInput().value).toBe("39963");
+    // …while every consumer still reads the PRECISE sum — the rounding is
+    // display-only and is never written back into the draft.
+    expect(drawerAum()).toBeCloseTo(39_963.1076231, 6);
+    expect(drawerAum()).not.toBe(39_963);
+  });
+
+  it("151 UAT: a bare focus→blur on the ROUNDED seed is still not an edit (WR-04 holds under rounding)", () => {
+    const { payload, holdings } = aumBook([21_000.5076231, 18_962.6]);
+    const { rerender } = renderAum1(payload);
+    expect(aumInput().value).toBe("39963");
+
+    // The WR-04 gesture against the rounded text.
+    const el = aumInput();
+    fireEvent.focus(el);
+    fireEvent.blur(el);
+
+    // (a) still derived — no override note, no manual value on the wire.
+    expect(screen.queryByText(/Overrides live-holdings total/i)).toBeNull();
+    expect(
+      vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.manualAumUsd,
+    ).toBeUndefined();
+
+    // (a2) THE `Math.round(parsed)` GUARD. Retyping the UNROUNDED live sum —
+    // the exact number that used to be on screen, and the one a user would
+    // paste back — must also be a no-op. Against a raw `parsed === committed`
+    // comparison this commits `manualAumUsd = 39963.1076231`: an override
+    // numerically identical to custody (so the disclosure note never appears,
+    // because sanitizedManualAum === liveHoldingsSum) that nonetheless FREEZES
+    // the AUM against later syncs and puts `manual_aum_usd` on the commit body
+    // — changing the idempotency request_hash. The full WR-04 harm, silently.
+    setAum("39963.1076231");
+    expect(
+      vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.manualAumUsd,
+    ).toBeUndefined();
+
+    // (b) BEHAVIOURAL PROOF: the AUM still TRACKS custody. A frozen override
+    // would pin it — and it would pin it at the ROUNDED 39963, which is also
+    // how a naive float comparison would have failed (it would have written
+    // 39963 and lost the cents).
+    rerender(
+      <ScenarioComposer
+        payload={{
+          ...payload,
+          holdingsSummary: holdings.map((h) => ({
+            ...h,
+            value_usd: h.value_usd * 2,
+          })),
+        }}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(drawerAum()).toBeCloseTo(79_926.2152462, 6);
+  });
+
+  it("151 UAT (control): a REAL edit on a float book still commits — rounding did not disable the field", () => {
+    const { payload } = aumBook([21_000.5076231, 18_962.6]);
+    renderAum1(payload);
+    expect(aumInput().value).toBe("39963");
+
+    setAum("50000");
+    expect(drawerAum()).toBe(50_000);
+    expect(
+      screen.getByText(/Overrides live-holdings total/i),
+    ).toBeInTheDocument();
+    // A manual value also displays whole.
+    expect(aumInput().value).toBe("50000");
+  });
+
   it("AUM-01 Test 8 (metrics invariance — AUM-01 is NOT the SCEN-01 fix): editing AUM leaves scenarioMetrics identical", () => {
     const { payload } = aumBook([300_000, 160_000]);
     renderAum1(payload);
