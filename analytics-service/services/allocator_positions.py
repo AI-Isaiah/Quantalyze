@@ -541,21 +541,40 @@ async def _fetch_mt5_account_rows(
     # (g) Extraction with the derive arm's fail-loud discipline: a NaN/Inf or
     # non-numeric equity would sail past every downstream denominator guard as a
     # silently poisoned AUM figure. Refuse the anchor rather than publish it.
+    #
+    # 151 review WR-02 — fail loud on EQUITY only. `balance` is DIAGNOSTIC: it
+    # appears nowhere but `raw_payload` below, and nothing economic reads it.
+    # Extracting it in the same fail-loud breath meant a broker/terminal whose
+    # account_info() omits it (or returns it non-numeric) raised a transient, so
+    # the allocator saw "MT5 terminal unreachable" forever and the account
+    # contributed ZERO to AUM — even though the one figure this branch needs was
+    # present and healthy. An absent diagnostic must never veto a real anchor.
     try:
         equity = float(info["equity"])
-        balance = float(info["balance"])
     except (KeyError, TypeError, ValueError) as exc:
         logger.warning(
             "poll_allocator_positions: mt5 account_info missing/non-numeric "
-            "equity/balance — refusing to emit a row"
+            "equity — refusing to emit a row"
         )
         raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
-    if not (math.isfinite(equity) and math.isfinite(balance)):
+    if not math.isfinite(equity):
         logger.warning(
-            "poll_allocator_positions: mt5 equity/balance non-finite — refusing "
-            "a poisoned anchor"
+            "poll_allocator_positions: mt5 equity non-finite — refusing a "
+            "poisoned anchor"
         )
         raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE)
+
+    # The diagnostic half: absent / non-numeric / non-finite ⇒ None, which is the
+    # conforming "not reported" value for the raw_payload (a 0.0 would read as a
+    # measured zero balance, the same lie the row's None fields avoid).
+    raw_balance: Any = info.get("balance")
+    balance: float | None
+    try:
+        balance = float(raw_balance)
+    except (TypeError, ValueError):
+        balance = None
+    if balance is not None and not math.isfinite(balance):
+        balance = None
 
     # 151 review WR-01 — POSITIVITY, at parity with the ccxt spot path's
     # `float(qty) > 0` filter (_fetch_spot_rows). Finiteness alone is not enough:

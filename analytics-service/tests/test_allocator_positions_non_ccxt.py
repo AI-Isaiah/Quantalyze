@@ -679,6 +679,71 @@ async def test_mt5_non_positive_equity_emits_no_row(mt5_enabled, equity):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"balance": None}, id="balance-omitted"),
+        pytest.param({"balance": "n/a"}, id="balance-non-numeric"),
+        pytest.param({"balance": float("nan")}, id="balance-nan"),
+    ],
+)
+async def test_mt5_missing_balance_never_kills_a_healthy_equity_sync(
+    mt5_enabled, overrides
+):
+    """`balance` is DIAGNOSTIC — it reaches `raw_payload` and nothing else.
+
+    Pre-fix it shared the fail-loud extraction with `equity`, so a terminal that
+    omitted it (or returned it non-numeric) raised the transient: the allocator
+    saw "MT5 terminal unreachable" indefinitely and the account contributed ZERO
+    to AUM even though the only economically load-bearing figure — equity — was
+    present. The row is what the phase exists to produce; a missing diagnostic
+    must never veto it.
+    """
+    account = _account()
+    if overrides["balance"] is None:
+        account.pop("balance")
+    else:
+        account["balance"] = overrides["balance"]
+    transport = _RecordingMt5Transport(account=account)
+
+    rows, warning = await fetch_allocator_holdings(
+        "mt5", _session(transport), API_KEY_ID
+    )
+
+    assert warning is None
+    assert len(rows) == 1, f"a healthy equity must still emit its row, got {rows}"
+    # The economic figure is untouched by the diagnostic's absence.
+    assert rows[0]["value_usd"] == ACCOUNT_EQUITY
+    # …and the diagnostic degrades to "not reported", never a fabricated 0.0
+    # (which would read downstream as a measured zero balance).
+    assert rows[0]["raw_payload"]["balance"] is None
+
+
+@pytest.mark.asyncio
+async def test_mt5_present_balance_is_still_reported(mt5_enabled):
+    """Control arm for the degradation above: a real balance still rides into
+    raw_payload, so WR-02's fix cannot degenerate into 'always None'."""
+    transport = _RecordingMt5Transport(account=_account())
+
+    rows, _ = await fetch_allocator_holdings("mt5", _session(transport), API_KEY_ID)
+
+    assert rows[0]["raw_payload"]["balance"] == ACCOUNT_BALANCE
+
+
+@pytest.mark.asyncio
+async def test_mt5_missing_equity_still_fails_loud(mt5_enabled):
+    """The other half of WR-02: relaxing the DIAGNOSTIC must not relax the
+    ANCHOR. A missing/non-numeric equity is still a transient — publishing a
+    guessed AUM anchor is the one thing worse than not publishing one."""
+    account = _account()
+    account.pop("equity")
+    transport = _RecordingMt5Transport(account=account)
+
+    with pytest.raises(ap.AllocatorHoldingsSyncTransientError):
+        await fetch_allocator_holdings("mt5", _session(transport), API_KEY_ID)
+
+
+@pytest.mark.asyncio
 async def test_mt5_positive_equity_still_emits_its_row(mt5_enabled):
     """The positivity guard's control arm: the smallest positive equity still
     contributes, so WR-01's filter cannot degenerate into 'MT5 never syncs'."""
