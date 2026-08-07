@@ -1002,7 +1002,9 @@ PROD-data facts).
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+> All six questions were resolved at planning time (2026-08-07) — inline markers below.
 
 1. **Does the ≥1 relaxation ship in this phase, or does manager-key exclusion suffice?**
    - What we know: the two changes are independent; exclusion alone very likely fixes the founder
@@ -1011,6 +1013,7 @@ PROD-data facts).
    - What's unclear: whether a 1-of-8-key "book" is a *good* book-mode experience or a confusing one.
    - Recommendation: **ship both**, but as separate plans with separate verification, exclusion
      first. That way if the partial-book UX proves poor, the founder's book is already reachable.
+   - → **RESOLVED (planned):** ship both — manager-key exclusion (151-02) + the ≥1 relaxation with the dataSourceKeys narrowing (151-05).
 
 2. **How does sFOX price a non-stablecoin balance?**
    - What we know: the GET-only facade has no ticker endpoint (four read methods, pinned by tests).
@@ -1024,6 +1027,7 @@ PROD-data facts).
      naming the skipped assets. Log the `get_balance_history` alternative as a deferred improvement
      for the sFOX go-live phase. If the founder prefers the NAV anchor, that is a CONTEXT amendment,
      not a planner call.
+   - → **RESOLVED (planned):** lock honoured — `get_balances()` in 151-04 Task 1; the `get_balance_history` NAV-anchor alternative is logged to TODOS.md as deferred (same task).
 
 3. **What token goes in `symbol` for an MT5 account row?**
    - What we know: it must match `[A-Za-z0-9_-]+`, must be account-scoped (Pitfall 1), and must be
@@ -1032,11 +1036,13 @@ PROD-data facts).
      practice. If readability wins, `ACCOUNT-{login}` is acceptable but leaks the broker account
      number into the UI and into the commit fingerprint (V8 concern above). **Decide before the
      first PROD write** — changing it later orphans rows under the old symbol.
+   - → **RESOLVED (planned):** `ACCOUNT-{api_key_id[:8]}` — 151-03 Task 2 (decided before the first PROD write).
 
 4. **Does `usePerKeySources` follow the new gate or the old one?**
    - Recommendation: **the new one.** "From my book" that renders an added-only (empty) engine is a
      worse dead end than today's refusal. But this must be explicit, tested, and commented — it is
      the single edit that most changes what book mode *shows*.
+   - → **RESOLVED (planned):** the NEW gate — 151-05 Task 1 (explicit, tested, commented; the 151-05 objective records the zero-contributing narrowing this implies).
 
 5. **What `sync_status` does a genuine MT5/sFOX transport failure land on, and where is its human
    copy written?**
@@ -1046,11 +1052,13 @@ PROD-data facts).
      failures → raise a purpose-built exception whose `str()` IS the human copy (so the existing
      `except Exception` arm's `sanitized = msg[:500]` stamps human text) AND classify transient so
      the job retries. This keeps `error_kind` honest and `sync_error` human with the smallest edit.
+   - → **RESOLVED (planned):** as recommended — warning channel for honest skips; `AllocatorHoldingsSyncTransientError` (str = human copy, error_kind=transient) for genuine failures — 151-03 Task 1.
 
 6. **Should the Overview "your live book" baseline eventually use a partial blend?**
    - Out of scope here (the split keeps it on the old gate), but worth logging to TODOS.md: the
      honest-empty baseline for a partial-coverage book is arguably too conservative now that the
      composer will show a partial book. Not this phase.
+   - → **RESOLVED (delegated):** logged to TODOS.md by 151-04 Task 1 (the same TODOS.md edit as the Q2 deferred line).
 
 ---
 
