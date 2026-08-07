@@ -12774,4 +12774,132 @@ describe("ScenarioComposer — SCEN-02 seams + chip (Phase 152)", () => {
       document.querySelectorAll('[data-testid^="scenario-yours-"]'),
     ).toHaveLength(1);
   });
+
+  // -------------------------------------------------------------------------
+  // Chip render states. The gate is `=== true`; `false`, `null` and an absent
+  // key are three DIFFERENT wire shapes that must all render nothing, and they
+  // fail different wrong gates: `!== false` survives the false case but not
+  // null/absent, a truthiness gate (`a.isOwn &&`) survives all three, and a
+  // `!= null` gate survives only the absent one. Asserting all three is what
+  // makes the gate pinned rather than merely exercised.
+  // -------------------------------------------------------------------------
+
+  /** The chip's anatomy + ink, byte-verbatim from `YoursChip.tsx` (which in turn
+   *  copies `OwnershipTag.tsx:35` / `:48`). Listed as literals, never read off
+   *  the component — an oracle that imports the implementation's own constant
+   *  cannot fail when the constant changes. `rounded-md` is the persistent-FACT
+   *  badge family; a drift to the `rounded-sm` uppercase family would say
+   *  "derived state that can change on its own", which ownership never is. */
+  const CHIP_CLASSES = [
+    "inline-flex",
+    "items-center",
+    "rounded-md",
+    "px-2",
+    "py-0.5",
+    "text-caption",
+    "font-medium",
+    "bg-badge-other/10",
+    "text-text-muted",
+  ];
+
+  it("SCEN-02 chip (isOwn true): renders the shared YoursChip anatomy — sentence-case label, persistent-fact rounded-md family, muted ink", () => {
+    renderScen(bookedPayload());
+    addOwn(OWN_ID, "Scen02 Own");
+
+    const chip = within(addedRow(OWN_ID)).getByTestId(
+      `scenario-yours-${OWN_ID}`,
+    );
+    // Sentence case, matching the OwnershipTag family ("Own capital" /
+    // "Team review") — NOT the shouty uppercase derived-state chips.
+    expect(chip.textContent).toBe("Yours");
+    for (const cls of CHIP_CLASSES) {
+      expect(chip).toHaveClass(cls);
+    }
+    // Placement-independent proof that it is a leaf span in the name cluster,
+    // not a wrapper that swallowed the row.
+    expect(chip.tagName).toBe("SPAN");
+    expect(chip).toHaveClass("shrink-0");
+  });
+
+  it("SCEN-02 chip (isOwn false): an explicit not-mine renders NO chip node", () => {
+    renderScen(bookedPayload());
+    addRaw({
+      id: OWN_ID,
+      name: "Scen02 Own",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+      isOwn: false,
+    });
+
+    expect(addedRow(OWN_ID)).toBeInTheDocument();
+    expect(
+      within(addedRow(OWN_ID)).queryByTestId(`scenario-yours-${OWN_ID}`),
+    ).toBeNull();
+  });
+
+  it("SCEN-02 chip (isOwn null): the JSON.stringify round-trip shape renders NO chip node", () => {
+    renderScen(bookedPayload());
+    addRaw({
+      id: OWN_ID,
+      name: "Scen02 Own",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+      // `null` is what a persisted draft carries when the value could not be
+      // represented — 152-02 declared the schema `.nullish()` precisely so this
+      // decodes instead of resetting the draft. UNKNOWN is not ownership.
+      isOwn: null,
+    });
+
+    expect(addedRow(OWN_ID)).toBeInTheDocument();
+    expect(
+      within(addedRow(OWN_ID)).queryByTestId(`scenario-yours-${OWN_ID}`),
+    ).toBeNull();
+  });
+
+  it("SCEN-02 chip (isOwn absent): a legacy persisted draft row renders NO chip node — un-marked until the next browse/add", () => {
+    renderScen(bookedPayload());
+    addWithoutOwnership(OWN_ID, "Scen02 Own");
+
+    expect(addedRow(OWN_ID)).toBeInTheDocument();
+    expect(
+      within(addedRow(OWN_ID)).queryByTestId(`scenario-yours-${OWN_ID}`),
+    ).toBeNull();
+  });
+
+  it("SCEN-02 chip order: name cluster reads provenance → ownership → coverage (identity facts before derived state)", () => {
+    // A trust tier so TrustTierLabel actually renders, and a toggled-OFF row so
+    // CoverageStateChip actually renders — an order assertion over absent
+    // neighbours proves nothing.
+    const base = catalogStrategy(OWN_ID, "Scen02 Own", S_STRAT_SERIES);
+    renderScen(
+      makePayload({
+        ...perKeyBook([{ id: S_K1, returns: S_KEY_SERIES, valueUsd: 60_000 }]),
+        apiKeys: [winApiKey(S_K1)],
+        strategies: [
+          { ...base, strategy: { ...base.strategy, trust_tier: "csv_uploaded" } },
+        ],
+      }),
+    );
+    addOwn(OWN_ID, "Scen02 Own");
+
+    const row = addedRow(OWN_ID);
+    fireEvent.click(
+      within(row).getByRole("switch", {
+        name: "Toggle Scen02 Own on/off in scenario",
+      }),
+    );
+
+    const trust = within(addedRow(OWN_ID)).getByTestId("trust-tier-label");
+    const chip = within(addedRow(OWN_ID)).getByTestId(
+      `scenario-yours-${OWN_ID}`,
+    );
+    const coverage = within(addedRow(OWN_ID)).getByText("Excluded");
+
+    expect(
+      trust.compareDocumentPosition(chip) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      chip.compareDocumentPosition(coverage) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
 });

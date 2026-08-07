@@ -164,6 +164,10 @@ import { CustomRangePicker } from "./CustomRangePicker";
 import { BlendHeader } from "./BlendHeader";
 import { CoverageStateChip } from "./CoverageStateChip";
 import type { CoverageState } from "./CoverageStateChip";
+// Phase 152 SCEN-02 — the SHARED ownership chip (152-04), not a local span:
+// the browse drawer's own rows render this same leaf, and two hand-rolled
+// chips for one claim drift.
+import { YoursChip } from "./YoursChip";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import type { ProvenanceTier } from "@/lib/design-tokens/trust-tier";
 import { deriveProvenance } from "../lib/provenance";
@@ -6386,6 +6390,29 @@ function CompositionList({
                   trustTier={addedProvenanceByRef[a.id] ?? null}
                   className="shrink-0"
                 />
+                {/* Phase 152 SCEN-02 — ownership is a persistent FACT, so it
+                    wears the rounded-md badge family (the uppercase rounded-sm
+                    family next to it is DERIVED state that changes on its own;
+                    ownership never does). Placed after provenance and before
+                    coverage: identity facts first, derived state last.
+
+                    The gate is `=== true`, never `!== false` and never bare
+                    truthiness. `false`, `null` and an ABSENT key are three
+                    different wire shapes — a legacy persisted draft written
+                    before 152-02 declared the field carries no `isOwn` at all,
+                    and a `!== false` gate would decorate every one of those
+                    rows with a claim the wire never made. Absence is honest;
+                    such rows go un-marked until the next browse/add refreshes
+                    them (CONTEXT lock: never fabricate ownership).
+
+                    Same YoursChip component the browse drawer renders (152-04)
+                    — one recipe, so the two surfaces cannot drift. */}
+                {a.isOwn === true && (
+                  <YoursChip
+                    data-testid={`scenario-yours-${a.id}`}
+                    className="shrink-0"
+                  />
+                )}
                 {chipState && (
                   <CoverageStateChip state={chipState} className="shrink-0" />
                 )}
