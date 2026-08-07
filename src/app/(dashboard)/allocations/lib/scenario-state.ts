@@ -480,8 +480,11 @@ export function togglePerKeySource(
  * Browse-add (D-03): the new strategy is allocated `1 / (n + 1)` and the
  * existing enabled set is scaled by `1 - 1/(n+1)`. Maintains sum === 1.0.
  *
- * M9 dedupe: if the strategy's id is already in `addedStrategies`, returns
- * the SAME draft reference (no-op).
+ * M9 dedupe: if the strategy's id is already in `addedStrategies`, no weight or
+ * toggle mutation runs. Returns the SAME draft reference, EXCEPT when the
+ * incoming payload carries a known `isOwn` that the draft row does not — see the
+ * WR-01 note in the dedupe branch. That one case returns a new draft whose only
+ * difference is the `isOwn` field, with `lastEditedAt` untouched.
  *
  * Disabled-row weight preservation (review fix P2): seed `nextWeights` from
  * the entire `weightOverrides` map (not an empty object) so any preserved
@@ -497,8 +500,39 @@ export function addStrategyBrowse(
   draft: ScenarioDraft,
   strategy: AddedStrategy,
 ): ScenarioDraft {
-  // M9 — dedupe guard: already in addedStrategies → no-op.
-  if (draft.addedStrategies.some((s) => s.id === strategy.id)) return draft;
+  // M9 — dedupe guard: already in addedStrategies → no weight/toggle mutation.
+  const existing = draft.addedStrategies.find((s) => s.id === strategy.id);
+  if (existing) {
+    // Phase 152 review WR-01 — the ONE exception to the no-op: backfill the
+    // `isOwn` bit. The SCEN-02 chip's gating comment promises that an un-marked
+    // row "goes un-marked until the next browse/add refreshes them", but the
+    // dedupe branch returned the same draft reference, so re-adding from Browse
+    // was a silent no-op and the promised refresh did not exist. Every allocator
+    // carrying a PRE-152 draft (localStorage or a saved scenario, neither of
+    // which has the field) therefore saw no "Yours" chip on their own
+    // strategies permanently, with no user-reachable remedy short of removing
+    // and re-adding the row.
+    //
+    // Deliberately narrow, so this does NOT resurrect the bug M9 fixed:
+    //   - ONLY `isOwn` is reconciled. Nothing else on the payload is trusted to
+    //     overwrite the draft, and no weight, toggle or ordering is touched — a
+    //     second Add must still never re-run the 1/(n+1) rescale.
+    //   - `strategy.isOwn == null` returns early: absence means UNKNOWN, so a
+    //     Bridge-shaped or pre-152 payload can never ERASE a known bit.
+    //   - `lastEditedAt` is deliberately NOT bumped. This is an autosave-only
+    //     metadata backfill, not a user edit: bumping it would make the draft
+    //     look dirty and inflate `diffCount`, un-blocking Commit on a change the
+    //     allocator never made.
+    if (strategy.isOwn == null || existing.isOwn === strategy.isOwn) {
+      return draft;
+    }
+    return {
+      ...draft,
+      addedStrategies: draft.addedStrategies.map((s) =>
+        s.id === strategy.id ? { ...s, isOwn: strategy.isOwn } : s,
+      ),
+    };
+  }
 
   const enabledBefore = enabledIdsOf(draft);
   const n = enabledBefore.length;

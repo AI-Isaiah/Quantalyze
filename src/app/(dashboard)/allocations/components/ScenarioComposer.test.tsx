@@ -12885,6 +12885,29 @@ describe("ScenarioComposer — SCEN-02 seams + chip (Phase 152)", () => {
     ).toHaveLength(1);
   });
 
+  it("WR-01 (composer seam): re-adding a chip-less row from Browse makes the Yours chip appear — the refresh path the gating comment promised", () => {
+    renderScen(bookedPayload());
+    // A pre-152 draft's row: added with no ownership signal at all.
+    addWithoutOwnership(OWN_ID, "Scen02 Own");
+    expect(
+      within(addedRow(OWN_ID)).queryByTestId(`scenario-yours-${OWN_ID}`),
+    ).toBeNull();
+
+    // The allocator hits Add again in Browse; the post-152 wire says it's
+    // theirs. Before the WR-01 fix `addStrategyBrowse`'s dedupe branch returned
+    // the draft untouched, so this was a silent no-op and the row stayed
+    // chip-less forever — no user-reachable remedy short of remove + re-add.
+    addOwn(OWN_ID, "Scen02 Own");
+
+    expect(
+      within(addedRow(OWN_ID)).getByTestId(`scenario-yours-${OWN_ID}`),
+    ).toHaveTextContent("Yours");
+    // The backfill is not a second add: still exactly one row for this id.
+    expect(
+      document.querySelectorAll(`[data-scope-ref="${OWN_ID}"]`),
+    ).toHaveLength(1);
+  });
+
   // -------------------------------------------------------------------------
   // Chip render states. The gate is `=== true`; `false`, `null` and an absent
   // key are three DIFFERENT wire shapes that must all render nothing, and they

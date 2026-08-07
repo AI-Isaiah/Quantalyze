@@ -6593,8 +6593,14 @@ function CompositionList({
                     before 152-02 declared the field carries no `isOwn` at all,
                     and a `!== false` gate would decorate every one of those
                     rows with a claim the wire never made. Absence is honest;
-                    such rows go un-marked until the next browse/add refreshes
-                    them (CONTEXT lock: never fabricate ownership).
+                    such rows go un-marked until the strategy is added again
+                    from Browse, whose dedupe branch backfills the bit
+                    (scenario-state.ts `addStrategyBrowse`). Review WR-01: that
+                    branch used to return the draft untouched, so this sentence
+                    named a refresh path that did not exist and a pre-152 draft
+                    stayed chip-less permanently. An ABSENT bit on the incoming
+                    payload still backfills nothing (CONTEXT lock: never
+                    fabricate ownership).
 
                     Same YoursChip component the browse drawer renders (152-04)
                     — one recipe, so the two surfaces cannot drift. */}

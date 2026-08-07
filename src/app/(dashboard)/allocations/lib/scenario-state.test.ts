@@ -271,6 +271,67 @@ describe("addStrategyBrowse", () => {
     expect(second.lastEditedAt).toBe(first.lastEditedAt);
   });
 
+  // -------------------------------------------------------------------------
+  // Phase 152 review WR-01 — the dedupe branch's ONE exception: an `isOwn`
+  // backfill.
+  //
+  // Why this class of bug was invisible: the composer's chip comment PROMISED
+  // that an un-marked row "goes un-marked until the next browse/add refreshes
+  // them", and the dedupe branch returned the draft untouched, so the promised
+  // refresh did not exist. Every allocator carrying a pre-152 draft
+  // (localStorage or a saved scenario — neither has the field) saw no "Yours"
+  // chip on their own strategies permanently, and clicking Add again in Browse
+  // did nothing observable.
+  //
+  // The three tests below pin the WHOLE contract, because the dangerous fix is
+  // the over-broad one: reconciling more than `isOwn` would resurrect the bug
+  // M9 fixed (a second Add re-running the 1/(n+1) rescale), and bumping
+  // `lastEditedAt` would make an autosave-only backfill look like a user edit
+  // and inflate `diffCount` — un-blocking Commit on a change nobody made.
+  // -------------------------------------------------------------------------
+  it("WR-01: re-adding an existing row BACKFILLS a newly-known isOwn (the refresh path the chip comment promised)", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    // A pre-152 draft: the row carries no `isOwn` at all.
+    const pre152 = addStrategyBrowse(initial, STRAT_A);
+    expect(pre152.addedStrategies[0].isOwn).toBeUndefined();
+
+    // The allocator hits Add again in Browse, where the post-152 wire now says
+    // the strategy is theirs.
+    const refreshed = addStrategyBrowse(pre152, { ...STRAT_A, isOwn: true });
+
+    expect(refreshed.addedStrategies[0].isOwn).toBe(true);
+    // Still ONE row — the backfill is not a second add.
+    expect(refreshed.addedStrategies.map((s) => s.id)).toEqual(
+      pre152.addedStrategies.map((s) => s.id),
+    );
+    // M9 still holds in every other respect: no rescale, no toggle churn.
+    expect(refreshed.weightOverrides).toEqual(pre152.weightOverrides);
+    expect(refreshed.toggleByScopeRef).toEqual(pre152.toggleByScopeRef);
+    // A metadata backfill is NOT a user edit — `lastEditedAt` must not move, or
+    // the draft reads as dirty and `diffCount` inflates.
+    expect(refreshed.lastEditedAt).toBe(pre152.lastEditedAt);
+  });
+
+  it("WR-01: an ABSENT isOwn on the incoming payload never ERASES a known bit (absence = unknown, not 'not yours')", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    const known = addStrategyBrowse(initial, { ...STRAT_A, isOwn: true });
+    expect(known.addedStrategies[0].isOwn).toBe(true);
+
+    // A Bridge-shaped / pre-152 payload for the same id: the wire said nothing.
+    const afterSilentPayload = addStrategyBrowse(known, STRAT_A);
+
+    expect(afterSilentPayload.addedStrategies[0].isOwn).toBe(true);
+    // …and it is a true no-op, reference identity included.
+    expect(afterSilentPayload).toBe(known);
+  });
+
+  it("WR-01: an UNCHANGED isOwn stays a reference-identity no-op (no gratuitous re-render / autosave churn)", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    const known = addStrategyBrowse(initial, { ...STRAT_A, isOwn: false });
+    const again = addStrategyBrowse(known, { ...STRAT_A, isOwn: false });
+    expect(again).toBe(known);
+  });
+
   it("T1.4_R1 addStrategyBrowse preserves disabled-row weights (regression — review-pass P2)", () => {
     // Setup: two holdings, BTC at 0.6, ETH at 0.4. Toggle ETH OFF — its
     // 0.4 weight is preserved in weightOverrides (toggleHolding stores the
