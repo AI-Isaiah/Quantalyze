@@ -149,6 +149,12 @@ const state = vi.hoisted(() => ({
     strategy_id: string;
     api_key_id: string;
   }>,
+  // 151 test-analyzer gap 2 — per-table read-error injection. A PostgREST
+  // failure (or a `strategy_keys` missing from the schema cache on a
+  // pre-migration environment) must degrade, not blank the dashboard: the
+  // role-discriminator reads are deliberately never assertOk'd. Nothing else
+  // could reach that arm — every other fixture resolves `error: null`.
+  tableErrors: {} as Record<string, { message: string } | null>,
 }));
 
 function resetState() {
@@ -166,6 +172,7 @@ function resetState() {
   state.allocatorEquityDerived = [];
   state.strategies = [];
   state.strategyKeys = [];
+  state.tableErrors = {};
   chainAudit.entries.length = 0;
 }
 
@@ -363,9 +370,17 @@ function buildChain(table: string) {
       resolve: (
         v:
           | { data: unknown[]; error: null; count?: number }
-          | { data: null; error: null; count: number },
+          | { data: null; error: null; count: number }
+          | { data: null; error: { message: string } },
       ) => void,
     ) => {
+      // Injected read failure for THIS table (state.tableErrors) — the shape
+      // PostgREST returns: null data alongside a non-null error.
+      const injected = state.tableErrors[table];
+      if (injected) {
+        resolve({ data: null, error: injected });
+        return;
+      }
       const rows = rowsFor();
       if (headCountMode) {
         resolve({ data: null, error: null, count: rows.length });
@@ -3281,5 +3296,146 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
     expect(result.liveBaselineMetrics.sharpe).toBeNull();
     expect(result.liveBaselineMetrics.ytdTwr).toBeNull();
     expect(result.liveBaselineMetrics.equity).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // 151 test-analyzer gap 2 — THE DEGRADATION PATH.
+  //
+  // Both role-discriminator reads are deliberately NON-FATAL (never assertOk'd):
+  // a transient failure must not blank a working dashboard, and `strategy_keys`
+  // can be absent from the PostgREST schema cache on a pre-migration
+  // environment. On error the link set falls back to EMPTY, which biases keys
+  // toward ALLOCATOR eligibility — the failure mode is an allocator who can
+  // still reach their book, not one locked out of it. That fail-OPEN choice is
+  // IN-08, logged and accepted; what was missing is that nothing PINNED it.
+  //
+  // The stake is a data-integrity WRITE, not just a render: with the link set
+  // empty the manager keys (which have per-key series — that is what makes them
+  // manager-side) become both allocator-eligible AND contributing, so the book
+  // gate flips TRUE and `memberKeyIdsForSave = contributingApiKeyIds` stamps
+  // them into a saved scenario's persisted membership. For the founder (6 of 8
+  // keys manager-side) a transient read failure silently changes what a saved
+  // scenario claims to model.
+  //
+  // Without these pins a future refactor could add an `assertOk` (blanking the
+  // dashboard) or drop the capture (making the fault invisible) with no red test.
+  // -------------------------------------------------------------------------
+  it("degradation (strategy_keys read errors): the dashboard still returns, the gate biases OPEN, and the fault is reported to Sentry", async () => {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = AUM04_KEYS;
+    state.strategies = AUM04_STRATEGIES;
+    state.strategyKeys = AUM04_LINKS;
+    seedSeriesFor(["k-bybit", "k-okx", "k-mt5-1", "k-deribit-1"]);
+    // The link table is unreadable — the manager keys become invisible AS
+    // manager keys.
+    state.tableErrors["strategy_keys"] = {
+      message: "PGRST002 schema cache lookup failed (test)",
+    };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(() => {});
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    // (a) NEVER blank the dashboard — the read is not a gate. If someone adds
+    // an assertOk here, this rejects instead of resolving.
+    expect(result).toHaveProperty("bookEntryGateSatisfied");
+    expect(result.eligibleApiKeyIds).toHaveLength(8);
+
+    // (b) The DOCUMENTED bias: with no link set, every eligible key reads as an
+    // allocator key. Pinning the exact set (not just the boolean) is what makes
+    // the fail-open direction explicit and reviewable — flipping to fail-CLOSED
+    // would empty these and go red here rather than silently in prod.
+    expect(result.allocatorEligibleApiKeyIds).toHaveLength(8);
+    // Two of these (k-deribit-1, k-mt5-1) are MANAGER keys re-admitted by the
+    // degradation. Order follows AUM04_KEYS' deliberately interleaved census.
+    expect(result.contributingApiKeyIds).toEqual([
+      "k-bybit",
+      "k-deribit-1",
+      "k-okx",
+      "k-mt5-1",
+    ]);
+    expect(result.bookEntryGateSatisfied).toBe(true);
+
+    // (c) The fault stays OBSERVABLE — the breadcrumb is the only signal that
+    // this book projection is degraded rather than correct.
+    expect(captureSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        tags: expect.objectContaining({
+          reason: "role_discriminator_read_failed",
+        }),
+      }),
+    );
+    expect(errSpy).toHaveBeenCalled();
+
+    captureSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  it("degradation (own-`strategies` read errors): the SAME non-fatal + reported posture on the other read", async () => {
+    // The two reads are OR'd into one error signal, so the sibling arm needs its
+    // own pin — dropping either read's error from `phase151LinkReadError` would
+    // otherwise stay green.
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = AUM04_KEYS;
+    state.strategies = AUM04_STRATEGIES;
+    state.strategyKeys = AUM04_LINKS;
+    seedSeriesFor(["k-bybit", "k-okx"]);
+    state.tableErrors["strategies"] = { message: "connection reset (test)" };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(() => {});
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result).toHaveProperty("bookEntryGateSatisfied");
+    expect(result.allocatorEligibleApiKeyIds).toHaveLength(8);
+    expect(captureSpy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        tags: expect.objectContaining({
+          reason: "role_discriminator_read_failed",
+        }),
+      }),
+    );
+
+    captureSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  it("control: with BOTH reads healthy, no degradation breadcrumb fires", async () => {
+    // Non-vacuity for the two tests above — proves they observe the ERROR arm
+    // and not a breadcrumb that fires on every call.
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = AUM04_KEYS;
+    state.strategies = AUM04_STRATEGIES;
+    state.strategyKeys = AUM04_LINKS;
+    seedSeriesFor(["k-bybit", "k-okx"]);
+    const sentry = await import("./sentry-capture");
+    const captureSpy = vi
+      .spyOn(sentry, "captureToSentry")
+      .mockImplementation(() => {});
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    // The healthy census: manager keys ARE excluded.
+    expect(result.allocatorEligibleApiKeyIds).toEqual(["k-bybit", "k-okx"]);
+    expect(
+      captureSpy.mock.calls.some(
+        ([, opts]) =>
+          (opts as { tags?: Record<string, unknown> } | undefined)?.tags
+            ?.reason === "role_discriminator_read_failed",
+      ),
+    ).toBe(false);
+
+    captureSpy.mockRestore();
   });
 });
