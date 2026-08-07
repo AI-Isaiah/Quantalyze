@@ -445,7 +445,10 @@ async def test_run_poll_allocator_positions_job_emits_sync_completed_audit_on_do
         "raw_payload": {"symbol": "BTCUSDT"},
     }
 
-    async def _fake_fetch(venue, exchange):
+    # Phase 151 / AUM-02: the chokepoint gained an optional api_key_id kwarg
+    # (account-level venues need an account-scoped symbol). Accepted here so the
+    # double matches the real call shape.
+    async def _fake_fetch(venue, exchange, api_key_id=None):
         return ([spot_row, deriv_row], None)
 
     async def _fake_persist(supa, rows, allocator_id, api_key_id, asof):
@@ -531,7 +534,7 @@ async def test_run_poll_allocator_positions_job_auth_error_sets_revoked(
 
     monkeypatch.setattr(jw, "_allocator_key_preflight", _fake_preflight)
 
-    async def _fail_auth(venue, exchange):
+    async def _fail_auth(venue, exchange, api_key_id=None):
         raise ccxt.AuthenticationError("401 invalid api key")
 
     monkeypatch.setattr(ap_mod, "fetch_allocator_holdings", _fail_auth)

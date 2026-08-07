@@ -30,6 +30,7 @@ import pytest
 
 import services.job_worker as jw
 from services.allocator_positions import fetch_allocator_holdings
+from services.closed_sets import MT5_DISABLED_DETAIL
 from services.job_worker import DispatchOutcome
 from services.mt5_client import Mt5Client, Mt5Session
 
@@ -112,25 +113,54 @@ def _session(transport: _FakeMt5Transport) -> Mt5Session:
 
 
 # ---------------------------------------------------------------------------
-# 1 — fetch_allocator_holdings: mt5 is an EXPLICIT no-op, never AttributeError
+# 1 — fetch_allocator_holdings: mt5 dispatches away from ccxt, never crashes
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_fetch_allocator_holdings_mt5_session_explicit_noop():
-    """Pre-fix: AttributeError "'Mt5Session' object has no attribute
+async def test_fetch_allocator_holdings_mt5_dark_skips_without_terminal_ipc(
+    monkeypatch,
+):
+    """Pre-hotfix: AttributeError "'Mt5Session' object has no attribute
     'fetch_balance'" from _fetch_spot_rows — the exact PROD sync_error.
-    Post-fix: explicit ([], None) no-op with ZERO terminal IPC (the holdings
-    poll must never open a live RPyC read outside the derive path's lock
-    discipline)."""
+
+    The hotfix returned a silent ([], None) no-op. Phase 151 (AUM-02) replaced
+    it with venue dispatch, so mt5 can never reach the ccxt body. With the
+    go-dark flag OFF the branch skips at the kill switch with END-USER copy and
+    ZERO terminal IPC — never a pretend-success, never a crash."""
+    monkeypatch.delenv("MT5_ENABLED", raising=False)
     transport = _FakeMt5Transport(account=_account())
 
     rows, warning = await fetch_allocator_holdings("mt5", _session(transport))
 
     assert rows == []
-    assert warning is None
+    assert warning == MT5_DISABLED_DETAIL
     assert transport.calls == [], (
-        "mt5 holdings no-op must not perform any terminal IPC; "
+        "the mt5 holdings skip must not perform any terminal IPC; "
         f"observed {transport.calls}"
     )
+
+
+@pytest.mark.asyncio
+async def test_fetch_allocator_holdings_mt5_enabled_reads_account_equity(
+    monkeypatch,
+):
+    """AUM-02, the substantive fix: with MT5 live, an MT5 key CONTRIBUTES —
+    one account-equity row read through login + account_info, never a ccxt
+    surface and never the deal ledger."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(account=_account())
+
+    rows, warning = await fetch_allocator_holdings(
+        "mt5", _session(transport), API_KEY_ID
+    )
+
+    assert warning is None
+    assert len(rows) == 1
+    assert rows[0]["venue"] == "mt5"
+    assert rows[0]["value_usd"] == pytest.approx(ACCOUNT_EQUITY)
+    assert rows[0]["value_usd"] != pytest.approx(ACCOUNT_BALANCE)
+    assert "login" in transport.calls
+    assert "account_info" in transport.calls
+    assert "history_deals_get" not in transport.calls
 
 
 # ---------------------------------------------------------------------------
@@ -141,9 +171,15 @@ async def test_run_poll_allocator_positions_job_mt5_reaches_complete(
     monkeypatch, api_key_row_factory
 ):
     """The daily fan-out handler must complete for a healthy MT5 key:
-    sync_status='complete' + last_sync_at stamped — never the pre-fix
-    sync_status='error' with the fetch_balance AttributeError."""
+    sync_status='complete' + last_sync_at stamped — never the pre-hotfix
+    sync_status='error' with the fetch_balance AttributeError.
+
+    Phase 151 (AUM-02) makes this a REAL sync rather than a no-op completion:
+    the key's account equity is read and persisted, so an MT5 account actually
+    contributes to the allocator's book."""
     from services import audit as audit_module
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
 
     key_row = api_key_row_factory(
         id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="mt5"
