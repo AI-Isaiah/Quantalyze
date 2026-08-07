@@ -3335,7 +3335,7 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
     const sentry = await import("./sentry-capture");
     const captureSpy = vi
       .spyOn(sentry, "captureToSentry")
-      .mockImplementation(() => {});
+      .mockImplementation(async () => {});
 
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
@@ -3390,7 +3390,7 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
     const sentry = await import("./sentry-capture");
     const captureSpy = vi
       .spyOn(sentry, "captureToSentry")
-      .mockImplementation(() => {});
+      .mockImplementation(async () => {});
 
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
@@ -3421,7 +3421,7 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
     const sentry = await import("./sentry-capture");
     const captureSpy = vi
       .spyOn(sentry, "captureToSentry")
-      .mockImplementation(() => {});
+      .mockImplementation(async () => {});
 
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");

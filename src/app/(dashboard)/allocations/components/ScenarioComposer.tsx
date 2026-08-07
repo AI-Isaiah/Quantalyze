@@ -3935,6 +3935,26 @@ export function ScenarioComposer({
     scenario.setManualAum(parsed);
   }
 
+  /**
+   * 151 UAT — the BOTTOM-UP AUM writer handed to the constituent list.
+   *
+   * A bottom-up dollar edit resizes the portfolio from a DIFFERENT control than
+   * the AUM field, so the field's seeded-once mirror must be released or it
+   * keeps displaying the last number typed INTO it while the draft holds the
+   * new one — the exact displayed-vs-draft divergence SP-C1 fixed on the reopen
+   * seam, arriving through another door (and with the same consequence: a bare
+   * blur would then write the stale figure back).
+   *
+   * Releasing the gate is right, not merely convenient: the gate exists to stop
+   * a HOLDINGS REFRESH from re-snapping text the allocator is still typing. An
+   * explicit resize by the allocator's own other gesture is not that — their
+   * uncommitted AUM keystrokes are superseded by it.
+   */
+  function setBottomUpAum(value: number) {
+    aumTouchedRef.current = false;
+    scenario.setManualAum(value);
+  }
+
 
   // -------------------------------------------------------------------------
   // Build delta summary for footer (top 3 above noise floor).
@@ -5369,6 +5389,11 @@ export function ScenarioComposer({
           blendShareByRef={blendShareByRef}
           totalBookEquity={totalBookEquity}
           scenarioAum={scenarioAum}
+          // 151 UAT (founder, 2026-08-07) — BOTTOM-UP AUM, blank mode only.
+          // In book mode the AUM comes from live holdings (overridable) and a
+          // dollar edit back-computes a weight WITHIN it — unchanged this round.
+          bottomUpAum={isBlankMode}
+          onSetManualAum={setBottomUpAum}
           leverageByRef={leverageByRef}
           onSetLeverage={handleLeverageChange}
           targetModeByRef={targetModeByRef}
@@ -5841,6 +5866,25 @@ interface CompositionListProps {
    * derived Notional column (a DIFFERENT number — equity × share × leverage).
    */
   scenarioAum: number;
+  /**
+   * 151 UAT (founder, 2026-08-07) — BOTTOM-UP AUM. True in BLANK mode, where
+   * the per-strategy USD input is THE entry point on which weight is built:
+   * there is no live book, so the portfolio's size is whatever the allocator
+   * allocates. Editing row i's dollar to `d_i'` holds every OTHER row's current
+   * derived dollar FIXED and grows/shrinks the portfolio instead —
+   * `manualAumUsd = Σ_{j≠i} d_j + d_i'` — then every weight is `d_j / AUM'`.
+   *
+   * False in BOOK mode, where the AUM is what custody says the book is worth
+   * (overridable) and a dollar edit back-computes a weight WITHIN that fixed
+   * size. Unchanged this round.
+   */
+  bottomUpAum: boolean;
+  /**
+   * 151 UAT — the manual-AUM writer, used ONLY on the bottom-up path, in the
+   * same event handler as the weight write (React batches both into one render,
+   * so the pair lands atomically). Never a second weight-write channel.
+   */
+  onSetManualAum: (value: number) => void;
   /** R4 — ref → leverage multiplier (default 1.0 when absent). */
   leverageByRef: Record<string, number>;
   onSetLeverage: (scopeRef: string, leverage: number) => void;
@@ -5909,6 +5953,8 @@ function CompositionList({
   blendShareByRef,
   totalBookEquity,
   scenarioAum,
+  bottomUpAum,
+  onSetManualAum,
   leverageByRef,
   onSetLeverage,
   targetModeByRef,
@@ -6069,6 +6115,53 @@ function CompositionList({
   // -------------------------------------------------------------------------
   const AUM_UNSET_REMEDY = "Set portfolio AUM to size in dollars";
 
+  /**
+   * A ref's weight, derived EXACTLY as the row that renders it does. ONE
+   * derivation shared by the row display and the bottom-up sum below, so the
+   * dollars the allocator is looking at and the dollars the AUM is built from
+   * can never drift (the RT-02 lesson: an edit basis and a display basis that
+   * are written twice WILL desync).
+   */
+  const weightForRef = (ref: string): number =>
+    mixedPerKeyBook
+      ? (blendShareByRef[ref] ?? draft.weightOverrides[ref] ?? 0)
+      : (draft.weightOverrides[ref] ?? 0);
+
+  /**
+   * 151 UAT — the bottom-up AUM for an edit of `ref` to `amount`.
+   *
+   * HOLD EVERY OTHER ROW'S DOLLAR FIXED and let the portfolio resize:
+   *   AUM' = Σ_{j≠i} d_j + d_i'   where d_j = w_j × AUM
+   *
+   * Summed over the OTHER rows explicitly rather than as `AUM − d_i`. Those two
+   * are equal only when the weights sum to 1, and they do not always: the
+   * added-only carve-out deliberately lets a LONE added unit keep its RAW typed
+   * weight rather than be renormalized to 1.0. With a sole row at w=0.5 and
+   * AUM 1,000,000, `AUM − d_i` would compute 500,000 of phantom "other" money
+   * and land the portfolio at 1,100,000 for a $600k edit instead of $600k.
+   *
+   * Returns null when the result is not a usable size (all-zero portfolio, or a
+   * non-finite from a degenerate draft) — the caller then refuses the edit
+   * rather than writing a zero/NaN AUM.
+   */
+  const bottomUpAumFor = (ref: string, amount: number): number | null => {
+    const otherRefs = [
+      ...perKeySources.map((k) => k.id),
+      ...draft.addedStrategies.map((a) => a.id),
+    ].filter(
+      // The BASIS is the enabled set — the same set `setWeightOverride`
+      // renormalizes over. An excluded row is not in the blend, so its dollars
+      // are not part of the portfolio's size.
+      (id) => id !== ref && draft.toggleByScopeRef[id] !== false,
+    );
+    const otherDollars = otherRefs.reduce(
+      (sum, id) => sum + weightForRef(id) * scenarioAum,
+      0,
+    );
+    const nextAum = Math.max(0, otherDollars) + amount;
+    if (!Number.isFinite(nextAum) || nextAum <= 0) return null;
+    return nextAum;
+  };
 
   const commitDollarInput = (
     ref: string,
@@ -6096,9 +6189,47 @@ function CompositionList({
           el.value = String(displayed);
           return;
         }
-        // THE one weight-write path. `scenarioAum > 0` is guaranteed: the
-        // em-dash branch below is the only other render, so no division by zero
-        // and no NaN can reach handleWeightChange from here.
+        // 151 UAT — BOTTOM-UP (blank mode): the portfolio resizes around the
+        // typed amount instead of the amount competing for a fixed pie.
+        //
+        // ⚠️ STILL THE ONE WEIGHT-WRITE PATH. This does NOT fork a second
+        // writer: it changes only the DENOMINATOR handed to `onSetWeight`
+        // (= handleWeightChange), so the >1 clamp + banner, the mixed-book
+        // engine-unit basis and the sole-unit refusal are all still inherited.
+        //
+        // Why the proportional redistribution inside handleWeightChange /
+        // setWeightOverride already produces exactly the bottom-up weights, so
+        // no second pass is needed and no other row has to be written here:
+        //   the redistribution gives  w_j' = w_j · (1 − w_i')/(1 − w_i)
+        //   and                       1 − w_i' = (AUM' − d_i')/AUM'
+        //                                      = (AUM − d_i)/AUM'
+        //   so with Σw = 1:           w_j' = w_j · AUM/AUM' = d_j/AUM'
+        // — i.e. every OTHER row's DOLLAR figure is unchanged, which is the
+        // founder's "hold every other row fixed" rule stated in weight space.
+        if (bottomUpAum) {
+          const nextAum = bottomUpAumFor(ref, amount);
+          if (nextAum === null) {
+            // An all-zero portfolio has no size to divide by. Refuse rather
+            // than write a 0/NaN AUM — the same fail-loud posture as the
+            // invalid-amount arm above.
+            console.warn(
+              "[ScenarioComposer] refused a dollar edit that yields no portfolio size",
+              { ref, amount },
+            );
+            el.value = String(displayed);
+            return;
+          }
+          // Both writes ride the SAME event handler, so React batches them into
+          // one render and the pair lands atomically: no frame exists in which
+          // the new weight is read against the old AUM.
+          onSetManualAum(nextAum);
+          onSetWeight(ref, amount / nextAum);
+          el.value = String(displayed);
+          return;
+        }
+        // BOOK mode — unchanged. THE one weight-write path. `scenarioAum > 0`
+        // is guaranteed: the em-dash branch below is the only other render, so
+        // no division by zero and no NaN can reach handleWeightChange from here.
         onSetWeight(ref, amount / scenarioAum);
       } else {
         // Fail-loud + keep the previous value, mirroring handleWeightChange's

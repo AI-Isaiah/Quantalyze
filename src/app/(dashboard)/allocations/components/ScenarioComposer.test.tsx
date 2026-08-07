@@ -12068,6 +12068,10 @@ describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
     });
   }
 
+  /** The Portfolio AUM field's displayed (whole-dollar) text. */
+  function aumInputValue(): string {
+    return (screen.getByTestId("scenario-aum-input") as HTMLInputElement).value;
+  }
   function weightInput(ref: string): HTMLInputElement {
     const el = document.getElementById(`weight-${ref}`);
     expect(el).not.toBeNull();
@@ -12142,11 +12146,152 @@ describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
 
     setDollar(D_A, "500000");
 
+    // 151 UAT — BOTTOM-UP. In BLANK mode the dollar input is THE entry point:
+    // the portfolio resizes around the typed amount instead of the amount
+    // competing for a fixed pie. With one row and nothing else allocated,
+    // AUM' = 0 + 500,000 and the row is the whole portfolio.
+    expect(aumInputValue()).toBe("500000");
+    expect(weightInput(D_A).value).toBe("1.000");
+    expect(dollarInput(D_A).value).toBe("500000");
+    // The founder's sentence is UNCHANGED and is the load-bearing half: the
+    // number the audit trail records is the number typed.
+    expect(committedSizes()[D_A]).toBe(500_000);
+  });
+
+  // Test 1b — the BOOK-mode twin, which keeps the pre-151-UAT top-down
+  // semantics verbatim: the AUM is what custody says the book is worth, so a
+  // dollar edit back-computes a weight WITHIN that fixed size. This is the
+  // non-vacuity control for Test 1 — without it, "bottom-up" could have been
+  // implemented as "everywhere" and nothing would fail.
+  it("AUM-01 Test 1b (book mode stays TOP-DOWN): $500,000 against a fixed $2,000,000 AUM sets weight 0.250 and does NOT resize the portfolio", () => {
+    renderUsd(mixedBookPayload());
+    add(D_A, "Dollar Strat A");
+    setAum("2000000");
+
+    setDollar(D_A, "500000");
+
     // 500,000 / 2,000,000 = 0.25 — hand-computed, never recomputed here.
     expect(weightInput(D_A).value).toBe("0.250");
     expect(dollarInput(D_A).value).toBe("500000");
-    // …and the number the audit trail would record is the number typed.
+    // THE book-mode invariant: the portfolio size did not move.
+    expect(aumInputValue()).toBe("2000000");
     expect(committedSizes()[D_A]).toBe(500_000);
+  });
+
+  // -----------------------------------------------------------------------
+  // 151 UAT — THE ECONOMIC ORACLE for bottom-up, stated as an INVARIANT over
+  // composed state rather than as a replay of the implementation's own
+  // arithmetic:
+  //
+  //     AUM' = Σ_j d_j     and     w_i = d_i / AUM'     for every row
+  //
+  // plus the HOLD-OTHERS-FIXED property: editing row i must not move any other
+  // row's DOLLAR figure — only its weight, and only because the denominator
+  // grew.
+  // -----------------------------------------------------------------------
+  it("151 UAT (bottom-up oracle): editing one row to $500,000 beside a $250,000 row makes AUM $750,000 with weights 2/3 and 1/3", () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    add(D_B, "Dollar Strat B");
+    // Seed a state with literal, hand-checkable dollars: $500,000 total, split
+    // evenly, so each row sits at $250,000.
+    setAum("500000");
+    expect(dollarInput(D_A).value).toBe("250000");
+    expect(dollarInput(D_B).value).toBe("250000");
+
+    // Raise row A to $500,000. Row B is HELD at its current $250,000.
+    setDollar(D_A, "500000");
+
+    // AUM' = 500,000 + 250,000 = 750,000 (literals, not recomputed).
+    expect(aumInputValue()).toBe("750000");
+    // w = d / AUM' → 2/3 and 1/3.
+    expect(weightInput(D_A).value).toBe("0.667");
+    expect(weightInput(D_B).value).toBe("0.333");
+    // HOLD-OTHERS-FIXED: B's DOLLARS are untouched. Its weight moved only
+    // because the denominator grew — which is the whole point.
+    expect(dollarInput(D_B).value).toBe("250000");
+    expect(dollarInput(D_A).value).toBe("500000");
+    // And the conservation invariant closes: Σ dollars === AUM.
+    expect(
+      Number(dollarInput(D_A).value) + Number(dollarInput(D_B).value),
+    ).toBe(750_000);
+    // The audit trail records what was typed, for BOTH rows.
+    const sizes = committedSizes();
+    expect(sizes[D_A]).toBe(500_000);
+    // Sub-cent tolerance on the HELD row only: its weight is the stored 1/3, so
+    // 1/3 × 750,000 lands at 250000.00000000003 in binary floating point. That
+    // is inherent to storing weights (not dollars) as the source of truth — the
+    // rendered figure is exact (asserted above), and the residual is ~3e-11 of a
+    // dollar. Pinned to the cent so a REAL drift (a wrong denominator, a lost
+    // renormalization) still fails.
+    expect(sizes[D_B]).toBeCloseTo(250_000, 2);
+    // The conservation invariant on the COMMITTED numbers, not just the render.
+    expect(sizes[D_A] + sizes[D_B]).toBeCloseTo(750_000, 2);
+  });
+
+  it("151 UAT (bottom-up, shrink direction): lowering a row shrinks the portfolio and still holds the other row's dollars", () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    add(D_B, "Dollar Strat B");
+    setAum("500000");
+
+    // Down, not up — the invariant is direction-agnostic.
+    setDollar(D_A, "50000");
+
+    // AUM' = 50,000 + 250,000 = 300,000.
+    expect(aumInputValue()).toBe("300000");
+    expect(dollarInput(D_B).value).toBe("250000");
+    expect(dollarInput(D_A).value).toBe("50000");
+    // 50,000/300,000 = 1/6 ≈ 0.167; 250,000/300,000 = 5/6 ≈ 0.833.
+    expect(weightInput(D_A).value).toBe("0.167");
+    expect(weightInput(D_B).value).toBe("0.833");
+  });
+
+  // The reason `bottomUpAumFor` sums the OTHER rows explicitly instead of
+  // taking the shortcut `AUM − d_i`. Those two agree only when the weights sum
+  // to 1, and the added-only carve-out deliberately lets a LONE added unit keep
+  // its RAW typed weight rather than be renormalized to 1.0 (the zero-size and
+  // >1 clamp gates read that raw value). With a sole row at w=0.5 the shortcut
+  // invents 500,000 of "other" money that no row on screen holds.
+  //
+  // Falsify: swap the sum for `scenarioAum - weightForRef(ref) * scenarioAum`
+  // and this reads 1,100,000 / 0.545 instead of 600,000 / 1.000.
+  it("151 UAT (bottom-up, no phantom money): a SOLE row whose weight is not 1 resizes to exactly the typed amount", () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    setAum("1000000");
+    // Drive the lone row OFF 1.0 — the added-only carve-out preserves the raw
+    // typed weight here rather than renormalizing back to the whole book.
+    fireEvent.change(weightInput(D_A), { target: { value: "0.5" } });
+    expect(weightInput(D_A).value).toBe("0.500");
+    expect(dollarInput(D_A).value).toBe("500000");
+
+    setDollar(D_A, "600000");
+
+    // Nothing else is allocated, so the portfolio IS this row: AUM' = 600,000.
+    expect(aumInputValue()).toBe("600000");
+    expect(weightInput(D_A).value).toBe("1.000");
+    expect(dollarInput(D_A).value).toBe("600000");
+  });
+
+  it("151 UAT (the AUM field is the OTHER direction): editing portfolio AUM holds WEIGHTS fixed and rescales dollars proportionally", () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    add(D_B, "Dollar Strat B");
+    setAum("500000");
+    fireEvent.change(weightInput(D_A), { target: { value: "0.25" } });
+    expect(weightInput(D_B).value).toBe("0.750");
+
+    // Double the portfolio through the AUM field.
+    setAum("1000000");
+
+    // Weights are UNCHANGED; the dollars scaled with the pie. This is the
+    // founder's stated complement to bottom-up, and it is what makes the two
+    // inputs non-redundant.
+    expect(weightInput(D_A).value).toBe("0.250");
+    expect(weightInput(D_B).value).toBe("0.750");
+    expect(dollarInput(D_A).value).toBe("250000");
+    expect(dollarInput(D_B).value).toBe("750000");
   });
 
   // Test 2 — CONSERVATION (oracle 1): the dollar column is a partition of the
@@ -12179,33 +12324,49 @@ describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
   // travelled the one path. Neutering handleWeightChange (an early `return`)
   // turns this RED — observed once during 151-07 Task 1, then reverted.
   it("AUM-01 Test 3 (wiring falsifier): the dollar edit writes the weight through handleWeightChange — the ONE weight-write path", async () => {
+    // 151 UAT — TWO rows, so the weight bottom-up produces is a non-trivial
+    // fraction (2/3) rather than the 1.0 a lone row would carry anyway. The
+    // stamp then genuinely proves the gesture travelled the weight path.
     renderUsd(blankSlatePayload());
     add(D_A, "Dollar Strat A");
-    setAum("2000000");
+    add(D_B, "Dollar Strat B");
+    setAum("1000000");
+    expect(dollarInput(D_A).value).toBe("500000");
 
-    setDollar(D_A, "500000");
+    // AUM' = 1,000,000 + 500,000 = 1,500,000 → w_A = 2/3.
+    setDollar(D_A, "1000000");
 
-    expect(weightInput(D_A).value).toBe("0.250");
+    expect(weightInput(D_A).value).toBe("0.667");
     await waitFor(() => {
       const raw = lsStore.get(`allocations.scenario_v0_15.${ALLOCATOR_A}`);
       expect(raw).toBeTruthy();
       const persisted = JSON.parse(raw as string) as ScenarioDraft;
       // The user-gesture stamp: only the weight-write path sets this.
-      expect(persisted.userWeightOverrides?.[D_A]).toBe(0.25);
-      expect(persisted.weightOverrides[D_A]).toBe(0.25);
+      expect(persisted.userWeightOverrides?.[D_A]).toBeCloseTo(2 / 3, 10);
+      expect(persisted.weightOverrides[D_A]).toBeCloseTo(2 / 3, 10);
+      // …and the AUM half of the atomic pair really landed in the SAME draft.
+      expect(persisted.manualAumUsd).toBe(1_500_000);
     });
   });
 
   // Test 4 — CLAMP INHERITANCE. An amount larger than the whole book is a
   // weight > 1; the dollar path must surface the EXISTING banner verbatim
   // rather than clamping silently or minting a second message.
-  it("AUM-01 Test 4 (clamp inheritance): a dollar amount above AUM fires the existing clamp banner and lands the weight at 1", () => {
-    renderUsd(blankSlatePayload());
+  // 151 UAT — this now runs on the BOOK path. Under bottom-up (blank mode) a
+  // weight > 1 is STRUCTURALLY unreachable from a dollar edit: the typed amount
+  // is itself part of the new denominator, so `amount / AUM'` can never exceed
+  // 1. That is not the clamp being lost — you simply cannot over-allocate a pie
+  // you are defining by allocating. The guard is still INHERITED (the dollar
+  // path calls the same `handleWeightChange`), and it stays reachable exactly
+  // where a fixed pie exists: book mode, pinned here, plus the weight input in
+  // either mode.
+  it("AUM-01 Test 4 (clamp inheritance): a dollar amount above a FIXED book AUM fires the existing clamp banner and lands the weight at 1", () => {
+    renderUsd(mixedBookPayload());
     add(D_A, "Dollar Strat A");
-    add(D_B, "Dollar Strat B");
-    setAum("1000000");
-    // Non-vacuity: two rows share the book, so a clamp to 1 is a real move.
-    expect(weightInput(D_A).value).toBe("0.500");
+    setAum("2000000");
+    // Non-vacuity: the row shares the book with the per-key unit, so a clamp to
+    // 1 is a real move.
+    expect(weightInput(D_K1).value).not.toBe("0.000");
 
     setDollar(D_A, "5000000");
 
@@ -12213,7 +12374,25 @@ describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
       "Weight clamped to 1 — the maximum allocation is 100% of portfolio AUM.",
     );
     expect(weightInput(D_A).value).toBe("1.000");
-    expect(weightInput(D_B).value).toBe("0.000");
+    expect(weightInput(D_K1).value).toBe("0.000");
+  });
+
+  it("151 UAT (bottom-up makes over-allocation meaningless): a huge blank-mode amount grows the portfolio instead of clamping", () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    add(D_B, "Dollar Strat B");
+    setAum("1000000");
+    expect(weightInput(D_A).value).toBe("0.500");
+
+    setDollar(D_A, "5000000");
+
+    // AUM' = 5,000,000 + 500,000 = 5,500,000. No clamp, no banner — the
+    // portfolio grew to hold the allocation.
+    expect(aumInputValue()).toBe("5500000");
+    expect(screen.queryByTestId("scenario-commit-error")).toBeNull();
+    expect(dollarInput(D_A).value).toBe("5000000");
+    // B is held at its dollars, exactly as the hold-others-fixed rule says.
+    expect(dollarInput(D_B).value).toBe("500000");
   });
 
   // Test 5 — GUARD INHERITANCE in a MIXED book (a selected per-key engine unit
@@ -12323,14 +12502,17 @@ describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
     add(D_B, "Dollar Strat B");
     setAum("1000000");
 
+    // 151 UAT — bottom-up: AUM' = 250,000 + 500,000 (B held) = 750,000, so
+    // w_A = 1/3. The point of the control is unchanged — a REAL edit stamps a
+    // user weight override, unlike the bare blur above.
     setDollar(D_A, "250000");
 
-    expect(weightInput(D_A).value).toBe("0.250");
+    expect(weightInput(D_A).value).toBe("0.333");
     await waitFor(() => {
       const persisted = JSON.parse(
         lsStore.get(`allocations.scenario_v0_15.${ALLOCATOR_A}`) as string,
       ) as ScenarioDraft;
-      expect(persisted.userWeightOverrides?.[D_A]).toBe(0.25);
+      expect(persisted.userWeightOverrides?.[D_A]).toBeCloseTo(1 / 3, 10);
     });
   });
 
