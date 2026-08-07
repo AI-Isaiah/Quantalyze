@@ -549,14 +549,57 @@ async def _fetch_mt5_account_rows(
 
     # (f) Currency gate — [A3] fail-loud. An account denominated in anything but
     # USD cannot be valued here without an FX rate we do not have, and silently
-    # treating it as USD IS a fabricated rate of 1.0 inside an AUM total. A
-    # missing/blank currency is the same problem wearing a different hat: we do
-    # not know the denomination, so we do not guess. Honest skip either way.
+    # treating it as USD IS a fabricated rate of 1.0 inside an AUM total. We
+    # never guess the denomination.
+    #
+    # 151 specialist F-2 — but "the terminal reported no currency at all" and
+    # "the terminal reported a currency that is not USD" are DIFFERENT
+    # conditions and were being collapsed into one, with no log on either arm:
+    #
+    #   • ABSENT / blank field  → PAYLOAD DEGRADATION, exactly like a missing
+    #     `equity` below, and it belongs on the same TRANSIENT posture. Pre-fix
+    #     a terminal glitch that dropped only this field from an otherwise
+    #     healthy USD account produced the copy "MT5 account currency is unknown
+    #     — USD conversion isn't supported yet", which blames a product FX
+    #     limitation and implies no retry will ever help, while the sync stamped
+    #     `complete_with_warnings` (a HEALTHY-looking state) and the account
+    #     contributed $0 to AUM. The next sync would very likely have succeeded.
+    #   • PRESENT but not a bare code (garbled / hostile) → still an honest skip
+    #     under the "unknown" copy: the terminal DID report a denomination, we
+    #     just cannot parse it, and the raw text must never be echoed into
+    #     `api_keys.sync_error` (T-151-05 / ASVS V7).
+    #   • PRESENT, well-formed, non-USD → the genuine, honest FX skip.
+    #
+    # Every arm now logs. Pre-fix the currency arms were the ONLY refusals in
+    # this function with no logger call, so a fleet-wide gateway regression that
+    # dropped the field would have shown ZERO log/Sentry signal — the only
+    # evidence being per-user copy in `api_keys.sync_error`.
     raw_ccy = info.get("currency")
-    ccy = raw_ccy.strip().upper() if isinstance(raw_ccy, str) else ""
+    reported_ccy = raw_ccy.strip() if isinstance(raw_ccy, str) else ""
+    if reported_ccy == "":
+        logger.warning(
+            "poll_allocator_positions: mt5 account_info reported no currency "
+            "(absent/blank) — payload degradation, classified transient "
+            "(NOT an FX-support gap)"
+        )
+        raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE)
+    ccy = reported_ccy.upper()
     if not _CURRENCY_CODE_RE.fullmatch(ccy):
+        # Bounded, non-echoing diagnostic: enough to recognise a gateway-wide
+        # shape regression, never the raw string in full.
+        logger.warning(
+            "poll_allocator_positions: mt5 account currency is not a bare "
+            "code (%d chars, starts %r) — honest skip as 'unknown'",
+            len(reported_ccy),
+            reported_ccy[:8],
+        )
         return ([], MT5_NON_USD_NOTE.format(ccy="unknown"))
     if ccy != "USD":
+        logger.info(
+            "poll_allocator_positions: mt5 account denominated in %s — honest "
+            "skip (no FX rate available)",
+            ccy,
+        )
         return ([], MT5_NON_USD_NOTE.format(ccy=ccy))
 
     # (g) Extraction with the derive arm's fail-loud discipline: a NaN/Inf or

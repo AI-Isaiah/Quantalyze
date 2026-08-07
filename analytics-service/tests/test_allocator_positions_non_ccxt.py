@@ -22,7 +22,7 @@ Required tests (numbered per 151-03-PLAN):
   6.  test_mt5_usd_account_emits_one_equity_row
   7.  test_mt5_symbol_is_account_scoped
   8.  test_mt5_non_usd_currency_skips_honestly
-      test_mt5_missing_currency_skips_and_is_never_treated_as_usd
+      test_mt5_absent_currency_is_transient_not_an_fx_support_gap
   9.  test_mt5_read_timeout_restarts_and_raises_transient
   10. test_mt5_holdings_branch_shares_the_one_terminal_lock_registry
       test_mt5_holdings_read_contends_on_the_shared_terminal_lock
@@ -65,6 +65,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import logging
 import re
 import textwrap
 import time
@@ -855,41 +856,74 @@ async def test_mt5_non_usd_currency_skips_honestly(mt5_enabled):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bad_ccy", [None, "", "   "])
-async def test_mt5_missing_currency_skips_and_is_never_treated_as_usd(
-    mt5_enabled, bad_ccy
+async def test_mt5_absent_currency_is_transient_not_an_fx_support_gap(
+    mt5_enabled, bad_ccy, caplog
 ):
-    """[A3] fail-loud rule: a missing/blank currency must NOT be read as USD.
-    An absent field means we do not know the denomination — and a silently
-    assumed USD is the same fabricated 1.0 FX rate by another route."""
-    from services.allocator_positions import MT5_NON_USD_NOTE
+    """151 specialist F-2 — an account_info payload that reports NO currency is
+    PAYLOAD DEGRADATION, not a product FX limitation.
+
+    The same payload is treated as transient when `equity` is missing (a
+    terminal/transport condition that a retry heals). Pre-fix a missing
+    `currency` instead produced the user-visible copy "MT5 account currency is
+    unknown — USD conversion isn't supported yet", which:
+      - blames the wrong thing and implies no retry will ever help, and
+      - stamped `complete_with_warnings` (a HEALTHY-looking sync state) while
+        the account silently contributed $0 to AUM.
+
+    [A3] still holds and is in fact STRONGER: a transient emits no row at all,
+    so an unknown denomination is still never read as USD.
+
+    Falsify: restore the `return ([], MT5_NON_USD_NOTE.format(ccy="unknown"))`
+    arm for the blank case and this goes red on the raise.
+    """
+    from services.allocator_positions import (
+        AllocatorHoldingsSyncTransientError,
+        MT5_UNREACHABLE_NOTE,
+    )
 
     transport = _RecordingMt5Transport(account=_account(currency=bad_ccy))
 
-    rows, warning = await fetch_allocator_holdings(
-        "mt5", _session(transport), API_KEY_ID
-    )
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(AllocatorHoldingsSyncTransientError) as excinfo:
+            await fetch_allocator_holdings("mt5", _session(transport), API_KEY_ID)
 
-    assert rows == [], "an unknown-currency account must contribute NO row"
-    assert warning == MT5_NON_USD_NOTE.format(ccy="unknown")
+    # Retryable, and the copy names the terminal — not an FX gap.
+    assert str(excinfo.value) == MT5_UNREACHABLE_NOTE
+    # Ops-visible: pre-fix BOTH currency arms were the only refusals in this
+    # function with no logger call at all, so a fleet-wide gateway regression
+    # dropping the field would have shown zero log/Sentry signal.
+    assert any(
+        "reported no currency" in r.getMessage() for r in caplog.records
+    ), "the absent-currency refusal must be logged"
 
 
 @pytest.mark.asyncio
-async def test_mt5_currency_is_never_echoed_raw_into_user_copy(mt5_enabled):
+async def test_mt5_currency_is_never_echoed_raw_into_user_copy(
+    mt5_enabled, caplog
+):
     """The currency string is TERMINAL-controlled text landing in a column the
     browser renders verbatim. Only a plain currency code may be echoed; any
-    other shape renders as "unknown" (T-151-05 / ASVS V7)."""
+    other shape renders as "unknown" (T-151-05 / ASVS V7).
+
+    F-2 boundary: a PRESENT-but-unparseable currency keeps the honest SKIP (the
+    terminal did report a denomination, we simply cannot parse it) — only an
+    ABSENT/blank field routes to the transient arm above. It now also logs."""
     from services.allocator_positions import MT5_NON_USD_NOTE
 
     hostile = "<script>alert(1)</script>"
     transport = _RecordingMt5Transport(account=_account(currency=hostile))
 
-    rows, warning = await fetch_allocator_holdings(
-        "mt5", _session(transport), API_KEY_ID
-    )
+    with caplog.at_level(logging.WARNING):
+        rows, warning = await fetch_allocator_holdings(
+            "mt5", _session(transport), API_KEY_ID
+        )
 
     assert rows == []
     assert warning == MT5_NON_USD_NOTE.format(ccy="unknown")
     assert hostile not in (warning or "")
+    # The diagnostic is bounded and must not dump the whole hostile string.
+    assert any("not a bare" in r.getMessage() for r in caplog.records)
+    assert not any(hostile in r.getMessage() for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
