@@ -1125,6 +1125,103 @@ describe("AUM-01 manualAumUsd (Phase 151)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Phase 152 / SCEN-02 — the `isOwn` ownership bit on an ADDED strategy.
+//
+// Same draft-deleting-reset hazard as AUM-01 above (Phase-59 Pitfall 1), plus a
+// second one that is specific to a NESTED field: `addedStrategySchema` is a
+// `z.object`, so an UNDECLARED `isOwn` is silently STRIPPED on every codec
+// decode AND on every save POST (saved/route.ts persists `parsed.data.draft`) —
+// the chip works in dev and vanishes on the first refresh. Hence: declared on
+// the NESTED schema, `.nullish()`, no schema_version bump, no refine.
+// ---------------------------------------------------------------------------
+describe("SCEN-02 isOwn (Phase 152)", () => {
+  const codec = scenarioDraftCodec(defaultDraftFromHoldings(HOLDINGS_2));
+
+  /**
+   * ⚠️ POPULATED on purpose. The AUM-01 `v4Draft()` fixture above (:1059) has
+   * `addedStrategies: []`, which is correct for a TOP-LEVEL field but makes any
+   * assertion about a NESTED added-strategy field VACUOUS — a strip guard over
+   * an empty array parses green whether or not the field is declared, so it can
+   * never go RED and proves nothing. Every test below therefore reads
+   * `addedStrategies[0]`, which requires a real entry.
+   */
+  const v4DraftWithAdded = (): ScenarioDraft => ({
+    schema_version: SCENARIO_SCHEMA_VERSION,
+    init_holdings_fingerprint: "fp",
+    toggleByScopeRef: { "holding:binance:BTC:spot": true, "uuid-1": true },
+    addedStrategies: [STRAT_A],
+    weightOverrides: { "holding:binance:BTC:spot": 0.5, "uuid-1": 0.5 },
+    // Defined (not undefined) so the same fixture also satisfies
+    // scenarioDraftSaveSchema's `schema_version >= 4` memberKeyIds superRefine.
+    memberKeyIds: [],
+    lastEditedAt: "2026-08-07T00:00:00.000Z",
+  });
+
+  it("Test 1 (backward decode) — a v4 blob whose addedStrategies[0] has NO isOwn decodes ok, never reset", () => {
+    const legacy = v4DraftWithAdded();
+    expect("isOwn" in legacy.addedStrategies[0]).toBe(false);
+    const r = codec.decode(JSON.stringify(legacy));
+    // The falsifier: a REQUIRED nested field (or a refine) would return "reset"
+    // and hand back defaultDraft — every pre-152 draft deleted on first read.
+    expect(r.outcome).toBe("ok");
+    expect(r.value.weightOverrides).toEqual(legacy.weightOverrides);
+    expect(r.value.addedStrategies).toHaveLength(1);
+    expect(r.value.addedStrategies[0].id).toBe(STRAT_A.id);
+  });
+
+  it("Test 2 (null tolerance) — isOwn: null decodes ok AND survives as null (never schema_invalid, never reset)", () => {
+    // `JSON.stringify` writes `null` for values it cannot represent, and a bare
+    // `z.boolean()` REJECTS null → safeParse fails → the codec's schema_invalid
+    // reset → the user's whole scenario deleted. `.nullish()` is what keeps the
+    // null flowing through instead of exploding.
+    const raw = JSON.stringify({
+      ...v4DraftWithAdded(),
+      addedStrategies: [{ ...STRAT_A, isOwn: null }],
+    });
+    expect(raw).toContain('"isOwn":null');
+    const r = codec.decode(raw);
+    expect(r.outcome).toBe("ok");
+    expect(r.value.addedStrategies).toHaveLength(1);
+    expect(r.value.addedStrategies[0].isOwn).toBeNull();
+  });
+
+  it("Test 3 (strip-guard) — addedStrategies[0].isOwn is RETAINED by BOTH the draft and the SAVE schema", () => {
+    // This is the phase's key seam. `z.object` STRIPS unknown keys, so without
+    // the declaration on the NESTED addedStrategySchema the ownership bit is
+    // dropped on every localStorage round-trip and on the way to the DB.
+    const withOwn = {
+      ...v4DraftWithAdded(),
+      addedStrategies: [
+        {
+          id: "uuid-1",
+          name: "Strat A",
+          markets: ["binance"],
+          strategy_types: ["momentum"],
+          isOwn: true,
+        },
+      ],
+    };
+
+    const parsed = scenarioDraftSchema.safeParse(withOwn);
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.addedStrategies[0].isOwn).toBe(true);
+
+    // And through the SAVE-boundary schema the two save routes use — the
+    // superRefine needs memberKeyIds defined at schema_version >= 4, which the
+    // fixture supplies.
+    const saved = scenarioDraftSaveSchema.safeParse(withOwn);
+    expect(saved.success).toBe(true);
+    if (!saved.success) return;
+    expect(saved.data.addedStrategies[0].isOwn).toBe(true);
+  });
+
+  it("Test 4 (version discipline) — SCENARIO_SCHEMA_VERSION is still 4 (optional + additive = no bump)", () => {
+    expect(SCENARIO_SCHEMA_VERSION).toBe(4);
+  });
+});
+
 describe("renormalizeWeights", () => {
   it("T1.8 already-summing-to-1 weights pass through unchanged", () => {
     const result = renormalizeWeights({ a: 0.6, b: 0.4, c: 0.5 }, ["a", "b"]);
