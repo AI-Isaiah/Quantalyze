@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: planning
-stopped_at: "Phase 153 SPLIT four ways (founder-approved 2026-08-08). 153.1 planned (6 plans) + 153.3 planned (5 plans, +06 in flight). Next: plan 153.2 and 153.4, then execute in dependency order starting 153.3 (it carries the live defects incl. the D-31 read-only fail-open). Opus for every subagent until 2026-08-11 11:00."
-last_updated: "2026-08-08T21:50:20.297Z"
-last_activity: 2026-08-08
+stopped_at: "Phase 153.3 wave 1 EXECUTED: 153.3-01 (D-31, the read-only fail-open) is complete — is_trade_capable deleted, tri-state classify_trade_capability gated on a new Mt5Client.terminal_info(), BOTH call sites refuse an undetermined verdict. pytest 5013 passed, mypy --strict clean, MT5_REQUEST_TIMEOUT_S byte-unchanged, zero TypeScript. Next: 153.3-02 (wave 2 — D-24/D-25 timeout inversion). ⚠️ WIZFORM-05 stays OPEN: this plan closes only the D-31 leg, not the timeout/lease/instrumentation legs. Opus for every subagent until 2026-08-11 11:00."
+last_updated: "2026-08-09T00:00:00.000Z"
+last_activity: 2026-08-09
 progress:
   total_phases: 13
   completed_phases: 6
-  total_plans: 37
-  completed_plans: 37
+  total_plans: 59
+  completed_plans: 38
   percent: 46
 ---
 
@@ -381,7 +381,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [░░░░░░░░░░] 0% (v1.17 — 0/9 phases)
+Progress: [██████░░░░] 64%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -473,6 +473,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 140.3 PG7 | ~12 min | 2 tasks | 1 file |
 | Phase 140.3 PG8 | ~15 min | 2 tasks | 5 files |
 | Phase 140.3 PG9 | ~18 min | 2 tasks | 2 files |
+| Phase 153.3 P01 | 75m | 3 tasks | 8 files |
 
 ## Accumulated Context
 
