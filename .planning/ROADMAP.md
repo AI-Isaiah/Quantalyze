@@ -350,7 +350,7 @@ Plans:
 **Requirements**: WIZFORM-05 (server leg)
 **Decisions**: D-02, D-03, D-24, D-25, D-27, D-29, D-30, D-31, D-32, D-33 (D-28 superseded)
 **Owns**: `analytics-service/services/mt5_client.py`, `services/mt5_validation.py`, `services/mt5_concurrency.py`, `routers/exchange.py`, `tests/test_mt5_*.py`, `docs/runbooks/mt5-go-live.md` — ⚠️ **PLUS `services/ingestion/mt5.py` (+ `tests/test_ingestion_mt5.py`), added at planning time**: it is the SECOND of the two callers of `is_trade_capable` (`:221`), so D-31 cannot be a class-level fail-closed fix without it. Python-only; file-disjoint from 153.1/153.2/153.4.
-**Plans**: 5 plans in 5 waves (strictly sequential — every plan contends on `mt5_client.py` and/or `routers/exchange.py`)
+**Plans**: 6 plans in 6 waves (strictly sequential — every plan contends on `mt5_client.py` and/or `routers/exchange.py`). Wave 6 = **D-35**, the `shutdown()` class closure, added after gating: an `ast` scan measured **three** `Mt5Client.close()` callers (`routers/exchange.py`, `services/exchange.py`'s `aclose_exchange` mt5 arm, and `services/ingestion/mt5.py`'s validate `finally`) reaching exactly **two** `shutdown()` sites (`mt5_client.py:384` `close`, `:436` `restart`). Fixed at the **sink** — the teardown leaves `close()` entirely — so all three callers are fixed with zero call-site edits.
 
 Plans:
 - [ ] 153.3-01-PLAN.md — 🔒 D-31: `terminal_info()` guard; tri-state `classify_trade_capability`; both call sites refuse what they cannot classify (SECURITY, sequenced FIRST so it is not blocked behind the refactors)
