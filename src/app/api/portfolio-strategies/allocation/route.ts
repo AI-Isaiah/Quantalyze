@@ -6,6 +6,7 @@ import { logAuditEvent } from "@/lib/audit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 import { OWN_CAPITAL } from "@/lib/capital-ownership";
+import { isUuid } from "@/lib/utils";
 
 /**
  * POST / DELETE /api/portfolio-strategies/allocation
@@ -77,10 +78,6 @@ import { OWN_CAPITAL } from "@/lib/capital-ownership";
  * writer before Phase 151. Adding it to the payload below is a money-math
  * regression, not a feature.
  */
-
-/** UUID shape (not version-conformant — shape only, as a cheap pre-DB guard). */
-const UUID_SHAPE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface AllocationBody {
   strategy_id?: unknown;
@@ -165,7 +162,7 @@ export async function POST(req: NextRequest) {
 
   const strategyId =
     typeof body.strategy_id === "string" ? body.strategy_id.trim() : "";
-  if (!UUID_SHAPE.test(strategyId)) {
+  if (!isUuid(strategyId)) {
     return json({ error: "strategy_id is required" }, 400);
   }
 
@@ -296,6 +293,27 @@ export async function POST(req: NextRequest) {
     .select("strategy_id");
 
   if (writeErr) {
+    // 151 review E4 — THE GATE FIRING IS NOT A SERVER FAULT.
+    //
+    // The docblock above says it plainly: the 409 pre-check at :207 is UX, the
+    // D-03-A BEFORE INSERT trigger is the gate. So when the gate actually fires
+    // — the mark flipped between that pre-check and this insert, e.g. from
+    // MarkOwnershipDialog in another tab — the ONLY refusal on this route with a
+    // one-screen remedy was being reported as `internal error` / 500: a claim
+    // that OUR software broke, for a request the caller can fix in one action.
+    // 23514 is `check_violation`, and on `portfolio_strategies` there is exactly
+    // one: that trigger. Answer it with the SAME code the pre-check emits, so
+    // the client has one thing to decode rather than two.
+    //
+    // The trigger's message carries an internal strategy UUID, so it stays in
+    // the log and never rides the response — the code is the contract.
+    if (writeErr.code === "23514") {
+      console.warn(
+        "[api/portfolio-strategies/allocation] mark flipped between pre-check and insert:",
+        { userId: user.id, strategyId },
+      );
+      return json({ error: "not_allocatable" }, 409);
+    }
     console.error(
       "[api/portfolio-strategies/allocation] upsert failed:",
       writeErr.message,
@@ -348,7 +366,7 @@ export async function DELETE(req: NextRequest) {
 
   const strategyId =
     typeof body.strategy_id === "string" ? body.strategy_id.trim() : "";
-  if (!UUID_SHAPE.test(strategyId)) {
+  if (!isUuid(strategyId)) {
     return json({ error: "strategy_id is required" }, 400);
   }
 

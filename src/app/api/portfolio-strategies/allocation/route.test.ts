@@ -186,7 +186,10 @@ function portfoliosChain(opts: {
 /** `portfolio_strategies` upsert (POST) + delete (DELETE). */
 function psChain(opts: {
   upsertRows?: number;
-  upsertError?: { message: string } | null;
+  // 151 review E4 — `code` is the field the route branches on. PostgREST always
+  // carries it; the fixture omitted it, so every write-error test drove the
+  // route down the code-less path and the 23514 arm was untestable.
+  upsertError?: { message: string; code?: string } | null;
   deleteRows?: number;
   deleteError?: { message: string } | null;
 }) {
@@ -532,14 +535,64 @@ describe("POST — the money write (SC 2) and the SC-4 duplicate-add oracle", ()
     errorSpy.mockRestore();
   });
 
-  it("returns 500 when the upsert errors (e.g. the D-03-A trigger rejects)", async () => {
+  /**
+   * 151 review E4 — THE GATE FIRING IS NOT A SERVER FAULT.
+   *
+   * This route's own docblock states the design: the 409 pre-check is UX, the
+   * D-03-A BEFORE INSERT trigger is the gate. So the ONE case where the gate
+   * actually fires — the mark flipped between the pre-check and the insert,
+   * e.g. from MarkOwnershipDialog in another tab — was answered with
+   * `internal error` / 500: our software claiming it broke, for a refusal the
+   * caller can clear in one action. The oracle here is that the RACE and the
+   * PRE-CHECK are indistinguishable to the client, because from the caller's
+   * side they are the same fact ("this strategy is not allocatable right now").
+   */
+  it("[E4] a 23514 from the trigger answers 409 not_allocatable — the SAME shape the pre-check emits", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    setup({ ps: { upsertError: { message: "check_violation" } } });
+    setup({
+      ps: {
+        upsertError: {
+          code: "23514",
+          // The real trigger message embeds an internal strategy UUID.
+          message:
+            "strategy 99999999-9999-4999-8999-999999999999 cannot become a position: capital_ownership=unmarked (required: own_capital)",
+        },
+      },
+    });
+    const { POST } = await import("./route");
+    const res = await POST(
+      post({ strategy_id: STRATEGY_ID, allocated_amount: 120_000 }),
+    );
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error).toBe("not_allocatable");
+    // The trigger's text (and the UUID in it) must never ride the response.
+    expect(JSON.stringify(body)).not.toContain("capital_ownership");
+    expect(JSON.stringify(body)).not.toContain("99999999");
+    // A refusal is not a server fault: nothing may be logged as console.error.
+    expect(errorSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+    errorSpy.mockRestore();
+  });
+
+  it("[E4 control] a NON-23514 write error still returns the generic 500", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    setup({
+      ps: {
+        upsertError: {
+          code: "42501",
+          message: "permission denied for table portfolio_strategies",
+        },
+      },
+    });
     const { POST } = await import("./route");
     const res = await POST(
       post({ strategy_id: STRATEGY_ID, allocated_amount: 120_000 }),
     );
     expect(res.status).toBe(500);
+    expect((await res.json()).error).toBe("internal error");
     errorSpy.mockRestore();
   });
 

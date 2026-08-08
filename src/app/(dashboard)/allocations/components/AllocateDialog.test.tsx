@@ -25,7 +25,61 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import type { ComponentProps } from "react";
 import { AllocateDialog } from "./AllocateDialog";
+
+/**
+ * 151 red-team K2 — THE FOCUS-RING SWEEP'S CARVE-OUT, MADE UN-INHERITABLE.
+ *
+ * The sweep below holds every focusable control THIS FILE authors to the
+ * clip-proof ring idiom, and carves out the two shared primitives it composes
+ * (`ui/Button`, `ui/Modal`) because their rings are repo-wide surface fixed as
+ * their own follow-up. The carve-out used to be a Tailwind substring match —
+ * `className.includes("inline-flex items-center justify-center rounded-md")` —
+ * which is exactly the shape of the original defect it was written to close: a
+ * future hand-rolled `<button>` in `AllocateDialog.tsx` that copied those base
+ * classes (the obvious thing to do when you want a button that looks like the
+ * others) would have been silently exempted, and the sweep would have gone
+ * green over a genuine violation.
+ *
+ * So the exemption is now STRUCTURAL, not cosmetic. These two wrappers render
+ * the REAL primitives — same DOM, same classes, so the sweep is still looking
+ * at production markup — and stamp the boundary the sweep reads:
+ *
+ *   • `data-ui-primitive="ui/Button"` lands on the element `ui/Button` itself
+ *     renders (it spreads `...props` onto its `<button>`), so ONLY a real
+ *     `<Button>` carries it.
+ *   • `data-consumer-scope="AllocateDialog"` wraps the children `ui/Modal` is
+ *     GIVEN, which separates the dialog's own markup from the modal chrome
+ *     (the close button) rendered around it.
+ *
+ * Authored = inside the consumer scope, without the primitive stamp. Copying
+ * classes cannot earn either marker: a hand-rolled control would have to write
+ * `data-ui-primitive` on itself in the source to escape the sweep, which is not
+ * something anyone does by accident.
+ */
+vi.mock("@/components/ui/Button", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/components/ui/Button")>();
+  return {
+    ...actual,
+    Button: (props: ComponentProps<typeof actual.Button>) => (
+      <actual.Button {...props} data-ui-primitive="ui/Button" />
+    ),
+  };
+});
+
+vi.mock("@/components/ui/Modal", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/components/ui/Modal")>();
+  return {
+    ...actual,
+    Modal: ({ children, ...rest }: ComponentProps<typeof actual.Modal>) => (
+      <actual.Modal {...rest}>
+        <div data-consumer-scope="AllocateDialog">{children}</div>
+      </actual.Modal>
+    ),
+  };
+});
 
 // jsdom lacks HTMLDialogElement.showModal()/close(); the Modal primitive calls
 // them from a useEffect when `open` is true (Modal.test.tsx:23-39).
@@ -299,6 +353,227 @@ describe("<AllocateDialog> — the write", () => {
     );
     expect(onClose).not.toHaveBeenCalled();
     expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * 151 review E5 + E6 — ONE code path, two defects.
+   *
+   * E5: the route has emitted 409 `{error:"not_allocatable"}` since Phase 150,
+   * and NO client read it. `envelopeForResponse` branched on `res.status === 429`
+   * alone, so this landed on UNKNOWN, whose copy deliberately "makes no claim
+   * about what happened" — the ONE refusal on this surface with a one-screen
+   * remedy was the one the user was told nothing about.
+   *
+   * E6: UNKNOWN's entry is `actions: ["clear_and_retry", …]` ⇒ recoverable, and
+   * `onRetry` was wired unconditionally, so the user got a "Try the last action
+   * again." CTA for a request the server refuses identically until the mark
+   * changes. The file's own comment claimed the opposite behaviour.
+   *
+   * The oracles are BEHAVIOURAL (the code on the envelope, the remedy named in
+   * the copy, the absence of the control) rather than a byte-compare against an
+   * imported string — importing the copy would make the assertion agree with any
+   * edit, including one that put the vague sentence back.
+   */
+  it("[E5] a 409 not_allocatable renders the mark-remedy envelope, not the no-claim UNKNOWN one", async () => {
+    fetchSpy.mockResolvedValue(failResponse(409, { error: "not_allocatable" }));
+    renderEdit();
+    fireEvent.click(screen.getByRole("button", { name: "Save allocation" }));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute(
+      "data-error-code",
+      "ALLOCATION_NOT_ALLOCATABLE",
+    );
+    // The copy must NAME the remedy — a mark, and where to set it.
+    expect(envelope.textContent).toMatch(/own capital/i);
+    expect(envelope.textContent).toMatch(/My Strategies/i);
+    // And it must NOT be the sentence that makes no claim about what happened.
+    expect(envelope.textContent).not.toContain("Something went wrong.");
+  });
+
+  it("[E6] the mark-flipped 409 offers NO Retry — the server refuses the identical request forever", async () => {
+    fetchSpy.mockResolvedValue(failResponse(409, { error: "not_allocatable" }));
+    renderEdit();
+    fireEvent.click(screen.getByRole("button", { name: "Save allocation" }));
+
+    await screen.findByTestId("error-envelope");
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    // Non-vacuity: the write really was attempted and really did fail.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("[E6 control] a genuinely retryable failure STILL offers Retry, and it re-issues the write", async () => {
+    // The guard must not degrade into "no surface ever retries". A 500 is
+    // unclassified → UNKNOWN → recoverable, and Retry is the right affordance.
+    fetchSpy.mockResolvedValue(failResponse(500, { error: "internal error" }));
+    renderAllocate();
+    fireEvent.change(amountInput(), { target: { value: "1000" } });
+    fireEvent.click(screen.getByRole("button", { name: "Allocate" }));
+
+    await screen.findByTestId("error-envelope");
+    const retry = screen.getByRole("button", { name: "Retry" });
+    fireEvent.click(retry);
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2));
+  });
+
+  it("[E5] an UNREADABLE 409 body falls through to UNKNOWN rather than claiming a mark problem", async () => {
+    // The code rides the BODY. A response we cannot read supports no verdict,
+    // so naming the mark remedy would be an invented claim.
+    fetchSpy.mockResolvedValue({
+      ok: false,
+      status: 409,
+      headers: new Headers(),
+      json: async () => {
+        throw new SyntaxError("Unexpected token < in JSON at position 0");
+      },
+    } as unknown as Response);
+    renderEdit();
+    fireEvent.click(screen.getByRole("button", { name: "Save allocation" }));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+});
+
+describe("<AllocateDialog> — 151 review E7 + I4: the focus indicators this file authors", () => {
+  /**
+   * WCAG 1.4.11 (≥3:1 non-text contrast). The money field shipped
+   * `focus:ring-accent/20` — a 20%-alpha ring measuring ~1.3:1 against
+   * `bg-surface`, i.e. an indicator a sighted keyboard user cannot see — on the
+   * money input of this phase's primary CTA, and it dropped the `border-focus`
+   * companion every shared input primitive carries. The repo already treats the
+   * alpha ring as a defect at two other sites
+   * (`factsheet/[id]/v2/focus-ring-clipproof.test.tsx`, `AllocationsTabs.test.tsx`);
+   * this asserts the same tokens, so the surfaces cannot drift apart.
+   *
+   * ⚠️ 151 review I4 — WHY THIS IS A SWEEP AND NOT A NAMED ELEMENT. The E7 fix
+   * landed on the money input while "Remove allocation…" — borderless,
+   * `hover:underline` only, so the ring is its ENTIRE keyboard affordance, and
+   * the destructive action on this surface — kept `ring-accent/50` with no
+   * `ring-inset`. The old assertion could not see it: it read
+   * `amountInput().className`, so its `not.toMatch(/ring-accent\/\d+/)` was
+   * scoped to the one element already fixed. A pin that can only see the
+   * element the fix touched cannot catch the element the fix missed. So the
+   * oracle now ENUMERATES the dialog's focusable controls and holds every one
+   * of them to the idiom — a control added to this file later is covered by
+   * construction, not by someone remembering to extend a list.
+   */
+
+  /**
+   * The sweep covers the controls THIS FILE styles. Two shared primitives it
+   * composes are carved out, because their rings are repo-wide surface (every
+   * dialog in the app mounts `ui/Modal`, and `ui/Button` is the app's button):
+   * both still carry `focus-visible:ring-accent/50`, and fixing them from
+   * inside one dialog's spec would either fork the primitive or redden a file
+   * this change does not own. They are reported as their own finding.
+   *
+   * 151 red-team K2 — the carve-out identifies the primitives STRUCTURALLY,
+   * via the markers the module mocks at the top of this file stamp on the exact
+   * elements each primitive renders. It used to match a Tailwind base-class
+   * substring, which a hand-rolled `<button>` copying those classes would have
+   * inherited — re-creating the very hole the sweep replaced (an oracle that
+   * cannot see the offending control). Copying classes earns nothing here.
+   */
+  const FOCUSABLE_SELECTOR =
+    'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])';
+  /** Stamped by the `ui/Button` mock onto the `<button>` the primitive renders. */
+  const UI_BUTTON_MARK = "data-ui-primitive";
+  /** Wraps the children `ui/Modal` is GIVEN — i.e. this file's own markup. */
+  const CONSUMER_SCOPE = '[data-consumer-scope="AllocateDialog"]';
+
+  /** Everything `AllocateDialog.tsx` renders inside the modal, primitives aside. */
+  function authoredFocusables(): HTMLElement[] {
+    const scope = document.querySelector<HTMLElement>(CONSUMER_SCOPE);
+    // If the mock ever stops applying, the scope disappears and this sweep
+    // would quietly reduce to an empty set. Fail here instead.
+    expect(scope).not.toBeNull();
+    return Array.from(
+      scope!.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+    ).filter((el) => !el.hasAttribute(UI_BUTTON_MARK));
+  }
+
+  /** The `ui/Button` instances the sweep is EXCUSING, inside the same scope. */
+  function exemptedPrimitives(): HTMLElement[] {
+    const scope = document.querySelector<HTMLElement>(CONSUMER_SCOPE);
+    expect(scope).not.toBeNull();
+    return Array.from(
+      scope!.querySelectorAll<HTMLElement>(`[${UI_BUTTON_MARK}="ui/Button"]`),
+    );
+  }
+
+  /** The in-repo clip-proof idiom, verbatim (StrategyTable.tsx:100, FactsheetView.tsx:770). */
+  function expectClipProofRing(el: HTMLElement) {
+    const cls = el.className;
+    // The UA outline is suppressed so nothing paints outside to be clipped …
+    expect(cls).toContain("focus-visible:outline-none");
+    // … replaced by an INSET ring, which an ancestor's overflow cannot clip …
+    expect(cls).toContain("focus-visible:ring-2");
+    expect(cls).toContain("focus-visible:ring-inset");
+    expect(cls).toContain("focus-visible:ring-accent");
+    // … at FULL opacity: the defect itself, named. `/20` was E7's, `/50` was
+    // I4's, and any future alpha is the same failure.
+    expect(cls).not.toMatch(/ring-accent\/\d+/);
+    // No OUTSET outline idiom may be reintroduced (only `-none` allowed).
+    expect(cls).not.toMatch(
+      /focus-visible:outline-(?!none)(offset|2|4|accent|\[)/,
+    );
+  }
+
+  it("EVERY focusable control this file styles carries the full-opacity inset ring — both dialog arms", () => {
+    renderEdit();
+
+    const formArm = authoredFocusables();
+    // Non-vacuity, and the exact widening: the sweep must reach BOTH of this
+    // file's own controls. A regression that deletes the remove button, or one
+    // that re-scopes this oracle back to a single element, fails here rather
+    // than passing over an empty set.
+    expect(formArm).toContain(amountInput());
+    expect(formArm).toContain(
+      screen.getByRole("button", { name: "Remove allocation…" }),
+    );
+    expect(formArm.length).toBeGreaterThanOrEqual(2);
+    for (const el of formArm) expectClipProofRing(el);
+
+    // 151 red-team K2 — NON-VACUITY FOR THE CARVE-OUT ITSELF. A sweep is only
+    // as honest as the set it excuses, so pin what is being excused and why:
+    //   (i)  the exemption really is finding the shared primitives (a mock that
+    //        stopped applying would exempt nothing and, worse, a deleted
+    //        consumer scope would empty the swept set — caught above);
+    //   (ii) every element it excuses carries the alpha ring that is the SOLE
+    //        reason for the exemption. An exempted control that is already
+    //        compliant does not need excusing, and one that is non-compliant
+    //        for some OTHER reason is a violation hiding behind this list.
+    //   (iii) the Modal chrome sits outside the consumer scope, so it is
+    //        excluded structurally rather than by an `aria-label` guess a
+    //        hand-rolled dismiss button could have inherited.
+    // ⚠️ When `ui/Button`'s ring is fixed repo-wide, (ii) goes red — and that
+    // is the signal to DELETE this carve-out, not to loosen the assertion.
+    const exempted = exemptedPrimitives();
+    expect(exempted.length).toBeGreaterThanOrEqual(2);
+    for (const el of exempted) {
+      expect(el.className).toContain("focus-visible:ring-accent/50");
+    }
+    // No authored control may also be exempted — the two sets are disjoint.
+    for (const el of formArm) expect(exempted).not.toContain(el);
+    // The Modal close button is chrome, not this file's markup.
+    const close = screen.getByRole("button", { name: "Close" });
+    expect(formArm).not.toContain(close);
+    expect(exempted).not.toContain(close);
+
+    // The confirm arm REPLACES the body, so its controls never coexist with the
+    // form's and a single-render sweep would miss them. Today it renders only
+    // shared `ui/Button`s, so the authored set is empty — swept anyway, so a
+    // raw control added to that arm is caught the day it appears.
+    fireEvent.click(screen.getByRole("button", { name: "Remove allocation…" }));
+    for (const el of authoredFocusables()) expectClipProofRing(el);
+  });
+
+  it("the money field additionally keeps the border companion every shared input primitive carries", () => {
+    renderAllocate();
+    expect(amountInput().className).toContain(
+      "focus-visible:border-border-focus",
+    );
   });
 });
 

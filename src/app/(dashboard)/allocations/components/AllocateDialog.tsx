@@ -37,6 +37,7 @@ import {
   type ErrorEnvelope as ErrorEnvelopeType,
 } from "@/lib/envelope";
 import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
+import { newCorrelationId } from "@/lib/correlation-id-client";
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 
 const ALLOCATION_ROUTE = "/api/portfolio-strategies/allocation";
@@ -110,36 +111,50 @@ function parseAmount(raw: string): ParsedAmount {
 // ────────────────────────────────────────────────────────────────── envelopes
 
 /**
- * A correlation id for the failure the user is looking at. Sent as
- * `X-Correlation-Id` on the request, so the id on screen joins to the server's
- * log line for THIS attempt rather than being a decorative uuid.
+ * The route's machine code for the ONE refusal on this surface the user can act
+ * on. Read off the BODY, not the status: 409 is also what a future conflict on
+ * this route would use, and the copy below names a specific remedy.
  */
-function newCorrelationId(): string {
-  const c = globalThis.crypto;
-  return typeof c?.randomUUID === "function"
-    ? c.randomUUID()
-    : `allocation-${Date.now().toString(16)}`;
-}
+const NOT_ALLOCATABLE_CODE = "not_allocatable";
 
 /**
  * Map a failed response to a CANONICAL wizardErrors entry — no new error
  * strings are minted on this surface (150-UI-SPEC Error state).
  *
- * Only two arms, because only two are truthful. `RATE_LIMITED` is exact (the
- * route emits `Retry-After`, read through the ONE parser — a raw
- * `Number(header)` is a repo-wide lint error). Everything else routes to
- * `UNKNOWN`, whose copy makes no claim about what happened; the 409
- * mark-flipped race additionally re-fetches the row set (see `runWrite`) so the
- * stale affordance disappears rather than inviting an identical retry.
+ * THREE arms, because three are truthful.
+ *
+ * `RATE_LIMITED` is exact (the route emits `Retry-After`, read through the ONE
+ * parser — a raw `Number(header)` is a repo-wide lint error).
+ *
+ * 151 review E5 — `ALLOCATION_NOT_ALLOCATABLE` is the arm that was missing. The
+ * route has emitted 409 `{error:"not_allocatable"}` since Phase 150 (from the
+ * pre-check, and since E4 from the D-03-A trigger firing on the insert too),
+ * and NO client read it: it fell to `UNKNOWN`, whose copy deliberately "makes
+ * no claim about what happened". So the only failure here with a one-screen
+ * remedy — mark the strategy as your own capital — was the one the user was
+ * told nothing about. Its entry is deliberately NON-recoverable, which is what
+ * removes the Retry CTA the server would refuse identically forever (E6).
+ *
+ * Everything else still routes to `UNKNOWN`, which remains correct for a
+ * failure we genuinely cannot classify.
  */
 function envelopeForResponse(
   res: Response,
   correlationId: string,
+  body: unknown,
 ): ErrorEnvelopeType {
   if (res.status === 429) {
     return buildEnvelope("RATE_LIMITED", correlationId, {
       retryAfterSeconds: parseRetryAfterSeconds(res.headers) ?? undefined,
     });
+  }
+  if (
+    res.status === 409 &&
+    typeof body === "object" &&
+    body !== null &&
+    (body as { error?: unknown }).error === NOT_ALLOCATABLE_CODE
+  ) {
+    return buildEnvelope("ALLOCATION_NOT_ALLOCATABLE", correlationId);
   }
   return buildEnvelope("UNKNOWN", correlationId);
 }
@@ -184,7 +199,10 @@ export function AllocateDialog({
    * so the number the user sees is always one the database agreed to.
    */
   async function runWrite(method: "POST" | "DELETE", body: object) {
-    const correlationId = newCorrelationId();
+    // Shared with the two strategy dialogs (@/lib/correlation-id-client): a
+    // guarded, per-failure id that is also SENT below, so the id on screen joins
+    // to the server's log line for THIS attempt.
+    const correlationId = newCorrelationId("allocation");
     setEnvelope(null);
     setBusy(true);
     let res: Response;
@@ -213,7 +231,11 @@ export function AllocateDialog({
         // truer remedy than a Retry the server will refuse again.
         router.refresh();
       }
-      setEnvelope(envelopeForResponse(res, correlationId));
+      // 151 review E5 — the code rides the BODY, so the body has to be read.
+      // A failed parse yields `null` and the caller falls through to UNKNOWN,
+      // which is the honest verdict for a response we could not read.
+      const body = await res.json().catch(() => null);
+      setEnvelope(envelopeForResponse(res, correlationId, body));
       setBusy(false);
       return;
     }
@@ -249,11 +271,29 @@ export function AllocateDialog({
     ? `Edit allocation — ${strategyName}`
     : `Allocate — ${strategyName}`;
 
+  // 151 review E6 — A RETRY HANDLER IS ONLY WIRED FOR A FAILURE RETRYING CAN
+  // CLEAR. `onRetry` was passed unconditionally, so the mark-flipped 409 got a
+  // "Try the last action again." CTA for a request the server refuses
+  // identically until the mark changes — the exact false affordance the file's
+  // own comment at `runWrite` claims this surface does not offer.
+  //
+  // `envelope.recoverable` is the canonical discriminator (`buildEnvelope`
+  // derives it from the entry's `actions`), and `ErrorEnvelope` already gates
+  // the control on `recoverable && Boolean(onRetry)`. Passing `undefined` here
+  // as well is not redundant belt-and-braces: it stops a non-recoverable
+  // envelope from carrying a live handler at all, so a future renderer that
+  // reads only `onRetry` cannot resurrect the dead button.
   const envelopeBlock = envelope ? (
     <div className="mt-4">
       <ErrorEnvelope
         envelope={envelope}
-        onRetry={confirmingRemove ? handleRemove : handleSave}
+        onRetry={
+          envelope.recoverable
+            ? confirmingRemove
+              ? handleRemove
+              : handleSave
+            : undefined
+        }
       />
     </div>
   ) : null;
@@ -300,7 +340,18 @@ export function AllocateDialog({
               inputMode="decimal"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
-              className={`min-h-[44px] rounded-lg border bg-surface px-3 py-2.5 text-body text-text-primary transition-colors focus:outline-none focus:ring-2 focus:ring-accent/20 ${
+              // 151 review E7 — WCAG 1.4.11 (≥3:1 non-text contrast). This was
+              // `focus:ring-accent/20`, a 20%-alpha ring that measures ~1.3:1
+              // against `bg-surface` — an indicator a sighted keyboard user
+              // cannot see, on the money field of the phase's primary CTA. It
+              // also dropped the `border-focus` companion every shared input
+              // primitive carries. The repo already treats the alpha ring as a
+              // defect: `focus-ring-clipproof.test.tsx` and
+              // `AllocationsTabs.test.tsx` assert full-opacity `ring-accent` and
+              // explicitly FORBID `ring-accent/20`. `ring-inset` keeps it inside
+              // the border box so an ancestor's overflow cannot clip it, and
+              // `focus-visible` (not `focus`) keeps it off pointer interactions.
+              className={`min-h-[44px] rounded-lg border bg-surface px-3 py-2.5 text-body text-text-primary transition-colors focus-visible:border-border-focus focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent ${
                 fieldError ? "border-negative" : "border-border"
               }`}
             />
@@ -333,7 +384,19 @@ export function AllocateDialog({
                   setEnvelope(null);
                   setConfirmingRemove(true);
                 }}
-                className="text-caption font-medium text-negative hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+                // 151 review I4 — the E7 fix landed on the money field above and
+                // left THIS control on `ring-accent/50`, a half-alpha ring with
+                // no `ring-inset`. It is the worst case for that idiom: the
+                // button is borderless and `hover:underline`-only, so the ring
+                // is the ENTIRE keyboard affordance, and it is the destructive
+                // action on this surface. `rounded-sm` gives the inset ring a
+                // radius to follow and the negative inline margin keeps the
+                // padded hit area flush with the column edge — the same shape
+                // `StrategyTable.tsx:100` and `FactsheetView.tsx:770` were fixed
+                // to. Full-opacity `ring-accent` clears WCAG 1.4.11 (≥3:1);
+                // `ring-inset` paints inside the border box so no ancestor
+                // overflow can clip it.
+                className="-mx-1 rounded-sm px-1 text-caption font-medium text-negative hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
               >
                 {REMOVE_ACTION}
               </button>

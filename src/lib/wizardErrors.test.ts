@@ -1418,12 +1418,23 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * not the user's to clear, so offering a control that deletes their draft
    * would be the worst possible answer to it.
    *
+   * **64 at the 151 review (E5/E6)**, which added
+   * `ALLOCATION_NOT_ALLOCATABLE` — the allocate surface's one actionable
+   * refusal, previously collapsed to `UNKNOWN`. The reasoning was re-run before
+   * the number moved. Its actions are `leave_and_return` + `expand_log`:
+   * NEITHER `try_another_key` NOR `start_fresh`, so the destructive class below
+   * is unchanged at four members and the entry is out of the scanned population
+   * by construction. That exclusion is load-bearing rather than incidental —
+   * the remedy for this state is a MARK on a strategy the user keeps, so a
+   * control that deletes their draft would destroy the very thing the copy tells
+   * them to go and fix.
+   *
    * Deliberately NOT `Object.keys(WIZARD_ERROR_COPY).length`: reading the
    * subject to build the expectation is how a guard stops being able to fail.
    * Bumping the LITERAL when the table legitimately grows is the intended
    * maintenance cost; replacing it with a derived value removes the guard.
    */
-  const EXPECTED_TABLE_SIZE = 63;
+  const EXPECTED_TABLE_SIZE = 64;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -1623,8 +1634,19 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * issues no write, so "unchanged" is a property of the control flow rather
    * than a comfort about a write that may or may not have landed — the
    * distinction the CSV entry failed on, where the handler HAD run the RPC.
+   *
+   * **64 at the 151 review (E5/E6)** (`ALLOCATION_NOT_ALLOCATABLE`). Read
+   * against all four FORBIDDEN fragments by hand before the number moved. It
+   * mentions no notification, no trade fetching and no session field name. The
+   * one needing care is again the server-state claim: the entry says "the
+   * allocation was refused and nothing was saved". That is OBSERVABLE, not
+   * asserted — the refusal comes from a BEFORE INSERT trigger and from a
+   * pre-check that both run before any row is written, so "nothing was saved" is
+   * a property of the control flow (the route's own tests pin `upsertCalls`
+   * empty on the pre-check arm) rather than a comfort about a write that may or
+   * may not have landed.
    */
-  const EXPECTED_TABLE_SIZE = 63;
+  const EXPECTED_TABLE_SIZE = 64;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
