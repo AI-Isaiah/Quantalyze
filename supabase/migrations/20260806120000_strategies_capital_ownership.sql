@@ -79,13 +79,39 @@
 -- (d) D-03-A — WHY THE TRIGGER PREDICATE IS NOT A BLANKET
 --     `IS DISTINCT FROM 'own_capital'` (CONTEXT amendment 2026-08-06).
 -- ------------------------------------------------------------------
--- Three SHIPPED paths insert `portfolio_strategies` rows for strategies owned
+-- FOUR SHIPPED paths insert `portfolio_strategies` rows for strategies owned
 -- by OTHER users, which the inserting allocator cannot mark (marking is
 -- owner-authz'd — `strategies_update USING (user_id = auth.uid())`):
 --   * src/components/portfolio/AddToPortfolio.tsx:54   (discovery, client .insert)
 --   * src/components/portfolio/MigrationWizard.tsx:72  (manager migration, client .upsert)
---   * scripts/seed-full-app-demo.ts:1697,1929          (demo seed, service-role .upsert)
--- A blanket not-own_capital predicate would DELETE all three. So the
+--   * scripts/seed-demo-data.ts:1069                   (⭐ THE CI SEED, service-role .upsert)
+--   * scripts/seed-full-app-demo.ts:1697,1929          (manual-only seed, service-role .upsert)
+--
+-- ⚠️ The seed that MATTERS here is `seed-demo-data.ts`, not `seed-full-app-demo.ts`.
+-- `seed-full-app-demo.ts` is a manual script that has never run against any
+-- shared database (CHANGELOG.md:2835; knip.json lists it as an orphan entry).
+-- `seed-demo-data.ts` is what every seed-gated e2e job executes
+-- (`.github/workflows/ci.yml:1600` — `SEED_CONFIRM_STAGING=true npx tsx
+-- scripts/seed-demo-data.ts`), so it is the one whose rows are actually
+-- presented to these triggers on every CI run. A rev of this migration that
+-- broke it would redden `e2e-seeded` with a bare 23514 check violation and no
+-- obvious cause. It survives both arms today, and BOTH reasons are fixture
+-- properties rather than anything the seed asserts about itself:
+--   * ARM 1 (`v_mark = 'team_review'`) is false because NO seed script writes
+--     `capital_ownership` at all — every seeded strategy is NULL/unmarked.
+--   * ARM 2 (self-owned AND not own_capital) is false because the fixture
+--     ownership sets are DISJOINT: all 8 `STRATEGY_PROFILES` are MANAGER-owned
+--     (`scripts/seed-demo-profiles.ts:79,93,107,120,134,148,162,176` →
+--     `MANAGER_*`), while the three persona portfolios that receive the
+--     memberships are ALLOCATOR-owned (`scripts/seed-demo-data.ts:1006,1018,1034`
+--     → `ALLOCATOR_*`), so `v_strategy_owner = v_portfolio_owner` never holds.
+-- Give a persona a self-owned strategy and CI goes red. Both properties are
+-- PINNED, so that edit fails a cheap vitest gate before it reaches CI's DB:
+-- `src/__tests__/phase-150-capital-ownership-invariant.test.ts` P2 (the census
+-- now walks `scripts/` as well as `src/`), P2b (no seed writes the mark) and
+-- P2c (seeded strategy owners ∩ seeded portfolio owners = ∅).
+--
+-- A blanket not-own_capital predicate would DELETE all four. So the
 -- not-own_capital arm is scoped to SELF-OWNED strategies (strategy.user_id =
 -- the inserting portfolio's owner), while the 'team_review' arm stays
 -- UNCONDITIONAL per SC 2b — a team-review mark blocks a position for ANYONE,
@@ -313,11 +339,16 @@ BEGIN
   --   ARM 2 (owner-scoped): a SELF-OWNED strategy must be affirmatively marked
   --     own_capital. NULL (never asked) is non-allocatable — the owner is the
   --     one person who can answer the question, so silence is not consent.
-  -- The owner-equality conjunct on ARM 2 is what preserves the three SHIPPED
+  -- The owner-equality conjunct on ARM 2 is what preserves the FOUR SHIPPED
   -- third-party allocation paths — AddToPortfolio.tsx:54,
-  -- MigrationWizard.tsx:72 and seed-full-app-demo.ts:1697,1929 — which insert
-  -- positions for OTHER owners' strategies that the allocator has no authority
-  -- to mark. A blanket not-own_capital predicate would break all three.
+  -- MigrationWizard.tsx:72, seed-demo-data.ts:1069 (⭐ the seed CI actually
+  -- runs, ci.yml:1600) and seed-full-app-demo.ts:1697,1929 (manual-only) —
+  -- which insert positions for OTHER owners' strategies that the allocator has
+  -- no authority to mark. A blanket not-own_capital predicate would break all
+  -- four. seed-demo-data clears BOTH arms only because its fixture ownership
+  -- sets are disjoint (manager-owned strategies, allocator-owned portfolios)
+  -- and no seed writes `capital_ownership`; see header (d) for why that is a
+  -- CI-reddening landmine and which vitest pins now defend it.
   IF v_mark = 'team_review'
      OR (v_strategy_owner = v_portfolio_owner AND v_mark IS DISTINCT FROM 'own_capital') THEN
     RAISE EXCEPTION
