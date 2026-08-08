@@ -549,9 +549,73 @@ Diagnostics is the one sanctioned machine-readable token.
 
 - [ ] Dimension 1 Copywriting: PASS
 - [ ] Dimension 2 Visuals: PASS
-- [ ] Dimension 3 Color: PASS
-- [ ] Dimension 4 Typography: PASS
-- [ ] Dimension 5 Spacing: PASS
-- [ ] Dimension 6 Registry Safety: PASS
+- [x] Dimension 3 Color: PASS
+- [x] Dimension 4 Typography: PASS
+- [x] Dimension 5 Spacing: PASS
+- [x] Dimension 6 Registry Safety: PASS
 
-**Approval:** pending
+**Approval:** APPROVED 2026-08-08 by `gsd-ui-checker` (opus). 6/6 dimensions PASS; all six
+structural claims re-verified at source (aria-derived border, structural Retry suppression via
+`envelope.ts:88` + `RECOVERABLE_ACTIONS`, `EXPECTED_TABLE_SIZE` two sites at 64, capability
+gating, the `:491` deletion, single-request/no-observed-stages).
+
+---
+
+## Checker findings folded in (non-blocking, but PLAN THESE)
+
+The checker returned 9 FLAGs. Three change what the planner must build — they are recorded
+here because the planner reads this file, not the checker's return.
+
+### ⛔ FLAG-3 — deleting `disabled` WITHOUT widening the guard re-ships the original defect
+`MetadataStep.tsx:491` is `disabled={!description.trim() || !categoryId}`. This spec deletes it
+(a dead button names nothing — the mechanism that hid the failing field). **But the
+`handleSubmit` early-return at `MetadataStep.tsx:222-233` is `.trim()`-ONLY**, and its comment
+at `:225-229` justifies that narrowness with *"The Submit button stays disabled until both are
+present."* Delete `:491` without widening `:230` and a 2-character description passes `.trim()`
+and POSTs — **exactly the WIZFORM-01 defect this phase exists to delete** — with `categoryId`
+unchecked entirely.
+**Required:** the same client mirror (10 ≤ len ≤ 5000, `categoryId` present) becomes the
+`handleSubmit` early-return predicate, and the stale comment at `:225-229` is rewritten in the
+same edit.
+
+### FLAG-1 — `AllocateDialog` is the BEHAVIOURAL precedent, not the styling one
+D-12 puts the Phase-150 allocation form in scope, but its money input colours via a JS ternary
+(`AllocateDialog.tsx:355` — `fieldError ? "border-negative" : "border-border"`), NOT
+`aria-[invalid=true]:border-negative`. It is correct today only because `fieldError` also feeds
+`Field`'s `error` prop, so this spec's "structurally impossible" invariant is not yet true
+there. **Required:** convert that surface to the aria-derived mechanism, and cite the sites that
+already work that way — `MetadataStep.tsx:334`, `CsvUploadStep.tsx:624`,
+`RenameStrategyDialog.tsx:178`.
+
+### FLAG-5 — character bounds must read from the constant, like durations do
+This spec forbids literal seconds in copy because "copy and budget cannot be allowed to drift",
+then hardcodes `10` and `5,000`. Apply the same rule: the server bound is `description.length < 10`
+plus `MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS` (`closed-sets.ts:535`, pinned at
+`closed-sets.test.ts:323`).
+
+### Smaller corrections to apply while editing
+- **FLAG-2** — `Still signing in. MetaTrader allows one sign-in at a time…` renders under the
+  `serialized` capability but hardcodes the venue name; a second serialized venue (IBKR) would
+  inherit a false sentence. Use `{VenueName}`. Same at the `is included because…` line, which
+  already uses `{VenueName}` in the Copywriting Contract.
+- **FLAG-4** — restate as "`EXPECTED_TABLE_SIZE` 64 → **67** at both sites — three new members".
+  The current "64 → 66 … ⇒ final 67" phrasing is arithmetically right but invites a stop at 66.
+- **FLAG-6** — `{n} fields need attention. The first is {Label}.` is announce-only, but
+  `LiveRegion.tsx:47-51` states its contract is "the SAME sentence the surface already renders
+  visually — never a place to author new copy". Either render it visibly (a form-level line, NOT
+  an `ErrorEnvelope`) or record the deviation.
+- **FLAG-7** — `gap-1.5` is **6px**, not 8px. Restate as "6px — Field's existing `gap-1.5`,
+  unchanged". Hazardous as written: an executor "correcting" `Field` to `gap-2` changes every
+  Field in the repo.
+- **FLAG-8** — add a `prefers-reduced-motion: reduce` suppression for the pulse dot; the card can
+  animate for ~2 minutes and Tailwind's `animate-pulse` does not self-disable. The dot is already
+  `aria-hidden` and non-load-bearing, so nothing else changes.
+- **FLAG-9** — cosmetic citation offsets: `text-amber-600` is `SyncPreviewStep.tsx:2378` (not
+  :2377); `passphraseSecret` is `ConnectKeyStep.tsx:76`; the never-disabled comment is
+  `AllocateDialog.tsx:370-372`; `ReviewStep` recaps are `:177-180` / `:239-242`.
+
+**Confirmed by the checker, do not re-litigate:** the focus-ring scope decision is correct —
+`AllocateDialog.test.tsx:555` really does assert the exempted primitives still carry
+`ring-accent/50`, so fixing `ui/Button.tsx:35` / `ui/Modal.tsx:33` would red an unrelated suite.
+Upgrading `MetadataStep.tsx:334` (`focus:ring-accent/20`, and `focus:` not `focus-visible:`) in
+the same edit is correct and unblocked.
