@@ -203,6 +203,46 @@ claims survive, the numbers do not:**
 - D-16 says the `closed-sets.mt5-flag` pin covers four sets; it asserts **two**
   (`UI_EXCHANGE_CODES`, `EXCHANGES`).
 
+### Founder architecture call — 2026-08-08 (BINDING, sets WIZFORM-05's posture)
+
+Presented with the one-concurrent-user ceiling and the read-only fail-open
+(`153-EVIDENCE-mt5-platform.md`), the founder chose: **ship 153 as beta with a
+one-account cap.** Keep the single terminal; do not buy a managed provider yet; do not
+block 153 on running the 134 spike. WIZFORM-05 proceeds — but as an honest beta, not as
+a claim of multi-tenancy.
+
+- **D-29: MT5 is BETA with a documented, ENFORCED one-account cap.** The ceiling is
+  structural (one `ThreadedServer(SlaveService)` ⇒ one process-global MT5 session ⇒ one
+  logged-in account). It must be stated in the product, not just in a doc, and enforced —
+  a second concurrent MT5 validation must be refused with honest copy, never silently
+  raced. ⚠️ Refusal copy must name an action the user can take (WIZFORM-04's rule) and
+  must not leak infrastructure detail (WIZFORM-03).
+- **D-30: `shutdown()` comes OUT of the request path.** `routers/exchange.py:449-466`
+  calls `close()` in `finally:` on every validate; on a shared session that tears down the
+  IPC pipe for any concurrent caller (`-10004`). Attach once, do not tear down per request.
+  ⚠️ This REPLACES D-28's "bound `close()` separately" — with `shutdown()` off the request
+  path there is no per-request close to bound. D-28 is superseded.
+- **D-31: 🔒 close the read-only fail-open — `terminal_info()` guard.** `is_trade_capable`
+  (`services/mt5_validation.py:133-149`) infers investor mode from two negative signals,
+  but the terminal's **default-ON** *"Disable automatic trading through the external Python
+  API"* makes both negative for a MASTER account too. Read `terminal_info()`
+  (called NOWHERE today — verified) and **fail CLOSED**: if the terminal-level trade
+  disable is on, we cannot distinguish investor from master, so REFUSE the key rather than
+  stamp it read-only. Also stop asserting `_TRADE_RETCODE_DONE = 10009` alone — `10017
+  TRADE_RETCODE_TRADE_DISABLED` is the documented investor signal and is never tested.
+- **D-32: instrument before tuning.** Emit `stage` + `duration_ms` around each MT5 stage.
+  D-26's 120 000 ms stands as the provisional client budget; the instrumentation is what
+  makes the next number evidence rather than judgement (D-27).
+- **D-33: pin the gateway to a SINGLE replica.** Ops, not code — but the one-session
+  invariant is false the moment a second replica exists. Record it in the runbook; a
+  scale-up is a correctness change, not a capacity change.
+
+⚠️ **Explicitly NOT in this phase** (recorded so the planner does not drift into them):
+buying a managed provider; a per-account container fleet; the two-level broker→server
+picker (backlog — a curated `broker → servers[]` table, since MetaQuotes' directory is
+binary/undocumented and parsing it risks ToS); moving the server name out of
+`passphrase_encrypted` into a plain `mt5_server` column; running the Phase-134 spike.
+
 ### Claude's Discretion
 
 - Whether WIZFORM-05's client-side fix is a per-venue entry in `SEAM_ROUTE_BUDGETS` or a
