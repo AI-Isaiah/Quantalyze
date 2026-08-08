@@ -377,8 +377,16 @@ Plans:
 **Depends on**: Phase 153.1 (`SEAM_DEADLINE_EXCEEDED`, `serialized`); best AFTER 153.3 (a budget cannot fix a structurally censored verdict — D-24)
 **Requirements**: WIZFORM-05 (client leg)
 **Decisions**: D-01, D-04, D-05, D-19, D-21, D-26, D-27 (D-18 superseded)
-**Owns**: `resilient-fetch.ts`, `analytics-client.ts`, `seam-constants.pin.test.ts`, `seam-budgets.invariant.test.ts`, `seam-retry-registry.ts`(+tests), `ConnectKeyStep.tsx`, `MultiKeyConnectStep.tsx`
-**Plans**: TBD
+**Owns**: `resilient-fetch.ts`, `analytics-client.ts`, `seam-constants.pin.test.ts`, `seam-budgets.invariant.test.ts`, `seam-retry-registry.ts`(+tests), `ConnectKeyStep.tsx`, `MultiKeyConnectStep.tsx` — ⚠️ **PLUS two NEW files added at planning time**: `src/lib/wizard/validate-budget.ts` (a client-safe duplicate of the two budget figures, pinned equal to `SEAM_BUDGETS`) and `src/app/(dashboard)/strategies/new/wizard/ValidateWaitCard.tsx` (the ONE long-wait card both connect steps consume). `resilient-fetch.ts` imports `next/server` and `@upstash/redis`, so a `"use client"` step can never read the budget it must quote in copy — the duplicate + equality pin is the repo's own convention for exactly that.
+**Plans**: 5 plans in 3 waves
+
+Plans:
+- [ ] 153.4-01-PLAN.md — the `validate-key-serialized` 120 000 ms row + `BREAKER_LOCK_TOMBSTONE_S` 60→90 in ONE commit, plus every pin site in `seam-constants.pin.test.ts` and the retry registry (wave 1)
+- [ ] 153.4-02-PLAN.md — `budgetKeyFor(exchange)` selecting by the `serialized` capability, the three validate routes re-branched, and `seam-budgets.invariant.test.ts` re-derived (wave 2)
+- [ ] 153.4-03-PLAN.md — the client-safe budget module + its equality pin, and `ValidateWaitCard` with the budget-fraction escalation ladder (wave 2)
+- [ ] 153.4-04-PLAN.md — `ConnectKeyStep` waits honestly: abortable validate, `Stop waiting`, client deadline → `SEAM_DEADLINE_EXCEEDED` (wave 3)
+- [ ] 153.4-05-PLAN.md — `MultiKeyConnectStep` gets the same wait, strictly PER PANEL (wave 3, parallel with 04)
+
 **UI hint**: yes
 
 - ⛔ **D-26: the `120_000` budget row and `BREAKER_LOCK_TOMBSTONE_S` 60 → 90 are the SAME commit.** A-25 then holds exactly: `(30 + 90) × 1000 = 120 000`.
