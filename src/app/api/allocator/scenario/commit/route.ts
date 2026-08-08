@@ -767,6 +767,21 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
   // Skipped on cached replays (the original commit already emitted the
   // server-side number; replays produce no new audit rows).
   let serverAumUsd = 0;
+  // 151 red-team G3 — the COMPARISON figure for the manual-AUM conflict
+  // sentinel, and NOTHING else. `serverAumUsd` above is a NOTIONAL sum
+  // (Σ `value_usd` over spot + derivative) and keeps sizing every audit row
+  // unchanged; this parallel accumulator is the same rows on the EQUITY basis —
+  // derivative → `unrealized_pnl_usd`, spot → `value_usd` — which is the
+  // definition the composer's `liveHoldingsSum` (and the SSR
+  // `holdingEquityContribution`, queries.ts NEW-C03-01) uses to produce the
+  // number the allocator is shown and types back. On a spot book the two
+  // coincide exactly; on a DERIVATIVES book a 10x perp puts ~10x its own equity
+  // into the notional sum, so comparing the client's equity figure against the
+  // notional one made `server_aum_manual_conflict` fire on every row of a
+  // wholly legitimate commit — the sentinel encoded "this is a derivatives
+  // book", not "there is a conflict". The founder's production book is Deribit,
+  // i.e. exactly that case.
+  let serverEquityAumUsd = 0;
   // Phase 151 AUM-01 — the CLIENT-ASSERTED portfolio AUM, present only when
   // the allocator typed one. Used ONLY as the fallback denominator below, and
   // only under its own `client_manual_aum` sentinel; `size_at_decision_usd_client`
@@ -794,7 +809,9 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
     // would otherwise return them in an unspecified order.
     const { data: holdingRows, error: holdingErr } = await supabase
       .from("allocator_holdings")
-      .select("venue, symbol, holding_type, value_usd, asof")
+      // G3 — `unrealized_pnl_usd` is selected for the EQUITY-basis comparison
+      // figure only; the sizing columns are unchanged.
+      .select("venue, symbol, holding_type, value_usd, unrealized_pnl_usd, asof")
       .eq("allocator_id", user.id)
       .in("holding_type", ["spot", "derivative"])
       .order("asof", { ascending: false })
@@ -825,9 +842,81 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
           : 0;
         holdingValueByRef.set(ref, v);
         serverAumUsd += v;
+        // G3 — the SAME deduped rows on the equity basis. Mirrors
+        // `holdingEquityContribution` (queries.ts) exactly: a derivative's
+        // equity at stake is its unrealized P&L, never its leveraged notional;
+        // a null/non-finite P&L contributes 0 rather than falling back to
+        // notional (better to exclude a derivative than to call notional
+        // equity).
+        if (row.holding_type === "derivative") {
+          const pnl = row.unrealized_pnl_usd;
+          serverEquityAumUsd +=
+            typeof pnl === "number" && Number.isFinite(pnl) ? pnl : 0;
+        } else {
+          serverEquityAumUsd += v;
+        }
       }
     }
   }
+
+  // Review round 2 F3 — the AUM DIVERGENCE, computed once, after the lookup has
+  // finished accumulating `serverAumUsd` (it is 0 until the loop above runs).
+  //
+  // Blank mode is selectable by an allocator WITH holdings (the segmented
+  // control renders it unconditionally), and in blank mode `holdingsSummary` is
+  // `[]`, so the manual figure is the ONLY AUM the allocator modelled against.
+  // The server-truth arm below then sizes every audit row from `serverAumUsd`
+  // and stamps the plain `server_aum` sentinel — recording, for a manual
+  // $1,000,000 at 50% against a $40,000 custody book, a
+  // `size_at_decision_usd` of $20,000 for a decision that was made at
+  // $500,000. `size_at_decision_usd` is the denominator the downstream
+  // daily-delta cron divides realized PnL by, so that is a 25× error in every
+  // derived return, and pre-fix nothing in the metadata made it detectable
+  // after the fact.
+  //
+  // ⚠️ This does NOT change WHICH figure sizes the row — server truth still
+  // wins outright (NEW-C18-04 / T-151-18: a client assertion must never
+  // outrank a server-verified number). It changes only what the audit SAYS
+  // about that choice, which is the half that was silent.
+  //
+  // Tolerance: 1% of the server figure. Float drift between the client's Σ of
+  // holding values and the server's deduped Σ sits well inside it; the failure
+  // above sits 25× outside.
+  //
+  // 151 red-team G3 — BOTH SIDES ON ONE BASIS. The comparison runs against
+  // `serverEquityAumUsd`, not the notional `serverAumUsd` that SIZES the row,
+  // because the client figure is an EQUITY figure (`liveHoldingsSum` sums
+  // `holdingEquityContributionLocal`, and the manual field is seeded from it).
+  // Comparing an equity claim against a notional total is a basis error, not a
+  // divergence test: on a leveraged derivatives book it fires ~10× outside a 1%
+  // tolerance for an allocator who typed the exact number the composer had just
+  // shown them, stamping `server_aum_manual_conflict` on every audit row of a
+  // legitimate commit and making the sentinel useless for the case it exists to
+  // catch (the blank-mode $1,000,000-vs-$40,000 modelling divergence, which is
+  // 25× outside on EITHER basis).
+  //
+  // ⚠️ What is sized is UNCHANGED — `size_at_decision_usd` still comes from
+  // `serverAumUsd` (documented above as the denominator the downstream
+  // daily-delta cron divides realized PnL by), and precedence is untouched:
+  // `lookup_failed` still outranks everything (a failed lookup leaves BOTH
+  // accumulators at 0), and no client figure is promoted over a server-verified
+  // one. Only the sentinel's meaning is repaired.
+  //
+  // ⚠️ Residual, deliberately NOT closed here: on a PARTIAL book the client
+  // narrows its sum to the CONTRIBUTING keys' toggled-on holdings while this
+  // sums the allocator's whole book, so a partial-book commit can still trip
+  // the sentinel. That is a set difference, not a basis error, it is bounded by
+  // the allocator's own book, and closing it would need the key set on the
+  // request. It is recorded rather than guessed at. Likewise a derivatives book
+  // whose Σ unrealized P&L is <= 0 has no equity basis to compare against, so
+  // the sentinel stays the plain `server_aum` — the same honest-absence answer
+  // the composer gives that book (`liveHoldingsSum <= 0` refuses to size it).
+  const MANUAL_AUM_CONFLICT_REL_TOLERANCE = 0.01;
+  const manualAumConflictsWithServer =
+    manualAumUsd != null &&
+    serverEquityAumUsd > 0 &&
+    Math.abs(manualAumUsd - serverEquityAumUsd) / serverEquityAumUsd >
+      MANUAL_AUM_CONFLICT_REL_TOLERANCE;
 
   if (!isCachedReplay) {
     // NEW-C18-11 (audit-2026-05-07): collect the per-row audit events and
@@ -888,7 +977,15 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
         // manual_aum_usd because the server had no holdings snapshot to
         // recompute from. Never a server-verified figure; see the enumeration
         // comment on the audit metadata below.
-        | "client_manual_aum" =
+        | "client_manual_aum"
+        // Review round 2 F3 — SIZED FROM SERVER TRUTH, but the client asserted a
+        // materially different AUM. A strict refinement of `server_aum`: same
+        // arm, same figure, same precedence — it only says out loud that the
+        // allocator modelled against a different denominator than the one this
+        // row is sized by. G3: "different" is measured on the EQUITY basis both
+        // sides speak (see `serverEquityAumUsd`), so it cannot fire merely
+        // because the book is leveraged.
+        | "server_aum_manual_conflict" =
         "client_unverified";
       // Distinguish "Supabase errored" (lookup_failed) from "allocator
       // legitimately has no holdings yet" (no_holdings_snapshot). The
@@ -924,7 +1021,14 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
             // server verified, or the audit-trust fix would be undone by the
             // very field added below.
             serverSizeUsd = (inputDiff.percent_allocated * serverAumUsd) / 100;
-            sizeSource = "server_aum";
+            // Review round 2 F3 — the size is UNCHANGED (server truth), only the
+            // sentinel narrows. Precedence is untouched: `lookup_failed` cannot
+            // be reached from here (a failed lookup leaves `serverAumUsd` at 0),
+            // and no client-supplied figure has been promoted over a
+            // server-verified one — the client number is recorded, not used.
+            sizeSource = manualAumConflictsWithServer
+              ? "server_aum_manual_conflict"
+              : "server_aum";
           } else if (!holdingsLookupOk) {
             // 151 specialist SP-W1 / F-1 — UNKNOWN ≠ ABSENT, and this arm must
             // outrank the client-asserted one below. `holdingsLookupOk` false
@@ -972,14 +1076,43 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
           allocator_id: user.id,
           // Sentinel — distinguishes "diff present" from "RPC index drift".
           _diff_present: Boolean(inputDiff),
+          // Review round 2 F3 — the CLIENT-ASSERTED portfolio AUM, recorded on
+          // EVERY row whichever source won the sizing, and OUTSIDE the
+          // `inputDiff &&` spread so even an RPC-index-drift row carries it.
+          //
+          // Before this it appeared nowhere: on the `server_aum` arm the value
+          // was read, discarded, and left no trace, so a commit whose decision
+          // was made against a manual AUM 25× the custody total was
+          // indistinguishable in the audit from one made against custody
+          // itself. A forensic reader can now recompute the size the allocator
+          // believed they were committing (`percent_allocated ×
+          // client_manual_aum_usd / 100`) and compare it against the
+          // `size_at_decision_usd` this row was actually sized by — which is
+          // the whole point of an audit trail on a financial decision.
+          //
+          // `null` means "the client asserted no manual AUM" (book mode, or an
+          // untouched field) — an ABSENT claim, never a zero one; the zod
+          // schema already rejects a non-positive value.
+          client_manual_aum_usd: manualAumUsd ?? null,
           ...diffFields,
           ...(inputDiff && {
             // NEW-C18-04: server-recomputed authoritative figure.
             // Pre-fix this was the unverified client number; a malicious
             // allocator could inflate or deflate it without bound. Now
-            // the `_size_source` sentinel below distinguishes seven states:
+            // the `_size_source` sentinel below distinguishes eight states:
             //   server_holding        — voluntary_remove uses holdings.value_usd
             //   server_aum            — other arms recompute pct × total_aum
+            //   server_aum_manual_conflict
+            //                         — as server_aum, AND the client asserted a
+            //                           manual AUM more than 1% away from the
+            //                           server's EQUITY-basis total (G3 — the
+            //                           basis the client figure is on; the row
+            //                           is still SIZED by the notional one).
+            //                           The SIZE is still server truth; the
+            //                           sentinel marks that the allocator
+            //                           modelled against a different
+            //                           denominator (see client_manual_aum_usd
+            //                           above to recover theirs).
             //   ref_not_found         — voluntary_remove's holding_ref absent
             //                           from a non-empty holdings map
             //   no_holdings_snapshot  — lookup ran, returned zero rows

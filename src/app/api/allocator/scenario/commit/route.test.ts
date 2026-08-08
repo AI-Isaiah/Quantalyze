@@ -123,6 +123,11 @@ type HoldingRowFixture = {
   symbol: string;
   holding_type: string;
   value_usd: number;
+  // 151 red-team G3 — the EQUITY column. Optional so every pre-existing SPOT
+  // fixture is untouched (on a spot row the equity basis IS `value_usd`); a
+  // DERIVATIVE row must set it, because there `value_usd` is leveraged notional
+  // and the equity at stake is the unrealized P&L.
+  unrealized_pnl_usd?: number | null;
   asof: string;
 };
 let holdingsFixture: HoldingRowFixture[] = [];
@@ -1835,10 +1840,235 @@ describe("AUM-01 — manual_aum_usd client-asserted AUM sidecar", () => {
     expect(res.status).toBe(200);
 
     const meta = getAuditMetadata(0);
-    expect(meta._size_source).toBe("server_aum");
+    // Review round 2 F3 — the SIZE precedence this test exists for is UNCHANGED
+    // (the two assertions below are byte-identical). The sentinel narrows from
+    // the flat `server_aum` to its conflict refinement, because a 10× gap
+    // between what the allocator modelled against and what custody shows is a
+    // fact the audit must state, not swallow. Both strings begin `server_aum`
+    // precisely so a forensic query for server-verified sizing still finds this
+    // row.
+    expect(meta._size_source).toBe("server_aum_manual_conflict");
     // 5% × 200,000 = 10,000 (server). NOT 5% × 2,000,000 = 100,000 (client).
     expect(meta.size_at_decision_usd).toBe(10_000);
     expect(meta.size_at_decision_usd_client).toBe(100_000);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Review round 2 F3 — the manual AUM must be OBSERVABLE, whichever source
+  // wins the sizing.
+  //
+  // Blank mode is selectable by an allocator WITH holdings, and in blank mode
+  // the composer feeds `holdingsSummary: []`, so the manual figure is the only
+  // AUM the scenario was modelled against. The server-truth arm then sized every
+  // row from custody and stamped a flat `server_aum` — recording $20,000 for a
+  // decision made at $500,000 — and `manual_aum_usd` appeared NOWHERE in the
+  // metadata, so the divergence was not detectable after the fact.
+  // `size_at_decision_usd` is the denominator the daily-delta cron divides
+  // realized PnL by, so an undetectable 25× error in it is an undetectable 25×
+  // error in every derived return.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** The founder-shaped conflict: a $40,000 custody book, a $1,000,000 manual
+   *  AUM, one 50% allocation. Hand-computed both ways:
+   *    server  50% × 40,000    =    20,000   ← what the row is sized by
+   *    client  50% × 1,000,000 =   500,000   ← what the allocator decided
+   *  25× apart, and pre-fix only the first number existed anywhere. */
+  function conflictBook() {
+    holdingsFixture = [
+      {
+        venue: "binance",
+        symbol: "BTC",
+        holding_type: "spot",
+        value_usd: 40_000,
+        asof: "2026-08-07",
+      },
+    ];
+    holdingsErrorFixture = null;
+  }
+
+  it("F3: the client-asserted AUM is recorded even when SERVER TRUTH wins — the 25× divergence becomes forensically visible", async () => {
+    conflictBook();
+    okAdd();
+
+    const res = await POST(
+      mkReq({
+        diffs: [
+          { ...VALID_VA, percent_allocated: 50, size_at_decision_usd: 500_000 },
+        ],
+        manual_aum_usd: 1_000_000,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    // The size is server truth — unchanged, and deliberately so.
+    expect(meta.size_at_decision_usd).toBe(20_000);
+    // The sentinel says the denominators disagreed …
+    expect(meta._size_source).toBe("server_aum_manual_conflict");
+    // … and the client's denominator is on the row, so a reader can recompute
+    // the decision the allocator actually made: 50% × 1,000,000 = 500,000,
+    // 25× the figure this row is sized by. THAT is the arm that did not exist.
+    expect(meta.client_manual_aum_usd).toBe(1_000_000);
+    expect(
+      (meta.percent_allocated as number) *
+        (meta.client_manual_aum_usd as number) /
+        100,
+    ).toBe(500_000);
+  });
+
+  it("F3: a manual AUM that AGREES with custody keeps the plain server_aum sentinel — the conflict marker means conflict, not 'a manual value was sent'", async () => {
+    // Non-vacuity for the test above: same shape, same arm, same recorded
+    // client value — only the AGREEMENT differs. A fix that stamped the
+    // conflict sentinel whenever `manual_aum_usd` was merely present would turn
+    // the marker into noise and turn this RED.
+    conflictBook();
+    okAdd();
+
+    const res = await POST(
+      mkReq({
+        diffs: [
+          { ...VALID_VA, percent_allocated: 50, size_at_decision_usd: 20_000 },
+        ],
+        // Within the 1% band of the $40,000 book (a float-drift-sized gap).
+        manual_aum_usd: 40_200,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    expect(meta._size_source).toBe("server_aum");
+    expect(meta.size_at_decision_usd).toBe(20_000);
+    // Recorded ANYWAY — "whichever source wins" is the contract.
+    expect(meta.client_manual_aum_usd).toBe(40_200);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // 151 red-team G3 — ONE BASIS ON BOTH SIDES OF THE CONFLICT TEST.
+  //
+  // The two sides were measuring different things. `serverAumUsd` sums
+  // `value_usd` over spot + derivative — a NOTIONAL basis — while the client's
+  // figure is an EQUITY one (`liveHoldingsSum` sums
+  // `holdingEquityContributionLocal`: derivative → `unrealized_pnl_usd`), and
+  // the manual field is SEEDED from exactly that number. On a leveraged
+  // derivatives book — the founder's production book is Deribit — the two are a
+  // leverage factor apart, so an allocator who typed back the very figure the
+  // composer had just shown them landed ~10× outside a 1% tolerance and
+  // `server_aum_manual_conflict` stamped EVERY audit row of a wholly legitimate
+  // commit. The sentinel encoded "this book is leveraged", not "there is a
+  // conflict".
+  //
+  // ⚠️ THE SIZED FIGURE IS DELIBERATELY UNCHANGED. `size_at_decision_usd` is
+  // documented as the denominator the downstream daily-delta cron divides
+  // realized PnL by, so this fix touches only what the audit SAYS, never what
+  // it sizes — the pair below pins both halves.
+  //
+  // A LEVERAGED book, hand-computed:
+  //   notional  Σ value_usd            = 400,000  ← still sizes the row
+  //   equity    Σ unrealized_pnl_usd   =  40,000  ← what the composer displays
+  //   i.e. 10× leverage, the shape the founder's Deribit book has.
+  // ─────────────────────────────────────────────────────────────────────────
+  function leveragedDerivativesBook() {
+    holdingsFixture = [
+      {
+        venue: "deribit",
+        symbol: "BTC-PERP",
+        holding_type: "derivative",
+        value_usd: 400_000,
+        unrealized_pnl_usd: 40_000,
+        asof: "2026-08-07",
+      },
+    ];
+    holdingsErrorFixture = null;
+  }
+
+  it("G3: on a LEVERAGED book, typing back the equity figure the composer displayed is NOT a conflict — and the row is still sized by server notional truth", async () => {
+    leveragedDerivativesBook();
+    okAdd();
+
+    const res = await POST(
+      mkReq({
+        diffs: [
+          { ...VALID_VA, percent_allocated: 50, size_at_decision_usd: 20_000 },
+        ],
+        // EXACTLY the equity total the composer's AUM field seeds from
+        // (Σ unrealized_pnl_usd). Zero divergence — there is nothing to flag.
+        manual_aum_usd: 40_000,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    // Pre-fix: |40,000 − 400,000| / 400,000 = 0.9, i.e. 90× the 1% tolerance,
+    // so this read "server_aum_manual_conflict" on a commit with no conflict in
+    // it — on every row, for the founder's whole book.
+    expect(meta._size_source).toBe("server_aum");
+    // …and the SIZING basis did not move with the comparison basis:
+    // 50% × 400,000 (notional) = 200,000, hand-computed. If this ever reads
+    // 20,000 (= 50% × the 40,000 equity total) the daily-delta cron's PnL
+    // denominator has been silently changed — a founder decision, not this one.
+    expect(meta.size_at_decision_usd).toBe(200_000);
+    expect(meta.client_manual_aum_usd).toBe(40_000);
+  });
+
+  it("G3 (non-vacuity): a REAL divergence on the same leveraged book still stamps the conflict — the sentinel was repaired, not disabled", async () => {
+    // Same fixture, same arm; only the client's claim differs. 1,000,000 against
+    // a 40,000 equity book is 25× — the blank-mode modelling divergence the
+    // sentinel exists to catch, and it must survive the basis change.
+    leveragedDerivativesBook();
+    okAdd();
+
+    const res = await POST(
+      mkReq({
+        diffs: [
+          { ...VALID_VA, percent_allocated: 50, size_at_decision_usd: 500_000 },
+        ],
+        manual_aum_usd: 1_000_000,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    expect(meta._size_source).toBe("server_aum_manual_conflict");
+    expect(meta.size_at_decision_usd).toBe(200_000);
+    expect(meta.client_manual_aum_usd).toBe(1_000_000);
+  });
+
+  it("F3: precedence is intact — a FAILED lookup still outranks everything, and the client value rides along without promoting itself", async () => {
+    // The regression this guards: making the client number visible must not make
+    // it authoritative. `lookup_failed` is the top of the ordering and must stay
+    // there, with no size derived from the unverified figure.
+    holdingsErrorFixture = { message: "connection refused (test)" };
+    okAdd();
+
+    const res = await POST(
+      mkReq({
+        diffs: [
+          { ...VALID_VA, percent_allocated: 50, size_at_decision_usd: 500_000 },
+        ],
+        manual_aum_usd: 1_000_000,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    expect(meta._size_source).toBe("lookup_failed");
+    expect(meta._size_source).not.toBe("server_aum_manual_conflict");
+    expect(meta.size_at_decision_usd).toBeNull();
+    // Visible, but not used.
+    expect(meta.client_manual_aum_usd).toBe(1_000_000);
+  });
+
+  it("F3: no manual AUM ⇒ the field is an explicit null, never absent — an absent key is indistinguishable from a dropped one", async () => {
+    conflictBook();
+    okAdd();
+
+    const res = await POST(mkReq({ diffs: [VALID_VA] }));
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    expect(meta._size_source).toBe("server_aum");
+    expect(meta).toHaveProperty("client_manual_aum_usd");
+    expect(meta.client_manual_aum_usd).toBeNull();
   });
 
   // Test 11 — ABSENT FIELD ⇒ PRE-151 BEHAVIOUR, byte-identical. Every caller
