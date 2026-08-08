@@ -573,6 +573,17 @@ true for 146 and half of 142–145, and **false for 141**.
   that secures nothing.
 
 ### Tech-debt / maintainability (opportunistic, don't force)
+
+- **🔁 `gsd-sdk query state.update-progress` REGRESSES `STATE.md:stopped_at`** — observed
+  **twice**, independently, by the 153.3-01 and 153.3-02 executors (2026-08-09). The verb bumps
+  `completed_plans` but rewrites `stopped_at` to an older/pre-wave value, silently discarding the
+  most recent progress note. Both executors caught it in their own diff and restored an accurate
+  string rather than committing the regression — but an executor that did *not* diff-check would
+  have committed a ledger that lies about where the run stopped, which is exactly what a resume
+  reads. ⚠️ `STATE.md` is the file `/gsd-autonomous` and every resume path trusts.
+  **Interim:** always `git diff .planning/STATE.md` before committing after that verb runs.
+  **Fix:** make the verb merge rather than overwrite, or stop it touching `stopped_at` at all —
+  progress counters and the human-readable stop note are different concerns.
 - **149 review IN-01:** `MyStrategiesSection.tsx` comment claims namespaced prefs persistence, but with no `userId` the prefs hook is a persistence no-op on that surface — fix the comment (or pass userId if prefs are wanted there).
 - **149 review IN-02:** `getOwnRowPercentiles` fully computes `publishedMap` only for its key-count; name the future consumer or reduce to a count.
 - God-files: `queries.ts` (3,205 lines), `job_worker.run_sync_trades_job` (688 lines),
