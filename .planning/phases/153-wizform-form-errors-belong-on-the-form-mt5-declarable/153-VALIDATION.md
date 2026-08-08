@@ -69,7 +69,7 @@ reproduce with `PATH=/opt/homebrew/opt/node@22/bin:$PATH npm test`.
 | WIZFORM-05 | 0 | `budgetKeyFor("mt5")` selects the long row; every other venue selects `validate-key`; unknown falls back | unit | `npx vitest run src/lib/analytics-client.*.test.ts` | ❌ **W0** | ⬜ pending |
 | WIZFORM-05 | 1 | SC-4a/b/d/e/f still green with the new legs | invariant | `npx vitest run src/lib/seam-budgets.invariant.test.ts` | ✅ update rosters | ⬜ pending |
 | WIZFORM-05 | 1 | Every budget key / timeout / dependency / retry pin | pin | `npx vitest run src/lib/seam-constants.pin.test.ts` | ✅ update literals | ⬜ pending |
-| WIZFORM-05 | 0 | ⭐ **A-25 holds against the NEW longest budget** (D-18/D-19) | pin | same file | ❌ **W0** | ⬜ pending |
+| WIZFORM-05 | 0 | ⭐ **A-25 holds against the NEW longest budget** (D-19; number from **D-26** = 120 000 ms — D-18's 90 000 is SUPERSEDED) | pin | same file | ❌ **W0** | ⬜ pending |
 | WIZFORM-05 | 1 | Python nested ordering `LOGIN_MS < REQUEST_S < STAGE_S < DEADLINE_S` holds (D-02) | unit | `cd analytics-service && python3 -m pytest tests/ -k mt5 -x` | ✅ extend | ⬜ pending |
 | WIZFORM-05 | 0 | The `finally`-close still runs when the end-to-end deadline fires | unit | same | ❌ **W0** | ⬜ pending |
 | MT5-14 | 1 | Flag OFF ⇒ no MT5 in any offered set (byte-identical) | pin | `npx vitest run src/lib/closed-sets.mt5-flag.test.ts` | ✅ **re-cut** | ⬜ pending |
@@ -95,6 +95,8 @@ reproduce with `PATH=/opt/homebrew/opt/node@22/bin:$PATH npm test`.
 - [ ] Python: `finally`-close survives the end-to-end deadline; ordering-chain assertion — WIZFORM-05
 - [ ] Flag-ON **positive** assertion in `closed-sets.mt5-flag.test.ts` — MT5-14
 - [ ] MT5 preselect + `<span>`-not-`<button>` pinned chip in `MetadataStep.test.tsx` — MT5-14
+- [ ] `supportedExchanges` always contains the detected venue in the submitted payload — MT5-14
+      *(added 2026-08-08: the test map carried this row with no matching Wave-0 bullet)*
 - [ ] Framework install: **none needed**
 
 ---
@@ -103,7 +105,7 @@ reproduce with `PATH=/opt/homebrew/opt/node@22/bin:$PATH npm test`.
 
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
-| A real MT5 login completes inside the 90s budget and reports an honest verdict | WIZFORM-05 | Needs the live funded account on a trading day; no distribution of *successful* MT5 login latencies exists to pin against | Founder connects the live MT5 key via the wizard on a trading day; verdict must render before the client gives up. Deferred to **Phase 155** (MT5-VERIFY). |
+| A real MT5 login completes inside the **120s** budget (D-26) and reports an honest verdict | WIZFORM-05 | Needs the live funded account on a trading day; no distribution of *successful* MT5 login latencies exists to pin against — and D-32's `stage`/`duration_ms` instrumentation is what will finally produce one | Founder connects the live MT5 key via the wizard on a trading day; verdict must render before the client gives up. Deferred to **Phase 155** (MT5-VERIFY). |
 | The inline red field reads correctly to a screen reader | WIZFORM-01 | axe catches the wiring, not the announcement quality | VoiceOver over the metadata step with a 2-char description |
 
 ---
@@ -166,7 +168,8 @@ nothing.
 
 - [ ] All tasks have `<automated>` verify or Wave 0 dependencies
 - [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references (10 items above)
+- [ ] Wave 0 covers all MISSING references — **10 bullets covering 11 `❌ W0` test-map rows**
+      (the vacuity-floor bullet covers two rows: the floor and the widened-predicate SELF-TEST)
 - [ ] No watch-mode flags
 - [ ] Feedback latency < 60s
 - [ ] **Every success criterion has a Falsifiability Ledger row**
