@@ -20,6 +20,7 @@ import { seamCorrelationId, seamErrorCode } from "@/lib/seam-discriminator";
 // error by design.
 import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
+import { WarningBanner } from "@/components/ui/WarningBanner";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SyncPreviewSnapshot } from "./SyncPreviewStep";
 import type { MetadataDraft } from "./MetadataStep";
@@ -37,6 +38,23 @@ import {
  *
  * Success redirect is handled by WizardClient's `handleSubmitSuccess`.
  */
+
+/**
+ * 151 review E8 — the dropped-mark notice copy. Module constants, not inline
+ * JSX, so the component and its spec cannot drift and so the apostrophes stay
+ * literal (the 150-UI-SPEC copywriting convention this wizard already follows).
+ *
+ * The first line leads with SAVED, deliberately: the finalize succeeded and the
+ * strategy exists. Reading this as a failure would be its own defect — the user
+ * would go looking for work that is not lost. The second line names the ONE
+ * thing that did not land and the screen where they can set it, plus the
+ * consequence of leaving it unset, because "your mark was dropped" without
+ * "so Allocate will not appear" is a fact with no meaning attached.
+ */
+const MARK_DROPPED_TITLE = "Saved. The own-capital mark didn't stick.";
+const MARK_DROPPED_BODY =
+  "Everything else was saved. Mark this strategy as your own capital in My Strategies — until you do, the Allocate action won't appear for it.";
+const MARK_DROPPED_CONTINUE = "Continue";
 
 export interface SubmitStepProps {
   strategyId: string;
@@ -99,6 +117,30 @@ export function SubmitStep({
   const [retryAfterSeconds, setRetryAfterSeconds] = useState<number | null>(
     null,
   );
+  /**
+   * 151 review E8 — THE FINALIZE SUCCEEDED AND THE CAPITAL MARK DID NOT LAND.
+   *
+   * `finalize-wizard` has emitted `capital_ownership_persisted: false` since
+   * 151 specialist F-3, and its docblock calls the field "the honest minimum" so
+   * a user whose mark was dropped is not shown plain success. NO client read it:
+   * the response was typed as five fields, this key appeared nowhere in `src/`,
+   * and the user got an unqualified success screen while their answer was lost —
+   * with no way to know why `Allocate…` never appears against the strategy (an
+   * unmarked strategy is non-allocatable, and the D-03-A trigger enforces it).
+   *
+   * Holding the id here rather than calling `onSubmitted` straight away is what
+   * makes the notice reachable at all: `onSubmitted` navigates (WizardClient's
+   * `handleSubmitSuccess` pushes /strategies, or the contribution overlay closes
+   * on `onSuccess`), so anything rendered beside it is unmounted before it can
+   * be read. The user leaves on their own click instead.
+   *
+   * NON-BLOCKING by construction: this is not an error envelope, no retry is
+   * offered, and `Continue` completes the submit exactly as the silent path did.
+   * The finalize genuinely succeeded; only the ONE metadata field was dropped.
+   */
+  const [markDroppedStrategyId, setMarkDroppedStrategyId] = useState<
+    string | null
+  >(null);
 
   const handleSubmit = useCallback(async () => {
     if (submitting) return;
@@ -154,6 +196,14 @@ export function SubmitStep({
         error?: string;
         code?: string;
         idempotent?: boolean;
+        /**
+         * 151 review E8 — present ONLY when the caller asked for a capital mark
+         * and it did not save (`finalize-wizard/route.ts`, the `...(persisted ?
+         * {} : {...})` spread). ABSENT means nothing was lost, so the read below
+         * is an explicit `=== false` and never a truthiness test: `undefined`
+         * must not be read as "dropped".
+         */
+        capital_ownership_persisted?: boolean;
       };
 
       if (!res.ok) {
@@ -320,6 +370,16 @@ export function SubmitStep({
         return;
       }
 
+      // 151 review E8 — the finalize SUCCEEDED; only the capital mark was
+      // dropped. Hold the completion so the notice can be read, then hand over
+      // on the user's own click (see the state's docblock for why an immediate
+      // `onSubmitted` would unmount the notice before anyone saw it).
+      if (data.capital_ownership_persisted === false) {
+        setMarkDroppedStrategyId(data.strategy_id ?? strategyId);
+        setSubmitting(false);
+        return;
+      }
+
       onSubmitted(data.strategy_id ?? strategyId);
     } catch (err) {
       // TRAP-1, restated as a PROPERTY and re-checked at this edit: a caught
@@ -439,22 +499,50 @@ export function SubmitStep({
         </div>
       )}
 
-      <div className="mt-6 flex gap-3">
-        <Button variant="secondary" type="button" onClick={onBack}>
-          Back
-        </Button>
-        <Button
-          onClick={handleSubmit}
-          disabled={submitting}
-          data-testid="wizard-submit-for-review"
+      {markDroppedStrategyId !== null ? (
+        // 151 review E8 — NOT an error envelope, on purpose: there is nothing to
+        // retry and nothing was rolled back. `role="status"` (polite) rather
+        // than `role="alert"` for the same reason — this is an outcome the user
+        // should hear about, not an interruption.
+        <div
+          role="status"
+          data-testid="capital-mark-dropped-notice"
+          className="mt-6"
         >
-          {submitting
-            ? "Submitting..."
-            : isContribution
-              ? "Add to my strategies"
-              : "Submit for review"}
-        </Button>
-      </div>
+          <WarningBanner>
+            <p className="font-medium text-text-primary">
+              {MARK_DROPPED_TITLE}
+            </p>
+            <p className="mt-1">{MARK_DROPPED_BODY}</p>
+          </WarningBanner>
+          <div className="mt-6 flex gap-3">
+            <Button
+              type="button"
+              onClick={() => onSubmitted(markDroppedStrategyId)}
+              data-testid="wizard-submit-continue"
+            >
+              {MARK_DROPPED_CONTINUE}
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-6 flex gap-3">
+          <Button variant="secondary" type="button" onClick={onBack}>
+            Back
+          </Button>
+          <Button
+            onClick={handleSubmit}
+            disabled={submitting}
+            data-testid="wizard-submit-for-review"
+          >
+            {submitting
+              ? "Submitting..."
+              : isContribution
+                ? "Add to my strategies"
+                : "Submit for review"}
+          </Button>
+        </div>
+      )}
     </section>
   );
 }

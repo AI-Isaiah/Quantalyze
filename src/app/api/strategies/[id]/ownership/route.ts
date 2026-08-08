@@ -38,10 +38,26 @@ import {
  *   5. checkLimit AFTER validation, so a rejected request does not burn one of
  *      the caller's own tokens (B15 ordering, T-150-18).
  *   6. Explicit `.eq("user_id", user.id)` on the UPDATE plus a `.select("id")`
- *      count-check: zero rows is a 404, NEVER `{ok:true}`. The predicate is the
- *      real tenant gate, not belt-and-braces — `strategies_update` RLS is
- *      `FOR UPDATE USING (user_id = auth.uid())` with NO WITH CHECK
- *      (20260405061912_rls_policies.sql:32), so T-150-13 rests on this line.
+ *      count-check: zero rows is a 404, NEVER `{ok:true}`.
+ *
+ *      CITATION RE-BASE (mirrors the capital-ownership migration's rev-3 note).
+ *      This used to justify the predicate by claiming `strategies_update` is
+ *      `FOR UPDATE USING (user_id = auth.uid())` with NO WITH CHECK, citing
+ *      20260405061912_rls_policies.sql:32. That definition is NOT the live one
+ *      and has not been since 20260410225610_sec005_follow_ups.sql:102-106,
+ *      which DROPs and recreates the policy as `USING (user_id = auth.uid())
+ *      WITH CHECK (user_id = auth.uid())` — and that migration's own self-check
+ *      (:228-246) RAISEs if the explicit WITH CHECK is absent, so it cannot
+ *      silently regress.
+ *
+ *      THE PREDICATE STAYS. It is defence in depth on the ground that actually
+ *      holds: it keeps this statement correct on its own terms if the client is
+ *      ever swapped for a service-role/admin one (where RLS stops applying and
+ *      neither USING nor WITH CHECK is evaluated), and it is what turns a
+ *      wrong-owner request into the honest 404 below instead of a silent
+ *      zero-row success. What it is NOT is the sole tenant gate — do not read
+ *      this stack as licence to drop RLS, and do not delete the predicate on
+ *      the grounds that RLS now covers it.
  *
  * NO STATUS GATE on the mark, deliberately. Unlike the rename (D-17,
  * ../name/route.ts), a published strategy is still markable — the UI-SPEC

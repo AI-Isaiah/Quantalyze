@@ -10,6 +10,7 @@ import { isValidDollar } from "@/lib/dollar-validation";
 import {
   OWN_CAPITAL,
   TEAM_REVIEW,
+  isCapitalOwnership,
   type CapitalOwnership,
 } from "@/lib/capital-ownership";
 import { notifyFounderNewStrategy, resolveManagerName } from "@/lib/email";
@@ -493,8 +494,7 @@ function validatePayload(
   if (
     capital_ownership !== undefined &&
     capital_ownership !== null &&
-    capital_ownership !== OWN_CAPITAL &&
-    capital_ownership !== TEAM_REVIEW
+    !isCapitalOwnership(capital_ownership)
   ) {
     return {
       ok: false,
@@ -505,9 +505,7 @@ function validatePayload(
     };
   }
   const capitalOwnershipValidated: CapitalOwnership | undefined =
-    capital_ownership === OWN_CAPITAL || capital_ownership === TEAM_REVIEW
-      ? capital_ownership
-      : undefined;
+    isCapitalOwnership(capital_ownership) ? capital_ownership : undefined;
 
   // audit-2026-05-07 H-0324 — isUuid is a type predicate (value is
   // string), so the prior `as string` casts were redundant. Removing
@@ -1182,7 +1180,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // be dropped in silence. Dropping is still SAFE (unwritten = NULL =
   // non-allocatable, and nothing the user was shown is contradicted), so this
   // is not an error arm; but it must not be invisible.
-  if (fields.capitalOwnership !== undefined) {
+  //
+  // ONE RESPONSE CONTRACT ACROSS BOTH ARMS. The legacy arm has emitted
+  // `capital_ownership_persisted: false` since 151 specialist F-3 when a mark
+  // it was asked for did not land; this arm dropped the mark with only a
+  // console.warn and a byte-identical success body, so a client that sent
+  // `capital_ownership` and got routed here could not tell "saved" from
+  // "discarded" — and SubmitStep's reader (151 review E8) would show plain
+  // success. The flag is forwarded below so the ONE `=== false` read on the
+  // client covers both arms. Console-only visibility is for US; the sidecar is
+  // for the person whose answer was dropped.
+  const capitalOwnershipDropped = fields.capitalOwnership !== undefined;
+  if (capitalOwnershipDropped) {
     console.warn(
       `[strategies/finalize-wizard] capital_ownership sent on the unified (manager) arm for ` +
         `${fields.strategy_id}; the mark is NOT persisted here and stays NULL. ` +
@@ -1193,6 +1202,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   return await unifiedFinalizeWizardHandler({
     strategy_id: fields.strategy_id,
     userId: user.id,
+    capitalOwnershipDropped,
     // 140.3-14 / TS-33 — read off the owner-scoped draft row above.
     wizardSessionId,
     // NEW-C14-06: forward the validated+normalized `fields` object instead
@@ -1336,10 +1346,18 @@ async function runLegacyFinalize(args: {
   // metadata, and any error code the wizard's roster does not carry renders
   // the useless UNKNOWN card.
   //
-  // Both `.eq()` predicates are load-bearing, not belt-and-braces: the
-  // strategies_update RLS policy has no WITH CHECK clause, so the `user_id`
-  // filter is the actual thing standing between this patch and another
-  // owner's row (T-150-10).
+  // Both `.eq()` predicates stay — with the justification RE-BASED onto the
+  // live policy. This comment used to say "the strategies_update RLS policy has
+  // no WITH CHECK clause, so the `user_id` filter is the actual thing standing
+  // between this patch and another owner's row". That is FALSE: the
+  // `strategies_update` policy was DROPped and recreated with an explicit
+  // `WITH CHECK (user_id = auth.uid())` by the sec005 follow-ups migration,
+  // whose own verification block RAISEs if that clause is missing. The real
+  // ground for keeping the predicates (T-150-10): they keep this UPDATE correct
+  // on its own terms if `supabase` here is ever swapped for the admin client
+  // this file already constructs elsewhere — where RLS does not apply at all —
+  // and the `user_id` filter is what makes the zero-row arm below
+  // distinguishable from a successful write.
   // 151 specialist F-3 — the SERVER posture above is sound (never fail the
   // finalize over metadata), but the RESPONSE was a plain success with no
   // signal at all: a user who explicitly answered "my own capital" got the
@@ -1703,6 +1721,15 @@ async function unifiedFinalizeWizardHandler(args: {
    * absence, never as a synthesised id.
    */
   wizardSessionId: string | null;
+  /**
+   * OWN-03 — TRUE when the caller asked for a `capital_ownership` mark. This
+   * arm has no mark write, so asking for one here IS a drop, and the two 200
+   * bodies below carry the same `capital_ownership_persisted: false` sidecar
+   * the legacy arm emits on a failed persist. One contract, both arms: the
+   * client's single `=== false` read (SubmitStep) never has to know which arm
+   * answered.
+   */
+  capitalOwnershipDropped: boolean;
   payload: Record<string, unknown>;
   apiKeyId: string | null;
   source: string;
@@ -1821,6 +1848,12 @@ async function unifiedFinalizeWizardHandler(args: {
   // there is no terminalStatus to thread here — this arm always terminates
   // 'pending_review' by construction.
   const upstream = result.body;
+  // OWN-03 — the dropped-mark sidecar, spelled ONCE and spread into both 200
+  // arms. Emitted ONLY when the caller asked for a mark, so every existing
+  // caller's response bytes are unchanged; absent still means nothing was lost.
+  const markSidecar = args.capitalOwnershipDropped
+    ? { capital_ownership_persisted: false as const }
+    : {};
   if (isProcessKeyOnboardResponse(upstream)) {
     if (upstream.queued) {
       return NextResponse.json(
@@ -1830,6 +1863,7 @@ async function unifiedFinalizeWizardHandler(args: {
           status: "pending_review",
           verification_id: upstream.verification_id,
           queued: true,
+          ...markSidecar,
         },
         { headers: NO_STORE_HEADERS },
       );
@@ -1844,6 +1878,7 @@ async function unifiedFinalizeWizardHandler(args: {
         queued: false,
         code: upstream.code,
         ...(upstream.idempotent === true ? { idempotent: true } : {}),
+        ...markSidecar,
       },
       { headers: NO_STORE_HEADERS },
     );

@@ -5,6 +5,7 @@ import { mandateAutoSaveLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { isUuid } from "@/lib/utils";
+import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 
 /**
  * PATCH /api/strategies/[id]/name
@@ -42,12 +43,24 @@ import { isUuid } from "@/lib/utils";
  *      forbidden filter without spelling it — naming it here would make this
  *      file its own offender.)
  *
- * The explicit `.eq("user_id", user.id)` is load-bearing, not belt-and-braces:
- * `strategies_update` RLS is `FOR UPDATE USING (user_id = auth.uid())` with NO
- * WITH CHECK (20260405061912_rls_policies.sql:32), so this predicate is the
- * real tenant gate (T-150-13). The `.select("id")` count-check then turns every
- * refusal — wrong owner, unknown id, published row — into one honest 404 rather
- * than a silent `{ok:true}` that touched nothing.
+ * THE EXPLICIT `.eq("user_id", user.id)` STAYS — but not for the reason this
+ * paragraph used to give. It claimed `strategies_update` RLS is
+ * `FOR UPDATE USING (user_id = auth.uid())` with NO WITH CHECK, citing
+ * 20260405061912_rls_policies.sql:32. That is FALSE and has been since
+ * 20260410225610_sec005_follow_ups.sql:102-106, which DROPs and recreates the
+ * policy as `USING (user_id = auth.uid()) WITH CHECK (user_id = auth.uid())`;
+ * that migration's own self-check (:228-246) RAISEs if the explicit WITH CHECK
+ * is missing. The citation is re-based here for the same reason the
+ * capital-ownership migration re-based its own (rev-3): a future author who
+ * trusted the old claim could conclude the app-layer predicate is the ONLY
+ * tenant gate — or, reading the correction, delete it as redundant.
+ *
+ * The ground that actually holds: the predicate keeps this statement correct on
+ * its own terms if the client is ever swapped for a service-role/admin one
+ * (RLS stops applying entirely there, so neither USING nor WITH CHECK is
+ * evaluated), and it is what makes the `.select("id")` count-check meaningful —
+ * every refusal (wrong owner, unknown id, published row) becomes one honest 404
+ * rather than a silent `{ok:true}` that touched nothing.
  *
  * PITFALL-3 CONSCIOUS ACCEPTANCE (150-RESEARCH.md § Pitfall 3), recorded here
  * so it does not read as an oversight: this route is the FIRST path putting
@@ -65,8 +78,17 @@ import { isUuid } from "@/lib/utils";
  * disclosure redaction contract is not read, not written, and not widened here.
  */
 
-/** Product cap from the UI-SPEC. `strategies.name` itself is uncapped TEXT. */
-const MAX_NAME_LENGTH = 80;
+/**
+ * Product cap from the UI-SPEC. `strategies.name` itself is uncapped TEXT.
+ *
+ * READ FROM `MAGNITUDE_CAPS`, never re-declared: that table
+ * (src/lib/closed-sets.ts) is the one declaration per cap, created to retire
+ * exactly this hand-copied-constant pattern across partner-import /
+ * csv-finalize / finalize-wizard / CsvUploadStep. RenameStrategyDialog reads
+ * the same entry, so the client-side guard and this server-side one cannot
+ * drift apart.
+ */
+const MAX_NAME_LENGTH = MAGNITUDE_CAPS.MAX_NAME_CHARS;
 
 interface NameBody {
   name?: unknown;

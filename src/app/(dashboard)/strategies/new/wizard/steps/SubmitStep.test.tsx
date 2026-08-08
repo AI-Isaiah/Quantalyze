@@ -1034,3 +1034,102 @@ describe("[140.5-03 / SEAMPROSE-02] SubmitStep — the advertised wait reaches t
     expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
   });
 });
+
+/**
+ * 151 review E8 — THE PRODUCER EXISTED AND THE CONSUMER DID NOT.
+ *
+ * `finalize-wizard` emits `capital_ownership_persisted: false` when the caller
+ * asked for a capital mark and the write of that ONE field did not land, and its
+ * docblock calls the field "the honest minimum" so such a user is not shown
+ * plain success. Nothing in `src/` read it: the response was typed as five
+ * fields, the key appeared nowhere else, and the user got an unqualified success
+ * screen while their answer was lost — then wondered why `Allocate…` never
+ * appeared against the strategy (an unmarked strategy is non-allocatable, and
+ * the D-03-A trigger enforces that).
+ *
+ * The notice is deliberately NON-BLOCKING: the finalize succeeded, so it must
+ * not read as a failure, must not be an error envelope, and must not offer a
+ * retry. The control asserting the ORDINARY success response renders no notice
+ * is what stops the fix degrading into "every submit warns".
+ */
+describe("SubmitStep — 151 review E8: a dropped capital mark is announced", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("surfaces the notice and holds the hand-off until the user continues", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          ok: true,
+          strategy_id: "strat-final",
+          status: "pending_review",
+          capital_ownership_persisted: false,
+        },
+        200,
+      ),
+    );
+    const onSubmitted = renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    const notice = await screen.findByTestId("capital-mark-dropped-notice");
+    // It reads as SAVED, not as a failure: the strategy exists and the rest of
+    // the submit landed. A user told "something went wrong" would go hunting
+    // for work that is not lost.
+    expect(notice.textContent).toMatch(/saved/i);
+    // It names the remedy AND where to reach it.
+    expect(notice.textContent).toMatch(/own capital/i);
+    expect(notice.textContent).toMatch(/My Strategies/i);
+    // NOT an error envelope, and no retry affordance.
+    expect(screen.queryByTestId("error-envelope")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(findWizardError()).toBeUndefined();
+
+    // The hand-off is HELD — `onSubmitted` navigates away, so calling it here
+    // would unmount the notice before anyone could read it.
+    expect(onSubmitted).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("wizard-submit-continue"));
+    expect(onSubmitted).toHaveBeenCalledWith("strat-final");
+  });
+
+  it("CONTROL — an ordinary success renders NO notice and hands off immediately", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { ok: true, strategy_id: "strat-final", status: "pending_review" },
+        200,
+      ),
+    );
+    const onSubmitted = renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await vi.waitFor(() => expect(onSubmitted).toHaveBeenCalledWith("strat-final"));
+    expect(screen.queryByTestId("capital-mark-dropped-notice")).toBeNull();
+  });
+
+  it("CONTROL — `capital_ownership_persisted: true` is a landed mark, not a dropped one", async () => {
+    // The read is `=== false`, never a truthiness test: a route that one day
+    // emits the field on BOTH outcomes must not turn every success into a
+    // warning, and `undefined` must never be read as "dropped".
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          ok: true,
+          strategy_id: "strat-final",
+          status: "pending_review",
+          capital_ownership_persisted: true,
+        },
+        200,
+      ),
+    );
+    const onSubmitted = renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await vi.waitFor(() => expect(onSubmitted).toHaveBeenCalledWith("strat-final"));
+    expect(screen.queryByTestId("capital-mark-dropped-notice")).toBeNull();
+  });
+});

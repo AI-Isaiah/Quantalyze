@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/Button";
 import { Field } from "@/components/ui/Field";
 import { ErrorEnvelope } from "@/components/error/ErrorEnvelope";
 import { buildEnvelope, type ErrorEnvelope as ErrorEnvelopeShape } from "@/lib/envelope";
+import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
+import { newCorrelationId } from "@/lib/correlation-id-client";
 
 /**
  * Phase 150 / OWN-05 — the owner relabels their own private or draft strategy.
@@ -41,11 +43,19 @@ import { buildEnvelope, type ErrorEnvelope as ErrorEnvelopeShape } from "@/lib/e
  * both surfaces are defence in depth, not the gate.
  */
 
-/** UI-SPEC product cap. `strategies.name` itself is uncapped TEXT in the DB. */
-const MAX_NAME_LENGTH = 80;
+/**
+ * UI-SPEC product cap. `strategies.name` itself is uncapped TEXT in the DB.
+ *
+ * READ FROM THE SHARED CAP, not re-declared: `MAGNITUDE_CAPS`
+ * (src/lib/closed-sets.ts) exists precisely to hold one declaration per cap,
+ * and the guard here, the route's guard and the sentence below are three
+ * spellings of the SAME number. The sentence interpolates it too, so raising
+ * the cap can never leave the copy naming the old one.
+ */
+const MAX_NAME_LENGTH = MAGNITUDE_CAPS.MAX_NAME_CHARS;
 
 const ERROR_EMPTY = "Enter a name.";
-const ERROR_TOO_LONG = "Keep it under 80 characters.";
+const ERROR_TOO_LONG = `Keep it under ${MAX_NAME_LENGTH} characters.`;
 
 /** The route's two field-level refusals, mapped to their inline copy. */
 const ROUTE_FIELD_ERRORS: Record<string, string> = {
@@ -108,10 +118,21 @@ export function RenameStrategyDialog({
     setEnvelope(null);
     setStatus("loading");
 
+    // Minted BEFORE the request and SENT on it (@/lib/correlation-id-client, the
+    // same helper AllocateDialog and MarkOwnershipDialog use). Previously this
+    // was a bare `crypto.randomUUID()` on each failure path with no header, so
+    // the id printed in the envelope joined to no server log line — and the copy
+    // in the `catch` below would have thrown inside the handler on any runtime
+    // without `crypto.randomUUID`, losing the envelope entirely.
+    const correlationId = newCorrelationId("rename");
+
     try {
       const res = await fetch(`/api/strategies/${strategyId}/name`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Correlation-Id": correlationId,
+        },
         body: JSON.stringify({ name: trimmed }),
       });
 
@@ -128,7 +149,7 @@ export function RenameStrategyDialog({
             return;
           }
         }
-        setEnvelope(buildEnvelope("UNKNOWN", crypto.randomUUID()));
+        setEnvelope(buildEnvelope("UNKNOWN", correlationId));
         setStatus("idle");
         return;
       }
@@ -137,7 +158,7 @@ export function RenameStrategyDialog({
       onClose();
       router.refresh();
     } catch {
-      setEnvelope(buildEnvelope("UNKNOWN", crypto.randomUUID()));
+      setEnvelope(buildEnvelope("UNKNOWN", correlationId));
       setStatus("idle");
     }
   }

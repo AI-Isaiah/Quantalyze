@@ -3219,4 +3219,100 @@ describe("POST /api/strategies/finalize-wizard — OWN-03 capital-ownership mark
 
     fetchSpy.mockRestore();
   });
+
+  // ── 151 informational D7 — ONE RESPONSE CONTRACT, BOTH ARMS ──────────────
+  //
+  // The sidecar above is the LEGACY/contribution arm. The UNIFIED (manager) arm
+  // has no mark write at all: a `capital_ownership` arriving there is dropped
+  // unconditionally, and until this change it was dropped with only a
+  // console.warn behind a byte-identical success body. A client that sent the
+  // field and got routed to the unified arm therefore could not distinguish
+  // "saved" from "discarded" — and SubmitStep's `=== false` reader (151 review
+  // E8) showed plain success while the answer was gone. Same loss, same signal.
+  it("D7 — the UNIFIED arm emits the same sidecar when a mark it cannot persist is sent", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    // Single-key manager draft with no entry_context ⇒ the unified arm.
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, capital_ownership: "own_capital" }),
+    );
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    // Non-vacuity: this really is the unified arm, not the legacy one — the
+    // legacy RPC never ran and no mark UPDATE was issued, which is precisely
+    // why the mark is lost here.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+    expect(markWrite()).toBeUndefined();
+    expect(body.queued).toBe(true);
+
+    expect(
+      body.capital_ownership_persisted,
+      "The unified arm dropped the caller's mark and reported unqualified " +
+        "success — the two arms no longer share one response contract.",
+    ).toBe(false);
+
+    warnSpy.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("D7 CONTROL — the unified arm's body is byte-unchanged when no mark was sent", async () => {
+    // The sidecar must be emitted ONLY when the caller asked for a mark.
+    // Without this control the assertion above would also pass against a field
+    // hardcoded onto every unified response, which would make every existing
+    // manager submission look like a data loss.
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(body.queued).toBe(true);
+    expect("capital_ownership_persisted" in body).toBe(false);
+
+    fetchSpy.mockRestore();
+  });
+
+  it("D7 — the dedup-hit (queued=false) unified body carries the sidecar too", async () => {
+    // The unified arm has TWO 200 shapes. The idempotent-resume envelope is the
+    // one a duplicate submit lands on, and a duplicate submit is exactly when a
+    // user re-sends the answer they thought was saved; leaving the sidecar off
+    // this shape would make the flag depend on which 200 you happened to get.
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    STATE.processKeyResult = {
+      ok: true,
+      body: {
+        queued: false,
+        verification_id: "ver-dup",
+        code: "WIZARD_DUPLICATE",
+        idempotent: true,
+      },
+    };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, capital_ownership: "team_review" }),
+    );
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(body.queued).toBe(false);
+    expect(body.code).toBe("WIZARD_DUPLICATE");
+    expect(body.capital_ownership_persisted).toBe(false);
+
+    warnSpy.mockRestore();
+    fetchSpy.mockRestore();
+  });
 });

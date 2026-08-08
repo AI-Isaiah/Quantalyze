@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { ErrorEnvelope } from "@/components/error/ErrorEnvelope";
 import { buildEnvelope, type ErrorEnvelope as ErrorEnvelopeShape } from "@/lib/envelope";
 import { formatUsd } from "@/lib/dollar-validation";
+import { newCorrelationId } from "@/lib/correlation-id-client";
 import { TEAM_REVIEW, type CapitalOwnership } from "@/lib/capital-ownership";
 import { CapitalOwnershipRadioGroup } from "./CapitalOwnershipRadioGroup";
 
@@ -95,10 +96,21 @@ export function MarkOwnershipDialog({
     setStatus("loading");
     setEnvelope(null);
 
+    // Minted BEFORE the request and SENT on it (@/lib/correlation-id-client, the
+    // same helper AllocateDialog uses). Two things were wrong with the previous
+    // shape: the id was minted only on the failure paths and never put on the
+    // wire, so the id the envelope showed the user joined to no server log line;
+    // and the bare `crypto.randomUUID()` sat inside the `catch` below, where a
+    // throw would replace the envelope with an unhandled rejection.
+    const correlationId = newCorrelationId("ownership");
+
     try {
       const res = await fetch(`/api/strategies/${strategyId}/ownership`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Correlation-Id": correlationId,
+        },
         body: JSON.stringify(
           confirmRemoveAllocation
             ? { mark, confirm_remove_allocation: true }
@@ -124,7 +136,7 @@ export function MarkOwnershipDialog({
       }
 
       if (!res.ok) {
-        setEnvelope(buildEnvelope("UNKNOWN", crypto.randomUUID()));
+        setEnvelope(buildEnvelope("UNKNOWN", correlationId));
         setStatus("idle");
         return;
       }
@@ -136,7 +148,7 @@ export function MarkOwnershipDialog({
     } catch {
       // Transport failure (offline, aborted). Same canonical envelope — the
       // dialog never invents a bespoke error sentence.
-      setEnvelope(buildEnvelope("UNKNOWN", crypto.randomUUID()));
+      setEnvelope(buildEnvelope("UNKNOWN", correlationId));
       setStatus("idle");
     }
   }
