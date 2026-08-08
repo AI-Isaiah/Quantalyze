@@ -211,12 +211,31 @@ one-account cap.** Keep the single terminal; do not buy a managed provider yet; 
 block 153 on running the 134 spike. WIZFORM-05 proceeds — but as an honest beta, not as
 a claim of multi-tenancy.
 
-- **D-29: MT5 is BETA with a documented, ENFORCED one-account cap.** The ceiling is
-  structural (one `ThreadedServer(SlaveService)` ⇒ one process-global MT5 session ⇒ one
-  logged-in account). It must be stated in the product, not just in a doc, and enforced —
-  a second concurrent MT5 validation must be refused with honest copy, never silently
-  raced. ⚠️ Refusal copy must name an action the user can take (WIZFORM-04's rule) and
-  must not leak infrastructure detail (WIZFORM-03).
+- **D-29 (REVISED 2026-08-08 — founder: *"We need to update MT5 accounts per client only
+  once [per day]. So potentially, one account can do a lot of them throughout the day.
+  Without concurrency"*). The cap is on CONCURRENCY, not on ACCOUNTS.**
+  The earlier reading ("one-account cap") was wrong. MT5 binds one account per terminal
+  *at a time* — that is a **serialization** constraint, not a capacity one. A daily sync is
+  sequential and latency-tolerant, so ONE terminal can cycle through many accounts across a
+  day: capacity ≈ (usable daily window ÷ per-account cycle time), which is hundreds, not one.
+  **There is therefore NO account cap. The number of MT5 clients is not architecturally
+  limited.** What must never overlap is two *simultaneous* uses of the terminal.
+  - ⭐ **The mechanism already exists and the validate path simply does not use it.**
+    `_mt5_terminal_lock_for` / `_MT5_TERMINAL_LOCKS` (`services/mt5_concurrency.py:126-134`)
+    is acquired by `job_worker.py:364`, `job_worker.py:3572` and
+    `allocator_positions.py:656` — and **`routers/exchange.py` acquires it ZERO times**
+    (verified). The wizard's validate path is the ONE caller that skips the lease. That is
+    the whole bug. Fix = take the same lease.
+  - **The lease needs a BOUNDED acquisition timeout**, separate from the operation timeout.
+    Today `wait_for` sits *inside* the lock, so a queued caller's wait is unbounded and its
+    own timer only starts once it holds the lock. An interactive validation must be able to
+    give up waiting for the terminal without waiting for the terminal.
+  - **Queueing is surfaced honestly, not hidden**: "waiting for the connection" is a
+    different state from "validating", and the UI-SPEC's long-wait card + `Stop waiting`
+    already provide the affordance. Copy names an action (WIZFORM-04) and leaks no
+    infrastructure (WIZFORM-03).
+  - ⚠️ Only the **interactive** path needs the bounded wait. The daily batch should queue
+    patiently — it has all day.
 - **D-30: `shutdown()` comes OUT of the request path.** `routers/exchange.py:449-466`
   calls `close()` in `finally:` on every validate; on a shared session that tears down the
   IPC pipe for any concurrent caller (`-10004`). Attach once, do not tear down per request.
