@@ -139,6 +139,9 @@ function makeMarked(over: {
   name?: string | null;
   codename?: string | null;
   capital_ownership?: string | null;
+  /** Review round 3 E2 — server-reduced scalar; the marked half no longer
+   *  carries a return series across the RSC boundary. */
+  mtd?: number | null;
   analytics?: OwnCapitalStrategy["strategy_analytics"];
 }): OwnCapitalStrategy {
   return {
@@ -150,6 +153,7 @@ function makeMarked(over: {
     capital_ownership: (over.capital_ownership === undefined
       ? "own_capital"
       : over.capital_ownership) as OwnCapitalStrategy["capital_ownership"],
+    mtd: over.mtd ?? null,
     strategy_analytics: over.analytics ?? null,
   };
 }

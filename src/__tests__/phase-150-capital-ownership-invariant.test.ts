@@ -3,6 +3,17 @@ import { join, relative } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+// P2c reads the CI seed's ownership fixtures BY VALUE. `seed-demo-profiles` is
+// the pure-data half of the seed (no supabase-js import, no side effects — the
+// RT-J08 split that already lets Playwright specs import it), so pulling it into
+// a vitest module graph costs nothing and cannot connect to anything.
+import {
+  ALLOCATOR_ACTIVE,
+  ALLOCATOR_COLD,
+  ALLOCATOR_STALLED,
+  STRATEGY_PROFILES,
+} from "../../scripts/seed-demo-profiles";
+
 /**
  * Phase 150 (OWN-03 / OWN-05) — the capital-ownership hard-invariant structural
  * gate.
@@ -83,6 +94,14 @@ import { describe, expect, it } from "vitest";
  *       repoint side, `UPDATE OF capital_ownership` on the mark-transition side.
  *       Plus the flip RPC's owner precheck (three `auth.uid()` occurrences) and
  *       its load-bearing DELETE-before-UPDATE order.
+ *   P4c. THE CROSS-LAYER RAISE CONTRACT (151 review A5). The D-03-A RAISE format
+ *       literal still contains `capital_ownership=%` fed the COALESCEd mark, and
+ *       both browser-direct clients still read that token. Their 23514 arms are
+ *       separated by a SUBSTRING OF A PL/pgSQL FORMAT STRING and by nothing
+ *       else; a reword in this in-place-amended migration would send every
+ *       third-party allocator down the owner-voiced branch — "mark it in My
+ *       Strategies first" for a row they neither own nor can reach — with the
+ *       whole suite green.
  *   P4b. THE SEED-TRIGGER REPAIR SURVIVES. `20260806130000` made the two
  *       `weight_snapshots` seed trigger functions `SECURITY DEFINER`, repairing a
  *       defect that had been live in PRODUCTION since 2026-04-16 (every
@@ -316,18 +335,50 @@ const SEED_SECDEF_MIGRATION =
   "supabase/migrations/20260806130000_seed_weight_snapshot_secdef.sql";
 
 /**
- * The complete set of production files that CREATE a `portfolio_strategies`
- * row. Two of these predate Phase 150 and write straight from the browser under
- * the user's own JWT — they are gated by the D-03-A trigger at the table layer,
- * NOT by anything in TypeScript and not by review vigilance. That is the whole
+ * The complete set of files that CREATE a `portfolio_strategies` row.
+ *
+ * Two of these predate Phase 150 and write straight from the browser under the
+ * user's own JWT — they are gated by the D-03-A trigger at the table layer, NOT
+ * by anything in TypeScript and not by review vigilance. That is the whole
  * design: the invariant holds against every path, including a raw PostgREST
  * call, so the census does not have to chase call sites forever. It does have to
  * stay a census, which is what P2's two-directional rot-guard enforces.
+ *
+ * ⚠️ `scripts/` IS PART OF THE CENSUS (added by the F1 review, 2026-08-08). The
+ * original census walked `src/` only and named `seed-full-app-demo.ts` in the
+ * migration header as "the demo seed". That was the wrong seed twice over:
+ * `seed-full-app-demo.ts` is manual-only (CHANGELOG.md:2835; a knip.json orphan
+ * entry) and has never run against a shared DB, while
+ * `scripts/seed-demo-data.ts:1069` — a FOURTH position writer that appeared in
+ * NO census — is what `.github/workflows/ci.yml:1600` runs on every seed-gated
+ * e2e job. A seed writer is not "not production": it is the only writer whose
+ * rows hit the D-03-A triggers on every CI run, so a seed edit that trips a
+ * trigger arm reddens `e2e-seeded` with a bare Postgres 23514 and no obvious
+ * cause. P2b + P2c pin the two fixture properties that keep it green.
  */
+const SEED_DEMO_DATA = "scripts/seed-demo-data.ts";
+const SEED_FULL_APP_DEMO = "scripts/seed-full-app-demo.ts";
+
 const SANCTIONED_POSITION_WRITERS: readonly string[] = [
   ALLOCATION_ROUTE,
   "src/components/portfolio/AddToPortfolio.tsx",
   "src/components/portfolio/MigrationWizard.tsx",
+  SEED_DEMO_DATA,
+  SEED_FULL_APP_DEMO,
+];
+
+/** The pure-data seed fixture module — strategy owners live here. */
+const SEED_DEMO_PROFILES = "scripts/seed-demo-profiles.ts";
+
+/**
+ * The seed scripts, as a set. Every one of these is walked for the mark literal
+ * (P2b) — a seed that starts writing `capital_ownership` changes which trigger
+ * arm its rows meet, and that is a decision, never a drive-by.
+ */
+const SEED_SCRIPTS: readonly string[] = [
+  SEED_DEMO_DATA,
+  SEED_FULL_APP_DEMO,
+  SEED_DEMO_PROFILES,
 ];
 
 /** The mark literal. Spelled here (a test) and in exactly one production file. */
@@ -396,6 +447,35 @@ function productionSources(dir: string, acc: string[] = []): string[] {
   }
   return acc;
 }
+
+/**
+ * A walk ROOT, resolved fail-loud. `productionSources` would throw a bare
+ * ENOENT if a root moved, which reads as infrastructure noise; this says what
+ * actually broke. Load-bearing for the `scripts/` root specifically — a scan
+ * that silently matches nothing is strictly worse than no scan, because the P2
+ * census would then pass by finding neither the offender nor the allowlisted
+ * seeds... except it would ALSO fail on the vanished allowlist entries, which
+ * is the two-directional property doing its job. This guard just makes the
+ * diagnosis one line instead of five.
+ */
+function walkRoot(relDir: string): string {
+  const abs = join(ROOT, relDir);
+  if (!existsSync(abs)) {
+    throw new Error(
+      `OWN-03 census root is missing: ${relDir}/. The portfolio_strategies ` +
+        `write census walks this directory; a root that moved must carry the ` +
+        `census with it. A missing root is a FAILURE, not a skip.`,
+    );
+  }
+  return abs;
+}
+
+/**
+ * Every directory the position-write census walks. `scripts/` is here because
+ * `seed-demo-data.ts` writes positions on every seed-gated CI run — see
+ * SANCTIONED_POSITION_WRITERS.
+ */
+const CENSUS_ROOTS: readonly string[] = ["src", "scripts"];
 
 /**
  * Index of the opening brace of a named function's BODY — the first `{` AFTER
@@ -538,7 +618,8 @@ function markLiteralSpellers(): string[] {
  */
 function positionWriters(): string[] {
   const found: string[] = [];
-  for (const abs of productionSources(join(ROOT, "src"))) {
+  const files = CENSUS_ROOTS.flatMap((r) => productionSources(walkRoot(r)));
+  for (const abs of files) {
     const src = stripComments(readFileSync(abs, "utf8"));
     WRITE_METHOD.lastIndex = 0;
     let match: RegExpExecArray | null;
@@ -563,18 +644,109 @@ describe("OWN-03 — one predicate, one census", () => {
     expect(markLiteralSpellers()).toEqual([CAPITAL_OWNERSHIP]);
   });
 
-  it("P2 — exactly three production files create a portfolio_strategies row, and they are the sanctioned three", () => {
+  it("P2 — exactly five files across src/ AND scripts/ create a portfolio_strategies row, and they are the sanctioned five", () => {
     // Two-directional rot-guard (the B10 SANCTIONED idiom): a NEW offender
     // fails, and an allowlisted file that stops matching fails too. The second
     // direction is the one that matters over time — a census that can quietly
     // shrink stops being a census, and the two legacy browser-direct writers
     // are exactly the entries a future refactor would drop without noticing.
     //
-    // ⛔ Those two are NOT gated in TypeScript. They are gated by
-    // `trg_portfolio_strategies_own_capital_only` at the table layer (P4), which
-    // is what makes an enumerable census sufficient here rather than a
-    // never-ending chase.
+    // ⛔ The two browser-direct writers are NOT gated in TypeScript. They are
+    // gated by `trg_portfolio_strategies_own_capital_only` at the table layer
+    // (P4), which is what makes an enumerable census sufficient here rather than
+    // a never-ending chase.
+    //
+    // ⛔ Neither are the two seeds — they write under the SERVICE ROLE, which is
+    // BYPASSRLS but NOT bypass-trigger. `scripts/seed-demo-data.ts` is what CI
+    // runs (`ci.yml:1600`), so its rows meet these triggers on every seed-gated
+    // e2e job. Its survival is a fixture property, pinned by P2b + P2c below.
     expect(positionWriters()).toEqual([...SANCTIONED_POSITION_WRITERS].sort());
+  });
+
+  it("P2b — no seed script writes capital_ownership, which is why trigger ARM 1 never fires on seeded rows", () => {
+    // ARM 1 (`v_mark = 'team_review'`) is UNCONDITIONAL — it blocks a position
+    // for ANYONE, third party included. Every seeded strategy clears it only
+    // because no seed sets the column at all, so `v_mark` is NULL. A seed that
+    // starts marking strategies is free to do so, but it must then decide what
+    // the personas' positions mean — and that decision belongs in a review, not
+    // in a red `e2e-seeded` job whose failure reads as an unexplained 23514.
+    //
+    // Positive control FIRST, so the negative below cannot pass on a file this
+    // gate failed to read.
+    for (const rel of SEED_SCRIPTS) {
+      expect(readSource(rel).length).toBeGreaterThan(0);
+    }
+    const marking = SEED_SCRIPTS.filter((rel) =>
+      stripComments(readSource(rel)).includes("capital_ownership"),
+    );
+    expect(marking).toEqual([]);
+  });
+
+  it("P2c — every seeded strategy owner is disjoint from every seeded portfolio owner, which is why trigger ARM 2 never fires on seeded rows", () => {
+    // ARM 2 is owner-scoped: it fires only when
+    // `v_strategy_owner = v_portfolio_owner`. The CI seed clears it because its
+    // two ownership sets are disjoint — all 8 STRATEGY_PROFILES are MANAGER_*,
+    // all three persona portfolios are ALLOCATOR_*. Nothing in the seed asserts
+    // that; it is an accident of how the fixtures were written, and accidents
+    // rot. Give a persona a self-owned strategy and the D-03-A trigger raises
+    // 23514 on the membership upsert.
+    //
+    // Asserted on the SET, not on the membership mapping: disjointness holds for
+    // ANY strategy_idx→persona wiring, so re-pointing a membership stays free
+    // while changing an OWNER is what fails.
+    //
+    // Two halves, because either alone is forgeable:
+    //   (i) the DATA half — imported from the pure-data fixture module, so a
+    //       changed uuid is caught by value, not by grep.
+    //  (ii) the SOURCE half — the persona portfolios live inside a function body
+    //       in seed-demo-data.ts and are not exported, so their owners are read
+    //       structurally. A new persona owned by a MANAGER_* would pass (i) and
+    //       fail (ii).
+    const allocatorOwners = new Set([
+      ALLOCATOR_ACTIVE,
+      ALLOCATOR_COLD,
+      ALLOCATOR_STALLED,
+    ]);
+
+    // (i) Fail loud on an emptied fixture: a zero-length profile list would make
+    // the disjointness below vacuously true.
+    expect(STRATEGY_PROFILES.length).toBeGreaterThan(0);
+    const strategyOwners = new Set(STRATEGY_PROFILES.map((p) => p.user_id));
+    expect([...strategyOwners].filter((o) => allocatorOwners.has(o))).toEqual([]);
+
+    // (ii) The persona-portfolio block, read structurally. The anchor is the
+    // `personaPortfolios` declaration; if it is renamed or moved the gate FAILS
+    // rather than matching nothing.
+    const seedSrc = stripComments(readSource(SEED_DEMO_DATA));
+    const anchor = seedSrc.indexOf("const personaPortfolios");
+    expect(
+      anchor,
+      "scripts/seed-demo-data.ts no longer declares `personaPortfolios` — the " +
+        "portfolio-owner half of the ARM 2 disjointness pin has nothing to read. " +
+        "Re-anchor it on whatever replaced the declaration; do not delete it.",
+    ).toBeGreaterThan(-1);
+
+    // Bound the scan to the declaration's own array literal, so a `user_id:` in
+    // a later statement cannot green (or redden) this. The END marker is
+    // asserted too: `indexOf` returning -1 would make `slice(anchor, -1)` run to
+    // the end of the FILE, quietly turning a bounded scan into a whole-file one.
+    const blockEnd = seedSrc.indexOf("\n  ];", anchor);
+    expect(
+      blockEnd,
+      "could not find the end of the `personaPortfolios` array literal in " +
+        "scripts/seed-demo-data.ts — re-anchor the P2c scan bounds rather than " +
+        "letting it read the whole file.",
+    ).toBeGreaterThan(anchor);
+    const block = seedSrc.slice(anchor, blockEnd);
+    const portfolioOwnerIdents = [...block.matchAll(/user_id:\s*([A-Za-z0-9_]+)/g)].map(
+      (m) => m[1],
+    );
+    expect(portfolioOwnerIdents.length).toBeGreaterThan(0);
+    expect(
+      portfolioOwnerIdents.filter(
+        (ident) => !/^ALLOCATOR_(ACTIVE|COLD|STALLED)$/.test(ident),
+      ),
+    ).toEqual([]);
   });
 });
 
@@ -712,6 +884,72 @@ describe("OWN-03 — the D-03-A invariant at the table layer (SOURCE facts; the 
     expect(del).toBeGreaterThan(-1);
     expect(upd).toBeGreaterThan(-1);
     expect(del).toBeLessThan(upd);
+  });
+
+  it("P4c — the RAISE still emits the `capital_ownership=<mark>` needle the two clients branch on", () => {
+    // 151 review A5 — a CROSS-LAYER contract, and the only unpinned one in the
+    // phase. `AddToPortfolio.tsx` and `MigrationWizard.tsx` split their 23514
+    // arm on `error.message.includes("capital_ownership=" + TEAM_REVIEW)`, i.e.
+    // on a SUBSTRING OF THIS FORMAT STRING. Nothing else connects the two
+    // layers: no vitest file executes SQL, and the components' own specs seed
+    // the message themselves.
+    //
+    // The failure this forbids is silent in the worst way. This migration is
+    // amended IN PLACE across revisions (it carries rev-2 and rev-3 headers),
+    // so a reword of the RAISE — dropping the `capital_ownership=` prefix,
+    // renaming it, moving the mark out of the message — leaves BOTH components
+    // taking the `else` branch for EVERY refusal. Every third-party allocator
+    // hitting ARM 1 would then be told to "mark it in My Strategies first": a
+    // dead end for a row they do not own, cannot see there, and have no route
+    // to mark. Every test in the repo stays green through that change.
+    const guard = sqlFunctionSource(
+      migrationSql,
+      "guard_allocation_requires_own_capital",
+    );
+    expect(guard).not.toBe("");
+    expect(guard).toContain("RAISE EXCEPTION");
+    // The needle itself, verbatim.
+    expect(guard).toContain("capital_ownership=%");
+    // ...and the `%` must still be FED the mark. A format placeholder with the
+    // argument list reordered (or the COALESCE dropped, which is what makes a
+    // NULL mark render as `unmarked` rather than blanking the token) would keep
+    // the literal above intact while emitting a message the needle misses.
+    expect(guard).toMatch(
+      /capital_ownership=%[\s\S]{0,120}?COALESCE\(v_mark, 'unmarked'\)/,
+    );
+    // The code the clients switch on before they ever look at the message.
+    expect(guard).toContain("ERRCODE = 'check_violation'");
+
+    // Consumer half — non-vacuity in the direction that matters. If nothing
+    // read the token any more, this pin would be guarding a string nobody
+    // consumes.
+    //
+    // ⚠️ PIN RE-BASED (151 informational D3). The token used to be spelled in
+    // BOTH components, verbatim, and this loop asserted it in each. That
+    // duplication was the finding: the copy and the branch now live once, in
+    // `capitalOwnershipRefusalMessage` beside the marks themselves, and the two
+    // components CALL it. So the assertion is split rather than relaxed — the
+    // token is pinned at its single home, and each component is pinned to still
+    // route through that home. Both directions of the original guard survive: a
+    // reworded RAISE still reddens here, and a component that stops consuming
+    // the mapper (open-coding its own arm again) reddens too.
+    expect(
+      stripComments(readSource(CAPITAL_OWNERSHIP)),
+      `${CAPITAL_OWNERSHIP} no longer reads the capital_ownership token out of ` +
+        `the trigger message — the two 23514 arms cannot be separated without it`,
+    ).toContain("capital_ownership=");
+
+    for (const consumer of [
+      "src/components/portfolio/AddToPortfolio.tsx",
+      "src/components/portfolio/MigrationWizard.tsx",
+    ]) {
+      expect(
+        stripComments(readSource(consumer)),
+        `${consumer} no longer routes its 23514 arm through the shared ` +
+          `capitalOwnershipRefusalMessage mapper — the two browser-direct ` +
+          `writers of this table must answer identically`,
+      ).toContain("capitalOwnershipRefusalMessage");
+    }
   });
 
   it("P4b — the weight_snapshots seed-trigger SECURITY DEFINER repair survives", () => {
