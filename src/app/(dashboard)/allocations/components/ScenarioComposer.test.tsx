@@ -46,6 +46,11 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+// Phase 152 SCEN-03 — the detail affordance is a NATIVE <button>, so Enter and
+// Space must be exercised through the real activation path. `fireEvent.keyDown`
+// would dispatch a key event the source deliberately does not listen for and
+// would pass against a component with no keyboard support at all.
+import userEvent from "@testing-library/user-event";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import { isoDayFromDate } from "@/lib/dateday";
 
@@ -464,7 +469,7 @@ function addStrategy(s: AddStrategyInput): void {
 function makePayload(
   overrides: Partial<MyAllocationDashboardPayload> = {},
 ): MyAllocationDashboardPayload {
-  return {
+  const base: MyAllocationDashboardPayload = {
     portfolio: null,
     analytics: null,
     strategies: [],
@@ -517,12 +522,45 @@ function makePayload(
     perKeyReturnsByApiKeyId: {},
     perKeyDailiesGateSatisfied: true,
     eligibleApiKeyIds: [],
+    // Phase 151 / AUM-04 — the split book-entry gate. Placeholders only: the
+    // real values are DERIVED below from the (possibly overridden) legacy
+    // fields, so a fixture that predates the split keeps its legacy behaviour.
+    allocatorEligibleApiKeyIds: [],
+    contributingApiKeyIds: [],
+    bookEntryGateSatisfied: false,
     // Phase 11 / 11-05 — onboarding visibility predicate inputs. The
     // composer fixture assumes a connected allocator (synced holdings),
     // so apiKeysCount is non-zero (banner+card never render here).
     apiKeysCount: 1,
     mandateIsSet: false,
     ...overrides,
+  };
+
+  // Phase 151 / AUM-04 — LEGACY-EQUIVALENT defaults for the three split-gate
+  // fields, so the ~200 fixtures written before the split keep behaving exactly
+  // as they did when `canEnterBook` / `usePerKeySources` read the old
+  // all-or-nothing flag. In a pre-split world every eligible key is an allocator
+  // key (no manager-role notion existed) and the all-or-nothing gate is true iff
+  // they all contribute — which is precisely this mapping:
+  //     allocatorEligible = eligible
+  //     contributing      = gate ? eligible : []
+  //     bookEntryGate     = gate
+  // An explicit override always wins (`??` only falls through on undefined), so
+  // the AUM-04 suite's partial-book fixtures set all three deliberately.
+  //
+  // Note the base fixture's `gate: true` + `eligibleApiKeyIds: []` combination
+  // reproduces the OLD flag's own vacuous truth (`allActiveKeysHavePerKeyDailies([])`),
+  // not a production-reachable state; `perKeyBook` is the real-book helper.
+  const legacyEligible = base.eligibleApiKeyIds ?? [];
+  return {
+    ...base,
+    allocatorEligibleApiKeyIds:
+      overrides.allocatorEligibleApiKeyIds ?? legacyEligible,
+    contributingApiKeyIds:
+      overrides.contributingApiKeyIds ??
+      (base.perKeyDailiesGateSatisfied ? legacyEligible : []),
+    bookEntryGateSatisfied:
+      overrides.bookEntryGateSatisfied ?? base.perKeyDailiesGateSatisfied,
   };
 }
 
@@ -2418,8 +2456,17 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   // T_C_P1933 — P1933 CRITICAL: empty-state add flow + commit must refuse
   //   when scenarioAum=0 (every voluntary_add row would land with
   //   size_at_decision_usd:0 → division-by-zero downstream).
+  //
+  // Phase 151 / AUM-03 (Tests 10 + 12) — REWRITTEN, not replaced: the refusal
+  // SEMANTICS below (no drawer, no callback) are the original guard and are
+  // kept verbatim. What changed is the COPY. The old string told the allocator
+  // to "Connect an exchange API key or toggle on a live holding" — the founder
+  // hit it with four venues already connected, and the live-holding toggle was
+  // deliberately never built (CONSTIT-03). The copy is pinned by EQUALITY
+  // against a literal typed into this test, not a regex: a regex match cannot
+  // catch a sentence that grows a second, false clause.
   // -------------------------------------------------------------------------
-  it("T_C_P1933 (audit-2026-05-07/Block-C/C.1) — refuses commit + surfaces alert when scenarioAum=0 with voluntary_add", () => {
+  it("T_C_P1933 / AUM-03 Tests 10+12 — refuses commit when AUM is unset; copy names ONLY the AUM input (no book to offer) and no never-string", () => {
     // Empty holdings + added-strategy via the empty-state Browse drawer
     // transitions the composer out of the empty-state branch and into the
     // main body with scenarioAum === 0 (no live holdings contribute).
@@ -2461,15 +2508,30 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     });
 
     // Composer now in main-body render. Click Commit — the handler should
-    // refuse and surface an inline role="alert" referencing zero AUM.
+    // refuse and surface an inline role="alert" naming the AUM input.
     fireEvent.click(screen.getByTestId("scenario-footer-commit"));
-    const alerts = screen.getAllByRole("alert");
-    expect(
-      alerts.some((a) => /portfolio AUM is zero/i.test(a.textContent ?? "")),
-    ).toBe(true);
-    // The drawer must NOT have opened (no internal drawer per the
-    // useInternalCommitDrawer={false} prop) and the legacy callback must
-    // NOT have fired either — the commit is refused outright.
+
+    // Test 10 — EXACT copy. No live book here, so "From my book" does not
+    // render and the refusal must not offer it.
+    const banner = screen.getByTestId("scenario-commit-error");
+    expect(banner).toHaveAttribute("role", "alert");
+    expect(banner.textContent).toBe(
+      "Can't record a scenario commit: portfolio AUM is not set. Set portfolio AUM before submitting.",
+    );
+
+    // Test 12 — the never-strings. Both name affordances that do not exist on
+    // this surface: the live-holding toggle was never built (CONSTIT-03), and
+    // telling a connected allocator to connect a key is simply false.
+    const allAlerts = screen
+      .queryAllByRole("alert")
+      .map((a) => a.textContent ?? "")
+      .join(" ");
+    expect(allAlerts).not.toContain("toggle on a live holding");
+    expect(allAlerts).not.toContain("Connect an exchange API key");
+
+    // Retained refusal semantics: the drawer must NOT have opened (no internal
+    // drawer per the useInternalCommitDrawer={false} prop) and the legacy
+    // callback must NOT have fired either — the commit is refused outright.
     expect(onCommitRequested).not.toHaveBeenCalled();
     expect(screen.queryByTestId("commit-drawer-mock")).toBeNull();
   });
@@ -3516,7 +3578,11 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     act(() => {
       fireEvent.change(lev, { target: { value: "999" } });
     });
-    expect(screen.getByRole("alert").textContent).toMatch(/clamped to 10/i);
+    // 151 UAT — derived, not a literal: the cap moved 10 → 200 and a hardcoded
+    // "clamped to 10" here would pin the OLD bound.
+    expect(screen.getByRole("alert").textContent).toMatch(
+      new RegExp(`clamped to ${MAX_LEVERAGE}`, "i"),
+    );
   });
 
   it("R3 guard — the projection renders NO peer/allocator/comparator factsheet panels (no false precision on a hypothetical blend)", () => {
@@ -5833,13 +5899,29 @@ describe("ScenarioComposer — Phase 112 per-key weights + leverage (RED scaffol
     expect(k1Cell!.tagName).not.toBe("INPUT");
     expect(k1Cell!.querySelector("input")).toBeNull();
 
-    expect(k1Cell!.textContent).toBe(formatCurrency(0.3 * 100_000 * 2));
-    expect(k2Cell!.textContent).toBe(formatCurrency(0.7 * 100_000 * 1));
+    // Review round 2 F5 — the VISIBLE text is unchanged (`toBe` → `toContain`
+    // is not a weakening here): the cell now also carries an `sr-only` column
+    // name, because both column-label strips are `aria-hidden` and a screen
+    // reader was announcing a bare "$60K" with no idea which of five numeric
+    // columns it came from. `textContent` includes sr-only text by design.
+    // The visible figure is still pinned exactly, and the name is asserted
+    // alongside it so this test cannot pass on a cell that lost either.
+    expect(k1Cell!.textContent).toContain(formatCurrency(0.3 * 100_000 * 2));
+    expect(k2Cell!.textContent).toContain(formatCurrency(0.7 * 100_000 * 1));
+    expect(within(k1Cell!).getByText(`${K1} notional.`)).toBeInTheDocument();
+    expect(within(k2Cell!).getByText(`${K2} notional.`)).toBeInTheDocument();
   });
 
   // (f) — with NO book equity (added-only mode) the notional is non-derivable, so
   // every notional cell shows the em-dash `—` (DESIGN.md Numbers Contract), never
   // a fabricated $0.
+  //
+  // Phase 152 SCEN-04 relaxed the equality to `toContain`: the added row's
+  // em-dash now carries an sr-only sentence explaining WHY it is non-derivable,
+  // so the cell's textContent is "—" plus that sentence. The assertion's INTENT
+  // is unchanged and still falsifiable — a fabricated $0 or a real dollar figure
+  // fails both lines below. The sentence itself is pinned by the
+  // "SCEN-04 honest notional" block.
   it("(f) — added-only mode (no book equity) renders the notional as an em-dash, never $0", () => {
     renderAddedOnly();
     addStrategy({
@@ -5850,8 +5932,8 @@ describe("ScenarioComposer — Phase 112 per-key weights + leverage (RED scaffol
     });
     const cell = notionalCellFor(A_ID);
     expect(cell).not.toBeNull();
-    expect(cell!.textContent).toBe("—");
-    expect(cell!.textContent).not.toContain("$0");
+    expect(cell!.textContent).toContain("—");
+    expect(cell!.textContent).not.toMatch(/\$/);
   });
 
   // (g) — the leverage-invariance honesty caveat renders exactly when a selected
@@ -5923,6 +6005,45 @@ describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () 
     render(
       <ScenarioComposer
         payload={make113Payload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // 151 UAT — the INFEASIBILITY fixture, forced by the leverage cap moving
+  // 10 → 200.
+  //
+  // K1's series (one −5% day among zeros) gives |dd(L)| = 0.05·L, so under the
+  // OLD 10× ceiling a 99% target was genuinely unreachable (dd caps at 50%).
+  // Under a 200× ceiling that same series RUINS at L=20 (wealth 1 − 0.05·20 =
+  // 0), the solver ruin-clamps its domain just below it, and |dd| there is
+  // ~99.95% — so every target in (0,1) is now reachable and the old fixture can
+  // no longer express infeasibility at all. That is the intended consequence of
+  // the founder's decision, not a regression.
+  //
+  // K1_SHALLOW keeps the SHAPE (one down day among zeros) and only scales the
+  // magnitude: a single −0.05% day → |dd(L)| = 0.0005·L → 10% at the 200×
+  // ceiling, with no ruin anywhere in the domain (wealth stays 0.9). A 99%
+  // target is therefore honestly unreachable, and the tests keep testing the
+  // thing they were written to test.
+  // -------------------------------------------------------------------------
+  const K1_SHALLOW = P113_DATES.map((date, i) => ({
+    date,
+    value: i === 6 ? -0.0005 : 0,
+  }));
+
+  function render113Shallow() {
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          ...perKeyBook([
+            { id: K1, returns: K1_SHALLOW, valueUsd: 60_000 },
+            { id: K2, returns: K2_SERIES, valueUsd: 40_000 },
+          ]),
+          apiKeys: [winApiKey(K1), winApiKey(K2)],
+        })}
         allocatorId={ALLOCATOR_A}
         allocatorMandate={null}
       />,
@@ -6060,13 +6181,15 @@ describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () 
     expect(note.textContent).toMatch(/[−-]?\d+\.\d{2}%/);
   });
 
-  // (k) INFEASIBLE HONESTY — an unreachable target (99% on the mild series capped
-  // by MAX_LEVERAGE) renders honest "unreachable at {L}×" copy + an em-dash where
+  // (k) INFEASIBLE HONESTY — an unreachable target (99% on the SHALLOW series
+  // capped by MAX_LEVERAGE) renders honest "unreachable at {L}×" copy + an em-dash where
   // a derived value would sit, and leaves the leverage input UNCHANGED (no
   // fabricated L — the clamp-and-lie failure mode is RED-proofed). RED: the toggle
   // does not exist.
   it("(k) RED — an unreachable target renders honest 'unreachable at …×' + em-dash and does NOT fabricate a leverage", () => {
-    render113();
+    // 151 UAT — the SHALLOW fixture: infeasibility must be expressed against the
+    // 200× ceiling (see K1_SHALLOW).
+    render113Shallow();
     const toggle = within(rowByRef(K1)).queryByTestId(
       "scenario-leverage-mode-toggle",
     );
@@ -6314,7 +6437,7 @@ describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () 
   // cleared only on `result.ok`. The range error stays only for out-of-range input.
   // -------------------------------------------------------------------------
   it("F3 a valid-but-infeasible commit clears a prior range-error banner and shows only the honest infeasible state", () => {
-    render113();
+    render113Shallow();
     act(() => {
       fireEvent.click(
         within(rowByRef(K1)).getByTestId("scenario-leverage-mode-toggle"),
@@ -6331,9 +6454,9 @@ describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () 
     });
     expect(screen.getByTestId("scenario-commit-error")).not.toBeNull();
 
-    // 2) Commit a VALID but INFEASIBLE target (99% on K1's 5% base exceeds
-    //    MAX_LEVERAGE). The prior range banner MUST clear; the honest infeasible
-    //    state renders in its place.
+    // 2) Commit a VALID but INFEASIBLE target (99% against K1_SHALLOW's 0.05%
+    //    base needs ~1980×, far past MAX_LEVERAGE). The prior range banner MUST
+    //    clear; the honest infeasible state renders in its place.
     act(() => {
       fireEvent.change(target, { target: { value: "99" } });
       fireEvent.blur(target);
@@ -6493,13 +6616,16 @@ describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () 
   // stale range error is still cleared beside the honest infeasible state).
   // -------------------------------------------------------------------------
   it("RT113-02 an infeasible target commit preserves an unrelated leverage-clamp banner (clears only a stale target-range error)", () => {
-    render113();
+    render113Shallow();
     // Over-max leverage on K2 (Leverage mode) → the shared clamp banner.
+    // 151 UAT — derived from MAX_LEVERAGE, not a literal: the cap was raised to
+    // 200 and the old hardcoded `50` is now comfortably IN-BAND, so it would
+    // silently stop producing the banner this test needs as its precondition.
     const k2Lev = document.getElementById(
       `leverage-${K2}`,
     ) as HTMLInputElement;
     act(() => {
-      fireEvent.change(k2Lev, { target: { value: "50" } });
+      fireEvent.change(k2Lev, { target: { value: String(MAX_LEVERAGE + 1) } });
     });
     expect(screen.getByTestId("scenario-commit-error").textContent).toMatch(
       /Leverage clamped/i,
@@ -6529,6 +6655,54 @@ describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () 
     expect(
       within(rowByRef(K1)).getByTestId("scenario-target-dd-state").textContent,
     ).toMatch(/unreachable at .*×/i);
+  });
+
+  // -------------------------------------------------------------------------
+  // 151 UAT (founder, 2026-08-07) — the strategy-row leverage cap is 200×.
+  //
+  // The old 10× bound was not just an input limit: `sanitizeLeverage` clamps on
+  // READ, so a saved 50× came back as 10× on every reopen, share-resolve and
+  // compare, with only a Sentry breadcrumb. These pin BOTH ends — an in-band
+  // high multiplier is accepted and stored verbatim, and the clamp still fires
+  // (at the new bound) so the ceiling is not simply gone.
+  // -------------------------------------------------------------------------
+  it("151 UAT: a strategy row accepts a 50× leverage — the value is stored, not clamped", () => {
+    render113();
+    const k2Lev = document.getElementById(
+      `leverage-${K2}`,
+    ) as HTMLInputElement;
+    // The input's declared bound moved with the contract.
+    expect(k2Lev.getAttribute("max")).toBe(String(MAX_LEVERAGE));
+    expect(Number(k2Lev.getAttribute("max"))).toBe(200);
+
+    act(() => {
+      fireEvent.change(k2Lev, { target: { value: "50" } });
+    });
+
+    // Stored verbatim — under the old cap this displayed 10 and banner'd.
+    expect(
+      (document.getElementById(`leverage-${K2}`) as HTMLInputElement).value,
+    ).toBe("50");
+    expect(screen.queryByTestId("scenario-commit-error")).toBeNull();
+  });
+
+  it("151 UAT: the ceiling still exists — above 200× clamps, visibly, at the new bound", () => {
+    render113();
+    const k2Lev = document.getElementById(
+      `leverage-${K2}`,
+    ) as HTMLInputElement;
+
+    act(() => {
+      fireEvent.change(k2Lev, { target: { value: "250" } });
+    });
+
+    expect(
+      (document.getElementById(`leverage-${K2}`) as HTMLInputElement).value,
+    ).toBe(String(MAX_LEVERAGE));
+    // The clamp is never silent, and the copy names the bound it enforced.
+    expect(screen.getByTestId("scenario-commit-error").textContent).toContain(
+      `Leverage clamped to ${MAX_LEVERAGE}×`,
+    );
   });
 });
 
@@ -6845,6 +7019,12 @@ function perKeyBook(
     ),
     perKeyDailiesGateSatisfied: true,
     eligibleApiKeyIds: units.map((u) => u.id),
+    // Phase 151 / AUM-04 — every unit here is a real allocator key WITH a
+    // series, so all three fields follow unambiguously (no manager keys in
+    // this helper's world).
+    allocatorEligibleApiKeyIds: units.map((u) => u.id),
+    contributingApiKeyIds: units.map((u) => u.id),
+    bookEntryGateSatisfied: units.length > 0,
   };
 }
 
@@ -10687,5 +10867,4360 @@ describe("ScenarioComposer — Phase 147 SCEN-01 hydration re-fetch (P6)", () =>
     await waitFor(() =>
       expect(latestReturnsLookup()[HYD_ID]).toEqual(HYD_SERIES),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 151 / AUM-04 — the SPLIT book-entry gate.
+//
+// 151-02 added three additive payload fields BESIDE the untouched all-or-nothing
+// `perKeyDailiesGateSatisfied`:
+//   allocatorEligibleApiKeyIds — eligible keys MINUS strategy-linked (manager) keys
+//   contributingApiKeyIds      — the allocator-eligible subset that HAS a per-key series
+//   bookEntryGateSatisfied     — contributingApiKeyIds.length > 0 (SOME-semantics)
+//
+// This plan repoints exactly THREE composer consumers onto the new gate
+// (canEnterBook, the mode-switch handler, usePerKeySources) and narrows the
+// per-key toggle-row basis to the contributing set. Everything else — the
+// liveBaselineMetrics selection (queries-side) and the MEMBER-04 derive/stamp —
+// stays FROZEN on the old flag (RESEARCH Pitfall 3), and Test 4 pins that.
+//
+// Root cause being closed: the founder's ~$460k book (8 keys, 6 of them
+// strategy-linked manager keys with no allocator per-key series) pinned the
+// all-or-nothing gate FALSE, so the composer FORCE-initialized to blank and the
+// "From my book" segment never rendered. Blank slate was forced, not chosen.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — AUM-04 split book-entry gate (partial book)", () => {
+  const AUM4_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-03-${String(i + 1).padStart(2, "0")}`,
+  );
+  const AUM4_SERIES_A = AUM4_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const AUM4_SERIES_B = AUM4_DATES.map((date, i) => ({
+    date,
+    value: [-0.01, 0.02, -0.005, 0.015][i % 4],
+  }));
+  // Distinct symbol per key so every holding gets a unique scopeRef; the per-key
+  // engine keys on api_key_id, never on the symbol.
+  const AUM4_SYMS = [
+    "BTC",
+    "ETH",
+    "SOL",
+    "XRP",
+    "ADA",
+    "DOT",
+    "LTC",
+    "BCH",
+    "AVAX",
+    "LINK",
+  ];
+  const AUM4_VENUES = ["binance", "okx", "bybit", "deribit"];
+
+  function aum4Key(id: string, idx: number) {
+    return {
+      id,
+      exchange: AUM4_VENUES[idx % AUM4_VENUES.length],
+      label: `Desk ${idx + 1}`,
+      is_active: true,
+      sync_status: null,
+      last_sync_at: null,
+      account_balance_usdt: null,
+      created_at: "2026-01-01T00:00:00Z",
+      sync_error: null,
+      last_429_at: null,
+      disconnected_at: null,
+    };
+  }
+
+  function aum4Holdings(keyIds: string[]) {
+    return keyIds.map((id, idx) => ({
+      ...HOLDING_BTC,
+      symbol: AUM4_SYMS[idx % AUM4_SYMS.length],
+      venue: AUM4_VENUES[idx % AUM4_VENUES.length],
+      value_usd: 50_000,
+      api_key_id: id,
+    }));
+  }
+
+  /** A PARTIAL book. `allocatorEligible` are the allocator's own keys;
+   *  `contributing` is the subset with a per-key series; `managerKeys` are
+   *  strategy-linked keys — present on `apiKeys` AND in the role-BLIND legacy
+   *  `eligibleApiKeyIds`, but absent from `allocatorEligibleApiKeyIds`.
+   *
+   *  Manager keys deliberately DO carry a per-key series: that is what makes
+   *  them manager-side (they back a published strategy), and it is precisely why
+   *  neither a venue predicate nor the legacy eligible set can separate them.
+   *  The OLD all-or-nothing gate is computed honestly from this fixture's own
+   *  world (every eligible key has a series), never hand-set. */
+  function partialBook(opts: {
+    allocatorEligible: string[];
+    contributing: string[];
+    managerKeys?: string[];
+    overrides?: Partial<MyAllocationDashboardPayload>;
+  }): { payload: MyAllocationDashboardPayload; holdings: ReturnType<typeof aum4Holdings> } {
+    const managerKeys = opts.managerKeys ?? [];
+    const allKeys = [...opts.allocatorEligible, ...managerKeys];
+    const withSeries = new Set([...opts.contributing, ...managerKeys]);
+    const holdings = aum4Holdings(allKeys);
+    const payload = makePayload({
+      apiKeys: allKeys.map((id, idx) => aum4Key(id, idx)),
+      holdingsSummary: holdings,
+      perKeyReturnsByApiKeyId: Object.fromEntries(
+        allKeys
+          .filter((id) => withSeries.has(id))
+          .map((id, i) => [id, i % 2 === 0 ? AUM4_SERIES_A : AUM4_SERIES_B]),
+      ),
+      perKeyDailiesGateSatisfied: allKeys.every((id) => withSeries.has(id)),
+      eligibleApiKeyIds: allKeys,
+      allocatorEligibleApiKeyIds: opts.allocatorEligible,
+      contributingApiKeyIds: opts.contributing,
+      bookEntryGateSatisfied: opts.contributing.length > 0,
+      ...opts.overrides,
+    });
+    return { payload, holdings };
+  }
+
+  const AUM4_SAVE_URL_RE = /\/api\/allocator\/scenario\/saved/;
+  function aum4SaveCalls(
+    fetchMock: ReturnType<typeof vi.fn>,
+  ): Array<[string, RequestInit | undefined]> {
+    return fetchMock.mock.calls.filter((c) =>
+      AUM4_SAVE_URL_RE.test(String(c[0])),
+    ) as Array<[string, RequestInit | undefined]>;
+  }
+  /** The parsed draft on the nth captured save request body. */
+  function aum4SavedDraft(
+    fetchMock: ReturnType<typeof vi.fn>,
+    n = 0,
+  ): ScenarioDraft {
+    const init = aum4SaveCalls(fetchMock)[n][1] as RequestInit;
+    return JSON.parse(init.body as string).draft as ScenarioDraft;
+  }
+  function aum4OkSave(): ReturnType<typeof vi.fn> {
+    return vi.fn(async (url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ id: "aum4-new-id", name: "AUM4" }),
+      };
+    });
+  }
+
+  let registeredOpen:
+    | ((row: { id: string; name: string; draft: unknown }) => void)
+    | null = null;
+
+  function renderAum4(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          registeredOpen = open as typeof registeredOpen;
+        }}
+      />,
+    );
+  }
+
+  /** Save a brand-new scenario through the real toolbar → name → Save gesture. */
+  async function saveNewAum4(
+    name: string,
+    fetchMock: ReturnType<typeof vi.fn>,
+    expectedCalls = 1,
+  ) {
+    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: name },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+    await waitFor(() => {
+      expect(aum4SaveCalls(fetchMock)).toHaveLength(expectedCalls);
+    });
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    registeredOpen = null;
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  // --- Task 1: the gate repoint ---------------------------------------------
+
+  it("AUM-04 Test 1: a PARTIAL book reaches BOOK mode — the old all-or-nothing gate refuses, the new split gate admits, forced-blank is gone", () => {
+    const { payload } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+    });
+    // The fixture IS the defect's shape: the OLD gate says no, the NEW gate says yes.
+    expect(payload.perKeyDailiesGateSatisfied).toBe(false);
+    expect(payload.bookEntryGateSatisfied).toBe(true);
+
+    renderAum4(payload);
+
+    const bookSegment = screen.getByRole("radio", { name: /From my book/i });
+    expect(bookSegment).toBeInTheDocument();
+    // Initial entryMode is BOOK — the composer never force-initializes to blank
+    // when the book is reachable (CONTEXT lock, UI-SPEC §3 "No forced blank").
+    expect(bookSegment).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("AUM-04 Test 2: ZERO contributing keys still initialize BLANK and keep the calm no-contributing note (deliberate Open-Q4 narrowing)", () => {
+    const { payload } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: [],
+    });
+    expect(payload.bookEntryGateSatisfied).toBe(false);
+
+    renderAum4(payload);
+
+    // RECORDED NARROWING (not an oversight): CONTEXT's "never force-initializes
+    // to blank" is narrowed on RESEARCH Open-Q4 grounds to the >= 1 contributing
+    // case. An engineless "From my book" (zero per-key units) is a worse dead end
+    // than blank mode, and 151-06's manual AUM input removes blank mode's
+    // residual harm — it can then size and commit.
+    expect(
+      screen.queryByRole("radio", { name: /From my book/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Blank slate/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    // The zero-contributing case KEEPS the pre-existing calm fallback note.
+    expect(
+      screen.getByTestId("scenario-constituent-fallback"),
+    ).toBeInTheDocument();
+  });
+
+  it("AUM-04 Test 3: under a partial book the PER-KEY engine feeds the projection (usePerKeySources), not the added-only set", () => {
+    const { payload } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+    });
+    renderAum4(payload);
+
+    // Observable 1 — the per-key constituent rows render at all
+    // (showDataSources === usePerKeySources).
+    expect(
+      screen.getAllByTestId("scenario-constituent-perkey").length,
+    ).toBeGreaterThan(0);
+    // Observable 2 — the contributing key actually reached the ENGINE as a unit.
+    // An added-only set would carry no api_key_id-keyed strategy at all.
+    expect(
+      computeScenarioStateArgs.some((a) => a.strategyIds.includes("key-a")),
+    ).toBe(true);
+  });
+
+  // 151 review CR-02 + WR-07 SUPERSEDE 151-05's freeze of this seam.
+  //
+  // The freeze was recorded as DEF-151-05-B ("a reopened BOOK draft still lands
+  // in BLANK mode under a partial book") and deliberately surfaced rather than
+  // fixed, because 151-05 ran in a parallel worktree. Its cost, once book mode
+  // became REACHABLE under a partial book, is a user-visible regression:
+  //   • a BOOK save persisted `memberKeyIds: []` — the schema's meaning for
+  //     "blank-authored, no book members" — so the saved row lied about what it
+  //     models, and `scenario-compare`'s selector (`memberKeyIds.length > 0`)
+  //     computed it added-only while the composer blended it per-key;
+  //   • reopening it computed `targetEntryMode = "blank"` and silently dropped
+  //     the book off screen.
+  // The invariant the pair below pins is ECONOMIC, not structural: THE SAVED
+  // MEMBERSHIP NAMES EXACTLY THE KEYS THE ENGINE BLENDS.
+  it("AUM-04 Test 4 (rev. CR-02/WR-07): a partial-book BOOK save stamps the CONTRIBUTING keys — what the engine blends — and a no-engine book still stamps []", async () => {
+    const fetchMock = aum4OkSave();
+    vi.stubGlobal("fetch", fetchMock);
+
+    // (a) The partial book: the NEW gate is true, the OLD one false. A manager
+    // key is present so "contributing" and the role-blind "eligible" DIFFER —
+    // stamping the legacy set would over-claim `mgr-1` here.
+    const { payload: partial } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+      managerKeys: ["mgr-1"],
+    });
+    expect(partial.perKeyDailiesGateSatisfied).toBe(false);
+    expect(partial.eligibleApiKeyIds).toEqual(["key-a", "key-b", "mgr-1"]);
+    renderAum4(partial);
+    // NON-VACUITY: the session IS in book mode, so the stamp's `entryMode ===
+    // "book"` conjunct is satisfied and the id SET is the thing under test.
+    expect(screen.getByRole("radio", { name: /From my book/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await saveNewAum4("Partial book", fetchMock, 1);
+    // The engine's own basis, asserted independently of the stamp: only key-a
+    // reached computeScenario as a unit. The stamp must equal THAT.
+    const engineUnits = new Set<string>();
+    for (const call of computeScenarioStateArgs) {
+      for (const id of call.strategyIds) {
+        if (id.startsWith("key-") || id.startsWith("mgr-")) engineUnits.add(id);
+      }
+    }
+    expect([...engineUnits].sort()).toEqual(["key-a"]);
+    expect(aum4SavedDraft(fetchMock, 0).memberKeyIds).toEqual(["key-a"]);
+
+    // (b) The control: ZERO contributing keys — no per-source engine at all, so
+    // book mode is unreachable and the stamp is [] (the F5 blank closure).
+    cleanup();
+    lsStore.clear();
+    const { payload: noBook } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: [],
+    });
+    renderAum4(noBook);
+    await saveNewAum4("No contributing keys", fetchMock, 2);
+    expect(aum4SavedDraft(fetchMock, 1).memberKeyIds).toEqual([]);
+  });
+
+  it("AUM-04 Test 4b (CR-02, discharges DEF-151-05-B): a saved BOOK draft REOPENS in book mode under a partial book — it no longer loses its book", () => {
+    const { payload, holdings } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+    });
+    renderAum4(payload);
+    expect(registeredOpen).not.toBeNull();
+
+    // A book-authored draft: same live-book fingerprint (→ not drifted), and
+    // membership naming the contributing key.
+    const savedBook = {
+      ...defaultDraftFromHoldings(
+        holdings as Parameters<typeof defaultDraftFromHoldings>[0],
+      ),
+      memberKeyIds: ["key-a"],
+    };
+    // Start the session in BLANK so the reopen has to MOVE the mode — otherwise
+    // the assertion would pass on the initial mode and prove nothing.
+    fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
+    expect(screen.getByRole("radio", { name: /Blank slate/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+
+    act(() => {
+      registeredOpen!({ id: "book-row", name: "My book", draft: savedBook });
+    });
+
+    // Pre-fix: `targetEntryMode` read the all-or-nothing flag (false here), so
+    // the reopen stayed BLANK, `holdingsSummary` was gated to [] and the book
+    // rows vanished.
+    expect(screen.getByRole("radio", { name: /From my book/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    expect(
+      screen
+        .getAllByTestId("scenario-constituent-perkey")
+        .map((r) => r.getAttribute("data-scope-ref")),
+    ).toEqual(["key-a"]);
+  });
+
+  it("AUM-04 Test 4c (CR-02): an UNDERIVED draft reopened under a partial book derives membership = the contributing keys, never [] and never the manager keys", async () => {
+    const fetchMock = aum4OkSave();
+    vi.stubGlobal("fetch", fetchMock);
+    const { payload, holdings } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+      managerKeys: ["mgr-1"],
+    });
+    renderAum4(payload);
+
+    // The shape a v2/v3 upgrade (or a round-tripped underived v4) decodes to.
+    const underived = {
+      ...defaultDraftFromHoldings(
+        holdings as Parameters<typeof defaultDraftFromHoldings>[0],
+      ),
+      memberKeyIds: undefined,
+    };
+    act(() => {
+      registeredOpen!({ id: "upgraded", name: "Upgraded", draft: underived });
+    });
+
+    // The DERIVE's real observable: the WORKING draft is self-describing
+    // immediately, so the localStorage persist carries it before any save.
+    await waitFor(() => {
+      const raw = lsStore.get(`allocations.scenario_v0_15.${ALLOCATOR_A}`);
+      expect(raw).toBeTruthy();
+      expect((JSON.parse(raw as string) as ScenarioDraft).memberKeyIds).toEqual([
+        "key-a",
+      ]);
+    });
+  });
+
+  // --- Task 2: the narrowed row basis + the partial-book note ---------------
+
+  const FOUR = ["key-a", "key-b", "key-c", "key-d"];
+  const SIX_MANAGER = ["mgr-1", "mgr-2", "mgr-3", "mgr-4", "mgr-5", "mgr-6"];
+  /** The UI-SPEC copy template, typed out here rather than imported — an oracle
+   *  that reads the source's own string would pass against any string. */
+  const PARTIAL_NOTE_COPY =
+    "2 of 4 keys not yet contributing — no per-key history yet.";
+
+  it("AUM-04 Test 5: only CONTRIBUTING keys get a toggle row — a non-contributing key renders no dead 0.000 row (Pitfall 4)", () => {
+    const { payload } = partialBook({
+      allocatorEligible: FOUR,
+      contributing: ["key-a", "key-b"],
+    });
+    renderAum4(payload);
+
+    const rows = screen.getAllByTestId("scenario-constituent-perkey");
+    expect(rows).toHaveLength(2);
+    expect(
+      rows.map((r) => r.getAttribute("data-scope-ref")).sort(),
+    ).toEqual(["key-a", "key-b"]);
+    // A non-contributing key has NO engine unit, so a toggle row for it would
+    // show a dead 0.000 weight and skew the bookEquity basis (which sums over
+    // exactly this set). Its weight/leverage inputs must not exist at all.
+    expect(document.querySelector("#weight-key-c")).toBeNull();
+    expect(document.querySelector("#leverage-key-c")).toBeNull();
+    expect(document.querySelector("#weight-key-d")).toBeNull();
+  });
+
+  it("AUM-04 Test 5b: the ENGINE basis equals the toggle-row basis — a manager key with a per-key series never rides the projection undisclosed (DSRC-03)", () => {
+    const { payload } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+      managerKeys: ["mgr-1", "mgr-2"],
+    });
+    renderAum4(payload);
+
+    expect(
+      screen
+        .getAllByTestId("scenario-constituent-perkey")
+        .map((r) => r.getAttribute("data-scope-ref")),
+    ).toEqual(["key-a"]);
+    // DSRC-03's stated invariant: blend ONLY the keys that get a toggle row.
+    // The manager keys ARE in the role-blind `eligibleApiKeyIds` AND do carry a
+    // per-key series, so an engine still filtering on the legacy eligible set
+    // would blend two undisclosed, untoggleable sources into the projection.
+    const engineKeyUnits = new Set<string>();
+    for (const call of computeScenarioStateArgs) {
+      for (const id of call.strategyIds) {
+        if (id.startsWith("key-") || id.startsWith("mgr-")) {
+          engineKeyUnits.add(id);
+        }
+      }
+    }
+    expect([...engineKeyUnits].sort()).toEqual(["key-a"]);
+  });
+
+  it("AUM-04 Test 6: the partial-book note carries the exact UI-SPEC copy in MUTED steady-state styling — never amber, never role=alert", () => {
+    const { payload } = partialBook({
+      allocatorEligible: FOUR,
+      contributing: ["key-a", "key-b"],
+    });
+    renderAum4(payload);
+
+    const note = screen.getByTestId("scenario-partial-book-note");
+    expect(note.textContent).toBe(PARTIAL_NOTE_COPY);
+    // UI-SPEC color gate: a key with no per-key history is an honest STEADY
+    // STATE — not a recoverable transient (amber) and not a failure (red).
+    expect(note.className).toContain("text-text-muted");
+    expect(note.className).not.toMatch(/warning|amber|danger|destructive/i);
+    // Steady-state disclosure, not an event: plain static text.
+    expect(note).not.toHaveAttribute("role");
+    expect(note).not.toHaveAttribute("aria-live");
+  });
+
+  it("AUM-04 Test 7: manager keys are in NEITHER count — six strategy-linked keys never turn '2 of 4' into '2 of 10'", () => {
+    const { payload } = partialBook({
+      allocatorEligible: FOUR,
+      contributing: ["key-a", "key-b"],
+      managerKeys: SIX_MANAGER,
+    });
+    // The role-BLIND legacy set carries all ten; the note must read neither it
+    // nor payload.apiKeys. "Not yet contributing" must never describe a key that
+    // will never contribute (UI-SPEC partial-book invariant).
+    expect(payload.eligibleApiKeyIds).toHaveLength(10);
+    expect(payload.apiKeys).toHaveLength(10);
+
+    renderAum4(payload);
+
+    expect(
+      screen.getByTestId("scenario-partial-book-note").textContent,
+    ).toBe(PARTIAL_NOTE_COPY);
+  });
+
+  it("AUM-04 Test 8: the note is absent when every allocator key contributes, and absent in blank mode (book-mode-only, never silent otherwise)", () => {
+    const { payload: full } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a", "key-b"],
+    });
+    renderAum4(full);
+    expect(
+      screen.queryByTestId("scenario-partial-book-note"),
+    ).not.toBeInTheDocument();
+
+    cleanup();
+    lsStore.clear();
+
+    const { payload: partial } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+    });
+    renderAum4(partial);
+    // Non-vacuity: the same fixture DOES show the note in book mode …
+    expect(
+      screen.getByTestId("scenario-partial-book-note"),
+    ).toBeInTheDocument();
+    // … and switching to blank retires it (a clean draft switches immediately).
+    fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
+    expect(
+      screen.queryByTestId("scenario-partial-book-note"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("AUM-04 Test 9: the old whole-book-blend fallback yields to the partial-book note — it renders ONLY when no key contributes", () => {
+    const { payload: partial } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+    });
+    renderAum4(partial);
+    // Its copy ("this projection blends your whole book") is FALSE under a
+    // partial book — the projection blends exactly the contributing keys.
+    expect(
+      screen.queryByTestId("scenario-constituent-fallback"),
+    ).not.toBeInTheDocument();
+
+    cleanup();
+    lsStore.clear();
+
+    const { payload: none } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: [],
+    });
+    renderAum4(none);
+    expect(
+      screen.getByTestId("scenario-constituent-fallback"),
+    ).toBeInTheDocument();
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // 151 red-team G2 / G4-c — THE TWO INTENTS THAT MEET ON `memberKeyIdsForUpdate`.
+  //
+  // Persisted membership is EXPLICIT: `computeMetricsForDraft` intersects it
+  // against the live set rather than re-deriving it, and
+  // `scenario-compare.ts:182` selects the whole per-key projection on
+  // `memberKeyIds.length > 0`. So both directions are user-visible data loss:
+  //   (a) an Update must NOT DROP a still-eligible member whose per-key series
+  //       is transiently empty (backfill lag / a sync gap) — the key would be
+  //       silently gone, with no message and no undo, and would NOT come back
+  //       when its series did;
+  //   (b) an Update after a deliberate BOOK→BLANK conversion MUST persist `[]` —
+  //       union semantics can never shrink membership, so the old book members
+  //       rode along and compare then projected the row as a per-key BOOK blend
+  //       while the composer computed it added-only: the CR-02
+  //       two-projections-of-one-portfolio defect.
+  // They are reconciled by SCOPE — the union is a BOOK-MODE rule only.
+  // ─────────────────────────────────────────────────────────────────────────
+  it("151 red-team G2 (a) / G4-c: a BOOK Update KEEPS a member key that is still ELIGIBLE but is NOT contributing today", async () => {
+    const fetchMock = aum4OkSave();
+    vi.stubGlobal("fetch", fetchMock);
+    // THE DISTINGUISHING FIXTURE. key-b is allocator-ELIGIBLE but carries no
+    // per-key series right now, so it is NOT in `contributingApiKeyIds` — the
+    // exact split every other fixture in this file lacks (their member keys are
+    // all contributing, which makes the eligible-vs-contributing keep-set
+    // indistinguishable and the assertion vacuous).
+    const { payload, holdings } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+    });
+    expect(payload.allocatorEligibleApiKeyIds).toEqual(["key-a", "key-b"]);
+    expect(payload.contributingApiKeyIds).toEqual(["key-a"]);
+
+    renderAum4(payload);
+    // The saved BOOK draft names BOTH keys — authored when key-b still had a
+    // series (or before the backlog swallowed it).
+    act(() => {
+      registeredOpen!({
+        id: "book-row",
+        name: "My book",
+        draft: {
+          ...defaultDraftFromHoldings(
+            holdings as Parameters<typeof defaultDraftFromHoldings>[0],
+          ),
+          memberKeyIds: ["key-a", "key-b"],
+        },
+      });
+    });
+    // Non-vacuity: the session really is in BOOK mode, so the union arm — not
+    // the blank stamp and not the F-1 freeze — is the code under test.
+    expect(screen.getByRole("radio", { name: /From my book/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    // …and key-b really is quiet: only the contributing key gets a row.
+    expect(
+      screen
+        .getAllByTestId("scenario-constituent-perkey")
+        .map((r) => r.getAttribute("data-scope-ref")),
+    ).toEqual(["key-a"]);
+
+    fireEvent.click(screen.getByRole("button", { name: /Update portfolio/i }));
+    await waitFor(() => {
+      expect(aum4SaveCalls(fetchMock)).toHaveLength(1);
+    });
+
+    // Narrowing the keep-set to the CONTRIBUTING ids turns this RED: key-b
+    // disappears from the saved row for being quiet today. Eligibility is what
+    // a key must LOSE to leave a book.
+    expect([...aum4SavedDraft(fetchMock, 0).memberKeyIds!].sort()).toEqual([
+      "key-a",
+      "key-b",
+    ]);
+  });
+
+  it("151 red-team G2 (b): converting a reopened BOOK draft to BLANK SLATE persists [] — the union must never outlive book mode", async () => {
+    const fetchMock = aum4OkSave();
+    vi.stubGlobal("fetch", fetchMock);
+    const { payload, holdings } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+    });
+    renderAum4(payload);
+
+    act(() => {
+      registeredOpen!({
+        id: "book-row",
+        name: "My book",
+        draft: {
+          ...defaultDraftFromHoldings(
+            holdings as Parameters<typeof defaultDraftFromHoldings>[0],
+          ),
+          memberKeyIds: ["key-a"],
+        },
+      });
+    });
+    expect(screen.getByRole("radio", { name: /From my book/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+
+    // THE CONVERSION — a clean draft switches immediately, no reset dialog.
+    fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
+    expect(screen.getByRole("radio", { name: /Blank slate/i })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    // The book is GONE from the screen: zero per-key rows, so the portfolio the
+    // allocator is now looking at has no book members in it at all. Whatever the
+    // PUT persists has to agree with THIS.
+    expect(
+      screen.queryAllByTestId("scenario-constituent-perkey"),
+    ).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: /Update portfolio/i }));
+    await waitFor(() => {
+      expect(aum4SaveCalls(fetchMock)).toHaveLength(1);
+    });
+
+    // Pre-fix the union carried `["key-a"]` through, so the saved row still
+    // claimed a book member — and `scenario-compare` (usePerKeySources =
+    // memberKeyIds.length > 0) then projected it as a per-key BOOK blend beside
+    // a composer computing it added-only: two projections of one portfolio on
+    // one screen.
+    expect(aum4SavedDraft(fetchMock, 0).memberKeyIds).toEqual([]);
+  });
+
+  it("151 red-team G2 (b, boundary): the F-1 freeze still wins when book mode is UNRENDERABLE — a forced-blank session never wipes membership", async () => {
+    // The blank stamp may only win when blank was CHOSEN. With the book gate
+    // false there is no per-source engine, the session is FORCED to blank, and
+    // persisting [] there would silently convert a book draft to
+    // blank-authored — the F-1 hole. Ordering the new `entryMode` check ahead of
+    // the gate check turns this RED.
+    const fetchMock = aum4OkSave();
+    vi.stubGlobal("fetch", fetchMock);
+    const { payload, holdings } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: [],
+    });
+    expect(payload.bookEntryGateSatisfied).toBe(false);
+    renderAum4(payload);
+
+    act(() => {
+      registeredOpen!({
+        id: "book-row",
+        name: "My book",
+        draft: {
+          ...defaultDraftFromHoldings(
+            holdings as Parameters<typeof defaultDraftFromHoldings>[0],
+          ),
+          memberKeyIds: ["key-a"],
+        },
+      });
+    });
+    // Non-vacuity: blank here is FORCED (the book segment does not even render),
+    // not chosen — the distinction the fix turns on.
+    expect(screen.queryByRole("radio", { name: /From my book/i })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /Update portfolio/i }));
+    await waitFor(() => {
+      expect(aum4SaveCalls(fetchMock)).toHaveLength(1);
+    });
+    expect(aum4SavedDraft(fetchMock, 0).memberKeyIds).toEqual(["key-a"]);
+  });
+
+  it("AUM-04 Test 10 (WEIGHTS-02 class): a stored leverage override on a NOT-YET-contributing allocator key SURVIVES Save", async () => {
+    const fetchMock = aum4OkSave();
+    vi.stubGlobal("fetch", fetchMock);
+    const { payload, holdings } = partialBook({
+      allocatorEligible: ["key-a", "key-b"],
+      contributing: ["key-a"],
+    });
+    renderAum4(payload);
+    expect(registeredOpen).not.toBeNull();
+
+    // A saved draft authored against the SAME live book (fingerprint matches →
+    // not drifted → its leverage seeds) carrying an override on key-b, the
+    // allocator-eligible key that has no per-key series YET.
+    const savedRow = {
+      ...defaultDraftFromHoldings(
+        holdings as Parameters<typeof defaultDraftFromHoldings>[0],
+      ),
+      leverageOverrides: { "key-b": 2 },
+    };
+    act(() => {
+      registeredOpen!({ id: "row-1", name: "Partial book", draft: savedRow });
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Update portfolio/i }));
+    await waitFor(() => {
+      expect(aum4SaveCalls(fetchMock)).toHaveLength(1);
+    });
+
+    // "Not YET contributing" is TEMPORARY — the key gets its series on the next
+    // sync. Narrowing the prune keep-set to the contributing set would silently
+    // drop the allocator's saved leverage at Save: the exact Phase-112 /
+    // WEIGHTS-02 defect class. key-b is in NONE of the prune's other three keep
+    // signals (it is not an added strategy, and the holdings-seeded draft keys
+    // its toggles/weights by holding ref), so eligibility is the only thing
+    // keeping it — this assertion is non-vacuous.
+    expect(aum4SavedDraft(fetchMock, 0).leverageOverrides).toEqual({
+      "key-b": 2,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 151 / AUM-01 — the direct Portfolio AUM input.
+//
+// AUM was DERIVED-ONLY before this plan: the sum of the toggled-on live
+// holdings. A blank-slate scenario — the primary use case — therefore had an
+// AUM of exactly 0 and structurally could not size or commit.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — AUM-01 Portfolio AUM input", () => {
+  const A1_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-04-${String(i + 1).padStart(2, "0")}`,
+  );
+  const A1_SERIES_A = A1_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const A1_SERIES_B = A1_DATES.map((date, i) => ({
+    date,
+    value: [-0.01, 0.02, -0.005, 0.015][i % 4],
+  }));
+  const A1_SYMS = ["BTC", "ETH", "SOL", "XRP"];
+  const A1_VENUES = ["binance", "okx", "bybit", "deribit"];
+
+  function a1Key(id: string, idx: number) {
+    return {
+      id,
+      exchange: A1_VENUES[idx % A1_VENUES.length],
+      label: `Desk ${idx + 1}`,
+      is_active: true,
+      sync_status: null,
+      last_sync_at: null,
+      account_balance_usdt: null,
+      created_at: "2026-01-01T00:00:00Z",
+      sync_error: null,
+      last_429_at: null,
+      disconnected_at: null,
+    };
+  }
+
+  /** A fully-contributing live book: one holding per key, so the derived
+   *  live-holdings sum is exactly `sum(values)`. */
+  function aumBook(values: number[]) {
+    const keyIds = values.map((_, i) => `aum1-key-${i}`);
+    const holdings = values.map((v, i) => ({
+      ...HOLDING_BTC,
+      symbol: A1_SYMS[i % A1_SYMS.length],
+      venue: A1_VENUES[i % A1_VENUES.length],
+      value_usd: v,
+      api_key_id: keyIds[i],
+    }));
+    const payload = makePayload({
+      apiKeys: keyIds.map((id, i) => a1Key(id, i)),
+      holdingsSummary: holdings,
+      perKeyReturnsByApiKeyId: Object.fromEntries(
+        keyIds.map((id, i) => [id, i % 2 === 0 ? A1_SERIES_A : A1_SERIES_B]),
+      ),
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: keyIds,
+      allocatorEligibleApiKeyIds: keyIds,
+      contributingApiKeyIds: keyIds,
+      bookEntryGateSatisfied: true,
+    });
+    return { payload, holdings, keyIds };
+  }
+
+  /** A no-book allocator — blank mode by construction (hasLiveBook false), so
+   *  the live-holdings sum is 0 and manual AUM is the ONLY possible source. */
+  function blankSlate(
+    overrides: Partial<MyAllocationDashboardPayload> = {},
+  ): MyAllocationDashboardPayload {
+    return makePayload({
+      holdingsSummary: [],
+      apiKeys: [],
+      perKeyReturnsByApiKeyId: {},
+      perKeyDailiesGateSatisfied: false,
+      eligibleApiKeyIds: [],
+      allocatorEligibleApiKeyIds: [],
+      contributingApiKeyIds: [],
+      bookEntryGateSatisfied: false,
+      ...overrides,
+    });
+  }
+
+  function renderAum1(payload: MyAllocationDashboardPayload) {
+    return render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  function aumInput(): HTMLInputElement {
+    return screen.getByTestId("scenario-aum-input") as HTMLInputElement;
+  }
+  /** Type + blur — the composer commits the value on blur/Enter, never per key. */
+  function setAum(raw: string) {
+    const el = aumInput();
+    fireEvent.change(el, { target: { value: raw } });
+    fireEvent.blur(el);
+  }
+  /** The scenarioAum every downstream consumer reads, observed at its
+   *  commit-boundary consumer (the established oracle in this file). */
+  function drawerAum(): number | undefined {
+    return vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.scenarioAum;
+  }
+  function alertText(): string {
+    return screen
+      .queryAllByRole("alert")
+      .map((a) => a.textContent ?? "")
+      .join(" ");
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  it("AUM-01 Test 5 (blank-mode sizing): typing an AUM sizes the scenario — the commit AUM gate clears and the illustrative note goes away", () => {
+    renderAum1(blankSlate());
+    addStrategy({
+      id: "aum1-strat-5",
+      name: "Blank Slate Strategy",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    // The defect's shape: no live book → derived AUM is 0 → the chart discloses
+    // it is illustrative and the commit gate refuses. Non-vacuity for below.
+    expect(drawerAum()).toBe(0);
+    expect(screen.getByText(/Illustrative shape only/i)).toBeInTheDocument();
+
+    setAum("1000000");
+
+    // The manual value is now THE portfolio AUM for every scenarioAum consumer.
+    expect(drawerAum()).toBe(1_000_000);
+    // Recorded UI-SPEC decision: the illustrative note keys off scenarioAum <= 0
+    // and clears itself once AUM is set (the persistent PROJECTED pill still
+    // carries the hypothetical disclosure).
+    expect(screen.queryByText(/Illustrative shape only/i)).toBeNull();
+
+    // And the commit no longer trips the AUM gate.
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+    expect(alertText()).not.toMatch(/portfolio AUM is not set/);
+  });
+
+  it("AUM-01 Test 6 (a zero is a claim): blank mode starts EMPTY, never pre-filled 0, and says what the field is for", () => {
+    renderAum1(blankSlate());
+    addStrategy({
+      id: "aum1-strat-6",
+      name: "Blank Slate Strategy",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    expect(aumInput().value).toBe("");
+    expect(screen.getByText("Required to size and commit.")).toBeInTheDocument();
+  });
+
+  it("AUM-01 Test 7 (book seed + override note + no re-snap): pre-fills from the live sum, an edit overrides it, and a holdings refresh does not clobber the edit", () => {
+    const { payload, holdings } = aumBook([300_000, 160_000]);
+    const { rerender } = renderAum1(payload);
+
+    // Book mode pre-fills from the live-holdings total.
+    expect(aumInput().value).toBe("460000");
+    expect(drawerAum()).toBe(460_000);
+    // No divergence yet → no override note.
+    expect(screen.queryByText(/Overrides live-holdings total/i)).toBeNull();
+
+    setAum("500000");
+    expect(drawerAum()).toBe(500_000);
+    expect(
+      screen.getByText("Overrides live-holdings total $460,000."),
+    ).toBeInTheDocument();
+
+    // A holdings VALUE refresh (same symbol/venue/type set → SAME fingerprint,
+    // so no drift and no draft rebase) must NOT re-snap the input back to the
+    // live sum — that is the windowTouchedRef seed idiom, not a controlled value.
+    rerender(
+      <ScenarioComposer
+        payload={{
+          ...payload,
+          holdingsSummary: holdings.map((h) => ({
+            ...h,
+            value_usd: h.value_usd * 2,
+          })),
+        }}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(aumInput().value).toBe("500000");
+    expect(drawerAum()).toBe(500_000);
+  });
+
+  // 151 review WR-04 — a blur that commits the value already displayed is not
+  // an edit. Book mode SEEDS the field with the derived live-holdings sum, so
+  // without this guard a bare focus→blur (a keyboard user tabbing through the
+  // form) silently converted the DERIVED size into a persisted manual OVERRIDE.
+  it("AUM-01 / WR-04: a bare focus→blur does NOT turn the derived live sum into a manual override", () => {
+    const { payload, holdings } = aumBook([300_000, 160_000]);
+    const { rerender } = renderAum1(payload);
+    expect(aumInput().value).toBe("460000");
+
+    // The gesture: focus and blur, no keystroke.
+    const el = aumInput();
+    fireEvent.focus(el);
+    fireEvent.blur(el);
+
+    // (a) No override note — the composer still considers the AUM derived.
+    expect(screen.queryByText(/Overrides live-holdings total/i)).toBeNull();
+    // (b) No manual value reaches the commit drawer, so the commit body (and
+    // with it the idempotency request_hash) is unchanged for this caller.
+    expect(
+      vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.manualAumUsd,
+    ).toBeUndefined();
+    // (c) THE BEHAVIOURAL PROOF: the AUM still TRACKS custody. A holdings
+    // refresh that doubles the book moves the scenario AUM; a frozen manual
+    // override would pin it at 460,000.
+    rerender(
+      <ScenarioComposer
+        payload={{
+          ...payload,
+          holdingsSummary: holdings.map((h) => ({
+            ...h,
+            value_usd: h.value_usd * 2,
+          })),
+        }}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(drawerAum()).toBe(920_000);
+  });
+
+  it("AUM-01 / WR-04 (control): a REAL edit still commits, and re-blurring the same number is idempotent", () => {
+    const { payload } = aumBook([300_000, 160_000]);
+    renderAum1(payload);
+
+    setAum("500000");
+    expect(drawerAum()).toBe(500_000);
+    expect(
+      screen.getByText("Overrides live-holdings total $460,000."),
+    ).toBeInTheDocument();
+
+    // Blurring the SAME committed value again changes nothing (and must not
+    // clear the override the user really made).
+    const el = aumInput();
+    fireEvent.focus(el);
+    fireEvent.blur(el);
+    expect(drawerAum()).toBe(500_000);
+    expect(
+      screen.getByText("Overrides live-holdings total $460,000."),
+    ).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // 151 UAT (founder, 2026-08-07) — WHOLE DOLLARS in the Portfolio AUM field.
+  //
+  // The founder's book summed to a float, so the seeded field read
+  // `39963.1076231`: eleven digits of false precision on a money input, and a
+  // number nobody would type. The per-strategy USD input already rounds for
+  // display; this mirrors it.
+  //
+  // The load-bearing half is the INTERACTION with WR-04. Rounding the display
+  // while comparing the blur against the raw float would make a bare focus→blur
+  // weigh "39963" against 39963.1076231, call it an edit, and persist the
+  // rounded number as a manual OVERRIDE — re-opening exactly the hole WR-04
+  // closed, through the same no-keystroke gesture.
+  // -------------------------------------------------------------------------
+  it("151 UAT: the seeded Portfolio AUM displays WHOLE dollars while state keeps the precise value", () => {
+    // A float book — the founder's shape (sums to 39963.1076231).
+    const { payload } = aumBook([21_000.5076231, 18_962.6]);
+    renderAum1(payload);
+
+    // What the founder saw: 39963.1076231. What they must see now:
+    expect(aumInput().value).toBe("39963");
+    // …while every consumer still reads the PRECISE sum — the rounding is
+    // display-only and is never written back into the draft.
+    expect(drawerAum()).toBeCloseTo(39_963.1076231, 6);
+    expect(drawerAum()).not.toBe(39_963);
+  });
+
+  /** The manual override as the commit boundary sees it — `undefined` means the
+   *  size is still DERIVED and no `manual_aum_usd` reaches the request body. */
+  function manualAumOnWire(): number | undefined {
+    return vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.manualAumUsd;
+  }
+
+  it("151 UAT: a bare focus→blur on the ROUNDED seed is still not an edit (WR-04 holds under rounding)", () => {
+    // WR-04's invariant, stated once so the arms below are readable: A BARE
+    // BLUR IS NEVER AN EDIT. No keystroke behind a blur ⇒ the DERIVED size is
+    // never converted into a persisted manual OVERRIDE. The harm it prevents is
+    // not cosmetic: an override freezes the scenario against later custody
+    // syncs, raises the "Overrides live-holdings total" note for an override
+    // nobody made, and puts `manual_aum_usd` on the commit body — changing the
+    // request bytes and therefore the idempotency `request_hash` for a caller
+    // the design deliberately left unchanged (T-151-21).
+    //
+    // ⚠️ WHAT THIS TEST NO LONGER CLAIMS (Review [9], and why the change is a
+    // narrowing rather than a weakening). It previously ALSO asserted that
+    // TYPING a number equal to the live-holdings sum was a no-op, because the
+    // guard was a value comparison (`Math.round(parsed)` against the displayed
+    // text). That comparison cannot tell a bare blur apart from a deliberate
+    // override that happens to land on the same integer, so it silently DROPPED
+    // the founder's pin gesture — see the `Review [9]` test below, which pins
+    // the replacement contract. The two claims are mutually exclusive: one
+    // gesture (type 39963, blur) cannot be both a no-op and a persisted
+    // override. The guard is now `aumTouchedRef`, which answers the actual WR-04
+    // question — "was there a keystroke?" — with no value comparison to alias
+    // over. Everything below is the invariant itself, tested through BOTH doors
+    // a derived value can enter the field by (initial seed, and re-seed on a
+    // holdings refresh); only the value-equality corollary is gone.
+    const { payload, holdings } = aumBook([21_000.5076231, 18_962.6]);
+    const { rerender } = renderAum1(payload);
+    expect(aumInput().value).toBe("39963");
+
+    // (a) The WR-04 gesture against the rounded text, on the INITIAL seed.
+    const el = aumInput();
+    fireEvent.focus(el);
+    fireEvent.blur(el);
+
+    // Still derived — no override note, no manual value on the wire.
+    expect(screen.queryByText(/Overrides live-holdings total/i)).toBeNull();
+    expect(manualAumOnWire()).toBeUndefined();
+
+    // (b) BEHAVIOURAL PROOF: the AUM still TRACKS custody. A frozen override
+    // would pin it — and it would pin it at the ROUNDED 39963, which is also
+    // how a naive float comparison would have failed (it would have written
+    // 39963 and lost the cents).
+    rerender(
+      <ScenarioComposer
+        payload={{
+          ...payload,
+          holdingsSummary: holdings.map((h) => ({
+            ...h,
+            value_usd: h.value_usd * 2,
+          })),
+        }}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(drawerAum()).toBeCloseTo(79_926.2152462, 6);
+
+    // (c) THE SECOND DOOR, and the arm that replaces the retired value-equality
+    // corollary. The refresh above did not merely move the number — it RE-SEEDED
+    // the input's text through the mirror effect, which writes the field without
+    // any keystroke. A bare blur on THAT text is the same WR-04 harm arriving by
+    // the other route, and it is the one the `aumTouchedRef` mechanism is
+    // uniquely responsible for: the ref is armed by `onChange` only, so a
+    // programmatic re-seed must leave it false. Arm it anywhere in the seed path
+    // (or drop the guard) and a routine holdings sync followed by a tab-through
+    // silently freezes the allocator's scenario at whatever custody happened to
+    // read that minute.
+    expect(aumInput().value).toBe("79926");
+    const reseeded = aumInput();
+    fireEvent.focus(reseeded);
+    fireEvent.blur(reseeded);
+    expect(manualAumOnWire()).toBeUndefined();
+    expect(screen.queryByText(/Overrides live-holdings total/i)).toBeNull();
+    // …and the size is still the PRECISE derived sum, not the 79926 on screen.
+    expect(drawerAum()).toBeCloseTo(79_926.2152462, 6);
+    expect(drawerAum()).not.toBe(79_926);
+  });
+
+  it("151 UAT / Review [9]: typing the ROUNDED seed IS a deliberate override — the pin gesture is no longer dropped", () => {
+    // The contract that REPLACED the retired value-equality corollary above, and
+    // the reason WR-04's guard had to stop being a value comparison.
+    //
+    // The founder's gesture: the field shows "39963" (a display rounding of
+    // 39963.1076231) and the allocator types that same integer BECAUSE they want
+    // the scenario pinned to a round number — so it stops drifting every time
+    // custody syncs. Under the old `Math.round(parsed) === displayed` guard the
+    // write was dropped on the floor: no `manualAumUsd`, no override note, no
+    // `manual_aum_usd` on the commit body, and the field snapped back to the
+    // exact text they had just typed — so it LOOKED like it had worked. A money
+    // input that silently discards the number the user typed is the failure this
+    // pins against.
+    const { payload, holdings } = aumBook([21_000.5076231, 18_962.6]);
+    const { rerender } = renderAum1(payload);
+    expect(aumInput().value).toBe("39963");
+
+    // ⚠️ NOT `setAum("39963")`. React's controlled-input value tracker swallows
+    // a `change` event whose target value equals the value already in the DOM,
+    // so the shared helper would fire NO `onChange` here and the assertions
+    // below would be measuring a bare blur — the previous test — rather than a
+    // typed override. The real gesture is select-all → delete → retype, which
+    // does move the DOM value; this reproduces it. (The blank intermediate is
+    // itself a no-op commit only if blurred, and it is not blurred.)
+    const el = aumInput();
+    fireEvent.change(el, { target: { value: "" } });
+    fireEvent.change(el, { target: { value: "39963" } });
+    fireEvent.blur(el);
+
+    // The write landed, as the exact integer typed — not the float behind it.
+    expect(manualAumOnWire()).toBe(39_963);
+    expect(drawerAum()).toBe(39_963);
+    // It is a real override of a numerically-near-identical custody figure, and
+    // says so on screen (39963 ≠ 39963.1076231).
+    expect(
+      screen.getByTestId("scenario-aum-override-note"),
+    ).toBeInTheDocument();
+
+    // And it does what pinning MEANS: a later custody sync no longer moves it.
+    // This is the half a "did the number change?" guard can never deliver — it
+    // would have left the scenario tracking the doubled sum.
+    rerender(
+      <ScenarioComposer
+        payload={{
+          ...payload,
+          holdingsSummary: holdings.map((h) => ({
+            ...h,
+            value_usd: h.value_usd * 2,
+          })),
+        }}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(drawerAum()).toBe(39_963);
+    expect(manualAumOnWire()).toBe(39_963);
+  });
+
+  it("151 UAT (control): a REAL edit on a float book still commits — rounding did not disable the field", () => {
+    const { payload } = aumBook([21_000.5076231, 18_962.6]);
+    renderAum1(payload);
+    expect(aumInput().value).toBe("39963");
+
+    setAum("50000");
+    expect(drawerAum()).toBe(50_000);
+    expect(
+      screen.getByText(/Overrides live-holdings total/i),
+    ).toBeInTheDocument();
+    // A manual value also displays whole.
+    expect(aumInput().value).toBe("50000");
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // 151 red-team G1 — A REFUSAL IS NOT AN EDIT IN PROGRESS.
+  //
+  // WR-04's guard is `aumTouchedRef` ("was there a keystroke behind this
+  // blur?"). Every arm that REFUSES a keystroke snaps the text back to the
+  // committed value, so it must also DISARM the ref — otherwise the refusal
+  // leaves the composer believing an uncommitted edit is still pending, and the
+  // very next bare blur commits the SNAPPED-BACK derived figure. That is the
+  // full WR-04 harm reached by a second door:
+  //   • the derived size freezes (a later custody sync no longer moves it),
+  //   • it freezes QUANTIZED — 39963.1076231 becomes the displayed 39963,
+  //   • "Overrides live-holdings total" appears for an override nobody made,
+  //   • `manual_aum_usd` joins the commit body, moving the idempotency
+  //     `request_hash` for a caller T-151-21 deliberately left unchanged.
+  //
+  // Both refusing arms are exercised, because they are separate `return`s:
+  // the ZERO/invalid arm and the BLANK arm.
+  // ─────────────────────────────────────────────────────────────────────────
+  it("151 red-team G1: a REFUSED AUM (zero) does not leave an edit pending — the next bare blur must not commit the snapped-back derived figure", () => {
+    const { payload, holdings } = aumBook([21_000.5076231, 18_962.6]);
+    const { rerender } = renderAum1(payload);
+    expect(aumInput().value).toBe("39963");
+
+    // (1) The refused gesture: type 0, commit with Enter. A zero is a claim,
+    // not an absence, so it is refused and the text snaps back.
+    const el = aumInput();
+    fireEvent.change(el, { target: { value: "0" } });
+    fireEvent.keyDown(el, { key: "Enter" });
+    expect(screen.getByTestId("scenario-commit-error").textContent).toContain(
+      "Portfolio AUM must be greater than $0",
+    );
+    expect(aumInput().value).toBe("39963");
+    // Non-vacuity: the refusal really refused — nothing was written.
+    expect(manualAumOnWire()).toBeUndefined();
+
+    // (2) THE REGRESSION. Refocus and blur with NO keystroke. Pre-fix the ref
+    // was still armed from step (1), so this committed `setManualAum(39963)`.
+    const after = aumInput();
+    fireEvent.focus(after);
+    fireEvent.blur(after);
+
+    expect(manualAumOnWire()).toBeUndefined();
+    expect(screen.queryByTestId("scenario-aum-override-note")).toBeNull();
+    // The precise derived sum survived — pre-fix it was quantized to 39963.
+    expect(drawerAum()).toBeCloseTo(39_963.1076231, 6);
+    expect(drawerAum()).not.toBe(39_963);
+
+    // (3) BEHAVIOURAL PROOF: the size still TRACKS custody. A frozen override
+    // would pin it at 39963 through this refresh.
+    rerender(
+      <ScenarioComposer
+        payload={{
+          ...payload,
+          holdingsSummary: holdings.map((h) => ({
+            ...h,
+            value_usd: h.value_usd * 2,
+          })),
+        }}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    expect(drawerAum()).toBeCloseTo(79_926.2152462, 6);
+  });
+
+  it("151 red-team G1: the BLANK arm disarms too — clearing the field then bare-blurring never converts the derived size into an override", () => {
+    // The same hole through the OTHER refusing `return`. Emptying the field is
+    // "no value entered" (never a 0), so it commits nothing and snaps back —
+    // but the keystroke that emptied it armed the ref just the same.
+    const { payload } = aumBook([21_000.5076231, 18_962.6]);
+    renderAum1(payload);
+    expect(aumInput().value).toBe("39963");
+
+    const el = aumInput();
+    fireEvent.change(el, { target: { value: "" } });
+    fireEvent.blur(el);
+    expect(aumInput().value).toBe("39963");
+    expect(manualAumOnWire()).toBeUndefined();
+
+    const after = aumInput();
+    fireEvent.focus(after);
+    fireEvent.blur(after);
+
+    expect(manualAumOnWire()).toBeUndefined();
+    expect(screen.queryByTestId("scenario-aum-override-note")).toBeNull();
+    expect(drawerAum()).toBeCloseTo(39_963.1076231, 6);
+  });
+
+  it("151 red-team G1 (control): a refusal does not disable the field — a REAL edit right after one still commits", () => {
+    // Non-vacuity for the pair above: disarming on refusal must not swallow the
+    // NEXT genuine keystroke. If it did, the "fix" would be a money input that
+    // silently discards what the allocator typed.
+    const { payload } = aumBook([21_000.5076231, 18_962.6]);
+    renderAum1(payload);
+
+    const el = aumInput();
+    fireEvent.change(el, { target: { value: "0" } });
+    fireEvent.blur(el);
+    expect(manualAumOnWire()).toBeUndefined();
+
+    setAum("50000");
+    expect(manualAumOnWire()).toBe(50_000);
+    expect(drawerAum()).toBe(50_000);
+    expect(
+      screen.getByTestId("scenario-aum-override-note"),
+    ).toBeInTheDocument();
+  });
+
+  it("AUM-01 Test 8 (metrics invariance — AUM-01 is NOT the SCEN-01 fix): editing AUM leaves scenarioMetrics identical", () => {
+    const { payload } = aumBook([300_000, 160_000]);
+    renderAum1(payload);
+
+    const before = lastKpiScenarioMetrics();
+    // Non-vacuity: the engine actually produced a blend, so "identical" is a
+    // claim about real numbers, not about two empty metric objects.
+    expect(before?.n ?? 0).toBeGreaterThan(0);
+    expect(before?.sharpe).not.toBeNull();
+    const engineCallsBefore = computeScenarioStateArgs.length;
+
+    setAum("5000000");
+    // The edit really landed (otherwise the invariance below is vacuous).
+    expect(drawerAum()).toBe(5_000_000);
+
+    const after = lastKpiScenarioMetrics();
+    expect(after?.sharpe).toBe(before?.sharpe);
+    expect(after?.cagr).toBe(before?.cagr);
+    expect(after?.max_drawdown).toBe(before?.max_drawdown);
+    expect(after?.n).toBe(before?.n);
+    // The sharp falsifier: adding scenarioAum to the scenarioMetrics dep array
+    // would re-invoke the engine on every AUM edit. Weights are the single
+    // source of truth; AUM rescales DOLLARS, never returns.
+    expect(computeScenarioStateArgs.length).toBe(engineCallsBefore);
+  });
+
+  it("AUM-01 Test 9 (sanitize on read): a corrupt persisted manualAumUsd reads as UNSET — never a negative, over-cap or null AUM", () => {
+    const { payload, holdings } = aumBook([300_000, 160_000]);
+    const storageKey = `allocations.scenario_v0_15.${ALLOCATOR_A}`;
+    const seed = (manualAumUsd: number | null) => {
+      cleanup();
+      lsStore.clear();
+      vi.mocked(ScenarioCommitDrawer).mockClear();
+      lsStore.set(
+        storageKey,
+        JSON.stringify({
+          ...defaultDraftFromHoldings(
+            holdings as Parameters<typeof defaultDraftFromHoldings>[0],
+          ),
+          manualAumUsd,
+        }),
+      );
+      renderAum1(payload);
+    };
+
+    // POSITIVE CONTROL — the seeding mechanism genuinely reaches the composer
+    // (same fingerprint → adopted, not reset), so the refusals below are real.
+    seed(750_000);
+    expect(aumInput().value).toBe("750000");
+    expect(drawerAum()).toBe(750_000);
+
+    // -5 (a client typo), 2e12 (above the isValidDollar 1e12 ceiling) and null
+    // (what JSON.stringify writes for a NaN) all sanitize to UNSET on read, so
+    // the composer falls back to the live-holdings sum.
+    for (const corrupt of [-5, 2e12, null]) {
+      seed(corrupt);
+      expect(aumInput().value).toBe("460000");
+      expect(drawerAum()).toBe(460_000);
+      expect(screen.queryByText(/Overrides live-holdings total/i)).toBeNull();
+    }
+  });
+
+  // AUM-03 Test 11 — the SECOND refusal variant. The "From my book" clause is
+  // named ONLY when that segment genuinely renders; offering a control the user
+  // cannot see is the same class of lie as the old "toggle on a live holding".
+  it("AUM-03 Test 11 (book reachable): the refusal offers 'From my book' — but only because the segment actually renders", () => {
+    const { payload } = aumBook([300_000, 160_000]);
+    const onCommitRequested = vi.fn();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        onCommitRequested={onCommitRequested}
+        useInternalCommitDrawer={false}
+      />,
+    );
+
+    // Non-vacuity: the segment IS on screen, so the clause below is honest.
+    expect(
+      screen.getByRole("radio", { name: /From my book/i }),
+    ).toBeInTheDocument();
+
+    // Switch to blank slate (a clean draft switches immediately), which drops
+    // the live holdings — and with them the derived AUM — to nothing. This is
+    // the only way to reach an unset AUM while the book is still reachable.
+    fireEvent.click(screen.getByTestId("scenario-entry-mode-blank"));
+    addStrategy({
+      id: "aum3-strat-11",
+      name: "Blank Slate Strategy",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    expect(aumInput().value).toBe("");
+    expect(drawerAum()).toBe(0);
+
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+
+    const banner = screen.getByTestId("scenario-commit-error");
+    expect(banner.textContent).toBe(
+      'Can\'t record a scenario commit: portfolio AUM is not set. Set portfolio AUM, or switch to "From my book", before submitting.',
+    );
+    expect(banner.textContent).not.toContain("toggle on a live holding");
+    expect(banner.textContent).not.toContain("Connect an exchange API key");
+    expect(onCommitRequested).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("commit-drawer-mock")).toBeNull();
+  });
+
+  // 151 review CR-01 — the headline flow's dead end. In blank mode the draft is
+  // seeded from `[]`, so its `init_holdings_fingerprint` is the EMPTY STRING.
+  // The drawer forwards the prop whenever it is `!== null`, and the RPC's
+  // optimistic-concurrency precondition reads an empty fingerprint as the empty
+  // token SET — so for an allocator who HAS holdings every blank-mode commit
+  // came back 409 with remedy copy ("Refresh to load the latest holdings") that
+  // no refresh could satisfy. Freezing `null` instead is the explicit "this
+  // draft has no holdings basis to be stale against".
+  it("AUM-01 / CR-01: a BLANK-mode commit by an allocator WITH a live book freezes a NULL fingerprint — never the empty string that 409s", () => {
+    // The FORCE-blanked shape the review pins as reachable: live holdings, but
+    // ZERO contributing keys, so `canEnterBook` is false and the composer
+    // initializes BLANK — the draft is seeded from `[]` and its fingerprint is
+    // the empty string, while the SERVER still has this allocator's holdings.
+    const { payload: book } = aumBook([300_000, 160_000]);
+    const payload = {
+      ...book,
+      perKeyDailiesGateSatisfied: false,
+      contributingApiKeyIds: [],
+      bookEntryGateSatisfied: false,
+    };
+    renderAum1(payload);
+
+    // Non-vacuity part 1: the allocator genuinely HAS a live book (so a
+    // forwarded "" would diverge from the server's token set), and the composer
+    // really is in forced-blank mode (the derived sum is gated away to 0).
+    expect(payload.holdingsSummary.length).toBeGreaterThan(0);
+    expect(drawerAum()).toBe(0);
+
+    addStrategy({
+      id: "aum1-strat-cr01",
+      name: "Blank Slate Strategy",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    setAum("1000000");
+    expect(drawerAum()).toBe(1_000_000);
+
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+    const props = vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0];
+    // Non-vacuity part 2: the commit really opened (diffs were built), so the
+    // fingerprint assertion below is about a REAL commit, not a refused one.
+    expect(props?.diffs?.length).toBeGreaterThan(0);
+    expect(props?.initHoldingsFingerprint).toBeNull();
+  });
+
+  // The other half: a BOOK-mode commit still freezes the real fingerprint, so
+  // the anti-stale precondition keeps protecting the case it was written for.
+  it("AUM-01 / CR-01 (guarantee preserved): a BOOK-mode commit still freezes the live-book fingerprint", () => {
+    const { payload } = aumBook([300_000, 160_000]);
+    renderAum1(payload);
+    addStrategy({
+      id: "aum1-strat-cr01b",
+      name: "Book Mode Strategy",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+    const props = vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0];
+    expect(props?.diffs?.length).toBeGreaterThan(0);
+    expect(props?.initHoldingsFingerprint).toBeTruthy();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 151 / AUM-01 — the per-strategy DOLLAR input ("allocate $500k to this
+// strategy" — the founder's literal sentence, made expressible).
+//
+// Dollars are a second VIEW of the weight, never a second weight-WRITE path.
+// Every commit routes through the composer's ONE `handleWeightChange`, so the
+// >1 clamp + its banner, the mixed-book engine-unit basis choice and the
+// sole-unit refusal are INHERITED rather than re-implemented (the v1.11
+// weight-basis landmines).
+//
+// Oracles are ECONOMIC and HAND-COMPUTED (151-VALIDATION "Binding Oracle
+// Rules"): `dollar = weight × AUM` and `weight = dollar / AUM` must round-trip
+// on the COMPOSED state. No assertion below recomputes `weight × AUM` from the
+// implementation's own formula — every expected figure is a literal typed here.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — AUM-01 per-strategy dollar input", () => {
+  const D_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-05-${String(i + 1).padStart(2, "0")}`,
+  );
+  const D_KEY_SERIES = D_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const D_STRAT_SERIES = D_DATES.map((date, i) => ({
+    date,
+    value: [0.01, -0.008, 0.012][i % 3],
+  }));
+
+  const D_A = "usd1-strat-a";
+  const D_B = "usd1-strat-b";
+  const D_K1 = "usd1-key-1";
+
+  /** A no-book allocator — blank mode by construction, so the live-holdings sum
+   *  is 0 and the manual AUM input is the ONLY possible source of size. */
+  function blankSlatePayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      holdingsSummary: [],
+      apiKeys: [],
+      perKeyReturnsByApiKeyId: {},
+      perKeyDailiesGateSatisfied: false,
+      eligibleApiKeyIds: [],
+      allocatorEligibleApiKeyIds: [],
+      contributingApiKeyIds: [],
+      bookEntryGateSatisfied: false,
+    });
+  }
+
+  /** A MIXED book: one per-key engine unit (K1) plus a catalogued added
+   *  strategy, so `isMixedPerKeyBook` is true and a weight edit takes the
+   *  engine-unit-basis branch of handleWeightChange. */
+  function mixedBookPayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      ...perKeyBook([{ id: D_K1, returns: D_KEY_SERIES, valueUsd: 60_000 }]),
+      apiKeys: [winApiKey(D_K1)],
+      strategies: [catalogStrategy(D_A, "Dollar Strat A", D_STRAT_SERIES)],
+    });
+  }
+
+  function renderUsd(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  function add(id: string, name: string) {
+    addStrategy({
+      id,
+      name,
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+  }
+
+  /** Set the portfolio AUM through the AUM-01 input (commits on blur). */
+  function setAum(raw: string) {
+    const el = screen.getByTestId("scenario-aum-input") as HTMLInputElement;
+    act(() => {
+      fireEvent.change(el, { target: { value: raw } });
+      fireEvent.blur(el);
+    });
+  }
+
+  /** The scenarioAum every downstream consumer reads, observed at its
+   *  commit-boundary consumer (the established oracle in this file). */
+  function usdDrawerAum(): number | undefined {
+    return vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.scenarioAum;
+  }
+  /** The Portfolio AUM field's displayed (whole-dollar) text. */
+  function aumInputValue(): string {
+    return (screen.getByTestId("scenario-aum-input") as HTMLInputElement).value;
+  }
+  function weightInput(ref: string): HTMLInputElement {
+    const el = document.getElementById(`weight-${ref}`);
+    expect(el).not.toBeNull();
+    return el as HTMLInputElement;
+  }
+  function dollarInput(ref: string): HTMLInputElement {
+    const el = document.getElementById(`alloc-usd-${ref}`);
+    expect(el).not.toBeNull();
+    return el as HTMLInputElement;
+  }
+  /** Type an amount into a row's dollar field and commit it (blur). */
+  function setDollar(ref: string, raw: string) {
+    const el = dollarInput(ref);
+    act(() => {
+      fireEvent.change(el, { target: { value: raw } });
+      fireEvent.blur(el);
+    });
+  }
+  /** The per-row sizes the commit pipeline would record — read at the drawer,
+   *  the established commit-boundary oracle in this file. */
+  function committedSizes(): Record<string, number> {
+    fireEvent.click(screen.getByTestId("scenario-footer-commit"));
+    const diffs = vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.diffs;
+    const out: Record<string, number> = {};
+    for (const d of diffs ?? []) {
+      if (d.kind === "voluntary_add") {
+        out[d.strategy_id] = d.size_at_decision_usd;
+      }
+    }
+    return out;
+  }
+  function alertText(): string {
+    return screen
+      .queryAllByRole("alert")
+      .map((a) => a.textContent ?? "")
+      .join(" ");
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    computeScenarioStateArgs.length = 0;
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  // Test 1 — THE FOUNDER'S SENTENCE. Invertibility (oracle 2): typing a dollar
+  // amount back-computes the weight, and the weight the commit pipeline sizes
+  // from reproduces exactly the dollars that were typed.
+  it("AUM-01 Test 1 (invertibility): typing a $500,000 dollar allocation against a $2,000,000 AUM sets weight 0.250 and commits a $500,000 size", () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    setAum("2000000");
+
+    // Non-vacuity: a lone added strategy starts at the whole book, so the field
+    // opens at the full AUM — the starting state is a real size, not a blank.
+    expect(dollarInput(D_A).value).toBe("2000000");
+    expect(weightInput(D_A).value).toBe("1.000");
+
+    setDollar(D_A, "500000");
+
+    // 151 UAT — BOTTOM-UP. In BLANK mode the dollar input is THE entry point:
+    // the portfolio resizes around the typed amount instead of the amount
+    // competing for a fixed pie. With one row and nothing else allocated,
+    // AUM' = 0 + 500,000 and the row is the whole portfolio.
+    expect(aumInputValue()).toBe("500000");
+    expect(weightInput(D_A).value).toBe("1.000");
+    expect(dollarInput(D_A).value).toBe("500000");
+    // The founder's sentence is UNCHANGED and is the load-bearing half: the
+    // number the audit trail records is the number typed.
+    expect(committedSizes()[D_A]).toBe(500_000);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // 151 red-team G4 — THE REFUSALS MUST BE VISIBLE, AND THE BOUND MUST BIND.
+  //
+  // Three lines in `commitDollarInput` / `bottomUpAumFor` had no test that
+  // could fail: deleting `onRefuseEdit` at either call site, and downgrading
+  // `isValidDollar` to `Number.isFinite`, all left the suite green. A refusal
+  // the allocator cannot see is indistinguishable from a money input that
+  // silently ate what they typed — that is the whole reason Review [10] added
+  // the banner — and an unbounded AUM is written into the draft only to be
+  // discarded by the read side one render later, while the autosave and the
+  // saved-scenario PUT still carry the out-of-range number.
+  //
+  // The copy is typed out here rather than imported: an oracle that reads the
+  // source's own string passes against any string.
+  // ─────────────────────────────────────────────────────────────────────────
+  it("151 red-team G4: zeroing the LAST funded row is refused ON SCREEN — the no-size refusal names the remedy, it is not a silent snap-back", () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    setDollar(D_A, "500000");
+    // Non-vacuity: the portfolio really is funded, and by this row alone.
+    expect(aumInputValue()).toBe("500000");
+    expect(alertText()).not.toContain("A portfolio needs a size");
+
+    // The ordinary gesture that reaches this arm: type 0 to drop the last
+    // funded row. AUM' would be 0 — no size to divide by.
+    setDollar(D_A, "0");
+
+    expect(screen.getByTestId("scenario-commit-error").textContent).toBe(
+      "A portfolio needs a size — zeroing the last funded strategy would leave nothing to allocate. Set another strategy's dollars first, or exclude this row instead.",
+    );
+    // The refusal REFUSED: no 0/NaN AUM was written, the field snapped back.
+    expect(aumInputValue()).toBe("500000");
+    expect(usdDrawerAum()).toBe(500_000);
+    expect(dollarInput(D_A).value).toBe("500000");
+  });
+
+  it("151 red-team G4: an INVALID dollar amount is refused ON SCREEN with its own cause-accurate copy, not the no-size one", () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    add(D_B, "Dollar Strat B");
+    setAum("1000000");
+    expect(dollarInput(D_A).value).toBe("500000");
+
+    // Negative — `isValidDollar` is [0, 1e12), so this never reaches the
+    // bottom-up arm at all. A DIFFERENT cause than "no size", and the two must
+    // not share one vague sentence (the sibling-arm rule the AUM field follows).
+    setDollar(D_A, "-100");
+
+    expect(screen.getByTestId("scenario-commit-error").textContent).toBe(
+      "Invalid dollar allocation — enter a positive amount under $1,000,000,000,000. The previous value was kept.",
+    );
+    // Previous value kept — never clamped to a number nobody typed.
+    expect(dollarInput(D_A).value).toBe("500000");
+    expect(weightInput(D_A).value).toBe("0.500");
+    expect(usdDrawerAum()).toBe(1_000_000);
+  });
+
+  it("151 red-team G4: a bottom-up resize that would breach the $1e12 ceiling is REFUSED — the write side and the read side must agree", () => {
+    // `bottomUpAumFor` validates the RESULTING portfolio size against the same
+    // shared [0, 1e12) bound `commitAumInput` enforces, not merely
+    // finite/positive. `sanitizedManualAum` re-reads the stored value through
+    // that bound on EVERY render, so a merely-finite sum gets written into the
+    // draft and then discarded one render later: `scenarioAum` collapses to the
+    // blank-mode 0 and the autosave still carries the out-of-range figure.
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    add(D_B, "Dollar Strat B");
+    // $900bn, split evenly → $450bn a row. Inside the bound, so the state this
+    // test starts from is legitimate.
+    setAum("900000000000");
+    expect(dollarInput(D_A).value).toBe("450000000000");
+    expect(dollarInput(D_B).value).toBe("450000000000");
+
+    // AUM' = 450,000,000,000 (B held) + 600,000,000,000 = 1,050,000,000,000 —
+    // hand-computed, and $50bn OVER the $1,000,000,000,000 ceiling. Finite, so
+    // a `Number.isFinite` guard admits it.
+    setDollar(D_A, "600000000000");
+
+    // Refused: the portfolio did not resize, and nothing out of range reached
+    // the draft. Under `Number.isFinite` the AUM field goes BLANK here and
+    // `scenarioAum` reads 0 — the read side discarding what the write side
+    // stored.
+    expect(aumInputValue()).toBe("900000000000");
+    expect(usdDrawerAum()).toBe(900_000_000_000);
+    expect(dollarInput(D_A).value).toBe("450000000000");
+    expect(dollarInput(D_B).value).toBe("450000000000");
+  });
+
+  it("151 red-team G4 (control): a bottom-up resize JUST INSIDE the ceiling still commits — the bound binds, it does not block", () => {
+    // Non-vacuity for the test above: same fixture, same arm, a resize $50bn
+    // the other side of the ceiling. A guard that refused everything large
+    // would pass the test above for the wrong reason.
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    add(D_B, "Dollar Strat B");
+    setAum("900000000000");
+
+    // AUM' = 450,000,000,000 + 500,000,000,000 = 950,000,000,000 < 1e12.
+    setDollar(D_A, "500000000000");
+
+    expect(aumInputValue()).toBe("950000000000");
+    expect(usdDrawerAum()).toBe(950_000_000_000);
+    expect(dollarInput(D_A).value).toBe("500000000000");
+    expect(dollarInput(D_B).value).toBe("450000000000");
+  });
+
+  // Test 1b — the BOOK-mode twin, which keeps the pre-151-UAT top-down
+  // semantics verbatim: the AUM is what custody says the book is worth, so a
+  // dollar edit back-computes a weight WITHIN that fixed size. This is the
+  // non-vacuity control for Test 1 — without it, "bottom-up" could have been
+  // implemented as "everywhere" and nothing would fail.
+  it("AUM-01 Test 1b (book mode stays TOP-DOWN): $500,000 against a fixed $2,000,000 AUM sets weight 0.250 and does NOT resize the portfolio", () => {
+    renderUsd(mixedBookPayload());
+    add(D_A, "Dollar Strat A");
+    setAum("2000000");
+
+    setDollar(D_A, "500000");
+
+    // 500,000 / 2,000,000 = 0.25 — hand-computed, never recomputed here.
+    expect(weightInput(D_A).value).toBe("0.250");
+    expect(dollarInput(D_A).value).toBe("500000");
+    // THE book-mode invariant: the portfolio size did not move.
+    expect(aumInputValue()).toBe("2000000");
+    expect(committedSizes()[D_A]).toBe(500_000);
+  });
+
+  // -----------------------------------------------------------------------
+  // 151 UAT — THE ECONOMIC ORACLE for bottom-up, stated as an INVARIANT over
+  // composed state rather than as a replay of the implementation's own
+  // arithmetic:
+  //
+  //     AUM' = Σ_j d_j     and     w_i = d_i / AUM'     for every row
+  //
+  // plus the HOLD-OTHERS-FIXED property: editing row i must not move any other
+  // row's DOLLAR figure — only its weight, and only because the denominator
+  // grew.
+  // -----------------------------------------------------------------------
+  it("151 UAT (bottom-up oracle): editing one row to $500,000 beside a $250,000 row makes AUM $750,000 with weights 2/3 and 1/3", () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    add(D_B, "Dollar Strat B");
+    // Seed a state with literal, hand-checkable dollars: $500,000 total, split
+    // evenly, so each row sits at $250,000.
+    setAum("500000");
+    expect(dollarInput(D_A).value).toBe("250000");
+    expect(dollarInput(D_B).value).toBe("250000");
+
+    // Raise row A to $500,000. Row B is HELD at its current $250,000.
+    setDollar(D_A, "500000");
+
+    // AUM' = 500,000 + 250,000 = 750,000 (literals, not recomputed).
+    expect(aumInputValue()).toBe("750000");
+    // w = d / AUM' → 2/3 and 1/3.
+    expect(weightInput(D_A).value).toBe("0.667");
+    expect(weightInput(D_B).value).toBe("0.333");
+    // HOLD-OTHERS-FIXED: B's DOLLARS are untouched. Its weight moved only
+    // because the denominator grew — which is the whole point.
+    expect(dollarInput(D_B).value).toBe("250000");
+    expect(dollarInput(D_A).value).toBe("500000");
+    // And the conservation invariant closes: Σ dollars === AUM.
+    expect(
+      Number(dollarInput(D_A).value) + Number(dollarInput(D_B).value),
+    ).toBe(750_000);
+    // The audit trail records what was typed, for BOTH rows.
+    const sizes = committedSizes();
+    expect(sizes[D_A]).toBe(500_000);
+    // Sub-cent tolerance on the HELD row only: its weight is the stored 1/3, so
+    // 1/3 × 750,000 lands at 250000.00000000003 in binary floating point. That
+    // is inherent to storing weights (not dollars) as the source of truth — the
+    // rendered figure is exact (asserted above), and the residual is ~3e-11 of a
+    // dollar. Pinned to the cent so a REAL drift (a wrong denominator, a lost
+    // renormalization) still fails.
+    expect(sizes[D_B]).toBeCloseTo(250_000, 2);
+    // The conservation invariant on the COMMITTED numbers, not just the render.
+    expect(sizes[D_A] + sizes[D_B]).toBeCloseTo(750_000, 2);
+  });
+
+  it("151 UAT (bottom-up, shrink direction): lowering a row shrinks the portfolio and still holds the other row's dollars", () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    add(D_B, "Dollar Strat B");
+    setAum("500000");
+
+    // Down, not up — the invariant is direction-agnostic.
+    setDollar(D_A, "50000");
+
+    // AUM' = 50,000 + 250,000 = 300,000.
+    expect(aumInputValue()).toBe("300000");
+    expect(dollarInput(D_B).value).toBe("250000");
+    expect(dollarInput(D_A).value).toBe("50000");
+    // 50,000/300,000 = 1/6 ≈ 0.167; 250,000/300,000 = 5/6 ≈ 0.833.
+    expect(weightInput(D_A).value).toBe("0.167");
+    expect(weightInput(D_B).value).toBe("0.833");
+  });
+
+  // The reason `bottomUpAumFor` sums the OTHER rows explicitly instead of
+  // taking the shortcut `AUM − d_i`. Those two agree only when the weights sum
+  // to 1, and the added-only carve-out deliberately lets a LONE added unit keep
+  // its RAW typed weight rather than be renormalized to 1.0 (the zero-size and
+  // >1 clamp gates read that raw value). With a sole row at w=0.5 the shortcut
+  // invents 500,000 of "other" money that no row on screen holds.
+  //
+  // Falsify: swap the sum for `scenarioAum - weightForRef(ref) * scenarioAum`
+  // and this reads 1,100,000 / 0.545 instead of 600,000 / 1.000.
+  it("151 UAT (bottom-up, no phantom money): a SOLE row whose weight is not 1 resizes to exactly the typed amount", () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    setAum("1000000");
+    // Drive the lone row OFF 1.0 — the added-only carve-out preserves the raw
+    // typed weight here rather than renormalizing back to the whole book.
+    fireEvent.change(weightInput(D_A), { target: { value: "0.5" } });
+    expect(weightInput(D_A).value).toBe("0.500");
+    expect(dollarInput(D_A).value).toBe("500000");
+
+    setDollar(D_A, "600000");
+
+    // Nothing else is allocated, so the portfolio IS this row: AUM' = 600,000.
+    expect(aumInputValue()).toBe("600000");
+    expect(weightInput(D_A).value).toBe("1.000");
+    expect(dollarInput(D_A).value).toBe("600000");
+  });
+
+  it("151 UAT (the AUM field is the OTHER direction): editing portfolio AUM holds WEIGHTS fixed and rescales dollars proportionally", () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    add(D_B, "Dollar Strat B");
+    setAum("500000");
+    fireEvent.change(weightInput(D_A), { target: { value: "0.25" } });
+    expect(weightInput(D_B).value).toBe("0.750");
+
+    // Double the portfolio through the AUM field.
+    setAum("1000000");
+
+    // Weights are UNCHANGED; the dollars scaled with the pie. This is the
+    // founder's stated complement to bottom-up, and it is what makes the two
+    // inputs non-redundant.
+    expect(weightInput(D_A).value).toBe("0.250");
+    expect(weightInput(D_B).value).toBe("0.750");
+    expect(dollarInput(D_A).value).toBe("250000");
+    expect(dollarInput(D_B).value).toBe("750000");
+  });
+
+  // Test 2 — CONSERVATION (oracle 1): the dollar column is a partition of the
+  // AUM. Two weights summing to 1 must render two dollar figures summing to the
+  // AUM, to the cent.
+  it("AUM-01 Test 2 (conservation): weights 0.25 / 0.75 over a $1,000,000 AUM render a dollar column of 250,000 and 750,000", () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    add(D_B, "Dollar Strat B");
+    setAum("1000000");
+
+    // Drive the WEIGHT input (not the dollar one) so the dollar column is a
+    // pure read-out here — the reverse direction of Test 1.
+    fireEvent.change(weightInput(D_A), { target: { value: "0.25" } });
+    expect(weightInput(D_A).value).toBe("0.250");
+    expect(weightInput(D_B).value).toBe("0.750");
+
+    const a = Number(dollarInput(D_A).value);
+    const b = Number(dollarInput(D_B).value);
+    expect(a).toBe(250_000);
+    expect(b).toBe(750_000);
+    expect(Math.abs(a + b - 1_000_000)).toBeLessThan(0.01);
+  });
+
+  // Test 3 — THE WIRING FALSIFIER (151-VALIDATION SC1 ledger row). The dollar
+  // edit must write the weight through `handleWeightChange` and nothing else.
+  // `userWeightOverrides` is the observable: `setWeightOverride` /
+  // `applyWeightOverrides` are its ONLY writers and handleWeightChange is the
+  // composer's only caller of either, so a stamped entry proves the gesture
+  // travelled the one path. Neutering handleWeightChange (an early `return`)
+  // turns this RED — observed once during 151-07 Task 1, then reverted.
+  it("AUM-01 Test 3 (wiring falsifier): the dollar edit writes the weight through handleWeightChange — the ONE weight-write path", async () => {
+    // 151 UAT — TWO rows, so the weight bottom-up produces is a non-trivial
+    // fraction (2/3) rather than the 1.0 a lone row would carry anyway. The
+    // stamp then genuinely proves the gesture travelled the weight path.
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    add(D_B, "Dollar Strat B");
+    setAum("1000000");
+    expect(dollarInput(D_A).value).toBe("500000");
+
+    // AUM' = 1,000,000 + 500,000 = 1,500,000 → w_A = 2/3.
+    setDollar(D_A, "1000000");
+
+    expect(weightInput(D_A).value).toBe("0.667");
+    await waitFor(() => {
+      const raw = lsStore.get(`allocations.scenario_v0_15.${ALLOCATOR_A}`);
+      expect(raw).toBeTruthy();
+      const persisted = JSON.parse(raw as string) as ScenarioDraft;
+      // The user-gesture stamp: only the weight-write path sets this.
+      expect(persisted.userWeightOverrides?.[D_A]).toBeCloseTo(2 / 3, 10);
+      expect(persisted.weightOverrides[D_A]).toBeCloseTo(2 / 3, 10);
+      // …and the AUM half of the atomic pair really landed in the SAME draft.
+      expect(persisted.manualAumUsd).toBe(1_500_000);
+    });
+  });
+
+  // Test 4 — CLAMP INHERITANCE. An amount larger than the whole book is a
+  // weight > 1; the dollar path must surface the EXISTING banner verbatim
+  // rather than clamping silently or minting a second message.
+  // 151 UAT — this now runs on the BOOK path. Under bottom-up (blank mode) a
+  // weight > 1 is STRUCTURALLY unreachable from a dollar edit: the typed amount
+  // is itself part of the new denominator, so `amount / AUM'` can never exceed
+  // 1. That is not the clamp being lost — you simply cannot over-allocate a pie
+  // you are defining by allocating. The guard is still INHERITED (the dollar
+  // path calls the same `handleWeightChange`), and it stays reachable exactly
+  // where a fixed pie exists: book mode, pinned here, plus the weight input in
+  // either mode.
+  it("AUM-01 Test 4 (clamp inheritance): a dollar amount above a FIXED book AUM fires the existing clamp banner and lands the weight at 1", () => {
+    renderUsd(mixedBookPayload());
+    add(D_A, "Dollar Strat A");
+    setAum("2000000");
+    // Non-vacuity: the row shares the book with the per-key unit, so a clamp to
+    // 1 is a real move.
+    expect(weightInput(D_K1).value).not.toBe("0.000");
+
+    setDollar(D_A, "5000000");
+
+    expect(screen.getByTestId("scenario-commit-error").textContent).toBe(
+      "Weight clamped to 1 — the maximum allocation is 100% of portfolio AUM.",
+    );
+    expect(weightInput(D_A).value).toBe("1.000");
+    expect(weightInput(D_K1).value).toBe("0.000");
+  });
+
+  it("151 UAT (bottom-up makes over-allocation meaningless): a huge blank-mode amount grows the portfolio instead of clamping", () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    add(D_B, "Dollar Strat B");
+    setAum("1000000");
+    expect(weightInput(D_A).value).toBe("0.500");
+
+    setDollar(D_A, "5000000");
+
+    // AUM' = 5,000,000 + 500,000 = 5,500,000. No clamp, no banner — the
+    // portfolio grew to hold the allocation.
+    expect(aumInputValue()).toBe("5500000");
+    expect(screen.queryByTestId("scenario-commit-error")).toBeNull();
+    expect(dollarInput(D_A).value).toBe("5000000");
+    // B is held at its dollars, exactly as the hold-others-fixed rule says.
+    expect(dollarInput(D_B).value).toBe("500000");
+  });
+
+  // Test 5 — GUARD INHERITANCE in a MIXED book (a selected per-key engine unit
+  // alongside the added strategy).
+  //
+  // 5a: the dollar edit takes handleWeightChange's ENGINE-UNIT-BASIS branch, so
+  //     the typed fraction REPRODUCES. This is exactly the v1.11 CR-01 failure
+  //     the basis choice exists to prevent — under `enabledIdsOf` the typed 0.25
+  //     renders as ~0% because it competes with raw per-key equity dollars.
+  // 5b: the sole-unit REFUSAL ("A single constituent is always 100%.") is live
+  //     on that same shared path and writes NOTHING (refuse, never renormalize).
+  //     Note the refusal is structurally UNREACHABLE from a dollar edit: the
+  //     dollar input lives only on added rows (UI-SPEC §2), and the refusal only
+  //     fires when the SOLE selected engine unit is the edited ref while the
+  //     book is mixed — a state that requires a selected per-key unit, which
+  //     would itself make `otherIds` non-empty. It is therefore pinned where it
+  //     IS reachable, on the shared function the dollar path calls.
+  it("AUM-01 Test 5 (mixed-book basis + sole-unit refusal): the dollar edit renormalizes over the engine basis, and the shared path still refuses a sole constituent", () => {
+    renderUsd(mixedBookPayload());
+    add(D_A, "Dollar Strat A");
+    setAum("2000000");
+
+    // 5a — 500,000 / 2,000,000 = 0.25 typed; the remaining 0.75 goes to the
+    // per-key unit. Both are hand-computed.
+    setDollar(D_A, "500000");
+    expect(weightInput(D_A).value).toBe("0.250");
+    expect(weightInput(D_K1).value).toBe("0.750");
+    expect(dollarInput(D_A).value).toBe("500000");
+
+    // 5b — collapse the basis to a single constituent (no added row), then edit
+    // the sole remaining unit's weight on the SAME handler.
+    cleanup();
+    lsStore.clear();
+    renderUsd(mixedBookPayload());
+    expect(weightInput(D_K1).value).toBe("1.000");
+    // No added strategy ⇒ no dollar input on screen: the sole-unit state and a
+    // dollar edit cannot coexist (see the note above).
+    expect(screen.queryAllByTestId("scenario-constituent-dollar")).toHaveLength(
+      0,
+    );
+
+    fireEvent.change(weightInput(D_K1), { target: { value: "0.5" } });
+    expect(alertText()).toContain("A single constituent is always 100%.");
+    expect(weightInput(D_K1).value).toBe("1.000");
+  });
+
+  // 151 review WR-05 — A BLUR IS NOT AN EDIT (the dollar twin of WR-04).
+  //
+  // The field displays `round(weight × AUM)`, so committing the DISPLAYED
+  // figure writes `round(w·A)/A` back — a lossy round-trip that moves the
+  // weight by up to `0.5 / AUM` and, through `handleWeightChange`, rescales
+  // every other constituent. And because an added row in a mixed book renders
+  // its DERIVED blend share, that write also STAMPS `userWeightOverrides`,
+  // pinning a row that was riding the blend. Both by a keyboard tab.
+  it("AUM-01 / WR-05: a bare focus→blur on a dollar field never stamps a user weight override", async () => {
+    renderUsd(mixedBookPayload());
+    add(D_A, "Dollar Strat A");
+    // Non-vacuity: the row renders a real dollar figure (AUM = the live book),
+    // so the blur below genuinely reaches commitDollarInput.
+    expect(Number(dollarInput(D_A).value)).toBeGreaterThan(0);
+
+    const el = dollarInput(D_A);
+    act(() => {
+      fireEvent.focus(el);
+      fireEvent.blur(el);
+    });
+
+    await waitFor(() => {
+      expect(
+        lsStore.get(`allocations.scenario_v0_15.${ALLOCATOR_A}`),
+      ).toBeTruthy();
+    });
+    const persisted = JSON.parse(
+      lsStore.get(`allocations.scenario_v0_15.${ALLOCATOR_A}`) as string,
+    ) as ScenarioDraft;
+    // `userWeightOverrides` is the user-gesture stamp — the thing that pins a
+    // derived-blend row to an explicit weight forever.
+    expect(persisted.userWeightOverrides?.[D_A]).toBeUndefined();
+  });
+
+  it("AUM-01 / WR-05: a bare focus→blur on a dollar field never moves the weight vector (the lossy round-trip)", () => {
+    const D_C = "usd1-strat-c";
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    add(D_B, "Dollar Strat B");
+    add(D_C, "Dollar Strat C");
+    // A modelling AUM small enough that whole-dollar rounding is LOSSY: three
+    // equal legs of $1,000 are $333.33 each, and the field shows 333.
+    setAum("1000");
+    const before = [D_A, D_B, D_C].map((r) => weightInput(r).value);
+    expect(dollarInput(D_A).value).toBe("333");
+
+    const el = dollarInput(D_A);
+    act(() => {
+      fireEvent.focus(el);
+      fireEvent.blur(el);
+    });
+
+    // Pre-fix: 333/1000 = 0.333 was written back and the other two legs were
+    // rescaled to absorb the lost third of a cent.
+    expect([D_A, D_B, D_C].map((r) => weightInput(r).value)).toEqual(before);
+  });
+
+  it("AUM-01 / WR-05 (control): a REAL dollar edit still writes through the one weight path", async () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+    add(D_B, "Dollar Strat B");
+    setAum("1000000");
+
+    // 151 UAT — bottom-up: AUM' = 250,000 + 500,000 (B held) = 750,000, so
+    // w_A = 1/3. The point of the control is unchanged — a REAL edit stamps a
+    // user weight override, unlike the bare blur above.
+    setDollar(D_A, "250000");
+
+    expect(weightInput(D_A).value).toBe("0.333");
+    await waitFor(() => {
+      const persisted = JSON.parse(
+        lsStore.get(`allocations.scenario_v0_15.${ALLOCATOR_A}`) as string,
+      ) as ScenarioDraft;
+      expect(persisted.userWeightOverrides?.[D_A]).toBeCloseTo(1 / 3, 10);
+    });
+  });
+
+  // Test 6 — AUM UNSET. A non-derivable dollar figure is the em-dash, never a
+  // silently disabled input and never $0 (DESIGN.md Numbers Contract). The
+  // `title` is duplicated into an sr-only span because a title alone is
+  // unreachable by keyboard/touch (UI-SPEC §2). No division executes.
+  //
+  // ⚠️ THE EM-DASH IS MODE-SCOPED (Review [8]) — this is one contract with two
+  // arms, and reading it as one rule made the founder's UAT-1 gesture
+  // unperformable. The causality runs OPPOSITE ways in the two entry modes:
+  //
+  //   BOOK mode   — the portfolio's size is CUSTODY's answer, and a row's
+  //                 dollars are `weight × AUM`. Before custody answers, the
+  //                 row's dollar figure genuinely DOES NOT EXIST, so an input
+  //                 would be an invitation to author a number the composer
+  //                 would then have to discard. Em-dash. (Arm 1.)
+  //   BLANK mode  — the row's dollars are the INPUT and the portfolio's size is
+  //                 their SUM. A zero AUM is not "unset, come back later"; it is
+  //                 the empty portfolio the allocator is about to fill. An
+  //                 em-dash here is a dead end: `liveHoldingsSum` is 0 by
+  //                 construction and nothing has been typed, so EVERY row
+  //                 rendered the em-dash and the allocator had to seed a
+  //                 top-down Portfolio AUM first — exactly the flow UAT-1
+  //                 replaced. Live input. (Arm 2.)
+  //
+  // Both arms are kept because collapsing them in EITHER direction is a real
+  // defect: em-dash everywhere breaks bottom-up entry, input everywhere invents
+  // a $0 for a book whose size custody has not reported.
+  //
+  /** A BOOK-mode allocator whose custody answer sums to ZERO — the arm-1 state.
+   *  Reachable and not contrived: `hasLiveBook` keys on the PRESENCE of holdings
+   *  rows while the AUM sums their VALUES, and a non-positive equity is exactly
+   *  what the MT5 floored-$0 row reports. So the allocator is in book mode, with
+   *  a real per-key engine unit, and no size. */
+  function bookNoValuePayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      ...perKeyBook([{ id: D_K1, returns: D_KEY_SERIES, valueUsd: 0 }]),
+      apiKeys: [winApiKey(D_K1)],
+      strategies: [catalogStrategy(D_A, "Dollar Strat A", D_STRAT_SERIES)],
+    });
+  }
+
+  it("AUM-01 Test 6 arm 1 (BOOK mode, AUM unset): the dollar cell is a read-only em-dash carrying the remedy in text, not a $0 and not a NaN", () => {
+    renderUsd(bookNoValuePayload());
+    add(D_A, "Dollar Strat A");
+
+    // Non-vacuity part 1: this really is BOOK mode — otherwise the assertion
+    // below would be re-testing arm 2's state and would pass for the wrong
+    // reason (the em-dash was, at one point, what BOTH modes rendered).
+    expect(
+      screen.getByTestId("scenario-entry-mode-book").getAttribute("aria-checked"),
+    ).toBe("true");
+    // Non-vacuity part 2: and it really is the AUM-unset state (custody summed
+    // to zero, nothing typed).
+    expect(
+      (screen.getByTestId("scenario-aum-input") as HTMLInputElement).value,
+    ).toBe("");
+    expect(screen.queryAllByTestId("scenario-constituent-dollar")).toHaveLength(
+      0,
+    );
+
+    const cell = screen.getAllByTestId("scenario-constituent-usd-unset")[0];
+    expect(cell.tagName).toBe("SPAN");
+    expect(cell.getAttribute("title")).toBe(
+      "Set portfolio AUM to size in dollars",
+    );
+    expect(cell.textContent).toContain("—");
+    expect(
+      within(cell).getByText("Set portfolio AUM to size in dollars"),
+    ).toBeInTheDocument();
+    // No fabricated zero, no NaN leaking out of a divide-by-zero.
+    expect(
+      screen.getByTestId("scenario-constituent-list").textContent,
+    ).not.toMatch(/NaN/);
+
+    // …and the state is genuinely reversible: setting an AUM turns the em-dash
+    // into a real editable field.
+    setAum("400000");
+    expect(screen.queryByTestId("scenario-constituent-usd-unset")).toBeNull();
+    expect(dollarInput(D_A).value).toBe("400000");
+  });
+
+  it("AUM-01 Test 6 arm 2 (BLANK mode, AUM unset): the dollar cell is a LIVE input, and the first amount typed seeds the portfolio (founder UAT-1)", () => {
+    renderUsd(blankSlatePayload());
+    add(D_A, "Dollar Strat A");
+
+    // Non-vacuity: blank mode, and the AUM is genuinely unset — this is the
+    // fresh-scenario state the founder starts from, with no top-down seed.
+    expect(screen.queryByTestId("scenario-entry-mode-book")).toBeNull();
+    expect(aumInputValue()).toBe("");
+    expect(usdDrawerAum()).toBe(0);
+
+    // The em-dash must NOT be here: a zero AUM in bottom-up mode is the empty
+    // portfolio, not a non-derivable figure.
+    expect(screen.queryByTestId("scenario-constituent-usd-unset")).toBeNull();
+    expect(screen.queryAllByTestId("scenario-constituent-dollar")).toHaveLength(
+      1,
+    );
+
+    // THE UAT-1 GESTURE, which had no test at all: type an amount into the
+    // row's dollar field on a fresh blank scenario. HAND-COMPUTED oracle — the
+    // only constituent, so AUM' = Σ_{j≠i} d_j + d_i' = 0 + 500,000.
+    setDollar(D_A, "500000");
+
+    expect(
+      vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.manualAumUsd,
+    ).toBe(500_000);
+    expect(usdDrawerAum()).toBe(500_000);
+    // The portfolio really is sized now: the AUM field reflects it, and the row
+    // reads back the amount that was typed (dollar → weight → dollar
+    // round-trips on the composed state).
+    expect(aumInputValue()).toBe("500000");
+    expect(dollarInput(D_A).value).toBe("500000");
+    // No fabricated zero and no NaN reached the screen on the way through.
+    expect(
+      screen.getByTestId("scenario-constituent-list").textContent,
+    ).not.toMatch(/NaN/);
+  });
+
+  // Test 7 — METRICS INVARIANCE re-checked on the COMPOSED state after this
+  // task's wiring (oracle 3). A dollar edit changes WEIGHTS, so the engine
+  // legitimately re-runs; a pure AUM change must still leave scenarioMetrics
+  // byte-identical and must not re-invoke the engine at all. AUM rescales
+  // DOLLARS, never returns — that is what keeps AUM-01 distinct from SCEN-01.
+  it("AUM-01 Test 7 (metrics invariance after the dollar wiring): a dollar edit moves weights, a pure AUM change moves nothing", () => {
+    renderUsd(mixedBookPayload());
+    add(D_A, "Dollar Strat A");
+    setAum("2000000");
+
+    const callsBeforeDollar = computeScenarioStateArgs.length;
+    setDollar(D_A, "500000");
+    // Non-vacuity: the weight edit really reached the engine.
+    expect(computeScenarioStateArgs.length).toBeGreaterThan(callsBeforeDollar);
+
+    const before = lastKpiScenarioMetrics();
+    expect(before?.n ?? 0).toBeGreaterThan(0);
+    expect(before?.sharpe).not.toBeNull();
+    const callsBeforeAum = computeScenarioStateArgs.length;
+
+    setAum("9000000");
+    // The AUM edit landed (otherwise the invariance below is vacuous):
+    // 0.25 × 9,000,000 = 2,250,000, hand-computed.
+    expect(dollarInput(D_A).value).toBe("2250000");
+
+    const after = lastKpiScenarioMetrics();
+    expect(after?.sharpe).toBe(before?.sharpe);
+    expect(after?.cagr).toBe(before?.cagr);
+    expect(after?.max_drawdown).toBe(before?.max_drawdown);
+    expect(after?.n).toBe(before?.n);
+    expect(computeScenarioStateArgs.length).toBe(callsBeforeAum);
+  });
+
+  // Test 12 — the COMMIT-PERSISTENCE seam. The composer hands the drawer
+  // `sanitizedManualAum`, NOT `scenarioAum`: only a genuinely manual value may
+  // cross to the server as a client assertion. A book-mode commit that never
+  // touched the AUM field must omit the field entirely so its audit row stays
+  // on the SERVER-recomputed path (NEW-C18-04) rather than being re-labelled a
+  // client assertion carrying the live-holdings sum.
+  it("AUM-01 Test 12 (drawer threading): a manual AUM reaches the drawer; an untouched book-mode AUM does not", () => {
+    function drawerManualAum(): number | undefined {
+      return vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]
+        ?.manualAumUsd;
+    }
+
+    // Book mode, nothing typed: the live sum sizes the scenario locally, but
+    // NOTHING is asserted to the server.
+    renderUsd(mixedBookPayload());
+    add(D_A, "Dollar Strat A");
+    expect(
+      vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.scenarioAum,
+    ).toBe(60_000);
+    expect(drawerManualAum()).toBeUndefined();
+
+    // …and the moment the allocator overrides it, the assertion travels.
+    setAum("2000000");
+    expect(drawerManualAum()).toBe(2_000_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 152 / SCEN-04 — "What do the numbers actually mean?" (founder verbatim).
+//
+// The composer's added-strategy row is five unlabelled numeric columns. This
+// block pins ONE aria-hidden mono-eyebrow header strip above the ADDED group,
+// labelling those columns: WEIGHT · USD · MODE · LEV · NOTIONAL (UI-SPEC's
+// correction of CONTEXT's four labels — Phase 151 shipped a per-row USD input
+// BETWEEN weight and mode, so a four-label header would silently label the
+// dollar column as part of WEIGHT).
+//
+// The strip carries no data and adds no affordance, so every assertion below is
+// a RENDER RULE (renders iff ≥1 added row, exactly once, in the right sibling
+// slot) or exact COPY — never a visual property, which no jsdom test can honour.
+// The aria-hidden assertion is load-bearing rather than cosmetic: every control
+// in the row already carries its own sr-only label / aria-label, so an
+// announced eyebrow strip would double-label the whole group.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — SCEN-04 header (Phase 152)", () => {
+  const S_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-05-${String(i + 1).padStart(2, "0")}`,
+  );
+  const S_KEY_SERIES = S_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const S_STRAT_SERIES = S_DATES.map((date, i) => ({
+    date,
+    value: [0.01, -0.008, 0.012][i % 3],
+  }));
+
+  const S_A = "scen04-strat-a";
+  const S_B = "scen04-strat-b";
+  const S_K1 = "scen04-key-1";
+
+  /** A LIVE per-key book (so per-key constituent rows genuinely render) plus two
+   *  catalogued strategies available to add. The book matters: the zero-added
+   *  case must prove the header is absent while OTHER rows are on screen — an
+   *  empty list would make that assertion vacuous. */
+  function bookedPayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      ...perKeyBook([{ id: S_K1, returns: S_KEY_SERIES, valueUsd: 60_000 }]),
+      apiKeys: [winApiKey(S_K1)],
+      strategies: [
+        catalogStrategy(S_A, "Scen04 Strat A", S_STRAT_SERIES),
+        catalogStrategy(S_B, "Scen04 Strat B", S_STRAT_SERIES),
+      ],
+    });
+  }
+
+  function renderScen(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  function add(id: string, name: string) {
+    addStrategy({
+      id,
+      name,
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+  }
+
+  // Re-install the CAPTURING browse-drawer mock (every top-level describe owns
+  // its own — the file-level `vi.clearAllMocks()` wipes the implementation, and
+  // without it `addStrategy` has no captured `onAdd` to call).
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  it("SCEN-04 header (render rule, absent): zero added strategies renders NO header — even while per-key rows are on screen", () => {
+    renderScen(bookedPayload());
+
+    // Non-vacuity: the list really is rendering rows, just not added ones.
+    expect(
+      document.querySelectorAll('[data-testid="scenario-constituent-added"]'),
+    ).toHaveLength(0);
+    expect(
+      document.querySelectorAll(`[data-scope-ref="${S_K1}"]`).length,
+    ).toBeGreaterThan(0);
+
+    expect(screen.queryByTestId("scenario-added-header")).toBeNull();
+    // The separator the header shares a guard with is absent too — the two
+    // render together or not at all.
+    expect(screen.queryByText(/Strategies added ·/)).toBeNull();
+  });
+
+  it("SCEN-04 header (render rule, exactly once): two added strategies still render a SINGLE header, never one per row", () => {
+    renderScen(bookedPayload());
+    add(S_A, "Scen04 Strat A");
+    add(S_B, "Scen04 Strat B");
+
+    // Non-vacuity: two added rows are genuinely on screen.
+    expect(
+      screen.getAllByTestId("scenario-constituent-added"),
+    ).toHaveLength(2);
+    expect(screen.getAllByTestId("scenario-added-header")).toHaveLength(1);
+  });
+
+  it("SCEN-04 header (a11y): the strip is aria-hidden so it never double-labels controls that already name themselves", () => {
+    renderScen(bookedPayload());
+    add(S_A, "Scen04 Strat A");
+
+    const header = screen.getByTestId("scenario-added-header");
+    expect(header.getAttribute("aria-hidden")).toBe("true");
+    // The labels are consequently unreachable through the accessible tree:
+    // "WEIGHT" as an accessible name belongs to nothing.
+    expect(screen.queryByLabelText("WEIGHT")).toBeNull();
+  });
+
+  it("SCEN-04 header (copy): exactly five labels — WEIGHT, USD, MODE, LEV, NOTIONAL — in DOM order, with no separator glyphs", () => {
+    renderScen(bookedPayload());
+    add(S_A, "Scen04 Strat A");
+
+    const header = screen.getByTestId("scenario-added-header");
+    const labels = within(header)
+      .getAllByTestId("scenario-added-header-label")
+      .map((el) => el.textContent);
+    expect(labels).toEqual(["WEIGHT", "USD", "MODE", "LEV", "NOTIONAL"]);
+    // Column alignment carries the separation (UI-SPEC Contract 3) — an
+    // interpunct between labels would be a second, competing separator.
+    expect(labels.join("")).not.toContain("·");
+  });
+
+  it("SCEN-04 header (placement): the strip sits AFTER the 'Strategies added ·' separator and BEFORE the first added row", () => {
+    renderScen(bookedPayload());
+    add(S_A, "Scen04 Strat A");
+
+    const header = screen.getByTestId("scenario-added-header");
+    const separator = header.previousElementSibling;
+    const firstRow = header.nextElementSibling;
+
+    expect(separator?.textContent).toContain("Strategies added ·");
+    expect(firstRow?.getAttribute("data-testid")).toBe(
+      "scenario-constituent-added",
+    );
+    // Belt-and-braces on the ordering, independent of sibling walking.
+    expect(
+      separator!.compareDocumentPosition(header) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      header.compareDocumentPosition(firstRow!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  // -------------------------------------------------------------------------
+  // 151/152 UAT (founder, 2026-08-07) — the PER-KEY column-label strip.
+  //
+  // This SUPERSEDES the 152 scope call that per-key rows "deliberately get
+  // none". On the founder's deribit book those rows read `0.000` and `1` with
+  // nothing on screen to say what either number was — the same complaint
+  // SCEN-04 fixed for added rows, one row-type short.
+  //
+  // Phase 152 declined a SHARED header for a real reason (the two row types
+  // have different column sets, so one strip would drift ~104px), and that
+  // reason still stands — hence a SECOND variant sized to the per-key cluster:
+  // WEIGHT · MODE · LEV · NOTIONAL, with NO USD column and NO trailing ×
+  // spacer, because a per-key row has neither control.
+  // -------------------------------------------------------------------------
+  it("151 UAT per-key header (copy): exactly four labels — WEIGHT, MODE, LEV, NOTIONAL — in DOM order, and NO USD", () => {
+    renderScen(bookedPayload());
+
+    const header = screen.getByTestId("scenario-perkey-header");
+    const labels = within(header)
+      .getAllByTestId("scenario-perkey-header-label")
+      .map((el) => el.textContent);
+    // USD is the added-row-only column: a per-key row has no dollar input, so
+    // labelling one would point at nothing.
+    expect(labels).toEqual(["WEIGHT", "MODE", "LEV", "NOTIONAL"]);
+    expect(labels).not.toContain("USD");
+    // Column alignment carries the separation — no competing separator glyph.
+    expect(labels.join("")).not.toContain("·");
+  });
+
+  it("151 UAT per-key header (render rule): renders once above the per-key group, and NOT when there are no per-key rows", () => {
+    renderScen(bookedPayload());
+    // Non-vacuity: per-key rows really are on screen.
+    expect(
+      document.querySelectorAll(`[data-scope-ref="${S_K1}"]`).length,
+    ).toBeGreaterThan(0);
+    expect(screen.getAllByTestId("scenario-perkey-header")).toHaveLength(1);
+
+    // The strip sits immediately BEFORE the first per-key row.
+    const header = screen.getByTestId("scenario-perkey-header");
+    expect(header.nextElementSibling?.getAttribute("data-testid")).toBe(
+      "scenario-constituent-perkey",
+    );
+
+    // A book-less (blank-mode) allocator has no per-key rows → no strip.
+    cleanup();
+    renderScen(
+      makePayload({
+        holdingsSummary: [],
+        apiKeys: [],
+        perKeyReturnsByApiKeyId: {},
+        perKeyDailiesGateSatisfied: false,
+        eligibleApiKeyIds: [],
+        allocatorEligibleApiKeyIds: [],
+        contributingApiKeyIds: [],
+        bookEntryGateSatisfied: false,
+      }),
+    );
+    expect(screen.queryByTestId("scenario-perkey-header")).toBeNull();
+  });
+
+  it("151 UAT per-key header (a11y): aria-hidden, so it never double-labels controls that already name themselves", () => {
+    renderScen(bookedPayload());
+
+    const header = screen.getByTestId("scenario-perkey-header");
+    expect(header.getAttribute("aria-hidden")).toBe("true");
+    // The per-key weight/leverage inputs carry their own sr-only labels, so the
+    // eyebrow must not become a competing accessible name.
+    expect(screen.queryByLabelText("WEIGHT")).toBeNull();
+    expect(screen.queryByLabelText("LEV")).toBeNull();
+  });
+
+  it("151 UAT per-key header (independence): the added header still renders its own five labels alongside it", () => {
+    renderScen(bookedPayload());
+    add(S_A, "Scen04 Strat A");
+
+    // Both strips coexist, each sized to its own cluster — the drift the 152
+    // scope call was protecting against is avoided by having TWO, not by having
+    // none.
+    expect(
+      within(screen.getByTestId("scenario-perkey-header"))
+        .getAllByTestId("scenario-perkey-header-label")
+        .map((el) => el.textContent),
+    ).toEqual(["WEIGHT", "MODE", "LEV", "NOTIONAL"]);
+    expect(
+      within(screen.getByTestId("scenario-added-header"))
+        .getAllByTestId("scenario-added-header-label")
+        .map((el) => el.textContent),
+    ).toEqual(["WEIGHT", "USD", "MODE", "LEV", "NOTIONAL"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 152 / SCEN-04 — the honest non-derivable NOTIONAL on the added row.
+//
+// An unexplained `—` reads "broken". 151's em-dash pattern (title + a duplicated
+// sr-only sentence, because a title alone is unreachable by keyboard/touch)
+// makes it read "not applicable, and here is why".
+//
+// The sentence is CAUSE-ACCURATE by decision D-3, and that is the whole point of
+// the tests below. Shipping CONTEXT's "Set portfolio AUM to size in dollars"
+// here would tell a book-less allocator to type a number that CANNOT make the
+// cell derivable: a dishonest remedy, which is precisely the defect class this
+// phase exists to remove. That sentence stays on the USD cell, where it is true.
+//
+// ⚠️ Review CR-01 — "cause-accurate" means ONE SENTENCE PER CAUSE, and the
+// original suite could not see the difference. The em-dash has three independent
+// causes (no live book equity / the ref carries no blend share / a degenerate
+// product) and SCEN-04 pinned the equity sentence for all of them. The suite
+// only ever exercised a BOOK-LESS payload, so the most common em-dash state — a
+// row toggled OFF while the allocator HAS a live book — rendered "Notional needs
+// live book equity" to someone holding $60,000 of it, and no test could fail.
+// The excluded-row tests below are the ones that close that hole: they assert
+// the note does NOT mention book equity, on a payload where book equity exists.
+//
+// The derived-branch test is the FALSIFIER for "patched the wrong branch": it
+// pins the original derived title byte-for-byte, so widening any remedy title to
+// cover the derived state goes RED.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — SCEN-04 honest notional (Phase 152)", () => {
+  /** The pinned copy (D-3), for the `totalBookEquity == null` cause ONLY.
+   *  U+2014 em-dash, matching the file's Numbers Contract. Typed here as a
+   *  literal, never imported from the component — an oracle that reads the
+   *  implementation's own constant asserts nothing. */
+  const NOTIONAL_NOTE =
+    "Notional needs live book equity — not derivable in this scenario";
+  /** Review CR-01 — the pinned copy for the "ref absent from blendShareByRef"
+   *  cause: an excluded row, or a selected weight mass of 0. A literal, byte
+   *  for byte. */
+  const NOT_IN_BLEND_NOTE =
+    "Notional needs a blend share — this row is not in the blend";
+  /** The pre-existing DERIVED title, byte-verbatim from the shipped tree. */
+  const DERIVED_TITLE =
+    "Notional = equity × blend share × leverage — derived, informative only (minimum-investment check); never a weight input";
+
+  const N_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-05-${String(i + 1).padStart(2, "0")}`,
+  );
+  const N_KEY_SERIES = N_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const N_STRAT_SERIES = N_DATES.map((date, i) => ({
+    date,
+    value: [0.01, -0.008, 0.012][i % 3],
+  }));
+
+  const N_A = "scen04n-strat-a";
+  const N_K1 = "scen04n-key-1";
+
+  /** No book at all → `usePerKeySources` false → `totalBookEquity` null → the
+   *  notional is structurally non-derivable. Also the ONLY row on screen, so
+   *  the single `scenario-constituent-notional` testid is unambiguous. */
+  function blankSlatePayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      holdingsSummary: [],
+      apiKeys: [],
+      perKeyReturnsByApiKeyId: {},
+      perKeyDailiesGateSatisfied: false,
+      eligibleApiKeyIds: [],
+      allocatorEligibleApiKeyIds: [],
+      contributingApiKeyIds: [],
+      bookEntryGateSatisfied: false,
+      strategies: [catalogStrategy(N_A, "Scen04N Strat A", N_STRAT_SERIES)],
+    });
+  }
+
+  /** A live $60,000 book, so the added leg joins the blend and its notional
+   *  genuinely derives (equity × share × leverage). */
+  function bookedPayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      ...perKeyBook([{ id: N_K1, returns: N_KEY_SERIES, valueUsd: 60_000 }]),
+      apiKeys: [winApiKey(N_K1)],
+      strategies: [catalogStrategy(N_A, "Scen04N Strat A", N_STRAT_SERIES)],
+    });
+  }
+
+  function renderScen(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  function add(id: string, name: string) {
+    addStrategy({
+      id,
+      name,
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+  }
+
+  /** The ADDED row's notional cell, scoped by data-scope-ref — never a bare
+   *  getByTestId: the same testid also lives on every per-key row. */
+  function addedNotionalCell(ref: string): HTMLElement {
+    const el = document.querySelector(
+      `[data-scope-ref="${ref}"] [data-testid="scenario-constituent-notional"]`,
+    );
+    expect(el).not.toBeNull();
+    return el as HTMLElement;
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  it("SCEN-04 honest notional (non-derivable): the em-dash carries a CAUSE-ACCURATE title and the same sentence in sr-only text", () => {
+    renderScen(blankSlatePayload());
+    add(N_A, "Scen04N Strat A");
+
+    // Non-vacuity + scope proof: with no book there is exactly ONE notional
+    // cell on screen, and it belongs to the added row.
+    expect(
+      screen.queryAllByTestId("scenario-constituent-notional"),
+    ).toHaveLength(1);
+
+    const cell = addedNotionalCell(N_A);
+    expect(cell.tagName).toBe("SPAN");
+    expect(cell.textContent).toContain("—");
+    expect(cell.getAttribute("title")).toBe(NOTIONAL_NOTE);
+    // The title alone is unreachable by keyboard/touch — the sentence must also
+    // exist as text inside the cell (151's pattern).
+    expect(within(cell).getByText(NOTIONAL_NOTE)).toBeInTheDocument();
+
+    // …and it names the RIGHT remedy: the AUM sentence would be a lie here,
+    // because typing an AUM cannot make this cell derivable.
+    expect(cell.getAttribute("title")).not.toBe(
+      "Set portfolio AUM to size in dollars",
+    );
+  });
+
+  it("SCEN-04 honest notional (derived): the derivable cell keeps its original title byte-verbatim and grows no remedy note", () => {
+    renderScen(bookedPayload());
+    add(N_A, "Scen04N Strat A");
+
+    const cell = addedNotionalCell(N_A);
+    // Non-vacuity: this really IS the derived branch — a dollar figure, not the
+    // em-dash the other test asserts.
+    expect(cell.textContent).not.toContain("—");
+    expect(cell.textContent).toContain("$");
+
+    // The falsifier for "patched the wrong branch": widening the remedy title
+    // to cover both states turns this line RED.
+    expect(cell.getAttribute("title")).toBe(DERIVED_TITLE);
+    expect(within(cell).queryByText(NOTIONAL_NOTE)).toBeNull();
+  });
+
+  it("SCEN-04 honest notional (derived, per-key): a DERIVABLE per-key notional keeps the original title and grows no remedy note", () => {
+    renderScen(bookedPayload());
+    add(N_A, "Scen04N Strat A");
+
+    const perKeyCell = document.querySelector(
+      `[data-scope-ref="${N_K1}"] [data-testid="scenario-constituent-notional"]`,
+    );
+    expect(perKeyCell).not.toBeNull();
+    // Non-vacuity: this is genuinely the derived branch.
+    expect(perKeyCell!.textContent).toContain("$");
+    expect(perKeyCell!.getAttribute("title")).toBe(DERIVED_TITLE);
+    expect(perKeyCell!.textContent).not.toContain(NOTIONAL_NOTE);
+    expect(perKeyCell!.textContent).not.toContain(NOT_IN_BLEND_NOTE);
+  });
+
+  // -------------------------------------------------------------------------
+  // Review CR-01 / WR-06 — the excluded-row arm, WITH a live book.
+  //
+  // These are the tests the shipped SCEN-04 could not have: every prior notional
+  // test either had no book (so "needs live book equity" was true) or was
+  // derivable (so no note rendered). Toggling a row OFF against a $60,000 book
+  // is the dominant em-dash state in real use — exclusion is a first-class
+  // gesture with its own chip — and it is exactly where the single pinned
+  // sentence lied.
+  //
+  // The load-bearing assertion in each is the NEGATIVE one: the note must not
+  // mention book equity. Reverting the fix (one string for all causes) turns it
+  // RED; a fix that merely reworded the equity sentence would not satisfy it.
+  // -------------------------------------------------------------------------
+
+  /** The row's include/exclude `role="switch"`, scoped by data-scope-ref so the
+   *  per-key and added switches can never be confused for one another. */
+  function rowSwitch(ref: string): HTMLElement {
+    const el = document.querySelector(
+      `[data-scope-ref="${ref}"] [role="switch"]`,
+    );
+    expect(el).not.toBeNull();
+    return el as HTMLElement;
+  }
+
+  it("SCEN-04 honest notional (CR-01, added row excluded): with a LIVE book, an excluded row's note names the blend share — never book equity", () => {
+    renderScen(bookedPayload());
+    add(N_A, "Scen04N Strat A");
+
+    // Precondition: with the row included the cell DERIVES, which proves the
+    // book equity this test depends on is genuinely live.
+    expect(addedNotionalCell(N_A).textContent).toContain("$");
+
+    fireEvent.click(rowSwitch(N_A));
+
+    const cell = addedNotionalCell(N_A);
+    expect(cell.textContent).toContain("—");
+    // The false diagnosis this fix removes: the allocator HAS $60,000 of book
+    // equity on screen. Naming it as the blocker is a lie whose implied remedy
+    // (get a live book) cannot make the cell derivable.
+    expect(cell.getAttribute("title")).not.toBe(NOTIONAL_NOTE);
+    expect(cell.textContent).not.toContain("live book equity");
+    // …and the cause it DOES name is the real one, with a reachable remedy
+    // (re-include the row).
+    expect(cell.getAttribute("title")).toBe(NOT_IN_BLEND_NOTE);
+    expect(within(cell).getByText(NOT_IN_BLEND_NOTE)).toBeInTheDocument();
+  });
+
+  it("SCEN-04 honest notional (WR-06, per-key row excluded): the PER-KEY em-dash explains itself too, with its own cause-accurate sentence", () => {
+    renderScen(bookedPayload());
+    add(N_A, "Scen04N Strat A");
+
+    const perKeyCell = () => {
+      const el = document.querySelector(
+        `[data-scope-ref="${N_K1}"] [data-testid="scenario-constituent-notional"]`,
+      );
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    };
+    // Precondition: derivable while included.
+    expect(perKeyCell().textContent).toContain("$");
+
+    fireEvent.click(rowSwitch(N_K1));
+
+    const cell = perKeyCell();
+    expect(cell.textContent).toContain("—");
+    // WR-06: before the fix this half of the list kept the DERIVED sentence on a
+    // cell showing no number at all — the original "what does this mean?"
+    // complaint, left standing directly above the rows that answered it.
+    expect(cell.getAttribute("title")).not.toBe(DERIVED_TITLE);
+    expect(cell.getAttribute("title")).toBe(NOT_IN_BLEND_NOTE);
+    // Same title+sr-only treatment as the added row — a title alone is
+    // unreachable by keyboard/touch.
+    expect(within(cell).getByText(NOT_IN_BLEND_NOTE)).toBeInTheDocument();
+    expect(cell.textContent).not.toContain("live book equity");
+  });
+
+  it("SCEN-04 honest notional (CR-01, book-less row): the equity sentence survives — it is still the right one for ITS cause", () => {
+    // The falsifier for over-correction: a fix that replaced the equity sentence
+    // everywhere (rather than branching on the cause) turns this RED.
+    renderScen(blankSlatePayload());
+    add(N_A, "Scen04N Strat A");
+
+    const cell = addedNotionalCell(N_A);
+    expect(cell.getAttribute("title")).toBe(NOTIONAL_NOTE);
+    expect(cell.getAttribute("title")).not.toBe(NOT_IN_BLEND_NOTE);
+  });
+});
+
+// ===========================================================================
+// Phase 152 / SCEN-02 — the composer's TWO Browse add seams and the "Yours"
+// chip they feed.
+//
+// Why two `it`s with different payloads rather than two adds in one render:
+// `browseOnAdd` is a single module-scoped variable that the capturing drawer
+// mock OVERWRITES on every render, and exactly ONE StrategyBrowseDrawer mounts
+// per branch — the empty-state twin lives inside the blank-slate early return,
+// the main-body twin in the composed one. A second invocation inside one render
+// therefore re-enters the SAME seam; it proves nothing about the other. The two
+// literals are byte-identical, which makes a one-of-two edit the most likely
+// defect in this phase and a single-render test the one that would miss it.
+// ===========================================================================
+describe("ScenarioComposer — SCEN-02 seams + chip (Phase 152)", () => {
+  const S_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-05-${String(i + 1).padStart(2, "0")}`,
+  );
+  const S_KEY_SERIES = S_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const S_STRAT_SERIES = S_DATES.map((date, i) => ({
+    date,
+    value: [0.01, -0.008, 0.012][i % 3],
+  }));
+
+  const OWN_ID = "scen02-own";
+  const OTHER_ID = "scen02-other";
+  const S_K1 = "scen02-key-1";
+
+  /** No book at all → the composer takes its empty-state early return, so the
+   *  ONLY drawer that mounts is the empty-state twin (Seam A). */
+  function blankSlatePayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      holdingsSummary: [],
+      apiKeys: [],
+      perKeyReturnsByApiKeyId: {},
+      perKeyDailiesGateSatisfied: false,
+      eligibleApiKeyIds: [],
+      allocatorEligibleApiKeyIds: [],
+      contributingApiKeyIds: [],
+      bookEntryGateSatisfied: false,
+      strategies: [
+        catalogStrategy(OWN_ID, "Scen02 Own", S_STRAT_SERIES),
+        catalogStrategy(OTHER_ID, "Scen02 Other", S_STRAT_SERIES),
+      ],
+    });
+  }
+
+  /** A live book → the empty-state return is skipped, so the ONLY drawer that
+   *  mounts is the main-body twin (Seam B). */
+  function bookedPayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      ...perKeyBook([{ id: S_K1, returns: S_KEY_SERIES, valueUsd: 60_000 }]),
+      apiKeys: [winApiKey(S_K1)],
+      strategies: [
+        catalogStrategy(OWN_ID, "Scen02 Own", S_STRAT_SERIES),
+        catalogStrategy(OTHER_ID, "Scen02 Other", S_STRAT_SERIES),
+      ],
+    });
+  }
+
+  function renderScen(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  /** Deliberately NOT the shared `addStrategy` helper: its `AddStrategyInput`
+   *  has no `isOwn`, and widening it would let a future test pass the field
+   *  everywhere by accident. These seam tests must control the payload shape
+   *  exactly — including the absent-key case, which is the never-fabricate
+   *  falsifier and cannot be expressed as `isOwn: undefined` on a typed helper
+   *  without the reader wondering which one is under test. */
+  function addRaw(s: {
+    id: string;
+    name: string;
+    markets: string[];
+    strategy_types: string[];
+    isOwn?: boolean | null;
+  }): void {
+    expect(browseOnAdd).not.toBeNull();
+    act(() => {
+      browseOnAdd!(s);
+    });
+  }
+
+  function addOwn(id: string, name: string) {
+    addRaw({
+      id,
+      name,
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+      isOwn: true,
+    });
+  }
+
+  /** The legacy / Bridge payload shape — the `isOwn` KEY is absent entirely,
+   *  not present-and-undefined. */
+  function addWithoutOwnership(id: string, name: string) {
+    addRaw({
+      id,
+      name,
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+  }
+
+  function addedRow(id: string): HTMLElement {
+    const el = document.querySelector(`[data-scope-ref="${id}"]`);
+    expect(el).not.toBeNull();
+    return el as HTMLElement;
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  it("SCEN-02 seam A (empty-state drawer mount): an own strategy added from the blank slate carries isOwn into the draft and shows the Yours chip", () => {
+    renderScen(blankSlatePayload());
+    // Non-vacuity / seam identity: the blank-slate card is on screen, so the
+    // captured onAdd belongs to the EMPTY-STATE twin. Without this line the
+    // test could silently be re-testing Seam B.
+    expect(screen.getByText("Start a portfolio")).toBeInTheDocument();
+
+    addOwn(OWN_ID, "Scen02 Own");
+
+    const chip = within(addedRow(OWN_ID)).getByTestId(
+      `scenario-yours-${OWN_ID}`,
+    );
+    expect(chip).toHaveTextContent("Yours");
+  });
+
+  it("SCEN-02 seam B (main-body drawer mount): an own strategy added over a live book carries isOwn into the draft and shows the Yours chip", () => {
+    renderScen(bookedPayload());
+    // Non-vacuity / seam identity: the blank-slate card is ABSENT, so the only
+    // drawer that mounted is the MAIN-BODY twin. This run cannot be exercising
+    // Seam A, which is what makes it a second, independent proof.
+    expect(screen.queryByText("Start a portfolio")).toBeNull();
+
+    addOwn(OWN_ID, "Scen02 Own");
+
+    const chip = within(addedRow(OWN_ID)).getByTestId(
+      `scenario-yours-${OWN_ID}`,
+    );
+    expect(chip).toHaveTextContent("Yours");
+  });
+
+  it("SCEN-02 never fabricates: a payload with NO isOwn key (Bridge candidate / legacy persisted draft) shows no chip, while an own sibling in the SAME list does", () => {
+    renderScen(bookedPayload());
+    addOwn(OWN_ID, "Scen02 Own");
+    addWithoutOwnership(OTHER_ID, "Scen02 Other");
+
+    // The own row still claims ownership …
+    expect(
+      within(addedRow(OWN_ID)).getByTestId(`scenario-yours-${OWN_ID}`),
+    ).toBeInTheDocument();
+    // … and the signal-less row does not.
+    expect(
+      within(addedRow(OTHER_ID)).queryByTestId(`scenario-yours-${OTHER_ID}`),
+    ).toBeNull();
+    // The paired count is the real falsifier: an implementation that renders
+    // the chip unconditionally (or gates on `!== false`) puts TWO on screen and
+    // still satisfies the positive assertion above on its own.
+    expect(
+      document.querySelectorAll('[data-testid^="scenario-yours-"]'),
+    ).toHaveLength(1);
+  });
+
+  it("WR-01 (composer seam): re-adding a chip-less row from Browse makes the Yours chip appear — the refresh path the gating comment promised", () => {
+    renderScen(bookedPayload());
+    // A pre-152 draft's row: added with no ownership signal at all.
+    addWithoutOwnership(OWN_ID, "Scen02 Own");
+    expect(
+      within(addedRow(OWN_ID)).queryByTestId(`scenario-yours-${OWN_ID}`),
+    ).toBeNull();
+
+    // The allocator hits Add again in Browse; the post-152 wire says it's
+    // theirs. Before the WR-01 fix `addStrategyBrowse`'s dedupe branch returned
+    // the draft untouched, so this was a silent no-op and the row stayed
+    // chip-less forever — no user-reachable remedy short of remove + re-add.
+    addOwn(OWN_ID, "Scen02 Own");
+
+    expect(
+      within(addedRow(OWN_ID)).getByTestId(`scenario-yours-${OWN_ID}`),
+    ).toHaveTextContent("Yours");
+    // The backfill is not a second add: still exactly one row for this id.
+    expect(
+      document.querySelectorAll(`[data-scope-ref="${OWN_ID}"]`),
+    ).toHaveLength(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // Chip render states. The gate is `=== true`; `false`, `null` and an absent
+  // key are three DIFFERENT wire shapes that must all render nothing, and they
+  // fail different wrong gates: `!== false` survives the false case but not
+  // null/absent, a truthiness gate (`a.isOwn &&`) survives all three, and a
+  // `!= null` gate survives only the absent one. Asserting all three is what
+  // makes the gate pinned rather than merely exercised.
+  // -------------------------------------------------------------------------
+
+  /** The chip's anatomy + ink, byte-verbatim from `YoursChip.tsx` (which in turn
+   *  copies `OwnershipTag.tsx:35` / `:48`). Listed as literals, never read off
+   *  the component — an oracle that imports the implementation's own constant
+   *  cannot fail when the constant changes. `rounded-md` is the persistent-FACT
+   *  badge family; a drift to the `rounded-sm` uppercase family would say
+   *  "derived state that can change on its own", which ownership never is. */
+  const CHIP_CLASSES = [
+    "inline-flex",
+    "items-center",
+    "rounded-md",
+    "px-2",
+    "py-0.5",
+    "text-caption",
+    "font-medium",
+    "bg-badge-other/10",
+    "text-text-muted",
+  ];
+
+  it("SCEN-02 chip (isOwn true): renders the shared YoursChip anatomy — sentence-case label, persistent-fact rounded-md family, muted ink", () => {
+    renderScen(bookedPayload());
+    addOwn(OWN_ID, "Scen02 Own");
+
+    const chip = within(addedRow(OWN_ID)).getByTestId(
+      `scenario-yours-${OWN_ID}`,
+    );
+    // Sentence case, matching the OwnershipTag family ("Own capital" /
+    // "Team review") — NOT the shouty uppercase derived-state chips.
+    expect(chip.textContent).toBe("Yours");
+    for (const cls of CHIP_CLASSES) {
+      expect(chip).toHaveClass(cls);
+    }
+    // Placement-independent proof that it is a leaf span in the name cluster,
+    // not a wrapper that swallowed the row.
+    expect(chip.tagName).toBe("SPAN");
+    expect(chip).toHaveClass("shrink-0");
+  });
+
+  it("SCEN-02 chip (isOwn false): an explicit not-mine renders NO chip node", () => {
+    renderScen(bookedPayload());
+    addRaw({
+      id: OWN_ID,
+      name: "Scen02 Own",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+      isOwn: false,
+    });
+
+    expect(addedRow(OWN_ID)).toBeInTheDocument();
+    expect(
+      within(addedRow(OWN_ID)).queryByTestId(`scenario-yours-${OWN_ID}`),
+    ).toBeNull();
+  });
+
+  it("SCEN-02 chip (isOwn null): the JSON.stringify round-trip shape renders NO chip node", () => {
+    renderScen(bookedPayload());
+    addRaw({
+      id: OWN_ID,
+      name: "Scen02 Own",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+      // `null` is what a persisted draft carries when the value could not be
+      // represented — 152-02 declared the schema `.nullish()` precisely so this
+      // decodes instead of resetting the draft. UNKNOWN is not ownership.
+      isOwn: null,
+    });
+
+    expect(addedRow(OWN_ID)).toBeInTheDocument();
+    expect(
+      within(addedRow(OWN_ID)).queryByTestId(`scenario-yours-${OWN_ID}`),
+    ).toBeNull();
+  });
+
+  it("SCEN-02 chip (isOwn absent): a legacy persisted draft row renders NO chip node — un-marked until the next browse/add", () => {
+    renderScen(bookedPayload());
+    addWithoutOwnership(OWN_ID, "Scen02 Own");
+
+    expect(addedRow(OWN_ID)).toBeInTheDocument();
+    expect(
+      within(addedRow(OWN_ID)).queryByTestId(`scenario-yours-${OWN_ID}`),
+    ).toBeNull();
+  });
+
+  it("SCEN-02 chip order: name cluster reads provenance → ownership → coverage (identity facts before derived state)", () => {
+    // A trust tier so TrustTierLabel actually renders, and a toggled-OFF row so
+    // CoverageStateChip actually renders — an order assertion over absent
+    // neighbours proves nothing.
+    const base = catalogStrategy(OWN_ID, "Scen02 Own", S_STRAT_SERIES);
+    renderScen(
+      makePayload({
+        ...perKeyBook([{ id: S_K1, returns: S_KEY_SERIES, valueUsd: 60_000 }]),
+        apiKeys: [winApiKey(S_K1)],
+        strategies: [
+          { ...base, strategy: { ...base.strategy, trust_tier: "csv_uploaded" } },
+        ],
+      }),
+    );
+    addOwn(OWN_ID, "Scen02 Own");
+
+    const row = addedRow(OWN_ID);
+    fireEvent.click(
+      within(row).getByRole("switch", {
+        name: "Toggle Scen02 Own on/off in scenario",
+      }),
+    );
+
+    const trust = within(addedRow(OWN_ID)).getByTestId("trust-tier-label");
+    const chip = within(addedRow(OWN_ID)).getByTestId(
+      `scenario-yours-${OWN_ID}`,
+    );
+    const coverage = within(addedRow(OWN_ID)).getByText("Excluded");
+
+    expect(
+      trust.compareDocumentPosition(chip) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      chip.compareDocumentPosition(coverage) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+});
+
+// ===========================================================================
+// Phase 152 / SCEN-03 — the composer row stops being a dead end.
+//
+// Clicking the strategy NAME (a real <button>, so Enter/Space work natively)
+// expands ONE inline detail panel below the row: provenance / markets / types /
+// CAGR / Sharpe, then a "View factsheet →" link. The panel is a pure projection
+// of data ALREADY in memory — CONTEXT locks NO new fetches this phase, so there
+// is no loading state and no failure state to test; there is only honest
+// absence.
+//
+// Two hazards drive the shape of this block:
+//
+//   B-1 (the double-toggle). The row <li> also toggles on pointer click
+//   (amplification), and the name button lives in the row's LEFT cluster, which
+//   sits OUTSIDE the control-cluster stopPropagation wrapper. Without the
+//   button's own `e.stopPropagation()` both handlers run the SAME functional
+//   toggle and one click nets to a no-op — the panel could never open, by
+//   pointer OR keyboard (a native button dispatches click for Enter/Space). So
+//   the expand test asserts the panel is open AFTER ONE click, never after two.
+//
+//   Fabrication. `formatPercent`/`formatNumber` return "—" for null, so a
+//   drawer-added leg with no analytics must never render "+0.0%" / "0.00". The
+//   honesty test pins the exact note AND sweeps the panel's text for a
+//   zero-shaped figure — an implementation that swapped the null-guard for
+//   `?? 0` would satisfy a note-only assertion.
+//
+// Oracle rule: the formatter outputs are pinned as LITERALS ("+23.4%", "1.87"),
+// never re-derived by calling the formatter in the test — an oracle that runs
+// the implementation's own formula cannot fail when that formula drifts.
+// ===========================================================================
+describe("ScenarioComposer — SCEN-03 detail (Phase 152)", () => {
+  const D_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-05-${String(i + 1).padStart(2, "0")}`,
+  );
+  const D_KEY_SERIES = D_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const D_STRAT_SERIES = D_DATES.map((date, i) => ({
+    date,
+    value: [0.01, -0.008, 0.012][i % 3],
+  }));
+
+  /** Book strategy WITH analytics (real cagr + sharpe). */
+  const D_A = "scen03-strat-a";
+  /** Second book strategy WITH analytics — the one-open-at-a-time partner. */
+  const D_B = "scen03-strat-b";
+  /** Strategy whose analytics are BOTH null — the metrics-absent arm. */
+  const D_NULL = "scen03-strat-null";
+  /** Strategy with a sharpe but NO cagr — the single-null arm. */
+  const D_HALF = "scen03-strat-half";
+  const D_K1 = "scen03-key-1";
+
+  /** The pinned metrics-absent copy (UI-SPEC copy table, amendment 6). U+2014
+   *  em-dash. A literal here, never imported from the component.
+   *
+   *  Review WR-02 — the note names THE COMPOSER, not "this view". For a
+   *  drawer-added strategy the metric pair is structurally unreachable (the
+   *  lookup sources cagr/sharpe from the BOOK payload only, and no fetch is
+   *  allowed this phase), so this is that population's permanent metrics
+   *  statement — it must not read as "expand something else and they appear". */
+  const ABSENT_NOTE =
+    "Metrics not available in the composer — open the factsheet for full detail.";
+
+  /** A catalog strategy carrying REAL analytics — this is the BOOK arm of
+   *  `addedStrategyMetadataLookup` (`found.strategy.strategy_analytics.*`).
+   *  `catalogStrategy` defaults cagr/sharpe to null, which is exactly the
+   *  drawer-added state, so the absent arm needs no override. */
+  function withMetrics(
+    id: string,
+    name: string,
+    cagr: number | null,
+    sharpe: number | null,
+    trustTier?: string,
+  ) {
+    const base = catalogStrategy(id, name, D_STRAT_SERIES);
+    return {
+      ...base,
+      strategy: {
+        ...base.strategy,
+        ...(trustTier ? { trust_tier: trustTier } : {}),
+        strategy_analytics: { ...base.strategy.strategy_analytics, cagr, sharpe },
+      },
+    };
+  }
+
+  /** A live per-key book so the composer takes its COMPOSED branch, plus four
+   *  catalogued strategies. Every id under test is IN the catalog on purpose:
+   *  an id absent from `payload.strategies` triggers the lazy
+   *  `/api/strategies/{id}/returns` fetch, which is orthogonal to this panel
+   *  (the panel reads the in-memory lookup, whose null pair is byte-identical
+   *  whether it came from a drawer-add or from a book row with no analytics). */
+  function bookedPayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      ...perKeyBook([{ id: D_K1, returns: D_KEY_SERIES, valueUsd: 60_000 }]),
+      apiKeys: [winApiKey(D_K1)],
+      strategies: [
+        withMetrics(D_A, "Scen03 Strat A", 0.234, 1.87, "csv_uploaded"),
+        withMetrics(D_B, "Scen03 Strat B", 0.051, 0.62),
+        withMetrics(D_NULL, "Scen03 Strat Null", null, null),
+        withMetrics(D_HALF, "Scen03 Strat Half", null, 1.25),
+      ],
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+  }
+
+  function renderScen(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  function add(id: string, name: string) {
+    addStrategy({
+      id,
+      name,
+      markets: ["binance", "okx"],
+      strategy_types: ["momentum"],
+    });
+  }
+
+  function addedRow(id: string): HTMLElement {
+    const el = document.querySelector(`[data-scope-ref="${id}"]`);
+    expect(el).not.toBeNull();
+    return el as HTMLElement;
+  }
+
+  /** The strategy-NAME button. Exact-string name matching keeps this off the
+   *  mode toggle, whose aria-label merely STARTS with the strategy name. */
+  function nameButton(id: string, name: string): HTMLElement {
+    return within(addedRow(id)).getByRole("button", { name });
+  }
+
+  function openDetail(id: string, name: string) {
+    fireEvent.click(nameButton(id, name));
+  }
+
+  function panel(id: string): HTMLElement | null {
+    return screen.queryByTestId(`scenario-detail-${id}`);
+  }
+
+  /** Panels carry an `id` (for aria-controls); the field spans inside them do
+   *  not. Counting on `[id^=...]` therefore counts PANELS, not fields — which
+   *  is what makes the one-open-at-a-time assertion discriminating. */
+  function openPanelCount(): number {
+    return document.querySelectorAll('[id^="scenario-detail-"]').length;
+  }
+
+  // Re-install the CAPTURING browse-drawer mock (the file-level
+  // `vi.clearAllMocks()` wipes the implementation and every top-level describe
+  // owns its own — without it `addStrategy` has no captured onAdd to call).
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  it("SCEN-03 expand: ONE click on the strategy-name button opens the detail and LEAVES it open; a second click collapses it", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+
+    // Collapsed by default — the panel is not merely hidden, it is unmounted.
+    expect(panel(D_A)).toBeNull();
+
+    openDetail(D_A, "Scen03 Strat A");
+    // THE B-1 ASSERTION. If the button's click bubbles into the row <li>'s
+    // pointer-amplification handler, the same functional toggle runs twice and
+    // this ONE click nets to a no-op — the panel would be null here and could
+    // never be opened by any means.
+    expect(panel(D_A)).toBeInTheDocument();
+
+    openDetail(D_A, "Scen03 Strat A");
+    expect(panel(D_A)).toBeNull();
+  });
+
+  it("SCEN-03 one-open-at-a-time: opening row B closes row A (a single string|null, never a Set)", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    add(D_B, "Scen03 Strat B");
+
+    openDetail(D_A, "Scen03 Strat A");
+    expect(panel(D_A)).toBeInTheDocument();
+    expect(panel(D_B)).toBeNull();
+
+    openDetail(D_B, "Scen03 Strat B");
+    expect(panel(D_A)).toBeNull();
+    expect(panel(D_B)).toBeInTheDocument();
+    // A Set-based state would leave BOTH mounted and still satisfy the
+    // "B is present" line above on its own.
+    expect(openPanelCount()).toBe(1);
+  });
+
+  it("SCEN-03 metrics (book strategy): renders the formatter's OWN renderings — signed 1dp CAGR, 2dp Sharpe — as pinned literals", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    openDetail(D_A, "Scen03 Strat A");
+
+    const p = panel(D_A)!;
+    // 0.234 → formatPercent(v, 1) → "+23.4%" (signed by default).
+    expect(
+      within(p).getByTestId(`scenario-detail-cagr-${D_A}`).textContent,
+    ).toBe("+23.4%");
+    // 1.87 → formatNumber(v, 2) → "1.87".
+    expect(
+      within(p).getByTestId(`scenario-detail-sharpe-${D_A}`).textContent,
+    ).toBe("1.87");
+    // Eyebrow labels are present so the figures are legible without the row.
+    expect(within(p).getByText("CAGR")).toBeInTheDocument();
+    expect(within(p).getByText("SHARPE")).toBeInTheDocument();
+    // A metrics-bearing row must NOT carry the absence note.
+    expect(within(p).queryByText(ABSENT_NOTE)).toBeNull();
+    // Markets / types come off the ADDED row itself (in-memory), `·`-joined.
+    expect(
+      within(p).getByTestId(`scenario-detail-markets-${D_A}`).textContent,
+    ).toBe("binance · okx");
+    expect(
+      within(p).getByTestId(`scenario-detail-types-${D_A}`).textContent,
+    ).toBe("momentum");
+  });
+
+  // -------------------------------------------------------------------------
+  // Review WR-03 — `expandedAddedId` must not outlive the row it names.
+  //
+  // The state is keyed by strategy id, not by position, so removing an EXPANDED
+  // row left the id held. Re-adding the same strategy in the same session then
+  // mounted its row PRE-EXPANDED with aria-expanded="true" and no user gesture —
+  // which a screen reader announces as expanded on first encounter.
+  //
+  // The second assertion pair is the falsifier for an over-broad fix: clearing
+  // the id on any draft change (rather than on the row's disappearance) would
+  // collapse an open panel on every weight edit, so the last block edits a
+  // weight and requires the panel to survive.
+  // -------------------------------------------------------------------------
+  it("WR-03: removing an expanded row releases the id — re-adding it mounts COLLAPSED, not pre-expanded", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    openDetail(D_A, "Scen03 Strat A");
+    expect(panel(D_A)).not.toBeNull();
+
+    // Remove the expanded row via its own × button.
+    fireEvent.click(
+      within(addedRow(D_A)).getByRole("button", {
+        name: "Remove from scenario",
+      }),
+    );
+    expect(document.querySelector(`[data-scope-ref="${D_A}"]`)).toBeNull();
+
+    // Add it straight back. Nothing has been clicked to open anything.
+    add(D_A, "Scen03 Strat A");
+    expect(panel(D_A)).toBeNull();
+    expect(
+      nameButton(D_A, "Scen03 Strat A").getAttribute("aria-expanded"),
+    ).toBe("false");
+    // Belt and braces: no panel anywhere, so the row did not merely re-key.
+    expect(openPanelCount()).toBe(0);
+  });
+
+  it("WR-03 (over-correction falsifier): an open panel SURVIVES an unrelated draft change to the same row", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    openDetail(D_A, "Scen03 Strat A");
+    expect(panel(D_A)).not.toBeNull();
+
+    // A weight edit rewrites `draft.addedStrategies`' containing draft. Clearing
+    // the id on any draft change would collapse the panel here.
+    const weightInput = within(addedRow(D_A)).getByLabelText(
+      "Scen03 Strat A weight",
+    );
+    fireEvent.change(weightInput, { target: { value: "0.400" } });
+
+    expect(panel(D_A)).not.toBeNull();
+  });
+
+  it("SCEN-03 honesty (both metrics null): renders the exact absence note and NO fabricated zero figure", () => {
+    renderScen(bookedPayload());
+    add(D_NULL, "Scen03 Strat Null");
+    openDetail(D_NULL, "Scen03 Strat Null");
+
+    const p = panel(D_NULL)!;
+    expect(within(p).getByText(ABSENT_NOTE)).toBeInTheDocument();
+    // The falsifier for a `?? 0` "fix": a zero-shaped figure anywhere in the
+    // panel means the surface invented a metric it does not have.
+    expect(p.textContent).not.toMatch(/0\.00/);
+    expect(p.textContent).not.toMatch(/[+-]?0\.0%/);
+    // And the metric blocks themselves are absent — a "—" pair plus the note
+    // would be two competing statements of the same absence.
+    expect(within(p).queryByTestId(`scenario-detail-cagr-${D_NULL}`)).toBeNull();
+    expect(
+      within(p).queryByTestId(`scenario-detail-sharpe-${D_NULL}`),
+    ).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Review WR-02 — the note is this population's PERMANENT metrics statement.
+  //
+  // Every other test in this describe seeds the strategy into `payload.strategies`
+  // so the metric pair can be exercised. A real drawer-added strategy is by
+  // construction NOT in the book (that payload is the portfolio_strategies
+  // join), so `addedStrategyMetadataLookup` yields null for both, forever — the
+  // lazy returns route serves only the series, and CONTEXT locks no new fetches.
+  // This test is the only one that reproduces that shape, and it is why the copy
+  // had to name the surface: "not available in this view" invites the reader to
+  // go find the view where they ARE available, and for this population there is
+  // none inside the composer.
+  // -------------------------------------------------------------------------
+  it("WR-02 (drawer-added population): a strategy ABSENT from the book payload shows the absence note naming the composer, and no metric eyebrows", async () => {
+    // The lazy /api/strategies/{id}/returns fetch fires for an id outside the
+    // book. Stub it to a bare series so the panel's metrics arm — not the
+    // network — is what this test observes.
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ daily_returns: D_STRAT_SERIES }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderScen(bookedPayload());
+    const OFF_BOOK = "scen03-not-in-book";
+    add(OFF_BOOK, "Scen03 Off Book");
+    openDetail(OFF_BOOK, "Scen03 Off Book");
+
+    const p = panel(OFF_BOOK)!;
+    // Non-vacuity: the panel really opened and really has in-memory content —
+    // markets come off the added row itself, so they render for an off-book leg.
+    expect(
+      within(p).getByTestId(`scenario-detail-markets-${OFF_BOOK}`).textContent,
+    ).toBe("binance · okx");
+
+    // The metrics arm: no eyebrows, no figures, and the note that names the
+    // surface rather than implying another view inside the composer has them.
+    expect(within(p).queryByTestId(`scenario-detail-cagr-${OFF_BOOK}`)).toBeNull();
+    expect(
+      within(p).queryByTestId(`scenario-detail-sharpe-${OFF_BOOK}`),
+    ).toBeNull();
+    expect(within(p).getByText(ABSENT_NOTE)).toBeInTheDocument();
+    expect(p.textContent).not.toContain("not available in this view");
+  });
+
+  it("SCEN-03 honesty (ONE metric null): the pair still renders and the missing one is an em-dash, not the absence note", () => {
+    renderScen(bookedPayload());
+    add(D_HALF, "Scen03 Strat Half");
+    openDetail(D_HALF, "Scen03 Strat Half");
+
+    const p = panel(D_HALF)!;
+    // The note is for a TOTAL absence; a half-known row still has something to
+    // say, so it says it and dashes the rest (Numbers Contract).
+    expect(within(p).queryByText(ABSENT_NOTE)).toBeNull();
+    expect(
+      within(p).getByTestId(`scenario-detail-cagr-${D_HALF}`).textContent,
+    ).toBe("—");
+    expect(
+      within(p).getByTestId(`scenario-detail-sharpe-${D_HALF}`).textContent,
+    ).toBe("1.25");
+  });
+
+  it("SCEN-03 provenance: a tiered row renders the shared TrustTierLabel; an untiered one renders an explicit em-dash", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A"); // trust_tier csv_uploaded
+    add(D_NULL, "Scen03 Strat Null"); // no trust tier at all
+
+    // Positive arm first — without it the em-dash assertion below would pass
+    // against a panel that renders no provenance row whatsoever.
+    openDetail(D_A, "Scen03 Strat A");
+    const tiered = within(panel(D_A)!).getByTestId(
+      `scenario-detail-provenance-${D_A}`,
+    );
+    expect(within(tiered).getByTestId("trust-tier-label")).toBeInTheDocument();
+    expect(tiered.textContent).not.toBe("—");
+
+    openDetail(D_NULL, "Scen03 Strat Null");
+    const untiered = within(panel(D_NULL)!).getByTestId(
+      `scenario-detail-provenance-${D_NULL}`,
+    );
+    // TrustTierLabel returns null for a null tier — a labelled empty space is
+    // not honest absence, so the panel writes the dash itself.
+    expect(untiered.textContent).toBe("—");
+    expect(within(untiered).queryByTestId("trust-tier-label")).toBeNull();
+  });
+
+  it("SCEN-03 factsheet link: href is exactly /factsheet/{id} and the text is the pinned CTA", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    openDetail(D_A, "Scen03 Strat A");
+
+    const link = within(panel(D_A)!).getByRole("link", {
+      name: "View factsheet →",
+    });
+    // getAttribute, not `.href`: jsdom resolves the property to an absolute URL,
+    // which would still pass against a wrong base path.
+    expect(link.getAttribute("href")).toBe(`/factsheet/${D_A}`);
+  });
+
+  it("SCEN-03 wiring: the name button's aria-controls names the panel's own id", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    openDetail(D_A, "Scen03 Strat A");
+
+    const btn = nameButton(D_A, "Scen03 Strat A");
+    const p = panel(D_A)!;
+    expect(btn.getAttribute("aria-controls")).toBe(`scenario-detail-${D_A}`);
+    // The controls target must EXIST under that id — an aria-controls pointing
+    // at nothing is a broken relationship a screen reader silently drops.
+    expect(p.getAttribute("id")).toBe(btn.getAttribute("aria-controls"));
+  });
+
+  // -------------------------------------------------------------------------
+  // Keyboard reach. The affordance is a REAL <button>, so Enter and Space are
+  // native — there is no onKeyDown in the source and there must not be one. The
+  // tests therefore drive the browser's own activation path via user-event
+  // (fireEvent.keyDown would dispatch a key event that nothing listens for and
+  // pass against a component with no keyboard support at all).
+  //
+  // The criteria are phrased "on the focused strategy-name BUTTON", never "on
+  // the focused row" (152-UI-SPEC acceptance-phrasing rule): the row container
+  // is deliberately not focusable, so a row-focus criterion would pin an
+  // affordance the contract forbids.
+  // -------------------------------------------------------------------------
+
+  it("SCEN-03 keyboard: Enter on the focused strategy-name button toggles the detail", async () => {
+    const user = userEvent.setup();
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+
+    nameButton(D_A, "Scen03 Strat A").focus();
+    expect(nameButton(D_A, "Scen03 Strat A")).toHaveFocus();
+
+    await user.keyboard("{Enter}");
+    expect(panel(D_A)).toBeInTheDocument();
+    await user.keyboard("{Enter}");
+    expect(panel(D_A)).toBeNull();
+  });
+
+  it("SCEN-03 keyboard: Space on the focused strategy-name button toggles the detail", async () => {
+    const user = userEvent.setup();
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+
+    nameButton(D_A, "Scen03 Strat A").focus();
+    expect(nameButton(D_A, "Scen03 Strat A")).toHaveFocus();
+
+    await user.keyboard(" ");
+    expect(panel(D_A)).toBeInTheDocument();
+    await user.keyboard(" ");
+    expect(panel(D_A)).toBeNull();
+  });
+
+  it("SCEN-03 keyboard: aria-expanded tracks the panel — 'false' collapsed, 'true' expanded", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+
+    expect(
+      nameButton(D_A, "Scen03 Strat A").getAttribute("aria-expanded"),
+    ).toBe("false");
+    openDetail(D_A, "Scen03 Strat A");
+    expect(
+      nameButton(D_A, "Scen03 Strat A").getAttribute("aria-expanded"),
+    ).toBe("true");
+    openDetail(D_A, "Scen03 Strat A");
+    expect(
+      nameButton(D_A, "Scen03 Strat A").getAttribute("aria-expanded"),
+    ).toBe("false");
+  });
+
+  // -------------------------------------------------------------------------
+  // Control exclusions. The row <li> toggles on pointer click (amplification),
+  // so every interactive descendant must stop propagation or the composer
+  // becomes unusable — every weight edit would expand or collapse a panel under
+  // the user's cursor.
+  //
+  // FIVE of the six controls are asserted in BOTH directions (a collapsed panel
+  // must not open, an open one must not close). One direction alone is weak:
+  // "still closed" passes trivially against a component whose panel never opens,
+  // and "still open" passes against one that never closes.
+  // -------------------------------------------------------------------------
+
+  /** Click `getControl()` with the panel collapsed and again with it expanded;
+   *  neither click may change the panel's presence. The control is re-queried
+   *  each time because some of them (the switch) re-render their own row. */
+  function expectExcluded(
+    id: string,
+    name: string,
+    getControl: () => HTMLElement,
+  ) {
+    expect(panel(id)).toBeNull();
+    fireEvent.click(getControl());
+    expect(panel(id)).toBeNull();
+
+    openDetail(id, name);
+    expect(panel(id)).toBeInTheDocument();
+    fireEvent.click(getControl());
+    expect(panel(id)).toBeInTheDocument();
+  }
+
+  /** Set the portfolio AUM through the AUM-01 input (commits on blur) so the
+   *  per-row dollar cell renders as an INPUT rather than its em-dash
+   *  read-only state — otherwise the dollar exclusion would test nothing. */
+  function setAum(raw: string) {
+    const el = screen.getByTestId("scenario-aum-input") as HTMLInputElement;
+    act(() => {
+      fireEvent.change(el, { target: { value: raw } });
+      fireEvent.blur(el);
+    });
+  }
+
+  it("SCEN-03 exclusion (weight input): clicking the weight field never toggles the detail", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    expectExcluded(D_A, "Scen03 Strat A", () => {
+      const el = document.getElementById(`weight-${D_A}`);
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+  });
+
+  it("SCEN-03 exclusion (dollar input): clicking the USD field never toggles the detail", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    setAum("1000000");
+    // Non-vacuity: the dollar INPUT genuinely rendered (unset AUM renders a
+    // read-only em-dash instead, which would make the click meaningless).
+    expect(document.getElementById(`alloc-usd-${D_A}`)).not.toBeNull();
+
+    expectExcluded(D_A, "Scen03 Strat A", () => {
+      const el = document.getElementById(`alloc-usd-${D_A}`);
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+  });
+
+  it("SCEN-03 exclusion (mode toggle): clicking the Leverage/Target mode toggle never toggles the detail", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    expectExcluded(D_A, "Scen03 Strat A", () =>
+      within(addedRow(D_A)).getByTestId("scenario-leverage-mode-toggle"),
+    );
+  });
+
+  it("SCEN-03 exclusion (leverage input): clicking the leverage field never toggles the detail", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    expectExcluded(D_A, "Scen03 Strat A", () => {
+      const el = document.getElementById(`leverage-${D_A}`);
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+  });
+
+  it("SCEN-03 exclusion (include/exclude switch): the on/off toggle never toggles the detail — it sits OUTSIDE the control-cluster wrapper", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    // Checker B-2: this switch lives in the row's LEFT cluster, so the ONE
+    // stopPropagation wrapper around the numeric controls does not cover it. It
+    // needs its own — without it, excluding a row also expands it.
+    expectExcluded(D_A, "Scen03 Strat A", () =>
+      within(addedRow(D_A)).getByRole("switch", {
+        name: "Toggle Scen03 Strat A on/off in scenario",
+      }),
+    );
+  });
+
+  it("SCEN-03 exclusion (remove button): removing row B while row A is expanded leaves A's panel open", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    add(D_B, "Scen03 Strat B");
+
+    openDetail(D_A, "Scen03 Strat A");
+    expect(panel(D_A)).toBeInTheDocument();
+
+    fireEvent.click(
+      within(addedRow(D_B)).getByRole("button", { name: "Remove from scenario" }),
+    );
+
+    // B is gone …
+    expect(document.querySelector(`[data-scope-ref="${D_B}"]`)).toBeNull();
+    // … and A's panel survived: the remove click neither collapsed A (a bubbled
+    // toggle on B's row would not have, but an unscoped one would) nor left a
+    // second panel behind.
+    expect(panel(D_A)).toBeInTheDocument();
+    expect(openPanelCount()).toBe(1);
+  });
+
+  it("SCEN-03 panel click: clicking INSIDE the open panel does not collapse it", () => {
+    renderScen(bookedPayload());
+    add(D_A, "Scen03 Strat A");
+    openDetail(D_A, "Scen03 Strat A");
+
+    // The panel is new DOM inside the clickable row; without its own
+    // stopPropagation, selecting a figure in it would collapse the thing you
+    // were reading.
+    fireEvent.click(
+      within(panel(D_A)!).getByTestId(`scenario-detail-markets-${D_A}`),
+    );
+    expect(panel(D_A)).toBeInTheDocument();
+  });
+});
+
+// ===========================================================================
+// Review round 2 (F2 / F4 / F5) — the partial book is the DEFAULT case.
+//
+// The founder's real account is 8 allocator-eligible keys of which 2 carry a
+// per-key return series, so every number on this surface is rendered against a
+// partial book in production. These tests fix the fixture in that shape and
+// pin three things the reviews found broken there:
+//
+//   F2 — one dollar BASIS. The AUM the per-row dollars are drawn from and the
+//        equity the NOTIONAL column is drawn from must be the SAME book.
+//   F4 — the Portfolio AUM refusal must be VISIBLE, not console-only.
+//   F5 — the NOTIONAL column must have an accessible name on BOTH branches.
+//
+// The money oracle is hand-computed from the fixture below and never re-derived
+// from the component: the equities are stated once, the modelled book is their
+// sum written out as a literal, and the expected cell strings are written out
+// as literals too.
+// ===========================================================================
+describe("ScenarioComposer — review round 2: partial-book dollars (F2/F4/F5)", () => {
+  const F2_DATES = Array.from(
+    { length: 14 },
+    (_, i) => `2026-06-${String(i + 1).padStart(2, "0")}`,
+  );
+  // DISTINCT return patterns per contributing key. Identical patterns would let
+  // a key-set discriminator pass by coincidence (the vacuous-fixture trap): with
+  // the same series on every key, blending the wrong set produces the same
+  // curve, and only the DOLLAR assertions below would still bite.
+  const F2_SERIES_A = F2_DATES.map((date, i) => ({
+    date,
+    value: [0.004, -0.001, 0.002, 0.0005][i % 4],
+  }));
+  const F2_SERIES_B = F2_DATES.map((date, i) => ({
+    date,
+    value: [-0.012, 0.021, -0.006, 0.017][i % 4],
+  }));
+
+  const F2_KEY_A = "f2-key-a";
+  const F2_KEY_B = "f2-key-b";
+  const F2_KEY_C = "f2-key-c";
+  const F2_KEY_D = "f2-key-d";
+  const F2_ALL_KEYS = [F2_KEY_A, F2_KEY_B, F2_KEY_C, F2_KEY_D];
+  const F2_CONTRIBUTING = [F2_KEY_A, F2_KEY_B];
+
+  // ── THE HAND-COMPUTED BOOK ────────────────────────────────────────────────
+  //   modelled (a + b, the keys with a series)  30,000 + 10,000 =  40,000
+  //   dormant  (c + d, no series)              200,000 + 220,000 = 420,000
+  //   custody total                                              = 460,000
+  // The 11.5× gap between modelled and custody is deliberate: it is far larger
+  // than any rounding or formatting slack, so a basis mix-up cannot hide inside
+  // a tolerance.
+  const F2_EQUITY: Record<string, number> = {
+    [F2_KEY_A]: 30_000,
+    [F2_KEY_B]: 10_000,
+    [F2_KEY_C]: 200_000,
+    [F2_KEY_D]: 220_000,
+  };
+  const F2_MODELLED_BOOK = 40_000;
+  const F2_CUSTODY_BOOK = 460_000;
+  // Each contributing key's share of the MODELLED book, and the notional cell
+  // that share must produce at the default 1× leverage:
+  //   key-a  30,000 / 40,000 = 0.75  →  0.75 × 40,000 = 30,000  →  "$30K"
+  //   key-b  10,000 / 40,000 = 0.25  →  0.25 × 40,000 = 10,000  →  "$10K"
+  const F2_NOTIONAL_A = "$30K";
+  const F2_NOTIONAL_B = "$10K";
+
+  const F2_SYMS = ["BTC", "ETH", "SOL", "XRP"];
+  const F2_VENUES = ["binance", "okx", "bybit", "deribit"];
+
+  /** A book of four allocator-eligible keys; `contributing` names the subset
+   *  that carries a per-key return series. Holdings are SPOT, so each key's
+   *  equity contribution IS its `value_usd` and the fixture's arithmetic is the
+   *  reader's arithmetic. */
+  function f2Payload(
+    contributing: string[] = F2_CONTRIBUTING,
+  ): MyAllocationDashboardPayload {
+    return makePayload({
+      apiKeys: F2_ALL_KEYS.map((id) => winApiKey(id)),
+      holdingsSummary: F2_ALL_KEYS.map((id, idx) => ({
+        ...HOLDING_BTC,
+        symbol: F2_SYMS[idx],
+        venue: F2_VENUES[idx],
+        holding_type: "spot" as const,
+        value_usd: F2_EQUITY[id],
+        api_key_id: id,
+      })),
+      perKeyReturnsByApiKeyId: Object.fromEntries(
+        contributing.map((id, i) => [
+          id,
+          i % 2 === 0 ? F2_SERIES_A : F2_SERIES_B,
+        ]),
+      ),
+      perKeyDailiesGateSatisfied: contributing.length === F2_ALL_KEYS.length,
+      eligibleApiKeyIds: [...F2_ALL_KEYS],
+      allocatorEligibleApiKeyIds: [...F2_ALL_KEYS],
+      contributingApiKeyIds: contributing,
+      bookEntryGateSatisfied: contributing.length > 0,
+    });
+  }
+
+  function renderF2(payload: MyAllocationDashboardPayload) {
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  function aumField(): HTMLInputElement {
+    return screen.getByTestId("scenario-aum-input") as HTMLInputElement;
+  }
+
+  /** A per-key row's notional cell, scoped by data-scope-ref — the testid also
+   *  lives on every other row. */
+  function notionalCell(ref: string): HTMLElement {
+    const el = document.querySelector(
+      `[data-scope-ref="${ref}"] [data-testid="scenario-constituent-notional"]`,
+    );
+    expect(el).not.toBeNull();
+    return el as HTMLElement;
+  }
+
+  function rowSwitchF2(ref: string): HTMLElement {
+    const el = document.querySelector(
+      `[data-scope-ref="${ref}"] [role="switch"]`,
+    );
+    expect(el).not.toBeNull();
+    return el as HTMLElement;
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    cleanup();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  // -------------------------------------------------------------------------
+  // F2 — THE ECONOMIC INVARIANT: the rows add up to the book they are drawn from
+  // -------------------------------------------------------------------------
+  it("F2: in a partial book the per-row dollars sum to the modelled book — Σ notional === PORTFOLIO AUM === $40,000, not the $460,000 custody total", () => {
+    const payload = f2Payload();
+
+    // Fixture self-proof (non-vacuity): custody really does hold 11.5× the
+    // modelled book, so the two candidate bases are unmistakably different and
+    // an assertion below cannot pass under both.
+    expect(
+      payload.holdingsSummary.reduce((s, h) => s + h.value_usd, 0),
+    ).toBe(F2_CUSTODY_BOOK);
+    expect(F2_EQUITY[F2_KEY_A] + F2_EQUITY[F2_KEY_B]).toBe(F2_MODELLED_BOOK);
+    expect(F2_CUSTODY_BOOK - F2_MODELLED_BOOK).toBe(420_000);
+
+    renderF2(payload);
+
+    // Only the contributing keys get rows — the set the weights renormalize
+    // across, and therefore the set the dollars must be drawn from.
+    expect(
+      screen
+        .getAllByTestId("scenario-constituent-perkey")
+        .map((r) => r.getAttribute("data-scope-ref")),
+    ).toEqual([F2_KEY_A, F2_KEY_B]);
+
+    // (1) The NOTIONAL column — share × book equity × leverage. Hand-computed
+    // above from the fixture's own equities; unchanged by this fix, and so the
+    // FIXED reference the AUM has to agree with.
+    expect(notionalCell(F2_KEY_A).textContent).toContain(F2_NOTIONAL_A);
+    expect(notionalCell(F2_KEY_B).textContent).toContain(F2_NOTIONAL_B);
+
+    // (2) The headline PORTFOLIO AUM — the denominator every per-row USD cell
+    // is `Math.round(weight × AUM)` of. Pre-fix this summed EVERY holding
+    // toggle in the draft (defaultDraftFromHoldings seeds them all true), so it
+    // read the custody total while the notionals above read the modelled book:
+    // one row, two dollar figures, 11.5× apart.
+    expect(aumField().value).toBe(String(F2_MODELLED_BOOK));
+
+    // (3) THE INVARIANT, stated as arithmetic on the two numbers above rather
+    // than as a restatement of either: the rows add up to the book.
+    expect(30_000 + 10_000).toBe(Number(aumField().value));
+
+    // (4) The discriminating negative. Without the narrowing this is exactly
+    // what the field showed.
+    expect(aumField().value).not.toBe(String(F2_CUSTODY_BOOK));
+  });
+
+  it("F2: a WHOLE book is untouched — when every eligible key contributes, the AUM is the full $460,000 and no modelled-set note is shown", () => {
+    // The over-correction falsifier: a fix that simply shrank the AUM (or
+    // hard-coded a narrowing) turns this RED. Same fixture, same holdings — only
+    // the contributing set changes.
+    renderF2(f2Payload(F2_ALL_KEYS));
+
+    expect(aumField().value).toBe(String(F2_CUSTODY_BOOK));
+    expect(
+      screen.queryByTestId("scenario-aum-modelled-note"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("scenario-partial-book-note"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("F2: the narrowed AUM is DISCLOSED next to the field — 'Models 2 of 4 keys', muted, and absent in blank mode", () => {
+    renderF2(f2Payload());
+
+    const note = screen.getByTestId("scenario-aum-modelled-note");
+    // Typed out, not imported: an oracle that reads the source's own string
+    // would pass against any string.
+    expect(note.textContent).toBe(
+      "Models 2 of 4 keys — the ones with a return series.",
+    );
+    // Steady-state disclosure, matching the sibling partial-book note's voice:
+    // muted, never amber, never an alert.
+    expect(note.className).toContain("text-text-muted");
+    expect(note.className).not.toMatch(/warning|amber|danger|destructive/i);
+    expect(note).not.toHaveAttribute("role");
+
+    // Blank mode has no key basis to disclose — the AUM there is whatever the
+    // allocator typed.
+    fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
+    expect(
+      screen.queryByTestId("scenario-aum-modelled-note"),
+    ).not.toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // F4 — the AUM refusal is visible
+  // -------------------------------------------------------------------------
+  it("F4: an invalid Portfolio AUM surfaces a cause-accurate banner naming the accepted range — not a console.warn and a silent snap-back", () => {
+    renderF2(f2Payload());
+    // Pre-condition: no banner, and the field holds the modelled book.
+    expect(screen.queryByTestId("scenario-commit-error")).not.toBeInTheDocument();
+    expect(aumField().value).toBe(String(F2_MODELLED_BOOK));
+
+    fireEvent.change(aumField(), { target: { value: "-5" } });
+    fireEvent.blur(aumField());
+
+    const banner = screen.getByTestId("scenario-commit-error");
+    expect(banner.textContent).toBe(
+      "Invalid portfolio AUM — enter a positive amount under $1,000,000,000,000. The previous value was kept.",
+    );
+    // The pre-existing half of the behaviour is intact: the field never
+    // displays a number the draft does not hold.
+    expect(aumField().value).toBe(String(F2_MODELLED_BOOK));
+  });
+
+  it("F4: a ZERO AUM gets its own sentence — a zero is a claim, not the same defect as a malformed number", () => {
+    renderF2(f2Payload());
+
+    fireEvent.change(aumField(), { target: { value: "0" } });
+    fireEvent.blur(aumField());
+
+    expect(screen.getByTestId("scenario-commit-error").textContent).toBe(
+      "Portfolio AUM must be greater than $0 — a zero size cannot be allocated. The zero was not applied.",
+    );
+  });
+
+  /**
+   * 151 red-team K1 — THE REFUSAL MAY NOT INSTRUCT AN ACTION THE CODE CANNOT
+   * PERFORM.
+   *
+   * The zero arm used to end "Clear the field instead to leave it unset." No
+   * caller of `setManualAum(undefined)` exists anywhere in `src/`: the blank
+   * arm of `commitAumInput` only snaps the text back to the committed value,
+   * deliberately, because that is what makes "a benign focus→blur of an empty
+   * field commits nothing" (WR-04) hold. So the sentence was false in exactly
+   * the state an allocator would act on it from — book mode with a committed
+   * manual override they want to remove — and merely harmless in the never-set
+   * blank state it happened to be written for.
+   *
+   * This test pins BOTH halves so the sentence cannot come back:
+   *   1. the mechanism — clearing a field holding a committed override does NOT
+   *      unset it, so any future re-added "clear it" instruction is provably a
+   *      lie at the moment it is added; and
+   *   2. the copy — the message names the rule and what happened, and instructs
+   *      no clearing.
+   *
+   * ⚠️ If the missing capability is ever built (a real "clear the override"
+   * path back to the derived live-holdings size), assertion (1) is the one that
+   * SHOULD go red — and at that point restoring the instruction is correct.
+   * Assertion (1) failing is therefore a prompt to re-read this block, not a
+   * flake to silence.
+   */
+  it("F4/K1: clearing a committed manual AUM does NOT unset it — so the zero refusal must not tell the allocator to clear the field", () => {
+    renderF2(f2Payload());
+    // Precondition: the field is seeded with the DERIVED modelled book, and
+    // nothing manual has been committed.
+    expect(aumField().value).toBe(String(F2_MODELLED_BOOK));
+    expect(
+      vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.manualAumUsd,
+    ).toBeUndefined();
+
+    // Commit a manual override — the state the dropped sentence addressed.
+    fireEvent.change(aumField(), { target: { value: "500000" } });
+    fireEvent.blur(aumField());
+    expect(aumField().value).toBe("500000");
+    expect(
+      vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.manualAumUsd,
+    ).toBe(500_000);
+
+    // (1) Now do what the old copy told them to do: clear the field and blur.
+    fireEvent.change(aumField(), { target: { value: "" } });
+    fireEvent.blur(aumField());
+
+    // …and the override is untouched. The field re-displays it, the draft still
+    // holds it, and it is still on the commit body. "Leave it unset" did not
+    // happen and cannot happen through this control.
+    expect(aumField().value).toBe("500000");
+    expect(
+      vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.manualAumUsd,
+    ).toBe(500_000);
+    // The override note is the user-visible proof the override survived.
+    expect(
+      screen.getByTestId("scenario-aum-override-note"),
+    ).toBeInTheDocument();
+
+    // (2) Given (1), the zero refusal may not point at that non-existent
+    // remedy. Typed out rather than imported: an oracle that read the source's
+    // own string would pass against any string, including the false one.
+    fireEvent.change(aumField(), { target: { value: "0" } });
+    fireEvent.blur(aumField());
+    const banner = screen.getByTestId("scenario-commit-error");
+    expect(banner.textContent).toBe(
+      "Portfolio AUM must be greater than $0 — a zero size cannot be allocated. The zero was not applied.",
+    );
+    // The specific lie, named — any rewording that again sends the allocator to
+    // the field-clearing gesture (1) just proved is a no-op fails here.
+    expect(banner.textContent).not.toMatch(/clear(ing)? the field/i);
+    expect(banner.textContent).not.toMatch(/unset/i);
+  });
+
+  it("F4: a subsequent VALID AUM clears the banner — the refusal cannot outlive the value it described", () => {
+    renderF2(f2Payload());
+
+    fireEvent.change(aumField(), { target: { value: "-5" } });
+    fireEvent.blur(aumField());
+    expect(screen.getByTestId("scenario-commit-error")).toBeInTheDocument();
+
+    fireEvent.change(aumField(), { target: { value: "75000" } });
+    fireEvent.blur(aumField());
+
+    // The banner has no dismiss control, so this is the only way it goes away.
+    expect(screen.queryByTestId("scenario-commit-error")).not.toBeInTheDocument();
+    expect(aumField().value).toBe("75000");
+  });
+
+  // -------------------------------------------------------------------------
+  // F5 — the NOTIONAL column's accessible name
+  // -------------------------------------------------------------------------
+  it("F5: the DERIVED notional carries an accessible name — a screen reader hears the column, not a bare '$30K'", () => {
+    renderF2(f2Payload());
+
+    const cell = notionalCell(F2_KEY_A);
+    // Non-vacuity: this really is the derived branch (a currency figure, not
+    // the em-dash), which pre-fix carried NO sr-only text at all.
+    expect(cell.textContent).toContain(F2_NOTIONAL_A);
+    expect(cell.textContent).not.toContain("—");
+    // The name, in the row's own terms. Both column-label strips are
+    // aria-hidden, so this span is the only thing that says which column the
+    // figure came from.
+    expect(within(cell).getByText(`${F2_KEY_A} notional.`)).toBeInTheDocument();
+  });
+
+  it("F5: the EM-DASH notional keeps its cause sentence AND gains the same name — the fix covers both branches, not one", () => {
+    renderF2(f2Payload());
+    // Precondition: derivable while included.
+    expect(notionalCell(F2_KEY_B).textContent).toContain(F2_NOTIONAL_B);
+
+    fireEvent.click(rowSwitchF2(F2_KEY_B));
+
+    const cell = notionalCell(F2_KEY_B);
+    expect(cell.textContent).toContain("—");
+    expect(within(cell).getByText(`${F2_KEY_B} notional.`)).toBeInTheDocument();
+    // The pre-existing cause-accurate sentence is not displaced by the name.
+    expect(
+      within(cell).getByText(
+        "Notional needs a blend share — this row is not in the blend",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // E1 — ONE VALUE BASIS, on a DERIVATIVES book
+  //
+  // F2 above closed the key-SET divergence and its fixture is deliberately
+  // SPOT-only, where `value_usd` and the equity contribution are the same
+  // number — so it cannot see a VALUE-basis divergence at all. The founder's
+  // production book is Deribit, i.e. derivatives, where the two definitions
+  // come apart by the leverage factor: `value_usd` on a derivative is the
+  // NOTIONAL contract size and the equity at stake is `unrealized_pnl_usd`.
+  //
+  // ── THE HAND-COMPUTED BOOK (arithmetic done here, not re-derived from the
+  //    component; the composer never sees these literals) ────────────────────
+  //   key-A  DERIVATIVE   notional  value_usd = 900,000
+  //                       equity    unrealized_pnl_usd = 30,000   ← 30× apart
+  //   key-B  SPOT         value_usd = 10,000, no P&L  ⇒ equity = 10,000
+  //   key-C  SPOT, NOT contributing (no series)  value_usd = 250,000
+  //
+  //   MODELLED book equity   = 30,000 + 10,000            =  40,000
+  //   MODELLED book NOTIONAL = 900,000 + 10,000           = 910,000  ← pre-fix
+  //   custody grand total    = 900,000 + 10,000 + 250,000 = 1,160,000
+  //
+  //   shares of the modelled book, and the 1× notional cells they produce:
+  //     key-A  30,000 / 40,000 = 0.75 → 0.75 × 40,000 = 30,000 → "$30K"
+  //     key-B  10,000 / 40,000 = 0.25 → 0.25 × 40,000 = 10,000 → "$10K"
+  //   per-row USD cells are Math.round(weight × AUM) of the SAME two shares,
+  //   so Σ row dollars must land on the same 40,000.
+  //
+  // The three candidate bases (40,000 / 910,000 / 1,160,000) are pairwise
+  // 20×-and-more apart, so no assertion below can pass under two of them.
+  // -------------------------------------------------------------------------
+  const E1_KEY_DERIV = "e1-key-deriv";
+  const E1_KEY_SPOT = "e1-key-spot";
+  const E1_KEY_DORMANT = "e1-key-dormant";
+
+  const E1_DERIV_NOTIONAL = 900_000;
+  const E1_DERIV_EQUITY = 30_000;
+  const E1_SPOT_EQUITY = 10_000;
+  const E1_DORMANT_VALUE = 250_000;
+
+  const E1_MODELLED_EQUITY = 40_000; // 30,000 + 10,000
+  const E1_MODELLED_NOTIONAL = 910_000; // 900,000 + 10,000 — the pre-fix figure
+  const E1_CUSTODY_TOTAL = 1_160_000;
+
+  const E1_NOTIONAL_DERIV = "$30K";
+  const E1_NOTIONAL_SPOT = "$10K";
+
+  /** Two contributing keys — one DERIVATIVE, one SPOT — plus a dormant spot
+   *  key. The spot/derivative split is the point: with a uniform holding_type
+   *  the two bases coincide and every assertion below would pass vacuously. */
+  function e1DerivativesPayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      apiKeys: [E1_KEY_DERIV, E1_KEY_SPOT, E1_KEY_DORMANT].map((id) =>
+        winApiKey(id),
+      ),
+      holdingsSummary: [
+        {
+          ...HOLDING_BTC,
+          symbol: "BTC-PERP",
+          venue: "deribit",
+          holding_type: "derivative" as const,
+          // Notional and equity are BOTH populated and 30× apart, so a reader
+          // of the wrong field produces an unmistakably wrong number.
+          value_usd: E1_DERIV_NOTIONAL,
+          unrealized_pnl_usd: E1_DERIV_EQUITY,
+          side: "long" as const,
+          api_key_id: E1_KEY_DERIV,
+        },
+        {
+          ...HOLDING_BTC,
+          symbol: "ETH",
+          venue: "binance",
+          holding_type: "spot" as const,
+          value_usd: E1_SPOT_EQUITY,
+          api_key_id: E1_KEY_SPOT,
+        },
+        {
+          ...HOLDING_BTC,
+          symbol: "SOL",
+          venue: "okx",
+          holding_type: "spot" as const,
+          value_usd: E1_DORMANT_VALUE,
+          api_key_id: E1_KEY_DORMANT,
+        },
+      ],
+      perKeyReturnsByApiKeyId: {
+        [E1_KEY_DERIV]: F2_SERIES_A,
+        [E1_KEY_SPOT]: F2_SERIES_B,
+      },
+      perKeyDailiesGateSatisfied: false,
+      eligibleApiKeyIds: [E1_KEY_DERIV, E1_KEY_SPOT, E1_KEY_DORMANT],
+      allocatorEligibleApiKeyIds: [E1_KEY_DERIV, E1_KEY_SPOT, E1_KEY_DORMANT],
+      contributingApiKeyIds: [E1_KEY_DERIV, E1_KEY_SPOT],
+      bookEntryGateSatisfied: true,
+    });
+  }
+
+  /** The rendered notional figures, parsed back to dollars. `formatUsd`
+   *  renders these compactly ("$30K"), so the reader can add them up. */
+  function notionalDollars(refs: string[]): number[] {
+    return refs.map((ref) => {
+      const text = notionalCell(ref).textContent ?? "";
+      const m = /\$([\d.]+)K/.exec(text);
+      expect(m).not.toBeNull();
+      return Number(m![1]) * 1_000;
+    });
+  }
+
+  it("E1: on a DERIVATIVES book the AUM, the per-row dollars and the notional basis are ONE number — $40,000 of equity, not $910,000 of notional", () => {
+    const payload = e1DerivativesPayload();
+
+    // Fixture self-proof (non-vacuity). Both candidate sums are computed off
+    // the fixture's OWN rows and shown to differ by 22.75×, so the assertions
+    // below cannot be satisfied by both.
+    const notionalSum = payload.holdingsSummary
+      .filter((h) => h.api_key_id !== E1_KEY_DORMANT)
+      .reduce((s, h) => s + h.value_usd, 0);
+    expect(notionalSum).toBe(E1_MODELLED_NOTIONAL);
+    expect(E1_DERIV_EQUITY + E1_SPOT_EQUITY).toBe(E1_MODELLED_EQUITY);
+    expect(E1_MODELLED_NOTIONAL - E1_MODELLED_EQUITY).toBe(870_000);
+    // And the spot/derivative distinction really is present in the fixture —
+    // a uniform book would make this test pass for the wrong reason.
+    expect(new Set(payload.holdingsSummary.map((h) => h.holding_type))).toEqual(
+      new Set(["derivative", "spot"]),
+    );
+
+    renderF2(payload);
+
+    // (1) The NOTIONAL column — `share × totalBookEquity × L`, the basis that
+    // was already equity-defined and is therefore the FIXED reference.
+    expect(notionalCell(E1_KEY_DERIV).textContent).toContain(
+      E1_NOTIONAL_DERIV,
+    );
+    expect(notionalCell(E1_KEY_SPOT).textContent).toContain(E1_NOTIONAL_SPOT);
+
+    // (2) The headline PORTFOLIO AUM. Pre-fix this summed `value_usd`, so the
+    // derivative's leveraged notional went in whole and the field read
+    // $910,000 while the notionals above described a $40,000 book.
+    expect(aumField().value).toBe(String(E1_MODELLED_EQUITY));
+
+    // (3) THE INVARIANT, as arithmetic over the two columns rather than a
+    // restatement of either: the per-row notionals add up to the headline AUM.
+    // The per-row DOLLAR column is `Math.round(weight × scenarioAum)` off this
+    // very AUM (ScenarioComposer.tsx `renderDollarInput`), so pinning the AUM
+    // pins that column too — it renders only on ADDED rows, and this fixture
+    // has none.
+    expect(
+      notionalDollars([E1_KEY_DERIV, E1_KEY_SPOT]).reduce((a, b) => a + b, 0),
+    ).toBe(Number(aumField().value));
+    expect(Number(aumField().value)).toBe(E1_DERIV_EQUITY + E1_SPOT_EQUITY);
+
+    // (5) The discriminating negatives — the two figures the other bases give.
+    expect(aumField().value).not.toBe(String(E1_MODELLED_NOTIONAL));
+    expect(aumField().value).not.toBe(String(E1_CUSTODY_TOTAL));
+  });
+
+  it("E1: a SPOT-only book is byte-unchanged — the two definitions coincide there, so the fix must move nothing", () => {
+    // The over-correction falsifier. Same F2 fixture, all spot: if the rebase
+    // had reached for `unrealized_pnl_usd` unconditionally (null on spot ⇒ 0),
+    // this AUM would collapse to 0 and the whole surface would go em-dash.
+    renderF2(f2Payload());
+    expect(aumField().value).toBe(String(F2_MODELLED_BOOK));
+    expect(
+      notionalDollars([F2_KEY_A, F2_KEY_B]).reduce((a, b) => a + b, 0),
+    ).toBe(F2_MODELLED_BOOK);
   });
 });

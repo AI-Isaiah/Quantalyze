@@ -275,6 +275,33 @@ test.describe("Phase 33 — composer axe (JOURNEY-03)", () => {
       page.locator('[data-testid="scenario-coverage-timeline-body"]'),
     ).toBeVisible({ timeout: 5_000 });
 
+    // --- Phase 152 / SCEN-03: scan the EXPANDED row-detail panel -------------
+    // The detail panel only exists while a row is expanded, so a scan of the
+    // collapsed surface covers none of it. Expand the fixture's row before
+    // analyze() so the single scan below reaches the panel's eyebrows, its
+    // figures and its "View factsheet →" link.
+    //
+    // The name button is targeted by its aria-controls (not by its text): the
+    // fixture is exploratory-tier, so the composer renders the masked CODENAME,
+    // and the attribute is the one stable handle. The aria-expanded assertion is
+    // the anti-false-green gate — a click that silently no-opped (the B-1
+    // double-toggle) would otherwise leave axe scanning a collapsed row and
+    // reporting a hollow pass.
+    //
+    // NOTE: a green LOCAL run of this file proves nothing — without
+    // TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY the whole describe
+    // self-skips (see the guard at the top). CI is where this executes.
+    const detailToggle = page.locator(
+      `[aria-controls="scenario-detail-${fixtureId}"]`,
+    );
+    await detailToggle.scrollIntoViewIfNeeded();
+    await expect(detailToggle).toBeVisible({ timeout: 10_000 });
+    await detailToggle.click();
+    await expect(
+      page.locator(`[data-testid="scenario-detail-${fixtureId}"]`),
+    ).toBeVisible({ timeout: 5_000 });
+    await expect(detailToggle).toHaveAttribute("aria-expanded", "true");
+
     // The composed surface EMBEDS the real factsheet body (Phase 40-43), whose own
     // internal complementary/region landmarks (the MetricsColumn <aside>, etc.) are
     // legitimately nested under the /allocations page's <main>. axe's page-level

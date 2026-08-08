@@ -310,6 +310,33 @@ export type WizardErrorCode =
   // `recoverable: false` and `ErrorEnvelope` renders NO Retry control. The
   // absence IS the fix, on the same mechanism `COMPOSITE_TOO_MANY_MEMBERS` uses.
   | "SEAM_MISCONFIGURED"
+  // Phase 151 review E5/E6 — the allocate surface's ONE actionable refusal.
+  //
+  // `/api/portfolio-strategies/allocation` answers 409 `not_allocatable` when
+  // the strategy is not marked as the caller's own capital: either it never was
+  // (every pre-150 row is NULL) or the mark changed between the row rendering
+  // its Allocate affordance and the write (MarkOwnershipDialog in another tab —
+  // and since E4, the D-03-A trigger firing on the insert reaches the client the
+  // same way). `AllocateDialog` read only `res.status === 429` and routed this
+  // to UNKNOWN, whose copy "makes no claim about what happened" — so the ONE
+  // failure on that surface with a one-screen remedy was the one the user was
+  // told nothing about, under a Retry the server refuses identically forever.
+  //
+  // ⚠️ NOT recoverable, deliberately: `actions` carries neither member of
+  // `RECOVERABLE_ACTIONS` (src/lib/envelope.ts), so `buildEnvelope` derives
+  // `recoverable: false` and `ErrorEnvelope` renders NO Retry control. That
+  // absence IS half the fix — the same mechanism `COMPOSITE_TOO_MANY_MEMBERS`
+  // and `SEAM_MISCONFIGURED` use. The remedy is a MARK, not a retry.
+  //
+  // ⚠️ NOT a duplicate of any near-miss, and each would assert something false:
+  //   · GUARD_BLOCKED — "you do not have access to this". The caller DOES own
+  //     the strategy; the route's 404 arm is what answers a row that is not
+  //     theirs. This is about the row's STATE, not the caller's rights.
+  //   · VALIDATION_FAILED — a request-shape rejection. The request is
+  //     well-formed; the server understood it exactly and declined.
+  //   · UNKNOWN — "we could not classify this failure". We classified it
+  //     precisely, which is the whole point.
+  | "ALLOCATION_NOT_ALLOCATABLE"
   // Fallback
   | "UNKNOWN";
 
@@ -1532,6 +1559,26 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // the only sentence true on every path is one that makes no claim about our
   // side at all. If 140.3-13 adds the missing captures, the claim may come back
   // — but only with the receipt, and only where it is true.
+  // Phase 151 review E5/E6 — see the union member's note for why this is its own
+  // code and why it is deliberately NOT recoverable.
+  ALLOCATION_NOT_ALLOCATABLE: {
+    title: "This strategy isn't marked as your own capital.",
+    cause:
+      "Money can only sit against a strategy you have marked as your own capital. That mark is either not set, or it changed after this page loaded — so the allocation was refused and nothing was saved.",
+    fix: [
+      "Open My Strategies and mark this strategy as your own capital, then allocate again.",
+      "If it is marked as a trading team's capital under review, it cannot take an allocation until that changes.",
+      "Close this dialog to see the strategy's current state — the list reloads with the mark as it stands now.",
+    ],
+    docsHref: "/security",
+    // ⚠️ NO `clear_and_retry` and NO `try_another_key` — the two members of
+    // `RECOVERABLE_ACTIONS`. Their absence derives `recoverable: false` and
+    // suppresses the Retry control, and that BEHAVIOUR is half of what this
+    // entry exists to change: the server refuses the identical request forever
+    // until the mark changes, so a Retry CTA is a false affordance.
+    actions: ["leave_and_return", "expand_log"],
+  },
+
   UNKNOWN: {
     title: "Something went wrong.",
     cause:

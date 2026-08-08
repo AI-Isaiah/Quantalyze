@@ -1,7 +1,11 @@
 import { Suspense } from "react";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getMyAllocationDashboard } from "@/lib/queries";
+import {
+  getMyAllocationDashboard,
+  hasAnyOwnStrategies,
+  getOwnCapitalStrategies,
+} from "@/lib/queries";
 import {
   getLatestExposureSnapshot,
   getNetExposureSeries,
@@ -70,17 +74,77 @@ export default async function MyAllocationPage() {
   // never a client-supplied id). They are NEW Promise.all items threaded as NEW
   // props — `getMyAllocationDashboard`'s polled payload and the `exposure`
   // threading stay byte-untouched (SC-4). Same throw-to-error.tsx discipline.
-  const [payload, snapshot, netSeries, allocationSeries, favorites, optimizer, note] =
-    await Promise.all([
-      getMyAllocationDashboard(user.id),
-      getLatestExposureSnapshot(user.id),
-      getNetExposureSeries(user.id),
-      getAllocationSeries(user.id),
-      getFavoritesWithStrategies(supabase, user.id),
-      getOptimizerPrefetch(supabase, user.id),
-      getDashboardNote(supabase, user.id),
-    ]);
+  // Phase 150 / OWN-03 — TWO more owner-scoped reads join the batch on the same
+  // additive precedent, both feeding the Holdings STRATEGIES panel:
+  //   - `getOwnCapitalStrategies` is the MARKED half of the D-12-A union row
+  //     set. It cannot be a widening of `getMyAllocationDashboard`'s embed,
+  //     which is rooted in `portfolio_strategies` — a marked strategy with no
+  //     position yet has no row there, and that row is precisely the one the
+  //     allocator clicks `Allocate…` on.
+  //   - `hasAnyOwnStrategies` is the D-15 empty-state arm-2/arm-3
+  //     discriminator. "Zero own-capital rows" and "zero strategies" are
+  //     different facts and deserve different copy; only this layer knows the
+  //     second one.
+  //     Review round 2 F6 — this was `getMyStrategies`, whose result was
+  //     discarded except for `.length > 0`. That read is `*, strategy_analytics
+  //     (*)` (every JSONB series column for every non-archived strategy) plus a
+  //     serial second round-trip through `readPublicVerificationSignals`, on
+  //     every SSR render of the money surface. The existence read answers the
+  //     same question with `select("id").limit(1)` and keeps the same
+  //     null-vs-empty contract, which is what the two consumers below need.
+  // Both take the AUTHENTICATED user.id, and both return `null` on a transient
+  // failure — never `[]` for the list read, never `false` for the existence
+  // read — so a fetch error cannot masquerade as a definitive empty state.
+  const [
+    payload,
+    snapshot,
+    netSeries,
+    allocationSeries,
+    favorites,
+    optimizer,
+    note,
+    ownCapitalStrategies,
+    anyOwnStrategies,
+  ] = await Promise.all([
+    getMyAllocationDashboard(user.id),
+    getLatestExposureSnapshot(user.id),
+    getNetExposureSeries(user.id),
+    getAllocationSeries(user.id),
+    getFavoritesWithStrategies(supabase, user.id),
+    getOptimizerPrefetch(supabase, user.id),
+    getDashboardNote(supabase, user.id),
+    getOwnCapitalStrategies(user.id),
+    hasAnyOwnStrategies(user.id),
+  ]);
   const exposure: ExposureSectionData = { snapshot, netSeries, allocationSeries };
+
+  // Review WR-02 — the null-vs-empty contract both reads document is CONSUMED
+  // here, not collapsed. `null` means the fetch failed; `[]` means the fetch
+  // succeeded and the account really is empty. Only the second may reach the
+  // panel as an account-state claim ("No strategies yet." / "No strategies
+  // marked as own capital.") — the first would tell an owner who HAS marked
+  // strategies that they have none, and would silently strip the Allocate
+  // affordance from positioned rows (the adapter derives `capitalOwnership`
+  // from marked-set membership, so a failed marked-set read reads as unmarked).
+  //
+  // DEGRADED RENDER, not a throw — the sibling `my-strategies/page.tsx:69-73`
+  // idiom (149 review WR-01), which these two queries' own docblocks name:
+  // "a degraded render beats an error boundary here". The competing precedent
+  // in the comment above (throw-to-error.tsx) belongs to the reads that THROW
+  // themselves — the dashboard payload and the three exposure reads, whose
+  // absence leaves nothing to render. Here the rest of the money surface
+  // (equity, exposure, holdings) is intact, and taking it down over a blip in
+  // one auxiliary strategies read is a bigger lie than the strip.
+  const strategiesReadFailed =
+    ownCapitalStrategies === null || anyOwnStrategies === null;
+  // Review round 2 F6 — the same null-vs-empty split the `.length > 0` form
+  // expressed, now stated directly: `null` (read failed) is NOT a claim about
+  // the account, so it must land on `false` here and be OUTRANKED by
+  // `strategiesReadFailed` at the render layer — never sent down as a
+  // definitive "this owner has no strategies". `=== true` is deliberate: a
+  // truthiness test would read the same today but would silently swallow any
+  // future third state.
+  const hasAnyStrategies = anyOwnStrategies === true;
 
   // Phase 11 / Plan 03 / D-13 — fire onboarding-funnel events (single-fire
   // via *_emitted_at sentinels on auth.users.raw_user_meta_data). All five
@@ -121,6 +185,9 @@ export default async function MyAllocationPage() {
             favorites={favorites}
             optimizer={optimizer}
             note={note}
+            ownCapitalStrategies={ownCapitalStrategies ?? []}
+            hasAnyStrategies={hasAnyStrategies}
+            strategiesReadFailed={strategiesReadFailed}
           />
         </AllocationProvider>
       </Suspense>

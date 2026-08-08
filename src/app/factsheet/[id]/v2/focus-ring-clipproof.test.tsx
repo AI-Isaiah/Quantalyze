@@ -37,6 +37,14 @@ vi.mock("@/hooks/useBreakpoint", () => ({
 // FactsheetBody render harness stubs (mirrors FactsheetView.kpistrip.test.tsx).
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
+// The owner masthead mounts RenameStrategyDialog, which calls useRouter() at
+// the top of its body. Same stub, same shape, as
+// FactsheetView.owner-notice.test.tsx:45 — the only file in this directory that
+// already renders the owner lane.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ refresh: vi.fn() }),
+}));
+
 const lsStore = new Map<string, string>();
 const localStorageMock = {
   getItem: vi.fn((k: string) => lsStore.get(k) ?? null),
@@ -142,6 +150,55 @@ describe("[UIFIX-02] factsheet section-nav — clip-proof focus ring, not a clip
       // /20-opacity accent fails WCAG 1.4.11 ≥3:1 — full opacity only.
       expect(link.className).not.toContain("ring-accent/20");
     }
+  });
+});
+
+describe("[UIFIX-02 / 151 A2] factsheet masthead `Rename…` — the ring IS the whole focus affordance", () => {
+  // WHY this control specifically (Rule 9 — intent): the Phase-150 / OWN-05
+  // owner action is a borderless, underline-less text button on the H1 baseline
+  // row. Every other focusable site on this route has a border or a background
+  // that survives a weak ring; here the ring is the ENTIRE keyboard affordance,
+  // so `ring-accent/20` (≈1.3:1 against the masthead, against a WCAG 1.4.11
+  // floor of 3:1) meant the ONLY owner-side action on the factsheet masthead had
+  // no visible focus state at all. Same token list, same `/20` forbid, as the
+  // three regions asserted above — extended to the newest surface so the
+  // low-alpha ring cannot come back through a copy-paste.
+  it("carries the inset ring tokens at FULL opacity and no outset outline", () => {
+    const payload = buildScenarioFactsheetPayload({
+      portfolioDaily: makeReturnsSeries(300),
+      benchmark: null,
+    });
+    render(
+      <FactsheetProvider payload={payload} persist={false}>
+        <FactsheetBody
+          payload={payload}
+          hideAllocatorSection
+          hideFooter
+          renameTarget={{ id: "s-1", name: payload.strategyName }}
+        />
+      </FactsheetProvider>,
+    );
+
+    // Scoped to the masthead: the rename DIALOG (always mounted, closed) also
+    // contains buttons, and a document-wide query could pick one of those up
+    // and assert the wrong element's classes.
+    const masthead = document.querySelector("header");
+    expect(masthead).not.toBeNull();
+    const action = Array.from(masthead!.querySelectorAll("button")).find(
+      (b) => b.textContent === "Rename…",
+    );
+    expect(action, "the owner masthead did not render a `Rename…` button").toBeDefined();
+
+    for (const token of RING_TOKENS) {
+      expect(action!.className).toContain(token);
+    }
+    expect(action!.className).not.toContain("ring-accent/20");
+    expect(action!.className).not.toMatch(
+      /focus-visible:outline-(?!none)(offset|2|4|accent|\[)/,
+    );
+    // The inset ring needs a radius to follow, or it draws a hard square inside
+    // the masthead's rounded vocabulary and reads as an artefact, not focus.
+    expect(action!.className).toContain("rounded-sm");
   });
 });
 

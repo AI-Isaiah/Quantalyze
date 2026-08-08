@@ -123,6 +123,11 @@ type HoldingRowFixture = {
   symbol: string;
   holding_type: string;
   value_usd: number;
+  // 151 red-team G3 — the EQUITY column. Optional so every pre-existing SPOT
+  // fixture is untouched (on a spot row the equity basis IS `value_usd`); a
+  // DERIVATIVE row must set it, because there `value_usd` is leveraged notional
+  // and the equity at stake is the unrealized P&L.
+  unrealized_pnl_usd?: number | null;
   asof: string;
 };
 let holdingsFixture: HoldingRowFixture[] = [];
@@ -1579,6 +1584,98 @@ describe("T_R24 — B11 / NEW-C18-10 portfolio-fingerprint precondition", () => 
     );
   });
 
+  // 151 review CR-01 — THE DEAD END THIS CLOSES. A blank-slate draft is seeded
+  // from `[]`, so its `init_holdings_fingerprint` is the EMPTY STRING. `""` is
+  // not nullish, so it used to reach the RPC, whose precondition read it as the
+  // empty token SET and compared it against the allocator's REAL holdings —
+  // every blank-mode commit by an allocator WITH a live book 409'd
+  // `portfolio_fingerprint_stale`, with remedy copy ("Refresh to load the
+  // latest holdings") that no refresh could ever satisfy. The phase's headline
+  // flow (blank slate → manual AUM → commit) was structurally impossible.
+  //
+  // The oracle is ECONOMIC, not implementation-shaped: an empty fingerprint
+  // means "this draft has NO holdings basis", so there is nothing for the
+  // optimistic-concurrency precondition to be stale against and it must be
+  // SKIPPED — which is exactly `p_portfolio_fingerprint: null`.
+  it("CR-01: an EMPTY init_holdings_fingerprint skips the precondition (null) — a blank-slate manual-AUM commit COMPLETES for an allocator WITH holdings", async () => {
+    // Non-vacuity: this allocator genuinely HAS holdings, so a forwarded `""`
+    // would diverge from the server token set and 409. Pre-fix this test's
+    // request is precisely the founder's blank-slate commit.
+    holdingsFixture = [
+      {
+        venue: "binance",
+        symbol: "BTC",
+        holding_type: "spot",
+        value_usd: 460_000,
+        asof: "2026-08-07",
+      },
+    ];
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          {
+            index: 0,
+            match_decision_id: "md-1",
+            bridge_outcome_id: "bo-1",
+            kind: "voluntary_add",
+          },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(
+      mkReq({
+        diffs: [{ ...VALID_VA, percent_allocated: 25 }],
+        init_holdings_fingerprint: "",
+        manual_aum_usd: 2_000_000,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({ p_portfolio_fingerprint: null }),
+    );
+  });
+
+  // The other half of the same invariant: the anti-stale guarantee is NOT
+  // weakened for a draft that DOES have a holdings basis. A book-authored draft
+  // carries a non-empty fingerprint, so its precondition still runs verbatim —
+  // a fix that normalised every fingerprint away would pass the test above and
+  // fail this one.
+  it("CR-01 (guarantee preserved): a NON-empty fingerprint still reaches the RPC verbatim", async () => {
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          {
+            index: 0,
+            match_decision_id: "md-1",
+            bridge_outcome_id: "bo-1",
+            kind: "voluntary_remove",
+          },
+        ],
+      },
+      error: null,
+    });
+
+    const res = await POST(
+      mkReq({
+        diffs: [VALID_VR],
+        init_holdings_fingerprint: "BTC:binance:spot|ETH:binance:spot",
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(mockRpc).toHaveBeenCalledWith(
+      "commit_scenario_batch",
+      expect.objectContaining({
+        p_portfolio_fingerprint: "BTC:binance:spot|ETH:binance:spot",
+      }),
+    );
+  });
+
   it("RPC ok:false + code=portfolio_fingerprint_stale → 409 (no Retry-After), no audit", async () => {
     // The holdings changed since the draft was built; the RPC recomputed the
     // current fingerprint, found divergence, and committed nothing. The route
@@ -1609,5 +1706,465 @@ describe("T_R24 — B11 / NEW-C18-10 portfolio-fingerprint precondition", () => 
     expect(body.code).toBe("portfolio_fingerprint_stale");
     expect(body.error).toMatch(/Portfolio changed/i);
     expect(emit).not.toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
+// Phase 151 / AUM-01 — `manual_aum_usd`, the client-asserted AUM sidecar.
+//
+// A blank-slate scenario has NO allocator_holdings rows, so the NEW-C18-04
+// audit recompute had no denominator: every commit from the primary use case
+// landed as `_size_source: "no_holdings_snapshot"` with a NULL size — a
+// financial audit row that recorded the decision but not its magnitude.
+//
+// The fix is ADDITIVE and deliberately labelled. `manual_aum_usd` is a
+// CLIENT-ASSERTED number: it may size the audit row only under its own
+// `client_manual_aum` sentinel, and it NEVER outranks the server-recomputed
+// figure when allocator_holdings can supply one (NEW-C18-04 preserved).
+// ===========================================================================
+
+describe("AUM-01 — manual_aum_usd client-asserted AUM sidecar", () => {
+  function getAuditMetadata(call: number): Record<string, unknown> {
+    const calls = (emit as unknown as { mock: { calls: unknown[][] } })
+      .mock.calls as Array<[unknown, { metadata: Record<string, unknown> }]>;
+    return calls[call][1].metadata;
+  }
+  function okAdd() {
+    mockRpc.mockResolvedValueOnce({
+      data: {
+        ok: true,
+        recorded: [
+          {
+            index: 0,
+            match_decision_id: "md-1",
+            bridge_outcome_id: "bo-1",
+            kind: "voluntary_add",
+          },
+        ],
+      },
+      error: null,
+    });
+  }
+
+  // Test 8 — THE FIELD MUST BE DECLARED (assumption A5). `CommitBodySchema` is
+  // a non-strict z.object, so an UNDECLARED key is silently STRIPPED: the route
+  // would 200 and the audit would still say "no_holdings_snapshot", with no
+  // error anywhere to explain the loss. Declaring it is what makes it arrive —
+  // and declaring it is also what bounds it (T-151-19).
+  it("Test 8a: a declared manual_aum_usd survives parsing and reaches the audit builder", async () => {
+    holdingsFixture = [];
+    okAdd();
+    const res = await POST(
+      mkReq({
+        diffs: [{ ...VALID_VA, percent_allocated: 25 }],
+        manual_aum_usd: 2_000_000,
+      }),
+    );
+    expect(res.status).toBe(200);
+    // Not stripped: the sentinel can only be reached by a value that arrived.
+    expect(getAuditMetadata(0)._size_source).toBe("client_manual_aum");
+  });
+
+  it("Test 8b: out-of-bounds manual_aum_usd is rejected with 400 (client-controlled number at a trust boundary)", async () => {
+    // -1 (a typo or a hostile payload), 0 (a zero is a claim, not a size),
+    // `null` (what JSON.stringify writes for a NaN), and 1e12 (the
+    // MAGNITUDE_CAPS.MAX_DOLLAR_VALUE_USD ceiling, exclusive) all refuse.
+    for (const bad of [-1, 0, null, 1e12, "2000000"]) {
+      const res = await POST(
+        mkReq({ diffs: [VALID_VA], manual_aum_usd: bad }),
+      );
+      expect(res.status).toBe(400);
+      // A refused body must not have committed anything.
+      expect(mockRpc).not.toHaveBeenCalled();
+    }
+  });
+
+  // Test 9 — THE HOLE THIS CLOSES. Blank-mode commit: zero holdings rows, a
+  // manual AUM, a 25% add. Pre-fix this audited as no_holdings_snapshot / null.
+  it("Test 9 (blank-mode commit): zero holdings + manual AUM sizes the audit row under the client_manual_aum sentinel", async () => {
+    holdingsFixture = [];
+    okAdd();
+
+    const res = await POST(
+      mkReq({
+        diffs: [
+          { ...VALID_VA, percent_allocated: 25, size_at_decision_usd: 500_000 },
+        ],
+        manual_aum_usd: 2_000_000,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    // 25% of 2,000,000 = 500,000 — hand-computed.
+    expect(meta.size_at_decision_usd).toBe(500_000);
+    expect(meta._size_source).toBe("client_manual_aum");
+    // The client sidecar column is untouched by this phase.
+    expect(meta.size_at_decision_usd_client).toBe(500_000);
+  });
+
+  // Test 10 — SERVER TRUTH PRECEDENCE (NEW-C18-04, T-151-18). When
+  // allocator_holdings CAN supply a denominator, the server's recompute wins
+  // and the client's assertion is ignored entirely. Flipping the branch order
+  // to prefer the client value turns this RED — the SC1 falsifier-ledger
+  // mutation, observed once during 151-07 Task 2 and reverted.
+  it("Test 10 (server truth precedence): a real holdings snapshot outranks manual_aum_usd — the sentinel stays server_aum", async () => {
+    // 80k + 120k = 200,000 of real, server-verified AUM.
+    holdingsFixture = [
+      {
+        venue: "binance",
+        symbol: "BTC",
+        holding_type: "spot",
+        value_usd: 80_000,
+        asof: "2026-08-07",
+      },
+      {
+        venue: "binance",
+        symbol: "ETH",
+        holding_type: "spot",
+        value_usd: 120_000,
+        asof: "2026-08-07",
+      },
+    ];
+    okAdd();
+
+    const res = await POST(
+      mkReq({
+        diffs: [
+          { ...VALID_VA, percent_allocated: 5, size_at_decision_usd: 100_000 },
+        ],
+        // A client asserting a 10× larger book than custody shows.
+        manual_aum_usd: 2_000_000,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    // Review round 2 F3 — the SIZE precedence this test exists for is UNCHANGED
+    // (the two assertions below are byte-identical). The sentinel narrows from
+    // the flat `server_aum` to its conflict refinement, because a 10× gap
+    // between what the allocator modelled against and what custody shows is a
+    // fact the audit must state, not swallow. Both strings begin `server_aum`
+    // precisely so a forensic query for server-verified sizing still finds this
+    // row.
+    expect(meta._size_source).toBe("server_aum_manual_conflict");
+    // 5% × 200,000 = 10,000 (server). NOT 5% × 2,000,000 = 100,000 (client).
+    expect(meta.size_at_decision_usd).toBe(10_000);
+    expect(meta.size_at_decision_usd_client).toBe(100_000);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Review round 2 F3 — the manual AUM must be OBSERVABLE, whichever source
+  // wins the sizing.
+  //
+  // Blank mode is selectable by an allocator WITH holdings, and in blank mode
+  // the composer feeds `holdingsSummary: []`, so the manual figure is the only
+  // AUM the scenario was modelled against. The server-truth arm then sized every
+  // row from custody and stamped a flat `server_aum` — recording $20,000 for a
+  // decision made at $500,000 — and `manual_aum_usd` appeared NOWHERE in the
+  // metadata, so the divergence was not detectable after the fact.
+  // `size_at_decision_usd` is the denominator the daily-delta cron divides
+  // realized PnL by, so an undetectable 25× error in it is an undetectable 25×
+  // error in every derived return.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** The founder-shaped conflict: a $40,000 custody book, a $1,000,000 manual
+   *  AUM, one 50% allocation. Hand-computed both ways:
+   *    server  50% × 40,000    =    20,000   ← what the row is sized by
+   *    client  50% × 1,000,000 =   500,000   ← what the allocator decided
+   *  25× apart, and pre-fix only the first number existed anywhere. */
+  function conflictBook() {
+    holdingsFixture = [
+      {
+        venue: "binance",
+        symbol: "BTC",
+        holding_type: "spot",
+        value_usd: 40_000,
+        asof: "2026-08-07",
+      },
+    ];
+    holdingsErrorFixture = null;
+  }
+
+  it("F3: the client-asserted AUM is recorded even when SERVER TRUTH wins — the 25× divergence becomes forensically visible", async () => {
+    conflictBook();
+    okAdd();
+
+    const res = await POST(
+      mkReq({
+        diffs: [
+          { ...VALID_VA, percent_allocated: 50, size_at_decision_usd: 500_000 },
+        ],
+        manual_aum_usd: 1_000_000,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    // The size is server truth — unchanged, and deliberately so.
+    expect(meta.size_at_decision_usd).toBe(20_000);
+    // The sentinel says the denominators disagreed …
+    expect(meta._size_source).toBe("server_aum_manual_conflict");
+    // … and the client's denominator is on the row, so a reader can recompute
+    // the decision the allocator actually made: 50% × 1,000,000 = 500,000,
+    // 25× the figure this row is sized by. THAT is the arm that did not exist.
+    expect(meta.client_manual_aum_usd).toBe(1_000_000);
+    expect(
+      (meta.percent_allocated as number) *
+        (meta.client_manual_aum_usd as number) /
+        100,
+    ).toBe(500_000);
+  });
+
+  it("F3: a manual AUM that AGREES with custody keeps the plain server_aum sentinel — the conflict marker means conflict, not 'a manual value was sent'", async () => {
+    // Non-vacuity for the test above: same shape, same arm, same recorded
+    // client value — only the AGREEMENT differs. A fix that stamped the
+    // conflict sentinel whenever `manual_aum_usd` was merely present would turn
+    // the marker into noise and turn this RED.
+    conflictBook();
+    okAdd();
+
+    const res = await POST(
+      mkReq({
+        diffs: [
+          { ...VALID_VA, percent_allocated: 50, size_at_decision_usd: 20_000 },
+        ],
+        // Within the 1% band of the $40,000 book (a float-drift-sized gap).
+        manual_aum_usd: 40_200,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    expect(meta._size_source).toBe("server_aum");
+    expect(meta.size_at_decision_usd).toBe(20_000);
+    // Recorded ANYWAY — "whichever source wins" is the contract.
+    expect(meta.client_manual_aum_usd).toBe(40_200);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // 151 red-team G3 — ONE BASIS ON BOTH SIDES OF THE CONFLICT TEST.
+  //
+  // The two sides were measuring different things. `serverAumUsd` sums
+  // `value_usd` over spot + derivative — a NOTIONAL basis — while the client's
+  // figure is an EQUITY one (`liveHoldingsSum` sums
+  // `holdingEquityContributionLocal`: derivative → `unrealized_pnl_usd`), and
+  // the manual field is SEEDED from exactly that number. On a leveraged
+  // derivatives book — the founder's production book is Deribit — the two are a
+  // leverage factor apart, so an allocator who typed back the very figure the
+  // composer had just shown them landed ~10× outside a 1% tolerance and
+  // `server_aum_manual_conflict` stamped EVERY audit row of a wholly legitimate
+  // commit. The sentinel encoded "this book is leveraged", not "there is a
+  // conflict".
+  //
+  // ⚠️ THE SIZED FIGURE IS DELIBERATELY UNCHANGED. `size_at_decision_usd` is
+  // documented as the denominator the downstream daily-delta cron divides
+  // realized PnL by, so this fix touches only what the audit SAYS, never what
+  // it sizes — the pair below pins both halves.
+  //
+  // A LEVERAGED book, hand-computed:
+  //   notional  Σ value_usd            = 400,000  ← still sizes the row
+  //   equity    Σ unrealized_pnl_usd   =  40,000  ← what the composer displays
+  //   i.e. 10× leverage, the shape the founder's Deribit book has.
+  // ─────────────────────────────────────────────────────────────────────────
+  function leveragedDerivativesBook() {
+    holdingsFixture = [
+      {
+        venue: "deribit",
+        symbol: "BTC-PERP",
+        holding_type: "derivative",
+        value_usd: 400_000,
+        unrealized_pnl_usd: 40_000,
+        asof: "2026-08-07",
+      },
+    ];
+    holdingsErrorFixture = null;
+  }
+
+  it("G3: on a LEVERAGED book, typing back the equity figure the composer displayed is NOT a conflict — and the row is still sized by server notional truth", async () => {
+    leveragedDerivativesBook();
+    okAdd();
+
+    const res = await POST(
+      mkReq({
+        diffs: [
+          { ...VALID_VA, percent_allocated: 50, size_at_decision_usd: 20_000 },
+        ],
+        // EXACTLY the equity total the composer's AUM field seeds from
+        // (Σ unrealized_pnl_usd). Zero divergence — there is nothing to flag.
+        manual_aum_usd: 40_000,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    // Pre-fix: |40,000 − 400,000| / 400,000 = 0.9, i.e. 90× the 1% tolerance,
+    // so this read "server_aum_manual_conflict" on a commit with no conflict in
+    // it — on every row, for the founder's whole book.
+    expect(meta._size_source).toBe("server_aum");
+    // …and the SIZING basis did not move with the comparison basis:
+    // 50% × 400,000 (notional) = 200,000, hand-computed. If this ever reads
+    // 20,000 (= 50% × the 40,000 equity total) the daily-delta cron's PnL
+    // denominator has been silently changed — a founder decision, not this one.
+    expect(meta.size_at_decision_usd).toBe(200_000);
+    expect(meta.client_manual_aum_usd).toBe(40_000);
+  });
+
+  it("G3 (non-vacuity): a REAL divergence on the same leveraged book still stamps the conflict — the sentinel was repaired, not disabled", async () => {
+    // Same fixture, same arm; only the client's claim differs. 1,000,000 against
+    // a 40,000 equity book is 25× — the blank-mode modelling divergence the
+    // sentinel exists to catch, and it must survive the basis change.
+    leveragedDerivativesBook();
+    okAdd();
+
+    const res = await POST(
+      mkReq({
+        diffs: [
+          { ...VALID_VA, percent_allocated: 50, size_at_decision_usd: 500_000 },
+        ],
+        manual_aum_usd: 1_000_000,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    expect(meta._size_source).toBe("server_aum_manual_conflict");
+    expect(meta.size_at_decision_usd).toBe(200_000);
+    expect(meta.client_manual_aum_usd).toBe(1_000_000);
+  });
+
+  it("F3: precedence is intact — a FAILED lookup still outranks everything, and the client value rides along without promoting itself", async () => {
+    // The regression this guards: making the client number visible must not make
+    // it authoritative. `lookup_failed` is the top of the ordering and must stay
+    // there, with no size derived from the unverified figure.
+    holdingsErrorFixture = { message: "connection refused (test)" };
+    okAdd();
+
+    const res = await POST(
+      mkReq({
+        diffs: [
+          { ...VALID_VA, percent_allocated: 50, size_at_decision_usd: 500_000 },
+        ],
+        manual_aum_usd: 1_000_000,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    expect(meta._size_source).toBe("lookup_failed");
+    expect(meta._size_source).not.toBe("server_aum_manual_conflict");
+    expect(meta.size_at_decision_usd).toBeNull();
+    // Visible, but not used.
+    expect(meta.client_manual_aum_usd).toBe(1_000_000);
+  });
+
+  it("F3: no manual AUM ⇒ the field is an explicit null, never absent — an absent key is indistinguishable from a dropped one", async () => {
+    conflictBook();
+    okAdd();
+
+    const res = await POST(mkReq({ diffs: [VALID_VA] }));
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    expect(meta._size_source).toBe("server_aum");
+    expect(meta).toHaveProperty("client_manual_aum_usd");
+    expect(meta.client_manual_aum_usd).toBeNull();
+  });
+
+  // Test 11 — ABSENT FIELD ⇒ PRE-151 BEHAVIOUR, byte-identical. Every caller
+  // that never learns about this field keeps the audit path it has today.
+  it("Test 11 (absent field): no manual_aum_usd + empty holdings audits exactly as it did before the phase", async () => {
+    holdingsFixture = [];
+    okAdd();
+
+    const res = await POST(mkReq({ diffs: [VALID_VA] }));
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    expect(meta._size_source).toBe("no_holdings_snapshot");
+    expect(meta.size_at_decision_usd).toBeNull();
+    expect(meta.size_at_decision_usd_client).toBe(VALID_VA.size_at_decision_usd);
+  });
+
+  // Test 12 — SP-W1 / F-1: UNKNOWN ≠ ABSENT. A FAILED allocator_holdings SELECT
+  // with a manual AUM present must still stamp `lookup_failed`. Pre-fix the
+  // manual arm was ordered FIRST, so during any Supabase degradation (the
+  // documented PostgREST 504 / wedged-pool condition) every audit row was sized
+  // from the unverified client number under `client_manual_aum` and the
+  // `lookup_failed` marker was unreachable — silently breaking the route's own
+  // observability promise ("mark every per-row audit with lookup_failed so the
+  // sparse path is observable in forensic queries") and turning the sentinel's
+  // documented meaning ("blank-slate — no holdings snapshot at all") into a lie
+  // for an allocator whose real book a DB blip merely hid.
+  //
+  // Falsify: restore the old arm order and this goes RED on both assertions.
+  it("Test 12 (SP-W1): a FAILED holdings lookup outranks manual_aum_usd — the sentinel stays lookup_failed and no unverified size is recorded", async () => {
+    // The server could not READ the book. It does NOT know the book is empty.
+    holdingsErrorFixture = { message: "connection refused (test)" };
+    okAdd();
+
+    const res = await POST(
+      mkReq({
+        diffs: [
+          { ...VALID_VA, percent_allocated: 25, size_at_decision_usd: 500_000 },
+        ],
+        manual_aum_usd: 2_000_000,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    // The forensic marker survives — this is the whole point.
+    expect(meta._size_source).toBe("lookup_failed");
+    // And no unverified magnitude is passed off as a recomputed one.
+    expect(meta.size_at_decision_usd).toBeNull();
+    // The client's own number still rides its own labelled column.
+    expect(meta.size_at_decision_usd_client).toBe(500_000);
+  });
+
+  // Test 12b — NON-VACUITY CONTROL. The very same body against a SUCCESSFUL,
+  // verified-empty lookup still reaches the blank-slate arm, so Test 12 pins the
+  // lookup-health precedence and not "the manual arm stopped working".
+  it("Test 12b (control): the same body on a verified-EMPTY book still sizes under client_manual_aum", async () => {
+    holdingsFixture = [];
+    holdingsErrorFixture = null;
+    okAdd();
+
+    const res = await POST(
+      mkReq({
+        diffs: [
+          { ...VALID_VA, percent_allocated: 25, size_at_decision_usd: 500_000 },
+        ],
+        manual_aum_usd: 2_000_000,
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const meta = getAuditMetadata(0);
+    expect(meta._size_source).toBe("client_manual_aum");
+    expect(meta.size_at_decision_usd).toBe(500_000);
+  });
+
+  // T-151-21 — idempotency drift. The request_hash binds an Idempotency-Key to
+  // the exact bytes of the body, so a field added UNCONDITIONALLY on the client
+  // would change the hash for every caller. Two identical field-less bodies
+  // must still hash to the same value the pre-phase body did; the drawer's
+  // conditional spread is what guarantees the bytes (pinned in the drawer's own
+  // suite), and this pins that the ROUTE reads the same shape either way.
+  it("T-151-21: the same key + the same field-less body is the same logical request (hash unchanged)", async () => {
+    holdingsFixture = [];
+    const body = { diffs: [VALID_VA] };
+    okAdd();
+    const res1 = await POST(mkReqWithIdempotency(body, "abcdefghijklmnopqrstuvwx"));
+    expect(res1.status).toBe(200);
+    const hash1 = mockRpc.mock.calls[0][1].p_request_hash;
+
+    okAdd();
+    const res2 = await POST(mkReqWithIdempotency(body, "abcdefghijklmnopqrstuvwx"));
+    expect(res2.status).toBe(200);
+    const hash2 = mockRpc.mock.calls[1][1].p_request_hash;
+
+    expect(hash1).toEqual(expect.any(String));
+    expect(hash2).toBe(hash1);
   });
 });

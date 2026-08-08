@@ -5,6 +5,9 @@ import dynamic from "next/dynamic";
 import type { FactsheetPayload, RollWindowPick } from "@/lib/factsheet/types";
 import { ROLL_WINDOW_6MO, ROLL_WINDOW_90D } from "@/lib/factsheet/rolling";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
+import { OwnershipTag } from "@/components/strategy/OwnershipTag";
+import { RenameStrategyDialog } from "@/components/strategy/RenameStrategyDialog";
+import type { CapitalOwnership } from "@/lib/capital-ownership";
 import { FactsheetProvider, useActiveComparator, useComparator, useDisplay, usePayload, useToggles, useXRange } from "./factsheet-context";
 import { BasisProvider, useBasis, useBasisMetrics, useBasisOrCash, useBasisSeriesView, useAppliedLeverage, leverageApplies, leverageEligibleFor, mtmDisabledReasonCopy, mtmReasonTone, smoothedDisabledReasonCopy, type Basis } from "./basis-context";
 // Phase 90.5 (LEV-01, D1/D2) + Phase 107 (LEV-BB): ephemeral single-key leverage.
@@ -12,7 +15,24 @@ import { BasisProvider, useBasis, useBasisMetrics, useBasisOrCash, useBasisSerie
 // ControlBar input AND the KpiStrip's levered-view gate. The KpiStrip now reads the
 // leverage-composed useBasisSeriesView (plan 01), so the derived metrics hooks are gone.
 import { LeverageProvider, useLeverage } from "./leverage-context";
-import { MAX_LEVERAGE } from "@/lib/leverage";
+/**
+ * 151 UAT — the shared CONTRACT ceiling (`MAX_LEVERAGE`, src/lib/leverage.ts)
+ * was raised 10 → 200 for the Scenario Composer's strategy rows, which is what
+ * the founder asked for. This PUBLIC, anonymous what-if projection was NOT in
+ * that ask, so it keeps its own, narrower input bound.
+ *
+ * That direction is the safe one and only that direction: the sanitizer's
+ * ceiling stays the WIDEST bound in the system, so nothing a viewer can set
+ * here is ever silently reduced on read. (Do not invert this — a surface bound
+ * ABOVE the contract ceiling would be silently truncated by `sanitizeLeverage`.)
+ *
+ * 151 review A6 — the constant is IMPORTED from the contract module rather than
+ * declared here, because a module-private literal made that ordering rule
+ * unenforceable: `leverage.test.ts` now pins
+ * `FACTSHEET_MAX_LEVERAGE <= MAX_LEVERAGE` directly. The value is unchanged, so
+ * this surface's behaviour and copy are byte-identical.
+ */
+import { FACTSHEET_MAX_LEVERAGE } from "@/lib/leverage";
 import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
 import { SMOOTHED_MTM_UI_ENABLED } from "@/lib/closed-sets";
 import { ComparatorPicker } from "./ComparatorPicker";
@@ -84,13 +104,62 @@ import { CHART_CONFIGS } from "./chart-configs";
 const trackSectionToggle = (section: string) => (open: boolean) =>
   trackFactsheetEvent("factsheet_v2_section_toggle", { section, open });
 
+/**
+ * Phase 148 + 150 — the OWNER-LANE render props, threaded together because they
+ * share one rule: every one of them is derived from the page's lane decision and
+ * NONE of them may live on `FactsheetPayload`. The payload is the object the
+ * shared, id-keyed public cache serves; lane state inside it would be handed to
+ * anonymous readers for the full TTL (T-150-27, and the phase-148 pins are the
+ * regression gate).
+ *
+ * All three are `undefined` on every non-owner mount, and each renders ZERO
+ * nodes when absent — no wrapper, no reserved space — so the public masthead is
+ * byte-identical to today.
+ */
+interface OwnerLaneProps {
+  /** Viewer-context notice rendered ABOVE the masthead (default undefined).
+   *  Phase 148 (OWN-02): the v2 page's OWNER lane — and only that lane — passes
+   *  "owner_unpublished" so the owner of an unpublished strategy sees why the
+   *  link 404s for everybody else. Undefined on every other call site
+   *  (AllocationDashboardV2.tsx:162, ScenarioFactsheetChart.tsx:237).
+   *
+   *  A string union rather than a boolean so later phases can add notice kinds
+   *  without a second prop. */
+  viewerNotice?: "owner_unpublished";
+  /**
+   * Phase 150 / OWN-03 — the capital mark, READ-ONLY here. The mark is SET from
+   * /my-strategies (D-09); the factsheet only shows it, so there is deliberately
+   * no set/change affordance on this surface. `null` (never asked) renders
+   * nothing.
+   */
+  ownershipMark?: CapitalOwnership | null;
+  /**
+   * Phase 150 / OWN-05 — present only when the viewer may rename this strategy,
+   * which the page derives from `lane === "owner"` (reachable only for an
+   * unpublished row the session owns — the D-17 gate for free).
+   */
+  renameTarget?: { id: string; name: string };
+}
+
+/** The masthead H1's class string, extracted so the owner and public arms of
+ *  the baseline row below cannot drift apart. */
+const MASTHEAD_H1 =
+  "font-serif text-page-title leading-tight sm:leading-none text-text-primary";
+
 export function FactsheetView({
   payload,
   viewerNotice,
-}: { payload: FactsheetPayload; viewerNotice?: "owner_unpublished" }) {
+  ownershipMark,
+  renameTarget,
+}: { payload: FactsheetPayload } & OwnerLaneProps) {
   return (
     <FactsheetProvider payload={payload}>
-      <FactsheetShell payload={payload} viewerNotice={viewerNotice} />
+      <FactsheetShell
+        payload={payload}
+        viewerNotice={viewerNotice}
+        ownershipMark={ownershipMark}
+        renameTarget={renameTarget}
+      />
     </FactsheetProvider>
   );
 }
@@ -103,7 +172,9 @@ export function FactsheetView({
 function FactsheetShell({
   payload,
   viewerNotice,
-}: { payload: FactsheetPayload; viewerNotice?: "owner_unpublished" }) {
+  ownershipMark,
+  renameTarget,
+}: { payload: FactsheetPayload } & OwnerLaneProps) {
 
   // One-shot view event when the page mounts so adoption of the new
   // surface can be measured cleanly without folding into the v1 funnel.
@@ -143,10 +214,17 @@ function FactsheetShell({
       window.removeEventListener("afterprint", afterprint);
     };
   }, []);
-  return <FactsheetBody payload={payload} viewerNotice={viewerNotice} />;
+  return (
+    <FactsheetBody
+      payload={payload}
+      viewerNotice={viewerNotice}
+      ownershipMark={ownershipMark}
+      renameTarget={renameTarget}
+    />
+  );
 }
 
-export interface FactsheetBodyOptions {
+export interface FactsheetBodyOptions extends OwnerLaneProps {
   /** Suppress the strategy-name header (caller already provides its own). */
   hideHeader?: boolean;
   /** Suppress the demo allocator-portfolio section (skip on allocator dashboards). */
@@ -164,20 +242,6 @@ export interface FactsheetBodyOptions {
    *  site (page.tsx, the Discovery detail page, the Overview EquityChartWidget)
    *  byte-identical. */
   scenarioMode?: boolean;
-  /** Viewer-context notice rendered ABOVE the masthead (default undefined).
-   *  Phase 148 (OWN-02): the v2 page's OWNER lane — and only that lane — passes
-   *  "owner_unpublished" so the owner of an unpublished strategy sees why the
-   *  link 404s for everybody else. Undefined on every existing call site
-   *  (page.tsx:463, AllocationDashboardV2.tsx:162, ScenarioFactsheetChart.tsx:237)
-   *  renders ZERO nodes — no wrapper, no reserved space — so those mounts stay
-   *  byte-identical and the GUARD-02 gate holds.
-   *
-   *  ⛔ This is a RENDER prop, deliberately NOT a field on FactsheetPayload: the
-   *  payload is what the shared public cache serves, so lane state must never
-   *  enter it (UI-SPEC:112 — it would also force the v6→v7 shape bump).
-   *  A string union rather than a boolean so later phases can add notice kinds
-   *  without a second prop. */
-  viewerNotice?: "owner_unpublished";
 }
 
 /**
@@ -196,6 +260,8 @@ export function FactsheetBody({
   topSlot,
   scenarioMode = false,
   viewerNotice,
+  ownershipMark,
+  renameTarget,
 }: { payload: FactsheetPayload } & FactsheetBodyOptions) {
   const { colorblind, darkMode } = useDisplay();
   // Centralised palette — resolve once, apply as CSS custom properties on
@@ -230,7 +296,13 @@ export function FactsheetBody({
             the masthead, before any number. NOT `topSlot`, which renders BELOW
             the masthead (UI-SPEC:97). Absent prop ⇒ zero nodes (GUARD-02). */}
         {viewerNotice === "owner_unpublished" && <OwnerUnpublishedNotice />}
-        {!hideHeader && <FactsheetHeader payload={payload} />}
+        {!hideHeader && (
+          <FactsheetHeader
+            payload={payload}
+            ownershipMark={ownershipMark}
+            renameTarget={renameTarget}
+          />
+        )}
         {topSlot}
         <KpiStrip />
         <SectionNav />
@@ -633,7 +705,14 @@ export function OwnerUnpublishedNotice() {
   );
 }
 
-function FactsheetHeader({ payload }: { payload: FactsheetPayload }) {
+function FactsheetHeader({
+  payload,
+  ownershipMark,
+  renameTarget,
+}: {
+  payload: FactsheetPayload;
+} & Pick<OwnerLaneProps, "ownershipMark" | "renameTarget">) {
+  const [renameOpen, setRenameOpen] = React.useState(false);
   const exchanges = payload.supportedExchanges.length > 0 ? payload.supportedExchanges.join(", ") : null;
   const leverage = payload.leverageRange;
   // Lead chip line — types / markets / subtypes / exchanges / leverage. Drop
@@ -667,11 +746,48 @@ function FactsheetHeader({ payload }: { payload: FactsheetPayload }) {
       </p>
       <div className="mt-2 flex flex-col sm:flex-row sm:flex-wrap sm:items-end sm:justify-between gap-4">
         <div className="max-w-3xl">
-          <h1 className="font-serif text-page-title leading-tight sm:leading-none text-text-primary">
-            {payload.strategyName}
-          </h1>
+          {/* Phase 150 / OWN-05 — the owner arm puts `Rename…` on the H1's
+              baseline row. The two arms are kept apart rather than always
+              wrapping the H1, so a public render emits the SAME single <h1>
+              with no extra wrapper (the class string is shared above, so the
+              two arms cannot drift).
+
+              151 review A2 — the focus ring is the Phase-117 / UIFIX-02
+              CLIP-PROOF idiom, the same one every other focusable site on this
+              route already carries (see focus-ring-clipproof.test.tsx). It
+              first shipped as `ring-accent/20`, which is ≈1.3:1 against the
+              masthead — far under the WCAG 1.4.11 ≥3:1 non-text floor, and on
+              a borderless, underline-less text button the ring is the ENTIRE
+              focus affordance, so a keyboard user reaching the only owner
+              action on this masthead saw nothing. Full-opacity + inset + a
+              radius for the ring to follow; pinned so `/20` cannot return. */}
+          {renameTarget ? (
+            <div className="flex flex-wrap items-baseline gap-3">
+              <h1 className={MASTHEAD_H1}>{payload.strategyName}</h1>
+              <button
+                type="button"
+                onClick={() => setRenameOpen(true)}
+                className="text-caption text-text-muted hover:text-text-primary transition-colors rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
+              >
+                Rename…
+              </button>
+            </div>
+          ) : (
+            <h1 className={MASTHEAD_H1}>{payload.strategyName}</h1>
+          )}
+          {renameTarget && (
+            <RenameStrategyDialog
+              open={renameOpen}
+              onClose={() => setRenameOpen(false)}
+              strategyId={renameTarget.id}
+              currentName={renameTarget.name}
+            />
+          )}
           <div className="mt-3 flex flex-wrap items-center gap-2 sm:gap-3">
             <TrustTierLabel trustTier={payload.trustTier} />
+            {/* READ-ONLY here (D-09: the mark is SET from /my-strategies).
+                Absent prop or an unmarked row ⇒ zero nodes. */}
+            <OwnershipTag mark={ownershipMark} />
             <span className="text-caption text-text-secondary">{chips.length > 0 ? chips.join(" · ") : "—"}</span>
             {isSelfReported && chips.length > 0 && (
               <span
@@ -1282,7 +1398,7 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
   const onLeverageChange = (raw: number) => {
     if (!Number.isFinite(raw)) {
       setLeverageMsg(
-        `Invalid leverage — enter a number between 0 and ${MAX_LEVERAGE}. The previous value was kept.`,
+        `Invalid leverage — enter a number between 0 and ${FACTSHEET_MAX_LEVERAGE}. The previous value was kept.`,
       );
       return;
     }
@@ -1290,12 +1406,12 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
       setLeverageMsg(
         "Leverage can't be negative — shorting isn't included in this what-if. Clamped to 0.",
       );
-    } else if (raw > MAX_LEVERAGE) {
-      setLeverageMsg(`Leverage clamped to ${MAX_LEVERAGE}× — the maximum in this what-if projection.`);
+    } else if (raw > FACTSHEET_MAX_LEVERAGE) {
+      setLeverageMsg(`Leverage clamped to ${FACTSHEET_MAX_LEVERAGE}× — the maximum in this what-if projection.`);
     } else {
       setLeverageMsg(null);
     }
-    setLeverage(Math.min(MAX_LEVERAGE, Math.max(0, raw)));
+    setLeverage(Math.min(FACTSHEET_MAX_LEVERAGE, Math.max(0, raw)));
   };
   const resetLeverage = () => {
     setLeverage(1);
@@ -1328,7 +1444,7 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
               type="number"
               step="0.1"
               min="0"
-              max={MAX_LEVERAGE}
+              max={FACTSHEET_MAX_LEVERAGE}
               value={leverage.toString()}
               title="Leverage multiplier (1× = unlevered; excludes borrow / funding cost)"
               aria-label="Leverage multiplier (1× = unlevered; excludes borrow / funding cost)"

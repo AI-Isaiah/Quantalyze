@@ -1,5 +1,69 @@
 # Changelog
 
+## [0.54.0.0] - 2026-08-08
+### v1.17 — whose capital it is, a book you can reach, and a size you can set
+
+Three phases land together, because they answer one question the allocator side could not:
+*how much money is behind this, and is it yours?*
+
+**Say whose capital it is, once, at the point you add a key (OWN-03).** The contribution
+wizard now asks the capital question directly and culls the old categorization step. A
+strategy marked `own_capital` is allocatable; one marked `team_review` — a trading team's key
+under verification — can never become a position, for anyone, and the database enforces that
+with a trigger rather than trusting a caller. Legacy strategies stay deliberately *unmarked*:
+defaulting them would fabricate a claim about whose money it is, so instead they render no tag
+and a Mark-ownership dialog on **My Strategies** lets the owner answer retroactively. Owners
+can also rename their own strategies now, gated server-side. Flipping a mark to `team_review`
+removes your own positions in the same transaction, so a mark and a live position can never
+disagree.
+
+**Your own book is reachable again (AUM-04).** Book mode used to demand that *every* eligible
+key carry a per-key return series — so an owner-manager with eight keys and two series was
+locked out of the composer entirely and told they had no book. Book entry now opens when *any*
+key contributes, and the surfaces that describe that book were made to agree with each other:
+the live baseline, the compare panel and the KPI strip are all built from the same contributing
+key set. Answering "my own capital" no longer evicts a key from your book either — declaring
+money as yours is the strongest possible signal it isn't manager-side, and the role
+discriminator now reads the mark.
+
+**MT5 and sFOX accounts count toward AUM (AUM-02/05).** Holdings sync branches on the venue at
+one chokepoint instead of assuming every account is a ccxt exchange: an MT5 account contributes
+its equity through the gateway under the per-terminal lock, and an sFOX account contributes its
+priceable balances, naming any it cannot value rather than inventing a rate. An account that
+goes flat or negative now publishes a floored $0 row instead of nothing — silence used to leave
+yesterday's positive equity standing as the newest reading, so a blown-up account kept counting
+money it no longer had under a clean sync status.
+
+**Set the size, in dollars, from either end (AUM-01).** The composer gained a Portfolio AUM
+field and a per-strategy dollar input. In blank mode the per-strategy dollars are the entry
+point — type $500,000 on a row and the portfolio becomes that size, holding every other row's
+dollars fixed — and the portfolio AUM is their sum. In book mode the AUM is what custody says,
+overridable, and a dollar edit back-computes a weight inside that size. Every edit still routes
+through the one weight-write path, so the existing clamps and refusals are inherited rather
+than forked. Strategy leverage now accepts up to 200×; the public factsheet keeps its own
+narrower ceiling.
+
+**The composer says what its numbers mean (SCEN-02/03/04/05).** Added-strategy rows carry a
+column-label strip (WEIGHT · USD · MODE · LEV · NOTIONAL), per-key rows got their own, and a
+notional that cannot be derived explains *why* in a sentence matched to the actual cause
+instead of reading as broken. Clicking a strategy name opens one detail panel at a time with a
+factsheet link. Your own strategies are marked with a **Yours** chip wherever they appear, and
+two of your own strategies with the same name are told apart by when they were created.
+
+**Refusals are visible, and errors stop leaking machine text.** A dollar edit the composer
+declines now says so instead of silently snapping back with only a console warning. Raw
+Postgres and exchange text can no longer reach the sync-error column or an error dialog: worker
+copy is selected by *status and venue* rather than built from an exception, so there is no
+parameter an exception string can travel through. A refusal a third party cannot act on no
+longer tells them to go fix something they do not own. Keyboard focus rings on the new owner
+actions and the allocation dialog now meet the contrast floor.
+
+Also in this release: geo-blocked exchanges are classified permanent again rather than retried
+forever against a host that will never answer; a saved scenario's membership survives a key
+whose series is temporarily empty; the allocations dashboard stopped loading every strategy's
+full return history to compute one boolean; and `strategies.user_id` got the index three
+owner-scoped reads per page load were missing.
+
 ## [0.53.3.1] - 2026-08-06
 ### Hotfix — MT5 keys sync again, and the wizard stops saying "we could not classify this failure"
 

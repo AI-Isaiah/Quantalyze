@@ -58,6 +58,21 @@ const API_DIR = path.resolve(__dirname, "../app/api");
  * portfolio-optimizer + trades/upload were fixed in PR #425; the rest in the
  * no-store class-closure batch; me/audit-log/export was normalized from a
  * bare `"Cache-Control": "no-store"` to the canonical const.
+ *
+ * Phase 150 (OWN-03/OWN-05) added the last THREE entries in one edit. All three
+ * are authenticated, owner-scoped write routes that ECHO a tenant value back in
+ * the success body, which is what puts them in scope rather than in the
+ * write-ack EXEMPT class above: `{ok:true, allocated_amount}`,
+ * `{ok:true, mark}` and `{ok:true, name}` — and the ownership route's 409 body
+ * additionally carries the caller's LIVE `allocated_amount`, a figure the caller
+ * never sent. The in-list sibling `portfolio-strategies/alias/route.ts` returns
+ * `{ok:true, alias}` and is the precedent this classification follows.
+ * (Recorded because 150-05 and 150-07 both noted a target count of 34 → 35:
+ * those notes enumerated the two routes their own authors were building and did
+ * not consider `strategies/[id]/name`, which 150-04 shipped alongside the
+ * ownership route. 36 is the complete set. Each of the three ALSO pins
+ * `Cache-Control: private, no-store` per-arm in its own route.test.ts; this
+ * gate is the cross-route tripwire, not the only cover.)
  */
 const MUST_STAMP_NO_STORE: readonly string[] = [
   "portfolio-optimizer/route.ts",
@@ -93,13 +108,17 @@ const MUST_STAMP_NO_STORE: readonly string[] = [
   "portfolio-strategies/alias/route.ts",
   "portfolio-documents/route.ts",
   "me/audit-log/export/route.ts",
+  // Phase 150 — see the header note.
+  "portfolio-strategies/allocation/route.ts",
+  "strategies/[id]/ownership/route.ts",
+  "strategies/[id]/name/route.ts",
 ];
 
 describe("no-store coverage: audited tenant-data routes stamp NO_STORE_HEADERS", () => {
   // Vacuity guard: a typo that drops entries from the allowlist must fail,
   // not silently shrink the gate.
-  it("locks the full audited tenant-data surface (33 routes)", () => {
-    expect(MUST_STAMP_NO_STORE.length).toBe(33);
+  it("locks the full audited tenant-data surface (36 routes)", () => {
+    expect(MUST_STAMP_NO_STORE.length).toBe(36);
     expect(new Set(MUST_STAMP_NO_STORE).size).toBe(MUST_STAMP_NO_STORE.length);
   });
 

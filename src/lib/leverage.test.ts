@@ -7,7 +7,12 @@ import { compute } from "@/lib/factsheet/compute";
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 import { captureToSentry } from "@/lib/sentry-capture";
 
-import { MAX_LEVERAGE, sanitizeLeverage, sanitizeLeverageMap } from "./leverage";
+import {
+  FACTSHEET_MAX_LEVERAGE,
+  MAX_LEVERAGE,
+  sanitizeLeverage,
+  sanitizeLeverageMap,
+} from "./leverage";
 
 /**
  * Relative-closeness helper for the invariance-math pins. `toBeCloseTo` works on
@@ -38,14 +43,63 @@ describe("sanitizeLeverage — read-side clamp (mirrors engine lev(), adds MAX c
     expect(sanitizeLeverage(0.5)).toBe(0.5);
     expect(sanitizeLeverage(1)).toBe(1);
     expect(sanitizeLeverage(10)).toBe(10);
+    // 151 UAT — the band now reaches the raised contract ceiling. A value the
+    // founder actually types for a strategy row (50×) must pass through
+    // UNTOUCHED; under the old bound it silently came back as 10× on every
+    // reopen, share-resolve and compare.
+    expect(sanitizeLeverage(50)).toBe(50);
+    expect(sanitizeLeverage(MAX_LEVERAGE)).toBe(MAX_LEVERAGE);
   });
 
   it("above MAX → MAX (read-side ceiling the engine lev() does not have)", () => {
-    expect(sanitizeLeverage(11)).toBe(10);
+    expect(sanitizeLeverage(MAX_LEVERAGE + 1)).toBe(MAX_LEVERAGE);
   });
 
-  it("MAX_LEVERAGE is 10", () => {
-    expect(MAX_LEVERAGE).toBe(10);
+  // The one deliberate LITERAL in this file: the ceiling's VALUE is the thing
+  // under test, so deriving it from the constant would make the assertion
+  // self-referential and unable to catch an unintended change.
+  it("MAX_LEVERAGE is 200 (151 UAT — raised from 10 for the composer's strategy rows)", () => {
+    expect(MAX_LEVERAGE).toBe(200);
+  });
+});
+
+describe("151 review A6 — MAX_LEVERAGE is the WIDEST bound in the system", () => {
+  /**
+   * WHY (Rule 9 — intent, not behaviour): `leverage.ts` states this invariant in
+   * capitals, and it is not style. `sanitizeLeverage` clamps on READ, so if any
+   * surface lets a user set a multiplier ABOVE the contract ceiling, that value
+   * is silently rewritten on every reopen / share-resolve / compare — the exact
+   * defect the 151 UAT raise (10 → 200) was fixing, reintroduced from the other
+   * end. Before this pin the two constants could not even see each other:
+   * `FACTSHEET_MAX_LEVERAGE` was module-private in `FactsheetView.tsx`, and the
+   * only leverage assertion in the repo was `MAX_LEVERAGE === 200`.
+   *
+   * The pin is the ORDERING, deliberately not the literals: a surface is free to
+   * pick any narrower bound it wants (that direction is safe), so pinning
+   * `FACTSHEET_MAX_LEVERAGE === 10` would fail on a legitimate product change
+   * while still missing an inversion introduced by editing MAX_LEVERAGE.
+   */
+  it("every per-surface input bound sits at or below the contract ceiling", () => {
+    expect(FACTSHEET_MAX_LEVERAGE).toBeLessThanOrEqual(MAX_LEVERAGE);
+  });
+
+  it("is not vacuous — the surface bound is a real, positive, finite multiplier", () => {
+    // A `0`/`NaN`/`undefined` constant would satisfy the `<=` above while
+    // meaning the surface had lost its bound entirely.
+    expect(Number.isFinite(FACTSHEET_MAX_LEVERAGE)).toBe(true);
+    expect(FACTSHEET_MAX_LEVERAGE).toBeGreaterThan(0);
+    // ...and the ceiling really is the WIDER of the two today, so the `<=`
+    // is carrying a live inequality rather than comparing a value to itself.
+    expect(MAX_LEVERAGE).toBeGreaterThan(FACTSHEET_MAX_LEVERAGE);
+  });
+
+  it("the factsheet's what-if bound is the one the surface actually enforces", () => {
+    // Closes the loop the move opened: the constant is only meaningful if
+    // `sanitizeLeverage` passes the surface's own maximum through UNTOUCHED.
+    // If someone lowered MAX_LEVERAGE under it, this reads back clamped.
+    expect(sanitizeLeverage(FACTSHEET_MAX_LEVERAGE)).toBe(
+      FACTSHEET_MAX_LEVERAGE,
+    );
   });
 });
 
@@ -54,12 +108,14 @@ describe("sanitizeLeverageMap — LEV-02 rehydrate helper (per-entry sanitize on
     expect(sanitizeLeverageMap(undefined)).toEqual({});
   });
 
-  it("sanitizes every entry independently (NaN/-3 → 1, 999 → 10, 2 identity)", () => {
-    expect(sanitizeLeverageMap({ a: 2, b: NaN, c: -3, d: 999 })).toEqual({
+  it("sanitizes every entry independently (NaN/-3 → 1, 999 → MAX, 2 identity)", () => {
+    expect(sanitizeLeverageMap({ a: 2, b: NaN, c: -3, d: 999, e: 50 })).toEqual({
       a: 2,
       b: 1,
       c: 1,
-      d: 10,
+      d: MAX_LEVERAGE,
+      // 151 UAT — an in-band high multiplier is IDENTITY, not a coercion.
+      e: 50,
     });
   });
 });
@@ -76,13 +132,21 @@ describe("SFH-2 — a REAL coercion is Sentry-visible; the identity path is sile
     expect(captureToSentry).not.toHaveBeenCalled();
   });
 
-  it("logs a warning with an errorId + input/output when a finite value is clamped down (999 → 10)", () => {
+  it("logs a warning with an errorId + input/output when a finite value is clamped down (999 → MAX)", () => {
     sanitizeLeverage(999);
     expect(captureToSentry).toHaveBeenCalledTimes(1);
     const [, options] = vi.mocked(captureToSentry).mock.calls[0];
     expect(options.tags.errorId).toBe("LEV_SANITIZE_COERCION");
     expect(options.level).toBe("warning");
-    expect(options.extra).toMatchObject({ input: 999, output: 10 });
+    expect(options.extra).toMatchObject({ input: 999, output: MAX_LEVERAGE });
+  });
+
+  it("151 UAT — an in-band 50× is NOT a coercion, so it emits nothing", () => {
+    // Under the old 10× ceiling this logged a LEV_SANITIZE_COERCION every time
+    // the founder's own draft was read. Non-vacuity for the clamp tests above.
+    sanitizeLeverage(50);
+    sanitizeLeverageMap({ row: 50 });
+    expect(captureToSentry).not.toHaveBeenCalled();
   });
 
   it("logs when a negative value is coerced to 1 (−5 → 1)", () => {
@@ -106,19 +170,25 @@ describe("SFH-2 — a REAL coercion is Sentry-visible; the identity path is sile
     expect(captureToSentry).toHaveBeenCalledTimes(1);
     const [, options] = vi.mocked(captureToSentry).mock.calls[0];
     expect(options.tags.source).toBe("sanitizeLeverageMap");
-    expect(options.extra).toMatchObject({ key: "bad", input: 999, output: 10 });
+    expect(options.extra).toMatchObject({
+      key: "bad",
+      input: 999,
+      output: MAX_LEVERAGE,
+    });
   });
 
   it("LOW-1 — signal:false SUPPRESSES the Sentry warning on a real coercion (value still clamps)", () => {
     // The clamp behavior is IDENTICAL — only the emission is gated.
-    expect(sanitizeLeverage(999, { source: "public", signal: false })).toBe(10);
+    expect(sanitizeLeverage(999, { source: "public", signal: false })).toBe(
+      MAX_LEVERAGE,
+    );
     expect(sanitizeLeverage(-5, { source: "public", signal: false })).toBe(1);
     expect(captureToSentry).not.toHaveBeenCalled();
   });
 
   it("LOW-1 — sanitizeLeverageMap({ signal:false }) suppresses on every entry (public share / read-twice compare path)", () => {
     expect(sanitizeLeverageMap({ a: 999, b: -5, c: 2 }, { signal: false })).toEqual({
-      a: 10,
+      a: MAX_LEVERAGE,
       b: 1,
       c: 2,
     });

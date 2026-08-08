@@ -217,9 +217,19 @@ const METADATA_DRAFT_STUB = {
   assetClass: "crypto",
 };
 
+// Phase 150 / OWN-03 D-07: the mock surfaces `showCapitalQuestion` for the same
+// reason it surfaces `entryContext` on the submit steps — the render gate is
+// DERIVED here, and MetadataStep's own spec can only prove what it does with the
+// prop it is handed, never what this file decides to hand it.
 vi.mock("./steps/MetadataStep", () => ({
-  MetadataStep: (props: { onComplete?: (draft: typeof METADATA_DRAFT_STUB) => void }) => (
+  MetadataStep: (props: {
+    showCapitalQuestion?: boolean;
+    onComplete?: (draft: typeof METADATA_DRAFT_STUB) => void;
+  }) => (
     <div data-testid="mock-metadata-step">
+      <span data-testid="metadata-show-capital-question">
+        {String(props.showCapitalQuestion ?? false)}
+      </span>
       <button
         type="button"
         data-testid="metadata-complete"
@@ -781,6 +791,48 @@ describe("[110-03] WizardClient — contribution-mode terminal paths", () => {
     await waitFor(() =>
       expect(pushMock).toHaveBeenCalledWith("/strategies?wizard_submitted=1"),
     );
+  });
+
+  // ── Phase 150 / OWN-03 D-07 — the capital question's RENDER GATE ─────────
+  //
+  // MetadataStep's own spec proves what the step does with each value of
+  // `showCapitalQuestion`. Neither of these cases existed until the Phase-150
+  // gate's mutation campaign measured the hole: replacing the derivation with a
+  // literal `true` left all 28 wizard spec files / 420 assertions GREEN, because
+  // MetadataStep is mocked here and the mock did not surface the prop. The
+  // property is a CALL-SITE decision, so only a call-site oracle can see it.
+  //
+  // Why it matters rather than merely differing: on the manager path the person
+  // at the keyboard is onboarding SOMEONE ELSE's key. "Whose capital is this?"
+  // is not their question to answer, and the answer is the single input that
+  // unlocks the money action (D-03-A: `own_capital` is the only allocatable
+  // mark). A manager idly leaving the default would be stating a fact about a
+  // client's money.
+  it("[OWN-03 D-07] does NOT ask the capital question on the manager entry path", async () => {
+    render(<WizardClient initialDraft={DRAFT} />);
+
+    fireEvent.click(await screen.findByTestId("sync-complete"));
+    expect(
+      await screen.findByTestId("metadata-show-capital-question"),
+    ).toHaveTextContent("false");
+  });
+
+  it("[OWN-03 D-01] asks the capital question on the allocator contribution path", async () => {
+    render(
+      <WizardClient
+        initialDraft={DRAFT}
+        entryContext="contribution"
+        onSuccess={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("sync-complete"));
+    // The positive arm is what makes the negative above a GATE rather than a
+    // dead prop: without it, deleting the question entirely would also pass.
+    expect(
+      await screen.findByTestId("metadata-show-capital-question"),
+    ).toHaveTextContent("true");
   });
 
   it("sourceOverride='csv' drives the CSV branch WITHOUT any route searchParams (Pitfall 3)", async () => {

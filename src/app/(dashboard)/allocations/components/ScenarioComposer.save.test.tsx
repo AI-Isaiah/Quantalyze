@@ -107,6 +107,9 @@ vi.mock("../lib/scenario-adapter", async (importOriginal) => {
 // --- Imports after mocks --------------------------------------------------
 
 import { ScenarioComposer, type SavedScenarioRow } from "./ScenarioComposer";
+// SP-C1 — read the committed `scenarioAum` off the mocked drawer's props (the
+// established cross-suite oracle for "what the draft actually holds").
+import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 
 // --- localStorage mock ----------------------------------------------------
 
@@ -197,7 +200,7 @@ let registeredOpen: ((row: SavedScenarioRow) => void) | null = null;
 function makePayload(
   overrides: Partial<MyAllocationDashboardPayload> = {},
 ): MyAllocationDashboardPayload {
-  return {
+  const base = {
     portfolio: null,
     analytics: null,
     strategies: [],
@@ -245,6 +248,26 @@ function makePayload(
     mandateIsSet: false,
     ...overrides,
   } as MyAllocationDashboardPayload;
+
+  // Phase 151 / AUM-04 — LEGACY-EQUIVALENT defaults for the split book-entry
+  // gate. This builder casts its literal, so 151-02's three additive fields were
+  // never forced onto it by the typechecker and arrive `undefined` — which the
+  // composer's `?? false` reads as "no reachable book", silently dropping every
+  // gate-true fixture in this file into blank mode. In a pre-split world every
+  // eligible key is an allocator key and the all-or-nothing gate is true iff
+  // they all contribute, so this mapping reproduces the old behaviour exactly.
+  // An explicit override always wins (`??` falls through on undefined only).
+  const legacyEligible = base.eligibleApiKeyIds ?? [];
+  return {
+    ...base,
+    allocatorEligibleApiKeyIds:
+      overrides.allocatorEligibleApiKeyIds ?? legacyEligible,
+    contributingApiKeyIds:
+      overrides.contributingApiKeyIds ??
+      (base.perKeyDailiesGateSatisfied ? legacyEligible : []),
+    bookEntryGateSatisfied:
+      overrides.bookEntryGateSatisfied ?? base.perKeyDailiesGateSatisfied,
+  };
 }
 
 function renderComposer() {
@@ -1646,6 +1669,109 @@ describe("ScenarioComposer — Phase 112 per-key leverage at Save (RED scaffold)
     const body = JSON.parse((init as RequestInit).body as string);
     // The eligible per-key ref's leverage survives the POST prune.
     expect(body.draft.leverageOverrides).toHaveProperty(PK, 2);
+  });
+});
+
+// ===========================================================================
+// 151 UAT / specialist SP-C1 — the AUM seed gate is released on the REOPEN seam.
+//
+// `aumTouchedRef` is the seeded-once gate on the Portfolio AUM field. It was
+// released only in `handleReset`, never in `openSavedScenario` — which re-seeds
+// every OTHER per-open twin (leverage via resetAllTransientState, the window via
+// resetWindowToDefaultOnReopen). `hydrateFromSaved` REPLACES the draft, so after
+// typing an AUM and then opening a saved scenario the field kept DISPLAYING the
+// typed number while `scenarioAum` (and every dollar figure derived from it)
+// came from the reopened draft — exactly the "the field can never display a
+// number the draft does not hold" invariant `commitAumInput` claims to uphold.
+//
+// Worse, a bare focus→blur then WROTE the stale figure: the WR-04 blur-is-not-an-
+// edit guard compares the typed text against the COMMITTED text, and after a
+// reopen those differ, so `setManualAum(staleValue)` fired and "Update portfolio"
+// persisted a number the user never associated with that scenario.
+//
+// Falsify: delete `aumTouchedRef.current = false` from `resetAllTransientState`
+// and (a) fails — the field still reads "1000000".
+// ===========================================================================
+describe("ScenarioComposer — SP-C1 AUM seed released on saved-scenario reopen", () => {
+  const SAVED_AUM = 250_000;
+
+  function renderForOpen() {
+    return render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          registeredOpen = open;
+        }}
+      />,
+    );
+  }
+
+  function aumInput(): HTMLInputElement {
+    return screen.getByTestId("scenario-aum-input") as HTMLInputElement;
+  }
+
+  /** The scenarioAum every downstream consumer reads, at its commit-boundary
+   *  consumer (the established oracle across the composer suites). */
+  function drawerAum(): number | undefined {
+    return vi.mocked(ScenarioCommitDrawer).mock.calls.at(-1)?.[0]?.scenarioAum;
+  }
+
+  function savedRowWithAum(): SavedScenarioRow {
+    return {
+      id: SAVED_ID,
+      name: "Sized portfolio",
+      draft: { ...okDraft(), manualAumUsd: SAVED_AUM } as ScenarioDraft,
+    };
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    registeredOpen = null;
+  });
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  it("(a) after typing an AUM, opening a saved scenario shows the SAVED scenario's AUM — never the number typed against the previous draft", () => {
+    renderForOpen();
+
+    // Type an AUM against the CURRENT (unsaved) draft. This sets the touched
+    // gate — the defect's precondition.
+    const el = aumInput();
+    fireEvent.change(el, { target: { value: "1000000" } });
+    fireEvent.blur(el);
+    expect(aumInput().value).toBe("1000000");
+    expect(drawerAum()).toBe(1_000_000);
+
+    // Open a DIFFERENT saved portfolio whose persisted draft carries its own AUM.
+    openRow(savedRowWithAum());
+
+    // The one invariant: what the field shows IS what the draft holds.
+    expect(drawerAum()).toBe(SAVED_AUM);
+    expect(aumInput().value).toBe(String(SAVED_AUM));
+  });
+
+  it("(b) a bare focus→blur after the reopen is a NO-OP — it can never write the previous draft's AUM onto the reopened scenario", () => {
+    renderForOpen();
+
+    const typed = aumInput();
+    fireEvent.change(typed, { target: { value: "1000000" } });
+    fireEvent.blur(typed);
+
+    openRow(savedRowWithAum());
+
+    // The WR-04 gesture: focus and tab out, touching nothing.
+    const reopened = aumInput();
+    fireEvent.focus(reopened);
+    fireEvent.blur(reopened);
+
+    expect(drawerAum()).toBe(SAVED_AUM);
+    expect(aumInput().value).toBe(String(SAVED_AUM));
   });
 });
 

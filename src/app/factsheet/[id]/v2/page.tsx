@@ -8,6 +8,10 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
 import { readPublicVerificationSignals } from "@/lib/queries";
+import {
+  isCapitalOwnership,
+  type CapitalOwnership,
+} from "@/lib/capital-ownership";
 import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
 import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
 import { readCompositeFactsheet, singleKeyDataQuality, readSingleKeyBasisOpts } from "@/lib/factsheet/composite-read-path";
@@ -421,6 +425,16 @@ export default async function FactsheetV2Page({
   let signature = signRes.data;
   let lane: "public" | "owner" = "public";
   let ownerUid: string | null = null;
+  // Phase 150 / OWN-03 — the owner's capital mark, read on the OWNER PROBE only
+  // and held in a lane-local variable rather than on `signature`.
+  //
+  // ⛔ It must never reach the cached payload: `buildFactsheetPayloadCached` is
+  // keyed id-first and its entry is served to anonymous readers for the full
+  // TTL, so a mark folded into the payload would be published by the cache. The
+  // mark rides the same request-scoped thread `viewerNotice` does (phase-148's
+  // pins are the regression gate — T-150-27). Nothing below this point touches
+  // the unstable_cache callback or its wrapper.
+  let ownershipMark: CapitalOwnership | null = null;
   if (signRes.error || !signature) {
     const {
       data: { user },
@@ -455,7 +469,7 @@ export default async function FactsheetV2Page({
     const { data: ownRow, error: probeError } = await withPublishedOrOwner(
       supabase
         .from("strategies")
-        .select("id, name, codename, disclosure_tier, status, strategy_analytics ( computed_at )")
+        .select("id, name, codename, disclosure_tier, status, capital_ownership, strategy_analytics ( computed_at )")
         .eq("id", id),
       user.id,
     ).maybeSingle();
@@ -497,6 +511,12 @@ export default async function FactsheetV2Page({
     if (ownRow.status !== "published") {
       lane = "owner";
       ownerUid = user.id;
+      // Read through the closed-set predicate rather than casting: the column
+      // is `text`, so an unrecognised value must render NO tag rather than a
+      // trusted-looking one (the same fail-closed posture as isAllocatable).
+      ownershipMark = isCapitalOwnership(ownRow.capital_ownership)
+        ? ownRow.capital_ownership
+        : null;
     }
   }
   const signAnalytics = Array.isArray(signature.strategy_analytics)
@@ -618,9 +638,26 @@ export default async function FactsheetV2Page({
       {/* The notice is derived from the LANE decision, never from a payload
           field — lane state must not enter the object the shared public cache
           serves (UI-SPEC:112). */}
+      {/* Phase 150 / OWN-03 + OWN-05 — two more lane-derived render props,
+          threaded exactly like `viewerNotice` above and for the same reason:
+          they must not enter the object the shared public cache serves.
+
+          `lane === "owner"` IS the D-17 gate, for free. That lane is reachable
+          only when the published probe MISSED and the owner-inclusive probe hit
+          with a non-published status — i.e. the row is unpublished AND owned by
+          this session. A published own strategy resolves on the public lane, so
+          `Rename…` is absent there with no second predicate to keep in sync
+          (150-RESEARCH § Pattern 5). The route enforces the same restriction
+          server-side regardless. */}
       <FactsheetView
         payload={payloadWithTrust}
         viewerNotice={lane === "owner" ? "owner_unpublished" : undefined}
+        ownershipMark={lane === "owner" ? ownershipMark : undefined}
+        renameTarget={
+          lane === "owner"
+            ? { id, name: payloadWithTrust.strategyName }
+            : undefined
+        }
       />
     </>
   );

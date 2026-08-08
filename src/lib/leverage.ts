@@ -28,12 +28,53 @@
 import { captureToSentry } from "./sentry-capture";
 
 /**
- * R4 — leverage v1 bounds. No shorting (L ≥ 0); a 10× ceiling keeps the
- * projection in a sane range. Lifted from ScenarioComposer.tsx:178 so the
- * factsheet recompute, the composer, and the read-side sanitizer share a single
- * source of truth.
+ * R4 — leverage v1 bounds. No shorting (L ≥ 0). Lifted from
+ * ScenarioComposer.tsx:178 so the composer, the solver and the read-side
+ * sanitizer share a single source of truth.
+ *
+ * ── 151 UAT (founder, 2026-08-07): raised 10 → 200 ─────────────────────────
+ *
+ * This is the CONTRACT ceiling: the widest multiplier the system will carry.
+ * The founder models strategy rows well above 10×, and the old bound silently
+ * truncated them — `sanitizeLeverage` clamps on READ, so a saved 50× came back
+ * as 10× on every reopen, share-resolve and compare, with only a Sentry
+ * breadcrumb to say so.
+ *
+ * There is no safety assumption at any particular ceiling. The engine's ruin
+ * handling is bound-independent: `1 + L·r ≤ 0` collapses cumulative wealth and
+ * `computeScenario` returns null metrics, which render as an honest em-dash;
+ * `solveLeverageForMaxDD` ruin-clamps its own search domain by bisecting for
+ * the smallest ruinous L before it solves. A 200× crypto sleeve simply reaches
+ * ruin, honestly, instead of being quietly rewritten to 10×.
+ *
+ * ⚠️ KEEP THIS THE WIDEST BOUND IN THE SYSTEM. A surface may impose a NARROWER
+ * input bound of its own (the public factsheet what-if does — see
+ * {@link FACTSHEET_MAX_LEVERAGE} below), and that is safe in one direction
+ * only: because the sanitizer's ceiling is the widest, no surface's stored
+ * value is ever silently reduced on read. Lowering THIS constant below a
+ * surface's own bound would reintroduce exactly the silent-truncation class
+ * above.
  */
-export const MAX_LEVERAGE = 10;
+export const MAX_LEVERAGE = 200;
+
+/**
+ * The PUBLIC factsheet what-if projection's own, narrower input bound.
+ *
+ * 151 review A6 — this lived as a module-private const in `FactsheetView.tsx`,
+ * which made the "widest bound" invariant above UNENFORCEABLE: nothing could
+ * compare the two, so raising this past `MAX_LEVERAGE` (or lowering
+ * `MAX_LEVERAGE` under it) would reintroduce silent read-time truncation of
+ * stored values with the whole suite green. It lives HERE, beside the ceiling
+ * it must stay under, so `leverage.test.ts` can pin the ORDERING —
+ * `FACTSHEET_MAX_LEVERAGE <= MAX_LEVERAGE` — rather than two literals that
+ * drift independently.
+ *
+ * The VALUE is deliberately unchanged (the pre-151 `MAX_LEVERAGE`): the 10 → 200
+ * raise was asked for by the founder for the Scenario Composer's strategy rows,
+ * and this anonymous public surface was not in that ask. Its behaviour and copy
+ * are byte-identical to before the move.
+ */
+export const FACTSHEET_MAX_LEVERAGE = 10;
 
 /**
  * Optional provenance for a sanitize call, used ONLY to enrich the SFH-2

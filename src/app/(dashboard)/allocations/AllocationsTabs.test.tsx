@@ -162,6 +162,11 @@ const STUB_PROPS: MyAllocationDashboardPayload & {
   perKeyReturnsByApiKeyId: {},
   perKeyDailiesGateSatisfied: false,
   eligibleApiKeyIds: [],
+  // Phase 151 / AUM-04 — the split book-entry gate. No eligible keys here, so
+  // no key can be allocator-side and none can contribute.
+  allocatorEligibleApiKeyIds: [],
+  contributingApiKeyIds: [],
+  bookEntryGateSatisfied: false,
   // Phase 11 / 11-05 — onboarding visibility predicate inputs.
   apiKeysCount: 0,
   mandateIsSet: false,

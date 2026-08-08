@@ -213,6 +213,33 @@ CRYPTO_VENUES: frozenset[str] = frozenset(
 
 
 # ---------------------------------------------------------------------------
+# Non-ccxt venues — the "this venue is NOT a ccxt.Exchange" set (Phase 151 /
+# AUM-02).
+#
+# MD-01 discipline (mirroring CRYPTO_VENUES above): this set MIRRORS the
+# non-ccxt dispatch branches of ``job_worker._make_exchange_client`` — the
+# SINGLE preflight construction chokepoint. That factory hands back a
+# ``SfoxClient`` or an ``Mt5Session`` for these venues, neither of which has a
+# ``fetch_balance`` / ``fetch_positions`` / ``id`` surface.
+#
+# ⚠️ A venue added to that factory WITHOUT being added here re-opens the AUM-02
+# crash class: the object gets built, reaches the holdings consumer
+# (``allocator_positions.fetch_allocator_holdings``), falls through to the ccxt
+# body, and raises a raw ``AttributeError`` that the worker then stamps into the
+# USER-VISIBLE ``api_keys.sync_error`` column. That is exactly the PROD defect
+# (census 2026-08-05: all three founder MT5 keys carried
+# "'Mt5Session' object has no attribute 'fetch_balance'"). Keep them in lockstep
+# — ``tests/test_allocator_positions_non_ccxt.py`` asserts set equality against
+# the factory's own source, so drift fails CI rather than PROD.
+#
+# Membership here means "do not use the ccxt path", NOT "cannot sync": a venue
+# in this set with a registered fetcher in
+# ``allocator_positions._NON_CCXT_HOLDINGS_FETCHERS`` syncs through that fetcher;
+# one without a fetcher yet skips HONESTLY with end-user copy.
+NON_CCXT_VENUES: frozenset[str] = frozenset({"mt5", "sfox"})
+
+
+# ---------------------------------------------------------------------------
 # Quote-currency derivation for the CCXT symbol format used during equity
 # replay. Single source for the two byte-identical inline derivations that
 # lived in ``_compute_daily_equity`` (the spot-balance loop and the perp

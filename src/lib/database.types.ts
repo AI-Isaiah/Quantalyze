@@ -2349,6 +2349,7 @@ export type Database = {
           aum: number | null
           avg_daily_turnover: number | null
           benchmark: string
+          capital_ownership: string | null
           category_id: string | null
           codename: string | null
           created_at: string
@@ -2380,6 +2381,7 @@ export type Database = {
           aum?: number | null
           avg_daily_turnover?: number | null
           benchmark?: string
+          capital_ownership?: string | null
           category_id?: string | null
           codename?: string | null
           created_at?: string
@@ -2411,6 +2413,7 @@ export type Database = {
           aum?: number | null
           avg_daily_turnover?: number | null
           benchmark?: string
+          capital_ownership?: string | null
           category_id?: string | null
           codename?: string | null
           created_at?: string

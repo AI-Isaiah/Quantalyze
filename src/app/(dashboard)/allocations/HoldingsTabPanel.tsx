@@ -24,11 +24,18 @@
  * `unrealized_pnl_usd` the equity contribution).
  */
 
-import { useMemo, useState } from "react";
-import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import { useCallback, useMemo, useState } from "react";
+import type {
+  MyAllocationDashboardPayload,
+  OwnCapitalStrategy,
+} from "@/lib/queries";
 import { buildHoldingRef } from "./lib/holding-outcome-adapter";
-import { toStrategyRows } from "./lib/strategies-row-adapter";
+import {
+  toStrategyRows,
+  type StrategyRow,
+} from "./lib/strategies-row-adapter";
 import { HoldingsTable, type HoldingRow } from "./components/HoldingsTable";
+import { AllocateDialog } from "./components/AllocateDialog";
 import {
   OpenPositionsTable,
   type OpenPositionRow,
@@ -67,6 +74,31 @@ export function HoldingsTabPanel(
     favorites?: FavoriteRow[];
     optimizer?: OptimizerPrefetch;
     note?: { initialContent: string; initialLastSavedAt: Date | null };
+    /**
+     * Phase 150 / OWN-03 — the viewer's own-capital-MARKED strategies
+     * (`getOwnCapitalStrategies`, server-side in page.tsx). The second half of
+     * the D-12-A union: a marked strategy with no position yet has no
+     * `portfolio_strategies` row, so it cannot arrive on `props.strategies`.
+     * Optional so harnesses render honest-empty.
+     */
+    ownCapitalStrategies?: OwnCapitalStrategy[];
+    /**
+     * D-15 empty-state arm-2/arm-3 discriminator — does the viewer have ANY
+     * strategies at all? Sourced from `getMyStrategies` server-side and passed
+     * as a NAMED signal; "zero own-capital rows" and "zero strategies" are
+     * different facts and only the data layer knows the second one.
+     */
+    hasAnyStrategies?: boolean;
+    /**
+     * Review WR-02 — did EITHER of the two strategies reads fail? Both return
+     * `null` (never `[]`) on a transient DB/RLS failure, and page.tsx consumes
+     * that distinction here rather than collapsing it: on failure the row set
+     * below is INCOMPLETE (marked rows missing, positioned rows reading as
+     * unmarked), so the table must say so instead of making a claim about the
+     * account. Defaults to false — a harness that supplies nothing is not
+     * asserting a failure.
+     */
+    strategiesReadFailed?: boolean;
   },
 ) {
   const holdingsSummary = useMemo(() => props.holdingsSummary ?? [], [props.holdingsSummary]);
@@ -74,6 +106,10 @@ export function HoldingsTabPanel(
   const matchDecisionsByHoldingRef = props.matchDecisionsByHoldingRef ?? {};
   const apiKeys = useMemo(() => props.apiKeys ?? [], [props.apiKeys]);
   const strategies = useMemo(() => props.strategies ?? [], [props.strategies]);
+  const ownCapitalStrategies = useMemo(
+    () => props.ownCapitalStrategies ?? [],
+    [props.ownCapitalStrategies],
+  );
 
   // Phase 100 / 100-04 — additive section inputs (honest-empty when absent).
   const favorites = useMemo(() => props.favorites ?? [], [props.favorites]);
@@ -88,12 +124,51 @@ export function HoldingsTabPanel(
 
   const [showRevoked, setShowRevoked] = useState(true);
 
-  // ── Section 1: one row per onboarded strategy. Real strategy data; no
-  //    holding involvement (raw positions render in section 2 below).
+  // ── Section 1: the D-12-A UNION row set — own-capital MARKED strategies ∪
+  //    this book's POSITIONS, joined by strategy id. Both halves are named
+  //    explicitly: the marked half is what the allocator clicks `Allocate…` on
+  //    (it has no position yet), and the position half is why no allocated
+  //    money vanishes from the surface when nobody has answered the capital
+  //    question for it. No holding involvement (raw positions render in
+  //    section 5 below).
   const strategyRows = useMemo(
-    () => toStrategyRows({ strategies }),
-    [strategies],
+    () =>
+      toStrategyRows({
+        strategies: ownCapitalStrategies,
+        positions: strategies,
+      }),
+    [ownCapitalStrategies, strategies],
   );
+
+  // ── The Allocate / Edit dialog host. Row identity is all it needs: `row.id`
+  //    IS the strategy id, and NO portfolio id is sourced or threaded (rev-4 /
+  //    D-03-B — the allocation route derives the caller's real book from the
+  //    session and lazily provisions it, so `props.portfolio` being null is not
+  //    a dead end and there is no remedy state to render).
+  const [dialog, setDialog] = useState<{
+    mode: "allocate" | "edit";
+    strategyId: string;
+    strategyName: string;
+    currentAmount: number | null;
+  } | null>(null);
+
+  const handleAllocate = useCallback((row: StrategyRow) => {
+    setDialog({
+      mode: "allocate",
+      strategyId: row.id,
+      strategyName: row.strategy,
+      currentAmount: null,
+    });
+  }, []);
+
+  const handleEditAllocation = useCallback((row: StrategyRow) => {
+    setDialog({
+      mode: "edit",
+      strategyId: row.id,
+      strategyName: row.strategy,
+      currentAmount: row.allocation,
+    });
+  }, []);
 
   const spotHoldings = useMemo(
     () => holdingsSummary.filter((h) => h.holding_type === "spot"),
@@ -178,7 +253,27 @@ export function HoldingsTabPanel(
   return (
     <div data-tab-panel="holdings" className="grid gap-8">
       {/* Section 1 — onboarded strategies (renders its own "Strategies" header). */}
-      <HoldingsTable strategyRows={strategyRows} />
+      <HoldingsTable
+        strategyRows={strategyRows}
+        hasAnyStrategies={props.hasAnyStrategies ?? false}
+        strategiesReadFailed={props.strategiesReadFailed ?? false}
+        onAllocate={handleAllocate}
+        onEditAllocation={handleEditAllocation}
+      />
+      {/* Keyed on the row + mode so reopening the dialog for a different row
+          (or flipping allocate↔edit) remounts it with a fresh prefill rather
+          than showing the previous row's amount. */}
+      {dialog && (
+        <AllocateDialog
+          key={`${dialog.mode}:${dialog.strategyId}`}
+          open
+          onClose={() => setDialog(null)}
+          mode={dialog.mode}
+          strategyId={dialog.strategyId}
+          strategyName={dialog.strategyName}
+          currentAmount={dialog.currentAmount}
+        />
+      )}
 
       {/* Section 2 — Exposure (PI-01/02/03). Sits directly after Strategies per
           the 99-UI-SPEC placement (the 100-04 Watchlist/Notes sections now follow

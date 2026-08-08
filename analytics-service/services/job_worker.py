@@ -75,10 +75,10 @@ if TYPE_CHECKING:
     # `-> "pd.Series"` return annotation needs the name resolvable under mypy.
     import pandas as pd
 
-    # MT5CONC-01: the bounded restart helper is typed against Mt5Client. The value
-    # is only ever a client already held by the live Mt5Session; a type-only import
+    # MT5CONC-01's `Mt5Client` type-only import moved to services/mt5_concurrency.py
+    # in Phase 151 along with `_mt5_bounded_restart`, the only annotation that used
+    # it. `_make_mt5_session` imports the class lazily at RUNTIME (see below), which
     # keeps the module-import-does-not-require-mt5linux contract intact.
-    from services.mt5_client import Mt5Client
 
 from services.analytics_status import sync_strategy_analytics_status
 from services.audit import log_audit_event
@@ -106,9 +106,29 @@ from services.exchange import (
 )
 from services.positions import fetch_positions, persist_position_snapshots
 from services.sfox_client import SfoxClient  # type annotations only
-from services.mt5_client import (  # mt5 holder + the rpyc bound the derive margins off
-    Mt5Session,
-    MT5_REQUEST_TIMEOUT_S as _MT5_REQUEST_TIMEOUT_S,
+from services.mt5_client import Mt5Session  # the worker's mt5 exchange holder
+# Phase 151: moved to services/mt5_concurrency.py (leaf) so allocator_positions.py
+# can share the ONE terminal registry without an import cycle; re-imported here so
+# existing call sites are unchanged.
+#
+# ⚠️ 151 review E2 — A MONKEYPATCH ON THIS MODULE ONLY BINDS WHAT THIS MODULE
+# READS. Re-exporting a name does not make `monkeypatch.setattr(job_worker, ...)`
+# reach the reader; the reader resolves it from its OWN module globals. Of the
+# six names below, `job_worker` itself reads exactly four —
+# `_MT5_DERIVE_READ_TIMEOUT_S`, `_mt5_bounded_restart`, `_mt5_terminal_lock_for`
+# and `_Mt5PostReadVerificationError` — so only those four are patchable here.
+# `_MT5_RESTART_TIMEOUT_S` and `_MT5_TERMINAL_LOCKS` are re-exports NOTHING here
+# reads: `_mt5_bounded_restart` / `_mt5_terminal_lock_for` read them from
+# `services.mt5_concurrency`, so a test must patch THAT module or its patch is a
+# silent no-op. (It already was one — see tests/test_mt5_derive_branch.py
+# `test_mt5_restart_itself_bounded`.)
+from services.mt5_concurrency import (
+    _MT5_DERIVE_READ_TIMEOUT_S,
+    _MT5_RESTART_TIMEOUT_S,
+    _MT5_TERMINAL_LOCKS,
+    _mt5_bounded_restart,
+    _mt5_terminal_lock_for,
+    _Mt5PostReadVerificationError,
 )
 from services.sfox_factory import make_sfox_client
 from services.sfox_read import sfox_transactions_crawl_wallclock_budget_s
@@ -277,37 +297,6 @@ _SFOX_FAR_PAST_EPOCH_MS: Final[int] = 1_420_070_400_000
 # reconstructed mt5 TWR with a flat series.
 _NATIVE_RETURNS_VENUES: Final[frozenset[str]] = frozenset({"deribit", "sfox", "mt5"})
 
-# MT5RECON-01 (Phase 136): the last-resort event-loop ceiling on the mt5 derive
-# read block (login → account_info → history_deals_get, run OFF the loop via
-# asyncio.to_thread). Each RPyC round-trip is already rpyc-bounded by
-# MT5_REQUEST_TIMEOUT_S inside Mt5Client; this outer wait_for is the FLIPRETRY-01
-# baseline so a hang OUTSIDE a bounded round-trip (netref materialization, a wedged
-# Wine terminal) becomes a CLASSIFIED TRANSIENT at the bound, never an unbounded
-# wedge of the SEQUENTIAL worker. Margin above one round-trip; deep hardening is
-# delivered incrementally: restart-on-timeout landed in Phase 137 plan 01 (the
-# _MT5_RESTART_TIMEOUT_S / _mt5_bounded_restart pair below + the TimeoutError-branch
-# invocation), and the module-level per-terminal lock (_MT5_TERMINAL_LOCKS /
-# _mt5_terminal_lock_for) + the account_info().login bracket (pre+post read) landed
-# in plan 137-02 — both Phase-137 deltas now delivered. Derived
-# from MT5_REQUEST_TIMEOUT_S (+10s margin) so a retuned rpyc bound carries through
-# — mirrors ingestion/mt5.py:_MT5_PROBE_TIMEOUT_S so the derive and probe paths
-# never diverge (WR-02).
-_MT5_DERIVE_READ_TIMEOUT_S: Final[float] = float(
-    os.getenv("MT5_DERIVE_READ_TIMEOUT_S", str(_MT5_REQUEST_TIMEOUT_S + 10.0))
-)
-
-# MT5CONC-01 (Phase 137 plan 01): the wall-clock ceiling on an ACTIVE terminal
-# restart (bounded shutdown + re-connect) invoked on the derive read-timeout
-# branch. The 10s magnitude mirrors exchange.py:_ACLOSE_TIMEOUT_S — a bounded
-# teardown+rebuild is the same order as a bounded close. It MUST stay far under
-# TIMEOUT_PER_KIND["derive_broker_dailies"] (15 min) so a hung restart can never
-# itself push the job into the outer dispatch ceiling: the restart is best-effort
-# recovery, and a restart that wedged is abandoned at this bound exactly like the
-# hung read (never a nested wedge of the sequential worker).
-_MT5_RESTART_TIMEOUT_S: Final[float] = float(
-    os.getenv("MT5_RESTART_TIMEOUT_S", "10.0")
-)
-
 # WR-02 — MT5 deal-fetch upper-bound margin. ``history_deals_get``'s upper bound is
 # built from UTC ``now``, but MT5 deal ``time`` values are in the broker's SERVER
 # timezone (``mt5_deals.deal_utc_day`` is the ONE server-time→UTC correction seam).
@@ -327,87 +316,6 @@ assert _MT5_DEAL_FETCH_MARGIN_S >= _MT5_MAX_SERVER_UTC_OFFSET_S, (
 )
 
 logger = logging.getLogger("quantalyze.analytics.job_worker")
-
-
-async def _mt5_bounded_restart(client: "Mt5Client") -> None:
-    """MT5CONC-01 — ACTIVELY restart a wedged MT5 terminal, bounded so it can never
-    itself nest-wedge the SEQUENTIAL worker.
-
-    ``Mt5Client.restart()`` is blocking RPyC (like the read), so it runs OFF the
-    event loop via ``to_thread`` and is capped by ``_MT5_RESTART_TIMEOUT_S`` (~10s,
-    far under the 15-min dispatch ceiling). A hung restart is ABANDONED at the bound
-    exactly like a hung read — the thread is never joined. Best-effort recovery: any
-    failure (the ``wait_for`` firing, a transport raise) is logged and SWALLOWED so
-    the restart can never mask or replace the caller's transient classification.
-    Kept module-level (not nested in the branch) because plan 137-02 reuses it for
-    the login-mismatch branch.
-    """
-    try:
-        await asyncio.wait_for(
-            asyncio.to_thread(client.restart), timeout=_MT5_RESTART_TIMEOUT_S
-        )
-    except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — best-effort recovery
-        logger.warning(
-            "derive_broker_dailies: bounded mt5 terminal restart did not complete "
-            "within its wall-clock bound — abandoning it; the transient retry will "
-            "reconnect on the next attempt (MT5CONC-01)"
-        )
-
-
-# MT5CONC-02 (Phase 137 plan 02): module-level per-terminal asyncio.Lock registry,
-# keyed by the process-wide terminal identity (host:port via Mt5Client.terminal_key),
-# mirroring position_reconstruction.py:308-317. It MUST be module-level, NOT a
-# Mt5Session attribute: _make_mt5_session builds a FRESH Mt5Session + Mt5Client per
-# job, so a Session-attached lock would be a brand-new Lock object per job and
-# serialize NOTHING (the Pitfall-1 anti-pattern). Keyed by terminal_key so every job
-# hitting the ONE shared Wine terminal contends on the SAME Lock.
-#
-# The dict grows unboundedly BY DESIGN (same rationale as the reconstruct registry):
-# evicting a Lock with waiters parked on it would silently break serialization, and
-# terminal cardinality is bounded (v1 = ONE gateway terminal, O(1) keys).
-#
-# v1 SCOPE — a DOCUMENTED gap, not silently assumed: an asyncio.Lock is
-# SINGLE-EVENT-LOOP. It serializes the shared terminal only WITHIN one worker
-# process's event loop. The sequential main_worker.py:606 dispatch loop runs jobs
-# one-at-a-time in-process, so in-process interleave is structurally impossible;
-# ACROSS worker replicas / the separate FastAPI validate process it does NOT
-# serialize. Cross-process serialization of the ONE gateway is a DOCUMENTED v1 gap
-# (v1 = one serialized terminal, one worker replica); the plan-02 login bracket
-# (account_info().login == expected, asserted pre+post the read) is the cross-process
-# safety net. The dispatch-epilogue aclose_exchange close also sits OUTSIDE this lock
-# — safe under the sequential per-process loop (no terminal IPC contends with it).
-_MT5_TERMINAL_LOCKS: dict[str, asyncio.Lock] = {}
-
-
-def _mt5_terminal_lock_for(terminal_key: str) -> asyncio.Lock:
-    # setdefault is atomic across coroutine resumption — there is no await between
-    # the lookup and the insert, so within one event loop two simultaneous first-
-    # callers for the same terminal cannot end up with two different Lock objects.
-    # Single-event-loop safe (see the cross-process gap noted above).
-    return _MT5_TERMINAL_LOCKS.setdefault(terminal_key, asyncio.Lock())
-
-
-class _Mt5PostReadVerificationError(Exception):
-    """IN-01 — a transient transport blip on the ASSERTION-ONLY POST login bracket.
-
-    The POST bracket re-reads ``account_info()`` purely to re-assert the account
-    AFTER the correct account's deals were already fetched successfully. A genuine
-    network/terminal blip on that re-read surfaces as an ``Mt5ClientError``. Routing
-    it through the shared ``except Mt5ClientError`` classify/stamp arm risks a
-    PERMANENT user-attributed ``failed`` stamp (if ``classify_mt5_login_error``
-    reads it as ``auth``/``wrong_server``) even though the economic read of the
-    CORRECT account succeeded — a credential verdict for a mere verification gap.
-
-    Deliberately a PLAIN ``Exception``, NOT an ``Mt5ClientError`` subclass, so the
-    classify/stamp arm is structurally UNABLE to absorb it: it routes instead to a
-    dedicated TRANSIENT (re-queue), no-stamp branch. It carries only the already-
-    secret-scrubbed ``Mt5ClientError`` text.
-
-    It does NOT weaken the trust guarantee: a genuine wrong-account POST read raises
-    ``Mt5AccountMismatchError`` (a different type, raised by ``_assert_expected_login``
-    OUTSIDE the wrapped ``account_info()`` call), which still routes to the
-    mismatch arm — so ``api_verified`` can never be stamped on the wrong account.
-    """
 
 
 async def _fetch_mt5_account_balance(session: Mt5Session) -> float | None:
@@ -3561,9 +3469,21 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # must honor the founder go-dark gate too. The DB CHECK admits 'mt5'
             # unconditionally, so after MT5_ENABLED is turned off (an incident
             # rollback) a stored mt5 key would keep firing live RPyC deal reads
-            # here every run. Gate BEFORE any decrypt/login/read. Permanent (the
-            # founder disabled it deliberately — retrying is wrong): fails cleanly
-            # and stops, never a live read while disabled.
+            # here every run. Permanent (the founder disabled it deliberately —
+            # retrying is wrong): fails cleanly and stops, never a live read
+            # while disabled.
+            #
+            # 151 review WR-08 — the previous wording ("gate BEFORE any
+            # decrypt/login/read") overstated the guarantee, and an operator
+            # makes an incident-response decision on it. `_exchange_preflight`
+            # has ALREADY decrypted the credentials and built the session
+            # (`_make_exchange_client` → `_make_mt5_session` → `Mt5Client`,
+            # whose `__init__` opens the RPyC transport) by the time control
+            # reaches here. What this gate stops is every terminal READ —
+            # login / account_info / history_deals_get — not the transport
+            # connect. A true pre-connect gate belongs at `_make_exchange_client`
+            # and would need each caller's disabled-path semantics adjusted with
+            # it (see the matching note in allocator_positions).
             if not mt5_enabled_server():
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
@@ -7203,8 +7123,10 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
     through without touching api_keys (the job stays queued).
     """
     from services.allocator_positions import (
+        AllocatorHoldingsSyncTransientError,
         fetch_allocator_holdings,
         persist_allocator_holdings,
+        sync_error_copy,
         _map_exception_to_sync_status,
     )
 
@@ -7221,7 +7143,9 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
 
     try:
         try:
-            rows, warning = await fetch_allocator_holdings(venue, ctx.exchange)
+            rows, warning = await fetch_allocator_holdings(
+                venue, ctx.exchange, api_key_id=api_key_id
+            )
         except ccxt.RateLimitExceeded as exc:
             await _stamp_429(ctx.supabase, ctx.key_row, exc)
             error_kind, msg = classify_exception(exc)
@@ -7231,13 +7155,19 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
             # misleading sync_status='rate_limited' for a key that is
             # permanently geo-blocked from this region — surface 'error'.
             sync_status = "error" if is_geo_blocked(exc) else "rate_limited"
+            # AUM-02 write boundary: the COLUMN gets copy, the operator surfaces
+            # (DispatchResult.error_message → compute_jobs.last_error, the audit
+            # metadata, the log) get `sanitized`. Pre-fix this arm wrote the
+            # geo-block's "move region or proxy" text — operator instructions,
+            # and a raw venue body — into a column the browser renders verbatim.
+            rate_limited_copy = sync_error_copy(sync_status, venue)
 
             def _update_rate_limited() -> None:
                 # Return value discarded by the caller; drop it (matches
                 # _update_persist_err below) so we never annotate the Any-typed
                 # `.execute()` as APIResponse.
                 ctx.supabase.table("api_keys").update(
-                    {"sync_status": sync_status, "sync_error": sanitized}
+                    {"sync_status": sync_status, "sync_error": rate_limited_copy}
                 ).eq("id", api_key_id).execute()
 
             try:
@@ -7257,16 +7187,64 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
                 error_message=sanitized,
                 error_kind=error_kind,
             )
+        except AllocatorHoldingsSyncTransientError as exc:
+            # AUM-02 — THE arm that keeps raw Python out of a user-visible
+            # column. It MUST precede the generic `except Exception` below:
+            # that arm's classify_exception fall-through returns str(exc), and
+            # it is exactly where the PROD AttributeError
+            # ("'Mt5Session' object has no attribute 'fetch_balance'") got
+            # stamped onto all three founder MT5 keys. A non-ccxt venue branch
+            # converts its venue-specific exception to END-USER copy and raises
+            # this type; str(exc) IS that copy, so we stamp it verbatim.
+            # Classified TRANSIENT (never 'permanent'): an unreachable terminal
+            # or a blipping broker API self-heals, so the DB backoff must retry
+            # rather than burn the key to a permanent error state.
+            # The [:500] cap mirrors the sibling arms (copy is far shorter).
+            human_copy = str(exc)[:500]
+
+            def _update_transient() -> None:
+                # Return value discarded by the caller (see _update_err).
+                ctx.supabase.table("api_keys").update(
+                    {"sync_status": "error", "sync_error": human_copy}
+                ).eq("id", api_key_id).execute()
+
+            try:
+                await db_execute(_update_transient)
+            except Exception as upd_exc:  # noqa: BLE001
+                logger.warning(
+                    "poll_allocator_positions: failed to stamp sync_status='error' "
+                    "for api_key %s: %s",
+                    api_key_id, upd_exc,
+                )
+            _emit_audit(
+                allocator_id, api_key_id, "allocator.holdings.sync_failed",
+                {"error_kind": "transient", "sanitized_message": human_copy},
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=human_copy,
+                error_kind="transient",
+            )
         except Exception as exc:  # noqa: BLE001
             error_kind, msg = classify_exception(exc)
             sanitized = msg[:500]
             status_target = _map_exception_to_sync_status(exc)
+            # AUM-02 write boundary — THE arm this defect class keeps coming
+            # back through. `sanitized` is `str(exc)[:500]` for every family the
+            # classifier has no fixed message for, and fetch_allocator_holdings
+            # deliberately re-raises PERMANENT failures unwrapped so the retry
+            # disposition survives (_must_reach_handler_unwrapped) — which means
+            # arbitrary exception text arrives HERE by design. It stays on the
+            # operator surfaces below (error_message → compute_jobs.last_error,
+            # audit metadata, log/Sentry); the user-visible column gets copy
+            # derived from the status, never from the exception.
+            human_copy = sync_error_copy(status_target, venue)
 
             def _update_err() -> None:
                 # Return value discarded by the caller; drop it (see
                 # _update_rate_limited / _update_persist_err).
                 ctx.supabase.table("api_keys").update(
-                    {"sync_status": status_target, "sync_error": sanitized}
+                    {"sync_status": status_target, "sync_error": human_copy}
                 ).eq("id", api_key_id).execute()
 
             try:
@@ -7308,12 +7286,21 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
 
         final_status = "complete_with_warnings" if warning else "complete"
 
+        # 151 review WR-03 — the LAST-LINE length cap. `sync_error` is rendered
+        # verbatim in the browser and every SIBLING write arm here truncates at
+        # [:500]; this success arm did not, so any producer whose warning
+        # interpolates venue-controlled text (an sFOX book of 100+ unpriced
+        # assets, say) could write a multi-kilobyte string into a user-visible
+        # column — a storage-poison surface as well as unreadable copy. Capping
+        # at the WRITE SITE means no future producer can bypass it by forgetting.
+        capped_warning = warning[:500] if warning else warning
+
         def _update_ok() -> None:
             # Return value discarded by the caller; drop it (see
             # _update_rate_limited / _update_persist_err).
             ctx.supabase.table("api_keys").update({
                 "sync_status": final_status,
-                "sync_error": warning,
+                "sync_error": capped_warning,
                 "last_sync_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", api_key_id).execute()
 
@@ -7330,10 +7317,19 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
             allocator_id, api_key_id, sanitized_persist,
         )
         # Best-effort: stamp sync_status so the UI exits the spinner.
+        #
+        # AUM-02 write boundary — the third and last arm that writes this
+        # column. `sanitized_persist` is a raw PostgREST/DB exception string
+        # (schema-cache misses, constraint names, connection errors): the same
+        # raw-Python-as-product-copy defect, just sourced from our own storage
+        # layer instead of a venue. It stays in the log and the audit metadata.
         try:
             def _update_persist_err() -> None:
                 ctx.supabase.table("api_keys").update(
-                    {"sync_status": "error", "sync_error": sanitized_persist}
+                    {
+                        "sync_status": "error",
+                        "sync_error": sync_error_copy("error", venue),
+                    }
                 ).eq("id", api_key_id).execute()
             await db_execute(_update_persist_err)
         except Exception as stamp_exc:  # noqa: BLE001

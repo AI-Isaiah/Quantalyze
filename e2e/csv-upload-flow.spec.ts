@@ -165,7 +165,7 @@ test.describe("/strategies/new/wizard?source=csv (Phase 15 / CSV-01..CSV-03)", (
     // 9. Strategy-profile (csv_metadata) step renders. A description is
     //    required to advance (the MetadataStep Submit gate).
     await expect(
-      page.getByRole("heading", { name: "Tell allocators what this strategy is" }),
+      page.getByRole("heading", { name: "Describe this strategy" }),
     ).toBeVisible({ timeout: 15_000 });
     await page
       .getByLabel("Description")

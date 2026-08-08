@@ -23,6 +23,7 @@ import { WatchlistTabs } from "./WatchlistTabs";
 import { EmptyWatchlist } from "./EmptyWatchlist";
 import { CustomizeDrawer } from "./CustomizeDrawer";
 import { SimulateImpactButton } from "@/components/discovery/SimulateImpactButton";
+import { OwnershipTag } from "./OwnershipTag";
 import { formatPercent, formatNumber, formatCurrency } from "@/lib/utils";
 import {
   isComputedAnalytics,
@@ -75,6 +76,28 @@ const HEADER_LABEL = "text-micro font-mono uppercase tracking-[0.14em]";
 // both radii are established DESIGN.md ladder members. Do NOT harmonize.
 const DATA_STATE_CHIP =
   "inline-flex items-center rounded-sm px-2 py-0.5 text-fixed-11 font-medium uppercase tracking-wide";
+
+// Phase 150 / OWN-03 — the ghost text-action treatment for the owner row
+// actions, taken from RemoveStrategyButton.tsx:51-57 with `hover:text-negative`
+// swapped for `hover:text-text-primary` (these actions are not destructive) and
+// a keyboard focus ring added. Deliberately NOT the accent-underlined
+// "Finish setup →" treatment further down this file: that is the placeholder
+// row's primary CTA and is meant to be louder than these.
+//
+// 151 review A1 — the ring is the Phase-117 / UIFIX-02 CLIP-PROOF idiom
+// verbatim (`outline-none` + `ring-2 ring-inset ring-accent` + a radius for the
+// ring to follow), NOT the `ring-accent/20` this first shipped with. Two
+// independent reasons, both load-bearing on THESE controls specifically:
+//   1. WCAG 1.4.11 (≥3:1 non-text contrast). These are borderless,
+//      underline-less text buttons, so the ring is the ENTIRE focus
+//      affordance — a 20%-alpha accent measures ≈1.3:1 against the row and a
+//      keyboard user sees nothing at all.
+//   2. WCAG 2.4.7. The row lives inside the table's `overflow-x-auto` scroll
+//      container, so an outset indicator is clipped at the scroll edge; an
+//      INSET box-shadow ring paints inside the element bounds and survives.
+// Pinned by StrategyTable.visibility.test.tsx so `/20` cannot come back.
+const GHOST_ROW_ACTION =
+  "text-caption font-medium text-text-muted hover:text-text-primary transition-colors rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent";
 
 // Maps a sortable column to its getPercentiles() metric key. Columns absent
 // from this map (Strategy name, 6 Month, AUM) have no peer-percentile and never
@@ -223,6 +246,26 @@ interface StrategyTableProps {
    * today, and inventing one is out of this phase's scope (tracked in TODOS.md).
    */
   onFinishSetup?: () => void;
+  /**
+   * Phase 150 / OWN-03 — opens the Mark-ownership dialog for a row (the retro
+   * path, D-09/D-11). Client→client function props, minted in
+   * MyStrategiesSection for the same reason `onFinishSetup` is: a function is
+   * non-serializable across the RSC→client boundary, so an RSC page cannot pass
+   * one. That is also what keeps them off the public surfaces — /discovery and
+   * /browse are RSCs and pass NEITHER (pin 2's negative list).
+   *
+   * ABSENT ⇒ the row-action cluster renders zero nodes, so the public action
+   * cell is byte-identical to today.
+   */
+  onMarkOwnership?: (s: StrategyWithAnalytics) => void;
+  /**
+   * Phase 150 / OWN-05 — opens the Rename dialog. Rendered only on private and
+   * draft rows (D-17): on a published row the affordance is ABSENT, not
+   * disabled, because published rename is a deferred trust-surface decision and
+   * there is no honest remedy to offer. Same precedent as the Simulate gate
+   * below — rendering nothing beats rendering a control that cannot work.
+   */
+  onRename?: (s: StrategyWithAnalytics) => void;
 }
 
 // --- Range filter helper ---
@@ -272,6 +315,8 @@ export function StrategyTable({
   visibility = "published-only",
   placeholderKeys,
   onFinishSetup,
+  onMarkOwnership,
+  onRename,
 }: StrategyTableProps) {
   const reactId = useId();
   const tabIdBase = `watchlist${reactId}`;
@@ -857,6 +902,57 @@ export function StrategyTable({
                       s.created_at ?? null,
                     );
                     const hasComputedAnalytics = isComputedAnalytics(chipStatus);
+                    // Phase 150 / OWN-03 + OWN-05 — the owner row-action
+                    // cluster, assembled HERE rather than inline in the action
+                    // cell. That placement is deliberate: pin 7 of
+                    // phase-149-my-strategies-parity.test.ts asserts that
+                    // `s.status === "published"` survives within 300
+                    // comment-stripped characters BEFORE `<SimulateImpactButton`,
+                    // and a multi-branch cluster written inline between them
+                    // would push the guard out of that window and redden the pin
+                    // with a misleading message.
+                    //
+                    // Both callbacks are ABSENT on every public mount, so this
+                    // is `null` on /discovery and /browse and the action cell
+                    // there is byte-identical to today.
+                    // D-17: the rename affordance mirrors the SERVER gate
+                    // exactly (the route's UPDATE filters to these two
+                    // statuses), rather than "not published" — an archived row
+                    // is not renameable either, and a render gate that is wider
+                    // than the write gate produces a control that 404s.
+                    const isRenameable =
+                      s.status === "private" || s.status === "draft";
+                    const ownerRowActions =
+                      onMarkOwnership || (onRename && isRenameable) ? (
+                        <span
+                          className={`inline-flex items-center gap-3 ${s.status === "published" ? "mr-3" : ""}`}
+                        >
+                          {onMarkOwnership && (
+                            <button
+                              type="button"
+                              onClick={() => onMarkOwnership(s)}
+                              className={GHOST_ROW_ACTION}
+                            >
+                              {/* The label names the ACT, and an unmarked row
+                                  is not "changing" anything — the retro path
+                                  exists precisely because the question was
+                                  never asked of these rows. */}
+                              {s.capital_ownership
+                                ? "Change mark…"
+                                : "Mark ownership…"}
+                            </button>
+                          )}
+                          {onRename && isRenameable && (
+                            <button
+                              type="button"
+                              onClick={() => onRename(s)}
+                              className={GHOST_ROW_ACTION}
+                            >
+                              Rename…
+                            </button>
+                          )}
+                        </span>
+                      ) : null;
                     return (
                       <tr
                         key={s.id}
@@ -916,6 +1012,24 @@ export function StrategyTable({
                                 absence of a marker IS "published". */}
                             {s.status !== "published" && (
                               <Badge type="status" label={s.status} />
+                            )}
+                            {/* Phase 150 / OWN-03 — the ownership mark, in the
+                                same Badge family as the status chip beside it.
+                                ⛔ THE VISIBILITY GATE IS LOAD-BEARING, unlike
+                                the status marker above: public rows arrive here
+                                with `capital_ownership` POPULATED (shapeRankingRows
+                                spreads the whole strategy row), so an ungated
+                                mount would render the owner's mark to anonymous
+                                /browse and /discovery readers — UI-SPEC invariant
+                                3 says public surfaces show zero pixels of this
+                                phase for non-owners (T-150-39). Same guard family
+                                as the Delta-4 chips below; public mounts never
+                                pass `visibility`, so the pinned "published-only"
+                                default keeps them tag-free. An UNMARKED row
+                                renders nothing — OwnershipTag returns null, and
+                                absence is honest. */}
+                            {visibility === "owner-all-statuses" && (
+                              <OwnershipTag mark={s.capital_ownership} />
                             )}
                           </div>
                           <div className="flex items-center gap-2 mt-1">
@@ -1053,6 +1167,7 @@ export function StrategyTable({
                             the visibility default already guarantees every row
                             is published. */}
                         <td className="px-4 py-3 text-right group-hover:bg-page/50 transition-colors">
+                          {ownerRowActions}
                           {s.status === "published" && (
                             <SimulateImpactButton
                               candidateStrategyId={s.id}

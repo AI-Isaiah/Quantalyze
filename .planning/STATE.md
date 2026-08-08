@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
-status: executing
-stopped_at: Phase 148 UI-SPEC approved
-last_updated: "2026-08-05T17:53:31.505Z"
-last_activity: 2026-08-05
+status: ready_to_plan
+stopped_at: Phase 152 complete (6/6) — ready to discuss Phase 153
+last_updated: 2026-08-07T20:17:44.150Z
+last_activity: 2026-08-07
 progress:
   total_phases: 9
-  completed_phases: 3
-  total_plans: 16
-  completed_plans: 16
-  percent: 33
+  completed_phases: 5
+  total_plans: 37
+  completed_plans: 198
+  percent: 56
 ---
 
 # Project State — Quantalyze
@@ -55,10 +55,10 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: 149 (--complete) — EXECUTING
-Plan: 1 of ?
-Status: Executing Phase 149
-Last activity: 2026-08-05 -- Phase 149 execution started
+Phase: 153
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-08-07 -- Phase 152 execution started
 
 ### Phase 142.1 scope (inserted 2026-08-02)
 
@@ -1186,8 +1186,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session Continuity
 
-**Last activity:** 2026-08-05
-**Stopped at:** Phase 148 UI-SPEC approved
+**Last activity:** 2026-08-07
+**Stopped at:** Phase 152 UI-SPEC approved
 **Next step:** run `/gsd:verify-work` on Phase 140.1.1. Nothing is left to execute.
 
 ⚠️ **Env changed and LEFT changed:** `slowapi` was synced **0.1.9 → 0.1.10** (the CI pin at `analytics-service/requirements.txt:226`) and deliberately NOT restored — matching CI is the point, and every #3/#4/#5 mutation row is version-stamped against it. A verifier re-running those cycles on 0.1.9 would not be reproducing this evidence.

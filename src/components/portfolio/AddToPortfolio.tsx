@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
+import { capitalOwnershipRefusalMessage } from "@/lib/capital-ownership";
 import { Button } from "@/components/ui/Button";
 
 interface Portfolio {
@@ -59,6 +60,20 @@ export function AddToPortfolio({ strategyId }: { strategyId: string }) {
     if (error) {
       if (error.code === "23505") {
         setFeedback("Already in portfolio");
+      } else if (error.code === "23514") {
+        // Phase 150 / OWN-03 (W-6). 23514 is a Postgres check_violation, and on
+        // this table there is exactly one: the D-03-A trigger that refuses a
+        // position on a strategy not marked as the owner's own capital.
+        // Reporting the generic failure here would tell the user the system
+        // broke when in fact it declined for a reason they can act on.
+        //
+        // The two arms, why they differ, and why the needle is interpolated
+        // rather than spelled inline all live with the marks themselves —
+        // `capitalOwnershipRefusalMessage` in @/lib/capital-ownership. This
+        // component and MigrationWizard are the only two browser-direct writers
+        // of this table and must answer identically; sharing the mapper is what
+        // makes that structural rather than a promise in a comment.
+        setFeedback(capitalOwnershipRefusalMessage(error));
       } else {
         setFeedback("Failed to add");
       }

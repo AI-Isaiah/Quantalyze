@@ -6,6 +6,13 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
 import { STRATEGY_NAMES, canonicalizeExchangeList } from "@/lib/constants";
 import { MAGNITUDE_CAPS, isCryptoExchange } from "@/lib/closed-sets";
+import { isValidDollar } from "@/lib/dollar-validation";
+import {
+  OWN_CAPITAL,
+  TEAM_REVIEW,
+  isCapitalOwnership,
+  type CapitalOwnership,
+} from "@/lib/capital-ownership";
 import { notifyFounderNewStrategy, resolveManagerName } from "@/lib/email";
 import { isUuid } from "@/lib/utils";
 import { postProcessKey } from "@/lib/process-key-client";
@@ -320,6 +327,11 @@ type ValidatedPayload = {
   // publish-candidate flow ('pending_review'); 'contribution' is the allocator
   // overlay, which finalizes to an owner-only terminal status ('private').
   entryContext: "manager" | "contribution";
+  // Phase 150 / OWN-03 — whose capital sits behind this key, when the wizard
+  // asked. UNDEFINED means the question was never put to the user, which is
+  // NOT the same as an answer: the mark is left unwritten (NULL), and an
+  // unmarked strategy is non-allocatable. Never default this.
+  capitalOwnership?: CapitalOwnership;
 };
 
 function validatePayload(
@@ -351,6 +363,7 @@ function validatePayload(
     max_capacity,
     asset_class,
     entry_context,
+    capital_ownership,
   } = body;
 
   if (!isUuid(strategy_id)) {
@@ -401,12 +414,9 @@ function validatePayload(
   // exposure for a "Verified by Quantalyze" factsheet with no AUM. The
   // contract: client must send a finite number in [0, 1e12), or omit
   // the field (null / undefined) entirely.
+  // Phase 150: the validator itself moved to `@/lib/dollar-validation` so the
+  // allocation route does not mint a second one; behaviour is unchanged.
   const MAX_DOLLAR_VALUE = MAGNITUDE_CAPS.MAX_DOLLAR_VALUE_USD;
-  const isValidDollar = (v: unknown): v is number =>
-    typeof v === "number" &&
-    Number.isFinite(v) &&
-    v >= 0 &&
-    v < MAX_DOLLAR_VALUE;
   const isOmitted = (v: unknown): boolean => v === undefined || v === null;
   if (!isOmitted(aum) && !isValidDollar(aum)) {
     return {
@@ -468,6 +478,35 @@ function validatePayload(
   const entryContextValidated =
     entry_context === "contribution" ? "contribution" : "manager";
 
+  // OWN-03 (Phase 150) — the capital mark. Closed set {own_capital,
+  // team_review}, mirroring the DB CHECK `strategies_capital_ownership_check`;
+  // ABSENT/null means the wizard never asked, and the mark is simply not
+  // written (the column stays NULL = unmarked = non-allocatable).
+  //
+  // A garbage value is a hard 400, NOT a silent coercion to the safe value.
+  // Coercing would let a broken or hostile client believe it had set a mark
+  // it did not set. Deliberately mirrors the entry_context arm above: a bare
+  // `error` string with NO `code`, because every code the wizard renders must
+  // exist in its error roster — an unknown one renders the UNKNOWN card, which
+  // tells the user nothing (Pitfall 7). This value is data, not privilege:
+  // marking a strategy own-capital only makes it ELIGIBLE for the allocation
+  // surface, which enforces ownership itself.
+  if (
+    capital_ownership !== undefined &&
+    capital_ownership !== null &&
+    !isCapitalOwnership(capital_ownership)
+  ) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: `capital_ownership must be '${OWN_CAPITAL}' or '${TEAM_REVIEW}'` },
+        { status: 400, headers: NO_STORE_HEADERS },
+      ),
+    };
+  }
+  const capitalOwnershipValidated: CapitalOwnership | undefined =
+    isCapitalOwnership(capital_ownership) ? capital_ownership : undefined;
+
   // audit-2026-05-07 H-0324 — isUuid is a type predicate (value is
   // string), so the prior `as string` casts were redundant. Removing
   // them keeps the parse boundary statically verified end-to-end.
@@ -495,6 +534,7 @@ function validatePayload(
       maxCapacityNum,
       asset_class: asset_class_validated,
       entryContext: entryContextValidated,
+      capitalOwnership: capitalOwnershipValidated,
     },
   };
 }
@@ -1132,9 +1172,37 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       resolvedSource = keyRow.exchange;
     }
   }
+  // OWN-03 (Phase 150) — fail LOUD on a mark that cannot land. The capital
+  // question is only rendered on the contribution entry, and every
+  // contribution routes to runLegacyFinalize above, which is where the mark is
+  // written. So a mark arriving HERE means a hand-crafted body or a future
+  // drift in the routing — and the unified arm has no mark write, so it would
+  // be dropped in silence. Dropping is still SAFE (unwritten = NULL =
+  // non-allocatable, and nothing the user was shown is contradicted), so this
+  // is not an error arm; but it must not be invisible.
+  //
+  // ONE RESPONSE CONTRACT ACROSS BOTH ARMS. The legacy arm has emitted
+  // `capital_ownership_persisted: false` since 151 specialist F-3 when a mark
+  // it was asked for did not land; this arm dropped the mark with only a
+  // console.warn and a byte-identical success body, so a client that sent
+  // `capital_ownership` and got routed here could not tell "saved" from
+  // "discarded" — and SubmitStep's reader (151 review E8) would show plain
+  // success. The flag is forwarded below so the ONE `=== false` read on the
+  // client covers both arms. Console-only visibility is for US; the sidecar is
+  // for the person whose answer was dropped.
+  const capitalOwnershipDropped = fields.capitalOwnership !== undefined;
+  if (capitalOwnershipDropped) {
+    console.warn(
+      `[strategies/finalize-wizard] capital_ownership sent on the unified (manager) arm for ` +
+        `${fields.strategy_id}; the mark is NOT persisted here and stays NULL. ` +
+        `The capital question is a contribution-entry surface only.`,
+    );
+  }
+
   return await unifiedFinalizeWizardHandler({
     strategy_id: fields.strategy_id,
     userId: user.id,
+    capitalOwnershipDropped,
     // 140.3-14 / TS-33 — read off the owner-scoped draft row above.
     wizardSessionId,
     // NEW-C14-06: forward the validated+normalized `fields` object instead
@@ -1261,6 +1329,89 @@ async function runLegacyFinalize(args: {
 
   const resolvedId =
     typeof finalizedId === "string" ? finalizedId : fields.strategy_id;
+
+  // ── OWN-03 (Phase 150) — persist the capital mark ────────────────────────
+  //
+  // A SEPARATE owner-scoped UPDATE, deliberately NOT a 14th argument to
+  // finalize_wizard_strategy. Widening that signature means a DROP/CREATE of a
+  // SECURITY DEFINER function sitting on the wizard's critical path; a
+  // botched deploy there costs every submission, whereas the worst case here
+  // costs one metadata field. The 13-arg signature stays byte-untouched.
+  //
+  // The cost of that choice is real and accepted: this is not atomic with the
+  // finalize. If the write fails, the strategy is finalized with a NULL mark
+  // — unmarked, therefore non-allocatable, therefore SAFE — and the user can
+  // set it from the Mark dialog. It must never be promoted to an error arm:
+  // returning a failure here would discard a successful finalize over
+  // metadata, and any error code the wizard's roster does not carry renders
+  // the useless UNKNOWN card.
+  //
+  // Both `.eq()` predicates stay — with the justification RE-BASED onto the
+  // live policy. This comment used to say "the strategies_update RLS policy has
+  // no WITH CHECK clause, so the `user_id` filter is the actual thing standing
+  // between this patch and another owner's row". That is FALSE: the
+  // `strategies_update` policy was DROPped and recreated with an explicit
+  // `WITH CHECK (user_id = auth.uid())` by the sec005 follow-ups migration,
+  // whose own verification block RAISEs if that clause is missing. The real
+  // ground for keeping the predicates (T-150-10): they keep this UPDATE correct
+  // on its own terms if `supabase` here is ever swapped for the admin client
+  // this file already constructs elsewhere — where RLS does not apply at all —
+  // and the `user_id` filter is what makes the zero-row arm below
+  // distinguishable from a successful write.
+  // 151 specialist F-3 — the SERVER posture above is sound (never fail the
+  // finalize over metadata), but the RESPONSE was a plain success with no
+  // signal at all: a user who explicitly answered "my own capital" got the
+  // normal success screen while their answer was dropped, and the consequence
+  // (a NULL-marked strategy is non-allocatable, so `Allocate…` never appears
+  // on the Holdings tab) surfaced days later as an unexplained absence. The
+  // documented remedy ("set it from the Mark dialog") is discoverable only by
+  // someone who already knows the mark failed. That is user-visible data loss
+  // reported to the user as success.
+  //
+  // The honest minimum: a NON-ERROR sidecar in the 200 body. It is emitted ONLY
+  // on failure, so every existing caller's response bytes are unchanged and the
+  // never-fail-the-finalize contract is intact — a client that asked for a mark
+  // and sees no flag got one.
+  let capitalOwnershipPersisted = true;
+  if (fields.capitalOwnership !== undefined) {
+    // @audit-skip: strategy-level metadata written as part of the already-
+    // audited finalization (mirrors the asset_class persist above).
+    const { data: markRows, error: markErr } = await supabase
+      .from("strategies")
+      .update({ capital_ownership: fields.capitalOwnership })
+      .eq("id", resolvedId)
+      .eq("user_id", user.id)
+      .select("id");
+    if (markErr) {
+      capitalOwnershipPersisted = false;
+      console.error(
+        `[strategies/finalize-wizard] capital_ownership persist failed for ${resolvedId} ` +
+          `(non-blocking; mark stays NULL = non-allocatable): ${scrubSeamError(markErr)}`,
+      );
+      captureToSentry(markErr, {
+        tags: { op: "finalize-wizard.capital_ownership_persist" },
+        level: "warning",
+        extra: { strategy_id: resolvedId },
+      });
+    } else if (Array.isArray(markRows) && markRows.length === 0) {
+      capitalOwnershipPersisted = false;
+      // Zero rows with no error means the id+user_id predicate matched
+      // nothing. Different story from a transport failure and a louder one:
+      // the finalized row is not the caller's, or is already gone.
+      console.error(
+        `[strategies/finalize-wizard] capital_ownership write matched NO row for ${resolvedId} ` +
+          `(owner predicate excluded it; mark stays NULL)`,
+      );
+      captureToSentry(
+        new Error("finalize-wizard capital_ownership write matched no row"),
+        {
+          tags: { op: "finalize-wizard.capital_ownership_persist" },
+          level: "warning",
+          extra: { strategy_id: resolvedId },
+        },
+      );
+    }
+  }
 
   // Both side effects are fire-and-forget: the row is already in
   // pending_review, so failures to notify or touch last_sync_at must
@@ -1475,6 +1626,12 @@ async function runLegacyFinalize(args: {
       // CONTRIB-02 — return the ACTUAL terminal status the RPC wrote ('private'
       // on the contribution branch, 'pending_review' for the manager flow).
       status: terminalStatus,
+      // 151 specialist F-3 — present ONLY when the caller asked for a capital
+      // mark and it did not land. The finalize still succeeded; this says the
+      // ONE metadata field was dropped, so the strategy is unmarked (therefore
+      // non-allocatable) and the user must set it from the Mark dialog. Absent
+      // ⇒ nothing was lost.
+      ...(capitalOwnershipPersisted ? {} : { capital_ownership_persisted: false }),
     },
     { headers: NO_STORE_HEADERS },
   );
@@ -1564,6 +1721,15 @@ async function unifiedFinalizeWizardHandler(args: {
    * absence, never as a synthesised id.
    */
   wizardSessionId: string | null;
+  /**
+   * OWN-03 — TRUE when the caller asked for a `capital_ownership` mark. This
+   * arm has no mark write, so asking for one here IS a drop, and the two 200
+   * bodies below carry the same `capital_ownership_persisted: false` sidecar
+   * the legacy arm emits on a failed persist. One contract, both arms: the
+   * client's single `=== false` read (SubmitStep) never has to know which arm
+   * answered.
+   */
+  capitalOwnershipDropped: boolean;
   payload: Record<string, unknown>;
   apiKeyId: string | null;
   source: string;
@@ -1682,6 +1848,12 @@ async function unifiedFinalizeWizardHandler(args: {
   // there is no terminalStatus to thread here — this arm always terminates
   // 'pending_review' by construction.
   const upstream = result.body;
+  // OWN-03 — the dropped-mark sidecar, spelled ONCE and spread into both 200
+  // arms. Emitted ONLY when the caller asked for a mark, so every existing
+  // caller's response bytes are unchanged; absent still means nothing was lost.
+  const markSidecar = args.capitalOwnershipDropped
+    ? { capital_ownership_persisted: false as const }
+    : {};
   if (isProcessKeyOnboardResponse(upstream)) {
     if (upstream.queued) {
       return NextResponse.json(
@@ -1691,6 +1863,7 @@ async function unifiedFinalizeWizardHandler(args: {
           status: "pending_review",
           verification_id: upstream.verification_id,
           queued: true,
+          ...markSidecar,
         },
         { headers: NO_STORE_HEADERS },
       );
@@ -1705,6 +1878,7 @@ async function unifiedFinalizeWizardHandler(args: {
         queued: false,
         code: upstream.code,
         ...(upstream.idempotent === true ? { idempotent: true } : {}),
+        ...markSidecar,
       },
       { headers: NO_STORE_HEADERS },
     );

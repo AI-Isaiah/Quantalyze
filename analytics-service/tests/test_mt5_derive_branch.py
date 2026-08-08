@@ -70,6 +70,11 @@ from services.ingestion.long_fetch import (
 )
 from services.metrics import periods_per_year_for_asset_class
 from services.mt5_client import Mt5Client, Mt5ClientError, Mt5Session
+# 151 review E2 — the restart bound is READ from this leaf module, not from
+# `job_worker` (Phase 151 moved the MT5 concurrency symbols out; job_worker only
+# re-exports `_MT5_RESTART_TIMEOUT_S`). A monkeypatch aimed at `jw` is a SILENT
+# no-op, so the bound must be patched HERE or the test that names it is vacuous.
+import services.mt5_concurrency as mt5_conc
 
 
 # ---------------------------------------------------------------------------
@@ -839,11 +844,21 @@ async def test_mt5_restart_itself_bounded(monkeypatch) -> None:
     tiny restart bound. The job must STILL return transient PROMPTLY (bounded wall-
     clock, well under the summed genuine hang durations) — the never-nested-wedge
     proof. Without the to_thread + wait_for bound on the restart, the hung shutdown
-    would wedge the sequential worker exactly as the original read hang would."""
+    would wedge the sequential worker exactly as the original read hang would.
+
+    151 review E2 — THE TWO PATCH TARGETS ARE DIFFERENT MODULES, ON PURPOSE.
+    `job_worker` READS `_MT5_DERIVE_READ_TIMEOUT_S` at its own call sites, so
+    patching `jw` binds it. It does NOT read `_MT5_RESTART_TIMEOUT_S` — it only
+    re-exports the name; `_mt5_bounded_restart` reads it from
+    `services.mt5_concurrency`, where Phase 151 moved it. Patching `jw` for that
+    one is a SILENT no-op: the real ~10s bound stays in force and the assertion
+    passes on the shutdown hang alone, which is exactly the bound the test is
+    supposed to prove fires. Re-point either patch at the wrong module and this
+    test stops testing what its name claims WITHOUT going red."""
     monkeypatch.setenv("MT5_ENABLED", "true")
     monkeypatch.setattr(jw, "_MT5_DERIVE_READ_TIMEOUT_S", 0.1)
-    monkeypatch.setattr(jw, "_MT5_RESTART_TIMEOUT_S", 0.05)
-    read_hang, shutdown_hang = 0.3, 0.5  # genuine hangs the bounds must cut short
+    monkeypatch.setattr(mt5_conc, "_MT5_RESTART_TIMEOUT_S", 0.05)
+    read_hang, shutdown_hang = 0.3, 1.0  # genuine hangs the bounds must cut short
     transport = _FakeMt5Transport(
         account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
         deals=_canonical_deals(),
@@ -859,11 +874,23 @@ async def test_mt5_restart_itself_bounded(monkeypatch) -> None:
 
     assert result.outcome == DispatchOutcome.FAILED
     assert result.error_kind == "transient"
-    # Both bounds fired: wall-clock is far under the summed genuine hangs (0.8s), so
-    # neither the read hang nor the restart-shutdown hang ran to completion inline.
-    assert elapsed < (read_hang + shutdown_hang), (
-        f"the bounded read + bounded restart must return well under the summed "
-        f"genuine hang durations; elapsed={elapsed:.3f}s"
+    # 151 review E2 — THE BAR IS `shutdown_hang` ALONE, NOT THE SUM.
+    #
+    # The old bar (`read_hang + shutdown_hang`) could not distinguish a restart
+    # bound that fired from one that did not: with the read bound at 0.1s an
+    # UNBOUNDED restart returns at ~0.1 + shutdown_hang, which sat comfortably
+    # under the summed bar and passed. So the assertion held even while the
+    # `_MT5_RESTART_TIMEOUT_S` patch was aimed at the wrong module and the real
+    # ~10s bound was in force — the test was green on the shutdown hang running
+    # to completion, i.e. on the very failure it exists to catch.
+    #
+    # Below `shutdown_hang` there is only one way to arrive: the restart's own
+    # wait_for cut the hung teardown short. Bounded ⇒ ~0.15s (0.1 read + 0.05
+    # restart); unbounded ⇒ ≥ 0.1 + shutdown_hang, which EXCEEDS this bar by
+    # construction, so the failure mode is deterministic rather than timing-lucky.
+    assert elapsed < shutdown_hang, (
+        f"the bounded restart must return before the hung shutdown "
+        f"({shutdown_hang}s) could even have completed; elapsed={elapsed:.3f}s"
     )
 
 

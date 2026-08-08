@@ -101,6 +101,26 @@ export interface ScenarioCompareInputs {
    */
   perKeyReturnsByApiKeyId?: Record<string, DailyPoint[]>;
   eligibleApiKeyIds?: string[];
+  /**
+   * Phase 151 / 151 specialist SP-W2 — the ROLE-AWARE basis: the ids the
+   * composer's engine actually blends (`payload.contributingApiKeyIds`, the
+   * allocator-eligible keys that carry a per-key series, with the owner's
+   * MANAGER-side keys subtracted). This is the set `computeMetricsForDraft`
+   * intersects a saved draft's persisted membership against.
+   *
+   * `eligibleApiKeyIds` above stays role-BLIND and is kept for the callers that
+   * still need the wider set (the ineligible-member disclosure). Intersecting
+   * compute against it re-admitted manager keys the composer excludes: an
+   * owner-manager whose keys ALL carried a series (so the pre-151 all-or-nothing
+   * gate was true) saved a book scenario with the whole eligible set as its
+   * persisted membership — post-151 the composer reopened it blending only the
+   * contributing keys while the compare panel, on the SAME screen, blended the
+   * manager keys too. Two projections of one portfolio.
+   *
+   * Optional + `?? eligibleApiKeyIds` at the use site so a narrow test payload
+   * (and any caller predating the split gate) keeps its current behaviour.
+   */
+  contributingApiKeyIds?: string[];
   equityByApiKeyId?: Record<string, number>;
   /**
    * WR-03 — carried for PARITY with the live payload only. `computeMetricsForDraft`
@@ -171,7 +191,17 @@ export function computeMetricsForDraft(
     // that are STILL eligible pass — a fabricated or since-removed member id
     // simply drops (T-62-04/-05), never pulling in a per-key series the
     // allocator is not eligible for.
-    const eligibleIds = new Set(liveInputs.eligibleApiKeyIds ?? []);
+    // SP-W2 — intersect against the ROLE-AWARE contributing set (what the
+    // composer's engine blends), falling back to the role-blind eligible set
+    // only when the caller predates the split gate. WR-07 repointed the two
+    // membership DERIVATIONS (deriveMembershipFromGate / buildLiveBookDraft) but
+    // not this compute-time intersection, so a pre-151 saved draft carrying the
+    // whole role-blind set as its persisted membership still made compare blend
+    // the owner's manager-side keys — while the composer, on the same screen,
+    // excluded them.
+    const eligibleIds = new Set(
+      liveInputs.contributingApiKeyIds ?? liveInputs.eligibleApiKeyIds ?? [],
+    );
     const eligible = new Set(
       (draft.memberKeyIds ?? []).filter((id) => eligibleIds.has(id)),
     );

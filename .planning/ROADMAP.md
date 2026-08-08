@@ -54,9 +54,9 @@ unpublished strategy; AUM-05 will hit sFOX the day its flag flips. **A fix scope
 - [x] **Phase 147: SCEN-01 — The scenario engine receives the real series** - Fix the READER (never the writer): every added strategy contributes its actual daily returns via the existing `resolveDailyReturnSeries`; wealth-index `returns_series` is differenced, never forwarded raw (completed 2026-08-05)
 - [x] **Phase 148: OWN — Owner factsheet without cache disclosure** - The owner views the full factsheet of their own unpublished strategy; adversarial anon-404 acceptance on the public `unstable_cache`d route; wizard-preview link that can never dead-end (OWN-04 strictly after OWN-02) (completed 2026-08-05)
 - [x] **Phase 149: NAV — "My strategies": a ranking at discovery parity** - Sidebar entry showing every uploaded key + derived strategy incl. `private`/`draft` rows, ranked with the SAME component/query as the external ranking (visibility predicate is the only difference); honest pending states, never zeros (completed 2026-08-05)
-- [ ] **Phase 150: OWN-03 — The wizard asks whose capital this is** - Own-capital-with-allocation vs verifying-a-team question at allocator finalize; (b) stays the default and a no-op; only an explicit (a) creates the portfolio position (money-path reviewed)
-- [ ] **Phase 151: AUM — A book you can reach and a size you can set** - Direct AUM input, non-ccxt holdings-sync crash fixed as a CLASS (MT5 + latent sFOX), all-or-nothing book gate fixed incl. cross-role contamination, honest refusal copy
-- [ ] **Phase 152: SCEN — Composer legibility** - Ownership marker, clickable rows with a working factsheet link, labelled numbers, no duplicate browse entries
+- [x] **Phase 150: OWN-03 — The wizard asks whose capital this is** - Own-capital-with-allocation vs verifying-a-team question at allocator finalize; (b) stays the default and a no-op; only an explicit (a) creates the portfolio position (money-path reviewed) (completed 2026-08-06)
+- [x] **Phase 151: AUM — A book you can reach and a size you can set** - Direct AUM input, non-ccxt holdings-sync crash fixed as a CLASS (MT5 + latent sFOX), all-or-nothing book gate fixed incl. cross-role contamination, honest refusal copy (completed 2026-08-07)
+- [x] **Phase 152: SCEN — Composer legibility** - Ownership marker, clickable rows with a working factsheet link, labelled numbers, no duplicate browse entries (completed 2026-08-07)
 - [ ] **Phase 153: WIZFORM — Form errors belong on the form (+ MT5 declarable)** - Inline field validation, honest error codes from emitting sites, transient infra absorbed not surfaced, venue-appropriate copy, MT5 preselected in metadata
 - [ ] **Phase 154: WIZCONT/STALE — Wizard continuity, no stale screens** - Draft-aware entry chooser, stale-screen root cause investigated BEFORE fixed, token-less credential dedup toward the existing row
 - [ ] **Phase 155: MT5-VERIFY — The numbers are true, live on a trading day** - Server-UTC offset measured, external-oracle parity on the live funded account, five surfaces agree, discrepancies fixed (uncapped), warnings explained; MT5-GOAL-01 acceptance gate
@@ -190,12 +190,36 @@ Plans:
   1. At allocator key-add, the wizard ASKS which of two things this is — (a) a key with my own capital in it, or (b) a trading team's key I am verifying (the DEFAULT) — and stores the answer as a persistent ownership mark. The wizard writes NO position and asks NO amount (2026-08-05 refinement: mark in wizard, allocate in Holdings — supersedes the 2026-08-04 finalize-form reading). Copy is CRISP and the question lives in the categorization step.
   1b. The categorization/profile step is culled to essentials: AUM, strategy-size, strategy-type and similar questions are removed or collapsed behind an optional disclosure (founder 2026-08-05, "just essentials, especially for the allocator") — with every culled answer's downstream consumer checked (hide per no-invented-data, never fabricate).
   1c. An allocator can rename their OWN private/draft strategies to a proper name (OWN-05); owner-authz only; the public codename/disclosure redaction contract stays byte-untouched; all owner surfaces (my-strategies, Browse own rows, owner factsheet, holdings alias) render the new name coherently.
+
   2. In the HOLDINGS tab, a strategy marked own-capital can be ADDED to the allocation (explicit action + amount — the money-path review applies to THIS write). Choosing (b) — or any path that never reaches the question — changes nothing: `status='private'`, portfolio untouched, behaviour-compatible with today.
   2b. ⛔ HARD INVARIANT: a team-review-marked strategy can NEVER become a position — no code path creates an allocation from it (an allocator cannot put money into a trading team's account). Asserted structurally, like the visibility gates. The retro path (marking pre-existing own strategies such as Black Swan so they become allocatable) is part of this phase.
+
   3. Auto-add remains refused: no code path adds to the portfolio without the explicit (a) answer — the founder has refused auto-add TWICE.
   4. Adding the same strategy twice has a defined, reviewed behaviour — never a silent duplicate position or a double-count.
 
-**Plans**: TBD
+**Plans**: 8 plans in 4 waves
+
+Plans:
+**Wave 1**
+
+- [x] 150-01-PLAN.md — DB: capital_ownership column + D-03 BEFORE INSERT trigger + atomic flip RPC + pgTAP; [BLOCKING] MCP apply to TEST (wave 1)
+- [x] 150-02-PLAN.md — Shared contracts: isAllocatable predicate, type widening, OwnershipTag, CapitalOwnershipRadioGroup, dollar-validator lift (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 150-03-PLAN.md — Wizard: capital question first + cull-to-disclosure + asset-class hoist + post-finalize mark persistence (wave 2)
+- [x] 150-04-PLAN.md — Routes: PATCH ownership (retro mark + 409/confirm/RPC flip) + PATCH name (OWN-05 rename) + audit actions (wave 2)
+- [x] 150-05-PLAN.md — Holdings data: allocation route (upsert, allocated_amount ONLY), getOwnCapitalStrategies, adapter + owner-name carve-out (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 150-06-PLAN.md — my-strategies + factsheet UI: tag, row actions, Mark/Rename dialogs, owner-lane thread (wave 3)
+- [x] 150-07-PLAN.md — Holdings UI: rows, AllocateDialog, three-arm empty state, unsigned-weight fix + contract pin (wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+
+- [x] 150-08-PLAN.md — Structural D-03 gate with mutation ledger + full regression + VALIDATION close (wave 4)
+
 **UI hint**: yes
 **Notes (binding traps)**:
 
@@ -216,7 +240,17 @@ Plans:
   3. The founder's own book (~$460k, 8 active keys of which 3 deribit + 3 mt5 carry zero per-key dailies) reaches "From my book" — the gate is no longer all-or-nothing over every eligible key, and MANAGER-side MT5 keys no longer pin the ALLOCATOR's book gate false permanently (cross-role contamination) (AUM-04).
   4. The AUM-zero refusal copy names only affordances that actually exist — never the deliberately-never-built live-holding toggle (AUM-03).
 
-**Plans**: TBD
+**Plans**: 7 plans
+
+Plans:
+- [x] 151-01-PLAN.md — Extract MT5 terminal-concurrency machinery into services/mt5_concurrency.py (leaf; the ONE lock registry)
+- [x] 151-02-PLAN.md — Split the book gate SSR-side: deriveStrategyLinkedKeyIds + 3 additive payload fields on both branches
+- [x] 151-03-PLAN.md — Non-ccxt venue dispatch + MT5 account-equity branch (kill switch, shared lock, honest skips, transient human copy)
+- [x] 151-04-PLAN.md — sFOX branch + parametrized class-closure proof (mt5+sfox+unknown) + non-collapse oracle
+- [x] 151-05-PLAN.md — Composer gate repoint: partial book reaches "From my book"; contributing-only rows + partial-book note
+- [x] 151-06-PLAN.md — manualAumUsd draft field + Portfolio AUM input + AUM-03 refusal copy
+- [x] 151-07-PLAN.md — Per-strategy dollar input via handleWeightChange + manual_aum_usd commit persistence (client_manual_aum sentinel)
+
 **UI hint**: yes
 **Notes (binding traps)**:
 
@@ -236,7 +270,16 @@ Plans:
   3. The numbers on a row are labelled — weight, mode, leverage, notional — and a non-derivable notional reads as "not applicable", not as a broken em-dash (SCEN-04).
   4. The strategy browser never shows two indistinguishable rows for the same strategy — the two identical "Alpha Centauri" entries become distinguishable or resolved (SCEN-05; prevention of future duplicates is WIZCONT-02 in Phase 154 — this is the presentation half).
 
-**Plans**: TBD
+**Plans**: 6 plans in 4 waves (planned 2026-08-07)
+
+Plans:
+- [x] 152-01-PLAN.md — Browse-route wire: isOwn on every row + own-only created_at/status through a two-arm H-0300 fence
+- [x] 152-02-PLAN.md — Draft-schema wire: isOwn on the NESTED addedStrategySchema, populated-fixture strip guard
+- [x] 152-03-PLAN.md — SCEN-04: header label li (WEIGHT USD MODE LEV NOTIONAL) + cause-accurate honest notional
+- [x] 152-04-PLAN.md — Drawer: isOwn through handleAdd, own-vs-own dedup line (Created date · Status), shared YoursChip + browse parity
+- [x] 152-05-PLAN.md — Composer: isOwn at both twin seams (Bridge deliberately absent) + Yours chip on the added row
+- [x] 152-06-PLAN.md — SCEN-03: inline detail expansion + factsheet link + axe expanded-panel coverage + phase-final gates
+
 **UI hint**: yes
 
 ### Phase 153: WIZFORM — Form errors belong on the form (+ MT5 declarable)
@@ -299,9 +342,9 @@ Plans:
 | 147. SCEN-01 engine series | 6/6 | Complete   | 2026-08-05 |
 | 148. OWN owner factsheet | 5/5 | Complete   | 2026-08-05 |
 | 149. NAV my-strategies ranking | 5/5 | Complete   | 2026-08-05 |
-| 150. OWN-03 portfolio question | 0/? | Not started | - |
-| 151. AUM book + sizing | 0/? | Not started | - |
-| 152. SCEN composer legibility | 0/? | Not started | - |
+| 150. OWN-03 portfolio question | 8/8 | Complete    | 2026-08-07 |
+| 151. AUM book + sizing | 7/7 | Complete    | 2026-08-07 |
+| 152. SCEN composer legibility | 6/6 | Complete    | 2026-08-07 |
 | 153. WIZFORM + MT5-14 | 0/? | Not started | - |
 | 154. WIZCONT + STALE | 0/? | Not started | - |
 | 155. MT5-VERIFY + acceptance | 0/? | Not started | - |

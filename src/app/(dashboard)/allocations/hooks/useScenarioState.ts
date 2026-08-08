@@ -49,6 +49,7 @@ import {
   setWeightOverride as setWeightPure,
   applyWeightOverrides as applyWeightsPure,
   setWindow as setWindowPure,
+  setManualAum as setManualAumPure,
   type ScenarioDraft,
   type AddedStrategy,
   type HoldingForDefault,
@@ -133,6 +134,15 @@ export interface UseScenarioStateReturn {
    * operates on the default draft the user actually sees.
    */
   setWindow: (window: CoverageWindow) => void;
+  /**
+   * Phase 151 AUM-01 — write the manual portfolio AUM through into the draft so
+   * the localStorage autosave, the save handlers' POST/PUT payload and a reopen
+   * all carry it. `undefined` clears the override (back to the live-holdings
+   * sum). Rebases via `baseOf` like every other mutator. The composer validates
+   * with `isValidDollar` BEFORE calling this and sanitizes again on read — this
+   * is a write-through, not a validator.
+   */
+  setManualAum: (value: number | undefined) => void;
   reset: () => void;
   dismissFingerprintMismatchBanner: () => void;
   /**
@@ -347,6 +357,12 @@ export function useScenarioState(
     },
     [setValue, baseOf],
   );
+  const setManualAum = useCallback(
+    (value: number | undefined) => {
+      setValue((prev) => setManualAumPure(baseOf(prev), value));
+    },
+    [setValue, baseOf],
+  );
   const reset = useCallback(() => {
     // removeStored: removeItem the scoped key + set in-memory to the default
     // WITHOUT re-persisting it (the next user edit persists). Clears the banner.
@@ -386,8 +402,18 @@ export function useScenarioState(
   // weight edit counts as one gesture (WR-01) — the prior "conservative zero"
   // plus the `!== true` guard locked out the voluntary_modify workflow and
   // per-key edits respectively.
+  //   (d) a manual portfolio AUM (Phase 151 AUM-01).
+  //
+  // 151 review WR-06 — `manualAumUsd` is a first-class, persisted,
+  // commit-affecting draft field and was counted NOWHERE. So an allocator who
+  // set the portfolio AUM and nothing else saw the footer chip read "0 changes"
+  // for a real unsaved edit, and — worse — sailed past
+  // `handleEntryModeSelect`'s `if (scenario.diffCount > 0)` guard, so the mode
+  // switch wiped the AUM with no ResetConfirmationModal. That guard exists
+  // precisely so "a mode switch can never silently wipe in-progress edits".
   const diffCount = useMemo(() => {
     let count = 0;
+    if (draft.manualAumUsd !== defaultDraft.manualAumUsd) count++;
     for (const [k, v] of Object.entries(draft.toggleByScopeRef)) {
       if (defaultDraft.toggleByScopeRef[k] !== v) count++;
     }
@@ -443,6 +469,7 @@ export function useScenarioState(
     setWeightOverride,
     applyWeightOverrides,
     setWindow,
+    setManualAum,
     reset,
     dismissFingerprintMismatchBanner,
     hydrateFromSaved,

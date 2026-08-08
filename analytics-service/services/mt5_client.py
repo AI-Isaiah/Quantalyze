@@ -414,8 +414,8 @@ class Mt5Client:
         state, and it clears ``self._closed`` so the fresh session is closable
         again. It never sleeps, retries, or joins the abandoned hung reader thread
         — the CALLER bounds this call with ``to_thread`` + ``wait_for`` (see
-        job_worker ``_mt5_bounded_restart``) so restart can never itself nest-wedge
-        the worker.
+        ``mt5_concurrency._mt5_bounded_restart``) so restart can never itself
+        nest-wedge the worker.
 
         Live ``initialize()`` semantics — and specifically whether ``shutdown()`` on
         a connection an abandoned reader is still parked on is safe or must be freed
@@ -441,7 +441,7 @@ class Mt5Client:
     def terminal_key(self) -> str:
         """Process-wide terminal identity (``host:port``) — the key for the
         Phase-137 per-terminal serialization lock registry
-        (``job_worker._MT5_TERMINAL_LOCKS``, MT5CONC-02).
+        (``mt5_concurrency._MT5_TERMINAL_LOCKS``, MT5CONC-02).
 
         Two ``Mt5Client`` instances built for the SAME gateway (every job builds a
         fresh client via ``_make_mt5_session``) share this key, so a single

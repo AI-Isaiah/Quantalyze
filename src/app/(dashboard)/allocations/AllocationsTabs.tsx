@@ -35,7 +35,10 @@ import { ContributionWizardOverlay } from "./components/ContributionWizardOverla
 // hydrate immediately on first paint (no skeleton flash for the nudge).
 import { OnboardingBanner } from "./components/OnboardingBanner";
 import { MandateQuickSetCard } from "./components/MandateQuickSetCard";
-import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import type {
+  MyAllocationDashboardPayload,
+  OwnCapitalStrategy,
+} from "@/lib/queries";
 import type { ExposureSectionData } from "./lib/exposure-props";
 import type { FavoriteRow, OptimizerPrefetch } from "./lib/watchlist-read";
 import { useCrossTabStorage } from "@/lib/storage/cross-tab";
@@ -380,6 +383,20 @@ export function AllocationsTabs(
     favorites?: FavoriteRow[];
     optimizer?: OptimizerPrefetch;
     note?: { initialContent: string; initialLastSavedAt: Date | null };
+    // Phase 150 / OWN-03 — ADDITIVE, same precedent as the trio above: two
+    // server reads threaded straight through to HoldingsTabPanel (already
+    // spread via `{...props}`). OPTIONAL here so the pre-existing
+    // AllocationsTabs test call-sites stay byte-unmodified; page.tsx always
+    // supplies both, and the panel renders honest-empty if either is absent.
+    ownCapitalStrategies?: OwnCapitalStrategy[];
+    hasAnyStrategies?: boolean;
+    /**
+     * Review WR-02 — did EITHER strategies read fail (both return `null`, never
+     * `[]`, on a transient DB/RLS failure)? Threaded so the panel can render a
+     * degraded notice instead of an account-state claim. Optional/defaults to
+     * false for the same reason as the two above; page.tsx always supplies it.
+     */
+    strategiesReadFailed?: boolean;
   },
 ) {
   const router = useRouter();
@@ -1142,6 +1159,13 @@ function ScenarioTabContent({
     perKeyReturnsByApiKeyId: props.perKeyReturnsByApiKeyId,
     eligibleApiKeyIds: props.eligibleApiKeyIds,
     perKeyDailiesGateSatisfied: props.perKeyDailiesGateSatisfied,
+    // Phase 151 AUM-04 / review WR-07 — the split gate + the contributing set.
+    // Without these the panel's membership seams fall back to the role-blind
+    // eligible set and the all-or-nothing flag, and compare diverges from the
+    // composer for exactly the owner-manager / partial-book population this
+    // phase exists to serve.
+    bookEntryGateSatisfied: props.bookEntryGateSatisfied,
+    contributingApiKeyIds: props.contributingApiKeyIds,
   };
 
   return (

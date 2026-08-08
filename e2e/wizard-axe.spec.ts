@@ -236,9 +236,7 @@ test.describe("Phase 17 — wizard axe (DESIGN-05)", () => {
     // description so the step can advance.
     await page.getByTestId("wizard-csv-preview-continue").click();
     await expect(
-      page.getByRole("heading", {
-        name: "Tell allocators what this strategy is",
-      }),
+      page.getByRole("heading", { name: "Describe this strategy" }),
     ).toBeVisible({ timeout: 15_000 });
     await page.getByLabel("Description").fill("Automated axe-scan description.");
     await page.getByRole("button", { name: /review and submit/i }).click();

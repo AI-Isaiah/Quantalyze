@@ -243,6 +243,12 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
+**v1.17 in flight — Phase 151 (AUM) complete 2026-08-07** (5/9 phases done: 147–151).
+Direct AUM input + per-strategy dollar sizing, non-ccxt holdings-sync class fix
+(MT5 equity row + sFOX proof), partial-book gate with role-based manager-key
+exclusion, honest refusal copy. 30/30 must-haves verified; 4 PROD-gated UAT items
+open in `151-HUMAN-UAT.md`. Next: 152 SCEN composer legibility.
+
 **v1.15 MetaTrader 5 shipped + LIVE 2026-07-25** (tag `v1.15`, v0.49.4.0) — MT5
 elevated to a live `api_verified` account sync, flags flipped on quantalyze.xyz
 (Vantage acct soaked, factsheet proven). v1.13 Infra + v1.14 Smoothed-MTM also

@@ -530,7 +530,7 @@ D-14 valve.
   adversarial, not happy-path: **after an owner has viewed their draft, an anon request for the same
   id must still 404.**
 
-- [ ] **OWN-03**: If the strategy is genuinely the allocator's own, it can be **added to their
+- [x] **OWN-03**: If the strategy is genuinely the allocator's own, it can be **added to their
   portfolio** (not only a scenario).
   ✅ **CURRENT BEHAVIOUR ESTABLISHED 2026-08-04** by the live MT5-05 run, so the "verify before
   planning" caveat is discharged: a contribution-wizard finalize lands `status='private'` and the
@@ -588,7 +588,7 @@ D-14 valve.
   BLOCKED ON OWN-02: adding the link first would point every draft at a `notFound()` — the same
   dead-end class Phase 142.2 existed to delete.
 
-- [ ] **OWN-05** *(added 2026-08-05 — founder dogfooding direction)*: **An allocator can give their
+- [x] **OWN-05** *(added 2026-08-05 — founder dogfooding direction)*: **An allocator can give their
   OWN private/draft strategies a proper name.** Verbatim: *"For the Allocator, he should for his own
   strategies have the ability to give strategies proper names. Like that strategy has a name, and as
   it is private, I should be able to give it its own name."* Today the wizard auto-assigns sentinel
@@ -802,7 +802,7 @@ All five found in one live founder session, composing a scenario from a just-upl
   Rule 7: use that resolver, do not mint a third mechanism. The composer then blends the same series
   those pages render.
 
-- [ ] **SCEN-02**: In the scenario composition list, a strategy **the allocator uploaded themselves**
+- [x] **SCEN-02**: In the scenario composition list, a strategy **the allocator uploaded themselves**
   is visually distinguishable from a third-party published one.
   **Today there is no such marker anywhere** (verified in code): the added-strategy row
   (`ScenarioComposer.tsx:5558-5686`) renders a toggle, the name, a `TrustTierLabel` (data
@@ -816,7 +816,7 @@ All five found in one live founder session, composing a scenario from a just-upl
   that type is zod-validated AND PERSISTED (`SCENARIO_SCHEMA_VERSION = 4`), so a new field is a
   schema-version decision.
 
-- [ ] **SCEN-03**: A strategy row in the scenario is **clickable**, opening richer detail (and, once
+- [x] **SCEN-03**: A strategy row in the scenario is **clickable**, opening richer detail (and, once
   OWN-02 exists, the full factsheet). Today rows are **not clickable at all** — no `onClick`, no
   `href`, no drawer, no expansion (`ScenarioComposer.tsx:5588-5595`). The Holdings tab already has
   this affordance (`HoldingsTable.tsx:468` → `HoldingDetail`), so the composer is the outlier.
@@ -825,13 +825,13 @@ All five found in one live founder session, composing a scenario from a just-upl
   strategies they are null — the returns route does not return them — so a richer row is NOT uniformly
   free. ⛔ Depends on OWN-02 for the factsheet link (same dead-end trap as OWN-04).
 
-- [ ] **SCEN-04**: The numbers on a scenario row are **labelled**. Founder, looking at a live row:
+- [x] **SCEN-04**: The numbers on a scenario row are **labelled**. Founder, looking at a live row:
   *"What do the numbers actually mean?"* The row renders `1.000`, a `LEVERAGE` toggle, `1`, and `—`
   with no column headers and no inline labels (`ScenarioComposer.tsx:5630-5672`). They are weight,
   mode, leverage, and notional; the last is an em-dash whenever it is non-derivable, which reads as
   "broken" rather than "not applicable".
 
-- [ ] **SCEN-05**: The strategy browser does not show **duplicate rows for the same strategy**.
+- [x] **SCEN-05**: The strategy browser does not show **duplicate rows for the same strategy**.
   Observed live: **two identical "Alpha Centauri" entries**, indistinguishable in the list. Both are
   real, owned, `status='private'` rows (`8d382aaf`, created 2026-08-04; `081f2912`, created
   2026-07-20) — so this is not a rendering bug, it is the accumulated cost of re-running the wizard.
@@ -842,7 +842,7 @@ All five found in one live founder session, composing a scenario from a just-upl
 
 ### AUM — An allocator can size a hypothetical book (founder call 2026-08-04, verbatim)
 
-- [ ] **AUM-01** ⛔ **DESIGN FLAW, founder-stated**: The allocator can **set AUM directly**, and
+- [x] **AUM-01** ⛔ **DESIGN FLAW, founder-stated**: The allocator can **set AUM directly**, and
   weights follow from it. Founder verbatim: *"I should be able to change AUM, and then the weight
   changes. That is it. Currently, I have only strategies that are not in my book, which consequently
   leads then to no AUM, and no computation at all. You see how silly that is?"*
@@ -860,7 +860,7 @@ All five found in one live founder session, composing a scenario from a just-upl
   dollar figures and gates the commit. **The 0.00s the founder saw were SCEN-01, not this.** Shipping
   AUM-01 alone would leave the screen showing zeros — do not let it be planned as the fix for that.
 
-- [ ] **AUM-02** ⛔ **NOT A FENCE — A CRASH. Investigated 2026-08-04, initial framing was WRONG.**
+- [x] **AUM-02** ⛔ **NOT A FENCE — A CRASH. Investigated 2026-08-04, initial framing was WRONG.**
   An **MT5 account's equity can contribute to AUM**. Today it cannot, ever, and the reason is not a
   deliberate venue decision: **the holdings sync is still ccxt-only and dies on the first call.**
   **PROD smoking gun** (verified directly, twice): api_key `46293712-59e6-46c0-8204-5dd32afe2503`
@@ -897,7 +897,7 @@ All five found in one live founder session, composing a scenario from a just-upl
   `AttributeError` into the user-visible `sync_error`. Ship only as an explicit interim decision — it
   papers over the gap.
 
-- [ ] **AUM-05** *(split out of AUM-02 so it cannot be lost when that item is scoped to MT5)*: **sFOX
+- [x] **AUM-05** *(split out of AUM-02 so it cannot be lost when that item is scoped to MT5)*: **sFOX
   will crash the holdings sync the same way MT5 does, the first day a real key exists.** `SfoxClient`
   exposes `get_balances()` (`sfox_client.py:272`), not the ccxt `fetch_balance()` that
   `_fetch_spot_rows` calls unconditionally (`allocator_positions.py:154`) — so a live sFOX key will
@@ -910,7 +910,7 @@ All five found in one live founder session, composing a scenario from a just-upl
   🔗 The sFOX go-live gate is tracked separately (worker egress IPs, founder flag) — this must be
   closed BEFORE that flip, not discovered by it.
 
-- [ ] **AUM-03** ⛔ **WORSE THAN FILED — the copy names a control THAT DOES NOT EXIST.** The AUM-zero
+- [x] **AUM-03** ⛔ **WORSE THAN FILED — the copy names a control THAT DOES NOT EXIST.** The AUM-zero
   refusal must name an affordance the user can find. Current copy: *"Can't record a scenario commit:
   portfolio AUM is zero. Connect an exchange API key or toggle on a live holding before submitting."*
   (`ScenarioComposer.tsx:3559`).
@@ -923,7 +923,7 @@ All five found in one live founder session, composing a scenario from a just-upl
   the UI"* (`:3542-3544`). Same class as WIZFORM-03, but stronger: this instructs the user to use a
   control that was deliberately never built.
 
-- [ ] **AUM-04** ⛔ **ROOT CAUSE of the founder's AUM=0 — blank slate was FORCED, not chosen.**
+- [x] **AUM-04** ⛔ **ROOT CAUSE of the founder's AUM=0 — blank slate was FORCED, not chosen.**
   An allocator with a live book can always reach it. Today one all-or-nothing gate can hide it
   entirely, with no explanation.
   **Mechanism:** blank mode does not merely toggle holdings off, it **removes them from the draft**

@@ -7,6 +7,7 @@ import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
 // to assert the suppression.
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 import { captureToSentry } from "@/lib/sentry-capture";
+import { MAX_LEVERAGE } from "@/lib/leverage";
 import type { ScenarioDraft, AddedStrategy } from "./scenario-state";
 import {
   buildAddedOnlySet,
@@ -450,16 +451,33 @@ describe("computeMetricsForDraft", () => {
   it("LOW-1 — a corrupt persisted leverage (999) is clamped but emits NO Sentry warning on the compare path (quota-safe)", () => {
     vi.mocked(captureToSentry).mockClear();
     const dates = buildDates("2024-01-02", 80);
+    // 151 UAT — the returns are scaled down (0.1%/0.08% instead of 1%/0.8%)
+    // because MAX_LEVERAGE moved 10 → 200. At 200× the original series RUINS
+    // (a −0.8% day becomes −160%, so cumulative wealth goes negative and the
+    // engine honestly returns null metrics), which would make the
+    // "still computes honestly" non-vacuity assertion below fail for a reason
+    // that has nothing to do with what this test is about. A gentler series
+    // keeps the clamp observable AND the projection real.
     const inputs = perKeyLiveInputs(
-      { "key-A": altReturns(dates, 0.01, -0.008) },
+      { "key-A": altReturns(dates, 0.001, -0.0008) },
       { "key-A": 5000 },
     );
-    // 999 → clamped to 10 at read; the metrics still compute honestly.
+    // 999 → clamped to MAX_LEVERAGE at read; the metrics still compute honestly.
     const m = computeMetricsForDraft(
       draft({ memberKeyIds: ["key-A"], leverageOverrides: { "key-A": 999 } }),
       inputs,
     );
     expect(m.twr).not.toBeNull();
+    // The clamp really happened: 999 projects identically to the ceiling, and
+    // NOT identically to an unclamped 999 (which would ruin → null metrics).
+    const atCeiling = computeMetricsForDraft(
+      draft({
+        memberKeyIds: ["key-A"],
+        leverageOverrides: { "key-A": MAX_LEVERAGE },
+      }),
+      inputs,
+    );
+    expect(m.twr).toBe(atCeiling.twr);
     // …but the coercion signal is suppressed on this read-twice compare path.
     expect(captureToSentry).not.toHaveBeenCalled();
   });
@@ -761,6 +779,51 @@ describe("MEMBER-02 membership selector (F5 closure)", () => {
     );
     expect(m.member_count).toBe(1);
     expect(m.member_ids).toEqual(["key-A"]);
+  });
+
+  // -----------------------------------------------------------------------
+  // SP-W2 (151 specialist) — the compute-time intersection must use the
+  // ROLE-AWARE contributing set, not the role-blind eligible set.
+  //
+  // WR-07 repointed the two membership DERIVATIONS onto contributingApiKeyIds
+  // but left this intersection on eligibleApiKeyIds. The population it bites:
+  // an owner-MANAGER whose keys all carry a per-key series (so the pre-151
+  // all-or-nothing gate was TRUE) and who saved a book scenario before the
+  // phase — its persisted memberKeyIds is the whole role-blind eligible set,
+  // manager keys included. Post-151 the composer reopens it blending only the
+  // contributing keys while this panel, on the SAME screen, blends the manager
+  // keys too: two projections of one portfolio.
+  //
+  // Here "key-B" stands for the MANAGER-side key (eligible, has a series, but
+  // feeds a live strategy → excluded from the allocator's own book).
+  // -----------------------------------------------------------------------
+  it("SP-W2: a pre-151 saved draft whose membership includes a MANAGER-side key blends only the CONTRIBUTING keys", () => {
+    const m = computeMetricsForDraft(
+      // The persisted membership a pre-split save produced: the whole
+      // role-blind eligible set.
+      draft({ memberKeyIds: ["key-A", "key-B"] }),
+      {
+        ...perKeyInputs(["key-A", "key-B"]),
+        // The role-aware basis: "key-B" is manager-side, so the composer's
+        // engine does not blend it.
+        contributingApiKeyIds: ["key-A"],
+      },
+    );
+    // Compare now names the SAME constituent set the composer projects.
+    expect(m.member_count).toBe(1);
+    expect(m.member_ids).toEqual(["key-A"]);
+    // Non-vacuous: the surviving allocator key really computed.
+    expect(m.twr).not.toBeNull();
+  });
+
+  it("SP-W2 control: a caller that supplies NO contributing set keeps the role-blind eligible behaviour (back-compat)", () => {
+    const m = computeMetricsForDraft(
+      draft({ memberKeyIds: ["key-A", "key-B"] }),
+      // contributingApiKeyIds ABSENT — the narrow-payload / pre-split caller.
+      perKeyInputs(["key-A", "key-B"]),
+    );
+    expect(m.member_count).toBe(2);
+    expect(m.member_ids).toEqual(expect.arrayContaining(["key-A", "key-B"]));
   });
 
   it("golden: the Atlas-class book-only 40-day blend is preserved for an upgraded/derived-membership column", () => {
