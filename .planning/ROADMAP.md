@@ -335,8 +335,15 @@ Plans:
 **Depends on**: Phase 153.1 (copy members, `VENUE_CAPABILITIES`, `MIN_DESCRIPTION_CHARS`)
 **Requirements**: WIZFORM-01, WIZFORM-04, MT5-14
 **Decisions**: D-06, D-07, D-11, D-12, D-13, D-14(a+b), D-15, D-16, D-20, D-22
-**Owns**: `MetadataStep.tsx`(+test), `AllocateDialog.tsx`(+test), `SubmitStep.tsx` (routing), `finalize-wizard/route.ts` (probe gate + catch-all), `closed-sets.mt5-flag.test.ts`, the wizard chip set
-**Plans**: TBD
+**Owns**: `MetadataStep.tsx`(+test), `AllocateDialog.tsx`(+test), `SubmitStep.tsx` (routing), `finalize-wizard/route.ts` (probe gate + catch-all), `closed-sets.mt5-flag.test.ts`, the wizard chip set — ⚠️ **PLUS `WizardClient.tsx`, added at planning time**: routing a field-level code back to its field requires a step change, and `WizardClient` is the sole owner of `step`. No other 153.x plan touches it.
+**Plans**: 5 plans in 4 waves. Wave 1 runs 153.2-01 and 153.2-03 in parallel (disjoint files); waves 2-4 are forced sequential because four plans contend on `MetadataStep.tsx`. **MT5-14 + WIZFORM-04 are ONE plan (153.2-04)** per D-14, with the chip-set widening and the pin re-cut in the SAME task.
+
+Plans:
+- [ ] 153.2-01-PLAN.md — ⛔ FLAG-3 as ONE indivisible task: the description client mirror reads `MIN_DESCRIPTION_CHARS`, becomes the `handleSubmit` predicate, the `:491` `disabled` and both stale comments go, the `:334` focus ring is upgraded — then the hint / `.title` / live-clear message states (D-11, D-13, D-23)
+- [ ] 153.2-02-PLAN.md — the rest of the form: category / AUM / capacity refuse through `Field` with aria-derived borders (AUM+capacity import the SERVER's own `isValidDollar`), and submit-with-errors opens the collapsed `<details>` before focusing the first invalid control, with a visible summary line `LiveRegion` re-states (D-11, D-13)
+- [ ] 153.2-03-PLAN.md — D-12: `AllocateDialog`'s money field converts from the JS ternary to `aria-[invalid=true]:border-negative` and clears live; the two rows that can tell the mechanisms apart (D-12, D-13)
+- [ ] 153.2-04-PLAN.md — ⛔ MT5-14 + WIZFORM-04 in ONE ship: `WIZARD_EXCHANGE_CODES`/`WIZARD_EXCHANGES` (Option B) with the `closed-sets.mt5-flag` pin re-cut + POSITIVE assertion in the SAME task; the pinned-`<span>` detected-venue chip, its mono provenance eyebrow and a payload that cannot omit the venue; `venueSupportsScopeProbe` gating BOTH probe call sites (fail-toward-probing on `null`) and the catch-all split so a parse miss and a missing internal token stop reading as network blips (D-06, D-07, D-14a+b, D-15, D-16, D-20, D-22)
+- [ ] 153.2-05-PLAN.md — a field-level server rejection routes back to the field: `FIELD_BY_CODE` + a totality assertion with a vacuity floor in `SubmitStep`, the handoff through `WizardClient`, and `MetadataStep` revealing + focusing the named field with its values intact (D-13, D-17 boundary)
 **UI hint**: yes
 
 - ⛔ **FLAG-3 is ONE indivisible task.** Deleting `MetadataStep.tsx:491`'s `disabled` without widening the `.trim()`-only `handleSubmit` guard at `:222-233` lets a 2-character description POST — re-shipping the very defect this phase deletes.
