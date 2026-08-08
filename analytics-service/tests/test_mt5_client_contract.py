@@ -29,11 +29,19 @@ Regression gates — WHY each case matters (Rule 9):
     must stay strictly below the rpyc sync_request_timeout (s) so MT5 fails its
     own pipe first and rpyc surfaces a clean error instead of a raw abort — a hung
     terminal must fail loud fast, never wedge the sequential worker (v1.11 WEDGE).
+  - the ordering is a CLASS rule, not a login rule (153.3 / D-24): `initialize()`
+    ran for months on MetaTrader5's 60000ms vendor default — 2x the rpyc bound —
+    because the guard covered `login()` alone. Every timeout-carrying MT5 call is
+    registered in `MT5_IPC_TIMEOUTS_MS`, the guard iterates the whole table, and
+    the registry's completeness is DERIVED FROM SOURCE below so a third such call
+    cannot land unregistered.
   - idempotent close: a teardown failure must never mask the caller's error, and
     shutdown() must never be called twice.
 """
 from __future__ import annotations
 
+import pathlib
+import re
 import sys
 import threading
 import time
@@ -41,7 +49,10 @@ import types
 
 import pytest
 
+import services.mt5_client as mt5_client_mod
 from services.mt5_client import (
+    MT5_INITIALIZE_TIMEOUT_MS,
+    MT5_IPC_TIMEOUTS_MS,
     MT5_LOGIN_TIMEOUT_MS,
     MT5_REQUEST_TIMEOUT_S,
     Mt5Client,
@@ -85,6 +96,7 @@ class _FakeMt5:
     def __init__(self, scenario: dict) -> None:
         self._scenario = scenario
         self.login_calls: list[tuple] = []
+        self.initialize_kwargs: list[dict] = []
         self.shutdown_calls = 0
         self.initialize_calls = 0
         self.call_order: list[str] = []
@@ -95,6 +107,9 @@ class _FakeMt5:
         # The real terminal needs initialize() before any call (attaches IPC).
         # **kwargs because initialize() carries its own `timeout=` ms ceiling
         # (153.3 / D-24) — a double that refused it would TypeError on every login.
+        # Recorded (like login's kwargs) so the ms ceiling is asserted for real
+        # rather than against the impl's own formula.
+        self.initialize_kwargs.append(dict(kwargs))
         self.initialize_calls += 1
         self.call_order.append("initialize")
         exc = self._scenario.get("initialize_raises")
@@ -390,6 +405,236 @@ def test_default_construction_satisfies_timeout_ordering():
     connect, _fake, _rec = _make({})
     Mt5Client("host", 18812, _connect=connect)  # must not raise
     assert MT5_LOGIN_TIMEOUT_MS < MT5_REQUEST_TIMEOUT_S * 1000
+
+
+# -- 153.3 / D-24: the ordering is a CLASS rule, and the registry is complete --
+
+
+def _timeout_carrying_mt5_calls(source: str) -> set[str]:
+    """Derive FROM SOURCE the set of ``self._mt5.<name>(...)`` calls that are passed
+    a ``timeout=`` keyword.
+
+    Whole-line comments are stripped first, so a comment that merely NAMES a call
+    (``# self._mt5.foo(timeout=...)``) can neither satisfy nor break the assertion.
+    Argument text is taken by walking to the matching close-paren rather than by a
+    line-local regex, because ``login(...)`` spans four lines.
+    """
+    body = "\n".join(
+        line for line in source.splitlines() if not line.lstrip().startswith("#")
+    )
+    found: set[str] = set()
+    for match in re.finditer(r"self\._mt5\.(\w+)\(", body):
+        depth, i = 0, match.end() - 1
+        while i < len(body):
+            if body[i] == "(":
+                depth += 1
+            elif body[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        if re.search(r"\btimeout\s*=", body[match.end() : i]):
+            found.add(match.group(1))
+    return found
+
+
+def test_every_timeout_carrying_mt5_call_is_registered():
+    """153.3 / D-24 — THE mechanism that stops the defect class recurring.
+
+    The ordering guard can only protect calls it knows about. `initialize()` was
+    bound nowhere and registered nowhere, so the guard — which checked
+    MT5_LOGIN_TIMEOUT_MS alone — was structurally blind to it, and every
+    production login was censored at the 30s rpyc ceiling (9/9 correlated
+    failures, 2026-08-06/08). Point-fixing `initialize()` would re-ship the class:
+    a THIRD timeout-carrying call could land tomorrow, unregistered, unguarded and
+    green.
+
+    So the set of timeout-carrying calls is derived from `mt5_client.py` ON DISK
+    and every member must be a registry key. The >= 2 floor is load-bearing: a
+    regex that silently stopped matching would otherwise pass by matching nothing
+    (a vacuous green is exactly how the original defect hid).
+    """
+    source = pathlib.Path(mt5_client_mod.__file__).read_text()
+    derived = _timeout_carrying_mt5_calls(source)
+
+    assert len(derived) >= 2, (
+        "the source-derived set collapsed — the extraction is broken, not the code; "
+        f"derived={derived!r}"
+    )
+    # The direct regression for the un-timed call: initialize() must carry a ceiling.
+    assert "initialize" in derived, (
+        "self._mt5.initialize(...) is not passed a timeout= — this is D-24 itself: "
+        "MetaTrader5's 60000ms vendor default applies, 2x the rpyc bound"
+    )
+    unregistered = derived - set(MT5_IPC_TIMEOUTS_MS)
+    assert not unregistered, (
+        f"MT5 call(s) {sorted(unregistered)} carry their own timeout but are absent "
+        "from MT5_IPC_TIMEOUTS_MS — the ordering guard cannot see them (D-24)"
+    )
+
+
+def test_timeout_call_extractor_ignores_comments_and_untimed_calls():
+    """The extractor above is itself under test, on synthetic source.
+
+    Without this, the completeness gate could rot in either direction and stay
+    green: a commented-out call could SATISFY it (masking that the real call was
+    deleted), or a comment could BREAK it (training the next reader to weaken the
+    assertion). Multi-line arguments must be seen, because `login(...)` spans four
+    lines in the real file.
+    """
+    synthetic = "\n".join(
+        [
+            "    def login(self):",
+            "        # self._mt5.commented_out(timeout=1)  <- a comment, not a call",
+            "        self._mt5.untimed()",
+            "        self._mt5.bound(timeout=5)",
+            "        self._mt5.spread(",
+            "            arg,",
+            "            timeout=7,",
+            "        )",
+        ]
+    )
+    assert _timeout_carrying_mt5_calls(synthetic) == {"bound", "spread"}
+
+
+@pytest.mark.parametrize("call_name", sorted(MT5_IPC_TIMEOUTS_MS))
+def test_every_registered_ipc_timeout_is_below_the_rpyc_bound(call_name):
+    """Every registered IPC ceiling — not just login's — must sit strictly below the
+    rpyc round-trip bound, or that call can never deliver an MT5-level answer.
+
+    Parametrized over the registry so a newly-registered call is checked the moment
+    it is added, without anyone remembering to write a test for it.
+    """
+    assert MT5_IPC_TIMEOUTS_MS[call_name] < MT5_REQUEST_TIMEOUT_S * 1000
+
+
+def test_shipped_timeout_chain_is_the_hand_typed_inequality():
+    """The SHIPPED chain, pinned as literals rather than recomputed from the table
+    under test (a self-referential oracle would pass for any consistent set of
+    numbers, including an inverted one).
+
+    Expected relation, typed by hand: 20000ms initialize < 30000ms rpyc bound, and
+    20000ms login < 30000ms rpyc bound.
+
+    ⚠️ This reds if the defaults move OR if MT5_*_TIMEOUT_* is exported in the test
+    environment. Both are things a reader must see: every other assertion in this
+    file (e.g. `test_inverting_request_timeout_is_rejected`, which picks 10.0s
+    precisely because it is below the 20000ms login ceiling) silently assumes this
+    chain.
+    """
+    assert MT5_IPC_TIMEOUTS_MS == {"initialize": 20000, "login": 20000}
+    assert MT5_REQUEST_TIMEOUT_S == 30.0
+    assert 20000 < 30 * 1000  # the ordering, written out
+
+
+def test_login_passes_initialize_ipc_timeout():
+    """D-24 DIRECT REGRESSION for the un-timed call.
+
+    `self._mt5.initialize()` carried NO `timeout=`, so MetaTrader5's vendor default
+    of 60000ms applied INSIDE a 30s rpyc bound — the first MT5 call of every login
+    was structurally incapable of answering in time. Asserted against the recorded
+    kwargs on the double (test-the-wiring), not against the client's own constant
+    expression. Fails against the bare `initialize()` call (no `timeout` key).
+    """
+    connect, fake, _rec = _make({"login": True})
+    client = Mt5Client("host", 18812, _connect=connect)
+    client.login(123, password="pw", server="Broker-Demo")
+    assert fake.initialize_kwargs[0]["timeout"] == MT5_INITIALIZE_TIMEOUT_MS
+    assert MT5_INITIALIZE_TIMEOUT_MS < MT5_REQUEST_TIMEOUT_S * 1000
+
+
+# -- 153.3 / D-25: the chain is PER-INSTANCE, the module constants stay put ----
+
+
+def test_per_instance_overrides_reach_both_mt5_calls():
+    """The validate path's chain (plan 153.3-03): a LONGER rpyc bound plus longer
+    per-call IPC ceilings, built per instance so the SEQUENTIAL worker's module
+    constants never move (D-25 — moving them reopens v1.11 WEDGE-01).
+
+    Both calls must read the OVERRIDDEN values. A client that lengthened only
+    `request_timeout_s` would still log in under the worker's 20000ms IPC ceiling —
+    "longer" only at the top, which is the truncation EVIDENCE Correction C-3
+    describes.
+    """
+    connect, fake, record = _make({"login": True})
+    client = Mt5Client(
+        "host",
+        18812,
+        _connect=connect,
+        request_timeout_s=90.0,
+        initialize_timeout_ms=60000,
+        login_timeout_ms=60000,
+    )
+    client.login(123, password="pw", server="Broker-Demo")
+
+    assert record["timeout"] == 90.0  # the rpyc bound is the instance's, too
+    assert fake.initialize_kwargs[0]["timeout"] == 60000
+    _login_arg, kwargs = fake.login_calls[0]
+    assert kwargs["timeout"] == 60000
+    # and the module constants are untouched by that construction
+    assert MT5_IPC_TIMEOUTS_MS == {"initialize": 20000, "login": 20000}
+
+
+def test_longer_request_timeout_without_overrides_uses_module_defaults():
+    """A longer rpyc bound alone leaves the IPC ceilings at the module defaults —
+    the overrides are opt-in, so the three non-validate construction sites
+    (`job_worker.py`, `services/ingestion/mt5.py`, `scripts/mt5_spike.py`, all of
+    which pass neither) keep today's behaviour byte-for-byte."""
+    connect, fake, _rec = _make({"login": True})
+    client = Mt5Client("host", 18812, _connect=connect, request_timeout_s=90.0)
+    client.login(123, password="pw", server="Broker-Demo")
+
+    assert fake.initialize_kwargs[0]["timeout"] == MT5_INITIALIZE_TIMEOUT_MS
+    _login_arg, kwargs = fake.login_calls[0]
+    assert kwargs["timeout"] == MT5_LOGIN_TIMEOUT_MS
+
+
+def test_inverting_initialize_override_is_rejected_and_names_the_call():
+    """⭐ THE class-vs-instance test. An `initialize` IPC ceiling at or above the
+    effective rpyc bound inverts the ordering exactly as the shipped 60000ms
+    default did, and must fail loud AT CONSTRUCTION — the only posture that makes a
+    bad MT5_INITIALIZE_TIMEOUT_MS visible before a hung production login.
+
+    Deliberately exercises the SECOND member of the class, not `login`: a guard
+    that was point-fixed to bind `initialize()` while still checking only
+    MT5_LOGIN_TIMEOUT_MS constructs this client happily, and this is the assertion
+    that reds. The message must NAME the offending call, because "some timeout
+    inverted" is not actionable at 3am.
+    """
+    connect, _fake, _rec = _make({})
+    with pytest.raises(ValueError) as exc_info:
+        # 30000ms IPC ceiling >= the default 30.0s (30000ms) rpyc bound.
+        Mt5Client("host", 18812, _connect=connect, initialize_timeout_ms=30000)
+    message = str(exc_info.value)
+    assert "initialize" in message
+    assert "login" not in message  # it names the OFFENDER, not the whole table
+    assert "WEDGE-01" in message
+
+
+def test_per_instance_ipc_timeouts_survive_restart():
+    """restart() rebuilds the transport with the SAME wiring (MT5CONC-01). The
+    resolved IPC ceilings live on the instance, so a rebuilt validate client must
+    NOT silently drop back to the worker's module constants — that would make the
+    post-restart retry run the very chain the override exists to avoid."""
+    connect, fake, record = _make({"login": True})
+    client = Mt5Client(
+        "host",
+        18812,
+        _connect=connect,
+        request_timeout_s=90.0,
+        initialize_timeout_ms=60000,
+        login_timeout_ms=60000,
+    )
+    client.login(123, password="pw", server="Broker-Demo")
+
+    client.restart()
+    assert record["connects"] == 2
+    assert record["timeout"] == 90.0  # the instance's rpyc bound, on the rebuild
+
+    client.login(123, password="pw", server="Broker-Demo")
+    assert fake.initialize_kwargs[-1]["timeout"] == 60000
+    _login_arg, kwargs = fake.login_calls[-1]
+    assert kwargs["timeout"] == 60000
 
 
 # -- account_info: None -> raise; populated -> native dict -------------------
