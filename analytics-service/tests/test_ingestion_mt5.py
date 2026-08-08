@@ -78,7 +78,8 @@ class _FakeMt5:
         self._scenario = scenario
         self.shutdown_calls = 0
 
-    def initialize(self):
+    def initialize(self, **kwargs):
+        # **kwargs: initialize() carries its own `timeout=` ms ceiling (153.3 / D-24).
         # Real login() attaches the terminal IPC via initialize() before login().
         exc = self._scenario.get("initialize_raises")
         if exc is not None:

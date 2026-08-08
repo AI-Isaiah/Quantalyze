@@ -553,7 +553,8 @@ class _RecordingMt5Transport:
         self._on_account_info = on_account_info
         self.calls: list[str] = []
 
-    def initialize(self):
+    def initialize(self, **kwargs):
+        # **kwargs: initialize() carries its own `timeout=` ms ceiling (153.3 / D-24).
         self.calls.append("initialize")
         return True
 

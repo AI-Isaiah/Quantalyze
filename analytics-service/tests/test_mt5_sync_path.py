@@ -65,7 +65,8 @@ class _FakeMt5Transport:
         self._account = account
         self.calls: list[str] = []
 
-    def initialize(self):
+    def initialize(self, **kwargs):
+        # **kwargs: initialize() carries its own `timeout=` ms ceiling (153.3 / D-24).
         self.calls.append("initialize")
         return True
 

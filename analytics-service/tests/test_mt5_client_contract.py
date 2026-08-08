@@ -91,8 +91,10 @@ class _FakeMt5:
         self.deals_window: tuple | None = None
         self.order_check_kwargs: dict | None = None
 
-    def initialize(self):
+    def initialize(self, **kwargs):
         # The real terminal needs initialize() before any call (attaches IPC).
+        # **kwargs because initialize() carries its own `timeout=` ms ceiling
+        # (153.3 / D-24) — a double that refused it would TypeError on every login.
         self.initialize_calls += 1
         self.call_order.append("initialize")
         exc = self._scenario.get("initialize_raises")

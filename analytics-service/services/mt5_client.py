@@ -41,9 +41,19 @@ Contract:
         round-trip before rpyc raises. Its implicit default is 300s — a hung
         terminal would block the SEQUENTIAL worker for 5 minutes, far past the
         ~90s healthz budget (the v1.11 WEDGE-01 failure class).
-      - `MT5_LOGIN_TIMEOUT_MS` is passed to MT5's own `login(timeout=<ms>)` IPC
-        pipe ceiling and MUST stay strictly BELOW the rpyc timeout, so MT5 fails
-        its own pipe first and rpyc surfaces a clean error instead of a raw abort.
+      - EVERY MT5 call that carries its own `timeout=` (milliseconds) is
+        registered in `MT5_IPC_TIMEOUTS_MS` — `initialize` and `login` today —
+        and each one MUST stay strictly BELOW the rpyc timeout, so MT5 fails its
+        own pipe first and rpyc surfaces a clean error instead of a raw abort.
+        The ordering is enforced for the WHOLE table at construction (153.3 /
+        D-24); it used to be enforced for `login` alone, and the unregistered
+        `initialize()` — running on MetaTrader5's vendor default of 60 000ms,
+        2x the rpyc bound — is what censored 9/9 production logins at the 30s
+        ceiling (2026-08-06/08).
+    The chain is PER-INSTANCE: `request_timeout_s` and the per-call `*_timeout_ms`
+    ctor overrides let an interactive caller build a LONGER chain without moving
+    the module constants, which the SEQUENTIAL worker depends on staying at 30s
+    (D-25).
     The outer `asyncio.to_thread` + `asyncio.wait_for` event-loop bound is a Phase
     136/137 worker-seam concern, NOT part of this synchronous, blocking client.
 
@@ -86,6 +96,31 @@ MT5_REQUEST_TIMEOUT_S = float(os.getenv("MT5_REQUEST_TIMEOUT_S", "30"))
 # own pipe first and rpyc surfaces a clean error rather than a raw mid-handshake
 # abort (Pitfall 3 / T-134-04). 20000ms < 30_000ms with headroom.
 MT5_LOGIN_TIMEOUT_MS = int(os.getenv("MT5_LOGIN_TIMEOUT_MS", "20000"))
+
+# MT5's own IPC pipe timeout (milliseconds) passed to initialize(timeout=...).
+# 153.3 / D-24 — THE ROOT CAUSE this constant exists to delete: MetaTrader5's
+# vendor default for `initialize(timeout=...)` is 60000ms, i.e. 2x the 30000ms
+# rpyc bound above. Left unset, the FIRST MT5 call of every login is structurally
+# incapable of returning an MT5-level answer before rpyc gives up — which is why
+# all 9/9 correlated gateway<->worker failures on 2026-08-06/08 clustered at
+# 30.1-31.0s (a fixed ceiling, not a latency distribution). Like the login value
+# it MUST stay strictly below the EFFECTIVE request_timeout_s (the ctor arg, not
+# necessarily the module constant); the guard in __init__ enforces that.
+MT5_INITIALIZE_TIMEOUT_MS = int(os.getenv("MT5_INITIALIZE_TIMEOUT_MS", "20000"))
+
+# The registry of every MT5 call that carries its OWN `timeout=` (milliseconds),
+# mapped to its default value.
+#
+# ⛔ ANY MT5 call that carries its own timeout MUST appear here. Both the
+# construction-time ordering guard (`Mt5Client.__init__`) and the source-derived
+# completeness test (`tests/test_mt5_client_contract.py`) read this table, so a
+# call bound OUTSIDE it is unguarded and untested — which is exactly the D-24
+# defect: `initialize()` was bound nowhere, the guard covered `login()` only, and
+# the resulting inversion censored every production verdict for months.
+MT5_IPC_TIMEOUTS_MS: dict[str, int] = {
+    "initialize": MT5_INITIALIZE_TIMEOUT_MS,
+    "login": MT5_LOGIN_TIMEOUT_MS,
+}
 
 
 class Mt5ClientError(RuntimeError):
@@ -201,22 +236,57 @@ class Mt5Client:
         *,
         _connect: Callable[..., Any] | None = None,
         request_timeout_s: float = MT5_REQUEST_TIMEOUT_S,
+        initialize_timeout_ms: int | None = None,
+        login_timeout_ms: int | None = None,
     ) -> None:
+        # Resolve the PER-INSTANCE IPC-timeout chain (153.3 / D-25). The module
+        # constants are the defaults, so a construction that passes no override is
+        # byte-identical in behaviour to the pre-153.3 client — which is what keeps
+        # job_worker.py, services/ingestion/mt5.py and scripts/mt5_spike.py (all of
+        # which build `Mt5Client(host, port)`) on the worker's 30s chain. The
+        # INTERACTIVE validate path is the caller that supplies longer values,
+        # together with a longer `request_timeout_s`; raising the module constants
+        # instead would lengthen the SEQUENTIAL worker's chain too and reopen the
+        # v1.11 WEDGE-01 wedge class (a hung terminal past the ~90s healthz budget).
+        # Resolution starts from the registry, so a call added to MT5_IPC_TIMEOUTS_MS
+        # is carried on its default even before it earns a ctor override.
+        ipc_timeouts_ms: dict[str, int] = dict(MT5_IPC_TIMEOUTS_MS)
+        for _call_name, _override in (
+            ("initialize", initialize_timeout_ms),
+            ("login", login_timeout_ms),
+        ):
+            if _override is not None:
+                ipc_timeouts_ms[_call_name] = _override
+
         # Enforce the load-bearing dual-timeout ORDERING (Pitfall 3 / T-134-04)
-        # where the two effective values finally meet: the MT5 login IPC timeout
-        # (ms) MUST stay strictly BELOW the rpyc sync_request_timeout (s -> ms) so
-        # MT5 fails its own pipe first and rpyc surfaces a clean error instead of a
-        # raw mid-handshake abort. A too-small request_timeout_s (ctor arg or a low
+        # where the effective values finally meet: EVERY MT5 IPC timeout (ms) MUST
+        # stay strictly BELOW the rpyc sync_request_timeout (s -> ms) so MT5 fails
+        # its own pipe first and rpyc surfaces a clean error instead of a raw
+        # mid-handshake abort. A too-small request_timeout_s (ctor arg or a low
         # MT5_REQUEST_TIMEOUT_S env) silently inverts it and reopens the v1.11
         # WEDGE-01 wedge class, so fail loud at construction rather than at a hung
         # live login.
-        if MT5_LOGIN_TIMEOUT_MS >= request_timeout_s * 1000:
-            raise ValueError(
-                "MT5 login IPC timeout must be strictly below the rpyc request "
-                f"timeout ({MT5_LOGIN_TIMEOUT_MS}ms >= "
-                f"{request_timeout_s * 1000:.0f}ms) — this inversion reopens the "
-                "v1.11 WEDGE-01 wedge class."
-            )
+        #
+        # 153.3 / D-24: this guard used to check MT5_LOGIN_TIMEOUT_MS ALONE — the
+        # instance its author had in mind — while `initialize()` ran unbound on
+        # MetaTrader5's 60000ms vendor default, 2x the rpyc bound. That inversion is
+        # what censored 9/9 correlated gateway<->worker failures at 30.1-31.0s on
+        # 2026-08-06/08: the first MT5 call could not physically answer in time. The
+        # guard therefore covers the whole CLASS — every entry of the per-instance
+        # table resolved above — and the contract suite derives the set of
+        # timeout-carrying calls from THIS source file so a third one cannot land
+        # unregistered. Iteration is sorted so a multi-inversion always names the
+        # same call first (a deterministic message, not an arbitrary dict order).
+        request_timeout_ms = request_timeout_s * 1000
+        for call_name in sorted(ipc_timeouts_ms):
+            ipc_ms = ipc_timeouts_ms[call_name]
+            if ipc_ms >= request_timeout_ms:
+                raise ValueError(
+                    f"MT5 {call_name}() IPC timeout must be strictly below the rpyc "
+                    f"request timeout ({ipc_ms}ms >= "
+                    f"{request_timeout_ms:.0f}ms) — this inversion reopens the "
+                    "v1.11 WEDGE-01 wedge class."
+                )
         # `_connect` is the injectable transport seam for the offline contract
         # suite (mirrors SfoxClient's _clock/_sleep injection). Default is the
         # lazy real transport.
@@ -229,6 +299,10 @@ class Mt5Client:
         self._host = host
         self._port = port
         self._request_timeout_s = request_timeout_s
+        # The resolved per-call IPC ceilings live on the INSTANCE, so restart()
+        # (which rebuilds the transport with the same wiring) cannot silently drop
+        # back to the module constants.
+        self._ipc_timeouts_ms = ipc_timeouts_ms
         self._mt5 = connect(host=host, port=port, timeout=request_timeout_s)
         self._closed = False
 
@@ -286,9 +360,11 @@ class Mt5Client:
         remotely-eval'd code, so a raw rpyc remote traceback is a real credential
         disclosure (T-134-01). Because the credential values are in scope here,
         they are ALSO redacted by value (login/server, not just `password=`
-        shapes) on top of the shape-based `scrub_freeform_string`. The MT5 IPC
-        login timeout is passed explicitly and stays below the rpyc request
-        timeout (Pitfall 3).
+        shapes) on top of the shape-based `scrub_freeform_string`. BOTH MT5 calls
+        below carry an explicit millisecond ceiling taken from this instance's
+        `_ipc_timeouts_ms` (registered in ``MT5_IPC_TIMEOUTS_MS``, ordering-checked
+        at construction), so each stays strictly below the rpyc request timeout and
+        MT5 can fail its own pipe first (Pitfall 3 / D-24).
 
         initialize() FIRST (T-139 go-live): the MT5 Python API requires
         ``initialize()`` to attach the terminal's IPC pipe before ANY call —
@@ -296,13 +372,15 @@ class Mt5Client:
         ``-10004 'No IPC connection'`` against a real terminal (verified live on
         the prod gateway; the offline doubles never exercised it). The gateway
         terminal is already running and investor-auto-logged-in, so a bare
-        ``initialize()`` attaches to the running instance (it is idempotent — a
-        no-op True when already attached), and the explicit ``login()`` below then
-        (re)authenticates the EXPECTED investor account under our controlled
-        timeout + read-only semantics. initialize() carries no credentials, but its
-        transport text is scrubbed on the same fail-loud path for safety."""
+        ``initialize()`` attaches to the running instance ([ASSUMED] idempotent —
+        a no-op True when already attached: that is OUR empirical observation, not
+        a MetaQuotes-documented guarantee, EVIDENCE Correction C-7; owner Phase 155
+        (MT5-VERIFY)), and the explicit ``login()`` below then (re)authenticates the
+        EXPECTED investor account under our controlled timeout + read-only
+        semantics. initialize() carries no credentials, but its transport text is
+        scrubbed on the same fail-loud path for safety."""
         try:
-            inited = self._mt5.initialize()
+            inited = self._mt5.initialize(timeout=self._ipc_timeouts_ms["initialize"])
         except Mt5ClientError:
             raise
         except Exception as exc:  # noqa: BLE001 — never let raw transport text escape
@@ -311,7 +389,10 @@ class Mt5Client:
             self._raise_last()
         try:
             ok = self._mt5.login(
-                login, password=password, server=server, timeout=MT5_LOGIN_TIMEOUT_MS
+                login,
+                password=password,
+                server=server,
+                timeout=self._ipc_timeouts_ms["login"],
             )
         except Mt5ClientError:
             raise

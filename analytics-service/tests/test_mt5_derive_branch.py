@@ -132,7 +132,8 @@ class _FakeMt5Transport:
         self._account_info_calls = 0
         self.calls: list[str] = []
 
-    def initialize(self):
+    def initialize(self, **kwargs):
+        # **kwargs: initialize() carries its own `timeout=` ms ceiling (153.3 / D-24).
         # Real login() attaches the terminal IPC via initialize() before login().
         self.calls.append("initialize")
         return True
