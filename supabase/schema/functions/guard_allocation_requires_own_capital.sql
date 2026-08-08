@@ -40,11 +40,16 @@ BEGIN
   --   ARM 2 (owner-scoped): a SELF-OWNED strategy must be affirmatively marked
   --     own_capital. NULL (never asked) is non-allocatable — the owner is the
   --     one person who can answer the question, so silence is not consent.
-  -- The owner-equality conjunct on ARM 2 is what preserves the three SHIPPED
+  -- The owner-equality conjunct on ARM 2 is what preserves the FOUR SHIPPED
   -- third-party allocation paths — AddToPortfolio.tsx:54,
-  -- MigrationWizard.tsx:72 and seed-full-app-demo.ts:1697,1929 — which insert
-  -- positions for OTHER owners' strategies that the allocator has no authority
-  -- to mark. A blanket not-own_capital predicate would break all three.
+  -- MigrationWizard.tsx:72, seed-demo-data.ts:1069 (⭐ the seed CI actually
+  -- runs, ci.yml:1600) and seed-full-app-demo.ts:1697,1929 (manual-only) —
+  -- which insert positions for OTHER owners' strategies that the allocator has
+  -- no authority to mark. A blanket not-own_capital predicate would break all
+  -- four. seed-demo-data clears BOTH arms only because its fixture ownership
+  -- sets are disjoint (manager-owned strategies, allocator-owned portfolios)
+  -- and no seed writes `capital_ownership`; see header (d) for why that is a
+  -- CI-reddening landmine and which vitest pins now defend it.
   IF v_mark = 'team_review'
      OR (v_strategy_owner = v_portfolio_owner AND v_mark IS DISTINCT FROM 'own_capital') THEN
     RAISE EXCEPTION
