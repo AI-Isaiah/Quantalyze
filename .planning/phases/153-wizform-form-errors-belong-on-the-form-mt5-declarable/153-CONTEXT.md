@@ -203,6 +203,21 @@ claims survive, the numbers do not:**
 - D-16 says the `closed-sets.mt5-flag` pin covers four sets; it asserts **two**
   (`UI_EXCHANGE_CODES`, `EXCHANGES`).
 
+- **D-34: ⚠️ the emitter-order trap is SIX PRE-EXISTING sites, not one — and widening the
+  status predicate makes them ALL invisible at once.** Found by the planner, verified at
+  HEAD 2026-08-08. `wizardErrors.invariant.test.ts:100-101` requires `code:` as the FIRST
+  key and matches `[A-Z][A-Z0-9_]*`. In `finalize-wizard/route.ts` the existing coded arms
+  are written the WRONG way round at **`:573`** (`CIRCUIT_OPEN`), **`:617`**
+  (`KEY_NETWORK_TIMEOUT`), **`:767`** and **`:1293`** (`GATE_DRAFT_GONE`), **`:1310`**
+  (`GUARD_BLOCKED`) — all `{ error, code }` — and **`:1319`** (`draft_state_invalid`) is
+  `code:`-first but **lowercase**, so it fails the literal class as well.
+  ⛔ The danger is compound: today `EMITTER_RE` also gates on `status: 400`, so these six
+  are simply out of scope. The moment the third `ROUTES` entry lands **and** the predicate
+  widens past 400, all six become sites the scanner *should* see and silently does not —
+  the coverage assertion goes blind on the **pre-existing** arms, not merely on the nine
+  new ones. **Reordering these six is IN SCOPE**, and the site-count vacuity floor must be
+  sized against the reordered total, not against the nine.
+
 ### Founder architecture call — 2026-08-08 (BINDING, sets WIZFORM-05's posture)
 
 Presented with the one-concurrent-user ceiling and the read-only fail-open
