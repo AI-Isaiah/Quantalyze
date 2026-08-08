@@ -428,6 +428,32 @@ true for 146 and half of 142–145, and **false for 141**.
   view, not a global registry. Decide between gateway-enumerated, a curated broker→servers map,
   or free-text-with-suggestions before planning.
 
+  **UPDATE 2026-08-08 (founder, with screenshots of the MT5 mobile flow):**
+  - **(a) is CLOSED** — delivered by **MT5-03**: the per-venue `passphraseSecret` flag renders
+    MT5's slot as `type="text"` (`ConnectKeyStep.tsx:739`) while OKX stays masked. The line
+    number in the paragraph above is stale (`:696` → `:739`).
+  - **(b) is now specified, as TWO levels**, matching how the MT5 app actually behaves:
+    **level 1 = broker family** (e.g. `VantageMarkets`), showing brokers this user/allocator has
+    connected before; **level 2 = every server in that family** (`VantageMarkets-Live 5`,
+    `-Live 19`, `-Live 14`, `-Live 3`, `-Live 6`, `-Live 4`, `VantageMarkets-Live`). Typing an
+    exact server name is cumbersome and error-prone; a picker removes a whole error class.
+  - ⛔ **The real blocker for level 1 is a STORAGE shortcut, not a missing API.** The broker
+    server flows into the OKX passphrase slot and is persisted in `api_keys.passphrase_encrypted`
+    (`exchange.py:234` states the rationale: *"No new columns"*). A broker server name is public
+    information, so encrypting it buys nothing and costs the ability to render a history without
+    decrypting secrets. **Fix = a plain `mt5_server` column**; that makes level 1 trivial.
+  - **Level 2 direction — DECIDED IN PRINCIPLE 2026-08-08 (founder: "why can't we download the
+    serverlist from metaquotes or vantagemarkets and just store it?"). Yes — download and store.**
+    The set is small, public and slow-changing, and our own gateway terminal has already
+    downloaded the directory in order to render these screens. Prior objection ("one terminal's
+    view, not a global registry") is answered: seed from the terminal + broker-published lists,
+    store as a table, refresh rarely, keep a free-text escape hatch for unseeded brokers.
+    ⚠️ The MT5 **Python API** has no `servers_get` — that is true and is *not* a blocker; the
+    data is obtained out-of-band, not through the API. Exact extraction mechanism/format pending
+    the platform research commissioned 2026-08-08.
+  - **Not in Phase 153.** 153 deletes an error class and is already 25 files; a server picker is
+    a new surface. Needs its own requirement + UI-SPEC.
+
 - **⭐ Expose an MCP server so a client can read their own stored data and analyse it with their own
   AI** (founder-requested 2026-08-03, during `/gsd-plan-phase 142.2`). Once we have ingested and
   derived a client's data, they should be able to point their own AI assistant at it — Claude
