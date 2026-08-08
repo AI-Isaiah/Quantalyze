@@ -11,16 +11,15 @@ Contract:
 
   * Surface (read-only by CONSTRUCTION) — `login`, `account_info`,
     `terminal_info`, `history_deals_get`, `order_check` (probe only), `close`.
-    Read-only is a
-    STRUCTURAL property, not a probed scope claim: the underlying `mt5linux`
-    client exposes the FULL trading surface (order_send, positions_get,
-    orders_get, ...), but this facade composes ONLY the read methods plus the
-    order_check probe and NEVER wraps the trade path. There is NO generic
-    attribute-forwarding passthrough (no dunder getattr hook) — such a facade would
-    silently re-expose that trade path and defeat the whole `api_verified` trust
-    story. The forbidden
-    trade method (referred to here without call parentheses so the grep gate stays
-    clean) is intentionally absent.
+    Read-only is a STRUCTURAL property, not a probed scope claim: the underlying
+    `mt5linux` client exposes the FULL trading surface (order_send,
+    positions_get, orders_get, ...), but this facade composes ONLY the read
+    methods plus the order_check probe and NEVER wraps the trade path. There is
+    NO generic attribute-forwarding passthrough (no dunder getattr hook) — such a
+    facade would silently re-expose that trade path and defeat the whole
+    `api_verified` trust story. The forbidden trade method (referred to here
+    without call parentheses so the grep gate stays clean) is absent.
+    `terminal_info` (153.3 / D-31) reads OUR terminal: a READ-surface widening.
 
   * Return discipline (fail-loud, no invented data) — every read distinguishes
     `None` (RPyC/terminal error -> capture `last_error()` IMMEDIATELY and raise a
