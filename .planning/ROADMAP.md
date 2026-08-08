@@ -313,9 +313,19 @@ Plans:
 **Requirements**: WIZFORM-02, WIZFORM-03
 **Decisions**: D-08, D-09(a/b), D-10, D-17, D-21, D-22, D-23, D-34 (D-18/D-28 referenced as superseded)
 **Owns**: `src/lib/closed-sets.ts`(+test), `src/lib/wizardErrors.ts`(+test, +invariant test), `finalize-wizard/route.ts` (validatePayload only), `SubmitStep.tsx` (roster only), `seam-constants.pin.test.ts` (Wave-0 A-25 assertion only)
-**Plans**: TBD
+**Plans**: 6 plans in 5 waves
+
+Plans:
+- [ ] 153.1-01-PLAN.md — Wave-0 scanner + A-25 gates: hardened `deriveRoster`, per-route status predicate, interpolation-safe error body, four SELF-TESTs, derived A-25 assertion (all green at HEAD)
+- [ ] 153.1-02-PLAN.md — `VENUE_CAPABILITIES` + the three predicates (fail-toward-probing on null) + `MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS`, pinned
+- [ ] 153.1-03-PLAN.md — WIZFORM-03 class filter: `FixRequirement` + `fixRequires` + ONE filter in `formatKeyError`; the three venue bullets and the surface bullet tagged; three whole-table sweeps
+- [ ] 153.1-04-PLAN.md — Ten new `WizardErrorCode` members (seven field-level, `SEAM_DEADLINE_EXCEEDED`, and the two live UNKNOWN residuals); `EXPECTED_TABLE_SIZE` moved at BOTH sites
+- [ ] 153.1-05-PLAN.md — `finalize-wizard`: 14 emitters reordered code-first, 11 `validatePayload` arms coded, `MIN_DESCRIPTION_CHARS` re-pointed, roster admitted in the same commit
+- [ ] 153.1-06-PLAN.md — Third `ROUTES` entry, per-route site literals, alias-aware coverage law (`CIRCUIT_OPEN`), vacuity floor sized against the reordered total, SC-2 mutations RUN
+
 **UI hint**: no
 
+- ⚠️ **PLANNER CORRECTION (2026-08-09, verified at `0c4f01d8`): the D-34 reorder is FOURTEEN sites, not six.** The six below are the SINGLE-LINE `{ error, code }` occurrences; eight more put `error:` on its own line inside a multi-line literal — same defect, invisible to a single-line grep (`:605-608`, `:625-628`, `:637-640`, `:952-955`, `:1007-1010`, `:1087-1093`, `:1754-1758`, `:1778-1782`). A THIRD blindness class was also measured: `EMITTER_RE`'s `error:[^}]*\}` cannot cross a `${…}` interpolation, so four bodies stay invisible even after the reorder. And `deriveRoster` returns `[]` for `KNOWN_FINALIZE_CODES` today (`indexOf("([")` → `-1`). All three are closed by 153.1-01 as Wave-0 gates.
 - ⛔ **D-34: reordering is not cosmetic.** Six PRE-EXISTING arms (`:573 :617 :767 :1293 :1310` written `{ error, code }`, plus `:1319` lowercase) are invisible to `EMITTER_RE`. They are out of scope only because it gates on `status: 400`; the moment the third `ROUTES` entry lands **and** the predicate widens, the coverage assertion goes blind on them. Size the vacuity floor against the **reordered total**, never against the nine.
 - ⚠️ The A-25 **derived** assertion lands here as a Wave-0 gate (green at HEAD) so that 153.4's budget raise cannot pass a pin that cannot fail.
 
