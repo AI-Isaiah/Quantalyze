@@ -103,25 +103,50 @@ describe("getOwnCapitalStrategies — WR-01 series resolution (API-ingested stra
     expect(rows[0].mtd).not.toBeNull();
   });
 
-  it("the resolved series is emitted AS daily_returns and the raw wealth index is stripped (no second resolution mechanism downstream)", async () => {
+  it("E2: the series is REDUCED server-side to `mtd` and NO return history crosses the RSC boundary", async () => {
+    // Review round 3 E2 — this payload is handed straight to a "use client"
+    // tree (page.tsx → AllocationsTabs → HoldingsTabPanel), so every field on
+    // it is serialized into the flight payload on first paint. The only
+    // consumer of the series was `computeMtd`; a strategy that is ALSO
+    // positioned shipped the same history twice, since `payload.strategies`
+    // carries its own embed.
     state.queryResult = { data: [API_INGESTED_ROW], error: null };
 
     const marked = await getOwnCapitalStrategies(USER);
-    const analytics = marked![0].strategy_analytics as unknown as Record<
+    const row = marked![0] as unknown as Record<string, unknown>;
+    const analytics = row.strategy_analytics as unknown as Record<
       string,
       unknown
     >;
 
-    // Differenced returns, not the raw wealth values (105 forwarded raw would
-    // read as a +10,400% day).
-    expect(analytics.daily_returns).toEqual([
-      { date: "2026-08-01", value: expect.closeTo(0.01, 10) },
-      { date: "2026-08-04", value: expect.closeTo(105 / 101 - 1, 10) },
-    ]);
+    // (1) The scalar is there, and it is the SAME economics the old
+    // client-side reduction produced: wealth on the last observed day over
+    // wealth at the previous month's close, 105/100 − 1 = 5%. Hand-computed
+    // from the fixture; never read back off the resolver.
+    expect(marked![0].mtd).toBeCloseTo(0.05, 10);
+
+    // (2) NEITHER series column crosses — not the resolved one, not the raw
+    // wealth index. This is the whole finding: pre-fix `daily_returns` was
+    // emitted in full.
+    expect(analytics).not.toHaveProperty("daily_returns");
     expect(analytics).not.toHaveProperty("returns_series");
-    // The sibling metric columns still cross untouched.
+    expect(row).not.toHaveProperty("daily_returns");
+    expect(row).not.toHaveProperty("returns_series");
+
+    // (3) Non-vacuity: the fixture really does carry a multi-point series that
+    // COULD have been serialized, and the resolution really did run — a
+    // fixture with no series would satisfy (2) for the wrong reason, and a
+    // dropped resolution would leave `mtd` null (this is the API-ingested row,
+    // whose `daily_returns` column is NULL).
+    expect(API_INGESTED_ROW.strategy_analytics.returns_series).toHaveLength(3);
+    expect(API_INGESTED_ROW.strategy_analytics.daily_returns).toBeNull();
+    expect(marked![0].mtd).not.toBeNull();
+
+    // (4) The sibling SCALAR columns still cross untouched.
     expect(analytics.sharpe).toBe(1.8);
     expect(analytics.max_drawdown).toBe(-0.12);
+    expect(analytics.cagr).toBe(0.4);
+    expect(analytics.volatility).toBe(0.3);
   });
 
   it("a CSV-ingested strategy (daily_returns populated, returns_series NULL) is unaffected — the direct column still wins", async () => {

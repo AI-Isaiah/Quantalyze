@@ -280,8 +280,14 @@ function makeMarked(over: {
   codename?: string | null;
   disclosure_tier?: PayloadStrategy["strategy"]["disclosure_tier"];
   capital_ownership?: string | null;
+  /**
+   * Review round 3 E2 — MTD is now a SCALAR on the payload, reduced
+   * server-side by `getOwnCapitalStrategies`; the marked half no longer
+   * carries a return series at all. The server-side reduction has its own
+   * coverage in `queries.own-capital-strategies.test.ts`.
+   */
+  mtd?: number | null;
   analytics?: {
-    daily_returns?: unknown;
     sharpe?: number | null;
     max_drawdown?: number | null;
   } | null;
@@ -295,11 +301,11 @@ function makeMarked(over: {
     capital_ownership: (over.capital_ownership === undefined
       ? "own_capital"
       : over.capital_ownership) as OwnCapitalStrategy["capital_ownership"],
+    mtd: over.mtd ?? null,
     strategy_analytics:
       over.analytics === undefined || over.analytics === null
         ? null
         : ({
-            daily_returns: over.analytics.daily_returns ?? null,
             cagr: null,
             sharpe: over.analytics.sharpe ?? null,
             volatility: null,
@@ -590,24 +596,74 @@ describe("toStrategyRows — OWN-05 SC 1c owner-name carve-out", () => {
     expect(row.manager).toBeNull();
   });
 
-  it("derives MTD/sharpe/maxDd from the marked strategy's own analytics when it has no position", () => {
+  it("E3: the Manager cell does not change meaning when money arrives — an owner's own strategy shows its CODENAME whether or not it has a position", () => {
+    // The product call behind E3. Both halves resolve
+    // `organization_name ?? codename ?? null`, and an owner's own strategy is
+    // non-institutional (organization_name redacted to null server-side), so
+    // both land on the codename. Had half 2 been dropped to `manager: null`,
+    // this SAME strategy would read "—" while unallocated and "OWL-3" the
+    // moment an allocation was made — a cell whose meaning turns on an
+    // unrelated event.
+    const CODENAME = "OWL-3";
+    const [unallocated] = toStrategyRows({
+      strategies: [makeMarked({ id: "s", codename: CODENAME })],
+      positions: [],
+      now: NOW,
+    });
+    const [allocated] = toStrategyRows({
+      strategies: [makeMarked({ id: "s", codename: CODENAME })],
+      positions: [
+        makeStrategy({
+          strategy_id: "s",
+          allocated_amount: 100_000,
+          strategy: { organization_name: null, codename: CODENAME },
+        }),
+      ],
+      now: NOW,
+    });
+
+    // Non-vacuity: these really are the two different halves (only the second
+    // carries money), so an identical Manager cell is a claim, not a tautology.
+    expect(unallocated.allocation).toBeNull();
+    expect(allocated.allocation).toBe(100_000);
+    expect(unallocated.manager).toBe(CODENAME);
+    expect(allocated.manager).toBe(CODENAME);
+  });
+
+  it("carries MTD/sharpe/maxDd from the marked strategy's own payload when it has no position", () => {
+    // Review round 3 E2 — MTD arrives as a SCALAR the server already reduced;
+    // sharpe/maxDd were always scalars. The adapter's job on this half is to
+    // put all three on the row, not to recompute any of them.
     const [row] = toStrategyRows({
       strategies: [
         makeMarked({
           id: "s",
-          analytics: {
-            daily_returns: { "2026-06-01": 0.01, "2026-06-02": 0.02 },
-            sharpe: 1.8,
-            max_drawdown: -0.064,
-          },
+          mtd: 0.0302,
+          analytics: { sharpe: 1.8, max_drawdown: -0.064 },
         }),
       ],
       positions: [],
       now: NOW,
     });
-    expect(row.mtd).toBeCloseTo(0.0302, 6);
+    expect(row.mtd).toBe(0.0302);
     expect(row.sharpe).toBe(1.8);
     expect(row.maxDd).toBe(-0.064);
+  });
+
+  it("E2: the marked half carries NO return series — the row's MTD is the payload's scalar and nothing else", () => {
+    // The falsifier for the RSC-payload fix. If `OwnCapitalStrategy` ever
+    // regrows a series field and the adapter goes back to reducing it here,
+    // this row's MTD would come from the series instead of the scalar and the
+    // two assertions below would disagree.
+    const marked = makeMarked({ id: "s", mtd: -0.017 });
+    // The payload genuinely has no series to reduce — the discriminator.
+    expect(
+      Object.keys((marked.strategy_analytics ?? {}) as object),
+    ).not.toContain("daily_returns");
+    expect(marked).not.toHaveProperty("returns_series");
+
+    const [row] = toStrategyRows({ strategies: [marked], positions: [], now: NOW });
+    expect(row.mtd).toBe(-0.017);
   });
 });
 

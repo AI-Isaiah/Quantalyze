@@ -115,8 +115,18 @@ export interface StrategyRowAdapterInputs {
  * day of that date's month, and compound every daily return on or after it:
  * `(1 + r1)·(1 + r2)·… − 1`. `normalizeDailyReturns` handles the nested
  * year-keyed JSONB shape and returns a date-ascending `{date, value}[]`.
+ *
+ * Review round 3 E2 — EXPORTED so `getOwnCapitalStrategies` can call it
+ * SERVER-side and emit the scalar, instead of serializing a multi-year return
+ * series across the RSC boundary for every marked strategy just so this
+ * function can run in the browser. ONE definition, two call sites — never a
+ * second implementation (the phase-147 SC2 lesson). The import direction
+ * (`src/lib/queries.ts` → this module) is the established one: queries.ts:23
+ * already imports `deriveSnapshotDrawdowns` from a sibling `allocations/lib`
+ * module. It is cycle-free because this module's only `@/lib/queries` import is
+ * `import type`, which is erased at runtime.
  */
-function computeMtd(rawDailyReturns: unknown): number | null {
+export function computeMtd(rawDailyReturns: unknown): number | null {
   const points = normalizeDailyReturns(rawDailyReturns);
   if (points.length === 0) return null;
   const lastDate = points[points.length - 1].date; // "YYYY-MM-DD", sorted asc
@@ -214,13 +224,29 @@ export function toStrategyRows(inputs: StrategyRowAdapterInputs): StrategyRow[] 
           codename: s.codename ?? null,
           disclosure_tier: (s.disclosure_tier ?? null) as DisclosureTier | null,
         }),
-      // No `organization_name` on the owner's own strategy — honest `—`
-      // rather than a fabricated manager (150-RESEARCH § Schema Findings 7).
+      // Review round 3 E3 — this comment used to promise an honest `—`, but the
+      // line has always read `codename`, and every finalized strategy is
+      // assigned one, so the Manager cell renders the codename. The CODENAME is
+      // what is right for the user, and the comment is what was wrong: half 1
+      // above resolves `organization_name ?? codename ?? null`, and for the
+      // owner's own strategy `organization_name` is null (non-institutional
+      // redaction) — so it lands on the codename too. Dropping to `null` here
+      // would make the SAME strategy render "—" while unallocated and its
+      // codename the moment money is placed behind it: a cell that changes
+      // meaning on an unrelated event. The codename is also the only manager
+      // identity that exists for a self-managed strategy — never a fabrication
+      // (150-RESEARCH § Schema Findings 7), just the safe pseudonym, and `null`
+      // still falls through to the honest em-dash when there is no codename yet.
       manager: s.codename ?? null,
       capitalOwnership: isAllocatable(s.capital_ownership) ? OWN_CAPITAL : null,
       weight: null,
       allocation: null, // not allocated — NOT 0
-      mtd: computeMtd(s.strategy_analytics?.daily_returns),
+      // Review round 3 E2 — SERVER-computed by the same `computeMtd`
+      // (`getOwnCapitalStrategies`), so the multi-year series it reduces never
+      // crosses the RSC boundary. Half 1 above still calls it inline: that half
+      // reads the dashboard payload's own embed, which is not this phase's to
+      // change.
+      mtd: s.mtd,
       sharpe: s.strategy_analytics?.sharpe ?? null,
       maxDd: s.strategy_analytics?.max_drawdown ?? null,
       age: null, // no added_at — NOT 0 ("added today" would be invented)

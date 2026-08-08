@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import {
   getMyAllocationDashboard,
-  getMyStrategies,
+  hasAnyOwnStrategies,
   getOwnCapitalStrategies,
 } from "@/lib/queries";
 import {
@@ -81,12 +81,20 @@ export default async function MyAllocationPage() {
   //     which is rooted in `portfolio_strategies` — a marked strategy with no
   //     position yet has no row there, and that row is precisely the one the
   //     allocator clicks `Allocate…` on.
-  //   - `getMyStrategies` is the D-15 empty-state arm-2/arm-3 discriminator.
-  //     "Zero own-capital rows" and "zero strategies" are different facts and
-  //     deserve different copy; only this layer knows the second one.
-  // Both take the AUTHENTICATED user.id, and both return `null` (never `[]`) on
-  // a transient failure, so a fetch error cannot masquerade as a definitive
-  // empty state.
+  //   - `hasAnyOwnStrategies` is the D-15 empty-state arm-2/arm-3
+  //     discriminator. "Zero own-capital rows" and "zero strategies" are
+  //     different facts and deserve different copy; only this layer knows the
+  //     second one.
+  //     Review round 2 F6 — this was `getMyStrategies`, whose result was
+  //     discarded except for `.length > 0`. That read is `*, strategy_analytics
+  //     (*)` (every JSONB series column for every non-archived strategy) plus a
+  //     serial second round-trip through `readPublicVerificationSignals`, on
+  //     every SSR render of the money surface. The existence read answers the
+  //     same question with `select("id").limit(1)` and keeps the same
+  //     null-vs-empty contract, which is what the two consumers below need.
+  // Both take the AUTHENTICATED user.id, and both return `null` on a transient
+  // failure — never `[]` for the list read, never `false` for the existence
+  // read — so a fetch error cannot masquerade as a definitive empty state.
   const [
     payload,
     snapshot,
@@ -96,7 +104,7 @@ export default async function MyAllocationPage() {
     optimizer,
     note,
     ownCapitalStrategies,
-    myStrategies,
+    anyOwnStrategies,
   ] = await Promise.all([
     getMyAllocationDashboard(user.id),
     getLatestExposureSnapshot(user.id),
@@ -106,7 +114,7 @@ export default async function MyAllocationPage() {
     getOptimizerPrefetch(supabase, user.id),
     getDashboardNote(supabase, user.id),
     getOwnCapitalStrategies(user.id),
-    getMyStrategies(user.id),
+    hasAnyOwnStrategies(user.id),
   ]);
   const exposure: ExposureSectionData = { snapshot, netSeries, allocationSeries };
 
@@ -128,12 +136,15 @@ export default async function MyAllocationPage() {
   // (equity, exposure, holdings) is intact, and taking it down over a blip in
   // one auxiliary strategies read is a bigger lie than the strip.
   const strategiesReadFailed =
-    ownCapitalStrategies === null || myStrategies === null;
-  // Review round 2 W-2 — the outer parentheses are LOAD-BEARING: `?? 0 > 0`
-  // parses as `?? (0 > 0)`, which would make this `myStrategies ?? false` and
-  // send a non-empty list down as `false`. On a failed read this is `false`,
-  // which is why `strategiesReadFailed` outranks it at the render layer.
-  const hasAnyStrategies = ((myStrategies?.length ?? 0) > 0);
+    ownCapitalStrategies === null || anyOwnStrategies === null;
+  // Review round 2 F6 — the same null-vs-empty split the `.length > 0` form
+  // expressed, now stated directly: `null` (read failed) is NOT a claim about
+  // the account, so it must land on `false` here and be OUTRANKED by
+  // `strategiesReadFailed` at the render layer — never sent down as a
+  // definitive "this owner has no strategies". `=== true` is deliberate: a
+  // truthiness test would read the same today but would silently swallow any
+  // future third state.
+  const hasAnyStrategies = anyOwnStrategies === true;
 
   // Phase 11 / Plan 03 / D-13 — fire onboarding-funnel events (single-fire
   // via *_emitted_at sentinels on auth.users.raw_user_meta_data). All five

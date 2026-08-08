@@ -2,9 +2,9 @@
  * Phase 150 review WR-02 — the allocations page must CONSUME the null-vs-empty
  * contract, not collapse it.
  *
- * `getOwnCapitalStrategies` and `getMyStrategies` both return `null` (never
- * `[]`) on a transient DB/RLS failure. The page previously wrote
- * `ownCapitalStrategies ?? []` and `(myStrategies?.length ?? 0) > 0`, which
+ * `getOwnCapitalStrategies` and `hasAnyOwnStrategies` both return `null` on a
+ * transient DB/RLS failure (never `[]`, never `false`). The page previously
+ * wrote `ownCapitalStrategies ?? []` and `(myStrategies?.length ?? 0) > 0`, which
  * makes a failed fetch INDISTINGUISHABLE from an empty account at the render
  * layer: the owner's marked rows vanish, positioned rows read as unmarked (the
  * adapter derives `capitalOwnership` from marked-set membership, so the
@@ -31,12 +31,12 @@ vi.mock("server-only", () => ({}));
 const {
   getUserMock,
   ownCapitalMock,
-  myStrategiesMock,
+  anyStrategiesMock,
   tabsPropsSpy,
 } = vi.hoisted(() => ({
   getUserMock: vi.fn(),
   ownCapitalMock: vi.fn(),
-  myStrategiesMock: vi.fn(),
+  anyStrategiesMock: vi.fn(),
   tabsPropsSpy: vi.fn(),
 }));
 
@@ -58,7 +58,7 @@ vi.mock("next/navigation", () => ({
 vi.mock("@/lib/queries", () => ({
   getMyAllocationDashboard: async () => ({ flaggedHoldings: [] }),
   getOwnCapitalStrategies: (...args: unknown[]) => ownCapitalMock(...args),
-  getMyStrategies: (...args: unknown[]) => myStrategiesMock(...args),
+  hasAnyOwnStrategies: (...args: unknown[]) => anyStrategiesMock(...args),
 }));
 vi.mock("@/lib/portfolio-exposure", () => ({
   getLatestExposureSnapshot: async () => null,
@@ -93,7 +93,12 @@ vi.mock("./AllocationContext", () => ({
 import MyAllocationPage from "./page";
 
 const MARKED = [{ id: "s-1", name: "Helios Basis" }];
-const OWNED = [{ id: "s-1" }, { id: "s-2" }];
+/** Review round 2 F6 — the page no longer receives a LIST here. `getMyStrategies`
+ *  was fetching every non-archived strategy with every JSONB series column, plus
+ *  a second serial round-trip, to answer `.length > 0`; `hasAnyOwnStrategies`
+ *  answers the same question directly. The tri-state it must preserve is
+ *  `true` / `false` / `null`, and every case below drives one of the three. */
+const HAS_STRATEGIES = true;
 
 /**
  * Run the server component and return the props the tab shell received.
@@ -115,7 +120,7 @@ beforeEach(() => {
 describe("MyAllocationPage — WR-02 null-vs-empty at the only consumption point", () => {
   it("a failed own-capital read is reported as a FAILURE, not as an empty marked set", async () => {
     ownCapitalMock.mockResolvedValue(null);
-    myStrategiesMock.mockResolvedValue(OWNED);
+    anyStrategiesMock.mockResolvedValue(HAS_STRATEGIES);
 
     const props = await runPage();
 
@@ -126,9 +131,9 @@ describe("MyAllocationPage — WR-02 null-vs-empty at the only consumption point
     expect(props.hasAnyStrategies).toBe(true);
   });
 
-  it("a failed my-strategies read is reported as a FAILURE, not as 'this account has no strategies'", async () => {
+  it("a failed strategy-existence read is reported as a FAILURE, not as 'this account has no strategies'", async () => {
     ownCapitalMock.mockResolvedValue(MARKED);
-    myStrategiesMock.mockResolvedValue(null);
+    anyStrategiesMock.mockResolvedValue(null);
 
     const props = await runPage();
 
@@ -140,7 +145,7 @@ describe("MyAllocationPage — WR-02 null-vs-empty at the only consumption point
 
   it("both reads failing is still one honest failure", async () => {
     ownCapitalMock.mockResolvedValue(null);
-    myStrategiesMock.mockResolvedValue(null);
+    anyStrategiesMock.mockResolvedValue(null);
 
     const props = await runPage();
 
@@ -149,7 +154,7 @@ describe("MyAllocationPage — WR-02 null-vs-empty at the only consumption point
 
   it("CONTROL — a genuinely empty account is NOT a failure (the definitive empty state stays reachable)", async () => {
     ownCapitalMock.mockResolvedValue([]);
-    myStrategiesMock.mockResolvedValue([]);
+    anyStrategiesMock.mockResolvedValue(false);
 
     const props = await runPage();
 
@@ -160,12 +165,48 @@ describe("MyAllocationPage — WR-02 null-vs-empty at the only consumption point
 
   it("CONTROL — a healthy populated account passes the marked rows through untouched", async () => {
     ownCapitalMock.mockResolvedValue(MARKED);
-    myStrategiesMock.mockResolvedValue(OWNED);
+    anyStrategiesMock.mockResolvedValue(HAS_STRATEGIES);
 
     const props = await runPage();
 
     expect(props.strategiesReadFailed).toBe(false);
     expect(props.ownCapitalStrategies).toEqual(MARKED);
     expect(props.hasAnyStrategies).toBe(true);
+  });
+
+  it("F6: the existence read is the ONLY strategies read the page makes for this flag, and it is owner-scoped", async () => {
+    // The efficiency half of F6, pinned at the seam that can regress: the page
+    // must not go back to pulling the whole ranked list (every JSONB series
+    // column for every non-archived strategy, plus a serial second round-trip
+    // through readPublicVerificationSignals) to compute a boolean.
+    ownCapitalMock.mockResolvedValue(MARKED);
+    anyStrategiesMock.mockResolvedValue(HAS_STRATEGIES);
+
+    await runPage();
+
+    expect(anyStrategiesMock).toHaveBeenCalledTimes(1);
+    expect(anyStrategiesMock).toHaveBeenCalledWith("u-1");
+  });
+
+  it("F6: `null` is NOT collapsed into `false` — a transient failure and an empty account send different signals", async () => {
+    // The tri-state, stated as the contrast that matters. Both cases produce
+    // `hasAnyStrategies: false`; only `strategiesReadFailed` separates "we could
+    // not read" from "there is nothing to read", and the panel picks its
+    // sentence off that difference.
+    ownCapitalMock.mockResolvedValue(MARKED);
+    anyStrategiesMock.mockResolvedValue(null);
+    const failed = await runPage();
+
+    vi.clearAllMocks();
+    getUserMock.mockResolvedValue({ data: { user: { id: "u-1" } } });
+    ownCapitalMock.mockResolvedValue(MARKED);
+    anyStrategiesMock.mockResolvedValue(false);
+    const empty = await runPage();
+
+    expect(failed.hasAnyStrategies).toBe(false);
+    expect(empty.hasAnyStrategies).toBe(false);
+    // …and yet they are not the same state.
+    expect(failed.strategiesReadFailed).toBe(true);
+    expect(empty.strategiesReadFailed).toBe(false);
   });
 });

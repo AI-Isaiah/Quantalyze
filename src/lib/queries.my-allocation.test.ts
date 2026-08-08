@@ -134,11 +134,19 @@ const state = vi.hoisted(() => ({
   // Scoped `user_id` (NOT owner_id — the columns are asymmetric across the
   // two tables, and the mock's generic eq filter makes that asymmetry
   // load-bearing rather than decorative).
+  // `capital_ownership` is OPTIONAL here, and that is the point rather than a
+  // convenience: the column is nullable with no DEFAULT and no backfill, so the
+  // pre-150 population really does arrive with the field absent, and the AUM-04
+  // fixtures above are that population. The own-capital exemption below seeds
+  // it explicitly. (Typed as `string | null` and never as the imported
+  // `CapitalOwnership` union — an oracle that borrows the module's own type
+  // cannot notice a mark being renamed out from under it.)
   strategies: [] as Array<{
     id: string;
     user_id: string;
     api_key_id: string | null;
     status: string;
+    capital_ownership?: string | null;
   }>,
   // Phase 151 / 151-02 (AUM-04) — the composite link table (migration
   // 20260710120000). Rows carry `owner_id`, so a builder that scopes
@@ -1953,7 +1961,7 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
     expect(result.liveBaselineMetrics.sharpe).not.toBe(aPlusB.sharpe);
   });
 
-  it("mixed-population HONESTY guard (D3): one key with dailies + one active key WITHOUT → takes the FALLBACK (never a half-per-key/half-snapshot curve)", async () => {
+  it("mixed-population HONESTY guard (D3, amended by 151): one key with dailies + one active key WITHOUT → the CONTRIBUTING SUBSET's curve (never a half-per-key/half-snapshot one)", async () => {
     // Two active keys: key-A has per-key dailies, key-B has NONE.
     state.apiKeys = [
       {
@@ -2023,25 +2031,106 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
     } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
 
-    // The honesty truth this pins SURVIVES Phase 63 ENGINE-04: a mixed
-    // population (key-B has no per-key series → whole allocator gate=false) is
-    // NEVER a blended half-per-key/half-snapshot curve. Only the expected result
-    // changed — the gate=false arm now returns the honest emptyDefault (AUM
-    // preserved from holdings, all metrics null) instead of a snapshot
-    // reconstruction. A per-key-partial gate that blended key-A alone would break
-    // BOTH this equality and the not-equal below.
-    const expected = emptyLiveBaselineMetrics(result.holdingsSummary);
-    expect(result.liveBaselineMetrics).toEqual(expected);
-    expect(result.liveBaselineMetrics.aum).toBeGreaterThan(0); // AUM preserved
-    expect(result.liveBaselineMetrics.sharpe).toBeNull();
+    // ─────────────────────────────────────────────────────────────────────
+    // WHAT D3 GUARANTEED, AND WHICH HALF OF IT SURVIVES PHASE 151.
+    //
+    // D3's rule was written when book entry and the live baseline shared ONE
+    // all-or-nothing gate. A mixed population (key-B has no per-key series)
+    // could not enter book mode at all, so "no curve" was the honest answer and
+    // the emptyDefault was what this test pinned. The DANGER it was defending
+    // against was never the null itself — it was a curve stitched from TWO
+    // BASES: key-A's real per-key series for one half of the book and a
+    // holdings-SNAPSHOT reconstruction standing in for key-B, which fabricates
+    // a ρ=1.0 collapse and mixes annualization bases inside one number.
+    //
+    // Phase 151 (AUM-04) splits the gates and ADMITS this population to book
+    // mode, and `ScenarioComparePanel` computes a real live-book column for it
+    // from `contributingApiKeyIds` on the same screen. A null baseline is now
+    // the DIShonest answer — it leaves two surfaces on one screen contradicting
+    // each other about whether this allocator's live book exists.
+    //
+    // So the expected VALUE flips, and the surviving guarantee is restated in
+    // the form that still bites: the curve is built from the CONTRIBUTING
+    // SUBSET ONLY, and the snapshot half is GONE — a key with no series
+    // contributes NOTHING to the curve rather than a reconstructed stand-in.
+    // Arm (4) below is the one that would fail if anyone re-mixed a snapshot
+    // reconstruction back in; it is the part of D3 still worth defending.
+    // ─────────────────────────────────────────────────────────────────────
 
-    // Falsifiable: it must NOT equal the per-key-only blend (which a naive
-    // per-key-partial gate would have produced from key-A alone).
+    // (1) Pre-condition — this really is the mixed population, and the OLD
+    // all-or-nothing gate really is still false (otherwise every arm below is
+    // testing an ordinary whole-book case).
+    expect(result.perKeyDailiesGateSatisfied).toBe(false);
+    expect(result.bookEntryGateSatisfied).toBe(true);
+    expect(result.contributingApiKeyIds).toEqual(["key-A"]);
+
+    // (2) The curve is the CONTRIBUTING SUBSET's per-key blend — key-A alone.
+    // Review round 2 F1 — and so are the HOLDINGS behind it. Handing this
+    // helper the full `holdingsSummary` (as this expectation did pre-fix)
+    // produced an object whose `aum` and dollar drawdown described key-A AND
+    // key-B while its `sharpe`/`equity` described key-A alone.
     const perKeyOnly = liveBaselineMetricsFromPerKeyDailies(
-      result.holdingsSummary,
+      result.holdingsSummary.filter((h) => h.api_key_id === "key-A"),
       { "key-A": ASOF.map((date, i) => ({ date, value: PERKEY_A[i] })) },
     );
-    expect(result.liveBaselineMetrics.equity).not.toEqual(perKeyOnly.equity);
+    expect(result.liveBaselineMetrics).toEqual(perKeyOnly);
+
+    // (2b) ONE KEY SET, stated as a number rather than as an object identity —
+    // hand-computed from this fixture's own holdings: key-A's BTC position is
+    // $30,000 and key-B's ETH position is $20,000, so a baseline describing
+    // key-A's returns must carry key-A's $30,000, never the $50,000 custody
+    // total. This is the arm that goes RED if anyone re-widens the holdings
+    // argument while leaving the returns narrowed.
+    expect(result.liveBaselineMetrics.aum).toBe(30_000);
+    expect(
+      result.holdingsSummary.reduce((s, h) => s + h.value_usd, 0),
+    ).toBe(50_000);
+
+    // (3) …and it is a REAL curve, not the honest-empty this used to be. Stated
+    // as a discriminating negative so (2) cannot pass by both sides being empty.
+    expect(result.liveBaselineMetrics.sharpe).not.toBeNull();
+    expect(result.liveBaselineMetrics.equity.length).toBeGreaterThan(0);
+    expect(result.liveBaselineMetrics).not.toEqual(
+      emptyLiveBaselineMetrics(result.holdingsSummary),
+    );
+
+    // (4) ⛔ THE SURVIVING HALF OF D3 — NO SNAPSHOT RECONSTRUCTION IS MIXED IN.
+    // This fixture seeds `allocatorEquitySnapshots` for BOTH symbols precisely
+    // so a snapshot half would be constructible. Move those snapshots by a large
+    // factor and re-derive: if any part of the baseline curve were reconstructed
+    // from them (the half-per-key/half-snapshot stitch D3 forbade), the result
+    // would move. It must be byte-identical.
+    const snapshotsBefore = state.allocatorEquitySnapshots;
+    state.allocatorEquitySnapshots = snapshotsBefore.map((s, i) => ({
+      ...s,
+      value_usd: s.value_usd * 3 + i * 5_000,
+      breakdown: { BTC: SNAP_BTC[i] * 3, ETH: 60_000 + i * 900 },
+    }));
+    const afterSnapshotShift = await getMyAllocationDashboard("user-1");
+    state.allocatorEquitySnapshots = snapshotsBefore;
+    // Non-vacuity: the shift really was a shift (the fixture is not a no-op).
+    expect(state.allocatorEquitySnapshots[0].value_usd).not.toBe(
+      snapshotsBefore[0].value_usd * 3,
+    );
+    expect(afterSnapshotShift.liveBaselineMetrics.equity).toEqual(
+      result.liveBaselineMetrics.equity,
+    );
+    expect(afterSnapshotShift.liveBaselineMetrics.sharpe).toBe(
+      result.liveBaselineMetrics.sharpe,
+    );
+
+    // (5) key-B contributes NOTHING to the curve — not a fabricated ρ=1.0
+    // stand-in. One contributing key means no pairs, so avgRho is null; a
+    // reconstructed second leg would give it a real value (that is exactly the
+    // axis the RT1 leak test above uses, because it is invisible to Sharpe).
+    expect(result.liveBaselineMetrics.avgRho).toBeNull();
+    // Review round 2 F1 — key-B's MONEY does NOT count here, and the previous
+    // arm (`toBe(50_000)`, "AUM is custody's answer for the WHOLE book … the
+    // two sets differ on purpose (Pitfall 5)") was the mixed basis stated as an
+    // intention. It is already pinned at (2b) above as key-A's $30,000; what
+    // survives from this arm is the contrast that gives it meaning — the curve
+    // and the money now come from the SAME key, so the object makes one claim.
+    expect(result.liveBaselineMetrics.aum).toBe(30_000);
   });
 
   it("C1 regression: a revoked-but-active key (is_active=true, sync_status='revoked') does NOT block the per-key branch — the gate predicate matches the backfill's, not bare is_active", async () => {
@@ -2133,8 +2222,20 @@ describe("getMyAllocationDashboard — Phase 36 per-key repoint (D1/D2/D3)", () 
     expect(result.liveBaselineMetrics.sharpe).not.toBeNull();
     expect(result.liveBaselineMetrics.equity.length).toBeGreaterThan(0);
 
-    // AUM still includes the revoked key's frozen holdings (D2 unchanged).
-    expect(result.liveBaselineMetrics.aum).toBe(50_000);
+    // Review round 2 F1 — this line used to read `toBe(50_000)` under the
+    // comment "AUM still includes the revoked key's frozen holdings (D2
+    // unchanged)". It no longer does, and that is the point: the revoked key is
+    // not in `contributingApiKeyIds`, so its equity is not in the book whose
+    // Sharpe the two assertions above describe. Hand-computed from the fixture:
+    // key-A's BTC holding alone, $30,000. key-B's frozen $20,000 is still
+    // custody's money and still reaches the Holdings surfaces via
+    // `holdingsSummary` — it is only out of THIS object, which is a statement
+    // about a blend it was never part of.
+    expect(result.liveBaselineMetrics.aum).toBe(30_000);
+    // Non-vacuity: the custody total really is the other number.
+    expect(
+      result.holdingsSummary.reduce((s, h) => s + h.value_usd, 0),
+    ).toBe(50_000);
   });
 
   it("AUM is unchanged on the per-key branch (D2): summed from holdings equity contribution", async () => {
@@ -3256,43 +3357,206 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
     expect(result.bookEntryGateSatisfied).toBe(false);
   });
 
-  it("consumer freeze: with the new gate TRUE, liveBaselineMetrics is STILL the honest emptyDefault (old gate untouched)", async () => {
+  // ---------------------------------------------------------------------------
+  // ONE BOOK, ONE ANSWER — the baseline rides the SPLIT gate and the CONTRIBUTING
+  // key set (151 review finding [6]).
+  //
+  // This replaces an earlier "consumer freeze" pin, and the reason it was wrong
+  // is worth keeping: that test asserted the baseline stayed frozen on the OLD
+  // all-or-nothing gate ON PURPOSE, as evidence that Phase 151 had disturbed
+  // nothing. The freeze WAS the defect. It left the partial-book allocator
+  // admitted to book mode by `bookEntryGateSatisfied` while `liveBaselineMetrics`
+  // — selected by the untouched `perKeyDailiesGateSatisfied` — stayed the
+  // all-null emptyDefault. Every `pushDelta` returned early, the "vs your live
+  // book" strip was permanently empty and the KpiStrip live column was
+  // em-dashes, while `ScenarioComparePanel` on the SAME SCREEN built a real
+  // live-book column from `contributingApiKeyIds` and showed numbers. Two
+  // surfaces, one screen, contradicting each other about whether the
+  // allocator's live book exists. A pin whose subject is "we changed nothing"
+  // cannot see that; these two arms pin the contract instead.
+  //
+  // The fixture gives THREE keys a series — the allocator's two AND one
+  // manager-side key — with three DIFFERENT return patterns, and gives all three
+  // holdings. That is what makes the negative below discriminating: a role-blind
+  // baseline (built from `eligibleApiKeyIds`) would fold the manager key's series
+  // into "your live book", and with identical patterns it would have been
+  // indistinguishable.
+  // ---------------------------------------------------------------------------
+
+  /** Distinct per-key patterns, so the contributing blend and the role-blind
+   *  blend cannot coincide by construction. */
+  function seedDistinctSeries(patterns: Record<string, number[]>) {
+    state.csvDailyReturns = Object.entries(patterns).flatMap(
+      ([api_key_id, values]) =>
+        AUM04_DATES.map((date, i) => ({
+          api_key_id,
+          allocator_id: "user-1",
+          date,
+          daily_return: values[i % values.length],
+        })),
+    );
+  }
+
+  function aum04Holding(apiKeyId: string, symbol: string, valueUsd: number) {
+    return {
+      allocator_id: "user-1",
+      symbol,
+      quantity: 1,
+      mark_price: valueUsd,
+      value_usd: valueUsd,
+      venue: "bybit",
+      holding_type: "spot" as const,
+      asof: AUM04_DATES[AUM04_DATES.length - 1],
+      api_key_id: apiKeyId,
+    };
+  }
+
+  /** The founder's shape: allocator keys k-bybit + k-okx contribute, the
+   *  manager-side k-mt5-1 has a series and holdings but is NOT the book. */
+  function seedSplitGateFixture() {
     state.portfolios = [P7_PORTFOLIO];
     state.apiKeys = AUM04_KEYS;
     state.strategies = AUM04_STRATEGIES;
     state.strategyKeys = AUM04_LINKS;
     state.allocatorHoldings = [
-      {
-        allocator_id: "user-1",
-        symbol: "BTC",
-        quantity: 1,
-        mark_price: 50_000,
-        value_usd: 50_000,
-        venue: "bybit",
-        holding_type: "spot",
-        asof: AUM04_DATES[AUM04_DATES.length - 1],
-        api_key_id: "k-bybit",
-      },
+      aum04Holding("k-bybit", "BTC", 50_000),
+      aum04Holding("k-okx", "ETH", 30_000),
+      aum04Holding("k-mt5-1", "SOL", 25_000),
     ];
-    seedSeriesFor(["k-bybit", "k-okx"]);
+    seedDistinctSeries({
+      "k-bybit": [0.012, -0.004, 0.009, -0.002, 0.014, -0.006],
+      "k-okx": [-0.003, 0.011, -0.007, 0.016, -0.001, 0.008],
+      // Deliberately the ODD one out — a manager-side key whose series would
+      // visibly distort "your live book" if it were ever folded in.
+      "k-mt5-1": [-0.05, 0.06, -0.045, 0.055, -0.04, 0.065],
+    });
+  }
+
+  it("AUM-04 [6]: with the book-entry gate TRUE, liveBaselineMetrics is a REAL curve built from contributingApiKeyIds — the same key set the compare panel's live-book column uses", async () => {
+    seedSplitGateFixture();
+
+    const {
+      getMyAllocationDashboard,
+      emptyLiveBaselineMetrics,
+      liveBaselineMetricsFromPerKeyDailies,
+    } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    // (1) Pre-condition: this is the fixture where the two gates DISAGREE —
+    // exactly the partial-book population the split exists to admit.
+    expect(result.bookEntryGateSatisfied).toBe(true);
+    expect(result.perKeyDailiesGateSatisfied).toBe(false);
+    expect(result.contributingApiKeyIds).toEqual(["k-bybit", "k-okx"]);
+    expect(result.eligibleApiKeyIds).toHaveLength(8);
+
+    // (2) THE AGREEMENT, asserted against the payload's OWN contributing set
+    // rather than a hard-coded key list: `ScenarioComparePanel` builds its
+    // live-book column with `buildLiveBookDraft(bookEntryGateSatisfied,
+    // contributingApiKeyIds)`, so deriving the expected baseline from those same
+    // two payload fields is what pins the two surfaces to ONE book. Re-point the
+    // production ternary at any other key set and this goes RED without needing
+    // to know which set it was re-pointed to.
+    const contributing = new Set(result.contributingApiKeyIds);
+    const expected = liveBaselineMetricsFromPerKeyDailies(
+      // Review round 2 F1 — the HOLDINGS are narrowed to the same set as the
+      // returns. Passing the full `holdingsSummary` here (as this expectation
+      // did pre-fix) is what let the production object carry an 3-key `aum` +
+      // dollar drawdown beside a 2-key `sharpe` / `ytdTwr` / `equity`.
+      result.holdingsSummary.filter((h) => contributing.has(h.api_key_id)),
+      Object.fromEntries(
+        Object.entries(result.perKeyReturnsByApiKeyId).filter(([id]) =>
+          contributing.has(id),
+        ),
+      ),
+    );
+    expect(result.liveBaselineMetrics).toEqual(expected);
+
+    // (3) It is a REAL curve — the defect was an all-null column beside a
+    // populated one, so "not null" is the user-visible half of the claim.
+    expect(result.liveBaselineMetrics.sharpe).not.toBeNull();
+    expect(result.liveBaselineMetrics.ytdTwr).not.toBeNull();
+    expect(result.liveBaselineMetrics.equity.length).toBeGreaterThan(0);
+    expect(result.liveBaselineMetrics).not.toEqual(
+      emptyLiveBaselineMetrics(result.holdingsSummary),
+    );
+
+    // (4) DISCRIMINATING NEGATIVE: it is NOT the role-blind blend over every
+    // eligible key. `contributingApiKeyIds` is a strict subset of
+    // `eligibleApiKeyIds` here, and the difference is the manager-side k-mt5-1 —
+    // whose money is in the AUM (custody counts it) but whose returns are not
+    // "your live book". Without this arm, (2) would still pass on a baseline
+    // that quietly re-admitted the manager keys.
+    const roleBlind = liveBaselineMetricsFromPerKeyDailies(
+      result.holdingsSummary,
+      result.perKeyReturnsByApiKeyId,
+    );
+    expect(roleBlind.sharpe).not.toBeNull(); // non-vacuity: a real rival curve
+    expect(result.liveBaselineMetrics.sharpe).not.toBe(roleBlind.sharpe);
+    expect(result.liveBaselineMetrics.equity).not.toEqual(roleBlind.equity);
+
+    // (5) Review round 2 F1 — ⛔ THIS ARM FLIPPED, and the flip IS the fix.
+    //
+    // It used to read: "Pitfall 5 restated: AUM is CUSTODY (all three keys'
+    // holdings, 50k + 30k + 25k hand-computed), not the modelled subset … no
+    // copy may claim the AUM is 'from these N keys'." — expecting 105,000.
+    //
+    // That made ONE object describe TWO key sets. `aum` and the DOLLAR drawdown
+    // series (`(p.value + 1) × totalAum`) covered all three keys, while
+    // `ytdTwr` / `sharpe` / `maxDd` / `avgRho` / `equity` covered only the two
+    // contributing ones — the mixed-basis presentation the `bookEntryGateSatisfied`
+    // docblock forbids in so many words ("a 2-of-8-key blend presented as your
+    // live book on the Overview KPI strip"), committed inside a single payload
+    // field instead of across two.
+    //
+    // Hand-computed from the fixture's own holdings, NOT re-derived from the
+    // helper: the contributing keys are k-bybit ($50,000) and k-okx ($30,000),
+    // so the baseline's AUM is 50,000 + 30,000 = 80,000. The manager-side
+    // k-mt5-1's $25,000 is custody's business — the Holdings tab and the
+    // gate=false `emptyLiveBaselineMetrics` arm still report it — but it is not
+    // part of the book whose Sharpe this object states.
+    expect(result.liveBaselineMetrics.aum).toBe(80_000);
+    // Non-vacuity + the discriminating negative in one line: the custody total
+    // is a genuinely different number, so this cannot pass under both bases.
+    expect(
+      result.holdingsSummary.reduce((s, h) => s + h.value_usd, 0),
+    ).toBe(105_000);
+    expect(result.liveBaselineMetrics.aum).not.toBe(105_000);
+  });
+
+  it("AUM-04 [6] (the unchanged half): with the book-entry gate FALSE, liveBaselineMetrics is STILL the honest emptyDefault", async () => {
+    // This half of the contract is untouched by the fix and still worth pinning:
+    // a null curve is the HONEST answer only when there is no book to describe.
+    // Here the allocator's own two keys carry no series at all — the only series
+    // belongs to a manager-side key, which must not open the gate — so there is
+    // nothing to blend and the KpiStrip's em-dashes are the truth.
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = AUM04_KEYS;
+    state.strategies = AUM04_STRATEGIES;
+    state.strategyKeys = AUM04_LINKS;
+    state.allocatorHoldings = [
+      aum04Holding("k-bybit", "BTC", 50_000),
+      aum04Holding("k-mt5-1", "SOL", 25_000),
+    ];
+    seedDistinctSeries({
+      "k-mt5-1": [-0.05, 0.06, -0.045, 0.055, -0.04, 0.065],
+    });
 
     const { getMyAllocationDashboard, emptyLiveBaselineMetrics } = await import(
       "./queries"
     );
     const result = await getMyAllocationDashboard("user-1");
 
-    // Pre-condition: this is the fixture where the two gates DISAGREE.
-    expect(result.bookEntryGateSatisfied).toBe(true);
-    expect(result.perKeyDailiesGateSatisfied).toBe(false);
+    // Pre-condition: the gate really is closed, and NOT because there are no
+    // allocator keys — there are two; they simply carry nothing to model.
+    expect(result.allocatorEligibleApiKeyIds).toEqual(["k-bybit", "k-okx"]);
+    expect(result.contributingApiKeyIds).toEqual([]);
+    expect(result.bookEntryGateSatisfied).toBe(false);
 
-    // The invariant: the Overview KPI strip must NOT present a 2-of-8-key blend
-    // as "your live book". AUM is preserved from holdings; every metric is null
-    // (the honest em-dash). If the new gate ever gets wired into the baseline
-    // ternary, sharpe/ytdTwr go non-null here and this goes RED.
     expect(result.liveBaselineMetrics).toEqual(
       emptyLiveBaselineMetrics(result.holdingsSummary),
     );
-    expect(result.liveBaselineMetrics.aum).toBeGreaterThan(0);
+    // AUM survives (custody still answered), every derived metric is null.
+    expect(result.liveBaselineMetrics.aum).toBe(75_000);
     expect(result.liveBaselineMetrics.sharpe).toBeNull();
     expect(result.liveBaselineMetrics.ytdTwr).toBeNull();
     expect(result.liveBaselineMetrics.equity).toEqual([]);
@@ -3437,5 +3701,173 @@ describe("getMyAllocationDashboard — Phase 151 book-entry gate split (AUM-04)"
     ).toBe(false);
 
     captureSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 151 review [4] / I5 — OWN CAPITAL IS NOT A MANAGER ROLE
+// ---------------------------------------------------------------------------
+/**
+ * THE GAP THIS CLOSES. The manager-role discriminator subtracts every
+ * strategy-linked key from the allocator's own book, with ONE exemption:
+ * `.filter((s) => !isAllocatable(s.capital_ownership))` at the
+ * `deriveStrategyLinkedKeyIds` call site. Deleting that line left the whole
+ * 113-test file green — the classic all-fixtures-identical vacuity. Every
+ * `strategies` fixture above omits `capital_ownership`, so `isAllocatable`
+ * returned false for every seeded row and the filter was a no-op in every
+ * scenario the suite could reach.
+ *
+ * THE ECONOMICS IT PROTECTS (why this is not a style test). An allocator
+ * finalizes a key through the wizard and answers "my own capital". That writes
+ * a `strategies` row, which lands the key in `strategyLinkedKeyIds`, which
+ * subtracts it from `allocatorEligibleApiKeyIds`. If it was their only
+ * series-carrying key, `bookEntryGateSatisfied` flips false and the composer
+ * tells them they have no book — the allocator locked out of their own capital,
+ * by the act of declaring that it is theirs. That is the exact lockout AUM-04
+ * exists to fix, re-entered through the other phase on this branch.
+ *
+ * `own_capital` is the STRONGEST available statement that a key is not
+ * manager-side, so it must survive the subtraction. The two non-allocatable
+ * states are the controls, and they are distinct on purpose: `team_review` is
+ * an affirmative "this is a team's capital" and `null` is "never asked" (the
+ * pre-150 population, where inferring a role from silence is the fabrication
+ * the nullable-no-default column was chosen to avoid). Both stay manager-side.
+ */
+const OWN_CAPITAL_KEYS = [
+  // Interleaved so a regression returning a prefix slice cannot pass.
+  aum04Key("k-team", "bybit"),
+  aum04Key("k-own-direct", "bybit"),
+  aum04Key("k-unmarked", "okx"),
+  aum04Key("k-own-composite", "deribit"),
+];
+
+const OWN_CAPITAL_STRATEGIES = [
+  // EXEMPT — and via BOTH link forms, because the filter drops the whole row
+  // and therefore has to defend the direct `strategies.api_key_id` link and the
+  // composite `strategy_keys` link alike.
+  {
+    id: "own-direct",
+    user_id: "user-1",
+    api_key_id: "k-own-direct",
+    status: "private",
+    capital_ownership: "own_capital",
+  },
+  {
+    id: "own-composite",
+    user_id: "user-1",
+    api_key_id: null,
+    status: "private",
+    capital_ownership: "own_capital",
+  },
+  // CONTROL 1 — an affirmative team mark stays manager-side.
+  {
+    id: "team",
+    user_id: "user-1",
+    api_key_id: "k-team",
+    status: "private",
+    capital_ownership: "team_review",
+  },
+  // CONTROL 2 — never asked. Silence is not "my own capital".
+  {
+    id: "unmarked",
+    user_id: "user-1",
+    api_key_id: "k-unmarked",
+    status: "private",
+    capital_ownership: null,
+  },
+];
+
+const OWN_CAPITAL_LINKS = [
+  { owner_id: "user-1", strategy_id: "own-composite", api_key_id: "k-own-composite" },
+];
+
+describe("getMyAllocationDashboard — own-capital keys stay in the allocator's own book (review [4])", () => {
+  beforeEach(resetState);
+
+  function seedOwnCapitalCensus() {
+    state.portfolios = [P7_PORTFOLIO];
+    state.apiKeys = OWN_CAPITAL_KEYS;
+    state.strategies = OWN_CAPITAL_STRATEGIES;
+    state.strategyKeys = OWN_CAPITAL_LINKS;
+  }
+
+  it("an own_capital strategy does NOT evict its key — via the direct link AND via strategy_keys — while team_review and unmarked both do", async () => {
+    seedOwnCapitalCensus();
+    seedSeriesFor(["k-own-direct", "k-own-composite", "k-team", "k-unmarked"]);
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    // All four keys clear the per-key basis — the discriminator, not
+    // eligibility, is what separates them.
+    expect(result.eligibleApiKeyIds).toHaveLength(4);
+
+    // The exemption, in key order: the two own-capital keys survive.
+    expect(result.allocatorEligibleApiKeyIds).toEqual([
+      "k-own-direct",
+      "k-own-composite",
+    ]);
+    // Stated as its own fact rather than as the complement: the controls are
+    // subtracted, and a filter that exempted EVERYTHING would pass the
+    // assertion above while failing here.
+    expect(result.allocatorEligibleApiKeyIds).not.toContain("k-team");
+    expect(result.allocatorEligibleApiKeyIds).not.toContain("k-unmarked");
+    // Each seeded key really does carry a series, so the split above is the
+    // discriminator's doing and not a missing-series artefact.
+    expect(result.contributingApiKeyIds).toEqual([
+      "k-own-direct",
+      "k-own-composite",
+    ]);
+  });
+
+  it("the LOCKOUT: an own-capital key that is the allocator's ONLY series-carrying key still opens the book gate", async () => {
+    // The founder-facing failure in full. Without the exemption the sole
+    // series-carrying key is subtracted, `contributingApiKeyIds` empties, the
+    // gate flips false, and the composer tells an allocator with live capital
+    // that they have no book.
+    seedOwnCapitalCensus();
+    seedSeriesFor(["k-own-direct"]);
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.contributingApiKeyIds).toEqual(["k-own-direct"]);
+    expect(result.bookEntryGateSatisfied).toBe(true);
+  });
+
+  it("control: flip that SAME sole key's mark to team_review and the gate closes — the exemption reads the mark, not the row's existence", async () => {
+    // Non-vacuity for the test above. If the gate stayed true here, the
+    // exemption would be exempting every strategy-linked key and the
+    // discriminator would be doing nothing at all.
+    seedOwnCapitalCensus();
+    state.strategies = OWN_CAPITAL_STRATEGIES.map((s) =>
+      s.id === "own-direct" ? { ...s, capital_ownership: "team_review" } : s,
+    );
+    seedSeriesFor(["k-own-direct"]);
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.allocatorEligibleApiKeyIds).not.toContain("k-own-direct");
+    expect(result.contributingApiKeyIds).toEqual([]);
+    expect(result.bookEntryGateSatisfied).toBe(false);
+  });
+
+  it("fails CLOSED on a garbled mark off the untyped text column", async () => {
+    // `capital_ownership` is `text` in Postgres. The exemption is spelled with
+    // the shared `isAllocatable` predicate precisely so a near-miss value
+    // cannot unlock it; an ad-hoc `!== "own_capital"` re-spelling would fail
+    // OPEN for one of these and quietly re-admit a manager key to the book.
+    seedOwnCapitalCensus();
+    state.strategies = OWN_CAPITAL_STRATEGIES.map((s) =>
+      s.id === "own-direct" ? { ...s, capital_ownership: "Own_Capital" } : s,
+    );
+    seedSeriesFor(["k-own-direct"]);
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(result.allocatorEligibleApiKeyIds).not.toContain("k-own-direct");
+    expect(result.bookEntryGateSatisfied).toBe(false);
   });
 });
