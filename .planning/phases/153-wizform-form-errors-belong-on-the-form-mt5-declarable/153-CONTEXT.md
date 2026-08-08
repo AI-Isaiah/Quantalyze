@@ -185,6 +185,17 @@ live MT5 numeric verification (Phase 155).
   `{EXCHANGES.length} exchanges supported`) does not move, and MT5 is not asserted to be
   an "exchange" in public copy. ⛔ `CRYPTO_EXCHANGES` must stay mt5-free — membership
   there drives √365 vs √252 annualization and would silently corrupt risk metrics.
+  ⚠️ **CORRECTION 2026-08-09 (153.2 planning, verified at source): choosing Option B silently
+  FALSIFIED the research's "the preselect already works".** That claim holds only under Option A.
+  `canonicalizeExchange` (`src/lib/constants.ts:92`) loops `EXCHANGES` and returns its input
+  unchanged on no match — and `closed-sets.ts:119` states outright that mt5 stays OUT of
+  `EXCHANGES`. So `canonicalizeExchange("mt5")` returns lowercase `"mt5"` and can never match an
+  `"MT5"` chip. Shipping Option B without noticing would have widened the chip set with a DEAD
+  preselect — precisely the combination D-15 forbids, and it would have looked fine in review.
+  **Fix: mint a separate `canonicalizeWizardExchange` in `closed-sets.ts` and leave
+  `constants.ts`'s `canonicalizeExchange` BYTE-UNCHANGED** — widening the shared one changes what
+  `supported_exchanges` persists for every caller, including two server routes
+  (`finalize-wizard/route.ts:526` and `csv-finalize`).
 - **D-21: `Validating...` (ASCII) wins; the UI-SPEC's `Validating…` is CORRECTED, not
   blended.** Rule 7 — there is a recorded superseding decision plus four live call sites.
   One spelling, chosen, everywhere.
