@@ -456,10 +456,13 @@ milestone or advertise MT5 until 142.3 passes.
   founder already connected** rather than asked again.
   ⛔ **SEVERITY CORRECTED 2026-08-04 — this was mis-filed as cosmetic and it is a HARD BLOCKER.**
   The same ccxt-only probe is called by `finalize-wizard` on EVERY submit as a scope-broadening
-  defence (`:175` → `/internal/keys/{id}/permissions?force_refresh=true`). For MT5 it throws
-  `Unsupported exchange: mt5` (confirmed in Sentry 2026-08-04T11:53:52 on
-  `GET /api/keys/6d36dd92-…/permissions`), `!res.ok` throws at `:194`, and the catch maps **every**
-  probe failure to `KEY_NETWORK_TIMEOUT` 502 at `:519`. So a PERMANENT venue-unsupported condition is
+  defence. ⚠️ **Line numbers re-derived from source 2026-08-08** (the previous set — `:175`,
+  `:194`, `:519` — had drifted; phases 150–152 moved this file). In
+  `src/app/api/strategies/finalize-wizard/route.ts`: the probe fetch of
+  `/internal/keys/{id}/permissions?force_refresh=true` at **:220**, the `if (!res.ok)` throw at
+  **:237**, and the catch mapping to `KEY_NETWORK_TIMEOUT` at **:617** and **:628**. For MT5 the
+  probe throws `Unsupported exchange: mt5` (confirmed in Sentry 2026-08-04T11:53:52 on
+  `GET /api/keys/6d36dd92-…/permissions`), so a PERMANENT venue-unsupported condition is
   reported to the user as a temporary network blip that says "try again" — the founder clicked Retry
   **five times** against a failure that can never succeed.
   **Consequence: an MT5 strategy cannot be submitted AT ALL.** MT5 reaching the wizard's preview
@@ -659,7 +662,12 @@ D-14 valve.
 - [ ] **WIZFORM-02** *(the same UNKNOWN class Phase 142.2 was supposed to delete)*: No wizard failure
   renders as `code: UNKNOWN` / "We could not classify this failure" when the server DID classify it.
   **Root cause:** `finalize-wizard`'s `validatePayload` returns bare `{ error: "..." }` with **no
-  `code` field** (`:345`, and the sibling 400s at `:298/:324/:333/:355/:381/:392/:427`), and the
+  `code` field**. ⚠️ **Line numbers re-derived from source 2026-08-08** (the previous set —
+  `:345` plus `:298/:324/:333/:355/:381/:392/:427` — had drifted; phases 150–152 moved this file).
+  Anchor on the SYMBOL: `function validatePayload(` at `src/app/api/strategies/finalize-wizard/route.ts:337`.
+  All NINE of its 400 arms are code-less: `:347` ("Invalid request body"), `:374`, `:383`,
+  `:396` ("description must be 10-5000 characters" — the arm that cost the founder 3 submits),
+  `:405`, `:428`, `:439`, `:474`, `:503`. And the
   client collapses any code-less or unmapped response to `UNKNOWN`.
   ⚠️ **Phase 142.2 plan 07 split 24 rejection sites onto honest codes and MISSED this validator** —
   so the defect class we shipped a fix for on 2026-08-04 was still reachable the same afternoon.
@@ -698,9 +706,12 @@ D-14 valve.
 - [ ] **WIZFORM-05** *(added 2026-08-05 — founder-hit the same day; previously unowned)*: **The MT5
   validate-key DEADLINE INVERSION is reconciled: an MT5 key validation's honest verdict always
   arrives inside the budget the client grants the request.** Today it structurally cannot:
-  `SEAM_ROUTE_BUDGETS["validate-key"].timeoutMs` is 30s (`resilient-fetch.ts:537`) while the
-  analytics-service applies `_MT5_PROBE_TIMEOUT_S` (35s) SEPARATELY to three stages of
-  `_validate_mt5_key` (`exchange.py:328/380/456`) — a slow MT5 broker login legitimately takes
+  `SEAM_ROUTE_BUDGETS["validate-key"].timeoutMs` is 30s (`src/lib/resilient-fetch.ts:537-538`,
+  verified 2026-08-08) while the analytics-service applies `_MT5_PROBE_TIMEOUT_S` (35s)
+  SEPARATELY to three stages of `_validate_mt5_key`
+  (`analytics-service/routers/exchange.py` — constant defined :62, applied :328 / :380 / :456;
+  `_validate_mt5_key` itself at :222. ⚠️ **`routers/`, not `services/exchange.py` — both files
+  exist and only `routers/` has this symbol**) — a slow MT5 broker login legitimately takes
   35–70s+ to fail, so the server's classified verdict lands after the client has already abandoned
   the request (founder-observed: two 502s at exactly 30s, downgraded to `UNKNOWN` by the WIZFORM-02
   roster gap). ccxt venues answer fast; only MT5 bites.
