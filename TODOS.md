@@ -58,11 +58,34 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      Phase 134 designed `scripts/mt5_spike.py` to answer exactly these four unknowns — **the
      harness was never built and `analytics-service/docs/mt5-spike-gonogo.md` still has 38
      `human_needed` cells.** v1.15 shipped through a gate that was never opened.
-   - **Options (ranked):** (1) **buy it** — MetaApi supports investor passwords natively and runs
-     ~50K accounts; our `Mt5Session` seam makes it ≈ one adapter file; (2) per-account container
-     fleet with supervision; (3) keep one terminal but pin to a single replica, attach once at
-     boot, drop `shutdown()` from the request path, and ship as **beta with a documented
-     one-account cap**.
+   - **RESOLVED 2026-08-08 — founder chose option (3), and the "once per day" fact makes it the
+     right answer on cost too.** See `docs/notes/mt5-scaling-cost-2026-08-08.md` (prices read
+     2026-08-08) — but note that report models **one terminal per account**, which is the wrong
+     model for us. MT5 accounts refresh **once per day**, and a daily sync is sequential, so ONE
+     terminal serves many accounts across a day (capacity ≈ daily window ÷ cycle time). Corrected
+     comparison:
+     | | one-terminal self-host (what we have) | MetaApi, duty-cycled nightly |
+     |---|---|---|
+     | 25 accounts | ~$20/mo **flat** | ~$124/mo |
+     | 100 accounts | ~$20/mo **flat** | ~$495/mo |
+     | per extra account | **≈ $0** | $4.95/mo |
+     The per-account marginal cost is ~zero until we exceed one terminal's daily throughput —
+     then we add a second container, not a subscription. ⚠️ Throughput is currently
+     **unquantified** because cycle time is uninstrumented; D-32 fixes that and is the input to
+     any future revisit.
+   - **Credential custody is the decisive non-price factor and it points the same way.** A managed
+     provider means a third party holds customers' broker investor passwords — a GDPR
+     sub-processor whose blast radius is every MT5 user at once. Quantalyze sells verified track
+     records to allocators; this surfaces in diligence. Self-hosting keeps it in our own store.
+   - ⚠️ Useful even though we are not buying: MetaApi bills **6 hours minimum per server start**,
+     so a wizard validation there would cost ~$0.144 a click — rate-limiting interactive
+     validation is sound design regardless of provider.
+   - ⛔ **API2Trade: do not use** for anything holding credentials — domain created 2026-04-13,
+     no Wayback history, ~5h of status-page history, yet claims "10,000+ Active Accounts", two
+     different legal entities named across the site, mail-forwarding address in the Imprint.
+   - **Revisit trigger** (not a task): if we ever need *interactive* MT5 at a rate that saturates
+     one terminal, or if a second replica is proposed (which breaks the one-session invariant —
+     D-33), re-open this with real cycle-time data in hand.
    - ⚠️ **Interacts with Phase 153 WIZFORM-05:** the 30 s wall is *also* a real timeout inversion
      (`initialize()` unbounded at its 60 s vendor default inside a 30 s rpyc bound — D-24), but
      fixing the timeout on a one-account architecture buys a working single user, not a working
