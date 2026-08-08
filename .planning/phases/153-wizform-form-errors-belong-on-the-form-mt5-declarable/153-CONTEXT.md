@@ -123,6 +123,42 @@ live MT5 numeric verification (Phase 155).
   class — the account IS the venue. Same family as MT5-13 and the deleted "0 trades"
   message.
 
+### Post-research decisions (locked 2026-08-08, after `153-RESEARCH.md`)
+
+- **D-18: the MT5 client budget is exactly `90_000` ms — NOT 120 000.** Research found the
+  A-25 breaker-tombstone invariant (`resilient-fetch.ts:268-274`) justifies
+  `BREAKER_LOCK_TOMBSTONE_S = 60` with `COOLDOWN(30) + TOMBSTONE(60) = 90s ≥ longest
+  budget`. 90 000 is the largest value inside D-01's ~90–120s range that satisfies this
+  with no second constant re-cut (90 ≥ 90 exactly). **120 000 breaks A-25 silently** and
+  would require raising the tombstone to 90 in the same commit. Take the number that
+  needs one change, not two.
+- **D-19: the A-25 pin must be re-cut to DERIVE from the longest budget.** Today
+  `seam-constants.pin.test.ts:713-718` asserts `60_000 >= 60_000 - 30_000` with **both
+  sides hand-typed literals**, so it stays green while its premise goes false. A pin that
+  cannot observe the coupling it guards is decorative. Deriving it is in scope.
+- **D-20: MT5-14 ships as Option B — a narrow wizard-declarable set plus a POSITIVE pin
+  assertion.** The public marketing count (`(marketing)/page.tsx:115` renders
+  `{EXCHANGES.length} exchanges supported`) does not move, and MT5 is not asserted to be
+  an "exchange" in public copy. ⛔ `CRYPTO_EXCHANGES` must stay mt5-free — membership
+  there drives √365 vs √252 annualization and would silently corrupt risk metrics.
+- **D-21: `Validating...` (ASCII) wins; the UI-SPEC's `Validating…` is CORRECTED, not
+  blended.** Rule 7 — there is a recorded superseding decision plus four live call sites.
+  One spelling, chosen, everywhere.
+- **D-22: sFOX keeps the submit-time scope probe byte-unchanged.** Only `mt5` opts out,
+  via the capability. The probe is a security control: it must fail *toward* probing when
+  the venue is unknown/null.
+- **D-23: mint a `MIN_DESCRIPTION_CHARS` constant.** The `10` is a bare literal at
+  `finalize-wizard/route.ts:389`; the field guard, the submit guard and the server arm
+  must all read the same constant or they will drift apart again.
+
+**Corrections to earlier decisions, verified at source by research — the substantive
+claims survive, the numbers do not:**
+- D-08 says "22 members"; the true count is **24** (a `[A-Z_]+` regex misses
+  `KEY_MT5_MASTER_PASSWORD` / `KEY_MT5_WRONG_SERVER`). All three stopgap codes are
+  present and the two rosters are identical, as D-08 claims.
+- D-16 says the `closed-sets.mt5-flag` pin covers four sets; it asserts **two**
+  (`UI_EXCHANGE_CODES`, `EXCHANGES`).
+
 ### Claude's Discretion
 
 - Whether WIZFORM-05's client-side fix is a per-venue entry in `SEAM_ROUTE_BUDGETS` or a
