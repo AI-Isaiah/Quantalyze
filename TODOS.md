@@ -24,6 +24,50 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
+0. **⛔ MT5 ARCHITECTURE — the shared gateway cannot safely serve more than ONE user, and the
+   read-only guarantee can fail OPEN.** Found 2026-08-08 by the platform research that Phase 134
+   specified but never executed (`153-EVIDENCE-mt5-platform.md`, `153-EVIDENCE-mt5-latency.md`).
+   **Founder decision needed before any further MT5 build.**
+   - **Structural:** `mt5linux` 0.1.9 starts a single `ThreadedServer(SlaveService)`; every rpyc
+     connection `import MetaTrader5` resolves through that one process's `sys.modules`, so **all
+     callers share ONE C-extension holding ONE logged-in account**. `login()` on any connection
+     silently reassigns the account every other caller sees, and our `finally:` `close()` →
+     `mt5.shutdown()` (`routers/exchange.py:449-466`) tears down the IPC pipe *for concurrent
+     callers*, who then see `-10004`. rpyc namespaces isolate variable names, not C globals.
+     Our own `Mt5AccountMismatchError` bracket (`routers/exchange.py:364-368`, test named
+     `test_mt5_login_bracket_post_hijack`) **detects** this race — it cannot remove it.
+     MQL5 moderators are explicit: one account per terminal, a separate installation per account.
+   - **🔒 Security — read-only verification can FAIL OPEN.** `is_trade_capable`
+     (`services/mt5_validation.py:133-149`) concludes "investor/read-only" when BOTH signals are
+     negative (`trade_allowed` false AND `order_check` retcode ≠ 10009). But `trade_allowed` is
+     false for several documented reasons besides investor mode — including the terminal's
+     **default-ON** *"Disable automatic trading through the external Python API"*. Under that
+     default a **MASTER password passes our investor probe** and is stored stamped read-only.
+     We call `terminal_info()` **nowhere** (verified: zero hits in `analytics-service/`), so we
+     cannot distinguish the two. Also: `_TRADE_RETCODE_DONE = 10009` is `[ASSUMED]`, and the real
+     investor signal `10017 TRADE_RETCODE_TRADE_DISABLED` is never tested.
+   - **Login classification is inverted both ways** (`services/mt5_validation.py:37-56`, both
+     token tables `[ASSUMED]`): a wrong-but-known server returns `-6 AUTH_FAILED` → we blame the
+     user's password; an *unknown* server **times out** rather than erroring.
+   - **Data integrity:** MT5 history syncs asynchronously after login; first-call-empty is widely
+     reported, with an unresolved **Wine-specific** report of history never arriving. Our
+     `()` → `[]` "honest empty" rule turns that into a **confidently flat account**.
+   - **Why none of this was caught:** CI never installs `mt5linux` (`Dockerfile:29` installs it
+     into the image only); every contract test injects a `_connect` double
+     (`services/mt5_client.py:135-141`). The real transport has never run outside production.
+     Phase 134 designed `scripts/mt5_spike.py` to answer exactly these four unknowns — **the
+     harness was never built and `analytics-service/docs/mt5-spike-gonogo.md` still has 38
+     `human_needed` cells.** v1.15 shipped through a gate that was never opened.
+   - **Options (ranked):** (1) **buy it** — MetaApi supports investor passwords natively and runs
+     ~50K accounts; our `Mt5Session` seam makes it ≈ one adapter file; (2) per-account container
+     fleet with supervision; (3) keep one terminal but pin to a single replica, attach once at
+     boot, drop `shutdown()` from the request path, and ship as **beta with a documented
+     one-account cap**.
+   - ⚠️ **Interacts with Phase 153 WIZFORM-05:** the 30 s wall is *also* a real timeout inversion
+     (`initialize()` unbounded at its 60 s vendor default inside a 30 s rpyc bound — D-24), but
+     fixing the timeout on a one-account architecture buys a working single user, not a working
+     product. Decide the architecture before sizing the budget.
+
 1. **`RESEND_API_KEY` unset in Vercel prod** — founder-LP report cron + all transactional
    email are dead (code soft-skips, only Sentry fires). **Founder action:** set the key in
    Vercel prod. Do before the first warned founder month. (Note: portfolio email *alerts*
@@ -442,15 +486,19 @@ true for 146 and half of 142–145, and **false for 141**.
     (`exchange.py:234` states the rationale: *"No new columns"*). A broker server name is public
     information, so encrypting it buys nothing and costs the ability to render a history without
     decrypting secrets. **Fix = a plain `mt5_server` column**; that makes level 1 trivial.
-  - **Level 2 direction — DECIDED IN PRINCIPLE 2026-08-08 (founder: "why can't we download the
-    serverlist from metaquotes or vantagemarkets and just store it?"). Yes — download and store.**
-    The set is small, public and slow-changing, and our own gateway terminal has already
-    downloaded the directory in order to render these screens. Prior objection ("one terminal's
-    view, not a global registry") is answered: seed from the terminal + broker-published lists,
-    store as a table, refresh rarely, keep a free-text escape hatch for unseeded brokers.
-    ⚠️ The MT5 **Python API** has no `servers_get` — that is true and is *not* a blocker; the
-    data is obtained out-of-band, not through the API. Exact extraction mechanism/format pending
-    the platform research commissioned 2026-08-08.
+  - **Level 2 direction — REVISED 2026-08-08 after the platform research came back. The founder's
+    "just download and store it" is RIGHT in substance but must change its SOURCE.**
+    - ⛔ **Auto-syncing MetaQuotes' directory is OUT.** The broker/server list is only obtainable
+      inside a terminal; `config/servers.dat` is **binary and undocumented**, and MQL5 warns that
+      third-party parsing may violate MetaQuotes' ToS. There is no endpoint and no API. So the
+      "our own terminal already has it" idea — mine, 2026-08-08 — does **not** survive: the file
+      is there, but reading it is not a route we should take.
+    - ✅ **Curating from broker-published pages is IN, and is ToS-clean.** Server names are
+      **public** — brokers document them (Vantage publishes its `VantageMarkets-Live N` set).
+      Seed a small `broker → servers[]` table by hand for the brokers we actually support,
+      refresh rarely, free-text escape hatch for anything unseeded. Hand-curated, not synced.
+    - Net: the two-level picker is still achievable and still worth it; it is a **content**
+      problem (curate a short list) rather than an **integration** problem.
   - **Not in Phase 153.** 153 deletes an error class and is already 25 files; a server picker is
     a new surface. Needs its own requirement + UI-SPEC.
 
