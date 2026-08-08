@@ -28,9 +28,10 @@ from services.mt5_client import (
 from services.mt5_validation import (
     Mt5ValidationError,
     classify_mt5_login_error,
-    is_trade_capable,
+    classify_trade_capability,
     mt5_probe_request,
     parse_mt5_credentials,
+    terminal_trade_permission_off,
 )
 from services.db import get_supabase, db_execute, one, rows
 # PYAPI-05 — the status-attributability contract. Every deliberate 5xx/424 in
@@ -356,7 +357,7 @@ async def _validate_mt5_key(
             # RED-TEAM login bracket, cloned from the worker derive arm (MT5CONC-02):
             # FastAPI serves validates CONCURRENTLY against the ONE shared terminal,
             # so a second request's login(...) can switch the terminal onto another
-            # account mid-probe. Without this bracket is_trade_capable() could be
+            # account mid-probe. Without this bracket the capability verdict could be
             # judged against the WRONG account — a master password wrongly accepted
             # as read-only (the EoP gate T-135-09 defeated), or an investor login
             # wrongly rejected. STRICT equality on the parsed login; a missing "login"
@@ -367,16 +368,37 @@ async def _validate_mt5_key(
             if _actual != login:
                 raise Mt5AccountMismatchError(login, _actual)
 
-        def _probe() -> tuple[dict[str, Any], dict[str, Any]]:
+        def _read_terminal() -> dict[str, Any] | None:
+            # An UNREADABLE terminal must yield NO signal (-> "undetermined" ->
+            # refusal), and it must NOT flow into the classify_mt5_login_error arm
+            # below: that table's "terminal"/"ipc"/"connect" tokens would classify
+            # OUR gateway's condition as the user's wrong broker server and blame
+            # their credentials for it. Caught here, logged secret-free with the
+            # scrubbed code only.
+            try:
+                return client.terminal_info()
+            except Mt5ClientError as terminal_err:
+                logger.warning(
+                    "validate_key: MT5 terminal_info unreadable (code=%s) — "
+                    "capability undetermined",
+                    terminal_err.code,
+                )
+                return None
+
+        def _probe() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
             client.login(login, investor_pw, server)  # falsy -> Mt5ClientError
             info = client.account_info()  # proves auth + read
             _assert_expected_login(info)  # PRE-probe bracket
+            # D-31: the TERMINAL's own state, read once ATTACHED (it describes the
+            # terminal we are logged into) and INSIDE the PRE/POST login bracket
+            # so the whole probe stays framed by the account-mismatch guard.
+            terminal = _read_terminal()
             probe = client.order_check(mt5_probe_request())  # PROBE ONLY
             _assert_expected_login(client.account_info())  # POST-probe bracket
-            return info, probe
+            return info, probe, terminal
 
         try:
-            info, probe = await asyncio.wait_for(
+            info, probe, terminal = await asyncio.wait_for(
                 asyncio.to_thread(_probe), timeout=_MT5_PROBE_TIMEOUT_S
             )
         except asyncio.TimeoutError:
@@ -434,14 +456,54 @@ async def _validate_mt5_key(
                 recoverable=True,
             )
 
-        if is_trade_capable(info, probe):
+        verdict = classify_trade_capability(info, probe, terminal)
+
+        if verdict == "trade_capable":
             # Master (trade-capable) login REJECTED — never persisted (the TS
             # caller only encrypts after valid:true). The EoP gate (T-135-09).
             raise HTTPException(
                 status_code=400, detail=MT5_MASTER_PASSWORD_DETAIL
             )
 
-        # Investor (read-only) login. read_only=True is STRUCTURAL (Mt5Client
+        if verdict == "undetermined":
+            # D-31: we CANNOT distinguish investor from master, so we refuse
+            # rather than stamp read-only. Routed BY CAUSE off the SAME terminal
+            # dict that produced the verdict (never a re-probe), using only arms
+            # that already exist — 153.1 owns the user-facing code table.
+            operator_fault = terminal_trade_permission_off(terminal)
+            if operator_fault:
+                # A setting in OUR gateway terminal ("Disable automatic trading
+                # through the external Python API", MetaQuotes' default). No
+                # retry can clear it; the remedy is an operator turning it off
+                # (docs/runbooks/mt5-go-live.md). PERMANENT operator fault.
+                logger.warning(
+                    "validate_key: MT5 capability undetermined (terminal trade "
+                    "permission off) — refusing rather than stamping read-only"
+                )
+                raise service_error(
+                    500,
+                    "MT5_GATEWAY_UNCONFIGURED",
+                    dependency="mt5-gateway",
+                    retryable=False,
+                    detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
+                )
+            if not operator_fault:
+                # Terminal unreadable or detached from the trade server — our
+                # bridge blipping, and it clears on retry. TRANSIENT.
+                logger.warning(
+                    "validate_key: MT5 capability undetermined (terminal signal "
+                    "unavailable) — refusing rather than stamping read-only"
+                )
+                raise VenueTransientHTTPException(
+                    status_code=424,
+                    code="NETWORK_UNAVAILABLE",
+                    detail=NETWORK_ERROR_DETAIL,
+                    recoverable=True,
+                )
+
+        # Investor (read-only) login — reachable ONLY when the terminal itself
+        # reported connected AND trade-permitting, so the account's refusal is
+        # attributable to the ACCOUNT. read_only=True is STRUCTURAL (Mt5Client
         # exposes no trade surface — the sFOX A1 posture), PLUS the behavioral
         # investor-vs-master probe above that sfox lacks.
         return {"valid": True, "read_only": True}

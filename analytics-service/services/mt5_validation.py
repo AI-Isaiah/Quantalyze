@@ -9,10 +9,22 @@ router (the closed-set discipline this module family exists to enforce).
 
 The rules below are DEFENSIVE and fail-CLOSED: an ambiguous login error is
 NEVER classified as an auth failure (which would falsely blame the user's
-credentials) — it degrades to a wrong-server or transient outcome. A
-trade-capable signal from EITHER the account snapshot OR the order_check probe
-rejects the login (Pitfall 4 — a master password must never be persisted as
-read-only).
+credentials) — it degrades to a wrong-server or transient outcome.
+
+The capability rule (``classify_trade_capability``) is TRI-state, not boolean:
+
+  * ``"trade_capable"`` — a positive signal from EITHER the account snapshot OR
+    the order_check probe rejects the login (Pitfall 4 — a master password must
+    never be persisted as read-only).
+  * ``"read_only"`` — reachable ONLY when the terminal itself reports connected
+    AND trade-permitting, so an account-level refusal is attributable to the
+    ACCOUNT rather than to our terminal's own settings.
+  * ``"undetermined"`` — a REFUSAL, never a fallback to read-only. It means the
+    two negative signals prove nothing (D-31 / EVIDENCE §C12 Correction C-5:
+    MetaQuotes ships *"Disable automatic trading through the external Python
+    API"* ON by default, and under it a MASTER password produces exactly the
+    negatives an investor password produces). Refusing a legitimate investor key
+    is the correct trade against storing a master key stamped read-only.
 
 NEVER references the forbidden trade method by its call form — the grep gate
 scans for the call token (the trade method name followed by an open paren), so
@@ -20,6 +32,7 @@ this module names that method only in prose, without call parentheses.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from services.mt5_client import Mt5ClientError
@@ -30,6 +43,22 @@ from services.mt5_client import Mt5ClientError
 # MT5SPIKE-01 leg 2: the live spike confirms the exact investor-vs-master retcode
 # signal; if it refines this, it is a one-line change HERE, not a rewrite.
 _TRADE_RETCODE_DONE = 10009  # [ASSUMED]
+
+# The DOCUMENTED investor-rejection signal: `TRADE_RETCODE_TRADE_DISABLED` from
+# `enum_trade_return_codes` (EVIDENCE Correction C-6 —
+# https://www.mql5.com/en/docs/constants/errorswarnings/enum_trade_return_codes).
+# It is deliberately NOT a branch of its own: under rule 6 of
+# classify_trade_capability a 10017 already yields "read_only". Naming it makes
+# the expected value legible and lets the suite pin it.
+#
+# RESIDUAL, stated honestly: rule 6 accepts ANY non-10009 retcode as read_only,
+# so an order_check rejected for an UNRELATED reason — e.g. `EURUSD` not being in
+# the broker's symbol list, and `mt5_probe_request` hardcodes EURUSD below — is
+# still classified read_only rather than undetermined. Tightening rule 6 to
+# demand a trade-disabled-class retcode would REFUSE legitimate investor keys at
+# such brokers, so it stays [ASSUMED]. Owner: **Phase 155 (MT5-VERIFY)**, to be
+# resolved against a live master AND investor login.
+_TRADE_RETCODE_TRADE_DISABLED = 10017  # [ASSUMED — documented, unverified live]
 
 # Server / connection / terminal failure tokens — a login error carrying any of
 # these is a wrong-server / bridge problem, NOT a credential problem, so it must
@@ -130,23 +159,98 @@ def mt5_probe_request(symbol: str = "EURUSD") -> dict[str, Any]:
     }
 
 
-def is_trade_capable(
-    account_info: dict[str, Any], order_check_result: dict[str, Any]
-) -> bool:
-    """True iff the logged-in account can place trades (a MASTER password).
+def classify_trade_capability(
+    account_info: dict[str, Any],
+    order_check_result: dict[str, Any],
+    terminal_info: dict[str, Any] | None,
+) -> Literal["trade_capable", "read_only", "undetermined"]:
+    """Tri-state, fail-CLOSED capability verdict for a logged-in MT5 session.
 
-    DEFENSIVE (Pitfall 4): EITHER positive trade-capable signal rejects the login
-    — the account snapshot's ``trade_allowed`` flag OR an ``order_check`` probe
-    that would be accepted (retcode ``TRADE_RETCODE_DONE``). An investor
-    (read-only) password fails BOTH signals. The retcode rule is [ASSUMED] pending
-    MT5SPIKE-01 leg 2; combining it with ``trade_allowed`` means a refinement of
-    either signal alone still fails closed."""
+    Replaces the two-signal ``is_trade_capable`` boolean, which concluded
+    "investor / read-only" from two NEGATIVE signals and therefore failed OPEN:
+    per EVIDENCE §C12 / Correction C-5 both signals are ALSO negative for a
+    **MASTER** password whenever the terminal's own trade permission is off —
+    including MetaQuotes' **default-ON** *"Disable automatic trading through the
+    external Python API"*. A trade-capable password then passed the investor
+    probe and was persisted stamped ``read_only`` (D-31).
+
+    The terminal signal is a REQUIRED argument, not an optional one: a callable
+    two-signal form that can conclude ``read_only`` is exactly the defect, so no
+    such form is left reachable in the tree.
+
+    Returns:
+      * ``"trade_capable"`` — reject (master password; never persist).
+      * ``"read_only"``     — accept (investor password).
+      * ``"undetermined"``  — REFUSE. We cannot classify, so we do not. Refusing
+        a legitimate investor key is the correct trade against storing a master
+        key we believe is read-only.
+    """
+    # 1. A POSITIVE account signal is conclusive and wins before any terminal
+    #    reasoning — [DOC] ACCOUNT_TRADE_ALLOWED "Allowed trade for the current
+    #    account". This preserves the pre-D-31 master-reject behaviour exactly.
     if account_info.get("trade_allowed"):
-        return True
+        return "trade_capable"
+    # 2. An order_check the server WOULD accept is likewise conclusive.
+    #    [DOC] TRADE_RETCODE_DONE = 10009. Still [ASSUMED] as the master signal
+    #    pending the live spike, and it keeps its marker.
     retcode = order_check_result.get("retcode")
     if retcode == _TRADE_RETCODE_DONE:  # [ASSUMED]
-        return True
-    return False
+        return "trade_capable"
+    # 3. No terminal read (unreadable, wrong shape, or missing either field) →
+    #    the two negatives above prove NOTHING, because we cannot rule out that
+    #    our own terminal caused them. EVIDENCE §C12: "Anything else is 'cannot
+    #    determine' and must fail closed".
+    if (
+        not isinstance(terminal_info, Mapping)
+        or "connected" not in terminal_info
+        or "trade_allowed" not in terminal_info
+    ):
+        return "undetermined"
+    # 4. Terminal detached from the trade server. [DOC] MQL5 "Trade permission"
+    #    lists "no connection to the trade server" as a SIBLING cause of the
+    #    account-level refusal, so the negative is not attributable to investor
+    #    mode.
+    if not terminal_info.get("connected"):
+        return "undetermined"
+    # 5. ⭐ THE FIX (D-31). Terminal-level trade permission is OFF — which
+    #    subsumes [DOC] "Disable automatic trading through the external Python
+    #    API", MetaQuotes' DEFAULT-ON setting. Under it a MASTER password
+    #    produces the identical two negatives an investor password produces, so
+    #    NO read-only conclusion is available and we must refuse.
+    if not terminal_info.get("trade_allowed"):
+        return "undetermined"
+    # 6. The terminal itself WOULD permit trading and the account still says no,
+    #    so the refusal is attributable to the ACCOUNT — the composition EVIDENCE
+    #    §C12 prescribes. The documented value here is
+    #    _TRADE_RETCODE_TRADE_DISABLED (10017); see its residual note above for
+    #    why an unrecognized retcode is admitted rather than refused.
+    return "read_only"
+
+
+def terminal_trade_permission_off(terminal_info: dict[str, Any] | None) -> bool:
+    """True iff the terminal WAS read, IS connected, and its OWN trade permission
+    is off — i.e. branch 5 of ``classify_trade_capability`` produced the
+    ``"undetermined"`` verdict.
+
+    This is the CAUSE predicate both call sites branch on to route an
+    ``"undetermined"`` refusal, and it lives HERE rather than being re-derived at
+    each site for the same reason the capability rule does: a four-condition shape
+    test copied twice drifts, and the drift would be silent (an unreadable
+    terminal routed to the operator arm looks identical in tests to a
+    trade-disabled one until an operator is paged for a network blip).
+
+      * ``True``  -> a setting in OUR gateway terminal. No retry can clear it;
+        the remedy is an operator turning the option off (see the go-live
+        runbook). Route to the PERMANENT operator-fault arm.
+      * ``False`` -> the terminal was unreadable, malformed, or detached from the
+        trade server. That is our bridge blipping and it clears on retry. Route
+        to the TRANSIENT arm.
+    """
+    if not isinstance(terminal_info, Mapping) or "trade_allowed" not in terminal_info:
+        return False  # unreadable / malformed shape -> transient, not operator
+    if not terminal_info.get("connected"):
+        return False  # detached from the trade server -> transient
+    return not terminal_info.get("trade_allowed")
 
 
 def classify_mt5_login_error(

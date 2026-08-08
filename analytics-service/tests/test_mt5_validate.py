@@ -102,12 +102,18 @@ def exchange_router(monkeypatch):
     evict_module("routers.exchange")
 
 
-def _make_client(*, login_raises=None, account=None, order_check=None):
-    """A mock Mt5Client instance: sync login/account_info/order_check/close.
+def _make_client(
+    *, login_raises=None, account=None, order_check=None, terminal=None
+):
+    """A mock Mt5Client instance: sync login/account_info/terminal_info/
+    order_check/close.
 
     `login_raises` makes login() raise (bad creds / wrong server / transient).
-    `account` / `order_check` are the native dicts the read methods return
-    (is_trade_capable reads .get('trade_allowed') / .get('retcode'))."""
+    `account` / `order_check` / `terminal` are the native dicts the read methods
+    return (classify_trade_capability reads account.get('trade_allowed'),
+    order_check.get('retcode') and terminal's connected/trade_allowed pair).
+    `terminal=None` means terminal_info() RAISES — the unreadable-terminal case,
+    which must never be mistaken for a terminal that answered "no"."""
     client = MagicMock(name="Mt5Client-instance")
     if login_raises is not None:
         client.login = MagicMock(side_effect=login_raises)
@@ -117,6 +123,12 @@ def _make_client(*, login_raises=None, account=None, order_check=None):
     client.order_check = MagicMock(
         return_value=order_check if order_check is not None else {}
     )
+    if terminal is None:
+        client.terminal_info = MagicMock(
+            side_effect=Mt5ClientError(-10004, "No IPC connection")
+        )
+    else:
+        client.terminal_info = MagicMock(return_value=terminal)
     client.close = MagicMock()
     return client
 
@@ -151,8 +163,150 @@ async def _call(router, req):
 # RED-TEAM login bracket (account_info().login == expected, pre+post the read) passes
 # on the happy path — the fake terminal IS on the connected account.
 _INVESTOR_ACCOUNT = {"trade_allowed": False, "balance": 1000.0, "login": 123456}
-# An investor order_check is rejected (retcode != TRADE_RETCODE_DONE 10009).
-_INVESTOR_ORDER_CHECK = {"retcode": 10027, "comment": "AutoTrading disabled"}
+# An investor order_check is rejected with the DOCUMENTED investor code
+# TRADE_RETCODE_TRADE_DISABLED (10017) — [DOC] enum_trade_return_codes.
+#
+# D-31 HISTORY: this fixture used to be `{"retcode": 10027}` with NO terminal read
+# at all, and that combination WAS the fail-open scenario — under MetaQuotes'
+# default-ON "Disable automatic trading through the external Python API" a MASTER
+# password produces exactly those two negatives, and the old two-signal rule
+# stamped it read_only. That combination now classifies "undetermined" (see the
+# security regression below) and is no longer a success fixture anywhere.
+_INVESTOR_ORDER_CHECK = {"retcode": 10017, "comment": "Trade disabled"}
+# The terminal ITSELF permits trading and is attached to a trade server, so an
+# account-level refusal is attributable to the ACCOUNT. Required for any
+# read_only verdict (D-31).
+_HEALTHY_TERMINAL_INFO = {"connected": True, "trade_allowed": True, "build": 4410}
+
+
+# --------------------------------------------------------------------------- #
+# classify_trade_capability — the tri-state seam (D-31), tested directly
+#
+# Every expected value below is a LITERAL typed here, never imported from
+# services.mt5_validation: an oracle that reads its expectation out of the thing
+# under test cannot fail (programme non-negotiable #3).
+# --------------------------------------------------------------------------- #
+
+
+_HEALTHY_TERMINAL = {"connected": True, "trade_allowed": True}
+
+
+def test_capability_account_trade_allowed_is_trade_capable():
+    """A POSITIVE account signal is conclusive and wins before any terminal
+    reasoning — the pre-D-31 master-reject behaviour is preserved exactly, even
+    when the terminal is healthy."""
+    from services.mt5_validation import classify_trade_capability
+
+    verdict = classify_trade_capability(
+        {"trade_allowed": True}, {"retcode": 10027}, dict(_HEALTHY_TERMINAL)
+    )
+    assert verdict == "trade_capable"
+
+
+def test_capability_order_check_done_retcode_is_trade_capable():
+    """An order_check the server WOULD accept (TRADE_RETCODE_DONE 10009) rejects
+    the login on its own, even with trade_allowed false and a healthy terminal."""
+    from services.mt5_validation import classify_trade_capability
+
+    verdict = classify_trade_capability(
+        {"trade_allowed": False}, {"retcode": 10009}, dict(_HEALTHY_TERMINAL)
+    )
+    assert verdict == "trade_capable"
+
+
+def test_capability_terminal_trade_disabled_is_undetermined():
+    """⭐ D-31 SECURITY REGRESSION — the fail-OPEN this whole plan exists to close.
+
+    The terminal is connected but its own trade permission is OFF, which is what
+    MetaQuotes' DEFAULT-ON "Disable automatic trading through the external Python
+    API" produces. Under that setting a **MASTER** password yields exactly these
+    two negatives (trade_allowed false + a rejected order_check) — identical to an
+    investor password. Concluding "read_only" here is how a trade-capable
+    credential got stored stamped read-only.
+
+    Reddens the moment the terminal trade-permission guard (branch 5) is removed.
+    """
+    from services.mt5_validation import classify_trade_capability
+
+    verdict = classify_trade_capability(
+        {"trade_allowed": False},
+        {"retcode": 10027},
+        {"connected": True, "trade_allowed": False},
+    )
+    assert verdict == "undetermined"
+    assert verdict != "read_only"
+
+
+def test_capability_terminal_disconnected_is_undetermined():
+    """[DOC] MQL5 "Trade permission" lists "no connection to the trade server" as a
+    SIBLING cause of the account-level refusal, so a detached terminal makes the
+    account negative unattributable to investor mode."""
+    from services.mt5_validation import classify_trade_capability
+
+    verdict = classify_trade_capability(
+        {"trade_allowed": False},
+        {"retcode": 10027},
+        {"connected": False, "trade_allowed": True},
+    )
+    assert verdict == "undetermined"
+
+
+def test_capability_no_terminal_read_is_undetermined():
+    """No terminal signal at all -> refuse. The two negatives prove nothing when
+    we cannot rule out that our OWN terminal caused them."""
+    from services.mt5_validation import classify_trade_capability
+
+    verdict = classify_trade_capability(
+        {"trade_allowed": False}, {"retcode": 10027}, None
+    )
+    assert verdict == "undetermined"
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    [
+        {"connected": True},  # trade_allowed field absent
+        {"trade_allowed": True},  # connected field absent
+        {},  # both absent
+    ],
+)
+def test_capability_partial_terminal_shape_is_undetermined(terminal):
+    """A terminal dict MISSING either load-bearing field is not a negative signal
+    — it is an unreadable one. `.get()` would silently render an absent field as
+    False and let a shape change masquerade as a verdict; the membership test
+    refuses instead."""
+    from services.mt5_validation import classify_trade_capability
+
+    verdict = classify_trade_capability(
+        {"trade_allowed": False}, {"retcode": 10027}, terminal
+    )
+    assert verdict == "undetermined"
+
+
+def test_capability_investor_retcode_10017_with_healthy_terminal_is_read_only():
+    """⭐ The DOCUMENTED investor path, untested until D-31.
+
+    TRADE_RETCODE_TRADE_DISABLED = 10017 is the retcode an investor session
+    should produce ([DOC] enum_trade_return_codes). With the terminal reporting
+    connected AND trade-permitting, the refusal is attributable to the ACCOUNT —
+    the only combination under which read_only is honest.
+    """
+    from services.mt5_validation import classify_trade_capability
+
+    verdict = classify_trade_capability(
+        {"trade_allowed": False}, {"retcode": 10017}, dict(_HEALTHY_TERMINAL)
+    )
+    assert verdict == "read_only"
+
+
+def test_capability_two_signal_fail_open_form_no_longer_exists():
+    """The fail-OPEN form must be UNREACHABLE, not merely unused: a two-argument
+    rule that can conclude read_only from two negatives is the defect itself, and
+    leaving a wrapper/alias behind re-ships it at the next call site (D-31; the
+    instance-vs-class lesson this repo has already paid for)."""
+    import services.mt5_validation as mt5_validation
+
+    assert not hasattr(mt5_validation, "is_trade_capable")
 
 
 # --------------------------------------------------------------------------- #
@@ -202,7 +356,11 @@ async def test_mt5_investor_returns_valid_readonly_and_never_ccxt(exchange_route
     """mt5 + investor creds -> {valid:true, read_only:true}; ccxt create_exchange
     is NEVER called for mt5; close() runs on the success path."""
     router = exchange_router
-    client = _make_client(account=_INVESTOR_ACCOUNT, order_check=_INVESTOR_ORDER_CHECK)
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
     _install_mt5_client(router, client)
 
     create_exchange_spy = MagicMock(side_effect=AssertionError("create_exchange must not be called for mt5"))
@@ -233,6 +391,7 @@ async def test_mt5_master_via_trade_allowed_rejected(exchange_router):
     client = _make_client(
         account={"trade_allowed": True, "login": 123456},
         order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
     )
     _install_mt5_client(router, client)
 
@@ -252,6 +411,7 @@ async def test_mt5_master_via_order_check_retcode_rejected(exchange_router):
     client = _make_client(
         account={"trade_allowed": False, "login": 123456},
         order_check={"retcode": 10009, "comment": "Done"},
+        terminal=_HEALTHY_TERMINAL_INFO,
     )
     _install_mt5_client(router, client)
 
@@ -263,13 +423,140 @@ async def test_mt5_master_via_order_check_retcode_rejected(exchange_router):
     client.close.assert_called_once()
 
 
+# --------------------------------------------------------------------------- #
+# D-31 — the read-only fail-OPEN, closed at the ROUTER call site
+# --------------------------------------------------------------------------- #
+
+
+async def test_mt5_terminal_trade_disabled_never_returns_readonly(exchange_router):
+    """⭐ D-31 SECURITY REGRESSION at the ROUTER seam.
+
+    The defect: MetaQuotes ships "Disable automatic trading through the external
+    Python API" ON by default. Under it a **MASTER** password produces the exact
+    two negatives an investor password produces (account trade_allowed false +
+    a rejected order_check), and the old two-signal rule answered
+    {"valid": true, "read_only": true} — so a trade-capable credential was
+    encrypted and persisted under a read-only claim we could not prove.
+
+    The verdict is now "undetermined" and the router REFUSES. The cause is our
+    OWN gateway terminal's setting, which no retry can clear, so it takes the
+    PERMANENT operator arm — retryable false, no Retry-After, and nothing
+    resembling a read_only success anywhere in the response.
+    """
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        # Connected, so this is NOT a bridge blip — the terminal itself refuses
+        # to permit trading, which is what the default Python-API option does.
+        terminal={"connected": True, "trade_allowed": False},
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    detail = ei.value.detail
+    # NEVER a success shape. Asserted structurally, not just by status: the whole
+    # defect was a 200 carrying read_only true.
+    assert not isinstance(detail, dict) or detail.get("read_only") is None
+    assert "read_only" not in repr(detail)
+    # PERMANENT operator fault — a setting in our terminal, not the user's key.
+    assert ei.value.status_code == 500
+    assert detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert detail["retryable"] is False
+    assert not (ei.value.headers or {}).get("Retry-After")
+    # Never blames the credentials.
+    assert detail["detail"] != AUTH_FAILED_DETAIL
+    assert detail["detail"] != MT5_MASTER_PASSWORD_DETAIL
+    client.close.assert_called_once()
+
+
+async def test_mt5_unreadable_terminal_is_transient_never_readonly(exchange_router):
+    """An UNREADABLE terminal yields no capability signal, so the two account
+    negatives prove nothing — refuse. This is our bridge blipping and it clears
+    on retry, so it takes the TRANSIENT arm, NOT the operator arm, and NOT the
+    wrong-server arm: classify_mt5_login_error's "ipc"/"terminal"/"connect"
+    tokens would have blamed the user's broker server for our gateway's
+    condition, which is why the terminal read is caught at its own call site."""
+    router = exchange_router
+    # terminal=None -> terminal_info() raises Mt5ClientError(-10004).
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT, order_check=_INVESTOR_ORDER_CHECK, terminal=None
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    assert ei.value.detail != MT5_WRONG_SERVER_DETAIL
+    assert ei.value.detail != AUTH_FAILED_DETAIL
+    client.close.assert_called_once()
+
+
+async def test_mt5_disconnected_terminal_is_transient_never_readonly(exchange_router):
+    """A terminal detached from the trade server is a documented SIBLING cause of
+    the account-level refusal ([DOC] MQL5 "Trade permission"), so investor mode is
+    not attributable — refuse, transiently."""
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal={"connected": False, "trade_allowed": True},
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    client.close.assert_called_once()
+
+
+async def test_mt5_capability_refusal_logs_carry_no_credentials(
+    exchange_router, monkeypatch
+):
+    """The two NEW capability WARNING lines must name a STAGE only — no login, no
+    password, no broker server may reach any log call (same sweep the gateway
+    misconfig case runs)."""
+    router = exchange_router
+    client = _make_client(
+        account={"trade_allowed": False, "login": 123456},
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal={"connected": True, "trade_allowed": False},
+    )
+    _install_mt5_client(router, client)
+    mock_logger = MagicMock()
+    monkeypatch.setattr(router, "logger", mock_logger)
+
+    with pytest.raises(HTTPException):
+        await _call(
+            router,
+            _make_req(
+                api_key="123456", api_secret="s3cr3t-pw", passphrase="MyBroker-Live"
+            ),
+        )
+
+    for meth in ("exception", "error", "warning", "info", "debug"):
+        for call in getattr(mock_logger, meth).call_args_list:
+            rendered = repr(call)
+            assert "123456" not in rendered
+            assert "s3cr3t-pw" not in rendered
+            assert "MyBroker-Live" not in rendered
+    # At least one WARNING was emitted, so the sweep above is not vacuous.
+    assert mock_logger.warning.call_args_list
+
+
 async def test_mt5_terminal_account_mismatch_fails_closed(exchange_router):
     """RED-TEAM login bracket: if the shared terminal is on the WRONG account
     (account_info().login != the connected login — e.g. a concurrent validate
     re-logged it mid-probe), the verdict must FAIL CLOSED transient
     (NETWORK_ERROR_DETAIL), NEVER {valid:true}, and order_check must NOT even run
     (the PRE bracket refuses before the probe). close() still runs. Without the
-    bracket, is_trade_capable() would be judged against the wrong account — a
+    bracket, the capability verdict would be judged against the wrong account — a
     master password could be wrongly accepted as read-only. Reddens if removed."""
     router = exchange_router
     # The connected login is 123456 (from _make_req) but the terminal reports 999999.

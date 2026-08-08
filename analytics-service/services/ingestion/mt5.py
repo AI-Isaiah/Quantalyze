@@ -37,6 +37,7 @@ encrypted by the caller).
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from typing import Any
 
@@ -62,9 +63,10 @@ from services.mt5_client import (
 from services.mt5_validation import (
     Mt5ValidationError,
     classify_mt5_login_error,
-    is_trade_capable,
+    classify_trade_capability,
     mt5_probe_request,
     parse_mt5_credentials,
+    terminal_trade_permission_off,
 )
 
 # The event-loop bound for the SYNCHRONOUS Mt5Client probe (login+read+order_check
@@ -75,6 +77,12 @@ from services.mt5_validation import (
 # v1.11 WEDGE-01 failure class). Mirrors routers/exchange.py:_MT5_PROBE_TIMEOUT_S so
 # the adapter and router paths do not diverge (WR-02).
 _MT5_PROBE_TIMEOUT_S = MT5_REQUEST_TIMEOUT_S + 5.0
+
+# Same stdlib logger name the rest of the MT5 family uses (services/mt5_client.py)
+# so the D-31 capability-refusal WARNINGs land on the one analytics stream. Every
+# line here is secret-free by construction: only a stage name and a scrubbed
+# Mt5ClientError code ever reach it — never a login, password or broker server.
+logger = logging.getLogger("quantalyze.analytics")
 
 
 def _build_client(host: str, port: int) -> Mt5Client:
@@ -168,7 +176,7 @@ class Mt5Adapter:
                 # RED-TEAM login bracket, cloned from the worker derive arm
                 # (MT5CONC-02): a concurrent validate (the FastAPI router path, a
                 # different process) or another worker replica can re-log the ONE
-                # shared terminal onto another account mid-probe, so is_trade_capable()
+                # shared terminal onto another account mid-probe, so the capability verdict
                 # could be judged against the WRONG account (a master password wrongly
                 # accepted as read-only, or an investor login wrongly rejected). STRICT
                 # equality on the parsed login; a missing "login" field FAILS LOUD.
@@ -178,13 +186,36 @@ class Mt5Adapter:
                 if _actual != login:
                     raise Mt5AccountMismatchError(login, _actual)
 
-            def _probe() -> tuple[dict[str, Any], dict[str, Any]]:
+            def _read_terminal() -> dict[str, Any] | None:
+                # An UNREADABLE terminal must yield NO signal (-> "undetermined"
+                # -> refusal), and it must NOT flow into the
+                # classify_mt5_login_error arm below: that table's
+                # "terminal"/"ipc"/"connect" tokens would classify OUR gateway's
+                # condition as the user's wrong broker server. Logged secret-free
+                # with the scrubbed code only.
+                try:
+                    return client.terminal_info()
+                except Mt5ClientError as terminal_err:
+                    logger.warning(
+                        "mt5.validate: terminal_info unreadable (code=%s) — "
+                        "capability undetermined",
+                        terminal_err.code,
+                    )
+                    return None
+
+            def _probe() -> tuple[
+                dict[str, Any], dict[str, Any], dict[str, Any] | None
+            ]:
                 client.login(login, investor_pw, server)  # falsy -> Mt5ClientError
                 info = client.account_info()  # proves auth + read
                 _assert_expected_login(info)  # PRE-probe bracket
+                # D-31: the TERMINAL's own state, read once ATTACHED and INSIDE
+                # the PRE/POST login bracket so the whole probe stays framed by
+                # the account-mismatch guard.
+                terminal = _read_terminal()
                 probe = client.order_check(mt5_probe_request())  # PROBE ONLY
                 _assert_expected_login(client.account_info())  # POST-probe bracket
-                return info, probe
+                return info, probe, terminal
 
             try:
                 # LAST-RESORT event-loop ceiling (WR-02): to_thread already keeps
@@ -192,7 +223,7 @@ class Mt5Adapter:
                 # round-trip (e.g. netref materialization) would let the sequential
                 # worker await unbounded — the router path already guards this, and
                 # the two must not diverge (v1.11 WEDGE-01 class).
-                info, probe = await asyncio.wait_for(
+                info, probe, terminal = await asyncio.wait_for(
                     asyncio.to_thread(_probe), timeout=_MT5_PROBE_TIMEOUT_S
                 )
             except asyncio.TimeoutError:
@@ -218,7 +249,57 @@ class Mt5Adapter:
                 # auth-failed, never valid; the caller classifies it honestly).
                 raise
 
-            if is_trade_capable(info, probe):
+            verdict = classify_trade_capability(info, probe, terminal)
+
+            if verdict == "undetermined":
+                # D-31: we CANNOT distinguish investor from master, so we refuse
+                # rather than stamp read-only. This arm is the CLASS half of the
+                # fix — an instance fix on the router alone would leave THIS path
+                # fail-open. Routed BY CAUSE off the SAME terminal dict that
+                # produced the verdict (never a re-probe).
+                operator_fault = terminal_trade_permission_off(terminal)
+                if operator_fault:
+                    # A setting in OUR gateway terminal ("Disable automatic
+                    # trading through the external Python API", MetaQuotes'
+                    # default-ON). No retry can clear it; the remedy is an
+                    # operator turning the option off (docs/runbooks/
+                    # mt5-go-live.md). Same RuntimeError shape as the
+                    # unconfigured-gateway case above — a server-side condition,
+                    # NEVER the user's credentials, and it names no credential.
+                    logger.warning(
+                        "mt5.validate: capability undetermined (terminal trade "
+                        "permission off) — refusing rather than stamping read-only"
+                    )
+                    raise RuntimeError(
+                        "MT5 gateway terminal refuses automated trading (the "
+                        "'Disable automatic trading through the external Python "
+                        "API' option is in force), so an investor password "
+                        "cannot be distinguished from a master password. This "
+                        "is a server misconfiguration, never a credential "
+                        "failure."
+                    )
+                if not operator_fault:
+                    # Terminal unreadable or detached — our bridge blipping,
+                    # which clears on retry. Take the adapter's TRANSIENT
+                    # disposition: propagate (never valid, never auth-failed,
+                    # never read-only). The message deliberately avoids the
+                    # classify_mt5_login_error token table's "terminal"/
+                    # "connect"/"ipc"/"server" words so that if it is ever
+                    # classified it degrades to transient, never to a
+                    # user-blaming wrong_server.
+                    logger.warning(
+                        "mt5.validate: capability undetermined (gateway trade-"
+                        "permission signal unavailable) — refusing rather than "
+                        "stamping read-only"
+                    )
+                    raise Mt5ClientError(
+                        0,
+                        "MT5 capability undetermined: the gateway trade-"
+                        "permission signal was unavailable, so read-only could "
+                        "not be proven.",
+                    )
+
+            if verdict == "trade_capable":
                 # Master (trade-capable) login REJECTED — NEVER persisted (the
                 # caller only encrypts after valid=True). No sFOX analog.
                 return ValidationResult(

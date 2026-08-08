@@ -206,7 +206,14 @@ EXPECTED_NON_LITERAL_STATUS_SITES_UNDER_LOOSE_READING = 4
 #: BLIND SPOT (b): in-tree ``HTTPException`` subclasses and their construction
 #: sites. Latent, not live — every site is a 4xx today.
 EXPECTED_HTTPEXCEPTION_SUBCLASSES = 1
-EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 7
+#: 7 -> 8 (2026-08-09, Phase 153.3 / D-31): ``_validate_mt5_key`` gained a FOURTH
+#: ``VenueTransientHTTPException(424)`` site — the capability-``undetermined``
+#: refusal taken when the gateway terminal's trade-permission signal is
+#: unreadable or the terminal is detached from the trade server. It reuses the
+#: EXISTING transient arm (no new user-facing code is minted here; 153.1 owns the
+#: TS code table), and it is a 4xx like every other site, so blind spot (b) stays
+#: latent rather than live.
+EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 8
 
 #: Vacuity fence. A scanner that matched nothing would report agreement with the
 #: quarantine forever, so the scan must prove it saw the tree. Loose floors on
