@@ -83,8 +83,21 @@ const DATA_STATE_CHIP =
 // a keyboard focus ring added. Deliberately NOT the accent-underlined
 // "Finish setup →" treatment further down this file: that is the placeholder
 // row's primary CTA and is meant to be louder than these.
+//
+// 151 review A1 — the ring is the Phase-117 / UIFIX-02 CLIP-PROOF idiom
+// verbatim (`outline-none` + `ring-2 ring-inset ring-accent` + a radius for the
+// ring to follow), NOT the `ring-accent/20` this first shipped with. Two
+// independent reasons, both load-bearing on THESE controls specifically:
+//   1. WCAG 1.4.11 (≥3:1 non-text contrast). These are borderless,
+//      underline-less text buttons, so the ring is the ENTIRE focus
+//      affordance — a 20%-alpha accent measures ≈1.3:1 against the row and a
+//      keyboard user sees nothing at all.
+//   2. WCAG 2.4.7. The row lives inside the table's `overflow-x-auto` scroll
+//      container, so an outset indicator is clipped at the scroll edge; an
+//      INSET box-shadow ring paints inside the element bounds and survives.
+// Pinned by StrategyTable.visibility.test.tsx so `/20` cannot come back.
 const GHOST_ROW_ACTION =
-  "text-caption font-medium text-text-muted hover:text-text-primary transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/20";
+  "text-caption font-medium text-text-muted hover:text-text-primary transition-colors rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent";
 
 // Maps a sortable column to its getPercentiles() metric key. Columns absent
 // from this map (Strategy name, 6 Month, AUM) have no peer-percentile and never

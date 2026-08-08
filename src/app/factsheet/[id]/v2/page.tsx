@@ -9,8 +9,7 @@ import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
 import { readPublicVerificationSignals } from "@/lib/queries";
 import {
-  OWN_CAPITAL,
-  TEAM_REVIEW,
+  isCapitalOwnership,
   type CapitalOwnership,
 } from "@/lib/capital-ownership";
 import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
@@ -515,11 +514,9 @@ export default async function FactsheetV2Page({
       // Read through the closed-set predicate rather than casting: the column
       // is `text`, so an unrecognised value must render NO tag rather than a
       // trusted-looking one (the same fail-closed posture as isAllocatable).
-      ownershipMark =
-        ownRow.capital_ownership === OWN_CAPITAL ||
-        ownRow.capital_ownership === TEAM_REVIEW
-          ? ownRow.capital_ownership
-          : null;
+      ownershipMark = isCapitalOwnership(ownRow.capital_ownership)
+        ? ownRow.capital_ownership
+        : null;
     }
   }
   const signAnalytics = Array.isArray(signature.strategy_analytics)

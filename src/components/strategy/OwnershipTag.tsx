@@ -2,6 +2,7 @@ import { cn } from "@/lib/utils";
 import {
   OWN_CAPITAL,
   TEAM_REVIEW,
+  isCapitalOwnership,
   type CapitalOwnership,
 } from "@/lib/capital-ownership";
 
@@ -53,7 +54,11 @@ export function OwnershipTag({
 }: {
   mark: CapitalOwnership | null | undefined;
 }) {
-  if (mark !== OWN_CAPITAL && mark !== TEAM_REVIEW) return null;
+  // Narrowed through the SHARED closed-set predicate, not a hand-spelled pair
+  // of comparisons: the prop is typed but the value behind it comes off an
+  // untyped `text` column, and a fail-OPEN copy of this check is what would
+  // render a trusted-looking tag for a value nobody recognises.
+  if (!isCapitalOwnership(mark)) return null;
 
   return <span className={cn(ANATOMY, INK[mark])}>{LABELS[mark]}</span>;
 }

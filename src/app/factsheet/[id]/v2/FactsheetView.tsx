@@ -24,11 +24,15 @@ import { LeverageProvider, useLeverage } from "./leverage-context";
  * That direction is the safe one and only that direction: the sanitizer's
  * ceiling stays the WIDEST bound in the system, so nothing a viewer can set
  * here is ever silently reduced on read. (Do not invert this — a surface bound
- * ABOVE the contract ceiling would be silently truncated by
- * `sanitizeLeverage`.) The value below is the pre-151 `MAX_LEVERAGE`, so this
- * surface's behaviour and copy are byte-unchanged.
+ * ABOVE the contract ceiling would be silently truncated by `sanitizeLeverage`.)
+ *
+ * 151 review A6 — the constant is IMPORTED from the contract module rather than
+ * declared here, because a module-private literal made that ordering rule
+ * unenforceable: `leverage.test.ts` now pins
+ * `FACTSHEET_MAX_LEVERAGE <= MAX_LEVERAGE` directly. The value is unchanged, so
+ * this surface's behaviour and copy are byte-identical.
  */
-const FACTSHEET_MAX_LEVERAGE = 10;
+import { FACTSHEET_MAX_LEVERAGE } from "@/lib/leverage";
 import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
 import { SMOOTHED_MTM_UI_ENABLED } from "@/lib/closed-sets";
 import { ComparatorPicker } from "./ComparatorPicker";
@@ -746,14 +750,24 @@ function FactsheetHeader({
               baseline row. The two arms are kept apart rather than always
               wrapping the H1, so a public render emits the SAME single <h1>
               with no extra wrapper (the class string is shared above, so the
-              two arms cannot drift). */}
+              two arms cannot drift).
+
+              151 review A2 — the focus ring is the Phase-117 / UIFIX-02
+              CLIP-PROOF idiom, the same one every other focusable site on this
+              route already carries (see focus-ring-clipproof.test.tsx). It
+              first shipped as `ring-accent/20`, which is ≈1.3:1 against the
+              masthead — far under the WCAG 1.4.11 ≥3:1 non-text floor, and on
+              a borderless, underline-less text button the ring is the ENTIRE
+              focus affordance, so a keyboard user reaching the only owner
+              action on this masthead saw nothing. Full-opacity + inset + a
+              radius for the ring to follow; pinned so `/20` cannot return. */}
           {renameTarget ? (
             <div className="flex flex-wrap items-baseline gap-3">
               <h1 className={MASTHEAD_H1}>{payload.strategyName}</h1>
               <button
                 type="button"
                 onClick={() => setRenameOpen(true)}
-                className="text-caption text-text-muted hover:text-text-primary transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/20"
+                className="text-caption text-text-muted hover:text-text-primary transition-colors rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
               >
                 Rename…
               </button>

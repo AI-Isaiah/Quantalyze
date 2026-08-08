@@ -564,6 +564,68 @@ describe("StrategyTable visibility — Phase 150: the owner row actions are prop
     expect(within(row).queryByRole("button", { name: RENAME })).toBeNull();
   });
 
+  /**
+   * 151 review A1 — the ghost row actions' focus ring.
+   *
+   * WHY (Rule 9 — intent, not behaviour): these are borderless, underline-less
+   * text buttons, so the focus ring is the ENTIRE keyboard affordance. They
+   * shipped with `focus-visible:ring-accent/20`, which measures ≈1.3:1 against
+   * the row — far under the WCAG 1.4.11 ≥3:1 non-text-contrast floor — so a
+   * keyboard user tabbing the owner surface saw NOTHING move. Worse, they sit
+   * inside the table's `overflow-x-auto` scroll container, where an outset
+   * indicator is clipped at the scroll edge (WCAG 2.4.7); the in-repo Phase-117
+   * / UIFIX-02 fix is an INSET ring, which paints inside the element bounds.
+   *
+   * The token list and the `/20` forbid are the same ones
+   * `src/app/factsheet/[id]/v2/focus-ring-clipproof.test.tsx` and
+   * `src/app/(dashboard)/allocations/AllocationsTabs.test.tsx` already assert —
+   * this extends that pin to the Phase-150 row actions so the low-alpha ring
+   * cannot come back.
+   */
+  const RING_TOKENS = [
+    "focus-visible:outline-none",
+    "focus-visible:ring-2",
+    "focus-visible:ring-inset",
+    "focus-visible:ring-accent",
+  ] as const;
+
+  it("[UIFIX-02] every owner row action carries the clip-proof inset ring at FULL opacity", () => {
+    render(
+      <StrategyTable
+        strategies={[privateRow()]}
+        categorySlug="vis-spec"
+        visibility="owner-all-statuses"
+        onMarkOwnership={() => {}}
+        onRename={() => {}}
+      />,
+    );
+
+    const row = rowFor(NAME_PRIVATE);
+    const actions = [
+      within(row).getByRole("button", { name: MARK }),
+      within(row).getByRole("button", { name: RENAME }),
+    ];
+    // Non-vacuity: both actions really rendered, so the loop below is not
+    // asserting over an empty set.
+    expect(actions).toHaveLength(2);
+
+    for (const action of actions) {
+      for (const token of RING_TOKENS) {
+        expect(action.className).toContain(token);
+      }
+      // A 20%-alpha accent ring fails WCAG 1.4.11 (≥3:1) — full opacity only.
+      expect(action.className).not.toContain("ring-accent/20");
+      // No OUTSET outline idiom may be reintroduced (only `-none` is allowed):
+      // it paints outside the box and the scroll container clips it.
+      expect(action.className).not.toMatch(
+        /focus-visible:outline-(?!none)(offset|2|4|accent|\[)/,
+      );
+      // The ring needs a radius to follow, or it draws a square inside a
+      // rounded row and reads as a rendering artefact rather than focus.
+      expect(action.className).toContain("rounded-sm");
+    }
+  });
+
   it("clicking an action hands the callback the ROW it belongs to", () => {
     const onMarkOwnership = vi.fn();
     render(
