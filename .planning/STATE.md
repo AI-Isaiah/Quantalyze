@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: planning
-stopped_at: "Phase 153: CONTEXT + UI-SPEC approved; both planning ledgers' citations re-derived. Ready for /gsd-plan-phase 153 (Opus until 2026-08-11 11:00)."
-last_updated: "2026-08-08T19:52:11.028Z"
+stopped_at: "Phase 153 SPLIT four ways (founder-approved 2026-08-08). 153.1 planned (6 plans) + 153.3 planned (5 plans, +06 in flight). Next: plan 153.2 and 153.4, then execute in dependency order starting 153.3 (it carries the live defects incl. the D-31 read-only fail-open). Opus for every subagent until 2026-08-11 11:00."
+last_updated: "2026-08-08T21:50:20.297Z"
 last_activity: 2026-08-08
 progress:
-  total_phases: 9
+  total_phases: 13
   completed_phases: 6
   total_plans: 37
   completed_plans: 37
-  percent: 67
+  percent: 46
 ---
 
 # Project State — Quantalyze

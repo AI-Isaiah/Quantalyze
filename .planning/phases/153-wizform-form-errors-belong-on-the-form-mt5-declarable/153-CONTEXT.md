@@ -217,6 +217,23 @@ claims survive, the numbers do not:**
   the coverage assertion goes blind on the **pre-existing** arms, not merely on the nine
   new ones. **Reordering these six is IN SCOPE**, and the site-count vacuity floor must be
   sized against the reordered total, not against the nine.
+  ⚠️ **CORRECTION 2026-08-09 (153.1 planning, verified at source): it is FOURTEEN sites, not
+  six.** The six above are the *single-line* `{ error, code }` occurrences. Eight more put
+  `error:` on its own line inside a multi-line object literal and are therefore invisible to a
+  single-line grep — spot-verified at `:605-608`, `:952-955`, `:1754-1758`; the full set is
+  `:605-608 :625-628 :637-640 :952-955 :1007-1010 :1087-1093 :1754-1758 :1778-1782`. Same
+  defect, different formatting. **Size the floor against fourteen.**
+  ⚠️ **A THIRD blindness class, previously unrecorded:** `EMITTER_RE`'s `error:[^}]*\}` cannot
+  cross a `${…}` template interpolation, so four bodies (`:428 :439 :503 :1091`) stay invisible
+  even after the reorder AND the status widening. One of them is the arm whose own comment
+  argues for the defect.
+  ⚠️ **`deriveRoster` would be BORN BLIND on the third route.** Verified by execution
+  2026-08-09: `SubmitStep.tsx:230-231` breaks the line between `(` and `[`, so
+  `source.indexOf("([", start)` returns **`-1`** and the roster derives to `[]`. The two LIVE
+  rosters (`KNOWN_CREATE_WITH_KEY_CODES`, `KNOWN_ADD_KEY_CODES`) DO resolve, so today's gate is
+  **not** vacuous — but the moment `KNOWN_FINALIZE_CODES` joins `ROUTES` the new assertion would
+  match nothing and pass. `deriveRoster` must be hardened BEFORE the third entry lands, and
+  reformatting `SubmitStep.tsx` is NOT the fix (Prettier re-breaks the ~93-char line).
 
 ### Founder architecture call — 2026-08-08 (BINDING, sets WIZFORM-05's posture)
 
