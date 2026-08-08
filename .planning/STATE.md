@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: planning
-stopped_at: "v0.54.0.0 landed (phases 150/151/152 shipped, PR #668 merged e0481411); Phase 153 discuss in progress"
-last_updated: "2026-08-08T18:45:44.080Z"
-last_activity: 2026-08-07
+stopped_at: "Phase 153: CONTEXT + UI-SPEC approved; both planning ledgers' citations re-derived. Ready for /gsd-plan-phase 153 (Opus until 2026-08-11 11:00)."
+last_updated: "2026-08-08T19:52:11.028Z"
+last_activity: 2026-08-08
 progress:
   total_phases: 9
   completed_phases: 6
@@ -1187,7 +1187,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session Continuity
 
 **Last activity:** 2026-08-08
-**Stopped at:** v0.54.0.0 landed (phases 150/151/152 shipped, PR #668 merged e0481411); Phase 153 discuss in progress
+**Stopped at:** Phase 153: CONTEXT + UI-SPEC approved; both planning ledgers' citations re-derived. Ready for /gsd-plan-phase 153 (Opus until 2026-08-11 11:00).
 **Next step:** Phase 153 (WIZFORM) — discuss → ui-phase → plan → execute on `feat/v1.17-153-wizform`.
 
 ⚠️ **Post-land CI state (2026-08-08):** `secret-scan` went RED on main at `e0481411` — a
