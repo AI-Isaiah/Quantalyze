@@ -36,54 +36,55 @@ import { YoursChip } from "./YoursChip";
 // Review WR-05 — the ONE declaration of the added-strategy shape. Type-only, so
 // nothing from scenario-state.ts reaches this component's runtime bundle.
 import type { AddedStrategy as PersistedAddedStrategy } from "../lib/scenario-state";
+// Review F2 — the ONE declaration of the browse wire row. Type-only, so the
+// route handler's runtime (supabase server client, rate limiter, Sentry) is
+// erased at compile time and never enters this client component's bundle.
+import type { BrowseStrategyRow } from "@/app/api/strategies/browse/route";
 
 export type { AllocatorMandateForFit } from "../lib/mandate-fit";
 
 /**
- * Row shape returned by GET /api/strategies/browse (Plan 03). Defined here
- * to keep the drawer self-contained — when Plan 03 ships in this branch,
- * this can be re-exported from the route handler instead.
+ * Row shape returned by GET /api/strategies/browse — DERIVED from the route's
+ * own exported wire contract, not re-declared.
+ *
+ * Review F2 (2026-08-08), the WR-05 idiom applied a second time. This used to
+ * be a hand-written parallel interface: same six-to-nine fields, independently
+ * maintained, and already DIVERGED on every field this branch added
+ * (`isOwn: boolean` on the route against `isOwn?: boolean` here;
+ * `is_example: boolean` against `is_example?: boolean`; `created_at`/`status`
+ * duplicated verbatim). A field added to the route and not to this copy would
+ * have errored NOWHERE — the drawer would simply never see it, which is a silent
+ * feature-drop, not a compile failure. That is the exact shape WR-05 (below)
+ * eliminated for `AddedStrategy`.
+ *
+ * ⭐ The optionality difference is REAL and is preserved deliberately, not
+ * collapsed. This component's fetch does `(await res.json()) as {...}` — an
+ * UNCHECKED cast of a network response, with no runtime validation anywhere
+ * between the wire and these fields. What the route PROMISES to emit and what
+ * this component may ASSUME it received are two different claims:
+ *   * `isOwn` / `is_example` are `boolean` on the route (emitted on every row,
+ *     `false` included) but must stay OPTIONAL here, because the PRE-152 /
+ *     PRE-29 wire shapes omit them and a stale cached response is not a
+ *     hypothetical. Absent → UNKNOWN → no chip / no tag, never a fabricated
+ *     ownership or provenance claim.
+ *   * `created_at` / `status` are already optional on BOTH sides — the route
+ *     emits them only when `isOwn === true` (owner-only; a creation date is a
+ *     correlation vector against the pseudonymised codename).
+ * So the boundary widening is expressed as a `Partial<Pick<…>>` over the two
+ * fields that need it. The field LIST still flows from ONE declaration: add a
+ * field to `BrowseStrategyRow` and it appears here; rename one and this file
+ * stops compiling.
+ *
+ * Type-only import, so nothing from the route module reaches this client
+ * component's runtime bundle — `import type` is fully erased under
+ * `isolatedModules` (the same guarantee the `PersistedAddedStrategy` import
+ * below relies on).
  */
-export interface StrategyBrowseRow {
-  id: string;
-  name: string;
-  codename: string | null;
-  markets: string[];
-  strategy_types: string[];
-  /**
-   * Phase 29 (UNIFY-03 UI) — true for example-universe rows in the merged
-   * catalog (`is_example = true AND status = 'published'`). Plan 02 emits this
-   * from GET /api/strategies/browse; it gates the neutral-outline "Example"
-   * provenance tag rendered next to the row name. Optional + absent → no tag.
-   */
-  is_example?: boolean;
-  /**
-   * Phase 152 (SCEN-02) — viewer-relative ownership bit, computed server-side
-   * from the requesting session (`route.ts:296`) and emitted on EVERY row,
-   * `false` included. `true` means the requesting allocator owns this row, so
-   * the drawer renders the muted "Yours" chip and the composer keeps the bit on
-   * the added strategy. Optional here (not `boolean`) because the field is
-   * absent from the PRE-152 wire shape: absent → UNKNOWN → no chip, never a
-   * fabricated ownership claim. Not a disclosure widening — it describes the
-   * viewer's RELATIONSHIP to a row, never another owner's data.
-   */
-  isOwn?: boolean;
-  /**
-   * Phase 152 (SCEN-05) — OWNER-ONLY creation timestamp (ISO). The route emits
-   * this key only when `isOwn === true`, so it is absent on third-party rows
-   * (a creation date is a correlation vector against the pseudonymised
-   * codename). It feeds the duplicate-disambiguation line; absent → no line.
-   */
-  created_at?: string;
-  /**
-   * Phase 152 (SCEN-05) — OWNER-ONLY raw `strategies.status` enum (`draft` /
-   * `pending_review` / `published` / `archived` / `private`), emitted under the
-   * same `isOwn === true` condition. The client product-cases it for display —
-   * the raw enum never reaches the DOM. Absent → the disambiguation line omits
-   * the status segment rather than claiming a state.
-   */
-  status?: string;
-}
+export type StrategyBrowseRow = Omit<
+  BrowseStrategyRow,
+  "isOwn" | "is_example"
+> &
+  Partial<Pick<BrowseStrategyRow, "isOwn" | "is_example">>;
 
 /**
  * The onAdd callback payload — DERIVED from `scenario-state.ts`'s

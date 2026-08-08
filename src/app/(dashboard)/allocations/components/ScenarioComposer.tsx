@@ -888,9 +888,23 @@ export function ScenarioComposer({
   //   the gate shut on the book they also allocate from. This is a SoT mirror —
   //   the client reads the flag verbatim and never re-derives eligibility.
   //
-  //   ENGINE-03's `perKeyDailiesGateSatisfied` (all-or-nothing) is UNCHANGED and
-  //   still governs `liveBaselineMetrics` (queries-side). Do NOT repoint that
-  //   one: a partial blend must never present as the whole live book.
+  //   ENGINE-03's `perKeyDailiesGateSatisfied` (all-or-nothing) is UNCHANGED
+  //   HERE — this file reads only `bookEntryGateSatisfied`.
+  //
+  //   ⚠️ SETTLED (151 red-team G5, supersedes this note's earlier "do NOT
+  //   repoint `liveBaselineMetrics`"): queries.ts:~4112 now DOES gate
+  //   `liveBaselineMetrics` on `bookEntryGateSatisfied`, and that is the
+  //   decision, not an oversight — do not revert it on the strength of this
+  //   comment. The original worry ("a partial blend must never present as the
+  //   whole live book") was answered by NARROWING the basis rather than by
+  //   withholding the blend: the SSR arm now feeds `liveBaselineMetricsFrom-
+  //   PerKeyDailies` the CONTRIBUTING holdings and returns, so every field of
+  //   that object — `aum`, `drawdown`, `ytdTwr`, `sharpe`, `maxDd`, `avgRho`,
+  //   `equity` — describes ONE key set. Under the all-or-nothing flag a partial
+  //   book instead produced an all-null baseline while THIS composer rendered a
+  //   per-key projection beside it, so the compare panel's live column and the
+  //   scenario column disagreed about what the live book even was. Same key set
+  //   on both sides is the invariant; the gate that selects it is shared.
   //
   //   151 review CR-02 — the MEMBER-04 reopen/stamp seams DID move (they were
   //   frozen by 151-05's plan and surfaced as DEF-151-05-B instead). Leaving
@@ -906,10 +920,20 @@ export function ScenarioComposer({
   //   Root cause: an owner-manager's ~$460k book (8 keys, 6 strategy-linked)
   //   pinned the old gate FALSE, so blank slate was FORCED, not chosen.
   const canEnterBook = hasLiveBook && (payload.bookEntryGateSatisfied ?? false);
-  // Pitfall 5 (recorded asymmetry): AUM is CUSTODY — the holdings of every
-  // active key, manager-side included — while this gate is MODELLING CAPABILITY
-  // (allocator keys that have a per-key history). The two sets deliberately
-  // differ, so no copy on this surface may claim the AUM is "from these N keys".
+  // Pitfall 5 (recorded asymmetry) — ⛔ SUPERSEDED by review round 2 F2. It read:
+  // "AUM is CUSTODY — the holdings of every active key, manager-side included —
+  // while this gate is MODELLING CAPABILITY (allocator keys that have a per-key
+  // history). The two sets deliberately differ, so no copy on this surface may
+  // claim the AUM is 'from these N keys'."
+  //
+  // That asymmetry WAS the defect: the composer renormalizes its weights across
+  // the contributing rows only, so a custody-wide denominator made one row's USD
+  // cell and its NOTIONAL cell two different dollar figures for the same
+  // position. The composer's AUM is now the MODELLED book (see `liveHoldingsSum`
+  // below), and the surface DOES say "models N of M keys" — because the claim is
+  // now true, and stating it is the price of narrowing a headline money figure.
+  // Custody's whole-book total remains the Overview/Holdings answer; it is no
+  // longer the scenario's denominator.
   //
   // Deliberate narrowing (RESEARCH Open Q4): a book with ZERO contributing keys
   // still initializes BLANK. CONTEXT's "never force-initializes to blank" is
@@ -2108,11 +2132,63 @@ export function ScenarioComposer({
   // phase enables) the reopen lands in BOOK mode and the stamp is honest, so
   // freezing membership there would instead pin a stale member set — a key that
   // has since earned its per-key series would never join the saved membership.
-  const memberKeyIdsForUpdate =
-    (scenario.draft.memberKeyIds ?? []).length > 0 &&
-    !(payload.bookEntryGateSatisfied ?? false)
-      ? (scenario.draft.memberKeyIds ?? [])
-      : memberKeyIdsForSave;
+  //
+  // Review [5] — CR-02 was right that a hard freeze is wrong, but replacing the
+  // freeze with a plain overwrite re-opened the hole it was guarding. Under the
+  // OLD all-or-nothing gate the freeze engaged whenever ANY eligible key lacked
+  // a series, which covered the transient case for free; under SOME-semantics
+  // the gate stays TRUE while one key contributes, so an Update wrote
+  // `contributingApiKeyIds` straight over the saved row. An allocator with 3
+  // keys in a saved book scenario, one of whose per-key series is momentarily
+  // empty (backfill lag, a sync gap, the derive-dailies backlog), reopens,
+  // nudges a weight, presses Update — and that key is silently gone. It does
+  // not come back when its series does: persisted membership is explicit, and
+  // `computeMetricsForDraft` intersects it against the live set rather than
+  // re-deriving it. No message, no undo.
+  //
+  // So: an Update may ADD, and may drop what is no longer ELIGIBLE, but may
+  // never drop a still-eligible member merely for being quiet today. Both
+  // failure modes close — the newly-earning key joins (it is in the
+  // contributing stamp) and the transiently-empty one survives (it is still
+  // eligible) — while a revoked or disconnected key still leaves, because
+  // eligibility is what it lost.
+  const memberKeyIdsForUpdate = (() => {
+    const existing = scenario.draft.memberKeyIds ?? [];
+    // A genuinely blank-authored draft has membership `[]` and must save `[]` —
+    // never resurrect members.
+    if (existing.length === 0) return memberKeyIdsForSave;
+    // Book mode unrenderable: the blank stamp would be `[]` and would silently
+    // convert a persisted book draft to blank-authored. Freeze (F-1).
+    if (!(payload.bookEntryGateSatisfied ?? false)) return existing;
+    // 151 red-team G2 — THE UNION IS A BOOK-MODE RULE, and only a book-mode
+    // rule. The two intents that meet on this line are genuinely different, and
+    // neither is a leftover:
+    //   • Review [5] (below): while the session is modelling the BOOK, an Update
+    //     may never drop a still-eligible member merely for being quiet today
+    //     (an empty per-key series from backfill lag is transient) — so the
+    //     union of "existing ∩ still-eligible" with the contributing stamp.
+    //   • MEMBER-04 / F5: converting to BLANK SLATE is an explicit act of
+    //     authorship — the allocator dropped the book off the screen (zero
+    //     `scenario-constituent-perkey` rows render) and the honest stamp for
+    //     what they are now modelling is `[]`. Union semantics can never SHRINK
+    //     membership, so before this the conversion silently persisted the old
+    //     book membership and `scenario-compare.ts:182`
+    //     (`usePerKeySources = memberKeyIds.length > 0`) then projected the row
+    //     as a per-key BOOK blend while the composer computed it added-only —
+    //     the CR-02 two-projections-of-one-portfolio defect, re-imported.
+    // They are reconciled by SCOPE, not by precedence: the union only speaks for
+    // a session still in book mode. A blank session's stamp wins outright —
+    // reachable only DELIBERATELY here, because the unrepresentable forced-blank
+    // case (gate false) already returned above.
+    if (entryMode !== "book") return memberKeyIdsForSave;
+    const stillEligible = new Set(payload.allocatorEligibleApiKeyIds ?? []);
+    return [
+      ...new Set([
+        ...existing.filter((id) => stillEligible.has(id)),
+        ...memberKeyIdsForSave,
+      ]),
+    ];
+  })();
 
   // POST a new scenario (first save OR "save as new"). On success adopt the
   // returned id as the loaded scenario (editable, not readonly).
@@ -3812,19 +3888,102 @@ export function ScenarioComposer({
     }
     return byRef;
   }, [holdingsSummary]);
-  // Phase 151 AUM-01 — RENAMED from `scenarioAum` (body byte-unchanged). This is
-  // the DERIVED live-holdings total: what custody says the book is worth. It is
-  // one INPUT to the scenario's AUM now, not the AUM itself.
+  // Phase 151 AUM-01 — the DERIVED live-holdings total: what custody says the
+  // modelled book is worth. It is one INPUT to the scenario's AUM, not the AUM
+  // itself.
+  //
+  // Review round 2 F2 — NARROWED to the CONTRIBUTING key set, the same
+  // narrowing `dataSourceKeys` and `totalBookEquity` already carry.
+  //
+  // Un-narrowed, this summed every `holding:` toggle in the draft — and
+  // `defaultDraftFromHoldings` seeds ALL holdings true — so `scenarioAum` was
+  // the WHOLE 8-key book while `totalBookEquity` (Σ equity over
+  // `dataSourceKeys`) was the 2 contributing ones, and the weights renormalize
+  // across just those 2 rows. One row then showed TWO dollar figures on the
+  // same line: its USD cell `Math.round(weight × scenarioAum)` against the
+  // whole book, its NOTIONAL cell `share × totalBookEquity × L` against the
+  // modelled one, differing by the whole-book/contributing ratio.
+  //
+  // The basis chosen is the MODELLED book (founder's AUM model: portfolio AUM
+  // is the sum of what is actually being modelled, built bottom-up from the
+  // per-strategy dollars). A key with no return series contributes no row, no
+  // weight and no projection, so its custody value cannot be part of a number
+  // the rows are supposed to add up to.
+  //
+  // ⚠️ This supersedes the "Pitfall 5 (recorded asymmetry)" note at the
+  // `canEnterBook` gate above, which read "AUM is CUSTODY — the holdings of
+  // every active key, manager-side included". That asymmetry is exactly the
+  // defect: it put the manager-side and series-less keys' custody value into a
+  // denominator the composer's own rows renormalize without them. Because the
+  // headline PORTFOLIO AUM now means something narrower for a partial book, it
+  // is DISCLOSED next to the field (`scenario-aum-modelled-note`) rather than
+  // changed silently.
+  //
+  // Blank mode is unaffected: `holdingsSummary` is `[]` there, so this is 0 by
+  // construction either way.
+  //
+  // Review round 3 E1 — the VALUE basis is now `holdingEquityContributionLocal`,
+  // not `value_usd`. F2 closed the key-SET divergence; this closes the
+  // remaining VALUE-basis one. `totalBookEquity` — the base the NOTIONAL column
+  // divides against — is Σ `holdingEquityContributionLocal`, and the SSR
+  // `liveBaselineMetrics.aum` is Σ `holdingEquityContribution` (queries.ts
+  // NEW-C03-01). On a SPOT book the two definitions coincide exactly, so F2's
+  // fixtures and the founder's spot venues see no change at all. On a
+  // DERIVATIVES book they do not: `value_usd` there is the leveraged NOTIONAL
+  // contract size while the equity at stake is `unrealized_pnl_usd`, so a 10x
+  // perp put ~10x its own equity into the AUM. The founder's production book is
+  // Deribit, i.e. exactly that case — the headline PORTFOLIO AUM and the
+  // NOTIONAL cells were two different definitions of what a position is worth,
+  // and the per-row dollars could not reconcile against the notionals no matter
+  // how the key set was narrowed.
+  //
+  // ⚠️ BEHAVIOUR NOTE. `scenarioAum` falls back to this sum only when the
+  // allocator has typed no manual AUM, and two gates ride on it: the commit
+  // refusal (`scenarioAum <= 0` with voluntary adds) and the per-row size gate
+  // (`weight × scenarioAum <= 0`). A derivatives book whose Σ unrealized P&L is
+  // zero or negative therefore now REFUSES a commit that the notional-based sum
+  // would have allowed — deliberately: `totalBookEquity` already returns `null`
+  // on that same Σ ≤ 0 (every NOTIONAL cell an em-dash) and the SSR AUM already
+  // reads the same 0-or-negative number, so refusing is the honest answer and
+  // the remedy is one field away (type the size). The remedy is NAMED: the
+  // refusal copy and the `liveHoldingsSum <= 0` hint next to the field both
+  // point at the Portfolio AUM input.
   const liveHoldingsSum = useMemo(() => {
+    const contributing = new Set(payload.contributingApiKeyIds ?? []);
+    // ⚠️ The narrowing applies only when there IS a modelled set to narrow TO.
+    // An EMPTY contributing set means no per-key row exists, so there is nothing
+    // for the AUM to agree with — and narrowing to ∅ would zero it, taking the
+    // dollar columns, the commit sizing and the commit itself down with it (the
+    // AUM-zero refusal), which is a far worse answer than custody's total.
+    //
+    // In production `bookEntryGateSatisfied === contributingApiKeyIds.length > 0`
+    // and book mode requires that gate, so this branch is unreachable there; it
+    // exists because the flag is read from the payload rather than re-derived,
+    // and a payload that asserts book-entry with an empty contributing set must
+    // degrade to the honest whole-book number rather than to zero. It also does
+    // NOT reintroduce F2's two-figure defect: with no contributing key,
+    // `totalBookEquity` is null and every NOTIONAL cell is an em-dash, so there
+    // is no second dollar figure to disagree with.
+    //
+    // The neighbouring degenerate case — a non-empty contributing set whose keys
+    // happen to carry no holdings — deliberately DOES land on 0: there the rows
+    // exist and their equity really is zero, so the USD and NOTIONAL columns are
+    // both honestly non-derivable and still agree.
+    const narrowToModelledBook = contributing.size > 0;
     let sum = 0;
     for (const [scopeRef, on] of Object.entries(scenario.draft.toggleByScopeRef)) {
       if (!on) continue;
       if (!scopeRef.startsWith("holding:")) continue;
       const h = holdingByRef.get(scopeRef);
-      if (h) sum += h.value_usd;
+      if (!h) continue;
+      if (narrowToModelledBook && !contributing.has(h.api_key_id)) continue;
+      // E1 — the SAME per-holding equity definition `equityByApiKeyId` (and
+      // therefore `totalBookEquity`, and therefore every NOTIONAL cell) uses.
+      // Never `h.value_usd`: on a derivative that is notional, not equity.
+      sum += holdingEquityContributionLocal(h);
     }
     return sum;
-  }, [scenario.draft.toggleByScopeRef, holdingByRef]);
+  }, [scenario.draft.toggleByScopeRef, holdingByRef, payload.contributingApiKeyIds]);
 
   // Phase 151 AUM-01 — SANITIZE-ON-READ (the sanitizeLeverageMap precedent at
   // the decode sites above). The persisted value is untrusted: the codec
@@ -3896,7 +4055,21 @@ export function ScenarioComposer({
   // never display a number the draft does not hold (the same displayed-vs-state
   // divergence the commitError banner exists to prevent for weights).
   function commitAumInput(raw: string) {
+    // 151 red-team G1 — A REFUSAL IS NOT AN EDIT IN PROGRESS. `aumTouchedRef` is
+    // armed by the input's onChange and answers "was there a keystroke behind
+    // this blur?"; every arm that REFUSES the keystroke must therefore disarm
+    // it, because the refusal snapped the text back to the committed value and
+    // there is no longer an uncommitted edit for a later blur to commit. Leaving
+    // it armed reopened WR-04 through a second door: type `0` → Enter (refused,
+    // text snaps back to the derived "39963") → refocus and blur with NO
+    // keystroke → the ref was still true, so the SNAPPED-BACK text committed as
+    // `setManualAum(39963)`. That is the full WR-04 harm — the derived size
+    // frozen (and QUANTIZED, 39963.1076231 → 39963), the "Overrides
+    // live-holdings total" note for an override nobody made, and `manual_aum_usd`
+    // newly on the commit body, moving the idempotency `request_hash` for a
+    // caller T-151-21 deliberately left unchanged.
     if (raw.trim() === "") {
+      aumTouchedRef.current = false;
       setAumInputText(committedAumText());
       return;
     }
@@ -3905,6 +4078,41 @@ export function ScenarioComposer({
       console.warn("[ScenarioComposer] refused an invalid portfolio AUM", {
         raw,
       });
+      // Review round 2 F4 — SAY SO, for the same reason `commitDollarInput`'s
+      // two refusal arms now route through `onRefuseEdit` → `setCommitError`: a
+      // console.warn is invisible, and all the allocator sees is the field
+      // snapping back to its previous figure with no explanation. This function
+      // runs in the OUTER component, so it calls `setCommitError` directly
+      // rather than through the `onRefuseEdit` prop the list rows use.
+      //
+      // Cause-accurate and range-naming, per the sibling arms: a zero is
+      // refused for a DIFFERENT reason than a malformed number (a zero AUM is a
+      // claim, not an absence — the same rule that makes a stored 0 read as
+      // unset), so the two do not share one vague sentence.
+      //
+      // 151 red-team K1 — THE MESSAGE MAY NOT INSTRUCT WHAT THE CODE CANNOT DO.
+      // The zero arm used to end "Clear the field instead to leave it unset.",
+      // and that sentence is FALSE in exactly the state an allocator would
+      // follow it from: book mode with a committed manual override they want to
+      // remove. There is no `setManualAum(undefined)` caller anywhere in `src/`
+      // — the blank arm above deliberately only snaps the text back, because it
+      // is what makes "a benign focus→blur of an empty field commits nothing"
+      // hold — so clearing a field showing `500000` and blurring re-displays
+      // `500000` and the draft still holds the override. The copy now states
+      // only what actually happened. (The missing capability itself — no UI
+      // path to revert an override to the derived live-holdings size — is a
+      // real gap, but closing it is a behaviour change on the AUM seam that has
+      // already produced three regressions this session, so it is logged as a
+      // follow-up rather than smuggled in behind a copy fix.)
+      setCommitError(
+        parsed === 0
+          ? "Portfolio AUM must be greater than $0 — a zero size cannot be allocated. The zero was not applied."
+          : "Invalid portfolio AUM — enter a positive amount under $1,000,000,000,000. The previous value was kept.",
+      );
+      // G1 — disarm (see the note at the top of this function): the snap-back
+      // below restores the committed text, so a subsequent bare blur must not
+      // write it.
+      aumTouchedRef.current = false;
       setAumInputText(committedAumText());
       return;
     }
@@ -3919,20 +4127,39 @@ export function ScenarioComposer({
     // `request_hash`, for a caller the design deliberately left unchanged
     // (T-151-21).
     //
-    // 151 UAT — compared against the DISPLAYED WHOLE-DOLLAR figure, not the raw
-    // float. The field now shows `round(liveHoldingsSum)`, so an exact-float
-    // comparison would weigh a bare blur of the seeded text ("39963") against
-    // 39963.1076231, call it an edit, and write the rounded number as a manual
-    // OVERRIDE — re-opening the very hole WR-04 closed, through the same
-    // no-keystroke gesture. Compare what the user is LOOKING AT, exactly as
-    // `commitDollarInput` does for the per-strategy field (`Math.round(amount)
-    // === displayed`). "460000.00" is still recognised as the same value.
-    const committed = committedAumText();
-    if (committed !== "" && Math.round(parsed) === Number(committed)) {
-      setAumInputText(committed);
+    // Review [9] — ask whether a KEYSTROKE happened, not whether the number
+    // came out the same. The previous guard compared `Math.round(parsed)`
+    // against the ROUNDED displayed text, which cannot tell a bare blur apart
+    // from a deliberate override that lands on the same integer: with
+    // `liveHoldingsSum = 39963.1076231` the field shows "39963", so an
+    // allocator who types 39963 precisely BECAUSE they want the scenario pinned
+    // to a round number — so it stops moving when custody syncs — had the write
+    // dropped. No `manualAumUsd`, no "Overrides live-holdings total" note, no
+    // `manual_aum_usd` in the commit body, and the field snapped back to the
+    // same text they typed, so it looked like it had worked.
+    //
+    // `aumTouchedRef` is set by the input's onChange, so it answers the actual
+    // WR-04 question ("is this a blur with no edit behind it?") exactly, with
+    // no value comparison to alias over — and it holds on the manual-AUM side
+    // too, where the old rounded comparison had the SAME hole in reverse: a
+    // bottom-up resize stores an exact float (Σ of the row dollars), the field
+    // shows `round()` of it, and a bare tab-through would have re-committed the
+    // rounded integer and QUANTIZED the stored value. Both programmatic writers
+    // (`setBottomUpAum`, the saved-scenario reopen) clear this ref precisely so
+    // a derived figure they seeded can never be written back by a blur.
+    if (!aumTouchedRef.current) {
+      setAumInputText(committedAumText());
       return;
     }
     scenario.setManualAum(parsed);
+    // Review round 2 F4 — clear on success, the `handleWeightChange` arm's own
+    // discipline. The banner has no dismiss control, so a refusal message that
+    // outlived the value it described would sit under a now-valid AUM until an
+    // unrelated weight edit happened to clear it.
+    setCommitError(null);
+    // The typed value IS the committed value now, so let the mirror resume
+    // tracking (a later holdings refresh should re-seed the field again).
+    aumTouchedRef.current = false;
   }
 
   /**
@@ -4453,6 +4680,27 @@ export function ScenarioComposer({
               Overrides live-holdings total {formatUsd(liveHoldingsSum)}.
             </span>
           )}
+        {/* Review round 2 F2 — the DISCLOSURE that pays for the narrowing above.
+            The book-mode AUM now describes the MODELLED book (the keys carrying
+            a return series), not custody's whole-book total, and a headline
+            money figure may not change meaning silently. Rendered next to the
+            field it qualifies, because that is the number it is about.
+
+            NOT a second copy of `scenario-partial-book-note`: that one sits
+            above the constituent list and explains MISSING ROWS ("N of M keys
+            not yet contributing"); this one explains the MONEY BASIS ("models N
+            of M"). Same two integers, same muted voice, two different questions
+            — and neither is stated twice. Book mode only: in blank mode the AUM
+            is whatever the allocator typed and has no key basis to disclose. */}
+        {entryMode === "book" && notYetContributing > 0 && (
+          <span
+            data-testid="scenario-aum-modelled-note"
+            className="text-xs text-text-muted"
+          >
+            Models {allocatorEligibleCount - notYetContributing} of{" "}
+            {allocatorEligibleCount} keys — the ones with a return series.
+          </span>
+        )}
       </div>
 
       {/* IMPACT-01 — coverage caveat. Names the live overlapping-day count
@@ -5394,6 +5642,7 @@ export function ScenarioComposer({
           // dollar edit back-computes a weight WITHIN it — unchanged this round.
           bottomUpAum={isBlankMode}
           onSetManualAum={setBottomUpAum}
+          onRefuseEdit={setCommitError}
           leverageByRef={leverageByRef}
           onSetLeverage={handleLeverageChange}
           targetModeByRef={targetModeByRef}
@@ -5885,6 +6134,15 @@ interface CompositionListProps {
    * so the pair lands atomically). Never a second weight-write channel.
    */
   onSetManualAum: (value: number) => void;
+  /**
+   * Review [10] — the list's channel to the composer's ONE refusal banner
+   * (`setCommitError`). `onSetWeight`'s own refusals already surface, but a
+   * dollar edit can be refused BEFORE it reaches the weight path (an all-zero
+   * portfolio has no size to divide by, and an invalid amount never gets that
+   * far), and those two arms were console-only — the field silently snapped
+   * back. Same sink, so a refusal from either source reads identically.
+   */
+  onRefuseEdit: (message: string) => void;
   /** R4 — ref → leverage multiplier (default 1.0 when absent). */
   leverageByRef: Record<string, number>;
   onSetLeverage: (scopeRef: string, leverage: number) => void;
@@ -5955,6 +6213,7 @@ function CompositionList({
   scenarioAum,
   bottomUpAum,
   onSetManualAum,
+  onRefuseEdit,
   leverageByRef,
   onSetLeverage,
   targetModeByRef,
@@ -6081,7 +6340,7 @@ function CompositionList({
    * sentence byte-verbatim and grows NO sr-only text — a remedy note on a cell
    * that already shows a number would be noise.
    */
-  const renderNotional = (ref: string) => {
+  const renderNotional = (ref: string, labelText: string) => {
     const { text, cause } = notionalCell(ref);
     const note = cause == null ? NOTIONAL_DERIVED_NOTE : NOTIONAL_NOTE_BY_CAUSE[cause];
     return (
@@ -6090,6 +6349,23 @@ function CompositionList({
         title={note}
         className="w-20 text-right font-mono text-xs text-text-muted"
       >
+        {/* Review round 2 F5 — the COLUMN NAME, on BOTH branches.
+            SCEN-04 attached sr-only text only to the em-dash branch, so the
+            DERIVED branch — a real currency figure — had no accessible name at
+            all, and BOTH column-label strips are `aria-hidden="true"`. A screen
+            reader announced a bare "$1,234" with no idea which column it came
+            from, in a row of five numeric columns. Every neighbouring control
+            already carries one (the weight input's sr-only label, the dollar
+            input's sr-only label, the leverage input's aria-label), so this was
+            the one unlabelled cell in the row — and an unlabelled NOTIONAL
+            column is the founder complaint that drove the phase. Fixing it for
+            sighted users only is half a fix.
+
+            Name first, then the note: the em-dash branch keeps its
+            cause-accurate sentence, the derived branch keeps having no remedy
+            text (a cell that already shows a number explains what the number
+            is via `title`, and the sr-only name supplies the column). */}
+        <span className="sr-only">{labelText} notional. </span>
         {text}
         {cause != null && <span className="sr-only">{note}</span>}
       </span>
@@ -6159,7 +6435,16 @@ function CompositionList({
       0,
     );
     const nextAum = Math.max(0, otherDollars) + amount;
-    if (!Number.isFinite(nextAum) || nextAum <= 0) return null;
+    // Review [7] — validate against the SAME shared bound `commitAumInput`
+    // enforces, not merely finite/positive. `isValidDollar` is [0, 1e12), and
+    // `sanitizedManualAum` re-reads the stored value through it on every render
+    // (:3837). A sum that clears `Number.isFinite` but not `isValidDollar` gets
+    // written into the draft and then discarded by the read side one render
+    // later: `scenarioAum` falls back to `liveHoldingsSum` (0 in blank mode),
+    // every dollar cell collapses to the em-dash and Commit refuses — while the
+    // autosave and the saved-scenario PUT still carry the out-of-range number.
+    // Refusing here keeps the write side and the read side agreeing.
+    if (!isValidDollar(nextAum) || nextAum <= 0) return null;
     return nextAum;
   };
 
@@ -6212,10 +6497,21 @@ function CompositionList({
             // An all-zero portfolio has no size to divide by. Refuse rather
             // than write a 0/NaN AUM — the same fail-loud posture as the
             // invalid-amount arm above.
+            //
+            // Review [10] — SAY SO. A console.warn is invisible: the field just
+            // snapped back to its previous figure with no explanation, and the
+            // gesture that reaches here most often is the ordinary one of
+            // typing 0 to drop the last funded row. Every other refusal on this
+            // surface (the >1 weight clamp, the non-finite weight arm, the
+            // leverage clamp) surfaces a message; this one now does too.
             console.warn(
               "[ScenarioComposer] refused a dollar edit that yields no portfolio size",
               { ref, amount },
             );
+            onRefuseEdit(
+              "A portfolio needs a size — zeroing the last funded strategy would leave nothing to allocate. Set another strategy's dollars first, or exclude this row instead.",
+            );
+
             el.value = String(displayed);
             return;
           }
@@ -6223,13 +6519,23 @@ function CompositionList({
           // one render and the pair lands atomically: no frame exists in which
           // the new weight is read against the old AUM.
           onSetManualAum(nextAum);
-          onSetWeight(ref, amount / nextAum);
+          // Review [8] follow-on — a SOLE constituent is already 100%, so the
+          // resize alone expresses the edit and `handleWeightChange` would
+          // refuse the (unchanged) 1.0 write with "A single constituent is
+          // always 100%." — a banner for a gesture that in fact succeeded.
+          // Skip the no-op write; a real weight move still goes through the one
+          // weight-write path and still inherits every refusal it carries.
+          const nextWeight = amount / nextAum;
+          if (Math.abs(nextWeight - weightForRef(ref)) > 1e-9) {
+            onSetWeight(ref, nextWeight);
+          }
           el.value = String(displayed);
           return;
         }
         // BOOK mode — unchanged. THE one weight-write path. `scenarioAum > 0`
-        // is guaranteed: the em-dash branch below is the only other render, so
-        // no division by zero and no NaN can reach handleWeightChange from here.
+        // is still guaranteed here: the em-dash branch below relaxes only for
+        // `bottomUpAum`, and that path returned above — so on this line the
+        // guard is intact and no division by zero can reach handleWeightChange.
         onSetWeight(ref, amount / scenarioAum);
       } else {
         // Fail-loud + keep the previous value, mirroring handleWeightChange's
@@ -6239,6 +6545,11 @@ function CompositionList({
           "[ScenarioComposer] refused an invalid dollar allocation",
           { ref, raw },
         );
+        // Review [10] — and say so, for the same reason as the no-size arm.
+        onRefuseEdit(
+          "Invalid dollar allocation — enter a positive amount under $1,000,000,000,000. The previous value was kept.",
+        );
+
       }
     }
     // Snap the text back to the DERIVED figure so the field can never display a
@@ -6259,7 +6570,22 @@ function CompositionList({
     // title is duplicated into an sr-only span because a title alone is
     // unreachable by keyboard/touch and is not announced by every screen reader
     // (UI-SPEC §2). No division executes on this branch.
-    if (!Number.isFinite(scenarioAum) || scenarioAum <= 0) {
+    // Review [8] — the em-dash is the honest state ONLY when the dollar figure
+    // is genuinely non-derivable, i.e. in BOOK mode, where the portfolio's size
+    // is custody's answer and a row's dollars cannot exist before it.
+    //
+    // In BOTTOM-UP (blank) mode the causality is the other way round: the row's
+    // dollars are the INPUT and the portfolio's size is their sum, so a zero
+    // AUM is not "unset, come back later" — it is the empty portfolio the
+    // allocator is about to fill. Rendering the em-dash here made the bottom-up
+    // path unreachable from a fresh blank scenario (`liveHoldingsSum` is 0 by
+    // construction and nothing has been typed, so `scenarioAum` is 0 and EVERY
+    // row rendered the em-dash): the allocator had to seed a Portfolio AUM
+    // top-down first — exactly the flow UAT-1 replaced. `bottomUpAumFor` needs
+    // no non-zero AUM to work (the other rows contribute Σ w_j × 0 = 0, so the
+    // first amount typed simply becomes the portfolio), and every division
+    // below is by `nextAum`, never by this zero.
+    if (!Number.isFinite(scenarioAum) || (scenarioAum <= 0 && !bottomUpAum)) {
       return (
         <span
           data-testid="scenario-constituent-usd-unset"
@@ -6637,7 +6963,7 @@ function CompositionList({
                     reads "not in the blend", not "needs live book equity").
                     Before this, SCEN-04's explanation stopped halfway down the
                     list. */}
-                {renderNotional(k.id)}
+                {renderNotional(k.id, labelText)}
               </div>
               </div>
               {renderSolveState(k.id)}
@@ -6948,7 +7274,7 @@ function CompositionList({
                     title names the ACTUAL cause (review CR-01: one sentence per
                     cause, not one sentence for all three) and is duplicated into
                     an sr-only span. Same renderer as the per-key rows above. */}
-                {renderNotional(a.id)}
+                {renderNotional(a.id, a.name)}
                 <button
                   type="button"
                   aria-label="Remove from scenario"
