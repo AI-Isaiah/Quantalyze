@@ -7,7 +7,12 @@ import { compute } from "@/lib/factsheet/compute";
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 import { captureToSentry } from "@/lib/sentry-capture";
 
-import { MAX_LEVERAGE, sanitizeLeverage, sanitizeLeverageMap } from "./leverage";
+import {
+  FACTSHEET_MAX_LEVERAGE,
+  MAX_LEVERAGE,
+  sanitizeLeverage,
+  sanitizeLeverageMap,
+} from "./leverage";
 
 /**
  * Relative-closeness helper for the invariance-math pins. `toBeCloseTo` works on
@@ -55,6 +60,46 @@ describe("sanitizeLeverage — read-side clamp (mirrors engine lev(), adds MAX c
   // self-referential and unable to catch an unintended change.
   it("MAX_LEVERAGE is 200 (151 UAT — raised from 10 for the composer's strategy rows)", () => {
     expect(MAX_LEVERAGE).toBe(200);
+  });
+});
+
+describe("151 review A6 — MAX_LEVERAGE is the WIDEST bound in the system", () => {
+  /**
+   * WHY (Rule 9 — intent, not behaviour): `leverage.ts` states this invariant in
+   * capitals, and it is not style. `sanitizeLeverage` clamps on READ, so if any
+   * surface lets a user set a multiplier ABOVE the contract ceiling, that value
+   * is silently rewritten on every reopen / share-resolve / compare — the exact
+   * defect the 151 UAT raise (10 → 200) was fixing, reintroduced from the other
+   * end. Before this pin the two constants could not even see each other:
+   * `FACTSHEET_MAX_LEVERAGE` was module-private in `FactsheetView.tsx`, and the
+   * only leverage assertion in the repo was `MAX_LEVERAGE === 200`.
+   *
+   * The pin is the ORDERING, deliberately not the literals: a surface is free to
+   * pick any narrower bound it wants (that direction is safe), so pinning
+   * `FACTSHEET_MAX_LEVERAGE === 10` would fail on a legitimate product change
+   * while still missing an inversion introduced by editing MAX_LEVERAGE.
+   */
+  it("every per-surface input bound sits at or below the contract ceiling", () => {
+    expect(FACTSHEET_MAX_LEVERAGE).toBeLessThanOrEqual(MAX_LEVERAGE);
+  });
+
+  it("is not vacuous — the surface bound is a real, positive, finite multiplier", () => {
+    // A `0`/`NaN`/`undefined` constant would satisfy the `<=` above while
+    // meaning the surface had lost its bound entirely.
+    expect(Number.isFinite(FACTSHEET_MAX_LEVERAGE)).toBe(true);
+    expect(FACTSHEET_MAX_LEVERAGE).toBeGreaterThan(0);
+    // ...and the ceiling really is the WIDER of the two today, so the `<=`
+    // is carrying a live inequality rather than comparing a value to itself.
+    expect(MAX_LEVERAGE).toBeGreaterThan(FACTSHEET_MAX_LEVERAGE);
+  });
+
+  it("the factsheet's what-if bound is the one the surface actually enforces", () => {
+    // Closes the loop the move opened: the constant is only meaningful if
+    // `sanitizeLeverage` passes the surface's own maximum through UNTOUCHED.
+    // If someone lowered MAX_LEVERAGE under it, this reads back clamped.
+    expect(sanitizeLeverage(FACTSHEET_MAX_LEVERAGE)).toBe(
+      FACTSHEET_MAX_LEVERAGE,
+    );
   });
 });
 

@@ -49,12 +49,32 @@ import { captureToSentry } from "./sentry-capture";
  *
  * ⚠️ KEEP THIS THE WIDEST BOUND IN THE SYSTEM. A surface may impose a NARROWER
  * input bound of its own (the public factsheet what-if does — see
- * FACTSHEET_MAX_LEVERAGE there), and that is safe in one direction only:
- * because the sanitizer's ceiling is the widest, no surface's stored value is
- * ever silently reduced on read. Lowering THIS constant below a surface's own
- * bound would reintroduce exactly the silent-truncation class above.
+ * {@link FACTSHEET_MAX_LEVERAGE} below), and that is safe in one direction
+ * only: because the sanitizer's ceiling is the widest, no surface's stored
+ * value is ever silently reduced on read. Lowering THIS constant below a
+ * surface's own bound would reintroduce exactly the silent-truncation class
+ * above.
  */
 export const MAX_LEVERAGE = 200;
+
+/**
+ * The PUBLIC factsheet what-if projection's own, narrower input bound.
+ *
+ * 151 review A6 — this lived as a module-private const in `FactsheetView.tsx`,
+ * which made the "widest bound" invariant above UNENFORCEABLE: nothing could
+ * compare the two, so raising this past `MAX_LEVERAGE` (or lowering
+ * `MAX_LEVERAGE` under it) would reintroduce silent read-time truncation of
+ * stored values with the whole suite green. It lives HERE, beside the ceiling
+ * it must stay under, so `leverage.test.ts` can pin the ORDERING —
+ * `FACTSHEET_MAX_LEVERAGE <= MAX_LEVERAGE` — rather than two literals that
+ * drift independently.
+ *
+ * The VALUE is deliberately unchanged (the pre-151 `MAX_LEVERAGE`): the 10 → 200
+ * raise was asked for by the founder for the Scenario Composer's strategy rows,
+ * and this anonymous public surface was not in that ask. Its behaviour and copy
+ * are byte-identical to before the move.
+ */
+export const FACTSHEET_MAX_LEVERAGE = 10;
 
 /**
  * Optional provenance for a sanitize call, used ONLY to enrich the SFH-2
