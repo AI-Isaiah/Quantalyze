@@ -125,13 +125,57 @@ live MT5 numeric verification (Phase 155).
 
 ### Post-research decisions (locked 2026-08-08, after `153-RESEARCH.md`)
 
-- **D-18: the MT5 client budget is exactly `90_000` ms — NOT 120 000.** Research found the
-  A-25 breaker-tombstone invariant (`resilient-fetch.ts:268-274`) justifies
-  `BREAKER_LOCK_TOMBSTONE_S = 60` with `COOLDOWN(30) + TOMBSTONE(60) = 90s ≥ longest
-  budget`. 90 000 is the largest value inside D-01's ~90–120s range that satisfies this
-  with no second constant re-cut (90 ≥ 90 exactly). **120 000 breaks A-25 silently** and
-  would require raising the tombstone to 90 in the same commit. Take the number that
-  needs one change, not two.
+- **D-18 (SUPERSEDED by D-24 — kept for the record):** an earlier reading set the budget at
+  `90_000` ms because that was the largest value needing only ONE constant changed under
+  the A-25 breaker invariant. **That reasoning was backwards** — it let a test invariant
+  pick a production timeout. Founder challenge 2026-08-08: *"I don't know if 90s is the
+  right number… maybe you do some research how much is enough time."* Superseded.
+
+- **D-24: ⭐ THE ROOT CAUSE IS NOT THE CLIENT BUDGET — it is an unguarded nested-timeout
+  inversion inside Python.** Measured evidence (`scratchpad/mt5-latency-evidence.md`,
+  9/9 correlated gateway↔worker failures on 2026-08-06/08) clusters at **30.1–31.0 s**,
+  i.e. exactly the rpyc bound — not a broker-latency spread. Cause, verified at source:
+  `mt5_client.py:306` calls `self._mt5.initialize()` **with no `timeout=`**, so MetaTrader5's
+  vendor default of **60 000 ms** applies, *inside* an rpyc `sync_request_timeout` of
+  **30 s** (`MT5_REQUEST_TIMEOUT_S`, `mt5_client.py:82`). The first MT5 call is therefore
+  **structurally incapable** of returning a verdict before rpyc gives up. No client-side
+  budget — 90 s, 120 s or 10 min — can fix this; it only moves where the pile-up happens.
+  **Fix the inversion first.**
+  ⚠️ This is the *same* defect class the codebase already knows about: the ordering guard
+  at `mt5_client.py:213-219` fails loud on `MT5_LOGIN_TIMEOUT_MS >= request_timeout_s*1000`
+  — it covers `login()`, the instance the author had in mind, and **not `initialize()`**,
+  the second member. Extend the guard to cover every MT5 call carrying its own timeout.
+
+- **D-25: the worker's `MT5_REQUEST_TIMEOUT_S = 30` must NOT be raised globally.** Its own
+  comment (`mt5_client.py:79-81`) records why: a hung terminal must not wedge the
+  SEQUENTIAL worker past the ~90 s healthz budget — that is the v1.11 WEDGE-01 wedge class.
+  `Mt5Client` already accepts `request_timeout_s` as a constructor argument
+  (`mt5_client.py:196`), so **the validate path gets its own longer chain** while the worker
+  read path stays byte-unchanged at 30 s. Any plan that raises the module constant has
+  reopened WEDGE-01.
+
+- **D-26: the client budget is `120_000` ms, and `BREAKER_LOCK_TOMBSTONE_S` goes 60 → 90 in
+  the SAME commit.** 120 s is the founder's stated tolerance (*"if it is 2 minutes old,
+  that is fine"*), and the UI-SPEC's `Stop waiting` affordance makes a long wait
+  user-abortable, so the cost of generosity is low. A-25 then holds exactly:
+  `(30 + 90) × 1000 = 120 000 ≥ 120 000`. The tombstone raise is a one-line change and was
+  never a reason to pick a smaller timeout.
+
+- **D-27: this number is PROVISIONAL, and the phase must make it measurable.** No
+  uncensored successful MT5 validation exists anywhere — not in Railway logs, not in
+  Sentry, not in `docs/evidence/`. Elapsed time is **not instrumented** on the wizard's
+  path (`mt5_client.py` and `routers/exchange.py:222-470` contain zero timing).
+  ⛔ Do not cite "35–70 s" from `153-UI-SPEC.md:226` as evidence — that line is derived
+  from the timeout constants and says so itself. This phase must add per-stage
+  `stage` + `duration_ms` instrumentation so the real p50/p95 exists; the budget is then
+  tightened from data during **Phase 155** (MT5-VERIFY), which is already live-gated.
+
+- **D-28: `close()` must be bounded separately.** Every one of the 9 failures was followed
+  by a *second* full 30.02–30.03 s in `Mt5Client.close: shutdown() raised` — so a failed
+  attempt costs ~60 s of server wall clock, already 2× the client budget before any broker
+  slowness. The `finally`-close (`exchange.py:448-465`) runs on every path and must keep
+  doing so; it needs its own bound, NOT inclusion inside the end-to-end deadline (that
+  would leak the RPyC session).
 - **D-19: the A-25 pin must be re-cut to DERIVE from the longest budget.** Today
   `seam-constants.pin.test.ts:713-718` asserts `60_000 >= 60_000 - 30_000` with **both
   sides hand-typed literals**, so it stays green while its premise goes false. A pin that
