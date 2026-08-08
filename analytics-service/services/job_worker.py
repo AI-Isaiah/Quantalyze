@@ -109,7 +109,19 @@ from services.sfox_client import SfoxClient  # type annotations only
 from services.mt5_client import Mt5Session  # the worker's mt5 exchange holder
 # Phase 151: moved to services/mt5_concurrency.py (leaf) so allocator_positions.py
 # can share the ONE terminal registry without an import cycle; re-imported here so
-# existing call sites and test monkeypatch targets are unchanged.
+# existing call sites are unchanged.
+#
+# ⚠️ 151 review E2 — A MONKEYPATCH ON THIS MODULE ONLY BINDS WHAT THIS MODULE
+# READS. Re-exporting a name does not make `monkeypatch.setattr(job_worker, ...)`
+# reach the reader; the reader resolves it from its OWN module globals. Of the
+# six names below, `job_worker` itself reads exactly four —
+# `_MT5_DERIVE_READ_TIMEOUT_S`, `_mt5_bounded_restart`, `_mt5_terminal_lock_for`
+# and `_Mt5PostReadVerificationError` — so only those four are patchable here.
+# `_MT5_RESTART_TIMEOUT_S` and `_MT5_TERMINAL_LOCKS` are re-exports NOTHING here
+# reads: `_mt5_bounded_restart` / `_mt5_terminal_lock_for` read them from
+# `services.mt5_concurrency`, so a test must patch THAT module or its patch is a
+# silent no-op. (It already was one — see tests/test_mt5_derive_branch.py
+# `test_mt5_restart_itself_bounded`.)
 from services.mt5_concurrency import (
     _MT5_DERIVE_READ_TIMEOUT_S,
     _MT5_RESTART_TIMEOUT_S,
@@ -7114,6 +7126,7 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
         AllocatorHoldingsSyncTransientError,
         fetch_allocator_holdings,
         persist_allocator_holdings,
+        sync_error_copy,
         _map_exception_to_sync_status,
     )
 
@@ -7142,13 +7155,19 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
             # misleading sync_status='rate_limited' for a key that is
             # permanently geo-blocked from this region — surface 'error'.
             sync_status = "error" if is_geo_blocked(exc) else "rate_limited"
+            # AUM-02 write boundary: the COLUMN gets copy, the operator surfaces
+            # (DispatchResult.error_message → compute_jobs.last_error, the audit
+            # metadata, the log) get `sanitized`. Pre-fix this arm wrote the
+            # geo-block's "move region or proxy" text — operator instructions,
+            # and a raw venue body — into a column the browser renders verbatim.
+            rate_limited_copy = sync_error_copy(sync_status, venue)
 
             def _update_rate_limited() -> None:
                 # Return value discarded by the caller; drop it (matches
                 # _update_persist_err below) so we never annotate the Any-typed
                 # `.execute()` as APIResponse.
                 ctx.supabase.table("api_keys").update(
-                    {"sync_status": sync_status, "sync_error": sanitized}
+                    {"sync_status": sync_status, "sync_error": rate_limited_copy}
                 ).eq("id", api_key_id).execute()
 
             try:
@@ -7210,12 +7229,22 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
             error_kind, msg = classify_exception(exc)
             sanitized = msg[:500]
             status_target = _map_exception_to_sync_status(exc)
+            # AUM-02 write boundary — THE arm this defect class keeps coming
+            # back through. `sanitized` is `str(exc)[:500]` for every family the
+            # classifier has no fixed message for, and fetch_allocator_holdings
+            # deliberately re-raises PERMANENT failures unwrapped so the retry
+            # disposition survives (_must_reach_handler_unwrapped) — which means
+            # arbitrary exception text arrives HERE by design. It stays on the
+            # operator surfaces below (error_message → compute_jobs.last_error,
+            # audit metadata, log/Sentry); the user-visible column gets copy
+            # derived from the status, never from the exception.
+            human_copy = sync_error_copy(status_target, venue)
 
             def _update_err() -> None:
                 # Return value discarded by the caller; drop it (see
                 # _update_rate_limited / _update_persist_err).
                 ctx.supabase.table("api_keys").update(
-                    {"sync_status": status_target, "sync_error": sanitized}
+                    {"sync_status": status_target, "sync_error": human_copy}
                 ).eq("id", api_key_id).execute()
 
             try:
@@ -7288,10 +7317,19 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
             allocator_id, api_key_id, sanitized_persist,
         )
         # Best-effort: stamp sync_status so the UI exits the spinner.
+        #
+        # AUM-02 write boundary — the third and last arm that writes this
+        # column. `sanitized_persist` is a raw PostgREST/DB exception string
+        # (schema-cache misses, constraint names, connection errors): the same
+        # raw-Python-as-product-copy defect, just sourced from our own storage
+        # layer instead of a venue. It stays in the log and the audit metadata.
         try:
             def _update_persist_err() -> None:
                 ctx.supabase.table("api_keys").update(
-                    {"sync_status": "error", "sync_error": sanitized_persist}
+                    {
+                        "sync_status": "error",
+                        "sync_error": sync_error_copy("error", venue),
+                    }
                 ).eq("id", api_key_id).execute()
             await db_execute(_update_persist_err)
         except Exception as stamp_exc:  # noqa: BLE001

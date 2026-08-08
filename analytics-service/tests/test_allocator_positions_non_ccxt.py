@@ -75,6 +75,7 @@ import pytest
 
 import services.allocator_positions as ap
 from services.allocator_positions import (
+    MT5_NON_POSITIVE_EQUITY_NOTE,
     MT5_NON_USD_NOTE,
     SFOX_UNPRICED_ASSETS_NOTE,
     UNSUPPORTED_VENUE_NOTE,
@@ -722,23 +723,35 @@ async def test_mt5_symbol_is_account_scoped(mt5_enabled):
 
 
 # ---------------------------------------------------------------------------
-# Test 7b (151 review WR-01) — a non-positive account equity emits NO row
+# Test 7b (151 review WR-01, reworked by review [1]) — a non-positive account
+# equity emits a FLOORED $0 ROW, never silence
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 @pytest.mark.parametrize("equity", [-4_200.0, 0.0])
-async def test_mt5_non_positive_equity_emits_no_row(mt5_enabled, equity):
-    """ECONOMIC ORACLE: AUM is a sum, so a NEGATIVE row is subtraction.
+async def test_mt5_non_positive_equity_emits_a_floored_zero_row(
+    mt5_enabled, equity
+):
+    """ECONOMIC ORACLE: two ways to misstate AUM, and only one row avoids both.
 
-    A stopped-out MT5 account reporting negative equity is a real broker state.
-    Pre-fix only `math.isfinite` was checked, so that account wrote a row with a
-    negative `value_usd` which silently DEFLATED the allocator's AUM — including
-    the commit route's server-side audit recompute, where it would understate
-    the size recorded against a real mandate decision. A zero writes a measured
-    `$0`, which this branch elsewhere argues is a claim, not an absence.
+    AUM is a sum, so a NEGATIVE row is subtraction: a stopped-out MT5 account
+    reporting negative equity would silently DEFLATE the allocator's AUM,
+    including the commit route's server-side audit recompute. That is WR-01's
+    half, and the floor at 0 is what closes it.
 
-    The ccxt spot path has filtered `float(qty) > 0` since Phase 06; this is the
-    same rule, and the parametrization is what makes it a RULE rather than a
-    negative-number special case.
+    But WR-01 closed it by emitting NO ROW, and silence misstates AUM in the
+    other direction — and worse, because it PERSISTS. `persist_allocator_holdings`
+    only upserts what it is handed: it never deletes or zeroes the prior day's
+    row, and the dashboard collapses holdings to the LATEST asof per symbol. So
+    an account that blew up kept publishing its last POSITIVE equity forever,
+    under a clean `complete` sync. On this venue the row IS the account's whole
+    contribution, so "no row" cannot mean "nothing held" — only a $0 row can.
+
+    The invariant, stated without reference to the implementation: after a sync
+    that observes a flat or negative account, the value this venue contributes
+    to AUM is exactly 0 — and the allocator is told, because losing an account's
+    balance is a fact about their book, not an internal detail.
+
+    Parametrized over both signs so this is a RULE, not a negative-number case.
     """
     transport = _RecordingMt5Transport(account=_account(equity=equity))
 
@@ -746,12 +759,75 @@ async def test_mt5_non_positive_equity_emits_no_row(mt5_enabled, equity):
         "mt5", _session(transport), API_KEY_ID
     )
 
-    assert rows == [], f"a non-positive equity must contribute no holdings: {rows}"
-    # Not an ERROR either: nothing failed, the account simply holds nothing.
-    assert warning is None
+    assert len(rows) == 1, (
+        "a flat/negative account must still publish a row, or the previous "
+        f"positive row survives as the latest asof: {rows}"
+    )
+    row = rows[0]
+    # THE oracle: the contribution to AUM is zero — neither stale nor negative.
+    assert row["value_usd"] == 0.0, (
+        f"equity {equity} must contribute exactly $0, got {row['value_usd']}"
+    )
+    assert row["quantity"] == 0.0
+    # Account-scoped symbol, so the $0 upserts OVER the stale positive row
+    # rather than landing beside it (the unique key is on symbol, not equity).
+    assert row["symbol"] == "ACCOUNT-46293712"
+    # Not an error — nothing failed — but not silent either: user-visible copy,
+    # never a raw identifier.
+    assert warning == MT5_NON_POSITIVE_EQUITY_NOTE
+    assert "equity" in warning and "$0" in warning
     # NON-VACUITY: the read really happened (this is not an early bail on some
-    # unrelated gate), so the emptiness is the positivity rule's doing.
+    # unrelated gate), so the zero is the flooring rule's doing.
     assert "account_info" in transport.calls
+
+
+# ---------------------------------------------------------------------------
+# Test 7c (review [2] H2) — the floor is an ECONOMIC decision, not a rewrite of
+# what the broker said
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_mt5_raw_payload_keeps_the_negative_equity_the_floor_hides(
+    mt5_enabled,
+):
+    """`raw_payload` is the NORMALIZER'S INPUT: what the venue reported.
+
+    Test 7b above pins the economic half — a stopped-out account contributes
+    exactly $0, never a negative that would subtract from the allocator's AUM.
+    This test pins the FORENSIC half, and the two are only compatible if the
+    floored figure and the reported figure are different values in the row.
+
+    They were not: the floor rebound `equity` in place, and forty lines later
+    that same name was serialized into `raw_payload`. So a broker that reported
+    -4,200.00 was recorded as having reported 0.00 — byte-identical to an
+    account that genuinely sat flat. Once the worker logs roll (days), the row
+    is the ONLY surviving record that the account blew up rather than emptied,
+    and the row had been overwritten with the answer we chose instead of the
+    answer we got. A reconciliation against the broker statement then shows a
+    discrepancy with nothing to explain it.
+
+    The invariant, implementation-free: after a sync of a NEGATIVE-equity
+    account, the value contributed to AUM is 0 AND the stored raw payload still
+    says what the broker said.
+    """
+    reported = -4_200.0
+    transport = _RecordingMt5Transport(account=_account(equity=reported))
+
+    rows, warning = await fetch_allocator_holdings(
+        "mt5", _session(transport), API_KEY_ID
+    )
+
+    row = rows[0]
+    # Economic half (7b's ruling still holds — no deflation of AUM).
+    assert row["value_usd"] == 0.0
+    assert row["quantity"] == 0.0
+    # Forensic half: the diagnostic payload is UNFLOORED.
+    assert row["raw_payload"]["equity"] == reported, (
+        "raw_payload must carry the equity the broker REPORTED; storing the "
+        "floored 0.0 makes a blown-up account indistinguishable from a flat one"
+    )
+    # And the two really are distinguishable, which is the whole point.
+    assert row["raw_payload"]["equity"] != row["value_usd"]
+    assert warning == MT5_NON_POSITIVE_EQUITY_NOTE
 
 
 @pytest.mark.asyncio

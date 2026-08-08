@@ -30,7 +30,14 @@ Key design decisions (from plan 06-02 + VOICES-ACCEPTED.md):
 
 * Exception → sync_status mapping lives HERE (not in job_worker.py) so the
   handler's error-UX logic is co-located with the worker concern it serves
-  and can be unit-tested without importing the whole job_worker stack.
+  and can be unit-tested without importing the whole job_worker stack. Retry
+  DISPOSITION (permanent vs retryable) is the opposite: it belongs to
+  ``job_worker.classify_exception`` and is consulted there at call time via
+  ``_must_reach_handler_unwrapped`` — never re-listed here, because the two
+  classifiers cover different sets and a hand-copied list silently drifts.
+  The USER-VISIBLE half of the same decision is ``sync_error_copy``, which the
+  handler's failure arms call at the write: the column's text is derived from
+  the sync_status, never from the exception that produced it.
 
 * Venue-capability dispatch (Phase 151 / AUM-02): ``fetch_allocator_holdings``
   branches on the venue STRING before any fetch, mirroring the construction
@@ -127,6 +134,12 @@ MT5_MISSING_ACCOUNT_REF_NOTE = (
     "MT5 holdings sync couldn't identify this account — sync will retry "
     "automatically."
 )
+# Review [1] — a flat/negative MT5 account is a MEASURED state, and one the
+# allocator should be told about: their book just lost this account's balance.
+MT5_NON_POSITIVE_EQUITY_NOTE = (
+    "This MT5 account's equity is zero or negative — it's counted as $0 in "
+    "your book."
+)
 SFOX_FETCH_FAILED_NOTE = (
     "Couldn't fetch balances from sFOX — sync will retry automatically."
 )
@@ -144,11 +157,35 @@ _SFOX_MAX_NAMED_ASSETS = 6
 # AllocatorSyncStatus renders VERBATIM: a KeyError/TypeError/ccxt parse failure
 # inside fetch_positions reached the allocator as raw Python text. That is the
 # very defect class this module's AUM-02 invariant above declares impossible,
-# still live for binance/bybit/okx/deribit. The exception text now lives ONLY in
-# the log / Sentry chain.
+# still live for binance/bybit/okx/deribit.
+#
+# SCOPE OF THIS CONSTANT, stated precisely (the earlier wording — "the exception
+# text now lives ONLY in the log / Sentry chain" — was a claim about the WHOLE
+# path, and this constant cannot make it): it covers the RETRYABLE derivative
+# failure, the one case this arm turns into partial success. A failure the
+# classifier calls PERMANENT is re-raised unwrapped (see
+# ``_must_reach_handler_unwrapped``) and never reaches this line at all. What
+# keeps THAT case's exception text out of the user-visible column is
+# ``sync_error_copy`` below, at the write boundary in the handler — not this
+# constant.
 DERIVATIVE_FETCH_FAILED_NOTE = (
     "Couldn't read open positions from {venue} — spot balances synced and "
     "positions will retry automatically."
+)
+# 151 review E1 — the ccxt SPOT arm's end-user copy, the sibling
+# DERIVATIVE_FETCH_FAILED_NOTE above was given and this arm was not. The spot
+# fetch sat OUTSIDE any try: a malformed venue payload (KeyError('total'), a
+# TypeError inside the ticker merge, any ccxt parse failure) propagated to the
+# handler's generic ``except Exception``, whose ``classify_exception``
+# fall-through stamps ``str(exc)[:500]`` into api_keys.sync_error — rendered
+# VERBATIM by AllocatorSyncStatus. Same defect, same class, still live for
+# binance/bybit/okx/deribit. Same scope caveat as the derivative note above: this
+# constant covers the RETRYABLE spot failure only; a PERMANENT one is re-raised
+# unwrapped and is kept out of the user-visible column by ``sync_error_copy``
+# below. The spot side still FAILS the sync (partial success is a
+# derivative-side-only contract), it just fails in English.
+SPOT_FETCH_FAILED_NOTE = (
+    "Couldn't read balances from {venue} — sync will retry automatically."
 )
 
 # Product casing for the venues this module names in copy. Kept LOCAL and
@@ -252,6 +289,56 @@ def _cap_raw_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {"truncated": True, "preview": encoded[:3900]}
 
 
+def _must_reach_handler_unwrapped(exc: Exception) -> bool:
+    """True when ``exc`` must reach the job_worker handler AS ITSELF, i.e. must
+    NOT be converted into ``AllocatorHoldingsSyncTransientError`` copy.
+
+    Two, and only two, reasons:
+
+    1. **``job_worker.classify_exception`` calls it PERMANENT.** That function
+       — not this module, and not ``_map_exception_to_sync_status`` below — is
+       THE AUTHORITY on retry disposition, so it is CONSULTED here rather than
+       mirrored. A hand-copied allow-list is what broke this: the first version
+       of the wrapper listed the three types ``_map_exception_to_sync_status``
+       names, which is a DIFFERENT classifier with a different set, so two
+       permanent failures were downgraded to transient — an egress GEO-BLOCK
+       (``is_geo_blocked`` intercepts it before the ccxt hierarchy, and Binance
+       delivers it as ``ExchangeNotAvailable``, outside any ccxt allow-list)
+       and ``ccxt.BadRequest``. Downgrading either buys the full 30s→6h retry
+       ladder plus the daily cron re-enqueue against a host that will never
+       answer, under the copy "sync will retry automatically" — a promise that
+       cannot be kept. The handler's transient arm hardcodes
+       ``error_kind='transient'`` and never re-reads the ``__cause__`` chain,
+       so a downgrade here is FINAL.
+    2. **``ccxt.RateLimitExceeded``**, which the classifier calls transient but
+       the handler has a DEDICATED arm for (``_stamp_429`` + the per-exchange
+       cooldown shared with strategy-side ``poll_positions``). Swallowing it
+       would skip the stamp entirely.
+
+    ``services.job_worker`` is imported INSIDE the function, mirroring the way
+    job_worker imports this module: the import graph stays acyclic and this
+    module still imports (and unit-tests) without the worker stack. A failure
+    to classify — including a rogue ``__str__`` raising inside the classifier —
+    returns False, so the caller falls back to fixed end-user copy. Losing the
+    diagnosis to the log is strictly better than losing the copy guarantee.
+    """
+    if isinstance(exc, ccxt.RateLimitExceeded):
+        return True
+    try:
+        from services.job_worker import classify_exception
+
+        kind, _ = classify_exception(exc)
+    except Exception:  # noqa: BLE001 - never let classification break the copy path
+        logger.warning(
+            "fetch_allocator_holdings: could not classify %s — treating it as "
+            "retryable and surfacing end-user copy",
+            type(exc).__name__,
+            exc_info=True,
+        )
+        return False
+    return kind == "permanent"
+
+
 def _map_exception_to_sync_status(exc: Exception) -> str:
     """INGEST-05 / D-07: map a CCXT exception to the api_keys.sync_status value.
 
@@ -266,6 +353,66 @@ def _map_exception_to_sync_status(exc: Exception) -> str:
     if isinstance(exc, ccxt.RateLimitExceeded):
         return "rate_limited"
     return "error"
+
+
+# ---------------------------------------------------------------------------
+# AUM-02 — the sync_error WRITE-BOUNDARY copy.
+#
+# Converting each venue exception to copy inside its own branch (above) is
+# necessary but NOT sufficient, and the gap is what re-opened this defect:
+# ``fetch_allocator_holdings`` deliberately re-raises anything
+# ``classify_exception`` calls PERMANENT (``_must_reach_handler_unwrapped``) so
+# the retry disposition survives — and that exception lands in
+# ``run_poll_allocator_positions_job``'s generic ``except Exception``, whose
+# ``classify_exception`` fall-through returns ``str(exc)[:500]``. Written into
+# ``api_keys.sync_error`` that is raw Python (or venue JSON) in front of a user:
+# ``binance {"code":-1121,"msg":"Invalid symbol."}``.
+#
+# The fix is at the WRITE, not in the raise. The handler's failure arms derive
+# the column's text from the ``sync_status`` they are about to write and from
+# the venue — the two things they legitimately know — so there is no parameter
+# through which an exception string can travel. Structural on purpose: the
+# alternative (another list of exception types kept in step by hand) is exactly
+# how the regression this replaces happened. The diagnosis is NOT lost: the
+# classifier's sanitized text still goes to ``compute_jobs.last_error`` via
+# DispatchResult, to the ``allocator.holdings.sync_failed`` audit metadata, and
+# to the log / Sentry chain — all operator surfaces, none of them rendered to
+# the key's owner.
+#
+# Keys are the ``_map_exception_to_sync_status`` outputs; an unknown status
+# falls back to the generic 'error' sentence rather than raising, because a
+# KeyError here would abort the very write that clears the UI's 'syncing'
+# spinner.
+# ---------------------------------------------------------------------------
+SYNC_ERROR_COPY_BY_STATUS: dict[str, str] = {
+    "revoked": (
+        "{venue} rejected these API credentials — reconnect the key to resume "
+        "syncing."
+    ),
+    "rate_limited": (
+        "{venue} is rate-limiting us — sync will retry automatically."
+    ),
+    # Deliberately promises nothing about retrying: this arm covers both a
+    # permanent failure (the job will NOT retry) and a retryable one, and the
+    # one thing true in both is what the allocator is looking at right now.
+    "error": (
+        "Couldn't sync holdings from {venue} — the balances shown are from the "
+        "last successful sync."
+    ),
+}
+
+
+def sync_error_copy(sync_status: str, venue: str) -> str:
+    """The ONLY value a worker FAILURE arm may write to ``api_keys.sync_error``.
+
+    Takes a sync_status and a venue — never an exception, and never a string
+    derived from one. See the block comment above for why the guarantee is made
+    by the signature rather than by vetting what callers pass.
+    """
+    template = SYNC_ERROR_COPY_BY_STATUS.get(
+        sync_status, SYNC_ERROR_COPY_BY_STATUS["error"]
+    )
+    return template.format(venue=_venue_display(venue))
 
 
 async def _fetch_spot_rows(exchange_name: str, exchange: Any) -> list[dict[str, Any]]:
@@ -640,20 +787,46 @@ async def _fetch_mt5_account_rows(
     if balance is not None and not math.isfinite(balance):
         balance = None
 
-    # 151 review WR-01 — POSITIVITY, at parity with the ccxt spot path's
-    # `float(qty) > 0` filter (_fetch_spot_rows). Finiteness alone is not enough:
-    # a stopped-out MT5 account can report NEGATIVE equity (a real broker state),
-    # and that row would carry a negative `value_usd` that silently DEFLATES the
-    # allocator's AUM — including the commit route's server-side audit recompute.
-    # A zero-equity account is the twin problem: emitting `0.0` publishes a
-    # measured zero, which this branch argues against a few lines below. A flat
-    # or negative account contributes no holdings, so it emits no row.
+    # 151 review WR-01 — a stopped-out MT5 account can report NEGATIVE equity (a
+    # real broker state), and a negative `value_usd` would silently DEFLATE the
+    # allocator's AUM, including the commit route's server-side audit recompute.
+    #
+    # Review [1] — WR-01 clamped that by emitting NO ROW, borrowing the ccxt spot
+    # path's `float(qty) > 0` filter. The parity does not hold, and the omission
+    # is worse than the number it avoided. On the spot path a row is ONE asset
+    # among many and a zero balance is genuinely an absence. Here the row IS the
+    # account's entire contribution — and `persist_allocator_holdings` only
+    # upserts what it is given: it never deletes or zeroes yesterday's row, and
+    # the dashboard collapses `allocator_holdings` to the LATEST asof per symbol.
+    # So emitting nothing froze the last POSITIVE equity in place forever. An
+    # account that blew up kept counting its pre-blowup money in the Holdings
+    # tab, in every AUM-derived figure, and in the commit audit — under a
+    # `sync_status` of `complete`, with no warning anywhere.
+    #
+    # A zero here is not the "measured zero" the None fields below avoid: MT5
+    # answered, and its answer was "nothing left". Publish that, floored at 0 so
+    # WR-01's no-deflation ruling still holds, and SAY SO — losing an account's
+    # balance is exactly the kind of change a warning column exists for.
+    #
+    # Review [2] — the floor gets its OWN name. Rebinding `equity` in place also
+    # rewrote the figure that feeds `raw_payload` forty lines down, and
+    # raw_payload is the NORMALIZER'S INPUT: the thing the venue actually
+    # reported. A broker-reported -4200.0 stored as 0.0 is indistinguishable
+    # from a genuinely flat account the moment the logs roll, which destroys the
+    # only record of a blow-up. `equity` stays REPORTED; `equity_usd` is the
+    # floored, economic figure and is the only one allowed near quantity /
+    # value_usd.
     if equity <= 0:
         logger.info(
-            "poll_allocator_positions: mt5 account equity is not positive — no "
-            "row emitted (parity with the ccxt spot path's > 0 filter)"
+            "poll_allocator_positions: mt5 account equity is not positive "
+            "(%r) — emitting a floored $0 row so the stale prior row cannot "
+            "survive as the latest asof",
+            equity,
         )
-        return ([], None)
+        non_positive_note = MT5_NON_POSITIVE_EQUITY_NOTE
+    else:
+        non_positive_note = None
+    equity_usd = max(equity, 0.0)
 
     # (h) THE row. `symbol` is ACCOUNT-SCOPED because allocator_holdings is
     # UNIQUE (allocator_id, venue, symbol, asof) with NO api_key_id in the key:
@@ -684,8 +857,8 @@ async def _fetch_mt5_account_rows(
                 # path uses for stablecoins.
                 "holding_type": "spot",
                 "side": "flat",
-                "quantity": equity,
-                "value_usd": equity,
+                "quantity": equity_usd,
+                "value_usd": equity_usd,
                 "mark_price": 1.0,
                 # No basis, and no derivative uPnL to report: None is the
                 # conforming value. A 0.0 here would read downstream as a real
@@ -693,12 +866,13 @@ async def _fetch_mt5_account_rows(
                 "entry_price": None,
                 "unrealized_pnl_usd": None,
                 "cost_basis_usd": None,
+                # REPORTED, never floored — raw_payload is what the venue said.
                 "raw_payload": _cap_raw_payload(
                     {"currency": ccy, "equity": equity, "balance": balance}
                 ),
             }
         ],
-        None,
+        non_positive_note,
     )
 
 
@@ -961,17 +1135,61 @@ async def fetch_allocator_holdings(
 
     # Spot side — any failure (including Deribit Path B) re-raises to
     # the handler; partial success only applies to the derivative side.
-    spot_rows = await _fetch_spot_rows(exchange_name, exchange)
+    #
+    # 151 review E1 — the derivative arm's posture, exactly: an exception the
+    # HANDLER classifies deliberately re-raises untouched (see
+    # _must_reach_handler_unwrapped — job_worker.classify_exception is the
+    # authority on that, NOT a list kept here), and every OTHER exception is
+    # converted to the fixed copy constant before it can reach the handler's
+    # generic arm and be stamped as raw Python. Unlike the derivative arm this
+    # is NOT partial success — there is no book without balances — so it raises
+    # AllocatorHoldingsSyncTransientError, the type whose ``str()`` IS end-user
+    # copy and which the handler retries.
+    try:
+        spot_rows = await _fetch_spot_rows(exchange_name, exchange)
+    except Exception as exc:  # noqa: BLE001
+        if _must_reach_handler_unwrapped(exc):
+            raise
+        logger.warning(
+            "fetch_allocator_holdings: spot-side read failed for %s (%s) — "
+            "surfacing end-user copy (AUM-02)",
+            exchange_name,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        raise AllocatorHoldingsSyncTransientError(
+            SPOT_FETCH_FAILED_NOTE.format(venue=_venue_display(exchange_name))
+        ) from exc
 
     try:
         deriv_rows = await _fetch_derivative_rows(exchange_name, exchange)
-    except (
-        ccxt.AuthenticationError,
-        ccxt.PermissionDenied,
-        ccxt.RateLimitExceeded,
-    ):
-        raise
     except Exception as exc:  # noqa: BLE001
+        # A PERMANENT failure is not partial success. This arm already re-raised
+        # two of them (auth / permission → the handler's 'revoked' path) and
+        # discarded the spot rows to do it; the predicate just completes that
+        # same rule over the classifier's whole permanent set, so a geo-block or
+        # a BadRequest can no longer be reported as "positions will retry
+        # automatically" on a DONE job that will never retry into a different
+        # answer. Everything the classifier would retry keeps the partial-
+        # success posture below.
+        #
+        # RE-AFFIRMED 2026-08-08, after the raw-text regression that rode in with
+        # this predicate. The alternative considered was restoring "permanent ⇒
+        # partial success" for non-credential failures, so a healthy Binance spot
+        # balance is not withheld from AUM because fetch_positions 4xx'd. Not
+        # taken, for two reasons. (1) It needs a SECOND axis — "is this permanent
+        # failure ALSO a key-level verdict?" — and a second hand-tuned axis is
+        # exactly the mechanism that produced the regression being repaired.
+        # (2) It is wrong for the venue where it would matter most: Deribit spot
+        # is deferred (``_fetch_spot_rows`` returns [] with no network call), so
+        # for Deribit this arm IS the whole book and "partial success" would
+        # stamp complete_with_warnings on a key contributing nothing. ONE rule
+        # instead: permanent ⇒ the key's sync failed; retryable derivative-only
+        # failure ⇒ partial success. What the regression actually cost the user
+        # was the COPY, and that is fixed at the write boundary (sync_error_copy)
+        # rather than by re-opening the disposition.
+        if _must_reach_handler_unwrapped(exc):
+            raise
         # Partial success: persist spot, surface the derivative-side failure as
         # sync_status='complete_with_warnings' via the handler.
         #
