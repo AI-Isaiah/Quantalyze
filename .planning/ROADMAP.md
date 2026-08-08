@@ -304,6 +304,63 @@ Plans:
 - ⚠️ WIZFORM-04: a naive retry loop multiplies the budget `src/lib/seam-budgets.invariant.test.ts` recomputes, and retrying into an open breaker is how one slow venue takes down every other user's submits. The fix starts with "is the call needed", not "add a loop".
 - ⚠️ The allocation-amount form Phase 150 (OWN-03) adds is IN SCOPE for the inline-validation criterion — a freshly-shipped wizard step must not re-introduce the terminal-envelope class this phase deletes.
 
+> ⛔ **PHASE 153 IS SPLIT FOUR WAYS (founder-approved 2026-08-08).** The planner measured 15–16 plans across two runtimes against a 3–5 plan budget and returned `## PHASE SPLIT RECOMMENDED` rather than thin the tasks. **Nothing is dropped or deferred** — all 6 requirements and all 34 locked decisions are assigned. Cut lines follow **file ownership**, so every co-commit constraint (D-14, D-15, D-16, D-26, and the admit-a-code-in-the-commit-that-emits-it rule) stays *inside* one sub-phase. Execute 153.1 → 153.2 and 153.3 → 153.4; the Python chain (153.3) is file-disjoint from the TypeScript chain and may run in parallel. Shared artefacts (RESEARCH, PATTERNS, UI-SPEC, VALIDATION, both EVIDENCE files) live in the parent `153-` directory and are read by every sub-phase.
+
+### Phase 153.1: WIZFORM-CODES — Honest codes + the venue-capability foundation (INSERTED)
+
+**Goal**: No wizard failure renders `code: UNKNOWN` when the server did classify it, and the copy layer gains a per-venue capability record so venue-shaped remedies are filtered by a class rule rather than by stacked instance checks
+**Depends on**: Nothing (foundation for 153.2 and 153.4)
+**Requirements**: WIZFORM-02, WIZFORM-03
+**Decisions**: D-08, D-09(a/b), D-10, D-17, D-21, D-22, D-23, D-34 (D-18/D-28 referenced as superseded)
+**Owns**: `src/lib/closed-sets.ts`(+test), `src/lib/wizardErrors.ts`(+test, +invariant test), `finalize-wizard/route.ts` (validatePayload only), `SubmitStep.tsx` (roster only), `seam-constants.pin.test.ts` (Wave-0 A-25 assertion only)
+**Plans**: TBD
+**UI hint**: no
+
+- ⛔ **D-34: reordering is not cosmetic.** Six PRE-EXISTING arms (`:573 :617 :767 :1293 :1310` written `{ error, code }`, plus `:1319` lowercase) are invisible to `EMITTER_RE`. They are out of scope only because it gates on `status: 400`; the moment the third `ROUTES` entry lands **and** the predicate widens, the coverage assertion goes blind on them. Size the vacuity floor against the **reordered total**, never against the nine.
+- ⚠️ The A-25 **derived** assertion lands here as a Wave-0 gate (green at HEAD) so that 153.4's budget raise cannot pass a pin that cannot fail.
+
+### Phase 153.2: WIZFORM-FIELD — The form refuses at the field; MT5 declarable *and* submittable (INSERTED)
+
+**Goal**: A field the user can get wrong is refused inline, at the field, before submit — and an MT5 strategy can both declare its venue and actually complete a submit
+**Depends on**: Phase 153.1 (copy members, `VENUE_CAPABILITIES`, `MIN_DESCRIPTION_CHARS`)
+**Requirements**: WIZFORM-01, WIZFORM-04, MT5-14
+**Decisions**: D-06, D-07, D-11, D-12, D-13, D-14(a+b), D-15, D-16, D-20, D-22
+**Owns**: `MetadataStep.tsx`(+test), `AllocateDialog.tsx`(+test), `SubmitStep.tsx` (routing), `finalize-wizard/route.ts` (probe gate + catch-all), `closed-sets.mt5-flag.test.ts`, the wizard chip set
+**Plans**: TBD
+**UI hint**: yes
+
+- ⛔ **FLAG-3 is ONE indivisible task.** Deleting `MetadataStep.tsx:491`'s `disabled` without widening the `.trim()`-only `handleSubmit` guard at `:222-233` lets a 2-character description POST — re-shipping the very defect this phase deletes.
+- ⛔ **MT5-14 and WIZFORM-04 ship together.** Widening the chip set without the probe skip leaves MT5 a HARD BLOCKER — declarable but still unsubmittable.
+- ⚠️ The `closed-sets.mt5-flag` pin re-cut and the widening are the SAME commit, and the re-cut ADDS the positive flag-ON assertion the pin lacks today.
+
+### Phase 153.3: WIZFORM-GW — MT5 gateway honesty (Python; file-disjoint) (INSERTED)
+
+**Goal**: An MT5 validation's honest verdict can physically arrive — the nested-timeout inversion is removed, the terminal is shared through the lease that already exists instead of raced, and a key we cannot classify is refused rather than stamped read-only
+**Depends on**: Nothing (independent of the TypeScript chain; sequenced BEFORE 153.4 per D-24)
+**Requirements**: WIZFORM-05 (server leg)
+**Decisions**: D-02, D-03, D-24, D-25, D-27, D-29, D-30, D-31, D-32, D-33 (D-28 superseded)
+**Owns**: `analytics-service/services/mt5_client.py`, `services/mt5_validation.py`, `services/mt5_concurrency.py`, `routers/exchange.py`, `tests/test_mt5_*.py`, `docs/runbooks/mt5-go-live.md`
+**Plans**: TBD
+**UI hint**: no
+
+- 🔒 **D-31 is a SECURITY fix, not a refactor.** `is_trade_capable` infers investor mode from two signals that are BOTH false for a MASTER account under the terminal's default-ON "Disable automatic trading through the external Python API". `terminal_info()` is called nowhere and does not exist on `Mt5Client` — it must be ADDED. Fail **CLOSED**: refuse what we cannot classify.
+- ⛔ **D-25: `MT5_REQUEST_TIMEOUT_S` stays byte-unchanged.** The validate path takes its own longer chain via the existing `request_timeout_s` ctor arg. Moving the module constant reopens the v1.11 WEDGE-01 wedge class.
+- ⭐ **D-29: the lease already exists and this path is the one caller that skips it.** `_mt5_terminal_lock_for` (`mt5_concurrency.py:126-134`) is taken by `job_worker.py:364`/`:3572` and `allocator_positions.py:656`, and by `routers/exchange.py` **zero** times. Add a BOUNDED acquisition timeout distinct from the operation timeout — today `wait_for` sits inside the lock, so a queued caller waits unbounded. No account cap: accounts are unlimited, concurrency is one.
+
+### Phase 153.4: WIZFORM-BUDGET — Venue-aware budget + the honest long wait (INSERTED)
+
+**Goal**: The client grants an MT5 validation a budget its honest verdict fits inside, and a long wait is legible and abortable rather than a silent stall
+**Depends on**: Phase 153.1 (`SEAM_DEADLINE_EXCEEDED`, `serialized`); best AFTER 153.3 (a budget cannot fix a structurally censored verdict — D-24)
+**Requirements**: WIZFORM-05 (client leg)
+**Decisions**: D-01, D-04, D-05, D-19, D-21, D-26, D-27 (D-18 superseded)
+**Owns**: `resilient-fetch.ts`, `analytics-client.ts`, `seam-constants.pin.test.ts`, `seam-budgets.invariant.test.ts`, `seam-retry-registry.ts`(+tests), `ConnectKeyStep.tsx`, `MultiKeyConnectStep.tsx`
+**Plans**: TBD
+**UI hint**: yes
+
+- ⛔ **D-26: the `120_000` budget row and `BREAKER_LOCK_TOMBSTONE_S` 60 → 90 are the SAME commit.** A-25 then holds exactly: `(30 + 90) × 1000 = 120 000`.
+- ⚠️ **`budgetKeyFor` must diverge from its analog deliberately.** `process-key-client.ts:123-134` throws on `default:` via a `never` assignment; this one takes a caller-supplied string, so `default:` **returns `"validate-key"` and never throws**. Write the divergence down or a reviewer will "fix" it back. Never interpolate a wire value into a breaker key (T-140-01).
+- ⚠️ 16 pin sites (RESEARCH Table C) must move together, including the prose restatements that stay green while their premise breaks.
+
 ### Phase 154: WIZCONT/STALE — Wizard continuity, no stale screens
 
 **Goal**: Re-entering the wizard continues where the founder left off, screens never show a state the backend has already left, and a token-less credential re-connect cannot mint duplicates
