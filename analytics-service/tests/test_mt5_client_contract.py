@@ -70,12 +70,14 @@ class _FakeMt5:
     Scenario keys (all optional):
       login            -> value login() returns (default True)
       account          -> value account_info() returns
+      terminal         -> value terminal_info() returns
       deals            -> value history_deals_get() returns
       order_check      -> value order_check() returns
       last_error       -> tuple last_error() returns (default (0, "unknown"))
       shutdown_raises  -> if truthy, shutdown() raises
       login_raises     -> if set, login() RAISES this exception (transport error)
       account_raises   -> if set, account_info() RAISES this exception
+      terminal_info_raises -> if set, terminal_info() RAISES this exception
       last_error_raises -> if set, last_error() RAISES this exception (transport
                            died on the last_error() round-trip itself)
     """
@@ -111,6 +113,12 @@ class _FakeMt5:
         if exc is not None:
             raise exc
         return self._scenario.get("account")
+
+    def terminal_info(self):
+        exc = self._scenario.get("terminal_info_raises")
+        if exc is not None:
+            raise exc
+        return self._scenario.get("terminal")
 
     def history_deals_get(self, from_ts, to_ts):
         self.deals_window = (from_ts, to_ts)  # record the (coerced) bounds
@@ -470,6 +478,79 @@ def test_account_info_materialized_to_native_dict():
     assert info["trade_allowed"] is False
 
 
+# -- terminal_info: the D-31 capability signal, same read discipline ----------
+
+
+def test_terminal_info_materialized_to_native_dict():
+    """terminal_info() netref -> a plain native dict (never the live proxy).
+
+    The two fields the Phase-153.3 capability rule consumes (`connected`,
+    `trade_allowed`) must survive materialization as native booleans; a leaked
+    proxy would die with the connection before the verdict is taken.
+    """
+    connect, _fake, _rec = _make(
+        {
+            "terminal": _FakeNamedTuple(
+                connected=True, trade_allowed=True, community_account=False
+            )
+        }
+    )
+    client = Mt5Client("host", 18812, _connect=connect)
+    info = client.terminal_info()
+    assert isinstance(info, dict)
+    assert not isinstance(info, _FakeNamedTuple)
+    assert info["connected"] is True
+    assert info["trade_allowed"] is True
+
+
+def test_terminal_info_none_raises_via_last_error():
+    """D-31 REGRESSION: a `None` terminal_info() is an ERROR, never data.
+
+    This is the case that must not be softened into `{}` or `None`-as-a-value:
+    the capability rule reads `connected` / `trade_allowed` off this dict, and a
+    silently-empty read would make BOTH look false — which under a rule that
+    treated the read as data (rather than as an error) is precisely how an
+    unreadable terminal turns into a confident verdict. `None` -> typed
+    Mt5ClientError carrying the last_error() code.
+    """
+    connect, _fake, _rec = _make(
+        {"terminal": None, "last_error": (-10004, "No IPC connection")}
+    )
+    client = Mt5Client("host", 18812, _connect=connect)
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.terminal_info()
+    assert exc_info.value.code == -10004
+
+
+def test_terminal_info_transport_raise_is_scrubbed_and_typed():
+    """A transport-RAISED terminal_info() surfaces scrubbed + typed, never a raw
+    rpyc exception (clone of the account_info read-transport guard, T-134-01)."""
+    connect, _fake, _rec = _make(
+        {
+            "terminal_info_raises": RuntimeError(
+                "rpyc timeout; apikey=SUPERSECRET leaked"
+            )
+        }
+    )
+    client = Mt5Client("host", 18812, _connect=connect)
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.terminal_info()
+    assert "SUPERSECRET" not in str(exc_info.value)
+
+
+def test_terminal_info_degenerate_shape_raises():
+    """A terminal_info() return without ._asdict() is degenerate -> fail loud,
+    never coerced into an empty dict (which would read as "terminal says no")."""
+
+    class _NoAsdict:
+        pass
+
+    connect, _fake, _rec = _make({"terminal": _NoAsdict()})
+    client = Mt5Client("host", 18812, _connect=connect)
+    with pytest.raises(Mt5ClientError):
+        client.terminal_info()
+
+
 # -- history_deals_get: the load-bearing None != () != populated trio --------
 
 
@@ -756,6 +837,10 @@ def test_public_surface_is_exactly_the_contract():
     assert public == {
         "login",
         "account_info",
+        # terminal_info (153.3 / D-31) is a READ of the terminal we operate — it
+        # carries no user credential and wraps no trade path, so the read-only-by-
+        # construction property is unchanged by its addition.
+        "terminal_info",
         "history_deals_get",
         "order_check",
         "close",

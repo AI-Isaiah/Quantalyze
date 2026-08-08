@@ -10,7 +10,8 @@ shape defined here, so the disciplines below are load-bearing.
 Contract:
 
   * Surface (read-only by CONSTRUCTION) — `login`, `account_info`,
-    `history_deals_get`, `order_check` (probe only), `close`. Read-only is a
+    `terminal_info`, `history_deals_get`, `order_check` (probe only), `close`.
+    Read-only is a
     STRUCTURAL property, not a probed scope claim: the underlying `mt5linux`
     client exposes the FULL trading surface (order_send, positions_get,
     orders_get, ...), but this facade composes ONLY the read methods plus the
@@ -327,6 +328,38 @@ class Mt5Client:
     def account_info(self) -> dict[str, Any]:
         """Current account snapshot as a native dict. None (error) -> typed raise."""
         info = self._guarded_read(self._mt5.account_info)
+        if info is None:
+            self._raise_last()
+        return _materialize(info)
+
+    def terminal_info(self) -> dict[str, Any]:
+        """Current TERMINAL snapshot as a native dict. None (error) -> typed raise.
+
+        This reads the state of the MetaTrader terminal WE operate (the gateway
+        process), NOT the user's account — it carries no credential of theirs.
+        Two fields are load-bearing for the Phase-153.3 capability rule (D-31,
+        EVIDENCE §C12):
+
+          * ``connected`` — is the terminal attached to a trade server. MQL5
+            "Trade permission" lists "no connection to the trade server" as a
+            SIBLING cause of ``account_info().trade_allowed`` being false, so a
+            detached terminal makes the account-level negative unattributable.
+          * ``trade_allowed`` — the terminal-level AutoTrading permission. It
+            subsumes the terminal option *"Disable automatic trading through the
+            external Python API"*, which MetaQuotes ships **ON by default, "for
+            security reasons"**. With that option in force ``order_check`` is
+            refused from Python REGARDLESS of investor vs master, so a MASTER
+            password produces exactly the two negatives an investor password
+            produces.
+
+        That is why this method exists: a false ``trade_allowed`` here makes the
+        account-level negatives UNINFORMATIVE, and a rule that concluded
+        "read-only" from them would stamp a trade-capable password read-only —
+        a fail-OPEN on the one security property the probe exists to prove.
+        ``services.mt5_validation.classify_trade_capability`` therefore refuses
+        (``"undetermined"``) rather than concluding.
+        """
+        info = self._guarded_read(self._mt5.terminal_info)
         if info is None:
             self._raise_last()
         return _materialize(info)
