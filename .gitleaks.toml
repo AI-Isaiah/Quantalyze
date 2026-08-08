@@ -133,4 +133,13 @@ paths = [
   # the whole point of both suites is that these values get suppressed.
   '''(^|/)analytics-service/tests/test_secret_misconfig_signal\.py$''',
   '''(^|/)analytics-service/tests/test_process_key_200_discriminator\.py$''',
+  # v1.17 Phase 151 (AUM) E1 money-basis oracle. The suite names its api_key
+  # fixtures after the ROLE each key plays in the notional-vs-equity proof —
+  # `E1_KEY_DERIV = "e1-key-deriv"`, `E1_KEY_SPOT`, `E1_KEY_DORMANT` — so
+  # generic-api-key matches the `KEY` in the identifier and scores the hyphenated
+  # literal at entropy ~3.52. The values are plain lowercase slugs used as map
+  # keys in an in-memory fixture; no credential material exists in this file.
+  # Same push-to-main-only asymmetry as the entries above (the PR-diff scan
+  # passed; the squash-commit scan on main flagged it).
+  '''(^|/)src/app/\(dashboard\)/allocations/components/ScenarioComposer\.test\.tsx$''',
 ]

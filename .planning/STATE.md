@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
-status: ready_to_plan
-stopped_at: Phase 152 complete (6/6) — ready to discuss Phase 153
-last_updated: 2026-08-07T20:17:44.150Z
+status: planning
+stopped_at: "v0.54.0.0 landed (phases 150/151/152 shipped, PR #668 merged e0481411); Phase 153 discuss in progress"
+last_updated: "2026-08-08T18:45:44.080Z"
 last_activity: 2026-08-07
 progress:
   total_phases: 9
-  completed_phases: 5
+  completed_phases: 6
   total_plans: 37
-  completed_plans: 198
-  percent: 56
+  completed_plans: 37
+  percent: 67
 ---
 
 # Project State — Quantalyze
@@ -1167,7 +1167,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ### Blockers / Concerns
 
-- **⏳ PR #656 is OPEN and unmerged** (`feat/v1.16-141-jobs-rate-retry`, 131 commits ahead of `origin/main`, MERGEABLE). 141 / 141.1 / 141.2 are all verified `passed` but NOT shipped. Founder call — everything else in the SEAM group is closed.
+- ~~**PR #656 is OPEN and unmerged**~~ — **RESOLVED: #656 MERGED** (v0.51.0.0, seam retry — 141 + 141.1 + 141.2). Verified 2026-08-08; the entry was stale.
 - **⚠️ Phase 140's `human_verification` item was never dispositioned — still owed as live ops.** "Watch Sentry during the next real Railway degradation window: confirm `CIRCUIT_OPEN` 503 envelopes appear and that no cascade-500s occur in the same window." It cannot be closed from the repo (no live Upstash in CI/local — 20+ test files delete the env vars — and no controllable Railway failure injection); it was declared manual-only in `140-VALIDATION.md`. `140-VERIFICATION.md` still reads `human_needed` for this one reason. Mirrored into TODOS.md.
 - **📋 Close-out lesson (2026-08-01):** the SEAM group's phase-close bookkeeping went un-run because the phases were hand-driven per-phase rather than under `/gsd-autonomous`, so nothing owned **autonomous step 3d (post-execution routing)**. Consequences found and fixed in one pass: 141.1 sat at `gaps_found` for a day after all three of its gaps were closed in the tree (`22332e34` + the ledger reconciliation) simply because the VERIFICATION was never re-run; 141.2 sat at `human_needed` with four probes nobody had been asked to run (three were dischargeable read-only in minutes); 141.1/141.2 had **no milestone-list entry at all**; and 41 plan checkboxes across 140.4, 140.5, 141, 141.1 and 141.2 were never ticked, plus 8 missing G-series rows under 140.3. See memory `feedback_hand_driving_gsd_skips_orchestrator_gates`. **If a phase is hand-driven, run the close-out explicitly — the verifier flags these as "orchestrator-owned" and then nothing owns them.**
 - **SEAM-05 audit is the Phase 141 long pole** — retry-safety of `recomputeMatch` / `computePortfolioAnalytics` / optimizer / simulator / bridge is UNAUDITED; `_get_recompute_lock` may be process-local, not distributed. Default everything unproven to no-retry.
@@ -1186,9 +1186,17 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session Continuity
 
-**Last activity:** 2026-08-07
-**Stopped at:** Phase 152 UI-SPEC approved
-**Next step:** run `/gsd:verify-work` on Phase 140.1.1. Nothing is left to execute.
+**Last activity:** 2026-08-08
+**Stopped at:** v0.54.0.0 landed (phases 150/151/152 shipped, PR #668 merged e0481411); Phase 153 discuss in progress
+**Next step:** Phase 153 (WIZFORM) — discuss → ui-phase → plan → execute on `feat/v1.17-153-wizform`.
+
+⚠️ **Post-land CI state (2026-08-08):** `secret-scan` went RED on main at `e0481411` — a
+false-positive `generic-api-key` hit on the Phase 151 E1 fixture `E1_KEY_DERIV = "e1-key-deriv"`
+in `ScenarioComposer.test.tsx` (green on PR #668; the push-to-main full scan flags what the
+PR-diff scan does not — the same asymmetry six existing `.gitleaks.toml` entries document).
+**Red main CI blocks the Railway analytics deploy**, so the Phase 151 worker fixes
+(`sync_error` copy selection, MT5/sFOX holdings) are NOT yet live — the service is still serving
+pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel frontend DID land.
 
 ⚠️ **Env changed and LEFT changed:** `slowapi` was synced **0.1.9 → 0.1.10** (the CI pin at `analytics-service/requirements.txt:226`) and deliberately NOT restored — matching CI is the point, and every #3/#4/#5 mutation row is version-stamped against it. A verifier re-running those cycles on 0.1.9 would not be reproducing this evidence.
 
