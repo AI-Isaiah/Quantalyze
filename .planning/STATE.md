@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: planning
-stopped_at: "153.3 wave 6 (D-35) LANDED — Phase 153.3 COMPLETE (6/6 waves). The mt5.shutdown() class is closed at the SINK: Mt5Client.close() no longer calls it, which fixed aclose_exchange's mt5 arm, ingestion/mt5.py's adapter finally and both operator scripts with ZERO call-site edits; close()/release() collapsed onto one _teardown_transport(); restart() keeps the ONE deliberate lease-held teardown and no longer leaks its stale rpyc socket. tests/test_mt5_shutdown_roster.py DERIVES the roster from source (ast, 110 files) with hand-typed pins, vacuity floors and 8 self-tests; mutations M1 (a shutdown added to close) and M2 (a restart moved out of its lease) were RUN and observed RED. All nine 'session never leaks' assertions re-pointed, none deleted. Gates: -k mt5 352 passed / full suite 5074 passed, 96 skipped; mypy --strict clean on 88 files; MT5_REQUEST_TIMEOUT_S zero-diff across all six waves. WIZFORM-05 stays UNCHECKED — the client leg (D-26 120000ms) is Phase 153.4's. Next: 153.1 -> 153.2 -> 153.4."
-last_updated: "2026-08-09T03:12:33.952Z"
+stopped_at: "Phase 153.3 COMPLETE (6/6 waves, independently gated: -k mt5 364 passed, full suite 5074, mypy --strict clean, MT5_REQUEST_TIMEOUT_S zero-diff, zero TypeScript, worker lease sites byte-unchanged). WIZFORM-05 deliberately UNCHECKED — client leg is 153.4's. Next: execute 153.1 (6 plans) -> 153.2 (5) -> 153.4 (5)."
+last_updated: "2026-08-09T03:17:26.935Z"
 last_activity: 2026-08-07 -- Phase 152 execution started
 progress:
   total_phases: 13
@@ -517,6 +517,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - 153.3-05: the per-validate outcome event hangs off a try/finally at a NEW function boundary, NOT off the release block — that block sits inside the terminal lease and cannot see lease_busy or gateway_unconfigured
 - 153.3-05: structlog loggers must be bound PER CALL — logging_config sets cache_logger_on_first_use=true, so a module-level proxy freezes its processor chain (including the PII scrub) at first use
 - 153.3-05: D-27 honoured literally — not one timeout constant moved; the runbook records the whole chain as PROVISIONAL with Phase 155 named as the owner of the tightening
+- [Phase ?]: Phase 153.3: MT5 gateway honesty shipped — teardown deleted at the sink (D-35), terminal lease taken by the validate path (D-29), initialize() bound and the ordering guard extended to the class (D-24), read-only fails CLOSED (D-31), stages instrumented (D-32)
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1219,8 +1220,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-09T03:12:33.941Z
-**Stopped At:** 153.3 wave 6 (D-35) LANDED — Phase 153.3 COMPLETE (6/6 waves). The mt5.shutdown() class is closed at the SINK: Mt5Client.close() no longer calls it, which fixed aclose_exchange's mt5 arm, ingestion/mt5.py's adapter finally and both operator scripts with ZERO call-site edits; close()/release() collapsed onto one _teardown_transport(); restart() keeps the ONE deliberate lease-held teardown and no longer leaks its stale rpyc socket. tests/test_mt5_shutdown_roster.py DERIVES the roster from source (ast, 110 files) with hand-typed pins, vacuity floors and 8 self-tests; mutations M1 (a shutdown added to close) and M2 (a restart moved out of its lease) were RUN and observed RED. All nine 'session never leaks' assertions re-pointed, none deleted. Gates: -k mt5 352 passed / full suite 5074 passed, 96 skipped; mypy --strict clean on 88 files; MT5_REQUEST_TIMEOUT_S zero-diff across all six waves. WIZFORM-05 stays UNCHECKED — the client leg (D-26 120000ms) is Phase 153.4's. Next: 153.1 -> 153.2 -> 153.4.
+**Last Date:** 2026-08-09T03:17:26.629Z
+**Stopped At:** Phase 153.3 COMPLETE (6/6 waves, independently gated: -k mt5 364 passed, full suite 5074, mypy --strict clean, MT5_REQUEST_TIMEOUT_S zero-diff, zero TypeScript, worker lease sites byte-unchanged). WIZFORM-05 deliberately UNCHECKED — client leg is 153.4's. Next: execute 153.1 (6 plans) -> 153.2 (5) -> 153.4 (5).
 **Resume File:** None
 **Next step:** 153.3 is COMPLETE (6/6). Execute 153.1 → 153.2 → 153.4 on `feat/v1.17-153-wizform`. ⛔ WIZFORM-05 stays unchecked until 153.4 closes the client leg.
 
