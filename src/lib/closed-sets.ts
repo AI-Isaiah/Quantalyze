@@ -160,9 +160,25 @@ function venueCapabilities(
   venue: string | null | undefined,
 ): VenueCapabilities | undefined {
   if (!venue) return undefined;
-  return (VENUE_CAPABILITIES as Record<string, VenueCapabilities | undefined>)[
-    venue.toLowerCase()
-  ];
+  const key = venue.toLowerCase();
+  // 153.1 review WR-05 — OWN-property only. The key arrives OVER THE WIRE
+  // (153.2 feeds this a venue read off the `api_keys` row), and a plain-object
+  // index resolves "constructor", "toString" and "__proto__" to inherited
+  // members, handing back a truthy object typed as a capability row. This is
+  // the Record-vs-Map rule wizardErrors.ts states twice as a security
+  // property rather than a style choice.
+  //
+  // ⚠️ Today's impact is nil for an ACCIDENTAL reason, which is exactly why
+  // this is worth closing: `Object.prototype` carries none of
+  // `scopeProbeSupported` / `substitutable` / `serialized`, so all three
+  // predicates fall to their declared defaults — the safe directions. That
+  // safety is a property of today's three capability NAMES, not of the
+  // lookup. A fourth capability whose safe default is the other polarity
+  // would be silently subverted for those three keys, and
+  // `venueSupportsScopeProbe` gates an ASVS V4 control.
+  return Object.hasOwn(VENUE_CAPABILITIES, key)
+    ? (VENUE_CAPABILITIES as Record<string, VenueCapabilities>)[key]
+    : undefined;
 }
 
 /**
