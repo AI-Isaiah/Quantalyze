@@ -33,6 +33,20 @@ import type { GateFailureCode } from "./strategyGate";
 // them. Replacing one bare integer with another is how this file would keep
 // lying with a different number, so the PREDICATE is named instead of a count.
 import { CircuitOpenError } from "@/lib/seam-errors";
+// 153.1-03 / WIZFORM-03 — SAFE UNDER THE LOAD-BEARING IMPORT RULE ABOVE, and
+// here is the check rather than the assurance. `closed-sets.ts` imports exactly
+// one module (`zod`), declares no `import "server-only"`, and its only
+// module-load env reads are the three build-inlined `NEXT_PUBLIC_*` flags
+// (`:226` SFOX, `:249` SMOOTHED_MTM, `:275` MT5); the two non-public reads
+// (`SFOX_ENABLED :302`, `MT5_ENABLED :330`) sit INSIDE functions and never run
+// at module load. `MetadataStep.tsx:19` already VALUE-imports this module into
+// the same wizard bundle, so this adds no new bytes to the browser payload.
+// The prohibition above targets `@upstash/*` and the top-level
+// `Redis.fromEnv()` singleton reachable through `@/lib/analytics-client` and
+// `@/lib/resilient-fetch`; neither is reachable from here.
+// [VERIFIED at 413d124f — re-verify the four claims above before landing any
+// further import into this file.]
+import { venueIsSubstitutable } from "./closed-sets";
 
 export type WizardErrorCode =
   // Key validation (ConnectKeyStep)
@@ -358,12 +372,117 @@ export type WizardErrorAction =
  */
 const SIZE_MB_PLACEHOLDER = "{sizeMb}";
 
+/**
+ * 153.1-03 / WIZFORM-03 — the wizard surface an error was raised on.
+ *
+ * Named as a closed set rather than a bare string so a bullet cannot be gated
+ * on a surface nobody passes: a typo is a COMPILE error at the table, not a
+ * bullet that silently never renders.
+ */
+export type WizardSurface = "connect" | "submit" | "csv" | "allocate";
+
+/**
+ * The venue capabilities a `fix[]` bullet may be gated on. ONE member today.
+ *
+ * Adding a second (153.4 wants `serialized` for the long-wait copy) is one
+ * member here plus one entry in `VENUE_CAPABILITY_PREDICATES` — never a new
+ * branch inside `formatKeyError`. That is the whole point of this mechanism.
+ */
+export type VenueCapabilityName = "substitutable";
+
+/**
+ * Capability name → the closed-sets PREDICATE that answers it.
+ *
+ * ⛔ Never index `VENUE_CAPABILITIES` here. The predicates own the per-capability
+ * default for an unresolved venue, and that default IS the mechanism (153.1-02);
+ * reading a row directly re-invents it per call site.
+ */
+const VENUE_CAPABILITY_PREDICATES: Record<
+  VenueCapabilityName,
+  (venue: string | null | undefined) => boolean
+> = {
+  substitutable: venueIsSubstitutable,
+};
+
+/**
+ * 153.1-03 / WIZFORM-03 — a precondition a single `fix[]` bullet declares about
+ * the CONTEXT it is rendered in. One filter reads these (`applyFixRequirements`
+ * below); no code branch does.
+ *
+ * D-17's class: "a remedy that presupposes a fact about the context". Telling an
+ * MT5 user to "switch to a different exchange" presupposes another venue exists
+ * — their account IS the venue, so the remedy is unwinnable. Three bullets said
+ * it; one filter now decides for all of them and for every bullet added later.
+ *
+ * ⛔ Do NOT re-express any of these as a per-code equality arm inside
+ * `formatKeyError`. Three such arms are exactly the instance-not-class defect
+ * this repo has already paid for (PATTERNS §wizardErrors.ts). The prohibited
+ * pattern is deliberately NOT spelled out literally here: the acceptance gate
+ * for this plan counts occurrences of it in this file, and prose that writes
+ * it out is how a grep guard stops being able to fail.
+ *
+ * A THIRD requirement kind is an added union member plus one arm in
+ * `requirementMet` — never a new call site.
+ */
+export type FixRequirement =
+  | {
+      readonly kind: "venueCapability";
+      readonly capability: VenueCapabilityName;
+      /** The answer the predicate must give for the bullet to render. */
+      readonly is: boolean;
+    }
+  | { readonly kind: "surface"; readonly surface: WizardSurface };
+
+/**
+ * "Render only when the venue CAN be substituted" — the incumbent bullets.
+ * With no `venue` in context `venueIsSubstitutable` answers `true`, so every
+ * caller that predates this field is byte-unchanged.
+ */
+const REQUIRES_SUBSTITUTABLE_VENUE: FixRequirement = {
+  kind: "venueCapability",
+  capability: "substitutable",
+  is: true,
+};
+
+/**
+ * "Render only when the venue CANNOT be substituted" — the D-17 replacement.
+ *
+ * ⭐ This is why the requirement carries a BOOLEAN rather than being a presence
+ * test: an MT5 user gets a truthful remedy, not merely a shorter list.
+ */
+const REQUIRES_NON_SUBSTITUTABLE_VENUE: FixRequirement = {
+  kind: "venueCapability",
+  capability: "substitutable",
+  is: false,
+};
+
+/** "Render only on the submit step" — UI-SPEC Gate B. */
+const REQUIRES_SUBMIT_SURFACE: FixRequirement = {
+  kind: "surface",
+  surface: "submit",
+};
+
 export interface WizardErrorCopy {
   title: string;
   /** Single-sentence summary of WHY the error happened. */
   cause: string;
   /** Numbered fix steps. Each step is an imperative sentence. */
   fix: string[];
+  /**
+   * 153.1-03 / WIZFORM-03 — OPTIONAL, index-aligned to `fix`. `null` at an
+   * index means "always render"; ABSENT on an entry means "no bullet in this
+   * entry is conditional", and `formatKeyError` then returns the entry object
+   * itself, untouched.
+   *
+   * ⚠️ A PARALLEL ARRAY is the one thing that can silently fall out of step, so
+   * `wizardErrors.test.ts` sweeps every tagged entry for
+   * `fixRequires.length === fix.length`. Add a bullet, add its slot.
+   *
+   * ⛔ `fix` stays `string[]`. `envelope.ts:86` forwards it VERBATIM as
+   * `debug_context` and `WizardErrorEnvelope.test.tsx:44` compares against it;
+   * turning a bullet into an object has a blast radius this phase did not scope.
+   */
+  fixRequires?: readonly (FixRequirement | null)[];
   /** Anchor URL on /security with a walkthrough + screenshots. */
   docsHref: string;
   /** Action IDs the UI should render as buttons/links. */
@@ -1626,6 +1745,90 @@ export interface WizardErrorContext {
    * specific lie (TRAP-3). The renderer skips the line entirely when absent.
    */
   retryAfterSeconds?: number;
+  /**
+   * 153.1-03 / WIZFORM-03 / D-17 — the venue the failure happened on, as a
+   * lowercase `SupportedExchange` code. Read ONLY as a lookup key into the
+   * closed capability record; it is never interpolated into copy, a log line,
+   * a URL or a breaker key, so no caller-supplied string can reach the
+   * envelope through this field.
+   *
+   * ABSENT ⇒ a venue-conditional bullet STILL RENDERS. That is the incumbent
+   * behaviour of every caller that predates this field, and suppressing
+   * venue-shaped copy everywhere the venue is merely unnamed would be a
+   * repo-wide copy regression D-17 did not ask for. D-17 asks that the bullet
+   * never reaches a venue we KNOW cannot be substituted.
+   *
+   * ⚠️ Note the asymmetry with `surface` below — the two absences answer
+   * DIFFERENTLY, deliberately. Unifying them breaks one of the two gates.
+   */
+  venue?: string;
+  /**
+   * 153.1-03 / WIZFORM-03 / UI-SPEC Gate B — which wizard step raised the
+   * error.
+   *
+   * ABSENT ⇒ a surface-conditional bullet is SUPPRESSED. Fail toward saying
+   * less, never toward advising a detour that may be pointless: the live defect
+   * this removes is `SERVICE_UNREACHABLE`'s "open /strategies before retrying"
+   * rendering on the CONNECT step, where nothing was being submitted.
+   *
+   * ⚠️ The opposite of `venue`'s absence rule above, and that is the point:
+   * an unnamed venue leaves incumbent copy intact, an unnamed surface withholds
+   * a claim we cannot support.
+   */
+  surface?: WizardSurface;
+}
+
+/**
+ * 153.1-03 — does the context satisfy one bullet's requirement?
+ *
+ * `null` (an unconditional bullet) is always met. Each union member's arm
+ * carries its absence rule; both rules are stated at the context fields above.
+ */
+function requirementMet(
+  req: FixRequirement | null,
+  context?: WizardErrorContext,
+): boolean {
+  if (req === null) return true;
+  switch (req.kind) {
+    case "venueCapability":
+      // An ABSENT venue answers the predicate's default (`substitutable` ⇒
+      // true), so an untagged caller keeps the incumbent bullet.
+      return VENUE_CAPABILITY_PREDICATES[req.capability](context?.venue) === req.is;
+    case "surface":
+      // An ABSENT surface can never equal a named one ⇒ suppressed (Gate B).
+      return context?.surface === req.surface;
+  }
+}
+
+/**
+ * 153.1-03 / WIZFORM-03 — THE ONE FILTER. Applied once, at the top of
+ * `formatKeyError`, for every code and therefore for every interpolation arm
+ * (each of which spreads `...base`).
+ *
+ * ⛔ It cannot live in `buildEnvelope`: `envelope.ts:86` forwards `copy.fix`
+ * verbatim as `debug_context`, and `formatKeyError` has consumers that never
+ * build an envelope at all.
+ *
+ * An entry WITHOUT `fixRequires` is returned as the SAME OBJECT — not a copy —
+ * so the ~60 untagged entries are provably untouched by this mechanism
+ * (pinned by a reference-identity sweep in `wizardErrors.test.ts`).
+ */
+function applyFixRequirements(
+  entry: WizardErrorCopy,
+  context?: WizardErrorContext,
+): WizardErrorCopy {
+  const requires = entry.fixRequires;
+  if (requires === undefined) return entry;
+  const keep = entry.fix.map((_, i) => requirementMet(requires[i] ?? null, context));
+  return {
+    ...entry,
+    fix: entry.fix.filter((_, i) => keep[i]),
+    // Filtered in LOCKSTEP. `fixRequires` declares itself index-aligned to
+    // `fix`, and `formatKeyError` returns a `WizardErrorCopy` — returning a
+    // value that violates its own type's invariant would leave a trap for the
+    // first consumer that reads both.
+    fixRequires: requires.filter((_, i) => keep[i]),
+  };
 }
 
 /**
@@ -1637,10 +1840,21 @@ export function formatKeyError(
   context?: WizardErrorContext,
 ): WizardErrorCopy {
   if (!code || !(code in WIZARD_ERROR_COPY)) {
+    // Returned WITHOUT the requirement filter, deliberately: `UNKNOWN` carries
+    // no `fixRequires` today, so filtering it would be a no-op that returns the
+    // identical object anyway. If `UNKNOWN` ever gains a conditional bullet this
+    // early return must route through `applyFixRequirements` too — the
+    // asymmetry is recorded here rather than left for a reader to wonder at.
     return WIZARD_ERROR_COPY.UNKNOWN;
   }
 
-  const base = WIZARD_ERROR_COPY[code];
+  // 153.1-03 / WIZFORM-03 — THE ONE requirement filter, applied ONCE. Every
+  // interpolation arm below spreads `...base`, so all five inherit the filtered
+  // array with no per-arm edit. ⛔ Do not add a filtering branch inside a
+  // per-code equality arm below; that is the instance-not-class defect in a new
+  // costume. (Spelled in prose, not in the literal form the plan's grep gate
+  // counts — see the FixRequirement docblock.)
+  const base = applyFixRequirements(WIZARD_ERROR_COPY[code], context);
 
   // Interpolate context fields where they are useful. We mutate copies
   // of the strings so the original table stays untouched.
