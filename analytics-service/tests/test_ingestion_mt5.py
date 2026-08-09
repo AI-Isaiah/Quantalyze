@@ -32,10 +32,13 @@ Regression gates — WHY each case matters (Rule 9):
 from __future__ import annotations
 
 import asyncio
+import time
 import typing
+from types import SimpleNamespace
 
 import pytest
 
+from services import mt5_concurrency
 from services.closed_sets import (
     MT5_MASTER_PASSWORD_DETAIL,
     MT5_WRONG_SERVER_DETAIL,
@@ -47,6 +50,21 @@ from services.ingestion.adapter import KeySubmissionRequest, MetricsSnapshot
 from services.ingestion.mt5 import Mt5Adapter
 from services.mt5_client import Mt5Client, Mt5ClientError
 from services.mt5_validation import classify_mt5_login_error
+
+
+@pytest.fixture(autouse=True)
+def _reset_mt5_terminal_locks():
+    """MT5CONC-02: clear the ONE process-wide per-terminal ``asyncio.Lock``
+    registry around every test in this module, exactly as
+    ``tests/test_mt5_concurrency.py`` does.
+
+    Load-bearing since ``Mt5Adapter.validate`` started taking the lease: these
+    tests each run their own ``asyncio.run`` loop, and a Lock left in the registry
+    by one of them would be re-entered from a DIFFERENT loop by the next — plus a
+    Lock a failing test left HELD would hang every subsequent validate here."""
+    mt5_concurrency._MT5_TERMINAL_LOCKS.clear()
+    yield
+    mt5_concurrency._MT5_TERMINAL_LOCKS.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -515,6 +533,182 @@ def test_validate_probe_hang_bounded_by_wait_for_ceiling(monkeypatch) -> None:
     with pytest.raises(asyncio.TimeoutError):
         asyncio.run(Mt5Adapter().validate(_req()))
     assert client.shutdown_calls == 1  # close() ran even though the probe was cut off
+
+
+# --------------------------------------------------------------------------- #
+# THE TERMINAL LEASE — the SIBLING validate path (153.3 review of D-29)
+#
+# D-29 made `routers/exchange.py` take the per-terminal lease. THIS path —
+# `Mt5Adapter.validate` — logs into the SAME process-global MetaTrader5 session,
+# from the SAME process (`main.py`'s lifespan runs the worker loops INSIDE the API
+# process), and took the lease ZERO times. A lease held by ONE of two callers of
+# ONE terminal serializes NOTHING: MT5 binds one account per terminal AT A TIME,
+# so the unleased login() silently re-points the terminal under the leased caller
+# mid-probe. Observed before the fix:
+#   ['login-start', 'login-start', 'login-end', 'release', 'login-end', 'release']
+#
+# ⚠️ The oracle is BLOCKING/ORDERING, never "a lease object was entered" or "a lock
+# exists": a lease built on a second registry, or on a differently formatted key,
+# enters and exits perfectly happily while serializing nothing — and looks fixed.
+# --------------------------------------------------------------------------- #
+
+
+def _expected_terminal_key(host: str, port: int) -> str:
+    """The key `Mt5Client` ITSELF produces — obtained by CALLING the shipped
+    property, never by retyping its format here. The three job call sites and the
+    router all key on `Mt5Client.terminal_key`; if this adapter formatted the key
+    differently the two would resolve to DIFFERENT Lock objects and serialize
+    nothing (MT5CONC-02 / 151-RESEARCH Pitfall 2) while every lock still "works".
+    """
+    return Mt5Client.terminal_key.fget(SimpleNamespace(_host=host, _port=port))
+
+
+class _InstrumentedConn(_FakeRpycConn):
+    """The rpyc socket, recording its teardown on the shared event log — so the
+    ordering oracle can see that the lease is held until the transport is given
+    up, not merely until login() returns."""
+
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self._events = events
+
+    def close(self):
+        self._events.append("close")
+        return super().close()
+
+
+class _SlowLoginMt5(_FakeMt5):
+    """The ONE shared Wine terminal, instrumented so the INTERLEAVE is observable.
+
+    `login` sleeps INSIDE the worker thread (`_probe` runs via
+    `asyncio.to_thread`) precisely so an UNSERIALIZED second caller genuinely
+    overlaps it. An instant login would let both callers pass in either order and
+    the ordering oracle would be vacuous — a guard that cannot fail.
+    """
+
+    def __init__(self, scenario: dict, events: list[str]) -> None:
+        super().__init__(scenario)
+        self._events = events
+        # Single leading underscore ⇒ NOT re-mangled by this class either; the
+        # name stays byte-identical to the one mt5linux 0.1.9 sets.
+        self._MetaTrader5__conn = _InstrumentedConn(events)
+
+    def login(self, login, **kwargs):
+        self._events.append("login-start")
+        time.sleep(0.1)
+        self._events.append("login-end")
+        return super().login(login, **kwargs)
+
+
+def _install_shared_terminal(
+    monkeypatch,
+    events: list[str],
+    factory_calls: list[tuple[str, int]] | None = None,
+) -> _SlowLoginMt5:
+    """Every `_build_client` call returns a FRESH `Mt5Client` over the SAME double
+    — which is the production topology: one Wine terminal, one MetaTrader5 module
+    instance, a new client per job."""
+    fake = _SlowLoginMt5(
+        {
+            "account": _INVESTOR_ACCOUNT,
+            "order_check": _INVESTOR_ORDER_CHECK,
+            "terminal": _HEALTHY_TERMINAL,
+        },
+        events,
+    )
+
+    def _connect(*, host, port, timeout):
+        return fake
+
+    def _fake_build(host: str, port: int) -> Mt5Client:
+        if factory_calls is not None:
+            factory_calls.append((host, port))
+        return Mt5Client(host, port, _connect=_connect)
+
+    monkeypatch.setattr("services.ingestion.mt5._build_client", _fake_build)
+    monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
+    monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    return fake
+
+
+async def test_two_concurrent_ingestion_validates_are_serialized_on_the_terminal(
+    monkeypatch,
+) -> None:
+    """⭐ THE POINT. Two concurrent validates through THIS path must serialize on
+    the ONE shared terminal.
+
+    Asserted as ORDERING, not as "both succeeded": both succeed under the defect
+    too whenever the interleave happens to be benign. Against the unleased adapter
+    this reds with the wave-4 shape (two `login-start`s before the first
+    `login-end`), which is the terminal being re-pointed under a caller mid-probe.
+    """
+    events: list[str] = []
+    _install_shared_terminal(monkeypatch, events)
+
+    results = await asyncio.gather(
+        Mt5Adapter().validate(_req()), Mt5Adapter().validate(_req())
+    )
+
+    assert [(r.valid, r.read_only) for r in results] == [(True, True)] * 2
+    assert events == ["login-start", "login-end", "close"] * 2, (
+        "the second validate's login() started before the first gave up the "
+        "terminal — this path is not taking the lease (or is taking one keyed "
+        f"differently from Mt5Client.terminal_key). Observed: {events}"
+    )
+
+
+async def test_ingestion_validate_waits_on_the_lock_keyed_by_terminal_key(
+    monkeypatch,
+) -> None:
+    """⭐ THE KEY IDENTITY, proven by CONTENTION rather than by inspection.
+
+    A lease on the wrong key is worse than no lease: it looks fixed. So the holder
+    here is the lock from the ONE shared registry under the key
+    `Mt5Client.terminal_key` itself computes — the same object `job_worker`,
+    `allocator_positions` and `routers/exchange.py` contend on. If this adapter
+    derived the key any other way (the raw `MT5_GATEWAY_PORT` string, a host-only
+    key, a private registry) it would sail straight past a held terminal and
+    `blocked` would be False.
+
+    Also asserted: a queued caller has not yet CONSTRUCTED a client. Construction
+    opens the rpyc socket, which is the very thing that races, so the lease must
+    already be held when it happens.
+    """
+    events: list[str] = []
+    factory_calls: list[tuple[str, int]] = []
+    _install_shared_terminal(monkeypatch, events, factory_calls)
+
+    held = mt5_concurrency._mt5_terminal_lock_for(
+        _expected_terminal_key("mt5-gw.internal", 18812)
+    )
+    await held.acquire()
+
+    task = asyncio.create_task(Mt5Adapter().validate(_req()))
+    try:
+        await asyncio.sleep(0.15)  # ample for an unleased validate to finish
+        blocked = not task.done()
+        factory_while_queued = list(factory_calls)
+        events_while_queued = list(events)
+    finally:
+        # Released unconditionally, so a failing assertion below can never strand
+        # the terminal for the rest of the session.
+        held.release()
+
+    result = await task
+
+    assert blocked, (
+        "the validate ran while another caller held the terminal — it is either "
+        "not leasing, leasing a differently-keyed lock, or leasing out of a "
+        "second registry"
+    )
+    assert factory_while_queued == [], (
+        "a queued validate constructed its rpyc client before holding the "
+        f"terminal: {factory_while_queued}"
+    )
+    assert events_while_queued == []
+    assert (result.valid, result.read_only) == (True, True)
+    assert factory_calls == [("mt5-gw.internal", 18812)]
+    assert events == ["login-start", "login-end", "close"]
 
 
 # --------------------------------------------------------------------------- #
