@@ -14,7 +14,8 @@ import { Skeleton } from "@/components/ui/Skeleton";
  * RSC (no "use client"). `animate-pulse` sits on the shell wrapper — the
  * sanctioned route-shell idiom (RESEARCH Pattern 2; matches the factsheet v2
  * `<article className="… animate-pulse">`) — with the `Skeleton` primitives
- * inside it. The fluid-fill measure matches the page (mx-auto max-w-[1920px]).
+ * inside it. The fluid-fill measure matches the page (fully fluid, no px cap
+ * since the 2026-08-09 founder decision).
  * Closed by an sr-only role="status" liveness hint for assistive tech.
  */
 
@@ -24,7 +25,7 @@ const METRIC_ROW_COUNT = 9; // mirrors CompareTable's METRICS length
 
 export default function CompareLoading() {
   return (
-    <div className="mx-auto max-w-[1920px] px-6 py-6 animate-pulse">
+    <div className="px-6 py-6 animate-pulse">
       {/* Page-header anchor — breadcrumb + title lines. */}
       <Skeleton className="h-4 w-48 mb-4" />
       <Skeleton className="h-9 w-72 mb-8" />

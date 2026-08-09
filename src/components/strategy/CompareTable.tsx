@@ -83,7 +83,7 @@ export function CompareTable({ items }: { items: CompareItem[] }) {
           `@container` containment context (mirrors the ResponsiveTable +
           StrategyTable idiom). Column behavior reacts to the TABLE's own measure
           via `@`-prefixed variants, never a viewport `lg:` — so at the wider
-          fluid-fill canvas (page caps at max-w-[1920px]) the comparison columns
+          fluid-fill canvas (fully fluid since 2026-08-09; no px cap) the comparison columns
           gain deliberate horizontal breathing room (`@3xl:px-8`) rather than
           stranding two columns in whitespace (Pitfall 4). Plain `@container`,
           never `@container-size` (Pitfall 1). */}

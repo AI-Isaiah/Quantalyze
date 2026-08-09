@@ -94,34 +94,44 @@ export function DashboardChrome({
   // Phase 52/53 (v1.4) — wide fluid-fill for the DATA/TABLE surfaces only.
   // P52 raised the allocator journey (/allocations, /compare, /discovery/*);
   // P53 (APPLY-04) adds the two remaining data-dense trees (/admin, /portfolios,
-  // incl. their sub-paths). The allocator pages each set their OWN page-level
-  // `max-w-[1920px]` cap; for admin/portfolios the SHELL is the sole owner of
-  // the wide measure (the pages carry no inner cap — the @container data tables
-  // reshape within whatever width the shell grants). The standard shell's
-  // `max-w-7xl` (1280px) content cap below CLAMPED both, so neither fluid-filled
-  // past 1280px. When isWide, the shell uses `max-w-[1920px]`. Prose/form trees
+  // incl. their sub-paths). ⚠️ The allocator pages USED to each set their own
+  // page-level `max-w-[1920px]` cap; those are all removed as of 2026-08-09 and
+  // this SHELL is now the sole owner of the wide measure for every data surface
+  // (the @container data tables reshape within whatever width it grants). Two
+  // owners for one property is what let `/my-strategies` cap itself at 1920 while
+  // the shell silently clamped it to 1280. When isWide, the shell is FLUID.
+  // Prose/form trees
   // (the new-strategy wizard under /strategies, /security, marketing, auth) stay
   // narrow at `max-w-7xl`. Mirrors the `isFullBleed` allow-list regex so the
   // widening stays scope-bounded; the `isFullBleed` admin match-detail carve-out
   // below takes a DIFFERENT branch (no centered container) and is unaffected.
   //
-  // ⭐ 2026-08-09 founder report — `/strategies` (the My Strategies LIST) is a
-  // dense table and DESIGN.md's measure ladder says "wider content earns a wider
-  // measure": 1100 prose / 1440 document / 1920 dense tables. It was getting
-  // `max-w-7xl` = 1280px, which is not on the ladder at all. The cause is that
-  // the list and the WIZARD share the `/strategies` prefix, and the prefix was
-  // excluded wholesale to keep the wizard form narrow — so the table inherited
-  // the form's measure. Visible symptom: the table renders "Scroll for more
-  // columns →" while dead space sits to its right, and zooming out grows the
-  // dead space instead of revealing columns.
+  // ⭐ 2026-08-09 founder decision — DENSE TABLES ARE NOW FLUID, NO px CAP.
+  // Report, with screenshots: "zooming out should allow me to see more of the
+  // content… it should never produce dead/empty areas." Any FIXED px cap
+  // dead-spaces once the viewport exceeds it, and zooming out is precisely how
+  // a user exceeds it — at 50% zoom a 2560px monitor reports 5120 CSS px, so
+  // even the old 1920px rung left ~3200px of dead margin. Founder chose Option
+  // B (TODOS.md): fluid for DATA surfaces, bounded measure kept for prose/forms
+  // where line length is a real readability control. DESIGN.md's ladder was
+  // amended in the same commit — it is 1100 prose / 1440 document / FLUID dense
+  // tables now.
   //
-  // ⛔ EXACT-MATCH, not a prefix. `/strategies/new/wizard` is a FORM and
-  // `/strategies/[id]` is a single-strategy DOCUMENT (1440px on the ladder) —
-  // neither earns the dense-table measure, and a `(\/|$)` prefix arm like the
-  // others would silently widen both.
+  // ⚠️ `/my-strategies` was MISSING from this list, which is what the founder
+  // actually hit. Its page shell carries its own cap under a comment claiming
+  // "(dashboard)/layout.tsx does NOT cap width" — false: this shell clamped it
+  // to `max-w-7xl` (1280px). A page believing one thing while the layout did
+  // another is why it went unseen. The page-level caps on the dense-table
+  // surfaces are removed in this same commit; leaving them would re-clamp the
+  // now-fluid shell and silently restore the bug.
+  //
+  // ⛔ `/strategies` is NOT here. It is a legacy CARD list, and the tree also
+  // holds `/strategies/new/wizard` (a FORM) and `/strategies/[id]` (a DOCUMENT,
+  // 1440px) — none of them earn the dense-table measure.
   const isWide =
-    /^\/(allocations|compare|discovery|admin|portfolios)(\/|$)/.test(pathname) ||
-    /^\/strategies\/?$/.test(pathname);
+    /^\/(allocations|compare|discovery|admin|portfolios|my-strategies)(\/|$)/.test(
+      pathname,
+    );
 
   if (isFullBleed) {
     return (
@@ -219,9 +229,13 @@ export function DashboardChrome({
           onMenuClick={() => setMenuOpen(true)}
           menuOpen={menuOpen}
         />
+        {/* ⭐ Dense-table surfaces are FLUID (`max-w-full`, no px cap) so zooming
+            out reveals columns instead of growing dead margin — founder decision
+            2026-08-09, Option B. `mx-auto` is retained and harmless at full
+            width; it still centres the narrow measure. */}
         <div
           className={`mx-auto ${
-            isWide ? "max-w-[1920px]" : "max-w-7xl"
+            isWide ? "max-w-full" : "max-w-7xl"
           } px-4 py-6 md:px-8 md:py-8`}
         >
           {children}

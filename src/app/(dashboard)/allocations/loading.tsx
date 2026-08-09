@@ -14,11 +14,12 @@ import { Skeleton } from "@/components/ui/Skeleton";
  * the largest, first region — a full-width 4-cell grid above the equity-chart
  * placeholder — so the skeleton reads unmistakably as the allocations dashboard
  * loading, not a generic spinner. The page shell mirrors the real page's fluid
- * `max-w-[1920px] mx-auto` so the skeleton fills the same envelope (Task 1).
+ * fully fluid (no px cap) so the skeleton fills the same envelope as the page
+ * (Task 1; founder decision 2026-08-09 — dense tables lost their cap).
  */
 export default function AllocationsLoading() {
   return (
-    <div className="mx-auto max-w-[1920px] px-6 py-6">
+    <div className="px-6 py-6">
       {/* Header row — title + entity name placeholder (mirrors the inline
           AllocationsTabs header the real page renders). */}
       <div className="mb-6 flex items-end justify-between gap-4">

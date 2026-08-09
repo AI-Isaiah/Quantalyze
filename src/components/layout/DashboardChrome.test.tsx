@@ -233,9 +233,15 @@ describe("DashboardChrome — standard vs full-bleed layout (M-0410)", () => {
  * 52-02/03/04 raised the allocator-journey PAGE content to a page-level
  * `max-w-[1920px]`, but the standard shell's content container caps at
  * `max-w-7xl` (1280px), which clamped that page cap. This pins the shell-level
- * widening: the allocator-journey routes (/allocations, /compare, /discovery/*)
- * get `max-w-[1920px]`, while every other dashboard route (incl. Phase-53
- * surfaces) keeps `max-w-7xl`.
+ * widening: the data/table routes get the wide measure, while every other
+ * dashboard route keeps `max-w-7xl`.
+ *
+ * ⭐ UPDATED 2026-08-09 (founder decision, Option B). The wide measure is no
+ * longer `max-w-[1920px]` — it is FLUID (`max-w-full`, no px ceiling), because
+ * any fixed cap turns surplus viewport into dead margin exactly when the user
+ * zooms out to see more. The page-level 1920px caps are removed too: two owners
+ * for one property is what let `/my-strategies` cap itself at 1920 while the
+ * shell clamped it to 1280. The shell is now the sole owner.
  *
  * The content container is the direct child <div> of the labeled <main> that
  * holds the page children (the `mx-auto max-w-* px-4 …` wrapper).
@@ -318,88 +324,103 @@ describe("DashboardChrome — wide fluid-fill variant (Phase 52)", () => {
     return screen.getByTestId("page-body").closest("div.mx-auto");
   }
 
-  it("widens the allocator route /allocations to max-w-[1920px]", () => {
+  it("widens the allocator route /allocations to max-w-full", () => {
     const container = contentContainerFor("/allocations");
-    expect(container).toHaveClass("max-w-[1920px]");
+    expect(container).toHaveClass("max-w-full");
     expect(container).not.toHaveClass("max-w-7xl");
   });
 
-  it("widens /compare to max-w-[1920px]", () => {
+  it("widens /compare to max-w-full", () => {
     const container = contentContainerFor("/compare");
-    expect(container).toHaveClass("max-w-[1920px]");
+    expect(container).toHaveClass("max-w-full");
   });
 
-  it("widens nested discovery routes (/discovery/digital-assets) to max-w-[1920px]", () => {
+  it("widens nested discovery routes (/discovery/digital-assets) to max-w-full", () => {
     const container = contentContainerFor("/discovery/digital-assets");
-    expect(container).toHaveClass("max-w-[1920px]");
+    expect(container).toHaveClass("max-w-full");
   });
 
-  it("widens the /portfolios data surface to max-w-[1920px] (Phase 53 APPLY-04)", () => {
+  it("widens the /portfolios data surface to max-w-full (Phase 53 APPLY-04)", () => {
     const container = contentContainerFor("/portfolios");
-    expect(container).toHaveClass("max-w-[1920px]");
+    expect(container).toHaveClass("max-w-full");
     expect(container).not.toHaveClass("max-w-7xl");
   });
 
-  it("widens nested portfolio detail routes (/portfolios/abc/manage) to max-w-[1920px]", () => {
+  it("widens nested portfolio detail routes (/portfolios/abc/manage) to max-w-full", () => {
     const container = contentContainerFor("/portfolios/abc/manage");
-    expect(container).toHaveClass("max-w-[1920px]");
+    expect(container).toHaveClass("max-w-full");
   });
 
-  it("widens the /admin data surface to max-w-[1920px] (Phase 53 APPLY-04)", () => {
+  it("widens the /admin data surface to max-w-full (Phase 53 APPLY-04)", () => {
     const container = contentContainerFor("/admin");
-    expect(container).toHaveClass("max-w-[1920px]");
+    expect(container).toHaveClass("max-w-full");
     expect(container).not.toHaveClass("max-w-7xl");
   });
 
-  it("widens nested admin sub-pages (/admin/compute-jobs) to max-w-[1920px]", () => {
+  it("widens nested admin sub-pages (/admin/compute-jobs) to max-w-full", () => {
     const container = contentContainerFor("/admin/compute-jobs");
-    expect(container).toHaveClass("max-w-[1920px]");
+    expect(container).toHaveClass("max-w-full");
   });
 
-  // ⭐ 2026-08-09 founder report — the My Strategies LIST is a dense table and
-  // was rendering at max-w-7xl (1280px), which is not on DESIGN.md's measure
-  // ladder at all (1100 prose / 1440 document / 1920 dense tables). Symptom:
-  // the table showed "Scroll for more columns →" while dead space sat to its
-  // right, and zooming out grew the dead space instead of revealing columns.
+  // ⭐ 2026-08-09 founder report — "zooming out should allow me to see more of
+  // the content… it should never produce dead/empty areas." The surface hit was
+  // My Strategies, which lives at `/my-strategies` and was MISSING from the
+  // isWide allow-list: its page set its own `max-w-[1920px]` under a comment
+  // claiming the layout does not cap width, while this shell silently clamped it
+  // to `max-w-7xl` (1280px). Symptom: the table rendered "Scroll for more
+  // columns →" beside dead space.
   //
-  // ⚠️ THIS BLOCK REPLACES A TEST THAT PINNED THE BUG. The previous row
-  // asserted `/strategies` stays narrow, reasoning "/strategies (incl. the
-  // new-strategy wizard) is a form surface" — conflating the LIST with the
-  // WIZARD because they share a prefix. That is the defect itself, written
-  // down as an expectation. The three rows below keep the wizard and the
-  // document negatives (which were the real intent) and correct the list.
-  it("widens the My Strategies LIST (/strategies) to max-w-[1920px] — it is a dense table", () => {
-    const container = contentContainerFor("/strategies");
-    expect(container).toHaveClass("max-w-[1920px]");
+  // Founder chose Option B: dense tables go FLUID (no px cap at all), prose and
+  // forms keep a bounded measure. Any fixed px cap dead-spaces once the viewport
+  // exceeds it, and zooming out is exactly how a viewport exceeds it.
+  it("widens the My Strategies LIST (/my-strategies) — the founder-reported surface", () => {
+    const container = contentContainerFor("/my-strategies");
+    expect(container).toHaveClass("max-w-full");
     expect(container).not.toHaveClass("max-w-7xl");
+  });
+
+  it("gives dense tables NO px cap at all — a ceiling is what strands content on zoom-out", () => {
+    // ⛔ The point of Option B is the ABSENCE of a numeric ceiling, not a larger
+    // one. `toHaveClass("max-w-full")` alone would still pass if someone
+    // reinstated a px cap alongside it, so this rejects the arbitrary-value form
+    // outright — it fails for max-w-[1920px] and for any successor number.
+    const container = contentContainerFor("/my-strategies");
+    // ⚠️ Assert the container EXISTS before filtering it. Without this, a null
+    // container would make `?? []` yield an empty list and the row would pass
+    // vacuously — an emptiness assertion is only meaningful once you have
+    // proven there was something to be empty of.
+    expect(container).not.toBeNull();
+    const pxCaps = [...(container?.classList ?? [])].filter((c) =>
+      /^max-w-\[\d+px\]$/.test(c),
+    );
+    expect(pxCaps).toEqual([]);
   });
 
   it("keeps the new-strategy WIZARD (/strategies/new/wizard) narrow — it is a form", () => {
-    // The exact-match arm exists for this row. A `(\/|$)` prefix arm like the
-    // other wide routes use would silently widen the wizard too.
+    // Nothing under `/strategies` is on the allow-list. A bounded measure is a
+    // real readability control for a form, not decoration.
     const container = contentContainerFor("/strategies/new/wizard");
     expect(container).toHaveClass("max-w-7xl");
-    expect(container).not.toHaveClass("max-w-[1920px]");
+    expect(container).not.toHaveClass("max-w-full");
   });
 
-  it("keeps a single-strategy DOCUMENT (/strategies/abc) off the dense-table measure", () => {
-    // A document earns 1440px on the ladder, not the 1920px dense-table
-    // measure — so it must not pick up the list's widening.
-    const container = contentContainerFor("/strategies/abc");
-    expect(container).not.toHaveClass("max-w-[1920px]");
-  });
-
-  it("does NOT widen a route that merely starts with the prefix string (/strategiesx)", () => {
-    // Regex boundary for the new exact-match arm, mirroring the /discoveryx row.
-    const container = contentContainerFor("/strategiesx");
+  it("keeps the legacy card list (/strategies) narrow — it is not a dense table", () => {
+    const container = contentContainerFor("/strategies");
     expect(container).toHaveClass("max-w-7xl");
-    expect(container).not.toHaveClass("max-w-[1920px]");
+    expect(container).not.toHaveClass("max-w-full");
+  });
+
+  it("does NOT widen a route that merely starts with the prefix string (/my-strategiesx)", () => {
+    // Regex boundary for the new allow-list member, mirroring /discoveryx.
+    const container = contentContainerFor("/my-strategiesx");
+    expect(container).toHaveClass("max-w-7xl");
+    expect(container).not.toHaveClass("max-w-full");
   });
 
   it("does NOT widen a route that merely starts with the prefix string (/discoveryx)", () => {
     // Regex boundary: /discoveryx is NOT a discovery route — keeps max-w-7xl.
     const container = contentContainerFor("/discoveryx");
     expect(container).toHaveClass("max-w-7xl");
-    expect(container).not.toHaveClass("max-w-[1920px]");
+    expect(container).not.toHaveClass("max-w-full");
   });
 });
