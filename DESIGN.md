@@ -247,10 +247,26 @@ absence.
     zoom a 2560px display reports 5120 CSS px, so a 1920px ceiling stranded
     ~3200px while the table still clipped columns. Data is the one content type
     where more width is strictly more information, so it gets all of it.
-  - ⛔ **The shell is the SOLE owner of the wide measure.** Dense-table pages
-    must not set their own `max-w-*`. `/my-strategies` capping itself at 1920px
-    while `DashboardChrome` clamped it to 1280px is the bug this rule prevents:
-    two owners, one property, neither aware of the other.
+  - ⛔ **The shell is the SOLE owner of the wide measure.** Nothing inside an
+    `isWide` tree (`/allocations`, `/compare`, `/discovery`, `/admin`,
+    `/portfolios`, `/my-strategies`) may set a `max-w-[Npx]` on its **page or
+    body shell**. `/my-strategies` capping itself at 1920px while
+    `DashboardChrome` clamped it to 1280px is the bug this rule prevents: two
+    owners, one property, neither aware of the other.
+    - **Scope, stated precisely** (2026-08-10, review WR-02 — the rule as first
+      written was contradicted by six sites and the exceptions were undocumented,
+      so the founder's dead-margin symptom survived on `/allocations`' Scenario
+      tab while this changelog recorded it fixed). The rule governs **shells**,
+      not every element: a `max-w-[Npx]` on a truncating table cell, a chart
+      wrapper or a centred *prose* block is not a competing page measure.
+    - **The one carve-out, named:** the four `/admin` text pages
+      (`users`, `users/[id]`, `partner-import`, `for-quants-leads`) keep
+      `max-w-[1100px]`. They sit inside the `isWide` `/admin` tree for
+      navigation reasons but their content is **prose/forms**, which is rung 1
+      of this ladder — the ladder governs by CONTENT TYPE, not by URL prefix.
+      A dense-table page may not use this carve-out.
+    - Guarded, not merely asserted: `DashboardChrome.test.tsx` reads the page
+      and skeleton sources and reds if any of them reinstates a px cap.
 - **Sidebar width:** 260px (fixed, desktop only)
 - **Border radius:** sm: 4px (badges, inputs), md: 6px (buttons, small cards), lg: 8px (interactive cards), xl: 12px (hero sections). **Data panels are square (no radius)** — see the Cards-vs-Data-panels split below; they are not on this ladder.
 

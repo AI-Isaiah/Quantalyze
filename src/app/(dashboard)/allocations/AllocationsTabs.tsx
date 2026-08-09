@@ -134,7 +134,11 @@ const ScenarioComposer = dynamic(
   {
     ssr: false,
     loading: () => (
-      <div className="mx-auto max-w-[1440px] py-6">
+      // 153.2 review WR-02 — the skeleton tracks the body it stands in for.
+      // `ScenarioComposer` dropped its 1440px cap in the same commit; leaving
+      // one here would reinstate the skeleton→page width jump that
+      // `compare/loading.test.tsx` states as the invariant.
+      <div className="mx-auto py-6">
         {/* KpiStrip skeleton — 5 cells × ~40px */}
         <div className="grid grid-cols-5 gap-2">
           {Array.from({ length: 5 }).map((_, i) => (
