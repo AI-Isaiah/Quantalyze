@@ -279,6 +279,68 @@ export function SubmitStep({
             // NON-recoverable, so it renders no Retry control. Correct: the
             // setting stays wrong until we fix it and redeploy.
             "SEAM_MISCONFIGURED",
+            // ─────────────────────────────────────────────────────────────
+            // Phase 153.1 / WIZFORM-02 — the ELEVEN codes `finalize-wizard`
+            // starts emitting in THIS SAME COMMIT (153.1-05).
+            //
+            // Nine are brand new on the wire: every `validatePayload` 400 arm
+            // used to answer a bare `error` string with no code at all, so
+            // every input rejection this route makes — including the
+            // two-character description that cost the founder three submits —
+            // fell to UNKNOWN and rendered "We could not classify this
+            // failure". Two more were already being emitted and were
+            // unrenderable for a different reason: `DRAFT_STATE_INVALID` was
+            // spelled in lowercase (uppercased in this commit) and
+            // `COMPOSITE_UNSUPPORTED_UNIFIED` simply had no copy entry until
+            // 153.1-04 minted one.
+            //
+            // OMIT ANY LINE BELOW and that code fails the membership check at
+            // the bottom of this block, falls through to UNKNOWN — whose copy
+            // IS recoverable — and the whole fix ships invisible while every
+            // route-side test stays green: the user gets the generic dead end
+            // and a Retry button, which is the exact defect being removed.
+            // That trap is recorded twice above and was walked into anyway
+            // (140.3-01); 153.1-06 replaces the discipline with a derived
+            // assertion that reds CI BY NAME.
+            //
+            // ⚠️ Two behaviours worth knowing before editing this group:
+            //   · the SEVEN `METADATA_*` members are deliberately
+            //     NON-recoverable and render NO Retry control. Correct: the
+            //     server compared a value against a fixed rule, so
+            //     resubmitting the identical payload is refused identically.
+            //     The remedy is on the FORM, and 153.2 routes each of them to
+            //     exactly one field.
+            //   · `DRAFT_STATE_INVALID` REMOVES a live control. Today's
+            //     UNKNOWN fallback is recoverable, and its Retry re-POSTed an
+            //     identical finalize against a draft the database had already
+            //     moved past. Only a reload can fix a stale page.
+            //
+            // ⓘ `CIRCUIT_OPEN` is NOT in this list, and adding it would be a
+            // type error rather than a fix. The route emits it (503, breaker
+            // open), but it is a WIRE code deliberately kept OUT of
+            // `WizardErrorCode`: `SEAM_CODE_TO_WIZARD_CODE` translates it to
+            // `SERVICE_UNAVAILABLE_RETRY`, which this set already admits, and
+            // the translation runs BEFORE the membership check below. That is
+            // why 153.1-06's coverage assertion must consult the alias table
+            // — a scan comparing emitted codes against this set alone would
+            // report `CIRCUIT_OPEN` as an uncovered emitter forever.
+            //
+            // ⓘ `VALIDATION_FAILED` is also translated by that table (to
+            // itself), so it is covered twice over. It is listed anyway: this
+            // set is the ROUTE-MINTED vocabulary, the route mints it, and
+            // relying on the alias table to carry a code we mint ourselves is
+            // the kind of implicit coupling 140.4-12 spent a plan removing.
+            "VALIDATION_FAILED",
+            "METADATA_NAME_INVALID",
+            "METADATA_DESCRIPTION_REQUIRED",
+            "METADATA_DESCRIPTION_TOO_SHORT",
+            "METADATA_DESCRIPTION_TOO_LONG",
+            "METADATA_CATEGORY_REQUIRED",
+            "METADATA_AUM_INVALID",
+            "METADATA_CAPACITY_INVALID",
+            "METADATA_CAPITAL_OWNERSHIP_INVALID",
+            "DRAFT_STATE_INVALID",
+            "COMPOSITE_UNSUPPORTED_UNIFIED",
           ],
         );
         // 140.4-12 / SEAMRIM-08 — EACH LIST OWNS ITS OWN VOCABULARY, AND

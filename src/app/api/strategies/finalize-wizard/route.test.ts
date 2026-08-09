@@ -1423,6 +1423,170 @@ describe("POST /api/strategies/finalize-wizard — H-0331 founder-email canonica
  * Contract: client must send a finite number in [0, 1e12) or omit the
  * field entirely (null / undefined). Invalid values now return 400.
  */
+/**
+ * 153.1-05 / WIZFORM-02 / D-09(b) — every `validatePayload` rejection carries a
+ * code the wizard can render.
+ *
+ * ⭐ WHY THIS DESCRIBE EXISTS AT ALL. Until this plan every arm of
+ * `validatePayload` answered a correct 400 with a bare `error` string and NO
+ * `code`. `SubmitStep` maps off the code alone, so all of them rendered the
+ * UNKNOWN card — "We could not classify this failure" — for a rejection the
+ * server had classified precisely. The defect survived a year of green tests
+ * because the tests asserted the STATUS. Every `it` below therefore asserts the
+ * code, and the sweep at the end asserts the CLASS: not one arm may answer
+ * without one.
+ *
+ * ⛔ The fixtures are HAND-TYPED, never sized off the constant they test. A
+ * description of `"x".repeat(MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS - 1)` would
+ * agree with whatever the constant happens to be and could never fail; `"ok"`
+ * is two characters because that is what the founder actually submitted, and if
+ * the lower bound is ever moved below three this test SHOULD red.
+ */
+describe("POST /api/strategies/finalize-wizard — 153.1-05 validatePayload codes", () => {
+  /** Every arm, as the payload that trips it and the code it must answer. */
+  const ARMS: ReadonlyArray<{
+    readonly what: string;
+    readonly patch: Record<string, unknown>;
+    readonly code: string;
+  }> = [
+    {
+      what: "a non-object body",
+      patch: {},
+      code: "VALIDATION_FAILED",
+    },
+    {
+      what: "a malformed strategy_id",
+      patch: { strategy_id: "not-a-uuid" },
+      code: "VALIDATION_FAILED",
+    },
+    {
+      what: "a codename outside the curated list",
+      patch: { name: "Not A Real Codename" },
+      code: "METADATA_NAME_INVALID",
+    },
+    {
+      what: "a missing description",
+      patch: { description: undefined },
+      code: "METADATA_DESCRIPTION_REQUIRED",
+    },
+    {
+      what: "a non-string description",
+      patch: { description: 12345 },
+      code: "METADATA_DESCRIPTION_REQUIRED",
+    },
+    {
+      // ⭐ THE INCIDENT, ENCODED. Two characters, hand-typed.
+      what: "the founder's two-character description",
+      patch: { description: "ok" },
+      code: "METADATA_DESCRIPTION_TOO_SHORT",
+    },
+    {
+      what: "a description one character over the ceiling",
+      patch: { description: "x".repeat(5001) },
+      code: "METADATA_DESCRIPTION_TOO_LONG",
+    },
+    {
+      what: "a malformed category_id",
+      patch: { category_id: "not-a-uuid" },
+      code: "METADATA_CATEGORY_REQUIRED",
+    },
+    {
+      what: "a negative aum",
+      patch: { aum: -1 },
+      code: "METADATA_AUM_INVALID",
+    },
+    {
+      what: "a negative max_capacity",
+      patch: { max_capacity: -1 },
+      code: "METADATA_CAPACITY_INVALID",
+    },
+    {
+      what: "an entry_context outside its closed set",
+      patch: { entry_context: "garbage" },
+      code: "VALIDATION_FAILED",
+    },
+    {
+      what: "a capital_ownership outside its closed set",
+      patch: { capital_ownership: "own_capitol" },
+      code: "METADATA_CAPITAL_OWNERSHIP_INVALID",
+    },
+  ];
+
+  /**
+   * The first arm rejects the BODY ITSELF, so it cannot be expressed as a patch
+   * over `VALID_BODY` — it needs a request whose JSON is not an object.
+   */
+  function bodyFor(patch: Record<string, unknown>): unknown {
+    if (Object.keys(patch).length === 0) return "not an object";
+    const merged: Record<string, unknown> = { ...VALID_BODY, ...patch };
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === undefined) delete merged[k];
+    }
+    return merged;
+  }
+
+  it.each(ARMS)("rejects $what with 400 + $code", async ({ patch, code }) => {
+    const POST = await importPost();
+    const res = await POST(makeReq(bodyFor(patch) as Record<string, unknown>));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.code).toBe(code);
+    // The code is the RENDERABLE half; the `error` string stays the
+    // developer-facing detail and must not have been dropped.
+    expect(typeof body.error).toBe("string");
+    // ⛔ T-153.1-16 — adding a code changes the response BODY, never the
+    // DECISION. Every arm is still a gate: the RPC must not have run.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+      "The RPC ran despite an invalid payload — validation is not a gate.",
+    ).toBeUndefined();
+  });
+
+  it("NOT ONE arm answers without a code (the class, not the instances)", async () => {
+    // The sweep the twelve `it`s above cannot do individually: a new arm added
+    // later without a code passes every assertion above by simply not being
+    // listed. This one reds the moment ANY rejection on this path arrives
+    // code-less — which is the state the whole route shipped in until now.
+    const POST = await importPost();
+    const codeless: string[] = [];
+    for (const arm of ARMS) {
+      const res = await POST(
+        makeReq(bodyFor(arm.patch) as Record<string, unknown>),
+      );
+      const body = await res.json();
+      if (typeof body.code !== "string" || body.code.length === 0) {
+        codeless.push(arm.what);
+      }
+    }
+    expect(
+      codeless,
+      `These validatePayload arms answered with no code: ${codeless.join(
+        ", ",
+      )}. A code-less rejection renders the UNKNOWN card ("We could not ` +
+        `classify this failure") for a failure the server classified exactly. ` +
+        `Give it a code AND admit that code to KNOWN_FINALIZE_CODES in the ` +
+        `same commit.`,
+    ).toEqual([]);
+    // Positive control: if `ARMS` is ever emptied or the loop stops running,
+    // `codeless` is [] and the assertion above is vacuously green.
+    expect(ARMS.length).toBe(12);
+  });
+
+  it("accepts a description at EXACTLY the lower bound (the boundary is <, not <=)", async () => {
+    // Hand-typed ten characters. This is the other half of the founder's
+    // incident: an off-by-one here would refuse a description that satisfies
+    // the rule the copy states, and the user would be told to add characters
+    // they had already added.
+    const fetchSpy = mockProbeReadOnly();
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, description: "abcdefghij" }),
+    );
+    expect(res.status).toBe(200);
+    fetchSpy.mockRestore();
+  });
+});
+
 describe("POST /api/strategies/finalize-wizard — H-0325 dollar-amount validation", () => {
   it("rejects negative aum with 400", async () => {
     const POST = await importPost();
@@ -1430,29 +1594,38 @@ describe("POST /api/strategies/finalize-wizard — H-0325 dollar-amount validati
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toMatch(/aum/);
+    // 153.1-05 / D-09(b) — the code, not just the status. A status-only
+    // assertion is precisely what let nine code-less arms live for a year:
+    // every one of them answered a correct 400 and an unrenderable body.
+    expect(body.code).toBe("METADATA_AUM_INVALID");
     expect(
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
     ).toBeUndefined();
   });
 
-  it("rejects aum at-or-above the 1e12 ceiling with 400", async () => {
+  it("rejects aum at-or-above the 1e12 ceiling with 400 + METADATA_AUM_INVALID", async () => {
     const POST = await importPost();
     const res = await POST(makeReq({ ...VALID_BODY, aum: 1e20 }));
     expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("METADATA_AUM_INVALID");
   });
 
-  it("rejects non-numeric aum (string) with 400", async () => {
+  it("rejects non-numeric aum (string) with 400 + METADATA_AUM_INVALID", async () => {
     const POST = await importPost();
     const res = await POST(makeReq({ ...VALID_BODY, aum: "foo" }));
     expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("METADATA_AUM_INVALID");
   });
 
-  it("rejects invalid max_capacity with 400", async () => {
+  it("rejects invalid max_capacity with 400 + METADATA_CAPACITY_INVALID", async () => {
     const POST = await importPost();
     const res = await POST(makeReq({ ...VALID_BODY, max_capacity: -1 }));
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toMatch(/max_capacity/);
+    // A DIFFERENT code from aum above, on an adjacent arm with an
+    // near-identical condition — the two fields are two remedies.
+    expect(body.code).toBe("METADATA_CAPACITY_INVALID");
   });
 
   it("accepts omitted aum (undefined / null)", async () => {
@@ -2758,6 +2931,11 @@ describe("POST /api/strategies/finalize-wizard — CONTRIB-02 private-by-default
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(String(body.error)).toContain("entry_context");
+    // 153.1-05 — VALIDATION_FAILED rather than a field-level code:
+    // `entry_context` is a context selector the wizard sets from which surface
+    // the user entered by, never something they typed, so there is no form
+    // control to route them back to (RESEARCH Q3).
+    expect(body.code).toBe("VALIDATION_FAILED");
     expect(
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
     ).toBeUndefined();

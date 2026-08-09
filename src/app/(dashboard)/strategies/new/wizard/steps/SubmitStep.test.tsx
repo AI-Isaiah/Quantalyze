@@ -528,45 +528,37 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     ).toBeInTheDocument();
   });
 
-  // A 409 stale-state ('draft_state_invalid' — not a WizardErrorCode) maps to
-  // UNKNOWN, which is recoverable, so the legitimately-retryable refresh path
-  // keeps its Retry button (RED-TEAM R1 regression guard).
+  // ⭐ 153.1-05 / WIZFORM-02 — THE FIRST OF THE TWO RESIDUALS, NOW CLOSED.
   //
-  // ⚠️ READ AS A PAIR with the case directly BELOW. `wizardErrors.ts` records
-  // that these are the two codes `finalize-wizard` can put in front of a user
-  // with no wizard member behind them. Both are pinned here so the pair is
-  // discoverable from either end; neither resolution is accidental.
-  it("maps a 409 unknown code (draft_state_invalid) to UNKNOWN (recoverable)", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      jsonResponse(
-        { error: "Refresh and try again.", code: "draft_state_invalid" },
-        409,
-      ),
-    );
-    renderStep();
-    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
-    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
-    expect(findWizardError()!.code).toBe("UNKNOWN");
-  });
-
-  // ⚠️ READ AS A PAIR with the sibling directly ABOVE. This is the SECOND
-  // residual wire code, and unlike its sibling it is reachable on the LIVE
-  // unified-backbone path. Recorded, not overlooked: 140.3-G2 / GC-3, and
-  // `deferred-items.md` DEF-G2-1 carries the owner.
+  // This case used to send the LOWERCASE literal `draft_state_invalid` and
+  // assert UNKNOWN, because that is what the route emitted and lowercase can
+  // never be a `WizardErrorCode`. 153.1-05 uppercased the route's literal and
+  // admitted `DRAFT_STATE_INVALID` to `KNOWN_FINALIZE_CODES` in the same
+  // commit, so the 409 now renders its own honest copy.
   //
-  // The failure message below is the deliverable, not the assertion. An
-  // assertion that "UNKNOWN is what happens" would read as blessing a defect;
-  // the message exists so that whoever reddens this test learns what has to
-  // ship alongside the fix.
-  it("[140.3-G2] the unified-backbone 409 is a RECORDED residual: COMPOSITE_UNSUPPORTED_UNIFIED resolves to UNKNOWN until TRAP-4 is cleared", async () => {
+  // ⚠️ THIS DELIBERATELY REMOVES A RETRY CONTROL, and that is the fix rather
+  // than a side effect. UNKNOWN's copy is recoverable, so the old resolution
+  // rendered a Retry button that re-POSTed an IDENTICAL finalize request
+  // against a draft the database had already moved out of a finalizable state.
+  // The RPC raised the same 22023 and the user got the same card. Only a
+  // reload can fix a stale page, which is why `DRAFT_STATE_INVALID`'s actions
+  // are `leave_and_return` + `expand_log` and NOT `start_fresh` (that DELETES
+  // the draft and cascades away every `strategy_keys` member under it — the
+  // draft is fine here, it is the PAGE that is out of date).
+  //
+  // ⚠️ READ AS A PAIR with the case directly BELOW. These were the two codes
+  // `finalize-wizard` could put in front of a user with no wizard member
+  // behind them; 153.1-05 closed both, and the pair is kept so the next reader
+  // finds them from either end.
+  it("maps the 409 stale-draft arm to DRAFT_STATE_INVALID (no Retry — the page is stale, not the draft)", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(
         {
-          // The body the route actually sends — read at
-          // `finalize-wizard/route.ts:1545-1553`, not invented here.
+          // The body the route actually sends, read at source rather than
+          // invented: `finalize-wizard/route.ts`, the SQLSTATE 22023 arm.
+          code: "DRAFT_STATE_INVALID",
           error:
-            "Composite (multi-key) strategies are not yet supported on this path.",
-          code: "COMPOSITE_UNSUPPORTED_UNIFIED",
+            "This draft is not in a finalizable state. Refresh and try again.",
         },
         409,
       ),
@@ -576,30 +568,79 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     await vi.waitFor(() => expect(findWizardError()).toBeDefined());
     expect(
       findWizardError()!.code,
-      [
-        "READ THIS BEFORE CHANGING IT.",
-        "",
-        "1. `finalize-wizard/route.ts:1551` emits `COMPOSITE_UNSUPPORTED_UNIFIED` on a",
-        "   409 on the LIVE unified-backbone finalize path, so a real user reaches",
-        "   this arm — it is not a hypothetical.",
-        "2. It is DELIBERATELY NOT a member of `KNOWN_FINALIZE_CODES` (SubmitStep.tsx),",
-        "   so it renders as UNKNOWN and the `wizard_error` funnel reports UNKNOWN,",
-        "   which collapses this arm into every other unrecognised one. That touches",
-        "   SC2's recognition clause and SC6's specificity clause. It is a RECORDED",
-        "   residual (140.3-G2 / GC-3; DEF-G2-1, owner Phase 140.4) — not an accident,",
-        "   and this assertion is not an endorsement of the outcome.",
-        "3. IF YOU ARE READING THIS BECAUSE YOU JUST ADMITTED THE CODE: that is the",
-        "   right fix and this test is doing its job. Admitting a code is a CODE-SET",
-        "   change, so widen `DESTRUCTIVE_CONTROL_IS_WRONG_FOR` (`SyncPreviewStep.tsx`)",
-        "   IN THE SAME COMMIT if the new member's copy is non-recoverable. A",
-        "   non-recoverable code renders no Retry, which can leave 'Try another key'",
-        "   -> handleDeleteDraft() as the SOLE affordance and destroy the user's",
-        "   composite draft. That is TRAP-4, a locked CONTEXT decision, and it is the",
-        "   exact coupling DEF-15-1 records for the sibling KNOWN_KICKOFF_CODES set.",
-        "4. THEN update this case to assert the new code. Do not delete it: the pair",
-        "   above and below is how the next reader finds the other residual.",
-      ].join("\n"),
-    ).toBe("UNKNOWN");
+      "The 409 stale-draft arm fell back to UNKNOWN. Either the route stopped " +
+        "emitting DRAFT_STATE_INVALID or KNOWN_FINALIZE_CODES stopped " +
+        "admitting it — and UNKNOWN's copy is RECOVERABLE, so the user gets a " +
+        "Retry button that re-POSTs the identical request against a draft the " +
+        "database has already moved past.",
+    ).toBe("DRAFT_STATE_INVALID");
+  });
+
+  // The lowercase spelling must STILL resolve to UNKNOWN. 153.1-05 renamed the
+  // route's literal; it did not create an identity rule, and an unrecognised
+  // wire code has to keep falling through the membership check. Without this
+  // the case above could be satisfied by a case-insensitive "fix".
+  it("[153.1-05] the OLD lowercase literal is still an unrecognised code (no identity rule was created)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { code: "draft_state_invalid", error: "Refresh and try again." },
+        409,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("UNKNOWN");
+  });
+
+  // ⭐ 153.1-05 / WIZFORM-02 — THE SECOND RESIDUAL, NOW CLOSED. Read as a pair
+  // with the sibling directly ABOVE.
+  //
+  // ⚠️ THIS TEST DID ITS JOB, and the record of how is worth keeping. It used
+  // to assert UNKNOWN behind a long failure message addressed to whoever
+  // eventually admitted the code. 153.1-05 admitted it, this case reddened
+  // unprompted, and its point 3 sent me to check TRAP-4 before proceeding.
+  // That check is recorded here so the next reader does not have to repeat it:
+  //
+  //   · `DESTRUCTIVE_CONTROL_IS_WRONG_FOR` no longer exists anywhere in
+  //     `src/` — the identifier that message names is stale.
+  //   · The coupling it warns about is real but does not bind here. It fires
+  //     when a NON-recoverable code renders no Retry and leaves
+  //     'Try another key' -> handleDeleteDraft() as the sole affordance. That
+  //     control comes from the `try_another_key` action, and NOT ONE of the
+  //     eleven codes 153.1-05 admitted carries it (checked through
+  //     `buildEnvelope`, not by reading the table's own `actions`).
+  //     `COMPOSITE_UNSUPPORTED_UNIFIED` carries `request_call` + `expand_log`.
+  //   · `SubmitStep.tsx` has no `handleDeleteDraft` and no destructive
+  //     affordance at all; that control lives on `SyncPreviewStep`.
+  //
+  // ⚠️ The check is NOT retired for future admissions — a later plan admitting
+  // a code whose copy carries `try_another_key` still owes it.
+  it("[153.1-05] the unified-backbone 409 resolves to COMPOSITE_UNSUPPORTED_UNIFIED (residual closed)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          // The body the route actually sends — read at source in
+          // `finalize-wizard/route.ts` (the unified-backbone 409 arm), not
+          // invented here. Its keys are `code`-first since 153.1-05.
+          code: "COMPOSITE_UNSUPPORTED_UNIFIED",
+          error:
+            "Composite (multi-key) strategies are not yet supported on this path.",
+        },
+        409,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(
+      findWizardError()!.code,
+      "The unified-backbone 409 fell back to UNKNOWN, which collapses this arm " +
+        "into every other unrecognised one in the `wizard_error` funnel and " +
+        "shows the user the generic dead end. Either the route stopped " +
+        "emitting COMPOSITE_UNSUPPORTED_UNIFIED or KNOWN_FINALIZE_CODES " +
+        "stopped admitting it.",
+    ).toBe("COMPOSITE_UNSUPPORTED_UNIFIED");
   });
 
   // UX-02 (#30) — the log-matching contract. Before the wizardFetch swap the
