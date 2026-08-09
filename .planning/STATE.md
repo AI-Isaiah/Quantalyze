@@ -4,13 +4,13 @@ milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
 stopped_at: "Completed 153.2-01-PLAN.md (WIZFORM-01 description field). NEXT: 153.2-02 (category/AUM/capacity mirrors + first-invalid-control focus orchestration)."
-last_updated: "2026-08-09T08:05:43.656Z"
+last_updated: "2026-08-09T08:16:21.870Z"
 last_activity: 2026-08-09
 progress:
   total_phases: 14
   completed_phases: 8
   total_plans: 59
-  completed_plans: 50
+  completed_plans: 51
   percent: 57
 ---
 
@@ -56,8 +56,8 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 ## Current Position
 
 Phase: 153.2 (WIZFORM-FIELD) -- 153.1 and 153.3 already COMPLETE on the same branch
-Plan: 1 of 05 complete
-Status: In progress
+Plan: 2 of 05 complete
+Status: Ready to execute
 Last activity: 2026-08-09
 
 ### Phase 142.1 scope (inserted 2026-08-02)
@@ -381,7 +381,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [█████████░] 85%
+Progress: [█████████░] 86%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -486,6 +486,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 153.1 P05 | 55m | 3 tasks | 4 files |
 | Phase 153.1 P06 | 75min | 2 tasks | 3 files |
 | Phase 153.2 P01 | 27 | 2 tasks | 2 files |
+| Phase 153.2 P03 | 6min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -543,6 +544,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 153.2]: 153.2-01: noValidate on the MetadataStep form, keeping required on the control for AT semantics — native constraint validation was intercepting the EMPTY refusal state with a browser bubble, so only two of three refusal states would have reached the inline message
 - [Phase 153.2]: 153.2-01: the submit disabled prop is deleted outright, not replaced by aria-disabled — the step performs no write of its own, so there is no in-flight state to guard; a dead button names no field, which is the D-13 mechanism
 - [Phase 153.2]: 153.2-01: WIZFORM-01 deliberately NOT marked complete in REQUIREMENTS.md — this plan closes only the DESCRIPTION field; 153.2-02 owns the category/AUM/capacity mirrors and the first-invalid-control focus, 153.2-03 owns AllocateDialog (D-12), 153.2-05 owns server-side field-level routing. Same call as 153.1-06 made for WIZFORM-02
+- [Phase 153.2]: AllocateDialog's invalid border derives from the ARIA state Field writes, never a JS ternary — The ternary was correct only by coincidence (fieldError also fed Field's error prop). Deriving the colour makes a red control with broken a11y wiring structurally impossible rather than merely unlikely (Shared Pattern A / FLAG-1). This was the last such holdout.
+- [Phase 153.2]: The amount field's live re-evaluation takes the mirror's VERDICT, it does not blanket-clear — D-12: a corrected amount must not still read red. Gating on a message already showing gives live-clear AND pre-refusal silence from one branch; taking the verdict (not null) also swaps the message when the value is still invalid for a different reason, so a user who types $1B+1 is not told it is fine until the next click.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1245,7 +1248,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-09T08:05:06.143Z
+**Last Date:** 2026-08-09T08:14:26.167Z
 **Stopped At:** Completed 153.2-01-PLAN.md (WIZFORM-01 description field). NEXT: 153.2-02 (category/AUM/capacity mirrors + first-invalid-control focus orchestration).
 **Resume File:** None
 **Next step:** 153.3 is COMPLETE (6/6); 153.1 is 5/6 (plan 01 Wave-0 gates, plan 02 the capability foundation, plan 03 the WIZFORM-03 class filter, plan 04 the ten new codes, plan 05 the honest codes on finalize-wizard -- all green at HEAD). Execute **153.1-06** next, then 153.2 -> 153.4 on `feat/v1.17-153-wizform`. ⛔ WIZFORM-05 stays unchecked until 153.4 closes the client leg. ⛔ **WIZFORM-03 stays unchecked until 153.2/153.4** -- the mechanism and the capability record exist and are pinned, but NOT ONE `buildEnvelope` call site passes `venue` or `surface`, so an MT5 user still reads "switch to a different exchange" in production. ⛔ **WIZFORM-02 stays unchecked until 153.1-06** -- plan 05 landed the emitting half (25 sites, 19 distinct codes, roster 21, EMITTED-NOT-IN-ROSTER empty), but nothing ASSERTS that reconciliation yet, so a twelfth arm added without a code would ship silently. ⭐ 153.1-06 must map through `SEAM_CODE_TO_WIZARD_CODE` before comparing against the roster, or it reports `CIRCUIT_OPEN` as an uncovered emitter forever.

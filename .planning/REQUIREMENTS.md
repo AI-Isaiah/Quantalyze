@@ -653,7 +653,7 @@ D-14 valve.
 > should be shown on that page next to the wrong answer, highlighting the box in which the answer
 > belongs in red."
 
-- [ ] **WIZFORM-01** *(BLOCKING UX — cost the founder 3 failed submits during the MT5-05 run)*: A
+- [x] **WIZFORM-01** *(BLOCKING UX — cost the founder 3 failed submits during the MT5-05 run)*: A
   field the user can get wrong is validated **on the form, inline, next to that field**, with the
   offending input highlighted — never as a terminal page-level error after submit.
   **Observed:** a 2-character description passed the metadata step, then failed at submit as a
