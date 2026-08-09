@@ -590,6 +590,51 @@ export function SubmitStep({
         // ZERO. `null` would reach the envelope slot, and a `0` there is a wait
         // we were never told about.
         retryAfterSeconds: retryAfterSeconds ?? undefined,
+        /**
+         * 153.2-05 / WIZFORM-03 / D-17 — ⭐ THE VENUE, NAMED AT LAST.
+         *
+         * 153.1-03 landed the `fixRequires` class filter and its three
+         * venue-conditional entries, and it is correct — but venue-ABSENCE
+         * deliberately preserves incumbent ccxt copy, and ZERO of the fourteen
+         * `buildEnvelope` call sites passed a venue. So the mechanism worked
+         * and changed nothing: an MT5 user went on reading "switch to a
+         * different exchange" for an account that IS the venue, with no other
+         * venue to switch to. This one line is what turns the filter on for
+         * this surface.
+         *
+         * ⚠️ Read ONLY as a lookup key into the closed capability record — it
+         * is never interpolated into copy, a log line, a URL or a breaker key,
+         * so no server-supplied string can reach the envelope through it. The
+         * source is the sync snapshot's own exchange, i.e. the venue of the key
+         * this strategy is built on. `?? undefined` because absence must answer
+         * the predicate's default, not the empty string.
+         */
+        venue: snapshot.exchange ?? undefined,
+        /**
+         * 153.2-05 / UI-SPEC Gate B — WHICH STEP THIS IS. `SERVICE_UNREACHABLE`
+         * carries a "open /strategies before retrying" bullet that is TRUE on
+         * exactly this surface and pointless on the connect step, so 153.1-03
+         * gated it on the surface being named. Nothing named it, so the bullet
+         * rendered nowhere ("fail toward saying less" — deliberate and
+         * temporary). This restores it where it is true.
+         */
+        surface: "submit",
+        /**
+         * 153.2-05 / TRAP-3 — the user's OWN character count, for the two
+         * description-bound codes.
+         *
+         * ⚠️ Reachable only on the fallback path: a description code normally
+         * routes to the field above and never builds an envelope at all. It is
+         * passed anyway because the fallback is a real path (a caller with no
+         * `onFieldLevelError`), and a refusal that states the rule without the
+         * count is the weaker of the two sentences.
+         *
+         * It is the length of the string THIS component POSTed, so the number
+         * in the sentence is the number the server measured — never a count we
+         * were not in a position to know. `formatKeyError` appends the tail
+         * only for those two codes, so it is inert everywhere else.
+         */
+        charCount: metadata.description.length,
       })
     : null;
 

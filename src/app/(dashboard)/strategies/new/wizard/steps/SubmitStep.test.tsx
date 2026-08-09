@@ -1381,3 +1381,130 @@ describe("[153.2-05] the routing behaviour", () => {
     expect(payload!.code).toBe("METADATA_DESCRIPTION_TOO_SHORT");
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 153.2-05 / WIZFORM-03 — the envelope this step builds now NAMES ITS CONTEXT.
+//
+// 153.1-03 shipped the `fixRequires` class filter and every venue-conditional
+// entry it needs. Nothing passed a venue, and venue-absence deliberately keeps
+// incumbent copy — so the mechanism was live and changed nothing: an MT5 user
+// went on being told to switch to a different exchange for an account that IS
+// the venue. Same story for `surface`, whose absence suppresses a bullet that
+// is true on exactly this step.
+//
+// ⚠️ ORACLE INDEPENDENCE: every expected sentence below is a LITERAL typed
+// here. Reading the copy table on the expected side would make the assertion
+// agree with any reword, including a reword back to the unwinnable remedy.
+// ═══════════════════════════════════════════════════════════════════════════
+describe("[153.2-05] the envelope names its venue and its surface", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function renderOnVenue(exchange: string | null) {
+    render(
+      <SubmitStep
+        strategyId="strat-1"
+        wizardSessionId="session-1"
+        snapshot={{ ...SNAPSHOT, exchange }}
+        metadata={METADATA}
+        onSubmitted={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+  }
+
+  const SWITCH_VENUE_BULLET =
+    "If it keeps failing, switch to a different exchange or contact support.";
+  const NO_OTHER_VENUE_BULLET =
+    "This is your broker account, so there is no other venue to try. If it keeps failing, email security@quantalyze.com with the correlation id below.";
+
+  it("⭐ D-17 — an MT5 submit is NOT told to switch to a different exchange", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "KEY_NETWORK_TIMEOUT", error: "probe failed" }, 502),
+    );
+    renderOnVenue("mt5");
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await screen.findByText("We could not reach the exchange.");
+    expect(screen.queryByText(SWITCH_VENUE_BULLET)).not.toBeInTheDocument();
+    // …and the truthful replacement renders instead. Both halves matter: a
+    // shorter list would also satisfy the absence assertion alone, and D-17
+    // asks for a true sentence, not for silence.
+    expect(screen.getByText(NO_OTHER_VENUE_BULLET)).toBeInTheDocument();
+  });
+
+  it("CONTROL — a ccxt venue keeps the incumbent copy byte-for-byte", async () => {
+    // The discrimination. A component that suppressed the bullet for EVERY
+    // venue would pass the row above and would be a repo-wide copy regression.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "KEY_NETWORK_TIMEOUT", error: "probe failed" }, 502),
+    );
+    renderOnVenue("binance");
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await screen.findByText("We could not reach the exchange.");
+    expect(screen.getByText(SWITCH_VENUE_BULLET)).toBeInTheDocument();
+    expect(screen.queryByText(NO_OTHER_VENUE_BULLET)).not.toBeInTheDocument();
+  });
+
+  it("CONTROL — an UNRESOLVED venue keeps the incumbent copy too", async () => {
+    // Absence answers the predicate's DEFAULT (`substitutable` ⇒ true), which
+    // is what keeps every pre-153.1 caller's copy intact. A snapshot with no
+    // exchange must not be read as "this venue cannot be substituted".
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "KEY_NETWORK_TIMEOUT", error: "probe failed" }, 502),
+    );
+    renderOnVenue(null);
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await screen.findByText("We could not reach the exchange.");
+    expect(screen.getByText(SWITCH_VENUE_BULLET)).toBeInTheDocument();
+  });
+
+  it("⭐ Gate B — SERVICE_UNREACHABLE's /strategies bullet renders on THIS surface", async () => {
+    // It was suppressed everywhere until a call site named its surface, which
+    // is exactly the "fail toward saying less" posture 153.1-03 chose. This is
+    // the surface where the detour is true, so this is where it comes back.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { code: "UPSTREAM_NETWORK_ERROR", error: "no answer" },
+        502,
+      ),
+    );
+    renderOnVenue("binance");
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await screen.findByText("We could not reach our own service.");
+    expect(
+      screen.getByText(
+        "If you were submitting a strategy, open /strategies before retrying — the request may have completed without answering.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("charCount reaches the fallback envelope for a description bound", async () => {
+    // Reachable only when no `onFieldLevelError` is wired — the routing branch
+    // otherwise takes this code to the field. The count is the length of the
+    // description THIS component POSTed, so the sentence names the number the
+    // server measured rather than one we guessed (TRAP-3).
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { code: "METADATA_DESCRIPTION_TOO_SHORT", error: "too short" },
+        400,
+      ),
+    );
+    renderOnVenue("binance");
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    expect(
+      await screen.findByText(
+        `Add at least 10 characters — you have ${METADATA.description.length}.`,
+      ),
+    ).toBeInTheDocument();
+  });
+});
