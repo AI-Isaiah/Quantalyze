@@ -4,7 +4,7 @@ milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
 stopped_at: Completed 153.2-04-PLAN.md (MT5 declarable AND submittable)
-last_updated: "2026-08-09T21:05:27.711Z"
+last_updated: "2026-08-09T21:47:07.770Z"
 last_activity: 2026-08-09
 progress:
   total_phases: 14
@@ -56,7 +56,7 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 ## Current Position
 
 Phase: 153.2 (WIZFORM-FIELD) -- 153.1 and 153.3 already COMPLETE on the same branch
-Plan: 4 of 05 complete
+Plan: 5 of 05 complete
 Status: Ready to execute
 Last activity: 2026-08-09
 
@@ -489,6 +489,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 153.2 P03 | 6min | 2 tasks | 2 files |
 | Phase 153.2 P02 | 20min | 2 tasks | 2 files |
 | Phase 153.2 P04 | ~55 min | 3 tasks | 8 modified files |
+| Phase 153.2 P05 | ~75 min | 5 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -555,6 +556,16 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 153.2]: 153.2-04: MT5 ships as Option B — WIZARD_EXCHANGE_CODES / WIZARD_EXCHANGES are wizard-only, so EXCHANGES.length (the public marketing count) does not move and CRYPTO_EXCHANGES stays mt5-free (membership there selects √365 over √252 — a money-math boundary, not a UI one)
 - [Phase 153.2]: 153.2-04: a parse miss (KEY_SCOPE_CHECK_UNAVAILABLE, 502) and a missing INTERNAL_API_TOKEN (SEAM_MISCONFIGURED, 500) are split off KEY_NETWORK_TIMEOUT as PERMANENT — both non-recoverable, so no Retry control renders. No retry loop was added (D-07)
 - [Phase 153.2]: 153.2-04 audit lesson: an inherited test's not.toBe between two literals declared in the SAME file is a guard that cannot fail — assert off the response body, and order the named assertion before the broad toEqual. A tolerant expect([502,503]).toContain(status) is what let the D-14b misclassification survive in tests/integration/process-key-thin-adapters.test.ts
+- [Phase ?]: 153.2-05: FIELD_BY_CODE routes every field-level METADATA_* code back to ONE metadata field, with a totality assertion derived from WIZARD_ERROR_COPY plus an anti-vacuity floor — an unmapped code reds BY NAME instead of falling through to a page-level envelope
+- [Phase ?]: 153.2-05: MetadataFieldId widened 4 -> 6 and EXPORTED — the codename and the capital question have NO CLIENT RULE but DO have a field; conflating those two facts is what sent a description refusal to an envelope that named no field
+- [Phase ?]: 153.2-05: the server's refusal MERGES into MetadataStep's existing fieldErrors map rather than rendering beside it, so the inline message, the aria-derived border, the submit predicate, the focus target and the summary line stay ONE derivation; the client mirror wins on ?? because it judges the value on screen now
+- [Phase ?]: 153.2-05: a server refusal is retired on the FIRST EDIT of its field, unconditionally — not on the edit becoming valid. A message the user cannot clear by acting on it is a dead end, and the client mirror re-raises its own code in the same render when it still disagrees
+- [Phase ?]: 153.2-05: wizard_error telemetry fires on BOTH branches and the routing is keyed on FIELD_BY_CODE, never on the HTTP status — a rule that moves arms must not silently revert a field refusal to a full-page dead end
+- [Phase ?]: 153.2-05: WIZFORM-03 was shipped-and-inert since 153.1-03 — the fixRequires filter was correct but zero of fourteen call sites passed a venue, and venue-absence preserves incumbent copy. Passing context.venue at SubmitStep is what turns it on; ConnectKeyStep/MultiKeyConnectStep remain 153.4's
+- [Phase ?]: 153.2-05: the finalize limiter's 429 answers RATE_LIMITED, NOT the ledger's suggested KEY_RATE_LIMIT — that entry's copy blames the exchange for OUR own per-user cap. A ledger entry is a suggestion, not a verdict
+- [Phase ?]: 153.2-05: the two limiter arms stay explicit NextResponse.json sites — routing them through the deny chokepoint was MEASURED to drop the derived rejection-site count 32 -> 30, i.e. to make the class guard blind to them
+- [Phase ?]: 153.2-05: three of nine seam citations in wizardErrors.ts had ALREADY drifted, and a tenth claim was substantively false (MetadataStep reads .title, not .cause, since 153.2-01) — re-derive against HEAD, never rename the symbol at the stale line
+- [Phase ?]: 153.2-05: WIZFORM-01 marked COMPLETE — checkbox and traceability row now agree (closes D-153.2-A). WIZFORM-02 and WIZFORM-03 recorded as PARTIAL with their remaining owners named
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1257,7 +1268,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-09T21:05:27.700Z
+**Last Date:** 2026-08-09T21:46:18.790Z
 **Stopped At:** Completed 153.2-04-PLAN.md (MT5 declarable AND submittable)
 **Resume File:** None
 **Next step:** 153.3 is COMPLETE (6/6); 153.1 is 5/6 (plan 01 Wave-0 gates, plan 02 the capability foundation, plan 03 the WIZFORM-03 class filter, plan 04 the ten new codes, plan 05 the honest codes on finalize-wizard -- all green at HEAD). Execute **153.1-06** next, then 153.2 -> 153.4 on `feat/v1.17-153-wizform`. ⛔ WIZFORM-05 stays unchecked until 153.4 closes the client leg. ⛔ **WIZFORM-03 stays unchecked until 153.2/153.4** -- the mechanism and the capability record exist and are pinned, but NOT ONE `buildEnvelope` call site passes `venue` or `surface`, so an MT5 user still reads "switch to a different exchange" in production. ⛔ **WIZFORM-02 stays unchecked until 153.1-06** -- plan 05 landed the emitting half (25 sites, 19 distinct codes, roster 21, EMITTED-NOT-IN-ROSTER empty), but nothing ASSERTS that reconciliation yet, so a twelfth arm added without a code would ship silently. ⭐ 153.1-06 must map through `SEAM_CODE_TO_WIZARD_CODE` before comparing against the roster, or it reports `CIRCUIT_OPEN` as an uncovered emitter forever.
