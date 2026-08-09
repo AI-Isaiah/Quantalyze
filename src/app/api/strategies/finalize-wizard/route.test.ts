@@ -3105,11 +3105,17 @@ describe("POST /api/strategies/finalize-wizard — OWN-03 capital-ownership mark
     );
     expect(res.status).toBe(400);
     const body = await res.json();
-    // Same envelope shape as the entry_context garbage arm: a bare `error`
-    // string and NO `code`. Minting a code here would put a string the wizard
-    // roster does not know onto the client, which renders the UNKNOWN card.
+    // ⚠️ 153.1-05 / D-09(b) — THIS ASSERTION USED TO PIN THE DEFECT. It read
+    // `expect(body.code).toBeUndefined()`, justified by "minting a code here
+    // would put a string the wizard roster does not know onto the client,
+    // which renders the UNKNOWN card". True premise, backwards conclusion, and
+    // the same one the source comment beside the arm carried: answering with
+    // NO code does not avoid the UNKNOWN card, it guarantees it. The remedy is
+    // to admit the code to `KNOWN_FINALIZE_CODES`, which this same commit
+    // does. A test written the old way is worse than no test — it makes the
+    // dead end a contract, so removing it would have read as a regression.
     expect(typeof body.error).toBe("string");
-    expect(body.code).toBeUndefined();
+    expect(body.code).toBe("METADATA_CAPITAL_OWNERSHIP_INVALID");
 
     expect(
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),

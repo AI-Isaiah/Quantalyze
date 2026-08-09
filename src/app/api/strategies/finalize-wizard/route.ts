@@ -334,6 +334,33 @@ type ValidatedPayload = {
   capitalOwnership?: CapitalOwnership;
 };
 
+/**
+ * The server-side input-validation control for this route (ASVS V5).
+ *
+ * ⭐ 153.1-05 / D-09(b) — EVERY arm below carries a `code`, and that is the
+ * whole point of this pass. Until now they answered a bare `error` string, so
+ * `SubmitStep` had nothing to map and rendered "We could not classify this
+ * failure" — the generic dead end — for a rejection the server had classified
+ * perfectly well. The arm that cost the founder three submits is the
+ * description one: a description of two characters produced a card that named
+ * neither the field nor the rule.
+ *
+ * Two properties to preserve when editing anything here:
+ *
+ *   · ⛔ A `code` changes the response BODY, never the DECISION. Not one
+ *     condition below is weakened by carrying one, and the client-side mirrors
+ *     Phase 153.2 adds are UX, never enforcement — this function stays the
+ *     control.
+ *   · ⚠️ A code emitted here must be a member of `KNOWN_FINALIZE_CODES`
+ *     (`SubmitStep.tsx`) IN THE SAME COMMIT, or it fails that membership check,
+ *     falls through to `UNKNOWN`, and the fix ships invisible while every
+ *     route-side test stays green. 153.1-06 turns that obligation into a
+ *     derived assertion so the next author cannot forget it.
+ *
+ * The `error` strings stay developer-facing detail. The USER-facing sentence
+ * now comes from the code's entry in `WIZARD_ERROR_COPY`, which is why the
+ * detail here can name a field and a rule without being written as copy.
+ */
 function validatePayload(
   body: Record<string, unknown> | null,
 ):
@@ -343,7 +370,10 @@ function validatePayload(
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "Invalid request body" },
+        // Not a field-level code: a body that is not an object was never
+        // TYPED by anyone, so there is no form control to route the user
+        // back to. `VALIDATION_FAILED` is the honest answer (RESEARCH Q3).
+        { code: "VALIDATION_FAILED", error: "Invalid request body" },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
@@ -370,7 +400,12 @@ function validatePayload(
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "strategy_id must be a valid UUID" },
+        // Same reasoning as the body arm: the draft id is minted by the
+        // wizard, never typed by the user, so there is no field to name.
+        {
+          code: "VALIDATION_FAILED",
+          error: "strategy_id must be a valid UUID",
+        },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
@@ -379,20 +414,62 @@ function validatePayload(
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "name must be one of the allowed codenames" },
+        {
+          code: "METADATA_NAME_INVALID",
+          error: "name must be one of the allowed codenames",
+        },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
   }
-  if (
-    typeof description !== "string" ||
-    description.length < 10 ||
-    description.length > MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS
-  ) {
+  // ⭐ 153.1-05 / D-09(b) + D-23 — THIS is the incident, and it is three arms
+  // rather than one on purpose.
+  //
+  // It shipped as a single condition answering one sentence, "description must
+  // be 10-5000 characters", with no `code`. The founder submitted a
+  // two-character description three times and read "We could not classify this
+  // failure" each time. The server knew exactly what was wrong.
+  //
+  // Splitting it is not cosmetic: UI-SPEC Surface 2 maps each field-level code
+  // to exactly one field, and the two bounds are two DIFFERENT remedies — one
+  // asks the user to write more, the other to cut. A single code cannot carry
+  // both sentences, and the copy 153.1-04 authored is a pair for that reason.
+  //
+  // ⛔ D-23 — the lower bound reads `MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS`. The
+  // bare `10` that used to sit here is the drift that produced the incident:
+  // the constant and the sentence were free to disagree, and a client-side
+  // mirror written against either could be wrong about the other. Both bounds
+  // are interpolated into the developer-facing string from the same constants
+  // the conditions read, so the text cannot contradict the rule it describes.
+  if (typeof description !== "string") {
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "description must be 10-5000 characters" },
+        { code: "METADATA_DESCRIPTION_REQUIRED", error: "description is required" },
+        { status: 400, headers: NO_STORE_HEADERS },
+      ),
+    };
+  }
+  if (description.length < MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          code: "METADATA_DESCRIPTION_TOO_SHORT",
+          error: `description must be at least ${MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS} characters`,
+        },
+        { status: 400, headers: NO_STORE_HEADERS },
+      ),
+    };
+  }
+  if (description.length > MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          code: "METADATA_DESCRIPTION_TOO_LONG",
+          error: `description must be at most ${MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS} characters`,
+        },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
@@ -401,7 +478,13 @@ function validatePayload(
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "category_id must be a valid UUID" },
+        // A field-level code even though the detail names a UUID: the user
+        // picks a category from a <Select>, and an absent or malformed id is
+        // what an unanswered picker looks like on the wire.
+        {
+          code: "METADATA_CATEGORY_REQUIRED",
+          error: "category_id must be a valid UUID",
+        },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
@@ -423,6 +506,7 @@ function validatePayload(
       ok: false,
       response: NextResponse.json(
         {
+          code: "METADATA_AUM_INVALID",
           error: `aum must be a finite non-negative number under ${MAX_DOLLAR_VALUE}`,
         },
         { status: 400, headers: NO_STORE_HEADERS },
@@ -434,6 +518,7 @@ function validatePayload(
       ok: false,
       response: NextResponse.json(
         {
+          code: "METADATA_CAPACITY_INVALID",
           error: `max_capacity must be a finite non-negative number under ${MAX_DOLLAR_VALUE}`,
         },
         { status: 400, headers: NO_STORE_HEADERS },
@@ -470,7 +555,14 @@ function validatePayload(
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "entry_context must be 'manager' or 'contribution'" },
+        // `VALIDATION_FAILED`, not a field-level code: `entry_context` is a
+        // trusted context selector the wizard sets from which surface the user
+        // entered by. It is never typed, so there is no control to route back
+        // to (RESEARCH Q3, same class as the two arms at the top).
+        {
+          code: "VALIDATION_FAILED",
+          error: "entry_context must be 'manager' or 'contribution'",
+        },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
@@ -485,12 +577,23 @@ function validatePayload(
   //
   // A garbage value is a hard 400, NOT a silent coercion to the safe value.
   // Coercing would let a broken or hostile client believe it had set a mark
-  // it did not set. Deliberately mirrors the entry_context arm above: a bare
-  // `error` string with NO `code`, because every code the wizard renders must
-  // exist in its error roster — an unknown one renders the UNKNOWN card, which
-  // tells the user nothing (Pitfall 7). This value is data, not privilege:
-  // marking a strategy own-capital only makes it ELIGIBLE for the allocation
-  // surface, which enforces ownership itself.
+  // it did not set. This value is data, not privilege: marking a strategy
+  // own-capital only makes it ELIGIBLE for the allocation surface, which
+  // enforces ownership itself.
+  //
+  // ⚠️ 153.1-05 — THIS COMMENT USED TO ARGUE FOR THE DEFECT, and the paragraph
+  // is deleted rather than softened. It read: "a bare `error` string with NO
+  // `code`, because every code the wizard renders must exist in its error
+  // roster — an unknown one renders the UNKNOWN card, which tells the user
+  // nothing." The observation was true and the conclusion was backwards: the
+  // remedy for a code that is not in the roster is to PUT IT IN THE ROSTER, in
+  // the same commit, which is exactly what this one does. Answering with no
+  // code at all does not avoid the UNKNOWN card — it GUARANTEES it, for every
+  // rejection on this path, forever. WIZFORM-02 removes the premise outright:
+  // the roster is asserted against the emitting sites (153.1-06), so a member
+  // missed here REDS CI BY NAME instead of shipping a silent dead end.
+  // Leaving the old sentence in place would invite the next reader to restore
+  // the bug (RESEARCH).
   if (
     capital_ownership !== undefined &&
     capital_ownership !== null &&
@@ -499,7 +602,10 @@ function validatePayload(
     return {
       ok: false,
       response: NextResponse.json(
-        { error: `capital_ownership must be '${OWN_CAPITAL}' or '${TEAM_REVIEW}'` },
+        {
+          code: "METADATA_CAPITAL_OWNERSHIP_INVALID",
+          error: `capital_ownership must be '${OWN_CAPITAL}' or '${TEAM_REVIEW}'`,
+        },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
