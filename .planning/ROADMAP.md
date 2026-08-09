@@ -348,7 +348,9 @@ Plans:
 
 - ⛔ **FLAG-3 is ONE indivisible task.** Deleting `MetadataStep.tsx:491`'s `disabled` without widening the `.trim()`-only `handleSubmit` guard at `:222-233` lets a 2-character description POST — re-shipping the very defect this phase deletes.
 - ⛔ **INHERITED FROM 153.1-03 — WIZFORM-03 does not close without you.** The `fixRequires` class filter is live and correct in `wizardErrors.ts`, but **no `buildEnvelope` call site passes `context.venue` or `context.surface`** (verified across all 14 sites, 2026-08-09), and venue-absence deliberately preserves incumbent copy. **An MT5 user still reads "switch to a different exchange" in production until a call site names its venue.** `SubmitStep.tsx:414` is yours; `ConnectKeyStep.tsx:609` and `MultiKeyConnectStep.tsx` are 153.4's. **No further change to `wizardErrors.ts` is needed** — just pass the context.
-- ⚠️ **A true sentence is temporarily hidden**: `SERVICE_UNREACHABLE`'s `/strategies` bullet now renders **nowhere** until a call site names its surface. That is the UI-SPEC's "fail toward saying less" working as designed, but it is a real loss on the one surface where the bullet applies — restored the moment you pass `surface`.
+- ⚠️ **A true sentence is temporarily hidden**: `SERVICE_UNREACHABLE`'s `/strategies` bullet now renders **nowhere** until a call site names its surface.
+- ⛔ **INHERITED FROM 153.1-06 — WIZFORM-02 does not close without you either.** 153.1 closed the *named root cause* (the `validatePayload` arms; `deriveEmittedCodes` moved 0 → **25 sites / 19 distinct**), but the requirement's criterion is broader than its root cause. A derived sweep found **five live rejections that still render "We could not classify this failure"** — HTTP **429, 503, 500, 500, 502** — fenced in `src/lib/wizardErrors.invariant.test.ts` as `KNOWN_CODELESS_FINALIZE_REJECTIONS = 5`, with a sixth reddening by name. **Code those five and drive the literal to 0**; that is what ticks WIZFORM-02. ⚠️ Do NOT raise the fence to make a test pass — the fence exists to make the debt visible, and raising it would launder an open requirement into a green suite.
+- ⛔ **INHERITED — two pre-existing `npm test` failures are YOURS to clear.** Verified unchanged since `aff52516` (`git diff aff52516..HEAD -- src/lib/wizardErrors.ts src/app/` is EMPTY, so 153.1 neither caused nor worsened them): **`seam-citations`** reds on **7 bare `file:line` citations in `src/lib/wizardErrors.ts`, 3 of them already stale** — you are editing that file anyway, so re-derive from HEAD rather than patching the integers (this milestone has burned two full sessions on citation drift). The sibling `seam-venue-vocabulary` failure (`mt5.py:242`) is **Phase 153.3's**, not yours — leave it. That is the UI-SPEC's "fail toward saying less" working as designed, but it is a real loss on the one surface where the bullet applies — restored the moment you pass `surface`.
 - ⛔ **MT5-14 and WIZFORM-04 ship together.** Widening the chip set without the probe skip leaves MT5 a HARD BLOCKER — declarable but still unsubmittable.
 - ⚠️ The `closed-sets.mt5-flag` pin re-cut and the widening are the SAME commit, and the re-cut ADDS the positive flag-ON assertion the pin lacks today.
 
@@ -394,6 +396,27 @@ Plans:
 - ⛔ **D-26: the `120_000` budget row and `BREAKER_LOCK_TOMBSTONE_S` 60 → 90 are the SAME commit.** A-25 then holds exactly: `(30 + 90) × 1000 = 120 000`.
 - ⚠️ **`budgetKeyFor` must diverge from its analog deliberately.** `process-key-client.ts:123-134` throws on `default:` via a `never` assignment; this one takes a caller-supplied string, so `default:` **returns `"validate-key"` and never throws**. Write the divergence down or a reviewer will "fix" it back. Never interpolate a wire value into a breaker key (T-140-01).
 - ⚠️ 16 pin sites (RESEARCH Table C) must move together, including the prose restatements that stay green while their premise breaks.
+
+### Phase 153.5: WIZFORM-ABANDON — Work that outlives its timeout (INSERTED, NOT YET PLANNED)
+
+**Goal**: No `asyncio.to_thread` work can keep touching the MT5 terminal after its `wait_for` fired and its caller released the lease
+**Depends on**: Phase 153.3 (complete) — this closes findings its `/code-review high` deliberately deferred
+**Requirements**: TBD at planning (derive from the three findings below)
+**Owns**: `analytics-service/services/mt5_concurrency.py`, `routers/exchange.py`, `services/ingestion/mt5.py`, `analytics-service/tests/**`
+**Plans**: TBD
+**UI hint**: no
+
+⭐ **ONE defect, three faces — fix it at the SINK, not three times.** Work handed to `to_thread` outlives its `wait_for`; the caller unwinds, releases the terminal lease, and the abandoned thread keeps driving the same process-global MT5 session.
+
+| # | Site | Symptom |
+|---|---|---|
+| 5 | `services/mt5_concurrency.py:119` | `_mt5_bounded_restart` abandons at its 10s bound; the one permitted `mt5.shutdown()` can fire **after** the lease is released, under the next holder |
+| 6 | `routers/exchange.py:483` (+ `services/ingestion/mt5.py:173`) | a connect-stage timeout orphans an `Mt5Client` the thread then constructs — `client` was never assigned, so the Pitfall-6 `finally` releases nothing and the rpyc session leaks |
+| 7 | `routers/exchange.py:689` | the end-to-end deadline fires; the abandoned probe keeps issuing rpyc calls, so D-29's serialization does not hold on the timeout path |
+
+- ⛔ **Patching three call sites is the instance-not-class mistake this milestone has paid for sixteen times.** Candidate designs (a real decision, not a fixer's improvisation): a cancellation-aware wrapper; a generation/epoch counter the terminal checks before each call; or refusing to release the lease until the worker thread confirms it stopped.
+- ⚠️ **The AST lease-roster CANNOT catch this.** Its enclosure proof is *lexical* — it reads the `shutdown` as inside the `async with` and passes while the runtime escapes. The fix needs a **runtime** assertion (observe the abandoned thread touching the session after release), never a second static pin. Guard #16 of Phase 153 lives here.
+- 📌 Deferred to **Phase 155**, not here (both need the live latency data D-32 made collectable — do NOT guess): the 60s per-stage ceiling wrapping six round-trips of 45 000ms/55s each, and the 20s interactive lease wait being smaller than the worker's 40s read + 10s restart hold.
 
 ### Phase 154: WIZCONT/STALE — Wizard continuity, no stale screens
 
