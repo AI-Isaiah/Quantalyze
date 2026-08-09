@@ -700,6 +700,22 @@ true for 146 and half of 142–145, and **false for 141**.
     **The sound invariant is `grep -c "applyFixRequirements("` → 2** (declaration + the one call).
     ⚠️ Lesson: a prose/regex gate in a PROMPT is exactly as falsifiable as one in a test, and
     nobody mutation-tests a prompt. Prefer an invariant a test can hold.
+  - **#15 An innocence proof that could not fail — in 153.1's OWN paperwork.** ✅ corrected
+    2026-08-09 by the 153.1 verifier. `ROADMAP.md:353` absolved 153.1 of the red
+    `seam-citations` gate on the strength of an empty `git diff aff52516..HEAD`. But
+    `aff52516` is a 153.1-05 **docs** commit dated AFTER every source edit in 153.1-03/04/05,
+    so that diff was empty **by construction**, whoever caused the citations. The truth is the
+    opposite: `git log -S'<citation>'` attributes **all nine** to `712c01a9`/`aeea5455`/
+    `3011c659` — 153.1's own commits, two of them added by the CR-01 review fix and recorded
+    nowhere. `deferred-items.md` said "PRE-EXISTING", then named 153.1-04 as introducer one
+    paragraph later, and counted 7 against a live 9.
+    ⚠️ Lesson — **this is the first instance found in a PLANNING LEDGER rather than a test**,
+    and it is the highest-leverage location of all: a false exoneration is read by the next
+    phase's planner and never re-derived. Same taxonomy row as "guards over a CROSS-FILE
+    coupling" — the coupling here is commit-order vs file-content. **Rule: a
+    baseline commit used to prove "we didn't cause this" must PREDATE the work, and you must
+    show that it does.** Prefer `git log -S` (names the author) over `git diff <base>` (names
+    nobody).
 
 - **✅ FIXED 2026-08-09 — the STATE.md "SDK bugs" were OUR schema drift, not the SDK.**
   Founder challenge (*"Probably something we do rather than SDK. Didn't have those problems

@@ -119,23 +119,37 @@ into "every rejection carries a code", which is where WIZFORM-02 lands.
 
 ## DEF-153.1-06-B — `seam-citations.invariant.test.ts` RED: bare `file:line` citations in `wizardErrors.ts`
 
-**Found during:** 153.1-06's full-suite run. **PRE-EXISTING at `aff52516`** —
-`git diff aff52516..HEAD` for this plan is a single test file, and this guard
-does not read it.
+**Found during:** 153.1-06's full-suite run. **SELF-CAUSED — every one of the
+nine was introduced by 153.1's own commits.** (Corrected 2026-08-09 by the
+153.1 verifier; this entry previously claimed "PRE-EXISTING at `aff52516`" and
+then contradicted itself one paragraph later by naming 153.1-04 as the
+introducer.)
+
+⚠️ **The original innocence proof was a guard that cannot fail** — the exact
+species this phase exists to delete. `git diff aff52516..HEAD` is empty because
+`aff52516` is a 153.1-05 **docs** commit dated AFTER all of 153.1-03/04/05's
+source edits, so the diff was always going to be empty no matter who caused the
+citations. `git log -S'<citation string>'` is the check that can actually fail,
+and it attributes all nine to `712c01a9`, `aeea5455` and `3011c659`.
 
 ```
 src/lib/wizardErrors.ts:42   cites MetadataStep.tsx:19
 src/lib/wizardErrors.ts:217  cites finalize-wizard/route.ts:1319
 src/lib/wizardErrors.ts:292  cites finalize-wizard/route.ts:1782
-src/lib/wizardErrors.ts:618  cites envelope.ts:86
-src/lib/wizardErrors.ts:619  cites WizardErrorEnvelope.test.tsx:44
-src/lib/wizardErrors.ts:1838 cites finalize-wizard/route.ts:1763-1777
-src/lib/wizardErrors.ts:2252 cites envelope.ts:86
+src/lib/wizardErrors.ts:625  cites envelope.ts:86
+src/lib/wizardErrors.ts:626  cites WizardErrorEnvelope.test.tsx:44
+src/lib/wizardErrors.ts:1184 cites route.ts:448
+src/lib/wizardErrors.ts:1192 cites MetadataStep.tsx:215
+src/lib/wizardErrors.ts:1857 cites finalize-wizard/route.ts:1763-1777
+src/lib/wizardErrors.ts:2271 cites envelope.ts:86
 ```
 
-Introduced by **153.1-04**, whose copy entries cite route coordinates. ⚠️ Three
-of them are ALREADY STALE — 153.1-05 moved `:1319 → :1448` and `:1782 → :1911`
-— which is precisely the drift the guard exists to name.
+Introduced by **153.1-04** (copy entries citing route coordinates) and by the
+**CR-01 review fix** `3011c659`, which added `route.ts:448` and
+`MetadataStep.tsx:215` — the last two were recorded nowhere until now, and this
+entry listed only seven. ⚠️ Three are ALREADY STALE: 153.1-05 moved
+`:1319 → :1448` and `:1782 → :1911` itself — precisely the drift the guard
+exists to name.
 
 **Not fixed:** comment prose only, no user-facing or data-integrity effect. The
 founder's stopping rule puts citations explicitly in the log-never-block class.
