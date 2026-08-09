@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: planning
-stopped_at: "Phase 153.3 COMPLETE (6/6 waves, independently gated: -k mt5 364 passed, full suite 5074, mypy --strict clean, MT5_REQUEST_TIMEOUT_S zero-diff, zero TypeScript, worker lease sites byte-unchanged). WIZFORM-05 deliberately UNCHECKED — client leg is 153.4's. Next: execute 153.1 (6 plans) -> 153.2 (5) -> 153.4 (5)."
-last_updated: "2026-08-09T03:17:26.935Z"
+stopped_at: "Phase 153.1 plan 01 COMPLETE (Wave-0 gates, green at HEAD, zero production-constant edits): deriveRoster reads line-broken rosters (KNOWN_FINALIZE_CODES 0 -> 10), emitter predicate is per-route (statusRe) and survives ${...} interpolation (cap 160), derived A-25 assertion landed beside the kept literal one. finalize-wizard derives 0 sites at HEAD under [45]\\d\\d — 153.1-06 must move that number. Next: 153.1-02."
+last_updated: "2026-08-09T03:32:34.542Z"
 last_activity: 2026-08-07 -- Phase 152 execution started
 progress:
   total_phases: 13
   completed_phases: 7
   total_plans: 59
-  completed_plans: 43
+  completed_plans: 44
   percent: 54
 ---
 
@@ -55,10 +55,10 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: 153
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-08-07 -- Phase 152 execution started
+Phase: 153.1 (WIZFORM-CODES) -- 153.3 already COMPLETE on the same branch
+Plan: 01 of 06 complete
+Status: Executing
+Last activity: 2026-08-09 -- Phase 153.1 plan 01 executed (Wave-0 gates)
 
 ### Phase 142.1 scope (inserted 2026-08-02)
 
@@ -381,7 +381,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [███████░░░] 73%
+Progress: [████████░░] 75%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -479,6 +479,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 153.3 P04 | ~70 min | 2 tasks | 5 files |
 | Phase 153.3 P05 | 85 min | 3 tasks | 5 files |
 | Phase 153.3 P06 | ~70 min | 3 tasks | 10 files |
+| Phase 153.1 P01 | ~35 min | 3 tasks | 2 modified files |
 
 ## Accumulated Context
 
@@ -518,6 +519,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - 153.3-05: structlog loggers must be bound PER CALL — logging_config sets cache_logger_on_first_use=true, so a module-level proxy freezes its processor chain (including the PII scrub) at first use
 - 153.3-05: D-27 honoured literally — not one timeout constant moved; the runbook records the whole chain as PROVISIONAL with Phase 155 named as the owner of the tightening
 - [Phase ?]: Phase 153.3: MT5 gateway honesty shipped — teardown deleted at the sink (D-35), terminal lease taken by the validate path (D-29), initialize() bound and the ordering guard extended to the class (D-24), read-only fails CLOSED (D-31), stages instrumented (D-32)
+- [Phase ?]: 153.1-01: emitter lazy-body cap = 160 chars — measured longest real error body 90, shortest reach to the next emitter's status 202; the cap must sit between them or a malformed body reports its code against the NEXT emitter's status
+- [Phase ?]: 153.1-01: the A-25 SELF-TEST synthetic is 150_000 not 120_000 — 120_000 clears today's 90_000 ceiling but goes FALSE when D-26 (153.4) raises the tombstone to 90 s and the ceiling becomes exactly 120_000
+- [Phase ?]: 153.1-01: both incumbent wizard routes keep statusRe 400 — widening them would move their site count 12 to 16 and add DRAFT_ALREADY_EXISTS/UNKNOWN to the pinned vocabulary, i.e. a population change dressed as a scanner improvement
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1220,10 +1224,21 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-09T03:17:26.629Z
-**Stopped At:** Phase 153.3 COMPLETE (6/6 waves, independently gated: -k mt5 364 passed, full suite 5074, mypy --strict clean, MT5_REQUEST_TIMEOUT_S zero-diff, zero TypeScript, worker lease sites byte-unchanged). WIZFORM-05 deliberately UNCHECKED — client leg is 153.4's. Next: execute 153.1 (6 plans) -> 153.2 (5) -> 153.4 (5).
+**Last Date:** 2026-08-09T03:32:34.531Z
+**Stopped At:** Phase 153.1 plan 01 COMPLETE (Wave-0 gates, green at HEAD, zero production-constant edits): deriveRoster reads line-broken rosters (KNOWN_FINALIZE_CODES 0 -> 10), emitter predicate is per-route (statusRe) and survives ${...} interpolation (cap 160), derived A-25 assertion landed beside the kept literal one. finalize-wizard derives 0 sites at HEAD under [45]\\d\\d — 153.1-06 must move that number. Next: 153.1-02.
 **Resume File:** None
-**Next step:** 153.3 is COMPLETE (6/6). Execute 153.1 → 153.2 → 153.4 on `feat/v1.17-153-wizform`. ⛔ WIZFORM-05 stays unchecked until 153.4 closes the client leg.
+**Next step:** 153.3 is COMPLETE (6/6); 153.1 is 1/6 (plan 01, the Wave-0 gates, landed green at HEAD). Execute 153.1-02 next, then the rest of 153.1 → 153.2 → 153.4 on `feat/v1.17-153-wizform`. ⛔ WIZFORM-05 stays unchecked until 153.4 closes the client leg.
+
+⭐ **Three numbers 153.1-06 must reconcile against** (measured in `153.1-01-SUMMARY.md`):
+`deriveRoster(SubmitStep.tsx, "KNOWN_FINALIZE_CODES")` = **10** (comment-stripped path);
+`deriveEmittedCodes(finalize-wizard, "[45]\\d\\d")` = **0** at HEAD — if the D-34 reorder
+leaves it at 0 the scanner is blind, not the route clean; `EMITTER_BODY_MAX_CHARS` = **160**
+(longest real body 90, nearest-neighbour reach 202), so a `finalize-wizard` error body longer
+than 160 chars makes its emitter invisible.
+⚠️ `DERIVED_FLOOR` is still **14** — 153.1-06 must re-size it against the REORDERED total
+(14 pre-existing finalize-wizard arms + the 9 new codes), never against the 9.
+⚠️ 153.4 moves the hand-typed `60` in the DERIVED A-25 assertion
+(`seam-constants.pin.test.ts:790`) to `90` in the SAME commit as the budget raise.
 
 ⚠️ **Post-land CI state (2026-08-08):** `secret-scan` went RED on main at `e0481411` — a
 false-positive `generic-api-key` hit on the Phase 151 E1 fixture `E1_KEY_DERIV = "e1-key-deriv"`
