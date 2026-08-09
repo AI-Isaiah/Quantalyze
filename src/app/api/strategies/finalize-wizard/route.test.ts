@@ -44,14 +44,25 @@ vi.mock("@/lib/api/withAuth", () => ({
       h(req, USER),
 }));
 
-vi.mock("@/lib/ratelimit", () => ({
+// ⛔ THE PREDICATE IS THE REAL ONE (153.2 review WR-03). Only the two seams this
+// suite must control — the limiter handle and the async `checkLimit` call — are
+// replaced; everything else, including `isRateLimitMisconfigured`, comes through
+// `importOriginal`.
+//
+// What was here before was a hand-written double:
+//   `isRateLimitMisconfigured: (rl) => rl?.misconfigured === true`
+// over a fixture shape `CheckLimitResult` cannot express — the production type
+// has no `misconfigured` field at all, and the real predicate reads
+// `result.success === false && result.reason === "ratelimit_misconfigured"`.
+// The comment beside it claimed it was "the real predicate's shape", which was
+// false. The 503 arm did execute, so the row was not vacuous — but the
+// DISCRIMINATION it demonstrated was one the test had authored for itself, and a
+// route change that read the real discriminator would have kept it green. A
+// double that cannot be wrong in the ways the original can be is not a double.
+vi.mock("@/lib/ratelimit", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/ratelimit")>()),
   userActionLimiter: {},
   checkLimit: vi.fn(async () => ({ success: true })),
-  // 153.2-05 — the real predicate's shape, not a stub that answers a constant:
-  // the route's two deny arms are told apart by THIS, and a mock that always
-  // said `false` would make the 503 row unreachable while looking green.
-  isRateLimitMisconfigured: (rl: { misconfigured?: boolean }) =>
-    rl?.misconfigured === true,
 }));
 
 const STATE = vi.hoisted(() => ({
@@ -3892,7 +3903,13 @@ describe("[153.2-04 / D-14b] our own configuration fault is not a network blip",
 // change wearing a classification change's clothes.
 // ═══════════════════════════════════════════════════════════════════════════
 describe("[153.2-05] the rate-limit deny arms carry codes", () => {
-  async function denyWith(rl: Record<string, unknown>) {
+  // ⛔ TYPED AS THE PRODUCTION RESULT (153.2 review WR-03), not
+  // `Record<string, unknown>`. The predicate under test is now the real one, so
+  // a fixture the production type cannot express is a compile error here rather
+  // than a green row demonstrating a discrimination nobody ships.
+  async function denyWith(
+    rl: import("@/lib/ratelimit").CheckLimitResult,
+  ) {
     const { checkLimit } = await import("@/lib/ratelimit");
     (checkLimit as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
       rl,
@@ -3923,10 +3940,16 @@ describe("[153.2-05] the rate-limit deny arms carry codes", () => {
     // different statuses; now they answer different classifications too, and
     // SEAM_MISCONFIGURED carries no recoverable action, so no Retry control
     // renders for a condition retrying cannot clear.
+    //
+    // ⭐ DRIVEN BY THE REAL DISCRIMINATOR (153.2 review WR-03): `reason:
+    // "ratelimit_misconfigured"` is the field the shipped predicate reads and
+    // the only one `CheckLimitResult` declares. The previous fixture said
+    // `misconfigured: true` — a key production never emits — and was told apart
+    // by a predicate this file had written for itself.
     const { res, body } = await denyWith({
       success: false,
       retryAfter: 60,
-      misconfigured: true,
+      reason: "ratelimit_misconfigured",
     });
 
     expect(res.status).toBe(503);
