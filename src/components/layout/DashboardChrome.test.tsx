@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { render, screen, within, fireEvent } from "@testing-library/react";
 import { Sidebar } from "./Sidebar";
 import { DashboardChrome } from "./DashboardChrome";
@@ -422,5 +424,135 @@ describe("DashboardChrome — wide fluid-fill variant (Phase 52)", () => {
     const container = contentContainerFor("/discoveryx");
     expect(container).toHaveClass("max-w-7xl");
     expect(container).not.toHaveClass("max-w-full");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 153.2 review WR-06 — THE OTHER SIDE OF THE COUPLING.
+//
+// The shell's own comment names the hazard ("leaving them would re-clamp the
+// now-fluid shell and silently restore the bug") and the rows above guard the
+// SHELL. Nothing guarded the surfaces INSIDE it — which is precisely where the
+// caps were, and where two of them survived: `ScenarioComposer` kept
+// `max-w-[1440px]` on both of its shells, so the founder's dead-margin symptom
+// was still live on `/allocations`' Scenario tab while DESIGN.md recorded that
+// route as fixed. A page-side cap ships green against every shell-side row.
+//
+// ⛔ THIS IS A CLASS SWEEP, NOT A LIST OF THE KNOWN OFFENDERS. It walks the
+// `isWide` trees rather than enumerating six paths, so a NEW page or body
+// component that reinstates a cap is caught without anyone remembering to add
+// it here. An enumerated list would have missed `ScenarioComposer` for exactly
+// the reason it was missed the first time.
+//
+// ⚠️ WHAT COUNTS AS AN OFFENCE — a *page measure*, not any `max-w-*`. A
+// truncating table cell (`truncate max-w-[160px]`) or a chart wrapper is not
+// competing with the shell for the page's width, and DESIGN.md's rule says so
+// in terms. The signature of a page measure is the centring idiom: a single
+// className carrying BOTH `mx-auto` AND an arbitrary-value `max-w-[Npx]`.
+// ═══════════════════════════════════════════════════════════════════════════
+describe("[153.2 WR-06] no surface inside an isWide tree re-clamps the fluid shell", () => {
+  // Mirrors `DashboardChrome`'s own `isWide` allow-list. Kept beside it, in the
+  // same file, so the sweep and the predicate cannot drift apart unnoticed.
+  const WIDE_TREES = [
+    "src/app/(dashboard)/allocations",
+    "src/app/(dashboard)/compare",
+    "src/app/(dashboard)/discovery",
+    "src/app/(dashboard)/admin",
+    "src/app/(dashboard)/portfolios",
+    "src/app/(dashboard)/my-strategies",
+  ];
+
+  /**
+   * The documented carve-outs, named so the next reader inherits the exception
+   * instead of rediscovering it (DESIGN.md §Measure ladder). Every entry is
+   * PROSE sitting inside an `isWide` tree: the ladder governs by CONTENT TYPE,
+   * not by URL prefix, and a bounded measure is a genuine readability control
+   * for a paragraph in a way it is not for a table.
+   *
+   *   - the four `/admin` text pages — under `/admin` for NAVIGATION reasons
+   *     only; RT-W2 (v1.4 Phase 54) set them at rung 1, 1100px.
+   *   - the Overview "factsheet warming up" status block.
+   *   - the discovery-detail "factsheet still computing" fallback article,
+   *     which carries the factsheet's own 760px reading measure.
+   *
+   * ⛔ A dense-table page may not join this list. Adding an entry is a design
+   * decision that belongs in DESIGN.md's changelog first.
+   */
+  const ALLOWED = new Map<string, string>([
+    ["src/app/(dashboard)/admin/users/page.tsx", "max-w-[1100px]"],
+    ["src/app/(dashboard)/admin/users/[id]/page.tsx", "max-w-[1100px]"],
+    ["src/app/(dashboard)/admin/partner-import/page.tsx", "max-w-[1100px]"],
+    ["src/app/(dashboard)/admin/for-quants-leads/page.tsx", "max-w-[1100px]"],
+    [
+      "src/app/(dashboard)/allocations/AllocationDashboardV2.tsx",
+      "max-w-[1100px]",
+    ],
+    [
+      "src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx",
+      "max-w-[760px]",
+    ],
+  ]);
+
+  /** Every `className="…"` / `className={`…`}` string literal in a source file. */
+  function classNameStrings(src: string): string[] {
+    const out: string[] = [];
+    for (const m of src.matchAll(/className="([^"]*)"/g)) out.push(m[1]!);
+    for (const m of src.matchAll(/className=\{`([^`]*)`\}/g)) out.push(m[1]!);
+    return out;
+  }
+
+  function tsxFilesUnder(dir: string): string[] {
+    const abs = join(process.cwd(), dir);
+    if (!existsSync(abs)) return [];
+    return readdirSync(abs, { recursive: true, encoding: "utf8" })
+      .filter((rel) => rel.endsWith(".tsx") && !rel.includes(".test."))
+      .map((rel) => `${dir}/${rel}`);
+  }
+
+  const files = WIDE_TREES.flatMap(tsxFilesUnder);
+
+  it("the sweep actually walked the isWide trees (anti-vacuity floor)", () => {
+    // Without this, a renamed directory or a broken glob would make every
+    // assertion below iterate an empty list and pass while guarding nothing —
+    // the exact shape of guard this milestone exists to delete.
+    expect(files.length).toBeGreaterThan(30);
+    for (const tree of WIDE_TREES) {
+      expect(
+        files.some((f) => f.startsWith(tree)),
+        `no .tsx found under ${tree} — the sweep is not reaching it`,
+      ).toBe(true);
+    }
+  });
+
+  it("⭐ no page or body shell inside an isWide tree carries a px page measure", () => {
+    const offenders: string[] = [];
+    for (const file of files) {
+      const src = readFileSync(join(process.cwd(), file), "utf8");
+      for (const cls of classNameStrings(src)) {
+        if (!cls.includes("mx-auto")) continue;
+        const cap = cls.match(/max-w-\[\d+px\]/)?.[0];
+        if (!cap) continue;
+        if (ALLOWED.get(file) === cap) continue;
+        offenders.push(`${file} → "${cls.trim()}"`);
+      }
+    }
+    // Named, not counted: a failure must say WHICH surface re-clamped the shell.
+    expect(offenders).toEqual([]);
+  });
+
+  it("CONTROL — every carve-out still exists, so a stale exemption cannot hide a regression", () => {
+    // The other direction. An allowlist entry whose file was deleted or whose
+    // measure changed is a permission granted to nothing — and the next person
+    // to reinstate a cap on that path would inherit it silently.
+    for (const [file, cap] of ALLOWED) {
+      const abs = join(process.cwd(), file);
+      expect(existsSync(abs), `carve-out names a missing file: ${file}`).toBe(
+        true,
+      );
+      const found = classNameStrings(readFileSync(abs, "utf8")).some(
+        (cls) => cls.includes("mx-auto") && cls.includes(cap),
+      );
+      expect(found, `carve-out ${file} no longer uses ${cap}`).toBe(true);
+    }
   });
 });

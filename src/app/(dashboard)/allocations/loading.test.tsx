@@ -42,6 +42,23 @@ describe("/allocations/loading.tsx — route skeleton (STATE-01)", () => {
     expect(host).not.toBe(grid);
   });
 
+  // ⭐ Added 2026-08-10 (153.2 review WR-06). `loading.tsx`'s docblock claimed
+  // the fluid envelope — "the page shell mirrors the real page's … no px cap" —
+  // with NO assertion behind it, while its `/compare` sibling had carried the
+  // matching row since the 2026-08-09 founder decision. A claim in a comment is
+  // not a guard, and this file is where a reinstated cap on the allocations
+  // skeleton would have shipped green.
+  //
+  // The invariant is NOT a number. It is that the skeleton occupies the SAME
+  // envelope as the page it stands in for, so content does not jump when the
+  // real page swaps in — which is why this rejects the arbitrary-value form
+  // outright rather than pinning a successor literal.
+  it("imposes no px measure of its own — it must not be narrower than the page it stands in for", () => {
+    const { container } = render(<AllocationsLoading />);
+    const pxCaps = container.innerHTML.match(/max-w-\[\d+px\]/g) ?? [];
+    expect(pxCaps).toEqual([]);
+  });
+
   it("assembles from the shared Skeleton primitive (animate-pulse), not hand-rolled bars", () => {
     const { container } = render(<AllocationsLoading />);
     // Skeleton renders `animate-pulse … bg-border/60`; assert several exist so
