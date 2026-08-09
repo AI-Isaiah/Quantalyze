@@ -2047,6 +2047,15 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // fires. The member has to exist first — an emitted code with no copy entry
   // renders UNKNOWN exactly as an unknown code does, which is the failure
   // WIZFORM-02 is about.
+  //
+  // ⚠️ ONE OBLIGATION ON THE EMITTER, STATED HERE BECAUSE THE COPY DEPENDS ON
+  // IT. "Nothing was saved — your key was not stored" is only OBSERVABLE while
+  // the abort fires before the request could persist anything; the UI-SPEC's
+  // own basis for it is that the wait is aborted pre-encrypt / pre-RPC. A
+  // server does not stop working because a client stopped listening (the
+  // reasoning behind the "data is unchanged" ban on the CSV entry), so 153.4
+  // must NOT emit this code on a path where the write could already have
+  // landed. If that ever changes, this sentence changes with it.
   SEAM_DEADLINE_EXCEEDED: {
     title: "This check ran out of the time we allow.",
     // Count-free by construction: `budgetSeconds` is optional, and

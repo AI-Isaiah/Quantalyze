@@ -16,6 +16,13 @@ import {
   type WizardErrorCode,
 } from "./wizardErrors";
 import type { GateFailureCode } from "./strategyGate";
+// 153.1-04 / WIZFORM-02 — the DERIVATION, not a restatement of it. The claim
+// under test is "no Retry control renders", and that is decided by
+// `buildEnvelope` reading `actions` against `RECOVERABLE_ACTIONS`, then by
+// `ErrorEnvelope`'s `showRetry = recoverable && Boolean(onRetry)`. Asserting
+// the table's `actions` array instead would only restate what the table says
+// about itself and would go green if the derivation rule ever changed.
+import { buildEnvelope } from "./envelope";
 // 153.1-03 / WIZFORM-03 — the INDEPENDENT registry the class sweeps iterate.
 // The oracle for "which venues are non-substitutable" must not be the copy
 // table under test, and it must not be a hand-listed `["mt5"]` either: a second
@@ -1435,12 +1442,48 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * control that deletes their draft would destroy the very thing the copy tells
    * them to go and fix.
    *
+   * **74 at 153.1-04** (WIZFORM-02), which added TEN members in one wave:
+   * the seven field-level metadata refusals (`METADATA_NAME_INVALID`,
+   * `METADATA_DESCRIPTION_TOO_SHORT`, `METADATA_DESCRIPTION_TOO_LONG`,
+   * `METADATA_CATEGORY_REQUIRED`, `METADATA_AUM_INVALID`,
+   * `METADATA_CAPACITY_INVALID`, `METADATA_CAPITAL_OWNERSHIP_INVALID`), plus
+   * `SEAM_DEADLINE_EXCEEDED`, `COMPOSITE_UNSUPPORTED_UNIFIED` and
+   * `DRAFT_STATE_INVALID`. The number was READ OUT OF THIS GUARD'S OWN FAILURE
+   * (`expected 74 to be 64`) rather than copied from the plan's arithmetic, and
+   * the reasoning below was re-run over all ten BEFORE it moved.
+   *
+   * THIS guard's population is entries carrying a DESTRUCTIVE action, and
+   * `DESTRUCTIVE_ACTIONS` has exactly one member: `start_fresh`. Per entry:
+   *   · the seven metadata refusals carry `["expand_log"]` and nothing else —
+   *     one non-destructive, non-actionable control apiece;
+   *   · `SEAM_DEADLINE_EXCEEDED` and `COMPOSITE_UNSUPPORTED_UNIFIED` carry
+   *     `request_call` + `expand_log`;
+   *   · `DRAFT_STATE_INVALID` carries `leave_and_return` + `expand_log`.
+   * NONE of the ten carries `start_fresh`, so all ten are outside the scanned
+   * population by construction and the destructive class below is unchanged at
+   * four members — which the `toEqual([...])` receipt two `it`s down asserts
+   * independently rather than by this reasoning.
+   *
+   * ⭐ That exclusion is LOAD-BEARING rather than incidental on `DRAFT_STATE_INVALID`
+   * in particular. Its condition is "this PAGE is stale"; the draft is intact
+   * and is the thing the user wants back. `start_fresh` DELETES that draft and
+   * cascades away every `strategy_keys` member under it, so offering it here
+   * would answer "your page is out of date" by destroying the work. The same
+   * argument applies to the seven metadata refusals, whose whole point is that
+   * the user's typing survives the refusal.
+   *
    * Deliberately NOT `Object.keys(WIZARD_ERROR_COPY).length`: reading the
    * subject to build the expectation is how a guard stops being able to fail.
    * Bumping the LITERAL when the table legitimately grows is the intended
    * maintenance cost; replacing it with a derived value removes the guard.
+   *
+   * ⚠️ THIS NUMBER HAS A TWIN. The same literal is pinned in the
+   * `[140.3-12 / SEAMUX-04]` describe below, and moving one without the other
+   * is a silent half-fix — the shrink-detection it buys survives in one scan
+   * and dies in the other. 153.1-04 added a third guard (at the end of this
+   * file) that reads this source and reds when the two literals disagree.
    */
-  const EXPECTED_TABLE_SIZE = 64;
+  const EXPECTED_TABLE_SIZE = 74;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -1651,8 +1694,60 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * a property of the control flow (the route's own tests pin `upsertCalls`
    * empty on the pre-check arm) rather than a comfort about a write that may or
    * may not have landed.
+   *
+   * **74 at 153.1-04** (WIZFORM-02) — TEN new entries, every one of them read
+   * against all four FORBIDDEN fragments by hand before the number moved. None
+   * mentions notification, trade fetching, or a session field name, so as ever
+   * the fragment needing care is "data is unchanged", and nine of the ten DO
+   * make a server-state claim. Taken in three groups, because the GROUND for
+   * the claim differs:
+   *
+   *   · **The seven field-level metadata refusals** (`METADATA_NAME_INVALID`,
+   *     `METADATA_DESCRIPTION_TOO_SHORT`, `METADATA_DESCRIPTION_TOO_LONG`,
+   *     `METADATA_CATEGORY_REQUIRED`, `METADATA_AUM_INVALID`,
+   *     `METADATA_CAPACITY_INVALID`, `METADATA_CAPITAL_OWNERSHIP_INVALID`) each
+   *     say "Nothing was saved". Not the banned string, and OBSERVABLE by the
+   *     same test 140.3-15's entry passed and the CSV case failed: every one of
+   *     these is raised inside `validatePayload`, which returns its 400 BEFORE
+   *     the route reaches `finalize_wizard_strategy`, before `postProcessKey`
+   *     and before any write of any kind. "Nothing was saved" is a property of
+   *     the control flow, not a comfort about a request whose outcome we never
+   *     learned. They also claim "everything you typed is still on the form",
+   *     which is a statement about the CLIENT's own DOM — the weakest possible
+   *     claim to make and the one the user actually needs.
+   *
+   *   · **`COMPOSITE_UNSUPPORTED_UNIFIED`** deliberately does NOT claim nothing
+   *     changed, and that is the interesting one. The route stamps
+   *     `strategy_analytics` with `computation_status: "failed"` in the
+   *     statement immediately above the 409, so a "nothing changed" sentence
+   *     here would have been exactly the CSV-entry lie. The copy says instead
+   *     "We stopped and marked the strategy as failed", which restates the row
+   *     the handler just wrote, and narrows its untouched-claim to the keys —
+   *     which that upsert does not touch.
+   *
+   *   · **`DRAFT_STATE_INVALID`** says "This attempt saved nothing, and the
+   *     draft itself is untouched." Ground: the 409 is raised from SQLSTATE
+   *     22023, i.e. the RPC itself raised, so the function's transaction is
+   *     rolled back by Postgres. That is a stronger guarantee than the
+   *     returns-before-write kind above, not a weaker one.
+   *
+   *   · **`SEAM_DEADLINE_EXCEEDED`** says "Nothing was saved — your key was not
+   *     stored". ⚠️ This is the ONE of the ten whose ground is an OBLIGATION ON
+   *     A FUTURE EMITTER rather than a property of code that exists today: the
+   *     member is authored here and Phase 153.4 emits it. The claim holds only
+   *     while the abort fires before the request can persist (the UI-SPEC's
+   *     stated basis: pre-encrypt / pre-RPC). A server does not stop working
+   *     because a client stopped listening — the precise reasoning behind the
+   *     "data is unchanged" ban. The obligation is written at the entry itself
+   *     so 153.4 inherits it; if 153.4 emits this code from a path where the
+   *     write could already have landed, this sentence must change in the same
+   *     commit.
+   *
+   * ⚠️ THIS NUMBER HAS A TWIN in the `[140.3-10 / TRAP-4]` describe above.
+   * Moving one without the other is a silent half-fix; the guard added at the
+   * end of this file reds when the two literals disagree.
    */
-  const EXPECTED_TABLE_SIZE = 64;
+  const EXPECTED_TABLE_SIZE = 74;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2891,5 +2986,177 @@ describe("[153.1-03 / WIZFORM-03] fix[] requirements — the class, not the inst
       "Try again in a moment.",
       "If it keeps failing, switch to a different exchange or contact support.",
     ]);
+  });
+});
+
+/**
+ * [153.1-04 / WIZFORM-02] THE TWO `EXPECTED_TABLE_SIZE` SITES ARE ONE FACT.
+ *
+ * ⚠️ WHY THIS EXISTS. The size guard is pinned TWICE — once in the
+ * `[140.3-10 / TRAP-4]` describe and once in `[140.3-12 / SEAMUX-04]` — because
+ * each scan needs its own shrink detector and each carries its own reasoning
+ * docblock. Neither `it` can see the other's constant: they are separate
+ * function scopes, so nothing has ever stopped a plan from moving one and
+ * leaving the other behind. That half-fix does not red anything at the moment
+ * it is made; it reds LATER, on the next plan, which then inherits a
+ * contradiction it did not create. 153.1-04 moved both, and this is what makes
+ * the next mover unable to move only one.
+ *
+ * The subject is this file's own SOURCE, which is the only vantage point from
+ * which both declarations are visible at once. `wizardErrors.test.ts` already
+ * reads a sibling module's source for the copy-marker hand-off, so the
+ * technique is the file's own.
+ */
+describe("[153.1-04 / WIZFORM-02] the two EXPECTED_TABLE_SIZE pins cannot silently diverge", () => {
+  it("both declarations are hand-typed literals, and they are the SAME literal", () => {
+    const source = readFileSync(join(__dirname, "wizardErrors.test.ts"), "utf-8");
+    // Matches a DECLARATION with a numeric literal only. An `EXPECTED_TABLE_SIZE
+    // = Object.keys(...).length` would not match, and would therefore fail the
+    // count assertion below rather than sneak past as agreement — which is the
+    // point: the two guards' own docblocks forbid a derived value, and this is
+    // where that prohibition becomes enforceable across both at once.
+    const declarations = [
+      ...source.matchAll(/const EXPECTED_TABLE_SIZE = (\d+);/g),
+    ].map((m) => Number(m[1]));
+
+    // ⭐ POSITIVE CONTROL, and the reason it is an assertion rather than a
+    // comment: if the regex above ever stops matching (a rename, a reformat, a
+    // derived value), `declarations` is empty and `new Set([]).size === 1` is
+    // FALSE — but `[...new Set([])].length <= 1` would have been vacuously
+    // true. Pinning the count to a hand-typed 2 is what stops this whole `it`
+    // from passing over nothing.
+    expect(
+      declarations.length,
+      "Expected exactly TWO hand-typed EXPECTED_TABLE_SIZE declarations in " +
+        "this file. Zero means the matcher stopped matching and everything " +
+        "below is vacuous; more than two means a third pin appeared and the " +
+        "reasoning docblocks no longer enumerate the sites.",
+    ).toBe(2);
+
+    expect(
+      new Set(declarations).size,
+      "The two EXPECTED_TABLE_SIZE pins disagree: " +
+        declarations.join(" vs ") +
+        ". Moving one and not the other is a silent half-fix — one scan keeps " +
+        "its shrink detection and the other one loses it, and nothing reds " +
+        "until a later plan inherits the contradiction. Move both, and re-run " +
+        "EACH docblock's reasoning over the new entries; the two guards scan " +
+        "different populations, so the clause one site needs is not the clause " +
+        "the other needs.",
+    ).toBe(1);
+
+    // Both pins describe the SAME table, so they must also still describe it.
+    // This is not a duplicate of the two size guards: they each answer "did my
+    // scan's population change?", this answers "are these two literals about
+    // the object I think they are about?" — the question that only has meaning
+    // once the two are known to agree.
+    expect(declarations[0]).toBe(Object.keys(WIZARD_ERROR_COPY).length);
+  });
+});
+
+/**
+ * [153.1-04 / WIZFORM-02] THE TEN NEW MEMBERS, AS A CLASS.
+ *
+ * ⚠️ WHY A SWEEP AND NOT TEN CASES. The plan's acceptance criteria were three
+ * behaviours checked once, by hand, at authoring time: none of the ten offers a
+ * Retry, and neither optional count reaches a sentence when it was not
+ * supplied. A check run once is a measurement, not a guard — and the whole
+ * reason these members exist is that a Retry control was offered against a
+ * condition retrying could not clear, which nothing in this file would have
+ * noticed. So the measurements are pinned here.
+ *
+ * The roster below is HAND-TYPED, deliberately. Deriving it (say, every code
+ * matching /^METADATA_/) would make the sweep agree with whatever the table
+ * happens to contain, and a member accidentally dropped from the union would
+ * take its own assertion out with it. Ten names, typed out, is the oracle.
+ */
+describe("[153.1-04 / WIZFORM-02] the ten new members offer no false affordance", () => {
+  /** HAND-TYPED — this plan's entire contract with 153.1-05, 153.2 and 153.4. */
+  const NEW_MEMBERS: readonly WizardErrorCode[] = [
+    "METADATA_NAME_INVALID",
+    "METADATA_DESCRIPTION_TOO_SHORT",
+    "METADATA_DESCRIPTION_TOO_LONG",
+    "METADATA_CATEGORY_REQUIRED",
+    "METADATA_AUM_INVALID",
+    "METADATA_CAPACITY_INVALID",
+    "METADATA_CAPITAL_OWNERSHIP_INVALID",
+    "SEAM_DEADLINE_EXCEEDED",
+    "COMPOSITE_UNSUPPORTED_UNIFIED",
+    "DRAFT_STATE_INVALID",
+  ];
+
+  it("all ten exist in the table, and there are ten of them", () => {
+    // Non-vacuity for every `it` below, plus the rename detector: a member
+    // renamed on one side only leaves a name here with no entry there.
+    expect(NEW_MEMBERS.length).toBe(10);
+    for (const code of NEW_MEMBERS) {
+      expect(
+        Object.keys(WIZARD_ERROR_COPY),
+        `${code} is named in 153.1-04's contract but has no copy entry. A code ` +
+          "with no entry renders UNKNOWN exactly as an unknown code does, " +
+          "which is the failure WIZFORM-02 is about.",
+      ).toContain(code);
+    }
+  });
+
+  it("NOT ONE of the ten derives recoverable — no Retry control renders", () => {
+    for (const code of NEW_MEMBERS) {
+      expect(
+        buildEnvelope(code, "corr-153104").recoverable,
+        `${code} derived recoverable: true, so ErrorEnvelope renders a Retry ` +
+          "button. Every one of these ten refuses on a condition an identical " +
+          "resubmission cannot change — a field the server compared against a " +
+          "fixed rule, a deadline that fires the same way every time, a draft " +
+          "the database has already moved past. A Retry there is a false " +
+          "affordance, and the founder clicking it five times is the incident " +
+          "that produced this phase. Recoverability is derived from `actions`: " +
+          "one of `clear_and_retry` / `try_another_key` got added.",
+      ).toBe(false);
+    }
+  });
+
+  it("the description pair names NO count when it was not given one (TRAP-3)", () => {
+    for (const code of [
+      "METADATA_DESCRIPTION_TOO_SHORT",
+      "METADATA_DESCRIPTION_TOO_LONG",
+    ] as const) {
+      const bare = formatKeyError(code);
+      // The BOUND may appear (a rule stated without its threshold is not a
+      // rule). What must not appear is the user's own count, or the machinery
+      // that would have carried it.
+      expect(
+        [bare.title, bare.cause, ...bare.fix].join(" "),
+        `${code} named the user's character count with no charCount in ` +
+          "context. Absence means 'we were not told how long it is' — never " +
+          "zero, never empty. A surface that invents a count turns a vague " +
+          "refusal into a specific lie.",
+      ).not.toMatch(/you have|\{n\}|\{charCount\}/);
+    }
+    // …and the counted form really is produced when the count IS given, so the
+    // rule above is a gate rather than a deletion.
+    expect(
+      formatKeyError("METADATA_DESCRIPTION_TOO_SHORT", { charCount: 2 }).title,
+    ).toBe("Add at least 10 characters — you have 2.");
+    expect(
+      formatKeyError("METADATA_DESCRIPTION_TOO_LONG", { charCount: 5231 }).title,
+    ).toBe("Keep this under 5,000 characters — you have 5,231.");
+  });
+
+  it("SEAM_DEADLINE_EXCEEDED names NO budget when it was not given one (TRAP-3)", () => {
+    const bare = formatKeyError("SEAM_DEADLINE_EXCEEDED");
+    expect(
+      bare.cause,
+      "The cause named a number with no budgetSeconds in context. Absence " +
+        "means 'no budget was named' — never zero and never 'immediately'. " +
+        "This is the same rule retryAfterSeconds states for durations, and " +
+        "the reason the table sentence says 'the time we allow'.",
+    ).not.toMatch(/\d/);
+    expect(
+      formatKeyError("SEAM_DEADLINE_EXCEEDED", { budgetSeconds: 120 }).cause,
+    ).toContain("120 seconds");
+    // The tail is shared between the two forms, so it must survive the swap.
+    expect(
+      formatKeyError("SEAM_DEADLINE_EXCEEDED", { budgetSeconds: 120 }).cause,
+    ).toContain("your key was not stored");
   });
 });
