@@ -347,6 +347,8 @@ Plans:
 **UI hint**: yes
 
 - ⛔ **FLAG-3 is ONE indivisible task.** Deleting `MetadataStep.tsx:491`'s `disabled` without widening the `.trim()`-only `handleSubmit` guard at `:222-233` lets a 2-character description POST — re-shipping the very defect this phase deletes.
+- ⛔ **INHERITED FROM 153.1-03 — WIZFORM-03 does not close without you.** The `fixRequires` class filter is live and correct in `wizardErrors.ts`, but **no `buildEnvelope` call site passes `context.venue` or `context.surface`** (verified across all 14 sites, 2026-08-09), and venue-absence deliberately preserves incumbent copy. **An MT5 user still reads "switch to a different exchange" in production until a call site names its venue.** `SubmitStep.tsx:414` is yours; `ConnectKeyStep.tsx:609` and `MultiKeyConnectStep.tsx` are 153.4's. **No further change to `wizardErrors.ts` is needed** — just pass the context.
+- ⚠️ **A true sentence is temporarily hidden**: `SERVICE_UNREACHABLE`'s `/strategies` bullet now renders **nowhere** until a call site names its surface. That is the UI-SPEC's "fail toward saying less" working as designed, but it is a real loss on the one surface where the bullet applies — restored the moment you pass `surface`.
 - ⛔ **MT5-14 and WIZFORM-04 ship together.** Widening the chip set without the probe skip leaves MT5 a HARD BLOCKER — declarable but still unsubmittable.
 - ⚠️ The `closed-sets.mt5-flag` pin re-cut and the widening are the SAME commit, and the re-cut ADDS the positive flag-ON assertion the pin lacks today.
 
