@@ -173,6 +173,32 @@ interface RouteUnderTest {
    * scanner improvement. The widening belongs to the route that needs it.
    */
   readonly statusRe: string;
+  /**
+   * HAND-TYPED site count for THIS route, measured under the predicate above.
+   *
+   * ⚠️ PER-ROUTE SINCE 153.1-06, AND THAT IS THE POINT. Until this plan the
+   * literal was one module-level `EXPECTED_SITES_PER_ROUTE = 12` applied to
+   * every entry by `it.each`, which was honest while the only two routes were
+   * structural mirrors emitting guard for guard. `finalize-wizard` is not a
+   * mirror of either — 25 sites against their 12 — and the only two ways to
+   * keep ONE literal are to widen it into a range or to drop the assertion,
+   * both of which retire a guard to make a new route fit. Moving the number
+   * onto the entry keeps every route pinned at its OWN measured value, and
+   * both incumbents keep the byte-identical 12 they were pinned at in 142.2-07.
+   *
+   * ⚠️ NEVER `derived.length`. A size compared against its own derivation
+   * cannot fail: delete every guard in the route and both sides go to zero
+   * together. This is the Oracle-Independence rule the phase's validation
+   * contract makes explicit, and it has a live precedent on this codebase —
+   * three money bugs survived six review passes behind self-referential
+   * oracles.
+   *
+   * ⚠️ AND FOR THE TWO INCUMBENTS THE NUMBER IS 12, NOT 14. 14 is what a raw
+   * `grep -c KEY_INVALID_FORMAT` reported before the split, and two of those 14
+   * per file are comment prose. Pinning 14 would make this guard assert a
+   * fiction and demand two emitters nobody can write.
+   */
+  readonly expectedSites: number;
 }
 
 const ROUTES: readonly RouteUnderTest[] = [
@@ -182,6 +208,7 @@ const ROUTES: readonly RouteUnderTest[] = [
     rosterFile: join(WIZARD_STEPS, "ConnectKeyStep.tsx"),
     rosterName: "KNOWN_CREATE_WITH_KEY_CODES",
     statusRe: "400",
+    expectedSites: 12,
   },
   {
     label: "composite/add-key",
@@ -189,6 +216,31 @@ const ROUTES: readonly RouteUnderTest[] = [
     rosterFile: join(WIZARD_STEPS, "MultiKeyConnectStep.tsx"),
     rosterName: "KNOWN_ADD_KEY_CODES",
     statusRe: "400",
+    expectedSites: 12,
+  },
+  {
+    // 153.1-06 / WIZFORM-02 — THE THIRD ENTRY, and the whole reason the two
+    // scanner fixes above (the per-route status fragment and the
+    // whitespace-tolerant roster anchors) landed first.
+    //
+    // Until 153.1-05 this route emitted ZERO codes under this predicate:
+    // fourteen arms were written `{ error, code }` and the rest carried no code
+    // at all. 153.1-05 reordered the fourteen and coded eleven `validatePayload`
+    // arms, taking the derivation 0 → 25. Adding this entry BEFORE that work
+    // would have wired an assertion over an empty population — green forever,
+    // measuring nothing, and indistinguishable from a route with no defects.
+    //
+    // ⚠️ `statusRe` IS WIDE HERE AND NARROW ABOVE, on purpose. This route
+    // answers its coded arms at 400/403/404/409/502/503; the two incumbents
+    // keep "400" because widening THEM would move their pinned count 12 → 16
+    // and change their vocabulary — a population change dressed as a scanner
+    // improvement (see `statusRe`'s docblock).
+    label: "finalize-wizard",
+    route: join(REPO, "src/app/api/strategies/finalize-wizard/route.ts"),
+    rosterFile: join(WIZARD_STEPS, "SubmitStep.tsx"),
+    rosterName: "KNOWN_FINALIZE_CODES",
+    statusRe: "[45]\\d\\d",
+    expectedSites: 25,
   },
 ];
 
@@ -269,20 +321,80 @@ function deriveRoster(source: string, name: string): string[] {
 }
 
 /**
- * HAND-TYPED LITERAL COUNTS. Measured at 142.2-07 under the predicate above.
+ * The wire→wizard ALIAS TABLE's pairs, read out of its declaration (153.1-06).
  *
- * ⚠️ PINNED AS LITERALS, NEVER AS `derived.length`. A size compared against its
- * own derivation cannot fail: delete every guard in the route and both sides go
- * to zero together. This is the Oracle-Independence rule the phase's validation
- * contract makes explicit, and it has a live precedent on this codebase — three
- * money bugs survived six review passes behind self-referential oracles.
+ * ── WHY THE COVERAGE LAW NEEDS THIS AT ALL ──────────────────────────────────
  *
- * ⚠️ AND THE NUMBER IS 12, NOT 14. 14 is what a raw `grep -c KEY_INVALID_FORMAT`
- * reported before the split, and two of those 14 per file are comment prose.
- * Pinning 14 here would make this guard assert a fiction and demand two
- * emitters nobody can write.
+ * `finalize-wizard` emits `CIRCUIT_OPEN`, and `CIRCUIT_OPEN` is deliberately
+ * NOT a `WizardErrorCode` and deliberately NOT in `KNOWN_FINALIZE_CODES`. It is
+ * a WIRE code: `SEAM_CODE_TO_WIZARD_CODE` translates it to
+ * `SERVICE_UNAVAILABLE_RETRY` — which the roster does admit — and that
+ * translation runs BEFORE the membership check (`SubmitStep.tsx`, `surfaced`).
+ * `SERVICE_UNAVAILABLE_RETRY` already IS the member for "the breaker is open,
+ * we declined to try, nothing was submitted"; minting a second one is how a
+ * vocabulary starts lying (`SEAM_CODE_TO_WIZARD_CODE`'s own docblock, 140.3-05).
+ *
+ * So a coverage assertion that compares emitted codes against the roster and
+ * the union ALONE reports `CIRCUIT_OPEN` as an uncovered emitter forever, and
+ * the obvious "fix" — adding it to a `ReadonlySet<WizardErrorCode>` — would not
+ * compile, and would be wrong if it did. `MultiKeyConnectStep.tsx`'s docblock
+ * states the rule as coverage-law row 1: the ONE shared table is consulted
+ * FIRST, never a member here.
+ *
+ * ⛔ DERIVED FROM SOURCE, NEVER RE-TYPED. A hand-copied alias list is a second
+ * source of truth that goes stale silently — precisely the failure this whole
+ * file exists to prevent, and the reason the rosters and the union are read off
+ * disk rather than mirrored here.
+ *
+ * Bounded exactly like `deriveUnionMembers`: from the declaration to the
+ * `]);` that closes the `new Map<…>([ … ])` argument, so the scan cannot run on
+ * into `recogniseSeamErrorCode` below it and read a string out of unrelated
+ * code. Returns `[]` when either anchor is missing — which is why the SELF-TEST
+ * on the real table's non-emptiness is load-bearing: an empty alias map turns
+ * the widened admission rule into a no-op that passes for the wrong reason.
  */
-const EXPECTED_SITES_PER_ROUTE = 12;
+function deriveAliasPairs(source: string): [string, string][] {
+  const start = source.indexOf("const SEAM_CODE_TO_WIZARD_CODE");
+  if (start < 0) return [];
+  const tail = source.slice(start);
+  const openMatch = /\(\s*\[/.exec(tail);
+  if (openMatch === null) return [];
+  const open = openMatch.index;
+  const closeMatch = /\]\s*,?\s*\)/.exec(tail.slice(open));
+  if (closeMatch === null) return [];
+  const block = tail.slice(open, open + closeMatch.index);
+  return [...block.matchAll(/\[\s*"([A-Z][A-Z0-9_]*)"\s*,\s*"([A-Z][A-Z0-9_]*)"\s*\]/g)].map(
+    (m) => [m[1], m[2]] as [string, string],
+  );
+}
+
+/**
+ * HAND-TYPED. The two routes 142.2-07 split, by LABEL.
+ *
+ * ⚠️ 153.1-06 — TWO ASSERTIONS BELOW ARE FACTS ABOUT THESE TWO ROUTES ONLY, and
+ * they are driven off this list rather than off `ROUTES` wholesale. The
+ * `KEY_INVALID_FORMAT`-exactly-once rule and the "emitted vocabulary is the
+ * hand-typed split set" rule both describe the ccxt KEY-VALIDATION split: one
+ * format guard per route, five codes between them. `finalize-wizard` is
+ * deliberately OUTSIDE both — it validates wizard METADATA, not key material,
+ * emits `KEY_INVALID_FORMAT` zero times, and its vocabulary is nineteen codes
+ * that have nothing to do with the split.
+ *
+ * ⛔ THE SCOPING IS NOT A WEAKENING, and the diff is where to check that: the
+ * two literals stayed `12`, `EXPECTED_SPLIT_CODES` stayed five members, and
+ * `EXPECTED_FORMAT_EMITTERS_PER_ROUTE` stayed `1`. Widening
+ * `EXPECTED_SPLIT_CODES` to absorb finalize-wizard's vocabulary — the other way
+ * to make the third entry fit — would have retired the guard instead.
+ *
+ * ⚠️ BY LABEL, NOT BY ARRAY POSITION. The mirror-pair assertion used to
+ * destructure `const [a, b] = derived`, which is correct only while the split
+ * routes happen to be first. It would go on comparing the wrong pair, silently,
+ * the day a fourth entry is inserted anywhere but the end.
+ */
+const SPLIT_ROUTE_LABELS: readonly string[] = [
+  "create-with-key",
+  "composite/add-key",
+];
 
 /**
  * After the split, exactly ONE guard per route may still answer
@@ -319,6 +431,18 @@ const EXPECTED_SPLIT_CODES: readonly string[] = [
 describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its route's roster", () => {
   const unionSource = stripped(UNION_SOURCE);
   const union = new Set(deriveUnionMembers(unionSource));
+  const alias = new Map(deriveAliasPairs(unionSource));
+
+  /**
+   * THE COVERAGE LAW, in one place so the union and the roster answer it the
+   * same way and neither can drift permissive on its own.
+   *
+   * A derived code is COVERED if it is a wizard member in its own right, OR if
+   * the alias table translates it to one. This mirrors `SubmitStep.tsx`'s
+   * `surfaced` exactly — translation first, membership second — rather than
+   * inventing a second admission rule for the test to be right about.
+   */
+  const aliasTarget = (code: string): string | undefined => alias.get(code);
 
   const derived = ROUTES.map((r) => {
     const rosterSource = stripped(r.rosterFile);
@@ -352,54 +476,87 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
   });
 
   it.each(ROUTES.map((r) => r.label))(
-    "%s: the site count is the LITERAL 12 — not 14, and not its own length",
+    "%s: the site count is THIS ROUTE's hand-typed literal — not its own length",
     (label) => {
       const d = derived.find((x) => x.label === label)!;
       expect(
         d.codes.length,
         `${label} has ${d.codes.length} rejection-emitting sites under the ` +
-          `predicate in this file's header; ${EXPECTED_SITES_PER_ROUTE} were ` +
-          `measured at 142.2-07. If a guard was ADDED, give it an honest code ` +
-          `and bump this literal. If one was REMOVED, a validation guard just ` +
-          `disappeared, which is a bigger question than this test.`,
-      ).toBe(EXPECTED_SITES_PER_ROUTE);
+          `predicate in this file's header; ${d.expectedSites} were measured ` +
+          `(142.2-07 for the two key-validation routes, 153.1-05 for ` +
+          `finalize-wizard). If a guard was ADDED, give it an honest code and ` +
+          `bump this route's literal. If one was REMOVED, a validation guard ` +
+          `just disappeared, which is a bigger question than this test. And if ` +
+          `a guard is still THERE but no longer counted, it went BLIND — the ` +
+          `two ways that happens are a \`{ error, code }\` key order and an ` +
+          `\`error:\` body longer than EMITTER_BODY_MAX_CHARS (${EMITTER_BODY_MAX_CHARS}); ` +
+          `⛔ the remedy is to fix the emitter, never to relax the predicate.`,
+      ).toBe(d.expectedSites);
     },
   );
 
   it.each(ROUTES.map((r) => r.label))(
-    "%s: every emitted code is a member of the WizardErrorCode union",
+    "%s: every emitted code is a WizardErrorCode member, or the alias table makes it one",
     (label) => {
       const d = derived.find((x) => x.label === label)!;
-      const missing = [...new Set(d.codes)].filter((c) => !union.has(c)).sort();
+      const missing = [...new Set(d.codes)]
+        .filter((c) => {
+          if (union.has(c)) return false;
+          const t = aliasTarget(c);
+          // A translated code still has to land in the union — an alias
+          // pointing at a member that no longer exists is the same silent
+          // UNKNOWN by a longer route.
+          return t === undefined || !union.has(t);
+        })
+        .sort();
       expect(
         missing,
-        `${label} emits codes that are not in the WizardErrorCode union, so ` +
+        `${label} emits codes that are not in the WizardErrorCode union AND ` +
+          `that SEAM_CODE_TO_WIZARD_CODE does not translate into it, so ` +
           `WIZARD_ERROR_COPY has no entry for them and formatKeyError falls ` +
-          `through to UNKNOWN.`,
+          `through to UNKNOWN. ⛔ THE REMEDY IS NOT TO ADD THE CODE TO A ` +
+          `ReadonlySet<WizardErrorCode>: a WIRE code is deliberately not a ` +
+          `wizard member (CIRCUIT_OPEN is the live case — SERVICE_UNAVAILABLE_RETRY ` +
+          `already stands for the same fact, and a second member with the same ` +
+          `meaning is how a vocabulary starts lying). Either mint a real union ` +
+          `member for a route-minted code, or record the translation as a row ` +
+          `in the ONE alias table.`,
       ).toEqual([]);
     },
   );
 
   it.each(ROUTES.map((r) => r.label))(
-    "%s: every emitted code is admitted by THAT ROUTE's roster",
+    "%s: every emitted code is admitted by THAT ROUTE's roster, or by the alias table",
     (label) => {
       const d = derived.find((x) => x.label === label)!;
-      const missing = [...new Set(d.codes)].filter((c) => !d.roster.has(c)).sort();
+      const missing = [...new Set(d.codes)]
+        // The step translates FIRST and consults the roster only for what the
+        // table does not answer (`SubmitStep.tsx`'s `surfaced`, and the same
+        // shape at both key-entry steps). A code the table translates is
+        // covered without a roster row, and adding one would be a type error.
+        .filter((c) => aliasTarget(c) === undefined && !d.roster.has(c))
+        .sort();
       expect(
         missing,
-        `${label} emits codes that ${d.rosterName} does not admit. The step ` +
-          `rejects an unrecognised code and renders UNKNOWN — silently, with ` +
-          `nothing else reddening. Add each code to ${d.rosterName}. Do NOT ` +
-          `merge the two rosters to make this pass: they are separate on ` +
-          `purpose (see ConnectKeyStep's docblock), and a merged set would ` +
-          `admit each route's codes at the other.`,
+        `${label} emits codes that ${d.rosterName} does not admit and that ` +
+          `SEAM_CODE_TO_WIZARD_CODE does not translate. The step rejects an ` +
+          `unrecognised code and renders UNKNOWN — silently, with nothing else ` +
+          `reddening. Add each code to ${d.rosterName}. Do NOT merge the ` +
+          `rosters to make this pass: they are separate on purpose (see ` +
+          `ConnectKeyStep's docblock), and a merged set would admit each ` +
+          `route's codes at the others.`,
       ).toEqual([]);
     },
   );
 
-  it.each(ROUTES.map((r) => r.label))(
+  it.each(SPLIT_ROUTE_LABELS)(
     "%s: KEY_INVALID_FORMAT survives at exactly ONE guard — the ccxt short-secret arm",
     (label) => {
+      // ⚠️ SCOPED TO THE TWO SPLIT ROUTES SINCE 153.1-06, and the scoping is
+      // the honest reading rather than a retirement: this is a fact about the
+      // ccxt key-validation split. `finalize-wizard` emits KEY_INVALID_FORMAT
+      // ZERO times — it validates wizard METADATA, not key material — so
+      // running this over it would demand a guard that must not exist.
       const d = derived.find((x) => x.label === label)!;
       const n = d.codes.filter((c) => c === "KEY_INVALID_FORMAT").length;
       expect(
@@ -414,16 +571,39 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
     },
   );
 
-  it("the two routes emit the SAME set of codes — they are structural mirrors", () => {
+  it("the two KEY-VALIDATION routes emit the SAME set of codes — they are structural mirrors", () => {
     // Not a tautology: the routes are separate files with separate guards, and
     // the phase's stated risk is fixing one and leaving the other. A divergence
     // here means a guard was edited on one side only.
-    const [a, b] = derived;
-    expect([...new Set(a.codes)].sort()).toEqual([...new Set(b.codes)].sort());
+    //
+    // ⚠️ LOOKED UP BY LABEL SINCE 153.1-06. This was `const [a, b] = derived`,
+    // which stays green by ACCIDENT now that a third route exists — it happens
+    // to destructure the first two — and would start comparing the wrong pair
+    // the day an entry is inserted above them. `finalize-wizard` has no mirror
+    // and must never be dragged into this comparison.
+    const [aLabel, bLabel] = SPLIT_ROUTE_LABELS;
+    const a = derived.find((x) => x.label === aLabel)!;
+    const b = derived.find((x) => x.label === bLabel)!;
+    expect(
+      [...new Set(a.codes)].sort(),
+      `${aLabel} and ${bLabel} mirror each other guard for guard; their ` +
+        `emitted vocabularies diverged, which means one side was edited alone.`,
+    ).toEqual([...new Set(b.codes)].sort());
   });
 
-  it("the emitted vocabulary is the hand-typed split set — no more, no less", () => {
-    const all = new Set(derived.flatMap((d) => d.codes));
+  it("the two SPLIT routes' emitted vocabulary is the hand-typed split set — no more, no less", () => {
+    // ⚠️ SCOPED TO THE TWO SPLIT ROUTES SINCE 153.1-06. EXPECTED_SPLIT_CODES is
+    // the five codes 142.2-07 minted and left in place; it is a fact about the
+    // ccxt split, not about the wizard's whole vocabulary.
+    // ⛔ The other way to make the third entry fit was to WIDEN
+    // EXPECTED_SPLIT_CODES by finalize-wizard's nineteen codes. That would have
+    // turned a closed-set assertion into a list of whatever happens to be
+    // emitted — a guard retired to accommodate a new route.
+    const split = derived.filter((d) => SPLIT_ROUTE_LABELS.includes(d.label));
+    expect(split.length, "SPLIT_ROUTE_LABELS matched no ROUTES entry").toBe(
+      SPLIT_ROUTE_LABELS.length,
+    );
+    const all = new Set(split.flatMap((d) => d.codes));
     expect(
       [...all].sort(),
       "The set of codes these two routes put on the wire changed. If a code " +
@@ -628,6 +808,67 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
       "};",
     ].join("\n");
     expect(deriveUnionMembers(fake)).toEqual(["UNION_MEMBER", "UNKNOWN"]);
+  });
+
+  it("SELF-TEST — the REAL alias table parsed, and it carries the CIRCUIT_OPEN pair", () => {
+    // ⚠️ THE LOAD-BEARING HALF OF THE ALIAS LAW (153.1-06). The two membership
+    // assertions above were WIDENED to admit a code the alias table translates.
+    // A widened admission rule over an EMPTY table is a no-op that passes for
+    // the wrong reason — and worse, an alias derivation that silently returns
+    // [] would make the widening look harmless while it quietly stopped
+    // covering `CIRCUIT_OPEN` at all. So the real table is asserted here, from
+    // disk, rather than trusted.
+    expect(
+      alias.size,
+      "SEAM_CODE_TO_WIZARD_CODE parsed as EMPTY. Every 'or the alias table " +
+        "makes it one' clause above is then a no-op, and the assertions pass " +
+        "while measuring nothing. Check deriveAliasPairs' anchors against the " +
+        "declaration in wizardErrors.ts before touching anything else.",
+    ).toBeGreaterThan(3);
+    expect(
+      alias.get("CIRCUIT_OPEN"),
+      "CIRCUIT_OPEN is the ONE live case the widened admission exists for: " +
+        "finalize-wizard emits it at the breaker-open 503, it is deliberately " +
+        "NOT a WizardErrorCode, and SubmitStep translates it before the " +
+        "membership check. If this row is gone the code renders UNKNOWN.",
+    ).toBe("SERVICE_UNAVAILABLE_RETRY");
+    // And the target really is a union member — the alias hop is only a cover
+    // if it lands somewhere WIZARD_ERROR_COPY can answer for.
+    expect(union.has("SERVICE_UNAVAILABLE_RETRY")).toBe(true);
+    // The table is NOT an identity rule, and this is what proves the widening
+    // did not quietly legalise every wire code. `SEAM_DEGRADED` and the venue
+    // codes are named in the table's own docblock as codes that correctly
+    // answer UNKNOWN; if either started resolving, an unlisted emitter would be
+    // admitted by the membership assertions above without anyone deciding so.
+    expect(alias.has("SEAM_DEGRADED")).toBe(false);
+    expect(alias.has("MT5_GATEWAY_UNREACHABLE")).toBe(false);
+  });
+
+  it("SELF-TEST — the alias scan reads the named Map and stops at its close", () => {
+    // The boundary guarantee, and the negative that keeps the pair regex from
+    // matching arbitrary two-string arrays further down the file. A scan that
+    // over-ran into `recogniseSeamErrorCode` or the copy table below could
+    // invent alias rows, and an invented row admits an emitter nobody covered.
+    const fake = [
+      "const SEAM_CODE_TO_WIZARD_CODE: ReadonlyMap<string, WizardErrorCode> = new Map<",
+      "  string,",
+      "  WizardErrorCode",
+      ">([",
+      '  ["WIRE_ONE", "MEMBER_ONE"],',
+      '  ["WIRE_TWO", "MEMBER_TWO"],',
+      "]);",
+      "",
+      "const SOMETHING_ELSE = [",
+      '  ["NOT_AN_ALIAS", "ALSO_NOT_ONE"],',
+      "];",
+    ].join("\n");
+    expect(deriveAliasPairs(fake)).toEqual([
+      ["WIRE_ONE", "MEMBER_ONE"],
+      ["WIRE_TWO", "MEMBER_TWO"],
+    ]);
+    // Missing declaration ⇒ empty, which the SELF-TEST above turns into a RED
+    // rather than a silent permissive pass.
+    expect(deriveAliasPairs("const OTHER = new Map([]);")).toEqual([]);
   });
 
   it("SELF-TEST — the roster scan reads the named Set and stops at its close", () => {
