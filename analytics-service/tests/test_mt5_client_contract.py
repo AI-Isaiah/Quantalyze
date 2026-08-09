@@ -48,6 +48,7 @@ import time
 import types
 
 import pytest
+from structlog.testing import capture_logs
 
 import services.mt5_client as mt5_client_mod
 from services.mt5_client import (
@@ -1239,3 +1240,267 @@ def test_public_surface_is_exactly_the_contract():
         "release",
         "restart",
     }
+
+
+# --------------------------------------------------------------------------- #
+# 153.3 / D-32 — PER-STAGE TIMING: stage + duration_ms, on BOTH outcomes
+#
+# WHY these matter (Rule 9). This client contained NO clock. Nine correlated
+# production failures (2026-08-06/08) were all right-censored at the rpyc
+# ceiling, and not one SUCCESSFUL stage duration has ever been recorded anywhere
+# — which is why the whole validate chain is a judgement call rather than a
+# measurement (D-27). An instrument that emits nothing looks EXACTLY like one
+# that was never wired, so every case below asserts on the captured event and its
+# VALUE, never on the presence of a call.
+#
+# The event NAME and the nine stage names are hand-typed here on purpose: they
+# are the aggregation key Phase 155 will group by, and an oracle that imported
+# them from the module under test could not fail a rename.
+# --------------------------------------------------------------------------- #
+
+_STAGE_EVENT_NAME = "mt5.stage"
+
+
+def _stage_events(captured, stage=None):
+    """The captured `mt5.stage` events, optionally filtered to one stage."""
+    events = [e for e in captured if e.get("event") == _STAGE_EVENT_NAME]
+    if stage is not None:
+        events = [e for e in events if e.get("stage") == stage]
+    return events
+
+
+def test_a_successful_read_emits_stage_and_a_real_duration():
+    """A successful round-trip emits `stage` + a non-negative integer
+    `duration_ms` — and the number is a MEASUREMENT, not a placeholder.
+
+    The read is made to take ~30ms so the assertion can be `>= 20`, not
+    `>= 0`. A `duration_ms` hard-wired to zero (a mis-scaled unit, a clock read
+    twice at the same instant, an emitter that never sees the call) satisfies
+    "a duration field is present" and is worth nothing to Phase 155.
+    """
+    connect, fake, _rec = _make({"account": _FakeNamedTuple(equity=1000.0)})
+    client = Mt5Client("mt5-gw.internal", 18812, _connect=connect)
+
+    def _slow_account_info():
+        time.sleep(0.03)
+        return _FakeNamedTuple(equity=1000.0)
+
+    fake.account_info = _slow_account_info
+
+    with capture_logs() as captured:
+        assert client.account_info() == {"equity": 1000.0}
+
+    events = _stage_events(captured, "account_info")
+    assert len(events) == 1, f"expected exactly one account_info event: {captured}"
+    event = events[0]
+    assert event["ok"] is True
+    assert isinstance(event["duration_ms"], int)
+    assert event["duration_ms"] >= 20, (
+        "the emitted duration does not track real elapsed time — a ~30ms read "
+        f"reported {event['duration_ms']}ms"
+    )
+    # Infrastructure identity only: the lock key, never a user value.
+    assert event["terminal_key"] == "mt5-gw.internal:18812"
+
+
+def test_a_failing_read_emits_its_event_and_reraises_the_identical_error():
+    """⭐ THE assertion that catches instrumentation swallowing an error.
+
+    Two independent failure modes are covered, and both are silent:
+      * a bracket that only emits on success measures a population that EXCLUDES
+        exactly the failures the timing exists to explain (the nine censored
+        production logins were all failures);
+      * a bracket that catches the exception to emit, and then re-raises a
+        DIFFERENT one — or converts it — changes the caller's verdict. The
+        router classifies on `Mt5ClientError.code`; a changed type silently
+        re-routes a transient into an auth failure.
+
+    The expected message is HAND-TYPED, not rebuilt from `Mt5ClientError`, so a
+    conversion that produced a consistent-but-different string cannot pass.
+    """
+    connect, _fake, _rec = _make(
+        {"account_raises": RuntimeError("rpyc connection closed by peer")}
+    )
+    client = Mt5Client("mt5-gw.internal", 18812, _connect=connect)
+
+    with capture_logs() as captured:
+        with pytest.raises(Mt5ClientError) as exc_info:
+            client.account_info()
+
+    assert type(exc_info.value) is Mt5ClientError
+    assert exc_info.value.code == 0
+    assert str(exc_info.value) == (
+        "MT5 client error (code=0): rpyc connection closed by peer"
+    )
+
+    events = _stage_events(captured, "account_info")
+    assert len(events) == 1, f"the FAILING stage emitted no event: {captured}"
+    assert events[0]["ok"] is False
+    # The raw transport class, not the uniform Mt5ClientError every failure would
+    # otherwise report — this is what makes a censor separable from a fast error.
+    assert events[0]["error_class"] == "RuntimeError"
+    assert isinstance(events[0]["duration_ms"], int)
+
+
+def test_every_mt5_round_trip_emits_its_stage_event():
+    """Every one of the NINE MT5 round-trips emits — asserted by driving each
+    method against the double and comparing the collected stage names to a
+    hand-typed set.
+
+    ⛔ The expected set is typed out here rather than read from
+    `services.mt5_client`: an oracle that derives its expectation from the thing
+    under test cannot fail, and "add the method, forget the bracket" is precisely
+    the omission this case exists to catch.
+    """
+    connect, fake, _rec = _make(
+        {
+            "account": _FakeNamedTuple(login=123456, equity=1000.0),
+            "terminal": _FakeNamedTuple(connected=True, trade_allowed=True),
+            "deals": (),
+            "order_check": _FakeNamedTuple(retcode=10017),
+        }
+    )
+    client = Mt5Client("mt5-gw.internal", 18812, _connect=connect)
+    # close() and release() BOTH latch `_closed`, so one instance can exercise
+    # only one of them — the second client is what makes close() reachable.
+    closer = Mt5Client("mt5-gw.internal", 18812, _connect=connect)
+
+    with capture_logs() as captured:
+        client.login(123456, "investor-pw", "Broker-Demo")  # initialize + login
+        client.account_info()
+        client.terminal_info()
+        client.history_deals_get(0, 1)
+        client.order_check({"action": 0})
+        client.restart()  # clears _closed, so release() below is still reachable
+        client.release()
+        closer.close()
+
+    assert {e["stage"] for e in _stage_events(captured)} == {
+        "initialize",
+        "login",
+        "account_info",
+        "terminal_info",
+        "history_deals_get",
+        "order_check",
+        "close",
+        "release",
+        "restart",
+    }
+    # Not vacuous: every event carries the two fields the whole exercise is for.
+    for event in _stage_events(captured):
+        assert isinstance(event["duration_ms"], int)
+        assert event["duration_ms"] >= 0
+        assert event["ok"] is True
+
+
+def test_the_last_error_round_trip_is_timed_too():
+    """`last_error()` is itself a full remote round-trip, taken AFTER the verdict
+    is already known — EVIDENCE §1b records a failed attempt paying a SECOND full
+    30s there. Un-timed, every failure looks like ONE round-trip and the failure
+    budget reads half its true size.
+
+    Note the account_info event is `ok=True`: a `None` RETURN is an honest,
+    completed round-trip (the error is discovered afterwards, by the return
+    discipline). Conflating the two would misreport the transport's latency.
+    """
+    connect, _fake, _rec = _make(
+        {"account": None, "last_error": (-10004, "No IPC connection")}
+    )
+    client = Mt5Client("mt5-gw.internal", 18812, _connect=connect)
+
+    with capture_logs() as captured:
+        with pytest.raises(Mt5ClientError) as exc_info:
+            client.account_info()
+
+    assert exc_info.value.code == -10004
+    assert [e["stage"] for e in _stage_events(captured)] == [
+        "account_info",
+        "last_error",
+    ]
+    assert _stage_events(captured, "account_info")[0]["ok"] is True
+    assert isinstance(_stage_events(captured, "last_error")[0]["duration_ms"], int)
+
+
+def test_no_credential_literal_reaches_any_stage_event():
+    """⭐ T-153.3-23 — the secret sweep over the NEW telemetry surface.
+
+    `mt5linux` f-string-interpolates the investor password into the remotely
+    eval'd source, so a leaked exception STRING is a real credential disclosure —
+    which is why the event carries the exception CLASS and never its message.
+
+    THREE outcomes are swept, because they reach three different emission paths
+    and only one of them is the obvious one:
+      * a successful login — the credential values are live in scope;
+      * a REFUSED login (a falsy return) — the `last_error` text is in scope;
+      * a login whose transport RAISES with the interpolated remote source in
+        the message. This is the one that matters: it is the ONLY path that
+        emits `error_class`, so a sweep without it never exercises the failure
+        emission at all and stays green while an `error_text` field is added.
+    """
+    connect, _fake, _rec = _make(
+        {"account": _FakeNamedTuple(equity=1.0), "last_error": (-6, "authorization failed")}
+    )
+    client = Mt5Client("mt5-gw.internal", 18812, _connect=connect)
+    refusing_connect, _f2, _r2 = _make(
+        {"login": False, "last_error": (-6, "authorization failed for 123456")}
+    )
+    refusing = Mt5Client("mt5-gw.internal", 18812, _connect=refusing_connect)
+    # The real disclosure vector: mt5linux builds the remote call as SOURCE TEXT
+    # with the password interpolated, so a remote traceback carries it verbatim.
+    raising_connect, _f3, _r3 = _make(
+        {
+            "login_raises": RuntimeError(
+                "remote eval failed: mt5.login(123456, "
+                "password='s3cr3t-pw', server='MyBroker-Live')"
+            )
+        }
+    )
+    raising = Mt5Client("mt5-gw.internal", 18812, _connect=raising_connect)
+
+    with capture_logs() as captured:
+        client.login(123456, "s3cr3t-pw", "MyBroker-Live")
+        client.account_info()
+        with pytest.raises(Mt5ClientError):
+            refusing.login(123456, "s3cr3t-pw", "MyBroker-Live")
+        with pytest.raises(Mt5ClientError):
+            raising.login(123456, "s3cr3t-pw", "MyBroker-Live")
+
+    events = _stage_events(captured)
+    assert events, "the sweep is vacuous — no stage event was captured at all"
+    # Not vacuous in the direction that matters: the FAILURE emission ran.
+    assert any(e.get("ok") is False for e in events), (
+        "no failed-stage event was captured — the sweep never reaches the "
+        "emission path that carries exception information"
+    )
+    rendered = repr(events)
+    for literal in ("123456", "s3cr3t-pw", "MyBroker-Live", "authorization failed"):
+        assert literal not in rendered, (
+            f"a credential (or raw last_error text) reached the telemetry: {literal!r}"
+        )
+
+
+def test_stage_telemetry_failure_never_changes_what_the_caller_observes(
+    monkeypatch, caplog
+):
+    """T-153.3-24 — a broken logging pipeline must not turn a successful terminal
+    read into a failed validate. Instrumentation is an ADDITION; it may never be
+    load-bearing for the request's verdict.
+
+    It must also not fail SILENTLY: an emitter that swallows its own breakage
+    leaves Phase 155 reading an empty histogram and concluding "no traffic".
+    """
+
+    class _BrokenLog:
+        def info(self, *_a, **_k):
+            raise RuntimeError("log pipeline down")
+
+    monkeypatch.setattr(mt5_client_mod, "_stage_log", _BrokenLog())
+    connect, _fake, _rec = _make({"account": _FakeNamedTuple(equity=1000.0)})
+    client = Mt5Client("mt5-gw.internal", 18812, _connect=connect)
+
+    with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+        assert client.account_info() == {"equity": 1000.0}
+
+    assert any(
+        "stage telemetry failed to emit" in r.message for r in caplog.records
+    ), "the emitter swallowed its own failure silently"

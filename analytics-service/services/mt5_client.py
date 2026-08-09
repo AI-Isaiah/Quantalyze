@@ -79,6 +79,18 @@ Contract:
     through `services.redact.scrub_freeform_string` at `Mt5ClientError`
     construction, and the interpolated remote `code` string is never logged.
 
+  * Instrumentation (153.3 / D-32) — EVERY MT5 round-trip is bracketed by
+    `_timed()` and emits a structlog `mt5.stage` event carrying `stage` +
+    `duration_ms`, on the SUCCESS path and on the FAILURE path alike. Before this
+    the client contained no clock at all, which is why no uncensored measurement
+    of a successful MT5 call existed anywhere: the only timer in the system was
+    the timeout, so every recorded number was right-censored at a ceiling.
+    ⛔ The event's field set is a CLOSED ALLOW-LIST (`emit_mt5_stage_event`) —
+    stage, duration_ms, ok, error_class, terminal_key, outcome — precisely so the
+    secret-hygiene rule above cannot be violated by a future caller passing
+    "just a bit of context". The exception CLASS name is emitted; its MESSAGE is
+    not, because a remote traceback carries the interpolated password.
+
   * Transport security (T-134-03, constraint documented; hardening owned by Phase
     139) — `mt5linux` speaks rpyc classic / SlaveService, an UNAUTHENTICATED
     arbitrary-remote-code channel. The bridge MUST only ever be reachable over a
@@ -89,13 +101,91 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, NoReturn
+from typing import Any, Callable, NoReturn, TypeVar
+
+import structlog
 
 from services.redact import scrub_freeform_string
 
 logger = logging.getLogger("quantalyze.analytics")
+
+_T = TypeVar("_T")
+
+# --------------------------------------------------------------------------- #
+# 153.3 / D-32 — MT5 STAGE TELEMETRY. The measurement this system has never had.
+#
+# WHY it exists: nine correlated gateway<->worker failures (2026-08-06/08) were
+# ALL right-censored at the rpyc ceiling, and no successful stage duration has
+# ever been recorded — not in Railway, not in Sentry, not in docs/evidence/. The
+# 45 000ms / 55s / 60s / 75s / 20s / 10s validate chain is therefore PROVISIONAL,
+# derived from vendor defaults and a client ceiling rather than from data
+# (D-27). These events are what lets **Phase 155 (MT5-VERIFY)** replace that
+# judgement with a real p50/p95. ⛔ This plan MEASURES and does not TUNE: moving a
+# timeout in the same change that first measured it destroys the before/after.
+#
+# STAGE NAMING CONVENTION — stage names are the MT5 call name verbatim
+# (`initialize`, `login`, `account_info`, `terminal_info`, `history_deals_get`,
+# `order_check`, `close`, `release`, `restart`, plus `last_error` for the error
+# round-trip). They are an AGGREGATION KEY across deploys: a rename silently
+# splits a Phase-155 histogram in two, so rename only with that cost in mind. The
+# router adds `lease_wait` and `validate` on the same event name.
+#
+# 🔒 The field set below is a CLOSED ALLOW-LIST and that is the whole hygiene
+# mechanism. `terminal_key` (host:port) is OUR infrastructure identity — already
+# the process-wide lock key — never a user value. NEVER add a parameter that can
+# carry a login, an investor password, a broker server, `last_error()` text or
+# the interpolated remote `code` string: `mt5linux` f-string-interpolates the
+# password into the remotely-eval'd source, so exception TEXT is a credential
+# disclosure surface (T-134-01 / T-153.3-23). Only the exception CLASS is safe.
+# --------------------------------------------------------------------------- #
+MT5_STAGE_EVENT = "mt5.stage"
+_stage_log = structlog.get_logger("quantalyze.mt5")
+
+
+def emit_mt5_stage_event(
+    stage: str,
+    started_at: float,
+    *,
+    ok: bool,
+    terminal_key: str | None = None,
+    error_class: str | None = None,
+    outcome: str | None = None,
+) -> None:
+    """Emit ONE structured `mt5.stage` event for a bracketed MT5 stage.
+
+    `started_at` is a `time.perf_counter()` reading taken before the call; the
+    duration is computed here so no call site can get the arithmetic wrong or
+    emit a duration in the wrong unit.
+
+    Fields are STRUCTURED, never interpolated into a message string — the entire
+    point is that Phase 155 can aggregate `duration_ms` by `stage` and by `ok`
+    rather than regex a prose line. `ok=False` events carry the exception CLASS
+    name so a 30s censor (a timeout class, duration at the ceiling) is separable
+    from a fast rejection in a single Railway query.
+
+    ⛔ NEVER raises. Instrumentation must not change what a caller observes
+    (T-153.3-24): a logging pipeline fault must not turn a successful terminal
+    read into a failed validate. A failure here is reported once, loudly, on the
+    stdlib logger — never swallowed silently.
+    """
+    fields: dict[str, Any] = {
+        "stage": stage,
+        "duration_ms": int((time.perf_counter() - started_at) * 1000),
+        "ok": ok,
+    }
+    if terminal_key is not None:
+        fields["terminal_key"] = terminal_key
+    if error_class is not None:
+        fields["error_class"] = error_class
+    if outcome is not None:
+        fields["outcome"] = outcome
+    try:
+        _stage_log.info(MT5_STAGE_EVENT, **fields)
+    except Exception:  # noqa: BLE001 — telemetry must never break the path it measures
+        logger.warning("emit_mt5_stage_event: stage telemetry failed to emit.")
 
 # rpyc `sync_request_timeout` (seconds). rpyc 5.x's own DEFAULT_CONFIG default is
 # 30s (NOT 300s — that is mt5linux 0.1.10's hardcode, and we pin 0.1.9), so an
@@ -338,6 +428,45 @@ class Mt5Client:
         self._mt5 = connect(host=host, port=port, timeout=request_timeout_s)
         self._closed = False
 
+    def _timed(self, stage: str, call: Callable[[], _T]) -> _T:
+        """Run ONE MT5 round-trip under a `perf_counter` bracket, emitting its
+        `stage` + `duration_ms` event on BOTH outcomes (153.3 / D-32).
+
+        ONE helper, not a bracket copy-pasted at ten call sites: a per-site
+        bracket is how half the sites end up un-instrumented, and a population
+        that silently excludes the failures is exactly the censored measurement
+        this exists to replace.
+
+        ⛔ The exception is re-raised UNCHANGED — same object, same type, same
+        message, same `__traceback__`. Timing must not alter what any caller
+        observes (T-153.3-24); in particular this composes with `_guarded_read`
+        rather than replacing it, so a raw transport raise is still converted to
+        a scrubbed typed `Mt5ClientError` exactly as before. The bracket sits
+        INSIDE that conversion deliberately, so `error_class` records the RAW
+        transport class (an rpyc `EOFError`, a socket timeout) instead of the
+        uniform `Mt5ClientError` every failure would otherwise report.
+
+        `BaseException` is caught, not `Exception`: a cancellation or a
+        `KeyboardInterrupt` mid-round-trip is precisely the long-tail case whose
+        duration we want, and the bare `raise` means catching it changes nothing.
+        """
+        started_at = time.perf_counter()
+        try:
+            result = call()
+        except BaseException as exc:  # noqa: BLE001 — re-raised bare on the next line
+            emit_mt5_stage_event(
+                stage,
+                started_at,
+                ok=False,
+                terminal_key=self.terminal_key,
+                error_class=type(exc).__name__,
+            )
+            raise
+        emit_mt5_stage_event(
+            stage, started_at, ok=True, terminal_key=self.terminal_key
+        )
+        return result
+
     def _raise_last(self) -> NoReturn:
         """Capture `last_error()` IMMEDIATELY (the next remote call overwrites it)
         and raise a typed, secret-scrubbed error."""
@@ -347,8 +476,13 @@ class Mt5Client:
         # unscrubbed rpyc traceback, bypassing the single typed fail-loud choke
         # point (router 500 instead of clean 400; worker skips the mt5 classify
         # arms). Convert it exactly as _guarded_read does.
+        #
+        # D-32: it is TIMED for the same reason it is guarded — it is a full
+        # remote round-trip taken AFTER the verdict is already known, and
+        # EVIDENCE §1b records a failed attempt paying a SECOND full 30s here.
+        # An un-timed `last_error` makes every failure look like one round-trip.
         try:
-            err = self._mt5.last_error()
+            err = self._timed("last_error", self._mt5.last_error)
         except Mt5ClientError:
             raise
         except Exception as exc:  # noqa: BLE001 — never let raw transport text escape
@@ -365,7 +499,7 @@ class Mt5Client:
             code, text = 0, "unknown (malformed last_error shape)"
         raise Mt5ClientError(code, text)
 
-    def _guarded_read(self, call: Callable[[], Any]) -> Any:
+    def _guarded_read(self, call: Callable[[], Any], *, stage: str | None = None) -> Any:
         """Run a raw transport read, converting ANY transport-RAISED exception
         into a scrubbed, typed `Mt5ClientError` (T-134-01). `mt5linux` speaks rpyc
         classic: a round-trip that raises (a remote traceback carrying the
@@ -376,9 +510,18 @@ class Mt5Client:
         (e.g. a `_materialize` degenerate-shape raise) passes through unchanged.
         Only RAISES are intercepted — the `None` (error) vs `()` (honest empty)
         RETURN discipline is untouched (the returned value is handed straight
-        back)."""
+        back).
+
+        `stage` (153.3 / D-32) composes the timing bracket INTO this one wrapper
+        — the single place every non-login read already passes through — rather
+        than wrapping it from outside. Two consequences, both deliberate: the
+        measured span is the RAW round-trip (not the round-trip plus our own
+        conversion), and `error_class` names the raw transport exception instead
+        of the `Mt5ClientError` this method uniformly produces. `stage=None`
+        keeps the pre-D-32 behaviour byte-for-byte for any caller that has no
+        stage to name."""
         try:
-            return call()
+            return call() if stage is None else self._timed(stage, call)
         except Mt5ClientError:
             raise
         except Exception as exc:  # noqa: BLE001 — never let raw transport text escape
@@ -412,7 +555,12 @@ class Mt5Client:
         semantics. initialize() carries no credentials, but its transport text is
         scrubbed on the same fail-loud path for safety."""
         try:
-            inited = self._mt5.initialize(timeout=self._ipc_timeouts_ms["initialize"])
+            inited = self._timed(
+                "initialize",
+                lambda: self._mt5.initialize(
+                    timeout=self._ipc_timeouts_ms["initialize"]
+                ),
+            )
         except Mt5ClientError:
             raise
         except Exception as exc:  # noqa: BLE001 — never let raw transport text escape
@@ -420,11 +568,14 @@ class Mt5Client:
         if not inited:
             self._raise_last()
         try:
-            ok = self._mt5.login(
-                login,
-                password=password,
-                server=server,
-                timeout=self._ipc_timeouts_ms["login"],
+            ok = self._timed(
+                "login",
+                lambda: self._mt5.login(
+                    login,
+                    password=password,
+                    server=server,
+                    timeout=self._ipc_timeouts_ms["login"],
+                ),
             )
         except Mt5ClientError:
             raise
@@ -439,7 +590,7 @@ class Mt5Client:
 
     def account_info(self) -> dict[str, Any]:
         """Current account snapshot as a native dict. None (error) -> typed raise."""
-        info = self._guarded_read(self._mt5.account_info)
+        info = self._guarded_read(self._mt5.account_info, stage="account_info")
         if info is None:
             self._raise_last()
         return _materialize(info)
@@ -471,7 +622,7 @@ class Mt5Client:
         ``services.mt5_validation.classify_trade_capability`` therefore refuses
         (``"undetermined"``) rather than concluding.
         """
-        info = self._guarded_read(self._mt5.terminal_info)
+        info = self._guarded_read(self._mt5.terminal_info, stage="terminal_info")
         if info is None:
             self._raise_last()
         return _materialize(info)
@@ -492,7 +643,9 @@ class Mt5Client:
         tz-aware datetimes; a naive/aware datetime → ``int(ts.timestamp())`` (the tz
         offset is immaterial for a range filter)."""
         _from, _to = _epoch_bound(from_ts), _epoch_bound(to_ts)
-        deals = self._guarded_read(lambda: self._mt5.history_deals_get(_from, _to))
+        deals = self._guarded_read(
+            lambda: self._mt5.history_deals_get(_from, _to), stage="history_deals_get"
+        )
         if deals is None:
             self._raise_last()
         return [_materialize(d) for d in deals]
@@ -513,7 +666,9 @@ class Mt5Client:
         positional dict with retcode ``-2 'Unnamed arguments not allowed'`` — it wants
         the named request fields (verified live). ``**request`` produces
         ``mt5.order_check(action=…, symbol=…, …)`` which MT5 accepts."""
-        result = self._guarded_read(lambda: self._mt5.order_check(**request))
+        result = self._guarded_read(
+            lambda: self._mt5.order_check(**request), stage="order_check"
+        )
         if result is None:
             self._raise_last()
         return _materialize(result)
@@ -526,7 +681,7 @@ class Mt5Client:
             return
         self._closed = True
         try:
-            self._mt5.shutdown()
+            self._timed("close", self._mt5.shutdown)
         except Exception:  # noqa: BLE001 — a close error must not mask caller errors
             logger.warning("Mt5Client.close: shutdown() raised; swallowing.")
 
@@ -577,7 +732,7 @@ class Mt5Client:
             )
             return
         try:
-            transport_close()
+            self._timed("release", transport_close)
         except Exception:  # noqa: BLE001 — a teardown error must not mask caller errors
             logger.warning(
                 "Mt5Client.release: transport close() raised; swallowing."
@@ -621,19 +776,29 @@ class Mt5Client:
         the offline ``_connect`` double, reconnect + best-effort ``shutdown()`` is
         the full exercised surface.
         """
-        stale = self._mt5
-        # Rebuild + swap in the fresh connection FIRST (see ORDERING above).
-        self._mt5 = self._connect(
-            host=self._host, port=self._port, timeout=self._request_timeout_s
-        )
-        self._closed = False
-        # Best-effort dispose of the stale connection AFTER the fresh one is live, so
-        # a shutdown() that blocks (an abandoned reader still driving `stale`) can
-        # never prevent the reconnect. A raising teardown is swallowed like close().
-        try:
-            stale.shutdown()
-        except Exception:  # noqa: BLE001 — a wedged teardown must not abort recovery
-            logger.warning("Mt5Client.restart: stale shutdown() raised; swallowing.")
+        # D-32: the WHOLE restart is one timed stage, not two. Recovery latency is
+        # what a Phase-155 reader needs (how long a wedged terminal costs us), and
+        # the reconnect and the stale disposal are not independently actionable —
+        # the ordering above deliberately makes the second one best-effort.
+        def _reconnect_then_dispose_stale() -> None:
+            stale = self._mt5
+            # Rebuild + swap in the fresh connection FIRST (see ORDERING above).
+            self._mt5 = self._connect(
+                host=self._host, port=self._port, timeout=self._request_timeout_s
+            )
+            self._closed = False
+            # Best-effort dispose of the stale connection AFTER the fresh one is live,
+            # so a shutdown() that blocks (an abandoned reader still driving `stale`)
+            # can never prevent the reconnect. A raising teardown is swallowed like
+            # close().
+            try:
+                stale.shutdown()
+            except Exception:  # noqa: BLE001 — a wedged teardown must not abort recovery
+                logger.warning(
+                    "Mt5Client.restart: stale shutdown() raised; swallowing."
+                )
+
+        self._timed("restart", _reconnect_then_dispose_stale)
 
     @property
     def terminal_key(self) -> str:
