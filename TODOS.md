@@ -593,7 +593,18 @@ true for 146 and half of 142–145, and **false for 141**.
 ### Tech-debt / maintainability (opportunistic, don't force)
 
 - **🔁 `gsd-sdk query state.update-progress` REGRESSES `STATE.md:stopped_at`** — observed
-  **twice**, independently, by the 153.3-01 and 153.3-02 executors (2026-08-09). The verb bumps
+  **THREE times**, independently, by the 153.3-01, 153.3-02 and 153.3-03 executors (2026-08-09).
+  The third occurrence also walked `last_activity` **backwards**. Three-for-three is not a flake;
+  it is the verb's normal behaviour. ⚠️ The `completed_plans` / progress-bar bumps it makes in the
+  same call ARE correct and should be kept — so the fix is a merge, not a revert of the whole verb.
+
+- **`gsd-sdk query state.add-decision` never matches this repo's STATE.md** — returns
+  `"Decisions section not found in STATE.md"` on every call (all three 153.3 executors, 2026-08-09).
+  Cause: the verb looks for a bare `### Decisions` heading; ours reads
+  `### Decisions (requirements-time, …)`. Consequence: **every decision an executor records is
+  silently dropped** — they landed in SUMMARY frontmatter instead, which is recoverable but not
+  where the resume path looks. Fix the matcher to be prefix-tolerant, or rename the heading.
+  ⚠️ Failing loudly here would be better than returning a string nobody checks. The verb bumps
   `completed_plans` but rewrites `stopped_at` to an older/pre-wave value, silently discarding the
   most recent progress note. Both executors caught it in their own diff and restored an accurate
   string rather than committing the regression — but an executor that did *not* diff-check would
