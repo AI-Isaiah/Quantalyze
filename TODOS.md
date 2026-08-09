@@ -511,6 +511,22 @@ than a deletion of the ladder. Requires: DESIGN.md ladder amendment + a decision
 - **ccxt tracebacks not secret-scrubbed** (`exc_info=True`) — an API key could land in Railway
   logs. Add a `redact_secrets` util.
 - **No Python lock file; ccxt unpinned** — unreproducible prod builds in the money-math path.
+- **`api_keys.exchange` is still CLIENT-SUPPLIED at row CREATION** (residual of review CR-01,
+  logged 2026-08-10). The UPDATE half is closed — migration `20260810120000` revokes table-level
+  UPDATE from `anon`/`authenticated` and a SECURITY INVOKER trigger backstops it, so a key owner
+  can no longer PATCH their own row to a probe-exempt venue, submit with the submit-time
+  scope-broadening probe skipped, and PATCH it back. The INSERT half remains: the browser calls
+  `/api/keys/validate-and-encrypt` and then performs the `api_keys` INSERT **itself**
+  (`ApiKeyManager.tsx:254`, `StrategyForm.tsx:140`, `AllocatorExchangeManager.tsx:591`), so a
+  crafted client can insert a venue that differs from the one the server actually validated.
+  **Why this is not filed FIX NOW:** the ciphertext is server-minted and only ever minted for a
+  key the server confirmed read-only (`validate-and-encrypt/route.ts:310`), and with UPDATE
+  revoked a mislabelled row can never be corrected back — so the forged strategy's sync fails
+  permanently and no credible listing results. The forgery is self-defeating, not harmful.
+  **Fix when the connect flow is next opened:** move the INSERT server-side into
+  `validate-and-encrypt` (it already knows the canonical venue it validated) and return the new
+  row id, then `REVOKE INSERT ON api_keys FROM authenticated`. That is a three-component
+  connect-flow refactor and was deliberately out of the CR-01 fix's blast radius.
 
 ### CI / test-infra ratchet
 - 🔁 **RECURS DAILY 05:30 UTC — nothing reaps stale `pending` compute_jobs on the TEST
