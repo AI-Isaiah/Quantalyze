@@ -158,6 +158,30 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
   that pin is **knowingly temporary** and is annotated **D-35**; wave 6 must re-cut it rather
   than be surprised by it.
 
+- [ ] **Module-level `structlog.get_logger(...)` proxies freeze their processor chain — swept in
+  `mt5_client.py` only.** Found 2026-08-09 by plan 153.3-05's full-suite run (invisible to
+  `-k mt5`). `services/logging_config.py:233` configures structlog with
+  `cache_logger_on_first_use=True`, so a module-level lazy proxy binds ONCE at its first use and
+  ignores every later `structlog.configure`. `main.py` configures logging inside the **lifespan**,
+  long after module import, so any module whose proxy binds before that point emits through a
+  chain **without** the `_redact_processor` PII scrub — a silent redaction bypass, not merely a
+  test-visibility problem. Fixed at the root in `services/mt5_client.py` (commit `78b05841`) by
+  binding per call (`_stage_logger()`); **the same exposure was NOT swept across
+  `services/exchange.py`, `services/redact.py`'s callers, `services/audit.py`,
+  `services/rate_limit.py` or any other structlog user.** Cheap check:
+  `grep -rn "^_\?log.* = structlog.get_logger" analytics-service --include="*.py"`.
+
+- [ ] **GSD `gsd-sdk query state.*` verbs take NAMED flags, not positional args — the executor
+  prompt documents positional.** Found 2026-08-09 during plan 153.3-05's state update.
+  `state.record-session "" "<stopped-at>" "None"` silently records only `Last Date` and drops the
+  stopped-at; `state.record-metric` and `state.add-decision` return `{"error": …}` on positional
+  argv. Correct forms: `--stopped-at/--resume-file`, `--phase/--plan/--duration/--tasks/--files`,
+  `--summary`. ⚠️ Also: **every** SDK write to `.planning/STATE.md` REGRESSES the frontmatter
+  `last_activity` to a stale value (observed: `2026-08-09 -- Phase 153.3 wave 4 complete` →
+  `2026-08-07 -- Phase 152 execution started`, three times in a row). Repaired in place each time.
+  Same defect family as the `### Decisions` heading drift already annotated in `STATE.md`.
+  ⚠️ `state.record-metric` is also NOT idempotent — running it twice appends a duplicate row.
+
 ### v1.14 Smoothed-MTM go-live blockers — FIXED in the v1.14 landing (2026-07-23)
 Surfaced by the /ship Fable red team; the safety-critical ones fixed in the landing PR so
 flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM factsheet.

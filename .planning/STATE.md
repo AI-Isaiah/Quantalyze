@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: planning
-stopped_at: "Phase 153 split 4 ways and fully planned (22 plans / 41 tasks). 153.3 waves 1-4 LANDED and independently gated (pytest -k mt5 337 passed / full suite 5047, mypy --strict clean on 88 files, MT5_REQUEST_TIMEOUT_S zero-diff). Wave 4 = D-29: the validate path now takes the terminal lease (bounded 20s acquisition OUTSIDE the 75s deadline; 105s < D-26's 120000ms). Next: wave 5 (instrumentation + D-33 runbook), then wave 6 (D-35), then 153.1 -> 153.2 -> 153.4."
-last_updated: "2026-08-09T02:03:57.220Z"
-last_activity: 2026-08-09 -- Phase 153.3 wave 4 complete
+stopped_at: "Phase 153 split 4 ways and fully planned (22 plans / 41 tasks). 153.3 waves 1-5 LANDED and independently gated (pytest -k mt5 348 passed / full suite 5058, mypy --strict clean on 88 files, MT5_REQUEST_TIMEOUT_S zero-diff across all five waves). Wave 5 = D-32/D-27/D-33: every MT5 round-trip now emits stage + duration_ms on BOTH outcomes, the lease queue wait is timed apart from the terminal work, every validate ends in exactly one of ten categorical outcomes, and the runbook pins the single-replica invariant, the terminal trade-disable step and the PROVISIONAL budget (owner Phase 155). No timeout was tuned. Next: wave 6 (D-35), then 153.1 -> 153.2 -> 153.4."
+last_updated: "2026-08-09T02:45:08.593Z"
+last_activity: 2026-08-09 -- Phase 153.3 wave 5 complete
 progress:
   total_phases: 13
   completed_phases: 6
   total_plans: 59
-  completed_plans: 41
+  completed_plans: 42
   percent: 46
 ---
 
@@ -381,7 +381,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [███████░░░] 69%
+Progress: [███████░░░] 71%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -477,6 +477,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 153.3 P02 | ~65m | 2 tasks | 6 files |
 | Phase 153.3 P03 | 75 min | 3 tasks | 8 files |
 | Phase 153.3 P04 | ~70 min | 2 tasks | 5 files |
+| Phase 153.3 P05 | 85 min | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -510,6 +511,11 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - csv-finalize fold-vs-compensate deferred to after the Phase 145 reproduction pass.
 - `cron/warm-analytics` OUT of RATE scope; Python limiters beyond `match.py` OUT of scope.
 - Roadmap kept research's 7-phase shape; 143/144 NOT merged (different tables/mechanisms, 143 has a design-pass flag, 144 is the founder's WR-02 call). JOB-07 mapped to Phase 142 only; constrains 143–145 (pg_cron by construction).
+- 153.3-05: MT5 stage-telemetry event fields are a CLOSED ALLOW-LIST (stage/duration_ms/ok/error_class/terminal_key/outcome) — secret hygiene is structural, not call-site discipline
+- 153.3-05: the timing bracket composes INTO _guarded_read, so the measured span is the RAW round-trip and error_class names the raw transport class rather than the uniform Mt5ClientError
+- 153.3-05: the per-validate outcome event hangs off a try/finally at a NEW function boundary, NOT off the release block — that block sits inside the terminal lease and cannot see lease_busy or gateway_unconfigured
+- 153.3-05: structlog loggers must be bound PER CALL — logging_config sets cache_logger_on_first_use=true, so a module-level proxy freezes its processor chain (including the PII scrub) at first use
+- 153.3-05: D-27 honoured literally — not one timeout constant moved; the runbook records the whole chain as PROVISIONAL with Phase 155 named as the owner of the tightening
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1212,8 +1218,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-09T02:03:57.210Z
-**Stopped At:** Phase 153 split 4 ways and fully planned (22 plans / 41 tasks). 153.3 waves 1-4 LANDED and independently gated (pytest -k mt5 337 passed / full suite 5047, mypy --strict clean on 88 files, MT5_REQUEST_TIMEOUT_S zero-diff). Wave 4 = D-29: the validate path now takes the terminal lease (bounded 20s acquisition OUTSIDE the 75s deadline; 105s < D-26's 120000ms). Next: wave 5 (instrumentation + D-33 runbook), then wave 6 (D-35), then 153.1 -> 153.2 -> 153.4.
+**Last Date:** 2026-08-09T02:43:52.653Z
+**Stopped At:** Phase 153 split 4 ways and fully planned (22 plans / 41 tasks). 153.3 waves 1-5 LANDED and independently gated (pytest -k mt5 348 passed / full suite 5058, mypy --strict clean on 88 files, MT5_REQUEST_TIMEOUT_S zero-diff across all five waves). Wave 5 = D-32/D-27/D-33: every MT5 round-trip now emits stage + duration_ms on BOTH outcomes, the lease queue wait is timed apart from the terminal work, every validate ends in exactly one of ten categorical outcomes, and the runbook pins the single-replica invariant, the terminal trade-disable step and the PROVISIONAL budget (owner Phase 155). No timeout was tuned. Next: wave 6 (D-35), then 153.1 -> 153.2 -> 153.4.
 **Resume File:** None
 **Next step:** Finish 153.3 waves 5-6, then execute 153.1 → 153.2 → 153.4 on `feat/v1.17-153-wizform`.
 
