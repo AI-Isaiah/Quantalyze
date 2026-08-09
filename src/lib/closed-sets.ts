@@ -56,6 +56,157 @@ export const EXCHANGE_DISPLAY = {
 export type ExchangeDisplay = (typeof EXCHANGE_DISPLAY)[SupportedExchange];
 
 /**
+ * Per-venue CAPABILITY facts (Phase 153.1 — D-17, D-22).
+ *
+ * These are facts about the VENUE, not about what we offer. Deliberately NOT gated on
+ * MT5_UI_ENABLED / SFOX_UI_ENABLED below: a capability is true whether or not the card
+ * is on screen, and flag-gating it would make the copy layer's behaviour depend on a UI
+ * flag.
+ *
+ * Why a record instead of `if (venue === "mt5")`: two different layers (the
+ * finalize-wizard scope-probe gate and the wizardErrors copy filter) ask the same
+ * venue-shaped question. Answered once here, a venue that behaves like MT5 costs one
+ * row; answered at each call site, it costs an unbounded instance-check sweep — the
+ * instance-not-class defect this repo has already paid for once.
+ *
+ * Every member is OPTIONAL and ABSENT means the INCUMBENT behaviour, so a venue that
+ * omits a key behaves byte-identically to today. That is the `ExchangeOption`
+ * `requiresSecret?` / `passphraseSecret?` precedent (ConnectKeyStep.tsx), applied to
+ * an isomorphic module because these facts are needed on BOTH sides of the wire.
+ */
+export interface VenueCapabilities {
+  /**
+   * Does this venue answer a per-key permissions probe (the submit-time
+   * scope-broadening probe)? Absent → TRUE, which is what every ccxt venue does, so
+   * every existing and future venue that omits the key probes exactly as it does today.
+   *
+   * `mt5` sets false: MT5 read-only is enforced STRUCTURALLY (Mt5Client composes only
+   * read methods — there is no order/withdraw/transfer surface to broaden) and
+   * BEHAVIOURALLY (the `order_check` master-login rejection), and MT5 exposes no
+   * per-key scope endpoint. The probe has nothing to ask.
+   *
+   * ⚠️ Read this through `venueSupportsScopeProbe()`, never by indexing the record:
+   * the predicate is what makes an UNRESOLVED venue still get probed, and that
+   * direction is a security property (ASVS V4).
+   *
+   * Consumer: Phase 153.2's finalize-wizard probe gate (D-14) — not this sub-phase.
+   */
+  scopeProbeSupported?: boolean;
+  /**
+   * Is there another venue the user could plausibly use instead, i.e. is "switch to a
+   * different exchange" a REAL remedy? Absent → TRUE, which is what every ccxt venue
+   * is, so the incumbent remedy copy is preserved everywhere it renders today.
+   *
+   * `mt5` sets false: the broker account IS the venue. Telling an MT5 user to use a
+   * different exchange is an unwinnable remedy (D-17 — the same class as MT5-13 and
+   * the deleted "0 trades" message).
+   *
+   * Consumer: 153.1-03's copy filter in wizardErrors.ts.
+   */
+  substitutable?: boolean;
+  /**
+   * Are this venue's calls SERIALIZED behind one shared lease, so that a long wait is
+   * QUEUEING rather than slowness? Absent → FALSE, which is what every ccxt venue is
+   * (per-key calls run concurrently) — and claiming a queue we cannot observe would be
+   * inventing a specific fact about the user's situation.
+   *
+   * `mt5` sets true: every gateway call funnels through a single terminal lease (one
+   * logged-in account per terminal), so N concurrent validations genuinely queue.
+   *
+   * Consumer: Phase 153.4's long-wait copy (D-05).
+   */
+  serialized?: boolean;
+}
+
+/**
+ * One capability row per SUPPORTED_EXCHANGES member. `as const satisfies
+ * Record<SupportedExchange, VenueCapabilities>` makes a missing row a COMPILE error, so
+ * a seventh venue physically cannot ship without one — the same discipline
+ * EXCHANGE_DISPLAY uses above.
+ *
+ * ⛔ This adds NO membership anywhere. `mt5` is already a member of SUPPORTED_EXCHANGES
+ * and EXCHANGE_DISPLAY, so giving it a row widens nothing; it stays OUT of
+ * UI_EXCHANGE_CODES / EXCHANGES / FUNDING_EXCHANGES / CRYPTO_EXCHANGES (the chip-set
+ * widening is Phase 153.2's, D-16/D-20, and CRYPTO_EXCHANGES membership drives the
+ * √365-vs-√252 annualization split).
+ */
+export const VENUE_CAPABILITIES = {
+  binance: {},
+  okx: {},
+  bybit: {},
+  deribit: {},
+  // D-22: sFOX keeps the submit-time scope probe BYTE-UNCHANGED in this phase, so its
+  // row asserts no capability at all.
+  // ⚠️ OPEN QUESTION, logged in TODOS.md and deliberately NOT answered here (RESEARCH
+  // Q2): sFOX asserts read_only=True structurally for the same reason MT5 does and
+  // exposes no per-key scope endpoint, so it may belong in the opt-out. What is unknown
+  // is whether the ccxt probe currently SUCCEEDS for sFOX or has been silently failing
+  // — and changing sFOX's submit path is outside this phase's requirements.
+  sfox: {},
+  mt5: { scopeProbeSupported: false, substitutable: false, serialized: true },
+} as const satisfies Record<SupportedExchange, VenueCapabilities>;
+
+/**
+ * The capability row for a venue string, or undefined when the venue is null/empty or
+ * is not a supported code. Case-insensitive, like isCryptoExchange below —
+ * canonicalizeExchange hands back the DISPLAY form ("MT5"), so callers legitimately
+ * pass mixed case.
+ *
+ * ⛔ Deliberately NOT exported. Every consumer must go through one of the three
+ * predicates, because the DEFAULT — what an absent key or an unresolved venue means —
+ * is the load-bearing part, and it is different for each capability.
+ */
+function venueCapabilities(
+  venue: string | null | undefined,
+): VenueCapabilities | undefined {
+  if (!venue) return undefined;
+  return (VENUE_CAPABILITIES as Record<string, VenueCapabilities | undefined>)[
+    venue.toLowerCase()
+  ];
+}
+
+/**
+ * Should the submit-time scope-broadening probe run for this venue?
+ *
+ * ⚠️ null / undefined / "" / an unknown venue ⇒ **TRUE**, which is the OPPOSITE of
+ * isCryptoExchange's null answer. That asymmetry is deliberate — do not "unify" these
+ * three predicates. This one gates a SECURITY control (ASVS V4): a key broadened to
+ * trade/withdraw between Connect and Submit is caught by the probe, so an unresolved
+ * venue must still be probed. Answering false here would silently disable the defense
+ * for every venue the resolver could not name. The local precedent for "venue
+ * unresolved ⇒ do the conservative thing" is finalize-wizard's `skipAssetClassWrite`
+ * arm, which leaves the existing stamp intact rather than guessing.
+ */
+export function venueSupportsScopeProbe(
+  venue: string | null | undefined,
+): boolean {
+  return venueCapabilities(venue)?.scopeProbeSupported ?? true;
+}
+
+/**
+ * May copy suggest using a different venue instead of this one?
+ *
+ * null / undefined / unknown ⇒ **TRUE**: when the caller did not name a venue we keep
+ * the incumbent copy. Suppressing venue-shaped remedies wherever the venue is unknown
+ * would be a repo-wide copy regression, which is not what D-17 asked for — D-17 asks
+ * that the bullet never renders for a venue we KNOW cannot be substituted.
+ */
+export function venueIsSubstitutable(venue: string | null | undefined): boolean {
+  return venueCapabilities(venue)?.substitutable ?? true;
+}
+
+/**
+ * Are calls to this venue serialized behind one shared lease (so a wait is a queue)?
+ *
+ * null / undefined / unknown ⇒ **FALSE**: never claim queueing we cannot observe. A
+ * surface must not invent a specific fact about why the user is waiting, so the honest
+ * answer for a venue we could not resolve is "not known to queue".
+ */
+export function venueIsSerialized(venue: string | null | undefined): boolean {
+  return venueCapabilities(venue)?.serialized ?? false;
+}
+
+/**
  * Feature flag for the public sFOX offer (Phase 122 / SFOX-08). Strict equality
  * against the EXACT string "true" — fail-closed: "1" / "TRUE" / "on" / "" all
  * read as OFF. Next.js inlines the full static `process.env.NEXT_PUBLIC_SFOX_ENABLED`
