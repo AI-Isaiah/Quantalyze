@@ -72,3 +72,87 @@ landed?) is a `SyncPreviewStep` archaeology task with no user-facing effect
 today. **Owner: whichever phase next touches `SyncPreviewStep.tsx`'s error
 surface.** Logged so the obligation is not quietly lost — it still binds for a
 future plan admitting a `try_another_key`-carrying code.
+
+---
+
+## DEF-153.1-06-A — FIVE `finalize-wizard` rejections still answer with NO code
+
+**Found during:** 153.1-06, by the new source-derived rejection sweep — the
+first scan in this sub-phase whose population includes arms that emit nothing.
+
+**Measured** (comment-stripped source, `9705838f`): **30** 4xx/5xx
+`NextResponse.json(` sites, **25** coded, **5** code-less:
+
+| Status | Body | Note |
+|---|---|---|
+| 429 | `{ error: "Too many requests" }` | `KEY_RATE_LIMIT` is what the key routes answer |
+| 503 | `{ error: "Rate limiter unavailable" }` | `SEAM_MISCONFIGURED`; 140.4-15 fixed this exact arm on `composite/add-key` |
+| 500 | `{ error: "Could not load draft" }` | the strategy lookup's failure |
+| 500 | `{ error: "Could not finalize wizard draft" }` | the RPC's generic failure |
+| 502 | `{ error: "Upstream service returned unexpected response" }` | |
+
+Each renders the UNKNOWN card — *"We could not classify this failure"* — for a
+failure the route classified well enough to pick a status and write a sentence
+about. **This is WIZFORM-02's own criterion, still open**, which is why the
+requirement was NOT ticked (see the SUMMARY's Requirements section).
+
+⚠️ **A raw-source scan with a fixed look-ahead window reports FOUR of the five**
+— it loses the `:869` arm behind the `console.error` block above it. The count
+must be taken from stripped source. Same class as the 14-vs-12 lesson.
+
+**Why NOT fixed here.** 153.1-06 is a TEST-ONLY plan (`⛔ No production source
+is touched by this plan`), and all five sit outside both populations 153.1-05
+worked on — it coded the eleven `validatePayload` arms and reordered the
+fourteen coded emitters, and none of these five is either. The 503/429 pair are
+limiter arms; the 502 is the upstream-shape arm.
+
+**They are now FENCED, not merely noted.** `KNOWN_CODELESS_FINALIZE_REJECTIONS
+= 5` in `wizardErrors.invariant.test.ts` pins the number, and a SIXTH reds by
+name. The failure message forbids the bump: *"IF THIS NUMBER WENT UP, THE
+REMEDY IS A CODE ON THE NEW ARM ... never a bump of this literal."*
+
+**Owner: Phase 153.2**, which already owns this route's error surface. Each arm
+fixed lowers the literal by one; at zero the constant and its assertion collapse
+into "every rejection carries a code", which is where WIZFORM-02 lands.
+
+---
+
+## DEF-153.1-06-B — `seam-citations.invariant.test.ts` RED: bare `file:line` citations in `wizardErrors.ts`
+
+**Found during:** 153.1-06's full-suite run. **PRE-EXISTING at `aff52516`** —
+`git diff aff52516..HEAD` for this plan is a single test file, and this guard
+does not read it.
+
+```
+src/lib/wizardErrors.ts:42   cites MetadataStep.tsx:19
+src/lib/wizardErrors.ts:217  cites finalize-wizard/route.ts:1319
+src/lib/wizardErrors.ts:292  cites finalize-wizard/route.ts:1782
+src/lib/wizardErrors.ts:618  cites envelope.ts:86
+src/lib/wizardErrors.ts:619  cites WizardErrorEnvelope.test.tsx:44
+src/lib/wizardErrors.ts:1838 cites finalize-wizard/route.ts:1763-1777
+src/lib/wizardErrors.ts:2252 cites envelope.ts:86
+```
+
+Introduced by **153.1-04**, whose copy entries cite route coordinates. ⚠️ Three
+of them are ALREADY STALE — 153.1-05 moved `:1319 → :1448` and `:1782 → :1911`
+— which is precisely the drift the guard exists to name.
+
+**Not fixed:** comment prose only, no user-facing or data-integrity effect. The
+founder's stopping rule puts citations explicitly in the log-never-block class.
+Remedy is mechanical: convert each to a SYMBOL anchor.
+**Owner: Phase 153.2** (it owns `wizardErrors.ts` copy and re-derives these
+anchors anyway).
+
+---
+
+## DEF-153.1-06-C — `seam-venue-vocabulary.invariant.test.ts` RED: `mt5.py` line drift
+
+**Found during:** 153.1-06's full-suite run. **PRE-EXISTING and NOT 153.1's.**
+
+The declared-blind-spot ledger pins dynamic `error_code` emitters by
+`file:line`; `analytics-service/services/ingestion/mt5.py:242` has moved.
+
+**Not fixed — explicitly out of bounds:** `analytics-service/` belongs to
+**Phase 153.3**, which is complete and under code review. Touching it during
+153.1's closing plan would collide with that review.
+**Owner: Phase 153.3.**
