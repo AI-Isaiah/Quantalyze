@@ -614,6 +614,29 @@ async def _validate_mt5_key_probe(
             # OUR gateway's condition as the user's wrong broker server and blame
             # their credentials for it. Caught here, logged secret-free with the
             # scrubbed code only.
+            #
+            # ⭐ THE GUARDED REGION IS THIS try, AND IT MUST SPAN THE WHOLE READ —
+            # INCLUDING MATERIALIZATION. `Mt5Client.terminal_info` converts a
+            # transport RAISE into a typed `Mt5ClientError` via `_guarded_read`,
+            # but it materializes the rpyc netref AFTER that wrapper has returned.
+            # An `Mt5ClientError`-only catch therefore left a hole exactly the
+            # width of that step: if the connection drops between the call
+            # returning a netref and the netref being read, the failure is a raw
+            # transport exception, it is NOT an `Mt5ClientError`, and it escaped
+            # this refusal entirely — out of `_probe`, past the `except
+            # Mt5ClientError` classify arm, past `validate_key`, to an unhandled
+            # bodyless 500. Under R-1 that status means SERVICE-PERMANENT, "do not
+            # retry" — the opposite of the truth for a dropped connection — and it
+            # is produced by NO arm of this contract, so nothing here chose it.
+            #
+            # ⛔ Fail CLOSED on ANY failure, deliberately: this is the one read
+            # whose absence must yield NO signal. A terminal we could not read
+            # cannot license a read_only verdict (D-31's fail-OPEN), and it must
+            # not reach `classify_mt5_login_error` either, whose
+            # "terminal"/"ipc"/"connect" tokens would blame the user's broker
+            # server for OUR gateway's condition. `Exception`, never
+            # `BaseException`: cancellation and interpreter exits are not "the
+            # terminal is unreadable".
             try:
                 return connected.terminal_info()
             except Mt5ClientError as terminal_err:
@@ -621,6 +644,18 @@ async def _validate_mt5_key_probe(
                     "validate_key: MT5 terminal_info unreadable (code=%s) — "
                     "capability undetermined",
                     terminal_err.code,
+                )
+                return None
+            except Exception as terminal_exc:  # noqa: BLE001 — see the block above
+                # The typed arm above carries a scrubbed MT5 code; this one has no
+                # such guarantee, so it logs the exception CLASS only. Never the
+                # message: an unconverted transport raise is precisely the raw,
+                # unscrubbed rpyc text `_guarded_read` exists to keep out of our
+                # logs (T-134-01).
+                logger.warning(
+                    "validate_key: MT5 terminal_info failed to materialize "
+                    "(error_class=%s) — capability undetermined",
+                    type(terminal_exc).__name__,
                 )
                 return None
 

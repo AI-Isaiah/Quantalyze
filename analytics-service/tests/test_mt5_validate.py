@@ -1141,6 +1141,102 @@ async def test_mt5_validate_constructs_the_client_with_the_validate_chain(
 
 
 # --------------------------------------------------------------------------- #
+# D-31's fail-closed guard — the MATERIALIZATION hole
+# --------------------------------------------------------------------------- #
+
+
+class _Netref:
+    """A namedtuple-shaped stand-in for the rpyc netref MT5 returns.
+
+    ``Mt5Client._materialize`` accepts anything exposing ``_asdict()``; this is the
+    healthy shape, used for the reads that are NOT under test here."""
+
+    def __init__(self, **fields):
+        self._fields = fields
+
+    def _asdict(self):
+        return dict(self._fields)
+
+
+class _NetrefDeadOnAttributeFetch:
+    """A netref whose ATTRIBUTE FETCH is itself a remote round-trip, and the
+    connection is already gone when ``_materialize`` reaches for ``_asdict``."""
+
+    def __getattr__(self, name):
+        raise EOFError("stream has been closed")
+
+
+class _NetrefDeadOnAsdictCall:
+    """A netref that answers the ``_asdict`` fetch and then dies on the CALL — the
+    other half of the same materialization window."""
+
+    def _asdict(self):
+        raise EOFError("stream has been closed")
+
+
+@pytest.mark.parametrize(
+    "dead_netref",
+    [_NetrefDeadOnAttributeFetch, _NetrefDeadOnAsdictCall],
+    ids=["dies-on-attribute-fetch", "dies-on-asdict-call"],
+)
+async def test_terminal_transport_failure_at_materialization_still_refuses(
+    exchange_router, dead_netref
+):
+    """⭐ D-31 must fail CLOSED through the MATERIALIZATION window too.
+
+    ``_read_terminal`` narrowed its fail-closed catch to ``Mt5ClientError``, but
+    ``Mt5Client.terminal_info`` materializes the rpyc netref OUTSIDE
+    ``_guarded_read`` — that is the ONE step of the read whose failure is not
+    converted to a typed error. So a transport failure in that window escaped the
+    refusal entirely, on a guard whose entire purpose is that an unreadable
+    terminal yields NO signal.
+
+    ⚠️ THE WINDOW IS THE POINT. ``terminal_info()`` is CALLED successfully here and
+    RETURNS a netref — ``_guarded_read`` has already handed control back — and only
+    the subsequent materialization dies. A test that made the CALL raise never
+    reaches this bug at all: that path is already an ``Mt5ClientError`` and is
+    already caught (see the unreadable-terminal case above). The doubles below
+    cannot raise at call time by construction; their bodies only return.
+
+    The correct outcome is the one D-31 exists to produce: no terminal signal ->
+    "undetermined" -> refusal. Never a read_only success built on two account
+    negatives we cannot attribute, and never an accusation against the user's
+    broker server — ``classify_mt5_login_error``'s ``_WRONG_SERVER_TOKENS`` carry
+    "terminal", "ipc" and "connect", so OUR gateway's transport fault must never be
+    allowed to reach it.
+    """
+    router = exchange_router
+    calls = []
+    transport = MagicMock(name="mt5-transport")
+    transport.account_info = MagicMock(return_value=_Netref(**_INVESTOR_ACCOUNT))
+    transport.order_check = MagicMock(return_value=_Netref(**_INVESTOR_ORDER_CHECK))
+
+    def _terminal_info():
+        # Records entry, then RETURNS a netref. There is no raise on this path —
+        # the round-trip succeeded and the guarded region is already over.
+        calls.append("returned-a-netref")
+        return dead_netref()
+
+    transport.terminal_info = _terminal_info
+    _install_real_mt5_client(router, transport)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    # The call itself succeeded — the failure was strictly at materialization.
+    assert calls == ["returned-a-netref"]
+    # Refusal, fail-CLOSED and transient (our bridge blipped; it clears on retry).
+    assert ei.value.status_code == 424
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    # ⛔ Never the two mistranslations. A wrong-server verdict here blames the user
+    # for a fault in our gateway; an auth verdict blames their credentials.
+    assert ei.value.detail != MT5_WRONG_SERVER_DETAIL
+    assert ei.value.detail != AUTH_FAILED_DETAIL
+    # ⛔ And never a permissive verdict: an unreadable terminal yields NO signal.
+    assert "read_only" not in repr(ei.value.detail)
+
+
+# --------------------------------------------------------------------------- #
 # D-24's ordering guard — a PERMANENT operator fault, never a gateway outage
 # --------------------------------------------------------------------------- #
 
