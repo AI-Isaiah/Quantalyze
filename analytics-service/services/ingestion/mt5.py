@@ -74,8 +74,14 @@ from services.mt5_validation import (
 # sync_request_timeout so a hung terminal fails its round-trip first and this outer
 # wait_for is the LAST-RESORT ceiling — a hang OUTSIDE a bounded round-trip (e.g.
 # netref materialization) must NEVER let the sequential worker await unbounded (the
-# v1.11 WEDGE-01 failure class). Mirrors routers/exchange.py:_MT5_PROBE_TIMEOUT_S so
-# the adapter and router paths do not diverge (WR-02).
+# v1.11 WEDGE-01 failure class). This used to MIRROR the router's own
+# `_MT5_PROBE_TIMEOUT_S` (WR-02); as of 153.3 / D-03 the two paths have DIVERGED on
+# purpose. The INTERACTIVE validate path in routers/exchange.py now runs a longer
+# per-instance chain under ONE end-to-end deadline
+# (`_MT5_VALIDATE_STAGE_TIMEOUT_S` / `_MT5_VALIDATE_DEADLINE_S`), because a human is
+# waiting and MetaQuotes budgets 60 000ms for initialize()/login(). The WORKER —
+# this file — deliberately keeps the short 30s chain: it is SEQUENTIAL, and holding
+# it longer is exactly the WEDGE-01 wedge (D-25).
 _MT5_PROBE_TIMEOUT_S = MT5_REQUEST_TIMEOUT_S + 5.0
 
 # Same stdlib logger name the rest of the MT5 family uses (services/mt5_client.py)

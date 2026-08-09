@@ -213,7 +213,14 @@ EXPECTED_HTTPEXCEPTION_SUBCLASSES = 1
 #: EXISTING transient arm (no new user-facing code is minted here; 153.1 owns the
 #: TS code table), and it is a 4xx like every other site, so blind spot (b) stays
 #: latent rather than live.
-EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 8
+#: 8 -> 9 (2026-08-09, Phase 153.3-03 / D-03): the MT5 validate probe gained ONE
+#: end-to-end deadline above its per-stage ceilings, and its expiry routes to the
+#: SAME transient arm as a probe-stage timeout (a hung terminal is a hung terminal)
+#: — a fifth ``VenueTransientHTTPException(424)`` construction, again a 4xx.
+#: The three MT5 probe-arm sites now resolve to the enclosing ``_connect_and_probe``
+#: rather than ``_validate_mt5_key``: connect+probe moved into one inner coroutine so
+#: a single deadline could bound them. Same function, same arms, one scope deeper.
+EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 9
 
 #: Vacuity fence. A scanner that matched nothing would report agreement with the
 #: quarantine forever, so the scan must prove it saw the tree. Loose floors on

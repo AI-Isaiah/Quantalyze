@@ -106,6 +106,23 @@ logger = logging.getLogger("quantalyze.analytics")
 # latency yet well under the healthz budget, so a stalled bridge fails loud fast.
 MT5_REQUEST_TIMEOUT_S = float(os.getenv("MT5_REQUEST_TIMEOUT_S", "30"))
 
+# The rpyc `sync_request_timeout` for the INTERACTIVE validate chain (153.3 /
+# D-25), deliberately SEPARATE from the worker's 30s above rather than a raise of
+# it. Two reasons, and both are load-bearing:
+#   * ⛔ MT5_REQUEST_TIMEOUT_S must NOT move. It bounds the SEQUENTIAL worker, where
+#     a hung terminal held past the ~90s healthz budget is the v1.11 WEDGE-01
+#     wedge class. A "harmonised" single constant buys the validate path its
+#     headroom by re-arming that wedge for every job.
+#   * The validate path needs the headroom because MetaQuotes budgets 60 000ms for
+#     `initialize()`/`login()` (the vendor default), and our 20s IPC / 30s rpyc
+#     pair truncated the legitimate tail of a real interactive login — a login that
+#     WOULD have answered was censored by our own ceiling (EVIDENCE Correction
+#     C-3). 55s carries a 45 000ms IPC ceiling with 10s of rpyc headroom.
+# A caller opts in by passing `request_timeout_s=MT5_VALIDATE_REQUEST_TIMEOUT_S`
+# together with the matching per-call IPC overrides; a construction that passes
+# nothing still gets the worker's chain.
+MT5_VALIDATE_REQUEST_TIMEOUT_S = float(os.getenv("MT5_VALIDATE_REQUEST_TIMEOUT_S", "55"))
+
 # MT5's own IPC pipe timeout (milliseconds) passed to login(timeout=...). MUST
 # stay strictly BELOW MT5_REQUEST_TIMEOUT_S (converted to ms) so MT5 fails its
 # own pipe first and rpyc surfaces a clean error rather than a raw mid-handshake
