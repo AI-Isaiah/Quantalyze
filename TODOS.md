@@ -170,6 +170,20 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
   `services/exchange.py`, `services/redact.py`'s callers, `services/audit.py`,
   `services/rate_limit.py` or any other structlog user.** Cheap check:
   `grep -rn "^_\?log.* = structlog.get_logger" analytics-service --include="*.py"`.
+  ⭐ **MEASURED by the orchestrator 2026-08-09 — the class is 8 sites** (non-test production):
+  `routers/debug_key_flow.py:41`, `main.py:153` (`_config_log`), `:365` (`_validation_log`),
+  `:458` (`_rate_limit_log`), `:643` (`_auth_log`), `routers/process_key.py:60`,
+  `services/rate_limit.py:136`, `services/ingestion/long_fetch.py:45`.
+  ⚠️ **Triage before fixing all eight — exposure is NOT uniform.** The freeze happens at first
+  *use*, not at creation, so a proxy used only at request time (after the lifespan configures
+  logging) is fine. The genuinely suspicious ones are those that can log during **import or
+  startup, before `configure_logging()`** — `main.py:153 _config_log` is the obvious candidate
+  since config validation runs early. Establish which of the eight can emit pre-configure, then
+  fix those; converting all eight blindly is churn.
+  ⭐ **Prefer a class fix over eight point fixes**: either drop `cache_logger_on_first_use` (it is
+  a micro-optimisation buying little here), or configure logging at import rather than in the
+  lifespan. Either removes the whole class; per-call binding at 8 sites leaves the 9th to be
+  written next week. Same reasoning as D-35's fix-at-the-sink.
 
 - [ ] **GSD `gsd-sdk query state.*` verbs take NAMED flags, not positional args — the executor
   prompt documents positional.** Found 2026-08-09 during plan 153.3-05's state update.
