@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
-stopped_at: "Completed 153.2-02-PLAN.md (WIZFORM-01 class: category/AUM/capacity mirrors + submit-with-errors orchestration). NEXT: 153.2-04 (MT5 chip set + preselect) / 153.2-05 (field-level code routing)."
-last_updated: "2026-08-09T08:37:43.757Z"
+stopped_at: Completed 153.2-04-PLAN.md (MT5 declarable AND submittable)
+last_updated: "2026-08-09T21:05:27.711Z"
 last_activity: 2026-08-09
 progress:
   total_phases: 14
   completed_phases: 8
   total_plans: 59
-  completed_plans: 52
+  completed_plans: 53
   percent: 57
 ---
 
@@ -56,7 +56,7 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 ## Current Position
 
 Phase: 153.2 (WIZFORM-FIELD) -- 153.1 and 153.3 already COMPLETE on the same branch
-Plan: 3 of 05 complete
+Plan: 4 of 05 complete
 Status: Ready to execute
 Last activity: 2026-08-09
 
@@ -381,7 +381,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [█████████░] 88%
+Progress: [█████████░] 90%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -488,6 +488,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 153.2 P01 | 27 | 2 tasks | 2 files |
 | Phase 153.2 P03 | 6min | 2 tasks | 2 files |
 | Phase 153.2 P02 | 20min | 2 tasks | 2 files |
+| Phase 153.2 P04 | ~55 min | 3 tasks | 8 modified files |
 
 ## Accumulated Context
 
@@ -550,6 +551,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 153.2]: 153.2-02: the AUM/capacity client mirror IMPORTS finalize-wizard's own isValidDollar plus its omitted-case half, so client and server cannot drift
 - [Phase 153.2]: 153.2-02: a refused submit opens the collapsed <details> before focusing the first invalid control; containment is tested, not hard-coded
 - [Phase 153.2]: 153.2-02: the submit summary agrees with its number ('1 field needs attention') — a recorded deviation from the UI contract's plural-only template
+- [Phase 153.2]: 153.2-04: the finalize-wizard scope probe is gated on venueSupportsScopeProbe (a CAPABILITY) at BOTH call sites, and fails TOWARD probing — null / unknown / absent-row venues are still probed, so a transient api_keys.exchange read fault cannot disable an ASVS V4 control
+- [Phase 153.2]: 153.2-04: MT5 ships as Option B — WIZARD_EXCHANGE_CODES / WIZARD_EXCHANGES are wizard-only, so EXCHANGES.length (the public marketing count) does not move and CRYPTO_EXCHANGES stays mt5-free (membership there selects √365 over √252 — a money-math boundary, not a UI one)
+- [Phase 153.2]: 153.2-04: a parse miss (KEY_SCOPE_CHECK_UNAVAILABLE, 502) and a missing INTERNAL_API_TOKEN (SEAM_MISCONFIGURED, 500) are split off KEY_NETWORK_TIMEOUT as PERMANENT — both non-recoverable, so no Retry control renders. No retry loop was added (D-07)
+- [Phase 153.2]: 153.2-04 audit lesson: an inherited test's not.toBe between two literals declared in the SAME file is a guard that cannot fail — assert off the response body, and order the named assertion before the broad toEqual. A tolerant expect([502,503]).toContain(status) is what let the D-14b misclassification survive in tests/integration/process-key-thin-adapters.test.ts
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1252,8 +1257,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-09T08:37:43.744Z
-**Stopped At:** Completed 153.2-02-PLAN.md (WIZFORM-01 class: category/AUM/capacity mirrors + submit-with-errors orchestration). NEXT: 153.2-04 (MT5 chip set + preselect) / 153.2-05 (field-level code routing).
+**Last Date:** 2026-08-09T21:05:27.700Z
+**Stopped At:** Completed 153.2-04-PLAN.md (MT5 declarable AND submittable)
 **Resume File:** None
 **Next step:** 153.3 is COMPLETE (6/6); 153.1 is 5/6 (plan 01 Wave-0 gates, plan 02 the capability foundation, plan 03 the WIZFORM-03 class filter, plan 04 the ten new codes, plan 05 the honest codes on finalize-wizard -- all green at HEAD). Execute **153.1-06** next, then 153.2 -> 153.4 on `feat/v1.17-153-wizform`. ⛔ WIZFORM-05 stays unchecked until 153.4 closes the client leg. ⛔ **WIZFORM-03 stays unchecked until 153.2/153.4** -- the mechanism and the capability record exist and are pinned, but NOT ONE `buildEnvelope` call site passes `venue` or `surface`, so an MT5 user still reads "switch to a different exchange" in production. ⛔ **WIZFORM-02 stays unchecked until 153.1-06** -- plan 05 landed the emitting half (25 sites, 19 distinct codes, roster 21, EMITTED-NOT-IN-ROSTER empty), but nothing ASSERTS that reconciliation yet, so a twelfth arm added without a code would ship silently. ⭐ 153.1-06 must map through `SEAM_CODE_TO_WIZARD_CODE` before comparing against the roster, or it reports `CIRCUIT_OPEN` as an uncovered emitter forever.
 

@@ -457,7 +457,7 @@ milestone or advertise MT5 until 142.3 passes.
   DEFAULT preserves today's behaviour, so every ccxt venue stays byte-identical and MT5 opts out. MT5
   renders an explanatory line (investor passwords are read-only by design), never a failed probe.
 
-- [ ] **MT5-14** *(found by the MT5-05 live run, 2026-08-04)*: An MT5 strategy can declare **MT5** as
+- [x] **MT5-14** *(found by the MT5-05 live run, 2026-08-04)*: An MT5 strategy can declare **MT5** as
   its supported exchange in the wizard metadata step, and the venue is **preselected from the key the
   founder already connected** rather than asked again.
   ⛔ **SEVERITY CORRECTED 2026-08-04 — this was mis-filed as cosmetic and it is a HARD BLOCKER.**
@@ -690,7 +690,7 @@ D-14 valve.
   invisible to Sentry. The derived-sweep MUST cover these rosters too. A 3-member stopgap may land
   earlier via hotfix; the class fix stays here. See ROADMAP Phase 153 SC2. (Diagnosis 2026-08-05: nothing was persisted server-side; the failure is strictly pre-encrypt/pre-RPC.)
 
-- [ ] **WIZFORM-04** *(founder, verbatim: "clicking twice is not acceptable, especially with this
+- [x] **WIZFORM-04** *(founder, verbatim: "clicking twice is not acceptable, especially with this
   mistake message. A user would just not know what to do")*: A **transient infrastructure** failure
   never becomes a user decision. Submit absorbs it — bounded automatic retry with backoff — and only
   surfaces an error once retries are genuinely exhausted, then with copy naming an action the user
