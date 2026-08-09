@@ -592,19 +592,27 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ### Tech-debt / maintainability (opportunistic, don't force)
 
-- **🔁 `gsd-sdk query state.update-progress` REGRESSES `STATE.md:stopped_at`** — observed
-  **THREE times**, independently, by the 153.3-01, 153.3-02 and 153.3-03 executors (2026-08-09).
-  The third occurrence also walked `last_activity` **backwards**. Three-for-three is not a flake;
-  it is the verb's normal behaviour. ⚠️ The `completed_plans` / progress-bar bumps it makes in the
-  same call ARE correct and should be kept — so the fix is a merge, not a revert of the whole verb.
-
-- **`gsd-sdk query state.add-decision` never matches this repo's STATE.md** — returns
-  `"Decisions section not found in STATE.md"` on every call (all three 153.3 executors, 2026-08-09).
-  Cause: the verb looks for a bare `### Decisions` heading; ours reads
-  `### Decisions (requirements-time, …)`. Consequence: **every decision an executor records is
-  silently dropped** — they landed in SUMMARY frontmatter instead, which is recoverable but not
-  where the resume path looks. Fix the matcher to be prefix-tolerant, or rename the heading.
-  ⚠️ Failing loudly here would be better than returning a string nobody checks. The verb bumps
+- **✅ FIXED 2026-08-09 — the STATE.md "SDK bugs" were OUR schema drift, not the SDK.**
+  Founder challenge (*"Probably something we do rather than SDK. Didn't have those problems
+  before"*) was correct. Root cause: two customised headings that sit inside SDK match patterns.
+  | gsd-sdk matches | we had written | consequence |
+  |---|---|---|
+  | `/##\s*Session\s*\n/i` | `## Session Continuity` | section never found |
+  | `/###?\s*(?:Decisions\|…)\s*\n/i` | `### Decisions (requirements-time, …)` | every decision dropped |
+  Both verbs **fail silently** — they return `"No session fields found"` / `"Decisions section not
+  found"` as data, and nothing checks the string. That is why it went unnoticed for months.
+  ⭐ **The `stopped_at` "regression" was a two-sources-of-truth bug.** `stopped_at` lives in YAML
+  frontmatter **and** as `**Stopped At:**` in the body, and the SDK rebuilds frontmatter FROM the
+  body. With the section unmatched the two floated free; we only ever updated frontmatter, so the
+  body copy had been stale since `9e990a90`. Three executors "restoring an accurate value" each
+  reconciled against that stale copy in good faith — one fact, two homes, one unmaintained.
+  **Fix:** headings renamed to `## Session` / `### Decisions` with load-bearing comments naming
+  the exact regex that depends on each. Verified end-to-end: `record-session` → `recorded: true`
+  (was `false`), `add-decision` → `added: true` (was an error string), frontmatter ↔ body in sync.
+  ⚠️ **Lesson worth keeping:** the first fix attempt put the explanatory comment INSIDE the
+  Session block, and because the comment contained the literal `**Last Date:**` markers the SDK's
+  regex matched **the comment instead of the data**. Same class as `EMITTER_RE` matching
+  commented-out code. Keep prose out of a machine-parsed block. The verb bumps
   `completed_plans` but rewrites `stopped_at` to an older/pre-wave value, silently discarding the
   most recent progress note. Both executors caught it in their own diff and restored an accurate
   string rather than committing the regression — but an executor that did *not* diff-check would
