@@ -104,7 +104,24 @@ export function DashboardChrome({
   // narrow at `max-w-7xl`. Mirrors the `isFullBleed` allow-list regex so the
   // widening stays scope-bounded; the `isFullBleed` admin match-detail carve-out
   // below takes a DIFFERENT branch (no centered container) and is unaffected.
-  const isWide = /^\/(allocations|compare|discovery|admin|portfolios)(\/|$)/.test(pathname);
+  //
+  // ⭐ 2026-08-09 founder report — `/strategies` (the My Strategies LIST) is a
+  // dense table and DESIGN.md's measure ladder says "wider content earns a wider
+  // measure": 1100 prose / 1440 document / 1920 dense tables. It was getting
+  // `max-w-7xl` = 1280px, which is not on the ladder at all. The cause is that
+  // the list and the WIZARD share the `/strategies` prefix, and the prefix was
+  // excluded wholesale to keep the wizard form narrow — so the table inherited
+  // the form's measure. Visible symptom: the table renders "Scroll for more
+  // columns →" while dead space sits to its right, and zooming out grows the
+  // dead space instead of revealing columns.
+  //
+  // ⛔ EXACT-MATCH, not a prefix. `/strategies/new/wizard` is a FORM and
+  // `/strategies/[id]` is a single-strategy DOCUMENT (1440px on the ladder) —
+  // neither earns the dense-table measure, and a `(\/|$)` prefix arm like the
+  // others would silently widen both.
+  const isWide =
+    /^\/(allocations|compare|discovery|admin|portfolios)(\/|$)/.test(pathname) ||
+    /^\/strategies\/?$/.test(pathname);
 
   if (isFullBleed) {
     return (

@@ -356,11 +356,42 @@ describe("DashboardChrome — wide fluid-fill variant (Phase 52)", () => {
     expect(container).toHaveClass("max-w-[1920px]");
   });
 
-  it("keeps a still-narrow prose/form route (/strategies) at the default max-w-7xl", () => {
-    // /strategies (incl. the new-strategy wizard) is a form surface — it stays
-    // narrow. This is the not-widened negative case, retargeted off /portfolios
-    // (now widened) onto a route that genuinely stays at max-w-7xl.
+  // ⭐ 2026-08-09 founder report — the My Strategies LIST is a dense table and
+  // was rendering at max-w-7xl (1280px), which is not on DESIGN.md's measure
+  // ladder at all (1100 prose / 1440 document / 1920 dense tables). Symptom:
+  // the table showed "Scroll for more columns →" while dead space sat to its
+  // right, and zooming out grew the dead space instead of revealing columns.
+  //
+  // ⚠️ THIS BLOCK REPLACES A TEST THAT PINNED THE BUG. The previous row
+  // asserted `/strategies` stays narrow, reasoning "/strategies (incl. the
+  // new-strategy wizard) is a form surface" — conflating the LIST with the
+  // WIZARD because they share a prefix. That is the defect itself, written
+  // down as an expectation. The three rows below keep the wizard and the
+  // document negatives (which were the real intent) and correct the list.
+  it("widens the My Strategies LIST (/strategies) to max-w-[1920px] — it is a dense table", () => {
     const container = contentContainerFor("/strategies");
+    expect(container).toHaveClass("max-w-[1920px]");
+    expect(container).not.toHaveClass("max-w-7xl");
+  });
+
+  it("keeps the new-strategy WIZARD (/strategies/new/wizard) narrow — it is a form", () => {
+    // The exact-match arm exists for this row. A `(\/|$)` prefix arm like the
+    // other wide routes use would silently widen the wizard too.
+    const container = contentContainerFor("/strategies/new/wizard");
+    expect(container).toHaveClass("max-w-7xl");
+    expect(container).not.toHaveClass("max-w-[1920px]");
+  });
+
+  it("keeps a single-strategy DOCUMENT (/strategies/abc) off the dense-table measure", () => {
+    // A document earns 1440px on the ladder, not the 1920px dense-table
+    // measure — so it must not pick up the list's widening.
+    const container = contentContainerFor("/strategies/abc");
+    expect(container).not.toHaveClass("max-w-[1920px]");
+  });
+
+  it("does NOT widen a route that merely starts with the prefix string (/strategiesx)", () => {
+    // Regex boundary for the new exact-match arm, mirroring the /discoveryx row.
+    const container = contentContainerFor("/strategiesx");
     expect(container).toHaveClass("max-w-7xl");
     expect(container).not.toHaveClass("max-w-[1920px]");
   });
