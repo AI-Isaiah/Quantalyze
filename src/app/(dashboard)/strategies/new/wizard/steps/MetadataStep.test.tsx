@@ -1857,6 +1857,69 @@ describe("[153.2-05] a server-side refusal, delivered to its field", () => {
     expect(screen.queryByText(/correlation id/i)).not.toBeInTheDocument();
   });
 
+  it("⭐ [WR-01] a refusal naming a field this surface does NOT render cannot block the submit", async () => {
+    // ⭐ THE dead end this row exists for. `capitalOwnership` is an
+    // unconditional member of `MetadataFieldId` / `FIELD_ORDER` / `FIELD_BY_CODE`
+    // but renders ONLY on the contribution surface. Before the fix, a refusal
+    // naming it while it was unrendered was merged into `fieldErrors` anyway, so
+    // `invalidFields` refused every submit FOREVER: `revealAndFocus` returned
+    // silently (no ref to focus), `messageFor` painted nothing (no control
+    // mounted), and `noteFieldEdited` could never fire because its only caller
+    // is that control's own `onChange`. The user read "1 field needs attention.
+    // The first is Whose capital is in this key?" beside a form that showed no
+    // such field, and had no way out.
+    //
+    // ⚠️ NOTE THE PROP: `showCapitalQuestion` is deliberately ABSENT (it
+    // defaults to false). Every other capitalOwnership row in this file passes
+    // `true`, which is exactly why nothing covered this branch.
+    //
+    // The oracle is `onComplete` being CALLED — i.e. the user can still finish —
+    // not merely that some message is absent. Neutering the fix (restoring the
+    // bare `if (!control) return;`) reds this line and nothing else in the file.
+    const onComplete = vi.fn();
+    await mountWithRefusal(
+      {
+        field: "capitalOwnership",
+        code: "METADATA_CAPITAL_OWNERSHIP_INVALID",
+      },
+      { onComplete },
+    );
+
+    // Precondition: the field really is unrendered on this surface, so the
+    // assertion below is measuring the case it claims to.
+    expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /review and submit/i }));
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    // …and the user was never shown a summary naming a field they cannot see.
+    expect(
+      screen.queryByTestId("metadata-submit-summary"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("CONTROL — the SAME refusal on the surface that DOES render the field still blocks", async () => {
+    // The anti-vacuity control for the row above: without it, the fix could
+    // have been "never let capitalOwnership block a submit", which would delete
+    // the refusal on the surface where it is deliverable and meaningful.
+    const onComplete = vi.fn();
+    await mountWithRefusal(
+      {
+        field: "capitalOwnership",
+        code: "METADATA_CAPITAL_OWNERSHIP_INVALID",
+      },
+      { onComplete, showCapitalQuestion: true },
+    );
+
+    expect(screen.getByRole("radiogroup")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /review and submit/i }));
+
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(screen.getByTestId("metadata-submit-summary").textContent).toContain(
+      "Whose capital is in this key?",
+    );
+  });
+
   it("CONTROL — no serverFieldError means nothing is flagged and nothing is focused", async () => {
     // The negative control the rows above need: every assertion here would also
     // pass on a component that flagged a field for no reason at all.

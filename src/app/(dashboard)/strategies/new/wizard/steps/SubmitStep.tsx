@@ -142,8 +142,18 @@ export interface SubmitStepProps {
    * through to today's envelope rather than being swallowed — see the routing
    * branch in `handleSubmit`. Silence is the one outcome that is never
    * acceptable.
+   *
+   * ⛔ RETURNS WHETHER IT ACTUALLY ROUTED (153.2 review WR-01). "I have a
+   * handler" and "the destination surface renders that field" are different
+   * facts, and only the caller knows the second one — the metadata step renders
+   * the capital question on the contribution surface alone. A handler that
+   * navigated to a field which is not on screen produced a form that refused
+   * every submit with no message and no control to clear it on. Answering
+   * `false` puts the refusal back on the SAME fall-through the missing-handler
+   * case already uses, so "never swallowed" holds for both reasons a route can
+   * be impossible.
    */
-  onFieldLevelError?: (field: MetadataFieldId, code: WizardErrorCode) => void;
+  onFieldLevelError?: (field: MetadataFieldId, code: WizardErrorCode) => boolean;
   onSubmitted: (strategyId: string) => void;
   onBack: () => void;
 }
@@ -492,14 +502,23 @@ export function SubmitStep({
         // to a different arm — or a route that starts answering 422 — must not
         // silently revert a field refusal to a full-page dead end.
         //
-        // ⛔ NEVER SWALLOWED. With no `onFieldLevelError` the caller cannot
-        // navigate, so the failure falls through to today's envelope. A refusal
-        // the user never sees is worse than one shown in the wrong place.
+        // ⛔ NEVER SWALLOWED, FOR EITHER REASON A ROUTE CAN BE IMPOSSIBLE. With
+        // no `onFieldLevelError` the caller cannot navigate; with a handler that
+        // answers `false` the destination surface does not render that field
+        // (153.2 review WR-01). Both fall through to today's envelope, because a
+        // refusal the user never sees is worse than one shown in the wrong
+        // place — and worse still is one that silently blocks every future
+        // submit, which is what routing to an unrendered field produced.
+        //
+        // `setSubmitting(false)` stays AHEAD of the handler, exactly where it
+        // was: the handler navigates away and unmounts this step, and the
+        // envelope branch below sets the same flag anyway, so clearing it first
+        // is correct on both sides of the `routed` fork.
         const field = FIELD_BY_CODE.get(surfaced);
         if (field && onFieldLevelError) {
           setSubmitting(false);
-          onFieldLevelError(field, surfaced);
-          return;
+          const routed = onFieldLevelError(field, surfaced);
+          if (routed) return;
         }
         setErrorCode(surfaced);
         // 140.3-15 / TS-20 — read through the leaf, which handles BOTH wire

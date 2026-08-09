@@ -207,6 +207,33 @@ export type MetadataFieldId =
   | "maxCapacity";
 
 /**
+ * 153.2 review WR-01 — DOES THIS SURFACE ACTUALLY RENDER THAT FIELD?
+ *
+ * ⛔ A refusal routed to a field this step does not render is a PERMANENT dead
+ * end, not a mislocated message: the control has no ref, so `revealAndFocus`
+ * has nothing to focus and `messageFor` renders nothing, while the code is
+ * still merged into `fieldErrors` — so `invalidFields` refuses every submit,
+ * forever, with no message and no control to clear it on. `noteFieldEdited`
+ * cannot rescue it either: its only caller is the unmounted control's
+ * `onChange`.
+ *
+ * The routing decision therefore needs this answer BEFORE it navigates, and the
+ * answer belongs here, beside the conditional render it describes, rather than
+ * in the caller — a caller that re-derives it is a caller that can drift.
+ *
+ * `capitalOwnership` is the only conditional member today (it renders on the
+ * contribution surface alone). A second conditional field is one arm here, and
+ * `SubmitStep`'s fall-through to the terminal envelope covers it automatically.
+ */
+export function metadataFieldIsRendered(
+  id: MetadataFieldId,
+  opts: { showCapitalQuestion: boolean },
+): boolean {
+  if (id === "capitalOwnership") return opts.showCapitalQuestion;
+  return true;
+}
+
+/**
  * The order the four fields RENDER in, declared explicitly.
  *
  * ⛔ Not `Object.keys(fieldErrors)`. "First invalid control in DOM order" is the
@@ -532,10 +559,24 @@ export function MetadataStep({
    * The element is driven imperatively because this stays a BARE native
    * `<details>` (see the comment on it below) with no `open` prop for React to
    * own — nothing will re-close it behind us.
+   *
+   * ⛔ NO CONTROL TO LAND ON IS A LOUD STATE, NOT A SILENT RETURN (153.2 review
+   * WR-01). Returning quietly left the refusal in `fieldErrors`, which meant
+   * `invalidFields` refused every subsequent submit with no message rendered
+   * (the control is not mounted, so `messageFor` paints nothing) and no way to
+   * clear it (`noteFieldEdited` fires only from that control's `onChange`). The
+   * summary line then named a field the user could not see. The primary closure
+   * is upstream — `metadataFieldIsRendered` makes `WizardClient` decline the
+   * route so the refusal reaches the terminal envelope instead — and this arm is
+   * the belt to that braces: whatever the reason a control is missing, drop the
+   * server's refusal rather than block the user behind an invisible one.
    */
   function revealAndFocus(id: MetadataFieldId) {
     const control = focusTargetFor(id);
-    if (!control) return;
+    if (!control) {
+      setServerRefusal((prev) => (prev?.field === id ? null : prev));
+      return;
+    }
     if (detailsRef.current?.contains(control)) {
       detailsRef.current.open = true;
     }

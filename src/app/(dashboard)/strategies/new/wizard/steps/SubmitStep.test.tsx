@@ -1277,7 +1277,14 @@ describe("[153.2-05] the routing behaviour", () => {
     vi.restoreAllMocks();
   });
 
-  function renderWithFieldHandler(onFieldLevelError = vi.fn()) {
+  // ⚠️ THE DEFAULT MOCK RETURNS `true`, and that is not decoration (153.2 review
+  // WR-01). The real handler (`WizardClient.handleMetadataFieldError`) answers
+  // whether it ACTUALLY routed — it declines for a field the destination surface
+  // does not render — and a bare `vi.fn()` returning `undefined` would model a
+  // handler that always declines, quietly turning every row below into an
+  // envelope assertion. A double must be able to be wrong in the same ways the
+  // original can, and in none of the ways it cannot.
+  function renderWithFieldHandler(onFieldLevelError = vi.fn(() => true)) {
     render(
       <SubmitStep
         strategyId="strat-1"
@@ -1379,6 +1386,45 @@ describe("[153.2-05] the routing behaviour", () => {
     ).toBeInTheDocument();
     const payload = findWizardError();
     expect(payload!.code).toBe("METADATA_DESCRIPTION_TOO_SHORT");
+  });
+
+  it("⭐ [WR-01] a handler that DECLINES the route falls back to the envelope, never to silence", async () => {
+    // The second reason a route can be impossible, and the one that used to be
+    // unhandled: the handler exists and navigates, but the destination surface
+    // does not render that field. `capitalOwnership` renders on the contribution
+    // surface only, so on the manager surface the old code sent the user to a
+    // metadata step that showed no such control, refused every subsequent submit
+    // through `invalidFields`, and rendered no message anywhere — a permanent,
+    // silent dead end reachable with no server change at all.
+    //
+    // The contract is now the SAME fall-through the missing-handler row above
+    // proves: declining hands the refusal back and the terminal envelope
+    // renders. Neutering the fix (ignoring the return value) reds this row.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          code: "METADATA_CAPITAL_OWNERSHIP_INVALID",
+          error: "capital_ownership invalid",
+        },
+        400,
+      ),
+    );
+    const onFieldLevelError = renderWithFieldHandler(vi.fn(() => false));
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    // The copy-table title for this code, typed as a LITERAL so a reword cannot
+    // make the assertion agree with itself.
+    expect(
+      await screen.findByText("Answer whose capital is in this key."),
+    ).toBeInTheDocument();
+    // The handler WAS consulted — this is a declined route, not an unmapped
+    // code taking the ordinary envelope path.
+    expect(onFieldLevelError).toHaveBeenCalledWith(
+      "capitalOwnership",
+      "METADATA_CAPITAL_OWNERSHIP_INVALID",
+    );
+    const payload = findWizardError();
+    expect(payload!.code).toBe("METADATA_CAPITAL_OWNERSHIP_INVALID");
   });
 });
 
