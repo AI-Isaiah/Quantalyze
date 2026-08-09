@@ -142,7 +142,24 @@ _T = TypeVar("_T")
 # disclosure surface (T-134-01 / T-153.3-23). Only the exception CLASS is safe.
 # --------------------------------------------------------------------------- #
 MT5_STAGE_EVENT = "mt5.stage"
-_stage_log = structlog.get_logger("quantalyze.mt5")
+_STAGE_LOGGER_NAME = "quantalyze.mt5"
+
+
+def _stage_logger() -> Any:
+    """Bind the stage logger PER CALL rather than once at import.
+
+    ⚠️ Not a style choice. `services/logging_config.py` configures structlog with
+    ``cache_logger_on_first_use=True``, so a module-level
+    ``structlog.get_logger(...)`` proxy freezes the processor chain that happened
+    to be installed at its FIRST use and ignores every later
+    ``structlog.configure``. A module imported before the process configures its
+    logging — which is this one: `main.py` configures inside the lifespan, long
+    after import — would then emit through a stale chain, i.e. WITHOUT the
+    `_redact_processor` PII scrub the configured pipeline installs. Binding here
+    costs a proxy allocation next to a network round-trip and cannot go stale.
+    (It is also what makes the events observable to `structlog.testing`.)
+    """
+    return structlog.get_logger(_STAGE_LOGGER_NAME)
 
 
 def emit_mt5_stage_event(
@@ -183,7 +200,7 @@ def emit_mt5_stage_event(
     if outcome is not None:
         fields["outcome"] = outcome
     try:
-        _stage_log.info(MT5_STAGE_EVENT, **fields)
+        _stage_logger().info(MT5_STAGE_EVENT, **fields)
     except Exception:  # noqa: BLE001 — telemetry must never break the path it measures
         logger.warning("emit_mt5_stage_event: stage telemetry failed to emit.")
 

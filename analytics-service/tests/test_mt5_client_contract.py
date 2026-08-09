@@ -1494,7 +1494,7 @@ def test_stage_telemetry_failure_never_changes_what_the_caller_observes(
         def info(self, *_a, **_k):
             raise RuntimeError("log pipeline down")
 
-    monkeypatch.setattr(mt5_client_mod, "_stage_log", _BrokenLog())
+    monkeypatch.setattr(mt5_client_mod, "_stage_logger", lambda: _BrokenLog())
     connect, _fake, _rec = _make({"account": _FakeNamedTuple(equity=1000.0)})
     client = Mt5Client("mt5-gw.internal", 18812, _connect=connect)
 
