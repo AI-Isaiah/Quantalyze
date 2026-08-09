@@ -472,9 +472,16 @@ const SIZE_MB_PLACEHOLDER = "{sizeMb}";
  */
 const DESCRIPTION_BOUND_TITLE = {
   METADATA_DESCRIPTION_TOO_SHORT: `Add at least ${MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS} characters`,
-  METADATA_DESCRIPTION_TOO_LONG: `Keep this under ${MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS.toLocaleString(
+  // 153.1 review WR-02 — "under N" asserts a ceiling of N-1, and the server
+  // does not enforce that: `finalize-wizard` rejects on
+  // `description.length > MAX_DESCRIPTION_CHARS` (route.ts), so a description
+  // of exactly 5,000 characters is ACCEPTED. The inclusive form is the true
+  // one, and it is what the `cause` one field down already says ("longer than
+  // the 5,000 characters we store"). The TOO_SHORT sibling needs no such
+  // change: `< MIN` rejects, so "at least 10" is exact.
+  METADATA_DESCRIPTION_TOO_LONG: `Keep this to ${MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS.toLocaleString(
     "en-US",
-  )} characters`,
+  )} characters or fewer`,
 } as const;
 
 /**
@@ -2388,7 +2395,14 @@ export function formatKeyError(
   ) {
     return {
       ...base,
-      cause: `We gave your broker ${context.budgetSeconds} seconds to answer and it did not.${DEADLINE_CAUSE_TAIL}`,
+      // 153.1 review WR-04 — pluralised. A one-second budget rendered "1
+      // seconds". 153.4 is the emitter and passes a real budget; sub-second
+      // and one-second budgets are plausible during a retune. The
+      // MULTI_KEY_WINDOWS_INVALID arm below already pluralises, so the bare
+      // form broke this file's own convention.
+      cause: `We gave your broker ${context.budgetSeconds} second${
+        context.budgetSeconds === 1 ? "" : "s"
+      } to answer and it did not.${DEADLINE_CAUSE_TAIL}`,
     };
   }
 

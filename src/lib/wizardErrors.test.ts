@@ -3195,7 +3195,10 @@ describe("[153.1-04 / WIZFORM-02] the ten new members offer no false affordance"
     ).toBe("Add at least 10 characters — you have 2.");
     expect(
       formatKeyError("METADATA_DESCRIPTION_TOO_LONG", { charCount: 5231 }).title,
-    ).toBe("Keep this under 5,000 characters — you have 5,231.");
+    // 153.1 review WR-02 — "to N or fewer", not "under N". The server rejects
+    // on `length > MAX_DESCRIPTION_CHARS`, so exactly 5,000 is ACCEPTED and
+    // "under 5,000" would name a ceiling of 4,999 that nothing enforces.
+    ).toBe("Keep this to 5,000 characters or fewer — you have 5,231.");
   });
 
   it("SEAM_DEADLINE_EXCEEDED names NO budget when it was not given one (TRAP-3)", () => {
@@ -3214,5 +3217,24 @@ describe("[153.1-04 / WIZFORM-02] the ten new members offer no false affordance"
     expect(
       formatKeyError("SEAM_DEADLINE_EXCEEDED", { budgetSeconds: 120 }).cause,
     ).toContain("your key was not stored");
+  });
+
+  it("SEAM_DEADLINE_EXCEEDED pluralises its budget (153.1 review WR-04)", () => {
+    // A one-second budget rendered "We gave your broker 1 seconds to answer".
+    // 153.4 is the emitter and passes a real budget; a sub-second or
+    // one-second budget is plausible during a retune, and the
+    // MULTI_KEY_WINDOWS_INVALID arm in the same function already pluralises,
+    // so the bare form broke this file's own convention.
+    expect(
+      formatKeyError("SEAM_DEADLINE_EXCEEDED", { budgetSeconds: 1 }).cause,
+      "the singular budget rendered with a plural noun.",
+    ).toContain("1 second to answer");
+    // ...and the plural is not collateral damage: only n === 1 loses the "s".
+    for (const n of [0, 2, 120]) {
+      expect(
+        formatKeyError("SEAM_DEADLINE_EXCEEDED", { budgetSeconds: n }).cause,
+        `${n} seconds lost its plural — the ternary is inverted or too wide.`,
+      ).toContain(`${n} seconds to answer`);
+    }
   });
 });
