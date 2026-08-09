@@ -405,16 +405,62 @@ const SPLIT_ROUTE_LABELS: readonly string[] = [
 const EXPECTED_FORMAT_EMITTERS_PER_ROUTE = 1;
 
 /**
- * HAND-TYPED VACUITY FLOOR on the combined derivation (24 sites measured),
- * with the reason.
+ * HAND-TYPED VACUITY FLOOR on the COMBINED derivation, with the reason.
  *
  * `source-scan.ts`'s own docblock places this obligation on every caller: it
  * BLANKS trailing comments rather than leaving them in, so a tokenizer bug now
  * fails SILENT rather than loud. An "every emitted code is in its registry"
  * assertion over an EMPTY derivation is green forever while measuring nothing,
- * and `it.each([])` is zero cases, which is a passing suite. ~60% of 24.
+ * and `it.each([])` is zero cases, which is a passing suite.
+ *
+ * ⚠️ 153.1-06 — RESIZED, AND LEAVING IT AT 14 WAS THE TRAP. The measured total
+ * is now **49** sites (12 create-with-key + 12 composite/add-key + 25
+ * finalize-wizard, up from the 24 this floor was written against). With 49
+ * available, a floor of 14 is satisfied even if the ENTIRE finalize-wizard
+ * derivation collapses to zero — the floor would have been carried by the two
+ * incumbents alone and could not have failed for the route it was raised to
+ * cover. ~60% of 49 is 29.4, so the floor is **29**.
+ *
+ * ⛔ SIZED AGAINST 49, NOT AGAINST THE NINE NEW ARMS AND NOT AGAINST THE
+ * FOURTEEN REORDERED SITES. Either of those smaller anchors produces a floor
+ * that is already cleared by work that predates this sub-phase.
+ *
+ * ── THE DIVISION OF LABOUR, so nobody "simplifies" one into the other ───────
+ *
+ * This floor and `RouteUnderTest.expectedSites` catch DIFFERENT failures and
+ * neither subsumes the other:
+ *
+ *   · THE FLOOR catches a TOTAL scanner break — the regex stops matching, the
+ *     comment-stripper starts blanking real code, a path goes wrong. It is a
+ *     `>=` on purpose: it must not need editing when a route legitimately
+ *     grows a guard, or it becomes a chore that gets bumped without thought.
+ *   · THE PER-ROUTE LITERALS catch a SINGLE SITE or a SINGLE ROUTE going blind
+ *     — one arm reordered back to `{ error, code }`, one body pushed past
+ *     `EMITTER_BODY_MAX_CHARS`, one route's file renamed. Those are exact `toBe`
+ *     equalities, so they red in BOTH directions.
+ *
+ * ⚠️ THE ARITHMETIC, WORKED RATHER THAN ASSERTED, because a floor is exactly
+ * the kind of guard whose prose drifts from what it can actually catch:
+ *
+ *   · ONE SITE goes blind → 48, which clears 29. The floor is SILENT; only
+ *     that route's literal reds. MEASURED at 153.1-06 by reordering one
+ *     `COMPOSITE_MEMBERSHIP_UNKNOWN` arm back to `{ error, code }` — exactly
+ *     one assertion red, the per-route count, at 24-vs-25.
+ *   · AN INCUMBENT ROUTE collapses entirely (12 → 0) → 37, which clears 29.
+ *     The floor is SILENT; only that route's literal reds.
+ *   · finalize-wizard collapses entirely (25 → 0) → 24, which does NOT clear
+ *     29. Both red. (This is the case the old floor of 14 could not see, and
+ *     the reason for the resize.)
+ *   · THE SCANNER breaks outright → 0. The floor reds, and so does everything
+ *     else. MEASURED at 153.1-06 by breaking the emitter regex: 13 assertions
+ *     red, the floor's message reading "expected 0 to be greater than or equal
+ *     to 29".
+ *
+ * Two of those four cases are caught ONLY by the per-route literals, which is
+ * why deleting them in favour of "the floor already covers it" would re-open
+ * the blindness this sub-phase spent five waves closing.
  */
-const DERIVED_FLOOR = 14;
+const DERIVED_FLOOR = 29;
 
 /**
  * HAND-TYPED. The four codes 142.2-07 minted, and the one it left in place.
@@ -457,22 +503,39 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
     const total = derived.reduce((n, d) => n + d.codes.length, 0);
     expect(
       total,
-      `Derived only ${total} rejection-emitting sites across the two wizard ` +
-        `routes (floor ${DERIVED_FLOOR}). PREDICATE: comment-stripped via ` +
-        `stripCommentsPreserveLines(src,"ts"), then every NextResponse.json( ` +
-        `call whose first argument is { code: "<LITERAL>", error: … } and ` +
-        `whose second carries status: 400. A number this low means the SCANNER ` +
-        `broke, not that the routes stopped validating input — and a broken ` +
-        `scanner makes every assertion below pass vacuously.`,
+      `Derived only ${total} rejection-emitting sites across the THREE wizard ` +
+        `routes (floor ${DERIVED_FLOOR}, measured total 49). PREDICATE: ` +
+        `comment-stripped via stripCommentsPreserveLines(src,"ts"), then every ` +
+        `NextResponse.json( call whose first argument is ` +
+        `{ code: "<LITERAL>", error: … } and whose second carries a status ` +
+        `matching THAT ROUTE'S OWN fragment — status 400 for the two ` +
+        `key-validation routes, any 4xx/5xx for finalize-wizard, which answers ` +
+        `its coded arms at 400/403/404/409/502/503. A number this low means ` +
+        `the SCANNER broke, not that the routes stopped validating input — and ` +
+        `a broken scanner makes every assertion below pass vacuously.`,
     ).toBeGreaterThanOrEqual(DERIVED_FLOOR);
 
     // Both sides of every comparison must have parsed, not just the emitters.
     expect(union.size, "the WizardErrorCode union parsed as empty").toBeGreaterThan(
       30,
     );
+    // ⚠️ THE BOUND IS 10 AND finalize-wizard IS THE ROUTE THAT MADE IT TIGHT.
+    // It was written for the two 24-member key rosters; KNOWN_FINALIZE_CODES
+    // has 21 (measured 153.1-06), so it clears with room but by less than half
+    // the margin the incumbents have. Left at 10 deliberately — this guard's
+    // job is to catch a roster that parsed as [] or nearly so (the real
+    // 153.1-01 defect), not to re-pin each roster's size, which is a fact about
+    // the roster rather than about the scanner.
     for (const d of derived) {
       expect(d.roster.size, `${d.rosterName} parsed as empty`).toBeGreaterThan(10);
     }
+    // The alias table is the THIRD vocabulary a comparison above depends on,
+    // and an empty one makes the widened admission a silent no-op. Its own
+    // SELF-TEST below asserts the CIRCUIT_OPEN row; this is the vacuity half,
+    // stated here beside the other two so all three are visible in one place.
+    expect(alias.size, "SEAM_CODE_TO_WIZARD_CODE parsed as empty").toBeGreaterThan(
+      3,
+    );
   });
 
   it.each(ROUTES.map((r) => r.label))(
