@@ -601,6 +601,16 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "Try again in a moment.",
       "If it keeps failing, switch to a different exchange or contact support.",
+      // D-17 / Gate C — the truthful replacement for a venue that IS the
+      // account. States the truth and invents no remedy.
+      "This is your broker account, so there is no other venue to try. If it keeps failing, email security@quantalyze.com with the correlation id below.",
+    ],
+    // D-17 — bullet 1 presupposes another venue exists; bullet 2 presupposes
+    // it does not. ONE filter picks; no code branch names mt5.
+    fixRequires: [
+      null,
+      REQUIRES_SUBSTITUTABLE_VENUE,
+      REQUIRES_NON_SUBSTITUTABLE_VENUE,
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
@@ -818,6 +828,16 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "Wait 60 seconds and try again.",
       "If it persists, try a different exchange account or contact support.",
+      // D-17 / Gate C — verbatim from the UI-SPEC, identical across all three
+      // venue-conditional entries.
+      "This is your broker account, so there is no other venue to try. If it keeps failing, email security@quantalyze.com with the correlation id below.",
+    ],
+    // D-17 — "a different exchange ACCOUNT" is the same unwinnable remedy for a
+    // venue that is the account.
+    fixRequires: [
+      null,
+      REQUIRES_SUBSTITUTABLE_VENUE,
+      REQUIRES_NON_SUBSTITUTABLE_VENUE,
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
@@ -830,6 +850,15 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "Try again in a moment.",
       "If it keeps failing, switch to a different exchange or contact support.",
+      // D-17 / Gate C — an MT5 user reads a truthful replacement, not a
+      // shorter list. That is why the requirement carries a boolean.
+      "This is your broker account, so there is no other venue to try. If it keeps failing, email security@quantalyze.com with the correlation id below.",
+    ],
+    // D-17 — the third instance of the one class; no third code branch.
+    fixRequires: [
+      null,
+      REQUIRES_SUBSTITUTABLE_VENUE,
+      REQUIRES_NON_SUBSTITUTABLE_VENUE,
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
@@ -1568,6 +1597,23 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "Otherwise, try the same action again.",
       "If it is still failing after a few minutes, contact security@quantalyze.com with your draft ID.",
     ],
+    // Gate B / 153.1-03 — the live defect: this first bullet rendered on the
+    // CONNECT step, where nothing was being submitted, and sent the user on a
+    // pointless detour. It now renders ONLY when the context names the submit
+    // surface.
+    //
+    // ⚠️ TRADE-OFF, stated so this reads as a decision and not a deletion:
+    // until the `buildEnvelope` call sites pass `surface` — `SubmitStep.tsx`
+    // (153.2 / D-06) and `ConnectKeyStep.tsx` + `MultiKeyConnectStep.tsx`
+    // (153.4's long-wait paths) — this bullet renders NOWHERE. That is the
+    // UI-SPEC's explicit direction: fail toward saying less, never toward
+    // advising a detour that may be pointless. The one surface where the
+    // detour IS true gets it back the moment its call site names itself.
+    //
+    // The table-reading assertion at `wizardErrors.test.ts` ("SERVICE_UNREACHABLE
+    // states the uncertainty…") reads WIZARD_ERROR_COPY directly and so is
+    // unaffected — the filter never mutates the table.
+    fixRequires: [REQUIRES_SUBMIT_SURFACE, null, null],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
   },
