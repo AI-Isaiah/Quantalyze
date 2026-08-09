@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
-stopped_at: "Phase 153.1 plan 04 COMPLETE (vocabulary only — 8 of the 10 have no emitter yet): TEN new WizardErrorCode members with copy. Seven field-level metadata refusals (METADATA_NAME_INVALID, _DESCRIPTION_TOO_SHORT, _DESCRIPTION_TOO_LONG, _CATEGORY_REQUIRED, _AUM_INVALID, _CAPACITY_INVALID, _CAPITAL_OWNERSHIP_INVALID) plus SEAM_DEADLINE_EXCEEDED, COMPOSITE_UNSUPPORTED_UNIFIED and DRAFT_STATE_INVALID. ALL TEN derive recoverable:false by absence of a RECOVERABLE_ACTIONS member. EXPECTED_TABLE_SIZE 64 -> 74 at BOTH sites (wizardErrors.test.ts :1486 and :1750) with each docblock's reasoning re-run over the ten; new divergence guard + a 4-it class sweep; SEVEN mutations watched red. New context fields charCount and budgetSeconds, both absent-means-not-told (TRAP-3). SEAM_DEADLINE_EXCEEDED.fix[0] declares REQUIRES_CONNECT_SURFACE so 153.4 MUST pass surface:connect. WIZFORM-02 and WIZFORM-03 NOT marked complete: route.ts:383/396/405/428/439/503 are still code-less and :1319 still lowercase (153.1-05 owns both), and no buildEnvelope call site passes venue/surface yet. Next: 153.1-05."
-last_updated: "2026-08-09T05:25:42.359Z"
+stopped_at: "Phase 153.1 plan 05 COMPLETE (WIZFORM-02's EMITTING half; the LAW is 153.1-06's): finalize-wizard/route.ts now derives 25 emitting sites under the widened predicate, measured 0 at base. All FOURTEEN pre-existing coded emitters reordered to code-first (six single-line, EIGHT multi-line -- the CONTEXT/ROADMAP 'six' counted only what a single-line grep can see). All ELEVEN validatePayload arms now carry a code, arm 4 split three ways so the description error names WHICH bound broke; the bare 10 is gone (D-23, reads MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS). draft_state_invalid -> DRAFT_STATE_INVALID (the one wire change; whole-repo grep run first, e2e CLEAR). KNOWN_FINALIZE_CODES 10 -> 21, admitted in the same commit. 3 deviations: (1) the reorder ALONE leaves COMPOSITE_TOO_MANY_MEMBERS blind at 13/14 because its interpolated body runs ~256 chars over the 160-char cap -- body hoisted into a const, cap NOT relaxed; (2) route.test.ts:3112 had PINNED the code-less defect as a contract (expect(body.code).toBeUndefined()) and was inverted, not deleted; (3) SubmitStep.test.tsx modified though not in files_modified -- its two RECORDED residuals reddened unprompted and its own failure message instructed the update; TRAP-4 was checked and does NOT bind (no admitted code carries try_another_key; DESTRUCTIVE_CONTROL_IS_WRONG_FOR no longer exists in src/). WIZFORM-02 NOT marked complete -- the reconciliation is a scratch script, not an assertion, until 153.1-06 wires the third ROUTES entry. Next: 153.1-06."
+last_updated: "2026-08-09T05:49:46.627Z"
 last_activity: 2026-08-09
 progress:
   total_phases: 13
   completed_phases: 7
   total_plans: 59
-  completed_plans: 47
+  completed_plans: 48
   percent: 54
 ---
 
@@ -56,7 +56,7 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 ## Current Position
 
 Phase: 153.1 (WIZFORM-CODES) -- 153.3 already COMPLETE on the same branch
-Plan: 4 of 06 complete
+Plan: 5 of 06 complete
 Status: Ready to execute
 Last activity: 2026-08-09
 
@@ -381,7 +381,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [████████░░] 80%
+Progress: [████████░░] 81%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -483,6 +483,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 153.1 P02 | 25m | 3 tasks | 3 files |
 | Phase 153.1 P03 | ~55m | 3 tasks | 2 files |
 | Phase 153.1 P04 | 80m | 3 tasks | 2 files |
+| Phase 153.1 P05 | 55m | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -532,6 +533,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 153.1]: 153.1-04: all ten new wizard codes are non-recoverable BY ABSENCE of a RECOVERABLE_ACTIONS member, decided once for the class — and DRAFT_STATE_INVALID's arrival REMOVES a live false Retry that ships today, because UNKNOWN's fallback IS recoverable and its Retry re-POSTed an identical finalize against a draft the DB had already moved past
 - [Phase 153.1]: 153.1-04: EXPECTED_TABLE_SIZE = 74 at BOTH wizardErrors.test.ts sites (:1486, :1750), the number READ OUT OF the guard's own failure rather than copied from the plan — and a third guard now reads the test file's own source (the only vantage point that sees both declarations) so the two pins cannot diverge again; its declaration count is pinned to a hand-typed 2 as the positive control
 - [Phase 153.1]: 153.1-04: SEAM_DEADLINE_EXCEEDED's 'Your key details are still on this page' bullet declares REQUIRES_CONNECT_SURFACE — Phase 153.4 MUST pass surface: 'connect' (and budgetSeconds) in the same commit it starts emitting the code, or Gate B's absence-suppresses rule silently withholds the reassurance
+- [Phase 153.1]: 153.1-05: COMPOSITE_TOO_MANY_MEMBERS' error body hoisted into a const — inline it runs ~256 chars over EMITTER_BODY_MAX_CHARS=160, so the D-34 reorder ALONE left that site blind (measured 13 vs 14). The scanner cap was NOT relaxed.
+- [Phase 153.1]: 153.1-05: finalize-wizard now derives 25 emitting sites (was 0), 19 distinct codes, KNOWN_FINALIZE_CODES 10 -> 21. CIRCUIT_OPEN is emitted and correctly NOT in the roster — 153.1-06's coverage assertion MUST map through SEAM_CODE_TO_WIZARD_CODE or it reports a false miss forever.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1234,10 +1237,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-09T05:25:42.348Z
-**Stopped At:** Phase 153.1 plan 04 COMPLETE (vocabulary only — 8 of the 10 have no emitter yet): TEN new WizardErrorCode members with copy. Seven field-level metadata refusals (METADATA_NAME_INVALID, _DESCRIPTION_TOO_SHORT, _DESCRIPTION_TOO_LONG, _CATEGORY_REQUIRED, _AUM_INVALID, _CAPACITY_INVALID, _CAPITAL_OWNERSHIP_INVALID) plus SEAM_DEADLINE_EXCEEDED, COMPOSITE_UNSUPPORTED_UNIFIED and DRAFT_STATE_INVALID. ALL TEN derive recoverable:false by absence of a RECOVERABLE_ACTIONS member. EXPECTED_TABLE_SIZE 64 -> 74 at BOTH sites (wizardErrors.test.ts :1486 and :1750) with each docblock's reasoning re-run over the ten; new divergence guard + a 4-it class sweep; SEVEN mutations watched red. New context fields charCount and budgetSeconds, both absent-means-not-told (TRAP-3). SEAM_DEADLINE_EXCEEDED.fix[0] declares REQUIRES_CONNECT_SURFACE so 153.4 MUST pass surface:connect. WIZFORM-02 and WIZFORM-03 NOT marked complete: route.ts:383/396/405/428/439/503 are still code-less and :1319 still lowercase (153.1-05 owns both), and no buildEnvelope call site passes venue/surface yet. Next: 153.1-05.
+**Last Date:** 2026-08-09T05:49:46.617Z
+**Stopped At:** Phase 153.1 plan 05 COMPLETE (WIZFORM-02's EMITTING half; the LAW is 153.1-06's): finalize-wizard/route.ts now derives 25 emitting sites under the widened predicate, measured 0 at base. All FOURTEEN pre-existing coded emitters reordered to code-first (six single-line, EIGHT multi-line -- the CONTEXT/ROADMAP 'six' counted only what a single-line grep can see). All ELEVEN validatePayload arms now carry a code, arm 4 split three ways so the description error names WHICH bound broke; the bare 10 is gone (D-23, reads MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS). draft_state_invalid -> DRAFT_STATE_INVALID (the one wire change; whole-repo grep run first, e2e CLEAR). KNOWN_FINALIZE_CODES 10 -> 21, admitted in the same commit. 3 deviations: (1) the reorder ALONE leaves COMPOSITE_TOO_MANY_MEMBERS blind at 13/14 because its interpolated body runs ~256 chars over the 160-char cap -- body hoisted into a const, cap NOT relaxed; (2) route.test.ts:3112 had PINNED the code-less defect as a contract (expect(body.code).toBeUndefined()) and was inverted, not deleted; (3) SubmitStep.test.tsx modified though not in files_modified -- its two RECORDED residuals reddened unprompted and its own failure message instructed the update; TRAP-4 was checked and does NOT bind (no admitted code carries try_another_key; DESTRUCTIVE_CONTROL_IS_WRONG_FOR no longer exists in src/). WIZFORM-02 NOT marked complete -- the reconciliation is a scratch script, not an assertion, until 153.1-06 wires the third ROUTES entry. Next: 153.1-06.
 **Resume File:** None
-**Next step:** 153.3 is COMPLETE (6/6); 153.1 is 4/6 (plan 01 Wave-0 gates, plan 02 the capability foundation, plan 03 the WIZFORM-03 class filter, plan 04 the ten new codes — all green at HEAD). Execute **153.1-05** next, then 153.1-06 → 153.2 → 153.4 on `feat/v1.17-153-wizform`. ⛔ WIZFORM-05 stays unchecked until 153.4 closes the client leg. ⛔ **WIZFORM-03 stays unchecked until 153.2/153.4** — the mechanism and the capability record exist and are pinned, but NOT ONE `buildEnvelope` call site passes `venue` or `surface`, so an MT5 user still reads "switch to a different exchange" in production. ⛔ **WIZFORM-02 stays unchecked until 153.1-05/06** — plan 04 minted the vocabulary, but `finalize-wizard/route.ts` `:383 :396 :405 :428 :439 :503` are still code-less and `:1319` is still lowercase `draft_state_invalid`.
+**Next step:** 153.3 is COMPLETE (6/6); 153.1 is 5/6 (plan 01 Wave-0 gates, plan 02 the capability foundation, plan 03 the WIZFORM-03 class filter, plan 04 the ten new codes, plan 05 the honest codes on finalize-wizard -- all green at HEAD). Execute **153.1-06** next, then 153.2 -> 153.4 on `feat/v1.17-153-wizform`. ⛔ WIZFORM-05 stays unchecked until 153.4 closes the client leg. ⛔ **WIZFORM-03 stays unchecked until 153.2/153.4** -- the mechanism and the capability record exist and are pinned, but NOT ONE `buildEnvelope` call site passes `venue` or `surface`, so an MT5 user still reads "switch to a different exchange" in production. ⛔ **WIZFORM-02 stays unchecked until 153.1-06** -- plan 05 landed the emitting half (25 sites, 19 distinct codes, roster 21, EMITTED-NOT-IN-ROSTER empty), but nothing ASSERTS that reconciliation yet, so a twelfth arm added without a code would ship silently. ⭐ 153.1-06 must map through `SEAM_CODE_TO_WIZARD_CODE` before comparing against the roster, or it reports `CIRCUIT_OPEN` as an uncovered emitter forever.
 
 ⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in
 `src/lib/closed-sets.ts`): `VenueCapabilities` (`:77`), `VENUE_CAPABILITIES` (`:133`),
