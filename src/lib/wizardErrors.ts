@@ -1172,7 +1172,19 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "Write one paragraph describing the strategy, its edge, and how you frame risk.",
     ],
     docsHref: "/security",
-    actions: ["clear_and_retry"],
+    // 153.1 review CR-01 — this Phase-53 entry became the copy for a
+    // FIELD-LEVEL refusal when 153.1-05 pointed `finalize-wizard`'s
+    // `typeof description !== "string"` arm at it (route.ts:448) and 153.1-06
+    // admitted it to `KNOWN_FINALIZE_CODES` (SubmitStep.tsx). It therefore
+    // joins the class documented in the block below and carries no member of
+    // `RECOVERABLE_ACTIONS`, so `buildEnvelope` derives `recoverable: false`
+    // and NO Retry control renders. It previously carried `clear_and_retry`,
+    // which the class docblock forbids BY NAME: the server compared a value
+    // against a fixed rule, so an identical resubmit is refused identically,
+    // and wiping the description the user typed is the worst possible answer.
+    // The remedy is on the FORM. `MetadataStep.tsx:215` reads only `.cause`
+    // from this entry, so the inline field guard is unaffected.
+    actions: ["expand_log"],
   },
 
   // ────────────────────────────────────────────────────────────────────────

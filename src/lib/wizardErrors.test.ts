@@ -3070,6 +3070,62 @@ describe("[153.1-04 / WIZFORM-02] the two EXPECTED_TABLE_SIZE pins cannot silent
  * happens to contain, and a member accidentally dropped from the union would
  * take its own assertion out with it. Ten names, typed out, is the oracle.
  */
+describe("[153.1 review CR-01 / WR-03] every FIELD-LEVEL refusal is NON-recoverable", () => {
+  // The sweep above is keyed on "the ten members 153.1-04 MINTED", which is a
+  // provenance, not a class. `METADATA_DESCRIPTION_REQUIRED` is answered by the
+  // same `validatePayload` block against the same kind of rule, but it is a
+  // Phase-53 entry that 153.1-05 merely POINTED the route at — so it fell
+  // outside that roster and kept a `clear_and_retry` for the whole phase while
+  // three artefacts asserted the class held. That is the instance-not-class
+  // shape this phase exists to delete, so the class is asserted here on what
+  // the codes ARE rather than on when they were written.
+  //
+  // HAND-TYPED, and deliberately NOT derived from `KNOWN_FINALIZE_CODES` or
+  // from a `startsWith("METADATA_")` filter: an oracle read off the same
+  // structure under test moves with it. This is the roster of codes
+  // `finalize-wizard` answers a FORM FIELD with (route.ts `validatePayload`).
+  const FIELD_LEVEL: readonly WizardErrorCode[] = [
+    "METADATA_NAME_INVALID",
+    "METADATA_DESCRIPTION_REQUIRED",
+    "METADATA_DESCRIPTION_TOO_SHORT",
+    "METADATA_DESCRIPTION_TOO_LONG",
+    "METADATA_CATEGORY_REQUIRED",
+    "METADATA_AUM_INVALID",
+    "METADATA_CAPACITY_INVALID",
+    "METADATA_CAPITAL_OWNERSHIP_INVALID",
+  ];
+
+  it("all eight exist in the table, and there are eight of them", () => {
+    // Non-vacuity for the sweep below, and the rename detector.
+    expect(FIELD_LEVEL.length).toBe(8);
+    for (const code of FIELD_LEVEL) {
+      expect(
+        Object.keys(WIZARD_ERROR_COPY),
+        `${code} is named as a field-level refusal but has no copy entry.`,
+      ).toContain(code);
+    }
+  });
+
+  it("NOT ONE of the eight derives recoverable — no Retry control renders", () => {
+    // Reported as a POPULATION, not code-by-code: a per-code assertion stops at
+    // the first offender and hides the rest of the class.
+    const offenders = FIELD_LEVEL.filter(
+      (code) => buildEnvelope(code, "corr-cr01").recoverable,
+    );
+    expect(
+      offenders,
+      "A field-level refusal derived `recoverable: true`, so SubmitStep " +
+        "renders a Retry wired to `onRetry={() => setErrorCode(null)}` that " +
+        "re-POSTs the identical payload against the identical server rule and " +
+        "is refused identically. The remedy is on the FORM — see the class " +
+        "docblock in wizardErrors.ts, which forbids `clear_and_retry` here BY " +
+        "NAME because it wipes what the user typed. Recoverability is derived " +
+        "STRUCTURALLY from `actions ∩ RECOVERABLE_ACTIONS`: the fix is to " +
+        "remove the action, never to special-case the code.",
+    ).toEqual([]);
+  });
+});
+
 describe("[153.1-04 / WIZFORM-02] the ten new members offer no false affordance", () => {
   /** HAND-TYPED — this plan's entire contract with 153.1-05, 153.2 and 153.4. */
   const NEW_MEMBERS: readonly WizardErrorCode[] = [

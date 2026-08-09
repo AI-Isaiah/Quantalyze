@@ -304,8 +304,12 @@ export function SubmitStep({
             // assertion that reds CI BY NAME.
             //
             // ⚠️ Two behaviours worth knowing before editing this group:
-            //   · the SEVEN `METADATA_*` members are deliberately
-            //     NON-recoverable and render NO Retry control. Correct: the
+            //   · the EIGHT `METADATA_*` members are deliberately
+            //     NON-recoverable and render NO Retry control. SEVEN were
+            //     minted by 153.1-04; the eighth,
+            //     `METADATA_DESCRIPTION_REQUIRED`, is a Phase-53 entry this
+            //     route was newly pointed at and it kept a `clear_and_retry`
+            //     until 153.1 review CR-01 removed it. Correct: the
             //     server compared a value against a fixed rule, so
             //     resubmitting the identical payload is refused identically.
             //     The remedy is on the FORM, and 153.2 routes each of them to
