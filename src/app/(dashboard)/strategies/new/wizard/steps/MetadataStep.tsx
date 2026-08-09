@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Field } from "@/components/ui/Field";
+import { isValidDollar } from "@/lib/dollar-validation";
 import { formatKeyError, type WizardErrorCode } from "@/lib/wizardErrors";
 import {
   STRATEGY_NAMES,
@@ -80,6 +81,128 @@ function validateDescription(value: string): WizardErrorCode | null {
  * unit, and this one already drifted once.
  */
 const DESCRIPTION_HINT = `At least ${MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS} characters.`;
+
+/**
+ * Client mirror of `finalize-wizard`'s `aum` / `max_capacity` arms (Phase 153.2
+ * / WIZFORM-01 / D-11), composed from the SAME two steps the wire path takes.
+ *
+ * ⛔ THE PREDICATE IS IMPORTED, NEVER RESTATED. `isValidDollar` is the exact
+ * function the route applies at both arms (it lives in `@/lib/dollar-validation`
+ * precisely so a second caller cannot mint a second bound). A re-typed
+ * "non-negative, under a trillion" here would be free to disagree with the
+ * server's — that disagreement IS the incident class this phase closes, and
+ * D-23 already paid for the lesson once with the description bound.
+ *
+ * ⚠️ BOTH HALVES OF THE SERVER'S CONDITION ARE MIRRORED. The route reads
+ * `!isOmitted(x) && !isValidDollar(x)`: a value that is absent is OMITTED and
+ * therefore valid, because AUM and capacity are optional fields. Mirroring only
+ * the `isValidDollar` half would refuse every blank AUM client-side while the
+ * server happily accepts it — a form stricter than the rule it claims to state.
+ *
+ * ⚠️ THE STRING→NUMBER STEP IS PART OF THE RULE. This step holds both values as
+ * strings and `SubmitStep` serialises them as `metadata.aum ? Number(...) : null`
+ * — so an empty string becomes `null` (omitted), and anything else is measured
+ * as `Number(value)`. The mirror performs the identical transform rather than
+ * inspecting the string, so the number this guard judges is the number the
+ * server will judge. (`csv-finalize` applies the same `Number(raw)` + bounds to
+ * its string-valued copies, so the CSV branch agrees too.)
+ *
+ * ⛔ The SERVER stays authoritative — same posture as `validateDescription`
+ * above. This is an affordance; `validatePayload` re-checks every submit and is
+ * untouched by this phase (T-153.2-04).
+ */
+function validateDollarField(
+  value: string,
+  code: WizardErrorCode,
+): WizardErrorCode | null {
+  const payload = value ? Number(value) : null;
+  const omitted = payload === undefined || payload === null;
+  return !omitted && !isValidDollar(payload) ? code : null;
+}
+
+/**
+ * The fields on this step that carry a rule the CLIENT can evaluate, and
+ * therefore a rule that must refuse at its own field rather than at submit.
+ *
+ * ⛔ ONE map, not N ad-hoc `showXError` chains. Every mechanism below —
+ * the inline message, the submit predicate, the first-invalid-control focus and
+ * the summary line — reads this one derivation, so a fifth field is added in one
+ * place and cannot be half-wired.
+ *
+ * Two fields on this step deliberately have NO entry, and their absence is a
+ * decision rather than an oversight:
+ *
+ *   • **Strategy codename.** The server refuses a name outside
+ *     `STRATEGY_NAME_SET` (`METADATA_NAME_INVALID`), but the control here is a
+ *     `<select>` over `STRATEGY_NAMES` — that arm is unreachable from this form,
+ *     so a mirror would be dead code that a reader would nonetheless have to
+ *     maintain. (The server arm still exists and still matters: 153.2-05 routes
+ *     the code to this field for the shape-drift case.)
+ *   • **Whose capital is in this key.** The OWN-03 radio group is defaulted to
+ *     team-review, never null, and offers no way to clear it, so
+ *     `METADATA_CAPITAL_OWNERSHIP_INVALID` is likewise unreachable from here.
+ */
+type MetadataFieldId = "description" | "category" | "aum" | "maxCapacity";
+
+/**
+ * The order the four fields RENDER in, declared explicitly.
+ *
+ * ⛔ Not `Object.keys(fieldErrors)`. "First invalid control in DOM order" is the
+ * whole behaviour of a refused submit, and deriving it from an object literal's
+ * declaration order couples it to how the map happens to be typed — a later
+ * reorder of the JSX (or of the map) would silently change which control the
+ * cursor lands in with every test still green. Stating the order here means the
+ * coupling is visible, and the DOM-order row in the spec pins it.
+ */
+const FIELD_ORDER: readonly MetadataFieldId[] = [
+  "description",
+  "category",
+  "aum",
+  "maxCapacity",
+];
+
+/**
+ * The rendered label of each field — the SAME strings the `Field`s below are
+ * given, read from here rather than typed twice.
+ *
+ * This is what makes the submit summary honest (T-153.2-05): the sentence names
+ * a field by reading the label the form is showing, so it cannot name a field
+ * the user cannot find. ⚠️ These strings are also how `e2e/` and RTL address
+ * these controls (`getByLabelText`), so they are load-bearing beyond this file.
+ */
+const FIELD_LABELS: Record<MetadataFieldId, string> = {
+  description: "Description",
+  category: "Category",
+  aum: "AUM (USD)",
+  maxCapacity: "Max capacity (USD)",
+};
+
+/**
+ * The class run shared by the two bare money `<input>`s and the bare category
+ * `<select>` this step wraps in `Field`.
+ *
+ * It is `Input.tsx` / `Select.tsx`'s own class string with two deliberate
+ * changes, and it is spelled here ONCE so the three controls cannot drift:
+ *
+ *   • the focus ring is the clip-proof, full-opacity inset ring
+ *     (`focus-visible:ring-2 ring-inset ring-accent`) rather than the
+ *     primitives' low-alpha `focus:` ring, which measures ~1.3:1 against
+ *     `bg-surface` — far under WCAG 1.4.11's 3:1 floor for a non-text
+ *     indicator. Same upgrade, same reasoning as the description textarea and
+ *     `AllocateDialog`'s amount input;
+ *   • the invalid border DERIVES from the ARIA state (Shared Pattern A). The
+ *     primitives colour their border from a JS `error &&` expression, which is
+ *     the FLAG-1 defect shape: it can paint a control red while its a11y wiring
+ *     is missing. `Field` is the only writer of the ARIA state, so here the red
+ *     and the announcement are the same fact.
+ *
+ * ⚠️ The primitives themselves are NOT changed — the codename select, the asset
+ * class select and the leverage-range input still use them, unvalidated, and
+ * rewriting a shared primitive to serve four call sites is a blast radius this
+ * phase did not price.
+ */
+const VALIDATED_CONTROL_CLASS =
+  "min-h-[44px] rounded-lg border border-border bg-surface px-3 py-2.5 text-body text-text-primary placeholder:text-text-muted transition-colors focus-visible:border-border-focus focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent aria-[invalid=true]:border-negative";
 
 export interface MetadataDraft {
   name: string | null;
@@ -198,15 +321,33 @@ export function MetadataStep({
     initial?.capitalOwnership ?? TEAM_REVIEW,
   );
   const [categoryLoadError, setCategoryLoadError] = useState<string | null>(null);
-  // Phase 53 / APPLY-02 — inline per-field validation surfacing. The
-  // description is the required free-text field; surface its existing
-  // validation at the field on blur + on submit (the WizardErrorEnvelope
-  // stays the role=alert summary, unchanged). `descriptionBlurred` gates
-  // the on-blur reveal; submit reveals it unconditionally and focuses the
-  // first invalid field.
-  const [descriptionBlurred, setDescriptionBlurred] = useState(false);
+  // Phase 53 / APPLY-02, generalised by 153.2 — inline per-field validation
+  // surfacing for every field with a client-evaluable rule. `blurredFields`
+  // gates the per-field on-blur reveal; a submit attempt reveals ALL of them at
+  // once and moves the cursor into the first one that is wrong.
+  const [blurredFields, setBlurredFields] = useState<
+    Record<MetadataFieldId, boolean>
+  >({
+    description: false,
+    category: false,
+    aum: false,
+    maxCapacity: false,
+  });
   const [submitAttempted, setSubmitAttempted] = useState(false);
+  function markBlurred(id: MetadataFieldId) {
+    setBlurredFields((prev) => (prev[id] ? prev : { ...prev, [id]: true }));
+  }
+
   const descriptionRef = useRef<HTMLTextAreaElement>(null);
+  const categoryRef = useRef<HTMLSelectElement>(null);
+  const aumRef = useRef<HTMLInputElement>(null);
+  const maxCapacityRef = useRef<HTMLInputElement>(null);
+  const fieldRefs: Record<MetadataFieldId, RefObject<HTMLElement | null>> = {
+    description: descriptionRef,
+    category: categoryRef,
+    aum: aumRef,
+    maxCapacity: maxCapacityRef,
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -289,14 +430,59 @@ export function MetadataStep({
   //   • submit attempted                   → revealed regardless of blur.
   // ⚠️ Latching the code into state on blur would break the third event and is
   // the shape to avoid if this ever grows.
-  const descriptionCode = validateDescription(description);
-  const showDescriptionError =
-    (descriptionBlurred || submitAttempted) && descriptionCode
-      ? formatKeyError(descriptionCode, { charCount: description.length }).title
-      : undefined;
+  // ⚠️ "You did not pick one" vs "there is nothing to pick". When the select
+  // has no options the user CANNOT satisfy a demand to choose, so the demand is
+  // withheld and the honest cause is stated instead — either the load-failure
+  // line or the empty-catalogue block below, both of which already exist and
+  // both of which say something the user can act on (T-153.2-06).
+  //
+  // Derived from the options actually rendered rather than from the two states
+  // that produce them, so the third such state (the fetch has not settled yet)
+  // is covered by construction instead of by a later bug report.
+  //
+  // ⛔ The REFUSAL is untouched. The code stays in the map, so the submit is
+  // still blocked and the summary line still names the field; only the
+  // "Choose a category." sentence is withheld. Dropping the code instead would
+  // let a draft with no category reach `onComplete`, which is the ISSUE-010
+  // null-category_id path.
+  const categoryHasNoOptions = categories.length === 0;
+
+  const fieldErrors: Record<MetadataFieldId, WizardErrorCode | null> = {
+    description: validateDescription(description),
+    // The server's rule is `isUuid(category_id)`; the client's honest mirror is
+    // "a category is selected", since the <select> guarantees the shape of
+    // whatever it yields. Claiming to check the UUID here would be a mirror of
+    // a rule this form cannot actually break.
+    category: categoryId ? null : "METADATA_CATEGORY_REQUIRED",
+    aum: validateDollarField(aum, "METADATA_AUM_INVALID"),
+    maxCapacity: validateDollarField(maxCapacity, "METADATA_CAPACITY_INVALID"),
+  };
+
+  const invalidFields = FIELD_ORDER.filter((id) => fieldErrors[id] !== null);
+
+  /**
+   * The sentence a field shows, or `undefined` for silence. One function for
+   * all four fields, so reveal timing cannot differ between them by accident.
+   */
+  function messageFor(id: MetadataFieldId): string | undefined {
+    const code = fieldErrors[id];
+    if (!code) return undefined;
+    if (!(blurredFields[id] || submitAttempted)) return undefined;
+    if (id === "category" && categoryHasNoOptions) return undefined;
+    // `charCount` belongs to the description bounds alone — `formatKeyError`
+    // appends the "you have {n}" tail only for those two codes, and only when
+    // it is given a count, so passing it elsewhere would be inert noise.
+    return formatKeyError(
+      code,
+      id === "description" ? { charCount: description.length } : undefined,
+    ).title;
+  }
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    // Reveals EVERY field's message at once — a user who is shown one problem,
+    // fixes it, and is then shown the next has been made to submit twice to
+    // learn something the form knew the first time.
     setSubmitAttempted(true);
     // The submit predicate IS the field mirror (Phase 153.2 / FLAG-3). This is
     // the only gate: the button carries no validation `disabled`, so an invalid
@@ -304,20 +490,12 @@ export function MetadataStep({
     // the offending control focused. Deleting the button gate without widening
     // this predicate would let a two-character description POST — the exact
     // defect WIZFORM-01 exists to close — so the two move together, always.
-    //
-    // `categoryId` is checked here for the first time; until this phase it was
-    // covered only by the deleted `disabled` gate.
-    //
-    // ⚠️ Focus is hand-rolled because the description is today the only
-    // inline-validated control on this step. Phase 153.2-02 replaces this with
-    // the general first-invalid-control orchestration (which also opens the
-    // collapsed <details> when the offending control is inside it); written as
-    // a per-field branch so that lands as a widening, not a rewrite.
-    const descriptionRefusal = validateDescription(description);
-    if (descriptionRefusal !== null || !categoryId) {
-      if (descriptionRefusal !== null) {
-        descriptionRef.current?.focus();
-      }
+    if (invalidFields.length > 0) {
+      // ⚠️ 153.2-02 Task 2 replaces this with the full orchestration: it must
+      // also OPEN the collapsed disclosure before focusing a control inside it,
+      // scroll the control into view, and state the count and the first field's
+      // name in one visible line. Focus alone is what this task owes.
+      fieldRefs[invalidFields[0]!].current?.focus();
       return;
     }
     onComplete({
@@ -425,15 +603,15 @@ export function MetadataStep({
             bare Textarea primitive does NOT do). Copy is the existing
             wizardErrors.ts string; the message is NOT role="alert". */}
         <Field
-          label="Description"
+          label={FIELD_LABELS.description}
           hint={DESCRIPTION_HINT}
-          error={showDescriptionError}
+          error={messageFor("description")}
         >
           <textarea
             ref={descriptionRef}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            onBlur={() => setDescriptionBlurred(true)}
+            onBlur={() => markBlurred("description")}
             rows={3}
             placeholder="One paragraph describing the strategy, edge, and risk framing."
             required
@@ -453,12 +631,28 @@ export function MetadataStep({
           />
         </Field>
 
-        <Select
-          label="Category"
-          options={categories.map((c) => ({ value: c.id, label: c.name }))}
-          value={categoryId ?? ""}
-          onChange={(e) => setCategoryId(e.target.value)}
-        />
+        {/* 153.2 — the category moved off the `Select` primitive onto
+            `Field` + a bare <select>, for the same reason the description did:
+            the primitive renders its own label and colours its own border from
+            a JS expression, and never writes `aria-invalid`. A red control
+            whose invalidity is invisible to assistive technology is the FLAG-1
+            defect. `Field` wires `htmlFor`↔`id` exactly as the primitive did,
+            so `getByLabelText("Category")` addresses this control unchanged. */}
+        <Field label={FIELD_LABELS.category} error={messageFor("category")}>
+          <select
+            ref={categoryRef}
+            value={categoryId ?? ""}
+            onChange={(e) => setCategoryId(e.target.value)}
+            onBlur={() => markBlurred("category")}
+            className={VALIDATED_CONTROL_CLASS}
+          >
+            {categories.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+        </Field>
         {categoryLoadError && (
           <p className="text-caption text-negative" role="alert">
             {categoryLoadError} Refresh the page. If this persists, contact
@@ -579,20 +773,37 @@ export function MetadataStep({
                 onChange={(e) => setLeverageRange(e.target.value)}
                 placeholder="e.g. 1x–5x"
               />
-              <Input
-                label="AUM (USD)"
-                type="number"
-                value={aum}
-                onChange={(e) => setAum(e.target.value)}
-                placeholder="0"
-              />
-              <Input
-                label="Max capacity (USD)"
-                type="number"
-                value={maxCapacity}
-                onChange={(e) => setMaxCapacity(e.target.value)}
-                placeholder="0"
-              />
+              {/* 153.2 — the two money fields carry a rule the server
+                  enforces and the client can evaluate, so they refuse here.
+                  Both moved off the `Input` primitive onto `Field` + a bare
+                  <input> for the aria-derivation reason stated on the category
+                  select above. Labels are byte-identical to the primitive's,
+                  because `e2e/` and RTL address these by label. */}
+              <Field label={FIELD_LABELS.aum} error={messageFor("aum")}>
+                <input
+                  ref={aumRef}
+                  type="number"
+                  value={aum}
+                  onChange={(e) => setAum(e.target.value)}
+                  onBlur={() => markBlurred("aum")}
+                  placeholder="0"
+                  className={VALIDATED_CONTROL_CLASS}
+                />
+              </Field>
+              <Field
+                label={FIELD_LABELS.maxCapacity}
+                error={messageFor("maxCapacity")}
+              >
+                <input
+                  ref={maxCapacityRef}
+                  type="number"
+                  value={maxCapacity}
+                  onChange={(e) => setMaxCapacity(e.target.value)}
+                  onBlur={() => markBlurred("maxCapacity")}
+                  placeholder="0"
+                  className={VALIDATED_CONTROL_CLASS}
+                />
+              </Field>
             </div>
           </div>
         </details>

@@ -566,6 +566,270 @@ describe("[H-0191] MetadataStep", () => {
     expect(draft.description).toBe("A market-neutral basis strategy.");
   });
 
+  // ── 153.2-02 / WIZFORM-01 — the OTHER three fields that can be got wrong ──
+  //
+  // WIZFORM-01 is a CLASS, not the description field. Category, AUM and max
+  // capacity each carry a rule `finalize-wizard` enforces and this form can
+  // evaluate, so each must refuse at its own control. Leaving them to the
+  // server would let all three reproduce the founder's failure through the
+  // identical path — a full-page envelope that names no field.
+  //
+  // Each field gets the same three claims the description has: SILENCE before
+  // the first interaction, the copy-table sentence + the ARIA state after it,
+  // and a LIVE clear on correction. Any one of the three alone is satisfiable
+  // by a mirror that is wrong in one of the other two directions.
+  describe("[153.2] category, AUM and capacity refuse at their own fields", () => {
+    /** Render, wait for the category auto-select, return the settled select. */
+    async function renderSettled(
+      extraProps: Partial<React.ComponentProps<typeof MetadataStep>> = {},
+    ): Promise<HTMLSelectElement> {
+      render(<MetadataStep {...baseProps} {...extraProps} />);
+      const select = (await screen.findByLabelText(
+        "Category",
+      )) as HTMLSelectElement;
+      await waitFor(() => expect(select.value).toBe("cat-aaa"));
+      return select;
+    }
+
+    // ── Category ──────────────────────────────────────────────────────────
+
+    it("[FLAG-1] ALL FOUR validated controls derive their invalid border from the ARIA state", async () => {
+      // ⭐ The class-level guard, asserted on the RENDERED DOM rather than by
+      // grepping the source. Three of the four share one class constant (one
+      // spelling cannot drift — the D-23 lesson applied to a class run), so a
+      // source grep counts spellings, not fields, and would pass while a field
+      // quietly went back to a JS-coloured border. This row counts FIELDS: each
+      // control the form validates must carry the derivation token, so the only
+      // way to paint any of them red is to hand `Field` an error, which is also
+      // the only thing that writes the ARIA state.
+      await renderSettled({ detectedExchange: null });
+      for (const label of [
+        "Description",
+        "Category",
+        "AUM (USD)",
+        "Max capacity (USD)",
+      ]) {
+        const control = screen.getByLabelText(label);
+        expect(control.className).toContain(
+          "aria-[invalid=true]:border-negative",
+        );
+        // …and none of them carries the low-alpha ring the primitives ship,
+        // which measures ~1.3:1 against bg-surface (WCAG 1.4.11 wants ≥3:1).
+        expect(control.className).not.toContain("ring-accent/20");
+        expect(control.className).toContain("focus-visible:ring-inset");
+      }
+    });
+
+    it("keeps the category select addressable by its label after the Field conversion", async () => {
+      // The conversion from the `Select` primitive to `Field` + a bare <select>
+      // is only safe because Field wires htmlFor↔id the same way. Every
+      // pre-existing row in this file and two e2e specs address this control by
+      // label, so the wiring is asserted rather than assumed — and the ARIA
+      // state the primitive never wrote is asserted to be available here.
+      const select = await renderSettled();
+      expect(select.tagName).toBe("SELECT");
+      expect(select.className).toContain("aria-[invalid=true]:border-negative");
+      expect(document.querySelector('label[for="' + select.id + '"]')?.textContent).toBe(
+        "Category",
+      );
+    });
+
+    it("stays SILENT about a cleared category until the field is blurred", async () => {
+      const select = await renderSettled();
+      fireEvent.change(select, { target: { value: "" } });
+
+      expect(select.getAttribute("aria-invalid")).not.toBe("true");
+      expect(errorNodeFor(select)).toBeNull();
+    });
+
+    it("refuses a cleared category AT the category field with the copy-table sentence", async () => {
+      const select = await renderSettled();
+      fireEvent.change(select, { target: { value: "" } });
+      fireEvent.blur(select);
+
+      await waitFor(() =>
+        expect(select.getAttribute("aria-invalid")).toBe("true"),
+      );
+      expect(errorNodeFor(select)!.textContent).toBe(
+        formatKeyError("METADATA_CATEGORY_REQUIRED").title,
+      );
+    });
+
+    it("clears the category message LIVE when a category is chosen again", async () => {
+      const select = await renderSettled();
+      fireEvent.change(select, { target: { value: "" } });
+      fireEvent.blur(select);
+      await waitFor(() =>
+        expect(select.getAttribute("aria-invalid")).toBe("true"),
+      );
+
+      // No second blur — the re-evaluation must be live.
+      fireEvent.change(select, { target: { value: "cat-bbb" } });
+      await waitFor(() =>
+        expect(select.getAttribute("aria-invalid")).not.toBe("true"),
+      );
+      expect(errorNodeFor(select)).toBeNull();
+    });
+
+    it("[T-153.2-06] does NOT demand a category the catalogue cannot offer", async () => {
+      // The honesty rule. With zero categories the user cannot choose one, so
+      // "Choose a category." is an instruction they cannot follow; the honest
+      // block states the real cause instead. ⛔ But the REFUSAL survives — a
+      // draft with no category must never reach onComplete (ISSUE-010).
+      orderResult = { data: [], error: null };
+      const onComplete = vi.fn();
+      render(<MetadataStep {...baseProps} onComplete={onComplete} />);
+      expect(
+        await screen.findByTestId("metadata-categories-empty"),
+      ).toBeInTheDocument();
+
+      fireEvent.change(screen.getByLabelText("Description"), {
+        target: { value: "A market-neutral basis strategy." },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /review and submit/i }));
+
+      expect(onComplete).not.toHaveBeenCalled();
+      expect(
+        screen.queryByText(formatKeyError("METADATA_CATEGORY_REQUIRED").title),
+      ).toBeNull();
+      const select = screen.getByLabelText("Category");
+      expect(select.getAttribute("aria-invalid")).not.toBe("true");
+    });
+
+    // ── AUM and max capacity ─────────────────────────────────────────────
+    //
+    // ⛔ The bound is NOT re-typed in this file. Every fixture below is built
+    // FROM `MAGNITUDE_CAPS.MAX_DOLLAR_VALUE_USD` — the same constant
+    // `isValidDollar` reads and the same one `finalize-wizard` reports — so the
+    // claim each row makes is "whatever the cap is, this side of it passes and
+    // that side refuses", which survives a retune of the cap.
+    const MAX_DOLLARS = MAGNITUDE_CAPS.MAX_DOLLAR_VALUE_USD;
+
+    it.each([
+      {
+        field: "AUM (USD)",
+        code: "METADATA_AUM_INVALID" as const,
+      },
+      {
+        field: "Max capacity (USD)",
+        code: "METADATA_CAPACITY_INVALID" as const,
+      },
+    ])(
+      "refuses a negative $field at its own field, and stays silent until blur",
+      async ({ field, code }) => {
+        await renderSettled();
+        const control = screen.getByLabelText(field) as HTMLInputElement;
+
+        fireEvent.change(control, { target: { value: "-5" } });
+        // Silence first: a field turning red mid-keystroke teaches the user to
+        // ignore red, which makes every later message worthless.
+        expect(control.getAttribute("aria-invalid")).not.toBe("true");
+        expect(errorNodeFor(control)).toBeNull();
+
+        fireEvent.blur(control);
+        await waitFor(() =>
+          expect(control.getAttribute("aria-invalid")).toBe("true"),
+        );
+        expect(errorNodeFor(control)!.textContent).toBe(
+          formatKeyError(code).title,
+        );
+
+        // …and it clears LIVE on a correction, with no second blur.
+        fireEvent.change(control, { target: { value: "250000" } });
+        await waitFor(() =>
+          expect(control.getAttribute("aria-invalid")).not.toBe("true"),
+        );
+        expect(errorNodeFor(control)).toBeNull();
+      },
+    );
+
+    it.each([
+      { field: "AUM (USD)" },
+      { field: "Max capacity (USD)" },
+    ])(
+      "refuses a $field AT the cap and accepts one just under it",
+      async ({ field }) => {
+        // `isValidDollar` is `v < MAX`, so the cap itself is OUT. Without the
+        // acceptance half, a mirror that refused every value would satisfy the
+        // refusal half — the guard-that-cannot-fail shape, inverted.
+        await renderSettled();
+        const control = screen.getByLabelText(field) as HTMLInputElement;
+
+        fireEvent.change(control, { target: { value: String(MAX_DOLLARS) } });
+        fireEvent.blur(control);
+        await waitFor(() =>
+          expect(control.getAttribute("aria-invalid")).toBe("true"),
+        );
+
+        fireEvent.change(control, {
+          target: { value: String(MAX_DOLLARS - 1) },
+        });
+        await waitFor(() =>
+          expect(control.getAttribute("aria-invalid")).not.toBe("true"),
+        );
+      },
+    );
+
+    it("accepts a BLANK AUM and capacity — the server's omitted case, mirrored", async () => {
+      // ⭐ The half a paraphrased mirror drops. `finalize-wizard` reads
+      // `!isOmitted(x) && !isValidDollar(x)`, and `SubmitStep` sends
+      // `metadata.aum ? Number(...) : null` — so an untouched money field is
+      // OMITTED and valid. A mirror that checked only `isValidDollar` would
+      // refuse every blank AUM client-side while the server accepted it, which
+      // is a form stricter than the rule it states. Both fields are blurred
+      // deliberately: blur is the reveal trigger, so this proves the silence is
+      // a verdict and not merely un-revealed.
+      const onComplete = vi.fn();
+      render(<MetadataStep {...baseProps} onComplete={onComplete} />);
+      const select = (await screen.findByLabelText(
+        "Category",
+      )) as HTMLSelectElement;
+      await waitFor(() => expect(select.value).toBe("cat-aaa"));
+
+      const aum = screen.getByLabelText("AUM (USD)") as HTMLInputElement;
+      const capacity = screen.getByLabelText(
+        "Max capacity (USD)",
+      ) as HTMLInputElement;
+      fireEvent.blur(aum);
+      fireEvent.blur(capacity);
+      expect(aum.getAttribute("aria-invalid")).not.toBe("true");
+      expect(capacity.getAttribute("aria-invalid")).not.toBe("true");
+
+      fireEvent.change(screen.getByLabelText("Description"), {
+        target: { value: "A market-neutral basis strategy." },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /review and submit/i }));
+
+      expect(onComplete).toHaveBeenCalledTimes(1);
+      const draft = onComplete.mock.calls[0]![0] as MetadataDraft;
+      expect(draft.aum).toBe("");
+      expect(draft.maxCapacity).toBe("");
+    });
+
+    it("refuses the SUBMIT on an invalid AUM, not just the field", async () => {
+      // The mirror and the submit predicate are one derivation, so a field that
+      // shows red and a submit that goes through anyway is impossible by
+      // construction — asserted here because "impossible by construction" is a
+      // claim about code that can be rewritten.
+      const onComplete = vi.fn();
+      render(<MetadataStep {...baseProps} onComplete={onComplete} />);
+      const select = (await screen.findByLabelText(
+        "Category",
+      )) as HTMLSelectElement;
+      await waitFor(() => expect(select.value).toBe("cat-aaa"));
+
+      fireEvent.change(screen.getByLabelText("Description"), {
+        target: { value: "A market-neutral basis strategy." },
+      });
+      fireEvent.change(screen.getByLabelText("AUM (USD)"), {
+        target: { value: "-5" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /review and submit/i }));
+
+      expect(onComplete).not.toHaveBeenCalled();
+    });
+  });
+
   // ── #597 — asset-class picker: crypto-exchange detection LOCKS to 'crypto' ──
   describe("#597 asset-class picker", () => {
     /** A full MetadataDraft carrying the DB NOT NULL DEFAULT assetClass. */
