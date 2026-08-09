@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
-stopped_at: "Phase 153.1 plan 03 COMPLETE (mechanism, not yet end-to-end): FixRequirement + WizardErrorCopy.fixRequires + WizardErrorContext.venue/surface + ONE applyFixRequirements call at formatKeyError:1903. Three venue bullets tagged substitutable true/false with the D-17 replacement copy verbatim; SERVICE_UNREACHABLE's /strategies bullet gated on surface submit. 4 whole-table sweeps + a positive control; 6 mutations watched red (SC-5; alignment; surface arm; reference identity; blind regex) and the class-not-instance mutation watched GREEN. WIZFORM-03 NOT complete — no buildEnvelope call site passes venue/surface yet, so 153.2 (SubmitStep:414) and 153.4 (ConnectKeyStep:609, MultiKeyConnectStep) must feed it. Next: 153.1-04."
-last_updated: "2026-08-09T04:14:34.435Z"
+stopped_at: "Phase 153.1 plan 04 COMPLETE (vocabulary only — 8 of the 10 have no emitter yet): TEN new WizardErrorCode members with copy. Seven field-level metadata refusals (METADATA_NAME_INVALID, _DESCRIPTION_TOO_SHORT, _DESCRIPTION_TOO_LONG, _CATEGORY_REQUIRED, _AUM_INVALID, _CAPACITY_INVALID, _CAPITAL_OWNERSHIP_INVALID) plus SEAM_DEADLINE_EXCEEDED, COMPOSITE_UNSUPPORTED_UNIFIED and DRAFT_STATE_INVALID. ALL TEN derive recoverable:false by absence of a RECOVERABLE_ACTIONS member. EXPECTED_TABLE_SIZE 64 -> 74 at BOTH sites (wizardErrors.test.ts :1486 and :1750) with each docblock's reasoning re-run over the ten; new divergence guard + a 4-it class sweep; SEVEN mutations watched red. New context fields charCount and budgetSeconds, both absent-means-not-told (TRAP-3). SEAM_DEADLINE_EXCEEDED.fix[0] declares REQUIRES_CONNECT_SURFACE so 153.4 MUST pass surface:connect. WIZFORM-02 and WIZFORM-03 NOT marked complete: route.ts:383/396/405/428/439/503 are still code-less and :1319 still lowercase (153.1-05 owns both), and no buildEnvelope call site passes venue/surface yet. Next: 153.1-05."
+last_updated: "2026-08-09T05:25:42.359Z"
 last_activity: 2026-08-09
 progress:
   total_phases: 13
   completed_phases: 7
   total_plans: 59
-  completed_plans: 46
+  completed_plans: 47
   percent: 54
 ---
 
@@ -56,7 +56,7 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 ## Current Position
 
 Phase: 153.1 (WIZFORM-CODES) -- 153.3 already COMPLETE on the same branch
-Plan: 3 of 06 complete
+Plan: 4 of 06 complete
 Status: Ready to execute
 Last activity: 2026-08-09
 
@@ -381,7 +381,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [████████░░] 78%
+Progress: [████████░░] 80%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -482,6 +482,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 153.1 P01 | ~35 min | 3 tasks | 2 modified files |
 | Phase 153.1 P02 | 25m | 3 tasks | 3 files |
 | Phase 153.1 P03 | ~55m | 3 tasks | 2 files |
+| Phase 153.1 P04 | 80m | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -528,6 +529,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase ?]: 153.1-02: venueCapabilities() (the row lookup) is deliberately NOT exported — consumers read the three predicates, because the DEFAULT is the load-bearing part and differs per capability (probe true / substitutable true / serialized false).
 - [Phase 153.1]: 153.1-03: a fix[] bullet carries a FixRequirement; ONE filter in formatKeyError applies it — never a per-code branch — D-17 is a class (a remedy presupposing a fact about the context), not three instances. Three if-arms would re-ship the instance-not-class defect; the filter also serves UI-SPEC Gate B unchanged.
 - [Phase 153.1]: 153.1-03: context.venue absent => venue-conditional bullet still renders; context.surface absent => surface-conditional bullet is SUPPRESSED — Deliberately asymmetric. An unnamed venue must leave incumbent ccxt copy byte-identical; an unnamed surface must withhold a detour we cannot support (fail toward saying less).
+- [Phase 153.1]: 153.1-04: all ten new wizard codes are non-recoverable BY ABSENCE of a RECOVERABLE_ACTIONS member, decided once for the class — and DRAFT_STATE_INVALID's arrival REMOVES a live false Retry that ships today, because UNKNOWN's fallback IS recoverable and its Retry re-POSTed an identical finalize against a draft the DB had already moved past
+- [Phase 153.1]: 153.1-04: EXPECTED_TABLE_SIZE = 74 at BOTH wizardErrors.test.ts sites (:1486, :1750), the number READ OUT OF the guard's own failure rather than copied from the plan — and a third guard now reads the test file's own source (the only vantage point that sees both declarations) so the two pins cannot diverge again; its declaration count is pinned to a hand-typed 2 as the positive control
+- [Phase 153.1]: 153.1-04: SEAM_DEADLINE_EXCEEDED's 'Your key details are still on this page' bullet declares REQUIRES_CONNECT_SURFACE — Phase 153.4 MUST pass surface: 'connect' (and budgetSeconds) in the same commit it starts emitting the code, or Gate B's absence-suppresses rule silently withholds the reassurance
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1230,10 +1234,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-09T04:14:34.424Z
-**Stopped At:** Phase 153.1 plan 03 COMPLETE (mechanism, not yet end-to-end): FixRequirement + WizardErrorCopy.fixRequires + WizardErrorContext.venue/surface + ONE applyFixRequirements call at formatKeyError:1903. Three venue bullets tagged substitutable true/false with the D-17 replacement copy verbatim; SERVICE_UNREACHABLE's /strategies bullet gated on surface submit. 4 whole-table sweeps + a positive control; 6 mutations watched red (SC-5; alignment; surface arm; reference identity; blind regex) and the class-not-instance mutation watched GREEN. WIZFORM-03 NOT complete — no buildEnvelope call site passes venue/surface yet, so 153.2 (SubmitStep:414) and 153.4 (ConnectKeyStep:609, MultiKeyConnectStep) must feed it. Next: 153.1-04.
+**Last Date:** 2026-08-09T05:25:42.348Z
+**Stopped At:** Phase 153.1 plan 04 COMPLETE (vocabulary only — 8 of the 10 have no emitter yet): TEN new WizardErrorCode members with copy. Seven field-level metadata refusals (METADATA_NAME_INVALID, _DESCRIPTION_TOO_SHORT, _DESCRIPTION_TOO_LONG, _CATEGORY_REQUIRED, _AUM_INVALID, _CAPACITY_INVALID, _CAPITAL_OWNERSHIP_INVALID) plus SEAM_DEADLINE_EXCEEDED, COMPOSITE_UNSUPPORTED_UNIFIED and DRAFT_STATE_INVALID. ALL TEN derive recoverable:false by absence of a RECOVERABLE_ACTIONS member. EXPECTED_TABLE_SIZE 64 -> 74 at BOTH sites (wizardErrors.test.ts :1486 and :1750) with each docblock's reasoning re-run over the ten; new divergence guard + a 4-it class sweep; SEVEN mutations watched red. New context fields charCount and budgetSeconds, both absent-means-not-told (TRAP-3). SEAM_DEADLINE_EXCEEDED.fix[0] declares REQUIRES_CONNECT_SURFACE so 153.4 MUST pass surface:connect. WIZFORM-02 and WIZFORM-03 NOT marked complete: route.ts:383/396/405/428/439/503 are still code-less and :1319 still lowercase (153.1-05 owns both), and no buildEnvelope call site passes venue/surface yet. Next: 153.1-05.
 **Resume File:** None
-**Next step:** 153.3 is COMPLETE (6/6); 153.1 is 2/6 (plan 01 Wave-0 gates + plan 02 the foundation, both green at HEAD). Execute 153.1-03 next, then the rest of 153.1 → 153.2 → 153.4 on `feat/v1.17-153-wizform`. ⛔ WIZFORM-05 stays unchecked until 153.4 closes the client leg. ⛔ **WIZFORM-03 stays unchecked until 153.1-03** — plan 02 minted the capability record but NOTHING reads it yet; the requirement's behavioural claim ("no `substitutable:false` venue receives a substitution bullet") is 153.1-03's.
+**Next step:** 153.3 is COMPLETE (6/6); 153.1 is 4/6 (plan 01 Wave-0 gates, plan 02 the capability foundation, plan 03 the WIZFORM-03 class filter, plan 04 the ten new codes — all green at HEAD). Execute **153.1-05** next, then 153.1-06 → 153.2 → 153.4 on `feat/v1.17-153-wizform`. ⛔ WIZFORM-05 stays unchecked until 153.4 closes the client leg. ⛔ **WIZFORM-03 stays unchecked until 153.2/153.4** — the mechanism and the capability record exist and are pinned, but NOT ONE `buildEnvelope` call site passes `venue` or `surface`, so an MT5 user still reads "switch to a different exchange" in production. ⛔ **WIZFORM-02 stays unchecked until 153.1-05/06** — plan 04 minted the vocabulary, but `finalize-wizard/route.ts` `:383 :396 :405 :428 :439 :503` are still code-less and `:1319` is still lowercase `draft_state_invalid`.
 
 ⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in
 `src/lib/closed-sets.ts`): `VenueCapabilities` (`:77`), `VENUE_CAPABILITIES` (`:133`),
