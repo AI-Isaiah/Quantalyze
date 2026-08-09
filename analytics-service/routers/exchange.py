@@ -25,6 +25,15 @@ from services.mt5_client import (
     Mt5AccountMismatchError,
     MT5_VALIDATE_REQUEST_TIMEOUT_S,
 )
+# D-29 — the ONE terminal-lock registry, imported (never re-declared) exactly as the
+# three job call sites import it. `_MT5_LEASE_WAIT_S` is re-bound here as a module
+# global so this path's bound is monkeypatchable/tunable independently of the batch's
+# (which passes wait_s=None and keeps unbounded patient queueing).
+from services.mt5_concurrency import (
+    _MT5_LEASE_WAIT_S,
+    Mt5TerminalBusyError,
+    mt5_terminal_lease,
+)
 from services.mt5_validation import (
     Mt5ValidationError,
     classify_mt5_login_error,
@@ -456,6 +465,14 @@ async def _validate_mt5_key(
             # field FAILS LOUD, never default-matches. A mismatch → the transient
             # fail-closed arm below (Mt5AccountMismatchError is NOT an Mt5ClientError,
             # so the classify arm can never absorb it into a verdict).
+            #
+            # 153.3-04 / D-29: the race this DETECTS is now also PREVENTED in-process
+            # — this whole body runs under `mt5_terminal_lease`, so a second validate
+            # (or an in-process worker read) queues instead of interleaving. The
+            # bracket nonetheless STAYS EXACTLY AS IT IS: an asyncio.Lock serializes
+            # nothing ACROSS REPLICAS, and this is the guarantee that `api_verified`
+            # is never stamped on another account's numbers. A prevention is not a
+            # licence to delete the detection.
             _actual = info.get("login")
             if _actual != login:
                 raise Mt5AccountMismatchError(login, _actual)
@@ -548,127 +565,185 @@ async def _validate_mt5_key(
                 recoverable=True,
             )
 
+    # ⭐ D-29 — TAKE THE LEASE. Until this line `routers/exchange.py` acquired the
+    # per-terminal lock ZERO times while `job_worker.py` (x2) and
+    # `allocator_positions.py` all took it — the wizard's validate path was the ONE
+    # caller that skipped it. Two concurrent submissions therefore both called
+    # login(...) on the ONE shared Wine terminal and made each OTHER fail via the
+    # mismatch bracket below, instead of queueing (153-EVIDENCE §4).
+    #
+    # ⭐ PLACEMENT IS THE WHOLE POINT. The acquisition wait sits OUTSIDE the
+    # end-to-end deadline: `_MT5_VALIDATE_DEADLINE_S` must start counting when we
+    # HOLD the terminal, not when we start queueing for it, or the two budgets
+    # silently share one number and a queued caller gets a truncated probe. The
+    # release stays INSIDE the lease — the terminal is held until our transport is
+    # given up (the finally's Pitfall-6 block still runs inside this `async with`).
+    #
+    # ⛔ What is capped here is CONCURRENCY, and nothing else — there is no limit on
+    # how many accounts exist. MT5 binds one account per terminal AT A TIME — a
+    # serialization constraint, not a capacity one — so one terminal cycles through
+    # hundreds of accounts across a day (D-29, REVISED 2026-08-08).
+    #
+    # The key MUST be byte-identical to `Mt5Client.terminal_key` (`f"{host}:{port}"`,
+    # mt5_client.py's `terminal_key` property), because that is what the three job
+    # sites key on: a divergent format yields a DIFFERENT Lock object and serializes
+    # nothing (MT5CONC-02 / Pitfall 2). It is derived from the same host/port
+    # resolved above, and BEFORE construction — construction opens the rpyc socket
+    # that races, so the lease must already be held when it happens.
+    terminal_key = f"{host}:{port}"
     try:
-        # ⭐ THE ONE END-TO-END DEADLINE (D-03). It bounds connect + probe TOGETHER;
-        # the release in the finally is deliberately NOT inside it (see below).
-        try:
-            info, probe, terminal = await asyncio.wait_for(
-                _connect_and_probe(), timeout=_MT5_VALIDATE_DEADLINE_S
-            )
-        except asyncio.TimeoutError:
-            # The end-to-end deadline fired — the stages themselves were outlived, so
-            # no stage can name a cause. Same verdict as a probe-stage timeout (a hung
-            # terminal, transient, never the user's key) but a DISTINCT warning, so
-            # the two are separable in Railway logs: a stage timeout means one
-            # round-trip hung, this means the whole probe did. Names a stage and a
-            # bound only — no login, password or broker server (T-153.3-15).
-            logger.warning(
-                "validate_key: MT5 validate exceeded the end-to-end deadline "
-                "(%.0fs, connect+probe) — hung terminal",
-                _MT5_VALIDATE_DEADLINE_S,
-            )
-            raise VenueTransientHTTPException(
-                status_code=424,
-                code="NETWORK_UNAVAILABLE",
-                detail=NETWORK_ERROR_DETAIL,
-                recoverable=True,
-            )
-
-        verdict = classify_trade_capability(info, probe, terminal)
-
-        if verdict == "trade_capable":
-            # Master (trade-capable) login REJECTED — never persisted (the TS
-            # caller only encrypts after valid:true). The EoP gate (T-135-09).
-            raise HTTPException(
-                status_code=400, detail=MT5_MASTER_PASSWORD_DETAIL
-            )
-
-        if verdict == "undetermined":
-            # D-31: we CANNOT distinguish investor from master, so we refuse
-            # rather than stamp read-only. Routed BY CAUSE off the SAME terminal
-            # dict that produced the verdict (never a re-probe), using only arms
-            # that already exist — 153.1 owns the user-facing code table.
-            operator_fault = terminal_trade_permission_off(terminal)
-            if operator_fault:
-                # A setting in OUR gateway terminal ("Disable automatic trading
-                # through the external Python API", MetaQuotes' default). No
-                # retry can clear it; the remedy is an operator turning it off
-                # (docs/runbooks/mt5-go-live.md). PERMANENT operator fault.
-                logger.warning(
-                    "validate_key: MT5 capability undetermined (terminal trade "
-                    "permission off) — refusing rather than stamping read-only"
-                )
-                raise service_error(
-                    500,
-                    "MT5_GATEWAY_UNCONFIGURED",
-                    dependency="mt5-gateway",
-                    retryable=False,
-                    detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
-                )
-            if not operator_fault:
-                # Terminal unreadable or detached from the trade server — our
-                # bridge blipping, and it clears on retry. TRANSIENT.
-                logger.warning(
-                    "validate_key: MT5 capability undetermined (terminal signal "
-                    "unavailable) — refusing rather than stamping read-only"
-                )
-                raise VenueTransientHTTPException(
-                    status_code=424,
-                    code="NETWORK_UNAVAILABLE",
-                    detail=NETWORK_ERROR_DETAIL,
-                    recoverable=True,
-                )
-
-        # Investor (read-only) login — reachable ONLY when the terminal itself
-        # reported connected AND trade-permitting, so the account's refusal is
-        # attributable to the ACCOUNT. read_only=True is STRUCTURAL (Mt5Client
-        # exposes no trade surface — the sFOX A1 posture), PLUS the behavioral
-        # investor-vs-master probe above that sfox lacks.
-        return {"valid": True, "read_only": True}
-    finally:
-        # RED-TEAM: bounded, off-loop RELEASE. Blocking RPyC (a hung teardown on the
-        # loop would wedge FastAPI), so off-loop under its own small ceiling.
-        #
-        # ⭐ D-30 — this RELEASES our transport and does NOT call shutdown().
-        # `mt5linux` serves every rpyc connection from ONE ThreadedServer process
-        # over ONE shared MetaTrader5 instance holding ONE IPC pipe (153-EVIDENCE
-        # §A2 / Correction C-1), so the close() this used to call destroyed that pipe
-        # for every CONCURRENT caller, who then observed `-10004 No IPC connection`.
-        # A per-request shutdown of a shared session is a denial of service against
-        # ourselves. Attach once; release the lease, never the pipe.
-        #
-        # ⛔ Pitfall 6 — this is LEXICALLY OUTSIDE the end-to-end wait_for above, and
-        # must stay there. Wrapping it inside means a deadline fired during the probe
-        # abandons the RPyC session unreleased — the session leak this block exists to
-        # prevent, and a WEDGE-01-class regression. Its bound is therefore the small
-        # release ceiling, never the stage ceiling and never the deadline.
-        #
-        # Runs on EVERY path (success, master-reject, undetermined, auth/server fail,
-        # mismatch, transient/timeout, END-TO-END DEADLINE) so the session never
-        # leaks. `client is None` means the connect stage never produced one — there
-        # is nothing to release, and the same is true of every pre-construction guard
-        # above, which return before this block is ever entered.
-        #
-        # 📌 RESIDUAL (recorded, not fixed here): the WORKER path still reaches
-        # shutdown() via services/exchange.py:924-938 (`aclose_exchange`'s mt5 arm)
-        # and services/ingestion/mt5.py, so a worker job can still tear the shared
-        # pipe down under a concurrent validate. Those files are outside this
-        # sub-phase's ownership; D-30 scopes the REQUEST path. Wave 6 / D-35 closes
-        # the class at the sink. Tracked in TODOS.md.
-        if client is not None:
+        async with mt5_terminal_lease(terminal_key, wait_s=_MT5_LEASE_WAIT_S):
             try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(client.release),
-                    timeout=_MT5_RELEASE_TIMEOUT_S,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "validate_key: MT5 client.release() timed out — abandoning session"
-                )
-            except Exception:  # noqa: BLE001 — release must never mask the probe verdict
-                logger.warning(
-                    "validate_key: MT5 client.release() failed — abandoning session"
-                )
+                # ⭐ THE ONE END-TO-END DEADLINE (D-03). It bounds connect + probe TOGETHER;
+                # the release in the finally is deliberately NOT inside it (see below).
+                try:
+                    info, probe, terminal = await asyncio.wait_for(
+                        _connect_and_probe(), timeout=_MT5_VALIDATE_DEADLINE_S
+                    )
+                except asyncio.TimeoutError:
+                    # The end-to-end deadline fired — the stages themselves were outlived, so
+                    # no stage can name a cause. Same verdict as a probe-stage timeout (a hung
+                    # terminal, transient, never the user's key) but a DISTINCT warning, so
+                    # the two are separable in Railway logs: a stage timeout means one
+                    # round-trip hung, this means the whole probe did. Names a stage and a
+                    # bound only — no login, password or broker server (T-153.3-15).
+                    logger.warning(
+                        "validate_key: MT5 validate exceeded the end-to-end deadline "
+                        "(%.0fs, connect+probe) — hung terminal",
+                        _MT5_VALIDATE_DEADLINE_S,
+                    )
+                    raise VenueTransientHTTPException(
+                        status_code=424,
+                        code="NETWORK_UNAVAILABLE",
+                        detail=NETWORK_ERROR_DETAIL,
+                        recoverable=True,
+                    )
+
+                verdict = classify_trade_capability(info, probe, terminal)
+
+                if verdict == "trade_capable":
+                    # Master (trade-capable) login REJECTED — never persisted (the TS
+                    # caller only encrypts after valid:true). The EoP gate (T-135-09).
+                    raise HTTPException(
+                        status_code=400, detail=MT5_MASTER_PASSWORD_DETAIL
+                    )
+
+                if verdict == "undetermined":
+                    # D-31: we CANNOT distinguish investor from master, so we refuse
+                    # rather than stamp read-only. Routed BY CAUSE off the SAME terminal
+                    # dict that produced the verdict (never a re-probe), using only arms
+                    # that already exist — 153.1 owns the user-facing code table.
+                    operator_fault = terminal_trade_permission_off(terminal)
+                    if operator_fault:
+                        # A setting in OUR gateway terminal ("Disable automatic trading
+                        # through the external Python API", MetaQuotes' default). No
+                        # retry can clear it; the remedy is an operator turning it off
+                        # (docs/runbooks/mt5-go-live.md). PERMANENT operator fault.
+                        logger.warning(
+                            "validate_key: MT5 capability undetermined (terminal trade "
+                            "permission off) — refusing rather than stamping read-only"
+                        )
+                        raise service_error(
+                            500,
+                            "MT5_GATEWAY_UNCONFIGURED",
+                            dependency="mt5-gateway",
+                            retryable=False,
+                            detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
+                        )
+                    if not operator_fault:
+                        # Terminal unreadable or detached from the trade server — our
+                        # bridge blipping, and it clears on retry. TRANSIENT.
+                        logger.warning(
+                            "validate_key: MT5 capability undetermined (terminal signal "
+                            "unavailable) — refusing rather than stamping read-only"
+                        )
+                        raise VenueTransientHTTPException(
+                            status_code=424,
+                            code="NETWORK_UNAVAILABLE",
+                            detail=NETWORK_ERROR_DETAIL,
+                            recoverable=True,
+                        )
+
+                # Investor (read-only) login — reachable ONLY when the terminal itself
+                # reported connected AND trade-permitting, so the account's refusal is
+                # attributable to the ACCOUNT. read_only=True is STRUCTURAL (Mt5Client
+                # exposes no trade surface — the sFOX A1 posture), PLUS the behavioral
+                # investor-vs-master probe above that sfox lacks.
+                return {"valid": True, "read_only": True}
+            finally:
+                # RED-TEAM: bounded, off-loop RELEASE. Blocking RPyC (a hung teardown on the
+                # loop would wedge FastAPI), so off-loop under its own small ceiling.
+                #
+                # ⭐ D-30 — this RELEASES our transport and does NOT call shutdown().
+                # `mt5linux` serves every rpyc connection from ONE ThreadedServer process
+                # over ONE shared MetaTrader5 instance holding ONE IPC pipe (153-EVIDENCE
+                # §A2 / Correction C-1), so the close() this used to call destroyed that pipe
+                # for every CONCURRENT caller, who then observed `-10004 No IPC connection`.
+                # A per-request shutdown of a shared session is a denial of service against
+                # ourselves. Attach once; release the lease, never the pipe.
+                #
+                # ⛔ Pitfall 6 — this is LEXICALLY OUTSIDE the end-to-end wait_for above, and
+                # must stay there. Wrapping it inside means a deadline fired during the probe
+                # abandons the RPyC session unreleased — the session leak this block exists to
+                # prevent, and a WEDGE-01-class regression. Its bound is therefore the small
+                # release ceiling, never the stage ceiling and never the deadline.
+                #
+                # Runs on EVERY path (success, master-reject, undetermined, auth/server fail,
+                # mismatch, transient/timeout, END-TO-END DEADLINE) so the session never
+                # leaks. `client is None` means the connect stage never produced one — there
+                # is nothing to release, and the same is true of every pre-construction guard
+                # above, which return before this block is ever entered.
+                #
+                # 📌 RESIDUAL (recorded, not fixed here): the WORKER path still reaches
+                # shutdown() via services/exchange.py:924-938 (`aclose_exchange`'s mt5 arm)
+                # and services/ingestion/mt5.py, so a worker job can still tear the shared
+                # pipe down under a concurrent validate. Those files are outside this
+                # sub-phase's ownership; D-30 scopes the REQUEST path. Wave 6 / D-35 closes
+                # the class at the sink. Tracked in TODOS.md.
+                if client is not None:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.to_thread(client.release),
+                            timeout=_MT5_RELEASE_TIMEOUT_S,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "validate_key: MT5 client.release() timed out — abandoning session"
+                        )
+                    except Exception:  # noqa: BLE001 — release must never mask the probe verdict
+                        logger.warning(
+                            "validate_key: MT5 client.release() failed — abandoning session"
+                        )
+    except Mt5TerminalBusyError:
+        # The terminal was still held when the INTERACTIVE acquisition bound
+        # expired. We never touched it, so nothing is known about this key — routed
+        # to the EXISTING transient arm, by cause, minting no new code (153.1 owns
+        # the user-facing code table).
+        #
+        # WHY this arm: it is genuinely RECOVERABLE — the terminal frees up — so
+        # "try again" is honest advice rather than a shrug, which is what
+        # WIZFORM-04's "copy names an action" requires of the server leg. And it
+        # leaks NO infrastructure (WIZFORM-03): no terminal key, host, port, queue
+        # depth or wait value reaches the body; the WARNING below names the bound
+        # only, and it is DISTINCT from the deadline/probe warnings so queueing is
+        # separable from hanging in Railway logs.
+        #
+        # 📌 A distinct USER-VISIBLE "waiting for the connection" state — different
+        # from "validating" — plus the long-wait card and `Stop waiting` are
+        # **Phase 153.4's** (D-05 / D-29's UI clause). 153.4 may re-map this arm
+        # onto 153.1's honest `serialized` code once that lands. ⛔ Nothing here
+        # depends on it.
+        logger.warning(
+            "validate_key: MT5 terminal busy — gave up queueing at the %.0fs "
+            "acquisition bound (serialized, not hung; D-29)",
+            _MT5_LEASE_WAIT_S,
+        )
+        raise VenueTransientHTTPException(
+            status_code=424,
+            code="NETWORK_UNAVAILABLE",
+            detail=NETWORK_ERROR_DETAIL,
+            recoverable=True,
+        )
 
 
 @router.post("/validate-key")

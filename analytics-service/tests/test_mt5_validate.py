@@ -66,7 +66,23 @@ from services.mt5_client import (
     MT5_VALIDATE_REQUEST_TIMEOUT_S,
     Mt5ClientError,
 )
+from services import mt5_concurrency
 from tests.limiter_stub import evict_module, patch_shared_limiter
+
+
+@pytest.fixture(autouse=True)
+def _reset_mt5_terminal_locks():
+    """153.3-04: the validate path now takes the process-wide terminal lease, so a
+    Lock minted here must never leak into another test — including the concurrency
+    and derive suites, which share this ONE registry when pytest runs all of them.
+
+    Load-bearing beyond hygiene: an ``asyncio.Lock`` binds to the event loop on its
+    first CONTENDED use, and pytest-asyncio gives each test a fresh loop — a lock
+    carried over from a contended case would raise "bound to a different event
+    loop" in the next one."""
+    mt5_concurrency._MT5_TERMINAL_LOCKS.clear()
+    yield
+    mt5_concurrency._MT5_TERMINAL_LOCKS.clear()
 
 
 @pytest.fixture()
@@ -730,6 +746,223 @@ async def test_mt5_end_to_end_deadline_still_releases_the_session(
     client.close.assert_not_called()
 
 
+# --------------------------------------------------------------------------- #
+# THE TERMINAL LEASE (153.3-04 / D-29) — this path used to be the ONE caller that
+# skipped it.
+#
+# `job_worker.py` (x2) and `allocator_positions.py` all take
+# `_mt5_terminal_lock_for`; `routers/exchange.py` took it ZERO times. Two wizard
+# submissions therefore both called login(...) on the ONE shared Wine terminal and
+# made each OTHER fail through the mismatch bracket, instead of queueing.
+#
+# ⚠️ The oracle is BLOCKING/ORDERING, never "a lease object was entered": a lease
+# built on a second registry, or on a differently-formatted key, enters and exits
+# perfectly happily while serializing nothing.
+# --------------------------------------------------------------------------- #
+
+
+def _expected_terminal_key(host: str, port: int) -> str:
+    """The key Mt5Client itself would produce — computed by CALLING the shipped
+    property, never by retyping its format here. The three job sites key on
+    `Mt5Client.terminal_key`, so if the router formats the key differently the two
+    resolve to DIFFERENT Lock objects and serialize nothing (MT5CONC-02 /
+    151-RESEARCH Pitfall 2) while every lock still "works"."""
+    from types import SimpleNamespace
+
+    from services.mt5_client import Mt5Client
+
+    return Mt5Client.terminal_key.fget(SimpleNamespace(_host=host, _port=port))
+
+
+async def test_two_concurrent_validates_are_serialized_on_the_terminal(
+    exchange_router,
+):
+    """⭐ THE POINT OF PLAN 153.3-04 (D-29, T-153.3-17).
+
+    The failure this prevents: two wizard submissions interleaving `login()` on the
+    ONE shared Wine terminal. MT5 binds one account per terminal AT A TIME, so the
+    second login re-points the terminal under the first caller — today they make
+    each OTHER fail via the mismatch bracket rather than queueing
+    (153-EVIDENCE §4). Under the lease the second caller WAITS.
+
+    Asserted as ORDERING, not as "both succeeded": both succeed under the defect too
+    whenever the interleave happens to miss. `login` sleeps inside the worker thread
+    precisely so an unserialized second caller WOULD overlap it.
+    """
+    router = exchange_router
+    events: list[str] = []
+
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
+
+    def _slow_login(*_a, **_k):
+        events.append("login-start")
+        time.sleep(0.1)
+        events.append("login-end")
+
+    client.login = MagicMock(side_effect=_slow_login)
+    client.release = MagicMock(side_effect=lambda: events.append("release"))
+    _install_mt5_client(router, client)
+
+    results = await asyncio.gather(
+        _call(router, _make_req()), _call(router, _make_req())
+    )
+
+    assert results == [{"valid": True, "read_only": True}] * 2
+    assert events == ["login-start", "login-end", "release"] * 2, (
+        "the second validate's login started before the first released the "
+        "terminal — the lease is not being taken (or is keyed differently from "
+        f"Mt5Client.terminal_key). Observed: {events}"
+    )
+
+
+async def test_mt5_terminal_busy_refuses_transiently_and_never_constructs_a_client(
+    exchange_router, monkeypatch
+):
+    """⭐ THE BOUNDED ACQUISITION (D-29). An interactive validate must be able to
+    give up waiting for the terminal WITHOUT waiting for the terminal — its own
+    operation deadline never starts until it HOLDS the terminal, so an unbounded
+    queue wait would blow the client budget (D-26) with no verdict at all.
+
+    Three things asserted, each with its own failure mode:
+      * 424 + NETWORK_ERROR_DETAIL — the EXISTING transient arm, honestly
+        recoverable ("try again" is real advice: the terminal frees up). NEVER
+        valid:true (fail CLOSED) and NEVER the auth arm — a busy terminal is OUR
+        infrastructure, not the user's key.
+      * `Mt5Client` was never CONSTRUCTED — waiting for the terminal must not also
+        burn a socket, and construction is the very thing that races.
+      * the body leaks no infrastructure (WIZFORM-03 / T-153.3-20): no terminal
+        key, host or port.
+    """
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
+    factory = _install_mt5_client(router, client)
+
+    # Somebody else holds the terminal for longer than the interactive bound.
+    held = mt5_concurrency._mt5_terminal_lock_for(
+        _expected_terminal_key("mt5-gw.internal", 18812)
+    )
+    await held.acquire()
+    monkeypatch.setattr(router, "_MT5_LEASE_WAIT_S", 0.05)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    assert ei.value.status_code != 500
+    assert ei.value.detail != AUTH_FAILED_DETAIL
+    assert "authentication failed" not in ei.value.detail.lower()
+
+    factory.assert_not_called()
+    client.release.assert_not_called()
+    client.close.assert_not_called()
+
+    body = ei.value.detail.lower()
+    for leak in ("mt5-gw.internal", "18812", "terminal", "lease", "queue", "lock"):
+        assert leak not in body, f"the busy refusal leaked infrastructure: {leak!r}"
+
+    # The real holder still holds it — a refused waiter released nothing.
+    assert held.locked()
+    held.release()
+
+
+async def test_the_lease_wait_does_not_consume_the_operation_deadline(
+    exchange_router, monkeypatch
+):
+    """⭐ PLACEMENT — the acquisition wait must sit OUTSIDE the end-to-end deadline.
+
+    The failure this prevents: wrapping the lease acquisition INSIDE
+    `_MT5_VALIDATE_DEADLINE_S`. Then the two budgets silently share one number and a
+    caller that queued behind another submission gets a TRUNCATED probe — or, as
+    here, no probe at all: it would answer 424 "hung terminal" having never touched
+    the terminal, while the honest verdict was 0.2s away.
+
+    The terminal is held for 0.5s; the OPERATION deadline is 0.3s. Correct placement
+    ⇒ the deadline starts when we HOLD the terminal and the (mocked, instant) probe
+    finishes well inside it. Inverted placement ⇒ the deadline fires while still
+    queueing and this reds with the transient 424."""
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
+    _install_mt5_client(router, client)
+
+    held = mt5_concurrency._mt5_terminal_lock_for(
+        _expected_terminal_key("mt5-gw.internal", 18812)
+    )
+    await held.acquire()
+
+    async def _release_later():
+        await asyncio.sleep(0.5)
+        held.release()
+
+    releaser = asyncio.create_task(_release_later())
+    # Far LONGER than the operation deadline, so the two cannot be confused.
+    monkeypatch.setattr(router, "_MT5_LEASE_WAIT_S", 5.0)
+    monkeypatch.setattr(router, "_MT5_VALIDATE_DEADLINE_S", 0.3)
+
+    result = await _call(router, _make_req())
+
+    await releaser
+    assert result == {"valid": True, "read_only": True}, (
+        "the queue wait was charged to the operation deadline — a caller that "
+        "waited its turn is given a truncated probe (or none at all)"
+    )
+    client.release.assert_called_once()
+
+
+async def test_validate_leases_the_key_mt5client_itself_would_produce(exchange_router):
+    """⭐ The key-format assertion. The router must hold the lease BEFORE
+    constructing the client (construction opens the racing rpyc socket), so it
+    cannot ask `Mt5Client.terminal_key` for the key — it re-derives it from the same
+    host/port. A divergent format ("mt5-gw.internal-18812", or a lowercased host)
+    yields a DIFFERENT Lock object from the one the three job sites take, and the
+    wizard would serialize only against ITSELF while still racing every worker job.
+
+    Also asserts the lock is genuinely HELD during the probe — a lease that acquired
+    a Lock nobody else uses would satisfy the key assertion alone."""
+    router = exchange_router
+    expected_key = _expected_terminal_key("mt5-gw.internal", 18812)
+    observed: list[bool] = []
+
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
+    # Runs INSIDE the probe thread, i.e. while the lease is held.
+    client.login = MagicMock(
+        side_effect=lambda *a, **k: observed.append(
+            mt5_concurrency._MT5_TERMINAL_LOCKS.get(expected_key) is not None
+            and mt5_concurrency._MT5_TERMINAL_LOCKS[expected_key].locked()
+        )
+    )
+    _install_mt5_client(router, client)
+
+    assert await _call(router, _make_req()) == {"valid": True, "read_only": True}
+
+    assert list(mt5_concurrency._MT5_TERMINAL_LOCKS) == [expected_key], (
+        "the router leased a key the job sites do not use — two Lock objects for "
+        "the ONE terminal, and zero serialization against the worker"
+    )
+    assert observed == [True], (
+        "the terminal lock was not held while the probe ran — the lease is not "
+        "wrapping the probe"
+    )
+    # Released on the way out: a stranded lock wedges every future caller.
+    assert not mt5_concurrency._MT5_TERMINAL_LOCKS[expected_key].locked()
+
+
 async def test_mt5_validate_never_calls_close_on_the_success_path(exchange_router):
     """⭐ D-30, stated POSITIVELY: the validate path calls release() and calls
     close() on NO path.
@@ -813,16 +1046,25 @@ def test_mt5_validate_worst_case_stays_inside_the_client_budget(exchange_router)
 
     120_000 is HAND-TYPED, not imported: the TS-side budget is Phase 153.4's to own
     (`seam-budgets.invariant.test.ts`), and a Python test that imported it would
-    move silently with it. Today: 75 + 10 = 85s. Plan 153.3-04 adds a bounded 20s
-    lease wait for 105s, still 15s inside."""
+    move silently with it.
+
+    EXTENDED by plan 153.3-04: the lease wait is now part of the TRUE end-to-end
+    worst case and is included here. D-04's shape — the lock-queue wait sits INSIDE
+    the client's budget, because the browser is waiting through it exactly as it
+    waits through the probe. 20 (lease) + 75 (deadline) + 10 (release) = 105s, 15s
+    inside the ceiling. Spending that headroom twice is what this test refuses."""
     router = exchange_router
     worst_case_ms = (
-        router._MT5_VALIDATE_DEADLINE_S + router._MT5_RELEASE_TIMEOUT_S
+        router._MT5_LEASE_WAIT_S
+        + router._MT5_VALIDATE_DEADLINE_S
+        + router._MT5_RELEASE_TIMEOUT_S
     ) * 1000
-    assert worst_case_ms == 85_000
+    assert worst_case_ms == 105_000
     assert worst_case_ms < 120_000
-    # The lease wait plan 153.3-04 adds must still fit.
-    assert worst_case_ms + 20_000 < 120_000
+    # The lease wait is a REAL term, not a rounding allowance: it must be the
+    # interactive bound, and it must not have quietly become unbounded/zero.
+    assert router._MT5_LEASE_WAIT_S == 20.0
+    assert mt5_concurrency._MT5_LEASE_WAIT_S == router._MT5_LEASE_WAIT_S
 
 
 def test_worker_request_timeout_is_unmoved_by_the_validate_chain():

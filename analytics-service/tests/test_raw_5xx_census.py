@@ -220,7 +220,14 @@ EXPECTED_HTTPEXCEPTION_SUBCLASSES = 1
 #: The three MT5 probe-arm sites now resolve to the enclosing ``_connect_and_probe``
 #: rather than ``_validate_mt5_key``: connect+probe moved into one inner coroutine so
 #: a single deadline could bound them. Same function, same arms, one scope deeper.
-EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 9
+#: 9 -> 10 (2026-08-09, Phase 153.3-04 / D-29): the MT5 validate path now takes the
+#: shared terminal lease with a BOUNDED acquisition wait, and a caller still queued
+#: at that bound routes to the SAME transient arm — a busy terminal is recoverable
+#: ("try again" is honest advice: it frees up) and is OUR infrastructure, never the
+#: user's key. A sixth ``VenueTransientHTTPException(424)`` construction; no new
+#: user-facing code is minted (153.1 owns the TS code table) and it is a 4xx like
+#: every other site, so blind spot (b) stays LATENT rather than live.
+EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 10
 
 #: Vacuity fence. A scanner that matched nothing would report agreement with the
 #: quarantine forever, so the scan must prove it saw the tree. Loose floors on

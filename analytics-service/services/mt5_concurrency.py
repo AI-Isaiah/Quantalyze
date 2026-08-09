@@ -87,10 +87,11 @@ _MT5_RESTART_TIMEOUT_S: Final[float] = float(
 # strictly worse outcome than waiting. This is why the three existing job call sites
 # need no edit.
 #
-# ⛔ It is NOT an account cap. MT5 binds one account per terminal AT A TIME — a
+# ⛔ It caps CONCURRENCY, and nothing else. It is emphatically not a limit on how
+# many accounts exist: MT5 binds one account per terminal AT A TIME — a
 # serialization constraint, not a capacity one — so ONE terminal cycles through
-# hundreds of accounts across a day. Only concurrency is one; the number of MT5
-# clients is not architecturally limited (D-29, REVISED 2026-08-08).
+# hundreds of accounts across a day. The number of MT5 clients is not
+# architecturally limited (D-29, REVISED 2026-08-08).
 _MT5_LEASE_WAIT_S: Final[float] = float(os.getenv("MT5_LEASE_WAIT_S", "20.0"))
 
 # Log a lease acquisition only when the caller actually had to QUEUE for a
