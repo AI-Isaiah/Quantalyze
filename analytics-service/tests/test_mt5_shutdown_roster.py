@@ -71,18 +71,29 @@ SCANNED_FILE_FLOOR = 90
 #: admitted by PASSING the lease check, never by lowering this floor.
 EXPECTED_RESTART_SITES = 4
 
-#: ⭐ THE INDIRECTION PIN. `restart` is also reached as a bare ATTRIBUTE reference —
-#: `mt5_concurrency.py:88` passes `client.restart` to `asyncio.to_thread` — which is
+#: ⭐ THE INDIRECTION PIN. A teardown verb is also reachable as a bare REFERENCE —
+#: `mt5_concurrency.py:119` passes `client.restart` to `asyncio.to_thread` — which is
 #: an `ast.Attribute`, NOT an `ast.Call`, and is therefore invisible to the call
-#: predicate below. Pinning the set of files that take such a reference means a new
+#: predicate below. Pinning the sites that take such a reference means a new
 #: indirection has to be admitted DELIBERATELY rather than walking past the guard.
+#:
+#: ⭐ ONE pin for EVERY verb, keyed by (relpath, name). It was originally a
+#: `restart`-only pin, and that asymmetry was the hole: `asyncio.to_thread(
+#: client.shutdown)` reached the teardown D-35 deleted while this file reported
+#: green — the guard written to prove the class was closed had the class open
+#: inside it. The cause was a hand-maintained pin covering one verb out of a set of
+#: three, so the remedy is mechanical rather than another hand-typed list: the
+#: reference scan derives its names from `_TEARDOWN_NAMES`, which is the UNION of
+#: the two call predicates below. A verb added to either predicate is pinned as a
+#: bare reference in the same commit, for free, and this asymmetry cannot re-open.
 #:
 #: ⚠️ Measured, and it differs from the plan's expectation: `services/mt5_client.py`
 #: is NOT in this set. It DEFINES `restart` (an `ast.FunctionDef`) and never takes a
-#: reference to it, so no `ast.Attribute` named `restart` exists in that file. The
-#: definition is pinned separately by `RESTART_DEFINITION_FILE`.
-RESTART_ATTRIBUTE_REFERENCE_FILES: frozenset[str] = frozenset(
-    {"services/mt5_concurrency.py"}
+#: reference to it, and its one `stale.shutdown()` is a CALL — pinned by the roster
+#: above, deliberately not double-counted here. The definition is pinned separately
+#: by `RESTART_DEFINITION_FILE`.
+TEARDOWN_BARE_REFERENCE_SITES: frozenset[tuple[str, str]] = frozenset(
+    {("services/mt5_concurrency.py", "restart")}
 )
 
 #: The single file that DEFINES the restart verb. Pinned so that "the definition
@@ -98,6 +109,14 @@ _LEASE_CONTEXT_MANAGERS: frozenset[str] = frozenset(
 
 _SHUTDOWN_NAMES: frozenset[str] = frozenset({"shutdown"})
 _RESTART_NAMES: frozenset[str] = frozenset({"restart", "_mt5_bounded_restart"})
+
+#: ⭐ Every verb the roster reasons about, DERIVED from the two call predicates
+#: rather than typed a second time. This is the single mechanism behind
+#: `TEARDOWN_BARE_REFERENCE_SITES`: whatever the Call predicates classify, the
+#: bare-reference predicate pins. ⛔ Never replace this with a literal — a
+#: hand-maintained second copy is precisely how `shutdown` came to be pinned as a
+#: call but not as a reference.
+_TEARDOWN_NAMES: frozenset[str] = _SHUTDOWN_NAMES | _RESTART_NAMES
 
 _ROOT = Path(__file__).resolve().parents[1]  # analytics-service/
 
@@ -156,10 +175,19 @@ class _Scan(ast.NodeVisitor):
         self.qualnames: dict[tuple[str, int], str] = {}
         #: (relpath, outermost enclosing def, lineno, lease_held)
         self.restart_sites: list[tuple[str, str, int, bool]] = []
-        self.restart_attribute_refs: list[tuple[str, int]] = []
+        #: (relpath, verb, lineno) for every BARE reference to a teardown verb —
+        #: an `ast.Attribute`/`ast.Name` that is NOT the callee of a Call.
+        self.bare_teardown_refs: list[tuple[str, str, int]] = []
         self.defines_restart = False
         self._func_stack: list[str] = ["<module>"]
         self._lease_depth = 0
+        #: The callee nodes already accounted for as CALLS. Identity-keyed (`ast`
+        #: nodes hash by identity), and every member is kept alive by the tree
+        #: being walked. Without this, `stale.shutdown()` would register as its own
+        #: indirection: the roster would then be pinning the permitted CALL a second
+        #: time and would go blind to a real `to_thread(client.shutdown)` added
+        #: beside it in the same file.
+        self._call_callees: set[ast.AST] = set()
 
     # -- structure -------------------------------------------------------- #
 
@@ -196,6 +224,9 @@ class _Scan(ast.NodeVisitor):
         return chain[0], ".".join(chain)
 
     def visit_Call(self, node: ast.Call) -> None:
+        # Registered BEFORE descending: `generic_visit` reaches `node.func` on the
+        # way down, and the bare-reference predicate consults this set there.
+        self._call_callees.add(node.func)
         name = _called_name(node)
         if name in _SHUTDOWN_NAMES:
             outer, qualname = self._enclosing()
@@ -209,9 +240,26 @@ class _Scan(ast.NodeVisitor):
             self.qualnames[(self.relpath, node.lineno)] = qualname
         self.generic_visit(node)
 
+    def _note_bare_reference(self, node: ast.expr, name: str) -> None:
+        """Record a teardown verb reached WITHOUT calling it.
+
+        ⭐ Symmetric across every member of `_TEARDOWN_NAMES`. `shutdown` used to be
+        matched by the Call predicate alone, so `asyncio.to_thread(client.shutdown)`
+        handed the one forbidden teardown to a worker thread and this module stayed
+        green. Both syntactic forms are covered for the same reason `_called_name`
+        covers both: `client.shutdown` is an `ast.Attribute`, and a
+        `from x import shutdown` / `to_thread(shutdown)` reach is an `ast.Name` —
+        matching only the first leaves the simplest bypass open.
+        """
+        if name in _TEARDOWN_NAMES and node not in self._call_callees:
+            self.bare_teardown_refs.append((self.relpath, name, node.lineno))
+
     def visit_Attribute(self, node: ast.Attribute) -> None:
-        if node.attr == "restart":
-            self.restart_attribute_refs.append((self.relpath, node.lineno))
+        self._note_bare_reference(node, node.attr)
+        self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        self._note_bare_reference(node, node.id)
         self.generic_visit(node)
 
 
@@ -370,25 +418,45 @@ def test_every_restart_call_site_holds_the_terminal_lease(
 
 
 # --------------------------------------------------------------------------- #
-# 3. The indirection pin — `client.restart` as a bare attribute reference
+# 3. The indirection pin — a teardown verb reached as a bare REFERENCE
 # --------------------------------------------------------------------------- #
 
 
-def test_restart_is_reached_by_reference_only_where_we_expect(
+def test_teardown_verbs_are_reached_by_reference_only_where_we_expect(
     tree_scan: list[_Scan],
 ) -> None:
-    """`mt5_concurrency.py:88` passes `client.restart` to `asyncio.to_thread` — an
+    """`mt5_concurrency.py:119` passes `client.restart` to `asyncio.to_thread` — an
     `ast.Attribute`, not an `ast.Call`, so the roster predicate above is blind to
     it. Without this pin, a new `to_thread(client.restart)` anywhere would reach the
-    one permitted teardown with no lease check applied to it at all."""
+    one permitted teardown with no lease check applied to it at all.
+
+    ⭐ EVERY verb, not just `restart`. This assertion once covered `restart` alone,
+    which left `asyncio.to_thread(client.shutdown)` — the call D-35 exists to
+    forbid — invisible to the entire module. The scan now derives its names from
+    `_TEARDOWN_NAMES`, so the two halves cannot drift apart again.
+    """
     referencing = {
-        rel for scan in tree_scan for rel, _ in scan.restart_attribute_refs
+        (rel, name) for scan in tree_scan for rel, name, _ in scan.bare_teardown_refs
     }
-    assert referencing == RESTART_ATTRIBUTE_REFERENCE_FILES, (
-        f"files taking a bare `.restart` reference changed: {sorted(referencing)} "
-        f"!= {sorted(RESTART_ATTRIBUTE_REFERENCE_FILES)}. A reference can be handed "
-        "to to_thread/gather and invoked far from any lease. Admit a new one here "
-        "deliberately, having checked it is lease-held at the point it RUNS."
+    located = {
+        (rel, name): line
+        for scan in tree_scan
+        for rel, name, line in scan.bare_teardown_refs
+    }
+    assert referencing == TEARDOWN_BARE_REFERENCE_SITES, (
+        "bare teardown references changed: "
+        + ", ".join(
+            f"{rel}:{located[(rel, name)]} -> .{name}"
+            for rel, name in sorted(referencing ^ TEARDOWN_BARE_REFERENCE_SITES)
+            if (rel, name) in located
+        )
+        + f" | derived {sorted(referencing)} != pinned "
+        f"{sorted(TEARDOWN_BARE_REFERENCE_SITES)}. A reference is not a call: it "
+        "can be handed to to_thread/gather/partial and invoked far from any lease, "
+        "so neither the roster nor the lease check above sees it. A NEW `.shutdown` "
+        "reference is the D-35 teardown returning through the back door — do not "
+        "admit it. A new `.restart` reference must be admitted here deliberately, "
+        "having checked it is lease-held at the point it RUNS."
     )
 
     definers = {scan.relpath for scan in tree_scan if scan.defines_restart}
@@ -527,3 +595,73 @@ def test_selftest_a_closure_defined_inside_a_lease_is_not_counted_as_held() -> N
     ]
     # …and the full chain names the closure, so the failure message stays readable.
     assert list(scan.qualnames.values()) == ["outer.later"]
+
+
+# --------------------------------------------------------------------------- #
+# 7. SELF-TEST — the BARE-REFERENCE predicate, and its symmetry across verbs
+# --------------------------------------------------------------------------- #
+#
+# ⛔ Load-bearing, not decorative. The real tree contains exactly ONE bare
+# reference and it is a `.restart`, so NOTHING in the production source witnesses
+# the `shutdown` half of the pin above: it would sit there matching nothing and
+# reporting green — the same "a scanner that matches nothing looks identical to a
+# clean codebase" failure this module was written to avoid, reproduced inside the
+# remedy for it. These synthetics are that missing witness.
+
+
+def test_selftest_a_bare_shutdown_reference_is_caught() -> None:
+    """⭐ THE BYPASS, stated as a case. `asyncio.to_thread(client.shutdown)` calls
+    nothing at the reference site, so the roster's `ast.Call` predicate never sees
+    it — yet the worker thread invokes the very teardown D-35 deleted, on the ONE
+    shared IPC pipe, with no lease held. Before this predicate covered `shutdown`,
+    this exact line passed every assertion in this file."""
+    src = (
+        "async def sneaky(client):\n"
+        "    await asyncio.to_thread(client.shutdown)\n"
+    )
+    scan = scan_source(src, "synthetic/h.py")
+    assert [(name, line) for _, name, line in scan.bare_teardown_refs] == [
+        ("shutdown", 2)
+    ]
+    # …and it is genuinely invisible to the call predicate, which is WHY the
+    # reference pin has to exist rather than being folded into the roster.
+    assert scan.shutdown_sites == []
+
+
+def test_selftest_a_shutdown_call_is_not_double_counted_as_a_reference() -> None:
+    """The converse. `stale.shutdown()` is an `ast.Attribute` wrapped in an
+    `ast.Call`; it belongs to the roster and must NOT also enter the reference pin.
+    If it did, `services/mt5_client.py` would be permanently pinned as a referencing
+    file and a real `to_thread(self._mt5.shutdown)` added beside it would change
+    nothing the pin can see."""
+    src = "def teardown(stale):\n    stale.shutdown()\n"
+    scan = scan_source(src, "synthetic/i.py")
+    assert scan.bare_teardown_refs == []
+    assert [func for _, func, _ in scan.shutdown_sites] == ["teardown"]
+
+
+def test_selftest_bare_reference_predicate_covers_every_teardown_verb() -> None:
+    """⭐ THE SYMMETRY ITSELF, asserted rather than trusted.
+
+    The defect this section closes was not "a missing `shutdown` case" — it was a
+    reference pin hand-maintained for ONE member of a set of three. So the property
+    under test is mechanical: for EVERY name either call predicate classifies, both
+    syntactic forms of a bare reference are caught. Add a verb to `_SHUTDOWN_NAMES`
+    or `_RESTART_NAMES` and it is covered here the same day; re-split the mechanism
+    into per-verb lists and this reds.
+    """
+    # ⛔ Anti-vacuity: a loop over an empty (or halved) set passes trivially, which
+    # is the exact shape of the bug. The membership is asserted, not counted.
+    assert {"shutdown", "restart"} <= _TEARDOWN_NAMES, _TEARDOWN_NAMES
+    assert _TEARDOWN_NAMES == _SHUTDOWN_NAMES | _RESTART_NAMES
+
+    for verb in sorted(_TEARDOWN_NAMES):
+        attribute_form = f"def f(client):\n    return to_thread(client.{verb})\n"
+        assert [
+            name for _, name, _ in scan_source(attribute_form, "s.py").bare_teardown_refs
+        ] == [verb], f"bare `.{verb}` attribute reference not caught"
+
+        name_form = f"def f():\n    return to_thread({verb})\n"
+        assert [
+            name for _, name, _ in scan_source(name_form, "s.py").bare_teardown_refs
+        ] == [verb], f"bare `{verb}` name reference not caught"
