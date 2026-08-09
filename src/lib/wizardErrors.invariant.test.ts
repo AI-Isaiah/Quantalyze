@@ -240,7 +240,21 @@ const ROUTES: readonly RouteUnderTest[] = [
     rosterFile: join(WIZARD_STEPS, "SubmitStep.tsx"),
     rosterName: "KNOWN_FINALIZE_CODES",
     statusRe: "[45]\\d\\d",
-    expectedSites: 25,
+    // 25 → 27 (153.2-04 / WIZFORM-04 / D-14b). TWO guards were ADDED, both
+    // with an honest code, and the literal is bumped in the SAME commit the
+    // route starts emitting them — which is what this assertion's own failure
+    // message instructs. They are:
+    //   · `KEY_SCOPE_CHECK_UNAVAILABLE` (502) — a probe body our schema could
+    //     not read, split off the `probe_error` arm because it is PERMANENT;
+    //   · `SEAM_MISCONFIGURED` (500) — `INTERNAL_API_TOKEN` unset, split off
+    //     the generic tail because it is OUR configuration, not a blip.
+    // Both were previously reported to the user as `KEY_NETWORK_TIMEOUT` with a
+    // Retry that could never succeed. ⛔ Neither is a new REJECTION: both
+    // conditions already blocked finalize, and both still fail CLOSED — only
+    // what the user is told changed. Both codes are already members of
+    // `KNOWN_FINALIZE_CODES`, so the coverage assertion below is satisfied
+    // without a roster edit (verified at source, not assumed).
+    expectedSites: 27,
   },
 ];
 
@@ -470,8 +484,17 @@ function deriveRejectionSites(
  */
 const KNOWN_CODELESS_FINALIZE_REJECTIONS = 5;
 
-/** Every rejection site on `finalize-wizard`, coded or not (measured 153.1-06). */
-const EXPECTED_FINALIZE_REJECTION_SITES = 30;
+/**
+ * Every rejection site on `finalize-wizard`, coded or not (measured 153.1-06).
+ *
+ * 30 → 32 (153.2-04): the two split arms above. ⚠️ Both arrive CODED, so
+ * `KNOWN_CODELESS_FINALIZE_REJECTIONS` stays at 5 — the ledger of debt did not
+ * grow, and the arithmetic this pair feeds (32 − 27 = 5) still holds. That is
+ * the point of keeping the two numbers separate: a NEW code-less rejection
+ * would move this literal without moving `expectedSites`, and the difference
+ * assertion would name it.
+ */
+const EXPECTED_FINALIZE_REJECTION_SITES = 32;
 
 /**
  * HAND-TYPED. The two routes 142.2-07 split, by LABEL.

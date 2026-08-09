@@ -5,7 +5,11 @@ import { withAuth } from "@/lib/api/withAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
 import { STRATEGY_NAMES, canonicalizeExchangeList } from "@/lib/constants";
-import { MAGNITUDE_CAPS, isCryptoExchange } from "@/lib/closed-sets";
+import {
+  MAGNITUDE_CAPS,
+  isCryptoExchange,
+  venueSupportsScopeProbe,
+} from "@/lib/closed-sets";
 import { isValidDollar } from "@/lib/dollar-validation";
 import {
   OWN_CAPITAL,
@@ -140,11 +144,21 @@ const MAX_COMPOSITE_MEMBERS = 10;
  * class cannot drift apart again.
  *
  * A parse miss resolves to this sentinel rather than throwing or returning a
- * fabricated triple, so it lands on the EXISTING `probe_error` arm below: a
- * body that could not be read is a probe that did not run, which is the
- * fail-CLOSED doctrine this file already states. Carrying no scope fields at
- * all is deliberate — it makes it structurally impossible for a parse miss to
- * present a scope verdict, however the gates below are later reordered.
+ * fabricated triple: a body that could not be read is a probe that did not run,
+ * which is the fail-CLOSED doctrine this file already states. Carrying no scope
+ * fields at all is deliberate — it makes it structurally impossible for a parse
+ * miss to present a scope verdict, however the gates below are later reordered.
+ *
+ * ⚠️ 153.2-04 / WIZFORM-04 / D-14b — IT NO LONGER SHARES THE `probe_error` ARM.
+ * It used to fall through to it, because it carries the same field. It now has
+ * its own arm, reached by IDENTITY (`livePerms === PROBE_PARSE_MISS`) so an
+ * upstream body that happens to carry `probe_error: true` cannot be mistaken for
+ * it. The security half is unchanged — both still fail CLOSED, both still block
+ * finalize — but a body OUR schema cannot read stays unreadable until a deploy,
+ * so it is reported as permanent instead of as a network blip with a Retry.
+ * ⛔ Keep this a module-scope singleton: the identity check below is the only
+ * thing separating the two, and a per-call object literal would silently merge
+ * them again.
  */
 const PROBE_PARSE_MISS = { probe_error: true } as const;
 type ProbeParseMiss = typeof PROBE_PARSE_MISS;
@@ -165,6 +179,29 @@ class ProbeUpstreamError extends Error {
   constructor(readonly status: number) {
     super(`permissions probe failed: ${status}`);
     this.name = "ProbeUpstreamError";
+  }
+}
+
+/**
+ * WIZFORM-04 / D-14b — OUR OWN configuration is wrong, and no retry can fix it.
+ *
+ * `fetchLivePermissions` refuses to call the seam when `INTERNAL_API_TOKEN` is
+ * unset. That threw a BARE `Error`, which landed on the generic tail of the
+ * catch below and was reported to the user as `KEY_NETWORK_TIMEOUT` — "we could
+ * not reach the exchange", with a Retry control. Every word of that is false:
+ * nothing was reached because nothing was attempted, the exchange was never
+ * involved, and the setting stays wrong until we fix it and redeploy. The user
+ * is handed a button whose only possible outcome is the same message again,
+ * which is the five-clicks behaviour this phase exists to end.
+ *
+ * A distinct CLASS rather than a status sniff, for the same reason
+ * `ProbeUpstreamError` is one: a status that survives only inside a message
+ * string cannot be branched on without parsing prose.
+ */
+class ProbeMisconfiguredError extends Error {
+  constructor(setting: string) {
+    super(`permissions probe misconfigured: ${setting} is not configured`);
+    this.name = "ProbeMisconfiguredError";
   }
 }
 
@@ -213,7 +250,10 @@ async function fetchLivePermissions(
 ): Promise<LivePermissions | ProbeParseMiss> {
   const internalToken = process.env.INTERNAL_API_TOKEN;
   if (!internalToken) {
-    throw new Error("INTERNAL_API_TOKEN is not configured");
+    // D-14b — a TYPED throw, so the catch can tell our own misconfiguration
+    // apart from a transport failure. The setting NAME is the only payload; the
+    // value is absent by definition, so there is nothing here to redact.
+    throw new ProbeMisconfiguredError("INTERNAL_API_TOKEN");
   }
   const res = await resilientFetch(
     "keys-permissions",
@@ -654,7 +694,48 @@ function validatePayload(
  */
 async function runScopeBroadeningProbe(
   apiKeyId: string,
+  venue: string | null,
 ): Promise<{ ok: true } | { ok: false; response: NextResponse }> {
+  // WIZFORM-04 / MT5-14(a) / D-06 — THE CAPABILITY SKIP. Four things about it,
+  // because this is a SECURITY control and a skip inside one needs its
+  // justification written where the skip is, not in a plan file:
+  //
+  // 1. This is the ASVS V4 scope-broadening defence: a key broadened to
+  //    trade/withdraw between Connect and Submit is caught here. The skip is a
+  //    deliberate PER-VENUE exemption, not a relaxation of the control — every
+  //    venue that answers a per-key permissions probe still gets probed, on
+  //    every submit, exactly as before.
+  //
+  // 2. The exempt venue is exempt because the question has no answer, not
+  //    because we decided to trust it. MT5 read-only is enforced STRUCTURALLY
+  //    (`Mt5Client` composes only read methods — there is no order / withdraw /
+  //    transfer surface that could be broadened) and BEHAVIOURALLY (`order_check`
+  //    is rejected for a master login, proven at `_validate_mt5_key`), and the
+  //    venue exposes no per-key scope endpoint at all. Demanding a ccxt
+  //    permissions probe from it produced a PERMANENT failure dressed as a
+  //    network blip, and that is what blocked every MT5 submit.
+  //
+  // 3. ⭐ THE PREDICATE ANSWERS `true` FOR null, "" AND ANY UNKNOWN VENUE, and
+  //    that direction is the whole safety of this line. `venue` is `null`
+  //    whenever the `api_keys.exchange` read faulted, and for a composite member
+  //    whose embed came back empty. Those keys are STILL PROBED. Skipping on
+  //    `null` would silently disable the defence for every key whose venue read
+  //    blipped — a control that fails open on a transient DB error is not a
+  //    control. Read it through the predicate; never index the capability record.
+  //
+  // 4. ⛔ It is `venueSupportsScopeProbe(venue)` — a CAPABILITY question — and
+  //    never an equality test against a particular venue's name. (The literal
+  //    is not written out even in this comment: the acceptance grep proving
+  //    this route never names the venue runs over these lines too, so quoting
+  //    it here would make the prose satisfy its own gate — a trap three sibling
+  //    plans in this phase have already walked into.) The answer lives in the
+  //    capability record precisely so a second venue with the same shape costs
+  //    one row instead of a repo sweep for instance checks — and so that sFOX,
+  //    which asks a superficially similar question, stays BYTE-UNCHANGED (D-22)
+  //    by simply not carrying the capability.
+  if (!venueSupportsScopeProbe(venue)) {
+    return { ok: true };
+  }
   let livePerms: LivePermissions | ProbeParseMiss;
   try {
     livePerms = await fetchLivePermissions(apiKeyId);
@@ -717,10 +798,77 @@ async function runScopeBroadeningProbe(
         ),
       };
     }
+    // WIZFORM-04 / D-14b — OUR CONFIGURATION IS WRONG, and it is permanent.
+    // BEFORE the generic tail, for the same "more specific claim first" reason
+    // the permanent-status arm above sits where it does.
+    //
+    // What makes it permanent: `INTERNAL_API_TOKEN` unset is a deployment
+    // setting, and a setting stays wrong until a human fixes it and redeploys.
+    // Reported as a network timeout it read "we could not reach the exchange"
+    // and offered a Retry — three untruths and a button that can only fail.
+    // `SEAM_MISCONFIGURED` carries no recoverable action, so `buildEnvelope`
+    // derives `recoverable: false` and NO Retry control renders at all (the
+    // structural suppression, never a prop). It is already a member of
+    // `SubmitStep`'s KNOWN_FINALIZE_CODES — verified at source in this commit,
+    // because an unlisted code falls to UNKNOWN, whose copy IS recoverable, and
+    // the fix would ship invisible with every route-side test green.
+    //
+    // 500, not 502: the fault is OURS, not the venue's. That is the same status
+    // `process-key-client` already answers this class with, so the two agree.
+    if (probeErr instanceof ProbeMisconfiguredError) {
+      return {
+        ok: false,
+        response: NextResponse.json(
+          {
+            code: "SEAM_MISCONFIGURED",
+            error: "Key scope check is not configured",
+          },
+          { status: 500, headers: NO_STORE_HEADERS },
+        ),
+      };
+    }
+    // The generic tail keeps KEY_NETWORK_TIMEOUT for exactly what it honestly
+    // describes: an unclassified TRANSPORT failure, where a retry really can
+    // succeed. ⛔ No retry is issued here — the user's Retry is the only one,
+    // and this route adds no loop (D-07).
     return {
       ok: false,
       response: NextResponse.json(
         { code: "KEY_NETWORK_TIMEOUT", error: "Could not verify key scopes" },
+        { status: 502, headers: NO_STORE_HEADERS },
+      ),
+    };
+  }
+  // WIZFORM-04 / D-14b — THE PARSE MISS IS NOT A NETWORK BLIP.
+  //
+  // Two conditions used to arrive on one arm because they resolve to the same
+  // SHAPE: a body our zod schema could not read (`fetchLivePermissions` returns
+  // the module-scope PROBE_PARSE_MISS sentinel) and a body in which the service
+  // itself reported `probe_error: true`. IDENTITY tells them apart — the
+  // sentinel is one module-scope object and `fetchLivePermissions` returns THAT
+  // reference, so `=== PROBE_PARSE_MISS` cannot be forged by an upstream payload
+  // that happens to carry the same field. (`as const` is a TYPE-level freeze,
+  // not `Object.freeze`; the guarantee here is reference identity, not
+  // immutability, and nothing on this path mutates it.)
+  //
+  // A body our schema cannot read stays unreadable until a deploy changes one
+  // side or the other: PERMANENT, so it takes KEY_SCOPE_CHECK_UNAVAILABLE (the
+  // code this route already uses for a permanent probe condition, already
+  // rostered, already non-recoverable). The SERVICE-REPORTED probe_error stays
+  // on KEY_NETWORK_TIMEOUT — there the upstream really did try and really did
+  // fail, and a retry is a real remedy.
+  //
+  // ⚠️ The sentinel's own contract is preserved: it carries NO scope fields, so
+  // however these gates are later reordered a parse miss can never present a
+  // scope verdict. Both arms still FAIL CLOSED — nothing is promoted either way.
+  if (livePerms === PROBE_PARSE_MISS) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          code: "KEY_SCOPE_CHECK_UNAVAILABLE",
+          error: "Could not read the key scope response",
+        },
         { status: 502, headers: NO_STORE_HEADERS },
       ),
     };
@@ -1006,8 +1154,14 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // Probe runs BEFORE both legacy and unified paths so the
   // scope-broadening defense covers either code path (Phase 19 /
   // Open Question 1 — RETAINED at the thin-adapter layer).
+  //
+  // WIZFORM-04 — `apiKeyExchange` is the venue resolved ~50 lines above for the
+  // asset_class stamp; the probe gate reads the SAME value rather than issuing a
+  // second lookup. It is `null` when that read faulted, and the helper's gate
+  // probes on `null` — same conservative direction `skipAssetClassWrite` takes
+  // just above, for the same reason.
   if (apiKeyId) {
-    const probe = await runScopeBroadeningProbe(apiKeyId);
+    const probe = await runScopeBroadeningProbe(apiKeyId, apiKeyExchange);
     if (!probe.ok) return probe.response;
   }
 
@@ -1081,9 +1235,23 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // SEAM_ROUTE_BUDGETS declaration has to be able to trust: that table
       // declares `keys-permissions × MAX_COMPOSITE_MEMBERS` for this branch,
       // and the two numbers are pinned to each other cross-file.
+      // WIZFORM-04 — the embed carries each member's VENUE, so the same
+      // capability gate the single-key arm uses can be applied per member. The
+      // shape and the to-one embed idiom are lifted verbatim from
+      // `composite/members/route.ts`, which already reads `api_keys ( exchange )`
+      // off this table.
+      //
+      // Gating BOTH call sites is what makes this a CLASS fix. Leaving this one
+      // ungated would be the instance fix: correct for the arm someone happened
+      // to test, and a live per-member probe demand for a venue that has no
+      // answer on the other.
+      //
+      // ⛔ `.limit(MAX_COMPOSITE_MEMBERS + 1)` below is UNTOUCHED — the +1 is the
+      // truncation detector whose arrival IS the refusal, and it is pinned
+      // cross-file against SEAM_ROUTE_BUDGETS.
       const { data: members, error: membersErr } = await compositeAdmin
         .from("strategy_keys")
-        .select("api_key_id")
+        .select("api_key_id, api_keys ( exchange )")
         .eq("strategy_id", fields.strategy_id)
         .order("seq", { ascending: true })
         // ⚠️ cap + 1, AND THE +1 IS THE WHOLE POINT (ME-02). `.limit(cap)`
@@ -1217,11 +1385,25 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           { status: 503, headers: NO_STORE_HEADERS },
         );
       }
-      for (const member of members ?? []) {
+      // `api_key_id` is a to-one FK into `api_keys`, so PostgREST returns a
+      // single embedded object at runtime; the generated types predate this
+      // table, so the row shape is asserted the same way `composite/members`
+      // asserts it. A member whose embed comes back `null` yields a `null`
+      // venue — and is therefore STILL PROBED, by the same fail-toward rule the
+      // single-key arm relies on.
+      const memberRows = (members ?? []) as unknown as Array<{
+        api_key_id: string | null;
+        api_keys: { exchange: string | null } | null;
+      }>;
+      for (const member of memberRows) {
         const memberKeyId =
           typeof member.api_key_id === "string" ? member.api_key_id : null;
         if (!memberKeyId) continue;
-        const probe = await runScopeBroadeningProbe(memberKeyId);
+        const memberVenue =
+          typeof member.api_keys?.exchange === "string"
+            ? member.api_keys.exchange
+            : null;
+        const probe = await runScopeBroadeningProbe(memberKeyId, memberVenue);
         if (!probe.ok) return probe.response;
       }
       // Route to the legacy finalize whose after() block enqueues
