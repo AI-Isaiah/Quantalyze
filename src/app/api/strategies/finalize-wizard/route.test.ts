@@ -1539,11 +1539,20 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
     consoleErr.mockRestore();
   });
 
-  it("audit-2026-05-07 H-0321: maps 22023 (invalid_parameter_value) to 409 with code='draft_state_invalid'", async () => {
+  it("audit-2026-05-07 H-0321: maps 22023 (invalid_parameter_value) to 409 with code='DRAFT_STATE_INVALID'", async () => {
     // PRE-FIX: 22023 lumped with 42501 → 403 "This draft cannot be finalized".
     // POST-FIX: 22023 is a state mismatch (already-published, missing-fields,
     // stale-snapshot), distinct from a true permission denial. 409 lets the
     // client show a refresh nudge rather than a sign-out / no-access prompt.
+    //
+    // 153.1-05 / D-34 — the LITERAL was `draft_state_invalid` (lowercase) until
+    // this plan. That is the one WIRE change in the D-34 reorder, and this
+    // assertion is where it is pinned: lowercase can never be a
+    // `WizardErrorCode`, so the 409 rendered the UNKNOWN card and its
+    // RECOVERABLE copy handed the user a Retry that re-POSTed the identical
+    // request against a draft the DB had already moved past. The uppercase
+    // member (153.1-04) has non-recoverable copy and is admitted to
+    // `KNOWN_FINALIZE_CODES` in this same commit.
     const fetchSpy = mockProbeReadOnly();
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
     routeThroughLegacyFinalize();
@@ -1561,7 +1570,7 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.error).toContain("not in a finalizable state");
-    expect(body.code).toBe("draft_state_invalid");
+    expect(body.code).toBe("DRAFT_STATE_INVALID");
     // The raw status/source details must not leak (P445-style hardening).
     expect(JSON.stringify(body)).not.toContain("source=legacy");
 

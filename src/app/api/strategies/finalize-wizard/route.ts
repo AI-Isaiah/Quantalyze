@@ -570,7 +570,7 @@ async function runScopeBroadeningProbe(
       return {
         ok: false,
         response: NextResponse.json(
-          { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
+          { code: "CIRCUIT_OPEN", error: CIRCUIT_OPEN_COPY },
           {
             status: 503,
             headers: {
@@ -604,8 +604,8 @@ async function runScopeBroadeningProbe(
         ok: false,
         response: NextResponse.json(
           {
-            error: "Could not verify key scopes",
             code: "KEY_SCOPE_CHECK_UNAVAILABLE",
+            error: "Could not verify key scopes",
           },
           { status: 502, headers: NO_STORE_HEADERS },
         ),
@@ -614,7 +614,7 @@ async function runScopeBroadeningProbe(
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "Could not verify key scopes", code: "KEY_NETWORK_TIMEOUT" },
+        { code: "KEY_NETWORK_TIMEOUT", error: "Could not verify key scopes" },
         { status: 502, headers: NO_STORE_HEADERS },
       ),
     };
@@ -624,8 +624,8 @@ async function runScopeBroadeningProbe(
       ok: false,
       response: NextResponse.json(
         {
-          error: "Exchange permission probe failed",
           code: "KEY_NETWORK_TIMEOUT",
+          error: "Exchange permission probe failed",
         },
         { status: 502, headers: NO_STORE_HEADERS },
       ),
@@ -636,8 +636,8 @@ async function runScopeBroadeningProbe(
       ok: false,
       response: NextResponse.json(
         {
-          error: "Key has been broadened beyond read-only on the exchange.",
           code: "KEY_SCOPE_BROADENED",
+          error: "Key has been broadened beyond read-only on the exchange.",
         },
         { status: 403, headers: NO_STORE_HEADERS },
       ),
@@ -764,7 +764,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
   if (!strategyRow) {
-    return NextResponse.json({ error: "Draft not found", code: "GATE_DRAFT_GONE" }, { status: 404, headers: NO_STORE_HEADERS });
+    return NextResponse.json({ code: "GATE_DRAFT_GONE", error: "Draft not found" }, { status: 404, headers: NO_STORE_HEADERS });
   }
 
   const apiKeyId =
@@ -951,8 +951,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       });
       return NextResponse.json(
         {
-          error: "Could not determine composite membership; please retry.",
           code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+          error: "Could not determine composite membership; please retry.",
         },
         { status: 503, headers: NO_STORE_HEADERS },
       );
@@ -1006,8 +1006,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         });
         return NextResponse.json(
           {
-            error: "Could not load composite members; please retry.",
             code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+            error: "Could not load composite members; please retry.",
           },
           { status: 503, headers: NO_STORE_HEADERS },
         );
@@ -1084,13 +1084,29 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         // The status stays 503, unchanged: this plan owns the code and the copy,
         // not the wire status. `SubmitStep` maps off `code` alone (never status),
         // so the permanent/transient distinction is carried entirely by the code.
+        //
+        // 153.1-05 / D-34 — the SENTENCE IS BYTE-IDENTICAL to what shipped; only
+        // where it is built moved. It is held in a local const rather than
+        // written inline because the emitter predicate in
+        // `wizardErrors.invariant.test.ts` caps the `error:` body at
+        // EMITTER_BODY_MAX_CHARS = 160 (measured: the cap must clear the longest
+        // real body but stay under the 202-char distance to the next emitter's
+        // `status:`, or one emitter's code gets reported against the next one's
+        // status). Inline, these three interpolated lines run ~256 characters, so
+        // this site — and ONLY this site — stayed invisible to the coverage
+        // scanner even after its keys were reordered. Hoisting the sentence makes
+        // the site scannable without relaxing a predicate to make a count come
+        // out right, which is the one thing that file forbids. Same shape as the
+        // `CIRCUIT_OPEN_COPY` emitter above: the scanner constrains the CODE
+        // literal, never the error value.
+        const compositeCapCopy =
+          `This draft has more than ${MAX_COMPOSITE_MEMBERS} keys attached; ` +
+          `a multi-key strategy can hold at most ${MAX_COMPOSITE_MEMBERS}. ` +
+          `Remove keys until ${MAX_COMPOSITE_MEMBERS} or fewer remain, then submit again.`;
         return NextResponse.json(
           {
-            error:
-              `This draft has more than ${MAX_COMPOSITE_MEMBERS} keys attached; ` +
-              `a multi-key strategy can hold at most ${MAX_COMPOSITE_MEMBERS}. ` +
-              `Remove keys until ${MAX_COMPOSITE_MEMBERS} or fewer remain, then submit again.`,
             code: "COMPOSITE_TOO_MANY_MEMBERS",
+            error: compositeCapCopy,
           },
           { status: 503, headers: NO_STORE_HEADERS },
         );
@@ -1290,7 +1306,7 @@ async function runLegacyFinalize(args: {
       error.code,
     );
     if (error.code === "P0002" || error.code === "02000") {
-      return NextResponse.json({ error: "Draft not found", code: "GATE_DRAFT_GONE" }, { status: 404, headers: NO_STORE_HEADERS });
+      return NextResponse.json({ code: "GATE_DRAFT_GONE", error: "Draft not found" }, { status: 404, headers: NO_STORE_HEADERS });
     }
     // audit-2026-05-07 H-0321: split the two SQLSTATEs so HTTP semantics
     // match the actual failure mode.
@@ -1307,16 +1323,25 @@ async function runLegacyFinalize(args: {
       // mislabeled pre-handler 403s (CSRF, approval-gate) as draft-finalize
       // failures and conflated them in the wizard_error funnel.
       return NextResponse.json(
-        { error: "This draft cannot be finalized", code: "GUARD_BLOCKED" },
+        { code: "GUARD_BLOCKED", error: "This draft cannot be finalized" },
         { status: 403, headers: NO_STORE_HEADERS },
       );
     }
     if (error.code === "22023") {
       return NextResponse.json(
         {
+          // 153.1-05 / D-34 — UPPERCASED from `draft_state_invalid`, which is a
+          // WIRE change and the only one in this reorder. The lowercase literal
+          // could never be seen by the coverage scanner (its class is
+          // `[A-Z][A-Z0-9_]*`) and could never be a `WizardErrorCode`, so this
+          // 409 rendered the UNKNOWN card — whose copy is RECOVERABLE, so the
+          // user was handed a Retry button that re-POSTed an identical request
+          // against a draft the DB had already moved past. 153.1-04 minted
+          // `DRAFT_STATE_INVALID` with honest, non-recoverable copy for exactly
+          // this arm; `KNOWN_FINALIZE_CODES` admits it in this same commit.
+          code: "DRAFT_STATE_INVALID",
           error:
             "This draft is not in a finalizable state. Refresh and try again.",
-          code: "draft_state_invalid",
         },
         { status: 409, headers: NO_STORE_HEADERS },
       );
@@ -1754,8 +1779,8 @@ async function unifiedFinalizeWizardHandler(args: {
     });
     return NextResponse.json(
       {
-        error: "Could not determine composite membership; please retry.",
         code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+        error: "Could not determine composite membership; please retry.",
       },
       { status: 503, headers: NO_STORE_HEADERS },
     );
@@ -1777,9 +1802,9 @@ async function unifiedFinalizeWizardHandler(args: {
     );
     return NextResponse.json(
       {
+        code: "COMPOSITE_UNSUPPORTED_UNIFIED",
         error:
           "Composite (multi-key) strategies are not yet supported on this path.",
-        code: "COMPOSITE_UNSUPPORTED_UNIFIED",
       },
       { status: 409, headers: NO_STORE_HEADERS },
     );
