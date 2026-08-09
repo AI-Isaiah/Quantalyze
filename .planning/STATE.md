@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: planning
-stopped_at: "Phase 153.3 wave 2 EXECUTED: 153.3-02 (D-24/D-25, the nested-timeout inversion) is complete — initialize() now carries an explicit 20000ms ceiling, every timeout-carrying MT5 call is registered in MT5_IPC_TIMEOUTS_MS, the construction guard iterates the WHOLE table (not login alone) and names the offending call, and the registry's completeness is derived from mt5_client.py on disk with a >=2 floor so a third such call cannot ship green. Chain is per-instance (ctor overrides) — MT5_REQUEST_TIMEOUT_S byte-unchanged, WEDGE-01 not reopened. pytest 5023 passed, mypy --strict clean on 88 files, zero TypeScript. Three falsifiability mutations RUN with RED pasted. ⚠️ Binding initialize() guarantees an ANSWER, not a SUCCESS — whether 20000ms suffices live is Phase 155. Next: 153.3-03 (wave 3 — D-02/D-03/D-30 end-to-end deadline; ⚠️ mt5_client.py line anchors MOVED, see 153.3-02-SUMMARY deviation 5). ⚠️ WIZFORM-05 stays OPEN: the lease (153.3-04) and instrumentation (153.3-05) legs are untouched. Opus for every subagent until 2026-08-11 11:00."
-last_updated: "2026-08-09T00:00:00.000Z"
-last_activity: 2026-08-09
+stopped_at: "Phase 153: CONTEXT + UI-SPEC approved; both planning ledgers' citations re-derived. Ready for /gsd-plan-phase 153 (Opus until 2026-08-11 11:00)."
+last_updated: "2026-08-09T01:38:30.802Z"
+last_activity: 2026-08-08
 progress:
   total_phases: 13
   completed_phases: 6
   total_plans: 59
-  completed_plans: 39
+  completed_plans: 40
   percent: 46
 ---
 
@@ -381,7 +381,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [██████░░░░] 64%
+Progress: [███████░░░] 68%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -475,6 +475,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 140.3 PG9 | ~18 min | 2 tasks | 2 files |
 | Phase 153.3 P01 | 75m | 3 tasks | 8 files |
 | Phase 153.3 P02 | ~65m | 2 tasks | 6 files |
+| Phase 153.3 P03 | 75 min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
