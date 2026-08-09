@@ -47,6 +47,11 @@ vi.mock("@/lib/api/withAuth", () => ({
 vi.mock("@/lib/ratelimit", () => ({
   userActionLimiter: {},
   checkLimit: vi.fn(async () => ({ success: true })),
+  // 153.2-05 — the real predicate's shape, not a stub that answers a constant:
+  // the route's two deny arms are told apart by THIS, and a mock that always
+  // said `false` would make the 503 row unreachable while looking green.
+  isRateLimitMisconfigured: (rl: { misconfigured?: boolean }) =>
+    rl?.misconfigured === true,
 }));
 
 const STATE = vi.hoisted(() => ({
@@ -3868,6 +3873,78 @@ describe("[153.2-04 / D-14b] our own configuration fault is not a network blip",
     expect(logged).toContain("INTERNAL_API_TOKEN");
 
     errSpy.mockRestore();
+    fetchSpy.mockRestore();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 153.2-05 / WIZFORM-02 — the limiter's two deny arms stop answering code-less.
+//
+// Both were on the KNOWN_CODELESS_FINALIZE_REJECTIONS ledger. A code-less
+// rejection renders the UNKNOWN card — "We could not classify this failure" —
+// for a failure the route classified well enough to pick a status and write a
+// sentence about, AND that card's copy is recoverable, so both arms handed the
+// user a Retry button: correct for a throttle, and a control that cannot work
+// for a misconfiguration.
+//
+// ⚠️ The status and header assertions are here because the fix must be a CODE
+// and nothing else — a change that also moved the status would be a wire
+// change wearing a classification change's clothes.
+// ═══════════════════════════════════════════════════════════════════════════
+describe("[153.2-05] the rate-limit deny arms carry codes", () => {
+  async function denyWith(rl: Record<string, unknown>) {
+    const { checkLimit } = await import("@/lib/ratelimit");
+    (checkLimit as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      rl,
+    );
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    return { res, body: (await res.json()) as { code?: string; error?: string } };
+  }
+
+  it("a genuine throttle answers 429 RATE_LIMITED — OUR cap, not the exchange's", async () => {
+    // ⛔ NOT `KEY_RATE_LIMIT`, whose copy opens "The exchange rate-limited this
+    // request". This is `userActionLimiter` on our own per-user key and the
+    // exchange is never contacted on this path, so that sentence would be a
+    // specific lie in place of a vague one. `RATE_LIMITED` says "the cap is
+    // ours, not your exchange's".
+    const { res, body } = await denyWith({ success: false, retryAfter: 42 });
+
+    expect(res.status).toBe(429);
+    expect(body.code).toBe("RATE_LIMITED");
+    expect(body.code).not.toBe("KEY_RATE_LIMIT");
+    expect(body.error).toBe("Too many requests");
+    expect(res.headers.get("Retry-After")).toBe("42");
+  });
+
+  it("a limiter MISCONFIGURATION answers 503 SEAM_MISCONFIGURED — the fault is ours", async () => {
+    // The discrimination that matters: a throttle is the user hitting a cap and
+    // a misconfiguration is our own setting being wrong. They already answered
+    // different statuses; now they answer different classifications too, and
+    // SEAM_MISCONFIGURED carries no recoverable action, so no Retry control
+    // renders for a condition retrying cannot clear.
+    const { res, body } = await denyWith({
+      success: false,
+      retryAfter: 60,
+      misconfigured: true,
+    });
+
+    expect(res.status).toBe(503);
+    expect(body.code).toBe("SEAM_MISCONFIGURED");
+    expect(body.code).not.toBe("RATE_LIMITED");
+    expect(body.error).toBe("Rate limiter unavailable");
+    expect(res.headers.get("Retry-After")).toBe("60");
+  });
+
+  it("CONTROL — a successful limiter check reaches neither arm", async () => {
+    // The positive control. Both rows above would also pass on a route that
+    // denied every request, which is a far worse defect than the one being fixed.
+    const fetchSpy = mockProbeReadOnly();
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).not.toBe(429);
+    expect(res.status).not.toBe(503);
     fetchSpy.mockRestore();
   });
 });

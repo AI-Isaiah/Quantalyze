@@ -254,7 +254,20 @@ const ROUTES: readonly RouteUnderTest[] = [
     // what the user is told changed. Both codes are already members of
     // `KNOWN_FINALIZE_CODES`, so the coverage assertion below is satisfied
     // without a roster edit (verified at source, not assumed).
-    expectedSites: 27,
+    //
+    // 27 → 29 (153.2-05 / WIZFORM-02). ⛔ NO GUARD WAS ADDED — this is the
+    // OTHER direction, and the only one that is good news: two rejections that
+    // already existed stopped answering code-less. The route's own limiter deny
+    // pair (429 throttle, 503 misconfiguration) now carries `RATE_LIMITED` and
+    // `SEAM_MISCONFIGURED`, so both arms crossed OUT of the code-less ledger
+    // and INTO this population. The sum is what proves nothing was invented:
+    // `EXPECTED_FINALIZE_REJECTION_SITES` is unchanged at 32, and
+    // `KNOWN_CODELESS_FINALIZE_REJECTIONS` falls 5 → 3 by the same two.
+    // Neither code needed a roster edit — `SEAM_MISCONFIGURED` is already a
+    // member and `RATE_LIMITED` is translated to itself by
+    // `SEAM_CODE_TO_WIZARD_CODE` before the roster is consulted (verified at
+    // source, not assumed).
+    expectedSites: 29,
   },
 ];
 
@@ -453,7 +466,7 @@ function deriveRejectionSites(
  * therefore render the UNKNOWN card today (measured 153.1-06).
  *
  * ⚠️ THIS IS A LEDGER OF KNOWN DEBT, NOT A LIST OF THINGS THAT ARE FINE. Each
- * of these five puts a user in front of "We could not classify this failure"
+ * of these three puts a user in front of "We could not classify this failure"
  * for a failure the route classified well enough to pick a status and write a
  * sentence about. They are recorded rather than fixed because 153.1-06 is a
  * TEST-ONLY plan and they sit outside both populations 153.1-05 worked on — it
@@ -468,31 +481,55 @@ function deriveRejectionSites(
  * constant and its assertion collapse into "every rejection carries a code",
  * which is where WIZFORM-02's criterion actually lands.
  *
- * The five, by status, measured from stripped source (⚠️ a raw-source scan with
- * a fixed look-ahead window reports FOUR — it loses the `:869` arm behind the
- * `console.error` block above it, which is the 14-vs-12 lesson again in a new
- * costume):
- *   · 429 — the limiter's throttle body (`{ error: "Too many requests" }`).
- *     `KEY_RATE_LIMIT` is what the key routes answer here.
- *   · 503 — the limiter's MISCONFIGURED body (`"Rate limiter unavailable"`).
- *     `SEAM_MISCONFIGURED` is the member; 140.4-15 fixed exactly this arm on
- *     `composite/add-key` and its reasoning transfers verbatim — the copy for
- *     the throttle blames the user's exchange for our own outage.
+ * The three, by status, measured from stripped source (⚠️ a raw-source scan
+ * with a fixed look-ahead window under-reports this population — it loses an
+ * arm sitting behind a `console.error` block, which is the 14-vs-12 lesson
+ * again in a new costume):
  *   · 500 — `"Could not load draft"`, the strategy lookup's failure.
  *   · 500 — `"Could not finalize wizard draft"`, the RPC's generic failure.
  *   · 502 — `"Upstream service returned unexpected response"`.
+ *
+ * ⭐ 5 → 3 (153.2-05 / WIZFORM-02). THE TWO LIMITER ARMS ARE FIXED, so their
+ * rows are DELETED here rather than annotated — the direction the failure
+ * message below instructs. The 429 now carries `RATE_LIMITED` and the 503
+ * carries `SEAM_MISCONFIGURED`; both moved into `expectedSites` above, which is
+ * why that literal rose by exactly two while
+ * `EXPECTED_FINALIZE_REJECTION_SITES` did not move at all.
+ *
+ * ⚠️ THE OLD LEDGER NAMED THE WRONG CODE FOR THE 429, and the correction is
+ * worth keeping: it proposed `KEY_RATE_LIMIT` "because that is what the key
+ * routes answer". That entry's copy opens "The exchange rate-limited this
+ * request", which is false for `userActionLimiter` on our own per-user key —
+ * the exchange is never contacted on that path. `RATE_LIMITED` is the member
+ * 140.3-01 wrote for our own cap ("the cap is ours, not your exchange's"). A
+ * ledger entry is a suggestion, not a verdict; this one was checked against the
+ * copy before it was applied.
+ *
+ * ⚠️ THE REMAINING THREE NEED NEW COPY MEMBERS, which is why they are still
+ * here: none of the existing entries states "our database read failed", "the
+ * finalize RPC failed" or "the upstream answered in a shape we do not
+ * recognise" without asserting something false. Minting them is a change to
+ * `wizardErrors.ts` — Phase 153.1's file — plus three roster members, and it is
+ * user-facing copy that wants the same care every other entry there got. It is
+ * NOT deleted from this ledger to make a number smaller.
  */
-const KNOWN_CODELESS_FINALIZE_REJECTIONS = 5;
+const KNOWN_CODELESS_FINALIZE_REJECTIONS = 3;
 
 /**
  * Every rejection site on `finalize-wizard`, coded or not (measured 153.1-06).
  *
  * 30 → 32 (153.2-04): the two split arms above. ⚠️ Both arrive CODED, so
- * `KNOWN_CODELESS_FINALIZE_REJECTIONS` stays at 5 — the ledger of debt did not
- * grow, and the arithmetic this pair feeds (32 − 27 = 5) still holds. That is
- * the point of keeping the two numbers separate: a NEW code-less rejection
- * would move this literal without moving `expectedSites`, and the difference
+ * `KNOWN_CODELESS_FINALIZE_REJECTIONS` stayed at 5 — the ledger of debt did not
+ * grow, and the arithmetic this pair feeds (32 − 27 = 5) held. That is the
+ * point of keeping the two numbers separate: a NEW code-less rejection would
+ * move this literal without moving `expectedSites`, and the difference
  * assertion would name it.
+ *
+ * ⭐ UNCHANGED AT 32 by 153.2-05, and that is the whole proof its change was a
+ * FIX rather than an addition: two arms moved from the code-less side to the
+ * coded side (`expectedSites` 27 → 29, the ledger 5 → 3), so the total holds
+ * and 32 − 29 = 3. A plan that had invented two rejections to "fix" would have
+ * moved this literal too.
  */
 const EXPECTED_FINALIZE_REJECTION_SITES = 32;
 

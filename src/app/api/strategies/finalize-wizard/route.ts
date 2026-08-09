@@ -942,14 +942,50 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   );
   if (!rl.success) {
     // PR-2 full-file reviewer #5 (2026-05-28): 503 on rate-limit misconfig.
+    //
+    // 153.2-05 / WIZFORM-02 — BOTH ARMS NOW CARRY A CODE. They were two of the
+    // five rejections this route still answered code-less, and a code-less
+    // rejection renders the UNKNOWN card — "We could not classify this failure"
+    // — for a failure the route classified well enough to pick a status and
+    // write a sentence about. Worse, UNKNOWN's copy is RECOVERABLE, so the user
+    // got a Retry button in both cases: correct for a throttle, and a control
+    // that cannot work for a misconfiguration.
+    //
+    // ⚠️ THE TWO ARMS STAY EXPLICIT `NextResponse.json` SITES, and that is a
+    // decision rather than inertia. Routing them through the deny chokepoint
+    // (140.4-13 / SEAMRIM-05) was tried first and MEASURED: it drops
+    // `finalize-wizard`'s derived rejection-site count from 32 to 30, because
+    // the class scan in `wizardErrors.invariant.test.ts` finds sites by reading
+    // 4xx/5xx `NextResponse.json` literals out of this file's source. A helper
+    // call is invisible to it, so both arms would leave the population the
+    // guard watches — and a guard that stops seeing an arm is exactly how a
+    // future code-less rejection ships green. Status, headers and the
+    // `Retry-After` stamp are byte-unchanged here; only the codes are added.
+    //
+    // ⚠️ `RATE_LIMITED`, NOT `KEY_RATE_LIMIT` — and the ledger that recorded
+    // this debt named the wrong one. `KEY_RATE_LIMIT`'s copy opens "The
+    // exchange rate-limited this request", which is FALSE here: this is
+    // `userActionLimiter` on OUR own per-user key, and the exchange was never
+    // contacted. `RATE_LIMITED` says "the cap is ours, not your exchange's",
+    // which is the sentence 140.3-01 wrote for exactly this condition.
+    // ⓘ It needs no roster entry: `SEAM_CODE_TO_WIZARD_CODE` maps it to itself
+    // and the translation runs BEFORE the roster check, so `SubmitStep`
+    // surfaces it as-is. (`composite/add-key` still answers `KEY_RATE_LIMIT`
+    // here; that arm carries its own note saying the sentence is wrong for an
+    // internal limiter, and re-cutting it is not this plan's file.)
+    //
+    // ⚠️ `SEAM_MISCONFIGURED` on the 503 — already a roster member, and its
+    // copy is written for precisely this: "our own configuration is wrong…
+    // Retrying will not clear it." It carries no recoverable action, so no
+    // Retry control renders at all — the structural suppression, not a prop.
     if (isRateLimitMisconfigured(rl)) {
       return NextResponse.json(
-        { error: "Rate limiter unavailable" },
+        { code: "SEAM_MISCONFIGURED", error: "Rate limiter unavailable" },
         { status: 503, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
       );
     }
     return NextResponse.json(
-      { error: "Too many requests" },
+      { code: "RATE_LIMITED", error: "Too many requests" },
       { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
     );
   }
