@@ -369,6 +369,111 @@ function deriveAliasPairs(source: string): [string, string][] {
 }
 
 /**
+ * EVERY rejection-answering `NextResponse.json(` site on a route, CODED OR NOT
+ * (153.1-06). Returns one entry per site, in source order.
+ *
+ * ── THE HOLE THIS EXISTS TO CLOSE, AND IT IS THE POINT OF THE WHOLE WAVE ────
+ *
+ * Everything else in this file derives from the CODED emitters, and that
+ * population has a blind spot with exactly the shape of the defect the
+ * sub-phase set out to kill: an arm that answers with NO CODE AT ALL emits
+ * nothing, so it does not appear in `deriveEmittedCodes`, so
+ *
+ *   · the per-route site count does not move (25 stays 25) — GREEN;
+ *   · the union and roster assertions have no code to judge — GREEN;
+ *   · the vacuity floor does not move — GREEN.
+ *
+ * The route ships a rejection that renders "We could not classify this failure"
+ * for a failure it classified exactly, and NOTHING REDDENS. That is precisely
+ * the year-long state 153.1-05 found on this route, and precisely what 153.1-05
+ * recorded as still open: *"nothing reds if 153.2 adds a twelfth arm without a
+ * code."*
+ *
+ * ⚠️ AND THE ROUTE-SIDE CLASS SWEEP DOES NOT CLOSE IT EITHER, which is worth
+ * writing down because it LOOKS like it does. `route.test.ts`'s *"NOT ONE arm
+ * answers without a code"* iterates a HAND-TYPED `ARMS` table, so a new arm is
+ * caught only once someone adds it to that table — the same "passes by not
+ * being listed" failure the sweep was written to fix, moved one level up. Its
+ * positive control pins `ARMS.length`, which proves the table is not empty, not
+ * that the table is complete. A source-derived population is the only kind that
+ * cannot be evaded by omission.
+ *
+ * ── THE PREDICATE ──────────────────────────────────────────────────────────
+ *
+ * Split the comment-stripped source at each `NextResponse.json(`. A segment
+ * runs to the NEXT such call, so it is bounded BY CONSTRUCTION — no lazy run,
+ * no character cap, and no way to reach a neighbour's `status:` (the failure
+ * `EMITTER_BODY_MAX_CHARS` exists to forbid for the coded scan). The FIRST
+ * `status: <n>` in a segment is that call's own, because the status lives in
+ * the second argument, immediately after the body. A site counts as a REJECTION
+ * when that status is 4xx or 5xx, and as CODED when its first argument opens
+ * `{ code: "<UPPER_SNAKE_LITERAL>"`.
+ *
+ * ⚠️ `coded` HERE IS THE SAME KEY-ORDER RULE `emitterRe` APPLIES, deliberately.
+ * An arm reordered to `{ error, code }` is reported UNCODED by this scan too —
+ * it is invisible to the wizard's scanner, which is the fact that matters, and
+ * making this scan more permissive than the emitter scan would let the two
+ * disagree about the same site.
+ */
+function deriveRejectionSites(
+  source: string,
+): { status: number; coded: boolean }[] {
+  const CALL = "NextResponse.json(";
+  const segments = source.split(CALL).slice(1);
+  const out: { status: number; coded: boolean }[] = [];
+  for (const seg of segments) {
+    const st = /status:\s*(\d{3})/.exec(seg);
+    if (st === null) continue;
+    const status = Number(st[1]);
+    if (status < 400 || status > 599) continue;
+    out.push({
+      status,
+      coded: /^\s*\{\s*code:\s*"[A-Z][A-Z0-9_]*"/.test(seg),
+    });
+  }
+  return out;
+}
+
+/**
+ * HAND-TYPED. The `finalize-wizard` rejections that answer with NO CODE, and
+ * therefore render the UNKNOWN card today (measured 153.1-06).
+ *
+ * ⚠️ THIS IS A LEDGER OF KNOWN DEBT, NOT A LIST OF THINGS THAT ARE FINE. Each
+ * of these five puts a user in front of "We could not classify this failure"
+ * for a failure the route classified well enough to pick a status and write a
+ * sentence about. They are recorded rather than fixed because 153.1-06 is a
+ * TEST-ONLY plan and they sit outside both populations 153.1-05 worked on — it
+ * coded the eleven `validatePayload` arms and reordered the fourteen coded
+ * emitters, and none of these five is either. Recording them is what makes the
+ * assertion below able to fail for a NEW one.
+ *
+ * ⛔ DO NOT ADD TO THIS NUMBER TO MAKE A FAILING ASSERTION PASS. A new
+ * code-less rejection is the defect this sub-phase exists to stop shipping; the
+ * remedy is a code on the arm and a member in `KNOWN_FINALIZE_CODES`. The
+ * number comes DOWN as those arms are fixed, and the day it reaches zero this
+ * constant and its assertion collapse into "every rejection carries a code",
+ * which is where WIZFORM-02's criterion actually lands.
+ *
+ * The five, by status, measured from stripped source (⚠️ a raw-source scan with
+ * a fixed look-ahead window reports FOUR — it loses the `:869` arm behind the
+ * `console.error` block above it, which is the 14-vs-12 lesson again in a new
+ * costume):
+ *   · 429 — the limiter's throttle body (`{ error: "Too many requests" }`).
+ *     `KEY_RATE_LIMIT` is what the key routes answer here.
+ *   · 503 — the limiter's MISCONFIGURED body (`"Rate limiter unavailable"`).
+ *     `SEAM_MISCONFIGURED` is the member; 140.4-15 fixed exactly this arm on
+ *     `composite/add-key` and its reasoning transfers verbatim — the copy for
+ *     the throttle blames the user's exchange for our own outage.
+ *   · 500 — `"Could not load draft"`, the strategy lookup's failure.
+ *   · 500 — `"Could not finalize wizard draft"`, the RPC's generic failure.
+ *   · 502 — `"Upstream service returned unexpected response"`.
+ */
+const KNOWN_CODELESS_FINALIZE_REJECTIONS = 5;
+
+/** Every rejection site on `finalize-wizard`, coded or not (measured 153.1-06). */
+const EXPECTED_FINALIZE_REJECTION_SITES = 30;
+
+/**
  * HAND-TYPED. The two routes 142.2-07 split, by LABEL.
  *
  * ⚠️ 153.1-06 — TWO ASSERTIONS BELOW ARE FACTS ABOUT THESE TWO ROUTES ONLY, and
@@ -611,6 +716,105 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
       ).toEqual([]);
     },
   );
+
+  it("finalize-wizard: NOT ONE NEW rejection may answer without a code (the class, from source)", () => {
+    // ⭐ THE ASSERTION THAT CLOSES WIZFORM-02's LOOP, and the only one in this
+    // file whose population includes arms that emit NOTHING. Everything above
+    // derives from CODED emitters and is therefore blind to the exact defect
+    // the sub-phase exists to kill: a rejection with no code at all. See
+    // `deriveRejectionSites`' docblock for why the route-side sweep does not
+    // cover this and why a hand-typed arm table can never be the population.
+    const d = derived.find((x) => x.label === "finalize-wizard")!;
+    const sites = deriveRejectionSites(stripped(d.route));
+    const codeless = sites.filter((s) => !s.coded);
+
+    // Positive control FIRST. A scan that matched nothing would report zero
+    // code-less sites and pass this test for the worst possible reason.
+    expect.soft(
+      sites.length,
+      `Found ${sites.length} 4xx/5xx NextResponse.json sites on finalize-wizard; ` +
+        `${EXPECTED_FINALIZE_REJECTION_SITES} were measured at 153.1-06. If a ` +
+        `rejection was ADDED, bump this literal in the SAME commit that gives ` +
+        `the arm a code. A number near zero means the scan broke, and a broken ` +
+        `scan reports "no code-less rejections" for a route made entirely of them.`,
+    ).toBe(EXPECTED_FINALIZE_REJECTION_SITES);
+
+    expect.soft(
+      codeless.length,
+      `finalize-wizard answers ${codeless.length} rejections with NO code ` +
+        `(statuses ${codeless.map((s) => s.status).join(", ")}); ` +
+        `${KNOWN_CODELESS_FINALIZE_REJECTIONS} are the KNOWN, RECORDED debt. A ` +
+        `code-less rejection renders the UNKNOWN card — "We could not classify ` +
+        `this failure" — for a failure this route classified well enough to ` +
+        `pick a status and write a sentence about. ⛔ IF THIS NUMBER WENT UP, ` +
+        `THE REMEDY IS A CODE ON THE NEW ARM plus a member in ` +
+        `KNOWN_FINALIZE_CODES — never a bump of this literal. If it went DOWN, ` +
+        `an arm was fixed: lower the literal and delete its row from the ` +
+        `ledger's docblock, which is the direction WIZFORM-02 is travelling.`,
+    ).toBe(KNOWN_CODELESS_FINALIZE_REJECTIONS);
+
+    // The two populations reconcile against each other, which is what makes
+    // either one's drift visible: the coded sites this scan sees are the same
+    // sites `deriveEmittedCodes` sees. If they disagree, one of the two
+    // predicates changed and the other did not.
+    expect.soft(
+      sites.length - codeless.length,
+      "the CODED rejections this scan sees and the emitters deriveEmittedCodes " +
+        "sees have diverged — the two predicates no longer describe the same " +
+        "sites, so one of them is measuring something nobody decided on.",
+    ).toBe(d.expectedSites);
+  });
+
+  it("SELF-TEST — the rejection scan sees a CODE-LESS arm that the emitter scan cannot", () => {
+    // ⚠️ THE POSITIVE CONTROL FOR THE ASSERTION ABOVE, and the clearest
+    // statement of why it had to be written. The same fixture is INVISIBLE to
+    // `deriveEmittedCodes` — no code literal, nothing to match — which is
+    // exactly how a code-less arm slips past every other guard in this file.
+    const codeless = [
+      "      return NextResponse.json(",
+      '        { error: "Could not finalize wizard draft" },',
+      "        { status: 500, headers: NO_STORE_HEADERS },",
+      "      );",
+    ].join("\n");
+    expect(deriveEmittedCodes(codeless, "[45]\\d\\d")).toEqual([]);
+    expect(deriveRejectionSites(codeless)).toEqual([
+      { status: 500, coded: false },
+    ]);
+
+    // A coded arm is seen by BOTH, and reported as coded by this one.
+    const coded = [
+      "      return NextResponse.json(",
+      '        { code: "GATE_DRAFT_GONE", error: "The draft is gone" },',
+      "        { status: 404, headers: NO_STORE_HEADERS },",
+      "      );",
+    ].join("\n");
+    expect(deriveRejectionSites(coded)).toEqual([{ status: 404, coded: true }]);
+
+    // A SUCCESS is not a rejection. Without this the scan would count every
+    // answer the route gives and the ledger literal would be meaningless.
+    const ok = [
+      "      return NextResponse.json(",
+      "        { ok: true, strategy_id: id },",
+      "        { status: 200, headers: NO_STORE_HEADERS },",
+      "      );",
+    ].join("\n");
+    expect(deriveRejectionSites(ok)).toEqual([]);
+
+    // ⚠️ A REORDERED arm is UNCODED to this scan too, on purpose: it is
+    // invisible to the wizard's scanner, which is the fact that matters. If
+    // this scan were more permissive than `emitterRe`, the two would disagree
+    // about the same site and the reconciliation above would red for a reason
+    // nobody could act on.
+    const reordered = [
+      "      return NextResponse.json(",
+      '        { error: "The draft is gone", code: "GATE_DRAFT_GONE" },',
+      "        { status: 404, headers: NO_STORE_HEADERS },",
+      "      );",
+    ].join("\n");
+    expect(deriveRejectionSites(reordered)).toEqual([
+      { status: 404, coded: false },
+    ]);
+  });
 
   it.each(SPLIT_ROUTE_LABELS)(
     "%s: KEY_INVALID_FORMAT survives at exactly ONE guard — the ccxt short-secret arm",
