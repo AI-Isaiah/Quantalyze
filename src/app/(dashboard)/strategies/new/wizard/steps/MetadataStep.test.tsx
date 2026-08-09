@@ -11,7 +11,7 @@
  * payload.
  */
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { MetadataStep, type MetadataDraft } from "./MetadataStep";
 import { WIZARD_ERROR_COPY, formatKeyError } from "@/lib/wizardErrors";
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
@@ -155,13 +155,49 @@ describe("[H-0191] MetadataStep", () => {
     expect(screen.queryByTestId("metadata-categories-empty")).toBeNull();
   });
 
-  it("pre-selects the canonical exchange chip from detectedExchange (lowercase → canonical)", () => {
-    // detectedExchange is the lowercase api_keys.exchange ('okx'); the chip
-    // group matches case-sensitively against EXCHANGES ('OKX'). The default
-    // must canonicalize so the chip renders pre-selected (aria-pressed).
+  it("[153.2 / D-15] the detected venue is a FACT, not a choice — it renders as a span, not a control", () => {
+    // detectedExchange is the lowercase api_keys.exchange ('okx'); the group
+    // matches case-sensitively ('OKX'), so the default must canonicalize or the
+    // venue renders unselected — the original ISSUE-004 claim, unchanged.
+    //
+    // 153.2 / MT5-14 / D-15 — what CHANGED is the element. This row used to
+    // assert `getByRole("button", { name: "OKX" })` carried aria-pressed=true.
+    // The venue of the connected key is not a question the user is being asked:
+    // they answered it by connecting that key, and un-answering it would
+    // declare a strategy that excludes the venue it trades on. So it is stated
+    // as a fact — a non-interactive <span> wearing the selected tokens, out of
+    // the tab order and with nothing to turn off.
+    //
+    // ⛔ NOT a greyed-out control. A dead thing the user can see and cannot act
+    // on is the failure mode this whole phase deletes.
     render(<MetadataStep {...baseProps} detectedExchange="okx" />);
-    const chip = screen.getByRole("button", { name: "OKX" });
-    expect(chip).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByRole("button", { name: "OKX" })).toBeNull();
+    const pinned = screen.getByText("OKX");
+    expect(pinned.tagName).toBe("SPAN");
+    // The selected tokens, verbatim — it looks chosen because it is chosen.
+    expect(pinned.className).toContain("border-accent");
+    expect(pinned.className).toContain("bg-accent/10");
+    expect(pinned.className).toContain("text-accent");
+    // …and every OTHER venue is still a real choice. Without this the row is
+    // satisfied by a group that stopped rendering controls altogether.
+    expect(screen.getByRole("button", { name: "Binance" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(screen.getByRole("button", { name: "Bybit" })).toBeInTheDocument();
+  });
+
+  it("[153.2 / D-15] no venue is pinned when no key was connected (the CSV path)", () => {
+    // detectedExchange=null: there is no fact to state, so every venue stays a
+    // choice and neither annotation renders. Without this row, a bug that
+    // pinned the FIRST item unconditionally would pass every row above.
+    render(<MetadataStep {...baseProps} detectedExchange={null} />);
+    expect(screen.getByRole("button", { name: "OKX" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Binance" })).toBeInTheDocument();
+    expect(screen.queryByText("DETECTED FROM YOUR KEY")).toBeNull();
+    expect(
+      screen.queryByText(/is included because it is the venue of the key/i),
+    ).toBeNull();
   });
 
   // ── 153.2 / WIZFORM-01 — the submit button is NEVER disabled for a
@@ -1402,5 +1438,204 @@ describe("[H-0191] MetadataStep", () => {
       fireEvent.click(submit);
       expect(onComplete).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+/**
+ * Phase 153.2 / MT5-14 — MT5 is declarable, and it is declared FOR the user.
+ *
+ * `MT5_UI_ENABLED` is a module-scope const read from `process.env` at import
+ * time, so every flag-ON render stubs the env, resets the registry and
+ * dynamic-imports the step fresh — the ConnectKeyStep MT5 harness, verbatim.
+ * `vi.unstubAllEnvs` in afterEach stops a stub leaking into a sibling test
+ * (the Node22-vs-Node25 stub-leak lesson).
+ *
+ * ⚠️ THE FLAG-OFF ROWS ARE NOT DECORATION. "No MT5 pixel when the flag is off"
+ * is the contract's own acceptance line, and it is the half that a widening
+ * shipped in the wrong place would break silently in production.
+ */
+describe("[MT5-14] the venue of the connected key is declarable, and pinned", () => {
+  const DESCRIPTION = "A perfectly valid description of a strategy.";
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  async function loadStep(flagOn: boolean) {
+    vi.stubEnv(
+      "NEXT_PUBLIC_MT5_ENABLED",
+      flagOn ? "true" : (undefined as unknown as string),
+    );
+    vi.resetModules();
+    const mod = await import("./MetadataStep");
+    return mod.MetadataStep;
+  }
+
+  it("flag ON — an MT5 key pins MT5 as a span, with its provenance and its reason", async () => {
+    const Fresh = await loadStep(true);
+    render(<Fresh {...baseProps} detectedExchange="mt5" />);
+
+    // The lowercase api_keys.exchange resolved to its display form and matched
+    // its own item. Without the wizard-set canonicalizer this is the bug
+    // ISSUE-004 recorded for OKX, one venue later: "mt5" matches nothing.
+    const pinned = screen.getByText("MT5");
+    expect(pinned.tagName).toBe("SPAN");
+    expect(pinned.className).toContain("border-accent");
+    expect(pinned.className).toContain("bg-accent/10");
+
+    // ⛔ Not a control at all — so it cannot be a DEAD control.
+    expect(screen.queryByRole("button", { name: "MT5" })).toBeNull();
+
+    // Provenance: the mono eyebrow at the standard tracking (DESIGN.md).
+    const eyebrow = screen.getByText("DETECTED FROM YOUR KEY");
+    expect(eyebrow.className).toContain("font-mono");
+    expect(eyebrow.className).toContain("tracking-[0.18em]");
+    expect(eyebrow.className).toContain("text-micro");
+
+    // And the reason, with the venue INTERPOLATED (FLAG-2) — asserted as the
+    // composed sentence so a hardcoded "MetaTrader 5" would red here.
+    expect(
+      screen.getByText(
+        "MT5 is included because it is the venue of the key you connected.",
+      ),
+    ).toBeInTheDocument();
+
+    // The public venues are still offered, and still choices.
+    expect(screen.getByRole("button", { name: "Binance" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Deribit" })).toBeInTheDocument();
+  });
+
+  it("flag ON — a crypto key pins ITS OWN venue; the rule is not about MT5", async () => {
+    // The instance-not-class guard, asserted rather than asserted-about. If the
+    // pin were written `venue === "mt5"` this row reds while every MT5 row above
+    // stays green — which is precisely how that defect class ships.
+    const Fresh = await loadStep(true);
+    render(<Fresh {...baseProps} detectedExchange="bybit" />);
+    const pinned = screen.getByText("Bybit");
+    expect(pinned.tagName).toBe("SPAN");
+    expect(screen.queryByRole("button", { name: "Bybit" })).toBeNull();
+    expect(
+      screen.getByText(
+        "Bybit is included because it is the venue of the key you connected.",
+      ),
+    ).toBeInTheDocument();
+    // MT5 is offered (flag on) but NOT pinned — it is somebody else's fact.
+    expect(screen.getByRole("button", { name: "MT5" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+  });
+
+  it("flag ON — the submitted payload CONTAINS the detected venue even when the resumed draft omits it", async () => {
+    // The door the pinned element cannot close: `initial` arrives from a server
+    // row that was written before the pin existed, or was normalized by a caller
+    // that knows only the public list. A strategy must never declare a venue set
+    // that excludes its own key's venue.
+    const Fresh = await loadStep(true);
+    const onComplete = vi.fn();
+    const initial = {
+      name: null,
+      description: DESCRIPTION,
+      categoryId: "cat-aaa",
+      strategyTypes: [],
+      subtypes: [],
+      markets: [],
+      supportedExchanges: [] as string[],
+      leverageRange: "",
+      aum: "",
+      maxCapacity: "",
+      assetClass: "traditional",
+    } satisfies MetadataDraft;
+
+    render(
+      <Fresh
+        {...baseProps}
+        initial={initial}
+        detectedExchange="mt5"
+        onComplete={onComplete}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /review and submit/i }));
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    const draft = onComplete.mock.calls[0][0] as MetadataDraft;
+    expect(draft.supportedExchanges).toContain("MT5");
+  });
+
+  it("flag ON — a lowercase venue already in the draft is canonicalized, not duplicated", async () => {
+    // `WizardClient` normalizes a resumed draft with the PUBLIC canonicalizer,
+    // which does not know a wizard-only venue and hands back "mt5" unchanged.
+    // Appending the display form on top of it would persist the exact
+    // ['bybit', 'Bybit'] display bug ISSUE-004 records.
+    const Fresh = await loadStep(true);
+    const onComplete = vi.fn();
+    const initial = {
+      name: null,
+      description: DESCRIPTION,
+      categoryId: "cat-aaa",
+      strategyTypes: [],
+      subtypes: [],
+      markets: [],
+      supportedExchanges: ["mt5"],
+      leverageRange: "",
+      aum: "",
+      maxCapacity: "",
+      assetClass: "traditional",
+    } satisfies MetadataDraft;
+
+    render(
+      <Fresh
+        {...baseProps}
+        initial={initial}
+        detectedExchange="mt5"
+        onComplete={onComplete}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /review and submit/i }));
+
+    const draft = onComplete.mock.calls[0][0] as MetadataDraft;
+    expect(draft.supportedExchanges).toEqual(["MT5"]);
+  });
+
+  it("flag OFF — an MT5 key renders NO MT5 pixel: no item, no eyebrow, no caption", async () => {
+    const Fresh = await loadStep(false);
+    render(<Fresh {...baseProps} detectedExchange="mt5" />);
+
+    // Nothing renders the venue at all — not as a control, not as a span.
+    expect(screen.queryByText("MT5")).toBeNull();
+    expect(screen.queryByRole("button", { name: "MT5" })).toBeNull();
+    expect(screen.queryByText("DETECTED FROM YOUR KEY")).toBeNull();
+    expect(
+      screen.queryByText(/is included because it is the venue of the key/i),
+    ).toBeNull();
+    // The public four are byte-identical to today, all still choices.
+    for (const venue of ["Binance", "OKX", "Bybit", "Deribit"]) {
+      expect(screen.getByRole("button", { name: venue })).toHaveAttribute(
+        "aria-pressed",
+        "false",
+      );
+    }
+  });
+
+  it("flag OFF — the lowercase wire form still rides through to the payload, exactly as today", async () => {
+    // The pre-153.2 behaviour, pinned so the flag-OFF path is proven UNCHANGED
+    // rather than merely proven quiet: "mt5" was seeded into state, rendered
+    // nowhere, and POSTed verbatim.
+    const Fresh = await loadStep(false);
+    const onComplete = vi.fn();
+    render(
+      <Fresh {...baseProps} detectedExchange="mt5" onComplete={onComplete} />,
+    );
+    const select = (await screen.findByLabelText(
+      "Category",
+    )) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe("cat-aaa"));
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: DESCRIPTION },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /review and submit/i }));
+
+    const draft = onComplete.mock.calls[0][0] as MetadataDraft;
+    expect(draft.supportedExchanges).toEqual(["mt5"]);
   });
 });

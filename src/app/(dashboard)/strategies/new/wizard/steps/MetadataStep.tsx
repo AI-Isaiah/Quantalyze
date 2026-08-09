@@ -15,10 +15,13 @@ import {
   STRATEGY_TYPES,
   SUBTYPES,
   MARKETS,
-  EXCHANGES,
-  canonicalizeExchange,
 } from "@/lib/constants";
-import { isCryptoExchange, MAGNITUDE_CAPS } from "@/lib/closed-sets";
+import {
+  isCryptoExchange,
+  MAGNITUDE_CAPS,
+  WIZARD_EXCHANGES,
+  canonicalizeWizardExchange,
+} from "@/lib/closed-sets";
 import { CapitalOwnershipRadioGroup } from "@/components/strategy/CapitalOwnershipRadioGroup";
 import { TEAM_REVIEW, type CapitalOwnership } from "@/lib/capital-ownership";
 
@@ -119,6 +122,47 @@ function validateDollarField(
   const payload = value ? Number(value) : null;
   const omitted = payload === undefined || payload === null;
   return !omitted && !isValidDollar(payload) ? code : null;
+}
+
+/**
+ * The declared supported-exchange set, canonicalized against the WIZARD set and
+ * guaranteed to contain the venue of the key this strategy is built on (Phase
+ * 153.2 / MT5-14 / D-15).
+ *
+ * ⛔ THE UNION IS THE POINT. A strategy must never declare a venue set that
+ * EXCLUDES its own key's venue — that is not a preference, it is a
+ * contradiction, and downstream surfaces (browse pills, mandate-fit chips, the
+ * factsheet recap) would each render it as a fact about where the strategy
+ * trades. The pinned control below already makes removal impossible through the
+ * UI; this closes the OTHER door — a resumed draft whose stored
+ * `supported_exchanges` predates the pin, or was written by a client that never
+ * had it.
+ *
+ * The canonicalization half exists for the reason ISSUE-004 records for OKX
+ * (see the state initializer): the group matches case-sensitively, and
+ * `WizardClient` normalizes a resumed draft with `canonicalizeExchangeList`,
+ * which knows only the PUBLIC set and therefore leaves a wizard-only venue's
+ * lowercase wire form untouched. Unknown names are returned unchanged, so a
+ * venue this set does not know is never silently dropped.
+ *
+ * Order-preserving, case-insensitively deduped — the same contract
+ * `canonicalizeExchangeList` states, applied to the wizard's own set.
+ */
+function withDetectedVenue(
+  list: readonly string[],
+  venue: string | null,
+): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const name of list) {
+    const canonical = canonicalizeWizardExchange(name);
+    const key = canonical.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(canonical);
+  }
+  if (venue && !seen.has(venue.toLowerCase())) out.push(venue);
+  return out;
 }
 
 /**
@@ -279,15 +323,29 @@ export function MetadataStep({
   const [subtypes, setSubtypes] = useState<string[]>(initial?.subtypes ?? []);
   const [markets, setMarkets] = useState<string[]>(initial?.markets ?? []);
   // QA report 2026-05-21 ISSUE-004: capitalize('okx') returned 'Okx',
-  // but EXCHANGES has 'OKX' — so on a first-visit submit the OKX chip
+  // but the offered set has 'OKX' — so on a first-visit submit the OKX chip
   // appeared unselected even though detectedExchange === 'okx'. Same
   // class of bug as the resume case fixed in WizardClient.tsx.
-  // canonicalizeExchange() maps the lowercase api_keys.exchange to its
-  // canonical EXCHANGES entry so the chip-group's case-sensitive
-  // .includes() check matches and the chip renders pre-selected.
+  // The canonicalizer maps the lowercase api_keys.exchange to its
+  // canonical entry so the group's case-sensitive
+  // .includes() check matches and the venue renders pre-selected.
+  //
+  // 153.2 / MT5-14 — canonicalized against the WIZARD set, not the public one.
+  // That single substitution is the whole preselect: the public canonicalizer
+  // does not know a wizard-only venue, hands back the lowercase wire form, and
+  // the group then matches nothing — exactly the ISSUE-004 shape above, one
+  // venue later. It is also applied to a RESUMED draft for the same reason:
+  // `WizardClient` normalizes those with the PUBLIC list, so a stored "mt5"
+  // arrives here still lowercase.
+  //
+  // ⚠️ Nothing here names a venue. Whatever venue the connected key carries is
+  // the one that gets canonicalized, preselected and pinned — a Bybit key pins
+  // Bybit. The set decides membership; this file never asks which venue it is.
+  const detectedVenue = detectedExchange
+    ? canonicalizeWizardExchange(detectedExchange)
+    : null;
   const [supportedExchanges, setSupportedExchanges] = useState<string[]>(
-    initial?.supportedExchanges ??
-      (detectedExchange ? [canonicalizeExchange(detectedExchange)] : []),
+    withDetectedVenue(initial?.supportedExchanges ?? [], detectedVenue),
   );
   const [leverageRange, setLeverageRange] = useState<string>(
     initial?.leverageRange ?? "",
@@ -556,7 +614,13 @@ export function MetadataStep({
       strategyTypes,
       subtypes,
       markets,
-      supportedExchanges,
+      // 153.2 / MT5-14 — unioned at the wire, not merely at mount. The pinned
+      // control makes removal impossible through the UI, so this is belt to
+      // that braces: it closes the path where `initial` arrives carrying a set
+      // that omits the venue (a draft stored before the pin existed, or
+      // normalized by a caller that knows only the public list). A strategy
+      // must never declare a venue set that excludes its own key's venue.
+      supportedExchanges: withDetectedVenue(supportedExchanges, detectedVenue),
       leverageRange,
       aum,
       maxCapacity,
@@ -806,10 +870,19 @@ export function MetadataStep({
               )}
             </div>
 
+            {/* 153.2 / MT5-14 — the ONE group sourced from the wizard set and
+                the ONE group that pins a venue. The other three are untouched.
+                `pinned` is the venue of the connected key: a FACT the user
+                stated by connecting that key, not a question to ask again
+                (D-15). It is generic by construction — a Bybit key pins Bybit
+                — and the group renders it only when the set actually offers
+                it, so with the MT5 flag off this is byte-identical to
+                today. */}
             <InlineChipGroup
               label="Supported exchanges"
-              items={[...EXCHANGES]}
+              items={[...WIZARD_EXCHANGES]}
               selected={supportedExchanges}
+              pinned={detectedVenue}
               onToggle={(item) =>
                 toggle(supportedExchanges, item, setSupportedExchanges)
               }
@@ -906,16 +979,73 @@ interface InlineChipGroupProps {
   label: string;
   items: string[];
   selected: string[];
+  /**
+   * An item that is a FACT rather than a CHOICE — rendered as a
+   * non-interactive `<span>` carrying the selected tokens, out of the tab order
+   * and impossible to turn off (Phase 153.2 / UI-SPEC Surface 4 / D-15).
+   *
+   * ⛔ NOT a greyed-out control. That is the failure mode this whole phase
+   * exists to delete: a dead thing the user can see, cannot act on, and is
+   * given no reason for. A fact is stated; it is not offered and then refused.
+   *
+   * ⚠️ A CLASS RULE, NOT ONE VENUE'S SPECIAL CASE. Whatever value the caller
+   * passes is pinned — this component neither knows nor asks which venue that
+   * is. Adding a name comparison here would be the instance-not-class defect
+   * this milestone exists to delete.
+   *
+   * Absent / null / not a member of `items` ⇒ nothing pins, no annotation
+   * renders, and the group is byte-identical to every other group.
+   */
+  pinned?: string | null;
   onToggle: (item: string) => void;
 }
 
-function InlineChipGroup({ label, items, selected, onToggle }: InlineChipGroupProps) {
+function InlineChipGroup({
+  label,
+  items,
+  selected,
+  pinned = null,
+  onToggle,
+}: InlineChipGroupProps) {
+  // Membership is the gate, not truthiness: a venue the offered set does not
+  // carry has no item to pin, so the annotations must not render either. This
+  // is what makes the flag-OFF path byte-identical rather than merely similar.
+  const pinnedMember = pinned && items.includes(pinned) ? pinned : null;
   return (
     <div>
-      <p className="text-caption font-medium text-text-primary">{label}</p>
+      {pinnedMember ? (
+        <div className="flex flex-wrap items-baseline gap-2">
+          <p className="text-caption font-medium text-text-primary">{label}</p>
+          {/* Provenance. A data annotation, so it takes the mono voice and the
+              standard eyebrow tracking (DESIGN.md §Tracking ladder) — DM Sans
+              here is the documented failure mode. It answers the question the
+              pinned item would otherwise raise ("why can I not change this?")
+              at the moment it is asked. */}
+          <span className="text-micro font-mono uppercase tracking-[0.18em] text-text-muted">
+            DETECTED FROM YOUR KEY
+          </span>
+        </div>
+      ) : (
+        <p className="text-caption font-medium text-text-primary">{label}</p>
+      )}
       <div className="mt-2 flex flex-wrap gap-2">
         {items.map((item) => {
           const active = selected.includes(item);
+          if (item === pinnedMember) {
+            return (
+              // The SELECTED tokens, verbatim — it looks identical to a chosen
+              // item because it IS chosen. Only the element differs, and shape
+              // carrying interactivity is the same logic DESIGN.md uses to
+              // split rounded interactive cards from square data panels.
+              // No handler is wired: there is nothing to toggle.
+              <span
+                key={item}
+                className="inline-flex items-center rounded-md border border-accent bg-accent/10 px-3 py-1.5 text-caption font-medium text-accent"
+              >
+                {item}
+              </span>
+            );
+          }
           return (
             <button
               key={item}
@@ -933,6 +1063,16 @@ function InlineChipGroup({ label, items, selected, onToggle }: InlineChipGroupPr
           );
         })}
       </div>
+      {pinnedMember && (
+        // ⛔ The name is INTERPOLATED (FLAG-2). A hardcoded venue name would be
+        // a false sentence the moment a second venue is pinned — and the second
+        // reader would have no way to tell the copy was ever meant to vary.
+        // No accent, no icon, no coloured rule: this explains, it does not warn.
+        <p className="mt-2 text-caption text-text-muted">
+          {pinnedMember} is included because it is the venue of the key you
+          connected.
+        </p>
+      )}
     </div>
   );
 }
