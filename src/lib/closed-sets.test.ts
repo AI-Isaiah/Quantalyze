@@ -320,6 +320,7 @@ describe("closed-sets registry", () => {
     it("pins the cap boundary values that the routes + validators consume", () => {
       expect(MAGNITUDE_CAPS.MAX_NAME_CHARS).toBe(80);
       expect(MAGNITUDE_CAPS.MAX_MANDATE_CHARS).toBe(500);
+      expect(MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS).toBe(10);
       expect(MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS).toBe(5000);
       expect(MAGNITUDE_CAPS.MAX_FOUNDER_NOTES_CHARS).toBe(10_000);
       expect(MAGNITUDE_CAPS.MAX_TICKET_SIZE_USD).toBe(1_000_000_000);
@@ -331,6 +332,17 @@ describe("closed-sets registry", () => {
     it("the AUM dollar cap is strictly larger than the ticket-size cap (distinct semantics)", () => {
       expect(MAGNITUDE_CAPS.MAX_DOLLAR_VALUE_USD).toBeGreaterThan(
         MAGNITUDE_CAPS.MAX_TICKET_SIZE_USD,
+      );
+    });
+
+    it("the description bound PAIR is ordered min < max (D-23)", () => {
+      // An inverted pair admits no description at all: the server would refuse
+      // every string (too short AND too long simultaneously) while the client
+      // field guard — reading the same two constants — believes the field is
+      // valid. That is the 3-failed-submit shape D-23 exists to prevent, now
+      // between two constants instead of between a constant and a literal.
+      expect(MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS).toBeLessThan(
+        MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS,
       );
     });
   });

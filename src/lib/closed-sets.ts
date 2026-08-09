@@ -682,7 +682,25 @@ export const MAGNITUDE_CAPS = {
   MAX_NAME_CHARS: 80,
   /** mandate_archetype free text. */
   MAX_MANDATE_CHARS: 500,
-  /** strategy description free text. */
+  /**
+   * strategy description free text — the LOWER bound (Phase 153.1 / D-23).
+   *
+   * Three consumers must read THIS constant and nothing else: the finalize-wizard
+   * server arm in `validatePayload` (re-pointed in 153.1-05), the MetadataStep inline
+   * field guard, and the MetadataStep `handleSubmit` predicate (both Phase 153.2 —
+   * D-11/D-12/D-13).
+   *
+   * Why it exists: the UPPER bound has been single-sourced here since this table was
+   * minted, while the lower bound was a naked `10` in exactly one route. The client
+   * therefore believed a short description was valid and the server refused it with a
+   * terminal envelope — the drift that cost the founder three failed submits. A bare
+   * literal in a route cannot be read by a client guard; a constant can.
+   *
+   * ⛔ Not a retune. `10` is what the server enforces today; this single-sources the
+   * EXISTING rule.
+   */
+  MIN_DESCRIPTION_CHARS: 10,
+  /** strategy description free text — the UPPER bound. */
   MAX_DESCRIPTION_CHARS: 5000,
   /** founder_notes (admin-only). */
   MAX_FOUNDER_NOTES_CHARS: 10_000,
