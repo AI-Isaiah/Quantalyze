@@ -3132,7 +3132,7 @@ describe("[153.1-04 / WIZFORM-02] the ten new members offer no false affordance"
           "refusal into a specific lie.",
       ).not.toMatch(/you have|\{n\}|\{charCount\}/);
     }
-    // …and the counted form really is produced when the count IS given, so the
+    // ...and the counted form really is produced when the count IS given, so the
     // rule above is a gate rather than a deletion.
     expect(
       formatKeyError("METADATA_DESCRIPTION_TOO_SHORT", { charCount: 2 }).title,
