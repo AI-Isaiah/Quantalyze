@@ -66,6 +66,24 @@ class _FakeNamedTuple:
         return dict(self._fields_dict)
 
 
+class _FakeRpycConn:
+    """The rpyc connection object `mt5linux.MetaTrader5` hangs off its name-mangled
+    `_MetaTrader5__conn` attribute — the ONLY transport-close seam 0.1.9 exposes,
+    and since 153.3-06 / **D-35** the ONLY thing `Mt5Client.close()` touches.
+
+    Present so the adapter's `finally: close()` genuinely EXERCISES the transport
+    teardown offline, instead of falling through to the "no transport close
+    reachable" WARNING branch and leaving the six session-never-leaks assertions
+    below asserting against a path production never takes.
+    """
+
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    def close(self):
+        self.close_calls += 1
+
+
 class _FakeMt5:
     """In-memory RPyC/MT5-shaped double driven by a scenario dict.
 
@@ -77,6 +95,22 @@ class _FakeMt5:
     def __init__(self, scenario: dict) -> None:
         self._scenario = scenario
         self.shutdown_calls = 0
+        # Single leading underscore ⇒ NOT re-mangled by this class; the attribute
+        # name is byte-identical to the one mt5linux 0.1.9 sets.
+        self._MetaTrader5__conn = _FakeRpycConn()
+
+    @property
+    def close_calls(self) -> int:
+        """The observable the six 'the session never leaks' assertions now use.
+
+        ⚠️ RE-POINTED by 153.3-06 / **D-35**, never deleted. Each of those
+        assertions encodes *"the session never leaks on this path"* — an intent
+        that survives intact. Only its MECHANISM changed: the adapter's
+        `finally: client.close()` used to end the SHARED terminal IPC (which was
+        the bug — one caller's teardown was every caller's `-10004`) and now
+        releases only OUR rpyc socket. `shutdown_calls` is asserted alongside and
+        must be 0 on every one of these paths."""
+        return self._MetaTrader5__conn.close_calls
 
     def initialize(self, **kwargs):
         # **kwargs: initialize() carries its own `timeout=` ms ceiling (153.3 / D-24).
@@ -117,8 +151,9 @@ class _FakeMt5:
 
 def _install_client(monkeypatch, scenario: dict) -> _FakeMt5:
     """Patch the adapter's _build_client to return a real Mt5Client wrapping the
-    in-memory double, and set the gateway env. Returns the fake so tests can
-    assert shutdown (close) was called."""
+    in-memory double, and set the gateway env. Returns the fake so tests can assert
+    the teardown ran — `close_calls` (our rpyc socket) since 153.3-06 / D-35, and
+    `shutdown_calls == 0` (the shared terminal IPC, which we must never touch)."""
     fake = _FakeMt5(scenario)
 
     def _connect(*, host, port, timeout):
@@ -218,7 +253,8 @@ def test_validate_investor_valid_readonly_and_close(monkeypatch) -> None:
     assert result.valid is True
     assert result.read_only is True  # STRUCTURAL (no trade surface), not probed
     assert result.error_code is None
-    assert fake.shutdown_calls == 1  # close() on the success path
+    assert fake.close_calls == 1  # close() on the success path (D-35: our socket)
+    assert fake.shutdown_calls == 0  # …and the SHARED terminal IPC is untouched
 
 
 def test_validate_terminal_trade_disabled_never_returns_readonly(monkeypatch) -> None:
@@ -254,7 +290,8 @@ def test_validate_terminal_trade_disabled_never_returns_readonly(monkeypatch) ->
     assert "server misconfiguration" in msg
     assert "investor-pw" not in msg
     assert "Broker-Demo" not in msg
-    assert fake.shutdown_calls == 1  # close() still runs on the refusal path
+    assert fake.close_calls == 1  # close() still runs on the refusal path
+    assert fake.shutdown_calls == 0
 
 
 def test_validate_unreadable_terminal_propagates_transient_never_readonly(
@@ -282,7 +319,8 @@ def test_validate_unreadable_terminal_propagates_transient_never_readonly(
     # classify_mt5_login_error over it would blame the user's broker server for
     # our gateway's condition.
     assert classify_mt5_login_error(exc.value) == "transient"
-    assert fake.shutdown_calls == 1
+    assert fake.close_calls == 1  # session never leaks on the unreadable-terminal path
+    assert fake.shutdown_calls == 0
 
 
 def test_validate_disconnected_terminal_is_transient_never_readonly(
@@ -304,7 +342,8 @@ def test_validate_disconnected_terminal_is_transient_never_readonly(
         asyncio.run(Mt5Adapter().validate(_req()))
 
     assert classify_mt5_login_error(exc.value) == "transient"
-    assert fake.shutdown_calls == 1
+    assert fake.close_calls == 1  # session never leaks on the disconnected-terminal path
+    assert fake.shutdown_calls == 0
 
 
 def test_validate_master_via_trade_allowed_rejected(monkeypatch) -> None:
@@ -323,7 +362,8 @@ def test_validate_master_via_trade_allowed_rejected(monkeypatch) -> None:
     assert result.error_code == "MT5_MASTER_PASSWORD"
     # Byte-identity pin — the cross-language contract string.
     assert result.human_message == MT5_MASTER_PASSWORD_DETAIL
-    assert fake.shutdown_calls == 1  # close() on the master-reject path
+    assert fake.close_calls == 1  # close() on the master-reject path
+    assert fake.shutdown_calls == 0
 
 
 def test_validate_master_via_order_check_retcode_rejected(monkeypatch) -> None:
@@ -359,7 +399,8 @@ def test_validate_bad_creds_maps_to_auth_failed(monkeypatch) -> None:
     assert result.error_code == "AUTH_FAILED"
     # Byte-identity with services/exchange.py AUTH_FAILED_DETAIL (zero TS edits).
     assert result.human_message == AUTH_FAILED_DETAIL
-    assert fake.shutdown_calls == 1  # close() on the auth-fail path
+    assert fake.close_calls == 1  # close() on the auth-fail path
+    assert fake.shutdown_calls == 0
 
 
 def test_validate_wrong_server_maps_to_wrong_server(monkeypatch) -> None:
@@ -373,7 +414,8 @@ def test_validate_wrong_server_maps_to_wrong_server(monkeypatch) -> None:
     assert result.valid is False
     assert result.error_code == "MT5_WRONG_SERVER"
     assert result.human_message == MT5_WRONG_SERVER_DETAIL
-    assert fake.shutdown_calls == 1
+    assert fake.close_calls == 1  # session never leaks on the wrong-server path
+    assert fake.shutdown_calls == 0
 
 
 def test_validate_transient_propagates_untouched_and_closes(monkeypatch) -> None:
@@ -386,7 +428,8 @@ def test_validate_transient_propagates_untouched_and_closes(monkeypatch) -> None
 
     with pytest.raises(Mt5ClientError):
         asyncio.run(Mt5Adapter().validate(_req()))
-    assert fake.shutdown_calls == 1  # session never leaks on the propagating path
+    assert fake.close_calls == 1  # session never leaks on the propagating path
+    assert fake.shutdown_calls == 0
 
 
 def test_validate_non_numeric_login_fails_closed_without_client(monkeypatch) -> None:

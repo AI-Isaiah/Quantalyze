@@ -58,19 +58,31 @@ Contract:
     The outer `asyncio.to_thread` + `asyncio.wait_for` event-loop bound is a Phase
     136/137 worker-seam concern, NOT part of this synchronous, blocking client.
 
-  * Teardown — TWO distinct verbs (153.3 / D-30), because "I am done with the
-    terminal" and "the terminal's IPC pipe should die" are NOT the same statement:
-      - `release()` ends OUR use of the terminal. It closes the rpyc TRANSPORT and
-        NEVER calls `shutdown()`.
-      - `close()` additionally calls `mt5.shutdown()`, which ends the terminal's
-        IPC attachment for EVERY caller of that gateway process — `mt5linux` serves
-        every rpyc connection from ONE `ThreadedServer` process sharing ONE
-        `MetaTrader5` module instance and ONE IPC pipe (153-EVIDENCE-mt5-platform
-        §A2 / Correction C-1). A concurrent caller then observes `-10004 No IPC
-        connection`. So `close()` belongs to a process that OWNS the terminal, not
-        to a per-request path serving concurrent users.
-    `release()` latches the same `_closed` flag, so after a release the shutdown
-    path is structurally UNREACHABLE on that instance, not merely unused.
+  * Teardown — TWO names, ONE implementation (153.3 / D-30 then D-35), because
+    "I am done with the terminal" and "the terminal's IPC pipe should die" are NOT
+    the same statement, and only the FIRST of them is ever ours to make:
+      - `release()` and `close()` both end OUR use of the terminal. They latch
+        `_closed`, close the rpyc TRANSPORT (our socket), and call `shutdown()`
+        ZERO times. Both delegate to `_teardown_transport`, so the two public
+        names cannot drift apart.
+      - `mt5.shutdown()` ends the terminal's IPC attachment for EVERY caller of
+        that gateway process — `mt5linux` serves every rpyc connection from ONE
+        `ThreadedServer` process sharing ONE `MetaTrader5` module instance and ONE
+        IPC pipe (153-EVIDENCE-mt5-platform §A2 / Correction C-1), so a concurrent
+        caller then observes `-10004 No IPC connection`. D-30 took that call off
+        the REQUEST path; **D-35 removed it from `close()` altogether**, which
+        fixes the worker paths (`services/exchange.py`'s `aclose_exchange` mt5
+        arm, `services/ingestion/mt5.py`'s adapter `finally`) at the SINK, with
+        zero call-site edits.
+      - The ONE surviving `shutdown()` is `restart()`'s deliberate heal of a
+        genuinely wedged pipe (MT5CONC-01). It is lease-held at every call site,
+        and `tests/test_mt5_shutdown_roster.py` derives that from source rather
+        than believing it.
+    We are NOT reclaiming a per-request resource by never calling it: per EVIDENCE
+    §A6 `shutdown()` "closes the IPC connection. It does not close the terminal,
+    does not log the account out, and does not reset terminal state." Attaching
+    once and never tearing down is the EVIDENCE's own recommendation, not an
+    oversight.
 
   * Secret hygiene (T-134-01) — the login / investor password / broker server
     NEVER appear in any exception message or log surface. `mt5linux`
@@ -104,7 +116,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, NoReturn, TypeVar
+from typing import Any, Callable, NoReturn, TypeVar, cast
 
 import structlog
 
@@ -690,52 +702,33 @@ class Mt5Client:
             self._raise_last()
         return _materialize(result)
 
-    def close(self) -> None:
-        """Bounded, idempotent shutdown of the terminal session. A teardown failure
-        is swallowed so it never masks the caller's error, and shutdown() is never
-        called twice (mirrors SfoxClient.aclose)."""
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            self._timed("close", self._mt5.shutdown)
-        except Exception:  # noqa: BLE001 — a close error must not mask caller errors
-            logger.warning("Mt5Client.close: shutdown() raised; swallowing.")
+    def _teardown_transport(
+        self, mt5_obj: Any, *, who: str, stage: str | None
+    ) -> None:
+        """Close ONE rpyc transport, best-effort — the single teardown mechanism
+        behind `close()`, `release()` and `restart()`'s stale disposal (153.3 / D-35).
 
-    def release(self) -> None:
-        """Give up OUR use of the terminal WITHOUT ending anybody else's (153.3 / D-30).
+        ONE implementation, three call sites, because two copies of a teardown are
+        two teardowns that will diverge: `close()` and `release()` are two public
+        names for exactly the same act, and the whole point of D-35 is that neither
+        of them can quietly regrow a `shutdown()`.
 
-        `close()` calls `mt5.shutdown()`. On this deployment that is a denial of
-        service against ourselves: `mt5linux` serves EVERY rpyc connection from ONE
-        `ThreadedServer` process over ONE shared `MetaTrader5` module instance
-        holding ONE IPC pipe to ONE terminal (153-EVIDENCE-mt5-platform §A2 /
-        Correction C-1), so a `shutdown()` issued by one request tears that pipe
-        down for every CONCURRENT caller, who then observe `-10004 No IPC
-        connection`. A request path serving concurrent users must therefore attach
-        once and never tear down — it releases its own lease instead.
+        `stage=None` runs the close WITHOUT a `_timed` bracket — that is `restart()`,
+        which is deliberately ONE timed stage end to end (recovery latency is the
+        actionable number), so a nested `close`/`release` event there would double-
+        count and misreport.
 
-        `release()` NEVER calls `shutdown()`. It:
-          1. latches `_closed` FIRST, so a later `close()` is structurally a no-op
-             and cannot reach `shutdown()` — after a release the shutdown path is
-             UNREACHABLE on this instance, not merely unused;
-          2. best-effort closes the rpyc TRANSPORT (our socket), which is what
-             actually ends our lease on the shared server;
-          3. swallows a raising teardown with a logged WARNING, exactly as `close()`
-             does — a teardown failure must never mask the caller's verdict.
-
-        `close()` keeps its shutdown semantics for the callers that OWN the terminal
-        (the worker's `aclose_exchange` mt5 arm, `job_worker`); this method is the
-        verb for everything that merely BORROWS it.
+        `mt5_obj` is passed explicitly rather than read from `self._mt5` because
+        `restart()` disposes the STALE connection AFTER the fresh one has already
+        been swapped in (the WR-01 ordering).
         """
-        if self._closed:
-            return
-        self._closed = True
         # ponytail: mt5linux 0.1.9 exposes NO transport-close method of its own
-        # (`shutdown` forwards to MetaTrader5), so reach the rpyc connection through
-        # the same name-mangled private attribute `_default_connect` already sets
-        # `sync_request_timeout` on. Stable for the same reason: mt5linux is pinned
-        # ==0.1.9 and rpyc's `close()` is stable across the 5.x line.
-        conn = getattr(self._mt5, "_MetaTrader5__conn", None)
+        # (`shutdown` forwards to MetaTrader5, which is the very thing we must not
+        # do), so reach the rpyc connection through the same name-mangled private
+        # attribute `_default_connect` already sets `sync_request_timeout` on.
+        # Stable for the same reason: mt5linux is pinned ==0.1.9 and rpyc's
+        # `close()` is stable across the 5.x line.
+        conn = getattr(mt5_obj, "_MetaTrader5__conn", None)
         transport_close = getattr(conn, "close", None)
         if not callable(transport_close):
             # ⛔ Never a silent no-op: a socket that is neither closed nor reported
@@ -743,17 +736,90 @@ class Mt5Client:
             # a future transport shape), and it must be VISIBLE if it ever becomes
             # production's shape.
             logger.warning(
-                "Mt5Client.release: no rpyc transport close reachable "
+                "%s: no rpyc transport close reachable "
                 "(_MetaTrader5__conn.close absent) — the connection is abandoned, "
-                "not closed."
+                "not closed.",
+                who,
             )
             return
+        closer = cast(Callable[[], Any], transport_close)
         try:
-            self._timed("release", transport_close)
+            if stage is None:
+                closer()
+            else:
+                self._timed(stage, closer)
         except Exception:  # noqa: BLE001 — a teardown error must not mask caller errors
-            logger.warning(
-                "Mt5Client.release: transport close() raised; swallowing."
-            )
+            logger.warning("%s: transport close() raised; swallowing.", who)
+
+    def close(self) -> None:
+        """End OUR use of the terminal. Bounded, idempotent, and it NEVER calls
+        `mt5.shutdown()` (153.3 / D-35, completing D-30).
+
+        WHY the shutdown is gone rather than merely moved: `mt5linux` serves EVERY
+        rpyc connection from ONE `ThreadedServer` process over ONE shared
+        `MetaTrader5` module instance holding ONE IPC pipe to ONE terminal
+        (153-EVIDENCE-mt5-platform §A2 / Correction C-1). A `shutdown()` from ANY
+        caller therefore destroys that pipe for EVERY concurrent caller, who then
+        observe `-10004 No IPC connection`. D-30 took the call off the request path;
+        that left the class half-closed, because two more callers still reached it
+        from the other direction and `main.py:83-91` runs the worker loops INSIDE
+        the API process — one `await` from a user's validate:
+          - `services/exchange.py`'s `aclose_exchange` mt5 arm (the dispatch
+            epilogue), and
+          - `services/ingestion/mt5.py`'s adapter `finally`.
+        Deleting the call HERE fixes both — and both operator scripts — with zero
+        per-call-site edits. That is the difference between ending a class and
+        adding a third point-fix. Neither caller can be fixed at its own site
+        anyway: both run in a `finally` outside the terminal lease, so leasing them
+        would mean queueing inside an error path to buy permission to do something
+        destructive.
+
+        What we give up by never calling it: nothing we had. Per EVIDENCE §A6,
+        `shutdown()` "closes the IPC connection. It does not close the terminal,
+        does not log the account out, and does not reset terminal state." We are
+        not reclaiming a per-request resource; we were dropping a shared one — at a
+        measured cost of a second full 30.02-30.03 s in all nine of the correlated
+        2026-08-06/08 production failures. "Attach once, never tear down" is the
+        EVIDENCE's own recommendation.
+
+        What this still DOES: release our own rpyc socket (Pitfall 6). "Release my
+        connection" and "shut down the terminal's IPC" are two different things, and
+        this method now performs only the first. `release()` is the same act under
+        the other name — one implementation, `_teardown_transport`.
+
+        The ONLY remaining `shutdown()` in the tree is `restart()`'s: deliberate,
+        the sole heal for a genuinely wedged pipe, and lease-held at every call
+        site — asserted from source by `tests/test_mt5_shutdown_roster.py`.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        self._teardown_transport(self._mt5, who="Mt5Client.close", stage="close")
+
+    def release(self) -> None:
+        """Give up OUR use of the terminal WITHOUT ending anybody else's (153.3 / D-30).
+
+        Since D-35 this is observationally identical to `close()` — same latch, same
+        transport teardown, same zero `shutdown()` calls — and deliberately so: the
+        two names share ONE implementation (`_teardown_transport`) precisely so they
+        cannot diverge, and so an "also call close() for safety" line at any call
+        site is harmless rather than destructive.
+
+        It:
+          1. latches `_closed` FIRST, so a later `close()` is a structural no-op;
+          2. best-effort closes the rpyc TRANSPORT (our socket), which is what
+             actually ends our lease on the shared server;
+          3. swallows a raising teardown with a logged WARNING — a teardown failure
+             must never mask the caller's verdict.
+
+        The name is retained (rather than collapsed into `close()`) because it states
+        the INTENT at the request-path call sites that D-30 re-pointed: this verb
+        borrows the terminal, it never owns it.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        self._teardown_transport(self._mt5, who="Mt5Client.release", stage="release")
 
     def restart(self) -> None:
         """Tear down a wedged terminal and re-establish the transport (MT5CONC-01).
@@ -778,6 +844,20 @@ class Mt5Client:
         client holds a FRESH usable connection whenever a connect is possible, EVEN
         IF the stale connection's shutdown would block; the abandoned stale shutdown
         can no longer prevent the reconnect.
+
+        ⭐ THE ONE PERMITTED ``shutdown()`` (153.3 / D-35). Every other teardown in
+        this client was deleted, because a ``shutdown()`` on this deployment
+        destroys the ONE shared IPC pipe for every concurrent caller. This one
+        STAYS, deliberately: with nobody else calling it, a genuinely wedged pipe is
+        healed ONLY here (MT5CONC-01), and destroying a pipe that is already wedged
+        is the point rather than the hazard. It is safe to keep because every one of
+        its call sites holds the terminal lease — ``allocator_positions.py`` x2 and
+        ``job_worker.py`` x2, all lexically inside ``async with
+        _mt5_terminal_lock_for(...)`` / ``mt5_terminal_lease(...)`` — so no
+        concurrent caller can be attached when it fires. That is not a belief:
+        ``tests/test_mt5_shutdown_roster.py`` derives BOTH facts from source (this
+        is the only ``shutdown()`` call node in the tree, and every restart call
+        site is lease-enclosed) and reds when a new site appears.
 
         Unlike ``close()`` this does NOT gate on ``self._closed`` and NEVER calls
         ``close()``: restart's contract is teardown+rebuild regardless of prior
@@ -814,6 +894,17 @@ class Mt5Client:
                 logger.warning(
                     "Mt5Client.restart: stale shutdown() raised; swallowing."
                 )
+            # D-35: and close the stale rpyc SOCKET too. Telling the terminal to
+            # shut down never closed OUR end of the pipe, so every restart used to
+            # leak one socket. This is a SEPARATE try from the shutdown above, both
+            # ways round: a raising shutdown must not skip the socket close, and a
+            # raising socket close must not mask the shutdown's warning.
+            # ⚠️ ORDERING (WR-01) is preserved verbatim — reconnect FIRST, dispose
+            # SECOND — and BOTH dispose steps are best-effort. Neither is bounded
+            # here; the caller's `_MT5_RESTART_TIMEOUT_S` (mt5_concurrency:68-70)
+            # is what stops a stale socket an abandoned reader is parked on from
+            # blocking recovery, exactly as it already did for the shutdown.
+            self._teardown_transport(stale, who="Mt5Client.restart", stage=None)
 
         self._timed("restart", _reconnect_then_dispose_stale)
 

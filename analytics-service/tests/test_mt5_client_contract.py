@@ -897,14 +897,26 @@ def test_materialize_degenerate_shape_raises():
 # -- close: bounded + idempotent ---------------------------------------------
 
 
-def test_close_is_idempotent_and_swallows_shutdown_errors():
-    """A shutdown() that raises must not propagate; a second close() is a no-op
-    (shutdown is never called twice)."""
-    connect, fake, _rec = _make({"shutdown_raises": True})
+def test_close_is_idempotent_and_swallows_teardown_errors(caplog):
+    """A teardown that raises must not propagate; a second close() is a no-op (the
+    transport is closed exactly once).
+
+    ⚠️ RE-CUT by 153.3-06 / **D-35**. The observable moved from `shutdown_calls` to
+    the transport close, because `close()` no longer calls `mt5.shutdown()` at all
+    — see `test_close_alone_never_reaches_shutdown`. The INTENT is unchanged and is
+    what matters: a teardown failure must never mask the caller's error, and a
+    double close must not double-tear-down.
+    """
+    connect, fake, _rec = _make({"transport_close_raises": True})
     client = Mt5Client("host", 18812, _connect=connect)
-    client.close()  # must not raise even though shutdown() boom-s
-    client.close()  # idempotent no-op
-    assert fake.shutdown_calls == 1
+    with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+        client.close()  # must not raise even though the transport close boom-s
+        client.close()  # idempotent no-op
+    assert fake._MetaTrader5__conn.close_calls == 1
+    assert fake.shutdown_calls == 0
+    assert any("Mt5Client.close" in r.getMessage() for r in caplog.records), (
+        "a swallowed teardown failure must still be LOGGED, never silent"
+    )
 
 
 # -- release: our transport dies, the shared IPC pipe does NOT (153.3 / D-30) --
@@ -983,31 +995,90 @@ def test_release_without_a_reachable_transport_close_warns_loudly(caplog):
     )
 
 
-def test_close_alone_still_calls_shutdown_exactly_once():
-    """The WORKER path is UNCHANGED by D-30: a bare close() (aclose_exchange's mt5
-    arm, job_worker) still ends the terminal session. release() narrows the REQUEST
-    path only; it must not quietly neuter the owner's teardown.
+def test_close_alone_never_reaches_shutdown():
+    """⭐ THE DIRECT **D-35** REGRESSION. A bare `close()` — the verb the WORKER
+    paths call — closes OUR transport and reaches `mt5.shutdown()` ZERO times.
 
-    ⚠️ KNOWINGLY TEMPORARY — owner **D-35** (153.3 wave 6). D-35 closes the
-    shutdown-on-a-shared-session class AT THE SINK by deleting the teardown from
-    `Mt5Client.close()` outright, at which point `shutdown_calls == 1` here becomes
-    exactly the wrong pin. Wave 6 must RE-CUT this case deliberately rather than be
-    surprised by it. Until then it is load-bearing: it is what says D-30 narrowed the
-    request path without silently changing the worker's contract. The remaining
-    worker-side sites are recorded in TODOS.md
-    (`services/exchange.py:924-938`, `services/ingestion/mt5.py`)."""
+    ⚠️ This case is the DELIBERATE RE-CUT of plan 153.3-03's
+    `test_close_alone_still_calls_shutdown_exactly_once`, which pinned
+    `shutdown_calls == 1` and was annotated KNOWINGLY TEMPORARY with D-35 named as
+    its owner. It flipped to `== 0` because D-35 deletes the teardown at the SINK
+    rather than at the call sites: D-30 had taken `shutdown()` off the REQUEST path
+    only, leaving `services/exchange.py`'s `aclose_exchange` mt5 arm and
+    `services/ingestion/mt5.py`'s adapter `finally` still reaching it — and
+    `main.py:83-91` runs the worker loops INSIDE the API process, so those are one
+    `await` from a user's validate. Removing the call from `close()` fixes both
+    without editing either.
+
+    WHY (Rule 9): `mt5linux` serves every rpyc connection from ONE `ThreadedServer`
+    over ONE shared `MetaTrader5` instance holding ONE IPC pipe (EVIDENCE §A2 /
+    C-1), so one caller's `shutdown()` is every caller's `-10004`. The pin that
+    survives is structural, not path-based: `tests/test_mt5_shutdown_roster.py`
+    derives the whole `shutdown()` roster from source.
+    """
     connect, fake, _rec = _make({})
     client = Mt5Client("host", 18812, _connect=connect)
     client.close()
-    assert fake.shutdown_calls == 1
+    assert fake.shutdown_calls == 0
+    # …and the session still does not LEAK: our socket is released (Pitfall 6).
+    assert fake._MetaTrader5__conn.close_calls == 1
+
+
+def test_close_twice_closes_the_transport_exactly_once():
+    """Idempotence stated on the NEW observable: two closes, one socket teardown.
+    A `close()` that re-closed an already-closed rpyc socket on every call would
+    turn the epilogue into a source of transport errors."""
+    connect, fake, _rec = _make({})
+    client = Mt5Client("host", 18812, _connect=connect)
+    client.close()
+    client.close()
+    assert fake._MetaTrader5__conn.close_calls == 1
+    assert fake.shutdown_calls == 0
+
+
+def test_close_and_release_are_observationally_identical():
+    """⭐ Two public names, ONE implementation (`_teardown_transport`). If they ever
+    diverge, one of them has regrown a `shutdown()` — which is exactly the class
+    D-35 closed. Asserted by driving each on its own client and comparing the
+    observables, not by reading the source."""
+    connect_a, fake_a, _ra = _make({})
+    connect_b, fake_b, _rb = _make({})
+    Mt5Client("host", 18812, _connect=connect_a).close()
+    Mt5Client("host", 18812, _connect=connect_b).release()
+    assert (
+        fake_a._MetaTrader5__conn.close_calls,
+        fake_a.shutdown_calls,
+    ) == (
+        fake_b._MetaTrader5__conn.close_calls,
+        fake_b.shutdown_calls,
+    ) == (1, 0)
+
+
+def test_close_without_a_reachable_transport_close_warns_loudly(caplog):
+    """⛔ Never a silent no-op — the `close()` half of the same guard `release()`
+    carries. After D-35 `close()` performs ONLY the transport teardown, so a
+    transport shape it cannot reach means it does nothing at all; that must be
+    REPORTED, or the socket leak is invisible."""
+    connect, fake, _rec = _make({"no_transport": True})
+    client = Mt5Client("host", 18812, _connect=connect)
+    with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+        client.close()
+    assert fake.shutdown_calls == 0
+    assert any(
+        "no rpyc transport close reachable" in r.getMessage() for r in caplog.records
+    )
 
 
 def test_release_never_appears_in_the_shutdown_call_sites():
-    """Source gate: `shutdown()` may be reached from close() and restart() ONLY.
+    """Source gate: release()'s body contains no `shutdown` text at all.
 
-    A grep-level pin, because the property that matters is STRUCTURAL — release()
-    must contain no shutdown call at all, not merely avoid one on the paths a test
-    happens to walk."""
+    A pin at the level that matters — STRUCTURAL, not path-based: release() must
+    contain no shutdown call, not merely avoid one on the paths a test happens to
+    walk. ⚠️ Since 153.3-06 / **D-35** the same is true of `close()` and of every
+    other function in the tree except `restart()`, and that far stronger statement
+    is derived from source for the WHOLE service by
+    `tests/test_mt5_shutdown_roster.py`. This case is retained as the narrow,
+    fast-reading pin on the verb D-30 introduced."""
     source = pathlib.Path(mt5_client_mod.__file__).read_text()
     body = source.split("    def release(self) -> None:", 1)[1]
     body = body.split("    def restart(self) -> None:", 1)[0]
@@ -1043,6 +1114,34 @@ def test_restart_reconnects():
     assert record["connects"] == 2  # factory re-invoked → fresh transport
     # The rebuilt transport is live: a read works against the returned fake.
     assert client.account_info()["equity"] == 1000.0
+
+
+def test_restart_closes_the_stale_socket_and_leaves_the_fresh_one_open():
+    """⭐ 153.3-06 / D-35: restart() disposes the stale connection COMPLETELY —
+    `shutdown()` (the one permitted teardown) AND our own rpyc socket.
+
+    WHY (Rule 9): telling the terminal to shut its IPC down never closed OUR end of
+    the pipe, so every restart leaked one socket against the gateway's
+    `ThreadedServer` — a slow resource bleed on the exact recovery path that runs
+    when the terminal is already unhealthy. The fresh connection must be untouched
+    by any of it, or recovery destroys what it just built."""
+    stale = _FakeMt5({})
+    fresh = _FakeMt5({"account": _FakeNamedTuple(login=123, equity=2000.0)})
+    conns = {"n": 0}
+
+    def _connect(*, host, port, timeout):
+        conns["n"] += 1
+        return stale if conns["n"] == 1 else fresh
+
+    client = Mt5Client("host", 18812, _connect=_connect)
+    client.restart()
+
+    assert stale.shutdown_calls == 1  # the ONE permitted, lease-held teardown
+    assert stale._MetaTrader5__conn.close_calls == 1  # …and our socket, no longer leaked
+    assert fresh.shutdown_calls == 0
+    assert fresh._MetaTrader5__conn.close_calls == 0
+    # The fresh connection is the LIVE one and is fully usable.
+    assert client.account_info()["equity"] == 2000.0
 
 
 def test_restart_survives_shutdown_raise():
@@ -1139,19 +1238,32 @@ def test_restart_reconnects_before_stale_shutdown_can_block():
 
 def test_restart_clears_closed():
     """restart() resets the idempotency latch: after close() (which latches
-    _closed) then restart(), a subsequent close() must actually reach shutdown()
-    again (shutdown_calls advances), proving restart cleared _closed. A restart
-    that left _closed set would leave the fresh terminal un-closable, leaking the
-    session on the next teardown."""
+    _closed) then restart(), a subsequent close() must actually tear the transport
+    down AGAIN, proving restart cleared _closed. A restart that left _closed set
+    would leave the fresh terminal un-closable, leaking the session on the next
+    teardown.
+
+    ⚠️ RE-CUT by 153.3-06 / **D-35**: the sequence was pinned on `shutdown_calls`
+    (1, 2, 3); `close()` no longer shuts anything down, so the same three-step
+    sequence is now read off the transport-close counter. `shutdown_calls` is
+    asserted alongside it and stays at exactly ONE — restart's, the only permitted
+    teardown in the tree — which is what proves the two closes did not regrow it.
+    (The single shared `_make` fake is both stale and fresh here, so all four
+    teardowns land on the one counter; the stale-vs-fresh separation is pinned by
+    `test_restart_closes_the_stale_socket_and_leaves_the_fresh_one_open`.)"""
     connect, fake, _record = _make({})
     client = Mt5Client("host", 18812, _connect=connect)
+    conn = fake._MetaTrader5__conn
 
     client.close()
-    assert fake.shutdown_calls == 1  # close() reached shutdown
+    assert conn.close_calls == 1  # close() released our socket
+    assert fake.shutdown_calls == 0  # …and reached shutdown ZERO times (D-35)
     client.restart()
-    assert fake.shutdown_calls == 2  # restart's own teardown
+    assert fake.shutdown_calls == 1  # restart's own — the ONE permitted teardown
+    assert conn.close_calls == 2  # restart also disposes the stale socket
     client.close()
-    assert fake.shutdown_calls == 3  # _closed was cleared → close() works again
+    assert conn.close_calls == 3  # _closed was cleared → close() works again
+    assert fake.shutdown_calls == 1  # still exactly restart's, and only restart's
 
 
 # -- order_check: probe only (investor-vs-master signal is a live unknown) ----

@@ -539,6 +539,24 @@ class _NT:
         return dict(self._d)
 
 
+
+class _FakeRpycConn:
+    """The name-mangled `_MetaTrader5__conn` seam mt5linux 0.1.9 exposes — and since
+    153.3-06 / **D-35** the ONLY thing `Mt5Client.close()`/`release()` touch.
+
+    Present so this double EXERCISES the real transport teardown instead of falling
+    through to the "no rpyc transport close reachable" WARNING branch, which would
+    mean the close paths here were silently walking a route production never takes.
+    """
+
+    def __init__(self, calls: list) -> None:
+        self._calls = calls
+        self.close_calls = 0
+
+    def close(self):
+        self.close_calls += 1
+        self._calls.append("transport_close")
+
 class _RecordingMt5Transport:
     """Records every terminal call so 'zero IPC' assertions are falsifiable.
 
@@ -552,6 +570,7 @@ class _RecordingMt5Transport:
         self._account = account
         self._on_account_info = on_account_info
         self.calls: list[str] = []
+        self._MetaTrader5__conn = _FakeRpycConn(self.calls)
 
     def initialize(self, **kwargs):
         # **kwargs: initialize() carries its own `timeout=` ms ceiling (153.3 / D-24).
