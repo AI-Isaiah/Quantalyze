@@ -273,8 +273,9 @@ export const SMOOTHED_MTM_UI_ENABLED =
  * static member access (never dynamic `process.env[...]` indexing) or the
  * inlining breaks and the flag reads undefined in the browser.
  *
- * DEFAULT OFF, dark until the founder flips it in Phase 139. It gates ONLY the
- * MT5 venue card in the add-key wizard (ConnectKeyStep's local EXCHANGES array).
+ * DEFAULT OFF, dark until the founder flips it in Phase 139. It gates the MT5
+ * venue card in the add-key wizard (ConnectKeyStep's local EXCHANGES array) and,
+ * since Phase 153.2, MT5's membership of WIZARD_EXCHANGE_CODES below.
  * Flag OFF ⇒ the wizard is BYTE-IDENTICAL to today (no MT5 pixel); a test pins
  * this (ConnectKeyStep.test.tsx + closed-sets.mt5-flag.test.ts).
  *
@@ -283,10 +284,32 @@ export const SMOOTHED_MTM_UI_ENABLED =
  * in Phase 139; either alone is an intentional SAFE half-state (card hidden but
  * gated, or card shown but connect fails closed 400).
  *
- * mt5 stays OUT of UI_EXCHANGE_CODES / EXCHANGES / FUNDING_EXCHANGES /
- * CRYPTO_EXCHANGES regardless of this flag — the manager-surface <Select> must
- * not silently widen (UI-SPEC §MT5-Manager-Parity; the closed-sets.mt5-flag
- * no-widening pin enforces it).
+ * ⚠️ THE FOUR-SET EXCLUSION, RE-CUT (Phase 153.2 / MT5-14 / D-16 / D-20). This
+ * docblock used to say mt5 stays out of UI_EXCHANGE_CODES / EXCHANGES /
+ * FUNDING_EXCHANGES / CRYPTO_EXCHANGES "regardless of this flag", full stop.
+ * Half of that is still true and half of it was outgrown, so it is REWRITTEN
+ * rather than deleted — the next reader should inherit the reasoning, not an
+ * unexplained inversion:
+ *
+ *   · mt5 still stays out of ALL FOUR of those sets, flag on or off. The
+ *     manager-surface <Select> (ApiKeyForm / StrategyForm / StrategyFilters /
+ *     MandateForm / PreferencesPanel / VerificationForm) derives from
+ *     UI_EXCHANGE_CODES and must not silently gain an MT5 option, and the public
+ *     "{EXCHANGES.length} exchanges supported" marketing count must not move
+ *     ((marketing)/page.tsx). That was the pin's original stated reason and it
+ *     is intact.
+ *   · ⛔ CRYPTO_EXCHANGES is the one that is not a UI question at all. Membership
+ *     there selects √365 over √252 for Sharpe / Sortino / volatility, so adding
+ *     mt5 would silently inflate every risk metric on a forex/CFD book (~×1.20
+ *     Sharpe vs crypto peers on the allocator-facing ranking). That is a
+ *     MONEY-MATH boundary, and no UI requirement may cross it.
+ *   · mt5 DOES enter WIZARD_EXCHANGE_CODES when this flag is on (MT5-14). The
+ *     strategy wizard must be able to declare the venue of the key it is
+ *     literally built on — refusing that is not a safety property, it is a
+ *     strategy that cannot name where it trades.
+ *
+ * The closed-sets.mt5-flag pin asserts all four negatives AND the positive, so
+ * neither half of this can drift silently.
  */
 export const MT5_UI_ENABLED = process.env.NEXT_PUBLIC_MT5_ENABLED === "true";
 
@@ -413,6 +436,89 @@ export const FUNDING_EXCHANGES = [
 export const EXCHANGES: readonly ExchangeDisplay[] = UI_EXCHANGE_CODES.map(
   (code) => EXCHANGE_DISPLAY[code],
 );
+
+// --- The wizard-declarable set (Phase 153.2 / MT5-14, D-20 "Option B") ------
+//
+// A venue a strategy may DECLARE as supported in the wizard's metadata step.
+// Deliberately a FIFTH set rather than a widening of UI_EXCHANGE_CODES, and the
+// narrowness is the whole decision:
+//
+//   · `EXCHANGES` — and therefore the public "{EXCHANGES.length} exchanges
+//     supported" count at (marketing)/page.tsx — DOES NOT MOVE. MT5 is a broker
+//     platform, not an exchange, and claiming it as one in public copy would be
+//     a marketing statement made by a UI fix.
+//   · the six manager <Select> surfaces (ApiKeyForm, StrategyForm,
+//     StrategyFilters, MandateForm, PreferencesPanel, VerificationForm) all
+//     derive from UI_EXCHANGE_CODES and DO NOT silently widen. That was the
+//     closed-sets.mt5-flag pin's original stated reason; Option B keeps the
+//     reason intact instead of retiring it, and the pin gains a POSITIVE
+//     assertion here rather than losing a negative there.
+//
+// ⛔ The ONLY consumer is MetadataStep's "Supported exchanges" chip group. If a
+// second consumer ever appears, that is a decision to make deliberately — not a
+// set to reach for because it happens to contain the venue you wanted.
+
+/**
+ * The codes the wizard may offer OVER AND ABOVE the publicly-offered set.
+ *
+ * A separate literal (rather than a fifth hand-typed full tuple) because
+ * WIZARD_EXCHANGE_CODES composes it ON TOP of UI_EXCHANGE_CODES: two
+ * INDEPENDENT flags (SFOX_UI_ENABLED and MT5_UI_ENABLED) would otherwise need
+ * four literals kept in lockstep, and the sFOX flag's behaviour here stays
+ * automatic instead of hand-maintained. `as const satisfies readonly
+ * SupportedExchange[]` keeps the closed-set guarantee on this literal too
+ * (Shared Pattern F).
+ */
+const WIZARD_ONLY_EXCHANGE_CODES = ["mt5"] as const satisfies readonly SupportedExchange[];
+
+/**
+ * The exchange codes the strategy wizard's metadata step may offer.
+ *
+ * = UI_EXCHANGE_CODES, plus mt5 when MT5_UI_ENABLED. Flag OFF ⇒ BYTE-IDENTICAL
+ * to UI_EXCHANGE_CODES, so the wizard has no MT5 pixel and no MT5 chip exists to
+ * preselect (the lowercase "mt5" seeded into MetadataStep's state renders
+ * nowhere, exactly as today).
+ */
+export const WIZARD_EXCHANGE_CODES: readonly SupportedExchange[] = MT5_UI_ENABLED
+  ? [...UI_EXCHANGE_CODES, ...WIZARD_ONLY_EXCHANGE_CODES]
+  : UI_EXCHANGE_CODES;
+
+/**
+ * Display-case wizard-declarable set — derived through EXCHANGE_DISPLAY exactly
+ * as EXCHANGES derives from UI_EXCHANGE_CODES, so casing cannot drift between
+ * the chip a user clicks and the value that is persisted.
+ *
+ * Flag OFF ⇒ deep-equal to EXCHANGES (the pin asserts that as an EQUALITY, not
+ * as two absences).
+ */
+export const WIZARD_EXCHANGES: readonly ExchangeDisplay[] =
+  WIZARD_EXCHANGE_CODES.map((code) => EXCHANGE_DISPLAY[code]);
+
+/**
+ * Canonicalize an exchange name against the WIZARD set — the same shape as
+ * `canonicalizeExchange` in constants.ts (case-insensitive loop; an unknown name
+ * is returned UNCHANGED so a future venue is not silently dropped before this
+ * set learns about it), but looping WIZARD_EXCHANGES so `"mt5"` resolves to
+ * `"MT5"` and matches its chip.
+ *
+ * ⛔ DO NOT "just widen" `constants.ts`'s `canonicalizeExchange` instead. That
+ * function is called SERVER-SIDE at finalize-wizard/route.ts (via
+ * `canonicalizeExchangeList`, on the persisted `supported_exchanges`) and in
+ * WizardClient.tsx, so widening it would change what every caller persists for
+ * every venue — a wire-format change made to fix a chip. This canonicalizer is
+ * wizard-scoped for the same reason the set is.
+ *
+ * Lives here rather than in constants.ts because constants.ts re-exports FROM
+ * this module (the module-header no-cycle rule).
+ */
+export function canonicalizeWizardExchange(name: string): string {
+  if (!name) return name;
+  const lower = name.toLowerCase();
+  for (const canonical of WIZARD_EXCHANGES) {
+    if (canonical.toLowerCase() === lower) return canonical;
+  }
+  return name;
+}
 
 /** Case-insensitive membership against the user exchange allowlist. */
 export function isSupportedExchange(value: string): boolean {
