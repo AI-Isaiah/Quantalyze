@@ -14,6 +14,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { MetadataStep, type MetadataDraft } from "./MetadataStep";
 import { WIZARD_ERROR_COPY } from "@/lib/wizardErrors";
+import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 
 // Supabase client mock: MetadataStep does
 //   supabase.from("discovery_categories").select("id, name").order("sort_order")
@@ -113,18 +114,31 @@ describe("[H-0191] MetadataStep", () => {
   });
 
   it("[WR-04] surfaces an honest block when categories load to an empty (readable) set", async () => {
-    // An empty-but-readable category list leaves categoryId=null and Submit
-    // permanently disabled. On the CSV path there is no detected-markets hint
-    // to explain the block, so the step must surface an honest reason rather
-    // than a silent dead-end (ISSUE-010 must never reopen via category_id=null).
+    // An empty-but-readable category list leaves categoryId=null, so no submit
+    // can succeed. On the CSV path there is no detected-markets hint to explain
+    // the block, so the step must surface an honest reason rather than a silent
+    // dead-end (ISSUE-010 must never reopen via category_id=null).
+    //
+    // 153.2 / WIZFORM-01 — this used to assert `toBeDisabled()`. The submit
+    // button is no longer disabled for a validation reason (a dead button names
+    // nothing), so what must be proven here is the BEHAVIOUR the disabled prop
+    // used to stand for: with no category loadable the submit is refused and
+    // onComplete is never reached. The honest block above is the explanation
+    // the disabled button never gave.
     orderResult = { data: [], error: null };
-    render(<MetadataStep {...baseProps} />);
+    const onComplete = vi.fn();
+    render(<MetadataStep {...baseProps} onComplete={onComplete} />);
     // Wait for the fetch to settle (categoriesLoaded gates the hint).
     expect(
       await screen.findByTestId("metadata-categories-empty"),
     ).toBeInTheDocument();
     const submit = screen.getByRole("button", { name: /review and submit/i });
-    expect(submit).toBeDisabled();
+    expect(submit).not.toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: "A perfectly valid description of a strategy." },
+    });
+    fireEvent.click(submit);
+    expect(onComplete).not.toHaveBeenCalled();
     // The honest empty block must NOT fire wizard_error telemetry (that is the
     // failure path; an empty readable result is a legitimate degenerate state).
     const errored = trackMock.mock.calls.some(
@@ -150,31 +164,126 @@ describe("[H-0191] MetadataStep", () => {
     expect(chip).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("disables Submit until both description and categoryId are present", async () => {
-    // Start with no categories so auto-select cannot fill categoryId, and an
-    // empty description: the gate must keep Submit disabled.
+  // ── 153.2 / WIZFORM-01 — the submit button is NEVER disabled for a
+  // validation reason, and the predicate that used to live in the `disabled`
+  // prop now lives in handleSubmit where it can NAME the failing field.
+  //
+  // These three rows replace two `toBeDisabled()` assertions. The old shape
+  // could only prove the button was dead; it could not prove the user was ever
+  // told why, and "the user was never told why" is the defect (D-13: a
+  // nameless refusal sent the founder to corrupt unrelated fields). Each row
+  // below therefore asserts the same three things about a differently-invalid
+  // draft: the control is REACHABLE, activating it does NOT reach onComplete,
+  // and the field says so.
+  it("[WIZFORM-01] Submit is enabled but refuses when description and categoryId are both absent", async () => {
+    // No categories so auto-select cannot fill categoryId, and an empty
+    // description. Formerly asserted `toBeDisabled()`.
     orderResult = { data: [], error: null };
-    render(<MetadataStep {...baseProps} detectedMarkets={["BTC"]} />);
+    const onComplete = vi.fn();
+    render(
+      <MetadataStep
+        {...baseProps}
+        onComplete={onComplete}
+        detectedMarkets={["BTC"]}
+      />,
+    );
+    const description = (await screen.findByLabelText(
+      "Description",
+    )) as HTMLTextAreaElement;
     const submit = screen.getByRole("button", { name: /review and submit/i });
-    expect(submit).toBeDisabled();
+
+    expect(submit).not.toBeDisabled();
+    fireEvent.click(submit);
+
+    expect(onComplete).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(description.getAttribute("aria-invalid")).toBe("true"),
+    );
+    expect(document.activeElement).toBe(description);
   });
 
-  it("[WR-03] keeps Submit disabled for a whitespace-only description (gate matches .trim() rule)", async () => {
-    // A whitespace-only description ("   ") is truthy but invalid. The
-    // disabled-gate must use the SAME .trim() predicate as the validation
-    // rule, so it stays disabled — otherwise the user reaches an "enabled"
-    // button that handleSubmit then silently no-ops on (the inconsistency
-    // that breeds regressions).
-    render(<MetadataStep {...baseProps} />);
+  it("[WR-03] a whitespace-only description leaves Submit enabled and is refused at the field", async () => {
+    // A whitespace-only description ("   ") is truthy but invalid. WR-03's
+    // original concern — that the button's predicate and the validation rule
+    // must not drift — is now structural rather than asserted: there is exactly
+    // ONE predicate (`validateDescription`), read by both the message and the
+    // submit guard, so they cannot disagree. What is left to prove is that the
+    // whitespace draft is still refused, and refused visibly.
+    const onComplete = vi.fn();
+    render(<MetadataStep {...baseProps} onComplete={onComplete} />);
     const select = (await screen.findByLabelText("Category")) as HTMLSelectElement;
     await waitFor(() => expect(select.value).toBe("cat-aaa"));
 
-    fireEvent.change(screen.getByLabelText("Description"), {
-      target: { value: "   " },
-    });
+    const description = screen.getByLabelText(
+      "Description",
+    ) as HTMLTextAreaElement;
+    fireEvent.change(description, { target: { value: "   " } });
 
     const submit = screen.getByRole("button", { name: /review and submit/i });
-    expect(submit).toBeDisabled();
+    expect(submit).not.toBeDisabled();
+    fireEvent.click(submit);
+
+    expect(onComplete).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(description.getAttribute("aria-invalid")).toBe("true"),
+    );
+  });
+
+  it("[WIZFORM-01] a 2-character description with a category present is refused at the field, not at the server", async () => {
+    // ⭐ THE incident row. Before this phase, a two-character description
+    // satisfied every client check, POSTed, and died at `finalize-wizard` as a
+    // full-page envelope that named no field — read three times by the founder,
+    // who then went and changed the supported-exchanges chips looking for the
+    // cause. The client knows this rule; it must refuse here.
+    //
+    // The fixture is deliberately sized WELL under the bound rather than at
+    // `MIN_DESCRIPTION_CHARS - 1`: a fixture derived from the constant under
+    // test would still pass if the constant were mutated to something absurd,
+    // which is the "guard that cannot fail" shape. Two characters is short by
+    // any plausible reading of "at least ten".
+    const onComplete = vi.fn();
+    render(<MetadataStep {...baseProps} onComplete={onComplete} />);
+    const select = (await screen.findByLabelText("Category")) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe("cat-aaa"));
+
+    const description = screen.getByLabelText(
+      "Description",
+    ) as HTMLTextAreaElement;
+    fireEvent.change(description, { target: { value: "ab" } });
+
+    const submit = screen.getByRole("button", { name: /review and submit/i });
+    expect(submit).not.toBeDisabled();
+    fireEvent.click(submit);
+
+    expect(onComplete).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(description.getAttribute("aria-invalid")).toBe("true"),
+    );
+    expect(document.activeElement).toBe(description);
+  });
+
+  it("[WIZFORM-01] a description at exactly the minimum length is ACCEPTED", async () => {
+    // The companion to the row above, and the reason it can fail honestly: the
+    // bound is `< MIN` (reject) / `>= MIN` (accept), matching what
+    // `finalize-wizard` enforces. Without this row a mirror that refused
+    // EVERYTHING would satisfy the refusal test. Built FROM the constant on
+    // purpose — here the constant is the subject, not the oracle: the claim is
+    // "whatever MIN is, exactly MIN passes".
+    const onComplete = vi.fn();
+    render(<MetadataStep {...baseProps} onComplete={onComplete} />);
+    const select = (await screen.findByLabelText("Category")) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe("cat-aaa"));
+
+    const atMinimum = "x".repeat(MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS);
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: atMinimum },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /review and submit/i }));
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect((onComplete.mock.calls[0]![0] as MetadataDraft).description).toBe(
+      atMinimum,
+    );
   });
 
   // ── Phase 53 / APPLY-02 — inline per-field validation surfacing ──────────
@@ -641,24 +750,35 @@ describe("[H-0191] MetadataStep", () => {
       ).toBeInTheDocument();
     });
 
-    it("leaves the submit gate unchanged when the question renders", async () => {
-      // The gate stays exactly `!description.trim() || !categoryId`. Answering
-      // the capital question must NOT become a new precondition (wizard
-      // validation UX belongs to Phase 153) — and since it is preselected,
-      // it never could be. Guard against someone widening the gate.
-      render(<MetadataStep {...baseProps} showCapitalQuestion />);
+    it("does not make the capital question a submit precondition", async () => {
+      // Answering the capital question must NOT become a new precondition —
+      // and since it is preselected, it never could be. Guard against someone
+      // widening the predicate.
+      //
+      // 153.2 / WIZFORM-01 — this row's original shape (disabled → enabled as
+      // the description is typed) is gone with the `disabled` prop. The claim
+      // it was really making survives intact and is asserted directly: with the
+      // question rendered and NOT touched, a valid description alone submits.
+      const onComplete = vi.fn();
+      render(
+        <MetadataStep {...baseProps} onComplete={onComplete} showCapitalQuestion />,
+      );
       const select = (await screen.findByLabelText(
         "Category",
       )) as HTMLSelectElement;
       await waitFor(() => expect(select.value).toBe("cat-aaa"));
 
       const submit = screen.getByRole("button", { name: /review and submit/i });
-      expect(submit).toBeDisabled(); // no description yet
+      // Refused while the description is missing — the capital question is
+      // answered (preselected), so this refusal can only be the description.
+      fireEvent.click(submit);
+      expect(onComplete).not.toHaveBeenCalled();
 
       fireEvent.change(screen.getByLabelText("Description"), {
         target: { value: DESCRIPTION },
       });
-      await waitFor(() => expect(submit).not.toBeDisabled());
+      fireEvent.click(submit);
+      expect(onComplete).toHaveBeenCalledTimes(1);
     });
   });
 });

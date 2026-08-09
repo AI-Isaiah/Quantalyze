@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Field } from "@/components/ui/Field";
-import { WIZARD_ERROR_COPY } from "@/lib/wizardErrors";
+import { WIZARD_ERROR_COPY, type WizardErrorCode } from "@/lib/wizardErrors";
 import {
   STRATEGY_NAMES,
   STRATEGY_TYPES,
@@ -16,7 +16,7 @@ import {
   EXCHANGES,
   canonicalizeExchange,
 } from "@/lib/constants";
-import { isCryptoExchange } from "@/lib/closed-sets";
+import { isCryptoExchange, MAGNITUDE_CAPS } from "@/lib/closed-sets";
 import { CapitalOwnershipRadioGroup } from "@/components/strategy/CapitalOwnershipRadioGroup";
 import { TEAM_REVIEW, type CapitalOwnership } from "@/lib/capital-ownership";
 
@@ -26,6 +26,48 @@ import { TEAM_REVIEW, type CapitalOwnership } from "@/lib/capital-ownership";
  * trades when available; `supported_exchanges` is pre-filled from the
  * Step 1 exchange selection.
  */
+
+/**
+ * Client mirror of `finalize-wizard`'s description arm (the `validatePayload`
+ * block in `src/app/api/strategies/finalize-wizard/route.ts`) — Phase 153.2 /
+ * WIZFORM-01 / D-11.
+ *
+ * ⛔ The SERVER stays authoritative. This function is a UX affordance, not a
+ * control: `validatePayload` re-checks the identical bound on every submit and
+ * is unchanged by this phase, so a client with this guard bypassed is still
+ * refused there. Do not delete the server arm as "redundant".
+ *
+ * Why it exists: the client used to check only `!description.trim()`, so a
+ * two-character description satisfied every client check, POSTed, and died as a
+ * full-page envelope that named no field. The founder read that envelope three
+ * times and went off to change unrelated fields looking for the cause (D-13).
+ * A typo belongs at the field, not at the end of a submit.
+ *
+ * ⛔ The bounds are READ from `MAGNITUDE_CAPS`, never re-typed as `10` / `5000`
+ * (D-23). A hand-typed literal here is free to disagree with the server's, and
+ * that disagreement IS the incident.
+ *
+ * ⚠️ WHICH LENGTH IS MEASURED, decided once. The server measures
+ * `description.length` on the RAW string for both bounds, so both bounds here
+ * measure `value.length` too — measuring a trimmed length against either would
+ * re-open the drift this constant closes, in a subtler form (a 12-character
+ * value with trailing spaces would pass one guard and fail the other). `.trim()`
+ * appears solely in the emptiness test, where it is STRICTER than the server
+ * (whitespace-only text of ten or more characters is accepted by
+ * `validatePayload` and refused here). Refusing more than the server is safe —
+ * the user is told at the field, and nothing that reaches the server is a
+ * surprise; the reverse is what breaks.
+ */
+function validateDescription(value: string): WizardErrorCode | null {
+  if (!value.trim()) return "METADATA_DESCRIPTION_REQUIRED";
+  if (value.length < MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS) {
+    return "METADATA_DESCRIPTION_TOO_SHORT";
+  }
+  if (value.length > MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS) {
+    return "METADATA_DESCRIPTION_TOO_LONG";
+  }
+  return null;
+}
 
 export interface MetadataDraft {
   name: string | null;
@@ -207,28 +249,42 @@ export function MetadataStep({
     setter(list.includes(item) ? list.filter((x) => x !== item) : [...list, item]);
   }
 
-  // Inline validation derives from the EXISTING required-field rule (the
-  // Submit gate). Copy comes from wizardErrors.ts (canonical home) — never
-  // an invented inline string. The message shows on blur or after a submit
-  // attempt; it is NOT role="alert" (the envelope owns that).
-  const descriptionError = !description.trim()
-    ? WIZARD_ERROR_COPY.METADATA_DESCRIPTION_REQUIRED.cause
-    : undefined;
+  // Inline validation derives from `validateDescription` — the ONE client
+  // mirror of the server rule (Phase 153.2 / WIZFORM-01). It is the same
+  // function `handleSubmit` refuses on, so the message the user reads and the
+  // reason the submit was refused can never disagree. Copy comes from
+  // wizardErrors.ts (canonical home) — never an invented inline string. The
+  // message shows on blur or after a submit attempt; it is NOT role="alert"
+  // (the envelope owns that).
+  const descriptionCode = validateDescription(description);
   const showDescriptionError =
-    (descriptionBlurred || submitAttempted) && descriptionError
-      ? descriptionError
+    (descriptionBlurred || submitAttempted) && descriptionCode
+      ? WIZARD_ERROR_COPY[descriptionCode].cause
       : undefined;
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setSubmitAttempted(true);
-    // On submit-with-errors, focus the first invalid field (description is
-    // the only inline-validated free-text field here; category is selected
-    // via auto-select / dropdown). The Submit button stays disabled until
-    // both are present, so this is a defense-in-depth focus aid for the AT
-    // path where the button is reached.
-    if (!description.trim()) {
-      descriptionRef.current?.focus();
+    // The submit predicate IS the field mirror (Phase 153.2 / FLAG-3). This is
+    // the only gate: the button carries no validation `disabled`, so an invalid
+    // draft reaches this handler by design and is refused HERE, inline, with
+    // the offending control focused. Deleting the button gate without widening
+    // this predicate would let a two-character description POST — the exact
+    // defect WIZFORM-01 exists to close — so the two move together, always.
+    //
+    // `categoryId` is checked here for the first time; until this phase it was
+    // covered only by the deleted `disabled` gate.
+    //
+    // ⚠️ Focus is hand-rolled because the description is today the only
+    // inline-validated control on this step. Phase 153.2-02 replaces this with
+    // the general first-invalid-control orchestration (which also opens the
+    // collapsed <details> when the offending control is inside it); written as
+    // a per-field branch so that lands as a widening, not a rewrite.
+    const descriptionRefusal = validateDescription(description);
+    if (descriptionRefusal !== null || !categoryId) {
+      if (descriptionRefusal !== null) {
+        descriptionRef.current?.focus();
+      }
       return;
     }
     onComplete({
@@ -298,7 +354,20 @@ export function MetadataStep({
         optional.
       </p>
 
-      <form onSubmit={handleSubmit} className="mt-8 space-y-6">
+      {/* 153.2 / WIZFORM-01 — `noValidate` makes `validateDescription` the
+          SINGLE gate on this form. The description textarea carries `required`
+          (kept: it is the correct semantics, and it is what tells AT the field
+          is mandatory), and native constraint validation would otherwise
+          intercept the EMPTY case before `handleSubmit` ever runs — the user
+          would get the browser's own bubble instead of the inline message this
+          phase exists to show, and only for one of the three refusal states,
+          so the empty field would behave unlike the too-short and too-long
+          ones. A tooltip-only error is forbidden by the UI contract, and two
+          gates disagreeing about the same field is the drift class WIZFORM-01
+          closes. Our predicate is strictly stronger than `required`: it also
+          refuses whitespace-only and under-length text, which native
+          validation accepts. */}
+      <form onSubmit={handleSubmit} noValidate className="mt-8 space-y-6">
         {/* OWN-03 (D-01) — THE question, first. It leads the step because a
             question buried under three fields is a question most people never
             read, and this one decides whether the strategy can ever hold
@@ -331,7 +400,19 @@ export function MetadataStep({
             rows={3}
             placeholder="One paragraph describing the strategy, edge, and risk framing."
             required
-            className="rounded-lg border border-border bg-surface px-3 py-2 text-body text-text-primary placeholder:text-text-muted transition-colors focus:border-border-focus focus:outline-none focus:ring-2 focus:ring-accent/20 aria-[invalid=true]:border-negative"
+            // 153.2 / UI-SPEC focus-ring contract — this carried a 20%-alpha
+            // accent ring on plain `focus:`, which measures ~1.3:1 against
+            // `bg-surface`, far under WCAG 1.4.11's 3:1 floor for a
+            // non-text indicator; a sighted keyboard user could not see where
+            // they were. Same fix, same reasoning as
+            // `AllocateDialog.tsx`'s amount input. `ring-inset` keeps the ring
+            // inside the border box so an ancestor's overflow cannot clip it,
+            // and `focus-visible` (not `focus`) keeps it off pointer
+            // interactions. The trailing `aria-[invalid=true]:border-negative`
+            // STAYS: the red border derives from the ARIA state Field writes,
+            // never from JS, which makes a red control without correct a11y
+            // wiring structurally impossible (Shared Pattern A).
+            className="rounded-lg border border-border bg-surface px-3 py-2 text-body text-text-primary placeholder:text-text-muted transition-colors focus-visible:border-border-focus focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent aria-[invalid=true]:border-negative"
           />
         </Field>
 
@@ -483,14 +564,23 @@ export function MetadataStep({
           <Button variant="secondary" type="button" onClick={onBack}>
             Back
           </Button>
-          {/* WR-03 — gate on the SAME .trim() predicate as the descriptionError
-              derivation + the handleSubmit guard, so a whitespace-only
-              description ("   ") does not enable a button that then silently
-              no-ops in handleSubmit. The disabled-prop must not drift from the
-              validation rule. */}
-          <Button type="submit" disabled={!description.trim() || !categoryId}>
-            Review and submit
-          </Button>
+          {/* ⛔ NEVER disabled for a validation reason (Phase 153.2 / D-13,
+              and the standing founder direction: a blocked action must be
+              clickable and must explain itself). This button used to carry a
+              prop gating it on the trimmed description plus the category id,
+              and that gate is exactly what hid WHICH field was wrong — a dead
+              button names nothing, so a user facing it has to guess. Guessing
+              is what sent the founder to change unrelated fields.
+
+              The refusal now lives in `handleSubmit`, which names the field,
+              shows the rule inline and moves focus there. `disabled` survives
+              on a submit control ONLY as an in-flight double-submit guard; this
+              step performs no write of its own (it hands the draft to the
+              Review recap), so there is no in-flight state and the prop is gone
+              entirely. ⛔ Do not reintroduce it, and do not substitute
+              `aria-disabled` — that is the same dead end with better a11y
+              paperwork. */}
+          <Button type="submit">Review and submit</Button>
         </div>
       </form>
     </section>
