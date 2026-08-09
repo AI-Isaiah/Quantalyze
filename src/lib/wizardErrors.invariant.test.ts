@@ -757,12 +757,24 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
     // either one's drift visible: the coded sites this scan sees are the same
     // sites `deriveEmittedCodes` sees. If they disagree, one of the two
     // predicates changed and the other did not.
+    //
+    // ⛔ THE RIGHT-HAND SIDE MUST BE THE OTHER SCANNER'S OUTPUT, NOT A THIRD
+    // LITERAL. It used to read `d.expectedSites`, which made the whole
+    // assertion `30 - 5 === 25` — both operands come from
+    // `deriveRejectionSites`, and both are already pinned by the two
+    // `expect.soft`s above, so whenever those passed this one was
+    // arithmetically forced and could not fail. `deriveEmittedCodes` was never
+    // read, so the divergence it exists to catch was invisible: break
+    // `emitterRe` until it returns 20 codes for finalize-wizard and this
+    // assertion still passed green while claiming the two predicates agree.
     expect.soft(
       sites.length - codeless.length,
-      "the CODED rejections this scan sees and the emitters deriveEmittedCodes " +
-        "sees have diverged — the two predicates no longer describe the same " +
-        "sites, so one of them is measuring something nobody decided on.",
-    ).toBe(d.expectedSites);
+      `the CODED rejections deriveRejectionSites sees (${
+        sites.length - codeless.length
+      }) and the emitters deriveEmittedCodes sees (${d.codes.length}) have ` +
+        "diverged — the two predicates no longer describe the same sites, so " +
+        "one of them is measuring something nobody decided on.",
+    ).toBe(d.codes.length);
   });
 
   it("SELF-TEST — the rejection scan sees a CODE-LESS arm that the emitter scan cannot", () => {
@@ -1044,18 +1056,41 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
     // body would backtrack past its own close and report ITS code against the
     // FOLLOWING emitter's status — inflating counts for a reason that has
     // nothing to do with the route's guards.
-    // ⚠️ THE GAP IS HAND-TYPED 200, NOT `EMITTER_BODY_MAX_CHARS + n`. A filler
+    // ⛔ THE BOUND IS ASSERTED DIRECTLY, and the fixture below is a SECOND,
+    // weaker check rather than the primary one. It used to be the only check,
+    // and it was ~100 characters weaker than the prose above it: the filler was
+    // sized 200 to model the measured 202-character neighbour distance, but the
+    // regex run is measured from `error:` to the next `}`, and the fixture
+    // injects ~104 characters of scaffolding into that span that the sizing did
+    // not account for (26 of the first body, 31 for the newline-plus-
+    // `return NextResponse.json(` line, 45 of the second body before its close).
+    // The real span was 304, so the fixture only red at cap >= ~305 — MEASURED,
+    // by sweeping the cap through this file's own regex: 160/200/250/300/304 all
+    // returned ["SECOND_CODE"] and only 320 returned ["FIRST_CODE"]. A cap of
+    // 250 — genuinely unsafe against the 202 bound — passed green. A guard which
+    // cannot fail across the range that matters is worse than no guard, so the
+    // property is now stated as itself.
+    expect(
+      EMITTER_BODY_MAX_CHARS,
+      "The lazy body run can now reach past a malformed emitter's own close " +
+        "and report ITS code against the FOLLOWING emitter's status, " +
+        "inflating counts for a reason that has nothing to do with the " +
+        "route's guards. 202 is the measured shortest distance from any " +
+        "`error:` to the next emitter's `status:` on the real sources; the " +
+        "cap must stay under it.",
+    ).toBeLessThan(202);
+
+    // ⚠️ THE GAP IS HAND-TYPED 100, NOT `EMITTER_BODY_MAX_CHARS + n`. A filler
     // sized off the constant under test grows with it, so raising the cap to
     // 2 000 would move the fixture too and this test would stay green for the
     // exact change it exists to catch — the self-referential oracle again, in
-    // miniature. 200 is chosen to MODEL the measured real world: the tightest
-    // observed distance from an `error:` to the next emitter's `status:` is 202
-    // characters, so a fixture at 200 is very slightly tighter than anything on
-    // disk. It reds for any cap at or above ~230 and stays green at 160.
+    // miniature. 100 puts this fixture's REAL span (filler + the ~104 chars of
+    // scaffolding described above) at ~205, just past the 202 bound, so it
+    // stays a behavioural demonstration that the cap does terminate the run.
     const unterminated = [
       "      return NextResponse.json(",
       '        { code: "FIRST_CODE", error: "no closing context here"',
-      "      ".padEnd(200, "x"),
+      "      ".padEnd(100, "x"),
       "      return NextResponse.json(",
       '        { code: "SECOND_CODE", error: "fine" },',
       "        { status: 400, headers: NO_STORE_HEADERS },",
