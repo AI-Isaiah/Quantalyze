@@ -155,14 +155,45 @@ function deriveUnionMembers(source: string): string[] {
   return [...block.matchAll(/\|\s*"([A-Z][A-Z0-9_]*)"/g)].map((m) => m[1]);
 }
 
-/** The string literals inside a `const <name> ... new Set<...>([ ... ])`. */
+/**
+ * The string literals inside a `const <name> ... new Set<...>([ ... ])`.
+ *
+ * ⚠️ THE ANCHORS ARE WHITESPACE-TOLERANT, AND THAT IS THE WHOLE POINT.
+ * Until 153.1-01 this function searched for the two-character strings `"(["`
+ * and `"])"`, which require the bracket to be ADJACENT to the paren. Both
+ * incumbent rosters wrap after the `=` (`ConnectKeyStep.tsx:265`,
+ * `MultiKeyConnectStep.tsx:214`) so their `([` really is adjacent — which is
+ * why nobody hit this. `SubmitStep.tsx:230` wraps INSIDE the call instead
+ * (`new Set<WizardErrorCode>(` at end of line, `[` on the next), so
+ * `indexOf("([")` returned -1 and the roster derived to `[]` — measured by
+ * execution 2026-08-09. An empty derivation satisfies every "the missing set is
+ * empty" assertion in this file, so the guard would have been BORN BLIND on
+ * that route and passed green.
+ *
+ * ⛔ REFORMATTING THE SUBJECT IS NOT THE FIX. Joining `SubmitStep.tsx`'s
+ * declaration onto one line makes it ~93 characters, Prettier re-breaks it, and
+ * the next `npm run lint -- --fix` silently re-blinds the scanner. Fixing the
+ * SCANNER is the class fix; reformatting the file it happens to be pointed at
+ * is the instance fix.
+ *
+ * The contract is otherwise unchanged: bounded to the NAMED declaration,
+ * returns `[]` when either anchor is missing, and extracts UPPER_SNAKE string
+ * literals only. The closing anchor tolerates the trailing comma that a
+ * multi-line argument list carries (`],` then `);`), and both anchors take
+ * their FIRST match, so the scan still stops at this roster's own close and
+ * cannot run on into the next `const KNOWN_*` set — pinned by the two SELF-TESTs
+ * at the bottom of this file.
+ */
 function deriveRoster(source: string, name: string): string[] {
   const start = source.indexOf(`const ${name}`);
   if (start < 0) return [];
-  const open = source.indexOf("([", start);
-  const close = source.indexOf("])", open);
-  if (open < 0 || close < 0) return [];
-  const block = source.slice(open, close);
+  const tail = source.slice(start);
+  const openMatch = /\(\s*\[/.exec(tail);
+  if (openMatch === null) return [];
+  const open = openMatch.index;
+  const closeMatch = /\]\s*,?\s*\)/.exec(tail.slice(open));
+  if (closeMatch === null) return [];
+  const block = tail.slice(open, open + closeMatch.index);
   return [...block.matchAll(/"([A-Z][A-Z0-9_]*)"/g)].map((m) => m[1]);
 }
 
@@ -418,5 +449,60 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
       "ALSO_IN_ROSTER",
     ]);
     expect(deriveRoster(fake, "KNOWN_OTHER_CODES")).toEqual(["IN_THE_OTHER_ONE"]);
+  });
+
+  it("SELF-TEST — the roster scan reads a Set whose `(` and `[` are on DIFFERENT lines", () => {
+    // ⚠️ THIS IS THE SHAPE THAT MADE THE SCANNER RETURN [] AND PASS ANYWAY.
+    // Reproduced structurally from `SubmitStep.tsx:230` — declared INSIDE a
+    // function body (hence the eight-space indent), type annotation, the call's
+    // `(` at end of line, the `[` on the next, and a close that carries a
+    // trailing comma (`],` then `);`) because it is one argument of a
+    // multi-line argument list rather than the whole call.
+    //
+    // The old two-character anchors (`"(["` / `"])"`) matched NONE of this and
+    // derived the empty set. An empty roster makes "every emitted code is
+    // admitted by that route's roster" fail LOUD, but an empty roster paired
+    // with an empty emitter derivation — which is what a third ROUTES entry
+    // would have had under the 400-only predicate — passes silently. Fixing the
+    // scanner BEFORE the third entry lands is what makes that assertion
+    // evidence rather than decoration.
+    const fake = [
+      "        const KNOWN_FINALIZE_CODES: ReadonlySet<WizardErrorCode> = new Set<WizardErrorCode>(",
+      "          [",
+      '            "IN_FINALIZE_ROSTER",',
+      '            "ALSO_IN_FINALIZE_ROSTER",',
+      "          ],",
+      "        );",
+    ].join("\n");
+    expect(deriveRoster(fake, "KNOWN_FINALIZE_CODES")).toEqual([
+      "IN_FINALIZE_ROSTER",
+      "ALSO_IN_FINALIZE_ROSTER",
+    ]);
+  });
+
+  it("SELF-TEST — the line-broken scan STOPS at its own close and does not swallow the next Set", () => {
+    // The boundary guarantee, restated for the widened anchors. The old anchors
+    // were two literal characters and could not over-run; regex anchors CAN, so
+    // the first-match semantics are pinned here rather than assumed. If the
+    // closing anchor ever became lazy across the wrong boundary, the first
+    // roster would silently absorb the second's members and every membership
+    // assertion in this file would go permissive.
+    const fake = [
+      "        const KNOWN_FINALIZE_CODES: ReadonlySet<WizardErrorCode> = new Set<WizardErrorCode>(",
+      "          [",
+      '            "IN_FINALIZE_ROSTER",',
+      "          ],",
+      "        );",
+      "",
+      "        const KNOWN_LATER_CODES: ReadonlySet<WizardErrorCode> = new Set<WizardErrorCode>(",
+      "          [",
+      '            "IN_THE_LATER_ONE",',
+      "          ],",
+      "        );",
+    ].join("\n");
+    expect(deriveRoster(fake, "KNOWN_FINALIZE_CODES")).toEqual([
+      "IN_FINALIZE_ROSTER",
+    ]);
+    expect(deriveRoster(fake, "KNOWN_LATER_CODES")).toEqual(["IN_THE_LATER_ONE"]);
   });
 });
