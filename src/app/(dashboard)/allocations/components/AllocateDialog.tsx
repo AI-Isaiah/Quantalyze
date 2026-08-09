@@ -339,7 +339,41 @@ export function AllocateDialog({
               type="number"
               inputMode="decimal"
               value={amount}
-              onChange={(e) => setAmount(e.target.value)}
+              onChange={(e) => {
+                const next = e.target.value;
+                setAmount(next);
+                // D-12 — AN AMOUNT THE USER HAS ALREADY FIXED MUST NOT STILL
+                // READ RED. `fieldError` was set in `handleSave` and cleared
+                // only on the NEXT save, so a corrected value kept its red (and
+                // its message) until the user clicked a second time — the
+                // reveal-timing rule this phase applies to every field.
+                //
+                // Once a message IS showing, re-run the mirror on every
+                // keystroke and take its verdict: `null` the instant the value
+                // becomes valid, and the OTHER message when the value is still
+                // invalid but for a different reason (`-5` → `1000000001`).
+                //
+                // The `!== null` guard is what preserves SILENCE before the
+                // first refusal: an untouched or never-refused field must not
+                // turn red while the user is still typing the number.
+                if (fieldError !== null) {
+                  const reparsed = parseAmount(next);
+                  setFieldError(reparsed.ok ? null : reparsed.error);
+                }
+              }}
+              // 153.2 / FLAG-1 — THE RED BORDER IS DERIVED, NOT TOGGLED. The
+              // invalid colour used to be a JS ternary on `fieldError`, with
+              // `border-border` as its false branch. That was correct only by
+              // coincidence: the same state also feeds `Field`'s `error` prop,
+              // so the two happened to agree. Deriving the colour from the ARIA
+              // state `Field` writes makes them the SAME fact — the only way to
+              // paint this field red is to give `Field` an error, so a red
+              // control whose a11y wiring is broken becomes structurally
+              // impossible rather than merely unlikely (Shared Pattern A).
+              // ⛔ Do not set the attribute on this input: `Field` spreads the
+              // child's own props LAST, so a hand-written one would win and
+              // re-open exactly the hazard this closes.
+              //
               // 151 review E7 — WCAG 1.4.11 (≥3:1 non-text contrast). This was
               // `focus:ring-accent/20`, a 20%-alpha ring that measures ~1.3:1
               // against `bg-surface` — an indicator a sighted keyboard user
@@ -351,9 +385,7 @@ export function AllocateDialog({
               // explicitly FORBID `ring-accent/20`. `ring-inset` keeps it inside
               // the border box so an ancestor's overflow cannot clip it, and
               // `focus-visible` (not `focus`) keeps it off pointer interactions.
-              className={`min-h-[44px] rounded-lg border bg-surface px-3 py-2.5 text-body text-text-primary transition-colors focus-visible:border-border-focus focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent ${
-                fieldError ? "border-negative" : "border-border"
-              }`}
+              className="min-h-[44px] rounded-lg border border-border bg-surface px-3 py-2.5 text-body text-text-primary transition-colors focus-visible:border-border-focus focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent aria-[invalid=true]:border-negative"
             />
           </Field>
           <p className="mt-2 text-caption text-text-secondary">{HELPER_LINE}</p>
