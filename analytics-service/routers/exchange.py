@@ -920,12 +920,18 @@ async def _validate_mt5_key_probe(
                 # is nothing to release, and the same is true of every pre-construction guard
                 # above, which return before this block is ever entered.
                 #
-                # 📌 RESIDUAL (recorded, not fixed here): the WORKER path still reaches
-                # shutdown() via services/exchange.py:924-938 (`aclose_exchange`'s mt5 arm)
-                # and services/ingestion/mt5.py, so a worker job can still tear the shared
-                # pipe down under a concurrent validate. Those files are outside this
-                # sub-phase's ownership; D-30 scopes the REQUEST path. Wave 6 / D-35 closes
-                # the class at the sink. Tracked in TODOS.md.
+                # ✅ CLOSED by wave 6 / D-35 (2026-08-09). This block once carried a
+                # present-tense residual saying the WORKER path "still reaches" shutdown()
+                # via services/exchange.py's `aclose_exchange` mt5 arm and
+                # services/ingestion/mt5.py. That is no longer true: D-35 deleted the
+                # teardown at the SINK — `Mt5Client.close()` no longer calls
+                # `mt5.shutdown()` — which fixed all three callers with zero call-site
+                # edits. Exactly ONE shutdown() call node now survives, inside
+                # `Mt5Client.restart`, and it is lease-held.
+                # ⚠️ Corrected after 153.3 verification found this comment still asserting
+                # the old state while TODOS.md already recorded it RESOLVED: `a7e88c7d`
+                # updated three sibling sites and missed this one. Behaviour was right,
+                # the record was wrong — which is the more dangerous of the two.
                 if client is not None:
                     try:
                         await asyncio.wait_for(
