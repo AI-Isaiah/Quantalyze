@@ -91,6 +91,33 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      fixing the timeout on a one-account architecture buys a working single user, not a working
      product. Decide the architecture before sizing the budget.
 
+0.5 **⛔ INSERT PHASE 153.5 — the abandoned-`to_thread` class (three review findings, ONE defect).**
+   Raised by the `/code-review high` of Phase 153.3 (2026-08-09, 10 findings reported, 4 fixed
+   immediately). **Not yet planned — this entry is the reminder.**
+   **The one defect:** work handed to `asyncio.to_thread` **outlives its `asyncio.wait_for`**. The
+   `wait_for` raises, the caller unwinds and releases the terminal lease, and the abandoned thread
+   keeps driving the same process-global MT5 session. Three faces, all in the 153.3 diff:
+   | # | Site | Symptom |
+   |---|---|---|
+   | 5 | `services/mt5_concurrency.py:119` | `_mt5_bounded_restart` abandons at 10s; the one permitted `mt5.shutdown()` can fire **after** the lease is released, under the next holder |
+   | 6 | `routers/exchange.py:483` (+ `services/ingestion/mt5.py:173`) | connect-stage timeout orphans an `Mt5Client` the thread then constructs — `client` was never assigned, so the Pitfall-6 `finally` releases nothing and the rpyc session leaks |
+   | 7 | `routers/exchange.py:689` | the end-to-end deadline fires; the abandoned probe keeps issuing rpyc calls, so D-29's serialization does not hold on the timeout path |
+   ⭐ **Fix it at the SINK, once — not three times.** Patching three call sites is precisely the
+   instance-not-class mistake this milestone has paid for sixteen times, and #5/#6/#7 are the same
+   mechanism. Candidate designs (needs a real decision, do NOT let a fixer improvise):
+   a cancellation-aware wrapper; a generation/epoch counter the terminal checks before each call;
+   or refusing to release the lease until the worker thread confirms it has stopped.
+   ⚠️ **The AST lease-roster CANNOT see this** — its enclosure proof is *lexical*, so it reads the
+   `shutdown` as inside `async with` and passes while the runtime escapes. Any fix needs a
+   **runtime** assertion (observe the abandoned thread touching the session after release), not a
+   second static pin. Guard #16 of the phase lives here.
+   **Deferred to Phase 155 (needs the real latency data D-32 just made collectable — do NOT guess
+   these numbers):** finding #8, the 60s per-stage ceiling wraps SIX round-trips whose own ceilings
+   are 45 000ms IPC / 55s rpyc, so "innermost fires first" holds per round-trip but not per stage
+   (re-censors exactly the slow-but-working login D-24 unblocked); and finding #10, the 20s
+   interactive lease wait is smaller than the worker's 40s read + 10s restart hold, so an
+   interactive validate can never wait out one in-flight derive.
+
 1. **`RESEND_API_KEY` unset in Vercel prod** — founder-LP report cron + all transactional
    email are dead (code soft-skips, only Sentry fires). **Founder action:** set the key in
    Vercel prod. Do before the first warned founder month. (Note: portfolio email *alerts*
