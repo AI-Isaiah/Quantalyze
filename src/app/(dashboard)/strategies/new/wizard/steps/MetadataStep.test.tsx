@@ -1647,3 +1647,230 @@ describe("[MT5-14] the venue of the connected key is declarable, and pinned", ()
     expect(draft.supportedExchanges).toEqual(["mt5"]);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 153.2-05 / WIZFORM-01 — a refusal that arrived from the SERVER lands at the
+// field, in a form that still holds everything the user typed.
+//
+// `SubmitStep` resolves a `METADATA_*` code to one field id and `WizardClient`
+// carries it here. What this block pins is the arrival: the field is revealed,
+// its disclosure opened if it is hiding inside one, the caret put in it, and the
+// message is the LOCAL copy table's sentence — never the server's own string.
+// ═══════════════════════════════════════════════════════════════════════════
+describe("[153.2-05] a server-side refusal, delivered to its field", () => {
+  const FILLED: MetadataDraft = {
+    // ⚠️ A REAL member of STRATEGY_NAMES. The codename control is a `<select>`
+    // over that list, so a value outside it renders as the first option and the
+    // Gate D assertion below would be measuring the fallback rather than the
+    // draft. (Behaviour inherited from the primitive this field replaced —
+    // unchanged, and out of this plan's scope.)
+    name: "Black Swan",
+    description: "A market-neutral basis strategy with a documented edge.",
+    categoryId: "cat-bbb",
+    strategyTypes: ["Directional"],
+    subtypes: [],
+    markets: ["BTC"],
+    supportedExchanges: ["Binance"],
+    leverageRange: "1x-3x",
+    aum: "2500000",
+    maxCapacity: "9000000",
+    assetClass: "crypto",
+  };
+
+  function errorNodeFor(control: Element): HTMLElement | null {
+    const ids = (control.getAttribute("aria-describedby") ?? "").split(/\s+/);
+    const errorId = ids.find((id) => id.endsWith("-error"));
+    return errorId ? document.getElementById(errorId) : null;
+  }
+
+  async function mountWithRefusal(
+    serverFieldError: { field: string; code: string },
+    extra: Record<string, unknown> = {},
+  ) {
+    render(
+      <MetadataStep
+        {...baseProps}
+        initial={FILLED}
+        {...extra}
+        serverFieldError={
+          serverFieldError as unknown as {
+            field: "aum";
+            code: "METADATA_AUM_INVALID";
+          }
+        }
+      />,
+    );
+    const select = (await screen.findByLabelText(
+      "Category",
+    )) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe("cat-bbb"));
+    return {
+      details: document.querySelector("form details") as HTMLDetailsElement,
+      select,
+    };
+  }
+
+  it("⭐ OPENS the collapsed disclosure, focuses the control and flags it — for a field hidden inside it", async () => {
+    // ⭐ THE row this plan exists for, on the hardest field: AUM lives inside
+    // the collapsed "More details (optional)" disclosure, so a naive
+    // implementation focuses a control the user cannot see and the page looks
+    // as if nothing happened.
+    //
+    // ⚠️ WHICH ASSERTION CATCHES THE REGRESSION, measured in 153.2-02 and
+    // re-confirmed here: deleting the open-the-disclosure step reds
+    // `details.open`, NOT `document.activeElement`. jsdom does not implement
+    // `<details>` content hiding, so it will happily focus a control inside a
+    // shut disclosure — in a real browser it is the focus call that no-ops.
+    // Both assertions are required and neither substitutes for the other.
+    const { details } = await mountWithRefusal({
+      field: "aum",
+      code: "METADATA_AUM_INVALID",
+    });
+    const aum = screen.getByLabelText("AUM (USD)") as HTMLInputElement;
+
+    expect(details.contains(aum)).toBe(true);
+    expect(details.open).toBe(true);
+    expect(document.activeElement).toBe(aum);
+    expect(aum.getAttribute("aria-invalid")).toBe("true");
+    // The sentence is the COPY TABLE's, imported — the component must not
+    // invent one, and the server's `error` string never reaches this surface.
+    expect(errorNodeFor(aum)?.textContent).toBe(
+      formatKeyError("METADATA_AUM_INVALID").title,
+    );
+  });
+
+  it("[Gate D] the form still holds everything the user typed", async () => {
+    // A form that loses its contents on a validation failure is a WORSE outcome
+    // than the envelope this replaces. Every prefilled value survives the trip
+    // back — including the one the server complained about, so the user can see
+    // what they submitted rather than guess at it.
+    await mountWithRefusal({ field: "aum", code: "METADATA_AUM_INVALID" });
+
+    expect(
+      (screen.getByLabelText("Description") as HTMLTextAreaElement).value,
+    ).toBe(FILLED.description);
+    expect((screen.getByLabelText("AUM (USD)") as HTMLInputElement).value).toBe(
+      "2500000",
+    );
+    expect(
+      (screen.getByLabelText("Max capacity (USD)") as HTMLInputElement).value,
+    ).toBe("9000000");
+    expect(
+      (screen.getByLabelText("Strategy codename") as HTMLSelectElement).value,
+    ).toBe("Black Swan");
+    expect(
+      (screen.getByLabelText("Category") as HTMLSelectElement).value,
+    ).toBe("cat-bbb");
+  });
+
+  it("editing the field clears the message — with no second submit", async () => {
+    // ⛔ A message the user cannot clear by acting on it is a dead end. The
+    // client mirror takes over the instant they edit, and `validatePayload`
+    // re-judges the new value on the next submit if it still disagrees.
+    await mountWithRefusal({ field: "aum", code: "METADATA_AUM_INVALID" });
+    const aum = screen.getByLabelText("AUM (USD)") as HTMLInputElement;
+    expect(aum.getAttribute("aria-invalid")).toBe("true");
+
+    fireEvent.change(aum, { target: { value: "3000000" } });
+
+    expect(aum.getAttribute("aria-invalid")).not.toBe("true");
+    expect(errorNodeFor(aum)).toBeNull();
+  });
+
+  it("…but an edit that is invalid on the CLIENT's OWN rule keeps a message", async () => {
+    // The control on the previous row: "clears on edit" must not become "goes
+    // quiet on edit". The server's verdict is retired; the client's replaces it
+    // when the new value breaks the mirror, so the field never silently accepts
+    // something the next submit will refuse again.
+    await mountWithRefusal({ field: "aum", code: "METADATA_AUM_INVALID" });
+    const aum = screen.getByLabelText("AUM (USD)") as HTMLInputElement;
+
+    fireEvent.change(aum, { target: { value: "-5" } });
+
+    expect(aum.getAttribute("aria-invalid")).toBe("true");
+    expect(errorNodeFor(aum)?.textContent).toBe(
+      formatKeyError("METADATA_AUM_INVALID").title,
+    );
+  });
+
+  it("a field with NO client mirror still receives its refusal — the codename", async () => {
+    // `METADATA_NAME_INVALID` is unreachable from this form's own `<select>`,
+    // which is exactly why it needed a field: it fires only when client and
+    // server disagree about the list, and before this it rendered as a
+    // full-page envelope naming no field at all.
+    await mountWithRefusal({
+      field: "name",
+      code: "METADATA_NAME_INVALID",
+    });
+    const codename = screen.getByLabelText(
+      "Strategy codename",
+    ) as HTMLSelectElement;
+
+    expect(document.activeElement).toBe(codename);
+    expect(codename.getAttribute("aria-invalid")).toBe("true");
+    expect(errorNodeFor(codename)?.textContent).toBe(
+      formatKeyError("METADATA_NAME_INVALID").title,
+    );
+  });
+
+  it("a radio GROUP is focused at its first radio, not at its wrapper", async () => {
+    // The capital question has no single element that is both the field and a
+    // focus target. The resolution is stated as a general rule (a container
+    // resolves to its first focusable descendant), so a later composite control
+    // needs no second branch — and a `<div>.focus()` would have been a silent
+    // no-op that every jsdom assertion about `aria-invalid` still passed.
+    await mountWithRefusal(
+      {
+        field: "capitalOwnership",
+        code: "METADATA_CAPITAL_OWNERSHIP_INVALID",
+      },
+      { showCapitalQuestion: true },
+    );
+
+    expect(document.activeElement).toBe(
+      screen.getByTestId("capital-ownership-own_capital"),
+    );
+    const group = screen.getByRole("radiogroup");
+    expect(group.getAttribute("aria-invalid")).toBe("true");
+    expect(
+      screen.getByText(
+        formatKeyError("METADATA_CAPITAL_OWNERSHIP_INVALID").title,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("⛔ NO terminal error panel renders on this step for a server refusal", async () => {
+    // UI-SPEC §What this contract FORBIDS, item 1. The whole point of the
+    // routing is that the page-level panel — the thing the founder read three
+    // times while it named no field — does not appear for a field problem.
+    // Asserted on the rendered DOM rather than by a source grep, because the
+    // grep can be satisfied by prose.
+    await mountWithRefusal({ field: "aum", code: "METADATA_AUM_INVALID" });
+
+    const copy = WIZARD_ERROR_COPY.METADATA_AUM_INVALID;
+    // The envelope renders the entry's `cause` paragraph and its `fix[]`
+    // bullets; the field renders the one-sentence `title` and nothing else.
+    expect(screen.queryByText(copy.cause!)).not.toBeInTheDocument();
+    for (const bullet of copy.fix) {
+      expect(screen.queryByText(bullet)).not.toBeInTheDocument();
+    }
+    expect(screen.queryByText(/correlation id/i)).not.toBeInTheDocument();
+  });
+
+  it("CONTROL — no serverFieldError means nothing is flagged and nothing is focused", async () => {
+    // The negative control the rows above need: every assertion here would also
+    // pass on a component that flagged a field for no reason at all.
+    render(<MetadataStep {...baseProps} initial={FILLED} />);
+    const select = (await screen.findByLabelText(
+      "Category",
+    )) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe("cat-bbb"));
+
+    const aum = screen.getByLabelText("AUM (USD)") as HTMLInputElement;
+    expect(aum.getAttribute("aria-invalid")).not.toBe("true");
+    expect(document.activeElement).not.toBe(aum);
+    expect(
+      (document.querySelector("form details") as HTMLDetailsElement).open,
+    ).toBe(false);
+  });
+});

@@ -335,6 +335,24 @@ export interface MetadataStepProps {
    * which is not a violation. The server re-derives everything that matters.
    */
   showCapitalQuestion?: boolean;
+  /**
+   * 153.2-05 / WIZFORM-01 — a refusal `finalize-wizard` raised about ONE field
+   * on this step, routed back here by `SubmitStep`'s `FIELD_BY_CODE` rather
+   * than rendered as a page-level envelope the user cannot act on.
+   *
+   * ⚠️ IT IS A CODE, NEVER A SENTENCE (T-153.2-17). The response's `error`
+   * string is server-controlled and developer-facing — it is the path by which
+   * a raw exception, an HTTP status, a module path or an env-var name would
+   * reach a form control. What renders here is the LOCAL copy table's title for
+   * this code, exactly as a client-raised refusal renders.
+   *
+   * On arrival the field is revealed, its disclosure opened if it is inside
+   * one, and the control focused. It is dropped the moment the user edits that
+   * field: the client mirror wins from then on, and the server will re-refuse
+   * on the next submit if it still disagrees. A message the user cannot clear
+   * is a dead end, which is the thing this whole phase deletes.
+   */
+  serverFieldError?: { field: MetadataFieldId; code: WizardErrorCode } | null;
   onComplete: (draft: MetadataDraft) => void;
   onBack: () => void;
 }
@@ -345,6 +363,7 @@ export function MetadataStep({
   detectedMarkets,
   detectedExchange,
   showCapitalQuestion = false,
+  serverFieldError = null,
   onComplete,
   onBack,
 }: MetadataStepProps) {
@@ -440,6 +459,24 @@ export function MetadataStep({
   function markBlurred(id: MetadataFieldId) {
     setBlurredFields((prev) => (prev[id] ? prev : { ...prev, [id]: true }));
   }
+  /**
+   * 153.2-05 — the LIVE copy of the server's refusal. Seeded from the prop and
+   * dropped locally on the first edit of the field it names, which is why it is
+   * state here rather than read straight off the prop: the user must be able to
+   * clear a message by acting on it, without a round-trip.
+   */
+  const [serverRefusal, setServerRefusal] = useState(serverFieldError);
+  /**
+   * Called by every control whose field can carry a server refusal. Editing a
+   * field retires the SERVER's verdict about it; the client mirror takes over
+   * immediately and `validatePayload` re-judges the new value on the next
+   * submit. ⛔ Not conditioned on the new value being valid: a refusal the user
+   * cannot clear by editing is the dead end this phase exists to delete, and
+   * the mirror re-raises its own code in the same render when it disagrees.
+   */
+  function noteFieldEdited(id: MetadataFieldId) {
+    setServerRefusal((prev) => (prev && prev.field === id ? null : prev));
+  }
 
   const nameRef = useRef<HTMLSelectElement>(null);
   const descriptionRef = useRef<HTMLTextAreaElement>(null);
@@ -505,6 +542,31 @@ export function MetadataStep({
     control.focus();
     control.scrollIntoView({ block: "center" });
   }
+
+  /**
+   * 153.2-05 — A REFUSAL ARRIVED FROM THE SERVER. Take the user to it.
+   *
+   * `markBlurred` is what REVEALS the message: the same flag a blur sets, so the
+   * server's verdict is surfaced through the one reveal mechanism rather than a
+   * second, parallel one — and it STAYS revealed while the user edits, which is
+   * the behaviour a user who was just sent here needs. `revealAndFocus` is the
+   * same function a client-refused submit calls, so the disclosure opens first
+   * and the caret lands on a control the user can actually see.
+   *
+   * ⛔ THE DEPENDENCY LIST IS THE PROP ONLY, and that is load-bearing rather
+   * than lazy. `revealAndFocus` and `markBlurred` are re-created every render;
+   * including them would re-run this effect on every keystroke and yank focus
+   * back to the flagged field while the user types in another one. The prop is
+   * a fresh object per refusal, so a SECOND refusal on the same field still
+   * fires this.
+   */
+  useEffect(() => {
+    setServerRefusal(serverFieldError);
+    if (!serverFieldError) return;
+    markBlurred(serverFieldError.field);
+    revealAndFocus(serverFieldError.field);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverFieldError]);
 
   useEffect(() => {
     let cancelled = false;
@@ -604,7 +666,7 @@ export function MetadataStep({
   // null-category_id path.
   const categoryHasNoOptions = categories.length === 0;
 
-  const fieldErrors: Record<MetadataFieldId, WizardErrorCode | null> = {
+  const clientFieldErrors: Record<MetadataFieldId, WizardErrorCode | null> = {
     // ⚠️ NO CLIENT RULE, BY DESIGN — and that is not the same as "no field".
     // The radio group is defaulted and uncleanable and the codename is a
     // `<select>` over a closed list, so neither server arm is reachable by any
@@ -622,6 +684,31 @@ export function MetadataStep({
     aum: validateDollarField(aum, "METADATA_AUM_INVALID"),
     maxCapacity: validateDollarField(maxCapacity, "METADATA_CAPACITY_INVALID"),
   };
+
+  /**
+   * 153.2-05 — THE ONE MAP, with the server's refusal MERGED INTO IT rather
+   * than rendered beside it.
+   *
+   * ⛔ Not a second derivation. Everything downstream — the inline message, the
+   * aria-derived red border, the submit predicate, the first-invalid-control
+   * focus and the summary line — reads this and only this, so a refusal that
+   * came from the server behaves in every one of those respects exactly like a
+   * refusal the client raised. A parallel rendering path is how a message ends
+   * up somewhere its own field's border and its own submit gate do not agree
+   * with, which is a subtler version of the defect being closed.
+   *
+   * THE CLIENT MIRROR WINS when it has a verdict of its own (`??`): it is
+   * evaluated against the value on screen RIGHT NOW, while the server's was
+   * evaluated against the value that was submitted.
+   */
+  const fieldErrors: Record<MetadataFieldId, WizardErrorCode | null> =
+    serverRefusal
+      ? {
+          ...clientFieldErrors,
+          [serverRefusal.field]:
+            clientFieldErrors[serverRefusal.field] ?? serverRefusal.code,
+        }
+      : clientFieldErrors;
 
   const invalidFields = FIELD_ORDER.filter((id) => fieldErrors[id] !== null);
 
@@ -789,7 +876,10 @@ export function MetadataStep({
             <CapitalOwnershipRadioGroup
               label={FIELD_LABELS.capitalOwnership}
               value={capitalOwnership}
-              onChange={setCapitalOwnership}
+              onChange={(v) => {
+                noteFieldEdited("capitalOwnership");
+                setCapitalOwnership(v);
+              }}
               error={messageFor("capitalOwnership")}
             />
           </div>
@@ -809,7 +899,10 @@ export function MetadataStep({
           <select
             ref={nameRef}
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => {
+              noteFieldEdited("name");
+              setName(e.target.value);
+            }}
             onBlur={() => markBlurred("name")}
             className={VALIDATED_CONTROL_CLASS}
           >
@@ -833,7 +926,10 @@ export function MetadataStep({
           <textarea
             ref={descriptionRef}
             value={description}
-            onChange={(e) => setDescription(e.target.value)}
+            onChange={(e) => {
+              noteFieldEdited("description");
+              setDescription(e.target.value);
+            }}
             onBlur={() => markBlurred("description")}
             rows={3}
             placeholder="One paragraph describing the strategy, edge, and risk framing."
@@ -865,7 +961,10 @@ export function MetadataStep({
           <select
             ref={categoryRef}
             value={categoryId ?? ""}
-            onChange={(e) => setCategoryId(e.target.value)}
+            onChange={(e) => {
+              noteFieldEdited("category");
+              setCategoryId(e.target.value);
+            }}
             onBlur={() => markBlurred("category")}
             className={VALIDATED_CONTROL_CLASS}
           >
@@ -1016,7 +1115,10 @@ export function MetadataStep({
                   ref={aumRef}
                   type="number"
                   value={aum}
-                  onChange={(e) => setAum(e.target.value)}
+                  onChange={(e) => {
+                    noteFieldEdited("aum");
+                    setAum(e.target.value);
+                  }}
                   onBlur={() => markBlurred("aum")}
                   placeholder="0"
                   className={VALIDATED_CONTROL_CLASS}
@@ -1030,7 +1132,10 @@ export function MetadataStep({
                   ref={maxCapacityRef}
                   type="number"
                   value={maxCapacity}
-                  onChange={(e) => setMaxCapacity(e.target.value)}
+                  onChange={(e) => {
+                    noteFieldEdited("maxCapacity");
+                    setMaxCapacity(e.target.value);
+                  }}
                   onBlur={() => markBlurred("maxCapacity")}
                   placeholder="0"
                   className={VALIDATED_CONTROL_CLASS}
