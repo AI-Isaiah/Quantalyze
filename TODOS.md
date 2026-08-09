@@ -643,6 +643,37 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ### Tech-debt / maintainability (opportunistic, don't force)
 
+- **⭐ AUDIT METHOD + two more unfalsifiable guards (2026-08-09).** Phase 153 found **14** guards
+  that could not fail. The method that finds them, in order of cost:
+  1. **Grep triage** on six smells: literal-vs-literal · fixture sized off the constant under test ·
+     matcher-driven sweep with no positive control · derived roster with no vacuity floor ·
+     assertion on absence with no proof the detector works · self-referential oracle.
+  2. **Check provenance** — do both sides of the assertion trace to the SAME definition? If yes it
+     is a tautology wearing a check's clothes.
+  3. **Mutation decides.** Grep only nominates. Break what the guard claims to protect; no red = decorative.
+  4. ⭐ **Read the comment as a suspect, not a witness.** 3 of the 14 carried comments asserting
+     precisely the capability they lacked. A confident comment over a weak assertion is a signal.
+  ⭐ **Highest yield: guards over a CROSS-FILE coupling** (budget↔breaker, roster↔emitter,
+  definition↔restatement). Same-file assertions are usually honest; cross-file ones go stale.
+  **Scope recommendation:** sweep the money-path and security guards only (`seam-*`, `closed-sets`,
+  RLS, `analytics-service/services/`). A mutation pass over 10 000 tests costs more than it returns.
+
+  - **#13 `src/__tests__/scenario-commit-rls.test.ts:971` — a tautology.** `HAS_FULL_LIVE` is
+    DEFINED at `:169` as `HAS_LIVE_DB && HAS_BASE_URL && HAS_ANON_KEY`, and `:971` asserts it
+    equals that same expression re-evaluated in the same file. Its comment claims it catches
+    "e.g. inverts `HAS_BASE_URL`" — inverting it changes BOTH sides identically, so it stays green.
+    All three flags come from env vars, so CI (all false) gives `false === false` and a configured
+    env (all true) gives `true === true`. It can only red in a mixed state neither environment
+    produces. **Fix:** assert the gating BEHAVIOUR (that the suite skips) or delete it.
+  - **#14 `grep -c "if (code === "` is a BLIND gate — and the orchestrator authored it.** Used
+    across several 153.1 executor prompts as evidence that a fix was class-level rather than
+    instance-level ("arm count unchanged at 3"). It is a single-line pattern; `wizardErrors.ts`
+    has **six** multi-line arms (`if (` alone on `:2330 :2357 :2373 :2383 :2743 :2789`) that it
+    structurally cannot see. Same blindness class as D-34's fourteen `error`-first emitters.
+    **The sound invariant is `grep -c "applyFixRequirements("` → 2** (declaration + the one call).
+    ⚠️ Lesson: a prose/regex gate in a PROMPT is exactly as falsifiable as one in a test, and
+    nobody mutation-tests a prompt. Prefer an invariant a test can hold.
+
 - **✅ FIXED 2026-08-09 — the STATE.md "SDK bugs" were OUR schema drift, not the SDK.**
   Founder challenge (*"Probably something we do rather than SDK. Didn't have those problems
   before"*) was correct. Root cause: two customised headings that sit inside SDK match patterns.
