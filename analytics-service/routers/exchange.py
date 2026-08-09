@@ -130,6 +130,36 @@ _MT5_VALIDATE_DEADLINE_S: Final[float] = float(os.getenv("MT5_VALIDATE_DEADLINE_
 # budget.
 _MT5_RELEASE_TIMEOUT_S: Final[float] = float(os.getenv("MT5_RELEASE_TIMEOUT_S", "10.0"))
 
+# ⭐ D-24's construction-time ORDERING guard (services/mt5_client.py's __init__)
+# raises a plain ``ValueError`` when ANY MT5 IPC ceiling in ``MT5_IPC_TIMEOUTS_MS``
+# is not strictly below the rpyc request timeout. That inversion is an OPERATOR
+# fault — e.g. someone sets ``MT5_VALIDATE_REQUEST_TIMEOUT_S=40`` while
+# ``MT5_VALIDATE_INITIALIZE_TIMEOUT_MS`` stays at its 45 000 default — and it stays
+# broken until an operator edits an env var. It is therefore SERVICE-PERMANENT
+# (R-1: 500, retryable:false), exactly like the unset-env and malformed-port arms
+# below, and NOT the transient bridge fault its raise SITE makes it look like: it
+# fires inside the connect ``to_thread``, so by TYPE it is indistinguishable there
+# from a refused socket. It is discriminated instead by the guard's own invariant
+# SENTENCE.
+#
+# ⛔ Matching the SENTENCE rather than ``ValueError`` the class is the whole point.
+# An unrelated construction ValueError must keep its EXISTING transient
+# classification rather than being silently re-labelled a permanent operator fault
+# — this arm may only narrow what reaches the 503, never widen what reaches the
+# 500. The coupling to that wording is not assumed on trust: the S-13 test drives
+# the REAL ``Mt5Client`` guard end to end through this router, so a reworded
+# message turns that test RED instead of silently restoring the self-sustaining
+# 503 (A-08/A-25: the breaker trips, expires, re-probes and re-trips forever on a
+# fault no retry can ever clear).
+_MT5_IPC_ORDERING_SENTINEL: Final[str] = "IPC timeout must be strictly below the rpyc"
+
+
+def _is_ipc_timeout_ordering_inversion(exc: BaseException) -> bool:
+    """True iff ``exc`` is D-24's construction-time IPC/rpyc timeout-ordering
+    ``ValueError`` — see ``_MT5_IPC_ORDERING_SENTINEL`` for why the discriminator
+    is the guard's sentence and not the exception class."""
+    return isinstance(exc, ValueError) and _MT5_IPC_ORDERING_SENTINEL in str(exc)
+
 
 class EncryptKeyRequest(BaseModel):
     exchange: str
@@ -503,7 +533,38 @@ async def _validate_mt5_key_probe(
                 retry_after=RETRY_AFTER_SECONDS["mt5-gateway"],
                 detail="The MetaTrader gateway is not responding. Try again shortly.",
             )
-        except Exception:  # noqa: BLE001 — connect failure is server/bridge, not the key
+        except Exception as connect_err:  # noqa: BLE001 — connect failure is server/bridge, not the key
+            # ⭐ NOT every construction failure is a bridge fault. D-24's ordering
+            # guard fires INSIDE this to_thread, and answering it 503 reports a
+            # PERMANENT misconfiguration as a transient outage: every MT5 validate
+            # then says "the gateway is not responding, try again shortly" while
+            # keying the `mt5-gateway` breaker, which trips, expires, re-probes and
+            # re-trips forever because no retry can edit an env var
+            # (A-08/A-25/C-17). This file already documents the correct treatment
+            # for exactly this class at the sFOX construction arm and at the
+            # unset-env / malformed-port arms above: 500, retryable:false, the same
+            # "needs an operator, not a retry" copy. The guard fires CORRECTLY —
+            # only its translation on the way out was wrong.
+            #
+            # Code and dependency are REUSED, never re-minted (153.1 owns the
+            # user-facing code table), and `outcome` stays inside the existing
+            # category set: an inverted timeout chain IS a gateway that is not
+            # correctly configured, refused before any client exists.
+            if _is_ipc_timeout_ordering_inversion(connect_err):
+                # Names the fault class only — no timeout values, no login,
+                # password or broker server (T-153.3-15).
+                logger.error(
+                    "validate_key: MT5 IPC/rpyc timeout ordering inverted "
+                    "(server misconfig) — permanent, not a bridge outage"
+                )
+                trace.outcome = "gateway_unconfigured"
+                raise service_error(
+                    500,
+                    "MT5_GATEWAY_UNCONFIGURED",
+                    dependency="mt5-gateway",
+                    retryable=False,
+                    detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
+                )
             logger.warning("validate_key: MT5 gateway connect failed (server/bridge)")
             trace.outcome = "gateway_unreachable"
             raise service_error(

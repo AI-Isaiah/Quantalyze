@@ -174,6 +174,27 @@ def _install_mt5_client(router, client):
     return factory
 
 
+def _install_real_mt5_client(router, transport):
+    """Patch the router's constructor to build the **REAL** ``Mt5Client`` over an
+    injected transport double; return the factory spy.
+
+    ⭐ The real class, deliberately. The two cases that use this helper are about
+    behaviour that lives OUTSIDE the router — D-24's construction-time ordering
+    guard, and ``terminal_info``'s materialize step running outside
+    ``_guarded_read`` — so a ``MagicMock`` client would FABRICATE the very thing
+    under test and the guard could not fail. ``_connect`` is the same injection
+    seam ``test_mt5_client_contract.py`` uses, so no socket is opened.
+    """
+    from services.mt5_client import Mt5Client as _RealMt5Client
+
+    def _build(*args, **kwargs):
+        return _RealMt5Client(*args, _connect=lambda **_ignored: transport, **kwargs)
+
+    factory = MagicMock(side_effect=_build)
+    router.Mt5Client = factory
+    return factory
+
+
 def _make_req(exchange="mt5", api_key="123456", api_secret="investor-pw", passphrase="Broker-Demo"):
     # Credential-slot reuse: login -> api_key, investor pw -> api_secret,
     # broker server -> passphrase.
@@ -1117,6 +1138,99 @@ async def test_mt5_validate_constructs_the_client_with_the_validate_chain(
     assert kwargs["request_timeout_s"] == MT5_VALIDATE_REQUEST_TIMEOUT_S
     assert kwargs["initialize_timeout_ms"] == router._MT5_VALIDATE_INITIALIZE_TIMEOUT_MS
     assert kwargs["login_timeout_ms"] == router._MT5_VALIDATE_LOGIN_TIMEOUT_MS
+
+
+# --------------------------------------------------------------------------- #
+# D-24's ordering guard — a PERMANENT operator fault, never a gateway outage
+# --------------------------------------------------------------------------- #
+
+
+async def test_inverted_ipc_timeout_chain_is_a_permanent_operator_fault(
+    exchange_router, monkeypatch
+):
+    """⭐ D-24's ordering guard fires CORRECTLY and was MISTRANSLATED on the way out.
+
+    The scenario is a real operator action, not a synthetic one: set
+    ``MT5_VALIDATE_REQUEST_TIMEOUT_S=40`` and leave
+    ``MT5_VALIDATE_INITIALIZE_TIMEOUT_MS`` at its 45 000 default. The ceiling
+    ordering inverts and ``Mt5Client.__init__`` refuses to construct — and because
+    it refuses INSIDE the connect ``to_thread``, the broad "connect failure is
+    server/bridge, not the key" arm answered **503 MT5_GATEWAY_UNREACHABLE,
+    retryable, with a Retry-After**.
+
+    WHY THAT IS THE BUG (Rule 9 — the economics, not the implementation's own
+    formula): the misconfiguration is PERMANENT. Every MT5 validate then says "the
+    gateway is not responding, try again shortly" — advice nobody can act on for a
+    fault only an operator can clear — and every one of those 503s keys the
+    ``mt5-gateway`` breaker, which trips, expires, re-probes and re-trips forever
+    (A-08/A-25/C-17). A 500 is SERVICE-PERMANENT and therefore breaker-INERT:
+    ``src/lib/seam-discriminator.ts`` classifies it ``counts:false`` /
+    ``breakerKey:null``, where a 503 yields ``counts:true`` and a key. That is why
+    the assertions below are on the RESPONSE SHAPE and not merely on "an error was
+    raised" — the status IS the breaker decision.
+
+    The REAL ``Mt5Client`` runs here, so this also pins the router's discriminator
+    to the guard's ACTUAL message: reword the guard and this test reds, rather than
+    the router silently falling back to the 503.
+    """
+    router = exchange_router
+    transport = MagicMock(name="mt5-transport")
+    factory = _install_real_mt5_client(router, transport)
+    # 40.0s -> 40 000ms, BELOW the 45 000ms initialize ceiling: inverted.
+    monkeypatch.setattr(router, "MT5_VALIDATE_REQUEST_TIMEOUT_S", 40.0)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    # Every literal hand-typed (programme non-negotiable #3).
+    assert ei.value.status_code == 500
+    assert ei.value.status_code != 503, (
+        "a 503 keys the mt5-gateway breaker on a fault no retry can ever clear — "
+        "the self-sustaining trip/expire/re-probe loop A-08/A-25 records"
+    )
+    body = ei.value.detail
+    assert body["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert body["dependency"] == "mt5-gateway"
+    assert body["retryable"] is False
+    # R-1: a permanent fault never advertises a wait.
+    assert not (ei.value.headers or {}).get("Retry-After")
+    # And never the transient copy, which asks the user to do the one thing that
+    # cannot possibly work.
+    assert (
+        body["detail"]
+        != "The MetaTrader gateway is not responding. Try again shortly."
+    )
+    assert "read_only" not in repr(body)
+    # The guard refused BEFORE any transport was opened — construction is where the
+    # effective values meet, and nothing reached the wire.
+    factory.assert_called_once()
+    transport.initialize.assert_not_called()
+    transport.login.assert_not_called()
+
+
+async def test_an_unrelated_construction_valueerror_stays_transient(exchange_router):
+    """⛔ The permanent arm may only NARROW what reaches the 503 — never widen what
+    reaches the 500.
+
+    A construction ``ValueError`` that is NOT D-24's ordering guard is, from this
+    router's vantage point, indistinguishable from a transport fault, so it keeps
+    its existing transient classification. This is the negative obligation on the
+    fix: a router that reclassified EVERY ValueError would answer "this needs an
+    operator, not a retry" for faults that clear on their own, and — because a 500
+    is breaker-inert — a genuinely failing dependency would stop being counted at
+    all. Catching the class instead of the specific failure reds here.
+    """
+    router = exchange_router
+    router.Mt5Client = MagicMock(side_effect=ValueError("something else entirely"))
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 503
+    assert ei.value.detail["code"] == "MT5_GATEWAY_UNREACHABLE"
+    assert ei.value.detail["dependency"] == "mt5-gateway"
+    assert ei.value.detail["retryable"] is True
+    assert (ei.value.headers or {}).get("Retry-After") == "30"
 
 
 # --------------------------------------------------------------------------- #
