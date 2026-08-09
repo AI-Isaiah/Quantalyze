@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
-stopped_at: "153.1 + 153.3 EXECUTED (12 plans). 153.3's /code-review high: 10 findings, 4 fixed + gated (374 -k mt5, 5084 full, mypy clean, D-25 zero-diff). gsd-code-review 153.1 IN FLIGHT. OWED before 153.2: re-review 153.3 to confirm the 4 fixes suffice, then gsd-verify-work on both. 153.2 inherits: pass context.venue (WIZFORM-03), code the 5 KNOWN_CODELESS rejections (WIZFORM-02), clear seam-citations. 153.5 booked in ROADMAP."
-last_updated: "2026-08-09T06:41:05.629Z"
+stopped_at: "153.1 + 153.3 COMPLETE and closed. 153.3: /code-review high (10 findings) -> 4 fixed -> gsd-verify-work gaps_found 29/30 (stale comment, now corrected). 153.1: gsd-code-review (1 blocker + 6 warnings) -> all 7 fixed -> OWED: gsd-verify-work 153.1, and a re-review of 153.3's fixes. Gates: py 374 -k mt5 / 5084 full / mypy clean; ts 462 green / tsc clean. NEXT: 153.2 (inherits context.venue, the 5 KNOWN_CODELESS rejections, seam-citations) then 153.4, then 153.5."
+last_updated: "2026-08-09T06:55:31.248Z"
 last_activity: 2026-08-09
 progress:
   total_phases: 14
@@ -1240,8 +1240,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-09T06:41:05.617Z
-**Stopped At:** 153.1 + 153.3 EXECUTED (12 plans). 153.3's /code-review high: 10 findings, 4 fixed + gated (374 -k mt5, 5084 full, mypy clean, D-25 zero-diff). gsd-code-review 153.1 IN FLIGHT. OWED before 153.2: re-review 153.3 to confirm the 4 fixes suffice, then gsd-verify-work on both. 153.2 inherits: pass context.venue (WIZFORM-03), code the 5 KNOWN_CODELESS rejections (WIZFORM-02), clear seam-citations. 153.5 booked in ROADMAP.
+**Last Date:** 2026-08-09T06:55:31.237Z
+**Stopped At:** 153.1 + 153.3 COMPLETE and closed. 153.3: /code-review high (10 findings) -> 4 fixed -> gsd-verify-work gaps_found 29/30 (stale comment, now corrected). 153.1: gsd-code-review (1 blocker + 6 warnings) -> all 7 fixed -> OWED: gsd-verify-work 153.1, and a re-review of 153.3's fixes. Gates: py 374 -k mt5 / 5084 full / mypy clean; ts 462 green / tsc clean. NEXT: 153.2 (inherits context.venue, the 5 KNOWN_CODELESS rejections, seam-citations) then 153.4, then 153.5.
 **Resume File:** None
 **Next step:** 153.3 is COMPLETE (6/6); 153.1 is 5/6 (plan 01 Wave-0 gates, plan 02 the capability foundation, plan 03 the WIZFORM-03 class filter, plan 04 the ten new codes, plan 05 the honest codes on finalize-wizard -- all green at HEAD). Execute **153.1-06** next, then 153.2 -> 153.4 on `feat/v1.17-153-wizform`. ⛔ WIZFORM-05 stays unchecked until 153.4 closes the client leg. ⛔ **WIZFORM-03 stays unchecked until 153.2/153.4** -- the mechanism and the capability record exist and are pinned, but NOT ONE `buildEnvelope` call site passes `venue` or `surface`, so an MT5 user still reads "switch to a different exchange" in production. ⛔ **WIZFORM-02 stays unchecked until 153.1-06** -- plan 05 landed the emitting half (25 sites, 19 distinct codes, roster 21, EMITTED-NOT-IN-ROSTER empty), but nothing ASSERTS that reconciliation yet, so a twelfth arm added without a code would ship silently. ⭐ 153.1-06 must map through `SEAM_CODE_TO_WIZARD_CODE` before comparing against the roster, or it reports `CIRCUIT_OPEN` as an uncovered emitter forever.
 
