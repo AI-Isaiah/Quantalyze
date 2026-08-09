@@ -385,6 +385,38 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### ⭐ NEEDS FOUNDER DECISION — should the measure ladder have a px cap at all? (raised 2026-08-09)
+Founder report, with screenshots: *"zooming out should allow me to see more of the
+content… it should never produce dead/empty areas."*
+
+The **specific** instance is FIXED (`ecb7140a`): the My Strategies list was a dense
+table stuck at `max-w-7xl` = 1280px — not even a rung on DESIGN.md's ladder — because
+it shares the `/strategies` prefix with the wizard, which is deliberately kept narrow.
+It now gets the 1920px dense-table measure it earns.
+
+**The general principle is NOT fixed, because it contradicts DESIGN.md as written**
+(`DESIGN.md:238-242`, measure ladder: 1100 prose / 1440 document / 1920 dense tables).
+Any FIXED px cap dead-spaces once the viewport exceeds it, and zooming out is exactly
+how a user exceeds it — at 50% zoom a 2560px monitor reports 5120 CSS px, so even the
+1920px rung leaves ~3200px of dead margin. The founder's rule ("never dead areas") and
+the ladder ("prose never exceeds 1100px regardless of viewport") cannot both hold.
+
+Per Rule 7 — surface the conflict, don't average it. **Do not blend these into a
+compromise cap.** The decision is which one governs, and it is the founder's:
+
+- **(A) Ladder wins.** Caps stay; dead space at extreme zoom-out is the accepted cost
+  of a bounded measure. Prose stays readable at any viewport. Status quo + the fix above.
+- **(B) Founder rule wins, for DATA surfaces only.** Dense tables go fluid (`max-w-full`,
+  no px cap) and reveal columns as the viewport grows; prose/forms keep 1100px, where a
+  bounded measure is a genuine readability control, not decoration. This is the narrow
+  reading of the complaint — every screenshot supplied was a table.
+- **(C) Founder rule wins everywhere.** No caps anywhere. ⚠️ Costs line-length control
+  on prose; a 5120px-wide paragraph is measurably harder to read.
+
+⭐ Recommendation: **(B)**. It resolves every case the founder actually hit, keeps the
+one property the ladder exists to protect, and is a one-rung edit to DESIGN.md rather
+than a deletion of the ladder. Requires: DESIGN.md ladder amendment + a decision-log row.
+
 ### Dependency pass — the 9 open dependabot PRs (booked 2026-08-05, founder call)
 - **One campaign, NOT piecemeal merges.** All 9 dependabot PRs are red — and NOT only the
   TEST-DB infra flake: #657 (npm minor-patch group, 25 updates) genuinely fails
