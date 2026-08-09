@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
-status: planning
-stopped_at: "Phase 153.1 plan 01 COMPLETE (Wave-0 gates, green at HEAD, zero production-constant edits): deriveRoster reads line-broken rosters (KNOWN_FINALIZE_CODES 0 -> 10), emitter predicate is per-route (statusRe) and survives ${...} interpolation (cap 160), derived A-25 assertion landed beside the kept literal one. finalize-wizard derives 0 sites at HEAD under [45]\\d\\d — 153.1-06 must move that number. Next: 153.1-02."
-last_updated: "2026-08-09T03:32:34.542Z"
-last_activity: 2026-08-07 -- Phase 152 execution started
+status: executing
+stopped_at: "Phase 153.1 plan 02 COMPLETE (foundation, zero behaviour change): VENUE_CAPABILITIES (6 rows, only mt5 opts out) + venueSupportsScopeProbe/venueIsSubstitutable/venueIsSerialized (null answers true/true/false) + MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS=10, all pinned. 4 mutations watched red (mt5 row deleted => TS1360; MIN 10->11 and ->6000; SC-3 probe default flip; sfox substitutable:false). Nothing READS the capabilities yet — 153.1-03 closes WIZFORM-03. Next: 153.1-03."
+last_updated: "2026-08-09T03:49:13.275Z"
+last_activity: 2026-08-09
 progress:
   total_phases: 13
   completed_phases: 7
   total_plans: 59
-  completed_plans: 44
+  completed_plans: 45
   percent: 54
 ---
 
@@ -56,9 +56,9 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 ## Current Position
 
 Phase: 153.1 (WIZFORM-CODES) -- 153.3 already COMPLETE on the same branch
-Plan: 01 of 06 complete
-Status: Executing
-Last activity: 2026-08-09 -- Phase 153.1 plan 01 executed (Wave-0 gates)
+Plan: 2 of 06 complete
+Status: Ready to execute
+Last activity: 2026-08-09
 
 ### Phase 142.1 scope (inserted 2026-08-02)
 
@@ -381,7 +381,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [████████░░] 75%
+Progress: [████████░░] 76%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -480,6 +480,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 153.3 P05 | 85 min | 3 tasks | 5 files |
 | Phase 153.3 P06 | ~70 min | 3 tasks | 10 files |
 | Phase 153.1 P01 | ~35 min | 3 tasks | 2 modified files |
+| Phase 153.1 P02 | 25m | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -522,6 +523,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase ?]: 153.1-01: emitter lazy-body cap = 160 chars — measured longest real error body 90, shortest reach to the next emitter's status 202; the cap must sit between them or a malformed body reports its code against the NEXT emitter's status
 - [Phase ?]: 153.1-01: the A-25 SELF-TEST synthetic is 150_000 not 120_000 — 120_000 clears today's 90_000 ceiling but goes FALSE when D-26 (153.4) raises the tombstone to 90 s and the ceiling becomes exactly 120_000
 - [Phase ?]: 153.1-01: both incumbent wizard routes keep statusRe 400 — widening them would move their site count 12 to 16 and add DRAFT_ALREADY_EXISTS/UNKNOWN to the pinned vocabulary, i.e. a population change dressed as a scanner improvement
+- [Phase ?]: 153.1-02: sfox's VENUE_CAPABILITIES row is {} — NOT RESEARCH's sketch { scopeProbeSupported: false }. D-22 and the sketch's own warning win; copying the sketch would have opted a live venue out of a security control as a side effect of minting a foundation. Logged to TODOS.md as RESEARCH Q2.
+- [Phase ?]: 153.1-02: venueCapabilities() (the row lookup) is deliberately NOT exported — consumers read the three predicates, because the DEFAULT is the load-bearing part and differs per capability (probe true / substitutable true / serialized false).
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1224,10 +1227,24 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-09T03:32:34.531Z
-**Stopped At:** Phase 153.1 plan 01 COMPLETE (Wave-0 gates, green at HEAD, zero production-constant edits): deriveRoster reads line-broken rosters (KNOWN_FINALIZE_CODES 0 -> 10), emitter predicate is per-route (statusRe) and survives ${...} interpolation (cap 160), derived A-25 assertion landed beside the kept literal one. finalize-wizard derives 0 sites at HEAD under [45]\\d\\d — 153.1-06 must move that number. Next: 153.1-02.
+**Last Date:** 2026-08-09T03:49:13.265Z
+**Stopped At:** Phase 153.1 plan 02 COMPLETE (foundation, zero behaviour change): VENUE_CAPABILITIES (6 rows, only mt5 opts out) + venueSupportsScopeProbe/venueIsSubstitutable/venueIsSerialized (null answers true/true/false) + MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS=10, all pinned. 4 mutations watched red (mt5 row deleted => TS1360; MIN 10->11 and ->6000; SC-3 probe default flip; sfox substitutable:false). Nothing READS the capabilities yet — 153.1-03 closes WIZFORM-03. Next: 153.1-03.
 **Resume File:** None
-**Next step:** 153.3 is COMPLETE (6/6); 153.1 is 1/6 (plan 01, the Wave-0 gates, landed green at HEAD). Execute 153.1-02 next, then the rest of 153.1 → 153.2 → 153.4 on `feat/v1.17-153-wizform`. ⛔ WIZFORM-05 stays unchecked until 153.4 closes the client leg.
+**Next step:** 153.3 is COMPLETE (6/6); 153.1 is 2/6 (plan 01 Wave-0 gates + plan 02 the foundation, both green at HEAD). Execute 153.1-03 next, then the rest of 153.1 → 153.2 → 153.4 on `feat/v1.17-153-wizform`. ⛔ WIZFORM-05 stays unchecked until 153.4 closes the client leg. ⛔ **WIZFORM-03 stays unchecked until 153.1-03** — plan 02 minted the capability record but NOTHING reads it yet; the requirement's behavioural claim ("no `substitutable:false` venue receives a substitution bullet") is 153.1-03's.
+
+⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in
+`src/lib/closed-sets.ts`): `VenueCapabilities` (`:77`), `VENUE_CAPABILITIES` (`:133`),
+`venueSupportsScopeProbe` (`:180`, 153.2's probe gate), `venueIsSubstitutable` (`:194`,
+153.1-03's copy filter), `venueIsSerialized` (`:205`, 153.4's long-wait copy),
+`MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS` (`:702`, = **10**; 153.1-05 re-points
+`finalize-wizard/route.ts:389` at it **without changing the value**).
+⛔ The row lookup `venueCapabilities()` is **module-private** — read the predicates, never
+index the record, or the per-capability default is bypassed.
+⚠️ Every `closed-sets.ts` symbol below `:56` shifted **+151**; `closed-sets.test.ts` symbols
+below the new `venue capabilities` describe (`:285`) shifted **+130**.
+⚠️ Three hand-typed `1`s pin "only mt5 opts out" (probe / substitutable / serialized). If
+153.2 or 153.4 adds a second opt-out those tests red **by design** — move the count in the
+same commit, deliberately.
 
 ⭐ **Three numbers 153.1-06 must reconcile against** (measured in `153.1-01-SUMMARY.md`):
 `deriveRoster(SubmitStep.tsx, "KNOWN_FINALIZE_CODES")` = **10** (comment-stripped path);
