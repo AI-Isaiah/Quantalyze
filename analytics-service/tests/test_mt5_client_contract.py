@@ -75,6 +75,26 @@ class _FakeNamedTuple:
         return dict(self._fields_dict)
 
 
+class _FakeRpycConn:
+    """The rpyc connection object `mt5linux.MetaTrader5` hangs off its name-mangled
+    `_MetaTrader5__conn` attribute — the ONLY transport-close seam 0.1.9 exposes
+    (its `shutdown` forwards to MetaTrader5, which is the very thing `release()`
+    must not do). Shaped, not mocked, so `Mt5Client.release()` genuinely EXERCISES
+    the transport-close branch offline instead of always falling through to the
+    "no transport close reachable" warning.
+    """
+
+    def __init__(self, scenario: dict) -> None:
+        self._scenario = scenario
+        self.close_calls = 0
+        self._config: dict = {}
+
+    def close(self):
+        self.close_calls += 1
+        if self._scenario.get("transport_close_raises"):
+            raise RuntimeError("transport close boom")
+
+
 class _FakeMt5:
     """In-memory RPyC/MT5-shaped double driven by a scenario dict.
 
@@ -86,6 +106,10 @@ class _FakeMt5:
       order_check      -> value order_check() returns
       last_error       -> tuple last_error() returns (default (0, "unknown"))
       shutdown_raises  -> if truthy, shutdown() raises
+      transport_close_raises -> if truthy, the rpyc transport close() raises
+      no_transport     -> if truthy, the double exposes NO `_MetaTrader5__conn` at
+                          all, so release() takes its "no transport close
+                          reachable" branch
       login_raises     -> if set, login() RAISES this exception (transport error)
       account_raises   -> if set, account_info() RAISES this exception
       terminal_info_raises -> if set, terminal_info() RAISES this exception
@@ -95,6 +119,10 @@ class _FakeMt5:
 
     def __init__(self, scenario: dict) -> None:
         self._scenario = scenario
+        if not scenario.get("no_transport"):
+            # Single leading underscore ⇒ NOT re-mangled by this class; the
+            # attribute name is byte-identical to the one mt5linux 0.1.9 sets.
+            self._MetaTrader5__conn = _FakeRpycConn(scenario)
         self.login_calls: list[tuple] = []
         self.initialize_kwargs: list[dict] = []
         self.shutdown_calls = 0
@@ -878,6 +906,112 @@ def test_close_is_idempotent_and_swallows_shutdown_errors():
     assert fake.shutdown_calls == 1
 
 
+# -- release: our transport dies, the shared IPC pipe does NOT (153.3 / D-30) --
+#
+# WHY (Rule 9): mt5linux serves every rpyc connection from ONE ThreadedServer
+# process over ONE shared MetaTrader5 module instance holding ONE IPC pipe
+# (153-EVIDENCE-mt5-platform §A2 / Correction C-1). A `shutdown()` issued by one
+# request therefore destroys that pipe for every CONCURRENT caller, who observe
+# `-10004 No IPC connection` — a denial of service against ourselves, which the
+# per-request `finally: client.close()` in routers/exchange.py was performing on
+# every single validate. These cases pin the separation of "release my lease" from
+# "shut the terminal down".
+
+
+def test_release_closes_the_transport_and_never_shuts_down():
+    """⭐ The direct D-30 regression: release() closes OUR rpyc socket and does NOT
+    reach shutdown(). If it ever did, a concurrent validate/derive against the same
+    gateway would lose its IPC pipe mid-probe."""
+    connect, fake, _rec = _make({})
+    client = Mt5Client("host", 18812, _connect=connect)
+    client.release()
+    assert fake._MetaTrader5__conn.close_calls == 1
+    assert fake.shutdown_calls == 0
+
+
+def test_release_makes_the_shutdown_path_unreachable():
+    """⭐ release() then close(): shutdown_calls stays 0.
+
+    This is the stronger statement — not "the request path happens not to call
+    close()" but "after a release, close() CANNOT reach shutdown() on that
+    instance". An "also call close() for safety" regression at any call site is
+    therefore harmless, and this test is what says so."""
+    connect, fake, _rec = _make({})
+    client = Mt5Client("host", 18812, _connect=connect)
+    client.release()
+    client.close()
+    assert fake.shutdown_calls == 0
+    assert fake._MetaTrader5__conn.close_calls == 1
+
+
+def test_release_is_idempotent():
+    """A second release() is a no-op — the transport is closed exactly once
+    (mirrors close()'s `_closed` latch)."""
+    connect, fake, _rec = _make({})
+    client = Mt5Client("host", 18812, _connect=connect)
+    client.release()
+    client.release()
+    assert fake._MetaTrader5__conn.close_calls == 1
+    assert fake.shutdown_calls == 0
+
+
+def test_release_swallows_a_raising_transport_close(caplog):
+    """A teardown failure must never mask the caller's verdict — the same posture
+    close() takes for a raising shutdown(). It is LOGGED, never silent."""
+    connect, fake, _rec = _make({"transport_close_raises": True})
+    client = Mt5Client("host", 18812, _connect=connect)
+    with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+        client.release()  # must NOT raise
+    assert fake._MetaTrader5__conn.close_calls == 1
+    assert fake.shutdown_calls == 0
+    assert any("release" in r.getMessage() for r in caplog.records)
+
+
+def test_release_without_a_reachable_transport_close_warns_loudly(caplog):
+    """⛔ Never a silent no-op. If the transport shape changes (or a double offers
+    no `_MetaTrader5__conn`), the abandoned connection must be REPORTED — an
+    un-closed, un-reported socket is a leak nobody can see. Reddens if the branch
+    is turned into a bare `return`."""
+    connect, fake, _rec = _make({"no_transport": True})
+    client = Mt5Client("host", 18812, _connect=connect)
+    with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+        client.release()
+    assert fake.shutdown_calls == 0
+    assert any(
+        "no rpyc transport close reachable" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_close_alone_still_calls_shutdown_exactly_once():
+    """The WORKER path is UNCHANGED by D-30: a bare close() (aclose_exchange's mt5
+    arm, job_worker) still ends the terminal session. release() narrows the REQUEST
+    path only; it must not quietly neuter the owner's teardown."""
+    connect, fake, _rec = _make({})
+    client = Mt5Client("host", 18812, _connect=connect)
+    client.close()
+    assert fake.shutdown_calls == 1
+
+
+def test_release_never_appears_in_the_shutdown_call_sites():
+    """Source gate: `shutdown()` may be reached from close() and restart() ONLY.
+
+    A grep-level pin, because the property that matters is STRUCTURAL — release()
+    must contain no shutdown call at all, not merely avoid one on the paths a test
+    happens to walk."""
+    source = pathlib.Path(mt5_client_mod.__file__).read_text()
+    body = source.split("    def release(self) -> None:", 1)[1]
+    body = body.split("    def restart(self) -> None:", 1)[0]
+    # Judge EXECUTABLE text only: drop the docstring (which necessarily discusses
+    # shutdown) and the comment lines.
+    _, _, after_open = body.partition('"""')
+    _, _, code = after_open.partition('"""')
+    code = "\n".join(
+        line for line in code.splitlines() if not line.strip().startswith("#")
+    )
+    assert code.strip(), "the release() body was not extracted — the gate is vacuous"
+    assert "shutdown" not in code
+
+
 # -- restart: bounded-by-caller shutdown + re-connect (MT5CONC-01) -----------
 
 
@@ -1091,5 +1225,8 @@ def test_public_surface_is_exactly_the_contract():
         "history_deals_get",
         "order_check",
         "close",
+        # release (153.3 / D-30) is a TEARDOWN verb, not a widening of the MT5
+        # surface: it closes our own rpyc socket and wraps no mt5linux call at all.
+        "release",
         "restart",
     }

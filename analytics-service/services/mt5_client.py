@@ -10,7 +10,8 @@ shape defined here, so the disciplines below are load-bearing.
 Contract:
 
   * Surface (read-only by CONSTRUCTION) — `login`, `account_info`,
-    `terminal_info`, `history_deals_get`, `order_check` (probe only), `close`.
+    `terminal_info`, `history_deals_get`, `order_check` (probe only), `close`,
+    `release`.
     Read-only is a STRUCTURAL property, not a probed scope claim: the underlying
     `mt5linux` client exposes the FULL trading surface (order_send,
     positions_get, orders_get, ...), but this facade composes ONLY the read
@@ -56,6 +57,20 @@ Contract:
     (D-25).
     The outer `asyncio.to_thread` + `asyncio.wait_for` event-loop bound is a Phase
     136/137 worker-seam concern, NOT part of this synchronous, blocking client.
+
+  * Teardown — TWO distinct verbs (153.3 / D-30), because "I am done with the
+    terminal" and "the terminal's IPC pipe should die" are NOT the same statement:
+      - `release()` ends OUR use of the terminal. It closes the rpyc TRANSPORT and
+        NEVER calls `shutdown()`.
+      - `close()` additionally calls `mt5.shutdown()`, which ends the terminal's
+        IPC attachment for EVERY caller of that gateway process — `mt5linux` serves
+        every rpyc connection from ONE `ThreadedServer` process sharing ONE
+        `MetaTrader5` module instance and ONE IPC pipe (153-EVIDENCE-mt5-platform
+        §A2 / Correction C-1). A concurrent caller then observes `-10004 No IPC
+        connection`. So `close()` belongs to a process that OWNS the terminal, not
+        to a per-request path serving concurrent users.
+    `release()` latches the same `_closed` flag, so after a release the shutdown
+    path is structurally UNREACHABLE on that instance, not merely unused.
 
   * Secret hygiene (T-134-01) — the login / investor password / broker server
     NEVER appear in any exception message or log surface. `mt5linux`
@@ -497,6 +512,59 @@ class Mt5Client:
             self._mt5.shutdown()
         except Exception:  # noqa: BLE001 — a close error must not mask caller errors
             logger.warning("Mt5Client.close: shutdown() raised; swallowing.")
+
+    def release(self) -> None:
+        """Give up OUR use of the terminal WITHOUT ending anybody else's (153.3 / D-30).
+
+        `close()` calls `mt5.shutdown()`. On this deployment that is a denial of
+        service against ourselves: `mt5linux` serves EVERY rpyc connection from ONE
+        `ThreadedServer` process over ONE shared `MetaTrader5` module instance
+        holding ONE IPC pipe to ONE terminal (153-EVIDENCE-mt5-platform §A2 /
+        Correction C-1), so a `shutdown()` issued by one request tears that pipe
+        down for every CONCURRENT caller, who then observe `-10004 No IPC
+        connection`. A request path serving concurrent users must therefore attach
+        once and never tear down — it releases its own lease instead.
+
+        `release()` NEVER calls `shutdown()`. It:
+          1. latches `_closed` FIRST, so a later `close()` is structurally a no-op
+             and cannot reach `shutdown()` — after a release the shutdown path is
+             UNREACHABLE on this instance, not merely unused;
+          2. best-effort closes the rpyc TRANSPORT (our socket), which is what
+             actually ends our lease on the shared server;
+          3. swallows a raising teardown with a logged WARNING, exactly as `close()`
+             does — a teardown failure must never mask the caller's verdict.
+
+        `close()` keeps its shutdown semantics for the callers that OWN the terminal
+        (the worker's `aclose_exchange` mt5 arm, `job_worker`); this method is the
+        verb for everything that merely BORROWS it.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        # ponytail: mt5linux 0.1.9 exposes NO transport-close method of its own
+        # (`shutdown` forwards to MetaTrader5), so reach the rpyc connection through
+        # the same name-mangled private attribute `_default_connect` already sets
+        # `sync_request_timeout` on. Stable for the same reason: mt5linux is pinned
+        # ==0.1.9 and rpyc's `close()` is stable across the 5.x line.
+        conn = getattr(self._mt5, "_MetaTrader5__conn", None)
+        transport_close = getattr(conn, "close", None)
+        if not callable(transport_close):
+            # ⛔ Never a silent no-op: a socket that is neither closed nor reported
+            # is a leak nobody can see. This is the offline double's shape today (or
+            # a future transport shape), and it must be VISIBLE if it ever becomes
+            # production's shape.
+            logger.warning(
+                "Mt5Client.release: no rpyc transport close reachable "
+                "(_MetaTrader5__conn.close absent) — the connection is abandoned, "
+                "not closed."
+            )
+            return
+        try:
+            transport_close()
+        except Exception:  # noqa: BLE001 — a teardown error must not mask caller errors
+            logger.warning(
+                "Mt5Client.release: transport close() raised; swallowing."
+            )
 
     def restart(self) -> None:
         """Tear down a wedged terminal and re-establish the transport (MT5CONC-01).
