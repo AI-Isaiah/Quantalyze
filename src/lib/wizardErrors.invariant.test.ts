@@ -76,10 +76,29 @@ const WIZARD_STEPS = join(
  *   `stripCommentsPreserveLines(src, "ts")`. A REJECTION-EMITTING SITE is a
  *   `NextResponse.json(` call whose FIRST argument is an object literal opening
  *   with `code: "<UPPER_SNAKE_LITERAL>"` immediately followed by an `error:`
- *   key, and whose SECOND argument carries `status: 400`. The emitted code is
- *   that string literal.
+ *   key, and whose SECOND argument carries a `status:` MATCHING THAT ROUTE'S
+ *   OWN `statusRe` FRAGMENT. The emitted code is that string literal.
  *
- * Three things this deliberately EXCLUDES, each verified against the real
+ * ⚠️ THE STATUS IS A PER-ROUTE PROPERTY, NOT A GLOBAL 400 (153.1-01 / D-34).
+ * Until this plan the predicate hard-coded `status: 400`, and its prose called
+ * the population "exactly the INPUT-VALIDATION rejections". That description is
+ * TRUE of the two incumbent routes — their coded rejections really are the
+ * pre-limiter, pre-probe input guards, and both keep `statusRe: "400"` so their
+ * pinned counts below are byte-identical to before. It is FALSE of
+ * `finalize-wizard`, which answers its coded arms at 400/403/404/409/502/503;
+ * a 400-only predicate sees almost none of them. Leaving the old prose in place
+ * while a third route arrived under it is this file's own Pitfall 1 — a
+ * description that stays green while its premise changes.
+ *
+ * ⚠️ AND THE ERROR BODY MUST SURVIVE A TEMPLATE INTERPOLATION. The old body
+ * matcher was `error:[^}]*\}`, a character class that EXCLUDES `}` outright, so
+ * it could not cross the brace that closes a `${…}` interpolation and the match
+ * died there. Four `finalize-wizard` bodies interpolate a constant, and they
+ * stayed invisible even after the status widened. The replacement is a LAZY
+ * bounded run that backtracks to the first `}` actually followed by the
+ * `, { … status: … }` context, which is the real end of the object literal.
+ *
+ * Three things this deliberately still EXCLUDES, each verified against the real
  * sources rather than assumed:
  *
  *   · The rate-limiter deny bodies. `rateLimitDenyJson(...)` receives
@@ -91,14 +110,49 @@ const WIZARD_STEPS = join(
  *     SHORTHAND `{ code }` — a computed value, no string literal, and no
  *     `error` key (it is uniform-`{ code }` by H-0305). Excluded by the
  *     literal requirement, which is why the count is 12 and not 13.
- *   · Every non-400 answer (409/403/500/502/503 and the 200 path).
+ *   · Any answer whose status does not match the route's own fragment.
  *
- * The population is therefore exactly the INPUT-VALIDATION rejections — the
- * guards that run before the limiter and before any live probe, which is the
- * class MT5-04 split.
+ * ⛔ TWO THINGS THAT MUST NOT BE RELAXED TO MAKE A COUNT COME OUT RIGHT: the
+ * `code:`-FIRST key order, and the `[A-Z][A-Z0-9_]*` literal class. Those two
+ * are the levers that make the D-34 reorder mandatory and that keep a lowercase
+ * `draft_state_invalid` VISIBLE as a defect. Relaxing either would "fix" the
+ * assertion by legalising the defect it exists to find.
  */
-const EMITTER_RE =
-  /NextResponse\.json\(\s*\{\s*code:\s*"([A-Z][A-Z0-9_]*)"\s*,\s*error:[^}]*\}\s*,\s*\{[^}]*status:\s*400/g;
+
+/**
+ * The lazy run's character cap, and the measurement that picked it (153.1-01).
+ *
+ * A lazy `[\s\S]{0,N}?` that is allowed to grow without bound can, when one
+ * emitter's body is malformed, backtrack straight past that emitter's own close
+ * and pick up the NEXT emitter's `status:` — reporting the first emitter's code
+ * against the second one's status. The cap is what forbids that.
+ *
+ * Measured on the comment-stripped sources of all three routes:
+ *   · longest REAL `error:` … `}` body = **90** characters (`DRAFT_ALREADY_EXISTS`
+ *     on create-with-key), so the cap must clear 90 with headroom;
+ *   · shortest distance from ANY `error:` to the NEXT emitter's `status:` =
+ *     **202** characters (finalize-wizard), so the cap must stay under 202 for
+ *     the cross-emitter reach to be arithmetically impossible.
+ * 160 sits between them: ~1.8× the longest real body, and 42 characters short
+ * of the nearest neighbour. If a genuinely longer body is ever written its
+ * emitter goes invisible — which the hand-typed site counts below redden.
+ */
+const EMITTER_BODY_MAX_CHARS = 160;
+
+/**
+ * Build the emitter regex for one route's status fragment.
+ *
+ * A FACTORY, not a module const, because the fragment is per-route. `statusRe`
+ * is a regex FRAGMENT (`"400"`, or `"[45]\\d\\d"` for every 4xx/5xx), spliced
+ * in raw — these are hand-typed in this file, never taken from input.
+ */
+function emitterRe(statusRe: string): RegExp {
+  return new RegExp(
+    `NextResponse\\.json\\(\\s*\\{\\s*code:\\s*"([A-Z][A-Z0-9_]*)"\\s*,\\s*` +
+      `error:[\\s\\S]{0,${EMITTER_BODY_MAX_CHARS}}?\\}\\s*,\\s*\\{[^}]*status:\\s*(?:${statusRe})`,
+    "g",
+  );
+}
 
 interface RouteUnderTest {
   /** Human name used in failure messages. */
@@ -109,6 +163,16 @@ interface RouteUnderTest {
   readonly rosterFile: string;
   /** The roster's declared name. */
   readonly rosterName: string;
+  /**
+   * The regex FRAGMENT this route's coded rejections answer on.
+   *
+   * ⚠️ NARROW ON PURPOSE for the two incumbents. Both also answer 403/409/500
+   * with a coded body, and widening them to `"[45]\\d\\d"` would move their
+   * pinned site count from 12 to 16 and add `DRAFT_ALREADY_EXISTS` / `UNKNOWN`
+   * to the vocabulary assertion — a real change of population dressed up as a
+   * scanner improvement. The widening belongs to the route that needs it.
+   */
+  readonly statusRe: string;
 }
 
 const ROUTES: readonly RouteUnderTest[] = [
@@ -117,12 +181,14 @@ const ROUTES: readonly RouteUnderTest[] = [
     route: join(REPO, "src/app/api/strategies/create-with-key/route.ts"),
     rosterFile: join(WIZARD_STEPS, "ConnectKeyStep.tsx"),
     rosterName: "KNOWN_CREATE_WITH_KEY_CODES",
+    statusRe: "400",
   },
   {
     label: "composite/add-key",
     route: join(REPO, "src/app/api/strategies/composite/add-key/route.ts"),
     rosterFile: join(WIZARD_STEPS, "MultiKeyConnectStep.tsx"),
     rosterName: "KNOWN_ADD_KEY_CODES",
+    statusRe: "400",
   },
 ];
 
@@ -130,12 +196,17 @@ function stripped(path: string): string {
   return stripCommentsPreserveLines(readFileSync(path, "utf-8"), "ts");
 }
 
-/** Every rejection-emitted code literal, in source order, WITH repeats. */
-function deriveEmittedCodes(source: string): string[] {
+/**
+ * Every rejection-emitted code literal, in source order, WITH repeats.
+ *
+ * `statusRe` defaults to `"400"` so the SELF-TESTs written before the widening
+ * still exercise the narrow configuration unchanged.
+ */
+function deriveEmittedCodes(source: string, statusRe = "400"): string[] {
   const out: string[] = [];
-  EMITTER_RE.lastIndex = 0;
+  const re = emitterRe(statusRe);
   let m: RegExpExecArray | null;
-  while ((m = EMITTER_RE.exec(source)) !== null) out.push(m[1]);
+  while ((m = re.exec(source)) !== null) out.push(m[1]);
   return out;
 }
 
@@ -253,7 +324,7 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
     const rosterSource = stripped(r.rosterFile);
     return {
       ...r,
-      codes: deriveEmittedCodes(stripped(r.route)),
+      codes: deriveEmittedCodes(stripped(r.route), r.statusRe),
       roster: new Set(deriveRoster(rosterSource, r.rosterName)),
     };
   });
@@ -416,6 +487,134 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
       "    });",
     ].join("\n");
     expect(deriveEmittedCodes(denyBodies)).toEqual([]);
+  });
+
+  it("SELF-TEST — a WIDENED status fragment sees a 502 coded rejection", () => {
+    // The POSITIVE half of the per-route widening. `finalize-wizard` answers
+    // its coded arms at 400/403/404/409/502/503; a predicate that can only see
+    // 400 finds almost none of them and then satisfies every "the missing set
+    // is empty" assertion by measuring nothing.
+    const seamDown = [
+      "      return NextResponse.json(",
+      '        { code: "SERVICE_UNREACHABLE", error: "The service is unreachable" },',
+      "        { status: 502, headers: NO_STORE_HEADERS },",
+      "      );",
+    ].join("\n");
+    expect(deriveEmittedCodes(seamDown, "[45]\\d\\d")).toEqual([
+      "SERVICE_UNREACHABLE",
+    ]);
+  });
+
+  it("SELF-TEST — the NARROW status fragment still refuses that same 502", () => {
+    // ⚠️ THIS IS WHAT PROVES THE PER-ROUTE SCOPING IS REAL AND NOT DECORATIVE.
+    // If the widening had leaked into the default, the two incumbent routes
+    // would silently pick up their 403/409/500 coded answers, their pinned
+    // site count would move 12 → 16, and someone would "fix" the literal to
+    // cover it — converting a population change into a scanner change.
+    const seamDown = [
+      "      return NextResponse.json(",
+      '        { code: "SERVICE_UNREACHABLE", error: "The service is unreachable" },',
+      "        { status: 502, headers: NO_STORE_HEADERS },",
+      "      );",
+    ].join("\n");
+    expect(deriveEmittedCodes(seamDown)).toEqual([]);
+    expect(deriveEmittedCodes(seamDown, "400")).toEqual([]);
+  });
+
+  it("SELF-TEST — an error body containing a `${…}` interpolation is still an emitter", () => {
+    // ⚠️ THE THIRD BLINDNESS CLASS, and the one that survives BOTH the D-34
+    // reorder and the status widening. The old body matcher was `[^}]*`, a
+    // class that excludes `}` outright, so the brace closing `${…}` ended the
+    // run and the match died before reaching the object literal's real close.
+    // Four finalize-wizard bodies interpolate a constant; this mirrors the
+    // two-interpolation shape of the own-capital arm.
+    const interpolated = [
+      "      return NextResponse.json(",
+      "        {",
+      '          code: "DRAFT_STATE_INVALID",',
+      "          error: `capital_source must be ${OWN_CAPITAL} or ${TEAM_REVIEW}`,",
+      "        },",
+      "        { status: 400, headers: NO_STORE_HEADERS },",
+      "      );",
+    ].join("\n");
+    expect(deriveEmittedCodes(interpolated)).toEqual(["DRAFT_STATE_INVALID"]);
+    expect(deriveEmittedCodes(interpolated, "[45]\\d\\d")).toEqual([
+      "DRAFT_STATE_INVALID",
+    ]);
+  });
+
+  it("SELF-TEST — `{ error, code }` key order is STILL invisible under BOTH fragments (D-34)", () => {
+    // ⚠️ THE NEGATIVE THIS WHOLE PLAN TURNS ON. Fourteen pre-existing
+    // finalize-wizard arms are written `{ error, code }`; they are out of scope
+    // today ONLY because the predicate gated on 400. Once a route arrives with
+    // a widened fragment, "the scanner found nothing" and "there was nothing to
+    // find" become indistinguishable unless this test exists — and the coverage
+    // assertion would go blind on the PRE-EXISTING arms, not merely on newly
+    // added ones.
+    //
+    // ⛔ The remedy is to REORDER THE ROUTE (153.1-06), never to relax this
+    // predicate. Accepting `{ error, code }` here would make the reorder
+    // optional and the defect legal.
+    const wrongOrder = [
+      "      return NextResponse.json(",
+      '        { error: "The draft is gone", code: "GATE_DRAFT_GONE" },',
+      "        { status: 404, headers: NO_STORE_HEADERS },",
+      "      );",
+    ].join("\n");
+    expect(deriveEmittedCodes(wrongOrder)).toEqual([]);
+    expect(deriveEmittedCodes(wrongOrder, "400")).toEqual([]);
+    expect(deriveEmittedCodes(wrongOrder, "[45]\\d\\d")).toEqual([]);
+
+    // The same arm written the RIGHT way round IS seen — otherwise the
+    // assertion above would pass for a scanner that matches nothing at all.
+    const rightOrder = [
+      "      return NextResponse.json(",
+      '        { code: "GATE_DRAFT_GONE", error: "The draft is gone" },',
+      "        { status: 404, headers: NO_STORE_HEADERS },",
+      "      );",
+    ].join("\n");
+    expect(deriveEmittedCodes(rightOrder, "[45]\\d\\d")).toEqual([
+      "GATE_DRAFT_GONE",
+    ]);
+
+    // The SECOND lever, and the other half of D-34: a `code:`-FIRST arm whose
+    // literal is lowercase. `finalize-wizard` has one (`draft_state_invalid`).
+    // It fails the `[A-Z][A-Z0-9_]*` class, and it must keep failing it — the
+    // remedy is to rename the code, never to widen the class, because a
+    // lowercase code cannot be a `WizardErrorCode` union member either.
+    const lowercase = [
+      "      return NextResponse.json(",
+      '        { code: "draft_state_invalid", error: "The draft moved on" },',
+      "        { status: 409, headers: NO_STORE_HEADERS },",
+      "      );",
+    ].join("\n");
+    expect(deriveEmittedCodes(lowercase, "[45]\\d\\d")).toEqual([]);
+  });
+
+  it("SELF-TEST — the lazy body run cannot reach the NEXT emitter's status", () => {
+    // The cap's own falsifier. If `EMITTER_BODY_MAX_CHARS` were removed or
+    // raised past the measured 202-character neighbour distance, a malformed
+    // body would backtrack past its own close and report ITS code against the
+    // FOLLOWING emitter's status — inflating counts for a reason that has
+    // nothing to do with the route's guards.
+    // ⚠️ THE GAP IS HAND-TYPED 200, NOT `EMITTER_BODY_MAX_CHARS + n`. A filler
+    // sized off the constant under test grows with it, so raising the cap to
+    // 2 000 would move the fixture too and this test would stay green for the
+    // exact change it exists to catch — the self-referential oracle again, in
+    // miniature. 200 is chosen to MODEL the measured real world: the tightest
+    // observed distance from an `error:` to the next emitter's `status:` is 202
+    // characters, so a fixture at 200 is very slightly tighter than anything on
+    // disk. It reds for any cap at or above ~230 and stays green at 160.
+    const unterminated = [
+      "      return NextResponse.json(",
+      '        { code: "FIRST_CODE", error: "no closing context here"',
+      "      ".padEnd(200, "x"),
+      "      return NextResponse.json(",
+      '        { code: "SECOND_CODE", error: "fine" },',
+      "        { status: 400, headers: NO_STORE_HEADERS },",
+      "      );",
+    ].join("\n");
+    expect(deriveEmittedCodes(unterminated)).toEqual(["SECOND_CODE"]);
   });
 
   it("SELF-TEST — the union scan stops at the declaration, not at the copy table", () => {
