@@ -46,7 +46,12 @@ import { CircuitOpenError } from "@/lib/seam-errors";
 // `@/lib/resilient-fetch`; neither is reachable from here.
 // [VERIFIED at 413d124f — re-verify the four claims above before landing any
 // further import into this file.]
-import { venueIsSubstitutable } from "./closed-sets";
+// 153.1-04 / D-23 — `MAGNITUDE_CAPS` joins the SAME import for the same
+// reason. The description bounds named in the copy below are read from the one
+// constant the server arm and the field guards read; a bound typed as a literal
+// into a sentence is how the client came to promise a rule the server did not
+// enforce (the three-failed-submit incident).
+import { MAGNITUDE_CAPS, venueIsSubstitutable } from "./closed-sets";
 
 export type WizardErrorCode =
   // Key validation (ConnectKeyStep)
@@ -179,6 +184,27 @@ export type WizardErrorCode =
   // validation. Copy lives here (the canonical wizard-copy home) so the
   // component never carries an invented inline string (copy-drift guard).
   | "METADATA_DESCRIPTION_REQUIRED"
+  // 153.1-04 / WIZFORM-02 — the seven FIELD-LEVEL refusals `validatePayload`
+  // makes in `finalize-wizard/route.ts`. Each one names a field the user typed
+  // or picked, so 153.2 can route the message back to that field instead of
+  // rendering a terminal envelope over a form the user can still fix.
+  //
+  // ⚠️ A member is minted here ONLY where a field-level message must reach a
+  // SPECIFIC field. The route's three non-field arms (malformed body, a
+  // non-UUID strategy_id, an out-of-set entry_context — none of them ever
+  // user-typed) keep `VALIDATION_FAILED`: minting a member per arm inflates
+  // the vocabulary, which is the failure `SEAM_CODE_TO_WIZARD_CODE`'s docblock
+  // warns about.
+  //
+  // ⛔ NONE of the seven is recoverable — see the copy entries. Resubmitting an
+  // identical payload is refused identically; the remedy is on the form.
+  | "METADATA_NAME_INVALID"
+  | "METADATA_DESCRIPTION_TOO_SHORT"
+  | "METADATA_DESCRIPTION_TOO_LONG"
+  | "METADATA_CATEGORY_REQUIRED"
+  | "METADATA_AUM_INVALID"
+  | "METADATA_CAPACITY_INVALID"
+  | "METADATA_CAPITAL_OWNERSHIP_INVALID"
   // Wizard lifecycle
   | "SESSION_EXPIRED"
   | "SUBMIT_NOTIFY_FAILED"
@@ -371,6 +397,36 @@ export type WizardErrorAction =
  * generic `interpolate(template, vars)` helper).
  */
 const SIZE_MB_PLACEHOLDER = "{sizeMb}";
+
+/**
+ * 153.1-04 — the count-free HEAD of each description-bound title, held once so
+ * the table's sentence and the interpolated sentence cannot drift apart.
+ *
+ * ⚠️ WHY A HEAD RATHER THAN A `{n}` PLACEHOLDER. `charCount` is OPTIONAL, and
+ * a title carrying `{n}` renders the literal token when nothing is passed. The
+ * table sentence must be TRUE and complete with no number (TRAP-3: a surface
+ * must never name a count it was not given, and must never print the machinery
+ * either). So the table appends only a full stop, and `formatKeyError`'s arm
+ * appends the specific tail. The CSV file-size token declared just above can
+ * use the placeholder shape because `CSV_FILE_TOO_LARGE` is emitted from
+ * exactly one site that always supplies the size; these two are emitted from a
+ * server arm that knows the length and from a client field guard that may not.
+ * (That token's identifier is deliberately not spelled out here:
+ * `wizardErrors.test.ts` pins its occurrence count in this file at THREE — one
+ * declaration plus its two uses — as a receipt that the interpolation machinery
+ * is untouched, and prose that names it moves that number for no behavioural
+ * reason.)
+ *
+ * ⛔ The bounds are READ from `MAGNITUDE_CAPS`, never typed as `10` / `5000`
+ * (D-23). `MAX_DESCRIPTION_CHARS` is grouped per the Numbers Contract, so 5000
+ * reads as "5,000".
+ */
+const DESCRIPTION_BOUND_TITLE = {
+  METADATA_DESCRIPTION_TOO_SHORT: `Add at least ${MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS} characters`,
+  METADATA_DESCRIPTION_TOO_LONG: `Keep this under ${MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS.toLocaleString(
+    "en-US",
+  )} characters`,
+} as const;
 
 /**
  * 153.1-03 / WIZFORM-03 — the wizard surface an error was raised on.
@@ -1036,6 +1092,131 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     ],
     docsHref: "/security",
     actions: ["clear_and_retry"],
+  },
+
+  // ────────────────────────────────────────────────────────────────────────
+  // 153.1-04 / WIZFORM-02 — the seven FIELD-LEVEL refusals.
+  //
+  // ⛔ RECOVERABILITY IS DECIDED ONCE, FOR THE CLASS, AND THE DECISION IS
+  // "NOT RECOVERABLE". Every entry below carries `["expand_log"]` and nothing
+  // else, so no member of `RECOVERABLE_ACTIONS` (`clear_and_retry`,
+  // `try_another_key` — src/lib/envelope.ts) is present, `buildEnvelope`
+  // derives `recoverable: false`, and NO Retry control renders. That absence
+  // IS the behaviour being shipped, exactly as `ALLOCATION_NOT_ALLOCATABLE`
+  // and `SEAM_MISCONFIGURED` already do it (Shared Pattern B).
+  //
+  // The reason, written once here and cross-referenced by the six entries
+  // after the first: resubmitting the identical payload is refused
+  // identically — the server compared the same value against the same rule and
+  // will keep doing so. The remedy is on the FORM. A Retry control against
+  // that is a false affordance, and a founder clicking it five times is the
+  // incident that produced this phase.
+  //
+  // ⛔ Specifically NOT `clear_and_retry`: it wipes what the user typed, which
+  // for a description they spent minutes on is the worst possible answer to
+  // "it is nine characters long". And NOT `try_another_key`: these are form
+  // fields, not credentials — no key is involved on any of the seven paths.
+  //
+  // ⚠️ The route does not emit these yet. 153.1-05 gives the nine
+  // `validatePayload` arms their codes and admits them to
+  // `KNOWN_FINALIZE_CODES` in the same commit (Shared Pattern D); 153.2 maps
+  // each code to its field id. A code with no copy entry falls through to
+  // UNKNOWN exactly as a missing code does, which is why the copy lands first.
+  // ────────────────────────────────────────────────────────────────────────
+
+  METADATA_NAME_INVALID: {
+    title: "Choose a codename from the list.",
+    cause:
+      "The codename on this draft is not one of the names we offer. Nothing was saved, and everything else you filled in is still on the form.",
+    fix: [
+      "Open the codename field and pick one of the offered names.",
+      "The list is fixed, so a name typed by hand will not be accepted.",
+    ],
+    docsHref: "/security",
+    // See the class comment above: field-level refusals carry no member of
+    // RECOVERABLE_ACTIONS, so no Retry renders.
+    actions: ["expand_log"],
+  },
+
+  METADATA_DESCRIPTION_TOO_SHORT: {
+    // Count-free by construction — `formatKeyError` appends " — you have {n}."
+    // only when `charCount` is supplied. See DESCRIPTION_BOUND_TITLE.
+    title: `${DESCRIPTION_BOUND_TITLE.METADATA_DESCRIPTION_TOO_SHORT}.`,
+    cause: `Allocators read the description before anything else, so we ask for at least ${MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS} characters. Nothing was saved, and everything you typed is still on the form.`,
+    fix: [
+      "Write one paragraph describing the strategy, its edge, and how you frame risk.",
+    ],
+    docsHref: "/security",
+    // Non-recoverable — see the class comment above this block.
+    actions: ["expand_log"],
+  },
+
+  METADATA_DESCRIPTION_TOO_LONG: {
+    title: `${DESCRIPTION_BOUND_TITLE.METADATA_DESCRIPTION_TOO_LONG}.`,
+    cause: `The description is longer than the ${MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS.toLocaleString(
+      "en-US",
+    )} characters we store. Nothing was saved, and everything you typed is still on the form.`,
+    fix: [
+      "Trim it to the essentials — the strategy, its edge, and how you frame risk.",
+      "Keep the longer version for the call; this field is a summary.",
+    ],
+    docsHref: "/security",
+    // Non-recoverable — see the class comment above this block.
+    actions: ["expand_log"],
+  },
+
+  METADATA_CATEGORY_REQUIRED: {
+    title: "Choose a category.",
+    cause:
+      "Every strategy is filed under one category so allocators can compare like with like. This draft has no category, or the one it carries is not one we offer. Nothing was saved, and everything else you filled in is still on the form.",
+    fix: [
+      "Open the category field and pick the closest match.",
+      "If none of them fits exactly, pick the nearest and say more in the description.",
+    ],
+    docsHref: "/security",
+    // Non-recoverable — see the class comment above this block.
+    actions: ["expand_log"],
+  },
+
+  METADATA_AUM_INVALID: {
+    title: "Enter AUM as a number of dollars, or leave it blank.",
+    cause:
+      "AUM has to be a plain, finite dollar amount that is not negative and not above our upper bound. Currency symbols, separators and text are not read as numbers. Nothing was saved, and everything else you filled in is still on the form.",
+    fix: [
+      "Type digits only — no currency symbol, no commas, no words.",
+      "AUM is optional. Leave the field empty if you would rather not state it.",
+    ],
+    docsHref: "/security",
+    // Non-recoverable — see the class comment above this block.
+    actions: ["expand_log"],
+  },
+
+  METADATA_CAPACITY_INVALID: {
+    title: "Enter capacity as a number of dollars, or leave it blank.",
+    cause:
+      "Capacity has to be a plain, finite dollar amount that is not negative and not above our upper bound. Currency symbols, separators and text are not read as numbers. Nothing was saved, and everything else you filled in is still on the form.",
+    fix: [
+      "Type digits only — no currency symbol, no commas, no words.",
+      "Capacity is optional. Leave the field empty if you do not want to state a limit.",
+    ],
+    docsHref: "/security",
+    // Non-recoverable — see the class comment above this block.
+    actions: ["expand_log"],
+  },
+
+  METADATA_CAPITAL_OWNERSHIP_INVALID: {
+    title: "Answer whose capital is in this key.",
+    cause:
+      "The answer on this draft is not one of the two we accept. That answer decides whether the strategy can ever hold money, so we will not guess it. Nothing was saved, and everything else you filled in is still on the form.",
+    fix: [
+      // The two labels are the ones CapitalOwnershipRadioGroup.tsx renders, so
+      // the user reads back the words they are looking at.
+      'Pick either "My own capital" or "A trading team\'s key I\'m verifying".',
+      "You can change the answer later from My Strategies.",
+    ],
+    docsHref: "/security",
+    // Non-recoverable — see the class comment above this block.
+    actions: ["expand_log"],
   },
 
   SESSION_EXPIRED: {
@@ -1792,6 +1973,20 @@ export interface WizardErrorContext {
    */
   retryAfterSeconds?: number;
   /**
+   * 153.1-04 / WIZFORM-02 — the description's CURRENT length in characters,
+   * for `METADATA_DESCRIPTION_TOO_SHORT` / `_TOO_LONG`.
+   *
+   * OPTIONAL, and absence means "we were not told how long it is" — never
+   * "zero", never "empty". A surface MUST NOT name a count it did not receive:
+   * telling a user "you have 0" when the value simply was not passed turns a
+   * vague refusal into a specific lie, and "0" is also the one value that would
+   * send them looking for a different problem (TRAP-3, the same rule
+   * `retryAfterSeconds` above states for durations). Both table sentences are
+   * written to be complete and true with no number; `formatKeyError` produces
+   * the counted form only when this field is present.
+   */
+  charCount?: number;
+  /**
    * 153.1-03 / WIZFORM-03 / D-17 — the venue the failure happened on, as a
    * lowercase `SupportedExchange` code. Read ONLY as a lookup key into the
    * closed capability record; it is never interpolated into copy, a log line,
@@ -1943,6 +2138,29 @@ export function formatKeyError(
     return {
       ...base,
       title: base.title.replace(SIZE_MB_PLACEHOLDER, context.sizeMb),
+    };
+  }
+
+  // 153.1-04 / WIZFORM-02 — the description pair names the user's current
+  // count, and ONLY when it was given one.
+  //
+  // ⓘ This is a per-CODE interpolation arm, and it is NOT the instance-not-class
+  // defect 153.1-03 removed. Interpolation is per-code BY NATURE — five arms
+  // above it do the same thing for five different context fields, because the
+  // sentence a count belongs in is different for every code. Requirement
+  // FILTERING is the opposite: it is one rule over the whole table, and it stays
+  // in the ONE filter at the top of this function. Do not "unify" these two;
+  // they are different shapes for different reasons.
+  if (
+    (code === "METADATA_DESCRIPTION_TOO_SHORT" ||
+      code === "METADATA_DESCRIPTION_TOO_LONG") &&
+    context?.charCount !== undefined
+  ) {
+    return {
+      ...base,
+      title: `${DESCRIPTION_BOUND_TITLE[code]} — you have ${context.charCount.toLocaleString(
+        "en-US",
+      )}.`,
     };
   }
 
