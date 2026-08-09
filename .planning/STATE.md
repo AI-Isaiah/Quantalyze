@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
-stopped_at: "Phase 153.1 plan 02 COMPLETE (foundation, zero behaviour change): VENUE_CAPABILITIES (6 rows, only mt5 opts out) + venueSupportsScopeProbe/venueIsSubstitutable/venueIsSerialized (null answers true/true/false) + MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS=10, all pinned. 4 mutations watched red (mt5 row deleted => TS1360; MIN 10->11 and ->6000; SC-3 probe default flip; sfox substitutable:false). Nothing READS the capabilities yet — 153.1-03 closes WIZFORM-03. Next: 153.1-03."
-last_updated: "2026-08-09T03:49:13.275Z"
+stopped_at: "Phase 153.1 plan 03 COMPLETE (mechanism, not yet end-to-end): FixRequirement + WizardErrorCopy.fixRequires + WizardErrorContext.venue/surface + ONE applyFixRequirements call at formatKeyError:1903. Three venue bullets tagged substitutable true/false with the D-17 replacement copy verbatim; SERVICE_UNREACHABLE's /strategies bullet gated on surface submit. 4 whole-table sweeps + a positive control; 6 mutations watched red (SC-5; alignment; surface arm; reference identity; blind regex) and the class-not-instance mutation watched GREEN. WIZFORM-03 NOT complete — no buildEnvelope call site passes venue/surface yet, so 153.2 (SubmitStep:414) and 153.4 (ConnectKeyStep:609, MultiKeyConnectStep) must feed it. Next: 153.1-04."
+last_updated: "2026-08-09T04:14:34.435Z"
 last_activity: 2026-08-09
 progress:
   total_phases: 13
   completed_phases: 7
   total_plans: 59
-  completed_plans: 45
+  completed_plans: 46
   percent: 54
 ---
 
@@ -56,7 +56,7 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 ## Current Position
 
 Phase: 153.1 (WIZFORM-CODES) -- 153.3 already COMPLETE on the same branch
-Plan: 2 of 06 complete
+Plan: 3 of 06 complete
 Status: Ready to execute
 Last activity: 2026-08-09
 
@@ -381,7 +381,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [████████░░] 76%
+Progress: [████████░░] 78%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -481,6 +481,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 153.3 P06 | ~70 min | 3 tasks | 10 files |
 | Phase 153.1 P01 | ~35 min | 3 tasks | 2 modified files |
 | Phase 153.1 P02 | 25m | 3 tasks | 3 files |
+| Phase 153.1 P03 | ~55m | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -525,6 +526,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase ?]: 153.1-01: both incumbent wizard routes keep statusRe 400 — widening them would move their site count 12 to 16 and add DRAFT_ALREADY_EXISTS/UNKNOWN to the pinned vocabulary, i.e. a population change dressed as a scanner improvement
 - [Phase ?]: 153.1-02: sfox's VENUE_CAPABILITIES row is {} — NOT RESEARCH's sketch { scopeProbeSupported: false }. D-22 and the sketch's own warning win; copying the sketch would have opted a live venue out of a security control as a side effect of minting a foundation. Logged to TODOS.md as RESEARCH Q2.
 - [Phase ?]: 153.1-02: venueCapabilities() (the row lookup) is deliberately NOT exported — consumers read the three predicates, because the DEFAULT is the load-bearing part and differs per capability (probe true / substitutable true / serialized false).
+- [Phase 153.1]: 153.1-03: a fix[] bullet carries a FixRequirement; ONE filter in formatKeyError applies it — never a per-code branch — D-17 is a class (a remedy presupposing a fact about the context), not three instances. Three if-arms would re-ship the instance-not-class defect; the filter also serves UI-SPEC Gate B unchanged.
+- [Phase 153.1]: 153.1-03: context.venue absent => venue-conditional bullet still renders; context.surface absent => surface-conditional bullet is SUPPRESSED — Deliberately asymmetric. An unnamed venue must leave incumbent ccxt copy byte-identical; an unnamed surface must withhold a detour we cannot support (fail toward saying less).
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1227,8 +1230,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-09T03:49:13.265Z
-**Stopped At:** Phase 153.1 plan 02 COMPLETE (foundation, zero behaviour change): VENUE_CAPABILITIES (6 rows, only mt5 opts out) + venueSupportsScopeProbe/venueIsSubstitutable/venueIsSerialized (null answers true/true/false) + MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS=10, all pinned. 4 mutations watched red (mt5 row deleted => TS1360; MIN 10->11 and ->6000; SC-3 probe default flip; sfox substitutable:false). Nothing READS the capabilities yet — 153.1-03 closes WIZFORM-03. Next: 153.1-03.
+**Last Date:** 2026-08-09T04:14:34.424Z
+**Stopped At:** Phase 153.1 plan 03 COMPLETE (mechanism, not yet end-to-end): FixRequirement + WizardErrorCopy.fixRequires + WizardErrorContext.venue/surface + ONE applyFixRequirements call at formatKeyError:1903. Three venue bullets tagged substitutable true/false with the D-17 replacement copy verbatim; SERVICE_UNREACHABLE's /strategies bullet gated on surface submit. 4 whole-table sweeps + a positive control; 6 mutations watched red (SC-5; alignment; surface arm; reference identity; blind regex) and the class-not-instance mutation watched GREEN. WIZFORM-03 NOT complete — no buildEnvelope call site passes venue/surface yet, so 153.2 (SubmitStep:414) and 153.4 (ConnectKeyStep:609, MultiKeyConnectStep) must feed it. Next: 153.1-04.
 **Resume File:** None
 **Next step:** 153.3 is COMPLETE (6/6); 153.1 is 2/6 (plan 01 Wave-0 gates + plan 02 the foundation, both green at HEAD). Execute 153.1-03 next, then the rest of 153.1 → 153.2 → 153.4 on `feat/v1.17-153-wizform`. ⛔ WIZFORM-05 stays unchecked until 153.4 closes the client leg. ⛔ **WIZFORM-03 stays unchecked until 153.1-03** — plan 02 minted the capability record but NOTHING reads it yet; the requirement's behavioural claim ("no `substitutable:false` venue receives a substitution bullet") is 153.1-03's.
 
