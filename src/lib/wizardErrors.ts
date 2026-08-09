@@ -39,8 +39,10 @@ import { CircuitOpenError } from "@/lib/seam-errors";
 // module-load env reads are the three build-inlined `NEXT_PUBLIC_*` flags
 // (`:226` SFOX, `:249` SMOOTHED_MTM, `:275` MT5); the two non-public reads
 // (`SFOX_ENABLED :302`, `MT5_ENABLED :330`) sit INSIDE functions and never run
-// at module load. `MetadataStep.tsx:19` already VALUE-imports this module into
-// the same wizard bundle, so this adds no new bytes to the browser payload.
+// at module load. `MetadataStep.tsx`'s own value-import of `@/lib/closed-sets`
+// (it reads `MAGNITUDE_CAPS` and `isCryptoExchange` from it) already pulls this
+// module into the same wizard bundle, so this adds no new bytes to the browser
+// payload.
 // The prohibition above targets `@upstash/*` and the top-level
 // `Redis.fromEnv()` singleton reachable through `@/lib/analytics-client` and
 // `@/lib/resilient-fetch`; neither is reachable from here.
@@ -214,9 +216,10 @@ export type WizardErrorCode =
   | "GUARD_BLOCKED"
   // 153.1-04 / WIZFORM-02 (RESEARCH Finding 4) — THE SECOND LIVE `UNKNOWN`.
   //
-  // `finalize-wizard/route.ts:1319`'s 409 already carries this discriminator,
-  // but as the LOWERCASE literal `draft_state_invalid`, so nothing matched a
-  // wizard member and SubmitStep rendered UNKNOWN. This mints the UPPER_SNAKE
+  // The `error.code === "22023"` arm in `finalize-wizard/route.ts` — the 409
+  // the finalize RPC's invalid-parameter raise lands on — already carried this
+  // discriminator, but as the LOWERCASE literal `draft_state_invalid`, so
+  // nothing matched a wizard member and SubmitStep rendered UNKNOWN. This mints the UPPER_SNAKE
   // member and its copy ONLY; 153.1-05 uppercases the route's literal in the
   // same commit the code starts being a wizard member, which is the point at
   // which the two halves become one honest classification.
@@ -289,9 +292,11 @@ export type WizardErrorCode =
   | "COMPOSITE_TOO_MANY_MEMBERS"
   // 153.1-04 / WIZFORM-02 (RESEARCH Finding 4) — A LIVE `UNKNOWN`, closed.
   //
-  // `finalize-wizard/route.ts:1782` has emitted this code all along; it simply
-  // had no member here, so SubmitStep rendered the "we could not classify this
-  // failure" card for a failure the server classified precisely. WIZFORM-02's
+  // The unified arm's composite-rejection emitter in
+  // `finalize-wizard/route.ts` (the one site that answers this code) has been
+  // emitting it all along; it simply had no member here, so SubmitStep rendered
+  // the "we could not classify this failure" card for a failure the server
+  // classified precisely. WIZFORM-02's
   // criterion covers it by its own words. The alias-table docblock further down
   // used to record it as out of scope — that sentence is gone, because the
   // premise it rested on is.
@@ -622,8 +627,9 @@ export interface WizardErrorCopy {
    * `wizardErrors.test.ts` sweeps every tagged entry for
    * `fixRequires.length === fix.length`. Add a bullet, add its slot.
    *
-   * ⛔ `fix` stays `string[]`. `envelope.ts:86` forwards it VERBATIM as
-   * `debug_context` and `WizardErrorEnvelope.test.tsx:44` compares against it;
+   * ⛔ `fix` stays `string[]`. `buildEnvelope` (in `envelope.ts`) forwards it
+   * VERBATIM as the envelope's `debug_context`, and the `debug_context`
+   * equality assertion in `WizardErrorEnvelope.test.tsx` compares against it;
    * turning a bullet into an object has a blast radius this phase did not scope.
    */
   fixRequires?: readonly (FixRequirement | null)[];
@@ -1181,16 +1187,26 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     docsHref: "/security",
     // 153.1 review CR-01 — this Phase-53 entry became the copy for a
     // FIELD-LEVEL refusal when 153.1-05 pointed `finalize-wizard`'s
-    // `typeof description !== "string"` arm at it (route.ts:448) and 153.1-06
-    // admitted it to `KNOWN_FINALIZE_CODES` (SubmitStep.tsx). It therefore
+    // `typeof description !== "string"` arm in `validatePayload` at it, and
+    // 153.1-06 admitted it to `KNOWN_FINALIZE_CODES` (SubmitStep.tsx). It therefore
     // joins the class documented in the block below and carries no member of
     // `RECOVERABLE_ACTIONS`, so `buildEnvelope` derives `recoverable: false`
     // and NO Retry control renders. It previously carried `clear_and_retry`,
     // which the class docblock forbids BY NAME: the server compared a value
     // against a fixed rule, so an identical resubmit is refused identically,
     // and wiping the description the user typed is the worst possible answer.
-    // The remedy is on the FORM. `MetadataStep.tsx:215` reads only `.cause`
-    // from this entry, so the inline field guard is unaffected.
+    // The remedy is on the FORM.
+    //
+    // ⚠️ THIS ENTRY NOW SERVES TWO SURFACES, and the note that used to sit here
+    // ("MetadataStep reads only `.cause`, so the inline field guard is
+    // unaffected") is FALSE at HEAD — it was true when CR-01 was written and
+    // 153.2-01 changed it in the same sub-phase. `MetadataStep`'s `messageFor`
+    // renders `formatKeyError(code).title`, deliberately: `.cause` is a
+    // multi-sentence paragraph containing "Nothing was saved, and everything
+    // you typed is still on the form", which is nonsense under a control the
+    // user is still typing into. 153.2-05 then routes the SERVER's copy of this
+    // code to the same field. So an edit to `title` moves the field message AND
+    // the envelope heading, and an edit to `cause` moves the envelope only.
     actions: ["expand_log"],
   },
 
@@ -1854,7 +1870,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // has been emitting into an UNKNOWN card.
   //
   // ⚠️ THE COPY MUST BE TRUE OF THE STATE THE ROUTE JUST WROTE. Immediately
-  // above the 409 (`finalize-wizard/route.ts:1763-1777`) the handler upserts
+  // above that emitter in `finalize-wizard/route.ts` the handler upserts
   // `strategy_analytics` with `computation_status: "failed"` and a
   // `computation_error` naming this same limitation. So "we stopped and marked
   // it failed" is OBSERVABLE rather than reassuring — the row is written before
@@ -2268,9 +2284,9 @@ function requirementMet(
  * `formatKeyError`, for every code and therefore for every interpolation arm
  * (each of which spreads `...base`).
  *
- * ⛔ It cannot live in `buildEnvelope`: `envelope.ts:86` forwards `copy.fix`
- * verbatim as `debug_context`, and `formatKeyError` has consumers that never
- * build an envelope at all.
+ * ⛔ It cannot live in `buildEnvelope`: that function (in `envelope.ts`)
+ * forwards `copy.fix` verbatim into the envelope's `debug_context`, and
+ * `formatKeyError` has consumers that never build an envelope at all.
  *
  * An entry WITHOUT `fixRequires` is returned as the SAME OBJECT — not a copy —
  * so the ~60 untagged entries are provably untouched by this mechanism
