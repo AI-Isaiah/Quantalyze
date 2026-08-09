@@ -917,10 +917,21 @@ async def aclose_exchange(exchange: "ccxt.Exchange | Any") -> None:
 
     # MT5RECON-01: an Mt5Session owns a SYNCHRONOUS Mt5Client (blocking RPyC).
     # Route its idempotent client.close() OFF the event loop (asyncio.to_thread)
-    # and BOUND it — a hung Wine terminal shutdown must never wedge the SEQUENTIAL
-    # worker (the v1.11 WEDGE-01 class). Mt5Client.close() already swallows its own
-    # teardown errors, but the wait_for bound is the last-resort ceiling. Lazy
-    # import avoids an import cycle. Route + return BEFORE the ccxt close() below.
+    # and BOUND it. Mt5Client.close() already swallows its own teardown errors,
+    # but the wait_for bound is the last-resort ceiling. Lazy import avoids an
+    # import cycle. Route + return BEFORE the ccxt close() below.
+    #
+    # ⚠️ WHY the bound stays, and why its REASON changed (153.3 / D-35, D-30).
+    # The ceiling used to be justified by a hanging teardown of the TERMINAL's IPC
+    # pipe. That reason is now false: `Mt5Client.close()` releases OUR rpyc transport and
+    # calls `mt5.shutdown()` ZERO times, so this arm can no longer tear the ONE
+    # shared IPC pipe down under a concurrent validate — which matters because
+    # `main.py:83-91` runs the worker loops INSIDE the API process, one `await`
+    # from a user's request. ⛔ The bound is NOT redundant: a blocking rpyc SOCKET
+    # close is still blocking, and a hung teardown in the dispatch epilogue would
+    # still wedge the SEQUENTIAL worker (the v1.11 WEDGE-01 class). The reason is
+    # corrected here rather than left standing, because a ceiling justified by a
+    # call that no longer exists is a ceiling the next author deletes.
     from services.mt5_client import Mt5Session
 
     if isinstance(exchange, Mt5Session):

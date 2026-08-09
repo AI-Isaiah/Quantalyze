@@ -163,8 +163,19 @@ async def _mt5_bounded_restart(client: "Mt5Client") -> None:
 # docs/runbooks/mt5-go-live.md by plan 153.3-05) and why a scale-up is a correctness
 # change, not a capacity knob. The plan-02 login bracket (account_info().login ==
 # expected, asserted pre+post the read) remains the cross-replica safety net and is
-# NOT weakened by the lease. The dispatch-epilogue aclose_exchange close also still
-# sits OUTSIDE this lock — the residual D-35 closes in wave 6.
+# NOT weakened by the lease.
+#
+# ✅ CLOSED 2026-08-09 (plan 153.3-06 / D-35). The dispatch-epilogue
+# `aclose_exchange` close still sits OUTSIDE this lock and that is now SAFE — not
+# because of the loop topology (the old argument, twice dead: the worker loops run
+# in the API process, and a `finally` cannot lease anyway without queueing inside
+# an error path), but because the epilogue no longer performs terminal IPC AT ALL.
+# `Mt5Client.close()` closes only our own rpyc transport; `mt5.shutdown()` was
+# deleted at the sink, so there is nothing left there to serialize. The argument
+# changed, the conclusion did not. The ONE remaining teardown is
+# `Mt5Client.restart()`, reached only via `_mt5_bounded_restart` — and every one of
+# its call sites is INSIDE this lock, which `tests/test_mt5_shutdown_roster.py`
+# derives from source.
 _MT5_TERMINAL_LOCKS: dict[str, asyncio.Lock] = {}
 
 

@@ -332,12 +332,21 @@ class Mt5Adapter:
             )
         finally:
             # RED-TEAM: bounded, off-loop close. client.close() is blocking RPyC (a
-            # hung Wine shutdown on the loop would wedge the sequential worker);
+            # hung teardown on the loop would wedge the sequential worker);
             # mirror aclose_exchange's mt5 arm + the router's close. Mt5Client.close()
             # swallows and logs its own teardown errors internally; the wait_for is
             # the last-resort ceiling. Runs on EVERY path so the session never leaks;
             # a timeout/failure abandons the session (bounded, client-logged) rather
             # than masking the probe verdict.
+            #
+            # ⚠️ 153.3 / D-35 — the THIRD path that reached the shared-IPC teardown
+            # (D-35 named two; the ast roster found this one). Its old rationale — a
+            # hanging teardown of the TERMINAL's IPC — is now false: close() releases
+            # only OUR rpyc transport and calls `mt5.shutdown()` ZERO times, so this
+            # `finally` can no longer destroy the ONE shared IPC pipe for a
+            # concurrent caller (`-10004`). ⛔ The bound STAYS regardless — a
+            # blocking socket close is still blocking. Nothing here was edited to
+            # achieve that: the fix landed at the SINK, in `Mt5Client.close()`.
             try:
                 await asyncio.wait_for(
                     asyncio.to_thread(client.close), timeout=_MT5_PROBE_TIMEOUT_S

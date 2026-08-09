@@ -142,21 +142,34 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ### Phase 153.3 (WIZFORM-GW) — recorded residuals (added 2026-08-09)
 
-- [ ] **⛔ The WORKER path still calls `mt5.shutdown()` on the SHARED gateway session.**
+- [x] **✅ RESOLVED 2026-08-09 by plan 153.3-06 (D-35) — the WORKER path no longer calls
+  `mt5.shutdown()` on the SHARED gateway session.**
   Plan 153.3-03 (D-30) took `shutdown()` off the **request** path: `routers/exchange.py`'s
-  `_validate_mt5_key` now calls the new `Mt5Client.release()` (transport close only) in its
-  `finally`, so a validate no longer tears the IPC pipe down under a concurrent caller
-  (`-10004` — the mechanism item 0 above describes). **Two worker-side sites still do:**
-  `analytics-service/services/exchange.py:924-938` (`aclose_exchange`'s mt5 arm, which calls
-  `exchange.client.close()`) and `analytics-service/services/ingestion/mt5.py:~337` (its own
-  bounded `client.close()`). So a derive/sync job can still destroy the pipe out from under an
-  interactive validate. Both files are outside 153.3-03's ownership and D-30 scopes the request
-  path only. **Owner: Phase 153.3 wave 6 (D-35)**, which closes the class at the sink by deleting
-  the teardown from `Mt5Client.close()` entirely. ⚠️ Until then the offline test
-  `test_close_alone_still_calls_shutdown_exactly_once`
-  (`tests/test_mt5_client_contract.py`) pins `shutdown_calls == 1` for a bare `close()` —
-  that pin is **knowingly temporary** and is annotated **D-35**; wave 6 must re-cut it rather
-  than be surprised by it.
+  `_validate_mt5_key` calls `Mt5Client.release()` (transport close only) in its `finally`, so a
+  validate no longer tears the IPC pipe down under a concurrent caller (`-10004` — the mechanism
+  item 0 above describes). Recorded here as remaining: `services/exchange.py:924-938`
+  (`aclose_exchange`'s mt5 arm) and `services/ingestion/mt5.py:~337`. An ast scan found a **third**
+  (`routers/exchange.py`) — three callers through **two** `shutdown()` call nodes.
+  **Plan 153.3-06 closed the class AT THE SINK:** `Mt5Client.close()` no longer calls
+  `mt5.shutdown()` at all, so all three callers are fixed with **zero call-site edits** (neither
+  worker site could be fixed at its own site anyway — both run in a `finally` outside the lease,
+  so leasing them would mean queueing inside an error path to buy permission to do something
+  destructive). `close()` still releases our own rpyc socket. The knowingly-temporary
+  `test_close_alone_still_calls_shutdown_exactly_once` pin was **re-cut**, not deleted, as
+  `test_close_alone_never_reaches_shutdown` (`shutdown_calls == 0`, D-35 named in its docstring);
+  the eight "the session never leaks" assertions in `tests/test_ingestion_mt5.py` were re-pointed
+  to the transport-close observable. A new `shutdown()` call site anywhere in `analytics-service`
+  now reds `tests/test_mt5_shutdown_roster.py`, which derives the roster from source (ast) with a
+  vacuity floor and self-tests — nobody has to hand-edit a list.
+
+  ⚠️ **The ONE residual that genuinely remains — cross-REPLICA.** The surviving teardown is
+  `Mt5Client.restart()`'s (the deliberate heal of a wedged pipe, MT5CONC-01). It is safe because
+  every call site holds the terminal lease — but that lease is an `asyncio.Lock`, which is
+  **single-event-loop** and serializes **nothing across replicas**: two analytics replicas own two
+  registries and two Lock objects. That is precisely why **D-33** pins the gateway to a SINGLE
+  replica (runbook `docs/runbooks/mt5-go-live.md` Step 1 + the `[ ] SCALE` gate-check row, plan
+  153.3-05). ⛔ **A scale-up is a correctness change, not a capacity knob** — it needs a durable
+  cross-process serializer first. **Owner: D-33.**
 
 - [ ] **Module-level `structlog.get_logger(...)` proxies freeze their processor chain — swept in
   `mt5_client.py` only.** Found 2026-08-09 by plan 153.3-05's full-suite run (invisible to
