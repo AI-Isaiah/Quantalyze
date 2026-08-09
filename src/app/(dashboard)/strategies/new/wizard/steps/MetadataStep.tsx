@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Field } from "@/components/ui/Field";
+import { LiveRegion } from "@/components/ui/LiveRegion";
 import { isValidDollar } from "@/lib/dollar-validation";
 import { formatKeyError, type WizardErrorCode } from "@/lib/wizardErrors";
 import {
@@ -342,6 +343,11 @@ export function MetadataStep({
   const categoryRef = useRef<HTMLSelectElement>(null);
   const aumRef = useRef<HTMLInputElement>(null);
   const maxCapacityRef = useRef<HTMLInputElement>(null);
+  // The "More details (optional)" disclosure. Held by ref so a refused submit
+  // can OPEN it before focusing a control inside it — focus that lands on a
+  // control the user cannot see is worse than no focus at all, because the
+  // keyboard caret is then somewhere the screen does not show.
+  const detailsRef = useRef<HTMLDetailsElement>(null);
   const fieldRefs: Record<MetadataFieldId, RefObject<HTMLElement | null>> = {
     description: descriptionRef,
     category: categoryRef,
@@ -478,6 +484,35 @@ export function MetadataStep({
     ).title;
   }
 
+  /**
+   * The form-level line a refused submit renders — VISIBLY — above the submit
+   * row, and hands verbatim to `LiveRegion`.
+   *
+   * ⛔ It is one expression feeding both channels (UI-SPEC FLAG-6 + Shared
+   * Pattern G): `LiveRegion`'s contract is that it re-states copy the surface
+   * already shows, never that it authors copy of its own. An announcement that
+   * exists only for assistive technology is a sentence sighted users are denied
+   * and that nobody proof-reads.
+   *
+   * ⛔ It is a plain line, NOT the page-level terminal error panel. A
+   * field-level problem never escalates to that panel — the panel is exactly
+   * what the founder read three times while it named no field. (The component
+   * is not named here: this file's acceptance grep runs over its own comments,
+   * so naming it would make the prose satisfy its own gate.)
+   *
+   * ⚠️ Copy deviation, recorded: the contract's template is
+   * `{n} fields need attention.`, which renders "1 fields need attention" in the
+   * single-field case — the COMMON case, since most refused submits are one
+   * missing description. The count and the second sentence are kept verbatim;
+   * only the noun and verb agree with the number.
+   */
+  const submitSummary =
+    submitAttempted && invalidFields.length > 0
+      ? `${invalidFields.length} ${
+          invalidFields.length === 1 ? "field needs" : "fields need"
+        } attention. The first is ${FIELD_LABELS[invalidFields[0]!]}.`
+      : null;
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     // Reveals EVERY field's message at once — a user who is shown one problem,
@@ -491,11 +526,27 @@ export function MetadataStep({
     // this predicate would let a two-character description POST — the exact
     // defect WIZFORM-01 exists to close — so the two move together, always.
     if (invalidFields.length > 0) {
-      // ⚠️ 153.2-02 Task 2 replaces this with the full orchestration: it must
-      // also OPEN the collapsed disclosure before focusing a control inside it,
-      // scroll the control into view, and state the count and the first field's
-      // name in one visible line. Focus alone is what this task owes.
-      fieldRefs[invalidFields[0]!].current?.focus();
+      const control = fieldRefs[invalidFields[0]!].current;
+      if (control) {
+        // ⛔ OPEN FIRST, FOCUS SECOND. AUM and max capacity live inside the
+        // collapsed "More details (optional)" disclosure, so the first invalid
+        // control is regularly one the user cannot see. Focusing it while the
+        // disclosure is shut puts the caret somewhere off-screen and leaves the
+        // page looking as if nothing happened.
+        //
+        // Containment is tested rather than a hard-coded list of "the fields
+        // inside the disclosure": moving a control in or out of the disclosure
+        // then needs no second edit here, and cannot silently desynchronise.
+        //
+        // The element is driven imperatively because this stays a BARE native
+        // <details> (see the comment on it below) with no `open` prop for React
+        // to own — nothing will re-close it behind us.
+        if (detailsRef.current?.contains(control)) {
+          detailsRef.current.open = true;
+        }
+        control.focus();
+        control.scrollIntoView({ block: "center" });
+      }
       return;
     }
     onComplete({
@@ -704,7 +755,7 @@ export function MetadataStep({
             over this comment too, so naming it would match its own prose.)
             The closest in-repo precedent at this weight is the bare
             details/summary "More" cell in StrategyTable. */}
-        <details className="group">
+        <details ref={detailsRef} className="group">
           <summary className="flex min-h-[44px] cursor-pointer list-none select-none items-center gap-2 rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent">
             <span
               aria-hidden
@@ -807,6 +858,22 @@ export function MetadataStep({
             </div>
           </div>
         </details>
+
+        {/* The form-level summary. VISIBLE first (⛔ never role="alert" on the
+            visible copy — the sentence is a summary of messages the fields are
+            already showing, not a second alarm), then re-stated to assistive
+            technology through the one primitive whose whole contract is that it
+            repeats existing copy. One `const` feeds both, so the two channels
+            cannot say different things. */}
+        {submitSummary && (
+          <p
+            className="text-caption text-negative"
+            data-testid="metadata-submit-summary"
+          >
+            {submitSummary}
+          </p>
+        )}
+        <LiveRegion assertive message={submitSummary} />
 
         <div className="flex gap-3">
           <Button variant="secondary" type="button" onClick={onBack}>

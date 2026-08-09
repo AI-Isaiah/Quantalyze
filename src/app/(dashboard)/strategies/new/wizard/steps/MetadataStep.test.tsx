@@ -830,6 +830,192 @@ describe("[H-0191] MetadataStep", () => {
     });
   });
 
+  // ── 153.2-02 Task 2 — a refused submit names the first problem and puts the
+  //    cursor in it ────────────────────────────────────────────────────────
+  //
+  // D-13's bar is behavioural. The founder's failure was not an ugly error, it
+  // was an error that named no field — so they edited the wrong ones. Revealing
+  // every message is only half of that; the other half is telling the user WHICH
+  // one to start with and taking them there, including when "there" is behind a
+  // disclosure they have never opened.
+  //
+  // ⚠️ The summary sentences below ARE typed out, unlike every field-message
+  // oracle in this file. That is deliberate: this sentence is composed in the
+  // component from a count and a label map, so it has no copy-table entry to
+  // import — and its singular form is a recorded deviation from the UI
+  // contract's template (which renders "1 fields need attention"). A literal
+  // oracle is what makes a silent re-wording, in either direction, red.
+  describe("[153.2] submit-with-errors orchestration", () => {
+    const VALID_DESCRIPTION = "A market-neutral basis strategy.";
+
+    /** Render, let the category auto-select settle, and hand back the pieces. */
+    async function renderSettled(onComplete = vi.fn()) {
+      render(<MetadataStep {...baseProps} onComplete={onComplete} />);
+      const select = (await screen.findByLabelText(
+        "Category",
+      )) as HTMLSelectElement;
+      await waitFor(() => expect(select.value).toBe("cat-aaa"));
+      return {
+        onComplete,
+        select,
+        details: document.querySelector("form details") as HTMLDetailsElement,
+        submit: screen.getByRole("button", { name: /review and submit/i }),
+        description: screen.getByLabelText("Description") as HTMLTextAreaElement,
+        aum: screen.getByLabelText("AUM (USD)") as HTMLInputElement,
+      };
+    }
+
+    it("[FIELD_ORDER] the declared order IS the render order", async () => {
+      // The pin behind "first invalid control in DOM order". The order is
+      // declared as an explicit array in the component precisely so it is not a
+      // silent coupling to an object literal's declaration order — but a
+      // declared array can still fall out of step with the JSX. This row is what
+      // reds when someone moves a field and does not move the array: it reads
+      // the four controls out of the live DOM and asserts they arrive in the
+      // order the component claims.
+      await renderSettled();
+      const form = document.querySelector("form")!;
+      const controls = [
+        "Description",
+        "Category",
+        "AUM (USD)",
+        "Max capacity (USD)",
+      ].map((label) => screen.getByLabelText(label));
+
+      const inDomOrder = Array.from(
+        form.querySelectorAll("textarea, select, input"),
+      ).filter((node) => controls.includes(node as HTMLElement));
+      expect(inDomOrder).toEqual(controls);
+    });
+
+    it("⭐ OPENS the collapsed disclosure before focusing a control hidden inside it", async () => {
+      // ⭐ THE row this task exists for. AUM and max capacity live inside the
+      // collapsed "More details (optional)" disclosure. Focusing a control the
+      // user cannot see moves the keyboard caret somewhere the screen does not
+      // show — the page looks as if the click did nothing, which is a worse
+      // failure than no focus at all because the next keystroke edits an
+      // invisible field.
+      //
+      // ⚠️ WHICH ASSERTION BELOW ACTUALLY CATCHES THE REGRESSION, measured:
+      // deleting the open-the-disclosure step reds `details.open`, NOT
+      // `document.activeElement`. jsdom does not implement `<details>` content
+      // hiding, so it will happily focus a control inside a shut disclosure —
+      // in a real browser that focus call is the one that no-ops. The
+      // activeElement line therefore proves the RIGHT control was chosen; the
+      // `details.open` line is what proves the user can see it. Both are
+      // required, and neither substitutes for the other.
+      const { onComplete, details, submit, description, aum } =
+        await renderSettled();
+
+      fireEvent.change(description, { target: { value: VALID_DESCRIPTION } });
+      fireEvent.change(aum, { target: { value: "-5" } });
+
+      // The disclosure is shut, and the AUM control really is inside it.
+      expect(details.open).toBe(false);
+      expect(details.contains(aum)).toBe(true);
+
+      fireEvent.click(submit);
+
+      expect(details.open).toBe(true);
+      expect(document.activeElement).toBe(aum);
+      expect(onComplete).not.toHaveBeenCalled();
+      // …and the summary names THAT field, not the description the user can see.
+      expect(screen.getByTestId("metadata-submit-summary").textContent).toBe(
+        "1 field needs attention. The first is AUM (USD).",
+      );
+    });
+
+    it("states the COUNT and the FIRST label in DOM order, visibly", async () => {
+      // Two problems, one of them below the fold. The sentence must count both
+      // and name the one the cursor was sent to — naming the second would send
+      // the user to the wrong field, which is the original incident in miniature.
+      const { submit, description, aum } = await renderSettled();
+
+      fireEvent.change(description, { target: { value: "ab" } });
+      fireEvent.change(aum, { target: { value: "-5" } });
+      fireEvent.click(submit);
+
+      expect(screen.getByTestId("metadata-submit-summary").textContent).toBe(
+        "2 fields need attention. The first is Description.",
+      );
+      expect(document.activeElement).toBe(description);
+    });
+
+    it("[FLAG-6 / Pattern G] the announcement RE-STATES the visible sentence", async () => {
+      // `LiveRegion`'s contract is that it repeats copy the surface already
+      // renders — it is never a place to author copy. An announcement that only
+      // assistive technology receives is a sentence sighted users are denied and
+      // that nobody proof-reads. Asserted as an EQUALITY between the two
+      // channels, so the day they are fed by different expressions this reds.
+      const { submit, description, aum } = await renderSettled();
+
+      fireEvent.change(description, { target: { value: "ab" } });
+      fireEvent.change(aum, { target: { value: "-5" } });
+      fireEvent.click(submit);
+
+      const visible = screen.getByTestId("metadata-submit-summary");
+      const announced = screen.getByRole("alert");
+      expect(announced.textContent).toBe(visible.textContent);
+      expect(announced.className).toBe("sr-only");
+      // ⛔ The VISIBLE copy is not itself an alert — it summarises messages the
+      // fields are already showing; it is not a second alarm.
+      expect(visible.getAttribute("role")).not.toBe("alert");
+      expect(visible.closest('[role="alert"]')).toBeNull();
+    });
+
+    it("clears the summary and submits once every field is corrected", async () => {
+      // The other half of a refusal: it has to end. A summary that survives the
+      // fix is a form that keeps shouting at a user who has already complied.
+      const { onComplete, submit, description, aum } = await renderSettled();
+
+      fireEvent.change(description, { target: { value: "ab" } });
+      fireEvent.change(aum, { target: { value: "-5" } });
+      fireEvent.click(submit);
+      expect(screen.getByTestId("metadata-submit-summary")).toBeInTheDocument();
+
+      fireEvent.change(description, { target: { value: VALID_DESCRIPTION } });
+      fireEvent.change(aum, { target: { value: "250000" } });
+      await waitFor(() =>
+        expect(screen.queryByTestId("metadata-submit-summary")).toBeNull(),
+      );
+      expect(screen.getByRole("alert").textContent).toBe("");
+
+      fireEvent.click(submit);
+      expect(onComplete).toHaveBeenCalledTimes(1);
+      const draft = onComplete.mock.calls[0]![0] as MetadataDraft;
+      expect(draft.aum).toBe("250000");
+    });
+
+    it("reveals EVERY field's message at once, not one per submit", async () => {
+      // A form that surfaces one problem, is fixed, then surfaces the next has
+      // made the user submit twice to learn something it knew the first time.
+      const { submit, description, aum } = await renderSettled();
+
+      fireEvent.change(description, { target: { value: "ab" } });
+      fireEvent.change(aum, { target: { value: "-5" } });
+      fireEvent.click(submit);
+
+      await waitFor(() =>
+        expect(description.getAttribute("aria-invalid")).toBe("true"),
+      );
+      expect(aum.getAttribute("aria-invalid")).toBe("true");
+    });
+
+    it("renders NO terminal error envelope for a field problem", async () => {
+      // UI-SPEC forbidden-list item 1. The envelope is what the founder read
+      // three times while it named no field; a field-level problem must never
+      // escalate to one. Asserted on the rendered DOM (the envelope always
+      // renders its Diagnostics disclosure and its docs link).
+      const { submit } = await renderSettled();
+      fireEvent.click(submit);
+
+      expect(screen.queryByText(/Diagnostics/i)).toBeNull();
+      expect(
+        document.querySelector('a[href="/security"]'),
+      ).toBeNull();
+    });
+  });
+
   // ── #597 — asset-class picker: crypto-exchange detection LOCKS to 'crypto' ──
   describe("#597 asset-class picker", () => {
     /** A full MetadataDraft carrying the DB NOT NULL DEFAULT assetClass. */
