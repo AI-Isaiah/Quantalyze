@@ -385,37 +385,39 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
-### ⭐ NEEDS FOUNDER DECISION — should the measure ladder have a px cap at all? (raised 2026-08-09)
+### ✅ DECIDED + SHIPPED — should the measure ladder have a px cap at all? (raised 2026-08-09, DECIDED 2026-08-09, closed 2026-08-10)
 Founder report, with screenshots: *"zooming out should allow me to see more of the
 content… it should never produce dead/empty areas."*
 
-The **specific** instance is FIXED (`ecb7140a`): the My Strategies list was a dense
-table stuck at `max-w-7xl` = 1280px — not even a rung on DESIGN.md's ladder — because
-it shares the `/strategies` prefix with the wizard, which is deliberately kept narrow.
-It now gets the 1920px dense-table measure it earns.
+**⭐ FOUNDER CHOSE (B): the founder's rule wins for DATA surfaces only.** Dense tables
+go fluid (`max-w-full`, **no px ceiling**) and reveal columns as the viewport grows;
+prose and forms keep 1100px, where a bounded measure is a genuine readability control
+rather than decoration. Rung 3 of DESIGN.md's ladder is therefore FLUID, not 1920px.
+Per Rule 7 the conflict was surfaced and one side picked — it was **not** blended into
+a compromise cap. (The alternatives weighed were (A) keep the ladder and accept the
+dead space, and (C) drop caps everywhere including prose; both were rejected.)
 
-**The general principle is NOT fixed, because it contradicts DESIGN.md as written**
-(`DESIGN.md:238-242`, measure ladder: 1100 prose / 1440 document / 1920 dense tables).
-Any FIXED px cap dead-spaces once the viewport exceeds it, and zooming out is exactly
-how a user exceeds it — at 50% zoom a 2560px monitor reports 5120 CSS px, so even the
-1920px rung leaves ~3200px of dead margin. The founder's rule ("never dead areas") and
-the ladder ("prose never exceeds 1100px regardless of viewport") cannot both hold.
+**Landed in:** `ecb7140a` (the `/my-strategies` instance) → `0f4dd69f` (the general
+rule: `DashboardChrome`'s `isWide` shell becomes `max-w-full` and gains
+`my-strategies`; the page-level `max-w-[1920px]` caps on `/my-strategies`,
+`/allocations` (+loading), `/compare` (+loading) and `/discovery/[slug]` are deleted so
+the shell is the sole owner) → **153.2 review WR-02** (the two surviving
+`max-w-[1440px]` caps on `/allocations`' Scenario tab — `ScenarioComposer` and its
+`AllocationsTabs` skeleton — which had kept the founder's reported symptom alive on
+that tab, plus DESIGN.md's rule restated with its real scope and its one carve-out
+named).
 
-Per Rule 7 — surface the conflict, don't average it. **Do not blend these into a
-compromise cap.** The decision is which one governs, and it is the founder's:
+**Recorded in:** DESIGN.md's measure-ladder section and its 2026-08-09 decision-log row.
 
-- **(A) Ladder wins.** Caps stay; dead space at extreme zoom-out is the accepted cost
-  of a bounded measure. Prose stays readable at any viewport. Status quo + the fix above.
-- **(B) Founder rule wins, for DATA surfaces only.** Dense tables go fluid (`max-w-full`,
-  no px cap) and reveal columns as the viewport grows; prose/forms keep 1100px, where a
-  bounded measure is a genuine readability control, not decoration. This is the narrow
-  reading of the complaint — every screenshot supplied was a table.
-- **(C) Founder rule wins everywhere.** No caps anywhere. ⚠️ Costs line-length control
-  on prose; a 5120px-wide paragraph is measurably harder to read.
+⚠️ **Two statements in the previous version of this item were false at HEAD** and are
+corrected above rather than left to be re-litigated: *"The general principle is NOT
+fixed"* (it was decided the same day) and *"It now gets the 1920px dense-table measure
+it earns"* (there is no 1920px measure any more — `/my-strategies` is fluid).
 
-⭐ Recommendation: **(B)**. It resolves every case the founder actually hit, keeps the
-one property the ladder exists to protect, and is a one-rung edit to DESIGN.md rather
-than a deletion of the ladder. Requires: DESIGN.md ladder amendment + a decision-log row.
+**Carve-out, so it is inherited rather than rediscovered:** the four `/admin` prose
+pages (`users`, `users/[id]`, `partner-import`, `for-quants-leads`) keep `max-w-[1100px]`.
+They live under the `isWide` `/admin` prefix for navigation reasons, but the ladder
+governs by CONTENT TYPE, and their content is prose/forms — rung 1.
 
 ### Dependency pass — the 9 open dependabot PRs (booked 2026-08-05, founder call)
 - **One campaign, NOT piecemeal merges.** All 9 dependabot PRs are red — and NOT only the
