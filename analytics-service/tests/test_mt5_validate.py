@@ -54,6 +54,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
+from structlog.testing import capture_logs
 
 from services.closed_sets import (
     MT5_DISABLED_DETAIL,
@@ -552,7 +553,14 @@ async def test_mt5_capability_refusal_logs_carry_no_credentials(
 ):
     """The two NEW capability WARNING lines must name a STAGE only — no login, no
     password, no broker server may reach any log call (same sweep the gateway
-    misconfig case runs)."""
+    misconfig case runs).
+
+    153.3 / D-32 — EXTENDED over the structlog stream (T-153.3-23). The stdlib
+    `logger` sweep below cannot see the new `mt5.stage` events at all: they go to
+    structlog, a second and entirely separate egress. A sweep that checked only
+    the mock logger would have stayed green while every stage event carried the
+    interpolated remote source line.
+    """
     router = exchange_router
     client = _make_client(
         account={"trade_allowed": False, "login": 123456},
@@ -563,22 +571,32 @@ async def test_mt5_capability_refusal_logs_carry_no_credentials(
     mock_logger = MagicMock()
     monkeypatch.setattr(router, "logger", mock_logger)
 
-    with pytest.raises(HTTPException):
-        await _call(
-            router,
-            _make_req(
-                api_key="123456", api_secret="s3cr3t-pw", passphrase="MyBroker-Live"
-            ),
-        )
+    with capture_logs() as captured:
+        with pytest.raises(HTTPException):
+            await _call(
+                router,
+                _make_req(
+                    api_key="123456", api_secret="s3cr3t-pw", passphrase="MyBroker-Live"
+                ),
+            )
 
+    secrets = ("123456", "s3cr3t-pw", "MyBroker-Live")
     for meth in ("exception", "error", "warning", "info", "debug"):
         for call in getattr(mock_logger, meth).call_args_list:
             rendered = repr(call)
-            assert "123456" not in rendered
-            assert "s3cr3t-pw" not in rendered
-            assert "MyBroker-Live" not in rendered
+            for secret in secrets:
+                assert secret not in rendered
     # At least one WARNING was emitted, so the sweep above is not vacuous.
     assert mock_logger.warning.call_args_list
+
+    # The SECOND egress: every structured event emitted during this request.
+    events = [e for e in captured if e.get("event") == "mt5.stage"]
+    assert events, "the structlog half of the sweep is vacuous — no event captured"
+    rendered_events = repr(events)
+    for secret in secrets:
+        assert secret not in rendered_events, (
+            f"a credential reached the mt5.stage telemetry: {secret!r}"
+        )
 
 
 async def test_mt5_terminal_account_mismatch_fails_closed(exchange_router):
@@ -1282,3 +1300,181 @@ def test_mt5_detail_strings_are_distinct_contract_literals():
     assert "master password" in MT5_MASTER_PASSWORD_DETAIL.lower()
     assert "broker server" in MT5_WRONG_SERVER_DETAIL.lower()
     assert "authentication failed" in AUTH_FAILED_DETAIL.lower()
+
+
+# --------------------------------------------------------------------------- #
+# 153.3 / D-32 — THE QUEUE WAIT AND THE VERDICT, MEASURED SEPARATELY
+#
+# WHY (Rule 9). Two things this path could never answer before:
+#   1. "how long did the terminal read take" vs "how long did we QUEUE for the
+#      terminal". EVIDENCE §4: a budget derived from a single-user total is wrong
+#      for user #2 BY CONSTRUCTION, because user #2's total contains user #1's
+#      read. Only a split measurement separates them after the fact.
+#   2. "how long does a validate take, by VERDICT". An instrument that fires only
+#      on success measures a population that excludes exactly the failures the
+#      45 000/55/60/75/20/10 chain was guessed against (D-27) — and every one of
+#      the nine production observations we have is a failure.
+#
+# The event name and the outcome vocabulary are HAND-TYPED here: they are the
+# aggregation keys Phase 155 groups by, so an oracle that imported them from
+# `routers/exchange.py` could not fail a rename or a re-categorisation.
+# --------------------------------------------------------------------------- #
+
+_STAGE_EVENT_NAME = "mt5.stage"
+
+
+def _mt5_events(captured, stage):
+    """The captured `mt5.stage` events for one stage."""
+    return [
+        e
+        for e in captured
+        if e.get("event") == _STAGE_EVENT_NAME and e.get("stage") == stage
+    ]
+
+
+async def test_the_happy_path_emits_a_lease_wait_and_a_read_only_outcome(
+    exchange_router,
+):
+    """The success path emits BOTH events: the (uncontended) queue wait and one
+    terminal outcome carrying `outcome="read_only"`.
+
+    `duration_ms` is asserted to be an int, not merely present — a field that is
+    always `None`, or a float of seconds mislabelled as milliseconds, satisfies
+    "the event has a duration" and is worthless to the phase that consumes it.
+    """
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
+    _install_mt5_client(router, client)
+
+    with capture_logs() as captured:
+        assert await _call(router, _make_req()) == {"valid": True, "read_only": True}
+
+    lease = _mt5_events(captured, "lease_wait")
+    assert len(lease) == 1, f"no lease_wait event was emitted: {captured}"
+    assert lease[0]["ok"] is True
+    assert isinstance(lease[0]["duration_ms"], int)
+    assert lease[0]["terminal_key"] == _expected_terminal_key("mt5-gw.internal", 18812)
+
+    validate = _mt5_events(captured, "validate")
+    assert len(validate) == 1, "a validate must terminate in EXACTLY one outcome event"
+    assert validate[0]["outcome"] == "read_only"
+    assert validate[0]["ok"] is True
+    assert isinstance(validate[0]["duration_ms"], int)
+
+
+async def test_a_busy_terminal_emits_a_measured_lease_wait_and_a_lease_busy_outcome(
+    exchange_router, monkeypatch
+):
+    """⭐ The refusal path. A validate given up at the acquisition bound is the
+    LONGEST queue wait there is, and it is the single observation a decision to
+    move `_MT5_LEASE_WAIT_S` turns on.
+
+    The bound is 0.2s and the wait is asserted `>= 100`ms, so the event carries a
+    REAL measurement of the queue wait. An instrument that emitted `0` here — or
+    that emitted nothing, because the emission sat inside the lease body the
+    refusal never enters — would report that nobody ever waits.
+    """
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
+    _install_mt5_client(router, client)
+
+    held = mt5_concurrency._mt5_terminal_lock_for(
+        _expected_terminal_key("mt5-gw.internal", 18812)
+    )
+    await held.acquire()
+    monkeypatch.setattr(router, "_MT5_LEASE_WAIT_S", 0.2)
+
+    with capture_logs() as captured:
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    held.release()
+
+    lease = _mt5_events(captured, "lease_wait")
+    assert len(lease) == 1, f"the REFUSED wait emitted no lease_wait event: {captured}"
+    assert lease[0]["ok"] is False
+    assert lease[0]["duration_ms"] >= 100, (
+        "the refused queue wait was not measured — reported "
+        f"{lease[0]['duration_ms']}ms for a wait that ran to a 200ms bound"
+    )
+
+    validate = _mt5_events(captured, "validate")
+    assert len(validate) == 1
+    assert validate[0]["outcome"] == "lease_busy"
+    assert validate[0]["ok"] is False
+
+
+async def test_the_end_to_end_deadline_still_emits_its_terminal_outcome_event(
+    exchange_router, monkeypatch
+):
+    """⭐ The category that MUST NOT be missing. A deadline expiry is the failure
+    mode the whole 153.3 sub-phase exists to explain, and it is reached through a
+    CANCELLATION rather than through a normal raise — the one path an emission
+    bolted onto the return statement would silently skip.
+
+    An instrumentation that only fires on the paths that return normally
+    measures a population that excludes exactly the failures we are trying to
+    explain, which is the same defect as the pre-153.3 censored logs.
+    """
+    router = exchange_router
+    client = _make_client(account=_INVESTOR_ACCOUNT, order_check=_INVESTOR_ORDER_CHECK)
+    client.login = MagicMock(side_effect=lambda *a, **k: time.sleep(0.3))
+    _install_mt5_client(router, client)
+    monkeypatch.setattr(router, "_MT5_VALIDATE_DEADLINE_S", 0.05)
+
+    with capture_logs() as captured:
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    validate = _mt5_events(captured, "validate")
+    assert len(validate) == 1, (
+        "the end-to-end deadline path emitted no terminal outcome event — the "
+        f"telemetry is blind to the failure it exists to explain: {captured}"
+    )
+    assert validate[0]["outcome"] == "deadline_exceeded"
+    assert validate[0]["ok"] is False
+    # The queue wait was uncontended and still measured: the two are independent.
+    assert len(_mt5_events(captured, "lease_wait")) == 1
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_outcome"),
+    [
+        ({"api_key": ""}, "auth"),
+        ({"passphrase": ""}, "wrong_server"),
+    ],
+)
+async def test_pre_probe_refusals_carry_their_own_outcome_category(
+    exchange_router, kwargs, expected_outcome
+):
+    """The two offline credential-shape refusals still terminate in an outcome
+    event, and in DISTINCT categories.
+
+    These never touch the terminal, so they can never appear in a measurement
+    hung off the release block — yet they are the fastest verdicts the endpoint
+    produces, and lumping them in with the terminal reads would drag the p50 of
+    every other category down.
+    """
+    router = exchange_router
+    _install_mt5_client(router, _make_client())
+
+    with capture_logs() as captured:
+        with pytest.raises(HTTPException):
+            await _call(router, _make_req(**kwargs))
+
+    validate = _mt5_events(captured, "validate")
+    assert len(validate) == 1
+    assert validate[0]["outcome"] == expected_outcome
+    assert validate[0]["ok"] is False
+    # No terminal was involved, so no lease was taken and none is reported.
+    assert _mt5_events(captured, "lease_wait") == []

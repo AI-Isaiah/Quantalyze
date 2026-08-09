@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+import time
+from dataclasses import dataclass
 from functools import partial
 from datetime import datetime, timezone
 from typing import Any, Final
@@ -24,6 +26,7 @@ from services.mt5_client import (
     Mt5ClientError,
     Mt5AccountMismatchError,
     MT5_VALIDATE_REQUEST_TIMEOUT_S,
+    emit_mt5_stage_event,
 )
 # D-29 — the ONE terminal-lock registry, imported (never re-declared) exactly as the
 # three job call sites import it. `_MT5_LEASE_WAIT_S` is re-bound here as a module
@@ -285,8 +288,68 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
         await client.aclose()
 
 
+@dataclass
+class _Mt5ValidateTrace:
+    """The categorical result of ONE validate, carried out to the terminal event.
+
+    153.3 / D-32. Every arm of ``_validate_mt5_key_probe`` writes its verdict
+    here on the way past, and the wrapper below emits it exactly once. A dataclass
+    rather than a ``nonlocal`` because ``_connect_and_probe`` is a nested
+    coroutine and three of the ten categories are produced inside it.
+
+    ``outcome`` deliberately starts at ``"unknown"``: an arm that forgets to set
+    it produces a VISIBLE ``outcome="unknown"`` in the telemetry rather than
+    silently borrowing a neighbouring category and corrupting the counts a
+    Phase-155 histogram is built from.
+    """
+
+    outcome: str = "unknown"
+    terminal_key: str | None = None
+
+
 async def _validate_mt5_key(
     api_key: str, api_secret: str, passphrase: str | None
+) -> dict[str, Any]:
+    """Time the WHOLE validate and emit exactly ONE categorical outcome event.
+
+    153.3 / D-32 + D-27. This is a thin bracket over ``_validate_mt5_key_probe``
+    (which holds the contract — read its docstring). It exists as a separate
+    frame for one structural reason: the "emits on EVERY path" property is then
+    inherited from a ``finally`` at the function boundary rather than re-derived
+    at fifteen raise sites.
+
+    ⚠️ The obvious alternative — hanging the emission off the release's
+    ``finally`` — measures the wrong population. That block lives INSIDE the
+    terminal lease, so it never runs for the two categories that never reach the
+    terminal at all: ``lease_busy`` (refused at the acquisition bound) and
+    ``gateway_unconfigured`` (refused before any client is built). Those are
+    exactly the outcomes an operator most needs counted.
+
+    The event carries the categorical ``outcome`` and ``duration_ms`` only —
+    Phase 155 groups by the former to get a p50/p95 per verdict, which is what
+    turns the PROVISIONAL 45 000/55/60/75/20/10 chain into a measured one.
+    ⛔ No login, password or broker server: see ``emit_mt5_stage_event``'s closed
+    allow-list (T-153.3-23).
+    """
+    trace = _Mt5ValidateTrace()
+    started_at = time.perf_counter()
+    try:
+        return await _validate_mt5_key_probe(api_key, api_secret, passphrase, trace)
+    finally:
+        emit_mt5_stage_event(
+            "validate",
+            started_at,
+            # `ok` is the SUCCESS predicate, not "no exception": every other
+            # category below raises, and a master-password rejection is a correct
+            # verdict but not a successful validation.
+            ok=trace.outcome == "read_only",
+            terminal_key=trace.terminal_key,
+            outcome=trace.outcome,
+        )
+
+
+async def _validate_mt5_key_probe(
+    api_key: str, api_secret: str, passphrase: str | None, trace: _Mt5ValidateTrace
 ) -> dict[str, Any]:
     """Validate an MT5 investor login via the Phase-134 read-only ``Mt5Client``
     (RPyC facade) — the MT5SRC-02 worker half.
@@ -340,7 +403,9 @@ async def _validate_mt5_key(
         # ccxt key emits (-> KEY_AUTH_FAILED, zero TS edits). Both fail CLOSED with
         # a 400, never a 500, never {"valid": true}.
         if e.kind == "wrong_server":
+            trace.outcome = "wrong_server"
             raise HTTPException(status_code=400, detail=MT5_WRONG_SERVER_DETAIL)
+        trace.outcome = "auth"
         raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
 
     # Gateway config: a missing/malformed MT5_GATEWAY_HOST / MT5_GATEWAY_PORT is a
@@ -357,6 +422,7 @@ async def _validate_mt5_key(
     port_raw = os.getenv("MT5_GATEWAY_PORT")
     if not host or not port_raw:
         logger.error("validate_key: MT5 gateway not configured (server misconfig)")
+        trace.outcome = "gateway_unconfigured"
         raise service_error(
             500,
             "MT5_GATEWAY_UNCONFIGURED",
@@ -368,6 +434,7 @@ async def _validate_mt5_key(
         port = int(port_raw)
     except ValueError:
         logger.error("validate_key: MT5 gateway port malformed (server misconfig)")
+        trace.outcome = "gateway_unconfigured"
         raise service_error(
             500,
             "MT5_GATEWAY_UNCONFIGURED",
@@ -427,6 +494,7 @@ async def _validate_mt5_key(
             )
         except asyncio.TimeoutError:
             logger.warning("validate_key: MT5 gateway connect timed out (bridge hung)")
+            trace.outcome = "gateway_unreachable"
             raise service_error(
                 503,
                 "MT5_GATEWAY_UNREACHABLE",
@@ -437,6 +505,7 @@ async def _validate_mt5_key(
             )
         except Exception:  # noqa: BLE001 — connect failure is server/bridge, not the key
             logger.warning("validate_key: MT5 gateway connect failed (server/bridge)")
+            trace.outcome = "gateway_unreachable"
             raise service_error(
                 503,
                 "MT5_GATEWAY_UNREACHABLE",
@@ -515,6 +584,7 @@ async def _validate_mt5_key(
             # with the shared NETWORK detail (mirrors the sfox transient arm);
             # WARNING (not exception) so a blip does not spam Sentry.
             logger.warning("validate_key: MT5 probe timed out (upstream bridge hung)")
+            trace.outcome = "transient"
             # PYAPIFIX2-01 (C3) — see the C1 block for the shape rationale. This
             # arm and the two below were found by the BEHAVIOURAL predicate, not
             # by the consumer list: `_validate_mt5_key` never calls
@@ -535,6 +605,7 @@ async def _validate_mt5_key(
                 "validate_key: MT5 terminal account mismatch mid-probe "
                 "(concurrent validate) — failing closed transient"
             )
+            trace.outcome = "transient"
             # PYAPIFIX2-01 (C4) — see the C1 block for the shape rationale.
             raise VenueTransientHTTPException(
                 status_code=424,
@@ -548,8 +619,10 @@ async def _validate_mt5_key(
             # login/pw/server values.
             kind = classify_mt5_login_error(e)
             if kind == "auth":
+                trace.outcome = "auth"
                 raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
             if kind == "wrong_server":
+                trace.outcome = "wrong_server"
                 raise HTTPException(status_code=400, detail=MT5_WRONG_SERVER_DETAIL)
             # transient -> fail CLOSED with the shared NETWORK detail (sfox F4
             # posture: never auth-failed, never valid). WARNING with the scrubbed
@@ -557,6 +630,7 @@ async def _validate_mt5_key(
             logger.warning(
                 "validate_key: MT5 transient upstream failure (code=%s)", e.code
             )
+            trace.outcome = "transient"
             # PYAPIFIX2-01 (C5) — see the C1 block for the shape rationale.
             raise VenueTransientHTTPException(
                 status_code=424,
@@ -591,8 +665,22 @@ async def _validate_mt5_key(
     # resolved above, and BEFORE construction — construction opens the rpyc socket
     # that races, so the lease must already be held when it happens.
     terminal_key = f"{host}:{port}"
+    trace.terminal_key = terminal_key
+    # ⭐ D-32 — TIME THE QUEUE WAIT SEPARATELY FROM THE TERMINAL WORK. This is the
+    # measurement nothing in this system has ever had, and the separation is the
+    # whole value: a budget sized off a COMBINED number is wrong for the second
+    # concurrent user by construction (EVIDENCE §4 "Consequence for budgeting") —
+    # user #1's total is a terminal read, user #2's is a terminal read plus user
+    # #1's read, and only a split measurement can tell those apart after the fact.
+    # Emitted on BOTH outcomes: a refusal at the bound is the longest wait there
+    # is, so an acquired-only instrument reports a distribution truncated at
+    # exactly the interesting end.
+    lease_started_at = time.perf_counter()
     try:
         async with mt5_terminal_lease(terminal_key, wait_s=_MT5_LEASE_WAIT_S):
+            emit_mt5_stage_event(
+                "lease_wait", lease_started_at, ok=True, terminal_key=terminal_key
+            )
             try:
                 # ⭐ THE ONE END-TO-END DEADLINE (D-03). It bounds connect + probe TOGETHER;
                 # the release in the finally is deliberately NOT inside it (see below).
@@ -612,6 +700,7 @@ async def _validate_mt5_key(
                         "(%.0fs, connect+probe) — hung terminal",
                         _MT5_VALIDATE_DEADLINE_S,
                     )
+                    trace.outcome = "deadline_exceeded"
                     raise VenueTransientHTTPException(
                         status_code=424,
                         code="NETWORK_UNAVAILABLE",
@@ -624,6 +713,7 @@ async def _validate_mt5_key(
                 if verdict == "trade_capable":
                     # Master (trade-capable) login REJECTED — never persisted (the TS
                     # caller only encrypts after valid:true). The EoP gate (T-135-09).
+                    trace.outcome = "master_rejected"
                     raise HTTPException(
                         status_code=400, detail=MT5_MASTER_PASSWORD_DETAIL
                     )
@@ -643,6 +733,11 @@ async def _validate_mt5_key(
                             "validate_key: MT5 capability undetermined (terminal trade "
                             "permission off) — refusing rather than stamping read-only"
                         )
+                        # Distinct from the env-gap `gateway_unconfigured` above even
+                        # though both answer the same code: this one means the terminal
+                        # ran and refused to classify, which is the D-31 signal Phase
+                        # 155 needs counted on its own.
+                        trace.outcome = "undetermined"
                         raise service_error(
                             500,
                             "MT5_GATEWAY_UNCONFIGURED",
@@ -657,6 +752,7 @@ async def _validate_mt5_key(
                             "validate_key: MT5 capability undetermined (terminal signal "
                             "unavailable) — refusing rather than stamping read-only"
                         )
+                        trace.outcome = "transient"
                         raise VenueTransientHTTPException(
                             status_code=424,
                             code="NETWORK_UNAVAILABLE",
@@ -669,6 +765,7 @@ async def _validate_mt5_key(
                 # attributable to the ACCOUNT. read_only=True is STRUCTURAL (Mt5Client
                 # exposes no trade surface — the sFOX A1 posture), PLUS the behavioral
                 # investor-vs-master probe above that sfox lacks.
+                trace.outcome = "read_only"
                 return {"valid": True, "read_only": True}
             finally:
                 # RED-TEAM: bounded, off-loop RELEASE. Blocking RPyC (a hung teardown on the
@@ -738,6 +835,19 @@ async def _validate_mt5_key(
             "acquisition bound (serialized, not hung; D-29)",
             _MT5_LEASE_WAIT_S,
         )
+        # D-32: the refusal is the LONGEST queue wait there is, and it is the one
+        # a bound-tuning decision turns on. Emitted here rather than inside the
+        # `async with` because `Mt5TerminalBusyError` is raised by the lease's
+        # __aenter__ — the body, and therefore the acquired-path emission above,
+        # never runs on this path.
+        emit_mt5_stage_event(
+            "lease_wait",
+            lease_started_at,
+            ok=False,
+            terminal_key=terminal_key,
+            error_class="Mt5TerminalBusyError",
+        )
+        trace.outcome = "lease_busy"
         raise VenueTransientHTTPException(
             status_code=424,
             code="NETWORK_UNAVAILABLE",
