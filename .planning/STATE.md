@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: planning
-stopped_at: "Phase 153: CONTEXT + UI-SPEC approved; both planning ledgers' citations re-derived. Ready for /gsd-plan-phase 153 (Opus until 2026-08-11 11:00)."
-last_updated: "2026-08-09T01:38:30.802Z"
-last_activity: 2026-08-08
+stopped_at: "Phase 153 split 4 ways and fully planned (22 plans / 41 tasks). 153.3 waves 1-4 LANDED and independently gated (pytest -k mt5 337 passed / full suite 5047, mypy --strict clean on 88 files, MT5_REQUEST_TIMEOUT_S zero-diff). Wave 4 = D-29: the validate path now takes the terminal lease (bounded 20s acquisition OUTSIDE the 75s deadline; 105s < D-26's 120000ms). Next: wave 5 (instrumentation + D-33 runbook), then wave 6 (D-35), then 153.1 -> 153.2 -> 153.4."
+last_updated: "2026-08-09T02:03:57.220Z"
+last_activity: 2026-08-09 -- Phase 153.3 wave 4 complete
 progress:
   total_phases: 13
   completed_phases: 6
   total_plans: 59
-  completed_plans: 40
+  completed_plans: 41
   percent: 46
 ---
 
@@ -381,7 +381,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [███████░░░] 68%
+Progress: [███████░░░] 69%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -476,6 +476,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 153.3 P01 | 75m | 3 tasks | 8 files |
 | Phase 153.3 P02 | ~65m | 2 tasks | 6 files |
 | Phase 153.3 P03 | 75 min | 3 tasks | 8 files |
+| Phase 153.3 P04 | ~70 min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -490,7 +491,17 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - v1.17 roadmap created 2026-08-04 (Phases 147–153); v1.16 PARKED at 68% (13/19 phases, 119/127 plans; resume at Phase 143). Phase 142.3's scope (MT5-06..10) re-homed to Phase 153, MT5-14 to Phase 151. Ordering locked: SCEN-01 first, OWN-02 before NAV-01/OWN-04/SCEN-03, AUM after SCEN-01, MT5 numeric verification last
 - v1.17 roadmap REVISED 2026-08-04 (Phases 147–155): the approved Phase 148 (OWN-02/03/04 + NAV-01) split into 148 OWN-02/04 (owner factsheet, adversarial cache acceptance), 149 NAV-01 (my-strategies ranking at DISCOVERY PARITY — founder sharpened the ask from 'an overview' to ranking parity over every uploaded key incl. private/draft), 150 OWN-03 (own-capital-vs-verifying wizard question, money-path review isolated); later phases renumbered +2 (AUM→151, SCEN→152, WIZFORM+MT5-14→153, WIZCONT/STALE→154, MT5-VERIFY→155). All ordering constraints unchanged and now structural (149 cannot start before 148)
 
-### Decisions (requirements-time, from research Open Decisions 1–8)
+### Decisions
+
+<!-- ⛔ HEADING IS LOAD-BEARING — do NOT re-add a parenthetical suffix here.
+     gsd-sdk `state.add-decision` matches /###?\s*(?:Decisions|Decisions Made|Accumulated.*Decisions)\s*\n/i
+     and appends to the FIRST match. With "### Decisions (requirements-time, ...)" it matched
+     NOTHING, so the verb returned "Decisions section not found in STATE.md" on every call and
+     every decision an executor tried to record was silently dropped. Diagnosed 2026-08-09.
+     The sibling "### Decisions (execution-time, Phase N)" headings below are fine — only the
+     FIRST match is used as the append target, and they are historical archives. -->
+
+*(requirements-time, from research Open Decisions 1–8)*
 
 - Janitor targets BOTH tables as two DISTINCT mechanisms: `strategy_analytics.computation_status='computing'` (new reaper, JOB-02/Phase 142) AND `compute_jobs.status='running'` (extend WORKER-04, JOB-05/Phase 144).
 - Fence-flake "two birds" claim: observation-only, never an acceptance criterion.
@@ -1187,11 +1198,24 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - **Standing latent bugs (TODOS.md):** quantstats price-detection Sharpe sign-flip (strategy-analytics path — v2 MONEY-03); blend unknown-asset_class annualization (v2 MONEY-04); `allocator_equity_snapshots` retirement (post-FLIP only).
 - **Backlog ground truth = root TODOS.md** — add/close items ONLY there.
 
-## Session Continuity
+<!-- ⛔ THE HEADING AND FIELD NAMES BELOW ARE LOAD-BEARING. Do NOT rename the heading to
+     "Session Continuity", and do NOT reword the three field labels.
+     gsd-sdk matches the section with /##\s*Session\s*\n/i and reads three fields by name
+     (Last Date / Stopped At / Resume File). With "## Session Continuity" the section match
+     FAILED, so `state.record-session` reported "No session fields found", the body copy went
+     stale, and three executors in a row "restored" frontmatter stopped_at FROM that stale copy.
+     Two sources of truth for one fact, only one maintained. Keep this block and the YAML
+     frontmatter in agreement — the SDK rebuilds frontmatter FROM this block.
+     ⚠️ Keep prose out of the section body: any commentary containing the literal field
+     markers is matched by the SDK's regex INSTEAD of the real data. That is why this note
+     sits ABOVE the heading. Diagnosed 2026-08-09. -->
 
-**Last activity:** 2026-08-08
-**Stopped at:** Phase 153: CONTEXT + UI-SPEC approved; both planning ledgers' citations re-derived. Ready for /gsd-plan-phase 153 (Opus until 2026-08-11 11:00).
-**Next step:** Phase 153 (WIZFORM) — discuss → ui-phase → plan → execute on `feat/v1.17-153-wizform`.
+## Session
+
+**Last Date:** 2026-08-09T02:03:57.210Z
+**Stopped At:** Phase 153 split 4 ways and fully planned (22 plans / 41 tasks). 153.3 waves 1-4 LANDED and independently gated (pytest -k mt5 337 passed / full suite 5047, mypy --strict clean on 88 files, MT5_REQUEST_TIMEOUT_S zero-diff). Wave 4 = D-29: the validate path now takes the terminal lease (bounded 20s acquisition OUTSIDE the 75s deadline; 105s < D-26's 120000ms). Next: wave 5 (instrumentation + D-33 runbook), then wave 6 (D-35), then 153.1 -> 153.2 -> 153.4.
+**Resume File:** None
+**Next step:** Finish 153.3 waves 5-6, then execute 153.1 → 153.2 → 153.4 on `feat/v1.17-153-wizform`.
 
 ⚠️ **Post-land CI state (2026-08-08):** `secret-scan` went RED on main at `e0481411` — a
 false-positive `generic-api-key` hit on the Phase 151 E1 fixture `E1_KEY_DERIV = "e1-key-deriv"`
