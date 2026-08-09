@@ -667,6 +667,39 @@ async def _validate_mt5_key_probe(
             # terminal we are logged into) and INSIDE the PRE/POST login bracket
             # so the whole probe stays framed by the account-mismatch guard.
             terminal = _read_terminal()
+            # ⭐ A CONCLUSIVE TERMINAL VERDICT SHORT-CIRCUITS THE PROBE.
+            #
+            # Asked with NO probe result, the ONE capability seam already answers
+            # "undetermined" whenever the terminal signal alone forces a refusal —
+            # unreadable, malformed, detached, or trade permission off. Running
+            # order_check after that cannot improve the verdict, and it can DESTROY
+            # it: under MetaQuotes' default-ON "Disable automatic trading through
+            # the external Python API" — the very setting that makes trade_allowed
+            # false, and the case D-31 was written for — the probe is refused, and
+            # its Mt5ClientError leaves by a different door. classify_mt5_login_error's
+            # _WRONG_SERVER_TOKENS carry "terminal", so that refusal came out as a
+            # 400 telling the user their BROKER SERVER is wrong: an accusation
+            # against the user for a checkbox in OUR gateway, silently replacing
+            # the operator-facing 500 that would have named the real remedy.
+            #
+            # ⛔ This NARROWS what can pre-empt the refusal; it never widens what
+            # can be classified read_only. Branch 5 reaches "undetermined" for
+            # EVERY probe value, so no read_only verdict is newly reachable. The
+            # only verdict the probe could still have changed is trade_capable via
+            # retcode 10009 — itself a refusal, and unobtainable from a terminal
+            # that refuses Python probes at all. The POSITIVE master signal is
+            # untouched: it comes from account_info().trade_allowed, read above and
+            # conclusive before any terminal reasoning.
+            #
+            # The predicate is the SEAM ITSELF, deliberately not a fourth copy of
+            # the shape test — a duplicated four-condition rule drifts, and the
+            # drift would be silent (see terminal_trade_permission_off's docstring).
+            if classify_trade_capability(info, {}, terminal) == "undetermined":
+                # The POST bracket still runs (below): the terminal read we are
+                # about to classify on must belong to OUR account, exactly as the
+                # probe result would have had to.
+                _assert_expected_login(connected.account_info())
+                return info, {}, terminal
             probe = connected.order_check(mt5_probe_request())  # PROBE ONLY
             _assert_expected_login(connected.account_info())  # POST-probe bracket
             return info, probe, terminal

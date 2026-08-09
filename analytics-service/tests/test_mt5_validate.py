@@ -130,7 +130,8 @@ def exchange_router(monkeypatch):
 
 
 def _make_client(
-    *, login_raises=None, account=None, order_check=None, terminal=None
+    *, login_raises=None, account=None, order_check=None, order_check_raises=None,
+    terminal=None,
 ):
     """A mock Mt5Client instance: sync login/account_info/terminal_info/
     order_check/release/close.
@@ -151,9 +152,15 @@ def _make_client(
     else:
         client.login = MagicMock(return_value=None)
     client.account_info = MagicMock(return_value=account if account is not None else {})
-    client.order_check = MagicMock(
-        return_value=order_check if order_check is not None else {}
-    )
+    if order_check_raises is not None:
+        # The real client raises here when MT5 returns None and last_error() is
+        # read (`_raise_last`) — which is what a terminal that refuses the probe
+        # produces.
+        client.order_check = MagicMock(side_effect=order_check_raises)
+    else:
+        client.order_check = MagicMock(
+            return_value=order_check if order_check is not None else {}
+        )
     if terminal is None:
         client.terminal_info = MagicMock(
             side_effect=Mt5ClientError(-10004, "No IPC connection")
@@ -522,6 +529,71 @@ async def test_mt5_terminal_trade_disabled_never_returns_readonly(exchange_route
     # Never blames the credentials.
     assert detail["detail"] != AUTH_FAILED_DETAIL
     assert detail["detail"] != MT5_MASTER_PASSWORD_DETAIL
+    client.release.assert_called_once()
+
+
+async def test_a_conclusive_terminal_verdict_is_not_pre_empted_by_an_erroring_probe(
+    exchange_router,
+):
+    """⭐ D-31's refusal must not be pre-empted by the probe it no longer needs, on
+    the exact configuration D-31 was written for.
+
+    Once the terminal has reported ``trade_allowed: false``, the verdict is already
+    ``undetermined`` — branch 5 of ``classify_trade_capability`` looks at no probe
+    result at all. Running ``order_check`` anyway was not free: under MetaQuotes'
+    default-ON *"Disable automatic trading through the external Python API"* — the
+    setting that MAKES ``trade_allowed`` false — the probe is refused, and its
+    error takes an ENTIRELY DIFFERENT route out. ``classify_mt5_login_error``'s
+    ``_WRONG_SERVER_TOKENS`` contain "terminal", so the refusal below classifies
+    ``wrong_server`` and the user is told **their broker server is wrong** — a
+    400 accusation against the user, for a checkbox in OUR gateway terminal, which
+    silently replaces the 500 that would have paged the operator who can actually
+    fix it.
+
+    ⚠️ THE ERRORING PROBE IS THE POINT. A version of this test whose ``order_check``
+    SUCCEEDS never reaches the bug: a successful probe returns a retcode the
+    classifier already ignores under branch 5, so the verdict is unchanged and the
+    guard cannot fail.
+
+    ⛔ Narrowing only. Skipping the probe cannot widen what is classified
+    ``read_only``: branch 5 reaches ``undetermined`` for EVERY probe value, and the
+    single verdict the probe could still have changed — ``trade_capable`` via
+    retcode 10009 — is itself a refusal, and is unobtainable anyway from a terminal
+    that refuses Python probes. The POSITIVE master signal survives untouched: it
+    comes from ``account_info().trade_allowed``, which is read BEFORE the terminal
+    and is asserted by the master-reject tests above.
+    """
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        # What a terminal with the Python-API option ON answers: None from
+        # order_check, then last_error() -> a "Terminal:" message. Note the text
+        # contains "terminal", which is a _WRONG_SERVER_TOKENS member.
+        order_check_raises=Mt5ClientError(
+            -8, "Terminal: AutoTrading disabled by the client terminal"
+        ),
+        # Connected, so this is not a bridge blip — the terminal itself refuses.
+        terminal={"connected": True, "trade_allowed": False},
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    # D-31's PERMANENT operator refusal wins. Literals hand-typed. Asserted
+    # BEFORE the mechanism below, because the verdict is what the user and the
+    # operator actually get; "the probe did not run" is only how.
+    assert ei.value.status_code == 500
+    assert ei.value.detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert ei.value.detail["retryable"] is False
+    assert not (ei.value.headers or {}).get("Retry-After")
+    # ⛔ Never the accusation against the user that the probe's error produced.
+    assert ei.value.detail["detail"] != MT5_WRONG_SERVER_DETAIL
+    assert ei.value.detail["detail"] != AUTH_FAILED_DETAIL
+    assert "read_only" not in repr(ei.value.detail)
+    # And the mechanism: the probe never ran, because the terminal signal was
+    # already conclusive.
+    client.order_check.assert_not_called()
     client.release.assert_called_once()
 
 
