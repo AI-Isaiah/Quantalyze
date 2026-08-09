@@ -985,7 +985,16 @@ def test_release_without_a_reachable_transport_close_warns_loudly(caplog):
 def test_close_alone_still_calls_shutdown_exactly_once():
     """The WORKER path is UNCHANGED by D-30: a bare close() (aclose_exchange's mt5
     arm, job_worker) still ends the terminal session. release() narrows the REQUEST
-    path only; it must not quietly neuter the owner's teardown."""
+    path only; it must not quietly neuter the owner's teardown.
+
+    ⚠️ KNOWINGLY TEMPORARY — owner **D-35** (153.3 wave 6). D-35 closes the
+    shutdown-on-a-shared-session class AT THE SINK by deleting the teardown from
+    `Mt5Client.close()` outright, at which point `shutdown_calls == 1` here becomes
+    exactly the wrong pin. Wave 6 must RE-CUT this case deliberately rather than be
+    surprised by it. Until then it is load-bearing: it is what says D-30 narrowed the
+    request path without silently changing the worker's contract. The remaining
+    worker-side sites are recorded in TODOS.md
+    (`services/exchange.py:924-938`, `services/ingestion/mt5.py`)."""
     connect, fake, _rec = _make({})
     client = Mt5Client("host", 18812, _connect=connect)
     client.close()

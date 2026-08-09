@@ -140,6 +140,24 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    NOT the balance-anchored parity). Optional: rotate the read-only investor pw
    (`Vantage_investor_password_26547876`).
 
+### Phase 153.3 (WIZFORM-GW) — recorded residuals (added 2026-08-09)
+
+- [ ] **⛔ The WORKER path still calls `mt5.shutdown()` on the SHARED gateway session.**
+  Plan 153.3-03 (D-30) took `shutdown()` off the **request** path: `routers/exchange.py`'s
+  `_validate_mt5_key` now calls the new `Mt5Client.release()` (transport close only) in its
+  `finally`, so a validate no longer tears the IPC pipe down under a concurrent caller
+  (`-10004` — the mechanism item 0 above describes). **Two worker-side sites still do:**
+  `analytics-service/services/exchange.py:924-938` (`aclose_exchange`'s mt5 arm, which calls
+  `exchange.client.close()`) and `analytics-service/services/ingestion/mt5.py:~337` (its own
+  bounded `client.close()`). So a derive/sync job can still destroy the pipe out from under an
+  interactive validate. Both files are outside 153.3-03's ownership and D-30 scopes the request
+  path only. **Owner: Phase 153.3 wave 6 (D-35)**, which closes the class at the sink by deleting
+  the teardown from `Mt5Client.close()` entirely. ⚠️ Until then the offline test
+  `test_close_alone_still_calls_shutdown_exactly_once`
+  (`tests/test_mt5_client_contract.py`) pins `shutdown_calls == 1` for a bare `close()` —
+  that pin is **knowingly temporary** and is annotated **D-35**; wave 6 must re-cut it rather
+  than be surprised by it.
+
 ### v1.14 Smoothed-MTM go-live blockers — FIXED in the v1.14 landing (2026-07-23)
 Surfaced by the /ship Fable red team; the safety-critical ones fixed in the landing PR so
 flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM factsheet.
