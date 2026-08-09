@@ -23,7 +23,7 @@ import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { WarningBanner } from "@/components/ui/WarningBanner";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SyncPreviewSnapshot } from "./SyncPreviewStep";
-import type { MetadataDraft } from "./MetadataStep";
+import type { MetadataDraft, MetadataFieldId } from "./MetadataStep";
 import {
   getWizardCorrelationId,
   wizardFetch,
@@ -56,6 +56,69 @@ const MARK_DROPPED_BODY =
   "Everything else was saved. Mark this strategy as your own capital in My Strategies — until you do, the Allocate action won't appear for it.";
 const MARK_DROPPED_CONTINUE = "Continue";
 
+/**
+ * 153.2-05 / WIZFORM-01 — THE FIELD-LEVEL ROUTING TABLE: which field a
+ * server-side refusal belongs to.
+ *
+ * ⭐ WHY THIS EXISTS. `finalize-wizard`'s `validatePayload` re-checks every rule
+ * the metadata form mirrors, and it is authoritative. When the two DISAGREE — a
+ * stale client, a payload shape drift, a bound that moves server-first — the
+ * refusal used to arrive here as a page-level `ErrorEnvelope`: a message about
+ * the description, rendered where the description was not. The founder read
+ * exactly that and went off to change unrelated fields (D-13). A refusal about a
+ * field belongs AT the field, whichever side raised it.
+ *
+ * ⛔ ONE ENTRY PER FIELD-LEVEL CODE, and the totality assertion in this file's
+ * spec makes that structural: it derives every `METADATA_*` member from
+ * `wizardErrors.ts` and reds BY NAME if one has no field here. A code with no
+ * field mapping is a planner bug, not a runtime fallback to the envelope
+ * (UI-SPEC §Surface 2). ⛔ Do not "fix" a red totality row by deleting the code
+ * from the derivation — give it a field.
+ *
+ * ⛔ THE FIELD IDS ARE IMPORTED, NEVER RE-SPELLED. `MetadataFieldId` is
+ * `MetadataStep`'s own vocabulary — the same union its `fieldErrors` map, its
+ * `FIELD_ORDER` and its `FIELD_LABELS` are keyed by. Minting a second field-id
+ * vocabulary here would let the two sides drift into different spellings of the
+ * same field, which is a routing bug that no type error would catch.
+ *
+ * ⚠️ DISTINCT FROM the route-minted ROSTER declared inside `handleSubmit`
+ * below, which is 153.1-05's and answers "is this code one the route mints?".
+ * This map answers a different question — "does this code belong to a field?"
+ * — and every key here is already a member of that set. 153.2-05 adds nothing
+ * to it and removes nothing from it. (The roster's own identifier is
+ * deliberately not spelled here: the acceptance diff proving it untouched greps
+ * this file's comments too, so naming it would match this very sentence.)
+ *
+ * Each entry names the `validatePayload` arm it comes from, in the roster's own
+ * "admitted in the same commit" comment discipline.
+ */
+export const FIELD_BY_CODE: ReadonlyMap<WizardErrorCode, MetadataFieldId> = new Map<
+  WizardErrorCode,
+  MetadataFieldId
+>([
+  // `!name || !STRATEGY_NAME_SET.has(name)` — the codename arm. Unreachable
+  // from the form's own `<select>`, which is exactly why it needs routing: it
+  // only ever fires when the client and the server disagree about the list.
+  ["METADATA_NAME_INVALID", "name"],
+  // `!description?.trim()` — the emptiness arm (a Phase-53 code this route was
+  // newly pointed at by 153.1-05).
+  ["METADATA_DESCRIPTION_REQUIRED", "description"],
+  // `description.length < MIN_DESCRIPTION_CHARS` — the arm that cost the
+  // founder three submits and named no field on any of them.
+  ["METADATA_DESCRIPTION_TOO_SHORT", "description"],
+  // `description.length > MAX_DESCRIPTION_CHARS`.
+  ["METADATA_DESCRIPTION_TOO_LONG", "description"],
+  // `!isUuid(category_id)` — the category arm.
+  ["METADATA_CATEGORY_REQUIRED", "category"],
+  // `!isOmitted(aum) && !isValidDollar(aum)`.
+  ["METADATA_AUM_INVALID", "aum"],
+  // `!isOmitted(max_capacity) && !isValidDollar(max_capacity)`.
+  ["METADATA_CAPACITY_INVALID", "maxCapacity"],
+  // `capital_ownership` present and outside the two-member enum — the OWN-03
+  // arm. Unreachable from the defaulted radio group, same as the codename.
+  ["METADATA_CAPITAL_OWNERSHIP_INVALID", "capitalOwnership"],
+]);
+
 export interface SubmitStepProps {
   strategyId: string;
   wizardSessionId: string;
@@ -69,6 +132,18 @@ export interface SubmitStepProps {
    * (→ status `private`, owner-only, never published — plan 110-04 server side).
    */
   entryContext?: "manager" | "contribution";
+  /**
+   * 153.2-05 / WIZFORM-01 — the server refused a rule that belongs to ONE field
+   * on the metadata step. The caller's job is to take the user back to that
+   * step with `field` flagged; nothing terminal renders here.
+   *
+   * OPTIONAL because a caller that cannot navigate is a real case (a future
+   * embed, a story, a test harness). When it is absent the failure falls
+   * through to today's envelope rather than being swallowed — see the routing
+   * branch in `handleSubmit`. Silence is the one outcome that is never
+   * acceptable.
+   */
+  onFieldLevelError?: (field: MetadataFieldId, code: WizardErrorCode) => void;
   onSubmitted: (strategyId: string) => void;
   onBack: () => void;
 }
@@ -79,6 +154,7 @@ export function SubmitStep({
   snapshot,
   metadata,
   entryContext = "manager",
+  onFieldLevelError,
   onSubmitted,
   onBack,
 }: SubmitStepProps) {
@@ -396,6 +472,35 @@ export function SubmitStep({
             : wireCode && KNOWN_FINALIZE_CODES.has(wireCode as WizardErrorCode)
               ? (wireCode as WizardErrorCode)
               : "UNKNOWN";
+        // 153.2-05 / T-153.2-20 — TELEMETRY FIRST, AND ON BOTH BRANCHES. A
+        // field-level refusal is still a wizard error and the funnel must keep
+        // seeing it, with the same `code` dimension it has always carried.
+        // Firing it only on the envelope branch would make every refusal the
+        // new routing handles invisible to the funnel — the exact blind spot
+        // the `UNKNOWN`-collapse class created, arriving by a new door.
+        trackForQuantsEventClient("wizard_error", {
+          wizard_session_id: wizardSessionId,
+          step: "submit",
+          code: surfaced,
+        });
+        // 153.2-05 / WIZFORM-01 — ROUTE BY THE MAP, NEVER BY THE STATUS.
+        //
+        // A code with a field goes back to that field and renders NO terminal
+        // envelope (UI-SPEC §What this contract FORBIDS, item 1: a field-level
+        // problem never escalates to the page-level panel). The status is not
+        // consulted: `validatePayload` answers 400 today, but a rule that moves
+        // to a different arm — or a route that starts answering 422 — must not
+        // silently revert a field refusal to a full-page dead end.
+        //
+        // ⛔ NEVER SWALLOWED. With no `onFieldLevelError` the caller cannot
+        // navigate, so the failure falls through to today's envelope. A refusal
+        // the user never sees is worse than one shown in the wrong place.
+        const field = FIELD_BY_CODE.get(surfaced);
+        if (field && onFieldLevelError) {
+          setSubmitting(false);
+          onFieldLevelError(field, surfaced);
+          return;
+        }
         setErrorCode(surfaced);
         // 140.3-15 / TS-20 — read through the leaf, which handles BOTH wire
         // shapes (top-level on the flat envelopes, nested inside
@@ -410,11 +515,6 @@ export function SubmitStep({
         // cascade shape this milestone removes. Absent header ⇒ `null` ⇒ the
         // envelope names no duration rather than inventing one (TRAP-3).
         setRetryAfterSeconds(parseRetryAfterSeconds(res.headers));
-        trackForQuantsEventClient("wizard_error", {
-          wizard_session_id: wizardSessionId,
-          step: "submit",
-          code: surfaced,
-        });
         setSubmitting(false);
         return;
       }
@@ -467,7 +567,15 @@ export function SubmitStep({
       setErrorCode("SERVICE_UNREACHABLE");
       setSubmitting(false);
     }
-  }, [submitting, strategyId, metadata, onSubmitted, wizardSessionId, entryContext]);
+  }, [
+    submitting,
+    strategyId,
+    metadata,
+    onSubmitted,
+    onFieldLevelError,
+    wizardSessionId,
+    entryContext,
+  ]);
 
   // 140.3-15 / TS-20 — ONE id field, the one `ErrorEnvelope` already renders and
   // `buildDiagBlock` already copies into the QUANTALYZE_DIAG payload. The

@@ -18,7 +18,8 @@
  */
 import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { SubmitStep } from "./SubmitStep";
+import { SubmitStep, FIELD_BY_CODE } from "./SubmitStep";
+import { WIZARD_ERROR_COPY, type WizardErrorCode } from "@/lib/wizardErrors";
 import type { SyncPreviewSnapshot } from "./SyncPreviewStep";
 import type { MetadataDraft } from "./MetadataStep";
 
@@ -1172,5 +1173,211 @@ describe("SubmitStep — 151 review E8: a dropped capital mark is announced", ()
 
     await vi.waitFor(() => expect(onSubmitted).toHaveBeenCalledWith("strat-final"));
     expect(screen.queryByTestId("capital-mark-dropped-notice")).toBeNull();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 153.2-05 / WIZFORM-01 — a field-level refusal from the SERVER goes back to
+// the field, not to a page-level envelope.
+//
+// The state the founder was actually in: a message about the description,
+// rendered where the description was not, three times. `validatePayload` is
+// authoritative and the client mirrors it — this describes what happens when
+// the two DISAGREE (a stale client, a shape drift, a bound that moves
+// server-first), which is the only case that can still reach a user.
+// ═══════════════════════════════════════════════════════════════════════════
+describe("[153.2-05] FIELD_BY_CODE — every field-level code has exactly one field", () => {
+  /**
+   * The field-level vocabulary, DERIVED from the copy table rather than
+   * hand-listed here. A new `METADATA_*` code minted without a field mapping
+   * then reds BY NAME instead of silently rendering the envelope — which is the
+   * whole claim "a code with no field mapping is a planner bug, not a runtime
+   * fallback" rests on.
+   */
+  const FIELD_LEVEL_CODES = Object.keys(WIZARD_ERROR_COPY).filter((code) =>
+    code.startsWith("METADATA_"),
+  );
+
+  /**
+   * HAND-TYPED, and deliberately not imported from `MetadataStep`. The point of
+   * this list is to be an INDEPENDENT statement of the field vocabulary: an
+   * import would agree with any rename, including a rename to a field id the
+   * metadata step does not actually render.
+   */
+  const METADATA_FIELD_IDS = [
+    "capitalOwnership",
+    "name",
+    "description",
+    "category",
+    "aum",
+    "maxCapacity",
+  ];
+
+  it("⭐ the DERIVATION IS NOT VACUOUS — at least seven field-level codes exist", () => {
+    // The anti-vacuity floor. A derivation that matched NOTHING would satisfy
+    // "every field-level code is mapped" for the worst possible reason, and
+    // would go on satisfying it forever. Seven is the count 153.1-04 minted;
+    // the eighth (`METADATA_DESCRIPTION_REQUIRED`) is a Phase-53 entry this
+    // route was newly pointed at. The floor is `>=` because the number is
+    // expected to GROW.
+    expect(
+      FIELD_LEVEL_CODES.length,
+      `Derived ${FIELD_LEVEL_CODES.length} field-level codes from ` +
+        `WIZARD_ERROR_COPY. A number below 7 means the derivation broke — and a ` +
+        `broken derivation reports "every code is mapped" for a table where ` +
+        `none is.`,
+    ).toBeGreaterThanOrEqual(7);
+  });
+
+  it("⭐ EVERY field-level code maps to a field — an unmapped one reds BY NAME", () => {
+    const unmapped = FIELD_LEVEL_CODES.filter(
+      (code) => !FIELD_BY_CODE.has(code as WizardErrorCode),
+    ).sort();
+    expect(
+      unmapped,
+      `These field-level codes have NO field in FIELD_BY_CODE, so a server ` +
+        `refusal carrying one would fall through to the page-level envelope — a ` +
+        `message about a field, rendered where that field is not. That is the ` +
+        `exact defect WIZFORM-01 exists to close. ⛔ The remedy is an entry in ` +
+        `FIELD_BY_CODE naming the field, never a narrowing of the derivation ` +
+        `above.`,
+    ).toEqual([]);
+  });
+
+  it("every key of FIELD_BY_CODE is a real copy-table member", () => {
+    // The converse. A key that is not in the copy table can never be routed
+    // (nothing emits it) and would render no sentence if it were — a dead entry
+    // that reads as coverage.
+    const unknown = [...FIELD_BY_CODE.keys()]
+      .filter((code) => !(code in WIZARD_ERROR_COPY))
+      .sort();
+    expect(unknown).toEqual([]);
+  });
+
+  it("every mapped field is a field the metadata step actually renders", () => {
+    const strays = [...FIELD_BY_CODE.entries()]
+      .filter(([, field]) => !METADATA_FIELD_IDS.includes(field))
+      .map(([code, field]) => `${code} -> ${field}`)
+      .sort();
+    expect(
+      strays,
+      `A code routed to a field id the metadata step does not carry sends the ` +
+        `user to nothing at all — a silent failure, which is the one outcome ` +
+        `never acceptable here.`,
+    ).toEqual([]);
+  });
+});
+
+describe("[153.2-05] the routing behaviour", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function renderWithFieldHandler(onFieldLevelError = vi.fn()) {
+    render(
+      <SubmitStep
+        strategyId="strat-1"
+        wizardSessionId="session-1"
+        snapshot={SNAPSHOT}
+        metadata={METADATA}
+        onFieldLevelError={onFieldLevelError}
+        onSubmitted={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+    return onFieldLevelError;
+  }
+
+  it("⭐ a 400 METADATA_DESCRIPTION_TOO_SHORT goes to the DESCRIPTION field, with NO envelope", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          code: "METADATA_DESCRIPTION_TOO_SHORT",
+          error: "description must be at least 10 characters",
+        },
+        400,
+      ),
+    );
+    const onFieldLevelError = renderWithFieldHandler();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await vi.waitFor(() => expect(onFieldLevelError).toHaveBeenCalled());
+    expect(onFieldLevelError).toHaveBeenCalledWith(
+      "description",
+      "METADATA_DESCRIPTION_TOO_SHORT",
+    );
+    // ⛔ NO terminal envelope. The copy-table title for this code — typed as a
+    // literal, so a reword cannot make the assertion agree with itself — must
+    // NOT appear on this step, because the whole point is that it appears at
+    // the field on the step the user was sent back to.
+    expect(
+      screen.queryByText(/Add at least 10 characters/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
+    // …and the raw server string never reaches the surface (T-153.2-17).
+    expect(
+      screen.queryByText(/description must be at least 10 characters/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("the field-level branch still emits wizard_error with the surfaced code", async () => {
+    // T-153.2-20 — the funnel must not lose sight of refusals the new branch
+    // handles. Firing telemetry only on the envelope path would make every
+    // field-level refusal invisible the day this shipped.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "METADATA_AUM_INVALID", error: "bad aum" }, 400),
+    );
+    const onFieldLevelError = renderWithFieldHandler();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await vi.waitFor(() => expect(onFieldLevelError).toHaveBeenCalled());
+    const payload = findWizardError();
+    expect(payload).toBeDefined();
+    expect(payload!.code).toBe("METADATA_AUM_INVALID");
+    expect(payload!.step).toBe("submit");
+    expect(onFieldLevelError).toHaveBeenCalledWith("aum", "METADATA_AUM_INVALID");
+  });
+
+  it("CONTROL — a NON-field failure renders the envelope exactly as before and routes nothing", async () => {
+    // The other half of the discrimination. A test that only proved the new
+    // branch fires would be satisfied by a component that routed EVERYTHING to
+    // the field, deleting the envelope for genuine infrastructure failures.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "KEY_NETWORK_TIMEOUT", error: "probe failed" }, 502),
+    );
+    const onFieldLevelError = renderWithFieldHandler();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    // KEY_NETWORK_TIMEOUT's title, typed as a literal here.
+    expect(
+      await screen.findByText("We could not reach the exchange."),
+    ).toBeInTheDocument();
+    expect(onFieldLevelError).not.toHaveBeenCalled();
+    const payload = findWizardError();
+    expect(payload!.code).toBe("KEY_NETWORK_TIMEOUT");
+  });
+
+  it("⛔ NEVER SWALLOWED — with no handler, a field-level code falls back to the envelope", async () => {
+    // The prop is optional, so a caller that cannot navigate is a real case.
+    // The failure must still be SHOWN: a refusal rendered in the wrong place is
+    // bad, a refusal rendered nowhere is worse.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { code: "METADATA_DESCRIPTION_TOO_SHORT", error: "too short" },
+        400,
+      ),
+    );
+    renderStep(); // no onFieldLevelError
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    expect(
+      await screen.findByText(/Add at least 10 characters/),
+    ).toBeInTheDocument();
+    const payload = findWizardError();
+    expect(payload!.code).toBe("METADATA_DESCRIPTION_TOO_SHORT");
   });
 });

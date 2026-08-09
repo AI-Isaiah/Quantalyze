@@ -909,9 +909,17 @@ describe("[H-0191] MetadataStep", () => {
       // reds when someone moves a field and does not move the array: it reads
       // the four controls out of the live DOM and asserts they arrive in the
       // order the component claims.
+      //
+      // ⚠️ 153.2-05 widened FIELD_ORDER from four members to six. The codename
+      // joins the scan below (it is a `<select>` and always renders); the
+      // capital question does NOT, because it renders only on the allocator
+      // surface and its controls are `role="radio"` buttons rather than form
+      // elements. Its slot ahead of the codename is asserted by the
+      // server-refusal rows further down, which mount it and focus it.
       await renderSettled();
       const form = document.querySelector("form")!;
       const controls = [
+        "Strategy codename",
         "Description",
         "Category",
         "AUM (USD)",

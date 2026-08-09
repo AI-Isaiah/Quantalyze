@@ -166,28 +166,45 @@ function withDetectedVenue(
 }
 
 /**
- * The fields on this step that carry a rule the CLIENT can evaluate, and
- * therefore a rule that must refuse at its own field rather than at submit.
+ * EVERY field on this step that a refusal can belong to — whether the refusal
+ * is raised by the client mirror or arrives from the server.
  *
  * ⛔ ONE map, not N ad-hoc `showXError` chains. Every mechanism below —
  * the inline message, the submit predicate, the first-invalid-control focus and
- * the summary line — reads this one derivation, so a fifth field is added in one
- * place and cannot be half-wired.
+ * the summary line — reads this one derivation, so a seventh field is added in
+ * one place and cannot be half-wired.
  *
- * Two fields on this step deliberately have NO entry, and their absence is a
- * decision rather than an oversight:
+ * ⚠️ 153.2-05 WIDENED THIS UNION from four members to six, and the two it added
+ * are the reason it is EXPORTED. `SubmitStep`'s `FIELD_BY_CODE` routes every
+ * `METADATA_*` code the finalize route can emit back to exactly one field id,
+ * and a totality assertion reds if any code has none. Two of those codes —
+ * `METADATA_NAME_INVALID` and `METADATA_CAPITAL_OWNERSHIP_INVALID` — belong to
+ * fields this form has no CLIENT rule for:
  *
- *   • **Strategy codename.** The server refuses a name outside
- *     `STRATEGY_NAME_SET` (`METADATA_NAME_INVALID`), but the control here is a
- *     `<select>` over `STRATEGY_NAMES` — that arm is unreachable from this form,
- *     so a mirror would be dead code that a reader would nonetheless have to
- *     maintain. (The server arm still exists and still matters: 153.2-05 routes
- *     the code to this field for the shape-drift case.)
+ *   • **Strategy codename.** The control is a `<select>` over `STRATEGY_NAMES`,
+ *     so the server's `STRATEGY_NAME_SET` arm is unreachable by any value this
+ *     form can produce. A client mirror would be dead code. But the arm still
+ *     FIRES — on a stale client, on a payload shape drift, on a constant that
+ *     moves server-first — and when it does, the refusal has a field.
  *   • **Whose capital is in this key.** The OWN-03 radio group is defaulted to
  *     team-review, never null, and offers no way to clear it, so
- *     `METADATA_CAPITAL_OWNERSHIP_INVALID` is likewise unreachable from here.
+ *     `METADATA_CAPITAL_OWNERSHIP_INVALID` is likewise unreachable from here —
+ *     and likewise still has a field to land on when the server disagrees.
+ *
+ * "No client rule" and "no field" are different facts. Conflating them is what
+ * sent a description refusal to a full-page envelope that named no field.
+ *
+ * ⛔ Do not mint a second field-id vocabulary in `SubmitStep`. This union is the
+ * only one; the two sides import it so they cannot drift into different
+ * spellings of the same field.
  */
-type MetadataFieldId = "description" | "category" | "aum" | "maxCapacity";
+export type MetadataFieldId =
+  | "capitalOwnership"
+  | "name"
+  | "description"
+  | "category"
+  | "aum"
+  | "maxCapacity";
 
 /**
  * The order the four fields RENDER in, declared explicitly.
@@ -200,6 +217,13 @@ type MetadataFieldId = "description" | "category" | "aum" | "maxCapacity";
  * coupling is visible, and the DOM-order row in the spec pins it.
  */
 const FIELD_ORDER: readonly MetadataFieldId[] = [
+  // The capital question leads the step (OWN-03 D-01) and the codename follows
+  // it, so both sit AHEAD of the description here. Neither can be raised by the
+  // client mirror, so neither can change which control a client-refused submit
+  // focuses — but a server refusal that names one of them must still be found
+  // by the same ordered scan rather than by a second code path.
+  "capitalOwnership",
+  "name",
   "description",
   "category",
   "aum",
@@ -216,6 +240,8 @@ const FIELD_ORDER: readonly MetadataFieldId[] = [
  * these controls (`getByLabelText`), so they are load-bearing beyond this file.
  */
 const FIELD_LABELS: Record<MetadataFieldId, string> = {
+  capitalOwnership: "Whose capital is in this key?",
+  name: "Strategy codename",
   description: "Description",
   category: "Category",
   aum: "AUM (USD)",
@@ -248,6 +274,22 @@ const FIELD_LABELS: Record<MetadataFieldId, string> = {
  */
 const VALIDATED_CONTROL_CLASS =
   "min-h-[44px] rounded-lg border border-border bg-surface px-3 py-2.5 text-body text-text-primary placeholder:text-text-muted transition-colors focus-visible:border-border-focus focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent aria-[invalid=true]:border-negative";
+
+/**
+ * What counts as "the thing to put the cursor in" when a field's ref points at a
+ * CONTAINER rather than at a control.
+ *
+ * Five of the six fields ref their own control directly. The capital question is
+ * a radio GROUP — a `<fieldset>` wrapping two `role="radio"` buttons — so there
+ * is no single element that both represents the field and accepts focus.
+ *
+ * ⛔ Stated as a general rule, not as one field's `if`. A later field that wraps
+ * a composite control needs no second branch here, and — the reason that matters
+ * — a branch keyed on a field NAME is the instance-not-class shape this
+ * milestone has spent two phases deleting.
+ */
+const FOCUSABLE_CONTROL_SELECTOR =
+  'input, select, textarea, button, [role="radio"], [tabindex]';
 
 export interface MetadataDraft {
   name: string | null;
@@ -387,6 +429,8 @@ export function MetadataStep({
   const [blurredFields, setBlurredFields] = useState<
     Record<MetadataFieldId, boolean>
   >({
+    capitalOwnership: false,
+    name: false,
     description: false,
     category: false,
     aum: false,
@@ -397,21 +441,70 @@ export function MetadataStep({
     setBlurredFields((prev) => (prev[id] ? prev : { ...prev, [id]: true }));
   }
 
+  const nameRef = useRef<HTMLSelectElement>(null);
   const descriptionRef = useRef<HTMLTextAreaElement>(null);
   const categoryRef = useRef<HTMLSelectElement>(null);
   const aumRef = useRef<HTMLInputElement>(null);
   const maxCapacityRef = useRef<HTMLInputElement>(null);
+  // The capital question is a radio GROUP, so the ref points at its CONTAINER
+  // rather than at a control. `focusTargetFor` below resolves a container to its
+  // first focusable descendant, which is the general rule rather than this
+  // field's special case.
+  const capitalOwnershipRef = useRef<HTMLDivElement>(null);
   // The "More details (optional)" disclosure. Held by ref so a refused submit
   // can OPEN it before focusing a control inside it — focus that lands on a
   // control the user cannot see is worse than no focus at all, because the
   // keyboard caret is then somewhere the screen does not show.
   const detailsRef = useRef<HTMLDetailsElement>(null);
   const fieldRefs: Record<MetadataFieldId, RefObject<HTMLElement | null>> = {
+    capitalOwnership: capitalOwnershipRef,
+    name: nameRef,
     description: descriptionRef,
     category: categoryRef,
     aum: aumRef,
     maxCapacity: maxCapacityRef,
   };
+
+  /**
+   * The element a refusal on `id` should put the cursor in, or `null` when that
+   * field is not currently rendered (the capital question only renders on the
+   * allocator surface).
+   */
+  function focusTargetFor(id: MetadataFieldId): HTMLElement | null {
+    const el = fieldRefs[id].current;
+    if (!el) return null;
+    if (el.matches(FOCUSABLE_CONTROL_SELECTOR)) return el;
+    return el.querySelector<HTMLElement>(FOCUSABLE_CONTROL_SELECTOR);
+  }
+
+  /**
+   * ⛔ THE ONE FOCUS PATH. Both callers — a submit refused by the client mirror
+   * and a refusal that arrived from the server — go through here, so the
+   * behaviour a user gets cannot depend on which side raised the problem.
+   *
+   * ⛔ OPEN FIRST, FOCUS SECOND. AUM and max capacity live inside the collapsed
+   * "More details (optional)" disclosure, so the offending control is regularly
+   * one the user cannot see. Focusing it while the disclosure is shut puts the
+   * caret somewhere off-screen and leaves the page looking as if nothing
+   * happened.
+   *
+   * Containment is TESTED rather than a hard-coded list of "the fields inside
+   * the disclosure": moving a control in or out of it then needs no second edit
+   * here, and cannot silently desynchronise.
+   *
+   * The element is driven imperatively because this stays a BARE native
+   * `<details>` (see the comment on it below) with no `open` prop for React to
+   * own — nothing will re-close it behind us.
+   */
+  function revealAndFocus(id: MetadataFieldId) {
+    const control = focusTargetFor(id);
+    if (!control) return;
+    if (detailsRef.current?.contains(control)) {
+      detailsRef.current.open = true;
+    }
+    control.focus();
+    control.scrollIntoView({ block: "center" });
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -512,6 +605,14 @@ export function MetadataStep({
   const categoryHasNoOptions = categories.length === 0;
 
   const fieldErrors: Record<MetadataFieldId, WizardErrorCode | null> = {
+    // ⚠️ NO CLIENT RULE, BY DESIGN — and that is not the same as "no field".
+    // The radio group is defaulted and uncleanable and the codename is a
+    // `<select>` over a closed list, so neither server arm is reachable by any
+    // value THIS form can produce. Both keep their slot because a refusal that
+    // arrives from the server still has to land somewhere, and 153.2-05 lands
+    // it here rather than on a full-page envelope. See `MetadataFieldId`.
+    capitalOwnership: null,
+    name: null,
     description: validateDescription(description),
     // The server's rule is `isUuid(category_id)`; the client's honest mirror is
     // "a category is selected", since the <select> guarantees the shape of
@@ -584,27 +685,9 @@ export function MetadataStep({
     // this predicate would let a two-character description POST — the exact
     // defect WIZFORM-01 exists to close — so the two move together, always.
     if (invalidFields.length > 0) {
-      const control = fieldRefs[invalidFields[0]!].current;
-      if (control) {
-        // ⛔ OPEN FIRST, FOCUS SECOND. AUM and max capacity live inside the
-        // collapsed "More details (optional)" disclosure, so the first invalid
-        // control is regularly one the user cannot see. Focusing it while the
-        // disclosure is shut puts the caret somewhere off-screen and leaves the
-        // page looking as if nothing happened.
-        //
-        // Containment is tested rather than a hard-coded list of "the fields
-        // inside the disclosure": moving a control in or out of the disclosure
-        // then needs no second edit here, and cannot silently desynchronise.
-        //
-        // The element is driven imperatively because this stays a BARE native
-        // <details> (see the comment on it below) with no `open` prop for React
-        // to own — nothing will re-close it behind us.
-        if (detailsRef.current?.contains(control)) {
-          detailsRef.current.open = true;
-        }
-        control.focus();
-        control.scrollIntoView({ block: "center" });
-      }
+      // The reveal-and-focus orchestration is shared with the server-refusal
+      // path (see `revealAndFocus` above) — one behaviour, one implementation.
+      revealAndFocus(invalidFields[0]!);
       return;
     }
     onComplete({
@@ -699,19 +782,44 @@ export function MetadataStep({
             read, and this one decides whether the strategy can ever hold
             money. */}
         {showCapitalQuestion && (
-          <CapitalOwnershipRadioGroup
-            label="Whose capital is in this key?"
-            value={capitalOwnership}
-            onChange={setCapitalOwnership}
-          />
+          // The wrapper exists ONLY to give the field a ref: a radio group has
+          // no single element that is both the field and a focus target, so
+          // `focusTargetFor` resolves this container to its first radio.
+          <div ref={capitalOwnershipRef}>
+            <CapitalOwnershipRadioGroup
+              label={FIELD_LABELS.capitalOwnership}
+              value={capitalOwnership}
+              onChange={setCapitalOwnership}
+              error={messageFor("capitalOwnership")}
+            />
+          </div>
         )}
 
-        <Select
-          label="Strategy codename"
-          options={STRATEGY_NAMES.map((n) => ({ value: n, label: n }))}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-        />
+        {/* 153.2-05 — the codename moved off the `Select` primitive onto
+            `Field` + a bare <select>, for the same reason the category did in
+            153.2-02: the primitive colours its border from a JS expression and
+            never writes `aria-invalid`, so it can paint a control red while
+            assistive technology cannot tell (FLAG-1). This field carries no
+            CLIENT rule — the options are a closed list — but it does carry a
+            SERVER one, and a server refusal now renders at the field instead of
+            as a full-page envelope. `Field` wires `htmlFor`↔`id` exactly as the
+            primitive did, so `getByLabelText("Strategy codename")` addresses
+            this control unchanged. */}
+        <Field label={FIELD_LABELS.name} error={messageFor("name")}>
+          <select
+            ref={nameRef}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onBlur={() => markBlurred("name")}
+            className={VALIDATED_CONTROL_CLASS}
+          >
+            {STRATEGY_NAMES.map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+        </Field>
 
         {/* Phase 53 / APPLY-02 — the description is wrapped in Field so the
             inline error wires aria-invalid + aria-describedby (the a11y the
