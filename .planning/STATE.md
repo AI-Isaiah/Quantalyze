@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
-stopped_at: "153.1 + 153.3 COMPLETE and closed. 153.3: /code-review high (10 findings) -> 4 fixed -> gsd-verify-work gaps_found 29/30 (stale comment, now corrected). 153.1: gsd-code-review (1 blocker + 6 warnings) -> all 7 fixed -> OWED: gsd-verify-work 153.1, and a re-review of 153.3's fixes. Gates: py 374 -k mt5 / 5084 full / mypy clean; ts 462 green / tsc clean. NEXT: 153.2 (inherits context.venue, the 5 KNOWN_CODELESS rejections, seam-citations) then 153.4, then 153.5."
-last_updated: "2026-08-09T06:55:31.248Z"
+stopped_at: "Completed 153.2-01-PLAN.md (WIZFORM-01 description field). NEXT: 153.2-02 (category/AUM/capacity mirrors + first-invalid-control focus orchestration)."
+last_updated: "2026-08-09T08:05:43.656Z"
 last_activity: 2026-08-09
 progress:
   total_phases: 14
   completed_phases: 8
   total_plans: 59
-  completed_plans: 49
+  completed_plans: 50
   percent: 57
 ---
 
@@ -55,9 +55,9 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: 153.1 (WIZFORM-CODES) -- 153.3 already COMPLETE on the same branch
-Plan: 6 of 06 complete
-Status: Ready to execute
+Phase: 153.2 (WIZFORM-FIELD) -- 153.1 and 153.3 already COMPLETE on the same branch
+Plan: 1 of 05 complete
+Status: In progress
 Last activity: 2026-08-09
 
 ### Phase 142.1 scope (inserted 2026-08-02)
@@ -381,7 +381,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [████████░░] 83%
+Progress: [█████████░] 85%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -485,6 +485,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 153.1 P04 | 80m | 3 tasks | 2 files |
 | Phase 153.1 P05 | 55m | 3 tasks | 4 files |
 | Phase 153.1 P06 | 75min | 2 tasks | 3 files |
+| Phase 153.2 P01 | 27 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -538,6 +539,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 153.1]: 153.1-05: finalize-wizard now derives 25 emitting sites (was 0), 19 distinct codes, KNOWN_FINALIZE_CODES 10 -> 21. CIRCUIT_OPEN is emitted and correctly NOT in the roster — 153.1-06's coverage assertion MUST map through SEAM_CODE_TO_WIZARD_CODE or it reports a false miss forever.
 - [Phase 153.1]: 153.1-06: the wizard coverage law consults SEAM_CODE_TO_WIZARD_CODE before membership — CIRCUIT_OPEN is a wire code, correctly absent from KNOWN_FINALIZE_CODES
 - [Phase 153.1]: 153.1-06: WIZFORM-02 NOT marked complete — five finalize-wizard rejections still answer code-less and render UNKNOWN (DEF-153.1-06-A, owner 153.2)
+- [Phase 153.2]: 153.2-01: the description bound is mirrored client-side from MAGNITUDE_CAPS, and both bounds measure the RAW value.length — exactly what finalize-wizard measures; .trim() is used solely for the emptiness test, where the client is deliberately stricter than the server
+- [Phase 153.2]: 153.2-01: noValidate on the MetadataStep form, keeping required on the control for AT semantics — native constraint validation was intercepting the EMPTY refusal state with a browser bubble, so only two of three refusal states would have reached the inline message
+- [Phase 153.2]: 153.2-01: the submit disabled prop is deleted outright, not replaced by aria-disabled — the step performs no write of its own, so there is no in-flight state to guard; a dead button names no field, which is the D-13 mechanism
+- [Phase 153.2]: 153.2-01: WIZFORM-01 deliberately NOT marked complete in REQUIREMENTS.md — this plan closes only the DESCRIPTION field; 153.2-02 owns the category/AUM/capacity mirrors and the first-invalid-control focus, 153.2-03 owns AllocateDialog (D-12), 153.2-05 owns server-side field-level routing. Same call as 153.1-06 made for WIZFORM-02
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1240,8 +1245,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-09T06:55:31.237Z
-**Stopped At:** 153.1 + 153.3 COMPLETE and closed. 153.3: /code-review high (10 findings) -> 4 fixed -> gsd-verify-work gaps_found 29/30 (stale comment, now corrected). 153.1: gsd-code-review (1 blocker + 6 warnings) -> all 7 fixed -> OWED: gsd-verify-work 153.1, and a re-review of 153.3's fixes. Gates: py 374 -k mt5 / 5084 full / mypy clean; ts 462 green / tsc clean. NEXT: 153.2 (inherits context.venue, the 5 KNOWN_CODELESS rejections, seam-citations) then 153.4, then 153.5.
+**Last Date:** 2026-08-09T08:05:06.143Z
+**Stopped At:** Completed 153.2-01-PLAN.md (WIZFORM-01 description field). NEXT: 153.2-02 (category/AUM/capacity mirrors + first-invalid-control focus orchestration).
 **Resume File:** None
 **Next step:** 153.3 is COMPLETE (6/6); 153.1 is 5/6 (plan 01 Wave-0 gates, plan 02 the capability foundation, plan 03 the WIZFORM-03 class filter, plan 04 the ten new codes, plan 05 the honest codes on finalize-wizard -- all green at HEAD). Execute **153.1-06** next, then 153.2 -> 153.4 on `feat/v1.17-153-wizform`. ⛔ WIZFORM-05 stays unchecked until 153.4 closes the client leg. ⛔ **WIZFORM-03 stays unchecked until 153.2/153.4** -- the mechanism and the capability record exist and are pinned, but NOT ONE `buildEnvelope` call site passes `venue` or `surface`, so an MT5 user still reads "switch to a different exchange" in production. ⛔ **WIZFORM-02 stays unchecked until 153.1-06** -- plan 05 landed the emitting half (25 sites, 19 distinct codes, roster 21, EMITTED-NOT-IN-ROSTER empty), but nothing ASSERTS that reconciliation yet, so a twelfth arm added without a code would ship silently. ⭐ 153.1-06 must map through `SEAM_CODE_TO_WIZARD_CODE` before comparing against the roster, or it reports `CIRCUIT_OPEN` as an uncovered emitter forever.
 
