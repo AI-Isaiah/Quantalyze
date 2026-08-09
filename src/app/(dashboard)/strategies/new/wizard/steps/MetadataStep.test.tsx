@@ -13,7 +13,7 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { MetadataStep, type MetadataDraft } from "./MetadataStep";
-import { WIZARD_ERROR_COPY } from "@/lib/wizardErrors";
+import { WIZARD_ERROR_COPY, formatKeyError } from "@/lib/wizardErrors";
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 
 // Supabase client mock: MetadataStep does
@@ -286,7 +286,24 @@ describe("[H-0191] MetadataStep", () => {
     );
   });
 
-  // ── Phase 53 / APPLY-02 — inline per-field validation surfacing ──────────
+  // ── Phase 53 / APPLY-02 + 153.2 — inline per-field validation surfacing ───
+  //
+  // ⚠️ These rows assert against `formatKeyError(...).title` imported from the
+  // copy module, never a hand-typed sentence. A hand-typed oracle turns a copy
+  // edit into a red test AND, worse, cannot detect the field rendering the
+  // WRONG entry — it only proves some string matched some other string.
+  //
+  // 153.2 moved the field from the entry's `cause` (a paragraph) to its
+  // `title` (one sentence), so every `.cause` oracle below became a `.title`
+  // one in the same commit.
+
+  /** The id `aria-describedby` reserves for the error line, per Field's wiring. */
+  function errorNodeFor(control: Element): HTMLElement | null {
+    const ids = (control.getAttribute("aria-describedby") ?? "").split(/\s+/);
+    const errorId = ids.find((id) => id.endsWith("-error"));
+    return errorId ? document.getElementById(errorId) : null;
+  }
+
   it("[APPLY-02] blur on an empty description surfaces the wizardErrors copy through Field a11y", async () => {
     render(<MetadataStep {...baseProps} />);
     const description = (await screen.findByLabelText(
@@ -295,6 +312,7 @@ describe("[H-0191] MetadataStep", () => {
 
     // No error before interaction.
     expect(description.getAttribute("aria-invalid")).not.toBe("true");
+    expect(errorNodeFor(description)).toBeNull();
 
     fireEvent.blur(description);
 
@@ -302,16 +320,170 @@ describe("[H-0191] MetadataStep", () => {
     await waitFor(() =>
       expect(description.getAttribute("aria-invalid")).toBe("true"),
     );
-    const describedBy = description.getAttribute("aria-describedby");
-    expect(describedBy).toBeTruthy();
 
     // The described element exists and carries the EXISTING wizardErrors copy
-    // (not a new inline string) — message id matches aria-describedby.
-    const messageNode = document.getElementById(describedBy!);
+    // (not a new inline string) — message id is the one aria-describedby names.
+    const messageNode = errorNodeFor(description);
     expect(messageNode).not.toBeNull();
     expect(messageNode!.textContent).toBe(
+      formatKeyError("METADATA_DESCRIPTION_REQUIRED").title,
+    );
+  });
+
+  it("[153.2] the description field renders the copy TITLE, never the paragraph", async () => {
+    // The specific regression this guards: a field message that is a paragraph
+    // is a field message nobody reads, and `cause` is written for the error
+    // panel ("Nothing was saved, and everything you typed is still on the
+    // form") — sentences that make no sense under a control the user is still
+    // typing into. Asserted as an inequality against the SAME entry so it can
+    // only fail by the field actually reverting.
+    render(<MetadataStep {...baseProps} />);
+    const description = (await screen.findByLabelText(
+      "Description",
+    )) as HTMLTextAreaElement;
+    fireEvent.blur(description);
+
+    await waitFor(() => expect(errorNodeFor(description)).not.toBeNull());
+    const text = errorNodeFor(description)!.textContent;
+    expect(text).toBe(formatKeyError("METADATA_DESCRIPTION_REQUIRED").title);
+    expect(text).not.toBe(
       WIZARD_ERROR_COPY.METADATA_DESCRIPTION_REQUIRED.cause,
     );
+  });
+
+  it("[153.2] a too-short description names the rule AND the user's own count", async () => {
+    // D-13's behavioural bar: the message must say which field, what the rule
+    // is, and where the user currently stands against it. The count is the
+    // length the mirror measured, so the sentence and the guard cannot disagree
+    // about the number.
+    render(<MetadataStep {...baseProps} />);
+    const description = (await screen.findByLabelText(
+      "Description",
+    )) as HTMLTextAreaElement;
+    fireEvent.change(description, { target: { value: "ab" } });
+    fireEvent.blur(description);
+
+    await waitFor(() =>
+      expect(description.getAttribute("aria-invalid")).toBe("true"),
+    );
+    expect(errorNodeFor(description)!.textContent).toBe(
+      formatKeyError("METADATA_DESCRIPTION_TOO_SHORT", { charCount: 2 }).title,
+    );
+  });
+
+  it("[153.2] an over-long description is refused with the upper-bound sentence", async () => {
+    // The third state. Sized one character past MAX so the boundary is the
+    // subject: `> MAX` rejects, `MAX` exactly is accepted (asserted below).
+    const tooLong = "x".repeat(MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS + 1);
+    render(<MetadataStep {...baseProps} />);
+    const description = (await screen.findByLabelText(
+      "Description",
+    )) as HTMLTextAreaElement;
+    fireEvent.change(description, { target: { value: tooLong } });
+    fireEvent.blur(description);
+
+    await waitFor(() =>
+      expect(description.getAttribute("aria-invalid")).toBe("true"),
+    );
+    expect(errorNodeFor(description)!.textContent).toBe(
+      formatKeyError("METADATA_DESCRIPTION_TOO_LONG", {
+        charCount: tooLong.length,
+      }).title,
+    );
+  });
+
+  it("[153.2] a description at exactly the upper bound is accepted", async () => {
+    // Pins the inclusive boundary the copy claims ("or fewer") and the server
+    // enforces (`> MAX` rejects). Without this row the too-long test above is
+    // satisfied by an off-by-one that refuses a legal 5,000-character
+    // description — a silent tightening of a stated rule.
+    const onComplete = vi.fn();
+    render(<MetadataStep {...baseProps} onComplete={onComplete} />);
+    const select = (await screen.findByLabelText("Category")) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe("cat-aaa"));
+
+    const atMax = "x".repeat(MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS);
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: atMax },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /review and submit/i }));
+
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("[153.2] typing into a never-blurred field stays silent", async () => {
+    // The silence rule. Turning a field red while the user is still typing the
+    // first character teaches them to ignore red, which is the failure mode
+    // that makes every later message worthless.
+    render(<MetadataStep {...baseProps} />);
+    const description = (await screen.findByLabelText(
+      "Description",
+    )) as HTMLTextAreaElement;
+
+    fireEvent.change(description, { target: { value: "A" } });
+
+    expect(description.getAttribute("aria-invalid")).not.toBe("true");
+    expect(errorNodeFor(description)).toBeNull();
+  });
+
+  it("[153.2] the message and the red border clear LIVE, with no second blur", async () => {
+    // ⭐ The live-clear rule. Reveal at two characters, then type up to a valid
+    // length WITHOUT blurring again: the sentence and the aria-derived border
+    // must both go. A message latched into state on blur satisfies every other
+    // row in this file and fails only here — which is exactly why this row
+    // exists. It also proves the count tracks keystrokes on the way up.
+    render(<MetadataStep {...baseProps} />);
+    const description = (await screen.findByLabelText(
+      "Description",
+    )) as HTMLTextAreaElement;
+
+    fireEvent.change(description, { target: { value: "ab" } });
+    fireEvent.blur(description);
+    await waitFor(() =>
+      expect(description.getAttribute("aria-invalid")).toBe("true"),
+    );
+
+    // Still short, one character longer — the count in the sentence moves.
+    fireEvent.change(description, { target: { value: "abc" } });
+    await waitFor(() =>
+      expect(errorNodeFor(description)!.textContent).toBe(
+        formatKeyError("METADATA_DESCRIPTION_TOO_SHORT", { charCount: 3 })
+          .title,
+      ),
+    );
+
+    // Now valid — no blur, no submit, no click.
+    fireEvent.change(description, {
+      target: { value: "A market-neutral basis strategy." },
+    });
+    await waitFor(() =>
+      expect(description.getAttribute("aria-invalid")).not.toBe("true"),
+    );
+    expect(errorNodeFor(description)).toBeNull();
+  });
+
+  it("[153.2] the pre-emptive hint is visible and referenced by aria-describedby", async () => {
+    // The cheapest fix in the phase: state the rule BEFORE the user can break
+    // it. Composed from MIN_DESCRIPTION_CHARS, so this reads the constant
+    // rather than a typed sentence — a retune of the bound moves the hint, the
+    // error copy and the guard together or the suite reds.
+    render(<MetadataStep {...baseProps} />);
+    const description = (await screen.findByLabelText(
+      "Description",
+    )) as HTMLTextAreaElement;
+
+    const ids = (description.getAttribute("aria-describedby") ?? "").split(
+      /\s+/,
+    );
+    const hintId = ids.find((id) => id.endsWith("-hint"));
+    expect(hintId).toBeTruthy();
+    const hintNode = document.getElementById(hintId!);
+    expect(hintNode).not.toBeNull();
+    expect(hintNode!.textContent).toBe(
+      `At least ${MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS} characters.`,
+    );
+    // Visible, not a tooltip: it is in the document and carries no aria-hidden.
+    expect(hintNode!.getAttribute("aria-hidden")).toBeNull();
   });
 
   it("[APPLY-02] the per-field description message is NOT role=alert (envelope owns the summary)", async () => {
@@ -320,7 +492,7 @@ describe("[H-0191] MetadataStep", () => {
     fireEvent.blur(description);
 
     const message = await screen.findByText(
-      WIZARD_ERROR_COPY.METADATA_DESCRIPTION_REQUIRED.cause,
+      formatKeyError("METADATA_DESCRIPTION_REQUIRED").title,
     );
     expect(message.getAttribute("role")).not.toBe("alert");
     expect(message.closest('[role="alert"]')).toBeNull();
@@ -333,14 +505,14 @@ describe("[H-0191] MetadataStep", () => {
     )) as HTMLTextAreaElement;
     fireEvent.blur(description);
     await screen.findByText(
-      WIZARD_ERROR_COPY.METADATA_DESCRIPTION_REQUIRED.cause,
+      formatKeyError("METADATA_DESCRIPTION_REQUIRED").title,
     );
 
     fireEvent.change(description, { target: { value: "A real description." } });
     await waitFor(() =>
       expect(
         screen.queryByText(
-          WIZARD_ERROR_COPY.METADATA_DESCRIPTION_REQUIRED.cause,
+          formatKeyError("METADATA_DESCRIPTION_REQUIRED").title,
         ),
       ).toBeNull(),
     );

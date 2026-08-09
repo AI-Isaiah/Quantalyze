@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Field } from "@/components/ui/Field";
-import { WIZARD_ERROR_COPY, type WizardErrorCode } from "@/lib/wizardErrors";
+import { formatKeyError, type WizardErrorCode } from "@/lib/wizardErrors";
 import {
   STRATEGY_NAMES,
   STRATEGY_TYPES,
@@ -68,6 +68,18 @@ function validateDescription(value: string): WizardErrorCode | null {
   }
   return null;
 }
+
+/**
+ * The always-visible, pre-emptive line under the description control (153.2 /
+ * UI-SPEC Surface 2). The cheapest fix in the phase: a user who is told the
+ * rule before they type mostly never meets the error at all.
+ *
+ * ⛔ Composed from `MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS`, not typed (FLAG-5).
+ * The spec forbids a literal duration in copy because copy and budget must not
+ * be free to drift; a character bound is the same thing wearing a different
+ * unit, and this one already drifted once.
+ */
+const DESCRIPTION_HINT = `At least ${MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS} characters.`;
 
 export interface MetadataDraft {
   name: string | null;
@@ -253,13 +265,34 @@ export function MetadataStep({
   // mirror of the server rule (Phase 153.2 / WIZFORM-01). It is the same
   // function `handleSubmit` refuses on, so the message the user reads and the
   // reason the submit was refused can never disagree. Copy comes from
-  // wizardErrors.ts (canonical home) — never an invented inline string. The
-  // message shows on blur or after a submit attempt; it is NOT role="alert"
-  // (the envelope owns that).
+  // wizardErrors.ts (canonical home) — never an invented inline string, and it
+  // is NOT role="alert" (the envelope owns that).
+  //
+  // ⛔ The TITLE, not the paragraph. This used to render the entry's `cause` —
+  // a multi-sentence paragraph under a form control, which is where a user
+  // stops reading. A field message is one declarative sentence naming the rule
+  // and the threshold; the paragraph belongs to the error panel.
+  //
+  // `charCount` is the length the mirror itself measured, so the number in the
+  // sentence and the number the guard compared are the same number by
+  // construction. `formatKeyError` appends the tail only for the two bound
+  // codes and only when given a count, so the empty-state sentence stays
+  // count-free.
+  //
+  // REVEAL TIMING, all four events, from these two flags plus the fact that
+  // this is derived during render rather than latched into state:
+  //   • typing into a never-blurred field  → silent (neither flag set);
+  //   • blur                               → that field's message appears;
+  //   • change while a message is showing  → LIVE re-evaluated, so the count
+  //     tracks every keystroke and both the sentence and the aria-derived red
+  //     border vanish the instant the value becomes valid, with no second blur;
+  //   • submit attempted                   → revealed regardless of blur.
+  // ⚠️ Latching the code into state on blur would break the third event and is
+  // the shape to avoid if this ever grows.
   const descriptionCode = validateDescription(description);
   const showDescriptionError =
     (descriptionBlurred || submitAttempted) && descriptionCode
-      ? WIZARD_ERROR_COPY[descriptionCode].cause
+      ? formatKeyError(descriptionCode, { charCount: description.length }).title
       : undefined;
 
   function handleSubmit(e: React.FormEvent) {
@@ -391,7 +424,11 @@ export function MetadataStep({
             inline error wires aria-invalid + aria-describedby (the a11y the
             bare Textarea primitive does NOT do). Copy is the existing
             wizardErrors.ts string; the message is NOT role="alert". */}
-        <Field label="Description" error={showDescriptionError}>
+        <Field
+          label="Description"
+          hint={DESCRIPTION_HINT}
+          error={showDescriptionError}
+        >
           <textarea
             ref={descriptionRef}
             value={description}
