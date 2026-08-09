@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: planning
-stopped_at: "Phase 153 split 4 ways and fully planned (22 plans / 41 tasks). 153.3 waves 1-5 LANDED and independently gated (pytest -k mt5 348 passed / full suite 5058, mypy --strict clean on 88 files, MT5_REQUEST_TIMEOUT_S zero-diff across all five waves). Wave 5 = D-32/D-27/D-33: every MT5 round-trip now emits stage + duration_ms on BOTH outcomes, the lease queue wait is timed apart from the terminal work, every validate ends in exactly one of ten categorical outcomes, and the runbook pins the single-replica invariant, the terminal trade-disable step and the PROVISIONAL budget (owner Phase 155). No timeout was tuned. Next: wave 6 (D-35), then 153.1 -> 153.2 -> 153.4."
-last_updated: "2026-08-09T02:45:08.593Z"
-last_activity: 2026-08-09 -- Phase 153.3 wave 5 complete
+stopped_at: "153.3 wave 6 (D-35) LANDED — Phase 153.3 COMPLETE (6/6 waves). The mt5.shutdown() class is closed at the SINK: Mt5Client.close() no longer calls it, which fixed aclose_exchange's mt5 arm, ingestion/mt5.py's adapter finally and both operator scripts with ZERO call-site edits; close()/release() collapsed onto one _teardown_transport(); restart() keeps the ONE deliberate lease-held teardown and no longer leaks its stale rpyc socket. tests/test_mt5_shutdown_roster.py DERIVES the roster from source (ast, 110 files) with hand-typed pins, vacuity floors and 8 self-tests; mutations M1 (a shutdown added to close) and M2 (a restart moved out of its lease) were RUN and observed RED. All nine 'session never leaks' assertions re-pointed, none deleted. Gates: -k mt5 352 passed / full suite 5074 passed, 96 skipped; mypy --strict clean on 88 files; MT5_REQUEST_TIMEOUT_S zero-diff across all six waves. WIZFORM-05 stays UNCHECKED — the client leg (D-26 120000ms) is Phase 153.4's. Next: 153.1 -> 153.2 -> 153.4."
+last_updated: "2026-08-09T03:12:33.952Z"
+last_activity: 2026-08-07 -- Phase 152 execution started
 progress:
   total_phases: 13
-  completed_phases: 6
+  completed_phases: 7
   total_plans: 59
-  completed_plans: 42
-  percent: 46
+  completed_plans: 43
+  percent: 54
 ---
 
 # Project State — Quantalyze
@@ -381,7 +381,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [███████░░░] 71%
+Progress: [███████░░░] 73%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -478,6 +478,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 153.3 P03 | 75 min | 3 tasks | 8 files |
 | Phase 153.3 P04 | ~70 min | 2 tasks | 5 files |
 | Phase 153.3 P05 | 85 min | 3 tasks | 5 files |
+| Phase 153.3 P06 | ~70 min | 3 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -1218,10 +1219,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-09T02:43:52.653Z
-**Stopped At:** Phase 153 split 4 ways and fully planned (22 plans / 41 tasks). 153.3 waves 1-5 LANDED and independently gated (pytest -k mt5 348 passed / full suite 5058, mypy --strict clean on 88 files, MT5_REQUEST_TIMEOUT_S zero-diff across all five waves). Wave 5 = D-32/D-27/D-33: every MT5 round-trip now emits stage + duration_ms on BOTH outcomes, the lease queue wait is timed apart from the terminal work, every validate ends in exactly one of ten categorical outcomes, and the runbook pins the single-replica invariant, the terminal trade-disable step and the PROVISIONAL budget (owner Phase 155). No timeout was tuned. Next: wave 6 (D-35), then 153.1 -> 153.2 -> 153.4.
+**Last Date:** 2026-08-09T03:12:33.941Z
+**Stopped At:** 153.3 wave 6 (D-35) LANDED — Phase 153.3 COMPLETE (6/6 waves). The mt5.shutdown() class is closed at the SINK: Mt5Client.close() no longer calls it, which fixed aclose_exchange's mt5 arm, ingestion/mt5.py's adapter finally and both operator scripts with ZERO call-site edits; close()/release() collapsed onto one _teardown_transport(); restart() keeps the ONE deliberate lease-held teardown and no longer leaks its stale rpyc socket. tests/test_mt5_shutdown_roster.py DERIVES the roster from source (ast, 110 files) with hand-typed pins, vacuity floors and 8 self-tests; mutations M1 (a shutdown added to close) and M2 (a restart moved out of its lease) were RUN and observed RED. All nine 'session never leaks' assertions re-pointed, none deleted. Gates: -k mt5 352 passed / full suite 5074 passed, 96 skipped; mypy --strict clean on 88 files; MT5_REQUEST_TIMEOUT_S zero-diff across all six waves. WIZFORM-05 stays UNCHECKED — the client leg (D-26 120000ms) is Phase 153.4's. Next: 153.1 -> 153.2 -> 153.4.
 **Resume File:** None
-**Next step:** Finish 153.3 waves 5-6, then execute 153.1 → 153.2 → 153.4 on `feat/v1.17-153-wizform`.
+**Next step:** 153.3 is COMPLETE (6/6). Execute 153.1 → 153.2 → 153.4 on `feat/v1.17-153-wizform`. ⛔ WIZFORM-05 stays unchecked until 153.4 closes the client leg.
 
 ⚠️ **Post-land CI state (2026-08-08):** `secret-scan` went RED on main at `e0481411` — a
 false-positive `generic-api-key` hit on the Phase 151 E1 fixture `E1_KEY_DERIV = "e1-key-deriv"`
