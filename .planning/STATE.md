@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
-stopped_at: Completed 153.2-04-PLAN.md (MT5 declarable AND submittable)
+stopped_at: Completed 153.2 — all 5 plans, verifier 25/25 (human_needed, 5 browser items). Next 153.4
 last_updated: "2026-08-09T21:47:07.770Z"
 last_activity: 2026-08-09
 progress:
