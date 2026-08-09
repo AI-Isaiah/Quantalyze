@@ -16,6 +16,12 @@ import {
   type WizardErrorCode,
 } from "./wizardErrors";
 import type { GateFailureCode } from "./strategyGate";
+// 153.1-03 / WIZFORM-03 — the INDEPENDENT registry the class sweeps iterate.
+// The oracle for "which venues are non-substitutable" must not be the copy
+// table under test, and it must not be a hand-listed `["mt5"]` either: a second
+// non-substitutable venue has to be picked up here with no test edit, which is
+// exactly what the class-not-instance mutation checks.
+import { SUPPORTED_EXCHANGES, venueIsSubstitutable } from "@/lib/closed-sets";
 // The dependency-free leaf — the SAME module wizardErrors itself imports, so
 // `instanceof` holds by class identity. Never route this through
 // `@/lib/analytics-client` (whose re-export is wholesale-mocked by 16 route
@@ -2659,5 +2665,231 @@ describe("[142.2-07 / MT5-04] KEY_INVALID_FORMAT split into four honest causes",
     expect(never.title).not.toBe(notYet.title);
     expect(never.cause).not.toBe(notYet.cause);
     expect(notYet.title.toLowerCase()).toContain("yet");
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// Phase 153.1-03 / WIZFORM-03 / D-17 — a remedy that presupposes a fact about
+// the context renders ONLY when the context supports it.
+//
+// ⚠️ WRITTEN OVER THE WHOLE COPY TABLE AND OVER THE WHOLE VENUE ALLOWLIST, and
+// that is the entire point. Three sweeps written over the three codes this plan
+// happened to tag would be the instance-not-class defect moved out of the
+// source and into the test — and the second Falsifiability mutation for this
+// requirement (a SECOND non-substitutable venue, no copy change) exists
+// specifically to tell the two apart.
+//
+// Oracle independence: every expectation below is a hand-typed literal, a
+// hand-typed regex, or an INDEPENDENT registry (`SUPPORTED_EXCHANGES`,
+// `venueIsSubstitutable`). Nothing reads `fixRequires` to build the value it
+// then compares `fixRequires` against.
+// ══════════════════════════════════════════════════════════════════════════
+describe("[153.1-03 / WIZFORM-03] fix[] requirements — the class, not the instances", () => {
+  const ALL_CODES = Object.keys(WIZARD_ERROR_COPY) as WizardErrorCode[];
+
+  /**
+   * HAND-TYPED. Covers all three live phrasings — "switch to a different
+   * exchange", "try a different exchange account" — plus "another venue" for a
+   * bullet nobody has written yet. Deliberately NOT derived from the table: a
+   * pattern built out of the strings it is meant to police matches them by
+   * construction and can never find a fourth one.
+   */
+  const SUBSTITUTION_RE =
+    /switch to a different exchange|different exchange account|another venue/i;
+
+  it("the substitution pattern is CAPABLE of matching — positive control", () => {
+    // Guards the failure this phase has now hit eleven times: a sweep that is
+    // green because its matcher matches nothing at all. `binance` is
+    // substitutable, so the bullet MUST be there for it.
+    expect(
+      formatKeyError("KEY_NETWORK_TIMEOUT", { venue: "binance" }).fix.some((b) =>
+        SUBSTITUTION_RE.test(b),
+      ),
+      "The substitution regex found nothing even for a substitutable venue. " +
+        "The sweep below is then vacuously green for every venue.",
+    ).toBe(true);
+    expect(
+      formatKeyError("KEY_RATE_LIMIT", { venue: "binance" }).fix.some((b) =>
+        SUBSTITUTION_RE.test(b),
+      ),
+    ).toBe(true);
+    expect(
+      formatKeyError("KEY_PROBE_FAILED", { venue: "binance" }).fix.some((b) =>
+        SUBSTITUTION_RE.test(b),
+      ),
+    ).toBe(true);
+  });
+
+  it("SWEEP 1: no non-substitutable venue receives a venue-substitution bullet, for ANY code", () => {
+    const nonSubstitutable = SUPPORTED_EXCHANGES.filter(
+      (venue) => !venueIsSubstitutable(venue),
+    );
+
+    // Non-vacuity floor A — a sweep over an empty venue list is green forever.
+    expect(
+      nonSubstitutable.length,
+      "No venue in SUPPORTED_EXCHANGES answers venueIsSubstitutable === false, " +
+        "so this sweep asserts nothing. Either the capability record lost its " +
+        "mt5 row or the predicate's default inverted (153.1-02).",
+    ).toBeGreaterThanOrEqual(1);
+
+    const offenders: string[] = [];
+    let checked = 0;
+    for (const venue of nonSubstitutable) {
+      for (const code of ALL_CODES) {
+        for (const bullet of formatKeyError(code, { venue }).fix) {
+          checked++;
+          if (SUBSTITUTION_RE.test(bullet)) {
+            offenders.push(`${venue} / ${code}: "${bullet}"`);
+          }
+        }
+      }
+    }
+
+    // Non-vacuity floor B — hand-typed, and deliberately far below the real
+    // count (~180 bullet-checks today) so ordinary table growth does not
+    // touch it, while a table or venue list that collapsed to nothing does.
+    expect(
+      checked,
+      "The loop body barely executed — the table or the venue list is empty.",
+    ).toBeGreaterThan(50);
+
+    expect(
+      offenders,
+      "A venue whose ACCOUNT IS THE VENUE was told to switch venues. That is " +
+        "the unwinnable-remedy class (D-17 / MT5-13): the user cannot act on " +
+        "it, so the panel is asking them to do something impossible. Tag the " +
+        "bullet with a substitutable requirement in WIZARD_ERROR_COPY — do " +
+        "NOT add a per-code branch to formatKeyError. Offenders:",
+    ).toEqual([]);
+  });
+
+  it("SWEEP 2: a bullet that presupposes a surface is SUPPRESSED when no surface is named (Gate B)", () => {
+    let covered = 0;
+    for (const code of ALL_CODES) {
+      const entry = WIZARD_ERROR_COPY[code];
+      const requires = entry.fixRequires;
+      if (requires === undefined) continue;
+      // Driven off fixRequires, not off a list of codes, so a fifth
+      // surface-conditional bullet added later is covered automatically.
+      requires.forEach((req, i) => {
+        if (req === null || req === undefined || req.kind !== "surface") return;
+        covered++;
+        const bullet = entry.fix[i];
+        expect(
+          formatKeyError(code).fix,
+          `${code} bullet ${i} presupposes the "${req.surface}" surface but ` +
+            "rendered with NO surface in context. Fail toward saying less: " +
+            "the live defect was this exact bullet advising a /strategies " +
+            "detour on the connect step, where nothing was being submitted.",
+        ).not.toContain(bullet);
+        expect(
+          formatKeyError(code, { surface: req.surface }).fix,
+          `${code} bullet ${i} did NOT render on the very surface it requires ` +
+            `("${req.surface}") — the requirement suppressed it everywhere, ` +
+            "which is a silent copy deletion, not a gate.",
+        ).toContain(bullet);
+      });
+    }
+    expect(
+      covered,
+      "No entry declares a surface requirement, so this sweep asserts nothing.",
+    ).toBeGreaterThanOrEqual(1);
+  });
+
+  it("SWEEP 3: every fixRequires array is index-aligned to its fix array", () => {
+    const tagged = ALL_CODES.filter(
+      (code) => WIZARD_ERROR_COPY[code].fixRequires !== undefined,
+    );
+
+    // HAND-TYPED FLOOR — the four entries 153.1-03 tags. Never
+    // `tagged.length` compared to something derived from `tagged`.
+    expect(
+      tagged.length,
+      "Fewer than the four entries 153.1-03 tagged carry fixRequires. An " +
+        "entry lost its requirements, which means a venue- or " +
+        "surface-conditional bullet is rendering unconditionally again.",
+    ).toBeGreaterThanOrEqual(4);
+
+    for (const code of tagged) {
+      const entry = WIZARD_ERROR_COPY[code];
+      expect(
+        entry.fixRequires!.length,
+        `${code}: fixRequires is a PARALLEL array — the ONE thing this shape ` +
+          "can silently get wrong. A length mismatch does not throw; it " +
+          "silently shifts every requirement onto the wrong bullet, so a " +
+          "remedy is gated on a condition that belongs to its neighbour. " +
+          "Added a bullet? Add its slot (null = always render).",
+      ).toBe(entry.fix.length);
+    }
+  });
+
+  it("SWEEP 4: every entry WITHOUT fixRequires returns the identical fix array reference", () => {
+    let checked = 0;
+    for (const code of ALL_CODES) {
+      const entry = WIZARD_ERROR_COPY[code];
+      if (entry.fixRequires !== undefined) continue;
+      checked++;
+      expect(
+        formatKeyError(code, { venue: "binance", surface: "connect" }).fix,
+        `${code} has no requirements, so the filter must not run for it at ` +
+          "all. Reference identity — not deep equality — is what proves that: " +
+          "a new array with the same strings would mean the filter DID run " +
+          "and the additive guarantee rests on it happening to agree.",
+      ).toBe(entry.fix);
+    }
+    // Hand-typed floor: ~60 untagged entries today, well clear of 40.
+    expect(
+      checked,
+      "Almost nothing was checked — either the table shrank or nearly every " +
+        "entry became conditional.",
+    ).toBeGreaterThan(40);
+  });
+
+  it("an MT5 user reads the truthful replacement, not merely a shorter list (D-17)", () => {
+    // HAND-TYPED verbatim from the UI-SPEC Gate C row. The replacement must be
+    // a static table string — nothing caller-supplied reaches the envelope
+    // through `context.venue`, which is read ONLY as a lookup key.
+    const REPLACEMENT =
+      "This is your broker account, so there is no other venue to try. If it keeps failing, email security@quantalyze.com with the correlation id below.";
+    for (const code of [
+      "KEY_PROBE_FAILED",
+      "KEY_RATE_LIMIT",
+      "KEY_NETWORK_TIMEOUT",
+    ] as const) {
+      const fix = formatKeyError(code, { venue: "mt5" }).fix;
+      expect(
+        fix,
+        `${code}: a non-substitutable venue got its substitution bullet ` +
+          "removed and NOTHING put in its place. The UI-SPEC asks for copy " +
+          "that states the truth and invents no remedy, not for silence.",
+      ).toContain(REPLACEMENT);
+      expect(fix.length).toBe(2);
+    }
+  });
+
+  it("a ccxt venue — and a caller that names no venue — is byte-identical to HEAD", () => {
+    // HAND-TYPED expected arrays: the pre-plan values. Reading the table for
+    // the expected side would assert only that a string equals itself.
+    const HEAD_TIMEOUT = [
+      "Try again in a moment.",
+      "If it keeps failing, switch to a different exchange or contact support.",
+    ];
+    expect(
+      formatKeyError("KEY_NETWORK_TIMEOUT", { venue: "binance" }).fix,
+    ).toEqual(HEAD_TIMEOUT);
+    expect(formatKeyError("KEY_NETWORK_TIMEOUT").fix).toEqual(HEAD_TIMEOUT);
+    expect(formatKeyError("KEY_RATE_LIMIT", { venue: "okx" }).fix).toEqual([
+      "Wait 60 seconds and try again.",
+      "If it persists, try a different exchange account or contact support.",
+    ]);
+    // An UNKNOWN venue string keeps the incumbent copy too — absence and
+    // unresolved both answer `substitutable` with the predicate's default.
+    expect(
+      formatKeyError("KEY_PROBE_FAILED", { venue: "kraken" }).fix,
+    ).toEqual([
+      "Try again in a moment.",
+      "If it keeps failing, switch to a different exchange or contact support.",
+    ]);
   });
 });
