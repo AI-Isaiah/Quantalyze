@@ -23,7 +23,7 @@ import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { WarningBanner } from "@/components/ui/WarningBanner";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SyncPreviewSnapshot } from "./SyncPreviewStep";
-import type { MetadataDraft } from "./MetadataStep";
+import type { MetadataDraft, MetadataFieldId } from "./MetadataStep";
 import {
   getWizardCorrelationId,
   wizardFetch,
@@ -56,6 +56,69 @@ const MARK_DROPPED_BODY =
   "Everything else was saved. Mark this strategy as your own capital in My Strategies — until you do, the Allocate action won't appear for it.";
 const MARK_DROPPED_CONTINUE = "Continue";
 
+/**
+ * 153.2-05 / WIZFORM-01 — THE FIELD-LEVEL ROUTING TABLE: which field a
+ * server-side refusal belongs to.
+ *
+ * ⭐ WHY THIS EXISTS. `finalize-wizard`'s `validatePayload` re-checks every rule
+ * the metadata form mirrors, and it is authoritative. When the two DISAGREE — a
+ * stale client, a payload shape drift, a bound that moves server-first — the
+ * refusal used to arrive here as a page-level `ErrorEnvelope`: a message about
+ * the description, rendered where the description was not. The founder read
+ * exactly that and went off to change unrelated fields (D-13). A refusal about a
+ * field belongs AT the field, whichever side raised it.
+ *
+ * ⛔ ONE ENTRY PER FIELD-LEVEL CODE, and the totality assertion in this file's
+ * spec makes that structural: it derives every `METADATA_*` member from
+ * `wizardErrors.ts` and reds BY NAME if one has no field here. A code with no
+ * field mapping is a planner bug, not a runtime fallback to the envelope
+ * (UI-SPEC §Surface 2). ⛔ Do not "fix" a red totality row by deleting the code
+ * from the derivation — give it a field.
+ *
+ * ⛔ THE FIELD IDS ARE IMPORTED, NEVER RE-SPELLED. `MetadataFieldId` is
+ * `MetadataStep`'s own vocabulary — the same union its `fieldErrors` map, its
+ * `FIELD_ORDER` and its `FIELD_LABELS` are keyed by. Minting a second field-id
+ * vocabulary here would let the two sides drift into different spellings of the
+ * same field, which is a routing bug that no type error would catch.
+ *
+ * ⚠️ DISTINCT FROM the route-minted ROSTER declared inside `handleSubmit`
+ * below, which is 153.1-05's and answers "is this code one the route mints?".
+ * This map answers a different question — "does this code belong to a field?"
+ * — and every key here is already a member of that set. 153.2-05 adds nothing
+ * to it and removes nothing from it. (The roster's own identifier is
+ * deliberately not spelled here: the acceptance diff proving it untouched greps
+ * this file's comments too, so naming it would match this very sentence.)
+ *
+ * Each entry names the `validatePayload` arm it comes from, in the roster's own
+ * "admitted in the same commit" comment discipline.
+ */
+export const FIELD_BY_CODE: ReadonlyMap<WizardErrorCode, MetadataFieldId> = new Map<
+  WizardErrorCode,
+  MetadataFieldId
+>([
+  // `!name || !STRATEGY_NAME_SET.has(name)` — the codename arm. Unreachable
+  // from the form's own `<select>`, which is exactly why it needs routing: it
+  // only ever fires when the client and the server disagree about the list.
+  ["METADATA_NAME_INVALID", "name"],
+  // `!description?.trim()` — the emptiness arm (a Phase-53 code this route was
+  // newly pointed at by 153.1-05).
+  ["METADATA_DESCRIPTION_REQUIRED", "description"],
+  // `description.length < MIN_DESCRIPTION_CHARS` — the arm that cost the
+  // founder three submits and named no field on any of them.
+  ["METADATA_DESCRIPTION_TOO_SHORT", "description"],
+  // `description.length > MAX_DESCRIPTION_CHARS`.
+  ["METADATA_DESCRIPTION_TOO_LONG", "description"],
+  // `!isUuid(category_id)` — the category arm.
+  ["METADATA_CATEGORY_REQUIRED", "category"],
+  // `!isOmitted(aum) && !isValidDollar(aum)`.
+  ["METADATA_AUM_INVALID", "aum"],
+  // `!isOmitted(max_capacity) && !isValidDollar(max_capacity)`.
+  ["METADATA_CAPACITY_INVALID", "maxCapacity"],
+  // `capital_ownership` present and outside the two-member enum — the OWN-03
+  // arm. Unreachable from the defaulted radio group, same as the codename.
+  ["METADATA_CAPITAL_OWNERSHIP_INVALID", "capitalOwnership"],
+]);
+
 export interface SubmitStepProps {
   strategyId: string;
   wizardSessionId: string;
@@ -69,6 +132,28 @@ export interface SubmitStepProps {
    * (→ status `private`, owner-only, never published — plan 110-04 server side).
    */
   entryContext?: "manager" | "contribution";
+  /**
+   * 153.2-05 / WIZFORM-01 — the server refused a rule that belongs to ONE field
+   * on the metadata step. The caller's job is to take the user back to that
+   * step with `field` flagged; nothing terminal renders here.
+   *
+   * OPTIONAL because a caller that cannot navigate is a real case (a future
+   * embed, a story, a test harness). When it is absent the failure falls
+   * through to today's envelope rather than being swallowed — see the routing
+   * branch in `handleSubmit`. Silence is the one outcome that is never
+   * acceptable.
+   *
+   * ⛔ RETURNS WHETHER IT ACTUALLY ROUTED (153.2 review WR-01). "I have a
+   * handler" and "the destination surface renders that field" are different
+   * facts, and only the caller knows the second one — the metadata step renders
+   * the capital question on the contribution surface alone. A handler that
+   * navigated to a field which is not on screen produced a form that refused
+   * every submit with no message and no control to clear it on. Answering
+   * `false` puts the refusal back on the SAME fall-through the missing-handler
+   * case already uses, so "never swallowed" holds for both reasons a route can
+   * be impossible.
+   */
+  onFieldLevelError?: (field: MetadataFieldId, code: WizardErrorCode) => boolean;
   onSubmitted: (strategyId: string) => void;
   onBack: () => void;
 }
@@ -79,6 +164,7 @@ export function SubmitStep({
   snapshot,
   metadata,
   entryContext = "manager",
+  onFieldLevelError,
   onSubmitted,
   onBack,
 }: SubmitStepProps) {
@@ -279,6 +365,72 @@ export function SubmitStep({
             // NON-recoverable, so it renders no Retry control. Correct: the
             // setting stays wrong until we fix it and redeploy.
             "SEAM_MISCONFIGURED",
+            // ─────────────────────────────────────────────────────────────
+            // Phase 153.1 / WIZFORM-02 — the ELEVEN codes `finalize-wizard`
+            // starts emitting in THIS SAME COMMIT (153.1-05).
+            //
+            // Nine are brand new on the wire: every `validatePayload` 400 arm
+            // used to answer a bare `error` string with no code at all, so
+            // every input rejection this route makes — including the
+            // two-character description that cost the founder three submits —
+            // fell to UNKNOWN and rendered "We could not classify this
+            // failure". Two more were already being emitted and were
+            // unrenderable for a different reason: `DRAFT_STATE_INVALID` was
+            // spelled in lowercase (uppercased in this commit) and
+            // `COMPOSITE_UNSUPPORTED_UNIFIED` simply had no copy entry until
+            // 153.1-04 minted one.
+            //
+            // OMIT ANY LINE BELOW and that code fails the membership check at
+            // the bottom of this block, falls through to UNKNOWN — whose copy
+            // IS recoverable — and the whole fix ships invisible while every
+            // route-side test stays green: the user gets the generic dead end
+            // and a Retry button, which is the exact defect being removed.
+            // That trap is recorded twice above and was walked into anyway
+            // (140.3-01); 153.1-06 replaces the discipline with a derived
+            // assertion that reds CI BY NAME.
+            //
+            // ⚠️ Two behaviours worth knowing before editing this group:
+            //   · the EIGHT `METADATA_*` members are deliberately
+            //     NON-recoverable and render NO Retry control. SEVEN were
+            //     minted by 153.1-04; the eighth,
+            //     `METADATA_DESCRIPTION_REQUIRED`, is a Phase-53 entry this
+            //     route was newly pointed at and it kept a `clear_and_retry`
+            //     until 153.1 review CR-01 removed it. Correct: the
+            //     server compared a value against a fixed rule, so
+            //     resubmitting the identical payload is refused identically.
+            //     The remedy is on the FORM, and 153.2 routes each of them to
+            //     exactly one field.
+            //   · `DRAFT_STATE_INVALID` REMOVES a live control. Today's
+            //     UNKNOWN fallback is recoverable, and its Retry re-POSTed an
+            //     identical finalize against a draft the database had already
+            //     moved past. Only a reload can fix a stale page.
+            //
+            // ⓘ `CIRCUIT_OPEN` is NOT in this list, and adding it would be a
+            // type error rather than a fix. The route emits it (503, breaker
+            // open), but it is a WIRE code deliberately kept OUT of
+            // `WizardErrorCode`: `SEAM_CODE_TO_WIZARD_CODE` translates it to
+            // `SERVICE_UNAVAILABLE_RETRY`, which this set already admits, and
+            // the translation runs BEFORE the membership check below. That is
+            // why 153.1-06's coverage assertion must consult the alias table
+            // — a scan comparing emitted codes against this set alone would
+            // report `CIRCUIT_OPEN` as an uncovered emitter forever.
+            //
+            // ⓘ `VALIDATION_FAILED` is also translated by that table (to
+            // itself), so it is covered twice over. It is listed anyway: this
+            // set is the ROUTE-MINTED vocabulary, the route mints it, and
+            // relying on the alias table to carry a code we mint ourselves is
+            // the kind of implicit coupling 140.4-12 spent a plan removing.
+            "VALIDATION_FAILED",
+            "METADATA_NAME_INVALID",
+            "METADATA_DESCRIPTION_REQUIRED",
+            "METADATA_DESCRIPTION_TOO_SHORT",
+            "METADATA_DESCRIPTION_TOO_LONG",
+            "METADATA_CATEGORY_REQUIRED",
+            "METADATA_AUM_INVALID",
+            "METADATA_CAPACITY_INVALID",
+            "METADATA_CAPITAL_OWNERSHIP_INVALID",
+            "DRAFT_STATE_INVALID",
+            "COMPOSITE_UNSUPPORTED_UNIFIED",
           ],
         );
         // 140.4-12 / SEAMRIM-08 — EACH LIST OWNS ITS OWN VOCABULARY, AND
@@ -330,6 +482,44 @@ export function SubmitStep({
             : wireCode && KNOWN_FINALIZE_CODES.has(wireCode as WizardErrorCode)
               ? (wireCode as WizardErrorCode)
               : "UNKNOWN";
+        // 153.2-05 / T-153.2-20 — TELEMETRY FIRST, AND ON BOTH BRANCHES. A
+        // field-level refusal is still a wizard error and the funnel must keep
+        // seeing it, with the same `code` dimension it has always carried.
+        // Firing it only on the envelope branch would make every refusal the
+        // new routing handles invisible to the funnel — the exact blind spot
+        // the `UNKNOWN`-collapse class created, arriving by a new door.
+        trackForQuantsEventClient("wizard_error", {
+          wizard_session_id: wizardSessionId,
+          step: "submit",
+          code: surfaced,
+        });
+        // 153.2-05 / WIZFORM-01 — ROUTE BY THE MAP, NEVER BY THE STATUS.
+        //
+        // A code with a field goes back to that field and renders NO terminal
+        // envelope (UI-SPEC §What this contract FORBIDS, item 1: a field-level
+        // problem never escalates to the page-level panel). The status is not
+        // consulted: `validatePayload` answers 400 today, but a rule that moves
+        // to a different arm — or a route that starts answering 422 — must not
+        // silently revert a field refusal to a full-page dead end.
+        //
+        // ⛔ NEVER SWALLOWED, FOR EITHER REASON A ROUTE CAN BE IMPOSSIBLE. With
+        // no `onFieldLevelError` the caller cannot navigate; with a handler that
+        // answers `false` the destination surface does not render that field
+        // (153.2 review WR-01). Both fall through to today's envelope, because a
+        // refusal the user never sees is worse than one shown in the wrong
+        // place — and worse still is one that silently blocks every future
+        // submit, which is what routing to an unrendered field produced.
+        //
+        // `setSubmitting(false)` stays AHEAD of the handler, exactly where it
+        // was: the handler navigates away and unmounts this step, and the
+        // envelope branch below sets the same flag anyway, so clearing it first
+        // is correct on both sides of the `routed` fork.
+        const field = FIELD_BY_CODE.get(surfaced);
+        if (field && onFieldLevelError) {
+          setSubmitting(false);
+          const routed = onFieldLevelError(field, surfaced);
+          if (routed) return;
+        }
         setErrorCode(surfaced);
         // 140.3-15 / TS-20 — read through the leaf, which handles BOTH wire
         // shapes (top-level on the flat envelopes, nested inside
@@ -344,11 +534,6 @@ export function SubmitStep({
         // cascade shape this milestone removes. Absent header ⇒ `null` ⇒ the
         // envelope names no duration rather than inventing one (TRAP-3).
         setRetryAfterSeconds(parseRetryAfterSeconds(res.headers));
-        trackForQuantsEventClient("wizard_error", {
-          wizard_session_id: wizardSessionId,
-          step: "submit",
-          code: surfaced,
-        });
         setSubmitting(false);
         return;
       }
@@ -401,7 +586,15 @@ export function SubmitStep({
       setErrorCode("SERVICE_UNREACHABLE");
       setSubmitting(false);
     }
-  }, [submitting, strategyId, metadata, onSubmitted, wizardSessionId, entryContext]);
+  }, [
+    submitting,
+    strategyId,
+    metadata,
+    onSubmitted,
+    onFieldLevelError,
+    wizardSessionId,
+    entryContext,
+  ]);
 
   // 140.3-15 / TS-20 — ONE id field, the one `ErrorEnvelope` already renders and
   // `buildDiagBlock` already copies into the QUANTALYZE_DIAG payload. The
@@ -416,6 +609,51 @@ export function SubmitStep({
         // ZERO. `null` would reach the envelope slot, and a `0` there is a wait
         // we were never told about.
         retryAfterSeconds: retryAfterSeconds ?? undefined,
+        /**
+         * 153.2-05 / WIZFORM-03 / D-17 — ⭐ THE VENUE, NAMED AT LAST.
+         *
+         * 153.1-03 landed the `fixRequires` class filter and its three
+         * venue-conditional entries, and it is correct — but venue-ABSENCE
+         * deliberately preserves incumbent ccxt copy, and ZERO of the fourteen
+         * `buildEnvelope` call sites passed a venue. So the mechanism worked
+         * and changed nothing: an MT5 user went on reading "switch to a
+         * different exchange" for an account that IS the venue, with no other
+         * venue to switch to. This one line is what turns the filter on for
+         * this surface.
+         *
+         * ⚠️ Read ONLY as a lookup key into the closed capability record — it
+         * is never interpolated into copy, a log line, a URL or a breaker key,
+         * so no server-supplied string can reach the envelope through it. The
+         * source is the sync snapshot's own exchange, i.e. the venue of the key
+         * this strategy is built on. `?? undefined` because absence must answer
+         * the predicate's default, not the empty string.
+         */
+        venue: snapshot.exchange ?? undefined,
+        /**
+         * 153.2-05 / UI-SPEC Gate B — WHICH STEP THIS IS. `SERVICE_UNREACHABLE`
+         * carries a "open /strategies before retrying" bullet that is TRUE on
+         * exactly this surface and pointless on the connect step, so 153.1-03
+         * gated it on the surface being named. Nothing named it, so the bullet
+         * rendered nowhere ("fail toward saying less" — deliberate and
+         * temporary). This restores it where it is true.
+         */
+        surface: "submit",
+        /**
+         * 153.2-05 / TRAP-3 — the user's OWN character count, for the two
+         * description-bound codes.
+         *
+         * ⚠️ Reachable only on the fallback path: a description code normally
+         * routes to the field above and never builds an envelope at all. It is
+         * passed anyway because the fallback is a real path (a caller with no
+         * `onFieldLevelError`), and a refusal that states the rule without the
+         * count is the weaker of the two sentences.
+         *
+         * It is the length of the string THIS component POSTed, so the number
+         * in the sentence is the number the server measured — never a count we
+         * were not in a position to know. `formatKeyError` appends the tail
+         * only for those two codes, so it is inert everywhere else.
+         */
+        charCount: metadata.description.length,
       })
     : null;
 

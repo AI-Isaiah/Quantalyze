@@ -10,7 +10,13 @@ import { WizardChrome, WIZARD_STEPS_CSV } from "./WizardChrome";
 import { type ConnectKeySuccess } from "./steps/ConnectKeyStep";
 import { MultiKeyConnectStep } from "./steps/MultiKeyConnectStep";
 import { SyncPreviewStep, type SyncPreviewSnapshot } from "./steps/SyncPreviewStep";
-import { MetadataStep, type MetadataDraft } from "./steps/MetadataStep";
+import {
+  MetadataStep,
+  metadataFieldIsRendered,
+  type MetadataDraft,
+  type MetadataFieldId,
+} from "./steps/MetadataStep";
+import type { WizardErrorCode } from "@/lib/wizardErrors";
 import { canonicalizeExchangeList } from "@/lib/constants";
 import { SubmitStep } from "./steps/SubmitStep";
 import { ReviewStep } from "./steps/ReviewStep";
@@ -155,6 +161,11 @@ export function WizardClient({
   // passes `sourceOverride` instead (Pitfall 3). Manager mode is unchanged.
   const searchParams = useSearchParams();
   const isContribution = entryContext === "contribution";
+  // ONE expression, read by BOTH the prop that decides the render and the
+  // routing guard that decides whether a server refusal on that field is
+  // deliverable (153.2 review WR-01). Two spellings of this fact is how the
+  // guard and the render drift into disagreeing.
+  const showCapitalQuestion = isContribution;
 
   // Phase 15: ?source=csv branch detection. Default 'api' for back-compat.
   // The query param is read once at mount; tab navigation changes are not
@@ -292,6 +303,27 @@ export function WizardClient({
   // the API branch's metadataDraft, but populated by the CSV-only user
   // typing instead of detection from synced trades.
   const [csvMetadataDraft, setCsvMetadataDraft] = useState<MetadataDraft | null>(null);
+
+  /**
+   * 153.2-05 / WIZFORM-01 — THE HANDOFF. A refusal `finalize-wizard` raised
+   * about one metadata field, carried back to the step that owns that field.
+   *
+   * ⚠️ This client is the only owner of `step`, which is why the routing has to
+   * land here rather than inside `SubmitStep`: taking the user to the field
+   * means a step change, and a step change means this component.
+   *
+   * ⛔ `metadataDraft` IS NOT RESET (UI-SPEC Surface 3, Gate D). The user is
+   * returned to a POPULATED form with one field flagged — never to a blank one.
+   * A form that loses its contents on a validation failure is a worse outcome
+   * than the envelope this replaces.
+   *
+   * Cleared whenever the user leaves the step or completes it, so a stale
+   * refusal cannot outlive the edit that fixed it.
+   */
+  const [metadataServerFieldError, setMetadataServerFieldError] = useState<{
+    field: MetadataFieldId;
+    code: WizardErrorCode;
+  } | null>(null);
 
   // Single post-mount localStorage read. Computes resume overrides from
   // the LS payload (if any) and applies them via setState. `hydrated`
@@ -566,10 +598,43 @@ export function WizardClient({
   // so a backward-then-forward round-trip redoes no work (T-94-16).
   const handleStepSelect = useCallback(
     (key: WizardStepKey) => {
+      // 153.2-05 — a server refusal belongs to the visit it was raised in.
+      // Navigating away from metadata by any route retires it, so a user who
+      // leaves and comes back does not meet a message about a submit they have
+      // since abandoned.
+      if (key !== "metadata") setMetadataServerFieldError(null);
       setStep(key);
       persistPointer(key, strategyId);
     },
     [persistPointer, strategyId],
+  );
+
+  /**
+   * 153.2-05 / WIZFORM-01 — `SubmitStep` resolved a field-level code to the ONE
+   * field it belongs to. Take the user there.
+   *
+   * The `persistPointer` companion is not optional: without it the resume
+   * pointer still reads `submit`, so a reload would drop the user back on a
+   * submit screen carrying a refusal they can neither see nor fix.
+   *
+   * ⛔ ANSWERS `false` RATHER THAN NAVIGATING BLIND (153.2 review WR-01). This
+   * is the only place that knows BOTH which fields the metadata step renders
+   * (`showCapitalQuestion` is decided here) and where the user is being sent.
+   * Routing to a field that surface does not render produced a form that
+   * refused every submit with no message, no focus target and no way to clear
+   * it — `capitalOwnership` on the manager surface is the concrete instance.
+   * Declining hands the refusal back to `SubmitStep`'s existing fall-through, so
+   * the user reads the terminal envelope instead of meeting a silent wall.
+   */
+  const handleMetadataFieldError = useCallback(
+    (field: MetadataFieldId, code: WizardErrorCode): boolean => {
+      if (!metadataFieldIsRendered(field, { showCapitalQuestion })) return false;
+      setMetadataServerFieldError({ field, code });
+      setStep("metadata");
+      persistPointer("metadata", strategyId);
+      return true;
+    },
+    [persistPointer, strategyId, showCapitalQuestion],
   );
 
   const handleConnectSuccess = useCallback(
@@ -614,6 +679,10 @@ export function WizardClient({
   const handleMetadataComplete = useCallback(
     (draft: MetadataDraft) => {
       setMetadataDraft(draft);
+      // 153.2-05 — the step was completed, so whatever the server refused last
+      // time has been re-answered. Keeping it would re-flag a field the user
+      // has already dealt with the moment they came back.
+      setMetadataServerFieldError(null);
       // Phase 53 / APPLY-02: metadata now advances to the read-only review
       // recap (not straight to submit). The review step's "Continue to create"
       // CTA advances to submit, where the unchanged finalize POST ("Submit for
@@ -949,9 +1018,14 @@ export function WizardClient({
                 // not spelled in this file — the phase gate greps this source
                 // to prove the wizard grew no money shortcut, and prose would
                 // match it.)
-                showCapitalQuestion={entryContext === "contribution"}
+                showCapitalQuestion={showCapitalQuestion}
+                // 153.2-05 / WIZFORM-01 — the field `finalize-wizard` refused,
+                // if the user is here because of one. The step reveals it,
+                // opens its disclosure if it is inside one, and focuses it.
+                serverFieldError={metadataServerFieldError}
                 onComplete={handleMetadataComplete}
                 onBack={() => {
+                  setMetadataServerFieldError(null);
                   setStep("sync_preview");
                   persistPointer("sync_preview", strategyId);
                 }}
@@ -993,6 +1067,12 @@ export function WizardClient({
                 snapshot={syncSnapshot}
                 metadata={metadataDraft}
                 entryContext={entryContext}
+                // 153.2-05 / WIZFORM-01 — a refusal about ONE metadata field
+                // goes back to that field instead of rendering a terminal
+                // envelope here. Passing the handler is what makes the routing
+                // reachable: without it SubmitStep falls back to the envelope
+                // (deliberately — never silence).
+                onFieldLevelError={handleMetadataFieldError}
                 onSubmitted={handleSubmitSuccess}
                 onBack={() => {
                   // Phase 53 / APPLY-02 — Back from submit returns to the

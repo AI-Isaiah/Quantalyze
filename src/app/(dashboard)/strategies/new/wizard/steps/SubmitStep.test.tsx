@@ -18,7 +18,8 @@
  */
 import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { SubmitStep } from "./SubmitStep";
+import { SubmitStep, FIELD_BY_CODE } from "./SubmitStep";
+import { WIZARD_ERROR_COPY, type WizardErrorCode } from "@/lib/wizardErrors";
 import type { SyncPreviewSnapshot } from "./SyncPreviewStep";
 import type { MetadataDraft } from "./MetadataStep";
 
@@ -528,45 +529,37 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     ).toBeInTheDocument();
   });
 
-  // A 409 stale-state ('draft_state_invalid' — not a WizardErrorCode) maps to
-  // UNKNOWN, which is recoverable, so the legitimately-retryable refresh path
-  // keeps its Retry button (RED-TEAM R1 regression guard).
+  // ⭐ 153.1-05 / WIZFORM-02 — THE FIRST OF THE TWO RESIDUALS, NOW CLOSED.
   //
-  // ⚠️ READ AS A PAIR with the case directly BELOW. `wizardErrors.ts` records
-  // that these are the two codes `finalize-wizard` can put in front of a user
-  // with no wizard member behind them. Both are pinned here so the pair is
-  // discoverable from either end; neither resolution is accidental.
-  it("maps a 409 unknown code (draft_state_invalid) to UNKNOWN (recoverable)", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      jsonResponse(
-        { error: "Refresh and try again.", code: "draft_state_invalid" },
-        409,
-      ),
-    );
-    renderStep();
-    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
-    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
-    expect(findWizardError()!.code).toBe("UNKNOWN");
-  });
-
-  // ⚠️ READ AS A PAIR with the sibling directly ABOVE. This is the SECOND
-  // residual wire code, and unlike its sibling it is reachable on the LIVE
-  // unified-backbone path. Recorded, not overlooked: 140.3-G2 / GC-3, and
-  // `deferred-items.md` DEF-G2-1 carries the owner.
+  // This case used to send the LOWERCASE literal `draft_state_invalid` and
+  // assert UNKNOWN, because that is what the route emitted and lowercase can
+  // never be a `WizardErrorCode`. 153.1-05 uppercased the route's literal and
+  // admitted `DRAFT_STATE_INVALID` to `KNOWN_FINALIZE_CODES` in the same
+  // commit, so the 409 now renders its own honest copy.
   //
-  // The failure message below is the deliverable, not the assertion. An
-  // assertion that "UNKNOWN is what happens" would read as blessing a defect;
-  // the message exists so that whoever reddens this test learns what has to
-  // ship alongside the fix.
-  it("[140.3-G2] the unified-backbone 409 is a RECORDED residual: COMPOSITE_UNSUPPORTED_UNIFIED resolves to UNKNOWN until TRAP-4 is cleared", async () => {
+  // ⚠️ THIS DELIBERATELY REMOVES A RETRY CONTROL, and that is the fix rather
+  // than a side effect. UNKNOWN's copy is recoverable, so the old resolution
+  // rendered a Retry button that re-POSTed an IDENTICAL finalize request
+  // against a draft the database had already moved out of a finalizable state.
+  // The RPC raised the same 22023 and the user got the same card. Only a
+  // reload can fix a stale page, which is why `DRAFT_STATE_INVALID`'s actions
+  // are `leave_and_return` + `expand_log` and NOT `start_fresh` (that DELETES
+  // the draft and cascades away every `strategy_keys` member under it — the
+  // draft is fine here, it is the PAGE that is out of date).
+  //
+  // ⚠️ READ AS A PAIR with the case directly BELOW. These were the two codes
+  // `finalize-wizard` could put in front of a user with no wizard member
+  // behind them; 153.1-05 closed both, and the pair is kept so the next reader
+  // finds them from either end.
+  it("maps the 409 stale-draft arm to DRAFT_STATE_INVALID (no Retry — the page is stale, not the draft)", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(
         {
-          // The body the route actually sends — read at
-          // `finalize-wizard/route.ts:1545-1553`, not invented here.
+          // The body the route actually sends, read at source rather than
+          // invented: `finalize-wizard/route.ts`, the SQLSTATE 22023 arm.
+          code: "DRAFT_STATE_INVALID",
           error:
-            "Composite (multi-key) strategies are not yet supported on this path.",
-          code: "COMPOSITE_UNSUPPORTED_UNIFIED",
+            "This draft is not in a finalizable state. Refresh and try again.",
         },
         409,
       ),
@@ -576,30 +569,79 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     await vi.waitFor(() => expect(findWizardError()).toBeDefined());
     expect(
       findWizardError()!.code,
-      [
-        "READ THIS BEFORE CHANGING IT.",
-        "",
-        "1. `finalize-wizard/route.ts:1551` emits `COMPOSITE_UNSUPPORTED_UNIFIED` on a",
-        "   409 on the LIVE unified-backbone finalize path, so a real user reaches",
-        "   this arm — it is not a hypothetical.",
-        "2. It is DELIBERATELY NOT a member of `KNOWN_FINALIZE_CODES` (SubmitStep.tsx),",
-        "   so it renders as UNKNOWN and the `wizard_error` funnel reports UNKNOWN,",
-        "   which collapses this arm into every other unrecognised one. That touches",
-        "   SC2's recognition clause and SC6's specificity clause. It is a RECORDED",
-        "   residual (140.3-G2 / GC-3; DEF-G2-1, owner Phase 140.4) — not an accident,",
-        "   and this assertion is not an endorsement of the outcome.",
-        "3. IF YOU ARE READING THIS BECAUSE YOU JUST ADMITTED THE CODE: that is the",
-        "   right fix and this test is doing its job. Admitting a code is a CODE-SET",
-        "   change, so widen `DESTRUCTIVE_CONTROL_IS_WRONG_FOR` (`SyncPreviewStep.tsx`)",
-        "   IN THE SAME COMMIT if the new member's copy is non-recoverable. A",
-        "   non-recoverable code renders no Retry, which can leave 'Try another key'",
-        "   -> handleDeleteDraft() as the SOLE affordance and destroy the user's",
-        "   composite draft. That is TRAP-4, a locked CONTEXT decision, and it is the",
-        "   exact coupling DEF-15-1 records for the sibling KNOWN_KICKOFF_CODES set.",
-        "4. THEN update this case to assert the new code. Do not delete it: the pair",
-        "   above and below is how the next reader finds the other residual.",
-      ].join("\n"),
-    ).toBe("UNKNOWN");
+      "The 409 stale-draft arm fell back to UNKNOWN. Either the route stopped " +
+        "emitting DRAFT_STATE_INVALID or KNOWN_FINALIZE_CODES stopped " +
+        "admitting it — and UNKNOWN's copy is RECOVERABLE, so the user gets a " +
+        "Retry button that re-POSTs the identical request against a draft the " +
+        "database has already moved past.",
+    ).toBe("DRAFT_STATE_INVALID");
+  });
+
+  // The lowercase spelling must STILL resolve to UNKNOWN. 153.1-05 renamed the
+  // route's literal; it did not create an identity rule, and an unrecognised
+  // wire code has to keep falling through the membership check. Without this
+  // the case above could be satisfied by a case-insensitive "fix".
+  it("[153.1-05] the OLD lowercase literal is still an unrecognised code (no identity rule was created)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { code: "draft_state_invalid", error: "Refresh and try again." },
+        409,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("UNKNOWN");
+  });
+
+  // ⭐ 153.1-05 / WIZFORM-02 — THE SECOND RESIDUAL, NOW CLOSED. Read as a pair
+  // with the sibling directly ABOVE.
+  //
+  // ⚠️ THIS TEST DID ITS JOB, and the record of how is worth keeping. It used
+  // to assert UNKNOWN behind a long failure message addressed to whoever
+  // eventually admitted the code. 153.1-05 admitted it, this case reddened
+  // unprompted, and its point 3 sent me to check TRAP-4 before proceeding.
+  // That check is recorded here so the next reader does not have to repeat it:
+  //
+  //   · `DESTRUCTIVE_CONTROL_IS_WRONG_FOR` no longer exists anywhere in
+  //     `src/` — the identifier that message names is stale.
+  //   · The coupling it warns about is real but does not bind here. It fires
+  //     when a NON-recoverable code renders no Retry and leaves
+  //     'Try another key' -> handleDeleteDraft() as the sole affordance. That
+  //     control comes from the `try_another_key` action, and NOT ONE of the
+  //     eleven codes 153.1-05 admitted carries it (checked through
+  //     `buildEnvelope`, not by reading the table's own `actions`).
+  //     `COMPOSITE_UNSUPPORTED_UNIFIED` carries `request_call` + `expand_log`.
+  //   · `SubmitStep.tsx` has no `handleDeleteDraft` and no destructive
+  //     affordance at all; that control lives on `SyncPreviewStep`.
+  //
+  // ⚠️ The check is NOT retired for future admissions — a later plan admitting
+  // a code whose copy carries `try_another_key` still owes it.
+  it("[153.1-05] the unified-backbone 409 resolves to COMPOSITE_UNSUPPORTED_UNIFIED (residual closed)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          // The body the route actually sends — read at source in
+          // `finalize-wizard/route.ts` (the unified-backbone 409 arm), not
+          // invented here. Its keys are `code`-first since 153.1-05.
+          code: "COMPOSITE_UNSUPPORTED_UNIFIED",
+          error:
+            "Composite (multi-key) strategies are not yet supported on this path.",
+        },
+        409,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(
+      findWizardError()!.code,
+      "The unified-backbone 409 fell back to UNKNOWN, which collapses this arm " +
+        "into every other unrecognised one in the `wizard_error` funnel and " +
+        "shows the user the generic dead end. Either the route stopped " +
+        "emitting COMPOSITE_UNSUPPORTED_UNIFIED or KNOWN_FINALIZE_CODES " +
+        "stopped admitting it.",
+    ).toBe("COMPOSITE_UNSUPPORTED_UNIFIED");
   });
 
   // UX-02 (#30) — the log-matching contract. Before the wizardFetch swap the
@@ -1131,5 +1173,384 @@ describe("SubmitStep — 151 review E8: a dropped capital mark is announced", ()
 
     await vi.waitFor(() => expect(onSubmitted).toHaveBeenCalledWith("strat-final"));
     expect(screen.queryByTestId("capital-mark-dropped-notice")).toBeNull();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 153.2-05 / WIZFORM-01 — a field-level refusal from the SERVER goes back to
+// the field, not to a page-level envelope.
+//
+// The state the founder was actually in: a message about the description,
+// rendered where the description was not, three times. `validatePayload` is
+// authoritative and the client mirrors it — this describes what happens when
+// the two DISAGREE (a stale client, a shape drift, a bound that moves
+// server-first), which is the only case that can still reach a user.
+// ═══════════════════════════════════════════════════════════════════════════
+describe("[153.2-05] FIELD_BY_CODE — every field-level code has exactly one field", () => {
+  /**
+   * The field-level vocabulary, DERIVED from the copy table rather than
+   * hand-listed here. A new `METADATA_*` code minted without a field mapping
+   * then reds BY NAME instead of silently rendering the envelope — which is the
+   * whole claim "a code with no field mapping is a planner bug, not a runtime
+   * fallback" rests on.
+   */
+  const FIELD_LEVEL_CODES = Object.keys(WIZARD_ERROR_COPY).filter((code) =>
+    code.startsWith("METADATA_"),
+  );
+
+  /**
+   * HAND-TYPED, and deliberately not imported from `MetadataStep`. The point of
+   * this list is to be an INDEPENDENT statement of the field vocabulary: an
+   * import would agree with any rename, including a rename to a field id the
+   * metadata step does not actually render.
+   */
+  const METADATA_FIELD_IDS = [
+    "capitalOwnership",
+    "name",
+    "description",
+    "category",
+    "aum",
+    "maxCapacity",
+  ];
+
+  it("⭐ the DERIVATION IS NOT VACUOUS — at least seven field-level codes exist", () => {
+    // The anti-vacuity floor. A derivation that matched NOTHING would satisfy
+    // "every field-level code is mapped" for the worst possible reason, and
+    // would go on satisfying it forever. Seven is the count 153.1-04 minted;
+    // the eighth (`METADATA_DESCRIPTION_REQUIRED`) is a Phase-53 entry this
+    // route was newly pointed at. The floor is `>=` because the number is
+    // expected to GROW.
+    expect(
+      FIELD_LEVEL_CODES.length,
+      `Derived ${FIELD_LEVEL_CODES.length} field-level codes from ` +
+        `WIZARD_ERROR_COPY. A number below 7 means the derivation broke — and a ` +
+        `broken derivation reports "every code is mapped" for a table where ` +
+        `none is.`,
+    ).toBeGreaterThanOrEqual(7);
+  });
+
+  it("⭐ EVERY field-level code maps to a field — an unmapped one reds BY NAME", () => {
+    const unmapped = FIELD_LEVEL_CODES.filter(
+      (code) => !FIELD_BY_CODE.has(code as WizardErrorCode),
+    ).sort();
+    expect(
+      unmapped,
+      `These field-level codes have NO field in FIELD_BY_CODE, so a server ` +
+        `refusal carrying one would fall through to the page-level envelope — a ` +
+        `message about a field, rendered where that field is not. That is the ` +
+        `exact defect WIZFORM-01 exists to close. ⛔ The remedy is an entry in ` +
+        `FIELD_BY_CODE naming the field, never a narrowing of the derivation ` +
+        `above.`,
+    ).toEqual([]);
+  });
+
+  it("every key of FIELD_BY_CODE is a real copy-table member", () => {
+    // The converse. A key that is not in the copy table can never be routed
+    // (nothing emits it) and would render no sentence if it were — a dead entry
+    // that reads as coverage.
+    const unknown = [...FIELD_BY_CODE.keys()]
+      .filter((code) => !(code in WIZARD_ERROR_COPY))
+      .sort();
+    expect(unknown).toEqual([]);
+  });
+
+  it("every mapped field is a field the metadata step actually renders", () => {
+    const strays = [...FIELD_BY_CODE.entries()]
+      .filter(([, field]) => !METADATA_FIELD_IDS.includes(field))
+      .map(([code, field]) => `${code} -> ${field}`)
+      .sort();
+    expect(
+      strays,
+      `A code routed to a field id the metadata step does not carry sends the ` +
+        `user to nothing at all — a silent failure, which is the one outcome ` +
+        `never acceptable here.`,
+    ).toEqual([]);
+  });
+});
+
+describe("[153.2-05] the routing behaviour", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // ⚠️ THE DEFAULT MOCK RETURNS `true`, and that is not decoration (153.2 review
+  // WR-01). The real handler (`WizardClient.handleMetadataFieldError`) answers
+  // whether it ACTUALLY routed — it declines for a field the destination surface
+  // does not render — and a bare `vi.fn()` returning `undefined` would model a
+  // handler that always declines, quietly turning every row below into an
+  // envelope assertion. A double must be able to be wrong in the same ways the
+  // original can, and in none of the ways it cannot.
+  function renderWithFieldHandler(onFieldLevelError = vi.fn(() => true)) {
+    render(
+      <SubmitStep
+        strategyId="strat-1"
+        wizardSessionId="session-1"
+        snapshot={SNAPSHOT}
+        metadata={METADATA}
+        onFieldLevelError={onFieldLevelError}
+        onSubmitted={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+    return onFieldLevelError;
+  }
+
+  it("⭐ a 400 METADATA_DESCRIPTION_TOO_SHORT goes to the DESCRIPTION field, with NO envelope", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          code: "METADATA_DESCRIPTION_TOO_SHORT",
+          error: "description must be at least 10 characters",
+        },
+        400,
+      ),
+    );
+    const onFieldLevelError = renderWithFieldHandler();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await vi.waitFor(() => expect(onFieldLevelError).toHaveBeenCalled());
+    expect(onFieldLevelError).toHaveBeenCalledWith(
+      "description",
+      "METADATA_DESCRIPTION_TOO_SHORT",
+    );
+    // ⛔ NO terminal envelope. The copy-table title for this code — typed as a
+    // literal, so a reword cannot make the assertion agree with itself — must
+    // NOT appear on this step, because the whole point is that it appears at
+    // the field on the step the user was sent back to.
+    expect(
+      screen.queryByText(/Add at least 10 characters/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
+    // …and the raw server string never reaches the surface (T-153.2-17).
+    expect(
+      screen.queryByText(/description must be at least 10 characters/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("the field-level branch still emits wizard_error with the surfaced code", async () => {
+    // T-153.2-20 — the funnel must not lose sight of refusals the new branch
+    // handles. Firing telemetry only on the envelope path would make every
+    // field-level refusal invisible the day this shipped.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "METADATA_AUM_INVALID", error: "bad aum" }, 400),
+    );
+    const onFieldLevelError = renderWithFieldHandler();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await vi.waitFor(() => expect(onFieldLevelError).toHaveBeenCalled());
+    const payload = findWizardError();
+    expect(payload).toBeDefined();
+    expect(payload!.code).toBe("METADATA_AUM_INVALID");
+    expect(payload!.step).toBe("submit");
+    expect(onFieldLevelError).toHaveBeenCalledWith("aum", "METADATA_AUM_INVALID");
+  });
+
+  it("CONTROL — a NON-field failure renders the envelope exactly as before and routes nothing", async () => {
+    // The other half of the discrimination. A test that only proved the new
+    // branch fires would be satisfied by a component that routed EVERYTHING to
+    // the field, deleting the envelope for genuine infrastructure failures.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "KEY_NETWORK_TIMEOUT", error: "probe failed" }, 502),
+    );
+    const onFieldLevelError = renderWithFieldHandler();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    // KEY_NETWORK_TIMEOUT's title, typed as a literal here.
+    expect(
+      await screen.findByText("We could not reach the exchange."),
+    ).toBeInTheDocument();
+    expect(onFieldLevelError).not.toHaveBeenCalled();
+    const payload = findWizardError();
+    expect(payload!.code).toBe("KEY_NETWORK_TIMEOUT");
+  });
+
+  it("⛔ NEVER SWALLOWED — with no handler, a field-level code falls back to the envelope", async () => {
+    // The prop is optional, so a caller that cannot navigate is a real case.
+    // The failure must still be SHOWN: a refusal rendered in the wrong place is
+    // bad, a refusal rendered nowhere is worse.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { code: "METADATA_DESCRIPTION_TOO_SHORT", error: "too short" },
+        400,
+      ),
+    );
+    renderStep(); // no onFieldLevelError
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    expect(
+      await screen.findByText(/Add at least 10 characters/),
+    ).toBeInTheDocument();
+    const payload = findWizardError();
+    expect(payload!.code).toBe("METADATA_DESCRIPTION_TOO_SHORT");
+  });
+
+  it("⭐ [WR-01] a handler that DECLINES the route falls back to the envelope, never to silence", async () => {
+    // The second reason a route can be impossible, and the one that used to be
+    // unhandled: the handler exists and navigates, but the destination surface
+    // does not render that field. `capitalOwnership` renders on the contribution
+    // surface only, so on the manager surface the old code sent the user to a
+    // metadata step that showed no such control, refused every subsequent submit
+    // through `invalidFields`, and rendered no message anywhere — a permanent,
+    // silent dead end reachable with no server change at all.
+    //
+    // The contract is now the SAME fall-through the missing-handler row above
+    // proves: declining hands the refusal back and the terminal envelope
+    // renders. Neutering the fix (ignoring the return value) reds this row.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          code: "METADATA_CAPITAL_OWNERSHIP_INVALID",
+          error: "capital_ownership invalid",
+        },
+        400,
+      ),
+    );
+    const onFieldLevelError = renderWithFieldHandler(vi.fn(() => false));
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    // The copy-table title for this code, typed as a LITERAL so a reword cannot
+    // make the assertion agree with itself.
+    expect(
+      await screen.findByText("Answer whose capital is in this key."),
+    ).toBeInTheDocument();
+    // The handler WAS consulted — this is a declined route, not an unmapped
+    // code taking the ordinary envelope path.
+    expect(onFieldLevelError).toHaveBeenCalledWith(
+      "capitalOwnership",
+      "METADATA_CAPITAL_OWNERSHIP_INVALID",
+    );
+    const payload = findWizardError();
+    expect(payload!.code).toBe("METADATA_CAPITAL_OWNERSHIP_INVALID");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 153.2-05 / WIZFORM-03 — the envelope this step builds now NAMES ITS CONTEXT.
+//
+// 153.1-03 shipped the `fixRequires` class filter and every venue-conditional
+// entry it needs. Nothing passed a venue, and venue-absence deliberately keeps
+// incumbent copy — so the mechanism was live and changed nothing: an MT5 user
+// went on being told to switch to a different exchange for an account that IS
+// the venue. Same story for `surface`, whose absence suppresses a bullet that
+// is true on exactly this step.
+//
+// ⚠️ ORACLE INDEPENDENCE: every expected sentence below is a LITERAL typed
+// here. Reading the copy table on the expected side would make the assertion
+// agree with any reword, including a reword back to the unwinnable remedy.
+// ═══════════════════════════════════════════════════════════════════════════
+describe("[153.2-05] the envelope names its venue and its surface", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function renderOnVenue(exchange: string | null) {
+    render(
+      <SubmitStep
+        strategyId="strat-1"
+        wizardSessionId="session-1"
+        snapshot={{ ...SNAPSHOT, exchange }}
+        metadata={METADATA}
+        onSubmitted={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+  }
+
+  const SWITCH_VENUE_BULLET =
+    "If it keeps failing, switch to a different exchange or contact support.";
+  const NO_OTHER_VENUE_BULLET =
+    "This is your broker account, so there is no other venue to try. If it keeps failing, email security@quantalyze.com with the correlation id below.";
+
+  it("⭐ D-17 — an MT5 submit is NOT told to switch to a different exchange", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "KEY_NETWORK_TIMEOUT", error: "probe failed" }, 502),
+    );
+    renderOnVenue("mt5");
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await screen.findByText("We could not reach the exchange.");
+    expect(screen.queryByText(SWITCH_VENUE_BULLET)).not.toBeInTheDocument();
+    // …and the truthful replacement renders instead. Both halves matter: a
+    // shorter list would also satisfy the absence assertion alone, and D-17
+    // asks for a true sentence, not for silence.
+    expect(screen.getByText(NO_OTHER_VENUE_BULLET)).toBeInTheDocument();
+  });
+
+  it("CONTROL — a ccxt venue keeps the incumbent copy byte-for-byte", async () => {
+    // The discrimination. A component that suppressed the bullet for EVERY
+    // venue would pass the row above and would be a repo-wide copy regression.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "KEY_NETWORK_TIMEOUT", error: "probe failed" }, 502),
+    );
+    renderOnVenue("binance");
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await screen.findByText("We could not reach the exchange.");
+    expect(screen.getByText(SWITCH_VENUE_BULLET)).toBeInTheDocument();
+    expect(screen.queryByText(NO_OTHER_VENUE_BULLET)).not.toBeInTheDocument();
+  });
+
+  it("CONTROL — an UNRESOLVED venue keeps the incumbent copy too", async () => {
+    // Absence answers the predicate's DEFAULT (`substitutable` ⇒ true), which
+    // is what keeps every pre-153.1 caller's copy intact. A snapshot with no
+    // exchange must not be read as "this venue cannot be substituted".
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "KEY_NETWORK_TIMEOUT", error: "probe failed" }, 502),
+    );
+    renderOnVenue(null);
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await screen.findByText("We could not reach the exchange.");
+    expect(screen.getByText(SWITCH_VENUE_BULLET)).toBeInTheDocument();
+  });
+
+  it("⭐ Gate B — SERVICE_UNREACHABLE's /strategies bullet renders on THIS surface", async () => {
+    // It was suppressed everywhere until a call site named its surface, which
+    // is exactly the "fail toward saying less" posture 153.1-03 chose. This is
+    // the surface where the detour is true, so this is where it comes back.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { code: "UPSTREAM_NETWORK_ERROR", error: "no answer" },
+        502,
+      ),
+    );
+    renderOnVenue("binance");
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await screen.findByText("We could not reach our own service.");
+    expect(
+      screen.getByText(
+        "If you were submitting a strategy, open /strategies before retrying — the request may have completed without answering.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("charCount reaches the fallback envelope for a description bound", async () => {
+    // Reachable only when no `onFieldLevelError` is wired — the routing branch
+    // otherwise takes this code to the field. The count is the length of the
+    // description THIS component POSTed, so the sentence names the number the
+    // server measured rather than one we guessed (TRAP-3).
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { code: "METADATA_DESCRIPTION_TOO_SHORT", error: "too short" },
+        400,
+      ),
+    );
+    renderOnVenue("binance");
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    expect(
+      await screen.findByText(
+        `Add at least 10 characters — you have ${METADATA.description.length}.`,
+      ),
+    ).toBeInTheDocument();
   });
 });

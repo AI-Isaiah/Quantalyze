@@ -457,6 +457,23 @@ describe("[140.5-05] AGREEMENT — where the roster and the wire table overlap, 
     //     the route's WR-07-corrected sentence on screen.
     //   · `CSV_RATE_LIMIT` does NOT appear, and its absence is asserted
     //     separately below — that absence is what routes it to the hop.
+    //   · ⭐ KNOWN_FINALIZE_CODES.VALIDATION_FAILED — added 153.1-05, recorded
+    //     here 153.1-06. THE DECISION THIS ROW RECORDS, and it was made
+    //     deliberately at the source rather than discovered here: the wire
+    //     table maps `VALIDATION_FAILED` to ITSELF, so the two sides agree and
+    //     the code cannot change with the order (the agreement check above
+    //     covers that). `finalize-wizard` MINTS this code at three of its own
+    //     `validatePayload` arms — the body-shape arm, the `strategy_id` arm
+    //     and the `entry_context` arm, whose values are never user-typed and so
+    //     have no field to route to. `SubmitStep.tsx`'s roster comment states
+    //     the reason for listing it anyway: this set is the ROUTE-MINTED
+    //     vocabulary, and leaning on the wire table to carry a code we mint
+    //     ourselves is the implicit coupling 140.4-12 spent a plan removing.
+    //     ⚠️ THE ROSTER IS NOT THE ACTIVE PATH FOR IT — SubmitStep translates
+    //     first, so the hop answers and the table's copy is what renders. That
+    //     is acceptable here precisely BECAUSE the mapping is to itself; if it
+    //     ever became a real alias, this row is where that would have to be
+    //     re-decided.
     const overlaps = ROSTERS.flatMap((r) =>
       [...r.answers.keys()]
         .filter((code) => WIRE_TABLE.has(code))
@@ -471,6 +488,7 @@ describe("[140.5-05] AGREEMENT — where the roster and the wire table overlap, 
       "KNOWN_CSV_FINALIZE_CODES.SEAM_MISCONFIGURED",
       "KNOWN_CSV_VALIDATE_CODES.SEAM_MISCONFIGURED",
       "KNOWN_FINALIZE_CODES.SEAM_MISCONFIGURED",
+      "KNOWN_FINALIZE_CODES.VALIDATION_FAILED",
       "KNOWN_KICKOFF_CODES.RATE_LIMITED",
     ]);
   });

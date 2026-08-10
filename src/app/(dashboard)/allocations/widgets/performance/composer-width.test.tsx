@@ -3,27 +3,36 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
- * PARITY-02 (Phase 38 Plan 04): the composer body widens from max-w-[1100px]
- * to max-w-[1440px] so the factsheet-grade chart (Plan 03) has room to render.
+ * The Scenario tab's measure. Originally PARITY-02 (Phase 38 Plan 04), which
+ * widened the composer body from `max-w-[1100px]` to `max-w-[1440px]` so the
+ * factsheet-grade chart had room.
+ *
+ * ⭐ SUPERSEDED 2026-08-10 by the founder's 2026-08-09 measure-ladder ruling
+ * (DESIGN.md changelog; Option B in TODOS.md): dense-table surfaces carry NO px
+ * cap, and `DashboardChrome` is the sole owner of the wide measure for every
+ * `isWide` tree. `/allocations` is such a tree and the Scenario tab is its
+ * densest table surface.
+ *
+ * ⛔ THIS FILE WAS NOT WEAKENED TO GO GREEN — it was RE-AIMED, and it is
+ * strictly stronger than before. It previously pinned 1440 in one direction
+ * only; it now pins "no px cap on either shell" AND keeps the original
+ * out-of-scope control. Review WR-02 found that the 1440 cap had survived the
+ * 2026-08-09 change, so the founder's dead-margin symptom was still live on the
+ * very surface they reported it against while DESIGN.md recorded it fixed —
+ * this file is the reason it survived, because it asserted the superseded
+ * decision. A guard that pins a decision the project has since reversed is not
+ * a guard; deleting the assertion instead of re-aiming it would have removed
+ * the only thing that will catch the next reinstatement.
  *
  * WHY THIS IS A SOURCE SCAN, NOT A RENDER TEST:
  *   The width is a Tailwind utility-class LITERAL on a container `<div>`. The
- *   actual pixel width comes from Tailwind's compiled CSS (`max-width: 1440px`),
- *   not from anything JSDOM measures — JSDOM has no layout engine, so a render
- *   test would read `getBoundingClientRect()` as all zeros and could never
- *   distinguish 1100 from 1440. The durable, falsifiable guard is therefore to
- *   read the source text and assert the exact literals at each container class.
+ *   actual pixel width comes from Tailwind's compiled CSS, not from anything
+ *   JSDOM measures — JSDOM has no layout engine, so a render test would read
+ *   `getBoundingClientRect()` as all zeros and could never distinguish 1100
+ *   from 1440 from fluid. The durable, falsifiable guard is to read the source
+ *   text and assert the exact literals at each container class.
  *
- *   Two directions are pinned so the change stays SCOPED:
- *     (a) the 3 IN-SCOPE composer containers are max-w-[1440px], and
- *     (b) the OUT-OF-SCOPE Overview empty-state (AllocationDashboardV2.tsx) is
- *         still max-w-[1100px] — an accidental over-broad edit fails here
- *         (T-38-04-01, Tampering / scope-creep mitigation).
- *
- *   Assertions key off STABLE className substrings, not absolute line numbers:
- *   Plan 03's composer call-site swap shifted the lines, so line numbers are
- *   unreliable but the container classNames (`mx-auto ... py-12`,
- *   `mx-auto flex ... flex-col`, `mx-auto ... py-6`) are stable.
+ *   Assertions key off STABLE className substrings, not absolute line numbers.
  */
 
 const REPO = process.cwd();
@@ -42,41 +51,53 @@ const composerSrc = readFileSync(COMPOSER, "utf8");
 const tabsSrc = readFileSync(TABS, "utf8");
 const overviewSrc = readFileSync(OVERVIEW, "utf8");
 
-describe("composer width — PARITY-02 (3 in-scope literals → 1440, Overview stays 1100)", () => {
-  it("ScenarioComposer empty-state container is max-w-[1440px]", () => {
-    expect(composerSrc).toContain('className="mx-auto max-w-[1440px] py-12"');
-    // the old narrow literal must be gone from this exact container class
-    expect(composerSrc).not.toContain('className="mx-auto max-w-[1100px] py-12"');
+/**
+ * A px cap on a SHELL, not on any element. A truncating table cell
+ * (`truncate max-w-[160px]`) is not a competing page measure and the ladder
+ * does not govern it — DESIGN.md states that scope explicitly. The three
+ * shells are matched by their own stable class strings below; this regex is
+ * the file-wide sweep for the two ladder rungs a shell could plausibly
+ * reinstate.
+ */
+const LADDER_RUNGS = /max-w-\[(1100|1200|1440|1920)px\]/g;
+
+describe("Scenario tab measure — fluid, no px cap (founder ruling 2026-08-09)", () => {
+  it("ScenarioComposer empty-state shell carries NO px cap", () => {
+    expect(composerSrc).toContain('className="mx-auto py-12"');
+    expect(composerSrc).not.toContain(
+      'className="mx-auto max-w-[1440px] py-12"',
+    );
   });
 
-  it("ScenarioComposer main composer body (the BINDING wrapper) is max-w-[1440px]", () => {
-    expect(composerSrc).toContain(
+  it("ScenarioComposer main body (the BINDING wrapper) carries NO px cap", () => {
+    expect(composerSrc).toContain('className="mx-auto flex flex-col"');
+    expect(composerSrc).not.toContain(
       'className="mx-auto flex max-w-[1440px] flex-col"',
     );
-    expect(composerSrc).not.toContain(
-      'className="mx-auto flex max-w-[1100px] flex-col"',
-    );
   });
 
-  it("both ScenarioComposer width literals are exactly 2 × max-w-[1440px] and 0 × max-w-[1100px]", () => {
-    expect(composerSrc.match(/max-w-\[1440px\]/g)?.length ?? 0).toBe(2);
-    expect(composerSrc.match(/max-w-\[1100px\]/g)?.length ?? 0).toBe(0);
+  it("no measure-ladder rung survives anywhere in ScenarioComposer", () => {
+    // The file-wide sweep. Named directly rather than counted, so a failure
+    // says WHICH rung came back rather than "expected 1 to be 0".
+    expect(composerSrc.match(LADDER_RUNGS) ?? []).toEqual([]);
   });
 
-  it("AllocationsTabs Scenario-tab loading skeleton is max-w-[1440px] (skeleton↔loaded consistency)", () => {
-    expect(tabsSrc).toContain('className="mx-auto max-w-[1440px] py-6"');
-    expect(tabsSrc).not.toContain('className="mx-auto max-w-[1100px] py-6"');
-    expect(tabsSrc.match(/max-w-\[1440px\]/g)?.length ?? 0).toBe(1);
+  it("AllocationsTabs Scenario-tab loading skeleton tracks the body — NO px cap", () => {
+    // Skeleton↔loaded consistency, which is the whole point of the skeleton:
+    // a 1440-capped skeleton in front of a fluid body is a visible width jump
+    // on every tab activation.
+    expect(tabsSrc).toContain('className="mx-auto py-6"');
+    expect(tabsSrc.match(LADDER_RUNGS) ?? []).toEqual([]);
   });
 
-  it("OUT OF SCOPE: AllocationDashboardV2 Overview empty-state STAYS max-w-[1100px]", () => {
-    // The Overview empty state must NOT be widened by this plan. Pinning it here
-    // makes an accidental scope-creep edit fail CI (T-38-04-01).
-    expect(overviewSrc).toContain("max-w-[1100px]");
+  it("CONTROL — the Overview PROSE block STAYS max-w-[1100px]", () => {
+    // Unchanged from the original PARITY-02 scope control, and it matters more
+    // now than it did: the ladder governs by CONTENT TYPE, so "dense tables go
+    // fluid" must not become "nothing has a measure". This block is a centred
+    // paragraph — rung 1 — and an over-broad de-capping edit fails here.
     expect(overviewSrc).toContain(
       'className="mx-auto mt-8 max-w-[1100px] py-12 text-center"',
     );
-    // and the composer's wider literal must NOT have leaked into the Overview
     expect(overviewSrc).not.toContain("max-w-[1440px]");
   });
 });

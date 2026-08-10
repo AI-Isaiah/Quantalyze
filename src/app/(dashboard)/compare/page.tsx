@@ -139,11 +139,12 @@ export default async function ComparePage({
         title={title}
         breadcrumb={[{ label: "Discovery", href: "/discovery/crypto-sma" }, { label: "Compare" }]}
       />
-      {/* APPLY-01 / TYPE-03: compare is a DATA surface — fluid-fill toward
-          ~1920px then center with gutters beyond, so the comparison table
-          reads as a deliberate institutional layout at the wider measure
-          rather than stranded across an uncapped canvas. */}
-      <div className="mx-auto max-w-[1920px]">
+      {/* APPLY-01 / TYPE-03: compare is a DATA surface. It fluid-filled
+          toward ~1920px until 2026-08-09, when the founder ruled that a fixed
+          px cap producing dead margin on zoom-out is the worse trade — a table
+          the user cannot widen is not "deliberate", it is clipped. Width is now
+          owned solely by DashboardChrome's `isWide` arm. */}
+      <div>
         <div className="space-y-8">
           <CompareTable items={items} />
           <CompareEquityOverlay items={strategyOnlyItems} />

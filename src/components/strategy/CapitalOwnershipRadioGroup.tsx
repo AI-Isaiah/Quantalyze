@@ -48,19 +48,46 @@ export function CapitalOwnershipRadioGroup({
   label,
   value,
   onChange,
+  error,
+  id,
 }: {
   /** Group label. The ONLY thing that differs between the two mounts. */
   label: string;
   /** Never null — the caller defaults to TEAM_REVIEW. */
   value: CapitalOwnership;
   onChange: (v: CapitalOwnership) => void;
+  /**
+   * 153.2-05 — a refusal that belongs to THIS question, rendered at it.
+   *
+   * The group cannot be wrapped in `Field`: that primitive wires one `<label
+   * htmlFor>` to one control `id`, and a radio group has neither. So the same
+   * contract is honoured here instead — `aria-invalid` and `aria-describedby`
+   * on the `role="radiogroup"` element, which is what assistive technology
+   * treats as the composite control, and the visible sentence rendered from the
+   * SAME string. ⛔ Never an `aria-invalid` written without the message, or a
+   * message rendered without the ARIA state: a red group AT can't see is the
+   * FLAG-1 defect one element type over.
+   *
+   * ABSENT ⇒ byte-identical to the pre-153.2-05 render: no attributes, no
+   * paragraph. The `MarkOwnershipDialog` mount passes nothing.
+   */
+  error?: string;
+  /** Explicit id root for the error node's `aria-describedby` wiring. */
+  id?: string;
 }) {
+  const errorId = error ? `${id ?? "capital-ownership"}-error` : undefined;
   return (
     <fieldset>
       <legend className="text-caption font-medium text-text-primary">
         {label}
       </legend>
-      <div role="radiogroup" aria-label={label} className="mt-2 space-y-2">
+      <div
+        role="radiogroup"
+        aria-label={label}
+        aria-invalid={error ? "true" : undefined}
+        aria-describedby={errorId}
+        className="mt-2 space-y-2"
+      >
         {OPTIONS.map((option) => {
           const checked = option.value === value;
           return (
@@ -83,6 +110,15 @@ export function CapitalOwnershipRadioGroup({
           );
         })}
       </div>
+      {error && (
+        // The same treatment `Field` gives a field message, so a refusal reads
+        // identically wherever it lands. ⛔ Not `role="alert"` — the wizard's
+        // form-level summary owns the announcement, and a second live region
+        // for the same fact would double-announce it (Shared Pattern G).
+        <p id={errorId} className="mt-2 text-caption text-negative">
+          {error}
+        </p>
+      )}
       <p className="mt-2 text-caption text-text-secondary">{HELPER_LINE}</p>
     </fieldset>
   );

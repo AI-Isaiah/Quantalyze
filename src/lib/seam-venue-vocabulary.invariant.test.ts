@@ -276,26 +276,38 @@ describe("[140.5-02 / SEAMPROSE-03] every EMITTED Python error_code has a TypeSc
     // unenumerable by any static scan. What the guard CAN hold is that this is
     // the ONLY such site: a second dynamic emitter appearing anywhere else reds
     // here rather than silently shrinking the derived population.
-    const dynamicish = sites
-      .filter((s) => s.codes.length === 0)
-      .map((s) => `${s.file}:${s.line}`)
-      .sort();
+    // ⭐ Re-cut 2026-08-10. This assertion used to pin bare `file:line` pairs —
+    // the SAME stale-coordinate defect that `seam-citations.invariant.test.ts`
+    // exists to ban in comments, reproduced inside an assertion. It went red
+    // because Phase 153.3 legitimately edited `mt5.py` and the site moved
+    // 242 → 363. Nothing about the blind spot changed; only an address did.
+    //
+    // ⛔ Bumping the integer would re-arm the same trap, so the oracle is now
+    // file → COUNT. It keeps every bit of the guard's power — a new dynamic
+    // emitter in a NEW file reds (new key), and a SECOND one in an
+    // already-listed file also reds (count changes) — while being immune to
+    // code moving up or down within a file, which is not a fact worth failing on.
+    const dynamicishByFile: Record<string, number> = {};
+    for (const s of sites.filter((x) => x.codes.length === 0)) {
+      dynamicishByFile[s.file] = (dynamicishByFile[s.file] ?? 0) + 1;
+    }
     expect(
-      dynamicish,
+      dynamicishByFile,
       "An error_code assignment yielded no literal code. Either it FORWARDS a " +
         "code computed elsewhere (fine — add it below with its reason), or it " +
         "is a NEW dynamic emitter, which widens a blind spot this guard exists " +
-        "to keep declared and narrow.",
-    ).toEqual([
-      "analytics-service/services/ingestion/binance.py:61",
-      "analytics-service/services/ingestion/bybit.py:51",
-      "analytics-service/services/ingestion/csv_adapter.py:152",
-      "analytics-service/services/ingestion/deribit.py:70",
-      "analytics-service/services/ingestion/long_fetch.py:311",
-      "analytics-service/services/ingestion/mt5.py:242",
-      "analytics-service/services/ingestion/okx.py:54",
-      "analytics-service/services/ingestion/sfox.py:85",
-    ]);
+        "to keep declared and narrow. Counts are per file: a second dynamic " +
+        "emitter inside an already-listed file reds here too.",
+    ).toEqual({
+      "analytics-service/services/ingestion/binance.py": 1,
+      "analytics-service/services/ingestion/bybit.py": 1,
+      "analytics-service/services/ingestion/csv_adapter.py": 1,
+      "analytics-service/services/ingestion/deribit.py": 1,
+      "analytics-service/services/ingestion/long_fetch.py": 1,
+      "analytics-service/services/ingestion/mt5.py": 1,
+      "analytics-service/services/ingestion/okx.py": 1,
+      "analytics-service/services/ingestion/sfox.py": 1,
+    });
   });
 
   it("SELF-TEST — the scanner reads a code out of the RHS of a multi-line ternary", () => {

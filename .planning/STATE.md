@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
-status: planning
-stopped_at: "v0.54.0.0 landed (phases 150/151/152 shipped, PR #668 merged e0481411); Phase 153 discuss in progress"
-last_updated: "2026-08-08T18:45:44.080Z"
-last_activity: 2026-08-07
+status: executing
+stopped_at: Completed 153.2-04-PLAN.md (MT5 declarable AND submittable)
+last_updated: "2026-08-10T06:40:44.605Z"
+last_activity: 2026-08-09
 progress:
-  total_phases: 9
-  completed_phases: 6
-  total_plans: 37
-  completed_plans: 37
-  percent: 67
+  total_phases: 14
+  completed_phases: 9
+  total_plans: 59
+  completed_plans: 54
+  percent: 64
 ---
 
 # Project State — Quantalyze
@@ -55,10 +55,10 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: 153
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-08-07 -- Phase 152 execution started
+Phase: 153.2 (WIZFORM-FIELD) -- 153.1 and 153.3 already COMPLETE on the same branch
+Plan: 5 of 05 complete
+Status: Ready to execute
+Last activity: 2026-08-09
 
 ### Phase 142.1 scope (inserted 2026-08-02)
 
@@ -381,7 +381,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [░░░░░░░░░░] 0% (v1.17 — 0/9 phases)
+Progress: [█████████░] 90%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -473,6 +473,23 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 140.3 PG7 | ~12 min | 2 tasks | 1 file |
 | Phase 140.3 PG8 | ~15 min | 2 tasks | 5 files |
 | Phase 140.3 PG9 | ~18 min | 2 tasks | 2 files |
+| Phase 153.3 P01 | 75m | 3 tasks | 8 files |
+| Phase 153.3 P02 | ~65m | 2 tasks | 6 files |
+| Phase 153.3 P03 | 75 min | 3 tasks | 8 files |
+| Phase 153.3 P04 | ~70 min | 2 tasks | 5 files |
+| Phase 153.3 P05 | 85 min | 3 tasks | 5 files |
+| Phase 153.3 P06 | ~70 min | 3 tasks | 10 files |
+| Phase 153.1 P01 | ~35 min | 3 tasks | 2 modified files |
+| Phase 153.1 P02 | 25m | 3 tasks | 3 files |
+| Phase 153.1 P03 | ~55m | 3 tasks | 2 files |
+| Phase 153.1 P04 | 80m | 3 tasks | 2 files |
+| Phase 153.1 P05 | 55m | 3 tasks | 4 files |
+| Phase 153.1 P06 | 75min | 2 tasks | 3 files |
+| Phase 153.2 P01 | 27 | 2 tasks | 2 files |
+| Phase 153.2 P03 | 6min | 2 tasks | 2 files |
+| Phase 153.2 P02 | 20min | 2 tasks | 2 files |
+| Phase 153.2 P04 | ~55 min | 3 tasks | 8 modified files |
+| Phase 153.2 P05 | ~75 min | 5 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -487,7 +504,17 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - v1.17 roadmap created 2026-08-04 (Phases 147–153); v1.16 PARKED at 68% (13/19 phases, 119/127 plans; resume at Phase 143). Phase 142.3's scope (MT5-06..10) re-homed to Phase 153, MT5-14 to Phase 151. Ordering locked: SCEN-01 first, OWN-02 before NAV-01/OWN-04/SCEN-03, AUM after SCEN-01, MT5 numeric verification last
 - v1.17 roadmap REVISED 2026-08-04 (Phases 147–155): the approved Phase 148 (OWN-02/03/04 + NAV-01) split into 148 OWN-02/04 (owner factsheet, adversarial cache acceptance), 149 NAV-01 (my-strategies ranking at DISCOVERY PARITY — founder sharpened the ask from 'an overview' to ranking parity over every uploaded key incl. private/draft), 150 OWN-03 (own-capital-vs-verifying wizard question, money-path review isolated); later phases renumbered +2 (AUM→151, SCEN→152, WIZFORM+MT5-14→153, WIZCONT/STALE→154, MT5-VERIFY→155). All ordering constraints unchanged and now structural (149 cannot start before 148)
 
-### Decisions (requirements-time, from research Open Decisions 1–8)
+### Decisions
+
+<!-- ⛔ HEADING IS LOAD-BEARING — do NOT re-add a parenthetical suffix here.
+     gsd-sdk `state.add-decision` matches /###?\s*(?:Decisions|Decisions Made|Accumulated.*Decisions)\s*\n/i
+     and appends to the FIRST match. With "### Decisions (requirements-time, ...)" it matched
+     NOTHING, so the verb returned "Decisions section not found in STATE.md" on every call and
+     every decision an executor tried to record was silently dropped. Diagnosed 2026-08-09.
+     The sibling "### Decisions (execution-time, Phase N)" headings below are fine — only the
+     FIRST match is used as the append target, and they are historical archives. -->
+
+*(requirements-time, from research Open Decisions 1–8)*
 
 - Janitor targets BOTH tables as two DISTINCT mechanisms: `strategy_analytics.computation_status='computing'` (new reaper, JOB-02/Phase 142) AND `compute_jobs.status='running'` (extend WORKER-04, JOB-05/Phase 144).
 - Fence-flake "two birds" claim: observation-only, never an acceptance criterion.
@@ -496,6 +523,49 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - csv-finalize fold-vs-compensate deferred to after the Phase 145 reproduction pass.
 - `cron/warm-analytics` OUT of RATE scope; Python limiters beyond `match.py` OUT of scope.
 - Roadmap kept research's 7-phase shape; 143/144 NOT merged (different tables/mechanisms, 143 has a design-pass flag, 144 is the founder's WR-02 call). JOB-07 mapped to Phase 142 only; constrains 143–145 (pg_cron by construction).
+- 153.3-05: MT5 stage-telemetry event fields are a CLOSED ALLOW-LIST (stage/duration_ms/ok/error_class/terminal_key/outcome) — secret hygiene is structural, not call-site discipline
+- 153.3-05: the timing bracket composes INTO _guarded_read, so the measured span is the RAW round-trip and error_class names the raw transport class rather than the uniform Mt5ClientError
+- 153.3-05: the per-validate outcome event hangs off a try/finally at a NEW function boundary, NOT off the release block — that block sits inside the terminal lease and cannot see lease_busy or gateway_unconfigured
+- 153.3-05: structlog loggers must be bound PER CALL — logging_config sets cache_logger_on_first_use=true, so a module-level proxy freezes its processor chain (including the PII scrub) at first use
+- 153.3-05: D-27 honoured literally — not one timeout constant moved; the runbook records the whole chain as PROVISIONAL with Phase 155 named as the owner of the tightening
+- [Phase ?]: Phase 153.3: MT5 gateway honesty shipped — teardown deleted at the sink (D-35), terminal lease taken by the validate path (D-29), initialize() bound and the ordering guard extended to the class (D-24), read-only fails CLOSED (D-31), stages instrumented (D-32)
+- [Phase ?]: 153.1-01: emitter lazy-body cap = 160 chars — measured longest real error body 90, shortest reach to the next emitter's status 202; the cap must sit between them or a malformed body reports its code against the NEXT emitter's status
+- [Phase ?]: 153.1-01: the A-25 SELF-TEST synthetic is 150_000 not 120_000 — 120_000 clears today's 90_000 ceiling but goes FALSE when D-26 (153.4) raises the tombstone to 90 s and the ceiling becomes exactly 120_000
+- [Phase ?]: 153.1-01: both incumbent wizard routes keep statusRe 400 — widening them would move their site count 12 to 16 and add DRAFT_ALREADY_EXISTS/UNKNOWN to the pinned vocabulary, i.e. a population change dressed as a scanner improvement
+- [Phase ?]: 153.1-02: sfox's VENUE_CAPABILITIES row is {} — NOT RESEARCH's sketch { scopeProbeSupported: false }. D-22 and the sketch's own warning win; copying the sketch would have opted a live venue out of a security control as a side effect of minting a foundation. Logged to TODOS.md as RESEARCH Q2.
+- [Phase ?]: 153.1-02: venueCapabilities() (the row lookup) is deliberately NOT exported — consumers read the three predicates, because the DEFAULT is the load-bearing part and differs per capability (probe true / substitutable true / serialized false).
+- [Phase 153.1]: 153.1-03: a fix[] bullet carries a FixRequirement; ONE filter in formatKeyError applies it — never a per-code branch — D-17 is a class (a remedy presupposing a fact about the context), not three instances. Three if-arms would re-ship the instance-not-class defect; the filter also serves UI-SPEC Gate B unchanged.
+- [Phase 153.1]: 153.1-03: context.venue absent => venue-conditional bullet still renders; context.surface absent => surface-conditional bullet is SUPPRESSED — Deliberately asymmetric. An unnamed venue must leave incumbent ccxt copy byte-identical; an unnamed surface must withhold a detour we cannot support (fail toward saying less).
+- [Phase 153.1]: 153.1-04: all ten new wizard codes are non-recoverable BY ABSENCE of a RECOVERABLE_ACTIONS member, decided once for the class — and DRAFT_STATE_INVALID's arrival REMOVES a live false Retry that ships today, because UNKNOWN's fallback IS recoverable and its Retry re-POSTed an identical finalize against a draft the DB had already moved past
+- [Phase 153.1]: 153.1-04: EXPECTED_TABLE_SIZE = 74 at BOTH wizardErrors.test.ts sites (:1486, :1750), the number READ OUT OF the guard's own failure rather than copied from the plan — and a third guard now reads the test file's own source (the only vantage point that sees both declarations) so the two pins cannot diverge again; its declaration count is pinned to a hand-typed 2 as the positive control
+- [Phase 153.1]: 153.1-04: SEAM_DEADLINE_EXCEEDED's 'Your key details are still on this page' bullet declares REQUIRES_CONNECT_SURFACE — Phase 153.4 MUST pass surface: 'connect' (and budgetSeconds) in the same commit it starts emitting the code, or Gate B's absence-suppresses rule silently withholds the reassurance
+- [Phase 153.1]: 153.1-05: COMPOSITE_TOO_MANY_MEMBERS' error body hoisted into a const — inline it runs ~256 chars over EMITTER_BODY_MAX_CHARS=160, so the D-34 reorder ALONE left that site blind (measured 13 vs 14). The scanner cap was NOT relaxed.
+- [Phase 153.1]: 153.1-05: finalize-wizard now derives 25 emitting sites (was 0), 19 distinct codes, KNOWN_FINALIZE_CODES 10 -> 21. CIRCUIT_OPEN is emitted and correctly NOT in the roster — 153.1-06's coverage assertion MUST map through SEAM_CODE_TO_WIZARD_CODE or it reports a false miss forever.
+- [Phase 153.1]: 153.1-06: the wizard coverage law consults SEAM_CODE_TO_WIZARD_CODE before membership — CIRCUIT_OPEN is a wire code, correctly absent from KNOWN_FINALIZE_CODES
+- [Phase 153.1]: 153.1-06: WIZFORM-02 NOT marked complete — five finalize-wizard rejections still answer code-less and render UNKNOWN (DEF-153.1-06-A, owner 153.2)
+- [Phase 153.2]: 153.2-01: the description bound is mirrored client-side from MAGNITUDE_CAPS, and both bounds measure the RAW value.length — exactly what finalize-wizard measures; .trim() is used solely for the emptiness test, where the client is deliberately stricter than the server
+- [Phase 153.2]: 153.2-01: noValidate on the MetadataStep form, keeping required on the control for AT semantics — native constraint validation was intercepting the EMPTY refusal state with a browser bubble, so only two of three refusal states would have reached the inline message
+- [Phase 153.2]: 153.2-01: the submit disabled prop is deleted outright, not replaced by aria-disabled — the step performs no write of its own, so there is no in-flight state to guard; a dead button names no field, which is the D-13 mechanism
+- [Phase 153.2]: 153.2-01: WIZFORM-01 deliberately NOT marked complete in REQUIREMENTS.md — this plan closes only the DESCRIPTION field; 153.2-02 owns the category/AUM/capacity mirrors and the first-invalid-control focus, 153.2-03 owns AllocateDialog (D-12), 153.2-05 owns server-side field-level routing. Same call as 153.1-06 made for WIZFORM-02
+- [Phase 153.2]: AllocateDialog's invalid border derives from the ARIA state Field writes, never a JS ternary — The ternary was correct only by coincidence (fieldError also fed Field's error prop). Deriving the colour makes a red control with broken a11y wiring structurally impossible rather than merely unlikely (Shared Pattern A / FLAG-1). This was the last such holdout.
+- [Phase 153.2]: The amount field's live re-evaluation takes the mirror's VERDICT, it does not blanket-clear — D-12: a corrected amount must not still read red. Gating on a message already showing gives live-clear AND pre-refusal silence from one branch; taking the verdict (not null) also swaps the message when the value is still invalid for a different reason, so a user who types $1B+1 is not told it is fine until the next click.
+- [Phase 153.2]: 153.2-02: the AUM/capacity client mirror IMPORTS finalize-wizard's own isValidDollar plus its omitted-case half, so client and server cannot drift
+- [Phase 153.2]: 153.2-02: a refused submit opens the collapsed <details> before focusing the first invalid control; containment is tested, not hard-coded
+- [Phase 153.2]: 153.2-02: the submit summary agrees with its number ('1 field needs attention') — a recorded deviation from the UI contract's plural-only template
+- [Phase 153.2]: 153.2-04: the finalize-wizard scope probe is gated on venueSupportsScopeProbe (a CAPABILITY) at BOTH call sites, and fails TOWARD probing — null / unknown / absent-row venues are still probed, so a transient api_keys.exchange read fault cannot disable an ASVS V4 control
+- [Phase 153.2]: 153.2-04: MT5 ships as Option B — WIZARD_EXCHANGE_CODES / WIZARD_EXCHANGES are wizard-only, so EXCHANGES.length (the public marketing count) does not move and CRYPTO_EXCHANGES stays mt5-free (membership there selects √365 over √252 — a money-math boundary, not a UI one)
+- [Phase 153.2]: 153.2-04: a parse miss (KEY_SCOPE_CHECK_UNAVAILABLE, 502) and a missing INTERNAL_API_TOKEN (SEAM_MISCONFIGURED, 500) are split off KEY_NETWORK_TIMEOUT as PERMANENT — both non-recoverable, so no Retry control renders. No retry loop was added (D-07)
+- [Phase 153.2]: 153.2-04 audit lesson: an inherited test's not.toBe between two literals declared in the SAME file is a guard that cannot fail — assert off the response body, and order the named assertion before the broad toEqual. A tolerant expect([502,503]).toContain(status) is what let the D-14b misclassification survive in tests/integration/process-key-thin-adapters.test.ts
+- [Phase ?]: 153.2-05: FIELD_BY_CODE routes every field-level METADATA_* code back to ONE metadata field, with a totality assertion derived from WIZARD_ERROR_COPY plus an anti-vacuity floor — an unmapped code reds BY NAME instead of falling through to a page-level envelope
+- [Phase ?]: 153.2-05: MetadataFieldId widened 4 -> 6 and EXPORTED — the codename and the capital question have NO CLIENT RULE but DO have a field; conflating those two facts is what sent a description refusal to an envelope that named no field
+- [Phase ?]: 153.2-05: the server's refusal MERGES into MetadataStep's existing fieldErrors map rather than rendering beside it, so the inline message, the aria-derived border, the submit predicate, the focus target and the summary line stay ONE derivation; the client mirror wins on ?? because it judges the value on screen now
+- [Phase ?]: 153.2-05: a server refusal is retired on the FIRST EDIT of its field, unconditionally — not on the edit becoming valid. A message the user cannot clear by acting on it is a dead end, and the client mirror re-raises its own code in the same render when it still disagrees
+- [Phase ?]: 153.2-05: wizard_error telemetry fires on BOTH branches and the routing is keyed on FIELD_BY_CODE, never on the HTTP status — a rule that moves arms must not silently revert a field refusal to a full-page dead end
+- [Phase ?]: 153.2-05: WIZFORM-03 was shipped-and-inert since 153.1-03 — the fixRequires filter was correct but zero of fourteen call sites passed a venue, and venue-absence preserves incumbent copy. Passing context.venue at SubmitStep is what turns it on; ConnectKeyStep/MultiKeyConnectStep remain 153.4's
+- [Phase ?]: 153.2-05: the finalize limiter's 429 answers RATE_LIMITED, NOT the ledger's suggested KEY_RATE_LIMIT — that entry's copy blames the exchange for OUR own per-user cap. A ledger entry is a suggestion, not a verdict
+- [Phase ?]: 153.2-05: the two limiter arms stay explicit NextResponse.json sites — routing them through the deny chokepoint was MEASURED to drop the derived rejection-site count 32 -> 30, i.e. to make the class guard blind to them
+- [Phase ?]: 153.2-05: three of nine seam citations in wizardErrors.ts had ALREADY drifted, and a tenth claim was substantively false (MetadataStep reads .title, not .cause, since 153.2-01) — re-derive against HEAD, never rename the symbol at the stale line
+- [Phase ?]: 153.2-05: WIZFORM-01 marked COMPLETE — checkbox and traceability row now agree (closes D-153.2-A). WIZFORM-02 and WIZFORM-03 recorded as PARTIAL with their remaining owners named
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1184,11 +1254,49 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - **Standing latent bugs (TODOS.md):** quantstats price-detection Sharpe sign-flip (strategy-analytics path — v2 MONEY-03); blend unknown-asset_class annualization (v2 MONEY-04); `allocator_equity_snapshots` retirement (post-FLIP only).
 - **Backlog ground truth = root TODOS.md** — add/close items ONLY there.
 
-## Session Continuity
+<!-- ⛔ THE HEADING AND FIELD NAMES BELOW ARE LOAD-BEARING. Do NOT rename the heading to
+     "Session Continuity", and do NOT reword the three field labels.
+     gsd-sdk matches the section with /##\s*Session\s*\n/i and reads three fields by name
+     (Last Date / Stopped At / Resume File). With "## Session Continuity" the section match
+     FAILED, so `state.record-session` reported "No session fields found", the body copy went
+     stale, and three executors in a row "restored" frontmatter stopped_at FROM that stale copy.
+     Two sources of truth for one fact, only one maintained. Keep this block and the YAML
+     frontmatter in agreement — the SDK rebuilds frontmatter FROM this block.
+     ⚠️ Keep prose out of the section body: any commentary containing the literal field
+     markers is matched by the SDK's regex INSTEAD of the real data. That is why this note
+     sits ABOVE the heading. Diagnosed 2026-08-09. -->
 
-**Last activity:** 2026-08-08
-**Stopped at:** v0.54.0.0 landed (phases 150/151/152 shipped, PR #668 merged e0481411); Phase 153 discuss in progress
-**Next step:** Phase 153 (WIZFORM) — discuss → ui-phase → plan → execute on `feat/v1.17-153-wizform`.
+## Session
+
+**Last Date:** 2026-08-10T06:40:44.592Z
+**Stopped At:** Completed 153.2-04-PLAN.md (MT5 declarable AND submittable)
+**Resume File:** None
+**Next step:** 153.3 is COMPLETE (6/6); 153.1 is 5/6 (plan 01 Wave-0 gates, plan 02 the capability foundation, plan 03 the WIZFORM-03 class filter, plan 04 the ten new codes, plan 05 the honest codes on finalize-wizard -- all green at HEAD). Execute **153.1-06** next, then 153.2 -> 153.4 on `feat/v1.17-153-wizform`. ⛔ WIZFORM-05 stays unchecked until 153.4 closes the client leg. ⛔ **WIZFORM-03 stays unchecked until 153.2/153.4** -- the mechanism and the capability record exist and are pinned, but NOT ONE `buildEnvelope` call site passes `venue` or `surface`, so an MT5 user still reads "switch to a different exchange" in production. ⛔ **WIZFORM-02 stays unchecked until 153.1-06** -- plan 05 landed the emitting half (25 sites, 19 distinct codes, roster 21, EMITTED-NOT-IN-ROSTER empty), but nothing ASSERTS that reconciliation yet, so a twelfth arm added without a code would ship silently. ⭐ 153.1-06 must map through `SEAM_CODE_TO_WIZARD_CODE` before comparing against the roster, or it reports `CIRCUIT_OPEN` as an uncovered emitter forever.
+
+⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in
+`src/lib/closed-sets.ts`): `VenueCapabilities` (`:77`), `VENUE_CAPABILITIES` (`:133`),
+`venueSupportsScopeProbe` (`:180`, 153.2's probe gate), `venueIsSubstitutable` (`:194`,
+153.1-03's copy filter), `venueIsSerialized` (`:205`, 153.4's long-wait copy),
+`MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS` (`:702`, = **10**; 153.1-05 re-points
+`finalize-wizard/route.ts:389` at it **without changing the value**).
+⛔ The row lookup `venueCapabilities()` is **module-private** — read the predicates, never
+index the record, or the per-capability default is bypassed.
+⚠️ Every `closed-sets.ts` symbol below `:56` shifted **+151**; `closed-sets.test.ts` symbols
+below the new `venue capabilities` describe (`:285`) shifted **+130**.
+⚠️ Three hand-typed `1`s pin "only mt5 opts out" (probe / substitutable / serialized). If
+153.2 or 153.4 adds a second opt-out those tests red **by design** — move the count in the
+same commit, deliberately.
+
+⭐ **Three numbers 153.1-06 must reconcile against** (measured in `153.1-01-SUMMARY.md`):
+`deriveRoster(SubmitStep.tsx, "KNOWN_FINALIZE_CODES")` = **10** (comment-stripped path);
+`deriveEmittedCodes(finalize-wizard, "[45]\\d\\d")` = **0** at HEAD — if the D-34 reorder
+leaves it at 0 the scanner is blind, not the route clean; `EMITTER_BODY_MAX_CHARS` = **160**
+(longest real body 90, nearest-neighbour reach 202), so a `finalize-wizard` error body longer
+than 160 chars makes its emitter invisible.
+⚠️ `DERIVED_FLOOR` is still **14** — 153.1-06 must re-size it against the REORDERED total
+(14 pre-existing finalize-wizard arms + the 9 new codes), never against the 9.
+⚠️ 153.4 moves the hand-typed `60` in the DERIVED A-25 assertion
+(`seam-constants.pin.test.ts:790`) to `90` in the SAME commit as the budget raise.
 
 ⚠️ **Post-land CI state (2026-08-08):** `secret-scan` went RED on main at `e0481411` — a
 false-positive `generic-api-key` hit on the Phase 151 E1 fixture `E1_KEY_DERIV = "e1-key-deriv"`

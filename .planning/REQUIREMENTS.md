@@ -85,12 +85,12 @@ investor factsheet on a spinner that never resolves.
 > From `.planning/phases/140.1-.../140.1-REVIEW.md` — 36 findings, **36 mutations injected and 12
 > SURVIVED**. These are defects in code 140.1 *landed*, not in the original Phase 140 surface.
 
-- [x] **PYAPIFIX-01**: the `/process-key` duplicate reply and its consumer agree on one contract, proven by a test that exercises the **real** Python response against the **real** TypeScript guard — not two suites each mocking the other. *(H-5: `routers/process_key.py:680-690` emits `queued:true` with `code`/`idempotent`; `finalize-wizard/route.ts:1433-1450` rejects that shape → Sentry + 502.)* ⚠️ **Two corrections, both source-verified:** the guard is **NOT deployed** (Phase 140's commit `57b11813` on this same unmerged branch) so there is no rollout-ordering constraint — choose the fix on contract quality; and **no live caller can trigger the 502 today** (`finalize-wizard`/`keys/sync` contain zero `wizard_session_id`; the duplicate path requires a caller-supplied one per `process_key.py:977-979`). This is contract incoherence with a live trap arm, **not** a production break. Also absorb the unowned **M-11 re-triage**: onboard has no request-level double-submit protection, only job-level dedupe.
+- [x] **PYAPIFIX-01**: the `/process-key` duplicate reply and its consumer agree on one contract, proven by a test that exercises the **real** Python response against the **real** TypeScript guard — not two suites each mocking the other. *(H-5: `analytics-service/routers/process_key.py` — `_wizard_duplicate_reply` defined :717, its dict emits `"code": "WIZARD_DUPLICATE"` :738 / `"idempotent": True` :739 / `"queued"` :744 — emits `queued:true` with `code`/`idempotent`; `src/app/api/strategies/finalize-wizard/route.ts` — the `isProcessKeyOnboardResponse(upstream)` guard at :1857 rejects that shape → Sentry + 502 (`console.error("[strategies/finalize-wizard] unified upstream returned unrecognized shape"` :1893-1894, the 502 :1917).)* ⚠️ **Two corrections, both source-verified:** the guard is **NOT deployed** (Phase 140's commit `57b11813` on this same unmerged branch) so there is no rollout-ordering constraint — choose the fix on contract quality; and **no live caller can trigger the 502 today** (`finalize-wizard`/`keys/sync` contain zero `wizard_session_id`; the duplicate path requires a caller-supplied one per `analytics-service/routers/process_key.py` — `idempotent_by_session = body.flow_type != "teaser" and bool(body.context.get("wizard_session_id"))` at :1033-1035, consumed at :1351 / :1509). This is contract incoherence with a live trap arm, **not** a production break. Also absorb the unowned **M-11 re-triage**: onboard has no request-level double-submit protection, only job-level dedupe.
 - [x] **PYAPIFIX-06**: `error_contract.py`'s remaining guard gaps are closed, breaking a **circular deferral** — no downstream phase can reach them (140.2/140.3 are TypeScript-only by their own CONTEXTs; 146 is a rate-limit phase). **(a)** A `429` carrying `Retry-After` is constructable — today `retry_after` requires `retryable:true` while the CALLER arm raises on it (`_validate`, `:146-155` + ~`:100`), yet `140.1-VERIFICATION.md` gap 1 and obligation TS-23 both mandate migrating the two in-handler 429 sites onto that envelope. **(b)** The `>=500` arm rejects a venue `dependency` — today `service_error(500, "X", dependency="binance", retryable=False)` validates, and **Phase 140.2 keys the breaker on `dependency`**, so a venue name on a 500 poisons a breaker key. *(M-1, M-2 — same function PYAPIFIX-04 already opens; excluding them half-closes the class in the phase whose stated principle is "enforce, don't document".)*
-- [x] **PYAPIFIX-02**: A fault at the caller's venue answers **424/retryable** at every site a Python-side change can correct without depending on an unlanded TypeScript obligation, with the remainder (`routers/exchange.py:145`, `:152`, `:505`) enumerated and blocker-named (**BLOCKED-BY: TS-05** — migrating them to `service_error(424)` turns `body.detail` from scalar to object, which `src/lib/analytics-client.ts:177-180` feeds into `classifyKeyValidationError` as `"[object Object]"` → terminal UNKNOWN dead-end render), not 403 — implemented as a **permanent-code ALLOW-LIST** (never a transient denylist), the class closed rather than point-fixed, and no body contradicting itself (`recoverable:false` beside "Try again in a moment"). *(H-1.* ⚠️ **Corrected at source 2026-07-26:** `/exchange/validate-key` does **NOT** already handle this — `read_only is False` appears exactly twice repo-wide (`process_key.py:1297`, `long_fetch.py:331`); the real analog is `long_fetch.py:386-397`. The research's **transient denylist fails unsafe — it is the existing bug's own shape**. `MISSING_SCOPE` **must** be allow-listed (`exchange.py:1047-1058` sets `read_only=False` + that code without `valid=True`, and it is absent from `long_fetch`'s `permanent_codes`) or a permanent scope fault becomes a retryable 424. The review also **missed `process_key.py:358-359`'s `recoverable` set**, which omits `PROBE_FAILED`/`DDOS_PROTECTION` — no status-code change fixes that.)*
-- [x] **PYAPIFIX-03**: A failure in code that performs **no network I/O** is attributed to us (500), never to the caller's venue — so it counts, and someone is paged, **at all three sites**. *(H-2: `internal.py:416-431`. ⚠️ **Corrected 2026-07-26 — this is a 3-site class, not 1**: the pattern-mapper found `routers/portfolio.py:2266`, and the **same function's second `create_exchange` at `:2316` already answers 500**, which is in-repo proof the class is real. The instance-not-class defect this programme exists to catch.)*
+- [x] **PYAPIFIX-02**: A fault at the caller's venue answers **424/retryable** at every site a Python-side change can correct without depending on an unlanded TypeScript obligation, with the remainder (all three in `analytics-service/routers/exchange.py`, coordinates re-derived from HEAD 2026-08-08 — the original `:145`/`:152`/`:505` were read at `e26f0520`: the sFOX 429 arm, now `VenueTransientHTTPException(status_code=424, code="RATE_LIMITED"` :184-189; the sFOX 5xx/transport arm, now `code="NETWORK_UNAVAILABLE"` :199-204; and the ccxt `result["error"]` arm, now `code=result["error_code"]` :619-624) enumerated and blocker-named (**BLOCKED-BY: TS-05** — migrating them to `service_error(424)` turns `body.detail` from scalar to object, which `src/lib/analytics-client.ts` feeds into `classifyKeyValidationError` as `"[object Object]"` → terminal UNKNOWN dead-end render; the read is now `throw new AnalyticsUpstreamError(seamHumanMessage(error) ?? …` :552-557, and its docblock names the old `error.detail ??` read at :535-536), not 403 — implemented as a **permanent-code ALLOW-LIST** (never a transient denylist), the class closed rather than point-fixed, and no body contradicting itself (`recoverable:false` beside "Try again in a moment"). *(H-1.* ⚠️ **Corrected at source 2026-07-26:** `/exchange/validate-key` does **NOT** already handle this — `read_only is False` appears exactly twice repo-wide outside tests (`analytics-service/routers/process_key.py:1597`, `analytics-service/services/ingestion/long_fetch.py:331`); the real analog is the same `long_fetch.py`'s IMP-1 permanence block — comment opens :385, `permanent_codes = {` :406-409, `_is_permanent = (` derivation :432-439. The research's **transient denylist fails unsafe — it is the existing bug's own shape**. `MISSING_SCOPE` **must** be allow-listed (⚠️ this one is the `services/` file, **not** the `routers/` one — `analytics-service/services/exchange.py`, where the deribit `if scope_detail:` arm inside `validate_key_permissions` sets `result["read_only"] = False` :1104 + `result["error_code"] = … "MISSING_SCOPE"` :1111-1115 without `valid=True`, and the allow-list it must join is `PERMANENT_VALIDATION_ERROR_CODES = frozenset(` :1025-1033, while it is absent from `analytics-service/services/ingestion/long_fetch.py`'s `permanent_codes = {` :406-409) or a permanent scope fault becomes a retryable 424. The review also **missed `analytics-service/routers/process_key.py`'s `_envelope_error` `recoverable` set** (the code-derived verdict — `def _envelope_error(` :375, derivation :405-412, now inverted onto `_ROUTE_TERMINAL_ERROR_CODES = frozenset(` :364), which omits `PROBE_FAILED`/`DDOS_PROTECTION` — no status-code change fixes that.)*
+- [x] **PYAPIFIX-03**: A failure in code that performs **no network I/O** is attributed to us (500), never to the caller's venue — so it counts, and someone is paged, **at all three sites**. *(H-2: `analytics-service/routers/internal.py` — `create_exchange(` :485, its `except Exception:` :488, now `service_error(500, "ADAPTER_INIT_FAILED"` :517-522. ⚠️ **Corrected 2026-07-26 — this is a 3-site class, not 1**: the pattern-mapper found `analytics-service/routers/portfolio.py` — `create_exchange(` :2283, `except Exception` :2286, now `service_error(500, "ADAPTER_INIT_FAILED"` :2309-2314 — and the **same function's second `create_exchange(` at `:2373` already answers 500** (`HTTPException(status_code=500, detail="Strategy verification failed")` :2550), which is in-repo proof the class is real. The instance-not-class defect this programme exists to catch.)*
 - [x] **PYAPIFIX-04**: The `body.detail.detail` scalar guarantee is **enforced by a guard**, matching every other rule in `error_contract.py`, because Phase 140.2 renders from it. *(H-3)*
-- [x] **PYAPIFIX-05**: Every one of the 12 surviving mutations turns a test RED, re-run and observed first-hand — including the ccxt-subclass narrowing that survived **twice** while making `RateLimitExceeded` answer 500, and `default_platform_key` returning `""`, which makes slowapi **skip limiting entirely** and ships green. *(H-4 + the Medium mutation set.)* **Also folds in M-15** — `tests/test_process_key_200_discriminator.py:416-424` asserts `len(_SHAPES) == 6` against a list literal **in the same file**, and its docstring's claim that a seventh return site reddens it is false. A toothless *Python* test squarely inside this phase's goal, which the "12 survivors" wording would otherwise skip and whose triage destination (140.2) cannot edit Python.
+- [x] **PYAPIFIX-05**: Every one of the 12 surviving mutations turns a test RED, re-run and observed first-hand — including the ccxt-subclass narrowing that survived **twice** while making `RateLimitExceeded` answer 500, and `default_platform_key` returning `""`, which makes slowapi **skip limiting entirely** and ships green. *(H-4 + the Medium mutation set.)* **Also folds in M-15** — `analytics-service/tests/test_process_key_200_discriminator.py` asserts `len(_SHAPES) == 6` against the `_SHAPES = [` list literal **in the same file** (:372) — ⚠️ the assertion is gone at HEAD; its tombstone (`# M-15 — the enumeration fence, read from the ROUTER'S OWN AST` :416, "What was here before: a bare length assertion on `_SHAPES` against the literal six" :420) marks the spot — and its docstring's claim that a seventh return site reddens it is false. A toothless *Python* test squarely inside this phase's goal, which the "12 survivors" wording would otherwise skip and whose triage destination (140.2) cannot edit Python.
 
 ### PYAPIFIX2 — Surviving findings from the 140.1.1 review cycle (Phase 140.1.2)
 
@@ -100,13 +100,13 @@ investor factsheet on a spinner that never resolves.
 > **All five code items are Python; Phase 140.2 is TypeScript-only by its own CONTEXT, so they have
 > no other home** — the same circular deferral that forced PYAPIFIX-06 into 140.1.1.
 
-- [x] **PYAPIFIX2-01** *(HIGH)* — ⚠️ **PYTHON HALF CLOSED (7/7 sites carry code+recoverable); RENDER HALF → OB-1, owner 140.3** (ledger row **TS-35** in `140.1-TS-OBLIGATIONS.md` carries it, with `analytics-service/tests/fixtures/validate_key_venue_transient_contract.json` as its parity input). Not a bare tick: ROADMAP SC1 also demands that a Binance-maintenance-shaped failure *no longer renders* as `UNKNOWN`/500 with no retry affordance, and that render assertion is **not delivered by this phase** — `create-with-key/route.ts` returns the status the classifier computed and the upstream status is discarded (RESEARCH C-1), so it can only be fixed in TypeScript. The venue-transient class is closed at **every** consumer of `validate_key_permissions`, including the **live key-connect route**. Today `routers/exchange.py:522` (`/api/validate-key` — used by `create-with-key`, `composite/add-key`, `keys/validate-and-encrypt`) and `routers/portfolio.py:2322` collapse `RATE_LIMITED`/`DDOS_PROTECTION`/`EXCHANGE_UNAVAILABLE`/`NETWORK_UNAVAILABLE`/`PROBE_FAILED` into an opaque 400 with no `code` and no `retryable`. **The arm 140.1.1 fixed serves teaser/csv/internal_report; the unfixed one carries strictly more real traffic.** Traced consequence: `EXCHANGE_UNAVAILABLE` and `NETWORK_UNAVAILABLE` fall through `classifyKeyValidationError`'s substring cascade (`wizardErrors.ts:967-1035`) to **`UNKNOWN`/500 "our team has been notified" with no retry affordance** — the DOGFOOD-3 dead end that cascade exists to kill. Also enumerate `_validate_mt5_key`'s three classified-upstream 400 arms (`exchange.py:335`, `:345`, `:361`), which sit outside TS-32's carve-out.
-- [x] **PYAPIFIX2-02** *(reproduce-first)* — **REPRODUCED, then FIXED** (plan 01): `error_kind="transient"` was observed first-hand on **both** codes through the real `Mt5Adapter`, so the gate opened and the fix landed — permanence is now **stated by the adapter** (provenance), not by a fifth string list. A permanent MT5 credential fault is not classified as a recoverable venue fault. `MT5_WRONG_SERVER` (`services/ingestion/mt5.py:104`) and `MT5_MASTER_PASSWORD` (`:224`) are absent from **both** `PERMANENT_VALIDATION_ERROR_CODES` and `long_fetch.py:391`'s local `permanent_codes`, so on the live worker path they yield `error_kind="transient"` → **3 gateway-serialised retries → `failed_final`** for a credential that can never succeed. **MT5 is `ENABLED=true` in production.** The TS side already classifies both as 400 client faults (`wizardErrors.ts:1002/1005`) — **Python and TypeScript hold opposite verdicts on the same codes.** ⚠️ **Reproduce the worker path before scoping** — one red team held that MT5 branches before `create_exchange` and never calls `validate_key_permissions`; "could not reproduce" is a valid, budget-saving outcome.
-- [x] **PYAPIFIX2-03** — closed (plan 02): the raw `HTTPException(429)` now goes through `service_error(429, "RATE_LIMITED", retryable=True, retry_after=...)`, giving that builder arm its first consumer; the `error_contract.py` comment it invalidated was inverted in the SAME commit. `/internal` throttling emits the service's own envelope. `routers/internal.py:226` raises a raw `HTTPException(429)` one line from a builder arm that would validate it cleanly — so the 429 arm added in 140.1.1 has **zero call sites** and the response carries no `code`. *(Its consumer additionally launders the 429 into `502 / PROBE_FAILED`, discarding the `Retry-After` — that half is TypeScript and belongs to 140.3.)*
-- [x] **PYAPIFIX2-04** — closed (plan 02): all four user-facing 429s carry `Retry-After`. Every **user-facing** 429 carries a `Retry-After`. Four do not: `match.py:1742`, `portfolio.py:1960`, `simulator.py:249` (+ `portfolio.py:2245` on a dead route). This is the 429-shaped hole in the "503 carries `Retry-After`; honour it" rule.
+- [x] **PYAPIFIX2-01** *(HIGH)* — ⚠️ **PYTHON HALF CLOSED (7/7 sites carry code+recoverable); RENDER HALF → OB-1, owner 140.3** (ledger row **TS-35** in `140.1-TS-OBLIGATIONS.md` carries it, with `analytics-service/tests/fixtures/validate_key_venue_transient_contract.json` as its parity input). Not a bare tick: ROADMAP SC1 also demands that a Binance-maintenance-shaped failure *no longer renders* as `UNKNOWN`/500 with no retry affordance, and that render assertion is **not delivered by this phase** — `create-with-key/route.ts` returns the status the classifier computed and the upstream status is discarded (RESEARCH C-1), so it can only be fixed in TypeScript. The venue-transient class is closed at **every** consumer of `validate_key_permissions`, including the **live key-connect route**. Today `analytics-service/routers/exchange.py`'s `if result["error"]:` arm (read as `:522` at `637074b0`; at HEAD it is `VenueTransientHTTPException(status_code=424, code=result["error_code"]` :619-624 under `@router.post("/validate-key")` :468 / `async def validate_key(` :472 — `/api/validate-key`, used by `create-with-key`, `composite/add-key`, `keys/validate-and-encrypt`) and `analytics-service/routers/portfolio.py`'s `if validation.get("error"):` arm (read as `:2322`; at HEAD the `if` is :2338 and the raise `code=validation["error_code"]` :2354-2359) collapse `RATE_LIMITED`/`DDOS_PROTECTION`/`EXCHANGE_UNAVAILABLE`/`NETWORK_UNAVAILABLE`/`PROBE_FAILED` into an opaque 400 with no `code` and no `retryable`. **The arm 140.1.1 fixed serves teaser/csv/internal_report; the unfixed one carries strictly more real traffic.** Traced consequence: `EXCHANGE_UNAVAILABLE` and `NETWORK_UNAVAILABLE` fall through `classifyKeyValidationError`'s substring cascade (`src/lib/wizardErrors.ts` — `export function classifyKeyValidationError(` :1927, terminating in `return { code: "UNKNOWN", status: 500 };` :2110) to **`UNKNOWN`/500 "our team has been notified" with no retry affordance** — the DOGFOOD-3 dead end that cascade exists to kill. Also enumerate `_validate_mt5_key`'s three classified-upstream 400 arms (all in `analytics-service/routers/exchange.py` — ⚠️ `routers/`, not `services/exchange.py`; `async def _validate_mt5_key(` :222, and the three `NETWORK_ERROR_DETAIL` arms read as `:335`/`:345`/`:361` at `637074b0` are at HEAD the `except asyncio.TimeoutError` arm :392-397, the `except Mt5AccountMismatchError` arm :408-413, and the `except Mt5ClientError` transient tail :430-435), which sit outside TS-32's carve-out.
+- [x] **PYAPIFIX2-02** *(reproduce-first)* — **REPRODUCED, then FIXED** (plan 01): `error_kind="transient"` was observed first-hand on **both** codes through the real `Mt5Adapter`, so the gate opened and the fix landed — permanence is now **stated by the adapter** (provenance), not by a fifth string list. A permanent MT5 credential fault is not classified as a recoverable venue fault. `MT5_WRONG_SERVER` (`analytics-service/services/ingestion/mt5.py` — `error_code="MT5_WRONG_SERVER",` :104) and `MT5_MASTER_PASSWORD` (same file, `error_code="MT5_MASTER_PASSWORD",` :227) are absent from **both** `PERMANENT_VALIDATION_ERROR_CODES` (`analytics-service/services/exchange.py:1025-1033`) and `analytics-service/services/ingestion/long_fetch.py`'s local `permanent_codes = {` :406-409, so on the live worker path they yield `error_kind="transient"` → **3 gateway-serialised retries → `failed_final`** for a credential that can never succeed. **MT5 is `ENABLED=true` in production.** The TS side already classifies both as 400 client faults (`src/lib/wizardErrors.ts` — `return { code: "KEY_MT5_MASTER_PASSWORD", status: 400 };` :2078 and `return { code: "KEY_MT5_WRONG_SERVER", status: 400 };` :2081) — **Python and TypeScript hold opposite verdicts on the same codes.** ⚠️ **Reproduce the worker path before scoping** — one red team held that MT5 branches before `create_exchange` and never calls `validate_key_permissions`; "could not reproduce" is a valid, budget-saving outcome.
+- [x] **PYAPIFIX2-03** — closed (plan 02): the raw `HTTPException(429)` now goes through `service_error(429, "RATE_LIMITED", retryable=True, retry_after=...)`, giving that builder arm its first consumer; the `error_contract.py` comment it invalidated was inverted in the SAME commit. `/internal` throttling emits the service's own envelope. `analytics-service/routers/internal.py`'s per-key throttle arm inside `async def get_key_permissions(` (:185, route decorator :184) raises a raw `HTTPException(429)` — ⚠️ at HEAD that site is already the fixed `service_error(429, "RATE_LIMITED", retryable=True, retry_after=int(_RATE_LIMIT_WINDOW_S)` :251-257 — one line from a builder arm that would validate it cleanly — so the 429 arm added in 140.1.1 has **zero call sites** and the response carries no `code`. *(Its consumer additionally launders the 429 into `502 / PROBE_FAILED`, discarding the `Retry-After` — that half is TypeScript and belongs to 140.3.)*
+- [x] **PYAPIFIX2-04** — closed (plan 02): all four user-facing 429s carry `Retry-After`. Every **user-facing** 429 carries a `Retry-After`. Four do not: `analytics-service/routers/match.py` — the `_force_last_run` throttle, `status_code=429,` :1742; `analytics-service/routers/portfolio.py` — the `if not _check_bridge_user_rate(` arm :1962, `status_code=429,` :1964; `analytics-service/routers/simulator.py` — the `if not _check_simulator_user_rate(` arm :247, `status_code=429,` :249 (+ the same `portfolio.py`'s `if not _check_verify_strategy_email_rate(` arm :2253, `status_code=429,` :2255, on a dead route). This is the 429-shaped hole in the "503 carries `Retry-After`; honour it" rule.
 - [x] **PYAPIFIX2-05** — closed (plan 04): `_SHAPES` is bound to the router's AST by a one-to-one containment oracle (router source AST vs live HTTP bodies — two artifacts, never a count). Falsifiability OBSERVED: deleting a row reddens naming the uncovered fingerprint, and the M-15 fence still reddens on a 7th 200-capable return. The 200-discriminator corpus cannot silently shrink. 140.1.1 deleted `test_pyapi_10a_exactly_six_shapes_are_covered` as self-referential — correctly — but it was **also** the only guard on `_SHAPES`, and the AST fence that replaced it does not read `_SHAPES` at all. **Deleting a row was OBSERVED to survive** (141→140 passed). One assertion, bound to the fingerprint set.
 - [x] **PYAPIFIX2-06** — closed (plans 02 + 04): all four artifact items corrected, each replacement coordinate RE-DERIVED by reading source at current HEAD (never `old + N`); the fifth item was a scope collision, settled below. The phase's own artifacts state only what they can support. `140.1.1-VERIFICATION.md` must read `gaps_found`: its Direction-2 claim *"no already-correct test was weakened or removed"* is **false** (two tests were deleted; one is missing from the deletions table), and PYAPIFIX-02's carve-out completeness was evidenced by `grep -c "BLOCKED-BY: TS-05" → 1`, which proves a marker exists, not that a list is complete. In `docs/STATUS_CONTRACT.md`: the "not seam-reachable" list's `exchange.py:491` **currently points at a live 424 arm**; S-11's `internal.py:414` is wrong (at HEAD `2c55ece0` the `except Exception:` is `:442` and the `service_error(500, "ADAPTER_INIT_FAILED", ...)` raise is `:471`; the `:421`/`:450` pair quoted here was itself read at `39688d69` and has since drifted — which is the point); `## 1. The four classes` heads a **five**-row table. ⚠️ **Do NOT run a general comment sweep** — the "six refs off by the inserted-line count" diagnosis was **refuted**; most drift pre-dates the phase, so any number recomputed as old+18 would be wrong.
-  - ⚠️ **W-1 — location clause corrected.** This requirement originally placed the 6/7→6/10 census *"In `docs/STATUS_CONTRACT.md`"*. **That was false.** The census is a CODE COMMENT at `analytics-service/services/error_contract.py` ≈:158-163. The planner settled the scope collision as a fenced comment-only exception and it landed in plan 02 (`e5aead5d`), with the arithmetic re-derived by AST — **6 of 16** `service_error(500, …)` sites carry `dependency` — never as `7 + 3`. Plan 04 therefore touches no code for this item. Leaving the false location on a ticked requirement would be the identical defect class this requirement exists to correct.
+  - ⚠️ **W-1 — location clause corrected.** This requirement originally placed the 6/7→6/10 census *"In `docs/STATUS_CONTRACT.md`"*. **That was false.** The census is a CODE COMMENT at `analytics-service/services/error_contract.py` — `# MEMBERSHIP, not prohibition: six of sixteen legitimately name one of`, inside `_validate`'s `if status_code >= 500:` arm, :166-171 (`def _validate(` :100). The planner settled the scope collision as a fenced comment-only exception and it landed in plan 02 (`e5aead5d`), with the arithmetic re-derived by AST — **6 of 16** `service_error(500, …)` sites carry `dependency` — never as `7 + 3`. Plan 04 therefore touches no code for this item. Leaving the false location on a ticked requirement would be the identical defect class this requirement exists to correct.
 
 ### SEAMCORE — Seam core & breaker correctness (Cluster A + D)
 
@@ -139,7 +139,7 @@ investor factsheet on a spinner that never resolves.
 - [x] **PYAPI-01**: Wizard-session uniqueness is **tenant-scoped**, and no duplicate pre-check can return another tenant's verification id, status or trust tier. Proven by an RLS/SQL gate under `supabase/tests/`. *(C-08 — the programme's only CRITICAL)*
   - **DONE (2026-07-26) — both halves, across two plans.**
     - *Constraint half* (Plan 140.1-01): `UNIQUE (strategy_id, wizard_session_id)` (migration `20260726000225`), gated by `supabase/tests/test_strategy_verifications_wizard_session_tenant_scope.sql`, proven RED pre-migration and GREEN post-migration.
-    - *Query half* (Plan 140.1-02, commit `ca9a9235`): **both** service-role read sites now scoped — the duplicate pre-check (`routers/process_key.py:930`) and the 23505 race-winner re-fetch (`:1009`), each filtering `strategy_id` AND `wizard_session_id`. The pre-check had to **move** below the `strategy_id is None` branch before it could be scoped at all. A `strategies` id+user_id ownership gate runs ahead of the first read (403 `STRATEGY_NOT_OWNED`), because `strategy_id` is caller-supplied and a scoped read alone is necessary-not-sufficient. Proven by pytest oracles PYAPI-01d (one per read site) and PYAPI-01e; mutation M2 (drop the scoping from the race site only) reddens the race oracle while the pre-check oracle stays green.
+    - *Query half* (Plan 140.1-02, commit `ca9a9235`): **both** service-role read sites now scoped — the duplicate pre-check (`analytics-service/routers/process_key.py` — `if idempotent_by_session:` :1351, `existing = one(` :1352 with `.eq("strategy_id", strategy_id)` :1355 + `.eq("wizard_session_id", wizard_session_id)` :1356) and the 23505 race-winner re-fetch (same file — `race_winner = one(` :1523, `.eq("strategy_id", strategy_id)` :1526 + `.eq("wizard_session_id", wizard_session_id)` :1527), each filtering `strategy_id` AND `wizard_session_id`. The pre-check had to **move** below the `strategy_id is None` branch before it could be scoped at all. A `strategies` id+user_id ownership gate runs ahead of the first read (403 `STRATEGY_NOT_OWNED`), because `strategy_id` is caller-supplied and a scoped read alone is necessary-not-sufficient. Proven by pytest oracles PYAPI-01d (one per read site) and PYAPI-01e; mutation M2 (drop the scoping from the race site only) reddens the race oracle while the pre-check oracle stays green.
     - The SQL gate passes with the query half unfixed, which is why both plans were required before this box could be ticked.
 - [x] **PYAPI-02**: `/process-key` throttling is bounded **per tenant**, so no single caller — and in particular no anonymous caller of the public teaser — can exhaust the allowance for paying tenants. *(C-09, C-23)*
   - **DONE (2026-07-26) — Plan 140.1-06, commits `f8c85b07` (Python) + `eb88d53e` (TS mint).**
@@ -158,7 +158,7 @@ investor factsheet on a spinner that never resolves.
       `unverified` buckets. That is why the two shipped together.
 - [x] **PYAPI-03**: No router declares its own request-address-keyed limiter; all throttling goes through the shared limiter service with a documented token cost per flow. *(C-10; distinct from RATE-03, which adds `match.py` coverage)*
   - Closed by 140.1-07 (`7297f941`, `60086ce3`, `e26f0520`, `139f3153`). 9/9 routes rekeyed onto `partial(tenant_or_platform_key, scope=...)`; 0 private `Limiter()` (AST-gated); singleton default no longer IP-derived; flow-cost table in `services/rate_limit.py`'s docstring; 63 oracles in `tests/test_limiter_identity.py`.
-  - ⚠️ **FINDING-10 open**: `routers/simulator.py:92` is a TENTH IP-keyed route (`simulator:ip:<addr>`) that the plan's do-not-touch list calls "correctly user-keyed". Reported, quarantined by an equality gate, NOT fixed — needs its own plan.
+  - ⚠️ **FINDING-10 open**: `analytics-service/routers/simulator.py` is a TENTH IP-keyed route — `def _simulator_rate_limit_key(` :59 returning `f"simulator:ip:{get_remote_address(request)}"` :92 that the plan's do-not-touch list calls "correctly user-keyed". Reported, quarantined by an equality gate, NOT fixed — needs its own plan.
 - [x] **PYAPI-04**: On `/process-key`, authentication is decided **before** validation and throttling, so an unauthenticated caller can neither enumerate configuration nor consume the throttle budget. *(C-18)*
   - **DONE (2026-07-26) — Plan 140.1-06, commit `3a1bee30`.**
     - Gate order was pydantic 422 → slowapi 429 → handler 403; it is now
@@ -187,9 +187,9 @@ investor factsheet on a spinner that never resolves.
     `process_key.auth.token_absent` (WARN), `process_key.auth.token_mismatch` (WARN). None
     references the token variable — no token, no prefix, no length. Plus
     `rate_limit.tenant_claim_unverified` (WARN, claim PRESENCE only, never content).
-    - *`/health` half closed by 140.1-08*: `main.py:768-769` adds `config_ok` (the secret verdict,
+    - *`/health` half closed by 140.1-08*: `analytics-service/main.py` — `async def health():` :829, whose body dict adds `config_ok` :863 (the secret verdict,
       deliberately NOT crossed with the worker-heartbeat `status`) and `config_degraded_secrets`
-      (names only), plus `REQUIRED_PLATFORM_SECRETS` + a lifespan startup assertion whose
+      :864 (names only), plus `REQUIRED_PLATFORM_SECRETS` + a lifespan startup assertion whose
       before-the-worker ordering is AST-pinned, plus rate-limited Sentry captures on all four
       secret arms. **`/health` stays HTTP 200** on config degradation — a red `/health` is a
       Railway restart loop that suppresses the very signal being added (T-140.1-24).
@@ -211,7 +211,7 @@ investor factsheet on a spinner that never resolves.
 
 Added 2026-08-03 from `/gsd-discuss-phase 142.2`. Scope anchor: the connect experience and the
 correctness of what it produces. v1.15 already shipped the MT5 pipeline (tag `v1.15`, 6/6 phases)
-and MT5 is already folded into the unified backbone at `broker_dailies.py:403` — this group does
+and MT5 is already folded into the unified backbone at `analytics-service/services/broker_dailies.py` — `def combine_mt5_deal_ledger(` :545 — this group does
 **not** build a pipeline, it makes the existing one reachable, honest, and *proven*.
 
 ⚠️ v1.15 shipped **6/6 phases green with two open items intact**. A green unit suite is therefore
@@ -231,40 +231,44 @@ a live funded account on a **trading day**.
   Development — and because `NEXT_PUBLIC_MT5_ENABLED` is today Production-only, **both** vars are
   extended to Preview and Development so no environment carries a gate the others do not. Evidence
   the gap is real: prod holds 29 encrypted vars and `MT5_ENABLED` is absent from all of them, so
-  `isMt5EnabledServer()` (`src/lib/closed-sets.ts:178`, strict `=== "true"`) is false while
-  `MT5_UI_ENABLED` (`:124`, a bare `NEXT_PUBLIC_MT5_ENABLED === "true"` with **no founder gate**)
-  is true — the MT5 card renders for **every** production user and `create-with-key/route.ts:147`
+  `isMt5EnabledServer()` (`src/lib/closed-sets.ts` — `export function isMt5EnabledServer(): boolean {` :178, strict `=== "true"`) is false while
+  `MT5_UI_ENABLED` (same file — `export const MT5_UI_ENABLED = process.env.NEXT_PUBLIC_MT5_ENABLED === "true";` :124, a bare `NEXT_PUBLIC_MT5_ENABLED === "true"` with **no founder gate**)
+  is true — the MT5 card renders for **every** production user and `src/app/api/strategies/create-with-key/route.ts`'s `if (isMt5 && !isMt5EnabledServer()) {` gate (:151, returning `code: "KEY_VENUE_NOT_ENABLED"` :153)
   rejects every one of their submissions. ⛔ The closed-set no-widening pin holds: `mt5` stays OUT
   of `UI_EXCHANGE_CODES` / `EXCHANGES` / `FUNDING_EXCHANGES` / `CRYPTO_EXCHANGES` regardless of the
-  flag (`closed-sets.ts:119-122`).
+  flag (`src/lib/closed-sets.ts` — the no-widening docblock above `MT5_UI_ENABLED`, :119-122).
 - [x] **MT5-02** — ✅ **DELIVERED + VERIFIED 2026-08-03** as a consequence of MT5-01, and verified by
   observation rather than inference: `curl https://quantalyze.xyz/security` now returns the
   `mt5-readonly` anchor and the "investor (read-only) password" copy (4 matches each), content that
   renders **only** when `isMt5EnabledServer()` is true. Before the redeploy it returned none. This
   doubles as the live proof that MT5-01's server gate is actually in effect — the same function
-  guards `create-with-key/route.ts:147`, so that rejection arm can no longer fire.
+  guards `src/app/api/strategies/create-with-key/route.ts` (`if (isMt5 && !isMt5EnabledServer()) {` :151), so that rejection arm can no longer fire.
   The `/security#mt5-readonly` investor-password guide renders in production. It
-  gates on the same `isMt5EnabledServer()` (`src/app/(marketing)/security/page.tsx:544`), so it is
+  gates on the same `isMt5EnabledServer()` (`src/app/(marketing)/security/page.tsx` — `{isMt5EnabledServer() && (` :544), so it is
   currently **blank** — the wizard tells a founder to use an investor password while the page
   explaining what that is shows nothing. Content is already correct; this is a gating consequence
   of MT5-01, asserted separately because it is a distinct user-visible surface.
 - [x] **MT5-03**: The Broker-server field renders as plain text while OKX's passphrase stays
   masked, via a **per-venue** flag (`passphraseSecret`) added alongside the per-venue
   `passphraseLabel` / `passphrasePlaceholder` config the file already carries. MT5 reuses OKX's
-  passphrase slot (`ConnectKeyStep.tsx:141`), and that slot is `type={showSecret ? "text" :
-  "password"}` at `:697` — so a global unmask would expose the OKX passphrase, a genuine API
+  passphrase slot (`src/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep.tsx` — the
+  `id: "mt5" as const,` venue entry :142, whose `passphraseLabel: "Broker server"` / `passphraseSecret: false`
+  sit at :151-152), and that slot used to be `type={showSecret ? "text" : "password"}` — the shared
+  unmask that still drives the api_secret input at :718; the passphrase input's `type=` is now the
+  per-venue `{passphraseSecret && !showSecret ? "password" : "text"}` at :739 (`passphraseSecret`
+  declared :76, defaulted `?? true` at :445) — so a global unmask would expose the OKX passphrase, a genuine API
   credential. The OKX render stays **byte-identical**.
 - [x] **MT5-04**: `KEY_INVALID_FORMAT` no longer buckets unrelated causes. The **24 emitting** sites across
   `src/app/api/strategies/create-with-key/route.ts` (12) and
   `src/app/api/strategies/composite/add-key/route.ts` (12) are split into honest codes
   (missing-required-field, unsupported-venue, venue-not-enabled, input-too-long), leaving
   `KEY_INVALID_FORMAT` for **actual format failures only** — which makes its existing copy true
-  again. Today `wizardErrors.ts:477` states *"Client-side format check failed before sending the
+  again. Today `src/lib/wizardErrors.ts`'s `KEY_INVALID_FORMAT: {` entry (:613, `cause:` :625-626) stated *"Client-side format check failed before sending the
   key to the exchange"*, which was **factually false** for the observed failure (a server-side
   feature gate), and offers Binance/OKX/Bybit hex-length advice to an MT5 user. ⚠️ MT5-01 makes the
-  MT5-gate arm (`route.ts:147`) **unreachable** — a fix aimed only at that arm would repair a line
+  MT5-gate arm (`src/app/api/strategies/create-with-key/route.ts` — `if (isMt5 && !isMt5EnabledServer()) {` :151) **unreachable** — a fix aimed only at that arm would repair a line
   that can no longer fire; the value is in the class. MT5 already has correct dedicated copy
-  (`KEY_MT5_MASTER_PASSWORD`, `KEY_MT5_WRONG_SERVER`, `wizardErrors.ts:470`) the route never
+  (`src/lib/wizardErrors.ts` — `KEY_MT5_MASTER_PASSWORD: {` :516 and `KEY_MT5_WRONG_SERVER: {` :533) the route never
   reaches. Out of scope, logged to `TODOS.md`: the same defect's **9** remaining emitting sites in
   `keys/validate-and-encrypt/route.ts` (4) and `verify-strategy/route.ts` (5).
   ⚠️ **Counts corrected 2026-08-04 from executed measurement, replacing the research's 28/11.**
@@ -290,9 +294,9 @@ a live funded account on a **trading day**.
   path)*: `isLedgerBackedExchange` is brought back into lockstep with the Python source set, so an
   MT5 (and sFOX) strategy is evaluated on the **daily-returns** branch of the gate rather than the
   fill-based one. **Measured drift:**
-  `analytics-service/services/ingestion/long_fetch.py:63` holds
+  `analytics-service/services/ingestion/long_fetch.py` — `_LEDGER_BACKED_SOURCES: frozenset[str] = frozenset({"deribit", "sfox", "mt5"})` :63 — holds
   `_LEDGER_BACKED_SOURCES = frozenset({"deribit", "sfox", "mt5"})`, while
-  `src/lib/strategyGate.ts:73` still returns `exchange === "deribit"` — under a comment that
+  `src/lib/strategyGate.ts`'s `export function isLedgerBackedExchange(` (`:73` at `8b327594^`; **deleted at HEAD by MT5-12**, replaced by `export function isDailyReturnsSourced(` :163) still returns `exchange === "deribit"` — under a comment that
   explicitly instructs *"Mirrors the analytics-service `is_ledger_backed` … **keep the two in
   lockstep**. Deribit is the only such venue today."* Python was widened for sfox and mt5; the
   TypeScript mirror and its comment were never updated.
@@ -301,8 +305,8 @@ a live funded account on a **trading day**.
   `compute_analytics_from_csv`, all `done`, 1 attempt, no errors, `unified_backbone_at_claim=true`
   — and wrote **135 rows to `csv_daily_returns` (2026-03-22 → 2026-08-03, 75 non-zero days, returns
   −10.57% … +14.97%)** with **0 rows in `trades`**, which is correct-by-construction for a
-  deal-ledger venue. `strategyGate.ts:181`'s `(!input.apiKeyId || input.isLedgerBacked === true)`
-  term then evaluated false, dropping a 135-day account onto the fill branch → `0 < 5` →
+  deal-ledger venue. `src/lib/strategyGate.ts`'s `const isDailyReturnsSourced =` (`:181` at `8b327594^`) and its
+  `(!input.apiKeyId || input.isLedgerBacked === true)` term (`:184` there; **both gone at HEAD** — MT5-12 replaced them with `export function isDailyReturnsSourced(` :163 reading `SERIES_TRUSTED_FOR_DAILY_BRANCH` :170) then evaluated false, dropping a 135-day account onto the fill branch → `0 < 5` →
   `GATE_INSUFFICIENT_TRADES`. ⚠️ **The failure is unwinnable and the remedy offered is false**: the
   screen advises "try another key", but **no** MT5 key can ever pass this gate regardless of
   history, and `try_another_key` **destroys the draft and every `strategy_keys` member under it**
@@ -323,7 +327,7 @@ a live funded account on a **trading day**.
   series itself, not from a venue-name list.** `isLedgerBackedExchange` is **deleted**, not widened,
   and no hardcoded venue set governs gate routing in *either* language.
   **Why the one-line fix is refused as the deliverable:** MT5-11's branch condition is a **proxy**.
-  The gate's real question — stated in `strategyGate.ts:170` — is *"is this daily series complete,
+  The gate's real question — stated in `src/lib/strategyGate.ts`'s `// The \`!input.apiKeyId || input.isLedgerBacked\` term is load-bearing:` comment (`:170-176` at `8b327594^`; gone at HEAD) — is *"is this daily series complete,
   or is it a funding-only stub with a fills gap that would understate the track record?"* It
   approximates that with *"which venue is this?"*, hand-maintained in two languages with only a
   comment ("keep the two in lockstep") as enforcement. That proxy was always going to drift; it
@@ -331,14 +335,14 @@ a live funded account on a **trading day**.
   ⭐ **Founder insight 2026-08-03, verified in code — "all venues produce a ledger."** This is
   correct and it reshapes the requirement. `services/broker_dailies.py` holds **four** combine
   functions and **every venue already derives the same daily series from ledger-shaped inputs**:
-  `combine_realized_and_funding:152` (binance/bybit/okx — realized PnL **+ funding**),
-  `combine_native_ledger:185` (deribit), `combine_sfox_balance_history:241` (sfox),
-  `combine_mt5_deal_ledger:403` (mt5). The file header records that funding was **+20.4% on a live
+  `def combine_realized_and_funding(` :218 (binance/bybit/okx — realized PnL **+ funding**),
+  `def combine_native_ledger(` :268 (deribit), `def combine_sfox_balance_history(` :351 (sfox),
+  `def combine_mt5_deal_ledger(` :545 (mt5). The file header records that funding was **+20.4% on a live
   Bybit account — two-thirds of the profit** — and that `fetch_daily_pnl` excludes funding by
   design, so realized-only is wrong. Some venues *additionally* expose equity / unrealized PnL.
   ⇒ **"ledger-backed vs fill-based" was never about whether a ledger exists.** Every venue has one.
   The only genuine difference is that perps *also* fetch fills (`adapter.fetch_raw`) into `trades`;
-  `long_fetch.py:461` skips that step for ledger venues because it is redundant or unimplemented
+  `analytics-service/services/ingestion/long_fetch.py`'s `if is_ledger_backed:` :461 skips that step for ledger venues because it is redundant or unimplemented
   there. `trades` is therefore a **parallel, partly-redundant representation populated by only some
   venues** — and the gate reads *it* instead of the daily series every venue produces. **MT5 did not
   fall through a gap in the backbone; it revealed the gate was never on the backbone for any venue.
@@ -403,8 +407,8 @@ milestone or advertise MT5 until 142.3 passes.
   terminal's own equity and balance figures, or the broker statement, over a fixed window, matching
   within a stated tolerance. ⛔ Internal consistency (dailies compound to displayed equity, backbone
   agrees with UI) does **not** satisfy this: that is the self-referential oracle shape that let
-  three money bugs survive six review passes. `broker_dailies.py` already claims `account_info()
-  .equity` is authoritative (`:514`); this tests the claim.
+  three money bugs survive six review passes. `analytics-service/services/broker_dailies.py` already claims `account_info()
+  .equity` is authoritative (`combine_mt5_deal_ledger`'s docstring — "``account_info().equity`` is ALWAYS authoritative" :604; `def combine_mt5_deal_ledger(` :545); this tests the claim.
 - [ ] **MT5-08**: Verification runs against the **live funded account** on a **trading day** — real
   fills, fees, swap charges and equity, via the read-only investor password. A demo account does
   not satisfy this (synthetic fills/swaps, artificial starting balance exercising different anchor
@@ -412,14 +416,16 @@ milestone or advertise MT5 until 142.3 passes.
   it has already demonstrated it does not catch these). A weekend run proves nothing.
 - [ ] **MT5-09**: Every surface that renders strategy performance shows the same, correct MT5
   numbers — strategy detail, public factsheet, scenario composer, portfolio PDF, browse. The
-  architecture says these agree by construction (`job_worker.py:6043`, via shared
+  architecture says these agree by construction (`analytics-service/services/job_worker.py` — the
+  `# 5. #5 collapse (D4): asset_class is THE annualization clock selector` block :6163-6172, whose
+  `periods_per_year = periods_per_year_for_asset_class(` is :6170, via shared
   `strategies.asset_class`), and MT5's annualization clock is already correct
-  (`create-with-key/route.ts:510` stamps `isCryptoExchange(exchange) ? "crypto" : "traditional"`;
-  `finalize-wizard/route.ts:731` says "stamp `traditional` for mt5 (forex/CFD)"; `portfolio-stats
+  (`src/app/api/strategies/create-with-key/route.ts` stamps `asset_class: isCryptoExchange(exchange) ? "crypto" : "traditional",` :514;
+  `src/app/api/strategies/finalize-wizard/route.ts` says "stamp `traditional` for mt5 (forex/CFD)" :829; `portfolio-stats
   .ts` **defaults** to 252, so a caller that forgets the basis still lands on MT5's right clock —
   crypto is the fragile direction, not MT5). This requirement exists to **test that invariant, not
   assume it**: the backbone-bypass surfaces logged in `TODOS.md` — `_compute_portfolio_analytics`
-  (`analytics-service/routers/portfolio.py:628`), `equity_reconstruction.py`, and the bespoke TS
+  (`analytics-service/routers/portfolio.py` — `async def _compute_portfolio_analytics(` :628), `equity_reconstruction.py`, and the bespoke TS
   stacks `portfolio-stats.ts` / `scenario-blend-panels.ts` / `health-score.ts` — **re-derive**
   metrics rather than reading them, and are the one place it could be false. One daily series
   checked five ways; a divergence is a finding.
@@ -434,16 +440,16 @@ milestone or advertise MT5 until 142.3 passes.
   with no API-scope concept never renders a failed scope probe.** The MT5 success screen shows
   `PROBE_FAILED: Could not check key scopes. Try again.` in red, with copy blaming the venue
   ("This is a problem at the venue — try again shortly"). It is **deterministic, not flaky**: the
-  probe handler (`analytics-service/routers/internal.py:184-460`) contains **zero `mt5` references**
+  probe handler (`analytics-service/routers/internal.py` — `@router.post("/keys/{key_id}/permissions")` :184 / `async def get_key_permissions(` :185, running to EOF :564) contains **zero `mt5` references**
   and its own docstring names step 5 as *"Open a CCXT exchange + call `detect_permissions`"*. MT5 is
   not a ccxt venue and a login / investor-password / server triple **has no scopes to detect**, so
-  `detect_permissions` throws → 424 `EXCHANGE_PROBE_FAILED` → `wizardErrors.ts:1728` maps it to
-  `KEY_PROBE_FAILED`. Every MT5 key hits it, every time.
+  `detect_permissions` throws → 424 `EXCHANGE_PROBE_FAILED` → `src/lib/wizardErrors.ts` maps it to
+  `KEY_PROBE_FAILED` (`VENUE_WIRE_CODE_TO_VERDICT` :1795, its `["PROBE_FAILED", { code: "KEY_PROBE_FAILED", status: 503 }],` row :1802; cascade fallback :2104). Every MT5 key hits it, every time.
   **Why this blocks MT5-05:** that requirement's wording is "without needing to know an internal
   error code", and a literal `PROBE_FAILED:` string on the success screen is exactly that. The
   "try again" advice is also unwinnable — retrying can never succeed.
   ⛔ **NOT a security hole, and the fix must not be sold as one.** Read-only IS enforced for MT5, by
-  a different and appropriate mechanism: `_validate_mt5_key` (`routers/exchange.py:222`), built as
+  a different and appropriate mechanism: `_validate_mt5_key` (`analytics-service/routers/exchange.py` — `async def _validate_mt5_key(` :222; ⚠️ `routers/`, not `services/exchange.py`), built as
   the fail-CLOSED clone of the sFOX validator, probes with `client.order_check(mt5_probe_request())`
   and rejects any credential that can trade. Verified 2026-08-04. The defect is the *badge*, not the
   enforcement.
@@ -451,15 +457,18 @@ milestone or advertise MT5 until 142.3 passes.
   DEFAULT preserves today's behaviour, so every ccxt venue stays byte-identical and MT5 opts out. MT5
   renders an explanatory line (investor passwords are read-only by design), never a failed probe.
 
-- [ ] **MT5-14** *(found by the MT5-05 live run, 2026-08-04)*: An MT5 strategy can declare **MT5** as
+- [x] **MT5-14** *(found by the MT5-05 live run, 2026-08-04)*: An MT5 strategy can declare **MT5** as
   its supported exchange in the wizard metadata step, and the venue is **preselected from the key the
   founder already connected** rather than asked again.
   ⛔ **SEVERITY CORRECTED 2026-08-04 — this was mis-filed as cosmetic and it is a HARD BLOCKER.**
   The same ccxt-only probe is called by `finalize-wizard` on EVERY submit as a scope-broadening
-  defence (`:175` → `/internal/keys/{id}/permissions?force_refresh=true`). For MT5 it throws
-  `Unsupported exchange: mt5` (confirmed in Sentry 2026-08-04T11:53:52 on
-  `GET /api/keys/6d36dd92-…/permissions`), `!res.ok` throws at `:194`, and the catch maps **every**
-  probe failure to `KEY_NETWORK_TIMEOUT` 502 at `:519`. So a PERMANENT venue-unsupported condition is
+  defence. ⚠️ **Line numbers re-derived from source 2026-08-08** (the previous set — `:175`,
+  `:194`, `:519` — had drifted; phases 150–152 moved this file). In
+  `src/app/api/strategies/finalize-wizard/route.ts`: the probe fetch of
+  `/internal/keys/{id}/permissions?force_refresh=true` at **:220**, the `if (!res.ok)` throw at
+  **:237**, and the catch mapping to `KEY_NETWORK_TIMEOUT` at **:617** and **:628**. For MT5 the
+  probe throws `Unsupported exchange: mt5` (confirmed in Sentry 2026-08-04T11:53:52 on
+  `GET /api/keys/6d36dd92-…/permissions`), so a PERMANENT venue-unsupported condition is
   reported to the user as a temporary network blip that says "try again" — the founder clicked Retry
   **five times** against a failure that can never succeed.
   **Consequence: an MT5 strategy cannot be submitted AT ALL.** MT5 reaching the wizard's preview
@@ -472,7 +481,7 @@ milestone or advertise MT5 until 142.3 passes.
   **Observed (the badge, same root cause):** the "Supported exchanges" chips render Binance / OKX / Bybit / Deribit / sFOX — no MT5
   — on a strategy whose only key IS MT5. The founder must either mis-declare the venue or leave it blank.
   ⛔ **This is NOT the MT5-11 drift class — do not "fix the stale list".** It is DELIBERATE:
-  `closed-sets.ts:119-122` states *"mt5 stays OUT of UI_EXCHANGE_CODES / EXCHANGES / FUNDING_EXCHANGES
+  `src/lib/closed-sets.ts:119-122` (the docblock above `export const MT5_UI_ENABLED` :124) states *"mt5 stays OUT of UI_EXCHANGE_CODES / EXCHANGES / FUNDING_EXCHANGES
   / CRYPTO_EXCHANGES regardless of this flag — the manager-surface `<Select>` must not silently
   widen"*, citing UI-SPEC §MT5-Manager-Parity and enforced by the `closed-sets.mt5-flag` no-widening
   pin. **A test WILL go red when this changes, and that is the guard working, not a regression to
@@ -517,9 +526,9 @@ D-14 valve.
   (adding a team's key to verify performance must not silently join the allocation).
 
 - [ ] **OWN-02**: The owner can **view the full factsheet** of their own unpublished strategy from the
-  account that uploaded it. Today `factsheet/[id]/v2/page.tsx:344` wraps the signature probe in
-  `withPublishedOnly(...)` with **no owner branch**, so the owner gets `notFound()` — the page's own
-  log hint reads *"strategy may be draft / archived or RLS-hidden"*. The correct primitive already
+  account that uploaded it. Today `src/app/factsheet/[id]/v2/page.tsx` wraps the signature probe in
+  `withPublishedOnly(` (:403-409, inside the `Promise.all` that also runs `readPublicVerificationSignals`) with **no owner branch**, so the owner gets `notFound()` — the page's own
+  log hint reads *"strategy may be draft / archived or RLS-hidden"* (:452). The correct primitive already
   exists and is used by browse (`withPublishedOrOwner`).
   ⛔ **THIS IS NOT A ONE-LINE SWAP, and shipping it as one would create a disclosure bug.** That
   route is **public and cached**: it builds an `unstable_cache` entry keyed on `${id}::${computedAt}`,
@@ -607,8 +616,8 @@ D-14 valve.
 
 - [ ] **WIZCONT-01**: Re-entering "add a strategy" with an existing wizard draft **continues where the
   founder left off** instead of restarting. ⚠️ **Resume is NOT missing — do not rebuild it.**
-  `WizardClient.tsx:187-191` already resumes to `sync_preview` when `initialDraft` is present, and the
-  server query on `page.tsx:79-90` correctly finds the row (verified on PROD: the live draft carries
+  `src/app/(dashboard)/strategies/new/wizard/WizardClient.tsx` — `const [step, setStep] = useState<WizardStepKey>(() => {` :187-191 — already resumes to `sync_preview` when `initialDraft` is present, and the
+  server query in `src/app/(dashboard)/strategies/new/wizard/page.tsx` (`const { data: draft } = await supabase` :79 … `.maybeSingle();` :89) correctly finds the row (verified on PROD: the live draft carries
   `source='wizard'`, `status='draft'`, so it IS matched). The restart is therefore attributable to the
   **entry point BEFORE the wizard** — `/strategies/new` is a branch chooser with no draft awareness,
   so it re-asks API-vs-CSV and the founder experiences "step 1" without the resuming component ever
@@ -622,7 +631,7 @@ D-14 valve.
   predicted that navigating away and re-entering the wizard would duplicate; the founder re-ran it on
   PROD and **no duplicate was created**. Mechanism, verified: `wizard_session_id` is a client
   idempotency token held in **localStorage**, "regenerated only on an explicit draft delete" — so it
-  SURVIVES navigation. The re-run matched the fence at `create-with-key/route.ts:263` and returned the
+  SURVIVES navigation. The re-run matched the fence at `src/app/api/strategies/create-with-key/route.ts` — the idempotency-fence `const { data: existingDraft, error: existingDraftErr } = await supabase` :263, `.eq("wizard_session_id", wizard_session_id)` :267 — and returned the
   existing draft **before** the Railway validate + encrypt (observable as the run being much faster).
   A DB backstop also exists on PROD: `strategies_user_wizard_session_source_uniq`
   — `UNIQUE (user_id, wizard_session_id, source) WHERE wizard_session_id IS NOT NULL`.
@@ -644,7 +653,7 @@ D-14 valve.
 > should be shown on that page next to the wrong answer, highlighting the box in which the answer
 > belongs in red."
 
-- [ ] **WIZFORM-01** *(BLOCKING UX — cost the founder 3 failed submits during the MT5-05 run)*: A
+- [x] **WIZFORM-01** *(BLOCKING UX — cost the founder 3 failed submits during the MT5-05 run)*: A
   field the user can get wrong is validated **on the form, inline, next to that field**, with the
   offending input highlighted — never as a terminal page-level error after submit.
   **Observed:** a 2-character description passed the metadata step, then failed at submit as a
@@ -652,21 +661,27 @@ D-14 valve.
   **supported-exchanges chips twice** (adding sFOX, which is factually wrong for an MT5 account)
   chasing an error that was actually about the description. **A misleading error does not just cost a
   retry — it sends people to corrupt unrelated fields.**
-  The server already knows the answer: `finalize-wizard/route.ts:338-346` returns the exact string
-  `"description must be 10-5000 characters"`. The user never sees it (see WIZFORM-02). The client
+  The server already knows the answer: `src/app/api/strategies/finalize-wizard/route.ts` — inside
+  `function validatePayload(` (:337), the `description.length < 10` arm (:389) returns the exact string
+  `{ error: "description must be 10-5000 characters" }` at :395. The user never sees it (see WIZFORM-02). The client
   knows the rule too and could refuse at the field.
 
 - [ ] **WIZFORM-02** *(the same UNKNOWN class Phase 142.2 was supposed to delete)*: No wizard failure
   renders as `code: UNKNOWN` / "We could not classify this failure" when the server DID classify it.
   **Root cause:** `finalize-wizard`'s `validatePayload` returns bare `{ error: "..." }` with **no
-  `code` field** (`:345`, and the sibling 400s at `:298/:324/:333/:355/:381/:392/:427`), and the
+  `code` field**. ⚠️ **Line numbers re-derived from source 2026-08-08** (the previous set —
+  `:345` plus `:298/:324/:333/:355/:381/:392/:427` — had drifted; phases 150–152 moved this file).
+  Anchor on the SYMBOL: `function validatePayload(` at `src/app/api/strategies/finalize-wizard/route.ts:337`.
+  All NINE of its 400 arms are code-less: `:347` ("Invalid request body"), `:374`, `:383`,
+  `:396` ("description must be 10-5000 characters" — the arm that cost the founder 3 submits),
+  `:405`, `:428`, `:439`, `:474`, `:503`. And the
   client collapses any code-less or unmapped response to `UNKNOWN`.
   ⚠️ **Phase 142.2 plan 07 split 24 rejection sites onto honest codes and MISSED this validator** —
   so the defect class we shipped a fix for on 2026-08-04 was still reachable the same afternoon.
   Whatever sweep closes this must be driven from the emitting sites, not from a hand-listed set.
   ⚠️ **A prior investigation logged this exact route + shape** (`wizard-finalize-codeless-400-unknown`,
   recorded 2026-07-08 as fixed by making description optional). The 10-char minimum is still enforced
-  at `:339`, so that fix was narrower than recorded or has regressed. Treat the stored learning as
+  at `description.length < 10 ||` (`src/app/api/strategies/finalize-wizard/route.ts:389`, the arm whose 400 is `:396` above — this one coordinate was missed by the 2026-08-08 re-derivation), so that fix was narrower than recorded or has regressed. Treat the stored learning as
   STALE and re-derive from source.
   ⚠️ **SECOND LIVE INSTANCE (founder-hit 2026-08-05):** the validate-key client rosters
   `KNOWN_CREATE_WITH_KEY_CODES` (`ConnectKeyStep.tsx`) / `KNOWN_ADD_KEY_CODES`
@@ -675,7 +690,7 @@ D-14 valve.
   invisible to Sentry. The derived-sweep MUST cover these rosters too. A 3-member stopgap may land
   earlier via hotfix; the class fix stays here. See ROADMAP Phase 153 SC2. (Diagnosis 2026-08-05: nothing was persisted server-side; the failure is strictly pre-encrypt/pre-RPC.)
 
-- [ ] **WIZFORM-04** *(founder, verbatim: "clicking twice is not acceptable, especially with this
+- [x] **WIZFORM-04** *(founder, verbatim: "clicking twice is not acceptable, especially with this
   mistake message. A user would just not know what to do")*: A **transient infrastructure** failure
   never becomes a user decision. Submit absorbs it — bounded automatic retry with backoff — and only
   surfaces an error once retries are genuinely exhausted, then with copy naming an action the user
@@ -698,9 +713,12 @@ D-14 valve.
 - [ ] **WIZFORM-05** *(added 2026-08-05 — founder-hit the same day; previously unowned)*: **The MT5
   validate-key DEADLINE INVERSION is reconciled: an MT5 key validation's honest verdict always
   arrives inside the budget the client grants the request.** Today it structurally cannot:
-  `SEAM_ROUTE_BUDGETS["validate-key"].timeoutMs` is 30s (`resilient-fetch.ts:537`) while the
-  analytics-service applies `_MT5_PROBE_TIMEOUT_S` (35s) SEPARATELY to three stages of
-  `_validate_mt5_key` (`exchange.py:328/380/456`) — a slow MT5 broker login legitimately takes
+  `SEAM_ROUTE_BUDGETS["validate-key"].timeoutMs` is 30s (`src/lib/resilient-fetch.ts:537-538`,
+  verified 2026-08-08) while the analytics-service applies `_MT5_PROBE_TIMEOUT_S` (35s)
+  SEPARATELY to three stages of `_validate_mt5_key`
+  (`analytics-service/routers/exchange.py` — constant defined :62, applied :328 / :380 / :456;
+  `_validate_mt5_key` itself at :222. ⚠️ **`routers/`, not `services/exchange.py` — both files
+  exist and only `routers/` has this symbol**) — a slow MT5 broker login legitimately takes
   35–70s+ to fail, so the server's classified verdict lands after the client has already abandoned
   the request (founder-observed: two 502s at exactly 30s, downgraded to `UNKNOWN` by the WIZFORM-02
   roster gap). ccxt venues answer fast; only MT5 bites.
@@ -724,7 +742,7 @@ D-14 valve.
   chain had finished at 11:39:35; (b) the gate rendered a refusal computed from a **stale analytics
   row while a re-derive was in flight**, so the user saw a failure that was already being fixed.
   ⚠️ **Root cause NOT yet established** — the poll loop was mapped but the investigation was not
-  finished. `SyncPreviewStep.tsx:109-111` states the loop "has no time-based abort (it stops only on
+  finished. `src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.tsx` — the docblock above `const RETRY_THRESHOLD_MS = 900_000;` (:112), lines :109-111 — states the loop "has no time-based abort (it stops only on
   success / terminal failure / 3 consecutive network errors)", which means it *should* have
   terminated at 11:39:35; why it did not is the open question. Do not plan a fix before answering it.
 
@@ -772,14 +790,16 @@ All five found in one live founder session, composing a scenario from a just-upl
 
   **Every populated row is a demo seed.** The only writers left are `scripts/seed-full-app-demo.ts:1633`
   and `e2e/helpers/seed-test-project.ts:570`. The service builds its upsert from
-  `metrics_result.metrics_json` (`analytics_runner.py:1594`, `job_worker.py:5299/:2385/:4380`), and that
-  dict (`metrics.py:1176-1196`) carries `returns_series`, `drawdown_series`, `monthly_returns`,
+  `metrics_result.metrics_json` (`analytics-service/services/analytics_runner.py` — `payload.update(metrics_result.metrics_json)` :1594; and the `strategy_analytics` upsert sites in
+  `analytics-service/services/job_worker.py` cited as `:5299/:2385/:4380` at `8b327594`, which are at HEAD
+  `def _upsert()` :5323-5324, `def _stamp_nav_failed()` :2397-2398 and `def _mark_insufficient()` :4404-4405), and that
+  dict (`analytics-service/services/metrics.py` — the `sanitize_metrics({` payload :1178-1196, `"returns_series"` :1191 … `"return_quantiles"` :1195) carries `returns_series`, `drawdown_series`, `monthly_returns`,
   `rolling_metrics`, `return_quantiles` — **never `daily_returns`**. PostgREST projects only named
   columns, so the un-named one stays NULL forever. My "18" were merely the rows that got far enough to
   have a `returns_series`; the real figure is **every strategy the service has ever computed**.
   ⚠️ **This is exactly why the demo universe looked fine and real strategies did not** — the seeds
-  write the column the engine reads, so no amount of demo-driven testing could surface it. `src/app/api/strategies/[id]/returns/route.ts:221` selects **only**
-  `daily_returns`, and that route is what the composer lazily fetches for a drawer-added strategy. So
+  write the column the engine reads, so no amount of demo-driven testing could surface it. `src/app/api/strategies/[id]/returns/route.ts` selects **only**
+  `daily_returns` — ⚠️ at HEAD that `.select(` reads `"daily_returns, returns_series, computation_status, data_quality_flags"` :254, with the reason recorded :241-242 — and that route is what the composer lazily fetches for a drawer-added strategy. So
   the engine receives an empty series and renders *"0 overlapping days"*, *"Only 0 observations"* and
   `0.00` for every metric — **with no error, no warning, no empty-state**.
   **Blast radius spans every source, so this is not an MT5 bug:** CSV published **7 of 30** (these are
@@ -793,41 +813,41 @@ All five found in one live founder session, composing a scenario from a just-upl
   (`20260428120919`, decision D-02, the 1MB TOAST ceiling), so re-populating a fat JSONB column would
   fight a settled architectural decision.
   ⚠️ **`returns_series` must NOT be forwarded raw.** It is `_drop_nonfinite(cumprod(1+returns))`
-  (`metrics.py:775-778`) — a WEALTH INDEX, shape-identical to `DailyPoint[]` but semantically
+  (`analytics-service/services/metrics.py` — `_cumulative_clean = _drop_nonfinite(cumulative)` :774, `returns_series = [` :775-778) — a WEALTH INDEX, shape-identical to `DailyPoint[]` but semantically
   inverted. Verified on PROD for `4eab92b0`: it starts at exactly **1.0** (2026-03-22) and ends at
   **0.7196** (2026-08-04). Forwarding it raw would claim **+100% on day one**. It must be DIFFERENCED.
   ⭐ **The codebase had already settled this drift** — `resolveDailyReturnSeries(daily_returns,
-  returns_series)` backs BOTH strategy-detail surfaces (`factsheet/[id]/v2/page.tsx:71`,
-  `discovery/[slug]/[strategyId]/page.tsx:65`) with its own tests and a docstring naming this bug.
+  returns_series)` backs BOTH strategy-detail surfaces (`src/app/factsheet/[id]/v2/page.tsx` — `let dailyReturns = resolveDailyReturnSeries(dailyRaw, analytics?.returns_series);` :121, docblock :114;
+  `src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx` — `let dailyReturns = resolveDailyReturnSeries(` :65) with its own tests and a docstring naming this bug.
   Rule 7: use that resolver, do not mint a third mechanism. The composer then blends the same series
   those pages render.
 
 - [x] **SCEN-02**: In the scenario composition list, a strategy **the allocator uploaded themselves**
   is visually distinguishable from a third-party published one.
   **Today there is no such marker anywhere** (verified in code): the added-strategy row
-  (`ScenarioComposer.tsx:5558-5686`) renders a toggle, the name, a `TrustTierLabel` (data
+  (`src/app/(dashboard)/allocations/components/ScenarioComposer.tsx` — `{draft.addedStrategies.map((a) => {` :7057 … `})}` :7447, the `<li` at :7108; `<TrustTierLabel` :7182, `<CoverageStateChip state={chipState}` :7216) renders a toggle, the name, a `TrustTierLabel` (data
   *provenance*: api_verified / csv_uploaded / self_reported / composite) and a `CoverageStateChip`
   (in-blend / manually-excluded) — none of which is ownership. The ownership bit **does exist
-  server-side** and is deliberately discarded: `browse/route.ts:220` computes `isOwnRow` purely to
-  un-redact the name, and the emitted row (`:233-245`) is a named-key fence carrying only
+  server-side** and is deliberately discarded: `src/app/api/strategies/browse/route.ts` computes `const isOwnRow = r.user_id !== null && r.user_id === user.id;` (:264) purely to
+  un-redact the name, and the emitted row (the `return {` object :277-311) is a named-key fence carrying only
   `id, name, codename, markets, strategy_types, is_example`.
   ⚠️ **Cost note:** surfacing it is an ADDITIVE WIRE CHANGE, not a client derivation — `AddedStrategy`
-  (`allocations/lib/scenario-state.ts:96-104`) carries only `id, name, markets, strategy_types`, and
+  (`src/app/(dashboard)/allocations/lib/scenario-state.ts` — `export interface AddedStrategy {` :96, fields :100-103) carries only `id, name, markets, strategy_types`, and
   that type is zod-validated AND PERSISTED (`SCENARIO_SCHEMA_VERSION = 4`), so a new field is a
   schema-version decision.
 
 - [x] **SCEN-03**: A strategy row in the scenario is **clickable**, opening richer detail (and, once
   OWN-02 exists, the full factsheet). Today rows are **not clickable at all** — no `onClick`, no
-  `href`, no drawer, no expansion (`ScenarioComposer.tsx:5588-5595`). The Holdings tab already has
-  this affordance (`HoldingsTable.tsx:468` → `HoldingDetail`), so the composer is the outlier.
-  ⚠️ Partially cheap: `addedStrategyMetadataLookup` (`ScenarioComposer.tsx:2180-2215`) **already holds
+  `href`, no drawer, no expansion (`src/app/(dashboard)/allocations/components/ScenarioComposer.tsx` — the added-row `<li` opens :7108 and closes :7445). The Holdings tab already has
+  this affordance (`src/app/(dashboard)/allocations/components/HoldingsTable.tsx` — `import { HoldingDetail } from "./HoldingDetail";` :55, rendered `<HoldingDetail` :966), so the composer is the outlier.
+  ⚠️ Partially cheap: `addedStrategyMetadataLookup` (same `ScenarioComposer.tsx` — `const addedStrategyMetadataLookup = useMemo<` :2486 … `return map;` :2542) **already holds
   `cagr` and `sharpe` in memory** for book strategies and never renders them. For drawer-added
   strategies they are null — the returns route does not return them — so a richer row is NOT uniformly
   free. ⛔ Depends on OWN-02 for the factsheet link (same dead-end trap as OWN-04).
 
 - [x] **SCEN-04**: The numbers on a scenario row are **labelled**. Founder, looking at a live row:
   *"What do the numbers actually mean?"* The row renders `1.000`, a `LEVERAGE` toggle, `1`, and `—`
-  with no column headers and no inline labels (`ScenarioComposer.tsx:5630-5672`). They are weight,
+  with no column headers and no inline labels (`src/app/(dashboard)/allocations/components/ScenarioComposer.tsx` — the control cluster `<div className="flex items-center gap-2"` :7226: weight `<input` :7233, `renderModeToggle` :7251, leverage `<input` :7257, notional `renderNotional(a.id, a.name)` :7277). They are weight,
   mode, leverage, and notional; the last is an em-dash whenever it is non-derivable, which reads as
   "broken" rather than "not applicable".
 
@@ -847,15 +867,15 @@ All five found in one live founder session, composing a scenario from a just-upl
   changes. That is it. Currently, I have only strategies that are not in my book, which consequently
   leads then to no AUM, and no computation at all. You see how silly that is?"*
   **Today AUM is derived-only and has no input anywhere.** `scenarioAum`
-  (`ScenarioComposer.tsx:3463-3472`) sums **exclusively** live holdings whose scope-ref is toggled on
+  (`src/app/(dashboard)/allocations/components/ScenarioComposer.tsx` — `const scenarioAum = useMemo(() => {` `:3463-3472` at `c4bbe51e`; at HEAD Phase 151 replaced it with `const liveHoldingsSum = useMemo(` :3951 and `const scenarioAum = sanitizedManualAum ?? liveHoldingsSum;` :4010) summed **exclusively** live holdings whose scope-ref is toggled on
   (`scopeRef.startsWith("holding:")`); an added strategy contributes nothing by construction. Size is
-  then `weight × scenarioAum` (`:3570`), so "allocate $500k to this strategy" is **not expressible** —
+  then `weight × scenarioAum` (`const size = weight * scenarioAum;` :4284), so "allocate $500k to this strategy" is **not expressible** —
   only "this strategy is N% of my existing book".
   **The causality is backwards for the primary use case:** evaluating a candidate you do not yet hold
   is precisely what a scenario is for, and that is the case that cannot compute a size or commit.
   ⚠️ **CORRECTION recorded so the fix is not mis-scoped:** the founder linked AUM=0 to *"no computation
   at all"*, and that link is **wrong** — verified in code. `scenarioMetrics`
-  (`ScenarioComposer.tsx:2814`) depends on `engineSet, engineState, dateMapCache, blendBasis` and
+  (`src/app/(dashboard)/allocations/components/ScenarioComposer.tsx` — `const scenarioMetrics = useMemo(` :3228) depends on `engineSet, engineState, dateMapCache, blendBasis` and
   **NOT on `scenarioAum`**. Sharpe/CAGR/cumulative-return/max-DD are weight-based; AUM scales only
   dollar figures and gates the commit. **The 0.00s the founder saw were SCEN-01, not this.** Shipping
   AUM-01 alone would leave the screen showing zeros — do not let it be planned as the fix for that.
@@ -868,39 +888,39 @@ All five found in one live founder session, composing a scenario from a just-upl
   `sync_error = "'Mt5Session' object has no attribute 'fetch_balance'"` — a **raw Python AttributeError
   sitting in a user-visible column**. Job `9d3f9c6e`, kind `poll_allocator_positions`, `failed_final`,
   fired by the 04:00 cron on 2026-08-04, carries the identical `last_error`.
-  **Mechanism:** `_make_exchange_client` (`job_worker.py:996-1023`) returns an `Mt5Session` for mt5
-  (`:1021-1022`), but `_fetch_spot_rows` unconditionally calls `exchange.fetch_balance()`
-  (`allocator_positions.py:154`) and `_fetch_derivative_rows` calls ccxt `fetch_positions`
-  (`positions.py:317-338`). Neither file contains the string `mt5` or `sfox` anywhere. Enqueue is
+  **Mechanism:** `_make_exchange_client` (`analytics-service/services/job_worker.py` — `def _make_exchange_client(` :976) returns an `Mt5Session` for mt5
+  (`if exchange_name == "mt5": return _make_mt5_session(...)` :1001-1002), but `_fetch_spot_rows` unconditionally calls `exchange.fetch_balance()`
+  (`analytics-service/services/allocator_positions.py` — `async def _fetch_spot_rows(` :418, `balance = await exchange.fetch_balance()` :434) and `_fetch_derivative_rows` (same file :515) calls ccxt `fetch_positions`
+  (`analytics-service/services/positions.py` — `async def fetch_positions(` :317-343). Neither file contains the string `mt5` or `sfox` anywhere. Enqueue is
   **venue-agnostic** at both triggers (cron jobid 15 `0 4 * * *`, and the user "Sync now" RPC), so MT5
   keys ARE scheduled and DO run — they just crash. `_make_exchange_client` was widened to two
   non-ccxt venues while its holdings-sync consumer stayed ccxt-only.
   ✅ **No deliberate fence exists in this path** — checked and absent from `run_poll_allocator_positions_job`,
   `_allocator_key_preflight`, both enqueue functions, and the `allocator_holdings` DDL (`venue` is free
-  TEXT). The real MT5 fences are elsewhere (`closed-sets.ts:101-124`, `job_worker.py:3462-3468`).
+  TEXT). The real MT5 fences are elsewhere (`src/lib/closed-sets.ts:101-124` — the `MT5_UI_ENABLED` docblock + const; and `analytics-service/services/job_worker.py`'s `elif venue == "mt5":` branch :3455, whose kill-switch gate `if not mt5_enabled_server():` is :3487).
   ⚠️ **sFOX is the same latent bug**: `SfoxClient` exposes `get_balances()`, not `fetch_balance()`
-  (`sfox_client.py:272`). Invisible only because sFOX is flag-off with no keys. Fix the CLASS.
+  (`analytics-service/services/sfox_client.py` — `async def get_balances(self)` :272). Invisible only because sFOX is flag-off with no keys. Fix the CLASS.
   ⚠️ **Sizing (~1–1.5 days, medium risk), not a one-liner.** Account-level equity IS available today —
-  `Mt5Client.account_info()` (`mt5_client.py:327-332`) returns equity/balance/currency and the derive
-  path already consumes it (`job_worker.py:3691-3693`) — so ONE holdings row per MT5 account is
+  `Mt5Client.account_info()` (`analytics-service/services/mt5_client.py` — `def account_info(self) -> dict[str, Any]:` :327-332) returns equity/balance/currency and the derive
+  path already consumes it (`analytics-service/services/job_worker.py` — `_mt5_equity = float(_mt5_info["equity"])` :3717, block :3716-3718) — so ONE holdings row per MT5 account is
   reachable. But it needs: a non-ccxt venue branch; the **MT5 gateway concurrency story** (a SECOND
-  job kind contending for the ONE shared Windows terminal — must reuse `_mt5_terminal_lock_for`
-  `job_worker.py:379-387`, the login bracket, the bounded-restart helper, the read-timeout discipline,
+  job kind contending for the ONE shared Windows terminal — must reuse `_mt5_terminal_lock_for`, which
+  now lives in `analytics-service/services/mt5_concurrency.py` (`_MT5_TERMINAL_LOCKS` :126, `def _mt5_terminal_lock_for(` :129-134) and is imported by `job_worker.py` :130 / used :364, the login bracket, the bounded-restart helper, the read-timeout discipline,
   and it re-raises MT5CONC-02 cross-process serialization); the `mt5_enabled_server()` kill-switch for
   parity with the derive arm; and an FX decision for non-USD account currency (no existing seam).
   ⛔ **Per-symbol MT5 holdings is a SEPARATE, larger decision**: `positions_get` is deliberately
-  forbidden on the client facade by a parametrized pin (`tests/test_mt5_client_contract.py:720-737`,
-  exact-surface pin at `:747-763`, no-getattr pin at `:741-745`). Widening it means consciously
+  forbidden on the client facade by a parametrized pin (`analytics-service/tests/test_mt5_client_contract.py` — `@pytest.mark.parametrize(` :720 listing `"positions_get",` :725, `def test_read_only_surface_no_trade_methods(forbidden):` :735-739,
+  exact-surface pin `def test_public_surface_is_exactly_the_contract():` :748-763, no-getattr pin `def test_no_getattr_passthrough():` :742-745). Widening it means consciously
   re-cutting a trust-integrity fence, not a quiet edit.
   💡 **Cheap interim, NOT the fix**: a ~4-line honest skip for non-ccxt venues in
-  `fetch_allocator_holdings` (`allocator_positions.py:268`) would stop stamping a daily raw
+  `fetch_allocator_holdings` (`analytics-service/services/allocator_positions.py` — `async def fetch_allocator_holdings(` :1076) would stop stamping a daily raw
   `AttributeError` into the user-visible `sync_error`. Ship only as an explicit interim decision — it
   papers over the gap.
 
 - [x] **AUM-05** *(split out of AUM-02 so it cannot be lost when that item is scoped to MT5)*: **sFOX
   will crash the holdings sync the same way MT5 does, the first day a real key exists.** `SfoxClient`
-  exposes `get_balances()` (`sfox_client.py:272`), not the ccxt `fetch_balance()` that
-  `_fetch_spot_rows` calls unconditionally (`allocator_positions.py:154`) — so a live sFOX key will
+  exposes `get_balances()` (`analytics-service/services/sfox_client.py` — `async def get_balances(self)` :272), not the ccxt `fetch_balance()` that
+  `_fetch_spot_rows` calls unconditionally (`analytics-service/services/allocator_positions.py` — `async def _fetch_spot_rows(` :418, `balance = await exchange.fetch_balance()` :434) — so a live sFOX key will
   stamp `sync_error = "'SfoxClient' object has no attribute 'fetch_balance'"`, byte-identical in
   shape to the MT5 failure already on PROD.
   ⚠️ **Invisible today only because sFOX is flag-off with zero keys** — which is exactly why it needs
@@ -913,26 +933,28 @@ All five found in one live founder session, composing a scenario from a just-upl
 - [x] **AUM-03** ⛔ **WORSE THAN FILED — the copy names a control THAT DOES NOT EXIST.** The AUM-zero
   refusal must name an affordance the user can find. Current copy: *"Can't record a scenario commit:
   portfolio AUM is zero. Connect an exchange API key or toggle on a live holding before submitting."*
-  (`ScenarioComposer.tsx:3559`).
+  (`src/app/(dashboard)/allocations/components/ScenarioComposer.tsx:3559` at `c4bbe51e`; at HEAD that
+  single literal is gone — the refusal now branches `canEnterBook ? AUM_REFUSAL_BOOK_REACHABLE : AUM_REFUSAL_NO_BOOK` :4272-4273 inside `function handleCommit()` :4253).
   **Both halves are unactionable.** The founder hit this with four venues connected and ~$460k of
   holdings, so "connect an exchange API key" is already done. And **there is no live-holding toggle
-  anywhere in the composer**: the only `onToggle` call site is on ADDED STRATEGIES (`:5603`); the
-  per-key switch at `:5619` toggles data sources, which never enter `scenarioAum`. The component says
+  anywhere in the composer**: the only `onToggle` call site is on ADDED STRATEGIES (`onToggle(a.id);` :7141); the
+  per-key switch (`onClick={() => onTogglePerKey(k.id)}` :6878, inside `{perKeySources.map((k) => {` :6853 — ⚠️ the original cited `:5619`, which was the added row's `TrustTierLabel` even at `c4bbe51e`; the real per-key switch was `:5458` there) toggles data sources, which never enter `scenarioAum`. The component says
   so itself — *"Per-coin holdings are NOT rendered — they live on the Holdings tab (CONSTIT-03)"*
-  (`:5431-5432`) and *"live holdings are FIXED context — they cannot be toggled off or reweighted in
-  the UI"* (`:3542-3544`). Same class as WIZFORM-03, but stronger: this instructs the user to use a
+  (:6784-6785) and *"live holdings are FIXED context — they cannot be toggled off or reweighted in
+  the UI"* (`function handleCommit()` :4253, comment :4254-4255). Same class as WIZFORM-03, but stronger: this instructs the user to use a
   control that was deliberately never built.
 
 - [x] **AUM-04** ⛔ **ROOT CAUSE of the founder's AUM=0 — blank slate was FORCED, not chosen.**
   An allocator with a live book can always reach it. Today one all-or-nothing gate can hide it
   entirely, with no explanation.
   **Mechanism:** blank mode does not merely toggle holdings off, it **removes them from the draft**
-  (`holdingsSummary = entryMode === "blank" ? [] : rawHoldingsSummary`, `ScenarioComposer.tsx:837-840`),
+  (`holdingsSummary = entryMode === "blank" ? [] : rawHoldingsSummary`, `src/app/(dashboard)/allocations/components/ScenarioComposer.tsx` — `const holdingsSummary = useMemo(` :954-957),
   so `scenarioAum` is **structurally always 0** in blank mode and the commit gate always refuses. The
   escape hatch — the "From my book" segment — renders only when
-  `canEnterBook = hasLiveBook && payload.perKeyDailiesGateSatisfied` (`:826`, render `:3746-3763`,
-  arrow-key nav short-circuited `:3741-3743`). `perKeyDailiesGateSatisfied` is **all-or-nothing over
-  EVERY eligible key** (`queries.ts:2383-2392`, eligibility `:2419-2427` = every active, non-revoked,
+  `canEnterBook = hasLiveBook && payload.perKeyDailiesGateSatisfied` (same file :922 — ⚠️ at HEAD Phase 151
+  repointed the right-hand side to `payload.bookEntryGateSatisfied ?? false`; render `{canEnterBook && (` :4480,
+  arrow-key nav short-circuited `if (!canEnterBook) return;` :4475). `perKeyDailiesGateSatisfied` is **all-or-nothing over
+  EVERY eligible key** (`src/lib/queries.ts` — `export function allActiveKeysHavePerKeyDailies(` :3025, eligibility `export function isPerKeyDailiesEligibleKey(key: {` :3061 = every active, non-revoked,
   non-disconnected key, fetched by bare `user_id`).
   **PROD, the founder's own account — 8 active keys:** bybit 155 per-key dailies, okx 100, **deribit ×3
   = 0**, **mt5 ×3 = 0**. One zero ⇒ gate false ⇒ `canEnterBook` false ⇒ composer force-initialised to
@@ -1058,19 +1080,19 @@ Populated during roadmap creation.
 | OWN-03 | Phase 150 (v1.17 — own phase, split 2026-08-04 so the money-path review is isolated) | Pending — **current behaviour now ESTABLISHED, not unverified**: portfolio correctly does NOT auto-update. Founder call — the deliverable is a **wizard question** (own-capital vs verifying-a-team), NOT an auto-add. ⚠️ first WRITING requirement in the OWN set → money-path review; ⭐ 2026-08-05 founder direction: cull profile step to essentials in the same pass |
 | OWN-05 | Phase 150 (v1.17) | Pending (added 2026-08-05) — allocator renames OWN private/draft strategies; owner-authz only; public codename redaction contract untouched |
 | MT5-13 | **SHIPPED v0.53.0.1** (PR #662, merged `135b6164`) | ✅ Closed 2026-08-04. mt5 branch added to the internal probe (structural read-only triple); permanent probe failures split off `KEY_NETWORK_TIMEOUT` onto `KEY_SCOPE_CHECK_UNAVAILABLE` (no Retry control). Railway `git_sha` confirmed matching before the retry. **MT5-05 discharged the same day** — see OWN-03 for the PROD evidence |
-| MT5-14 | Phase 153 (v1.17) | Pending — re-homed from v1.16 Phase 142.3; MT5 missing from the metadata exchange chips + preselect from the connected key; ⛔ deliberate no-widening pin will red — re-cut it consciously, reasoning updated, same commit |
+| MT5-14 | Phase 153.2 (v1.17) | ✅ **Complete 2026-08-09** (153.2-04). MT5 is declarable via the narrow `WIZARD_EXCHANGE_CODES` set and **preselected** from `detectedExchange`, so the venue is never asked twice; the chip is a `<span>`, not a disabled button (D-15). The no-widening pin was re-cut consciously in the same task — both negatives kept and the POSITIVE flag-ON assertion added, so it can no longer pass merely by asserting absence. `CRYPTO_EXCHANGES` stays mt5-free and the public marketing exchange count did not move. This row and the checkbox at `:460` now agree (was warning W-153.2-1, the same class as D-153.2-A) |
 | MT5-15 | Phase 155 (v1.17) | Pending — ALL THREE MT5 strategies on PROD are `complete_with_warnings`; ⚠️ NOT investigated. Do not read `MT5-05 ✅` as 'the numbers are audited'. ⛔ MT5-07 does NOT close this |
 | WIZCONT-01 | Phase 154 (v1.17) | Pending — **OBSERVED**: allocators have NO resume path at all (`/strategies/*` is manager-only; the overlay hardcodes `initialDraft={null}`, Phase 110 deferral) |
 | WIZCONT-02 | Phase 154 (v1.17) | Pending — **LOW**; corrected 2026-08-04, the common case is already safe (localStorage session token + `strategies_user_wizard_session_source_uniq`) |
-| WIZFORM-01 | Phase 153 (v1.17) | Pending — **blocking UX**; inline field errors, cost 3 failed submits and drove wrong-field edits |
-| WIZFORM-02 | Phase 153 (v1.17) | Pending — code-less 400 → `UNKNOWN`; 142.2 plan 07's sweep missed this validator |
-| WIZFORM-03 | Phase 153 (v1.17) | Pending — "switch to a different exchange" is impossible advice for MT5 |
-| WIZFORM-04 | Phase 153 (v1.17) | Pending — **blocking UX**; transient seam timeout must not become a user decision; ⛔ ask whether the per-submit re-validation is needed before adding retries |
+| WIZFORM-01 | Phase 153.2 (v1.17) | ✅ **Complete 2026-08-09** (153.2-01/02/03/05). Every rule the client can evaluate refuses inline at its own field; the submit button is never `disabled` for a validation reason and a refused submit names the count, names the first field and puts the cursor in it, opening the collapsed disclosure first; `AllocateDialog` derives its invalid border from the ARIA state (D-12). ⭐ **153.2-05 closed the last path**: a field-level refusal raised by `finalize-wizard` is routed back to its field by `FIELD_BY_CODE` instead of rendering a terminal envelope, with a totality assertion making an unmapped `METADATA_*` code a RED test rather than a silent fallback. This row and the checkbox at `:656` now agree (was D-153.2-A) |
+| WIZFORM-02 | Phase 153.1 / 153.2 (v1.17) | **Partial — NOT complete.** 153.1-05 coded the eleven `validatePayload` arms and 153.1-06 wired the derived-roster invariant; 153.2-05 coded the limiter's two deny arms, taking `KNOWN_CODELESS_FINALIZE_REJECTIONS` 5 → 3. ⛔ **Three rejections still answer code-less** (500 draft-load, 500 finalize-RPC, 502 upstream-shape) and each needs a NEW copy member — see `D-153.2-D` in the 153.2 deferred ledger. The invariant reds in both directions, so the debt cannot grow while it waits |
+| WIZFORM-03 | Phase 153.1 / 153.2 / 153.4 (v1.17) | **Partial — NOT complete.** 153.1-03 landed the `fixRequires` class filter and all three venue-conditional entries; 153.2-05 made it LIVE on the submit surface by passing `context.venue` (+ `surface: "submit"`, which also restores `SERVICE_UNREACHABLE`'s `/strategies` bullet). ⚠️ Until then the mechanism was shipped and changed nothing — venue-absence deliberately preserves incumbent copy, and zero call sites passed a venue. ⛔ `ConnectKeyStep` / `MultiKeyConnectStep` are **Phase 153.4's** and still pass neither, so an MT5 user can still read "switch to a different exchange" on the CONNECT step |
+| WIZFORM-04 | Phase 153.2 (v1.17) | ✅ **Complete 2026-08-09** (153.2-04). ⚠️ **Satisfied by REMOVING the call, not by adding retries** — read the requirement's own ⛔ ("the fix is NOT 'add a retry loop'… ask first whether the call is needed at all"), which overrides its headline mention of "bounded automatic retry with backoff". An MT5 submit now makes **zero** live calls to the venue: the scope-broadening probe is skipped for venues whose capability row says they cannot answer it, gated at BOTH call sites (`route.ts:1200` single-key and `:1442` per composite member). ⭐ The security control still fails TOWARD probing — an unresolved venue is probed anyway (`venueSupportsScopeProbe` → `?? true`) — and a permanent probe condition is no longer reported as a transient blip inviting a retry. Seam budgets and `breaker:railway` untouched, as the requirement's ⚠️ demands. This row and the checkbox at `:693` now agree (was warning W-153.2-1) |
 | WIZFORM-05 | Phase 153 (v1.17) | Pending (added 2026-08-05) — MT5 validate-key deadline inversion: 30s client budget vs 35s×3-stage server probe; verdict can never arrive |
 | STALE-01 | Phase 154 (v1.17) | Pending — root cause NOT yet established; investigate before planning |
 | MT5-GOAL-01 | Phase 155 (v1.17 — umbrella acceptance gate) | **Umbrella** — no implementation work of its own; MT5 'works' only when SCEN-01 + OWN-02 close. Exists so `MT5-05 ✅` is never read as 'MT5 works' |
 | SCEN-01 | **Phase 147 (v1.17)** | ⛔ **HIGHEST** — ⭐census corrected: `daily_returns` has **NO production writer**; **0 of 27 REAL** strategies populated vs 15/15 demo seeds. Root-caused: the READER is wrong; use the existing `resolveDailyReturnSeries`. ⚠️`returns_series` is a WEALTH INDEX — must be DIFFERENCED, never forwarded raw |
-| SCEN-02 | Phase 152 (v1.17) | Pending — no ownership marker exists; ownership bit deliberately discarded at `browse/route.ts:220`. ⚠️ additive WIRE change + persisted-schema bump |
+| SCEN-02 | Phase 152 (v1.17) | Pending — no ownership marker exists; ownership bit deliberately discarded at `src/app/api/strategies/browse/route.ts` (`const isOwnRow = …` :264). ⚠️ additive WIRE change + persisted-schema bump |
 | SCEN-03 | Phase 152 (v1.17) | Pending — scenario rows are not clickable at all; ⛔ depends on OWN-02 (Phase 148) for the factsheet link |
 | SCEN-04 | Phase 152 (v1.17) | Pending — row numbers carry no labels; founder could not tell what they meant |
 | SCEN-05 | Phase 152 (v1.17) | Pending — two identical 'Alpha Centauri' rows in Browse; related to but distinct from WIZCONT-02 |

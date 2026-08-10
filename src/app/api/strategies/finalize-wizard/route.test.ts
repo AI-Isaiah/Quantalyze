@@ -44,7 +44,23 @@ vi.mock("@/lib/api/withAuth", () => ({
       h(req, USER),
 }));
 
-vi.mock("@/lib/ratelimit", () => ({
+// ⛔ THE PREDICATE IS THE REAL ONE (153.2 review WR-03). Only the two seams this
+// suite must control — the limiter handle and the async `checkLimit` call — are
+// replaced; everything else, including `isRateLimitMisconfigured`, comes through
+// `importOriginal`.
+//
+// What was here before was a hand-written double:
+//   `isRateLimitMisconfigured: (rl) => rl?.misconfigured === true`
+// over a fixture shape `CheckLimitResult` cannot express — the production type
+// has no `misconfigured` field at all, and the real predicate reads
+// `result.success === false && result.reason === "ratelimit_misconfigured"`.
+// The comment beside it claimed it was "the real predicate's shape", which was
+// false. The 503 arm did execute, so the row was not vacuous — but the
+// DISCRIMINATION it demonstrated was one the test had authored for itself, and a
+// route change that read the real discriminator would have kept it green. A
+// double that cannot be wrong in the ways the original can be is not a double.
+vi.mock("@/lib/ratelimit", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/ratelimit")>()),
   userActionLimiter: {},
   checkLimit: vi.fn(async () => ({ success: true })),
 }));
@@ -108,7 +124,14 @@ const STATE = vi.hoisted(() => ({
   // Phase 88 (ONB-01) — the ordered member list read by the composite-first
   // hoist's O-1 per-member scope-broadening loop (select api_key_id ORDER BY
   // seq). A read error fails CLOSED (never enqueue an un-enumerable composite).
-  strategyKeysList: [] as Array<{ api_key_id: string | null }> | null,
+  // 153.2-04 / WIZFORM-04 — the member rows carry the widened `api_keys (
+  // exchange )` embed the route now selects, so a member's VENUE is drivable
+  // from a test. OPTIONAL: every pre-existing row omits it, which is exactly the
+  // "embed came back empty" case, and those members must still be probed.
+  strategyKeysList: [] as Array<{
+    api_key_id: string | null;
+    api_keys?: { exchange: string | null } | null;
+  }> | null,
   // CR-01: typed as an open record, not `{ message: string }`. A Supabase error
   // on the NON-throwing path is a PLAIN parsed-JSON object carrying `code`,
   // `details` and `hint` as well — the fields the operator actually needs — and
@@ -880,22 +903,46 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
  * withdraw scope published as read-only-verified.** That contradicts the
  * fail-CLOSED doctrine this file states 40 lines above the probe.
  *
- * WHAT THE FIX MUST NOT DO. A parse miss must join the EXISTING probe-failure
- * arm rather than open a second rejection path with new copy: a body that could
- * not be read is a probe that did not run, which is the doctrine already
- * written here. So the expected envelope below is hand-typed ONCE and asserted
- * against BOTH the `probe_error` arm and every parse-miss case — byte-identity
- * proven against a literal, never by comparing the two code paths to each other.
+ * ⚠️ THE ENVELOPE HALF OF THIS BLOCK WAS RE-CUT — 153.2-04 / WIZFORM-04 / D-14b.
+ *
+ * 140.3-03 required that a parse miss join the EXISTING probe-failure arm and
+ * share its envelope: "a body that could not be read is a probe that did not
+ * run". The SECURITY half of that is permanent and is untouched below — both
+ * conditions still fail CLOSED, and the finalize RPC still must not run on
+ * either. What was wrong was the second inference: that because two conditions
+ * block identically, the USER should be told the same thing about them.
+ *
+ * They are not the same thing. `KEY_NETWORK_TIMEOUT` says we could not reach the
+ * exchange and offers a Retry. For a service that REPORTED `probe_error: true`
+ * that is honest — it tried, it failed, a retry can work. For a body our own
+ * schema could not parse it is false twice over: the exchange answered, and the
+ * body stays unparseable until a deploy changes one side or the other. The
+ * founder clicked that Retry five times against a condition of exactly this
+ * shape, which is the incident WIZFORM-04 exists to close.
+ *
+ * So the two arms now carry DIFFERENT hand-typed literals, and both are still
+ * hand-typed rather than imported — the property under test is what the user is
+ * told, and importing the route's own string would make each row agree with
+ * itself. The row that used to assert byte-identity now asserts the DISTINCTION,
+ * which is the same coupling read from the other side.
  *
  * The last case is the ANTI-REGRESSION CONTROL. A gate that refuses everything
  * is not a fix, it is an outage, so a well-formed read-only 2xx must still
  * publish. It is deliberately in this block rather than the one above.
  */
 describe("[140.3-03 / SEAMUX-07] the scope probe fails CLOSED on an unreadable 2xx", () => {
-  // Hand-typed, from reading the probe-failure arm — NOT imported from it.
+  // Hand-typed, from reading the SERVICE-REPORTED probe-failure arm — NOT
+  // imported from it. This arm keeps its transient code and its Retry.
   const PROBE_FAILURE_ENVELOPE = {
     error: "Exchange permission probe failed",
     code: "KEY_NETWORK_TIMEOUT",
+  };
+  // 153.2-04 / D-14b — the PARSE-MISS arm, permanent and therefore
+  // non-recoverable. `KEY_SCOPE_CHECK_UNAVAILABLE` carries no recoverable
+  // action, so no Retry control renders at all (the structural suppression).
+  const PARSE_MISS_ENVELOPE = {
+    error: "Could not read the key scope response",
+    code: "KEY_SCOPE_CHECK_UNAVAILABLE",
   };
 
   function mockProbeBody(body: unknown): ReturnType<typeof vi.spyOn> {
@@ -921,7 +968,7 @@ describe("[140.3-03 / SEAMUX-07] the scope probe fails CLOSED on an unreadable 2
         "true` is false at BOTH gates — so pre-fix this body returned `{ok: " +
         "true}` and the draft finalised with an unverified key.",
     ).toBe(502);
-    expect(await res.json()).toEqual(PROBE_FAILURE_ENVELOPE);
+    expect(await res.json()).toEqual(PARSE_MISS_ENVELOPE);
     expect(
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
       "The finalize RPC must NOT have run: an unreadable probe is a probe " +
@@ -949,7 +996,7 @@ describe("[140.3-03 / SEAMUX-07] the scope probe fails CLOSED on an unreadable 2
     consoleErr.mockRestore();
 
     expect(res.status).toBe(502);
-    expect(await res.json()).toEqual(PROBE_FAILURE_ENVELOPE);
+    expect(await res.json()).toEqual(PARSE_MISS_ENVELOPE);
     expect(
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
     ).toBeUndefined();
@@ -974,17 +1021,23 @@ describe("[140.3-03 / SEAMUX-07] the scope probe fails CLOSED on an unreadable 2
     consoleErr.mockRestore();
 
     expect(res.status).toBe(502);
-    expect(await res.json()).toEqual(PROBE_FAILURE_ENVELOPE);
+    expect(await res.json()).toEqual(PARSE_MISS_ENVELOPE);
     expect(
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
     ).toBeUndefined();
     fetchSpy.mockRestore();
   });
 
-  it("the parse-miss envelope is BYTE-IDENTICAL to the `probe_error` arm's, asserted against the same literal", async () => {
-    // The doctrine under test: a body that could not be READ and a probe that
-    // reported its own failure are the same event to the user. Both are
-    // compared to the hand-typed literal above, never to each other.
+  it("[153.2-04 / D-14b] a SERVICE-REPORTED probe_error keeps the transient code — it is NOT the parse miss", async () => {
+    // ⚠️ RE-CUT, not deleted. This row used to assert the parse miss and this
+    // arm were BYTE-IDENTICAL. It now asserts the DISTINCTION, which is the same
+    // coupling read from the other side — and it is the half a careless fix
+    // would break: sweeping BOTH conditions onto the permanent code would strip
+    // a correct Retry from a genuine transient upstream failure, the exact
+    // inverse of the defect D-14b fixes.
+    //
+    // Here the SERVICE tried and told us it failed. A retry can succeed, so the
+    // envelope stays recoverable.
     const fetchSpy = mockProbeBody({
       read: true,
       trade: true,
@@ -997,7 +1050,25 @@ describe("[140.3-03 / SEAMUX-07] the scope probe fails CLOSED on an unreadable 2
     const res = await POST(makeReq(VALID_BODY));
 
     expect(res.status).toBe(502);
-    expect(await res.json()).toEqual(PROBE_FAILURE_ENVELOPE);
+    // ⚠️ The distinction is asserted against what the ROUTE ANSWERED, never
+    // against the other hand-typed literal. `PROBE_FAILURE_ENVELOPE.code !==
+    // PARSE_MISS_ENVELOPE.code` would compare two constants declared thirty
+    // lines apart in THIS file — true the moment they were typed, and unable to
+    // fail for any change to the route. Reading `body.code` couples the claim to
+    // production: collapse the two arms back onto one code and this reds by
+    // name, which is the whole point of stating it separately from the
+    // `toEqual` above.
+    const body = await res.json();
+    // ORDER IS DELIBERATE: the DISTINCTION is asserted before the full
+    // `toEqual`, so a collapse of the two arms reports this explanation rather
+    // than a bare `expected {…(2)} to deeply equal {…(2)}` object diff.
+    expect(
+      body.code,
+      "The service-reported arm and the parse-miss arm must not share a code: " +
+        "one is transient and keeps its Retry, the other is permanent and must " +
+        "render none.",
+    ).not.toBe(PARSE_MISS_ENVELOPE.code);
+    expect(body).toEqual(PROBE_FAILURE_ENVELOPE);
     fetchSpy.mockRestore();
   });
 
@@ -1423,6 +1494,170 @@ describe("POST /api/strategies/finalize-wizard — H-0331 founder-email canonica
  * Contract: client must send a finite number in [0, 1e12) or omit the
  * field entirely (null / undefined). Invalid values now return 400.
  */
+/**
+ * 153.1-05 / WIZFORM-02 / D-09(b) — every `validatePayload` rejection carries a
+ * code the wizard can render.
+ *
+ * ⭐ WHY THIS DESCRIBE EXISTS AT ALL. Until this plan every arm of
+ * `validatePayload` answered a correct 400 with a bare `error` string and NO
+ * `code`. `SubmitStep` maps off the code alone, so all of them rendered the
+ * UNKNOWN card — "We could not classify this failure" — for a rejection the
+ * server had classified precisely. The defect survived a year of green tests
+ * because the tests asserted the STATUS. Every `it` below therefore asserts the
+ * code, and the sweep at the end asserts the CLASS: not one arm may answer
+ * without one.
+ *
+ * ⛔ The fixtures are HAND-TYPED, never sized off the constant they test. A
+ * description of `"x".repeat(MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS - 1)` would
+ * agree with whatever the constant happens to be and could never fail; `"ok"`
+ * is two characters because that is what the founder actually submitted, and if
+ * the lower bound is ever moved below three this test SHOULD red.
+ */
+describe("POST /api/strategies/finalize-wizard — 153.1-05 validatePayload codes", () => {
+  /** Every arm, as the payload that trips it and the code it must answer. */
+  const ARMS: ReadonlyArray<{
+    readonly what: string;
+    readonly patch: Record<string, unknown>;
+    readonly code: string;
+  }> = [
+    {
+      what: "a non-object body",
+      patch: {},
+      code: "VALIDATION_FAILED",
+    },
+    {
+      what: "a malformed strategy_id",
+      patch: { strategy_id: "not-a-uuid" },
+      code: "VALIDATION_FAILED",
+    },
+    {
+      what: "a codename outside the curated list",
+      patch: { name: "Not A Real Codename" },
+      code: "METADATA_NAME_INVALID",
+    },
+    {
+      what: "a missing description",
+      patch: { description: undefined },
+      code: "METADATA_DESCRIPTION_REQUIRED",
+    },
+    {
+      what: "a non-string description",
+      patch: { description: 12345 },
+      code: "METADATA_DESCRIPTION_REQUIRED",
+    },
+    {
+      // ⭐ THE INCIDENT, ENCODED. Two characters, hand-typed.
+      what: "the founder's two-character description",
+      patch: { description: "ok" },
+      code: "METADATA_DESCRIPTION_TOO_SHORT",
+    },
+    {
+      what: "a description one character over the ceiling",
+      patch: { description: "x".repeat(5001) },
+      code: "METADATA_DESCRIPTION_TOO_LONG",
+    },
+    {
+      what: "a malformed category_id",
+      patch: { category_id: "not-a-uuid" },
+      code: "METADATA_CATEGORY_REQUIRED",
+    },
+    {
+      what: "a negative aum",
+      patch: { aum: -1 },
+      code: "METADATA_AUM_INVALID",
+    },
+    {
+      what: "a negative max_capacity",
+      patch: { max_capacity: -1 },
+      code: "METADATA_CAPACITY_INVALID",
+    },
+    {
+      what: "an entry_context outside its closed set",
+      patch: { entry_context: "garbage" },
+      code: "VALIDATION_FAILED",
+    },
+    {
+      what: "a capital_ownership outside its closed set",
+      patch: { capital_ownership: "own_capitol" },
+      code: "METADATA_CAPITAL_OWNERSHIP_INVALID",
+    },
+  ];
+
+  /**
+   * The first arm rejects the BODY ITSELF, so it cannot be expressed as a patch
+   * over `VALID_BODY` — it needs a request whose JSON is not an object.
+   */
+  function bodyFor(patch: Record<string, unknown>): unknown {
+    if (Object.keys(patch).length === 0) return "not an object";
+    const merged: Record<string, unknown> = { ...VALID_BODY, ...patch };
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === undefined) delete merged[k];
+    }
+    return merged;
+  }
+
+  it.each(ARMS)("rejects $what with 400 + $code", async ({ patch, code }) => {
+    const POST = await importPost();
+    const res = await POST(makeReq(bodyFor(patch) as Record<string, unknown>));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.code).toBe(code);
+    // The code is the RENDERABLE half; the `error` string stays the
+    // developer-facing detail and must not have been dropped.
+    expect(typeof body.error).toBe("string");
+    // ⛔ T-153.1-16 — adding a code changes the response BODY, never the
+    // DECISION. Every arm is still a gate: the RPC must not have run.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+      "The RPC ran despite an invalid payload — validation is not a gate.",
+    ).toBeUndefined();
+  });
+
+  it("NOT ONE arm answers without a code (the class, not the instances)", async () => {
+    // The sweep the twelve `it`s above cannot do individually: a new arm added
+    // later without a code passes every assertion above by simply not being
+    // listed. This one reds the moment ANY rejection on this path arrives
+    // code-less — which is the state the whole route shipped in until now.
+    const POST = await importPost();
+    const codeless: string[] = [];
+    for (const arm of ARMS) {
+      const res = await POST(
+        makeReq(bodyFor(arm.patch) as Record<string, unknown>),
+      );
+      const body = await res.json();
+      if (typeof body.code !== "string" || body.code.length === 0) {
+        codeless.push(arm.what);
+      }
+    }
+    expect(
+      codeless,
+      `These validatePayload arms answered with no code: ${codeless.join(
+        ", ",
+      )}. A code-less rejection renders the UNKNOWN card ("We could not ` +
+        `classify this failure") for a failure the server classified exactly. ` +
+        `Give it a code AND admit that code to KNOWN_FINALIZE_CODES in the ` +
+        `same commit.`,
+    ).toEqual([]);
+    // Positive control: if `ARMS` is ever emptied or the loop stops running,
+    // `codeless` is [] and the assertion above is vacuously green.
+    expect(ARMS.length).toBe(12);
+  });
+
+  it("accepts a description at EXACTLY the lower bound (the boundary is <, not <=)", async () => {
+    // Hand-typed ten characters. This is the other half of the founder's
+    // incident: an off-by-one here would refuse a description that satisfies
+    // the rule the copy states, and the user would be told to add characters
+    // they had already added.
+    const fetchSpy = mockProbeReadOnly();
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, description: "abcdefghij" }),
+    );
+    expect(res.status).toBe(200);
+    fetchSpy.mockRestore();
+  });
+});
+
 describe("POST /api/strategies/finalize-wizard — H-0325 dollar-amount validation", () => {
   it("rejects negative aum with 400", async () => {
     const POST = await importPost();
@@ -1430,29 +1665,38 @@ describe("POST /api/strategies/finalize-wizard — H-0325 dollar-amount validati
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toMatch(/aum/);
+    // 153.1-05 / D-09(b) — the code, not just the status. A status-only
+    // assertion is precisely what let nine code-less arms live for a year:
+    // every one of them answered a correct 400 and an unrenderable body.
+    expect(body.code).toBe("METADATA_AUM_INVALID");
     expect(
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
     ).toBeUndefined();
   });
 
-  it("rejects aum at-or-above the 1e12 ceiling with 400", async () => {
+  it("rejects aum at-or-above the 1e12 ceiling with 400 + METADATA_AUM_INVALID", async () => {
     const POST = await importPost();
     const res = await POST(makeReq({ ...VALID_BODY, aum: 1e20 }));
     expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("METADATA_AUM_INVALID");
   });
 
-  it("rejects non-numeric aum (string) with 400", async () => {
+  it("rejects non-numeric aum (string) with 400 + METADATA_AUM_INVALID", async () => {
     const POST = await importPost();
     const res = await POST(makeReq({ ...VALID_BODY, aum: "foo" }));
     expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("METADATA_AUM_INVALID");
   });
 
-  it("rejects invalid max_capacity with 400", async () => {
+  it("rejects invalid max_capacity with 400 + METADATA_CAPACITY_INVALID", async () => {
     const POST = await importPost();
     const res = await POST(makeReq({ ...VALID_BODY, max_capacity: -1 }));
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toMatch(/max_capacity/);
+    // A DIFFERENT code from aum above, on an adjacent arm with an
+    // near-identical condition — the two fields are two remedies.
+    expect(body.code).toBe("METADATA_CAPACITY_INVALID");
   });
 
   it("accepts omitted aum (undefined / null)", async () => {
@@ -1539,11 +1783,20 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
     consoleErr.mockRestore();
   });
 
-  it("audit-2026-05-07 H-0321: maps 22023 (invalid_parameter_value) to 409 with code='draft_state_invalid'", async () => {
+  it("audit-2026-05-07 H-0321: maps 22023 (invalid_parameter_value) to 409 with code='DRAFT_STATE_INVALID'", async () => {
     // PRE-FIX: 22023 lumped with 42501 → 403 "This draft cannot be finalized".
     // POST-FIX: 22023 is a state mismatch (already-published, missing-fields,
     // stale-snapshot), distinct from a true permission denial. 409 lets the
     // client show a refresh nudge rather than a sign-out / no-access prompt.
+    //
+    // 153.1-05 / D-34 — the LITERAL was `draft_state_invalid` (lowercase) until
+    // this plan. That is the one WIRE change in the D-34 reorder, and this
+    // assertion is where it is pinned: lowercase can never be a
+    // `WizardErrorCode`, so the 409 rendered the UNKNOWN card and its
+    // RECOVERABLE copy handed the user a Retry that re-POSTed the identical
+    // request against a draft the DB had already moved past. The uppercase
+    // member (153.1-04) has non-recoverable copy and is admitted to
+    // `KNOWN_FINALIZE_CODES` in this same commit.
     const fetchSpy = mockProbeReadOnly();
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
     routeThroughLegacyFinalize();
@@ -1561,7 +1814,7 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.error).toContain("not in a finalizable state");
-    expect(body.code).toBe("draft_state_invalid");
+    expect(body.code).toBe("DRAFT_STATE_INVALID");
     // The raw status/source details must not leak (P445-style hardening).
     expect(JSON.stringify(body)).not.toContain("source=legacy");
 
@@ -2749,6 +3002,11 @@ describe("POST /api/strategies/finalize-wizard — CONTRIB-02 private-by-default
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(String(body.error)).toContain("entry_context");
+    // 153.1-05 — VALIDATION_FAILED rather than a field-level code:
+    // `entry_context` is a context selector the wizard sets from which surface
+    // the user entered by, never something they typed, so there is no form
+    // control to route them back to (RESEARCH Q3).
+    expect(body.code).toBe("VALIDATION_FAILED");
     expect(
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
     ).toBeUndefined();
@@ -3096,11 +3354,17 @@ describe("POST /api/strategies/finalize-wizard — OWN-03 capital-ownership mark
     );
     expect(res.status).toBe(400);
     const body = await res.json();
-    // Same envelope shape as the entry_context garbage arm: a bare `error`
-    // string and NO `code`. Minting a code here would put a string the wizard
-    // roster does not know onto the client, which renders the UNKNOWN card.
+    // ⚠️ 153.1-05 / D-09(b) — THIS ASSERTION USED TO PIN THE DEFECT. It read
+    // `expect(body.code).toBeUndefined()`, justified by "minting a code here
+    // would put a string the wizard roster does not know onto the client,
+    // which renders the UNKNOWN card". True premise, backwards conclusion, and
+    // the same one the source comment beside the arm carried: answering with
+    // NO code does not avoid the UNKNOWN card, it guarantees it. The remedy is
+    // to admit the code to `KNOWN_FINALIZE_CODES`, which this same commit
+    // does. A test written the old way is worse than no test — it makes the
+    // dead end a contract, so removing it would have read as a regression.
     expect(typeof body.error).toBe("string");
-    expect(body.code).toBeUndefined();
+    expect(body.code).toBe("METADATA_CAPITAL_OWNERSHIP_INVALID");
 
     expect(
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
@@ -3313,6 +3577,397 @@ describe("POST /api/strategies/finalize-wizard — OWN-03 capital-ownership mark
     expect(body.capital_ownership_persisted).toBe(false);
 
     warnSpy.mockRestore();
+    fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * Phase 153.2-04 / WIZFORM-04 + MT5-14(a) — the submit path stops asking a venue
+ * a question it has no answer to.
+ *
+ * ── WHAT WAS BROKEN ─────────────────────────────────────────────────────────
+ *
+ * `runScopeBroadeningProbe` demanded a ccxt per-key permissions probe on EVERY
+ * submit. A venue that exposes no per-key scope endpoint cannot answer it, so
+ * the seam returned a permanent failure and the route reported it as
+ * `KEY_NETWORK_TIMEOUT` — "we could not reach the exchange", with a Retry. The
+ * founder clicked that Retry five times against a condition that can never
+ * change. The strategy was undeclarable and unsubmittable at once, which is why
+ * MT5-14 and WIZFORM-04 had to ship together.
+ *
+ * ── WHY THESE ROWS ARE SHAPED THE WAY THEY ARE ──────────────────────────────
+ *
+ * ⚠️ THEY ASSERT ON THE SEAM, NOT ON THE RESPONSE. "Zero live calls on submit"
+ * (D-06) is a claim about what crossed the network, and a 200 proves nothing
+ * about it — a route that probed successfully and a route that never probed
+ * both answer 200. `RF.lastCall` is set on EVERY `resilientFetch`, so `null` is
+ * proof the chokepoint was never reached; the `globalThis.fetch` spy is asserted
+ * alongside it so a future path that bypassed the core would still be seen.
+ *
+ * ⚠️ THE SWEEP IS DERIVED FROM THE CAPABILITY RECORD, NOT FROM A VENUE NAME. An
+ * instance test over one venue is satisfied by an instance FIX (`venue === …`),
+ * and an instance fix is the defect class this milestone exists to delete. The
+ * sweep asks the same registry the route asks and holds every member to its
+ * answer, so a second non-probing venue is covered the day its row lands and a
+ * skip written as a name comparison reds here while every single-venue row
+ * stays green. ⛔ The oracle is the PREDICATE over `SUPPORTED_EXCHANGES`, which
+ * is a different derivation from the route's own branch — not the route's
+ * behaviour compared against itself.
+ */
+describe("[153.2-04 / WIZFORM-04] the scope probe is gated on a CAPABILITY, and fails toward probing", () => {
+  /** Proof the seam was never crossed, by both routes to it. */
+  function expectNoSeamCall(fetchSpy: ReturnType<typeof vi.spyOn>): void {
+    expect(
+      RF.lastCall,
+      "The resilience core was entered, so a live permissions probe was issued " +
+        "for a venue that has no per-key scope surface to report — the demand " +
+        "WIZFORM-04 removes.",
+    ).toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  }
+
+  /** Proof the seam WAS crossed, on the keys-permissions budget. */
+  function expectSeamProbed(): void {
+    expect(
+      RF.lastCall,
+      "The scope-broadening probe did NOT run. It is an ASVS V4 control: a key " +
+        "broadened to trade/withdraw between Connect and Submit is caught here, " +
+        "and skipping it for a venue that can answer is a real hole.",
+    ).not.toBeNull();
+    expect(RF.lastCall!.budgetKey).toBe("keys-permissions");
+    expect(RF.lastCall!.path).toContain("/permissions?force_refresh=true");
+  }
+
+  it("an MT5 single-key submit crosses the keys-permissions seam ZERO times (D-06)", async () => {
+    STATE.adminApiKeysExchange = "mt5";
+    // The read-only mock is installed DELIBERATELY: if the route still probed,
+    // this row would pass on the response and fail only here. The spy is the
+    // assertion, not the setup.
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectNoSeamCall(fetchSpy);
+    fetchSpy.mockRestore();
+  });
+
+  it("a ccxt submit still probes, byte-identically — binance", async () => {
+    STATE.adminApiKeysExchange = "binance";
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectSeamProbed();
+    fetchSpy.mockRestore();
+  });
+
+  it("[D-22] sFOX keeps the submit-time scope probe BYTE-UNCHANGED", async () => {
+    // Asserted EXPLICITLY rather than left to the binance row. sFOX asserts
+    // read_only structurally for a similar reason to MT5 and is the obvious
+    // candidate for a careless second opt-out — but whether the ccxt probe
+    // currently SUCCEEDS for it is unknown, so D-22 pins it unchanged and the
+    // question is logged rather than answered.
+    STATE.adminApiKeysExchange = "sfox";
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectSeamProbed();
+    fetchSpy.mockRestore();
+  });
+
+  it("⭐ an UNRESOLVED venue is STILL probed — the control fails TOWARD probing", async () => {
+    // `api_keys.exchange` read faulted, so the route holds `null`. Skipping on
+    // null would silently disable the scope-broadening defence for every key
+    // whose venue read blipped — a control that fails open on a transient DB
+    // error is not a control (RESEARCH Pitfall 4 / ASVS V4).
+    STATE.adminApiKeysSelectError = { message: "transient read fault" };
+    const fetchSpy = mockProbeReadOnly();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectSeamProbed();
+    warnSpy.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("an UNKNOWN venue string is STILL probed — same direction, different cause", async () => {
+    // A venue the capability registry has never heard of (a code added to the
+    // DB ahead of the registry). The registry's answer for "I do not know this
+    // venue" must be "probe it".
+    STATE.adminApiKeysExchange = "some-venue-we-have-never-heard-of";
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectSeamProbed();
+    fetchSpy.mockRestore();
+  });
+
+  it("⭐ CLASS SWEEP: every supported venue's probe behaviour matches its capability row", async () => {
+    // The oracle is the capability predicate over SUPPORTED_EXCHANGES — a
+    // derivation the route does not share. An instance skip (`venue === …`)
+    // plus a second non-probing row in the registry reds HERE and nowhere else.
+    const { SUPPORTED_EXCHANGES, venueSupportsScopeProbe } = await import(
+      "@/lib/closed-sets"
+    );
+    const nonProbing = SUPPORTED_EXCHANGES.filter(
+      (v) => !venueSupportsScopeProbe(v),
+    );
+    // Anti-vacuity: a sweep over an empty opt-out set is green forever.
+    expect(
+      nonProbing.length,
+      "No venue opts out of the probe, so this sweep proves nothing. If the " +
+        "capability was removed, WIZFORM-04 was reverted.",
+    ).toBeGreaterThan(0);
+    expect(nonProbing.length).toBeLessThan(SUPPORTED_EXCHANGES.length);
+
+    const POST = await importPost();
+    for (const venue of SUPPORTED_EXCHANGES) {
+      RF.lastCall = null;
+      STATE.adminApiKeysExchange = venue;
+      const fetchSpy = mockProbeReadOnly();
+      await POST(makeReq(VALID_BODY));
+      const shouldProbe = venueSupportsScopeProbe(venue);
+      expect(
+        RF.lastCall !== null,
+        `venue "${venue}": the route ${RF.lastCall ? "probed" : "skipped"} but ` +
+          `its capability row says it should ${shouldProbe ? "probe" : "skip"}. ` +
+          `The gate must read the CAPABILITY, never a venue name.`,
+      ).toBe(shouldProbe);
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("⭐ CLASS SWEEP, composite arm: the SAME gate applies per member", async () => {
+    // Gating only the single-key arm would be the instance fix wearing a
+    // different hat — correct for the path someone happened to test, and a live
+    // per-member probe demand on the other. The member's venue arrives on the
+    // widened embed; `.limit(cap + 1)` is untouched.
+    const { SUPPORTED_EXCHANGES, venueSupportsScopeProbe } = await import(
+      "@/lib/closed-sets"
+    );
+    const POST = await importPost();
+    for (const venue of SUPPORTED_EXCHANGES) {
+      RF.lastCall = null;
+      STATE.strategyRow = { api_key_id: null };
+      STATE.strategyKeysCount = 1;
+      STATE.strategyKeysList = [
+        { api_key_id: MEMBER_KEY_1, api_keys: { exchange: venue } },
+      ];
+      const fetchSpy = mockProbeReadOnly();
+      await POST(makeReq(VALID_BODY));
+      expect(
+        RF.lastCall !== null,
+        `composite member on venue "${venue}" did not match its capability row.`,
+      ).toBe(venueSupportsScopeProbe(venue));
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("a composite member whose venue could not be read is STILL probed", async () => {
+    // The embed resolves null when the join comes back empty. Same fail-toward
+    // rule as the single-key arm, asserted separately because it reaches the
+    // gate down a different path.
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 1;
+    STATE.strategyKeysList = [{ api_key_id: MEMBER_KEY_1, api_keys: null }];
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectSeamProbed();
+    fetchSpy.mockRestore();
+  });
+
+  it("the composite member read still asks for the truncation-detector row", async () => {
+    // The select was widened in this plan; the cap was NOT. `cap + 1` is a
+    // truncation DETECTOR whose arrival IS the refusal, and it is pinned
+    // cross-file against SEAM_ROUTE_BUDGETS. Asserted here because the two live
+    // on the same query and an edit to one is an edit next to the other.
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 1;
+    STATE.strategyKeysList = [
+      { api_key_id: MEMBER_KEY_1, api_keys: { exchange: "binance" } },
+    ];
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expect(STATE.strategyKeysListLimit).toBe(11);
+    fetchSpy.mockRestore();
+  });
+
+  it("⛔ no retry is issued on the probe path (D-07)", async () => {
+    // The requirement is explicit that a naive retry multiplies the budget this
+    // route is capped on and feeds breaker:railway. This fix REMOVES calls; it
+    // must never multiply them. One submit, one crossing.
+    STATE.adminApiKeysExchange = "binance";
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(RF.lastCall!.init.retriesOverride).toBe(0);
+    fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * Phase 153.2-04 / WIZFORM-04 / D-14b — a permanent condition is never reported
+ * as a temporary blip.
+ *
+ * `KEY_NETWORK_TIMEOUT`'s copy says we could not reach the exchange and its
+ * envelope carries a recoverable action, so a Retry control renders. Two arms
+ * that are PERMANENT used to land on it, and the Retry they offered could only
+ * ever produce the same message again — the five-clicks behaviour. The parse
+ * miss is covered by the SEAMUX-07 block above (re-cut there, beside the arm it
+ * was split off). This block covers the configuration fault.
+ */
+describe("[153.2-04 / D-14b] our own configuration fault is not a network blip", () => {
+  it("a missing INTERNAL_API_TOKEN answers SEAM_MISCONFIGURED (500), not KEY_NETWORK_TIMEOUT", async () => {
+    delete process.env.INTERNAL_API_TOKEN;
+    const fetchSpy = mockProbeReadOnly();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(
+      res.status,
+      "The fault is OURS, not the venue's — 500, matching how process-key-client " +
+        "already answers this class. 502 would blame the upstream for our own " +
+        "unset setting.",
+    ).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("SEAM_MISCONFIGURED");
+    expect(
+      body.code,
+      "A setting stays wrong until a human fixes it and redeploys. Reported as " +
+        "a timeout it renders a Retry whose only possible outcome is the same " +
+        "message again.",
+    ).not.toBe("KEY_NETWORK_TIMEOUT");
+
+    // Nothing was attempted, so nothing could have been unreachable.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // And it still FAILS CLOSED: no key is promoted on a probe that did not run.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+
+    errSpy.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("the misconfiguration log carries the SETTING NAME and no secret", async () => {
+    // Shared Pattern E — every error path scrubs through the one leaf. The
+    // operator needs to know WHICH setting; there is no value to leak, because
+    // the whole condition is that it is absent.
+    delete process.env.INTERNAL_API_TOKEN;
+    const fetchSpy = mockProbeReadOnly();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    const logged = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toMatch(/probe misconfigured/i);
+    expect(logged).toContain("INTERNAL_API_TOKEN");
+
+    errSpy.mockRestore();
+    fetchSpy.mockRestore();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 153.2-05 / WIZFORM-02 — the limiter's two deny arms stop answering code-less.
+//
+// Both were on the KNOWN_CODELESS_FINALIZE_REJECTIONS ledger. A code-less
+// rejection renders the UNKNOWN card — "We could not classify this failure" —
+// for a failure the route classified well enough to pick a status and write a
+// sentence about, AND that card's copy is recoverable, so both arms handed the
+// user a Retry button: correct for a throttle, and a control that cannot work
+// for a misconfiguration.
+//
+// ⚠️ The status and header assertions are here because the fix must be a CODE
+// and nothing else — a change that also moved the status would be a wire
+// change wearing a classification change's clothes.
+// ═══════════════════════════════════════════════════════════════════════════
+describe("[153.2-05] the rate-limit deny arms carry codes", () => {
+  // ⛔ TYPED AS THE PRODUCTION RESULT (153.2 review WR-03), not
+  // `Record<string, unknown>`. The predicate under test is now the real one, so
+  // a fixture the production type cannot express is a compile error here rather
+  // than a green row demonstrating a discrimination nobody ships.
+  async function denyWith(
+    rl: import("@/lib/ratelimit").CheckLimitResult,
+  ) {
+    const { checkLimit } = await import("@/lib/ratelimit");
+    (checkLimit as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      rl,
+    );
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    return { res, body: (await res.json()) as { code?: string; error?: string } };
+  }
+
+  it("a genuine throttle answers 429 RATE_LIMITED — OUR cap, not the exchange's", async () => {
+    // ⛔ NOT `KEY_RATE_LIMIT`, whose copy opens "The exchange rate-limited this
+    // request". This is `userActionLimiter` on our own per-user key and the
+    // exchange is never contacted on this path, so that sentence would be a
+    // specific lie in place of a vague one. `RATE_LIMITED` says "the cap is
+    // ours, not your exchange's".
+    const { res, body } = await denyWith({ success: false, retryAfter: 42 });
+
+    expect(res.status).toBe(429);
+    expect(body.code).toBe("RATE_LIMITED");
+    expect(body.code).not.toBe("KEY_RATE_LIMIT");
+    expect(body.error).toBe("Too many requests");
+    expect(res.headers.get("Retry-After")).toBe("42");
+  });
+
+  it("a limiter MISCONFIGURATION answers 503 SEAM_MISCONFIGURED — the fault is ours", async () => {
+    // The discrimination that matters: a throttle is the user hitting a cap and
+    // a misconfiguration is our own setting being wrong. They already answered
+    // different statuses; now they answer different classifications too, and
+    // SEAM_MISCONFIGURED carries no recoverable action, so no Retry control
+    // renders for a condition retrying cannot clear.
+    //
+    // ⭐ DRIVEN BY THE REAL DISCRIMINATOR (153.2 review WR-03): `reason:
+    // "ratelimit_misconfigured"` is the field the shipped predicate reads and
+    // the only one `CheckLimitResult` declares. The previous fixture said
+    // `misconfigured: true` — a key production never emits — and was told apart
+    // by a predicate this file had written for itself.
+    const { res, body } = await denyWith({
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    });
+
+    expect(res.status).toBe(503);
+    expect(body.code).toBe("SEAM_MISCONFIGURED");
+    expect(body.code).not.toBe("RATE_LIMITED");
+    expect(body.error).toBe("Rate limiter unavailable");
+    expect(res.headers.get("Retry-After")).toBe("60");
+  });
+
+  it("CONTROL — a successful limiter check reaches neither arm", async () => {
+    // The positive control. Both rows above would also pass on a route that
+    // denied every request, which is a far worse defect than the one being fixed.
+    const fetchSpy = mockProbeReadOnly();
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).not.toBe(429);
+    expect(res.status).not.toBe(503);
     fetchSpy.mockRestore();
   });
 });

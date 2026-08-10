@@ -116,10 +116,18 @@ export default async function MyStrategiesPage() {
   const hasRows = strategyRows.length > 0 || placeholderRows.length > 0;
 
   return (
-    // Data surface fluid-fill: fill toward ~1920px then center (Phase 52
-    // APPLY-01 / TYPE-03). (dashboard)/layout.tsx does NOT cap width, so the
-    // cap goes here at the page shell rather than in the layout.
-    <div className="mx-auto max-w-[1920px]">
+    // Data surface: FULLY FLUID, no px cap (founder decision 2026-08-09,
+    // Option B) — zooming out must reveal more columns, never more dead margin.
+    //
+    // ⚠️ The comment that stood here claimed "(dashboard)/layout.tsx does NOT
+    // cap width", which was FALSE: `DashboardChrome` caps every route at
+    // `max-w-7xl` (1280px) unless it is on the `isWide` allow-list, and
+    // `/my-strategies` was never added to it. So this page's own 1920px cap was
+    // dead code — the shell clamped it 640px narrower — and this table rendered
+    // "Scroll for more columns →" beside empty space. That mismatch, a page
+    // asserting one thing while the layout did another, is the whole bug.
+    // The width is now owned in ONE place: the `isWide` arm of DashboardChrome.
+    <div>
       <PageHeader title="My Strategies" />
       {fetchFailed && (
         <div

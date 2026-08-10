@@ -33,6 +33,27 @@ import type { GateFailureCode } from "./strategyGate";
 // them. Replacing one bare integer with another is how this file would keep
 // lying with a different number, so the PREDICATE is named instead of a count.
 import { CircuitOpenError } from "@/lib/seam-errors";
+// 153.1-03 / WIZFORM-03 — SAFE UNDER THE LOAD-BEARING IMPORT RULE ABOVE, and
+// here is the check rather than the assurance. `closed-sets.ts` imports exactly
+// one module (`zod`), declares no `import "server-only"`, and its only
+// module-load env reads are the three build-inlined `NEXT_PUBLIC_*` flags
+// (`:226` SFOX, `:249` SMOOTHED_MTM, `:275` MT5); the two non-public reads
+// (`SFOX_ENABLED :302`, `MT5_ENABLED :330`) sit INSIDE functions and never run
+// at module load. `MetadataStep.tsx`'s own value-import of `@/lib/closed-sets`
+// (it reads `MAGNITUDE_CAPS` and `isCryptoExchange` from it) already pulls this
+// module into the same wizard bundle, so this adds no new bytes to the browser
+// payload.
+// The prohibition above targets `@upstash/*` and the top-level
+// `Redis.fromEnv()` singleton reachable through `@/lib/analytics-client` and
+// `@/lib/resilient-fetch`; neither is reachable from here.
+// [VERIFIED at 413d124f — re-verify the four claims above before landing any
+// further import into this file.]
+// 153.1-04 / D-23 — `MAGNITUDE_CAPS` joins the SAME import for the same
+// reason. The description bounds named in the copy below are read from the one
+// constant the server arm and the field guards read; a bound typed as a literal
+// into a sentence is how the client came to promise a rule the server did not
+// enforce (the three-failed-submit incident).
+import { MAGNITUDE_CAPS, venueIsSubstitutable } from "./closed-sets";
 
 export type WizardErrorCode =
   // Key validation (ConnectKeyStep)
@@ -165,6 +186,27 @@ export type WizardErrorCode =
   // validation. Copy lives here (the canonical wizard-copy home) so the
   // component never carries an invented inline string (copy-drift guard).
   | "METADATA_DESCRIPTION_REQUIRED"
+  // 153.1-04 / WIZFORM-02 — the seven FIELD-LEVEL refusals `validatePayload`
+  // makes in `finalize-wizard/route.ts`. Each one names a field the user typed
+  // or picked, so 153.2 can route the message back to that field instead of
+  // rendering a terminal envelope over a form the user can still fix.
+  //
+  // ⚠️ A member is minted here ONLY where a field-level message must reach a
+  // SPECIFIC field. The route's three non-field arms (malformed body, a
+  // non-UUID strategy_id, an out-of-set entry_context — none of them ever
+  // user-typed) keep `VALIDATION_FAILED`: minting a member per arm inflates
+  // the vocabulary, which is the failure `SEAM_CODE_TO_WIZARD_CODE`'s docblock
+  // warns about.
+  //
+  // ⛔ NONE of the seven is recoverable — see the copy entries. Resubmitting an
+  // identical payload is refused identically; the remedy is on the form.
+  | "METADATA_NAME_INVALID"
+  | "METADATA_DESCRIPTION_TOO_SHORT"
+  | "METADATA_DESCRIPTION_TOO_LONG"
+  | "METADATA_CATEGORY_REQUIRED"
+  | "METADATA_AUM_INVALID"
+  | "METADATA_CAPACITY_INVALID"
+  | "METADATA_CAPITAL_OWNERSHIP_INVALID"
   // Wizard lifecycle
   | "SESSION_EXPIRED"
   | "SUBMIT_NOTIFY_FAILED"
@@ -172,6 +214,21 @@ export type WizardErrorCode =
   // (not in a finalizable state) used to collapse to UNKNOWN at SubmitStep.
   | "GATE_DRAFT_GONE"
   | "GUARD_BLOCKED"
+  // 153.1-04 / WIZFORM-02 (RESEARCH Finding 4) — THE SECOND LIVE `UNKNOWN`.
+  //
+  // The `error.code === "22023"` arm in `finalize-wizard/route.ts` — the 409
+  // the finalize RPC's invalid-parameter raise lands on — already carried this
+  // discriminator, but as the LOWERCASE literal `draft_state_invalid`, so
+  // nothing matched a wizard member and SubmitStep rendered UNKNOWN. This mints the UPPER_SNAKE
+  // member and its copy ONLY; 153.1-05 uppercases the route's literal in the
+  // same commit the code starts being a wizard member, which is the point at
+  // which the two halves become one honest classification.
+  //
+  // ⚠️ NOT `GUARD_BLOCKED` and NOT `GATE_DRAFT_GONE`, and each would assert
+  // something false: `GUARD_BLOCKED` is the 42501 arm ("you do not have access
+  // to this") and `GATE_DRAFT_GONE` says the draft is not there at all. This
+  // draft exists, is the caller's, and has simply MOVED ON.
+  | "DRAFT_STATE_INVALID"
   // Phase 17 NEW — CSV branch absorption (DESIGN-05).
   | "CSV_PARSE_FAILED"
   | "CSV_SCHEMA_VIOLATION"
@@ -233,6 +290,21 @@ export type WizardErrorCode =
   // `finalize-wizard/route.ts` by a test that reads the route's own declaration,
   // so the sentence cannot drift away from the constant it describes.
   | "COMPOSITE_TOO_MANY_MEMBERS"
+  // 153.1-04 / WIZFORM-02 (RESEARCH Finding 4) — A LIVE `UNKNOWN`, closed.
+  //
+  // The unified arm's composite-rejection emitter in
+  // `finalize-wizard/route.ts` (the one site that answers this code) has been
+  // emitting it all along; it simply had no member here, so SubmitStep rendered
+  // the "we could not classify this failure" card for a failure the server
+  // classified precisely. WIZFORM-02's
+  // criterion covers it by its own words. The alias-table docblock further down
+  // used to record it as out of scope — that sentence is gone, because the
+  // premise it rested on is.
+  //
+  // ⛔ NOT an alias in `SEAM_CODE_TO_WIZARD_CODE`. That table translates WIRE
+  // codes emitted by another service; this one is minted by our own route, so
+  // it is a wizard member outright.
+  | "COMPOSITE_UNSUPPORTED_UNIFIED"
   // Phase 94.1 / RT-FINDING-3 — the wizard connect step's on-mount rehydration
   // GET (/api/strategies/composite/members) failed transiently. NEUTRAL copy:
   // it fires for ANY api draft (the client can't yet know single-key vs
@@ -310,6 +382,28 @@ export type WizardErrorCode =
   // `recoverable: false` and `ErrorEnvelope` renders NO Retry control. The
   // absence IS the fix, on the same mechanism `COMPOSITE_TOO_MANY_MEMBERS` uses.
   | "SEAM_MISCONFIGURED"
+  // 153.1-04 / UI-SPEC Gate A — the answer did not arrive inside the time WE
+  // granted. Distinguishable client-side: our own abort fired and no transport
+  // error was observed, so this is OUR deadline expiring, not the broker
+  // refusing and not the network dropping.
+  //
+  // ⚠️ NOT `SERVICE_UNREACHABLE` and NOT `KEY_NETWORK_TIMEOUT`, and both would
+  // assert something we did not observe: `SERVICE_UNREACHABLE` says we never
+  // got an answer (we stopped listening), and `KEY_NETWORK_TIMEOUT` points at
+  // the venue's responsiveness when what actually happened is that our own
+  // budget was too small for this broker.
+  //
+  // NOT recoverable, deliberately: `actions` carries neither member of
+  // `RECOVERABLE_ACTIONS`, so no Retry control renders. A deadline inversion
+  // fails identically on every attempt — the 2026-08-08 panel offered Retry
+  // against exactly this, and the founder clicked it five times.
+  //
+  // ⭐ Phase 153.4 is the CONSUMER (ROADMAP §153.4 Depends-on names this
+  // member): it raises the validate-key budget and emits this code when its own
+  // deadline fires. The copy is authored here so the member exists before the
+  // emitter does — a code with no copy entry falls through to UNKNOWN exactly
+  // as a missing code does.
+  | "SEAM_DEADLINE_EXCEEDED"
   // Phase 151 review E5/E6 — the allocate surface's ONE actionable refusal.
   //
   // `/api/portfolio-strategies/allocation` answers 409 `not_allocatable` when
@@ -358,12 +452,187 @@ export type WizardErrorAction =
  */
 const SIZE_MB_PLACEHOLDER = "{sizeMb}";
 
+/**
+ * 153.1-04 — the count-free HEAD of each description-bound title, held once so
+ * the table's sentence and the interpolated sentence cannot drift apart.
+ *
+ * ⚠️ WHY A HEAD RATHER THAN A `{n}` PLACEHOLDER. `charCount` is OPTIONAL, and
+ * a title carrying `{n}` renders the literal token when nothing is passed. The
+ * table sentence must be TRUE and complete with no number (TRAP-3: a surface
+ * must never name a count it was not given, and must never print the machinery
+ * either). So the table appends only a full stop, and `formatKeyError`'s arm
+ * appends the specific tail. The CSV file-size token declared just above can
+ * use the placeholder shape because `CSV_FILE_TOO_LARGE` is emitted from
+ * exactly one site that always supplies the size; these two are emitted from a
+ * server arm that knows the length and from a client field guard that may not.
+ * (That token's identifier is deliberately not spelled out here:
+ * `wizardErrors.test.ts` pins its occurrence count in this file at THREE — one
+ * declaration plus its two uses — as a receipt that the interpolation machinery
+ * is untouched, and prose that names it moves that number for no behavioural
+ * reason.)
+ *
+ * ⛔ The bounds are READ from `MAGNITUDE_CAPS`, never typed as `10` / `5000`
+ * (D-23). `MAX_DESCRIPTION_CHARS` is grouped per the Numbers Contract, so 5000
+ * reads as "5,000".
+ */
+const DESCRIPTION_BOUND_TITLE = {
+  METADATA_DESCRIPTION_TOO_SHORT: `Add at least ${MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS} characters`,
+  // 153.1 review WR-02 — "under N" asserts a ceiling of N-1, and the server
+  // does not enforce that: `finalize-wizard` rejects on
+  // `description.length > MAX_DESCRIPTION_CHARS` (route.ts), so a description
+  // of exactly 5,000 characters is ACCEPTED. The inclusive form is the true
+  // one, and it is what the `cause` one field down already says ("longer than
+  // the 5,000 characters we store"). The TOO_SHORT sibling needs no such
+  // change: `< MIN` rejects, so "at least 10" is exact.
+  METADATA_DESCRIPTION_TOO_LONG: `Keep this to ${MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS.toLocaleString(
+    "en-US",
+  )} characters or fewer`,
+} as const;
+
+/**
+ * 153.1-04 — the SHARED TAIL of `SEAM_DEADLINE_EXCEEDED`'s cause, held once so
+ * the count-free sentence in the table and the budget-naming sentence
+ * `formatKeyError` builds cannot drift apart.
+ *
+ * Same reasoning as `DESCRIPTION_BOUND_TITLE` above: `budgetSeconds` is
+ * OPTIONAL, so the table sentence must be complete and true with no number, and
+ * only the interpolation arm may name one (TRAP-3).
+ */
+const DEADLINE_CAUSE_TAIL =
+  " Nothing was saved — your key was not stored, and this is not a sign that your key is wrong.";
+
+/**
+ * 153.1-03 / WIZFORM-03 — the wizard surface an error was raised on.
+ *
+ * Named as a closed set rather than a bare string so a bullet cannot be gated
+ * on a surface nobody passes: a typo is a COMPILE error at the table, not a
+ * bullet that silently never renders.
+ */
+export type WizardSurface = "connect" | "submit" | "csv" | "allocate";
+
+/**
+ * The venue capabilities a `fix[]` bullet may be gated on. ONE member today.
+ *
+ * Adding a second (153.4 wants `serialized` for the long-wait copy) is one
+ * member here plus one entry in `VENUE_CAPABILITY_PREDICATES` — never a new
+ * branch inside `formatKeyError`. That is the whole point of this mechanism.
+ */
+export type VenueCapabilityName = "substitutable";
+
+/**
+ * Capability name → the closed-sets PREDICATE that answers it.
+ *
+ * ⛔ Never index `VENUE_CAPABILITIES` here. The predicates own the per-capability
+ * default for an unresolved venue, and that default IS the mechanism (153.1-02);
+ * reading a row directly re-invents it per call site.
+ */
+const VENUE_CAPABILITY_PREDICATES: Record<
+  VenueCapabilityName,
+  (venue: string | null | undefined) => boolean
+> = {
+  substitutable: venueIsSubstitutable,
+};
+
+/**
+ * 153.1-03 / WIZFORM-03 — a precondition a single `fix[]` bullet declares about
+ * the CONTEXT it is rendered in. One filter reads these (`applyFixRequirements`
+ * below); no code branch does.
+ *
+ * D-17's class: "a remedy that presupposes a fact about the context". Telling an
+ * MT5 user to "switch to a different exchange" presupposes another venue exists
+ * — their account IS the venue, so the remedy is unwinnable. Three bullets said
+ * it; one filter now decides for all of them and for every bullet added later.
+ *
+ * ⛔ Do NOT re-express any of these as a per-code equality arm inside
+ * `formatKeyError`. Three such arms are exactly the instance-not-class defect
+ * this repo has already paid for (PATTERNS §wizardErrors.ts). The prohibited
+ * pattern is deliberately NOT spelled out literally here: the acceptance gate
+ * for this plan counts occurrences of it in this file, and prose that writes
+ * it out is how a grep guard stops being able to fail.
+ *
+ * A THIRD requirement kind is an added union member plus one arm in
+ * `requirementMet` — never a new call site.
+ */
+export type FixRequirement =
+  | {
+      readonly kind: "venueCapability";
+      readonly capability: VenueCapabilityName;
+      /** The answer the predicate must give for the bullet to render. */
+      readonly is: boolean;
+    }
+  | { readonly kind: "surface"; readonly surface: WizardSurface };
+
+/**
+ * "Render only when the venue CAN be substituted" — the incumbent bullets.
+ * With no `venue` in context `venueIsSubstitutable` answers `true`, so every
+ * caller that predates this field is byte-unchanged.
+ */
+const REQUIRES_SUBSTITUTABLE_VENUE: FixRequirement = {
+  kind: "venueCapability",
+  capability: "substitutable",
+  is: true,
+};
+
+/**
+ * "Render only when the venue CANNOT be substituted" — the D-17 replacement.
+ *
+ * ⭐ This is why the requirement carries a BOOLEAN rather than being a presence
+ * test: an MT5 user gets a truthful remedy, not merely a shorter list.
+ */
+const REQUIRES_NON_SUBSTITUTABLE_VENUE: FixRequirement = {
+  kind: "venueCapability",
+  capability: "substitutable",
+  is: false,
+};
+
+/** "Render only on the submit step" — UI-SPEC Gate B. */
+const REQUIRES_SUBMIT_SURFACE: FixRequirement = {
+  kind: "surface",
+  surface: "submit",
+};
+
+/**
+ * "Render only on the connect step" — UI-SPEC Gate B, 153.1-04.
+ *
+ * ⭐ ONE CONSTANT, NO NEW BRANCH. Adding a second surface requirement costs a
+ * declaration here and an index in one `fixRequires` array; `requirementMet`
+ * and `formatKeyError` are byte-unchanged. That is the property 153.1-03 bought
+ * and the reason a bullet's precondition is DATA rather than a conditional.
+ *
+ * ⚠️ Its one user is `SEAM_DEADLINE_EXCEEDED`'s "Your key details are still on
+ * this page" bullet, which is a claim about the FORM BEHIND the panel. It is
+ * true on the connect step and unverifiable anywhere else, so it is gated —
+ * absence suppresses (see `WizardErrorContext.surface`). Phase 153.4 owns
+ * passing `surface: "connect"` at the ConnectKeyStep / MultiKeyConnectStep
+ * `buildEnvelope` call sites, in the same commit it starts emitting this code.
+ */
+const REQUIRES_CONNECT_SURFACE: FixRequirement = {
+  kind: "surface",
+  surface: "connect",
+};
+
 export interface WizardErrorCopy {
   title: string;
   /** Single-sentence summary of WHY the error happened. */
   cause: string;
   /** Numbered fix steps. Each step is an imperative sentence. */
   fix: string[];
+  /**
+   * 153.1-03 / WIZFORM-03 — OPTIONAL, index-aligned to `fix`. `null` at an
+   * index means "always render"; ABSENT on an entry means "no bullet in this
+   * entry is conditional", and `formatKeyError` then returns the entry object
+   * itself, untouched.
+   *
+   * ⚠️ A PARALLEL ARRAY is the one thing that can silently fall out of step, so
+   * `wizardErrors.test.ts` sweeps every tagged entry for
+   * `fixRequires.length === fix.length`. Add a bullet, add its slot.
+   *
+   * ⛔ `fix` stays `string[]`. `buildEnvelope` (in `envelope.ts`) forwards it
+   * VERBATIM as the envelope's `debug_context`, and the `debug_context`
+   * equality assertion in `WizardErrorEnvelope.test.tsx` compares against it;
+   * turning a bullet into an object has a blast radius this phase did not scope.
+   */
+  fixRequires?: readonly (FixRequirement | null)[];
   /** Anchor URL on /security with a walkthrough + screenshots. */
   docsHref: string;
   /** Action IDs the UI should render as buttons/links. */
@@ -482,6 +751,16 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "Try again in a moment.",
       "If it keeps failing, switch to a different exchange or contact support.",
+      // D-17 / Gate C — the truthful replacement for a venue that IS the
+      // account. States the truth and invents no remedy.
+      "This is your broker account, so there is no other venue to try. If it keeps failing, email security@quantalyze.com with the correlation id below.",
+    ],
+    // D-17 — bullet 1 presupposes another venue exists; bullet 2 presupposes
+    // it does not. ONE filter picks; no code branch names mt5.
+    fixRequires: [
+      null,
+      REQUIRES_SUBSTITUTABLE_VENUE,
+      REQUIRES_NON_SUBSTITUTABLE_VENUE,
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
@@ -699,6 +978,16 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "Wait 60 seconds and try again.",
       "If it persists, try a different exchange account or contact support.",
+      // D-17 / Gate C — verbatim from the UI-SPEC, identical across all three
+      // venue-conditional entries.
+      "This is your broker account, so there is no other venue to try. If it keeps failing, email security@quantalyze.com with the correlation id below.",
+    ],
+    // D-17 — "a different exchange ACCOUNT" is the same unwinnable remedy for a
+    // venue that is the account.
+    fixRequires: [
+      null,
+      REQUIRES_SUBSTITUTABLE_VENUE,
+      REQUIRES_NON_SUBSTITUTABLE_VENUE,
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
@@ -711,6 +1000,15 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "Try again in a moment.",
       "If it keeps failing, switch to a different exchange or contact support.",
+      // D-17 / Gate C — an MT5 user reads a truthful replacement, not a
+      // shorter list. That is why the requirement carries a boolean.
+      "This is your broker account, so there is no other venue to try. If it keeps failing, email security@quantalyze.com with the correlation id below.",
+    ],
+    // D-17 — the third instance of the one class; no third code branch.
+    fixRequires: [
+      null,
+      REQUIRES_SUBSTITUTABLE_VENUE,
+      REQUIRES_NON_SUBSTITUTABLE_VENUE,
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
@@ -887,7 +1185,154 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "Write one paragraph describing the strategy, its edge, and how you frame risk.",
     ],
     docsHref: "/security",
-    actions: ["clear_and_retry"],
+    // 153.1 review CR-01 — this Phase-53 entry became the copy for a
+    // FIELD-LEVEL refusal when 153.1-05 pointed `finalize-wizard`'s
+    // `typeof description !== "string"` arm in `validatePayload` at it, and
+    // 153.1-06 admitted it to `KNOWN_FINALIZE_CODES` (SubmitStep.tsx). It therefore
+    // joins the class documented in the block below and carries no member of
+    // `RECOVERABLE_ACTIONS`, so `buildEnvelope` derives `recoverable: false`
+    // and NO Retry control renders. It previously carried `clear_and_retry`,
+    // which the class docblock forbids BY NAME: the server compared a value
+    // against a fixed rule, so an identical resubmit is refused identically,
+    // and wiping the description the user typed is the worst possible answer.
+    // The remedy is on the FORM.
+    //
+    // ⚠️ THIS ENTRY NOW SERVES TWO SURFACES, and the note that used to sit here
+    // ("MetadataStep reads only `.cause`, so the inline field guard is
+    // unaffected") is FALSE at HEAD — it was true when CR-01 was written and
+    // 153.2-01 changed it in the same sub-phase. `MetadataStep`'s `messageFor`
+    // renders `formatKeyError(code).title`, deliberately: `.cause` is a
+    // multi-sentence paragraph containing "Nothing was saved, and everything
+    // you typed is still on the form", which is nonsense under a control the
+    // user is still typing into. 153.2-05 then routes the SERVER's copy of this
+    // code to the same field. So an edit to `title` moves the field message AND
+    // the envelope heading, and an edit to `cause` moves the envelope only.
+    actions: ["expand_log"],
+  },
+
+  // ────────────────────────────────────────────────────────────────────────
+  // 153.1-04 / WIZFORM-02 — the seven FIELD-LEVEL refusals.
+  //
+  // ⛔ RECOVERABILITY IS DECIDED ONCE, FOR THE CLASS, AND THE DECISION IS
+  // "NOT RECOVERABLE". Every entry below carries `["expand_log"]` and nothing
+  // else, so no member of `RECOVERABLE_ACTIONS` (`clear_and_retry`,
+  // `try_another_key` — src/lib/envelope.ts) is present, `buildEnvelope`
+  // derives `recoverable: false`, and NO Retry control renders. That absence
+  // IS the behaviour being shipped, exactly as `ALLOCATION_NOT_ALLOCATABLE`
+  // and `SEAM_MISCONFIGURED` already do it (Shared Pattern B).
+  //
+  // The reason, written once here and cross-referenced by the six entries
+  // after the first: resubmitting the identical payload is refused
+  // identically — the server compared the same value against the same rule and
+  // will keep doing so. The remedy is on the FORM. A Retry control against
+  // that is a false affordance, and a founder clicking it five times is the
+  // incident that produced this phase.
+  //
+  // ⛔ Specifically NOT `clear_and_retry`: it wipes what the user typed, which
+  // for a description they spent minutes on is the worst possible answer to
+  // "it is nine characters long". And NOT `try_another_key`: these are form
+  // fields, not credentials — no key is involved on any of the seven paths.
+  //
+  // ⚠️ The route does not emit these yet. 153.1-05 gives the nine
+  // `validatePayload` arms their codes and admits them to
+  // `KNOWN_FINALIZE_CODES` in the same commit (Shared Pattern D); 153.2 maps
+  // each code to its field id. A code with no copy entry falls through to
+  // UNKNOWN exactly as a missing code does, which is why the copy lands first.
+  // ────────────────────────────────────────────────────────────────────────
+
+  METADATA_NAME_INVALID: {
+    title: "Choose a codename from the list.",
+    cause:
+      "The codename on this draft is not one of the names we offer. Nothing was saved, and everything else you filled in is still on the form.",
+    fix: [
+      "Open the codename field and pick one of the offered names.",
+      "The list is fixed, so a name typed by hand will not be accepted.",
+    ],
+    docsHref: "/security",
+    // See the class comment above: field-level refusals carry no member of
+    // RECOVERABLE_ACTIONS, so no Retry renders.
+    actions: ["expand_log"],
+  },
+
+  METADATA_DESCRIPTION_TOO_SHORT: {
+    // Count-free by construction — `formatKeyError` appends " — you have {n}."
+    // only when `charCount` is supplied. See DESCRIPTION_BOUND_TITLE.
+    title: `${DESCRIPTION_BOUND_TITLE.METADATA_DESCRIPTION_TOO_SHORT}.`,
+    cause: `Allocators read the description before anything else, so we ask for at least ${MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS} characters. Nothing was saved, and everything you typed is still on the form.`,
+    fix: [
+      "Write one paragraph describing the strategy, its edge, and how you frame risk.",
+    ],
+    docsHref: "/security",
+    // Non-recoverable — see the class comment above this block.
+    actions: ["expand_log"],
+  },
+
+  METADATA_DESCRIPTION_TOO_LONG: {
+    title: `${DESCRIPTION_BOUND_TITLE.METADATA_DESCRIPTION_TOO_LONG}.`,
+    cause: `The description is longer than the ${MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS.toLocaleString(
+      "en-US",
+    )} characters we store. Nothing was saved, and everything you typed is still on the form.`,
+    fix: [
+      "Trim it to the essentials — the strategy, its edge, and how you frame risk.",
+      "Keep the longer version for the call; this field is a summary.",
+    ],
+    docsHref: "/security",
+    // Non-recoverable — see the class comment above this block.
+    actions: ["expand_log"],
+  },
+
+  METADATA_CATEGORY_REQUIRED: {
+    title: "Choose a category.",
+    cause:
+      "Every strategy is filed under one category so allocators can compare like with like. This draft has no category, or the one it carries is not one we offer. Nothing was saved, and everything else you filled in is still on the form.",
+    fix: [
+      "Open the category field and pick the closest match.",
+      "If none of them fits exactly, pick the nearest and say more in the description.",
+    ],
+    docsHref: "/security",
+    // Non-recoverable — see the class comment above this block.
+    actions: ["expand_log"],
+  },
+
+  METADATA_AUM_INVALID: {
+    title: "Enter AUM as a number of dollars, or leave it blank.",
+    cause:
+      "AUM has to be a plain, finite dollar amount that is not negative and not above our upper bound. Currency symbols, separators and text are not read as numbers. Nothing was saved, and everything else you filled in is still on the form.",
+    fix: [
+      "Type digits only — no currency symbol, no commas, no words.",
+      "AUM is optional. Leave the field empty if you would rather not state it.",
+    ],
+    docsHref: "/security",
+    // Non-recoverable — see the class comment above this block.
+    actions: ["expand_log"],
+  },
+
+  METADATA_CAPACITY_INVALID: {
+    title: "Enter capacity as a number of dollars, or leave it blank.",
+    cause:
+      "Capacity has to be a plain, finite dollar amount that is not negative and not above our upper bound. Currency symbols, separators and text are not read as numbers. Nothing was saved, and everything else you filled in is still on the form.",
+    fix: [
+      "Type digits only — no currency symbol, no commas, no words.",
+      "Capacity is optional. Leave the field empty if you do not want to state a limit.",
+    ],
+    docsHref: "/security",
+    // Non-recoverable — see the class comment above this block.
+    actions: ["expand_log"],
+  },
+
+  METADATA_CAPITAL_OWNERSHIP_INVALID: {
+    title: "Answer whose capital is in this key.",
+    cause:
+      "The answer on this draft is not one of the two we accept. That answer decides whether the strategy can ever hold money, so we will not guess it. Nothing was saved, and everything else you filled in is still on the form.",
+    fix: [
+      // The two labels are the ones CapitalOwnershipRadioGroup.tsx renders, so
+      // the user reads back the words they are looking at.
+      'Pick either "My own capital" or "A trading team\'s key I\'m verifying".',
+      "You can change the answer later from My Strategies.",
+    ],
+    docsHref: "/security",
+    // Non-recoverable — see the class comment above this block.
+    actions: ["expand_log"],
   },
 
   SESSION_EXPIRED: {
@@ -939,6 +1384,37 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     // renders — the route's 403 is a refresh-nudge (stale page), not a hard
     // permission wall, and retrying after a refresh is the intended path.
     actions: ["clear_and_retry", "start_fresh", "request_call"],
+  },
+
+  // 153.1-04 / WIZFORM-02 (RESEARCH Finding 4) — the 409 the route already
+  // discriminates, given the copy it never had.
+  //
+  // ⚠️ THIS REMOVES A CONTROL, AND REMOVING A CONTROL IS A DECISION. Until now
+  // this 409 fell to `UNKNOWN`, whose actions are `clear_and_retry` +
+  // `request_call` — so `recoverable` derived TRUE and SubmitStep rendered a
+  // Retry button. That button re-POSTed the identical finalize request against
+  // a draft the database had already moved out of a finalizable state, so the
+  // RPC raised the same 22023 and the user got the same card. It was a false
+  // affordance: the page's idea of the draft is stale, and only a RELOAD can
+  // fix that. The Retry is gone deliberately, and the copy says what to do
+  // instead.
+  //
+  // ⛔ NOT `start_fresh` either — that DELETES the draft row and cascades away
+  // every `strategy_keys` member under it. The draft here is fine; it is this
+  // PAGE that is out of date. `leave_and_return` names the actual remedy.
+  DRAFT_STATE_INVALID: {
+    title: "This draft has moved on since this page loaded.",
+    cause:
+      "The draft is no longer in a state we can finalize — it may already have been submitted from another tab, or changed after this page loaded. This attempt saved nothing, and the draft itself is untouched.",
+    fix: [
+      "Reload this page to see the draft as it stands now.",
+      "If it was already submitted, it is on your strategies page — submitting again would create a duplicate.",
+    ],
+    docsHref: "/security#draft-resume",
+    // ⚠️ NO `clear_and_retry` and NO `try_another_key` — the two members of
+    // `RECOVERABLE_ACTIONS`. Their absence derives `recoverable: false`, which
+    // is the behaviour change described above.
+    actions: ["leave_and_return", "expand_log"],
   },
 
   // ============================================================
@@ -1390,6 +1866,34 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["request_call", "expand_log"],
   },
 
+  // 153.1-04 / WIZFORM-02 (RESEARCH Finding 4) — the copy for a code the route
+  // has been emitting into an UNKNOWN card.
+  //
+  // ⚠️ THE COPY MUST BE TRUE OF THE STATE THE ROUTE JUST WROTE. Immediately
+  // above that emitter in `finalize-wizard/route.ts` the handler upserts
+  // `strategy_analytics` with `computation_status: "failed"` and a
+  // `computation_error` naming this same limitation. So "we stopped and marked
+  // it failed" is OBSERVABLE rather than reassuring — the row is written before
+  // the response is sent. Saying instead that "nothing changed" would be the
+  // false comfort the copy-honesty sweep exists to catch.
+  COMPOSITE_UNSUPPORTED_UNIFIED: {
+    title: "Multi-key strategies can't be finalized on this path yet.",
+    cause:
+      "This draft has more than one key attached, and the pipeline it was routed through does not support multi-key strategies yet. We stopped and marked the strategy as failed rather than publish half of it. Submitting the same draft again reaches the same refusal.",
+    fix: [
+      "Email security@quantalyze.com with the correlation id below — this is a gap on our side, and we can finalize it for you.",
+      "Your keys are untouched and stay connected. Nothing needs undoing.",
+    ],
+    docsHref: "/security",
+    // ⚠️ NO `clear_and_retry` and NO `try_another_key` — the two members of
+    // `RECOVERABLE_ACTIONS`. Their absence derives `recoverable: false` and
+    // suppresses the Retry control, which is the BEHAVIOUR this entry ships:
+    // the route refuses on a property of the draft (its key count) that a
+    // retry cannot change. `request_call` keeps a way out that can actually
+    // resolve it; `expand_log` opens the id the first fix line asks for.
+    actions: ["request_call", "expand_log"],
+  },
+
   WIZARD_KEYS_LOAD_FAILED: {
     title: "We couldn't load this draft's saved keys.",
     cause:
@@ -1449,6 +1953,23 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "Otherwise, try the same action again.",
       "If it is still failing after a few minutes, contact security@quantalyze.com with your draft ID.",
     ],
+    // Gate B / 153.1-03 — the live defect: this first bullet rendered on the
+    // CONNECT step, where nothing was being submitted, and sent the user on a
+    // pointless detour. It now renders ONLY when the context names the submit
+    // surface.
+    //
+    // ⚠️ TRADE-OFF, stated so this reads as a decision and not a deletion:
+    // until the `buildEnvelope` call sites pass `surface` — `SubmitStep.tsx`
+    // (153.2 / D-06) and `ConnectKeyStep.tsx` + `MultiKeyConnectStep.tsx`
+    // (153.4's long-wait paths) — this bullet renders NOWHERE. That is the
+    // UI-SPEC's explicit direction: fail toward saying less, never toward
+    // advising a detour that may be pointless. The one surface where the
+    // detour IS true gets it back the moment its call site names itself.
+    //
+    // The table-reading assertion at `wizardErrors.test.ts` ("SERVICE_UNREACHABLE
+    // states the uncertainty…") reads WIZARD_ERROR_COPY directly and so is
+    // unaffected — the filter never mutates the table.
+    fixRequires: [REQUIRES_SUBMIT_SURFACE, null, null],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
   },
@@ -1546,6 +2067,52 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["request_call", "expand_log"],
   },
 
+  // 153.1-04 / UI-SPEC Gate A — copy authored from the spec's field table.
+  //
+  // ⛔ THE MISSING RETRY IS THE FEATURE. The 2026-08-08 panel offered Retry
+  // against a deadline inversion — a condition that fails identically on every
+  // attempt — and the founder pressed it. `actions` below holds neither member
+  // of `RECOVERABLE_ACTIONS`, so `recoverable` derives false and no Retry
+  // control renders. ⛔ Do NOT "replace" it with a second button either: the
+  // escalation path is the existing diagnostics disclosure, and a new control
+  // would re-create the false-affordance class in a fresh costume.
+  //
+  // ⭐ NOT DEAD COPY. Phase 153.4 is the consumer: it raises the validate-key
+  // budget and emits this code from the client abort that its own deadline
+  // fires. The member has to exist first — an emitted code with no copy entry
+  // renders UNKNOWN exactly as an unknown code does, which is the failure
+  // WIZFORM-02 is about.
+  //
+  // ⚠️ ONE OBLIGATION ON THE EMITTER, STATED HERE BECAUSE THE COPY DEPENDS ON
+  // IT. "Nothing was saved — your key was not stored" is only OBSERVABLE while
+  // the abort fires before the request could persist anything; the UI-SPEC's
+  // own basis for it is that the wait is aborted pre-encrypt / pre-RPC. A
+  // server does not stop working because a client stopped listening (the
+  // reasoning behind the "data is unchanged" ban on the CSV entry), so 153.4
+  // must NOT emit this code on a path where the write could already have
+  // landed. If that ever changes, this sentence changes with it.
+  SEAM_DEADLINE_EXCEEDED: {
+    title: "This check ran out of the time we allow.",
+    // Count-free by construction: `budgetSeconds` is optional, and
+    // `formatKeyError` substitutes the number-naming head when it is supplied.
+    cause: `We gave your broker the time we allow to answer and it did not.${DEADLINE_CAUSE_TAIL}`,
+    fix: [
+      // ⭐ Gated on the CONNECT surface (Gate B). This sentence is a claim about
+      // the form standing behind the panel — true on the key step, unverifiable
+      // anywhere else. Absence of `surface` SUPPRESSES it, so 153.4 must pass
+      // `surface: "connect"` in the same commit it starts emitting this code or
+      // the reassurance the user most needs is silently withheld.
+      "Your key details are still on this page.",
+      "Some brokers are slower than the time we allow. Email security@quantalyze.com with the correlation id below and we will raise the limit for your broker.",
+    ],
+    fixRequires: [REQUIRES_CONNECT_SURFACE, null],
+    docsHref: "/security#sync-timing",
+    // ⚠️ NO `clear_and_retry` AND NO `try_another_key` — see the block comment
+    // above. `request_call` keeps a way out that can actually resolve it;
+    // `expand_log` opens the correlation id the second fix line asks for.
+    actions: ["request_call", "expand_log"],
+  },
+
   // 140.3-12 / SEAMUX-04 — the notification claim is GONE. It asserted an audit
   // trail that does not exist: 9 of the 15 seam routes capture nothing at all,
   // so on those paths the sentence promised a person was looking at something
@@ -1626,6 +2193,121 @@ export interface WizardErrorContext {
    * specific lie (TRAP-3). The renderer skips the line entirely when absent.
    */
   retryAfterSeconds?: number;
+  /**
+   * 153.1-04 / WIZFORM-02 — the description's CURRENT length in characters,
+   * for `METADATA_DESCRIPTION_TOO_SHORT` / `_TOO_LONG`.
+   *
+   * OPTIONAL, and absence means "we were not told how long it is" — never
+   * "zero", never "empty". A surface MUST NOT name a count it did not receive:
+   * telling a user "you have 0" when the value simply was not passed turns a
+   * vague refusal into a specific lie, and "0" is also the one value that would
+   * send them looking for a different problem (TRAP-3, the same rule
+   * `retryAfterSeconds` above states for durations). Both table sentences are
+   * written to be complete and true with no number; `formatKeyError` produces
+   * the counted form only when this field is present.
+   */
+  charCount?: number;
+  /**
+   * 153.1-04 / UI-SPEC Gate A — the budget WE granted, in SECONDS, for
+   * `SEAM_DEADLINE_EXCEEDED`.
+   *
+   * UNITS ARE SECONDS, like `retryAfterSeconds` above and for the same reason:
+   * one field, one unit, no conversion between the deadline that fired and the
+   * sentence that names it. Phase 153.4 owns the budget constant this is
+   * derived from; it must divide the millisecond budget once, at the call site,
+   * rather than letting a millisecond value reach a sentence that says
+   * "seconds".
+   *
+   * OPTIONAL, and absence means "no budget was named" — never "zero" and never
+   * "immediately". `SEAM_DEADLINE_EXCEEDED`'s table `cause` is written to be
+   * true with no number ("the time we allow"); `formatKeyError` swaps in the
+   * number-naming sentence only when this field is present (TRAP-3).
+   */
+  budgetSeconds?: number;
+  /**
+   * 153.1-03 / WIZFORM-03 / D-17 — the venue the failure happened on, as a
+   * lowercase `SupportedExchange` code. Read ONLY as a lookup key into the
+   * closed capability record; it is never interpolated into copy, a log line,
+   * a URL or a breaker key, so no caller-supplied string can reach the
+   * envelope through this field.
+   *
+   * ABSENT ⇒ a venue-conditional bullet STILL RENDERS. That is the incumbent
+   * behaviour of every caller that predates this field, and suppressing
+   * venue-shaped copy everywhere the venue is merely unnamed would be a
+   * repo-wide copy regression D-17 did not ask for. D-17 asks that the bullet
+   * never reaches a venue we KNOW cannot be substituted.
+   *
+   * ⚠️ Note the asymmetry with `surface` below — the two absences answer
+   * DIFFERENTLY, deliberately. Unifying them breaks one of the two gates.
+   */
+  venue?: string;
+  /**
+   * 153.1-03 / WIZFORM-03 / UI-SPEC Gate B — which wizard step raised the
+   * error.
+   *
+   * ABSENT ⇒ a surface-conditional bullet is SUPPRESSED. Fail toward saying
+   * less, never toward advising a detour that may be pointless: the live defect
+   * this removes is `SERVICE_UNREACHABLE`'s "open /strategies before retrying"
+   * rendering on the CONNECT step, where nothing was being submitted.
+   *
+   * ⚠️ The opposite of `venue`'s absence rule above, and that is the point:
+   * an unnamed venue leaves incumbent copy intact, an unnamed surface withholds
+   * a claim we cannot support.
+   */
+  surface?: WizardSurface;
+}
+
+/**
+ * 153.1-03 — does the context satisfy one bullet's requirement?
+ *
+ * `null` (an unconditional bullet) is always met. Each union member's arm
+ * carries its absence rule; both rules are stated at the context fields above.
+ */
+function requirementMet(
+  req: FixRequirement | null,
+  context?: WizardErrorContext,
+): boolean {
+  if (req === null) return true;
+  switch (req.kind) {
+    case "venueCapability":
+      // An ABSENT venue answers the predicate's default (`substitutable` ⇒
+      // true), so an untagged caller keeps the incumbent bullet.
+      return VENUE_CAPABILITY_PREDICATES[req.capability](context?.venue) === req.is;
+    case "surface":
+      // An ABSENT surface can never equal a named one ⇒ suppressed (Gate B).
+      return context?.surface === req.surface;
+  }
+}
+
+/**
+ * 153.1-03 / WIZFORM-03 — THE ONE FILTER. Applied once, at the top of
+ * `formatKeyError`, for every code and therefore for every interpolation arm
+ * (each of which spreads `...base`).
+ *
+ * ⛔ It cannot live in `buildEnvelope`: that function (in `envelope.ts`)
+ * forwards `copy.fix` verbatim into the envelope's `debug_context`, and
+ * `formatKeyError` has consumers that never build an envelope at all.
+ *
+ * An entry WITHOUT `fixRequires` is returned as the SAME OBJECT — not a copy —
+ * so the ~60 untagged entries are provably untouched by this mechanism
+ * (pinned by a reference-identity sweep in `wizardErrors.test.ts`).
+ */
+function applyFixRequirements(
+  entry: WizardErrorCopy,
+  context?: WizardErrorContext,
+): WizardErrorCopy {
+  const requires = entry.fixRequires;
+  if (requires === undefined) return entry;
+  const keep = entry.fix.map((_, i) => requirementMet(requires[i] ?? null, context));
+  return {
+    ...entry,
+    fix: entry.fix.filter((_, i) => keep[i]),
+    // Filtered in LOCKSTEP. `fixRequires` declares itself index-aligned to
+    // `fix`, and `formatKeyError` returns a `WizardErrorCopy` — returning a
+    // value that violates its own type's invariant would leave a trap for the
+    // first consumer that reads both.
+    fixRequires: requires.filter((_, i) => keep[i]),
+  };
 }
 
 /**
@@ -1637,10 +2319,21 @@ export function formatKeyError(
   context?: WizardErrorContext,
 ): WizardErrorCopy {
   if (!code || !(code in WIZARD_ERROR_COPY)) {
+    // Returned WITHOUT the requirement filter, deliberately: `UNKNOWN` carries
+    // no `fixRequires` today, so filtering it would be a no-op that returns the
+    // identical object anyway. If `UNKNOWN` ever gains a conditional bullet this
+    // early return must route through `applyFixRequirements` too — the
+    // asymmetry is recorded here rather than left for a reader to wonder at.
     return WIZARD_ERROR_COPY.UNKNOWN;
   }
 
-  const base = WIZARD_ERROR_COPY[code];
+  // 153.1-03 / WIZFORM-03 — THE ONE requirement filter, applied ONCE. Every
+  // interpolation arm below spreads `...base`, so all five inherit the filtered
+  // array with no per-arm edit. ⛔ Do not add a filtering branch inside a
+  // per-code equality arm below; that is the instance-not-class defect in a new
+  // costume. (Spelled in prose, not in the literal form the plan's grep gate
+  // counts — see the FixRequirement docblock.)
+  const base = applyFixRequirements(WIZARD_ERROR_COPY[code], context);
 
   // Interpolate context fields where they are useful. We mutate copies
   // of the strings so the original table stays untouched.
@@ -1683,6 +2376,49 @@ export function formatKeyError(
     return {
       ...base,
       title: base.title.replace(SIZE_MB_PLACEHOLDER, context.sizeMb),
+    };
+  }
+
+  // 153.1-04 / WIZFORM-02 — the description pair names the user's current
+  // count, and ONLY when it was given one.
+  //
+  // ⓘ This is a per-CODE interpolation arm, and it is NOT the instance-not-class
+  // defect 153.1-03 removed. Interpolation is per-code BY NATURE — five arms
+  // above it do the same thing for five different context fields, because the
+  // sentence a count belongs in is different for every code. Requirement
+  // FILTERING is the opposite: it is one rule over the whole table, and it stays
+  // in the ONE filter at the top of this function. Do not "unify" these two;
+  // they are different shapes for different reasons.
+  if (
+    (code === "METADATA_DESCRIPTION_TOO_SHORT" ||
+      code === "METADATA_DESCRIPTION_TOO_LONG") &&
+    context?.charCount !== undefined
+  ) {
+    return {
+      ...base,
+      title: `${DESCRIPTION_BOUND_TITLE[code]} — you have ${context.charCount.toLocaleString(
+        "en-US",
+      )}.`,
+    };
+  }
+
+  // 153.1-04 / UI-SPEC Gate A — name the budget we granted, and only when we
+  // were told what it was. The tail is shared with the table sentence so the
+  // two forms cannot drift; only the head changes.
+  if (
+    code === "SEAM_DEADLINE_EXCEEDED" &&
+    context?.budgetSeconds !== undefined
+  ) {
+    return {
+      ...base,
+      // 153.1 review WR-04 — pluralised. A one-second budget rendered "1
+      // seconds". 153.4 is the emitter and passes a real budget; sub-second
+      // and one-second budgets are plausible during a retune. The
+      // MULTI_KEY_WINDOWS_INVALID arm below already pluralises, so the bare
+      // form broke this file's own convention.
+      cause: `We gave your broker ${context.budgetSeconds} second${
+        context.budgetSeconds === 1 ? "" : "s"
+      } to answer and it did not.${DEADLINE_CAUSE_TAIL}`,
     };
   }
 
@@ -2146,9 +2882,22 @@ export function classifyKeyValidationError(error: unknown): {
  * historical citation. The aliasing still matters for the same reason: an
  * honest generic terminal is still a terminal, and these codes deserve their
  * own specific, true copy rather than the one that admits knowing nothing.)
- * (`draft_state_invalid` and `COMPOSITE_UNSUPPORTED_UNIFIED` also reach
- * SubmitStep without a wizard member — both are deliberately out of scope here
- * and are recorded in the TS-35 ledger row, NOT silently absorbed.)
+ * ⚠️ THAT PARAGRAPH USED TO END BY NAMING `draft_state_invalid` and
+ * `COMPOSITE_UNSUPPORTED_UNIFIED` as two more codes reaching SubmitStep without
+ * a wizard member, recorded in the TS-35 ledger and out of scope. **As of Phase
+ * 153.1 both ARE wizard members** (`DRAFT_STATE_INVALID`,
+ * `COMPOSITE_UNSUPPORTED_UNIFIED`), minted because WIZFORM-02's criterion —
+ * "no wizard failure renders UNKNOWN when the server DID classify it" — covers
+ * them by its own words: `finalize-wizard` classified both precisely and the
+ * client rendered "we could not classify this failure" anyway. The old sentence
+ * is replaced rather than left standing, because prose whose premise has broken
+ * is the Pitfall-1 class this sub-phase exists to close.
+ *
+ * ⛔ NEITHER IS ADDED TO THE MAP BELOW, and the omission is deliberate. This
+ * table translates codes another service put on the wire; those two are minted
+ * by our OWN route, so aliasing them would be the "vocabulary starts lying"
+ * failure this docblock warns about one paragraph up. `CIRCUIT_OPEN` stays an
+ * alias, unchanged.
  *
  * ⚠️ SCOPE. TS-09's type half landed in 140.3-01. `classifyKeyValidationError`'s
  * cascade must still NOT be deleted until every emitter carries a code, or the

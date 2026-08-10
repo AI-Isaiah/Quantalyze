@@ -165,6 +165,27 @@ function amountInput(): HTMLInputElement {
   return screen.getByLabelText("Allocation (USD)") as HTMLInputElement;
 }
 
+/**
+ * The node `Field` announces as the control's error, resolved THROUGH
+ * `aria-describedby` rather than by text search — so "the message a sighted
+ * user reads" and "the message a screen reader is pointed at" are asserted to
+ * be the same node, not two independently-true facts.
+ *
+ * `aria-describedby` is a space-separated id LIST (`Field` joins a hint id
+ * ahead of the error id when a hint is present), so it is split rather than
+ * looked up whole: a `getElementById` against the raw attribute returns `null`
+ * the day a hint lands on this field, which would silently turn every message
+ * assertion below into a check of `null`.
+ */
+function errorNodeFor(control: HTMLElement): HTMLElement | null {
+  const describedBy = control.getAttribute("aria-describedby");
+  if (!describedBy) return null;
+  for (const id of describedBy.split(/\s+/).filter(Boolean)) {
+    if (id.endsWith("-error")) return document.getElementById(id);
+  }
+  return null;
+}
+
 describe("<AllocateDialog> — titles, field, helper", () => {
   it("allocate mode carries the byte-exact title and the primary CTA label", () => {
     renderAllocate();
@@ -229,8 +250,15 @@ describe("<AllocateDialog> — inline validation (never a disabled CTA)", () => 
     expect(fetchSpy).not.toHaveBeenCalled();
     // The CTA stays clickable — no-disabled-buttons direction.
     expect(cta).not.toBeDisabled();
-    // Red border + focus land on the field itself.
-    expect(input.className).toMatch(/border-negative/);
+    // 153.2 / FLAG-1 — THE OLD ASSERTION HERE WAS `/border-negative/` ON THE
+    // className, WHICH PASSED FOR BOTH MECHANISMS AND SO PROVED NOTHING ABOUT
+    // THE ONE THAT MATTERS. It matched the hand-toggled ternary this phase
+    // deleted (`fieldError ? "border-negative" : …`) exactly as happily as the
+    // derived class that replaced it, so it could not have caught a revert — or
+    // a red field whose a11y wiring was silently gone. The pair below can: the
+    // ARIA state must be SET, and the red must be a CONSEQUENCE of it.
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(input.className).toContain("aria-[invalid=true]:border-negative");
     expect(document.activeElement).toBe(input);
   });
 
@@ -257,6 +285,123 @@ describe("<AllocateDialog> — inline validation (never a disabled CTA)", () => 
     ).not.toBeInTheDocument();
     const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
     expect(JSON.parse(init.body as string).allocated_amount).toBe(1000000000);
+  });
+
+  /**
+   * 153.2 / FLAG-1 — THE RED IS DERIVED, AND THE VISUAL AND ANNOUNCED STATES
+   * ARE ONE FACT.
+   *
+   * Until this phase the border was a JS ternary on `fieldError`. It rendered
+   * correctly, but only by coincidence: the same state also fed `Field`'s
+   * `error` prop, so nothing forced the two to agree. Anyone who later coloured
+   * the field from a different condition — or kept the colour while dropping
+   * the `error` prop — would have shipped a control that reads "wrong" to a
+   * sighted user and "fine" to a screen reader, with every existing assertion
+   * still green.
+   *
+   * This row closes that by asserting the CAUSAL CHAIN rather than the outcome:
+   * `Field` writes the ARIA state, the class turns red BECAUSE of that state,
+   * and `aria-describedby` resolves to the very node carrying the sentence on
+   * screen. Break any link and this reds.
+   */
+  it("[153.2 FLAG-1] the red border DERIVES from the ARIA state, and points at the visible message", () => {
+    renderAllocate();
+    const input = amountInput();
+    fireEvent.change(input, { target: { value: "0" } });
+    fireEvent.click(screen.getByRole("button", { name: "Allocate" }));
+
+    // (1) `Field` set the state — the component must never write it itself, or
+    //     the child's own prop would win the spread and re-open the hazard.
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    // (2) The red is a CONSEQUENCE of (1): the variant is what paints it, so a
+    //     hand-toggled `border-negative` cannot satisfy this.
+    expect(input.className).toContain("aria-[invalid=true]:border-negative");
+    // (3) …and the resting colour is unconditional, so nothing else can be
+    //     driving the swap.
+    expect(input.className).toContain("border-border");
+    // (4) The announced message IS the visible message — one node, not two
+    //     independently-true facts.
+    const announced = errorNodeFor(input);
+    expect(announced).not.toBeNull();
+    expect(announced).toHaveTextContent("Enter an amount above $0.");
+    expect(announced).toBe(screen.getByText("Enter an amount above $0."));
+  });
+
+  /**
+   * D-12 — AN AMOUNT THE USER HAS ALREADY CORRECTED MUST NOT STILL READ RED.
+   *
+   * `fieldError` was set on save and cleared only on the NEXT save, so the
+   * field kept its red (and its sentence) while the user stared at a value that
+   * was already fine. The fix must land on `change`, not on blur and not on a
+   * second click — which is the only reason this row never blurs the control.
+   */
+  it("[D-12] a corrected amount clears the message and the red LIVE, without a second click", async () => {
+    fetchSpy.mockResolvedValue(okResponse());
+    renderAllocate();
+    const input = amountInput();
+    const cta = screen.getByRole("button", { name: "Allocate" });
+
+    fireEvent.change(input, { target: { value: "-5" } });
+    fireEvent.click(cta);
+    expect(screen.getByText("Enter an amount above $0.")).toBeInTheDocument();
+    expect(input).toHaveAttribute("aria-invalid", "true");
+
+    // The correction ALONE clears it. No blur, no second click.
+    fireEvent.change(input, { target: { value: "25000" } });
+    expect(
+      screen.queryByText("Enter an amount above $0."),
+    ).not.toBeInTheDocument();
+    expect(input.getAttribute("aria-invalid")).not.toBe("true");
+    expect(errorNodeFor(input)).toBeNull();
+    // Clearing a message is not a write — the user typed, they did not submit.
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    // …and the clear did not SWALLOW the write either: one click, one fetch,
+    // carrying the corrected amount. A "fix" that reset state too eagerly would
+    // fail here rather than passing the clear assertions above in isolation.
+    fireEvent.click(cta);
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string).allocated_amount).toBe(25000);
+  });
+
+  it("[D-12] the live re-evaluation SWAPS the message when the value is still invalid for a different reason", () => {
+    // The re-evaluation re-runs the mirror; it does not blanket-clear. A
+    // `setFieldError(null)` on every keystroke would satisfy the clear row
+    // above while telling a user who typed $1B+1 that their amount is fine
+    // until they click again — the same second-click defect, one bound over.
+    renderAllocate();
+    const input = amountInput();
+    fireEvent.change(input, { target: { value: "-5" } });
+    fireEvent.click(screen.getByRole("button", { name: "Allocate" }));
+    expect(screen.getByText("Enter an amount above $0.")).toBeInTheDocument();
+
+    fireEvent.change(input, { target: { value: "1000000001" } });
+    expect(
+      screen.getByText("That's above the $1B sanity cap — check the amount."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Enter an amount above $0."),
+    ).not.toBeInTheDocument();
+    expect(input).toHaveAttribute("aria-invalid", "true");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("[D-12] typing an invalid amount BEFORE any refusal stays silent — the field does not go red mid-keystroke", () => {
+    // The other half of the reveal-timing rule, and the reason the live
+    // re-evaluation is gated on a message already showing: someone reaching for
+    // "-5000" types "-" first. A field that reddened on every keystroke would
+    // scold the user for a number they have not finished entering.
+    renderAllocate();
+    const input = amountInput();
+    fireEvent.change(input, { target: { value: "0" } });
+
+    expect(input.getAttribute("aria-invalid")).not.toBe("true");
+    expect(errorNodeFor(input)).toBeNull();
+    expect(
+      screen.queryByText("Enter an amount above $0."),
+    ).not.toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 

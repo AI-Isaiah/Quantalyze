@@ -24,6 +24,100 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
+0. **⛔ MT5 ARCHITECTURE — the shared gateway cannot safely serve more than ONE user, and the
+   read-only guarantee can fail OPEN.** Found 2026-08-08 by the platform research that Phase 134
+   specified but never executed (`153-EVIDENCE-mt5-platform.md`, `153-EVIDENCE-mt5-latency.md`).
+   **Founder decision needed before any further MT5 build.**
+   - **Structural:** `mt5linux` 0.1.9 starts a single `ThreadedServer(SlaveService)`; every rpyc
+     connection `import MetaTrader5` resolves through that one process's `sys.modules`, so **all
+     callers share ONE C-extension holding ONE logged-in account**. `login()` on any connection
+     silently reassigns the account every other caller sees, and our `finally:` `close()` →
+     `mt5.shutdown()` (`routers/exchange.py:449-466`) tears down the IPC pipe *for concurrent
+     callers*, who then see `-10004`. rpyc namespaces isolate variable names, not C globals.
+     Our own `Mt5AccountMismatchError` bracket (`routers/exchange.py:364-368`, test named
+     `test_mt5_login_bracket_post_hijack`) **detects** this race — it cannot remove it.
+     MQL5 moderators are explicit: one account per terminal, a separate installation per account.
+   - **🔒 Security — read-only verification can FAIL OPEN.** `is_trade_capable`
+     (`services/mt5_validation.py:133-149`) concludes "investor/read-only" when BOTH signals are
+     negative (`trade_allowed` false AND `order_check` retcode ≠ 10009). But `trade_allowed` is
+     false for several documented reasons besides investor mode — including the terminal's
+     **default-ON** *"Disable automatic trading through the external Python API"*. Under that
+     default a **MASTER password passes our investor probe** and is stored stamped read-only.
+     We call `terminal_info()` **nowhere** (verified: zero hits in `analytics-service/`), so we
+     cannot distinguish the two. Also: `_TRADE_RETCODE_DONE = 10009` is `[ASSUMED]`, and the real
+     investor signal `10017 TRADE_RETCODE_TRADE_DISABLED` is never tested.
+   - **Login classification is inverted both ways** (`services/mt5_validation.py:37-56`, both
+     token tables `[ASSUMED]`): a wrong-but-known server returns `-6 AUTH_FAILED` → we blame the
+     user's password; an *unknown* server **times out** rather than erroring.
+   - **Data integrity:** MT5 history syncs asynchronously after login; first-call-empty is widely
+     reported, with an unresolved **Wine-specific** report of history never arriving. Our
+     `()` → `[]` "honest empty" rule turns that into a **confidently flat account**.
+   - **Why none of this was caught:** CI never installs `mt5linux` (`Dockerfile:29` installs it
+     into the image only); every contract test injects a `_connect` double
+     (`services/mt5_client.py:135-141`). The real transport has never run outside production.
+     Phase 134 designed `scripts/mt5_spike.py` to answer exactly these four unknowns — **the
+     harness was never built and `analytics-service/docs/mt5-spike-gonogo.md` still has 38
+     `human_needed` cells.** v1.15 shipped through a gate that was never opened.
+   - **RESOLVED 2026-08-08 — founder chose option (3), and the "once per day" fact makes it the
+     right answer on cost too.** See `docs/notes/mt5-scaling-cost-2026-08-08.md` (prices read
+     2026-08-08) — but note that report models **one terminal per account**, which is the wrong
+     model for us. MT5 accounts refresh **once per day**, and a daily sync is sequential, so ONE
+     terminal serves many accounts across a day (capacity ≈ daily window ÷ cycle time). Corrected
+     comparison:
+     | | one-terminal self-host (what we have) | MetaApi, duty-cycled nightly |
+     |---|---|---|
+     | 25 accounts | ~$20/mo **flat** | ~$124/mo |
+     | 100 accounts | ~$20/mo **flat** | ~$495/mo |
+     | per extra account | **≈ $0** | $4.95/mo |
+     The per-account marginal cost is ~zero until we exceed one terminal's daily throughput —
+     then we add a second container, not a subscription. ⚠️ Throughput is currently
+     **unquantified** because cycle time is uninstrumented; D-32 fixes that and is the input to
+     any future revisit.
+   - **Credential custody is the decisive non-price factor and it points the same way.** A managed
+     provider means a third party holds customers' broker investor passwords — a GDPR
+     sub-processor whose blast radius is every MT5 user at once. Quantalyze sells verified track
+     records to allocators; this surfaces in diligence. Self-hosting keeps it in our own store.
+   - ⚠️ Useful even though we are not buying: MetaApi bills **6 hours minimum per server start**,
+     so a wizard validation there would cost ~$0.144 a click — rate-limiting interactive
+     validation is sound design regardless of provider.
+   - ⛔ **API2Trade: do not use** for anything holding credentials — domain created 2026-04-13,
+     no Wayback history, ~5h of status-page history, yet claims "10,000+ Active Accounts", two
+     different legal entities named across the site, mail-forwarding address in the Imprint.
+   - **Revisit trigger** (not a task): if we ever need *interactive* MT5 at a rate that saturates
+     one terminal, or if a second replica is proposed (which breaks the one-session invariant —
+     D-33), re-open this with real cycle-time data in hand.
+   - ⚠️ **Interacts with Phase 153 WIZFORM-05:** the 30 s wall is *also* a real timeout inversion
+     (`initialize()` unbounded at its 60 s vendor default inside a 30 s rpyc bound — D-24), but
+     fixing the timeout on a one-account architecture buys a working single user, not a working
+     product. Decide the architecture before sizing the budget.
+
+0.5 **⛔ INSERT PHASE 153.5 — the abandoned-`to_thread` class (three review findings, ONE defect).**
+   Raised by the `/code-review high` of Phase 153.3 (2026-08-09, 10 findings reported, 4 fixed
+   immediately). **Not yet planned — this entry is the reminder.**
+   **The one defect:** work handed to `asyncio.to_thread` **outlives its `asyncio.wait_for`**. The
+   `wait_for` raises, the caller unwinds and releases the terminal lease, and the abandoned thread
+   keeps driving the same process-global MT5 session. Three faces, all in the 153.3 diff:
+   | # | Site | Symptom |
+   |---|---|---|
+   | 5 | `services/mt5_concurrency.py:119` | `_mt5_bounded_restart` abandons at 10s; the one permitted `mt5.shutdown()` can fire **after** the lease is released, under the next holder |
+   | 6 | `routers/exchange.py:483` (+ `services/ingestion/mt5.py:173`) | connect-stage timeout orphans an `Mt5Client` the thread then constructs — `client` was never assigned, so the Pitfall-6 `finally` releases nothing and the rpyc session leaks |
+   | 7 | `routers/exchange.py:689` | the end-to-end deadline fires; the abandoned probe keeps issuing rpyc calls, so D-29's serialization does not hold on the timeout path |
+   ⭐ **Fix it at the SINK, once — not three times.** Patching three call sites is precisely the
+   instance-not-class mistake this milestone has paid for sixteen times, and #5/#6/#7 are the same
+   mechanism. Candidate designs (needs a real decision, do NOT let a fixer improvise):
+   a cancellation-aware wrapper; a generation/epoch counter the terminal checks before each call;
+   or refusing to release the lease until the worker thread confirms it has stopped.
+   ⚠️ **The AST lease-roster CANNOT see this** — its enclosure proof is *lexical*, so it reads the
+   `shutdown` as inside `async with` and passes while the runtime escapes. Any fix needs a
+   **runtime** assertion (observe the abandoned thread touching the session after release), not a
+   second static pin. Guard #16 of the phase lives here.
+   **Deferred to Phase 155 (needs the real latency data D-32 just made collectable — do NOT guess
+   these numbers):** finding #8, the 60s per-stage ceiling wraps SIX round-trips whose own ceilings
+   are 45 000ms IPC / 55s rpyc, so "innermost fires first" holds per round-trip but not per stage
+   (re-censors exactly the slow-but-working login D-24 unblocked); and finding #10, the 20s
+   interactive lease wait is smaller than the worker's 40s read + 10s restart hold, so an
+   interactive validate can never wait out one in-flight derive.
+
 1. **`RESEND_API_KEY` unset in Vercel prod** — founder-LP report cron + all transactional
    email are dead (code soft-skips, only Sentry fires). **Founder action:** set the key in
    Vercel prod. Do before the first warned founder month. (Note: portfolio email *alerts*
@@ -72,6 +166,75 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    fixed env can't auto-switch EET↔EEST at the Oct/Mar transition; affects day-bucketing only,
    NOT the balance-anchored parity). Optional: rotate the read-only investor pw
    (`Vantage_investor_password_26547876`).
+
+### Phase 153.3 (WIZFORM-GW) — recorded residuals (added 2026-08-09)
+
+- [x] **✅ RESOLVED 2026-08-09 by plan 153.3-06 (D-35) — the WORKER path no longer calls
+  `mt5.shutdown()` on the SHARED gateway session.**
+  Plan 153.3-03 (D-30) took `shutdown()` off the **request** path: `routers/exchange.py`'s
+  `_validate_mt5_key` calls `Mt5Client.release()` (transport close only) in its `finally`, so a
+  validate no longer tears the IPC pipe down under a concurrent caller (`-10004` — the mechanism
+  item 0 above describes). Recorded here as remaining: `services/exchange.py:924-938`
+  (`aclose_exchange`'s mt5 arm) and `services/ingestion/mt5.py:~337`. An ast scan found a **third**
+  (`routers/exchange.py`) — three callers through **two** `shutdown()` call nodes.
+  **Plan 153.3-06 closed the class AT THE SINK:** `Mt5Client.close()` no longer calls
+  `mt5.shutdown()` at all, so all three callers are fixed with **zero call-site edits** (neither
+  worker site could be fixed at its own site anyway — both run in a `finally` outside the lease,
+  so leasing them would mean queueing inside an error path to buy permission to do something
+  destructive). `close()` still releases our own rpyc socket. The knowingly-temporary
+  `test_close_alone_still_calls_shutdown_exactly_once` pin was **re-cut**, not deleted, as
+  `test_close_alone_never_reaches_shutdown` (`shutdown_calls == 0`, D-35 named in its docstring);
+  the eight "the session never leaks" assertions in `tests/test_ingestion_mt5.py` were re-pointed
+  to the transport-close observable. A new `shutdown()` call site anywhere in `analytics-service`
+  now reds `tests/test_mt5_shutdown_roster.py`, which derives the roster from source (ast) with a
+  vacuity floor and self-tests — nobody has to hand-edit a list.
+
+  ⚠️ **The ONE residual that genuinely remains — cross-REPLICA.** The surviving teardown is
+  `Mt5Client.restart()`'s (the deliberate heal of a wedged pipe, MT5CONC-01). It is safe because
+  every call site holds the terminal lease — but that lease is an `asyncio.Lock`, which is
+  **single-event-loop** and serializes **nothing across replicas**: two analytics replicas own two
+  registries and two Lock objects. That is precisely why **D-33** pins the gateway to a SINGLE
+  replica (runbook `docs/runbooks/mt5-go-live.md` Step 1 + the `[ ] SCALE` gate-check row, plan
+  153.3-05). ⛔ **A scale-up is a correctness change, not a capacity knob** — it needs a durable
+  cross-process serializer first. **Owner: D-33.**
+
+- [ ] **Module-level `structlog.get_logger(...)` proxies freeze their processor chain — swept in
+  `mt5_client.py` only.** Found 2026-08-09 by plan 153.3-05's full-suite run (invisible to
+  `-k mt5`). `services/logging_config.py:233` configures structlog with
+  `cache_logger_on_first_use=True`, so a module-level lazy proxy binds ONCE at its first use and
+  ignores every later `structlog.configure`. `main.py` configures logging inside the **lifespan**,
+  long after module import, so any module whose proxy binds before that point emits through a
+  chain **without** the `_redact_processor` PII scrub — a silent redaction bypass, not merely a
+  test-visibility problem. Fixed at the root in `services/mt5_client.py` (commit `78b05841`) by
+  binding per call (`_stage_logger()`); **the same exposure was NOT swept across
+  `services/exchange.py`, `services/redact.py`'s callers, `services/audit.py`,
+  `services/rate_limit.py` or any other structlog user.** Cheap check:
+  `grep -rn "^_\?log.* = structlog.get_logger" analytics-service --include="*.py"`.
+  ⭐ **MEASURED by the orchestrator 2026-08-09 — the class is 8 sites** (non-test production):
+  `routers/debug_key_flow.py:41`, `main.py:153` (`_config_log`), `:365` (`_validation_log`),
+  `:458` (`_rate_limit_log`), `:643` (`_auth_log`), `routers/process_key.py:60`,
+  `services/rate_limit.py:136`, `services/ingestion/long_fetch.py:45`.
+  ⚠️ **Triage before fixing all eight — exposure is NOT uniform.** The freeze happens at first
+  *use*, not at creation, so a proxy used only at request time (after the lifespan configures
+  logging) is fine. The genuinely suspicious ones are those that can log during **import or
+  startup, before `configure_logging()`** — `main.py:153 _config_log` is the obvious candidate
+  since config validation runs early. Establish which of the eight can emit pre-configure, then
+  fix those; converting all eight blindly is churn.
+  ⭐ **Prefer a class fix over eight point fixes**: either drop `cache_logger_on_first_use` (it is
+  a micro-optimisation buying little here), or configure logging at import rather than in the
+  lifespan. Either removes the whole class; per-call binding at 8 sites leaves the 9th to be
+  written next week. Same reasoning as D-35's fix-at-the-sink.
+
+- [ ] **GSD `gsd-sdk query state.*` verbs take NAMED flags, not positional args — the executor
+  prompt documents positional.** Found 2026-08-09 during plan 153.3-05's state update.
+  `state.record-session "" "<stopped-at>" "None"` silently records only `Last Date` and drops the
+  stopped-at; `state.record-metric` and `state.add-decision` return `{"error": …}` on positional
+  argv. Correct forms: `--stopped-at/--resume-file`, `--phase/--plan/--duration/--tasks/--files`,
+  `--summary`. ⚠️ Also: **every** SDK write to `.planning/STATE.md` REGRESSES the frontmatter
+  `last_activity` to a stale value (observed: `2026-08-09 -- Phase 153.3 wave 4 complete` →
+  `2026-08-07 -- Phase 152 execution started`, three times in a row). Repaired in place each time.
+  Same defect family as the `### Decisions` heading drift already annotated in `STATE.md`.
+  ⚠️ `state.record-metric` is also NOT idempotent — running it twice appends a duplicate row.
 
 ### v1.14 Smoothed-MTM go-live blockers — FIXED in the v1.14 landing (2026-07-23)
 Surfaced by the /ship Fable red team; the safety-critical ones fixed in the landing PR so
@@ -222,6 +385,62 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### ⚠️ PRE-EXISTING RED on `main`: `AllocationsTabs.scenario-state-preservation` (found 2026-08-10 during /ship)
+`src/app/(dashboard)/allocations/AllocationsTabs.scenario-state-preservation.test.tsx` →
+*"adding + toggling a strategy in Scenario, leaving to Overview, and re-entering preserves the
+draft"* fails with `TestingLibraryElementError: Unable to find an element by:
+[data-testid="kpi-strip-mock"]`, preceded by
+`scenario_list_load_failed { error: 'TypeError: Failed to parse URL from /api/allocator/scenario/saved' }`.
+
+⭐ **Triaged as NOT ours before shipping v0.55.0.0**, and the triage is the part worth keeping:
+- **Deterministic, not a flake** — fails twice in isolation, and in the full suite.
+- **Fails on pristine `origin/main`** — proven in a throwaway detached worktree at `861a4d91`
+  with `node_modules` symlinked, so the branch is not the cause.
+- **Not the Node-version split** either — reproduced under **both** local Node 25 and CI's
+  Node 22 (`PATH=/opt/homebrew/opt/node@22/bin`), so it is not
+  [[reference_ci_node22_vs_local_node25]].
+
+The relative-URL parse failure is the likely root: `fetch('/api/…')` has no base in jsdom, so the
+scenario list load throws, the composer never renders, and the mock strip is never found. It
+presumably passes (or skips) in CI because something supplies a base URL there — **which means a
+green CI on this spec is not evidence the behaviour works.** Worth confirming whether CI runs it
+at all; if CI skips it, the spec is a guard that cannot fail in the only place it is enforced.
+
+
+### ✅ DECIDED + SHIPPED — should the measure ladder have a px cap at all? (raised 2026-08-09, DECIDED 2026-08-09, closed 2026-08-10)
+Founder report, with screenshots: *"zooming out should allow me to see more of the
+content… it should never produce dead/empty areas."*
+
+**⭐ FOUNDER CHOSE (B): the founder's rule wins for DATA surfaces only.** Dense tables
+go fluid (`max-w-full`, **no px ceiling**) and reveal columns as the viewport grows;
+prose and forms keep 1100px, where a bounded measure is a genuine readability control
+rather than decoration. Rung 3 of DESIGN.md's ladder is therefore FLUID, not 1920px.
+Per Rule 7 the conflict was surfaced and one side picked — it was **not** blended into
+a compromise cap. (The alternatives weighed were (A) keep the ladder and accept the
+dead space, and (C) drop caps everywhere including prose; both were rejected.)
+
+**Landed in:** `ecb7140a` (the `/my-strategies` instance) → `0f4dd69f` (the general
+rule: `DashboardChrome`'s `isWide` shell becomes `max-w-full` and gains
+`my-strategies`; the page-level `max-w-[1920px]` caps on `/my-strategies`,
+`/allocations` (+loading), `/compare` (+loading) and `/discovery/[slug]` are deleted so
+the shell is the sole owner) → **153.2 review WR-02** (the two surviving
+`max-w-[1440px]` caps on `/allocations`' Scenario tab — `ScenarioComposer` and its
+`AllocationsTabs` skeleton — which had kept the founder's reported symptom alive on
+that tab, plus DESIGN.md's rule restated with its real scope and its one carve-out
+named).
+
+**Recorded in:** DESIGN.md's measure-ladder section and its 2026-08-09 decision-log row.
+
+⚠️ **Two statements in the previous version of this item were false at HEAD** and are
+corrected above rather than left to be re-litigated: *"The general principle is NOT
+fixed"* (it was decided the same day) and *"It now gets the 1920px dense-table measure
+it earns"* (there is no 1920px measure any more — `/my-strategies` is fluid).
+
+**Carve-out, so it is inherited rather than rediscovered:** the four `/admin` prose
+pages (`users`, `users/[id]`, `partner-import`, `for-quants-leads`) keep `max-w-[1100px]`.
+They live under the `isWide` `/admin` prefix for navigation reasons, but the ladder
+governs by CONTENT TYPE, and their content is prose/forms — rung 1.
+
 ### Dependency pass — the 9 open dependabot PRs (booked 2026-08-05, founder call)
 - **One campaign, NOT piecemeal merges.** All 9 dependabot PRs are red — and NOT only the
   TEST-DB infra flake: #657 (npm minor-patch group, 25 updates) genuinely fails
@@ -316,6 +535,22 @@ true for 146 and half of 142–145, and **false for 141**.
 - **ccxt tracebacks not secret-scrubbed** (`exc_info=True`) — an API key could land in Railway
   logs. Add a `redact_secrets` util.
 - **No Python lock file; ccxt unpinned** — unreproducible prod builds in the money-math path.
+- **`api_keys.exchange` is still CLIENT-SUPPLIED at row CREATION** (residual of review CR-01,
+  logged 2026-08-10). The UPDATE half is closed — migration `20260810120000` revokes table-level
+  UPDATE from `anon`/`authenticated` and a SECURITY INVOKER trigger backstops it, so a key owner
+  can no longer PATCH their own row to a probe-exempt venue, submit with the submit-time
+  scope-broadening probe skipped, and PATCH it back. The INSERT half remains: the browser calls
+  `/api/keys/validate-and-encrypt` and then performs the `api_keys` INSERT **itself**
+  (`ApiKeyManager.tsx:254`, `StrategyForm.tsx:140`, `AllocatorExchangeManager.tsx:591`), so a
+  crafted client can insert a venue that differs from the one the server actually validated.
+  **Why this is not filed FIX NOW:** the ciphertext is server-minted and only ever minted for a
+  key the server confirmed read-only (`validate-and-encrypt/route.ts:310`), and with UPDATE
+  revoked a mislabelled row can never be corrected back — so the forged strategy's sync fails
+  permanently and no credible listing results. The forgery is self-defeating, not harmful.
+  **Fix when the connect flow is next opened:** move the INSERT server-side into
+  `validate-and-encrypt` (it already knows the canonical venue it validated) and return the new
+  row id, then `REVOKE INSERT ON api_keys FROM authenticated`. That is a three-component
+  connect-flow refactor and was deliberately out of the CR-01 fix's blast radius.
 
 ### CI / test-infra ratchet
 - 🔁 **RECURS DAILY 05:30 UTC — nothing reaps stale `pending` compute_jobs on the TEST
@@ -428,6 +663,36 @@ true for 146 and half of 142–145, and **false for 141**.
   view, not a global registry. Decide between gateway-enumerated, a curated broker→servers map,
   or free-text-with-suggestions before planning.
 
+  **UPDATE 2026-08-08 (founder, with screenshots of the MT5 mobile flow):**
+  - **(a) is CLOSED** — delivered by **MT5-03**: the per-venue `passphraseSecret` flag renders
+    MT5's slot as `type="text"` (`ConnectKeyStep.tsx:739`) while OKX stays masked. The line
+    number in the paragraph above is stale (`:696` → `:739`).
+  - **(b) is now specified, as TWO levels**, matching how the MT5 app actually behaves:
+    **level 1 = broker family** (e.g. `VantageMarkets`), showing brokers this user/allocator has
+    connected before; **level 2 = every server in that family** (`VantageMarkets-Live 5`,
+    `-Live 19`, `-Live 14`, `-Live 3`, `-Live 6`, `-Live 4`, `VantageMarkets-Live`). Typing an
+    exact server name is cumbersome and error-prone; a picker removes a whole error class.
+  - ⛔ **The real blocker for level 1 is a STORAGE shortcut, not a missing API.** The broker
+    server flows into the OKX passphrase slot and is persisted in `api_keys.passphrase_encrypted`
+    (`exchange.py:234` states the rationale: *"No new columns"*). A broker server name is public
+    information, so encrypting it buys nothing and costs the ability to render a history without
+    decrypting secrets. **Fix = a plain `mt5_server` column**; that makes level 1 trivial.
+  - **Level 2 direction — REVISED 2026-08-08 after the platform research came back. The founder's
+    "just download and store it" is RIGHT in substance but must change its SOURCE.**
+    - ⛔ **Auto-syncing MetaQuotes' directory is OUT.** The broker/server list is only obtainable
+      inside a terminal; `config/servers.dat` is **binary and undocumented**, and MQL5 warns that
+      third-party parsing may violate MetaQuotes' ToS. There is no endpoint and no API. So the
+      "our own terminal already has it" idea — mine, 2026-08-08 — does **not** survive: the file
+      is there, but reading it is not a route we should take.
+    - ✅ **Curating from broker-published pages is IN, and is ToS-clean.** Server names are
+      **public** — brokers document them (Vantage publishes its `VantageMarkets-Live N` set).
+      Seed a small `broker → servers[]` table by hand for the brokers we actually support,
+      refresh rarely, free-text escape hatch for anything unseeded. Hand-curated, not synced.
+    - Net: the two-level picker is still achievable and still worth it; it is a **content**
+      problem (curate a short list) rather than an **integration** problem.
+  - **Not in Phase 153.** 153 deletes an error class and is already 25 files; a server picker is
+    a new surface. Needs its own requirement + UI-SPEC.
+
 - **⭐ Expose an MCP server so a client can read their own stored data and analyse it with their own
   AI** (founder-requested 2026-08-03, during `/gsd-plan-phase 142.2`). Once we have ingested and
   derived a client's data, they should be able to point their own AI assistant at it — Claude
@@ -476,6 +741,83 @@ true for 146 and half of 142–145, and **false for 141**.
   that secures nothing.
 
 ### Tech-debt / maintainability (opportunistic, don't force)
+
+- **⭐ AUDIT METHOD + two more unfalsifiable guards (2026-08-09).** Phase 153 found **14** guards
+  that could not fail. The method that finds them, in order of cost:
+  1. **Grep triage** on six smells: literal-vs-literal · fixture sized off the constant under test ·
+     matcher-driven sweep with no positive control · derived roster with no vacuity floor ·
+     assertion on absence with no proof the detector works · self-referential oracle.
+  2. **Check provenance** — do both sides of the assertion trace to the SAME definition? If yes it
+     is a tautology wearing a check's clothes.
+  3. **Mutation decides.** Grep only nominates. Break what the guard claims to protect; no red = decorative.
+  4. ⭐ **Read the comment as a suspect, not a witness.** 3 of the 14 carried comments asserting
+     precisely the capability they lacked. A confident comment over a weak assertion is a signal.
+  ⭐ **Highest yield: guards over a CROSS-FILE coupling** (budget↔breaker, roster↔emitter,
+  definition↔restatement). Same-file assertions are usually honest; cross-file ones go stale.
+  **Scope recommendation:** sweep the money-path and security guards only (`seam-*`, `closed-sets`,
+  RLS, `analytics-service/services/`). A mutation pass over 10 000 tests costs more than it returns.
+
+  - **#13 `src/__tests__/scenario-commit-rls.test.ts:971` — a tautology.** `HAS_FULL_LIVE` is
+    DEFINED at `:169` as `HAS_LIVE_DB && HAS_BASE_URL && HAS_ANON_KEY`, and `:971` asserts it
+    equals that same expression re-evaluated in the same file. Its comment claims it catches
+    "e.g. inverts `HAS_BASE_URL`" — inverting it changes BOTH sides identically, so it stays green.
+    All three flags come from env vars, so CI (all false) gives `false === false` and a configured
+    env (all true) gives `true === true`. It can only red in a mixed state neither environment
+    produces. **Fix:** assert the gating BEHAVIOUR (that the suite skips) or delete it.
+  - **#14 `grep -c "if (code === "` is a BLIND gate — and the orchestrator authored it.** Used
+    across several 153.1 executor prompts as evidence that a fix was class-level rather than
+    instance-level ("arm count unchanged at 3"). It is a single-line pattern; `wizardErrors.ts`
+    has **six** multi-line arms (`if (` alone on `:2330 :2357 :2373 :2383 :2743 :2789`) that it
+    structurally cannot see. Same blindness class as D-34's fourteen `error`-first emitters.
+    **The sound invariant is `grep -c "applyFixRequirements("` → 2** (declaration + the one call).
+    ⚠️ Lesson: a prose/regex gate in a PROMPT is exactly as falsifiable as one in a test, and
+    nobody mutation-tests a prompt. Prefer an invariant a test can hold.
+  - **#15 An innocence proof that could not fail — in 153.1's OWN paperwork.** ✅ corrected
+    2026-08-09 by the 153.1 verifier. `ROADMAP.md:353` absolved 153.1 of the red
+    `seam-citations` gate on the strength of an empty `git diff aff52516..HEAD`. But
+    `aff52516` is a 153.1-05 **docs** commit dated AFTER every source edit in 153.1-03/04/05,
+    so that diff was empty **by construction**, whoever caused the citations. The truth is the
+    opposite: `git log -S'<citation>'` attributes **all nine** to `712c01a9`/`aeea5455`/
+    `3011c659` — 153.1's own commits, two of them added by the CR-01 review fix and recorded
+    nowhere. `deferred-items.md` said "PRE-EXISTING", then named 153.1-04 as introducer one
+    paragraph later, and counted 7 against a live 9.
+    ⚠️ Lesson — **this is the first instance found in a PLANNING LEDGER rather than a test**,
+    and it is the highest-leverage location of all: a false exoneration is read by the next
+    phase's planner and never re-derived. Same taxonomy row as "guards over a CROSS-FILE
+    coupling" — the coupling here is commit-order vs file-content. **Rule: a
+    baseline commit used to prove "we didn't cause this" must PREDATE the work, and you must
+    show that it does.** Prefer `git log -S` (names the author) over `git diff <base>` (names
+    nobody).
+
+- **✅ FIXED 2026-08-09 — the STATE.md "SDK bugs" were OUR schema drift, not the SDK.**
+  Founder challenge (*"Probably something we do rather than SDK. Didn't have those problems
+  before"*) was correct. Root cause: two customised headings that sit inside SDK match patterns.
+  | gsd-sdk matches | we had written | consequence |
+  |---|---|---|
+  | `/##\s*Session\s*\n/i` | `## Session Continuity` | section never found |
+  | `/###?\s*(?:Decisions\|…)\s*\n/i` | `### Decisions (requirements-time, …)` | every decision dropped |
+  Both verbs **fail silently** — they return `"No session fields found"` / `"Decisions section not
+  found"` as data, and nothing checks the string. That is why it went unnoticed for months.
+  ⭐ **The `stopped_at` "regression" was a two-sources-of-truth bug.** `stopped_at` lives in YAML
+  frontmatter **and** as `**Stopped At:**` in the body, and the SDK rebuilds frontmatter FROM the
+  body. With the section unmatched the two floated free; we only ever updated frontmatter, so the
+  body copy had been stale since `9e990a90`. Three executors "restoring an accurate value" each
+  reconciled against that stale copy in good faith — one fact, two homes, one unmaintained.
+  **Fix:** headings renamed to `## Session` / `### Decisions` with load-bearing comments naming
+  the exact regex that depends on each. Verified end-to-end: `record-session` → `recorded: true`
+  (was `false`), `add-decision` → `added: true` (was an error string), frontmatter ↔ body in sync.
+  ⚠️ **Lesson worth keeping:** the first fix attempt put the explanatory comment INSIDE the
+  Session block, and because the comment contained the literal `**Last Date:**` markers the SDK's
+  regex matched **the comment instead of the data**. Same class as `EMITTER_RE` matching
+  commented-out code. Keep prose out of a machine-parsed block. The verb bumps
+  `completed_plans` but rewrites `stopped_at` to an older/pre-wave value, silently discarding the
+  most recent progress note. Both executors caught it in their own diff and restored an accurate
+  string rather than committing the regression — but an executor that did *not* diff-check would
+  have committed a ledger that lies about where the run stopped, which is exactly what a resume
+  reads. ⚠️ `STATE.md` is the file `/gsd-autonomous` and every resume path trusts.
+  **Interim:** always `git diff .planning/STATE.md` before committing after that verb runs.
+  **Fix:** make the verb merge rather than overwrite, or stop it touching `stopped_at` at all —
+  progress counters and the human-readable stop note are different concerns.
 - **149 review IN-01:** `MyStrategiesSection.tsx` comment claims namespaced prefs persistence, but with no `userId` the prefs hook is a persistence no-op on that surface — fix the comment (or pass userId if prefs are wanted there).
 - **149 review IN-02:** `getOwnRowPercentiles` fully computes `publishedMap` only for its key-count; name the future consumer or reduce to a count.
 - God-files: `queries.ts` (3,205 lines), `job_worker.run_sync_trades_job` (688 lines),
@@ -1478,5 +1820,18 @@ purpose, not by omission.
 
 **Found at land time (2026-08-08), not by any review:**
 
+- [ ] **⭐ The `shared-test-db` concurrency group can silently skip the Railway analytics deploy on ANY merge.** Observed on the v0.54.0.0 hotfix merge (`861a4d91`, CI run 31273384829 attempt 1). The group now has **three** members — `python` (`ci.yml:~1140`), `sql-tests` (`:934`) and `e2e-seeded` — but GitHub Actions holds only **one pending entry per concurrency group**, so a later arrival evicts the queued one: `python: Canceling since a higher priority waiting request for shared-test-db exists`. It was killed **36s after queueing with zero steps executed** (`steps: []`). ⚠️ `cancel-in-progress: false` does NOT protect against this — it protects *running* jobs, not *queued* ones. Consequences: (1) the run concludes **`cancelled`, not `failure`**, so it renders **grey** and reads as "no result" rather than a red gate; (2) Railway skips the analytics deploy on a non-green check suite, so frontend + migrations land while the Python service stays behind — the exact stale-prod state issue **#616** was filed for. Remedy that day was `gh run rerun <id> --failed` (attempt 2 fully green). ⛔ This is NOT the TEST-DB backlog flake — `compute_jobs` was verified **completely empty** at the time, and no delete was needed. Real fix: serialize the group properly, or return it to two members. `analytics-deploy-verify` bounds detection to ~6h but does not prevent it.
+- [ ] **Close GitHub issue #616** ("Analytics prod is running stale code (deploy skipped?) — 2026-07-15", labels `analytics-service`/`p1`/`analytics-deploy-stale`, last comment 2026-08-05). PROD converged 2026-08-08 — analytics `/health` `git_sha` = `861a4d91`, matching main HEAD, worker ticking. Left open deliberately rather than closed unilaterally. ⚠️ Do not close it as "fixed" without also landing the `shared-test-db` item above — the *recurrence mechanism* is still live.
+
+- [ ] **⭐ Stale `file:line` citations live in SOURCE files too, and one class is invisible to any path-based guard.** Found 2026-08-08 while repairing the ledgers. Confirmed stale in shipped code: `src/lib/process-key-onboard-contract.ts:116` cites `process_key.py:680-690` (emitter is now :717-750); `analytics-service/routers/exchange.py:152` cites `wizardErrors.ts:936-1035` (`classifyKeyValidationError` is now :1927-2110); `analytics-service/docs/STATUS_CONTRACT.md:379` cites `routers/internal.py:442`/`:471` (now :488/:517). ⚠️ **The nastiest one is SELF-RELATIVE:** `analytics-service/services/broker_dailies.py:552`'s docstring cites `combine_native_ledger` **(:174)** when it is at **:268** — a coordinate pointing *inside its own file*, which no path-resolving checker would ever flag because there is no path to resolve. Any citation gate must therefore handle bare `:NNN` and same-file references, not just `path:NNN`.
+- [ ] **`file:line` citations across `.planning/REQUIREMENTS.md` and `ROADMAP.md` rot silently, and nothing catches it.** ✅ **BOTH LEDGERS REPAIRED 2026-08-08** — ROADMAP: 50 audited / 38 renumbered / 8 anchored / 0 undeterminable. REQUIREMENTS: 91 audited / 60 renumbered / 29 anchored / 2 deliberately left (both are quotations of coordinates *inside another document*, pinned to named commits where the drift IS the argument). Verified: 101 requirement IDs + checkbox states byte-identical, headings identical, independent drift audit 0 problems. **The gate itself is still unbuilt** — that is what remains open below. Audited all **109** distinct code citations on 2026-08-08. Cheap tests found little (1 missing file — `extension.py:506` in ROADMAP.md; 0 out-of-range), because an out-of-range check is far too weak: a citation can be *in range* and still point at unrelated code, which is exactly what WIZFORM-02's `:345` did. A symbol-anchored content check found **~13 high-confidence drifts**, several large: `wizardErrors.ts:967 → classifyKeyValidationError` actually at **:1927** (+960), `allocator_positions.py:154 → _fetch_spot_rows` at **:418**, `ScenarioComposer.tsx:2180 → addedStrategyMetadataLookup` at **:2486**, `wizardErrors.ts:1728 → EXCHANGE_PROBE_FAILED` (symbol no longer in that file at all). **Only the WIZFORM-01..05 + MT5-14 citations were repaired** (phase 153 is about to consume them); the rest stand. ⚠️ **A bare filename is itself the bug in one case: `exchange.py` is ambiguous** — `routers/exchange.py` and `services/exchange.py` both exist and only `routers/` holds `_MT5_PROBE_TIMEOUT_S` / `_validate_mt5_key`. Two candidate fixes: (a) a CI gate that resolves every `path:line` in the ledgers and fails on drift — needs symbol anchoring to be meaningful, and generic anchors (`href`, `ValueError`, `UNKNOWN`, `idempotent`) must be excluded or it is pure noise; (b) drop line numbers from the ledgers entirely in favour of symbol names, which do not rot. Cost of leaving it: every planner and executor that trusts a citation walks to the wrong code, and the reader cannot tell a stale pointer from a correct one without re-deriving.
+
 - [ ] **No gate catches an `e2e/` assertion whose copy no longer exists in `src/`.** Phase 150-03 renamed the MetadataStep heading and updated its own component test; two e2e specs kept waiting 15s for the dead string and only one of them reddened (the other is seed-gated and did not run). Ten specialist review passes, a red team, and 10,193 local tests all missed it, because the phase's own grep never left `src/`. A gate is buildable — extract literals from `getByRole(name:)` / `getByText` / `getByLabel` in `e2e/` and fail when one is absent from `src/` — but a naive version has ~6 false positives today (composed date ranges like `"2026-01-05 → 2026-01-09"`, seeded fixture names like `"E2E Test Key"`, and chart headings built at runtime), so it needs an allowlist to be useful rather than noisy. Same family as the v1.10 lesson that e2e grep-gates scan `src/` only.
 - [ ] **The TEST `compute_jobs` backlog has no owner and reappears daily.** Cron jobid 9 fans out one `derive_broker_dailies` job per `api_key` at 05:30 UTC; TEST has no worker, so they accumulate as `pending`, sort ahead of anything a test seeds by `next_attempt_at`, and crowd the `LIMIT 50` claim batch — reddening exactly 10 claim-path tests in `test_compute_jobs_fencing.py` and `test_drain_semantics.py`. Cleared 1313 rows by hand this land (all dated 2026-08-07, all `derive-dailies-*`); it will be back the next morning. **900 orphaned `running` rows are also sitting there** — the separate deferred purge item. Owner is Phase 144 and nothing has been done. ⛔ Never `cron.unschedule(9)`.
+
+### Phase 153.1-02 — deferred open questions from the venue-capability foundation (added 2026-08-09)
+
+Both are explicitly OUT OF SCOPE for phase 153 (RESEARCH §Open Questions Q2 and Q5); logged here so the decision is visible rather than implied by a default.
+
+- [ ] **Should sFOX also opt out of the submit-time scope probe?** `VENUE_CAPABILITIES.sfox` (`src/lib/closed-sets.ts`) asserts NO capability at all, so sFOX's submit path is byte-unchanged — that is D-22, pinned by `closed-sets.test.ts`'s *"sFOX asserts NO capability at all"* assertion. The question stands because sFOX asserts `read_only=True` **structurally** for the same reason MT5 does (`_validate_sfox_key`: the SfoxClient adapter has no order/withdraw/transfer surface, and sFOX exposes no per-key scope endpoint) — the same argument that earned MT5 `scopeProbeSupported: false`. What is unknown: whether the ccxt permissions probe currently *succeeds* for sFOX or has been silently failing on every sFOX submit. ⚠️ This is a SECURITY decision (the scope-broadening probe is ASVS V4) — do not flip it as a tidy-up; measure the probe's current behaviour against a live sFOX key first. Owner: unassigned. Reference: 153.1 D-22, RESEARCH Q2.
+- [ ] **`Validating…` (U+2026) at `CsvUploadStep.tsx:751` is the odd one out.** The four other live sites use ASCII `Validating...` (`ConnectKeyStep.tsx:782`, `MultiKeyConnectStep.tsx:1637`, `ApiKeyForm.tsx:199`, `StrategyForm.tsx:356`), and ASCII is the **recorded superseding decision** (`MultiKeyConnectStep.test.tsx:19-21` states it supersedes the UI-SPEC's typographic form). D-21 settles the spelling; a repo-wide copy sweep to apply it is not in phase 153's scope. ⚠️ Before changing any of these strings, grep `e2e/` — `e2e/api-key-flow.spec.ts:212` matches on the prefix regex `/Validating/i` and survives either form, but that is luck, not a guarantee for the next one. Owner: unassigned. Reference: 153.1 D-21, RESEARCH Q5.

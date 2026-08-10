@@ -5,7 +5,11 @@ import { withAuth } from "@/lib/api/withAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
 import { STRATEGY_NAMES, canonicalizeExchangeList } from "@/lib/constants";
-import { MAGNITUDE_CAPS, isCryptoExchange } from "@/lib/closed-sets";
+import {
+  MAGNITUDE_CAPS,
+  isCryptoExchange,
+  venueSupportsScopeProbe,
+} from "@/lib/closed-sets";
 import { isValidDollar } from "@/lib/dollar-validation";
 import {
   OWN_CAPITAL,
@@ -140,11 +144,21 @@ const MAX_COMPOSITE_MEMBERS = 10;
  * class cannot drift apart again.
  *
  * A parse miss resolves to this sentinel rather than throwing or returning a
- * fabricated triple, so it lands on the EXISTING `probe_error` arm below: a
- * body that could not be read is a probe that did not run, which is the
- * fail-CLOSED doctrine this file already states. Carrying no scope fields at
- * all is deliberate — it makes it structurally impossible for a parse miss to
- * present a scope verdict, however the gates below are later reordered.
+ * fabricated triple: a body that could not be read is a probe that did not run,
+ * which is the fail-CLOSED doctrine this file already states. Carrying no scope
+ * fields at all is deliberate — it makes it structurally impossible for a parse
+ * miss to present a scope verdict, however the gates below are later reordered.
+ *
+ * ⚠️ 153.2-04 / WIZFORM-04 / D-14b — IT NO LONGER SHARES THE `probe_error` ARM.
+ * It used to fall through to it, because it carries the same field. It now has
+ * its own arm, reached by IDENTITY (`livePerms === PROBE_PARSE_MISS`) so an
+ * upstream body that happens to carry `probe_error: true` cannot be mistaken for
+ * it. The security half is unchanged — both still fail CLOSED, both still block
+ * finalize — but a body OUR schema cannot read stays unreadable until a deploy,
+ * so it is reported as permanent instead of as a network blip with a Retry.
+ * ⛔ Keep this a module-scope singleton: the identity check below is the only
+ * thing separating the two, and a per-call object literal would silently merge
+ * them again.
  */
 const PROBE_PARSE_MISS = { probe_error: true } as const;
 type ProbeParseMiss = typeof PROBE_PARSE_MISS;
@@ -165,6 +179,29 @@ class ProbeUpstreamError extends Error {
   constructor(readonly status: number) {
     super(`permissions probe failed: ${status}`);
     this.name = "ProbeUpstreamError";
+  }
+}
+
+/**
+ * WIZFORM-04 / D-14b — OUR OWN configuration is wrong, and no retry can fix it.
+ *
+ * `fetchLivePermissions` refuses to call the seam when `INTERNAL_API_TOKEN` is
+ * unset. That threw a BARE `Error`, which landed on the generic tail of the
+ * catch below and was reported to the user as `KEY_NETWORK_TIMEOUT` — "we could
+ * not reach the exchange", with a Retry control. Every word of that is false:
+ * nothing was reached because nothing was attempted, the exchange was never
+ * involved, and the setting stays wrong until we fix it and redeploy. The user
+ * is handed a button whose only possible outcome is the same message again,
+ * which is the five-clicks behaviour this phase exists to end.
+ *
+ * A distinct CLASS rather than a status sniff, for the same reason
+ * `ProbeUpstreamError` is one: a status that survives only inside a message
+ * string cannot be branched on without parsing prose.
+ */
+class ProbeMisconfiguredError extends Error {
+  constructor(setting: string) {
+    super(`permissions probe misconfigured: ${setting} is not configured`);
+    this.name = "ProbeMisconfiguredError";
   }
 }
 
@@ -213,7 +250,10 @@ async function fetchLivePermissions(
 ): Promise<LivePermissions | ProbeParseMiss> {
   const internalToken = process.env.INTERNAL_API_TOKEN;
   if (!internalToken) {
-    throw new Error("INTERNAL_API_TOKEN is not configured");
+    // D-14b — a TYPED throw, so the catch can tell our own misconfiguration
+    // apart from a transport failure. The setting NAME is the only payload; the
+    // value is absent by definition, so there is nothing here to redact.
+    throw new ProbeMisconfiguredError("INTERNAL_API_TOKEN");
   }
   const res = await resilientFetch(
     "keys-permissions",
@@ -334,6 +374,33 @@ type ValidatedPayload = {
   capitalOwnership?: CapitalOwnership;
 };
 
+/**
+ * The server-side input-validation control for this route (ASVS V5).
+ *
+ * ⭐ 153.1-05 / D-09(b) — EVERY arm below carries a `code`, and that is the
+ * whole point of this pass. Until now they answered a bare `error` string, so
+ * `SubmitStep` had nothing to map and rendered "We could not classify this
+ * failure" — the generic dead end — for a rejection the server had classified
+ * perfectly well. The arm that cost the founder three submits is the
+ * description one: a description of two characters produced a card that named
+ * neither the field nor the rule.
+ *
+ * Two properties to preserve when editing anything here:
+ *
+ *   · ⛔ A `code` changes the response BODY, never the DECISION. Not one
+ *     condition below is weakened by carrying one, and the client-side mirrors
+ *     Phase 153.2 adds are UX, never enforcement — this function stays the
+ *     control.
+ *   · ⚠️ A code emitted here must be a member of `KNOWN_FINALIZE_CODES`
+ *     (`SubmitStep.tsx`) IN THE SAME COMMIT, or it fails that membership check,
+ *     falls through to `UNKNOWN`, and the fix ships invisible while every
+ *     route-side test stays green. 153.1-06 turns that obligation into a
+ *     derived assertion so the next author cannot forget it.
+ *
+ * The `error` strings stay developer-facing detail. The USER-facing sentence
+ * now comes from the code's entry in `WIZARD_ERROR_COPY`, which is why the
+ * detail here can name a field and a rule without being written as copy.
+ */
 function validatePayload(
   body: Record<string, unknown> | null,
 ):
@@ -343,7 +410,10 @@ function validatePayload(
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "Invalid request body" },
+        // Not a field-level code: a body that is not an object was never
+        // TYPED by anyone, so there is no form control to route the user
+        // back to. `VALIDATION_FAILED` is the honest answer (RESEARCH Q3).
+        { code: "VALIDATION_FAILED", error: "Invalid request body" },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
@@ -370,7 +440,12 @@ function validatePayload(
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "strategy_id must be a valid UUID" },
+        // Same reasoning as the body arm: the draft id is minted by the
+        // wizard, never typed by the user, so there is no field to name.
+        {
+          code: "VALIDATION_FAILED",
+          error: "strategy_id must be a valid UUID",
+        },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
@@ -379,20 +454,62 @@ function validatePayload(
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "name must be one of the allowed codenames" },
+        {
+          code: "METADATA_NAME_INVALID",
+          error: "name must be one of the allowed codenames",
+        },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
   }
-  if (
-    typeof description !== "string" ||
-    description.length < 10 ||
-    description.length > MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS
-  ) {
+  // ⭐ 153.1-05 / D-09(b) + D-23 — THIS is the incident, and it is three arms
+  // rather than one on purpose.
+  //
+  // It shipped as a single condition answering one sentence, "description must
+  // be 10-5000 characters", with no `code`. The founder submitted a
+  // two-character description three times and read "We could not classify this
+  // failure" each time. The server knew exactly what was wrong.
+  //
+  // Splitting it is not cosmetic: UI-SPEC Surface 2 maps each field-level code
+  // to exactly one field, and the two bounds are two DIFFERENT remedies — one
+  // asks the user to write more, the other to cut. A single code cannot carry
+  // both sentences, and the copy 153.1-04 authored is a pair for that reason.
+  //
+  // ⛔ D-23 — the lower bound reads `MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS`. The
+  // bare `10` that used to sit here is the drift that produced the incident:
+  // the constant and the sentence were free to disagree, and a client-side
+  // mirror written against either could be wrong about the other. Both bounds
+  // are interpolated into the developer-facing string from the same constants
+  // the conditions read, so the text cannot contradict the rule it describes.
+  if (typeof description !== "string") {
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "description must be 10-5000 characters" },
+        { code: "METADATA_DESCRIPTION_REQUIRED", error: "description is required" },
+        { status: 400, headers: NO_STORE_HEADERS },
+      ),
+    };
+  }
+  if (description.length < MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          code: "METADATA_DESCRIPTION_TOO_SHORT",
+          error: `description must be at least ${MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS} characters`,
+        },
+        { status: 400, headers: NO_STORE_HEADERS },
+      ),
+    };
+  }
+  if (description.length > MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          code: "METADATA_DESCRIPTION_TOO_LONG",
+          error: `description must be at most ${MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS} characters`,
+        },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
@@ -401,7 +518,13 @@ function validatePayload(
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "category_id must be a valid UUID" },
+        // A field-level code even though the detail names a UUID: the user
+        // picks a category from a <Select>, and an absent or malformed id is
+        // what an unanswered picker looks like on the wire.
+        {
+          code: "METADATA_CATEGORY_REQUIRED",
+          error: "category_id must be a valid UUID",
+        },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
@@ -423,6 +546,7 @@ function validatePayload(
       ok: false,
       response: NextResponse.json(
         {
+          code: "METADATA_AUM_INVALID",
           error: `aum must be a finite non-negative number under ${MAX_DOLLAR_VALUE}`,
         },
         { status: 400, headers: NO_STORE_HEADERS },
@@ -434,6 +558,7 @@ function validatePayload(
       ok: false,
       response: NextResponse.json(
         {
+          code: "METADATA_CAPACITY_INVALID",
           error: `max_capacity must be a finite non-negative number under ${MAX_DOLLAR_VALUE}`,
         },
         { status: 400, headers: NO_STORE_HEADERS },
@@ -470,7 +595,14 @@ function validatePayload(
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "entry_context must be 'manager' or 'contribution'" },
+        // `VALIDATION_FAILED`, not a field-level code: `entry_context` is a
+        // trusted context selector the wizard sets from which surface the user
+        // entered by. It is never typed, so there is no control to route back
+        // to (RESEARCH Q3, same class as the two arms at the top).
+        {
+          code: "VALIDATION_FAILED",
+          error: "entry_context must be 'manager' or 'contribution'",
+        },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
@@ -485,12 +617,23 @@ function validatePayload(
   //
   // A garbage value is a hard 400, NOT a silent coercion to the safe value.
   // Coercing would let a broken or hostile client believe it had set a mark
-  // it did not set. Deliberately mirrors the entry_context arm above: a bare
-  // `error` string with NO `code`, because every code the wizard renders must
-  // exist in its error roster — an unknown one renders the UNKNOWN card, which
-  // tells the user nothing (Pitfall 7). This value is data, not privilege:
-  // marking a strategy own-capital only makes it ELIGIBLE for the allocation
-  // surface, which enforces ownership itself.
+  // it did not set. This value is data, not privilege: marking a strategy
+  // own-capital only makes it ELIGIBLE for the allocation surface, which
+  // enforces ownership itself.
+  //
+  // ⚠️ 153.1-05 — THIS COMMENT USED TO ARGUE FOR THE DEFECT, and the paragraph
+  // is deleted rather than softened. It read: "a bare `error` string with NO
+  // `code`, because every code the wizard renders must exist in its error
+  // roster — an unknown one renders the UNKNOWN card, which tells the user
+  // nothing." The observation was true and the conclusion was backwards: the
+  // remedy for a code that is not in the roster is to PUT IT IN THE ROSTER, in
+  // the same commit, which is exactly what this one does. Answering with no
+  // code at all does not avoid the UNKNOWN card — it GUARANTEES it, for every
+  // rejection on this path, forever. WIZFORM-02 removes the premise outright:
+  // the roster is asserted against the emitting sites (153.1-06), so a member
+  // missed here REDS CI BY NAME instead of shipping a silent dead end.
+  // Leaving the old sentence in place would invite the next reader to restore
+  // the bug (RESEARCH).
   if (
     capital_ownership !== undefined &&
     capital_ownership !== null &&
@@ -499,7 +642,10 @@ function validatePayload(
     return {
       ok: false,
       response: NextResponse.json(
-        { error: `capital_ownership must be '${OWN_CAPITAL}' or '${TEAM_REVIEW}'` },
+        {
+          code: "METADATA_CAPITAL_OWNERSHIP_INVALID",
+          error: `capital_ownership must be '${OWN_CAPITAL}' or '${TEAM_REVIEW}'`,
+        },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
@@ -548,7 +694,48 @@ function validatePayload(
  */
 async function runScopeBroadeningProbe(
   apiKeyId: string,
+  venue: string | null,
 ): Promise<{ ok: true } | { ok: false; response: NextResponse }> {
+  // WIZFORM-04 / MT5-14(a) / D-06 — THE CAPABILITY SKIP. Four things about it,
+  // because this is a SECURITY control and a skip inside one needs its
+  // justification written where the skip is, not in a plan file:
+  //
+  // 1. This is the ASVS V4 scope-broadening defence: a key broadened to
+  //    trade/withdraw between Connect and Submit is caught here. The skip is a
+  //    deliberate PER-VENUE exemption, not a relaxation of the control — every
+  //    venue that answers a per-key permissions probe still gets probed, on
+  //    every submit, exactly as before.
+  //
+  // 2. The exempt venue is exempt because the question has no answer, not
+  //    because we decided to trust it. MT5 read-only is enforced STRUCTURALLY
+  //    (`Mt5Client` composes only read methods — there is no order / withdraw /
+  //    transfer surface that could be broadened) and BEHAVIOURALLY (`order_check`
+  //    is rejected for a master login, proven at `_validate_mt5_key`), and the
+  //    venue exposes no per-key scope endpoint at all. Demanding a ccxt
+  //    permissions probe from it produced a PERMANENT failure dressed as a
+  //    network blip, and that is what blocked every MT5 submit.
+  //
+  // 3. ⭐ THE PREDICATE ANSWERS `true` FOR null, "" AND ANY UNKNOWN VENUE, and
+  //    that direction is the whole safety of this line. `venue` is `null`
+  //    whenever the `api_keys.exchange` read faulted, and for a composite member
+  //    whose embed came back empty. Those keys are STILL PROBED. Skipping on
+  //    `null` would silently disable the defence for every key whose venue read
+  //    blipped — a control that fails open on a transient DB error is not a
+  //    control. Read it through the predicate; never index the capability record.
+  //
+  // 4. ⛔ It is `venueSupportsScopeProbe(venue)` — a CAPABILITY question — and
+  //    never an equality test against a particular venue's name. (The literal
+  //    is not written out even in this comment: the acceptance grep proving
+  //    this route never names the venue runs over these lines too, so quoting
+  //    it here would make the prose satisfy its own gate — a trap three sibling
+  //    plans in this phase have already walked into.) The answer lives in the
+  //    capability record precisely so a second venue with the same shape costs
+  //    one row instead of a repo sweep for instance checks — and so that sFOX,
+  //    which asks a superficially similar question, stays BYTE-UNCHANGED (D-22)
+  //    by simply not carrying the capability.
+  if (!venueSupportsScopeProbe(venue)) {
+    return { ok: true };
+  }
   let livePerms: LivePermissions | ProbeParseMiss;
   try {
     livePerms = await fetchLivePermissions(apiKeyId);
@@ -570,7 +757,7 @@ async function runScopeBroadeningProbe(
       return {
         ok: false,
         response: NextResponse.json(
-          { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
+          { code: "CIRCUIT_OPEN", error: CIRCUIT_OPEN_COPY },
           {
             status: 503,
             headers: {
@@ -604,17 +791,84 @@ async function runScopeBroadeningProbe(
         ok: false,
         response: NextResponse.json(
           {
-            error: "Could not verify key scopes",
             code: "KEY_SCOPE_CHECK_UNAVAILABLE",
+            error: "Could not verify key scopes",
           },
           { status: 502, headers: NO_STORE_HEADERS },
         ),
       };
     }
+    // WIZFORM-04 / D-14b — OUR CONFIGURATION IS WRONG, and it is permanent.
+    // BEFORE the generic tail, for the same "more specific claim first" reason
+    // the permanent-status arm above sits where it does.
+    //
+    // What makes it permanent: `INTERNAL_API_TOKEN` unset is a deployment
+    // setting, and a setting stays wrong until a human fixes it and redeploys.
+    // Reported as a network timeout it read "we could not reach the exchange"
+    // and offered a Retry — three untruths and a button that can only fail.
+    // `SEAM_MISCONFIGURED` carries no recoverable action, so `buildEnvelope`
+    // derives `recoverable: false` and NO Retry control renders at all (the
+    // structural suppression, never a prop). It is already a member of
+    // `SubmitStep`'s KNOWN_FINALIZE_CODES — verified at source in this commit,
+    // because an unlisted code falls to UNKNOWN, whose copy IS recoverable, and
+    // the fix would ship invisible with every route-side test green.
+    //
+    // 500, not 502: the fault is OURS, not the venue's. That is the same status
+    // `process-key-client` already answers this class with, so the two agree.
+    if (probeErr instanceof ProbeMisconfiguredError) {
+      return {
+        ok: false,
+        response: NextResponse.json(
+          {
+            code: "SEAM_MISCONFIGURED",
+            error: "Key scope check is not configured",
+          },
+          { status: 500, headers: NO_STORE_HEADERS },
+        ),
+      };
+    }
+    // The generic tail keeps KEY_NETWORK_TIMEOUT for exactly what it honestly
+    // describes: an unclassified TRANSPORT failure, where a retry really can
+    // succeed. ⛔ No retry is issued here — the user's Retry is the only one,
+    // and this route adds no loop (D-07).
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "Could not verify key scopes", code: "KEY_NETWORK_TIMEOUT" },
+        { code: "KEY_NETWORK_TIMEOUT", error: "Could not verify key scopes" },
+        { status: 502, headers: NO_STORE_HEADERS },
+      ),
+    };
+  }
+  // WIZFORM-04 / D-14b — THE PARSE MISS IS NOT A NETWORK BLIP.
+  //
+  // Two conditions used to arrive on one arm because they resolve to the same
+  // SHAPE: a body our zod schema could not read (`fetchLivePermissions` returns
+  // the module-scope PROBE_PARSE_MISS sentinel) and a body in which the service
+  // itself reported `probe_error: true`. IDENTITY tells them apart — the
+  // sentinel is one module-scope object and `fetchLivePermissions` returns THAT
+  // reference, so `=== PROBE_PARSE_MISS` cannot be forged by an upstream payload
+  // that happens to carry the same field. (`as const` is a TYPE-level freeze,
+  // not `Object.freeze`; the guarantee here is reference identity, not
+  // immutability, and nothing on this path mutates it.)
+  //
+  // A body our schema cannot read stays unreadable until a deploy changes one
+  // side or the other: PERMANENT, so it takes KEY_SCOPE_CHECK_UNAVAILABLE (the
+  // code this route already uses for a permanent probe condition, already
+  // rostered, already non-recoverable). The SERVICE-REPORTED probe_error stays
+  // on KEY_NETWORK_TIMEOUT — there the upstream really did try and really did
+  // fail, and a retry is a real remedy.
+  //
+  // ⚠️ The sentinel's own contract is preserved: it carries NO scope fields, so
+  // however these gates are later reordered a parse miss can never present a
+  // scope verdict. Both arms still FAIL CLOSED — nothing is promoted either way.
+  if (livePerms === PROBE_PARSE_MISS) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          code: "KEY_SCOPE_CHECK_UNAVAILABLE",
+          error: "Could not read the key scope response",
+        },
         { status: 502, headers: NO_STORE_HEADERS },
       ),
     };
@@ -624,8 +878,8 @@ async function runScopeBroadeningProbe(
       ok: false,
       response: NextResponse.json(
         {
-          error: "Exchange permission probe failed",
           code: "KEY_NETWORK_TIMEOUT",
+          error: "Exchange permission probe failed",
         },
         { status: 502, headers: NO_STORE_HEADERS },
       ),
@@ -636,8 +890,8 @@ async function runScopeBroadeningProbe(
       ok: false,
       response: NextResponse.json(
         {
-          error: "Key has been broadened beyond read-only on the exchange.",
           code: "KEY_SCOPE_BROADENED",
+          error: "Key has been broadened beyond read-only on the exchange.",
         },
         { status: 403, headers: NO_STORE_HEADERS },
       ),
@@ -688,14 +942,50 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   );
   if (!rl.success) {
     // PR-2 full-file reviewer #5 (2026-05-28): 503 on rate-limit misconfig.
+    //
+    // 153.2-05 / WIZFORM-02 — BOTH ARMS NOW CARRY A CODE. They were two of the
+    // five rejections this route still answered code-less, and a code-less
+    // rejection renders the UNKNOWN card — "We could not classify this failure"
+    // — for a failure the route classified well enough to pick a status and
+    // write a sentence about. Worse, UNKNOWN's copy is RECOVERABLE, so the user
+    // got a Retry button in both cases: correct for a throttle, and a control
+    // that cannot work for a misconfiguration.
+    //
+    // ⚠️ THE TWO ARMS STAY EXPLICIT `NextResponse.json` SITES, and that is a
+    // decision rather than inertia. Routing them through the deny chokepoint
+    // (140.4-13 / SEAMRIM-05) was tried first and MEASURED: it drops
+    // `finalize-wizard`'s derived rejection-site count from 32 to 30, because
+    // the class scan in `wizardErrors.invariant.test.ts` finds sites by reading
+    // 4xx/5xx `NextResponse.json` literals out of this file's source. A helper
+    // call is invisible to it, so both arms would leave the population the
+    // guard watches — and a guard that stops seeing an arm is exactly how a
+    // future code-less rejection ships green. Status, headers and the
+    // `Retry-After` stamp are byte-unchanged here; only the codes are added.
+    //
+    // ⚠️ `RATE_LIMITED`, NOT `KEY_RATE_LIMIT` — and the ledger that recorded
+    // this debt named the wrong one. `KEY_RATE_LIMIT`'s copy opens "The
+    // exchange rate-limited this request", which is FALSE here: this is
+    // `userActionLimiter` on OUR own per-user key, and the exchange was never
+    // contacted. `RATE_LIMITED` says "the cap is ours, not your exchange's",
+    // which is the sentence 140.3-01 wrote for exactly this condition.
+    // ⓘ It needs no roster entry: `SEAM_CODE_TO_WIZARD_CODE` maps it to itself
+    // and the translation runs BEFORE the roster check, so `SubmitStep`
+    // surfaces it as-is. (`composite/add-key` still answers `KEY_RATE_LIMIT`
+    // here; that arm carries its own note saying the sentence is wrong for an
+    // internal limiter, and re-cutting it is not this plan's file.)
+    //
+    // ⚠️ `SEAM_MISCONFIGURED` on the 503 — already a roster member, and its
+    // copy is written for precisely this: "our own configuration is wrong…
+    // Retrying will not clear it." It carries no recoverable action, so no
+    // Retry control renders at all — the structural suppression, not a prop.
     if (isRateLimitMisconfigured(rl)) {
       return NextResponse.json(
-        { error: "Rate limiter unavailable" },
+        { code: "SEAM_MISCONFIGURED", error: "Rate limiter unavailable" },
         { status: 503, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
       );
     }
     return NextResponse.json(
-      { error: "Too many requests" },
+      { code: "RATE_LIMITED", error: "Too many requests" },
       { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
     );
   }
@@ -764,7 +1054,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
   if (!strategyRow) {
-    return NextResponse.json({ error: "Draft not found", code: "GATE_DRAFT_GONE" }, { status: 404, headers: NO_STORE_HEADERS });
+    return NextResponse.json({ code: "GATE_DRAFT_GONE", error: "Draft not found" }, { status: 404, headers: NO_STORE_HEADERS });
   }
 
   const apiKeyId =
@@ -900,8 +1190,14 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // Probe runs BEFORE both legacy and unified paths so the
   // scope-broadening defense covers either code path (Phase 19 /
   // Open Question 1 — RETAINED at the thin-adapter layer).
+  //
+  // WIZFORM-04 — `apiKeyExchange` is the venue resolved ~50 lines above for the
+  // asset_class stamp; the probe gate reads the SAME value rather than issuing a
+  // second lookup. It is `null` when that read faulted, and the helper's gate
+  // probes on `null` — same conservative direction `skipAssetClassWrite` takes
+  // just above, for the same reason.
   if (apiKeyId) {
-    const probe = await runScopeBroadeningProbe(apiKeyId);
+    const probe = await runScopeBroadeningProbe(apiKeyId, apiKeyExchange);
     if (!probe.ok) return probe.response;
   }
 
@@ -951,8 +1247,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       });
       return NextResponse.json(
         {
-          error: "Could not determine composite membership; please retry.",
           code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+          error: "Could not determine composite membership; please retry.",
         },
         { status: 503, headers: NO_STORE_HEADERS },
       );
@@ -975,9 +1271,23 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // SEAM_ROUTE_BUDGETS declaration has to be able to trust: that table
       // declares `keys-permissions × MAX_COMPOSITE_MEMBERS` for this branch,
       // and the two numbers are pinned to each other cross-file.
+      // WIZFORM-04 — the embed carries each member's VENUE, so the same
+      // capability gate the single-key arm uses can be applied per member. The
+      // shape and the to-one embed idiom are lifted verbatim from
+      // `composite/members/route.ts`, which already reads `api_keys ( exchange )`
+      // off this table.
+      //
+      // Gating BOTH call sites is what makes this a CLASS fix. Leaving this one
+      // ungated would be the instance fix: correct for the arm someone happened
+      // to test, and a live per-member probe demand for a venue that has no
+      // answer on the other.
+      //
+      // ⛔ `.limit(MAX_COMPOSITE_MEMBERS + 1)` below is UNTOUCHED — the +1 is the
+      // truncation detector whose arrival IS the refusal, and it is pinned
+      // cross-file against SEAM_ROUTE_BUDGETS.
       const { data: members, error: membersErr } = await compositeAdmin
         .from("strategy_keys")
-        .select("api_key_id")
+        .select("api_key_id, api_keys ( exchange )")
         .eq("strategy_id", fields.strategy_id)
         .order("seq", { ascending: true })
         // ⚠️ cap + 1, AND THE +1 IS THE WHOLE POINT (ME-02). `.limit(cap)`
@@ -1006,8 +1316,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         });
         return NextResponse.json(
           {
-            error: "Could not load composite members; please retry.",
             code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+            error: "Could not load composite members; please retry.",
           },
           { status: 503, headers: NO_STORE_HEADERS },
         );
@@ -1084,22 +1394,52 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         // The status stays 503, unchanged: this plan owns the code and the copy,
         // not the wire status. `SubmitStep` maps off `code` alone (never status),
         // so the permanent/transient distinction is carried entirely by the code.
+        //
+        // 153.1-05 / D-34 — the SENTENCE IS BYTE-IDENTICAL to what shipped; only
+        // where it is built moved. It is held in a local const rather than
+        // written inline because the emitter predicate in
+        // `wizardErrors.invariant.test.ts` caps the `error:` body at
+        // EMITTER_BODY_MAX_CHARS = 160 (measured: the cap must clear the longest
+        // real body but stay under the 202-char distance to the next emitter's
+        // `status:`, or one emitter's code gets reported against the next one's
+        // status). Inline, these three interpolated lines run ~256 characters, so
+        // this site — and ONLY this site — stayed invisible to the coverage
+        // scanner even after its keys were reordered. Hoisting the sentence makes
+        // the site scannable without relaxing a predicate to make a count come
+        // out right, which is the one thing that file forbids. Same shape as the
+        // `CIRCUIT_OPEN_COPY` emitter above: the scanner constrains the CODE
+        // literal, never the error value.
+        const compositeCapCopy =
+          `This draft has more than ${MAX_COMPOSITE_MEMBERS} keys attached; ` +
+          `a multi-key strategy can hold at most ${MAX_COMPOSITE_MEMBERS}. ` +
+          `Remove keys until ${MAX_COMPOSITE_MEMBERS} or fewer remain, then submit again.`;
         return NextResponse.json(
           {
-            error:
-              `This draft has more than ${MAX_COMPOSITE_MEMBERS} keys attached; ` +
-              `a multi-key strategy can hold at most ${MAX_COMPOSITE_MEMBERS}. ` +
-              `Remove keys until ${MAX_COMPOSITE_MEMBERS} or fewer remain, then submit again.`,
             code: "COMPOSITE_TOO_MANY_MEMBERS",
+            error: compositeCapCopy,
           },
           { status: 503, headers: NO_STORE_HEADERS },
         );
       }
-      for (const member of members ?? []) {
+      // `api_key_id` is a to-one FK into `api_keys`, so PostgREST returns a
+      // single embedded object at runtime; the generated types predate this
+      // table, so the row shape is asserted the same way `composite/members`
+      // asserts it. A member whose embed comes back `null` yields a `null`
+      // venue — and is therefore STILL PROBED, by the same fail-toward rule the
+      // single-key arm relies on.
+      const memberRows = (members ?? []) as unknown as Array<{
+        api_key_id: string | null;
+        api_keys: { exchange: string | null } | null;
+      }>;
+      for (const member of memberRows) {
         const memberKeyId =
           typeof member.api_key_id === "string" ? member.api_key_id : null;
         if (!memberKeyId) continue;
-        const probe = await runScopeBroadeningProbe(memberKeyId);
+        const memberVenue =
+          typeof member.api_keys?.exchange === "string"
+            ? member.api_keys.exchange
+            : null;
+        const probe = await runScopeBroadeningProbe(memberKeyId, memberVenue);
         if (!probe.ok) return probe.response;
       }
       // Route to the legacy finalize whose after() block enqueues
@@ -1290,7 +1630,7 @@ async function runLegacyFinalize(args: {
       error.code,
     );
     if (error.code === "P0002" || error.code === "02000") {
-      return NextResponse.json({ error: "Draft not found", code: "GATE_DRAFT_GONE" }, { status: 404, headers: NO_STORE_HEADERS });
+      return NextResponse.json({ code: "GATE_DRAFT_GONE", error: "Draft not found" }, { status: 404, headers: NO_STORE_HEADERS });
     }
     // audit-2026-05-07 H-0321: split the two SQLSTATEs so HTTP semantics
     // match the actual failure mode.
@@ -1307,16 +1647,25 @@ async function runLegacyFinalize(args: {
       // mislabeled pre-handler 403s (CSRF, approval-gate) as draft-finalize
       // failures and conflated them in the wizard_error funnel.
       return NextResponse.json(
-        { error: "This draft cannot be finalized", code: "GUARD_BLOCKED" },
+        { code: "GUARD_BLOCKED", error: "This draft cannot be finalized" },
         { status: 403, headers: NO_STORE_HEADERS },
       );
     }
     if (error.code === "22023") {
       return NextResponse.json(
         {
+          // 153.1-05 / D-34 — UPPERCASED from `draft_state_invalid`, which is a
+          // WIRE change and the only one in this reorder. The lowercase literal
+          // could never be seen by the coverage scanner (its class is
+          // `[A-Z][A-Z0-9_]*`) and could never be a `WizardErrorCode`, so this
+          // 409 rendered the UNKNOWN card — whose copy is RECOVERABLE, so the
+          // user was handed a Retry button that re-POSTed an identical request
+          // against a draft the DB had already moved past. 153.1-04 minted
+          // `DRAFT_STATE_INVALID` with honest, non-recoverable copy for exactly
+          // this arm; `KNOWN_FINALIZE_CODES` admits it in this same commit.
+          code: "DRAFT_STATE_INVALID",
           error:
             "This draft is not in a finalizable state. Refresh and try again.",
-          code: "draft_state_invalid",
         },
         { status: 409, headers: NO_STORE_HEADERS },
       );
@@ -1754,8 +2103,8 @@ async function unifiedFinalizeWizardHandler(args: {
     });
     return NextResponse.json(
       {
-        error: "Could not determine composite membership; please retry.",
         code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+        error: "Could not determine composite membership; please retry.",
       },
       { status: 503, headers: NO_STORE_HEADERS },
     );
@@ -1777,9 +2126,9 @@ async function unifiedFinalizeWizardHandler(args: {
     );
     return NextResponse.json(
       {
+        code: "COMPOSITE_UNSUPPORTED_UNIFIED",
         error:
           "Composite (multi-key) strategies are not yet supported on this path.",
-        code: "COMPOSITE_UNSUPPORTED_UNIFIED",
       },
       { status: 409, headers: NO_STORE_HEADERS },
     );

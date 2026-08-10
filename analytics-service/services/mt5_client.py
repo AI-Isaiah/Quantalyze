@@ -10,16 +10,17 @@ shape defined here, so the disciplines below are load-bearing.
 Contract:
 
   * Surface (read-only by CONSTRUCTION) — `login`, `account_info`,
-    `history_deals_get`, `order_check` (probe only), `close`. Read-only is a
-    STRUCTURAL property, not a probed scope claim: the underlying `mt5linux`
-    client exposes the FULL trading surface (order_send, positions_get,
-    orders_get, ...), but this facade composes ONLY the read methods plus the
-    order_check probe and NEVER wraps the trade path. There is NO generic
-    attribute-forwarding passthrough (no dunder getattr hook) — such a facade would
-    silently re-expose that trade path and defeat the whole `api_verified` trust
-    story. The forbidden
-    trade method (referred to here without call parentheses so the grep gate stays
-    clean) is intentionally absent.
+    `terminal_info`, `history_deals_get`, `order_check` (probe only), `close`,
+    `release`.
+    Read-only is a STRUCTURAL property, not a probed scope claim: the underlying
+    `mt5linux` client exposes the FULL trading surface (order_send,
+    positions_get, orders_get, ...), but this facade composes ONLY the read
+    methods plus the order_check probe and NEVER wraps the trade path. There is
+    NO generic attribute-forwarding passthrough (no dunder getattr hook) — such a
+    facade would silently re-expose that trade path and defeat the whole
+    `api_verified` trust story. The forbidden trade method (referred to here
+    without call parentheses so the grep gate stays clean) is absent.
+    `terminal_info` (153.3 / D-31) reads OUR terminal: a READ-surface widening.
 
   * Return discipline (fail-loud, no invented data) — every read distinguishes
     `None` (RPyC/terminal error -> capture `last_error()` IMMEDIATELY and raise a
@@ -41,11 +42,47 @@ Contract:
         round-trip before rpyc raises. Its implicit default is 300s — a hung
         terminal would block the SEQUENTIAL worker for 5 minutes, far past the
         ~90s healthz budget (the v1.11 WEDGE-01 failure class).
-      - `MT5_LOGIN_TIMEOUT_MS` is passed to MT5's own `login(timeout=<ms>)` IPC
-        pipe ceiling and MUST stay strictly BELOW the rpyc timeout, so MT5 fails
-        its own pipe first and rpyc surfaces a clean error instead of a raw abort.
+      - EVERY MT5 call that carries its own `timeout=` (milliseconds) is
+        registered in `MT5_IPC_TIMEOUTS_MS` — `initialize` and `login` today —
+        and each one MUST stay strictly BELOW the rpyc timeout, so MT5 fails its
+        own pipe first and rpyc surfaces a clean error instead of a raw abort.
+        The ordering is enforced for the WHOLE table at construction (153.3 /
+        D-24); it used to be enforced for `login` alone, and the unregistered
+        `initialize()` — running on MetaTrader5's vendor default of 60 000ms,
+        2x the rpyc bound — is what censored 9/9 production logins at the 30s
+        ceiling (2026-08-06/08).
+    The chain is PER-INSTANCE: `request_timeout_s` and the per-call `*_timeout_ms`
+    ctor overrides let an interactive caller build a LONGER chain without moving
+    the module constants, which the SEQUENTIAL worker depends on staying at 30s
+    (D-25).
     The outer `asyncio.to_thread` + `asyncio.wait_for` event-loop bound is a Phase
     136/137 worker-seam concern, NOT part of this synchronous, blocking client.
+
+  * Teardown — TWO names, ONE implementation (153.3 / D-30 then D-35), because
+    "I am done with the terminal" and "the terminal's IPC pipe should die" are NOT
+    the same statement, and only the FIRST of them is ever ours to make:
+      - `release()` and `close()` both end OUR use of the terminal. They latch
+        `_closed`, close the rpyc TRANSPORT (our socket), and call `shutdown()`
+        ZERO times. Both delegate to `_teardown_transport`, so the two public
+        names cannot drift apart.
+      - `mt5.shutdown()` ends the terminal's IPC attachment for EVERY caller of
+        that gateway process — `mt5linux` serves every rpyc connection from ONE
+        `ThreadedServer` process sharing ONE `MetaTrader5` module instance and ONE
+        IPC pipe (153-EVIDENCE-mt5-platform §A2 / Correction C-1), so a concurrent
+        caller then observes `-10004 No IPC connection`. D-30 took that call off
+        the REQUEST path; **D-35 removed it from `close()` altogether**, which
+        fixes the worker paths (`services/exchange.py`'s `aclose_exchange` mt5
+        arm, `services/ingestion/mt5.py`'s adapter `finally`) at the SINK, with
+        zero call-site edits.
+      - The ONE surviving `shutdown()` is `restart()`'s deliberate heal of a
+        genuinely wedged pipe (MT5CONC-01). It is lease-held at every call site,
+        and `tests/test_mt5_shutdown_roster.py` derives that from source rather
+        than believing it.
+    We are NOT reclaiming a per-request resource by never calling it: per EVIDENCE
+    §A6 `shutdown()` "closes the IPC connection. It does not close the terminal,
+    does not log the account out, and does not reset terminal state." Attaching
+    once and never tearing down is the EVIDENCE's own recommendation, not an
+    oversight.
 
   * Secret hygiene (T-134-01) — the login / investor password / broker server
     NEVER appear in any exception message or log surface. `mt5linux`
@@ -53,6 +90,18 @@ Contract:
     error string is a real credential disclosure; every error detail passes
     through `services.redact.scrub_freeform_string` at `Mt5ClientError`
     construction, and the interpolated remote `code` string is never logged.
+
+  * Instrumentation (153.3 / D-32) — EVERY MT5 round-trip is bracketed by
+    `_timed()` and emits a structlog `mt5.stage` event carrying `stage` +
+    `duration_ms`, on the SUCCESS path and on the FAILURE path alike. Before this
+    the client contained no clock at all, which is why no uncensored measurement
+    of a successful MT5 call existed anywhere: the only timer in the system was
+    the timeout, so every recorded number was right-censored at a ceiling.
+    ⛔ The event's field set is a CLOSED ALLOW-LIST (`emit_mt5_stage_event`) —
+    stage, duration_ms, ok, error_class, terminal_key, outcome — precisely so the
+    secret-hygiene rule above cannot be violated by a future caller passing
+    "just a bit of context". The exception CLASS name is emitted; its MESSAGE is
+    not, because a remote traceback carries the interpolated password.
 
   * Transport security (T-134-03, constraint documented; hardening owned by Phase
     139) — `mt5linux` speaks rpyc classic / SlaveService, an UNAUTHENTICATED
@@ -64,13 +113,108 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, NoReturn
+from typing import Any, Callable, NoReturn, TypeVar, cast
+
+import structlog
 
 from services.redact import scrub_freeform_string
 
 logger = logging.getLogger("quantalyze.analytics")
+
+_T = TypeVar("_T")
+
+# --------------------------------------------------------------------------- #
+# 153.3 / D-32 — MT5 STAGE TELEMETRY. The measurement this system has never had.
+#
+# WHY it exists: nine correlated gateway<->worker failures (2026-08-06/08) were
+# ALL right-censored at the rpyc ceiling, and no successful stage duration has
+# ever been recorded — not in Railway, not in Sentry, not in docs/evidence/. The
+# 45 000ms / 55s / 60s / 75s / 20s / 10s validate chain is therefore PROVISIONAL,
+# derived from vendor defaults and a client ceiling rather than from data
+# (D-27). These events are what lets **Phase 155 (MT5-VERIFY)** replace that
+# judgement with a real p50/p95. ⛔ This plan MEASURES and does not TUNE: moving a
+# timeout in the same change that first measured it destroys the before/after.
+#
+# STAGE NAMING CONVENTION — stage names are the MT5 call name verbatim
+# (`initialize`, `login`, `account_info`, `terminal_info`, `history_deals_get`,
+# `order_check`, `close`, `release`, `restart`, plus `last_error` for the error
+# round-trip). They are an AGGREGATION KEY across deploys: a rename silently
+# splits a Phase-155 histogram in two, so rename only with that cost in mind. The
+# router adds `lease_wait` and `validate` on the same event name.
+#
+# 🔒 The field set below is a CLOSED ALLOW-LIST and that is the whole hygiene
+# mechanism. `terminal_key` (host:port) is OUR infrastructure identity — already
+# the process-wide lock key — never a user value. NEVER add a parameter that can
+# carry a login, an investor password, a broker server, `last_error()` text or
+# the interpolated remote `code` string: `mt5linux` f-string-interpolates the
+# password into the remotely-eval'd source, so exception TEXT is a credential
+# disclosure surface (T-134-01 / T-153.3-23). Only the exception CLASS is safe.
+# --------------------------------------------------------------------------- #
+MT5_STAGE_EVENT = "mt5.stage"
+_STAGE_LOGGER_NAME = "quantalyze.mt5"
+
+
+def _stage_logger() -> Any:
+    """Bind the stage logger PER CALL rather than once at import.
+
+    ⚠️ Not a style choice. `services/logging_config.py` configures structlog with
+    ``cache_logger_on_first_use=True``, so a module-level
+    ``structlog.get_logger(...)`` proxy freezes the processor chain that happened
+    to be installed at its FIRST use and ignores every later
+    ``structlog.configure``. A module imported before the process configures its
+    logging — which is this one: `main.py` configures inside the lifespan, long
+    after import — would then emit through a stale chain, i.e. WITHOUT the
+    `_redact_processor` PII scrub the configured pipeline installs. Binding here
+    costs a proxy allocation next to a network round-trip and cannot go stale.
+    (It is also what makes the events observable to `structlog.testing`.)
+    """
+    return structlog.get_logger(_STAGE_LOGGER_NAME)
+
+
+def emit_mt5_stage_event(
+    stage: str,
+    started_at: float,
+    *,
+    ok: bool,
+    terminal_key: str | None = None,
+    error_class: str | None = None,
+    outcome: str | None = None,
+) -> None:
+    """Emit ONE structured `mt5.stage` event for a bracketed MT5 stage.
+
+    `started_at` is a `time.perf_counter()` reading taken before the call; the
+    duration is computed here so no call site can get the arithmetic wrong or
+    emit a duration in the wrong unit.
+
+    Fields are STRUCTURED, never interpolated into a message string — the entire
+    point is that Phase 155 can aggregate `duration_ms` by `stage` and by `ok`
+    rather than regex a prose line. `ok=False` events carry the exception CLASS
+    name so a 30s censor (a timeout class, duration at the ceiling) is separable
+    from a fast rejection in a single Railway query.
+
+    ⛔ NEVER raises. Instrumentation must not change what a caller observes
+    (T-153.3-24): a logging pipeline fault must not turn a successful terminal
+    read into a failed validate. A failure here is reported once, loudly, on the
+    stdlib logger — never swallowed silently.
+    """
+    fields: dict[str, Any] = {
+        "stage": stage,
+        "duration_ms": int((time.perf_counter() - started_at) * 1000),
+        "ok": ok,
+    }
+    if terminal_key is not None:
+        fields["terminal_key"] = terminal_key
+    if error_class is not None:
+        fields["error_class"] = error_class
+    if outcome is not None:
+        fields["outcome"] = outcome
+    try:
+        _stage_logger().info(MT5_STAGE_EVENT, **fields)
+    except Exception:  # noqa: BLE001 — telemetry must never break the path it measures
+        logger.warning("emit_mt5_stage_event: stage telemetry failed to emit.")
 
 # rpyc `sync_request_timeout` (seconds). rpyc 5.x's own DEFAULT_CONFIG default is
 # 30s (NOT 300s — that is mt5linux 0.1.10's hardcode, and we pin 0.1.9), so an
@@ -81,11 +225,53 @@ logger = logging.getLogger("quantalyze.analytics")
 # latency yet well under the healthz budget, so a stalled bridge fails loud fast.
 MT5_REQUEST_TIMEOUT_S = float(os.getenv("MT5_REQUEST_TIMEOUT_S", "30"))
 
+# The rpyc `sync_request_timeout` for the INTERACTIVE validate chain (153.3 /
+# D-25), deliberately SEPARATE from the worker's 30s above rather than a raise of
+# it. Two reasons, and both are load-bearing:
+#   * ⛔ MT5_REQUEST_TIMEOUT_S must NOT move. It bounds the SEQUENTIAL worker, where
+#     a hung terminal held past the ~90s healthz budget is the v1.11 WEDGE-01
+#     wedge class. A "harmonised" single constant buys the validate path its
+#     headroom by re-arming that wedge for every job.
+#   * The validate path needs the headroom because MetaQuotes budgets 60 000ms for
+#     `initialize()`/`login()` (the vendor default), and our 20s IPC / 30s rpyc
+#     pair truncated the legitimate tail of a real interactive login — a login that
+#     WOULD have answered was censored by our own ceiling (EVIDENCE Correction
+#     C-3). 55s carries a 45 000ms IPC ceiling with 10s of rpyc headroom.
+# A caller opts in by passing `request_timeout_s=MT5_VALIDATE_REQUEST_TIMEOUT_S`
+# together with the matching per-call IPC overrides; a construction that passes
+# nothing still gets the worker's chain.
+MT5_VALIDATE_REQUEST_TIMEOUT_S = float(os.getenv("MT5_VALIDATE_REQUEST_TIMEOUT_S", "55"))
+
 # MT5's own IPC pipe timeout (milliseconds) passed to login(timeout=...). MUST
 # stay strictly BELOW MT5_REQUEST_TIMEOUT_S (converted to ms) so MT5 fails its
 # own pipe first and rpyc surfaces a clean error rather than a raw mid-handshake
 # abort (Pitfall 3 / T-134-04). 20000ms < 30_000ms with headroom.
 MT5_LOGIN_TIMEOUT_MS = int(os.getenv("MT5_LOGIN_TIMEOUT_MS", "20000"))
+
+# MT5's own IPC pipe timeout (milliseconds) passed to initialize(timeout=...).
+# 153.3 / D-24 — THE ROOT CAUSE this constant exists to delete: MetaTrader5's
+# vendor default for `initialize(timeout=...)` is 60000ms, i.e. 2x the 30000ms
+# rpyc bound above. Left unset, the FIRST MT5 call of every login is structurally
+# incapable of returning an MT5-level answer before rpyc gives up — which is why
+# all 9/9 correlated gateway<->worker failures on 2026-08-06/08 clustered at
+# 30.1-31.0s (a fixed ceiling, not a latency distribution). Like the login value
+# it MUST stay strictly below the EFFECTIVE request_timeout_s (the ctor arg, not
+# necessarily the module constant); the guard in __init__ enforces that.
+MT5_INITIALIZE_TIMEOUT_MS = int(os.getenv("MT5_INITIALIZE_TIMEOUT_MS", "20000"))
+
+# The registry of every MT5 call that carries its OWN `timeout=` (milliseconds),
+# mapped to its default value.
+#
+# ⛔ ANY MT5 call that carries its own timeout MUST appear here. Both the
+# construction-time ordering guard (`Mt5Client.__init__`) and the source-derived
+# completeness test (`tests/test_mt5_client_contract.py`) read this table, so a
+# call bound OUTSIDE it is unguarded and untested — which is exactly the D-24
+# defect: `initialize()` was bound nowhere, the guard covered `login()` only, and
+# the resulting inversion censored every production verdict for months.
+MT5_IPC_TIMEOUTS_MS: dict[str, int] = {
+    "initialize": MT5_INITIALIZE_TIMEOUT_MS,
+    "login": MT5_LOGIN_TIMEOUT_MS,
+}
 
 
 class Mt5ClientError(RuntimeError):
@@ -201,22 +387,57 @@ class Mt5Client:
         *,
         _connect: Callable[..., Any] | None = None,
         request_timeout_s: float = MT5_REQUEST_TIMEOUT_S,
+        initialize_timeout_ms: int | None = None,
+        login_timeout_ms: int | None = None,
     ) -> None:
+        # Resolve the PER-INSTANCE IPC-timeout chain (153.3 / D-25). The module
+        # constants are the defaults, so a construction that passes no override is
+        # byte-identical in behaviour to the pre-153.3 client — which is what keeps
+        # job_worker.py, services/ingestion/mt5.py and scripts/mt5_spike.py (all of
+        # which build `Mt5Client(host, port)`) on the worker's 30s chain. The
+        # INTERACTIVE validate path is the caller that supplies longer values,
+        # together with a longer `request_timeout_s`; raising the module constants
+        # instead would lengthen the SEQUENTIAL worker's chain too and reopen the
+        # v1.11 WEDGE-01 wedge class (a hung terminal past the ~90s healthz budget).
+        # Resolution starts from the registry, so a call added to MT5_IPC_TIMEOUTS_MS
+        # is carried on its default even before it earns a ctor override.
+        ipc_timeouts_ms: dict[str, int] = dict(MT5_IPC_TIMEOUTS_MS)
+        for _call_name, _override in (
+            ("initialize", initialize_timeout_ms),
+            ("login", login_timeout_ms),
+        ):
+            if _override is not None:
+                ipc_timeouts_ms[_call_name] = _override
+
         # Enforce the load-bearing dual-timeout ORDERING (Pitfall 3 / T-134-04)
-        # where the two effective values finally meet: the MT5 login IPC timeout
-        # (ms) MUST stay strictly BELOW the rpyc sync_request_timeout (s -> ms) so
-        # MT5 fails its own pipe first and rpyc surfaces a clean error instead of a
-        # raw mid-handshake abort. A too-small request_timeout_s (ctor arg or a low
+        # where the effective values finally meet: EVERY MT5 IPC timeout (ms) MUST
+        # stay strictly BELOW the rpyc sync_request_timeout (s -> ms) so MT5 fails
+        # its own pipe first and rpyc surfaces a clean error instead of a raw
+        # mid-handshake abort. A too-small request_timeout_s (ctor arg or a low
         # MT5_REQUEST_TIMEOUT_S env) silently inverts it and reopens the v1.11
         # WEDGE-01 wedge class, so fail loud at construction rather than at a hung
         # live login.
-        if MT5_LOGIN_TIMEOUT_MS >= request_timeout_s * 1000:
-            raise ValueError(
-                "MT5 login IPC timeout must be strictly below the rpyc request "
-                f"timeout ({MT5_LOGIN_TIMEOUT_MS}ms >= "
-                f"{request_timeout_s * 1000:.0f}ms) — this inversion reopens the "
-                "v1.11 WEDGE-01 wedge class."
-            )
+        #
+        # 153.3 / D-24: this guard used to check MT5_LOGIN_TIMEOUT_MS ALONE — the
+        # instance its author had in mind — while `initialize()` ran unbound on
+        # MetaTrader5's 60000ms vendor default, 2x the rpyc bound. That inversion is
+        # what censored 9/9 correlated gateway<->worker failures at 30.1-31.0s on
+        # 2026-08-06/08: the first MT5 call could not physically answer in time. The
+        # guard therefore covers the whole CLASS — every entry of the per-instance
+        # table resolved above — and the contract suite derives the set of
+        # timeout-carrying calls from THIS source file so a third one cannot land
+        # unregistered. Iteration is sorted so a multi-inversion always names the
+        # same call first (a deterministic message, not an arbitrary dict order).
+        request_timeout_ms = request_timeout_s * 1000
+        for call_name in sorted(ipc_timeouts_ms):
+            ipc_ms = ipc_timeouts_ms[call_name]
+            if ipc_ms >= request_timeout_ms:
+                raise ValueError(
+                    f"MT5 {call_name}() IPC timeout must be strictly below the rpyc "
+                    f"request timeout ({ipc_ms}ms >= "
+                    f"{request_timeout_ms:.0f}ms) — this inversion reopens the "
+                    "v1.11 WEDGE-01 wedge class."
+                )
         # `_connect` is the injectable transport seam for the offline contract
         # suite (mirrors SfoxClient's _clock/_sleep injection). Default is the
         # lazy real transport.
@@ -229,8 +450,51 @@ class Mt5Client:
         self._host = host
         self._port = port
         self._request_timeout_s = request_timeout_s
+        # The resolved per-call IPC ceilings live on the INSTANCE, so restart()
+        # (which rebuilds the transport with the same wiring) cannot silently drop
+        # back to the module constants.
+        self._ipc_timeouts_ms = ipc_timeouts_ms
         self._mt5 = connect(host=host, port=port, timeout=request_timeout_s)
         self._closed = False
+
+    def _timed(self, stage: str, call: Callable[[], _T]) -> _T:
+        """Run ONE MT5 round-trip under a `perf_counter` bracket, emitting its
+        `stage` + `duration_ms` event on BOTH outcomes (153.3 / D-32).
+
+        ONE helper, not a bracket copy-pasted at ten call sites: a per-site
+        bracket is how half the sites end up un-instrumented, and a population
+        that silently excludes the failures is exactly the censored measurement
+        this exists to replace.
+
+        ⛔ The exception is re-raised UNCHANGED — same object, same type, same
+        message, same `__traceback__`. Timing must not alter what any caller
+        observes (T-153.3-24); in particular this composes with `_guarded_read`
+        rather than replacing it, so a raw transport raise is still converted to
+        a scrubbed typed `Mt5ClientError` exactly as before. The bracket sits
+        INSIDE that conversion deliberately, so `error_class` records the RAW
+        transport class (an rpyc `EOFError`, a socket timeout) instead of the
+        uniform `Mt5ClientError` every failure would otherwise report.
+
+        `BaseException` is caught, not `Exception`: a cancellation or a
+        `KeyboardInterrupt` mid-round-trip is precisely the long-tail case whose
+        duration we want, and the bare `raise` means catching it changes nothing.
+        """
+        started_at = time.perf_counter()
+        try:
+            result = call()
+        except BaseException as exc:  # noqa: BLE001 — re-raised bare on the next line
+            emit_mt5_stage_event(
+                stage,
+                started_at,
+                ok=False,
+                terminal_key=self.terminal_key,
+                error_class=type(exc).__name__,
+            )
+            raise
+        emit_mt5_stage_event(
+            stage, started_at, ok=True, terminal_key=self.terminal_key
+        )
+        return result
 
     def _raise_last(self) -> NoReturn:
         """Capture `last_error()` IMMEDIATELY (the next remote call overwrites it)
@@ -241,8 +505,13 @@ class Mt5Client:
         # unscrubbed rpyc traceback, bypassing the single typed fail-loud choke
         # point (router 500 instead of clean 400; worker skips the mt5 classify
         # arms). Convert it exactly as _guarded_read does.
+        #
+        # D-32: it is TIMED for the same reason it is guarded — it is a full
+        # remote round-trip taken AFTER the verdict is already known, and
+        # EVIDENCE §1b records a failed attempt paying a SECOND full 30s here.
+        # An un-timed `last_error` makes every failure look like one round-trip.
         try:
-            err = self._mt5.last_error()
+            err = self._timed("last_error", self._mt5.last_error)
         except Mt5ClientError:
             raise
         except Exception as exc:  # noqa: BLE001 — never let raw transport text escape
@@ -259,7 +528,7 @@ class Mt5Client:
             code, text = 0, "unknown (malformed last_error shape)"
         raise Mt5ClientError(code, text)
 
-    def _guarded_read(self, call: Callable[[], Any]) -> Any:
+    def _guarded_read(self, call: Callable[[], Any], *, stage: str | None = None) -> Any:
         """Run a raw transport read, converting ANY transport-RAISED exception
         into a scrubbed, typed `Mt5ClientError` (T-134-01). `mt5linux` speaks rpyc
         classic: a round-trip that raises (a remote traceback carrying the
@@ -270,9 +539,18 @@ class Mt5Client:
         (e.g. a `_materialize` degenerate-shape raise) passes through unchanged.
         Only RAISES are intercepted — the `None` (error) vs `()` (honest empty)
         RETURN discipline is untouched (the returned value is handed straight
-        back)."""
+        back).
+
+        `stage` (153.3 / D-32) composes the timing bracket INTO this one wrapper
+        — the single place every non-login read already passes through — rather
+        than wrapping it from outside. Two consequences, both deliberate: the
+        measured span is the RAW round-trip (not the round-trip plus our own
+        conversion), and `error_class` names the raw transport exception instead
+        of the `Mt5ClientError` this method uniformly produces. `stage=None`
+        keeps the pre-D-32 behaviour byte-for-byte for any caller that has no
+        stage to name."""
         try:
-            return call()
+            return call() if stage is None else self._timed(stage, call)
         except Mt5ClientError:
             raise
         except Exception as exc:  # noqa: BLE001 — never let raw transport text escape
@@ -286,9 +564,11 @@ class Mt5Client:
         remotely-eval'd code, so a raw rpyc remote traceback is a real credential
         disclosure (T-134-01). Because the credential values are in scope here,
         they are ALSO redacted by value (login/server, not just `password=`
-        shapes) on top of the shape-based `scrub_freeform_string`. The MT5 IPC
-        login timeout is passed explicitly and stays below the rpyc request
-        timeout (Pitfall 3).
+        shapes) on top of the shape-based `scrub_freeform_string`. BOTH MT5 calls
+        below carry an explicit millisecond ceiling taken from this instance's
+        `_ipc_timeouts_ms` (registered in ``MT5_IPC_TIMEOUTS_MS``, ordering-checked
+        at construction), so each stays strictly below the rpyc request timeout and
+        MT5 can fail its own pipe first (Pitfall 3 / D-24).
 
         initialize() FIRST (T-139 go-live): the MT5 Python API requires
         ``initialize()`` to attach the terminal's IPC pipe before ANY call —
@@ -296,13 +576,20 @@ class Mt5Client:
         ``-10004 'No IPC connection'`` against a real terminal (verified live on
         the prod gateway; the offline doubles never exercised it). The gateway
         terminal is already running and investor-auto-logged-in, so a bare
-        ``initialize()`` attaches to the running instance (it is idempotent — a
-        no-op True when already attached), and the explicit ``login()`` below then
-        (re)authenticates the EXPECTED investor account under our controlled
-        timeout + read-only semantics. initialize() carries no credentials, but its
-        transport text is scrubbed on the same fail-loud path for safety."""
+        ``initialize()`` attaches to the running instance ([ASSUMED] idempotent —
+        a no-op True when already attached: that is OUR empirical observation, not
+        a MetaQuotes-documented guarantee, EVIDENCE Correction C-7; owner Phase 155
+        (MT5-VERIFY)), and the explicit ``login()`` below then (re)authenticates the
+        EXPECTED investor account under our controlled timeout + read-only
+        semantics. initialize() carries no credentials, but its transport text is
+        scrubbed on the same fail-loud path for safety."""
         try:
-            inited = self._mt5.initialize()
+            inited = self._timed(
+                "initialize",
+                lambda: self._mt5.initialize(
+                    timeout=self._ipc_timeouts_ms["initialize"]
+                ),
+            )
         except Mt5ClientError:
             raise
         except Exception as exc:  # noqa: BLE001 — never let raw transport text escape
@@ -310,8 +597,14 @@ class Mt5Client:
         if not inited:
             self._raise_last()
         try:
-            ok = self._mt5.login(
-                login, password=password, server=server, timeout=MT5_LOGIN_TIMEOUT_MS
+            ok = self._timed(
+                "login",
+                lambda: self._mt5.login(
+                    login,
+                    password=password,
+                    server=server,
+                    timeout=self._ipc_timeouts_ms["login"],
+                ),
             )
         except Mt5ClientError:
             raise
@@ -326,7 +619,39 @@ class Mt5Client:
 
     def account_info(self) -> dict[str, Any]:
         """Current account snapshot as a native dict. None (error) -> typed raise."""
-        info = self._guarded_read(self._mt5.account_info)
+        info = self._guarded_read(self._mt5.account_info, stage="account_info")
+        if info is None:
+            self._raise_last()
+        return _materialize(info)
+
+    def terminal_info(self) -> dict[str, Any]:
+        """Current TERMINAL snapshot as a native dict. None (error) -> typed raise.
+
+        This reads the state of the MetaTrader terminal WE operate (the gateway
+        process), NOT the user's account — it carries no credential of theirs.
+        Two fields are load-bearing for the Phase-153.3 capability rule (D-31,
+        EVIDENCE §C12):
+
+          * ``connected`` — is the terminal attached to a trade server. MQL5
+            "Trade permission" lists "no connection to the trade server" as a
+            SIBLING cause of ``account_info().trade_allowed`` being false, so a
+            detached terminal makes the account-level negative unattributable.
+          * ``trade_allowed`` — the terminal-level AutoTrading permission. It
+            subsumes the terminal option *"Disable automatic trading through the
+            external Python API"*, which MetaQuotes ships **ON by default, "for
+            security reasons"**. With that option in force ``order_check`` is
+            refused from Python REGARDLESS of investor vs master, so a MASTER
+            password produces exactly the two negatives an investor password
+            produces.
+
+        That is why this method exists: a false ``trade_allowed`` here makes the
+        account-level negatives UNINFORMATIVE, and a rule that concluded
+        "read-only" from them would stamp a trade-capable password read-only —
+        a fail-OPEN on the one security property the probe exists to prove.
+        ``services.mt5_validation.classify_trade_capability`` therefore refuses
+        (``"undetermined"``) rather than concluding.
+        """
+        info = self._guarded_read(self._mt5.terminal_info, stage="terminal_info")
         if info is None:
             self._raise_last()
         return _materialize(info)
@@ -347,7 +672,9 @@ class Mt5Client:
         tz-aware datetimes; a naive/aware datetime → ``int(ts.timestamp())`` (the tz
         offset is immaterial for a range filter)."""
         _from, _to = _epoch_bound(from_ts), _epoch_bound(to_ts)
-        deals = self._guarded_read(lambda: self._mt5.history_deals_get(_from, _to))
+        deals = self._guarded_read(
+            lambda: self._mt5.history_deals_get(_from, _to), stage="history_deals_get"
+        )
         if deals is None:
             self._raise_last()
         return [_materialize(d) for d in deals]
@@ -368,22 +695,131 @@ class Mt5Client:
         positional dict with retcode ``-2 'Unnamed arguments not allowed'`` — it wants
         the named request fields (verified live). ``**request`` produces
         ``mt5.order_check(action=…, symbol=…, …)`` which MT5 accepts."""
-        result = self._guarded_read(lambda: self._mt5.order_check(**request))
+        result = self._guarded_read(
+            lambda: self._mt5.order_check(**request), stage="order_check"
+        )
         if result is None:
             self._raise_last()
         return _materialize(result)
 
+    def _teardown_transport(
+        self, mt5_obj: Any, *, who: str, stage: str | None
+    ) -> None:
+        """Close ONE rpyc transport, best-effort — the single teardown mechanism
+        behind `close()`, `release()` and `restart()`'s stale disposal (153.3 / D-35).
+
+        ONE implementation, three call sites, because two copies of a teardown are
+        two teardowns that will diverge: `close()` and `release()` are two public
+        names for exactly the same act, and the whole point of D-35 is that neither
+        of them can quietly regrow a `shutdown()`.
+
+        `stage=None` runs the close WITHOUT a `_timed` bracket — that is `restart()`,
+        which is deliberately ONE timed stage end to end (recovery latency is the
+        actionable number), so a nested `close`/`release` event there would double-
+        count and misreport.
+
+        `mt5_obj` is passed explicitly rather than read from `self._mt5` because
+        `restart()` disposes the STALE connection AFTER the fresh one has already
+        been swapped in (the WR-01 ordering).
+        """
+        # ponytail: mt5linux 0.1.9 exposes NO transport-close method of its own
+        # (`shutdown` forwards to MetaTrader5, which is the very thing we must not
+        # do), so reach the rpyc connection through the same name-mangled private
+        # attribute `_default_connect` already sets `sync_request_timeout` on.
+        # Stable for the same reason: mt5linux is pinned ==0.1.9 and rpyc's
+        # `close()` is stable across the 5.x line.
+        conn = getattr(mt5_obj, "_MetaTrader5__conn", None)
+        transport_close = getattr(conn, "close", None)
+        if not callable(transport_close):
+            # ⛔ Never a silent no-op: a socket that is neither closed nor reported
+            # is a leak nobody can see. This is the offline double's shape today (or
+            # a future transport shape), and it must be VISIBLE if it ever becomes
+            # production's shape.
+            logger.warning(
+                "%s: no rpyc transport close reachable "
+                "(_MetaTrader5__conn.close absent) — the connection is abandoned, "
+                "not closed.",
+                who,
+            )
+            return
+        closer = cast(Callable[[], Any], transport_close)
+        try:
+            if stage is None:
+                closer()
+            else:
+                self._timed(stage, closer)
+        except Exception:  # noqa: BLE001 — a teardown error must not mask caller errors
+            logger.warning("%s: transport close() raised; swallowing.", who)
+
     def close(self) -> None:
-        """Bounded, idempotent shutdown of the terminal session. A teardown failure
-        is swallowed so it never masks the caller's error, and shutdown() is never
-        called twice (mirrors SfoxClient.aclose)."""
+        """End OUR use of the terminal. Bounded, idempotent, and it NEVER calls
+        `mt5.shutdown()` (153.3 / D-35, completing D-30).
+
+        WHY the shutdown is gone rather than merely moved: `mt5linux` serves EVERY
+        rpyc connection from ONE `ThreadedServer` process over ONE shared
+        `MetaTrader5` module instance holding ONE IPC pipe to ONE terminal
+        (153-EVIDENCE-mt5-platform §A2 / Correction C-1). A `shutdown()` from ANY
+        caller therefore destroys that pipe for EVERY concurrent caller, who then
+        observe `-10004 No IPC connection`. D-30 took the call off the request path;
+        that left the class half-closed, because two more callers still reached it
+        from the other direction and `main.py:83-91` runs the worker loops INSIDE
+        the API process — one `await` from a user's validate:
+          - `services/exchange.py`'s `aclose_exchange` mt5 arm (the dispatch
+            epilogue), and
+          - `services/ingestion/mt5.py`'s adapter `finally`.
+        Deleting the call HERE fixes both — and both operator scripts — with zero
+        per-call-site edits. That is the difference between ending a class and
+        adding a third point-fix. Neither caller can be fixed at its own site
+        anyway: both run in a `finally` outside the terminal lease, so leasing them
+        would mean queueing inside an error path to buy permission to do something
+        destructive.
+
+        What we give up by never calling it: nothing we had. Per EVIDENCE §A6,
+        `shutdown()` "closes the IPC connection. It does not close the terminal,
+        does not log the account out, and does not reset terminal state." We are
+        not reclaiming a per-request resource; we were dropping a shared one — at a
+        measured cost of a second full 30.02-30.03 s in all nine of the correlated
+        2026-08-06/08 production failures. "Attach once, never tear down" is the
+        EVIDENCE's own recommendation.
+
+        What this still DOES: release our own rpyc socket (Pitfall 6). "Release my
+        connection" and "shut down the terminal's IPC" are two different things, and
+        this method now performs only the first. `release()` is the same act under
+        the other name — one implementation, `_teardown_transport`.
+
+        The ONLY remaining `shutdown()` in the tree is `restart()`'s: deliberate,
+        the sole heal for a genuinely wedged pipe, and lease-held at every call
+        site — asserted from source by `tests/test_mt5_shutdown_roster.py`.
+        """
         if self._closed:
             return
         self._closed = True
-        try:
-            self._mt5.shutdown()
-        except Exception:  # noqa: BLE001 — a close error must not mask caller errors
-            logger.warning("Mt5Client.close: shutdown() raised; swallowing.")
+        self._teardown_transport(self._mt5, who="Mt5Client.close", stage="close")
+
+    def release(self) -> None:
+        """Give up OUR use of the terminal WITHOUT ending anybody else's (153.3 / D-30).
+
+        Since D-35 this is observationally identical to `close()` — same latch, same
+        transport teardown, same zero `shutdown()` calls — and deliberately so: the
+        two names share ONE implementation (`_teardown_transport`) precisely so they
+        cannot diverge, and so an "also call close() for safety" line at any call
+        site is harmless rather than destructive.
+
+        It:
+          1. latches `_closed` FIRST, so a later `close()` is a structural no-op;
+          2. best-effort closes the rpyc TRANSPORT (our socket), which is what
+             actually ends our lease on the shared server;
+          3. swallows a raising teardown with a logged WARNING — a teardown failure
+             must never mask the caller's verdict.
+
+        The name is retained (rather than collapsed into `close()`) because it states
+        the INTENT at the request-path call sites that D-30 re-pointed: this verb
+        borrows the terminal, it never owns it.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        self._teardown_transport(self._mt5, who="Mt5Client.release", stage="release")
 
     def restart(self) -> None:
         """Tear down a wedged terminal and re-establish the transport (MT5CONC-01).
@@ -409,6 +845,20 @@ class Mt5Client:
         IF the stale connection's shutdown would block; the abandoned stale shutdown
         can no longer prevent the reconnect.
 
+        ⭐ THE ONE PERMITTED ``shutdown()`` (153.3 / D-35). Every other teardown in
+        this client was deleted, because a ``shutdown()`` on this deployment
+        destroys the ONE shared IPC pipe for every concurrent caller. This one
+        STAYS, deliberately: with nobody else calling it, a genuinely wedged pipe is
+        healed ONLY here (MT5CONC-01), and destroying a pipe that is already wedged
+        is the point rather than the hazard. It is safe to keep because every one of
+        its call sites holds the terminal lease — ``allocator_positions.py`` x2 and
+        ``job_worker.py`` x2, all lexically inside ``async with
+        _mt5_terminal_lock_for(...)`` / ``mt5_terminal_lease(...)`` — so no
+        concurrent caller can be attached when it fires. That is not a belief:
+        ``tests/test_mt5_shutdown_roster.py`` derives BOTH facts from source (this
+        is the only ``shutdown()`` call node in the tree, and every restart call
+        site is lease-enclosed) and reds when a new site appears.
+
         Unlike ``close()`` this does NOT gate on ``self._closed`` and NEVER calls
         ``close()``: restart's contract is teardown+rebuild regardless of prior
         state, and it clears ``self._closed`` so the fresh session is closable
@@ -423,19 +873,40 @@ class Mt5Client:
         the offline ``_connect`` double, reconnect + best-effort ``shutdown()`` is
         the full exercised surface.
         """
-        stale = self._mt5
-        # Rebuild + swap in the fresh connection FIRST (see ORDERING above).
-        self._mt5 = self._connect(
-            host=self._host, port=self._port, timeout=self._request_timeout_s
-        )
-        self._closed = False
-        # Best-effort dispose of the stale connection AFTER the fresh one is live, so
-        # a shutdown() that blocks (an abandoned reader still driving `stale`) can
-        # never prevent the reconnect. A raising teardown is swallowed like close().
-        try:
-            stale.shutdown()
-        except Exception:  # noqa: BLE001 — a wedged teardown must not abort recovery
-            logger.warning("Mt5Client.restart: stale shutdown() raised; swallowing.")
+        # D-32: the WHOLE restart is one timed stage, not two. Recovery latency is
+        # what a Phase-155 reader needs (how long a wedged terminal costs us), and
+        # the reconnect and the stale disposal are not independently actionable —
+        # the ordering above deliberately makes the second one best-effort.
+        def _reconnect_then_dispose_stale() -> None:
+            stale = self._mt5
+            # Rebuild + swap in the fresh connection FIRST (see ORDERING above).
+            self._mt5 = self._connect(
+                host=self._host, port=self._port, timeout=self._request_timeout_s
+            )
+            self._closed = False
+            # Best-effort dispose of the stale connection AFTER the fresh one is live,
+            # so a shutdown() that blocks (an abandoned reader still driving `stale`)
+            # can never prevent the reconnect. A raising teardown is swallowed like
+            # close().
+            try:
+                stale.shutdown()
+            except Exception:  # noqa: BLE001 — a wedged teardown must not abort recovery
+                logger.warning(
+                    "Mt5Client.restart: stale shutdown() raised; swallowing."
+                )
+            # D-35: and close the stale rpyc SOCKET too. Telling the terminal to
+            # shut down never closed OUR end of the pipe, so every restart used to
+            # leak one socket. This is a SEPARATE try from the shutdown above, both
+            # ways round: a raising shutdown must not skip the socket close, and a
+            # raising socket close must not mask the shutdown's warning.
+            # ⚠️ ORDERING (WR-01) is preserved verbatim — reconnect FIRST, dispose
+            # SECOND — and BOTH dispose steps are best-effort. Neither is bounded
+            # here; the caller's `_MT5_RESTART_TIMEOUT_S` (mt5_concurrency:68-70)
+            # is what stops a stale socket an abandoned reader is parked on from
+            # blocking recovery, exactly as it already did for the shutdown.
+            self._teardown_transport(stale, who="Mt5Client.restart", stage=None)
+
+        self._timed("restart", _reconnect_then_dispose_stale)
 
     @property
     def terminal_key(self) -> str:

@@ -206,7 +206,28 @@ EXPECTED_NON_LITERAL_STATUS_SITES_UNDER_LOOSE_READING = 4
 #: BLIND SPOT (b): in-tree ``HTTPException`` subclasses and their construction
 #: sites. Latent, not live — every site is a 4xx today.
 EXPECTED_HTTPEXCEPTION_SUBCLASSES = 1
-EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 7
+#: 7 -> 8 (2026-08-09, Phase 153.3 / D-31): ``_validate_mt5_key`` gained a FOURTH
+#: ``VenueTransientHTTPException(424)`` site — the capability-``undetermined``
+#: refusal taken when the gateway terminal's trade-permission signal is
+#: unreadable or the terminal is detached from the trade server. It reuses the
+#: EXISTING transient arm (no new user-facing code is minted here; 153.1 owns the
+#: TS code table), and it is a 4xx like every other site, so blind spot (b) stays
+#: latent rather than live.
+#: 8 -> 9 (2026-08-09, Phase 153.3-03 / D-03): the MT5 validate probe gained ONE
+#: end-to-end deadline above its per-stage ceilings, and its expiry routes to the
+#: SAME transient arm as a probe-stage timeout (a hung terminal is a hung terminal)
+#: — a fifth ``VenueTransientHTTPException(424)`` construction, again a 4xx.
+#: The three MT5 probe-arm sites now resolve to the enclosing ``_connect_and_probe``
+#: rather than ``_validate_mt5_key``: connect+probe moved into one inner coroutine so
+#: a single deadline could bound them. Same function, same arms, one scope deeper.
+#: 9 -> 10 (2026-08-09, Phase 153.3-04 / D-29): the MT5 validate path now takes the
+#: shared terminal lease with a BOUNDED acquisition wait, and a caller still queued
+#: at that bound routes to the SAME transient arm — a busy terminal is recoverable
+#: ("try again" is honest advice: it frees up) and is OUR infrastructure, never the
+#: user's key. A sixth ``VenueTransientHTTPException(424)`` construction; no new
+#: user-facing code is minted (153.1 owns the TS code table) and it is a 4xx like
+#: every other site, so blind spot (b) stays LATENT rather than live.
+EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 10
 
 #: Vacuity fence. A scanner that matched nothing would report agreement with the
 #: quarantine forever, so the scan must prove it saw the tree. Loose floors on

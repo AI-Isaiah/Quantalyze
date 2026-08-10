@@ -56,6 +56,173 @@ export const EXCHANGE_DISPLAY = {
 export type ExchangeDisplay = (typeof EXCHANGE_DISPLAY)[SupportedExchange];
 
 /**
+ * Per-venue CAPABILITY facts (Phase 153.1 — D-17, D-22).
+ *
+ * These are facts about the VENUE, not about what we offer. Deliberately NOT gated on
+ * MT5_UI_ENABLED / SFOX_UI_ENABLED below: a capability is true whether or not the card
+ * is on screen, and flag-gating it would make the copy layer's behaviour depend on a UI
+ * flag.
+ *
+ * Why a record instead of `if (venue === "mt5")`: two different layers (the
+ * finalize-wizard scope-probe gate and the wizardErrors copy filter) ask the same
+ * venue-shaped question. Answered once here, a venue that behaves like MT5 costs one
+ * row; answered at each call site, it costs an unbounded instance-check sweep — the
+ * instance-not-class defect this repo has already paid for once.
+ *
+ * Every member is OPTIONAL and ABSENT means the INCUMBENT behaviour, so a venue that
+ * omits a key behaves byte-identically to today. That is the `ExchangeOption`
+ * `requiresSecret?` / `passphraseSecret?` precedent (ConnectKeyStep.tsx), applied to
+ * an isomorphic module because these facts are needed on BOTH sides of the wire.
+ */
+export interface VenueCapabilities {
+  /**
+   * Does this venue answer a per-key permissions probe (the submit-time
+   * scope-broadening probe)? Absent → TRUE, which is what every ccxt venue does, so
+   * every existing and future venue that omits the key probes exactly as it does today.
+   *
+   * `mt5` sets false: MT5 read-only is enforced STRUCTURALLY (Mt5Client composes only
+   * read methods — there is no order/withdraw/transfer surface to broaden) and
+   * BEHAVIOURALLY (the `order_check` master-login rejection), and MT5 exposes no
+   * per-key scope endpoint. The probe has nothing to ask.
+   *
+   * ⚠️ Read this through `venueSupportsScopeProbe()`, never by indexing the record:
+   * the predicate is what makes an UNRESOLVED venue still get probed, and that
+   * direction is a security property (ASVS V4).
+   *
+   * Consumer: Phase 153.2's finalize-wizard probe gate (D-14) — not this sub-phase.
+   */
+  scopeProbeSupported?: boolean;
+  /**
+   * Is there another venue the user could plausibly use instead, i.e. is "switch to a
+   * different exchange" a REAL remedy? Absent → TRUE, which is what every ccxt venue
+   * is, so the incumbent remedy copy is preserved everywhere it renders today.
+   *
+   * `mt5` sets false: the broker account IS the venue. Telling an MT5 user to use a
+   * different exchange is an unwinnable remedy (D-17 — the same class as MT5-13 and
+   * the deleted "0 trades" message).
+   *
+   * Consumer: 153.1-03's copy filter in wizardErrors.ts.
+   */
+  substitutable?: boolean;
+  /**
+   * Are this venue's calls SERIALIZED behind one shared lease, so that a long wait is
+   * QUEUEING rather than slowness? Absent → FALSE, which is what every ccxt venue is
+   * (per-key calls run concurrently) — and claiming a queue we cannot observe would be
+   * inventing a specific fact about the user's situation.
+   *
+   * `mt5` sets true: every gateway call funnels through a single terminal lease (one
+   * logged-in account per terminal), so N concurrent validations genuinely queue.
+   *
+   * Consumer: Phase 153.4's long-wait copy (D-05).
+   */
+  serialized?: boolean;
+}
+
+/**
+ * One capability row per SUPPORTED_EXCHANGES member. `as const satisfies
+ * Record<SupportedExchange, VenueCapabilities>` makes a missing row a COMPILE error, so
+ * a seventh venue physically cannot ship without one — the same discipline
+ * EXCHANGE_DISPLAY uses above.
+ *
+ * ⛔ This adds NO membership anywhere. `mt5` is already a member of SUPPORTED_EXCHANGES
+ * and EXCHANGE_DISPLAY, so giving it a row widens nothing; it stays OUT of
+ * UI_EXCHANGE_CODES / EXCHANGES / FUNDING_EXCHANGES / CRYPTO_EXCHANGES (the chip-set
+ * widening is Phase 153.2's, D-16/D-20, and CRYPTO_EXCHANGES membership drives the
+ * √365-vs-√252 annualization split).
+ */
+export const VENUE_CAPABILITIES = {
+  binance: {},
+  okx: {},
+  bybit: {},
+  deribit: {},
+  // D-22: sFOX keeps the submit-time scope probe BYTE-UNCHANGED in this phase, so its
+  // row asserts no capability at all.
+  // ⚠️ OPEN QUESTION, logged in TODOS.md and deliberately NOT answered here (RESEARCH
+  // Q2): sFOX asserts read_only=True structurally for the same reason MT5 does and
+  // exposes no per-key scope endpoint, so it may belong in the opt-out. What is unknown
+  // is whether the ccxt probe currently SUCCEEDS for sFOX or has been silently failing
+  // — and changing sFOX's submit path is outside this phase's requirements.
+  sfox: {},
+  mt5: { scopeProbeSupported: false, substitutable: false, serialized: true },
+} as const satisfies Record<SupportedExchange, VenueCapabilities>;
+
+/**
+ * The capability row for a venue string, or undefined when the venue is null/empty or
+ * is not a supported code. Case-insensitive, like isCryptoExchange below —
+ * canonicalizeExchange hands back the DISPLAY form ("MT5"), so callers legitimately
+ * pass mixed case.
+ *
+ * ⛔ Deliberately NOT exported. Every consumer must go through one of the three
+ * predicates, because the DEFAULT — what an absent key or an unresolved venue means —
+ * is the load-bearing part, and it is different for each capability.
+ */
+function venueCapabilities(
+  venue: string | null | undefined,
+): VenueCapabilities | undefined {
+  if (!venue) return undefined;
+  const key = venue.toLowerCase();
+  // 153.1 review WR-05 — OWN-property only. The key arrives OVER THE WIRE
+  // (153.2 feeds this a venue read off the `api_keys` row), and a plain-object
+  // index resolves "constructor", "toString" and "__proto__" to inherited
+  // members, handing back a truthy object typed as a capability row. This is
+  // the Record-vs-Map rule wizardErrors.ts states twice as a security
+  // property rather than a style choice.
+  //
+  // ⚠️ Today's impact is nil for an ACCIDENTAL reason, which is exactly why
+  // this is worth closing: `Object.prototype` carries none of
+  // `scopeProbeSupported` / `substitutable` / `serialized`, so all three
+  // predicates fall to their declared defaults — the safe directions. That
+  // safety is a property of today's three capability NAMES, not of the
+  // lookup. A fourth capability whose safe default is the other polarity
+  // would be silently subverted for those three keys, and
+  // `venueSupportsScopeProbe` gates an ASVS V4 control.
+  return Object.hasOwn(VENUE_CAPABILITIES, key)
+    ? (VENUE_CAPABILITIES as Record<string, VenueCapabilities>)[key]
+    : undefined;
+}
+
+/**
+ * Should the submit-time scope-broadening probe run for this venue?
+ *
+ * ⚠️ null / undefined / "" / an unknown venue ⇒ **TRUE**, which is the OPPOSITE of
+ * isCryptoExchange's null answer. That asymmetry is deliberate — do not "unify" these
+ * three predicates. This one gates a SECURITY control (ASVS V4): a key broadened to
+ * trade/withdraw between Connect and Submit is caught by the probe, so an unresolved
+ * venue must still be probed. Answering false here would silently disable the defense
+ * for every venue the resolver could not name. The local precedent for "venue
+ * unresolved ⇒ do the conservative thing" is finalize-wizard's `skipAssetClassWrite`
+ * arm, which leaves the existing stamp intact rather than guessing.
+ */
+export function venueSupportsScopeProbe(
+  venue: string | null | undefined,
+): boolean {
+  return venueCapabilities(venue)?.scopeProbeSupported ?? true;
+}
+
+/**
+ * May copy suggest using a different venue instead of this one?
+ *
+ * null / undefined / unknown ⇒ **TRUE**: when the caller did not name a venue we keep
+ * the incumbent copy. Suppressing venue-shaped remedies wherever the venue is unknown
+ * would be a repo-wide copy regression, which is not what D-17 asked for — D-17 asks
+ * that the bullet never renders for a venue we KNOW cannot be substituted.
+ */
+export function venueIsSubstitutable(venue: string | null | undefined): boolean {
+  return venueCapabilities(venue)?.substitutable ?? true;
+}
+
+/**
+ * Are calls to this venue serialized behind one shared lease (so a wait is a queue)?
+ *
+ * null / undefined / unknown ⇒ **FALSE**: never claim queueing we cannot observe. A
+ * surface must not invent a specific fact about why the user is waiting, so the honest
+ * answer for a venue we could not resolve is "not known to queue".
+ */
+export function venueIsSerialized(venue: string | null | undefined): boolean {
+  return venueCapabilities(venue)?.serialized ?? false;
+}
+
+/**
  * Feature flag for the public sFOX offer (Phase 122 / SFOX-08). Strict equality
  * against the EXACT string "true" — fail-closed: "1" / "TRUE" / "on" / "" all
  * read as OFF. Next.js inlines the full static `process.env.NEXT_PUBLIC_SFOX_ENABLED`
@@ -106,8 +273,9 @@ export const SMOOTHED_MTM_UI_ENABLED =
  * static member access (never dynamic `process.env[...]` indexing) or the
  * inlining breaks and the flag reads undefined in the browser.
  *
- * DEFAULT OFF, dark until the founder flips it in Phase 139. It gates ONLY the
- * MT5 venue card in the add-key wizard (ConnectKeyStep's local EXCHANGES array).
+ * DEFAULT OFF, dark until the founder flips it in Phase 139. It gates the MT5
+ * venue card in the add-key wizard (ConnectKeyStep's local EXCHANGES array) and,
+ * since Phase 153.2, MT5's membership of WIZARD_EXCHANGE_CODES below.
  * Flag OFF ⇒ the wizard is BYTE-IDENTICAL to today (no MT5 pixel); a test pins
  * this (ConnectKeyStep.test.tsx + closed-sets.mt5-flag.test.ts).
  *
@@ -116,10 +284,32 @@ export const SMOOTHED_MTM_UI_ENABLED =
  * in Phase 139; either alone is an intentional SAFE half-state (card hidden but
  * gated, or card shown but connect fails closed 400).
  *
- * mt5 stays OUT of UI_EXCHANGE_CODES / EXCHANGES / FUNDING_EXCHANGES /
- * CRYPTO_EXCHANGES regardless of this flag — the manager-surface <Select> must
- * not silently widen (UI-SPEC §MT5-Manager-Parity; the closed-sets.mt5-flag
- * no-widening pin enforces it).
+ * ⚠️ THE FOUR-SET EXCLUSION, RE-CUT (Phase 153.2 / MT5-14 / D-16 / D-20). This
+ * docblock used to say mt5 stays out of UI_EXCHANGE_CODES / EXCHANGES /
+ * FUNDING_EXCHANGES / CRYPTO_EXCHANGES "regardless of this flag", full stop.
+ * Half of that is still true and half of it was outgrown, so it is REWRITTEN
+ * rather than deleted — the next reader should inherit the reasoning, not an
+ * unexplained inversion:
+ *
+ *   · mt5 still stays out of ALL FOUR of those sets, flag on or off. The
+ *     manager-surface <Select> (ApiKeyForm / StrategyForm / StrategyFilters /
+ *     MandateForm / PreferencesPanel / VerificationForm) derives from
+ *     UI_EXCHANGE_CODES and must not silently gain an MT5 option, and the public
+ *     "{EXCHANGES.length} exchanges supported" marketing count must not move
+ *     ((marketing)/page.tsx). That was the pin's original stated reason and it
+ *     is intact.
+ *   · ⛔ CRYPTO_EXCHANGES is the one that is not a UI question at all. Membership
+ *     there selects √365 over √252 for Sharpe / Sortino / volatility, so adding
+ *     mt5 would silently inflate every risk metric on a forex/CFD book (~×1.20
+ *     Sharpe vs crypto peers on the allocator-facing ranking). That is a
+ *     MONEY-MATH boundary, and no UI requirement may cross it.
+ *   · mt5 DOES enter WIZARD_EXCHANGE_CODES when this flag is on (MT5-14). The
+ *     strategy wizard must be able to declare the venue of the key it is
+ *     literally built on — refusing that is not a safety property, it is a
+ *     strategy that cannot name where it trades.
+ *
+ * The closed-sets.mt5-flag pin asserts all four negatives AND the positive, so
+ * neither half of this can drift silently.
  */
 export const MT5_UI_ENABLED = process.env.NEXT_PUBLIC_MT5_ENABLED === "true";
 
@@ -246,6 +436,89 @@ export const FUNDING_EXCHANGES = [
 export const EXCHANGES: readonly ExchangeDisplay[] = UI_EXCHANGE_CODES.map(
   (code) => EXCHANGE_DISPLAY[code],
 );
+
+// --- The wizard-declarable set (Phase 153.2 / MT5-14, D-20 "Option B") ------
+//
+// A venue a strategy may DECLARE as supported in the wizard's metadata step.
+// Deliberately a FIFTH set rather than a widening of UI_EXCHANGE_CODES, and the
+// narrowness is the whole decision:
+//
+//   · `EXCHANGES` — and therefore the public "{EXCHANGES.length} exchanges
+//     supported" count at (marketing)/page.tsx — DOES NOT MOVE. MT5 is a broker
+//     platform, not an exchange, and claiming it as one in public copy would be
+//     a marketing statement made by a UI fix.
+//   · the six manager <Select> surfaces (ApiKeyForm, StrategyForm,
+//     StrategyFilters, MandateForm, PreferencesPanel, VerificationForm) all
+//     derive from UI_EXCHANGE_CODES and DO NOT silently widen. That was the
+//     closed-sets.mt5-flag pin's original stated reason; Option B keeps the
+//     reason intact instead of retiring it, and the pin gains a POSITIVE
+//     assertion here rather than losing a negative there.
+//
+// ⛔ The ONLY consumer is MetadataStep's "Supported exchanges" chip group. If a
+// second consumer ever appears, that is a decision to make deliberately — not a
+// set to reach for because it happens to contain the venue you wanted.
+
+/**
+ * The codes the wizard may offer OVER AND ABOVE the publicly-offered set.
+ *
+ * A separate literal (rather than a fifth hand-typed full tuple) because
+ * WIZARD_EXCHANGE_CODES composes it ON TOP of UI_EXCHANGE_CODES: two
+ * INDEPENDENT flags (SFOX_UI_ENABLED and MT5_UI_ENABLED) would otherwise need
+ * four literals kept in lockstep, and the sFOX flag's behaviour here stays
+ * automatic instead of hand-maintained. `as const satisfies readonly
+ * SupportedExchange[]` keeps the closed-set guarantee on this literal too
+ * (Shared Pattern F).
+ */
+const WIZARD_ONLY_EXCHANGE_CODES = ["mt5"] as const satisfies readonly SupportedExchange[];
+
+/**
+ * The exchange codes the strategy wizard's metadata step may offer.
+ *
+ * = UI_EXCHANGE_CODES, plus mt5 when MT5_UI_ENABLED. Flag OFF ⇒ BYTE-IDENTICAL
+ * to UI_EXCHANGE_CODES, so the wizard has no MT5 pixel and no MT5 chip exists to
+ * preselect (the lowercase "mt5" seeded into MetadataStep's state renders
+ * nowhere, exactly as today).
+ */
+export const WIZARD_EXCHANGE_CODES: readonly SupportedExchange[] = MT5_UI_ENABLED
+  ? [...UI_EXCHANGE_CODES, ...WIZARD_ONLY_EXCHANGE_CODES]
+  : UI_EXCHANGE_CODES;
+
+/**
+ * Display-case wizard-declarable set — derived through EXCHANGE_DISPLAY exactly
+ * as EXCHANGES derives from UI_EXCHANGE_CODES, so casing cannot drift between
+ * the chip a user clicks and the value that is persisted.
+ *
+ * Flag OFF ⇒ deep-equal to EXCHANGES (the pin asserts that as an EQUALITY, not
+ * as two absences).
+ */
+export const WIZARD_EXCHANGES: readonly ExchangeDisplay[] =
+  WIZARD_EXCHANGE_CODES.map((code) => EXCHANGE_DISPLAY[code]);
+
+/**
+ * Canonicalize an exchange name against the WIZARD set — the same shape as
+ * `canonicalizeExchange` in constants.ts (case-insensitive loop; an unknown name
+ * is returned UNCHANGED so a future venue is not silently dropped before this
+ * set learns about it), but looping WIZARD_EXCHANGES so `"mt5"` resolves to
+ * `"MT5"` and matches its chip.
+ *
+ * ⛔ DO NOT "just widen" `constants.ts`'s `canonicalizeExchange` instead. That
+ * function is called SERVER-SIDE at finalize-wizard/route.ts (via
+ * `canonicalizeExchangeList`, on the persisted `supported_exchanges`) and in
+ * WizardClient.tsx, so widening it would change what every caller persists for
+ * every venue — a wire-format change made to fix a chip. This canonicalizer is
+ * wizard-scoped for the same reason the set is.
+ *
+ * Lives here rather than in constants.ts because constants.ts re-exports FROM
+ * this module (the module-header no-cycle rule).
+ */
+export function canonicalizeWizardExchange(name: string): string {
+  if (!name) return name;
+  const lower = name.toLowerCase();
+  for (const canonical of WIZARD_EXCHANGES) {
+    if (canonical.toLowerCase() === lower) return canonical;
+  }
+  return name;
+}
 
 /** Case-insensitive membership against the user exchange allowlist. */
 export function isSupportedExchange(value: string): boolean {
@@ -531,7 +804,25 @@ export const MAGNITUDE_CAPS = {
   MAX_NAME_CHARS: 80,
   /** mandate_archetype free text. */
   MAX_MANDATE_CHARS: 500,
-  /** strategy description free text. */
+  /**
+   * strategy description free text — the LOWER bound (Phase 153.1 / D-23).
+   *
+   * Three consumers must read THIS constant and nothing else: the finalize-wizard
+   * server arm in `validatePayload` (re-pointed in 153.1-05), the MetadataStep inline
+   * field guard, and the MetadataStep `handleSubmit` predicate (both Phase 153.2 —
+   * D-11/D-12/D-13).
+   *
+   * Why it exists: the UPPER bound has been single-sourced here since this table was
+   * minted, while the lower bound was a naked `10` in exactly one route. The client
+   * therefore believed a short description was valid and the server refused it with a
+   * terminal envelope — the drift that cost the founder three failed submits. A bare
+   * literal in a route cannot be read by a client guard; a constant can.
+   *
+   * ⛔ Not a retune. `10` is what the server enforces today; this single-sources the
+   * EXISTING rule.
+   */
+  MIN_DESCRIPTION_CHARS: 10,
+  /** strategy description free text — the UPPER bound. */
   MAX_DESCRIPTION_CHARS: 5000,
   /** founder_notes (admin-only). */
   MAX_FOUNDER_NOTES_CHARS: 10_000,

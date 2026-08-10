@@ -29,19 +29,31 @@ Regression gates — WHY each case matters (Rule 9):
     must stay strictly below the rpyc sync_request_timeout (s) so MT5 fails its
     own pipe first and rpyc surfaces a clean error instead of a raw abort — a hung
     terminal must fail loud fast, never wedge the sequential worker (v1.11 WEDGE).
+  - the ordering is a CLASS rule, not a login rule (153.3 / D-24): `initialize()`
+    ran for months on MetaTrader5's 60000ms vendor default — 2x the rpyc bound —
+    because the guard covered `login()` alone. Every timeout-carrying MT5 call is
+    registered in `MT5_IPC_TIMEOUTS_MS`, the guard iterates the whole table, and
+    the registry's completeness is DERIVED FROM SOURCE below so a third such call
+    cannot land unregistered.
   - idempotent close: a teardown failure must never mask the caller's error, and
     shutdown() must never be called twice.
 """
 from __future__ import annotations
 
+import pathlib
+import re
 import sys
 import threading
 import time
 import types
 
 import pytest
+from structlog.testing import capture_logs
 
+import services.mt5_client as mt5_client_mod
 from services.mt5_client import (
+    MT5_INITIALIZE_TIMEOUT_MS,
+    MT5_IPC_TIMEOUTS_MS,
     MT5_LOGIN_TIMEOUT_MS,
     MT5_REQUEST_TIMEOUT_S,
     Mt5Client,
@@ -64,33 +76,69 @@ class _FakeNamedTuple:
         return dict(self._fields_dict)
 
 
+class _FakeRpycConn:
+    """The rpyc connection object `mt5linux.MetaTrader5` hangs off its name-mangled
+    `_MetaTrader5__conn` attribute — the ONLY transport-close seam 0.1.9 exposes
+    (its `shutdown` forwards to MetaTrader5, which is the very thing `release()`
+    must not do). Shaped, not mocked, so `Mt5Client.release()` genuinely EXERCISES
+    the transport-close branch offline instead of always falling through to the
+    "no transport close reachable" warning.
+    """
+
+    def __init__(self, scenario: dict) -> None:
+        self._scenario = scenario
+        self.close_calls = 0
+        self._config: dict = {}
+
+    def close(self):
+        self.close_calls += 1
+        if self._scenario.get("transport_close_raises"):
+            raise RuntimeError("transport close boom")
+
+
 class _FakeMt5:
     """In-memory RPyC/MT5-shaped double driven by a scenario dict.
 
     Scenario keys (all optional):
       login            -> value login() returns (default True)
       account          -> value account_info() returns
+      terminal         -> value terminal_info() returns
       deals            -> value history_deals_get() returns
       order_check      -> value order_check() returns
       last_error       -> tuple last_error() returns (default (0, "unknown"))
       shutdown_raises  -> if truthy, shutdown() raises
+      transport_close_raises -> if truthy, the rpyc transport close() raises
+      no_transport     -> if truthy, the double exposes NO `_MetaTrader5__conn` at
+                          all, so release() takes its "no transport close
+                          reachable" branch
       login_raises     -> if set, login() RAISES this exception (transport error)
       account_raises   -> if set, account_info() RAISES this exception
+      terminal_info_raises -> if set, terminal_info() RAISES this exception
       last_error_raises -> if set, last_error() RAISES this exception (transport
                            died on the last_error() round-trip itself)
     """
 
     def __init__(self, scenario: dict) -> None:
         self._scenario = scenario
+        if not scenario.get("no_transport"):
+            # Single leading underscore ⇒ NOT re-mangled by this class; the
+            # attribute name is byte-identical to the one mt5linux 0.1.9 sets.
+            self._MetaTrader5__conn = _FakeRpycConn(scenario)
         self.login_calls: list[tuple] = []
+        self.initialize_kwargs: list[dict] = []
         self.shutdown_calls = 0
         self.initialize_calls = 0
         self.call_order: list[str] = []
         self.deals_window: tuple | None = None
         self.order_check_kwargs: dict | None = None
 
-    def initialize(self):
+    def initialize(self, **kwargs):
         # The real terminal needs initialize() before any call (attaches IPC).
+        # **kwargs because initialize() carries its own `timeout=` ms ceiling
+        # (153.3 / D-24) — a double that refused it would TypeError on every login.
+        # Recorded (like login's kwargs) so the ms ceiling is asserted for real
+        # rather than against the impl's own formula.
+        self.initialize_kwargs.append(dict(kwargs))
         self.initialize_calls += 1
         self.call_order.append("initialize")
         exc = self._scenario.get("initialize_raises")
@@ -111,6 +159,12 @@ class _FakeMt5:
         if exc is not None:
             raise exc
         return self._scenario.get("account")
+
+    def terminal_info(self):
+        exc = self._scenario.get("terminal_info_raises")
+        if exc is not None:
+            raise exc
+        return self._scenario.get("terminal")
 
     def history_deals_get(self, from_ts, to_ts):
         self.deals_window = (from_ts, to_ts)  # record the (coerced) bounds
@@ -382,6 +436,236 @@ def test_default_construction_satisfies_timeout_ordering():
     assert MT5_LOGIN_TIMEOUT_MS < MT5_REQUEST_TIMEOUT_S * 1000
 
 
+# -- 153.3 / D-24: the ordering is a CLASS rule, and the registry is complete --
+
+
+def _timeout_carrying_mt5_calls(source: str) -> set[str]:
+    """Derive FROM SOURCE the set of ``self._mt5.<name>(...)`` calls that are passed
+    a ``timeout=`` keyword.
+
+    Whole-line comments are stripped first, so a comment that merely NAMES a call
+    (``# self._mt5.foo(timeout=...)``) can neither satisfy nor break the assertion.
+    Argument text is taken by walking to the matching close-paren rather than by a
+    line-local regex, because ``login(...)`` spans four lines.
+    """
+    body = "\n".join(
+        line for line in source.splitlines() if not line.lstrip().startswith("#")
+    )
+    found: set[str] = set()
+    for match in re.finditer(r"self\._mt5\.(\w+)\(", body):
+        depth, i = 0, match.end() - 1
+        while i < len(body):
+            if body[i] == "(":
+                depth += 1
+            elif body[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        if re.search(r"\btimeout\s*=", body[match.end() : i]):
+            found.add(match.group(1))
+    return found
+
+
+def test_every_timeout_carrying_mt5_call_is_registered():
+    """153.3 / D-24 — THE mechanism that stops the defect class recurring.
+
+    The ordering guard can only protect calls it knows about. `initialize()` was
+    bound nowhere and registered nowhere, so the guard — which checked
+    MT5_LOGIN_TIMEOUT_MS alone — was structurally blind to it, and every
+    production login was censored at the 30s rpyc ceiling (9/9 correlated
+    failures, 2026-08-06/08). Point-fixing `initialize()` would re-ship the class:
+    a THIRD timeout-carrying call could land tomorrow, unregistered, unguarded and
+    green.
+
+    So the set of timeout-carrying calls is derived from `mt5_client.py` ON DISK
+    and every member must be a registry key. The >= 2 floor is load-bearing: a
+    regex that silently stopped matching would otherwise pass by matching nothing
+    (a vacuous green is exactly how the original defect hid).
+    """
+    source = pathlib.Path(mt5_client_mod.__file__).read_text()
+    derived = _timeout_carrying_mt5_calls(source)
+
+    assert len(derived) >= 2, (
+        "the source-derived set collapsed — the extraction is broken, not the code; "
+        f"derived={derived!r}"
+    )
+    # The direct regression for the un-timed call: initialize() must carry a ceiling.
+    assert "initialize" in derived, (
+        "self._mt5.initialize(...) is not passed a timeout= — this is D-24 itself: "
+        "MetaTrader5's 60000ms vendor default applies, 2x the rpyc bound"
+    )
+    unregistered = derived - set(MT5_IPC_TIMEOUTS_MS)
+    assert not unregistered, (
+        f"MT5 call(s) {sorted(unregistered)} carry their own timeout but are absent "
+        "from MT5_IPC_TIMEOUTS_MS — the ordering guard cannot see them (D-24)"
+    )
+
+
+def test_timeout_call_extractor_ignores_comments_and_untimed_calls():
+    """The extractor above is itself under test, on synthetic source.
+
+    Without this, the completeness gate could rot in either direction and stay
+    green: a commented-out call could SATISFY it (masking that the real call was
+    deleted), or a comment could BREAK it (training the next reader to weaken the
+    assertion). Multi-line arguments must be seen, because `login(...)` spans four
+    lines in the real file.
+    """
+    synthetic = "\n".join(
+        [
+            "    def login(self):",
+            "        # self._mt5.commented_out(timeout=1)  <- a comment, not a call",
+            "        self._mt5.untimed()",
+            "        self._mt5.bound(timeout=5)",
+            "        self._mt5.spread(",
+            "            arg,",
+            "            timeout=7,",
+            "        )",
+        ]
+    )
+    assert _timeout_carrying_mt5_calls(synthetic) == {"bound", "spread"}
+
+
+@pytest.mark.parametrize("call_name", sorted(MT5_IPC_TIMEOUTS_MS))
+def test_every_registered_ipc_timeout_is_below_the_rpyc_bound(call_name):
+    """Every registered IPC ceiling — not just login's — must sit strictly below the
+    rpyc round-trip bound, or that call can never deliver an MT5-level answer.
+
+    Parametrized over the registry so a newly-registered call is checked the moment
+    it is added, without anyone remembering to write a test for it.
+    """
+    assert MT5_IPC_TIMEOUTS_MS[call_name] < MT5_REQUEST_TIMEOUT_S * 1000
+
+
+def test_shipped_timeout_chain_is_the_hand_typed_inequality():
+    """The SHIPPED chain, pinned as literals rather than recomputed from the table
+    under test (a self-referential oracle would pass for any consistent set of
+    numbers, including an inverted one).
+
+    Expected relation, typed by hand: 20000ms initialize < 30000ms rpyc bound, and
+    20000ms login < 30000ms rpyc bound.
+
+    ⚠️ This reds if the defaults move OR if MT5_*_TIMEOUT_* is exported in the test
+    environment. Both are things a reader must see: every other assertion in this
+    file (e.g. `test_inverting_request_timeout_is_rejected`, which picks 10.0s
+    precisely because it is below the 20000ms login ceiling) silently assumes this
+    chain.
+    """
+    assert MT5_IPC_TIMEOUTS_MS == {"initialize": 20000, "login": 20000}
+    assert MT5_REQUEST_TIMEOUT_S == 30.0
+    assert 20000 < 30 * 1000  # the ordering, written out
+
+
+def test_login_passes_initialize_ipc_timeout():
+    """D-24 DIRECT REGRESSION for the un-timed call.
+
+    `self._mt5.initialize()` carried NO `timeout=`, so MetaTrader5's vendor default
+    of 60000ms applied INSIDE a 30s rpyc bound — the first MT5 call of every login
+    was structurally incapable of answering in time. Asserted against the recorded
+    kwargs on the double (test-the-wiring), not against the client's own constant
+    expression. Fails against the bare `initialize()` call (no `timeout` key).
+    """
+    connect, fake, _rec = _make({"login": True})
+    client = Mt5Client("host", 18812, _connect=connect)
+    client.login(123, password="pw", server="Broker-Demo")
+    assert fake.initialize_kwargs[0]["timeout"] == MT5_INITIALIZE_TIMEOUT_MS
+    assert MT5_INITIALIZE_TIMEOUT_MS < MT5_REQUEST_TIMEOUT_S * 1000
+
+
+# -- 153.3 / D-25: the chain is PER-INSTANCE, the module constants stay put ----
+
+
+def test_per_instance_overrides_reach_both_mt5_calls():
+    """The validate path's chain (plan 153.3-03): a LONGER rpyc bound plus longer
+    per-call IPC ceilings, built per instance so the SEQUENTIAL worker's module
+    constants never move (D-25 — moving them reopens v1.11 WEDGE-01).
+
+    Both calls must read the OVERRIDDEN values. A client that lengthened only
+    `request_timeout_s` would still log in under the worker's 20000ms IPC ceiling —
+    "longer" only at the top, which is the truncation EVIDENCE Correction C-3
+    describes.
+    """
+    connect, fake, record = _make({"login": True})
+    client = Mt5Client(
+        "host",
+        18812,
+        _connect=connect,
+        request_timeout_s=90.0,
+        initialize_timeout_ms=60000,
+        login_timeout_ms=60000,
+    )
+    client.login(123, password="pw", server="Broker-Demo")
+
+    assert record["timeout"] == 90.0  # the rpyc bound is the instance's, too
+    assert fake.initialize_kwargs[0]["timeout"] == 60000
+    _login_arg, kwargs = fake.login_calls[0]
+    assert kwargs["timeout"] == 60000
+    # and the module constants are untouched by that construction
+    assert MT5_IPC_TIMEOUTS_MS == {"initialize": 20000, "login": 20000}
+
+
+def test_longer_request_timeout_without_overrides_uses_module_defaults():
+    """A longer rpyc bound alone leaves the IPC ceilings at the module defaults —
+    the overrides are opt-in, so the three non-validate construction sites
+    (`job_worker.py`, `services/ingestion/mt5.py`, `scripts/mt5_spike.py`, all of
+    which pass neither) keep today's behaviour byte-for-byte."""
+    connect, fake, _rec = _make({"login": True})
+    client = Mt5Client("host", 18812, _connect=connect, request_timeout_s=90.0)
+    client.login(123, password="pw", server="Broker-Demo")
+
+    assert fake.initialize_kwargs[0]["timeout"] == MT5_INITIALIZE_TIMEOUT_MS
+    _login_arg, kwargs = fake.login_calls[0]
+    assert kwargs["timeout"] == MT5_LOGIN_TIMEOUT_MS
+
+
+def test_inverting_initialize_override_is_rejected_and_names_the_call():
+    """⭐ THE class-vs-instance test. An `initialize` IPC ceiling at or above the
+    effective rpyc bound inverts the ordering exactly as the shipped 60000ms
+    default did, and must fail loud AT CONSTRUCTION — the only posture that makes a
+    bad MT5_INITIALIZE_TIMEOUT_MS visible before a hung production login.
+
+    Deliberately exercises the SECOND member of the class, not `login`: a guard
+    that was point-fixed to bind `initialize()` while still checking only
+    MT5_LOGIN_TIMEOUT_MS constructs this client happily, and this is the assertion
+    that reds. The message must NAME the offending call, because "some timeout
+    inverted" is not actionable at 3am.
+    """
+    connect, _fake, _rec = _make({})
+    with pytest.raises(ValueError) as exc_info:
+        # 30000ms IPC ceiling >= the default 30.0s (30000ms) rpyc bound.
+        Mt5Client("host", 18812, _connect=connect, initialize_timeout_ms=30000)
+    message = str(exc_info.value)
+    assert "initialize" in message
+    assert "login" not in message  # it names the OFFENDER, not the whole table
+    assert "WEDGE-01" in message
+
+
+def test_per_instance_ipc_timeouts_survive_restart():
+    """restart() rebuilds the transport with the SAME wiring (MT5CONC-01). The
+    resolved IPC ceilings live on the instance, so a rebuilt validate client must
+    NOT silently drop back to the worker's module constants — that would make the
+    post-restart retry run the very chain the override exists to avoid."""
+    connect, fake, record = _make({"login": True})
+    client = Mt5Client(
+        "host",
+        18812,
+        _connect=connect,
+        request_timeout_s=90.0,
+        initialize_timeout_ms=60000,
+        login_timeout_ms=60000,
+    )
+    client.login(123, password="pw", server="Broker-Demo")
+
+    client.restart()
+    assert record["connects"] == 2
+    assert record["timeout"] == 90.0  # the instance's rpyc bound, on the rebuild
+
+    client.login(123, password="pw", server="Broker-Demo")
+    assert fake.initialize_kwargs[-1]["timeout"] == 60000
+    _login_arg, kwargs = fake.login_calls[-1]
+    assert kwargs["timeout"] == 60000
+
+
 # -- account_info: None -> raise; populated -> native dict -------------------
 
 
@@ -470,6 +754,79 @@ def test_account_info_materialized_to_native_dict():
     assert info["trade_allowed"] is False
 
 
+# -- terminal_info: the D-31 capability signal, same read discipline ----------
+
+
+def test_terminal_info_materialized_to_native_dict():
+    """terminal_info() netref -> a plain native dict (never the live proxy).
+
+    The two fields the Phase-153.3 capability rule consumes (`connected`,
+    `trade_allowed`) must survive materialization as native booleans; a leaked
+    proxy would die with the connection before the verdict is taken.
+    """
+    connect, _fake, _rec = _make(
+        {
+            "terminal": _FakeNamedTuple(
+                connected=True, trade_allowed=True, community_account=False
+            )
+        }
+    )
+    client = Mt5Client("host", 18812, _connect=connect)
+    info = client.terminal_info()
+    assert isinstance(info, dict)
+    assert not isinstance(info, _FakeNamedTuple)
+    assert info["connected"] is True
+    assert info["trade_allowed"] is True
+
+
+def test_terminal_info_none_raises_via_last_error():
+    """D-31 REGRESSION: a `None` terminal_info() is an ERROR, never data.
+
+    This is the case that must not be softened into `{}` or `None`-as-a-value:
+    the capability rule reads `connected` / `trade_allowed` off this dict, and a
+    silently-empty read would make BOTH look false — which under a rule that
+    treated the read as data (rather than as an error) is precisely how an
+    unreadable terminal turns into a confident verdict. `None` -> typed
+    Mt5ClientError carrying the last_error() code.
+    """
+    connect, _fake, _rec = _make(
+        {"terminal": None, "last_error": (-10004, "No IPC connection")}
+    )
+    client = Mt5Client("host", 18812, _connect=connect)
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.terminal_info()
+    assert exc_info.value.code == -10004
+
+
+def test_terminal_info_transport_raise_is_scrubbed_and_typed():
+    """A transport-RAISED terminal_info() surfaces scrubbed + typed, never a raw
+    rpyc exception (clone of the account_info read-transport guard, T-134-01)."""
+    connect, _fake, _rec = _make(
+        {
+            "terminal_info_raises": RuntimeError(
+                "rpyc timeout; apikey=SUPERSECRET leaked"
+            )
+        }
+    )
+    client = Mt5Client("host", 18812, _connect=connect)
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.terminal_info()
+    assert "SUPERSECRET" not in str(exc_info.value)
+
+
+def test_terminal_info_degenerate_shape_raises():
+    """A terminal_info() return without ._asdict() is degenerate -> fail loud,
+    never coerced into an empty dict (which would read as "terminal says no")."""
+
+    class _NoAsdict:
+        pass
+
+    connect, _fake, _rec = _make({"terminal": _NoAsdict()})
+    client = Mt5Client("host", 18812, _connect=connect)
+    with pytest.raises(Mt5ClientError):
+        client.terminal_info()
+
+
 # -- history_deals_get: the load-bearing None != () != populated trio --------
 
 
@@ -540,14 +897,200 @@ def test_materialize_degenerate_shape_raises():
 # -- close: bounded + idempotent ---------------------------------------------
 
 
-def test_close_is_idempotent_and_swallows_shutdown_errors():
-    """A shutdown() that raises must not propagate; a second close() is a no-op
-    (shutdown is never called twice)."""
-    connect, fake, _rec = _make({"shutdown_raises": True})
+def test_close_is_idempotent_and_swallows_teardown_errors(caplog):
+    """A teardown that raises must not propagate; a second close() is a no-op (the
+    transport is closed exactly once).
+
+    ⚠️ RE-CUT by 153.3-06 / **D-35**. The observable moved from `shutdown_calls` to
+    the transport close, because `close()` no longer calls `mt5.shutdown()` at all
+    — see `test_close_alone_never_reaches_shutdown`. The INTENT is unchanged and is
+    what matters: a teardown failure must never mask the caller's error, and a
+    double close must not double-tear-down.
+    """
+    connect, fake, _rec = _make({"transport_close_raises": True})
     client = Mt5Client("host", 18812, _connect=connect)
-    client.close()  # must not raise even though shutdown() boom-s
-    client.close()  # idempotent no-op
-    assert fake.shutdown_calls == 1
+    with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+        client.close()  # must not raise even though the transport close boom-s
+        client.close()  # idempotent no-op
+    assert fake._MetaTrader5__conn.close_calls == 1
+    assert fake.shutdown_calls == 0
+    assert any("Mt5Client.close" in r.getMessage() for r in caplog.records), (
+        "a swallowed teardown failure must still be LOGGED, never silent"
+    )
+
+
+# -- release: our transport dies, the shared IPC pipe does NOT (153.3 / D-30) --
+#
+# WHY (Rule 9): mt5linux serves every rpyc connection from ONE ThreadedServer
+# process over ONE shared MetaTrader5 module instance holding ONE IPC pipe
+# (153-EVIDENCE-mt5-platform §A2 / Correction C-1). A `shutdown()` issued by one
+# request therefore destroys that pipe for every CONCURRENT caller, who observe
+# `-10004 No IPC connection` — a denial of service against ourselves, which the
+# per-request `finally: client.close()` in routers/exchange.py was performing on
+# every single validate. These cases pin the separation of "release my lease" from
+# "shut the terminal down".
+
+
+def test_release_closes_the_transport_and_never_shuts_down():
+    """⭐ The direct D-30 regression: release() closes OUR rpyc socket and does NOT
+    reach shutdown(). If it ever did, a concurrent validate/derive against the same
+    gateway would lose its IPC pipe mid-probe."""
+    connect, fake, _rec = _make({})
+    client = Mt5Client("host", 18812, _connect=connect)
+    client.release()
+    assert fake._MetaTrader5__conn.close_calls == 1
+    assert fake.shutdown_calls == 0
+
+
+def test_release_makes_the_shutdown_path_unreachable():
+    """⭐ release() then close(): shutdown_calls stays 0.
+
+    This is the stronger statement — not "the request path happens not to call
+    close()" but "after a release, close() CANNOT reach shutdown() on that
+    instance". An "also call close() for safety" regression at any call site is
+    therefore harmless, and this test is what says so."""
+    connect, fake, _rec = _make({})
+    client = Mt5Client("host", 18812, _connect=connect)
+    client.release()
+    client.close()
+    assert fake.shutdown_calls == 0
+    assert fake._MetaTrader5__conn.close_calls == 1
+
+
+def test_release_is_idempotent():
+    """A second release() is a no-op — the transport is closed exactly once
+    (mirrors close()'s `_closed` latch)."""
+    connect, fake, _rec = _make({})
+    client = Mt5Client("host", 18812, _connect=connect)
+    client.release()
+    client.release()
+    assert fake._MetaTrader5__conn.close_calls == 1
+    assert fake.shutdown_calls == 0
+
+
+def test_release_swallows_a_raising_transport_close(caplog):
+    """A teardown failure must never mask the caller's verdict — the same posture
+    close() takes for a raising shutdown(). It is LOGGED, never silent."""
+    connect, fake, _rec = _make({"transport_close_raises": True})
+    client = Mt5Client("host", 18812, _connect=connect)
+    with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+        client.release()  # must NOT raise
+    assert fake._MetaTrader5__conn.close_calls == 1
+    assert fake.shutdown_calls == 0
+    assert any("release" in r.getMessage() for r in caplog.records)
+
+
+def test_release_without_a_reachable_transport_close_warns_loudly(caplog):
+    """⛔ Never a silent no-op. If the transport shape changes (or a double offers
+    no `_MetaTrader5__conn`), the abandoned connection must be REPORTED — an
+    un-closed, un-reported socket is a leak nobody can see. Reddens if the branch
+    is turned into a bare `return`."""
+    connect, fake, _rec = _make({"no_transport": True})
+    client = Mt5Client("host", 18812, _connect=connect)
+    with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+        client.release()
+    assert fake.shutdown_calls == 0
+    assert any(
+        "no rpyc transport close reachable" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_close_alone_never_reaches_shutdown():
+    """⭐ THE DIRECT **D-35** REGRESSION. A bare `close()` — the verb the WORKER
+    paths call — closes OUR transport and reaches `mt5.shutdown()` ZERO times.
+
+    ⚠️ This case is the DELIBERATE RE-CUT of plan 153.3-03's
+    `test_close_alone_still_calls_shutdown_exactly_once`, which pinned
+    `shutdown_calls == 1` and was annotated KNOWINGLY TEMPORARY with D-35 named as
+    its owner. It flipped to `== 0` because D-35 deletes the teardown at the SINK
+    rather than at the call sites: D-30 had taken `shutdown()` off the REQUEST path
+    only, leaving `services/exchange.py`'s `aclose_exchange` mt5 arm and
+    `services/ingestion/mt5.py`'s adapter `finally` still reaching it — and
+    `main.py:83-91` runs the worker loops INSIDE the API process, so those are one
+    `await` from a user's validate. Removing the call from `close()` fixes both
+    without editing either.
+
+    WHY (Rule 9): `mt5linux` serves every rpyc connection from ONE `ThreadedServer`
+    over ONE shared `MetaTrader5` instance holding ONE IPC pipe (EVIDENCE §A2 /
+    C-1), so one caller's `shutdown()` is every caller's `-10004`. The pin that
+    survives is structural, not path-based: `tests/test_mt5_shutdown_roster.py`
+    derives the whole `shutdown()` roster from source.
+    """
+    connect, fake, _rec = _make({})
+    client = Mt5Client("host", 18812, _connect=connect)
+    client.close()
+    assert fake.shutdown_calls == 0
+    # …and the session still does not LEAK: our socket is released (Pitfall 6).
+    assert fake._MetaTrader5__conn.close_calls == 1
+
+
+def test_close_twice_closes_the_transport_exactly_once():
+    """Idempotence stated on the NEW observable: two closes, one socket teardown.
+    A `close()` that re-closed an already-closed rpyc socket on every call would
+    turn the epilogue into a source of transport errors."""
+    connect, fake, _rec = _make({})
+    client = Mt5Client("host", 18812, _connect=connect)
+    client.close()
+    client.close()
+    assert fake._MetaTrader5__conn.close_calls == 1
+    assert fake.shutdown_calls == 0
+
+
+def test_close_and_release_are_observationally_identical():
+    """⭐ Two public names, ONE implementation (`_teardown_transport`). If they ever
+    diverge, one of them has regrown a `shutdown()` — which is exactly the class
+    D-35 closed. Asserted by driving each on its own client and comparing the
+    observables, not by reading the source."""
+    connect_a, fake_a, _ra = _make({})
+    connect_b, fake_b, _rb = _make({})
+    Mt5Client("host", 18812, _connect=connect_a).close()
+    Mt5Client("host", 18812, _connect=connect_b).release()
+    assert (
+        fake_a._MetaTrader5__conn.close_calls,
+        fake_a.shutdown_calls,
+    ) == (
+        fake_b._MetaTrader5__conn.close_calls,
+        fake_b.shutdown_calls,
+    ) == (1, 0)
+
+
+def test_close_without_a_reachable_transport_close_warns_loudly(caplog):
+    """⛔ Never a silent no-op — the `close()` half of the same guard `release()`
+    carries. After D-35 `close()` performs ONLY the transport teardown, so a
+    transport shape it cannot reach means it does nothing at all; that must be
+    REPORTED, or the socket leak is invisible."""
+    connect, fake, _rec = _make({"no_transport": True})
+    client = Mt5Client("host", 18812, _connect=connect)
+    with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+        client.close()
+    assert fake.shutdown_calls == 0
+    assert any(
+        "no rpyc transport close reachable" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_release_never_appears_in_the_shutdown_call_sites():
+    """Source gate: release()'s body contains no `shutdown` text at all.
+
+    A pin at the level that matters — STRUCTURAL, not path-based: release() must
+    contain no shutdown call, not merely avoid one on the paths a test happens to
+    walk. ⚠️ Since 153.3-06 / **D-35** the same is true of `close()` and of every
+    other function in the tree except `restart()`, and that far stronger statement
+    is derived from source for the WHOLE service by
+    `tests/test_mt5_shutdown_roster.py`. This case is retained as the narrow,
+    fast-reading pin on the verb D-30 introduced."""
+    source = pathlib.Path(mt5_client_mod.__file__).read_text()
+    body = source.split("    def release(self) -> None:", 1)[1]
+    body = body.split("    def restart(self) -> None:", 1)[0]
+    # Judge EXECUTABLE text only: drop the docstring (which necessarily discusses
+    # shutdown) and the comment lines.
+    _, _, after_open = body.partition('"""')
+    _, _, code = after_open.partition('"""')
+    code = "\n".join(
+        line for line in code.splitlines() if not line.strip().startswith("#")
+    )
+    assert code.strip(), "the release() body was not extracted — the gate is vacuous"
+    assert "shutdown" not in code
 
 
 # -- restart: bounded-by-caller shutdown + re-connect (MT5CONC-01) -----------
@@ -571,6 +1114,34 @@ def test_restart_reconnects():
     assert record["connects"] == 2  # factory re-invoked → fresh transport
     # The rebuilt transport is live: a read works against the returned fake.
     assert client.account_info()["equity"] == 1000.0
+
+
+def test_restart_closes_the_stale_socket_and_leaves_the_fresh_one_open():
+    """⭐ 153.3-06 / D-35: restart() disposes the stale connection COMPLETELY —
+    `shutdown()` (the one permitted teardown) AND our own rpyc socket.
+
+    WHY (Rule 9): telling the terminal to shut its IPC down never closed OUR end of
+    the pipe, so every restart leaked one socket against the gateway's
+    `ThreadedServer` — a slow resource bleed on the exact recovery path that runs
+    when the terminal is already unhealthy. The fresh connection must be untouched
+    by any of it, or recovery destroys what it just built."""
+    stale = _FakeMt5({})
+    fresh = _FakeMt5({"account": _FakeNamedTuple(login=123, equity=2000.0)})
+    conns = {"n": 0}
+
+    def _connect(*, host, port, timeout):
+        conns["n"] += 1
+        return stale if conns["n"] == 1 else fresh
+
+    client = Mt5Client("host", 18812, _connect=_connect)
+    client.restart()
+
+    assert stale.shutdown_calls == 1  # the ONE permitted, lease-held teardown
+    assert stale._MetaTrader5__conn.close_calls == 1  # …and our socket, no longer leaked
+    assert fresh.shutdown_calls == 0
+    assert fresh._MetaTrader5__conn.close_calls == 0
+    # The fresh connection is the LIVE one and is fully usable.
+    assert client.account_info()["equity"] == 2000.0
 
 
 def test_restart_survives_shutdown_raise():
@@ -667,19 +1238,32 @@ def test_restart_reconnects_before_stale_shutdown_can_block():
 
 def test_restart_clears_closed():
     """restart() resets the idempotency latch: after close() (which latches
-    _closed) then restart(), a subsequent close() must actually reach shutdown()
-    again (shutdown_calls advances), proving restart cleared _closed. A restart
-    that left _closed set would leave the fresh terminal un-closable, leaking the
-    session on the next teardown."""
+    _closed) then restart(), a subsequent close() must actually tear the transport
+    down AGAIN, proving restart cleared _closed. A restart that left _closed set
+    would leave the fresh terminal un-closable, leaking the session on the next
+    teardown.
+
+    ⚠️ RE-CUT by 153.3-06 / **D-35**: the sequence was pinned on `shutdown_calls`
+    (1, 2, 3); `close()` no longer shuts anything down, so the same three-step
+    sequence is now read off the transport-close counter. `shutdown_calls` is
+    asserted alongside it and stays at exactly ONE — restart's, the only permitted
+    teardown in the tree — which is what proves the two closes did not regrow it.
+    (The single shared `_make` fake is both stale and fresh here, so all four
+    teardowns land on the one counter; the stale-vs-fresh separation is pinned by
+    `test_restart_closes_the_stale_socket_and_leaves_the_fresh_one_open`.)"""
     connect, fake, _record = _make({})
     client = Mt5Client("host", 18812, _connect=connect)
+    conn = fake._MetaTrader5__conn
 
     client.close()
-    assert fake.shutdown_calls == 1  # close() reached shutdown
+    assert conn.close_calls == 1  # close() released our socket
+    assert fake.shutdown_calls == 0  # …and reached shutdown ZERO times (D-35)
     client.restart()
-    assert fake.shutdown_calls == 2  # restart's own teardown
+    assert fake.shutdown_calls == 1  # restart's own — the ONE permitted teardown
+    assert conn.close_calls == 2  # restart also disposes the stale socket
     client.close()
-    assert fake.shutdown_calls == 3  # _closed was cleared → close() works again
+    assert conn.close_calls == 3  # _closed was cleared → close() works again
+    assert fake.shutdown_calls == 1  # still exactly restart's, and only restart's
 
 
 # -- order_check: probe only (investor-vs-master signal is a live unknown) ----
@@ -756,8 +1340,279 @@ def test_public_surface_is_exactly_the_contract():
     assert public == {
         "login",
         "account_info",
+        # terminal_info (153.3 / D-31) is a READ of the terminal we operate — it
+        # carries no user credential and wraps no trade path, so the read-only-by-
+        # construction property is unchanged by its addition.
+        "terminal_info",
         "history_deals_get",
         "order_check",
         "close",
+        # release (153.3 / D-30) is a TEARDOWN verb, not a widening of the MT5
+        # surface: it closes our own rpyc socket and wraps no mt5linux call at all.
+        "release",
         "restart",
     }
+
+
+# --------------------------------------------------------------------------- #
+# 153.3 / D-32 — PER-STAGE TIMING: stage + duration_ms, on BOTH outcomes
+#
+# WHY these matter (Rule 9). This client contained NO clock. Nine correlated
+# production failures (2026-08-06/08) were all right-censored at the rpyc
+# ceiling, and not one SUCCESSFUL stage duration has ever been recorded anywhere
+# — which is why the whole validate chain is a judgement call rather than a
+# measurement (D-27). An instrument that emits nothing looks EXACTLY like one
+# that was never wired, so every case below asserts on the captured event and its
+# VALUE, never on the presence of a call.
+#
+# The event NAME and the nine stage names are hand-typed here on purpose: they
+# are the aggregation key Phase 155 will group by, and an oracle that imported
+# them from the module under test could not fail a rename.
+# --------------------------------------------------------------------------- #
+
+_STAGE_EVENT_NAME = "mt5.stage"
+
+
+def _stage_events(captured, stage=None):
+    """The captured `mt5.stage` events, optionally filtered to one stage."""
+    events = [e for e in captured if e.get("event") == _STAGE_EVENT_NAME]
+    if stage is not None:
+        events = [e for e in events if e.get("stage") == stage]
+    return events
+
+
+def test_a_successful_read_emits_stage_and_a_real_duration():
+    """A successful round-trip emits `stage` + a non-negative integer
+    `duration_ms` — and the number is a MEASUREMENT, not a placeholder.
+
+    The read is made to take ~30ms so the assertion can be `>= 20`, not
+    `>= 0`. A `duration_ms` hard-wired to zero (a mis-scaled unit, a clock read
+    twice at the same instant, an emitter that never sees the call) satisfies
+    "a duration field is present" and is worth nothing to Phase 155.
+    """
+    connect, fake, _rec = _make({"account": _FakeNamedTuple(equity=1000.0)})
+    client = Mt5Client("mt5-gw.internal", 18812, _connect=connect)
+
+    def _slow_account_info():
+        time.sleep(0.03)
+        return _FakeNamedTuple(equity=1000.0)
+
+    fake.account_info = _slow_account_info
+
+    with capture_logs() as captured:
+        assert client.account_info() == {"equity": 1000.0}
+
+    events = _stage_events(captured, "account_info")
+    assert len(events) == 1, f"expected exactly one account_info event: {captured}"
+    event = events[0]
+    assert event["ok"] is True
+    assert isinstance(event["duration_ms"], int)
+    assert event["duration_ms"] >= 20, (
+        "the emitted duration does not track real elapsed time — a ~30ms read "
+        f"reported {event['duration_ms']}ms"
+    )
+    # Infrastructure identity only: the lock key, never a user value.
+    assert event["terminal_key"] == "mt5-gw.internal:18812"
+
+
+def test_a_failing_read_emits_its_event_and_reraises_the_identical_error():
+    """⭐ THE assertion that catches instrumentation swallowing an error.
+
+    Two independent failure modes are covered, and both are silent:
+      * a bracket that only emits on success measures a population that EXCLUDES
+        exactly the failures the timing exists to explain (the nine censored
+        production logins were all failures);
+      * a bracket that catches the exception to emit, and then re-raises a
+        DIFFERENT one — or converts it — changes the caller's verdict. The
+        router classifies on `Mt5ClientError.code`; a changed type silently
+        re-routes a transient into an auth failure.
+
+    The expected message is HAND-TYPED, not rebuilt from `Mt5ClientError`, so a
+    conversion that produced a consistent-but-different string cannot pass.
+    """
+    connect, _fake, _rec = _make(
+        {"account_raises": RuntimeError("rpyc connection closed by peer")}
+    )
+    client = Mt5Client("mt5-gw.internal", 18812, _connect=connect)
+
+    with capture_logs() as captured:
+        with pytest.raises(Mt5ClientError) as exc_info:
+            client.account_info()
+
+    assert type(exc_info.value) is Mt5ClientError
+    assert exc_info.value.code == 0
+    assert str(exc_info.value) == (
+        "MT5 client error (code=0): rpyc connection closed by peer"
+    )
+
+    events = _stage_events(captured, "account_info")
+    assert len(events) == 1, f"the FAILING stage emitted no event: {captured}"
+    assert events[0]["ok"] is False
+    # The raw transport class, not the uniform Mt5ClientError every failure would
+    # otherwise report — this is what makes a censor separable from a fast error.
+    assert events[0]["error_class"] == "RuntimeError"
+    assert isinstance(events[0]["duration_ms"], int)
+
+
+def test_every_mt5_round_trip_emits_its_stage_event():
+    """Every one of the NINE MT5 round-trips emits — asserted by driving each
+    method against the double and comparing the collected stage names to a
+    hand-typed set.
+
+    ⛔ The expected set is typed out here rather than read from
+    `services.mt5_client`: an oracle that derives its expectation from the thing
+    under test cannot fail, and "add the method, forget the bracket" is precisely
+    the omission this case exists to catch.
+    """
+    connect, fake, _rec = _make(
+        {
+            "account": _FakeNamedTuple(login=123456, equity=1000.0),
+            "terminal": _FakeNamedTuple(connected=True, trade_allowed=True),
+            "deals": (),
+            "order_check": _FakeNamedTuple(retcode=10017),
+        }
+    )
+    client = Mt5Client("mt5-gw.internal", 18812, _connect=connect)
+    # close() and release() BOTH latch `_closed`, so one instance can exercise
+    # only one of them — the second client is what makes close() reachable.
+    closer = Mt5Client("mt5-gw.internal", 18812, _connect=connect)
+
+    with capture_logs() as captured:
+        client.login(123456, "investor-pw", "Broker-Demo")  # initialize + login
+        client.account_info()
+        client.terminal_info()
+        client.history_deals_get(0, 1)
+        client.order_check({"action": 0})
+        client.restart()  # clears _closed, so release() below is still reachable
+        client.release()
+        closer.close()
+
+    assert {e["stage"] for e in _stage_events(captured)} == {
+        "initialize",
+        "login",
+        "account_info",
+        "terminal_info",
+        "history_deals_get",
+        "order_check",
+        "close",
+        "release",
+        "restart",
+    }
+    # Not vacuous: every event carries the two fields the whole exercise is for.
+    for event in _stage_events(captured):
+        assert isinstance(event["duration_ms"], int)
+        assert event["duration_ms"] >= 0
+        assert event["ok"] is True
+
+
+def test_the_last_error_round_trip_is_timed_too():
+    """`last_error()` is itself a full remote round-trip, taken AFTER the verdict
+    is already known — EVIDENCE §1b records a failed attempt paying a SECOND full
+    30s there. Un-timed, every failure looks like ONE round-trip and the failure
+    budget reads half its true size.
+
+    Note the account_info event is `ok=True`: a `None` RETURN is an honest,
+    completed round-trip (the error is discovered afterwards, by the return
+    discipline). Conflating the two would misreport the transport's latency.
+    """
+    connect, _fake, _rec = _make(
+        {"account": None, "last_error": (-10004, "No IPC connection")}
+    )
+    client = Mt5Client("mt5-gw.internal", 18812, _connect=connect)
+
+    with capture_logs() as captured:
+        with pytest.raises(Mt5ClientError) as exc_info:
+            client.account_info()
+
+    assert exc_info.value.code == -10004
+    assert [e["stage"] for e in _stage_events(captured)] == [
+        "account_info",
+        "last_error",
+    ]
+    assert _stage_events(captured, "account_info")[0]["ok"] is True
+    assert isinstance(_stage_events(captured, "last_error")[0]["duration_ms"], int)
+
+
+def test_no_credential_literal_reaches_any_stage_event():
+    """⭐ T-153.3-23 — the secret sweep over the NEW telemetry surface.
+
+    `mt5linux` f-string-interpolates the investor password into the remotely
+    eval'd source, so a leaked exception STRING is a real credential disclosure —
+    which is why the event carries the exception CLASS and never its message.
+
+    THREE outcomes are swept, because they reach three different emission paths
+    and only one of them is the obvious one:
+      * a successful login — the credential values are live in scope;
+      * a REFUSED login (a falsy return) — the `last_error` text is in scope;
+      * a login whose transport RAISES with the interpolated remote source in
+        the message. This is the one that matters: it is the ONLY path that
+        emits `error_class`, so a sweep without it never exercises the failure
+        emission at all and stays green while an `error_text` field is added.
+    """
+    connect, _fake, _rec = _make(
+        {"account": _FakeNamedTuple(equity=1.0), "last_error": (-6, "authorization failed")}
+    )
+    client = Mt5Client("mt5-gw.internal", 18812, _connect=connect)
+    refusing_connect, _f2, _r2 = _make(
+        {"login": False, "last_error": (-6, "authorization failed for 123456")}
+    )
+    refusing = Mt5Client("mt5-gw.internal", 18812, _connect=refusing_connect)
+    # The real disclosure vector: mt5linux builds the remote call as SOURCE TEXT
+    # with the password interpolated, so a remote traceback carries it verbatim.
+    raising_connect, _f3, _r3 = _make(
+        {
+            "login_raises": RuntimeError(
+                "remote eval failed: mt5.login(123456, "
+                "password='s3cr3t-pw', server='MyBroker-Live')"
+            )
+        }
+    )
+    raising = Mt5Client("mt5-gw.internal", 18812, _connect=raising_connect)
+
+    with capture_logs() as captured:
+        client.login(123456, "s3cr3t-pw", "MyBroker-Live")
+        client.account_info()
+        with pytest.raises(Mt5ClientError):
+            refusing.login(123456, "s3cr3t-pw", "MyBroker-Live")
+        with pytest.raises(Mt5ClientError):
+            raising.login(123456, "s3cr3t-pw", "MyBroker-Live")
+
+    events = _stage_events(captured)
+    assert events, "the sweep is vacuous — no stage event was captured at all"
+    # Not vacuous in the direction that matters: the FAILURE emission ran.
+    assert any(e.get("ok") is False for e in events), (
+        "no failed-stage event was captured — the sweep never reaches the "
+        "emission path that carries exception information"
+    )
+    rendered = repr(events)
+    for literal in ("123456", "s3cr3t-pw", "MyBroker-Live", "authorization failed"):
+        assert literal not in rendered, (
+            f"a credential (or raw last_error text) reached the telemetry: {literal!r}"
+        )
+
+
+def test_stage_telemetry_failure_never_changes_what_the_caller_observes(
+    monkeypatch, caplog
+):
+    """T-153.3-24 — a broken logging pipeline must not turn a successful terminal
+    read into a failed validate. Instrumentation is an ADDITION; it may never be
+    load-bearing for the request's verdict.
+
+    It must also not fail SILENTLY: an emitter that swallows its own breakage
+    leaves Phase 155 reading an empty histogram and concluding "no traffic".
+    """
+
+    class _BrokenLog:
+        def info(self, *_a, **_k):
+            raise RuntimeError("log pipeline down")
+
+    monkeypatch.setattr(mt5_client_mod, "_stage_logger", lambda: _BrokenLog())
+    connect, _fake, _rec = _make({"account": _FakeNamedTuple(equity=1000.0)})
+    client = Mt5Client("mt5-gw.internal", 18812, _connect=connect)
+
+    with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+        assert client.account_info() == {"equity": 1000.0}
+
+    assert any(
+        "stage telemetry failed to emit" in r.message for r in caplog.records
+    ), "the emitter swallowed its own failure silently"

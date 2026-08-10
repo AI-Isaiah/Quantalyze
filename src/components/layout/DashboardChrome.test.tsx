@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { render, screen, within, fireEvent } from "@testing-library/react";
 import { Sidebar } from "./Sidebar";
 import { DashboardChrome } from "./DashboardChrome";
@@ -233,9 +235,15 @@ describe("DashboardChrome — standard vs full-bleed layout (M-0410)", () => {
  * 52-02/03/04 raised the allocator-journey PAGE content to a page-level
  * `max-w-[1920px]`, but the standard shell's content container caps at
  * `max-w-7xl` (1280px), which clamped that page cap. This pins the shell-level
- * widening: the allocator-journey routes (/allocations, /compare, /discovery/*)
- * get `max-w-[1920px]`, while every other dashboard route (incl. Phase-53
- * surfaces) keeps `max-w-7xl`.
+ * widening: the data/table routes get the wide measure, while every other
+ * dashboard route keeps `max-w-7xl`.
+ *
+ * ⭐ UPDATED 2026-08-09 (founder decision, Option B). The wide measure is no
+ * longer `max-w-[1920px]` — it is FLUID (`max-w-full`, no px ceiling), because
+ * any fixed cap turns surplus viewport into dead margin exactly when the user
+ * zooms out to see more. The page-level 1920px caps are removed too: two owners
+ * for one property is what let `/my-strategies` cap itself at 1920 while the
+ * shell clamped it to 1280. The shell is now the sole owner.
  *
  * The content container is the direct child <div> of the labeled <main> that
  * holds the page children (the `mx-auto max-w-* px-4 …` wrapper).
@@ -318,57 +326,287 @@ describe("DashboardChrome — wide fluid-fill variant (Phase 52)", () => {
     return screen.getByTestId("page-body").closest("div.mx-auto");
   }
 
-  it("widens the allocator route /allocations to max-w-[1920px]", () => {
+  it("widens the allocator route /allocations to max-w-full", () => {
     const container = contentContainerFor("/allocations");
-    expect(container).toHaveClass("max-w-[1920px]");
+    expect(container).toHaveClass("max-w-full");
     expect(container).not.toHaveClass("max-w-7xl");
   });
 
-  it("widens /compare to max-w-[1920px]", () => {
+  it("widens /compare to max-w-full", () => {
     const container = contentContainerFor("/compare");
-    expect(container).toHaveClass("max-w-[1920px]");
+    expect(container).toHaveClass("max-w-full");
   });
 
-  it("widens nested discovery routes (/discovery/digital-assets) to max-w-[1920px]", () => {
+  it("widens nested discovery routes (/discovery/digital-assets) to max-w-full", () => {
     const container = contentContainerFor("/discovery/digital-assets");
-    expect(container).toHaveClass("max-w-[1920px]");
+    expect(container).toHaveClass("max-w-full");
   });
 
-  it("widens the /portfolios data surface to max-w-[1920px] (Phase 53 APPLY-04)", () => {
+  it("widens the /portfolios data surface to max-w-full (Phase 53 APPLY-04)", () => {
     const container = contentContainerFor("/portfolios");
-    expect(container).toHaveClass("max-w-[1920px]");
+    expect(container).toHaveClass("max-w-full");
     expect(container).not.toHaveClass("max-w-7xl");
   });
 
-  it("widens nested portfolio detail routes (/portfolios/abc/manage) to max-w-[1920px]", () => {
+  it("widens nested portfolio detail routes (/portfolios/abc/manage) to max-w-full", () => {
     const container = contentContainerFor("/portfolios/abc/manage");
-    expect(container).toHaveClass("max-w-[1920px]");
+    expect(container).toHaveClass("max-w-full");
   });
 
-  it("widens the /admin data surface to max-w-[1920px] (Phase 53 APPLY-04)", () => {
+  it("widens the /admin data surface to max-w-full (Phase 53 APPLY-04)", () => {
     const container = contentContainerFor("/admin");
-    expect(container).toHaveClass("max-w-[1920px]");
+    expect(container).toHaveClass("max-w-full");
     expect(container).not.toHaveClass("max-w-7xl");
   });
 
-  it("widens nested admin sub-pages (/admin/compute-jobs) to max-w-[1920px]", () => {
+  it("widens nested admin sub-pages (/admin/compute-jobs) to max-w-full", () => {
     const container = contentContainerFor("/admin/compute-jobs");
-    expect(container).toHaveClass("max-w-[1920px]");
+    expect(container).toHaveClass("max-w-full");
   });
 
-  it("keeps a still-narrow prose/form route (/strategies) at the default max-w-7xl", () => {
-    // /strategies (incl. the new-strategy wizard) is a form surface — it stays
-    // narrow. This is the not-widened negative case, retargeted off /portfolios
-    // (now widened) onto a route that genuinely stays at max-w-7xl.
+  // ⭐ 2026-08-09 founder report — "zooming out should allow me to see more of
+  // the content… it should never produce dead/empty areas." The surface hit was
+  // My Strategies, which lives at `/my-strategies` and was MISSING from the
+  // isWide allow-list: its page set its own `max-w-[1920px]` under a comment
+  // claiming the layout does not cap width, while this shell silently clamped it
+  // to `max-w-7xl` (1280px). Symptom: the table rendered "Scroll for more
+  // columns →" beside dead space.
+  //
+  // Founder chose Option B: dense tables go FLUID (no px cap at all), prose and
+  // forms keep a bounded measure. Any fixed px cap dead-spaces once the viewport
+  // exceeds it, and zooming out is exactly how a viewport exceeds it.
+  it("widens the My Strategies LIST (/my-strategies) — the founder-reported surface", () => {
+    const container = contentContainerFor("/my-strategies");
+    expect(container).toHaveClass("max-w-full");
+    expect(container).not.toHaveClass("max-w-7xl");
+  });
+
+  it("gives dense tables NO px cap at all — a ceiling is what strands content on zoom-out", () => {
+    // ⛔ The point of Option B is the ABSENCE of a numeric ceiling, not a larger
+    // one. `toHaveClass("max-w-full")` alone would still pass if someone
+    // reinstated a px cap alongside it, so this rejects the arbitrary-value form
+    // outright — it fails for max-w-[1920px] and for any successor number.
+    const container = contentContainerFor("/my-strategies");
+    // ⚠️ Assert the container EXISTS before filtering it. Without this, a null
+    // container would make `?? []` yield an empty list and the row would pass
+    // vacuously — an emptiness assertion is only meaningful once you have
+    // proven there was something to be empty of.
+    expect(container).not.toBeNull();
+    const pxCaps = [...(container?.classList ?? [])].filter((c) =>
+      /^max-w-\[\d+px\]$/.test(c),
+    );
+    expect(pxCaps).toEqual([]);
+  });
+
+  it("keeps the new-strategy WIZARD (/strategies/new/wizard) narrow — it is a form", () => {
+    // Nothing under `/strategies` is on the allow-list. A bounded measure is a
+    // real readability control for a form, not decoration.
+    const container = contentContainerFor("/strategies/new/wizard");
+    expect(container).toHaveClass("max-w-7xl");
+    expect(container).not.toHaveClass("max-w-full");
+  });
+
+  it("keeps the legacy card list (/strategies) narrow — it is not a dense table", () => {
     const container = contentContainerFor("/strategies");
     expect(container).toHaveClass("max-w-7xl");
-    expect(container).not.toHaveClass("max-w-[1920px]");
+    expect(container).not.toHaveClass("max-w-full");
+  });
+
+  it("does NOT widen a route that merely starts with the prefix string (/my-strategiesx)", () => {
+    // Regex boundary for the new allow-list member, mirroring /discoveryx.
+    const container = contentContainerFor("/my-strategiesx");
+    expect(container).toHaveClass("max-w-7xl");
+    expect(container).not.toHaveClass("max-w-full");
   });
 
   it("does NOT widen a route that merely starts with the prefix string (/discoveryx)", () => {
     // Regex boundary: /discoveryx is NOT a discovery route — keeps max-w-7xl.
     const container = contentContainerFor("/discoveryx");
     expect(container).toHaveClass("max-w-7xl");
-    expect(container).not.toHaveClass("max-w-[1920px]");
+    expect(container).not.toHaveClass("max-w-full");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 153.2 review WR-06 — THE OTHER SIDE OF THE COUPLING.
+//
+// The shell's own comment names the hazard ("leaving them would re-clamp the
+// now-fluid shell and silently restore the bug") and the rows above guard the
+// SHELL. Nothing guarded the surfaces INSIDE it — which is precisely where the
+// caps were, and where two of them survived: `ScenarioComposer` kept
+// `max-w-[1440px]` on both of its shells, so the founder's dead-margin symptom
+// was still live on `/allocations`' Scenario tab while DESIGN.md recorded that
+// route as fixed. A page-side cap ships green against every shell-side row.
+//
+// ⛔ THIS IS A CLASS SWEEP, NOT A LIST OF THE KNOWN OFFENDERS. It walks the
+// `isWide` trees rather than enumerating six paths, so a NEW page or body
+// component that reinstates a cap is caught without anyone remembering to add
+// it here. An enumerated list would have missed `ScenarioComposer` for exactly
+// the reason it was missed the first time.
+//
+// ⚠️ WHAT COUNTS AS AN OFFENCE — a *page measure*, not any `max-w-*`. A
+// truncating table cell (`truncate max-w-[160px]`), a `<p>` of empty-state copy
+// at `max-w-md`, a modal at `w-[480px]` and a chart wrapper are not competing
+// with the shell for the page's width, and DESIGN.md's rule says so in terms.
+// The signature of a page measure is the centring idiom: ONE className carrying
+// BOTH `mx-auto` AND a CONTAINER-sized cap.
+//
+// ⛔ "CONTAINER-SIZED" IS BOTH FORMS, and the second one is not decoration. The
+// original founder bug WAS a Tailwind-named rung: `DashboardChrome` clamping a
+// dense table to `max-w-7xl` (1280px). A sweep that only rejected the
+// arbitrary-value `max-w-[Npx]` form would let the exact original defect ship
+// green. `3xl`(768) and up are container widths; `md`/`lg`/`xl`/`2xl` are
+// sentence widths and stay out deliberately.
+//
+// ⛔ AND IT SCANS `src/components/**` TOO. A body shell does not have to live in
+// the route tree — `PartialDataBanner` sets its own measure and renders inside
+// `ScenarioComposer` on `/allocations`. Scanning only `src/app/(dashboard)/…`
+// would leave a shared dense-table shell free to re-clamp the page from one
+// directory over, which is the same "guard on the wrong side of the coupling"
+// shape WR-06 is about.
+// ═══════════════════════════════════════════════════════════════════════════
+describe("[153.2 WR-06] no surface inside an isWide tree re-clamps the fluid shell", () => {
+  // The first six mirror `DashboardChrome`'s own `isWide` allow-list, kept
+  // beside it in the same file so the sweep and the predicate cannot drift
+  // apart unnoticed. `src/components` is added because shells live there too.
+  const SCANNED_TREES = [
+    "src/app/(dashboard)/allocations",
+    "src/app/(dashboard)/compare",
+    "src/app/(dashboard)/discovery",
+    "src/app/(dashboard)/admin",
+    "src/app/(dashboard)/portfolios",
+    "src/app/(dashboard)/my-strategies",
+    "src/components",
+  ];
+
+  /** A container-sized cap: the px form OR a large Tailwind rung. */
+  // ⚠️ NO trailing `\b` after the `]` alternative — `]` is a non-word character,
+  // so a word boundary there can never match and the px form would silently
+  // never fire. (Measured: an earlier draft of this sweep had exactly that bug
+  // and reported 2 offenders where there were 10.)
+  const CONTAINER_CAP =
+    /max-w-(?:\[\d+px\]|3xl\b|4xl\b|5xl\b|6xl\b|7xl\b|screen-[a-z]+\b)/;
+
+  /**
+   * The documented carve-outs, named so the next reader inherits the exception
+   * instead of rediscovering it (DESIGN.md §Measure ladder). NONE is a dense
+   * table: the ladder governs by CONTENT TYPE, not by URL prefix, and a bounded
+   * measure is a genuine readability control for prose in a way it is not for a
+   * table.
+   *
+   *   - the four `/admin` text pages — under `/admin` for NAVIGATION reasons
+   *     only; RT-W2 (v1.4 Phase 54) set them at rung 1, 1100px.
+   *   - the Overview "factsheet warming up" status block (prose).
+   *   - the discovery-detail "factsheet still computing" fallback article,
+   *     which carries the factsheet's own 760px reading measure.
+   *   - `DashboardChrome` itself: this IS the owner, and the cap it carries is
+   *     the NARROW branch of its own ternary (`isWide ? max-w-full : max-w-7xl`).
+   *     Exempting the owner is what makes the rule "sole owner" rather than
+   *     "no owner".
+   *   - `LegalFooter`: site chrome, rendered OUTSIDE the content container, so
+   *     it is not a page measure competing with it.
+   *   - `PartialDataBanner`: a centred 480px notice, not a shell.
+   *   - `StrategyV2Shell`: the `/strategy/[id]` document shell — rung 2. That
+   *     route is deliberately NOT on the `isWide` list (a document, not a data
+   *     surface), so its measure is correct and must not be swept away.
+   *
+   * ⛔ A dense-table page may not join this list. Adding an entry is a design
+   * decision that belongs in DESIGN.md's changelog first.
+   */
+  const ALLOWED = new Map<string, string>([
+    ["src/app/(dashboard)/admin/users/page.tsx", "max-w-[1100px]"],
+    ["src/app/(dashboard)/admin/users/[id]/page.tsx", "max-w-[1100px]"],
+    ["src/app/(dashboard)/admin/partner-import/page.tsx", "max-w-[1100px]"],
+    ["src/app/(dashboard)/admin/for-quants-leads/page.tsx", "max-w-[1100px]"],
+    [
+      "src/app/(dashboard)/allocations/AllocationDashboardV2.tsx",
+      "max-w-[1100px]",
+    ],
+    [
+      "src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx",
+      "max-w-[760px]",
+    ],
+    ["src/components/layout/DashboardChrome.tsx", "max-w-7xl"],
+    ["src/components/legal/LegalFooter.tsx", "max-w-6xl"],
+    ["src/components/strategy-v2/PartialDataBanner.tsx", "max-w-[480px]"],
+    ["src/components/strategy-v2/StrategyV2Shell.tsx", "max-w-[1200px]"],
+  ]);
+
+  /** Every `className="…"` / `className={`…`}` string literal in a source file. */
+  function classNameStrings(src: string): string[] {
+    const out: string[] = [];
+    for (const m of src.matchAll(/className="([^"]*)"/g)) out.push(m[1]!);
+    for (const m of src.matchAll(/className=\{`([^`]*)`\}/g)) out.push(m[1]!);
+    return out;
+  }
+
+  function tsxFilesUnder(dir: string): string[] {
+    const abs = join(process.cwd(), dir);
+    if (!existsSync(abs)) return [];
+    return readdirSync(abs, { recursive: true, encoding: "utf8" })
+      .filter((rel) => rel.endsWith(".tsx") && !rel.includes(".test."))
+      .map((rel) => `${dir}/${rel}`);
+  }
+
+  const files = SCANNED_TREES.flatMap(tsxFilesUnder);
+
+  it("the sweep actually walked every scanned tree (anti-vacuity floor)", () => {
+    // Without this, a renamed directory or a broken glob would make every
+    // assertion below iterate an empty list and pass while guarding nothing —
+    // the exact shape of guard this milestone exists to delete.
+    expect(files.length).toBeGreaterThan(200);
+    for (const tree of SCANNED_TREES) {
+      expect(
+        files.some((f) => f.startsWith(tree)),
+        `no .tsx found under ${tree} — the sweep is not reaching it`,
+      ).toBe(true);
+    }
+  });
+
+  it("the offence pattern matches BOTH cap forms (the regex is itself guarded)", () => {
+    // A `\b` after the `]` alternative silently disables the px form — measured,
+    // not hypothetical. Both forms are asserted here so the sweep below cannot
+    // quietly become a sweep for one of them.
+    expect("mx-auto max-w-[1920px] px-4".match(CONTAINER_CAP)?.[0]).toBe(
+      "max-w-[1920px]",
+    );
+    expect("mx-auto max-w-7xl px-4".match(CONTAINER_CAP)?.[0]).toBe("max-w-7xl");
+    // …and sentence-width rungs and truncating cells stay OUT, so the sweep
+    // cannot drift into flagging every centred paragraph in an empty state.
+    expect("mx-auto max-w-md text-sm").not.toMatch(CONTAINER_CAP);
+    expect("truncate max-w-[160px]").toMatch(CONTAINER_CAP); // caught by the cap…
+    expect("truncate max-w-[160px]".includes("mx-auto")).toBe(false); // …excluded by the idiom
+  });
+
+  it("⭐ no page or body shell reachable from an isWide tree carries a container cap", () => {
+    const offenders: string[] = [];
+    for (const file of files) {
+      const src = readFileSync(join(process.cwd(), file), "utf8");
+      for (const cls of classNameStrings(src)) {
+        if (!cls.includes("mx-auto")) continue;
+        const cap = cls.match(CONTAINER_CAP)?.[0];
+        if (!cap) continue;
+        if (ALLOWED.get(file) === cap) continue;
+        offenders.push(`${file} → "${cap}"`);
+      }
+    }
+    // Named, not counted: a failure must say WHICH surface re-clamped the shell.
+    expect(offenders).toEqual([]);
+  });
+
+  it("CONTROL — every carve-out still exists, so a stale exemption cannot hide a regression", () => {
+    // The other direction. An allowlist entry whose file was deleted or whose
+    // measure changed is a permission granted to nothing — and the next person
+    // to reinstate a cap on that path would inherit it silently.
+    for (const [file, cap] of ALLOWED) {
+      const abs = join(process.cwd(), file);
+      expect(existsSync(abs), `carve-out names a missing file: ${file}`).toBe(
+        true,
+      );
+      const found = classNameStrings(readFileSync(abs, "utf8")).some(
+        (cls) => cls.includes("mx-auto") && cls.includes(cap),
+      );
+      expect(found, `carve-out ${file} no longer uses ${cap}`).toBe(true);
+    }
   });
 });

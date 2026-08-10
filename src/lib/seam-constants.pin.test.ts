@@ -565,6 +565,25 @@ describe("SEAM_BUDGETS — every timeout pinned to a hand-typed literal", () => 
   });
 });
 
+/**
+ * The ONE reducer both A-25 assertions below run — the real one over the live
+ * table, and the SELF-TEST over a synthetic one.
+ *
+ * ⚠️ SHARED ON PURPOSE. A SELF-TEST that re-types the reducer proves that the
+ * RE-TYPED code works and says nothing at all about the assertion it claims to
+ * exercise. Sharing the code path is what makes the SELF-TEST evidence.
+ *
+ * ⚠️ Returns `-Infinity` for an empty or mis-shaped table, which would satisfy
+ * any upper-bound ceiling forever. Every caller therefore carries an explicit
+ * vacuity guard; do not "fix" that here by clamping — a clamp would hide the
+ * mis-shape rather than redden it.
+ */
+function longestTimeoutMs(
+  table: Readonly<Record<string, { readonly timeoutMs: number }>>,
+): number {
+  return Math.max(...Object.values(table).map((row) => row.timeoutMs));
+}
+
 describe("breaker constants — all six pinned to hand-typed literals", () => {
   it("BREAKER_KEY is the literal 'breaker:railway'", () => {
     // MODULE CONSTANT, never interpolated from user input (threat T-140-01):
@@ -714,6 +733,93 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
         "the lock it overlapped — and re-arms the circuit on evidence it " +
         "gathered before the previous trip.",
     ).toBeGreaterThanOrEqual(60_000 - 30_000);
+  });
+
+  it("A-25 (DERIVED): the LONGEST budget in the live table fits inside tombstone + cooldown", () => {
+    // ── WHY THIS STANDS BESIDE THE ASSERTION ABOVE, NOT INSTEAD OF IT ─────────
+    // The one above is LITERAL vs LITERAL: it catches the two breaker constants
+    // moving. It cannot catch the COUPLING breaking, because the "60 000" it
+    // compares against is a hand-typed restatement of a fact that lives in the
+    // budget table — raise a budget row past the tombstone and that assertion
+    // stays green while A-25 is actually violated. This one is DERIVATION vs
+    // HAND-TYPED: the only derived side is the longest timeout in the table.
+    // Neither implies the other, so both are kept (D-19).
+    //
+    // ⛔ The ceiling below is deliberately built from the bare literals 60 and
+    // 30 (seconds). Reading it out of the module under test is the exact defect
+    // this file's ONE RULE forbids, and it is precisely what makes the incumbent
+    // A-25 pin unable to fail.
+    const longest = longestTimeoutMs(SEAM_BUDGETS);
+
+    // VACUITY GUARDS. `Math.max` over an empty or mis-shaped table is
+    // -Infinity, which passes the ceiling forever while measuring nothing.
+    expect(
+      Object.keys(SEAM_BUDGETS).length,
+      "The seam budget table parsed with fewer than the 13 rows it carries. " +
+        "The derivation below is measuring an empty or renamed table, so its " +
+        "ceiling check is vacuous — fix the derivation, never the floor.",
+    ).toBeGreaterThanOrEqual(13);
+    expect(
+      longest,
+      "The longest seam budget derived below 60 000 ms. Either a real budget " +
+        "was cut (a separate question) or the rows no longer carry timeoutMs " +
+        "and the reducer is reading undefined.",
+    ).toBeGreaterThanOrEqual(60_000);
+
+    expect(
+      longest,
+      "A-25 IS BROKEN: the longest seam budget no longer fits inside " +
+        "(lock tombstone + breaker cooldown), so a request admitted just " +
+        "before a lock was armed can fail after the tombstone has expired, " +
+        "find no trace of that lock, and re-arm a fresh cooldown on stale " +
+        "evidence. THE NEXT MOVE HERE IS OWNED BY PHASE 153.4 / D-26: it " +
+        "raises the validate-key budget to 120 000 ms AND the lock tombstone " +
+        "from 60 s to 90 s in ONE commit. When that lands, the hand-typed 60 " +
+        "in this expression moves to 90 IN THAT SAME COMMIT — raising the " +
+        "budget alone is the break this assertion exists to catch. " +
+        "⚠️ D-18's 90 000 ms is SUPERSEDED by D-26: D-18 picked 90 000 only " +
+        "because it was the largest budget needing ONE constant changed, i.e. " +
+        "it let a test invariant choose a production timeout, and that " +
+        "reasoning was rejected — do not re-derive it from this arithmetic. " +
+        "⚠️ D-28 (bounding the MT5 close() separately) is likewise SUPERSEDED " +
+        "by D-30, which takes shutdown() off the request path entirely; it is " +
+        "named only because the A-25 sizing conversation cites it. Neither " +
+        "superseded decision is implemented by this sub-phase and neither " +
+        "number belongs in this expression.",
+    ).toBeLessThanOrEqual((60 + 30) * 1_000);
+  });
+
+  it("SELF-TEST — the DERIVED A-25 assertion reddens for a budget that outgrows the ceiling", () => {
+    // A relaxed or mis-shaped reducer that returns a small number would make
+    // the assertion above green forever. This runs the SAME reducer over a
+    // synthetic table and proves (a) it reports the MAXIMUM, not the first or
+    // the last row, and (b) that maximum genuinely EXCEEDS the ceiling the
+    // real assertion applies.
+    const synthetic = { a: { timeoutMs: 15_000 }, b: { timeoutMs: 150_000 } };
+
+    expect(
+      longestTimeoutMs(synthetic),
+      "The shared reducer no longer reports the maximum timeoutMs, so the " +
+        "assertion above is not measuring the longest budget.",
+    ).toBe(150_000);
+
+    // ⚠️ THE SYNTHETIC IS HAND-TYPED 150_000 ON PURPOSE — do NOT rewrite it as
+    // `ceiling + 1`. Deriving the synthetic from the module under test is the
+    // self-referential oracle this whole file exists to forbid.
+    // ⚠️ AND IT IS 150_000, NOT 120_000. Today's ceiling is (30 + 60) × 1 000 =
+    // 90 000, which 120 000 clears — but D-26 (Phase 153.4) raises the
+    // tombstone to 90 s, making the ceiling exactly (30 + 90) × 1 000 =
+    // 120 000, and `120 000 > 120 000` is FALSE. 150 000 clears BOTH ceilings,
+    // so this SELF-TEST needs no churn and there is no sub-phase boundary at
+    // which it is red. If D-26's successor ever raises the ceiling past
+    // 150 000 s-equivalent, this literal moves in that same commit.
+    expect(
+      150_000,
+      "A budget of 150 000 ms no longer exceeds (cooldown + tombstone), so the " +
+        "DERIVED A-25 assertion above can no longer redden for ANY table and " +
+        "is decorative. Raise this synthetic above the new ceiling in the same " +
+        "commit that raised it (see D-26).",
+    ).toBeGreaterThan((BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S) * 1_000);
   });
 
   it("A-14: the cooldown is at least as long as the failure window", () => {

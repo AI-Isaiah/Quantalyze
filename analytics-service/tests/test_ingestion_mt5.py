@@ -32,10 +32,13 @@ Regression gates — WHY each case matters (Rule 9):
 from __future__ import annotations
 
 import asyncio
+import time
 import typing
+from types import SimpleNamespace
 
 import pytest
 
+from services import mt5_concurrency
 from services.closed_sets import (
     MT5_MASTER_PASSWORD_DETAIL,
     MT5_WRONG_SERVER_DETAIL,
@@ -46,6 +49,22 @@ from services.ingestion import IngestionAdapter
 from services.ingestion.adapter import KeySubmissionRequest, MetricsSnapshot
 from services.ingestion.mt5 import Mt5Adapter
 from services.mt5_client import Mt5Client, Mt5ClientError
+from services.mt5_validation import classify_mt5_login_error
+
+
+@pytest.fixture(autouse=True)
+def _reset_mt5_terminal_locks():
+    """MT5CONC-02: clear the ONE process-wide per-terminal ``asyncio.Lock``
+    registry around every test in this module, exactly as
+    ``tests/test_mt5_concurrency.py`` does.
+
+    Load-bearing since ``Mt5Adapter.validate`` started taking the lease: these
+    tests each run their own ``asyncio.run`` loop, and a Lock left in the registry
+    by one of them would be re-entered from a DIFFERENT loop by the next — plus a
+    Lock a failing test left HELD would hang every subsequent validate here."""
+    mt5_concurrency._MT5_TERMINAL_LOCKS.clear()
+    yield
+    mt5_concurrency._MT5_TERMINAL_LOCKS.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -65,18 +84,54 @@ class _FakeNamedTuple:
         return dict(self._fields_dict)
 
 
+class _FakeRpycConn:
+    """The rpyc connection object `mt5linux.MetaTrader5` hangs off its name-mangled
+    `_MetaTrader5__conn` attribute — the ONLY transport-close seam 0.1.9 exposes,
+    and since 153.3-06 / **D-35** the ONLY thing `Mt5Client.close()` touches.
+
+    Present so the adapter's `finally: close()` genuinely EXERCISES the transport
+    teardown offline, instead of falling through to the "no transport close
+    reachable" WARNING branch and leaving the six session-never-leaks assertions
+    below asserting against a path production never takes.
+    """
+
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    def close(self):
+        self.close_calls += 1
+
+
 class _FakeMt5:
     """In-memory RPyC/MT5-shaped double driven by a scenario dict.
 
-    Scenario keys (all optional): login (default True), account, order_check,
-    last_error (default (0, "unknown")), login_raises (login RAISES this).
+    Scenario keys (all optional): login (default True), account, terminal,
+    order_check, last_error (default (0, "unknown")), login_raises (login RAISES
+    this), terminal_info_raises (terminal_info RAISES this).
     """
 
     def __init__(self, scenario: dict) -> None:
         self._scenario = scenario
         self.shutdown_calls = 0
+        # Single leading underscore ⇒ NOT re-mangled by this class; the attribute
+        # name is byte-identical to the one mt5linux 0.1.9 sets.
+        self._MetaTrader5__conn = _FakeRpycConn()
 
-    def initialize(self):
+    @property
+    def close_calls(self) -> int:
+        """The observable the six 'the session never leaks' assertions now use.
+
+        ⚠️ RE-POINTED by 153.3-06 / **D-35**, never deleted. Each of those
+        assertions encodes *"the session never leaks on this path"* — an intent
+        that survives intact. Only its MECHANISM changed: the adapter's
+        `finally: client.close()` used to end the SHARED terminal IPC (which was
+        the bug — one caller's teardown was every caller's `-10004`) and now
+        releases only OUR rpyc socket. `shutdown_calls` is asserted alongside and
+        must be 0 on every one of these paths."""
+        return self._MetaTrader5__conn.close_calls
+
+    def initialize(self, **kwargs):
+        # **kwargs: initialize() carries its own `timeout=` ms ceiling (153.3 / D-24).
         # Real login() attaches the terminal IPC via initialize() before login().
         exc = self._scenario.get("initialize_raises")
         if exc is not None:
@@ -92,6 +147,16 @@ class _FakeMt5:
     def account_info(self):
         return self._scenario.get("account")
 
+    def terminal_info(self):
+        # D-31: the terminal's OWN state — the signal every read_only verdict is
+        # now gated on. A scenario that omits "terminal" returns None, which the
+        # client treats as an ERROR (never as data), so an unset key exercises
+        # the unreadable-terminal refusal rather than silently passing.
+        exc = self._scenario.get("terminal_info_raises")
+        if exc is not None:
+            raise exc
+        return self._scenario.get("terminal")
+
     def order_check(self, **request):  # client passes KEYWORDS (mt5linux eval form)
         return self._scenario.get("order_check")
 
@@ -104,8 +169,9 @@ class _FakeMt5:
 
 def _install_client(monkeypatch, scenario: dict) -> _FakeMt5:
     """Patch the adapter's _build_client to return a real Mt5Client wrapping the
-    in-memory double, and set the gateway env. Returns the fake so tests can
-    assert shutdown (close) was called."""
+    in-memory double, and set the gateway env. Returns the fake so tests can assert
+    the teardown ran — `close_calls` (our rpyc socket) since 153.3-06 / D-35, and
+    `shutdown_calls == 0` (the shared terminal IPC, which we must never touch)."""
     fake = _FakeMt5(scenario)
 
     def _connect(*, host, port, timeout):
@@ -147,8 +213,19 @@ _METRICS_SENTINEL = MetricsSnapshot(
 # login=123456 matches the parsed login from _req's api_key="123456" so the RED-TEAM
 # login bracket (account_info().login == expected, pre+post) passes on the happy path.
 _INVESTOR_ACCOUNT = _FakeNamedTuple(trade_allowed=False, balance=1000.0, login=123456)
-# An investor order_check is rejected (retcode != TRADE_RETCODE_DONE 10009).
-_INVESTOR_ORDER_CHECK = _FakeNamedTuple(retcode=10027, comment="AutoTrading disabled")
+# An investor order_check is rejected with the DOCUMENTED investor code
+# TRADE_RETCODE_TRADE_DISABLED (10017) — [DOC] enum_trade_return_codes.
+#
+# D-31 HISTORY: this fixture used to be retcode=10027 with NO terminal read at
+# all, and that pair WAS the fail-open scenario — under MetaQuotes' default-ON
+# "Disable automatic trading through the external Python API" a MASTER password
+# produces exactly those two negatives, and the old two-signal rule returned
+# ValidationResult(valid=True, read_only=True) for it.
+_INVESTOR_ORDER_CHECK = _FakeNamedTuple(retcode=10017, comment="Trade disabled")
+# The terminal ITSELF permits trading and is attached to a trade server, so an
+# account-level refusal is attributable to the ACCOUNT. Required for any
+# read_only verdict (D-31).
+_HEALTHY_TERMINAL = _FakeNamedTuple(connected=True, trade_allowed=True, build=4410)
 
 
 # --------------------------------------------------------------------------- #
@@ -182,7 +259,11 @@ def test_fetch_raw_fails_loud() -> None:
 def test_validate_investor_valid_readonly_and_close(monkeypatch) -> None:
     fake = _install_client(
         monkeypatch,
-        {"account": _INVESTOR_ACCOUNT, "order_check": _INVESTOR_ORDER_CHECK},
+        {
+            "account": _INVESTOR_ACCOUNT,
+            "order_check": _INVESTOR_ORDER_CHECK,
+            "terminal": _HEALTHY_TERMINAL,
+        },
     )
 
     result = asyncio.run(Mt5Adapter().validate(_req()))
@@ -190,7 +271,97 @@ def test_validate_investor_valid_readonly_and_close(monkeypatch) -> None:
     assert result.valid is True
     assert result.read_only is True  # STRUCTURAL (no trade surface), not probed
     assert result.error_code is None
-    assert fake.shutdown_calls == 1  # close() on the success path
+    assert fake.close_calls == 1  # close() on the success path (D-35: our socket)
+    assert fake.shutdown_calls == 0  # …and the SHARED terminal IPC is untouched
+
+
+def test_validate_terminal_trade_disabled_never_returns_readonly(monkeypatch) -> None:
+    """⭐ D-31 SECURITY REGRESSION at the ADAPTER seam — the CLASS half of the fix.
+
+    `is_trade_capable` had TWO call sites. Fixing only the router would leave
+    `Mt5Adapter.validate` fail-OPEN, which is the instance-not-class defect this
+    milestone has been bitten by repeatedly — so THIS test is the one that proves
+    the fix is a class fix. It is red against a router-only remedy.
+
+    Same inputs as the router regression: the terminal is connected but its own
+    trade permission is off (MetaQuotes' default-ON "Disable automatic trading
+    through the external Python API"), under which a MASTER password produces the
+    identical two negatives. The adapter must NOT return
+    ValidationResult(valid=True, read_only=True); it refuses with the same
+    server-misconfiguration disposition it already uses for an unconfigured
+    gateway, because no retry can clear a setting in our own terminal.
+    """
+    fake = _install_client(
+        monkeypatch,
+        {
+            "account": _INVESTOR_ACCOUNT,
+            "order_check": _INVESTOR_ORDER_CHECK,
+            "terminal": _FakeNamedTuple(connected=True, trade_allowed=False),
+        },
+    )
+
+    with pytest.raises(RuntimeError) as exc:
+        asyncio.run(Mt5Adapter().validate(_req()))
+
+    # Names the operator remedy, never the user's credentials.
+    msg = str(exc.value)
+    assert "server misconfiguration" in msg
+    assert "investor-pw" not in msg
+    assert "Broker-Demo" not in msg
+    assert fake.close_calls == 1  # close() still runs on the refusal path
+    assert fake.shutdown_calls == 0
+
+
+def test_validate_unreadable_terminal_propagates_transient_never_readonly(
+    monkeypatch,
+) -> None:
+    """An unreadable terminal yields no capability signal, so the two account
+    negatives prove nothing — refuse. The adapter takes its TRANSIENT disposition
+    (propagate) rather than the permanent operator arm, because a detached/
+    unreadable bridge clears on retry. Never valid, never read_only."""
+    fake = _install_client(
+        monkeypatch,
+        {
+            "account": _INVESTOR_ACCOUNT,
+            "order_check": _INVESTOR_ORDER_CHECK,
+            # No "terminal" key -> terminal_info() returns None -> the client
+            # treats it as an ERROR and raises, which the validate path catches
+            # and turns into "no signal".
+        },
+    )
+
+    with pytest.raises(Mt5ClientError) as exc:
+        asyncio.run(Mt5Adapter().validate(_req()))
+
+    # The message must NOT carry a wrong_server/auth token, or a caller running
+    # classify_mt5_login_error over it would blame the user's broker server for
+    # our gateway's condition.
+    assert classify_mt5_login_error(exc.value) == "transient"
+    assert fake.close_calls == 1  # session never leaks on the unreadable-terminal path
+    assert fake.shutdown_calls == 0
+
+
+def test_validate_disconnected_terminal_is_transient_never_readonly(
+    monkeypatch,
+) -> None:
+    """A terminal detached from the trade server is a documented SIBLING cause of
+    the account-level refusal ([DOC] MQL5 "Trade permission"), so investor mode is
+    not attributable — refuse, transiently, never read_only."""
+    fake = _install_client(
+        monkeypatch,
+        {
+            "account": _INVESTOR_ACCOUNT,
+            "order_check": _INVESTOR_ORDER_CHECK,
+            "terminal": _FakeNamedTuple(connected=False, trade_allowed=True),
+        },
+    )
+
+    with pytest.raises(Mt5ClientError) as exc:
+        asyncio.run(Mt5Adapter().validate(_req()))
+
+    assert classify_mt5_login_error(exc.value) == "transient"
+    assert fake.close_calls == 1  # session never leaks on the disconnected-terminal path
+    assert fake.shutdown_calls == 0
 
 
 def test_validate_master_via_trade_allowed_rejected(monkeypatch) -> None:
@@ -199,6 +370,7 @@ def test_validate_master_via_trade_allowed_rejected(monkeypatch) -> None:
         {
             "account": _FakeNamedTuple(trade_allowed=True, login=123456),
             "order_check": _INVESTOR_ORDER_CHECK,
+            "terminal": _HEALTHY_TERMINAL,
         },
     )
 
@@ -208,7 +380,8 @@ def test_validate_master_via_trade_allowed_rejected(monkeypatch) -> None:
     assert result.error_code == "MT5_MASTER_PASSWORD"
     # Byte-identity pin — the cross-language contract string.
     assert result.human_message == MT5_MASTER_PASSWORD_DETAIL
-    assert fake.shutdown_calls == 1  # close() on the master-reject path
+    assert fake.close_calls == 1  # close() on the master-reject path
+    assert fake.shutdown_calls == 0
 
 
 def test_validate_master_via_order_check_retcode_rejected(monkeypatch) -> None:
@@ -219,6 +392,7 @@ def test_validate_master_via_order_check_retcode_rejected(monkeypatch) -> None:
         {
             "account": _FakeNamedTuple(trade_allowed=False, login=123456),
             "order_check": _FakeNamedTuple(retcode=10009, comment="Done"),
+            "terminal": _HEALTHY_TERMINAL,
         },
     )
 
@@ -243,7 +417,8 @@ def test_validate_bad_creds_maps_to_auth_failed(monkeypatch) -> None:
     assert result.error_code == "AUTH_FAILED"
     # Byte-identity with services/exchange.py AUTH_FAILED_DETAIL (zero TS edits).
     assert result.human_message == AUTH_FAILED_DETAIL
-    assert fake.shutdown_calls == 1  # close() on the auth-fail path
+    assert fake.close_calls == 1  # close() on the auth-fail path
+    assert fake.shutdown_calls == 0
 
 
 def test_validate_wrong_server_maps_to_wrong_server(monkeypatch) -> None:
@@ -257,7 +432,8 @@ def test_validate_wrong_server_maps_to_wrong_server(monkeypatch) -> None:
     assert result.valid is False
     assert result.error_code == "MT5_WRONG_SERVER"
     assert result.human_message == MT5_WRONG_SERVER_DETAIL
-    assert fake.shutdown_calls == 1
+    assert fake.close_calls == 1  # session never leaks on the wrong-server path
+    assert fake.shutdown_calls == 0
 
 
 def test_validate_transient_propagates_untouched_and_closes(monkeypatch) -> None:
@@ -270,7 +446,8 @@ def test_validate_transient_propagates_untouched_and_closes(monkeypatch) -> None
 
     with pytest.raises(Mt5ClientError):
         asyncio.run(Mt5Adapter().validate(_req()))
-    assert fake.shutdown_calls == 1  # session never leaks on the propagating path
+    assert fake.close_calls == 1  # session never leaks on the propagating path
+    assert fake.shutdown_calls == 0
 
 
 def test_validate_non_numeric_login_fails_closed_without_client(monkeypatch) -> None:
@@ -356,6 +533,182 @@ def test_validate_probe_hang_bounded_by_wait_for_ceiling(monkeypatch) -> None:
     with pytest.raises(asyncio.TimeoutError):
         asyncio.run(Mt5Adapter().validate(_req()))
     assert client.shutdown_calls == 1  # close() ran even though the probe was cut off
+
+
+# --------------------------------------------------------------------------- #
+# THE TERMINAL LEASE — the SIBLING validate path (153.3 review of D-29)
+#
+# D-29 made `routers/exchange.py` take the per-terminal lease. THIS path —
+# `Mt5Adapter.validate` — logs into the SAME process-global MetaTrader5 session,
+# from the SAME process (`main.py`'s lifespan runs the worker loops INSIDE the API
+# process), and took the lease ZERO times. A lease held by ONE of two callers of
+# ONE terminal serializes NOTHING: MT5 binds one account per terminal AT A TIME,
+# so the unleased login() silently re-points the terminal under the leased caller
+# mid-probe. Observed before the fix:
+#   ['login-start', 'login-start', 'login-end', 'release', 'login-end', 'release']
+#
+# ⚠️ The oracle is BLOCKING/ORDERING, never "a lease object was entered" or "a lock
+# exists": a lease built on a second registry, or on a differently formatted key,
+# enters and exits perfectly happily while serializing nothing — and looks fixed.
+# --------------------------------------------------------------------------- #
+
+
+def _expected_terminal_key(host: str, port: int) -> str:
+    """The key `Mt5Client` ITSELF produces — obtained by CALLING the shipped
+    property, never by retyping its format here. The three job call sites and the
+    router all key on `Mt5Client.terminal_key`; if this adapter formatted the key
+    differently the two would resolve to DIFFERENT Lock objects and serialize
+    nothing (MT5CONC-02 / 151-RESEARCH Pitfall 2) while every lock still "works".
+    """
+    return Mt5Client.terminal_key.fget(SimpleNamespace(_host=host, _port=port))
+
+
+class _InstrumentedConn(_FakeRpycConn):
+    """The rpyc socket, recording its teardown on the shared event log — so the
+    ordering oracle can see that the lease is held until the transport is given
+    up, not merely until login() returns."""
+
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self._events = events
+
+    def close(self):
+        self._events.append("close")
+        return super().close()
+
+
+class _SlowLoginMt5(_FakeMt5):
+    """The ONE shared Wine terminal, instrumented so the INTERLEAVE is observable.
+
+    `login` sleeps INSIDE the worker thread (`_probe` runs via
+    `asyncio.to_thread`) precisely so an UNSERIALIZED second caller genuinely
+    overlaps it. An instant login would let both callers pass in either order and
+    the ordering oracle would be vacuous — a guard that cannot fail.
+    """
+
+    def __init__(self, scenario: dict, events: list[str]) -> None:
+        super().__init__(scenario)
+        self._events = events
+        # Single leading underscore ⇒ NOT re-mangled by this class either; the
+        # name stays byte-identical to the one mt5linux 0.1.9 sets.
+        self._MetaTrader5__conn = _InstrumentedConn(events)
+
+    def login(self, login, **kwargs):
+        self._events.append("login-start")
+        time.sleep(0.1)
+        self._events.append("login-end")
+        return super().login(login, **kwargs)
+
+
+def _install_shared_terminal(
+    monkeypatch,
+    events: list[str],
+    factory_calls: list[tuple[str, int]] | None = None,
+) -> _SlowLoginMt5:
+    """Every `_build_client` call returns a FRESH `Mt5Client` over the SAME double
+    — which is the production topology: one Wine terminal, one MetaTrader5 module
+    instance, a new client per job."""
+    fake = _SlowLoginMt5(
+        {
+            "account": _INVESTOR_ACCOUNT,
+            "order_check": _INVESTOR_ORDER_CHECK,
+            "terminal": _HEALTHY_TERMINAL,
+        },
+        events,
+    )
+
+    def _connect(*, host, port, timeout):
+        return fake
+
+    def _fake_build(host: str, port: int) -> Mt5Client:
+        if factory_calls is not None:
+            factory_calls.append((host, port))
+        return Mt5Client(host, port, _connect=_connect)
+
+    monkeypatch.setattr("services.ingestion.mt5._build_client", _fake_build)
+    monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
+    monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    return fake
+
+
+async def test_two_concurrent_ingestion_validates_are_serialized_on_the_terminal(
+    monkeypatch,
+) -> None:
+    """⭐ THE POINT. Two concurrent validates through THIS path must serialize on
+    the ONE shared terminal.
+
+    Asserted as ORDERING, not as "both succeeded": both succeed under the defect
+    too whenever the interleave happens to be benign. Against the unleased adapter
+    this reds with the wave-4 shape (two `login-start`s before the first
+    `login-end`), which is the terminal being re-pointed under a caller mid-probe.
+    """
+    events: list[str] = []
+    _install_shared_terminal(monkeypatch, events)
+
+    results = await asyncio.gather(
+        Mt5Adapter().validate(_req()), Mt5Adapter().validate(_req())
+    )
+
+    assert [(r.valid, r.read_only) for r in results] == [(True, True)] * 2
+    assert events == ["login-start", "login-end", "close"] * 2, (
+        "the second validate's login() started before the first gave up the "
+        "terminal — this path is not taking the lease (or is taking one keyed "
+        f"differently from Mt5Client.terminal_key). Observed: {events}"
+    )
+
+
+async def test_ingestion_validate_waits_on_the_lock_keyed_by_terminal_key(
+    monkeypatch,
+) -> None:
+    """⭐ THE KEY IDENTITY, proven by CONTENTION rather than by inspection.
+
+    A lease on the wrong key is worse than no lease: it looks fixed. So the holder
+    here is the lock from the ONE shared registry under the key
+    `Mt5Client.terminal_key` itself computes — the same object `job_worker`,
+    `allocator_positions` and `routers/exchange.py` contend on. If this adapter
+    derived the key any other way (the raw `MT5_GATEWAY_PORT` string, a host-only
+    key, a private registry) it would sail straight past a held terminal and
+    `blocked` would be False.
+
+    Also asserted: a queued caller has not yet CONSTRUCTED a client. Construction
+    opens the rpyc socket, which is the very thing that races, so the lease must
+    already be held when it happens.
+    """
+    events: list[str] = []
+    factory_calls: list[tuple[str, int]] = []
+    _install_shared_terminal(monkeypatch, events, factory_calls)
+
+    held = mt5_concurrency._mt5_terminal_lock_for(
+        _expected_terminal_key("mt5-gw.internal", 18812)
+    )
+    await held.acquire()
+
+    task = asyncio.create_task(Mt5Adapter().validate(_req()))
+    try:
+        await asyncio.sleep(0.15)  # ample for an unleased validate to finish
+        blocked = not task.done()
+        factory_while_queued = list(factory_calls)
+        events_while_queued = list(events)
+    finally:
+        # Released unconditionally, so a failing assertion below can never strand
+        # the terminal for the rest of the session.
+        held.release()
+
+    result = await task
+
+    assert blocked, (
+        "the validate ran while another caller held the terminal — it is either "
+        "not leasing, leasing a differently-keyed lock, or leasing out of a "
+        "second registry"
+    )
+    assert factory_while_queued == [], (
+        "a queued validate constructed its rpyc client before holding the "
+        f"terminal: {factory_while_queued}"
+    )
+    assert events_while_queued == []
+    assert (result.valid, result.read_only) == (True, True)
+    assert factory_calls == [("mt5-gw.internal", 18812)]
+    assert events == ["login-start", "login-end", "close"]
 
 
 # --------------------------------------------------------------------------- #

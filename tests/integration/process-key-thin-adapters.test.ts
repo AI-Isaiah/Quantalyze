@@ -779,11 +779,28 @@ describe("thin adapters — INTERNAL_API_TOKEN missing returns 503 (I-T3)", () =
     expect(findProcessKeyCall()).toBeUndefined();
   });
 
-  it("I-T3c: strategies/finalize-wizard missing token → 503 OR 502 (probe), no /process-key call", async () => {
+  it("I-T3c: strategies/finalize-wizard missing token → 500 SEAM_MISCONFIGURED (probe), no /process-key call", async () => {
     delete process.env.INTERNAL_API_TOKEN;
-    // The pre-flight scope-broadening probe also needs INTERNAL_API_TOKEN —
-    // its absence triggers a 502 KEY_NETWORK_TIMEOUT BEFORE the unified
-    // delegation runs. Either way, /process-key MUST NOT be called.
+    // ⚠️ RE-CUT — 153.2-04 / WIZFORM-04 / D-14b. The I-T3 INVARIANT is
+    // untouched and is the reason this row exists: a missing internal token must
+    // never reach /process-key. What changed is the ENVELOPE this route answers
+    // with on the way to that outcome.
+    //
+    // The pre-flight scope-broadening probe needs INTERNAL_API_TOKEN too, so it
+    // refuses BEFORE the unified delegation's own 503 can run — that ordering is
+    // unchanged. But it used to refuse with `502 KEY_NETWORK_TIMEOUT`, whose
+    // copy says we could not reach the exchange and whose envelope renders a
+    // Retry. All of that was false: nothing was attempted, no exchange was
+    // involved, and the setting stays wrong until a human fixes it and
+    // redeploys, so the Retry could only ever reproduce the same message. That
+    // is the five-clicks behaviour WIZFORM-04 exists to end.
+    //
+    // ⛔ The tolerant `[502, 503]` is deliberately GONE. A set-membership
+    // assertion over the two answers this route could give was satisfied by the
+    // wrong one, which is how the lie survived here — the honest code is pinned
+    // exactly, so a regression to either reds by name. 500 because the fault is
+    // OURS: that is the status `process-key-client` already answers this class
+    // with, and 502 would blame the upstream for our own unset setting.
     const { POST } = await import("@/app/api/strategies/finalize-wizard/route");
     const res = await POST(
       jsonReq("/api/strategies/finalize-wizard", {
@@ -793,7 +810,15 @@ describe("thin adapters — INTERNAL_API_TOKEN missing returns 503 (I-T3)", () =
         category_id: "22222222-2222-2222-2222-222222222222",
       }),
     );
-    expect([502, 503]).toContain(res.status);
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("SEAM_MISCONFIGURED");
+    expect(
+      body.code,
+      "A permanent configuration fault must not be reported as a transient " +
+        "network condition — KEY_NETWORK_TIMEOUT's copy renders a Retry that " +
+        "can never succeed.",
+    ).not.toBe("KEY_NETWORK_TIMEOUT");
     expect(findProcessKeyCall()).toBeUndefined();
   });
 

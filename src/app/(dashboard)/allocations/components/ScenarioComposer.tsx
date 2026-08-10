@@ -4353,7 +4353,12 @@ export function ScenarioComposer({
     return (
       <div
         data-widget-id="scenario-composer"
-        className="mx-auto max-w-[1440px] py-12"
+        // 153.2 review WR-02 — NO px CAP. This body is the Scenario tab of
+        // `/allocations`, an `isWide` dense-table surface, and the shell went
+        // fluid on 2026-08-09. A 1440px cap here silently re-clamped it, so the
+        // founder's dead-margin report survived on the very surface they filed
+        // it against while DESIGN.md recorded `/allocations` as fixed.
+        className="mx-auto py-12"
       >
         <div className="rounded-lg border border-border bg-surface p-12 text-center">
           <h2
@@ -4434,7 +4439,10 @@ export function ScenarioComposer({
   return (
     <div
       data-widget-id="scenario-composer"
-      className="mx-auto flex max-w-[1440px] flex-col"
+      // 153.2 review WR-02 — NO px CAP; see the empty-state branch above. This
+      // is the shell that holds the constituent and coverage tables, i.e. the
+      // exact content the fluid decision exists for.
+      className="mx-auto flex flex-col"
     >
       {/* IMPACT-01 — persistent PROJECTED honesty pill. Always rendered (NOT a
           tooltip/hover), plain text, NO role="alert". Neutral-outline token per

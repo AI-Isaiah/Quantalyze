@@ -18,6 +18,10 @@ import {
   isComputedAnalytics,
   isCryptoExchange,
   CRYPTO_EXCHANGES,
+  VENUE_CAPABILITIES,
+  venueSupportsScopeProbe,
+  venueIsSubstitutable,
+  venueIsSerialized,
   annualizationPeriods,
   blendPeriodsPerYear,
   calendarYears,
@@ -272,6 +276,132 @@ describe("closed-sets registry", () => {
     });
   });
 
+  // Phase 153.1 / D-17, D-22. These assert the record's PROPERTIES, never the
+  // record read back at itself: the oracle for totality is SUPPORTED_EXCHANGES and
+  // the oracle for "only one opt-out" is a hand-typed 1. A count derived from the
+  // same filter it is checking would stay green the day a second venue opts out,
+  // which is exactly the class-vs-instance mutation the falsifiability ledger
+  // (SC-3, second non-probing venue) is watching for.
+  describe("venue capabilities (class, not instance)", () => {
+    it("every SUPPORTED_EXCHANGES member has a capability row", () => {
+      // Iterate the ORACLE (the allowlist) and index the SUBJECT (the record).
+      // Object.keys(VENUE_CAPABILITIES).length compared to itself would pass for
+      // any record whatsoever.
+      const record: Record<string, unknown> = VENUE_CAPABILITIES;
+      for (const venue of SUPPORTED_EXCHANGES) {
+        expect(
+          Object.prototype.hasOwnProperty.call(record, venue),
+          `${venue} is a SUPPORTED exchange with no VENUE_CAPABILITIES row — the ` +
+            `satisfies clause makes this a compile error too, but a runtime hole ` +
+            `(a deleted row behind a cast) would otherwise read as "all defaults"`,
+        ).toBe(true);
+        expect(typeof record[venue]).toBe("object");
+      }
+    });
+
+    it("sFOX asserts NO capability at all — its submit path is byte-unchanged (D-22)", () => {
+      // Structural, not behavioural: the KEY must be absent, so sFOX inherits the
+      // default rather than restating it. If someone opts sFOX out of the scope
+      // probe later, that is a DECISION (RESEARCH Q2, logged in TODOS.md) and this
+      // is where it gets made — deliberately, with the reasoning written down.
+      expect(
+        "scopeProbeSupported" in VENUE_CAPABILITIES.sfox,
+        "D-22 pins sFOX byte-unchanged in this phase. RESEARCH Q2 asks whether " +
+          "sFOX should also opt out (it asserts read_only structurally for the same " +
+          "reason MT5 does) — but it is unknown whether the ccxt probe currently " +
+          "succeeds for sFOX, so the question is logged, not answered.",
+      ).toBe(false);
+      expect(venueSupportsScopeProbe("sfox")).toBe(true);
+      expect(venueIsSubstitutable("sfox")).toBe(true);
+      expect(venueIsSerialized("sfox")).toBe(false);
+    });
+
+    it("EXACTLY ONE venue opts out of the scope probe, and it is mt5", () => {
+      const nonProbing = SUPPORTED_EXCHANGES.filter(
+        (venue) => !venueSupportsScopeProbe(venue),
+      );
+      expect(
+        nonProbing.length,
+        "A SECOND non-probing venue arrived. That is a security decision (the " +
+          "scope-broadening probe is ASVS V4) and it must be made explicitly here, " +
+          "not inherited from a copied row.",
+      ).toBe(1);
+      expect(nonProbing).toEqual(["mt5"]);
+    });
+
+    it("EXACTLY ONE venue is non-substitutable, and it is mt5", () => {
+      const nonSubstitutable = SUPPORTED_EXCHANGES.filter(
+        (venue) => !venueIsSubstitutable(venue),
+      );
+      expect(
+        nonSubstitutable.length,
+        "A second non-substitutable venue means the copy layer now suppresses the " +
+          '"switch exchange" remedy somewhere it used to render. D-17 asks for that ' +
+          "only where the account IS the venue.",
+      ).toBe(1);
+      expect(nonSubstitutable).toEqual(["mt5"]);
+    });
+
+    it("EXACTLY ONE venue is serialized, and it is mt5", () => {
+      const serialized = SUPPORTED_EXCHANGES.filter((venue) =>
+        venueIsSerialized(venue),
+      );
+      expect(
+        serialized.length,
+        "Claiming a venue queues is a specific factual claim about why the user is " +
+          "waiting. Only mt5 funnels every call through one terminal lease.",
+      ).toBe(1);
+      expect(serialized).toEqual(["mt5"]);
+    });
+
+    it("an UNRESOLVED venue is still scope-probed — the control fails TOWARD probing", () => {
+      // ⭐ SC-3. This is the assertion the falsifiability ledger targets: flipping
+      // the default from true to false silently disables the scope-broadening
+      // defense for every venue the resolver could not name, promoting a key
+      // broadened to trade/withdraw between Connect and Submit. ASVS V4.
+      // ⚠️ Note this is the OPPOSITE direction from isCryptoExchange(null) === false.
+      const reason =
+        "an unresolved venue must still be probed (ASVS V4) — a false answer here " +
+        "would disable a security control for every unnamed venue";
+      expect(venueSupportsScopeProbe(null), reason).toBe(true);
+      expect(venueSupportsScopeProbe(undefined), reason).toBe(true);
+      expect(venueSupportsScopeProbe(""), reason).toBe(true);
+      expect(venueSupportsScopeProbe("kraken"), reason).toBe(true);
+    });
+
+    it("an UNRESOLVED venue keeps the incumbent substitution copy", () => {
+      const reason =
+        "when the caller did not name a venue the incumbent copy stands — " +
+        "suppressing venue-shaped remedies everywhere would be a repo-wide copy " +
+        "regression D-17 did not ask for";
+      expect(venueIsSubstitutable(null), reason).toBe(true);
+      expect(venueIsSubstitutable(undefined), reason).toBe(true);
+      expect(venueIsSubstitutable(""), reason).toBe(true);
+      expect(venueIsSubstitutable("kraken"), reason).toBe(true);
+    });
+
+    it("an UNRESOLVED venue is NOT claimed to be queueing", () => {
+      const reason =
+        "never invent a specific fact about why the user is waiting — a venue we " +
+        "could not resolve is not known to queue";
+      expect(venueIsSerialized(null), reason).toBe(false);
+      expect(venueIsSerialized(undefined), reason).toBe(false);
+      expect(venueIsSerialized(""), reason).toBe(false);
+      expect(venueIsSerialized("kraken"), reason).toBe(false);
+    });
+
+    it("the predicates are case-insensitive, like isCryptoExchange", () => {
+      // canonicalizeExchange hands back the DISPLAY form ("MT5") for an MT5 key, so
+      // a case-sensitive lookup would silently fall to every default — i.e. MT5
+      // would be probed, called substitutable and called unqueued, undoing all
+      // three capabilities at once.
+      expect(venueIsSubstitutable("MT5")).toBe(false);
+      expect(venueIsSubstitutable("Mt5")).toBe(false);
+      expect(venueSupportsScopeProbe("MT5")).toBe(false);
+      expect(venueIsSerialized("MT5")).toBe(true);
+    });
+  });
+
   describe("signup roles (security boundary)", () => {
     it("SIGNUP_ROLES mirrors the handle_new_user trigger allowlist exactly", () => {
       expect(SIGNUP_ROLES).toEqual(["manager", "allocator", "both"]);
@@ -320,6 +450,7 @@ describe("closed-sets registry", () => {
     it("pins the cap boundary values that the routes + validators consume", () => {
       expect(MAGNITUDE_CAPS.MAX_NAME_CHARS).toBe(80);
       expect(MAGNITUDE_CAPS.MAX_MANDATE_CHARS).toBe(500);
+      expect(MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS).toBe(10);
       expect(MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS).toBe(5000);
       expect(MAGNITUDE_CAPS.MAX_FOUNDER_NOTES_CHARS).toBe(10_000);
       expect(MAGNITUDE_CAPS.MAX_TICKET_SIZE_USD).toBe(1_000_000_000);
@@ -331,6 +462,17 @@ describe("closed-sets registry", () => {
     it("the AUM dollar cap is strictly larger than the ticket-size cap (distinct semantics)", () => {
       expect(MAGNITUDE_CAPS.MAX_DOLLAR_VALUE_USD).toBeGreaterThan(
         MAGNITUDE_CAPS.MAX_TICKET_SIZE_USD,
+      );
+    });
+
+    it("the description bound PAIR is ordered min < max (D-23)", () => {
+      // An inverted pair admits no description at all: the server would refuse
+      // every string (too short AND too long simultaneously) while the client
+      // field guard — reading the same two constants — believes the field is
+      // valid. That is the 3-failed-submit shape D-23 exists to prevent, now
+      // between two constants instead of between a constant and a literal.
+      expect(MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS).toBeLessThan(
+        MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS,
       );
     });
   });
