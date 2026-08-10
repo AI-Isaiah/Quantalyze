@@ -265,13 +265,27 @@ export const BREAKER_COOLDOWN_S = 30;
  * decorative: the encoded expiry could never be in the past while the key still
  * existed.
  *
- * 60 s, because the guard must span the longest budget in `SEAM_BUDGETS`
- * (`process-key-sync`, 60 000 ms) measured from the instant a lock is armed:
- * `BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S = 90 s ≥ 60 s`, with the
- * cooldown itself absorbing the first 30. Pinned in
- * `seam-constants.pin.test.ts`, both as a literal and as that inequality.
+ * 90 s, because the guard must span the longest budget in `SEAM_BUDGETS`
+ * (`validate-key-serialized`, 120 000 ms) measured from the instant a lock is
+ * armed: `(BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S) × 1000 = (30 + 90) ×
+ * 1000 = 120 000 ≥ 120 000`, with the cooldown itself absorbing the first 30 s.
+ *
+ * ⚠️ THE INEQUALITY IS TIGHT ON PURPOSE — it holds with EQUALITY, not with
+ * slack. This constant was 60 while the longest budget was 60 000 ms; Phase
+ * 153.4 / D-26 raised the serialized validate budget to 120 000 ms and this
+ * constant to 90 IN THE SAME COMMIT, because landing the budget alone leaves
+ * A-25 false while every literal-vs-literal assertion about it stays green.
+ * Any FURTHER budget raise must move this constant again, in its own same
+ * commit: there is no headroom left to absorb one.
+ *
+ * Pinned in `seam-constants.pin.test.ts` three ways, and the third is the one
+ * that can see this coupling break: a literal pin on this constant, the
+ * literal-vs-literal A-25 inequality, and the DERIVED A-25 assertion that takes
+ * `Math.max` over the live `SEAM_BUDGETS` and compares it to a ceiling built
+ * from hand-typed breaker literals. The first two catch the constants moving;
+ * only the third catches a budget outgrowing them.
  */
-export const BREAKER_LOCK_TOMBSTONE_S = 60;
+export const BREAKER_LOCK_TOMBSTONE_S = 90;
 
 /**
  * Fallback `Retry-After` for a caller that has an open circuit but no hint.
@@ -414,6 +428,7 @@ export const SEAM_RETRY_JITTER_MAX_MS = 250;
 /** Identifier for a seam call site. One key per distinct budget owner. */
 export type SeamBudgetKey =
   | "validate-key"
+  | "validate-key-serialized"
   | "encrypt-key"
   | "bridge"
   | "simulator"
@@ -547,6 +562,26 @@ export const SEAM_BUDGETS: Record<
     retries: SEAM_RETRIES,
     notes:
       "Live exchange auth probe — genuinely slow and venue-variable (Deribit, Binance, OKX all differ). Was the analytics-client 30s default.",
+  },
+  "validate-key-serialized": {
+    timeoutMs: 120_000,
+    // SAME endpoint, SAME dependency as the row above — POST /api/validate-key,
+    // whose `exchange.py` `_validate_mt5_key` raises MT5_GATEWAY_UNREACHABLE at
+    // service_error(503, dependency="mt5-gateway"). Declared here for the same
+    // reason and no other; the MT5_GATEWAY_UNCONFIGURED arm of that same
+    // function is a 500 and never counts, so the status is again the only thing
+    // separating them. ⚠️ Nothing new is declared: a longer budget does not earn
+    // a wider dependency set.
+    dependencies: ["mt5-gateway"],
+    // ⛔ NEVER a literal 1 here, and never an entry in RETRY_SAFE_ANALYTICS
+    // (its NO verdict is written in `seam-retry-registry.ts`). In the OPEN state
+    // CircuitOpenError is thrown BEFORE fetch, so a retry merely re-runs
+    // isBreakerOpen, charges a second store round and throws again — and a
+    // retried 120 000 ms leg would double the wall-clock SC-4b charges against
+    // this route's Vercel ceiling. D-07 is the standing prohibition.
+    retries: SEAM_RETRIES,
+    notes:
+      "The SERIALIZED-venue arm of the live exchange auth probe — spent by venues whose VENUE_CAPABILITIES.serialized is true (today: MT5), selected by budgetKeyFor(exchange) in analytics-client.ts. One terminal, one account at a time, so a caller's own probe waits behind whoever holds the lease. It must contain a server worst case of 105 s: a 20 s BOUNDED lease acquisition + a 75 s end-to-end probe deadline + a 10 s release that runs OUTSIDE that deadline (Phase 153.3), leaving 15 s of margin. 120 000 ms is PROVISIONAL (D-27): it is the founder's stated staleness tolerance, NOT a measurement — no uncensored successful MT5 validation exists anywhere, so no p50/p95 does either. Phase 153.3's per-stage stage/duration_ms instrumentation is what will produce one, and Phase 155 (MT5-VERIFY) owns tightening this number from that data. RECORDED, NOT MITIGATED (T-153.4-03): this arm holds a Vercel lambda four times longer than the default row, and the only bound is the per-tenant 100/hour limiter on /api/validate-key — the same accepted exposure the process-key-sync row's ME-04 note carries.",
   },
   "encrypt-key": {
     timeoutMs: 30_000,
