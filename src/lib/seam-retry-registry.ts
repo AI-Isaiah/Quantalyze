@@ -110,9 +110,12 @@
  * 141.1 / D-11 — THIS EXCLUSION LIST IS NOW ENFORCED, not merely described.
  * `seam-retry-registry.test.ts` types the same four keys as `RouteBudgetKey` and
  * subtracts them from `SeamBudgetKey` before asserting analytics coverage, so a
- * FOURTEENTH budget key must be classified as an analytics wrapper (→ a verdict
+ * FIFTEENTH budget key must be classified as an analytics wrapper (→ a verdict
  * here) or as a route budget (→ that list) before `npm run typecheck` passes.
  * Doing neither is no longer a silent exclusion. Edit the two together.
+ * ⚠️ The fourteenth was `validate-key-serialized` (Phase 153.4 / D-26) and the
+ * fence DID refuse the repo until its NO verdict was written — the mechanism is
+ * exercised, not merely described.
  */
 
 import type { FlowType } from "./process-key-client";
@@ -512,8 +515,8 @@ export const RETRY_SAFE_ANALYTICS: Readonly<
 
 /**
  * Analytics-seam wrapper functions that are NOT retry-safe — evidence-only NO
- * verdicts. Exactly FIVE entries; together with the four YES entries they cover
- * all nine analytics wrappers (the exhaustiveness pin).
+ * verdicts. Exactly SIX entries; together with the four YES entries they cover
+ * all ten analytics wrappers (the exhaustiveness pin).
  */
 export const RETRY_AUDIT_NO_ANALYTICS: Readonly<
   Partial<Record<SeamBudgetKey, string>>
@@ -522,6 +525,25 @@ export const RETRY_AUDIT_NO_ANALYTICS: Readonly<
     "validateKey — runs a live exchange probe against caller credentials; " +
     "non-idempotent by construction, REQUIREMENTS Out of Scope. A retry re-probes " +
     "the venue.",
+  "validate-key-serialized":
+    "validateKey on the SERIALIZED-venue arm — the budget budgetKeyFor(exchange) " +
+    "selects when VENUE_CAPABILITIES.serialized is true (today: MT5). Same live " +
+    "exchange probe against caller credentials as validate-key, and " +
+    "non-idempotent for the same reason: a retry re-probes the venue with the " +
+    "same credentials. THREE FURTHER REASONS THIS ONE IS WORSE, not merely equal. " +
+    "(1) AMPLIFICATION INTO AN OPEN BREAKER: the row declares mt5-gateway, and " +
+    "breakerKeysFor adds the global railway key to every check, so in the OPEN " +
+    "state CircuitOpenError is thrown BEFORE any fetch is issued — a retry does " +
+    "not reach the venue at all, it merely re-runs isBreakerOpen, charges a " +
+    "second store round trip and throws again. Retry here is not discouraged, it " +
+    "is structurally wasteful. (2) WALL CLOCK: this is the longest budget in the " +
+    "table at 120 000 ms, and SC-4b in seam-budgets.invariant.test.ts charges " +
+    "(1 + retries) x timeoutMs against the route's Vercel ceiling — a retried leg " +
+    "would double the largest term in that arithmetic. (3) SERIALIZATION: the " +
+    "server takes a terminal lease, one account at a time, so a retried attempt " +
+    "queues behind every other caller's probe and lengthens THEIR waits too — " +
+    "which is how one slow venue takes down every other user's submits. D-07 is " +
+    "the standing prohibition and nothing here reopens it.",
   "encrypt-key":
     "encryptKey — a credential WRITE; non-idempotent by construction, REQUIREMENTS " +
     "Out of Scope. A retry double-writes credentials.",

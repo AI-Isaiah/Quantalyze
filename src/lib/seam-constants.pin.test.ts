@@ -468,12 +468,12 @@ describe("SEAM_BUDGETS — every timeout pinned to a hand-typed literal", () => 
       ).toBe(3);
       expect(
         Object.keys(RETRY_AUDIT_NO_ANALYTICS).length,
-        "RETRY_AUDIT_NO_ANALYTICS no longer holds exactly 5 refusals " +
-          "(validate-key, encrypt-key, match-recompute, portfolio-analytics, " +
-          "match-eval). Together with the 4 above this is the whole 9-wrapper " +
-          "analytics surface: a wrapper in NEITHER map has no audit verdict at " +
-          "all.",
-      ).toBe(5);
+        "RETRY_AUDIT_NO_ANALYTICS no longer holds exactly 6 refusals " +
+          "(validate-key, validate-key-serialized, encrypt-key, " +
+          "match-recompute, portfolio-analytics, match-eval). Together with the " +
+          "4 above this is the whole 10-wrapper analytics surface: a wrapper in " +
+          "NEITHER map has no audit verdict at all.",
+      ).toBe(6);
     });
 
     it.each(Object.keys(RETRY_SAFE_ANALYTICS))(
