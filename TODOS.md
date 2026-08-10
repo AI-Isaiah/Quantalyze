@@ -385,6 +385,28 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### ⚠️ PRE-EXISTING RED on `main`: `AllocationsTabs.scenario-state-preservation` (found 2026-08-10 during /ship)
+`src/app/(dashboard)/allocations/AllocationsTabs.scenario-state-preservation.test.tsx` →
+*"adding + toggling a strategy in Scenario, leaving to Overview, and re-entering preserves the
+draft"* fails with `TestingLibraryElementError: Unable to find an element by:
+[data-testid="kpi-strip-mock"]`, preceded by
+`scenario_list_load_failed { error: 'TypeError: Failed to parse URL from /api/allocator/scenario/saved' }`.
+
+⭐ **Triaged as NOT ours before shipping v0.55.0.0**, and the triage is the part worth keeping:
+- **Deterministic, not a flake** — fails twice in isolation, and in the full suite.
+- **Fails on pristine `origin/main`** — proven in a throwaway detached worktree at `861a4d91`
+  with `node_modules` symlinked, so the branch is not the cause.
+- **Not the Node-version split** either — reproduced under **both** local Node 25 and CI's
+  Node 22 (`PATH=/opt/homebrew/opt/node@22/bin`), so it is not
+  [[reference_ci_node22_vs_local_node25]].
+
+The relative-URL parse failure is the likely root: `fetch('/api/…')` has no base in jsdom, so the
+scenario list load throws, the composer never renders, and the mock strip is never found. It
+presumably passes (or skips) in CI because something supplies a base URL there — **which means a
+green CI on this spec is not evidence the behaviour works.** Worth confirming whether CI runs it
+at all; if CI skips it, the spec is a guard that cannot fail in the only place it is enforced.
+
+
 ### ✅ DECIDED + SHIPPED — should the measure ladder have a px cap at all? (raised 2026-08-09, DECIDED 2026-08-09, closed 2026-08-10)
 Founder report, with screenshots: *"zooming out should allow me to see more of the
 content… it should never produce dead/empty areas."*
