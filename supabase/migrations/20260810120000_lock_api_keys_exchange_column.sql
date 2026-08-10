@@ -29,19 +29,17 @@
 --     `api_keys_exchange_check` to ADMIT the probe-exempt venue, so the forged
 --     value is a legal value of the constraint in production today.
 --
--- Exploit, entirely within the user's own session and own rows:
---   1. Connect a read-only key (passes the connect-time read-only gate — the
---      /api/keys/validate-and-encrypt route refuses to encrypt a key it cannot
---      confirm read-only, which is why row CREATION is not the hole).
---   2. Broaden that key at the exchange to trade/withdraw.
---   3. `PATCH /rest/v1/api_keys?id=eq.<own key>` with a probe-exempt
---      `exchange` value, using the browser's own Supabase JWT. RLS allowed it;
---      the CHECK admitted it.
---   4. Submit the wizard — the scope-broadening probe never runs, and the
---      strategy finalizes to `pending_review` holding a trade/withdraw key.
---   5. PATCH the venue back, so the key syncs normally and the listing looks
---      ordinary. Step 5 is what turns this from a self-defeating forgery into a
---      durable one, and step 5 needs UPDATE.
+-- Impact, in one sentence: a key's own owner could rewrite this column from
+-- their browser session to a probe-exempt value, causing the submit-time
+-- scope-broadening check to be skipped for a key it should have examined — so a
+-- strategy could reach `pending_review` under a read-only-verified claim that
+-- was false. Row CREATION was never the hole: /api/keys/validate-and-encrypt
+-- refuses to mint ciphertext for a key it cannot confirm read-only. The
+-- REWRITE was the hole, and rewriting needs UPDATE.
+--
+-- (The reproduction steps are deliberately not recorded in this public repo.
+-- They are in the private session log for 2026-08-10 and may be restored here
+-- once every deployed environment has this migration applied.)
 --
 -- The same rewrite also flips the `asset_class` annualization stamp
 -- (√365 crypto vs √252 traditional) that finalize-wizard derives from this
