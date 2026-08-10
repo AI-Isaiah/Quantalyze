@@ -1835,3 +1835,37 @@ Both are explicitly OUT OF SCOPE for phase 153 (RESEARCH §Open Questions Q2 and
 
 - [ ] **Should sFOX also opt out of the submit-time scope probe?** `VENUE_CAPABILITIES.sfox` (`src/lib/closed-sets.ts`) asserts NO capability at all, so sFOX's submit path is byte-unchanged — that is D-22, pinned by `closed-sets.test.ts`'s *"sFOX asserts NO capability at all"* assertion. The question stands because sFOX asserts `read_only=True` **structurally** for the same reason MT5 does (`_validate_sfox_key`: the SfoxClient adapter has no order/withdraw/transfer surface, and sFOX exposes no per-key scope endpoint) — the same argument that earned MT5 `scopeProbeSupported: false`. What is unknown: whether the ccxt permissions probe currently *succeeds* for sFOX or has been silently failing on every sFOX submit. ⚠️ This is a SECURITY decision (the scope-broadening probe is ASVS V4) — do not flip it as a tidy-up; measure the probe's current behaviour against a live sFOX key first. Owner: unassigned. Reference: 153.1 D-22, RESEARCH Q2.
 - [ ] **`Validating…` (U+2026) at `CsvUploadStep.tsx:751` is the odd one out.** The four other live sites use ASCII `Validating...` (`ConnectKeyStep.tsx:782`, `MultiKeyConnectStep.tsx:1637`, `ApiKeyForm.tsx:199`, `StrategyForm.tsx:356`), and ASCII is the **recorded superseding decision** (`MultiKeyConnectStep.test.tsx:19-21` states it supersedes the UI-SPEC's typographic form). D-21 settles the spelling; a repo-wide copy sweep to apply it is not in phase 153's scope. ⚠️ Before changing any of these strings, grep `e2e/` — `e2e/api-key-flow.spec.ts:212` matches on the prefix regex `/Validating/i` and survives either form, but that is luck, not a guarantee for the next one. Owner: unassigned. Reference: 153.1 D-21, RESEARCH Q5.
+
+### Phase 153.4-03 (the long-wait card) — non-blocking findings, logged per the stopping rule (added 2026-08-10)
+
+Both are recorded rather than fixed: neither is user-facing today and neither is a
+data-integrity risk, so both sit below the founder stopping rule. Each is a conflict the
+plan resolved by SURFACING it (Rule 7), not by blending.
+
+- [ ] **`ui/Button.tsx:35` cannot be given a full-opacity focus ring by a caller.** It
+  hard-codes `focus-visible:ring-2 focus-visible:ring-accent/50` on EVERY variant, and
+  `cn` (`src/lib/utils.ts:72`) is a plain `filter(Boolean).join(" ")` — **not**
+  tailwind-merge — so a `className` passed in does not override the baked-in utility; it
+  merely appends a second, losing declaration. Consequence for this phase: the UI-SPEC
+  specifies `Button variant="ghost" size="sm"` for `Stop waiting`, but forbidden item #9
+  forbids a `/50` ring on a control this phase creates, so `ValidateWaitCard` renders a
+  plain `<button type="button">` carrying the ghost look plus the verbatim focus
+  contract. ⚠️ Fixing `Button.tsx` is a CROSS-SUITE change, not a one-line edit:
+  `AllocateDialog.test.tsx`'s focus sweep carves `ui/Button.tsx` and `ui/Modal.tsx` out
+  **by identity** and asserts they still carry `ring-accent/50`, so the fix reds an
+  unrelated suite and the carve-out must be deleted in the same commit. Same item as the
+  repo-wide `~20 files still use ring-accent/20 or /50` sweep above — this entry records
+  the *mechanism* (plain-join `cn`) that makes the two primitives un-overridable rather
+  than merely unfixed. Owner: the focus sweep.
+- [ ] **The UI-SPEC's queue-disclosure sentence names `MetaTrader` literally while its
+  render condition is the class-shaped `serialized` capability.** Copy (UI-SPEC Surface 1,
+  40% rung, shipped verbatim in `ValidateWaitCard.tsx`): *"Still signing in. MetaTrader
+  allows one sign-in at a time, so your check may be waiting behind another."* The gate is
+  `venueIsSerialized(exchange)` — correctly a class check, so a second serialized venue
+  would render this line automatically **and would read wrong**, naming a broker the user
+  is not connected to. Not fixed here because the remedy is a copy decision, not a code
+  one (`{VenueName} allows one sign-in at a time` loses the concrete, recognisable noun
+  that makes the sentence land for the only venue that has it today), and the copy table
+  is 153.1's. ⚠️ The trigger is not hypothetical-forever: it fires the day any second
+  venue gets `VENUE_CAPABILITIES.<venue>.serialized = true`. Whoever adds that row owns
+  this sentence. Owner: unassigned; reference 153.4-03, UI-SPEC Surface 1.

@@ -25,6 +25,10 @@ import {
   RETRY_AUDIT_NO_FLOW_TYPES,
 } from "./seam-retry-registry";
 import {
+  VALIDATE_KEY_BUDGET_MS,
+  VALIDATE_KEY_SERIALIZED_BUDGET_MS,
+} from "./wizard/validate-budget";
+import {
   FAKE_BREAKER_KEY,
   FAKE_THRESHOLD,
   FAKE_WINDOW_MS,
@@ -928,6 +932,67 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
         "BREAKER_LOCK_TOMBSTONE_S with it, D-26) or to LOWER the server chain. " +
         "⛔ Never to lower this hand-typed 105 000.",
     ).toBeGreaterThan(105_000);
+  });
+
+  it("the CLIENT-SAFE budget module agrees with the seam table (WIZFORM-05 / D-05)", () => {
+    // ── WHY A SECOND COPY OF THESE TWO NUMBERS EXISTS AT ALL ──────────────────
+    // The seam core is server-side BY CONSTRUCTION — `next/server`,
+    // `@upstash/ratelimit`, `@upstash/redis`, the breaker keyspace, the Sentry
+    // capture path. A `use client` wizard step cannot import it, and the long-wait
+    // card (Phase 153.4-03 / D-05) has to STATE the budget in copy: "We wait up to
+    // 120s for your broker to answer." So `src/lib/wizard/validate-budget.ts`
+    // hand-types the two figures for the browser, exactly as
+    // `src/lib/wizard/wizard-correlation.ts` hand-rolls the client half of the
+    // correlation id for the same boundary and the same reason.
+    //
+    // ── WHY THAT DUPLICATION IS SAFE, AND WHAT THIS ASSERTION IS FOR ──────────
+    // THIS IS THE ONLY THING THAT MAKES IT SAFE. A divergence is not cosmetic: it
+    // means the wizard PROMISES the user a wait the seam does not grant (the card
+    // says 120s, the fetch is abandoned at 30s — the silent-UNKNOWN inversion
+    // WIZFORM-05 exists to close), or grants one it never promised (the user is
+    // shown 30s and then held for 120s with no explanation, which is D-05's
+    // "worse than a fast wrong answer").
+    // ⛔ IF THIS REDS, MOVE BOTH CONSTANTS. Never delete the pin, and never close
+    // the gap by importing the seam table into the client module — that import is
+    // the thing the duplication exists to avoid, and `validate-budget.test.ts`
+    // scans the module's import edges for exactly it.
+    //
+    // ── WHY THIS DOES NOT BREAK THIS FILE'S ONE RULE ──────────────────────────
+    // The rule forbids reading an expectation out of the MODULE UNDER TEST. These
+    // two are a CROSS-MODULE agreement between two independently hand-typed
+    // vocabularies — the same shape as the SeamServiceDependency pin above — and
+    // the second half below re-pins the client side against bare literals typed
+    // HERE, so the pair cannot be satisfied by both sides moving together to a
+    // wrong value. One assertion without the other would be half a guard.
+    expect(
+      BUDGET_TABLE["validate-key"]?.timeoutMs,
+      "The default validate budget and the client's copy of it have diverged. The " +
+        "wizard would show one deadline and the seam would enforce another.",
+    ).toBe(VALIDATE_KEY_BUDGET_MS);
+    expect(
+      BUDGET_TABLE["validate-key-serialized"]?.timeoutMs,
+      "The SERIALIZED validate budget and the client's copy of it have diverged. " +
+        "On this arm the gap is the whole product: the long-wait card promises a " +
+        "duration in copy, and a promise the seam will not honour is the exact " +
+        "repudiation this pin exists to make impossible.",
+    ).toBe(VALIDATE_KEY_SERIALIZED_BUDGET_MS);
+
+    // The hand-typed half. Both sides of the equality above live in source files;
+    // an editor "fixing" a red pin by moving the CLIENT constant to match a wrong
+    // server value would satisfy it. These two literals are what refuses that.
+    expect(
+      VALIDATE_KEY_BUDGET_MS,
+      "The client's default validate budget is no longer 30 000 ms. If that is " +
+        "deliberate, the seam row moves in the SAME commit and both literals in " +
+        "this file move with it.",
+    ).toBe(30_000);
+    expect(
+      VALIDATE_KEY_SERIALIZED_BUDGET_MS,
+      "The client's serialized validate budget is no longer 120 000 ms. If that is " +
+        "deliberate: the seam row moves in the SAME commit, and a RAISE also moves " +
+        "BREAKER_LOCK_TOMBSTONE_S (D-26 — the A-25 equality is TIGHT at 120 000, " +
+        "zero headroom) plus its four hand-typed twins and the runbook.",
+    ).toBe(120_000);
   });
 
   it("A-14: the cooldown is at least as long as the failure window", () => {
