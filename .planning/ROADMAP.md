@@ -329,7 +329,9 @@ Plans:
 - ⛔ **D-34: reordering is not cosmetic.** Six PRE-EXISTING arms (`:573 :617 :767 :1293 :1310` written `{ error, code }`, plus `:1319` lowercase) are invisible to `EMITTER_RE`. They are out of scope only because it gates on `status: 400`; the moment the third `ROUTES` entry lands **and** the predicate widens, the coverage assertion goes blind on them. Size the vacuity floor against the **reordered total**, never against the nine.
 - ⚠️ The A-25 **derived** assertion lands here as a Wave-0 gate (green at HEAD) so that 153.4's budget raise cannot pass a pin that cannot fail.
 
-### Phase 153.2: WIZFORM-FIELD — The form refuses at the field; MT5 declarable *and* submittable (INSERTED)
+### Phase 153.2: WIZFORM-FIELD — The form refuses at the field; MT5 declarable *and* submittable (INSERTED) ✅ COMPLETE 2026-08-10
+
+**Status**: ✅ **COMPLETE** — 5/5 plans; `gsd-verifier` **25/25 must-haves, no gaps** (`human_needed` only for 5 browser items); `gsd-code-reviewer` found **1 blocker + 6 warnings, all fixed**. ⭐ The blocker (CR-01) was a live security defect: the scope-broadening probe's gate branched on `api_keys.exchange`, a column the key's own owner could rewrite — so the beneficiary could switch an ASVS V4 control off for their own key. Closed by migration `20260810120000` (table-level `REVOKE UPDATE` + a `SECURITY INVOKER` backstop trigger), **verified on TEST**: the exploit succeeded pre-fix and returns `42501` post-fix, with the worker sync path, `service_role` writes, user `SELECT` and user `DELETE` all confirmed intact. Residual (client-supplied `exchange` at INSERT) is self-defeating rather than harmful and is logged in TODOS.md with its real remedy.
 
 **Goal**: A field the user can get wrong is refused inline, at the field, before submit — and an MT5 strategy can both declare its venue and actually complete a submit
 **Depends on**: Phase 153.1 (copy members, `VENUE_CAPABILITIES`, `MIN_DESCRIPTION_CHARS`)
