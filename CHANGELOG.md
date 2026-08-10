@@ -1,5 +1,76 @@
 # Changelog
 
+## [0.55.0.0] - 2026-08-10
+### v1.17 — the form refuses at the field, and MT5 can finish a submit
+
+Three phases of the WIZFORM milestone land together (153.1, 153.2, 153.3). They answer one
+complaint: *the form told me nothing, three times in a row.*
+
+**A field you can get wrong now refuses at the field (WIZFORM-01, WIZFORM-02).** The founder
+submitted a two-character description three times and read "We could not classify this failure"
+each time — while the server knew exactly what was wrong. It answered with a bare `error` string
+and no `code`, so the client's roster could not name it and fell through to the UNKNOWN card.
+Eleven codes now carry that knowledge to the surface: `METADATA_DESCRIPTION_TOO_SHORT` says "Add
+at least 10 characters", absent says "Add a description", too long says "Keep this to 5,000".
+Three remedies where one silent arm used to be. The description bound is read from
+`MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS` on **both** sides, so the client mirror and the server
+rule cannot disagree — the drift that produced the incident. The submit button is no longer
+`disabled` for a validation reason: it stays clickable and explains itself, and a refused submit
+names the count, names the first bad field, opens the disclosure it hides in, and puts the cursor
+there. A field-level rejection raised by the server routes **back to its field** via
+`FIELD_BY_CODE` instead of rendering a terminal envelope, with a totality assertion that makes an
+unmapped `METADATA_*` code a failing test rather than a silent fallback.
+
+**MT5 is declarable and can actually finish a submit (MT5-14, WIZFORM-04).** MT5 joins the
+metadata chip set through a deliberately narrow `WIZARD_EXCHANGE_CODES` and is **preselected**
+from the connected key, so the venue is never asked twice. WIZFORM-04 is satisfied by *removing*
+a call rather than adding retries — read the requirement's own instruction, "ask first whether the
+call is needed at all". An MT5 submit now makes zero live calls to the venue: the
+scope-broadening probe is skipped for venues whose capability row says they cannot answer it,
+gated at both call sites. The control still fails **toward** probing — a venue whose identity
+cannot be resolved is probed anyway.
+
+**MT5 connection timeouts were structural, not slow brokers (Phase 153.3).** Nine of nine
+failures clustered at 30.1–31.0s because `initialize()` was called with no `timeout=`, so the
+vendor's 60s default sat inside a 30s rpyc bound: the outer bound always won and every connection
+was reported as a network blip. The IPC budget is now explicit per call, and `shutdown()` came off
+the request path.
+
+### Security
+**A key's own owner could switch off a security control for their own key.** The submit-time
+scope-broadening probe (ASVS V4) decides whether to re-check a key's live permissions by reading
+`api_keys.exchange` — and that column was writable by the row's owner: the `api_keys_owner` policy
+is `FOR ALL`, and migration 027 revoked `SELECT` only, so the inherited `GRANT ALL` left `UPDATE`
+in place. Rewriting the venue to a probe-exempt value skipped the probe entirely, letting a
+strategy reach `pending_review` under a read-only-verified claim that was false. Migration
+`20260810120000` revokes table-level `UPDATE` from `anon` and `authenticated` with no re-grant (an
+audit found zero user-scoped `UPDATE`s; every real one is the worker on the service role or a
+`SECURITY DEFINER` RPC), plus a `SECURITY INVOKER` trigger as a backstop — `DEFINER` would have
+made it a no-op, the same bug that neutered `prevent_profile_role_change`. Verified on TEST in
+both directions: the exploit succeeded before and returns `42501` after, with the worker sync
+path, user `SELECT` and user `DELETE` all confirmed intact. `INSERT` is deliberately untouched and
+the residual (client-supplied venue at row creation) is self-defeating and logged.
+
+### Fixed
+- **Zooming out produced dead margin instead of more table.** My Strategies rendered at
+  `max-w-7xl` (1280px) — not a rung on DESIGN.md's measure ladder at all — because the list shares
+  the `/strategies`-shaped prefix problem with the wizard and had never been added to the wide
+  allow-list, so its own 1920px cap was dead code the shell clamped. Dense tables are now fully
+  fluid with **no px ceiling** (founder decision): a fixed cap always strands space once the
+  viewport exceeds it, which is exactly what zooming out does. Prose and forms keep 1100px, where
+  a bounded measure is a real readability control. The page-level caps were deleted so the shell
+  is the single owner — two owners for one property is what hid this.
+- Native constraint validation (`required`) pre-empted the inline message on an empty description
+  once the submit button became clickable, producing a browser tooltip instead of the form's own
+  refusal.
+
+### Internal
+- ~18 instances of "a guard that cannot fail" found and removed across the milestone. New this
+  release: a coverage sweep keyed on **provenance** rather than on what the codes are, so a
+  pre-existing member fell outside it by construction; an innocence proof whose baseline commit
+  post-dated the work it exonerated; and two assertions pinning bare `file:line` coordinates,
+  re-cut to oracles that survive line drift without losing power.
+
 ## [0.54.0.0] - 2026-08-08
 ### v1.17 — whose capital it is, a book you can reach, and a size you can set
 
