@@ -49,7 +49,7 @@ Answer decode — `{"result":[...]}`, one slot per key, in request order:
 
 A value `decodeBreakerLock` rejects reads CLOSED rather than yielding a
 `Retry-After`. It rejects a nonsensical SPAN (`<= 0`, or wider than
-`(BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S) × 1000` = 90 000 ms) and, since
+`(BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S) × 1000` = 120 000 ms) and, since
 phase 141.2, an implausible ABSOLUTE expiry — one further into the future than
 that same widest span. The absolute check is **one-sided on purpose**: a lock in
 the past is the tombstone the close event is derived from.
@@ -95,7 +95,7 @@ outside this module wrote it. That is a finding, not a normal state.
 | `BREAKER_FAILURE_THRESHOLD` | 5 | Counted failures inside the window before the circuit opens |
 | `BREAKER_WINDOW` | `30 s` | The sliding window failures are counted over |
 | `BREAKER_COOLDOWN_S` | 30 | How long the lock stays live — and the `Retry-After` the 503 envelope advertises |
-| `BREAKER_LOCK_TOMBSTONE_S` | 60 | How much longer the KEY survives than the lock it carries |
+| `BREAKER_LOCK_TOMBSTONE_S` | 90 | How much longer the KEY survives than the lock it carries — 60 → 90 with Phase 153.4 / D-26, so the guard still spans the longest budget (`validate-key-serialized`, 120 000 ms). The inequality holds with EQUALITY: `(30 + 90) × 1000 = 120 000`, so the next budget raise of any size must move this constant too |
 | `BREAKER_STORE_TIMEOUT_MS` | 2 000 | Per-command deadline on the breaker's OWN Upstash calls |
 
 **⚠️ THE UNIT IS AN ATTEMPT, NOT A REQUEST.** Since Phase 141 the per-attempt

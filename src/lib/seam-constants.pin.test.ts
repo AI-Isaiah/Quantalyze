@@ -88,14 +88,23 @@ import {
  */
 
 /**
- * The 13 budgets, typed HERE as literals and never derived from `SEAM_BUDGETS`.
+ * The 14 budgets, typed HERE as literals and never derived from `SEAM_BUDGETS`.
  *
  * `it.each` below iterates THIS map, not the table's own keys: a table row that
  * is DELETED then produces a failing lookup, whereas iterating the table would
  * silently produce a shorter — and still green — case list.
+ *
+ * ⚠️ `validate-key-serialized` at 120 000 ms is the FOURTH magnitude, added by
+ * Phase 153.4 / D-26. It is the LONGEST row in the table, which makes it the
+ * row the A-25 breaker coupling is sized against — see the DERIVED A-25
+ * assertion far below. Retuning it is therefore never a one-line change: it
+ * moves `BREAKER_LOCK_TOMBSTONE_S` with it. The number itself is PROVISIONAL
+ * (D-27) — the founder's stated staleness tolerance, not a measurement — and
+ * Phase 155 (MT5-VERIFY) owns tightening it from real instrumentation.
  */
 const EXPECTED_TIMEOUT_MS: Record<string, number> = {
   "validate-key": 30_000,
+  "validate-key-serialized": 120_000,
   "encrypt-key": 30_000,
   bridge: 15_000,
   simulator: 15_000,
@@ -113,12 +122,18 @@ const EXPECTED_TIMEOUT_MS: Record<string, number> = {
 /**
  * The `SeamBudgetKey` SET, typed here as literals.
  *
- * Asserted as a sorted-array EQUALITY, never as a length. A `.length === 13`
+ * Asserted as a sorted-array EQUALITY, never as a length. A `.length === 14`
  * check passes a RENAME (`bridge` → `bridg`) and passes a swap (one key removed,
  * another added) — both of which silently detach a call site from its budget.
+ *
+ * ⚠️ `validate-key` and `validate-key-serialized` are TWO keys for ONE endpoint,
+ * chosen per venue by `budgetKeyFor(exchange)`. The set equality is what stops a
+ * future edit from "simplifying" them back into one row and silently handing
+ * every ccxt venue a 120 s ceiling — or every serialized venue a 30 s one.
  */
 const EXPECTED_BUDGET_KEYS: string[] = [
   "validate-key",
+  "validate-key-serialized",
   "encrypt-key",
   "bridge",
   "simulator",
@@ -153,9 +168,16 @@ const EXPECTED_BUDGET_KEYS: string[] = [
  * `egress-proxy` arm is a `500`, which never counts — so declaring them anywhere
  * would declare a key that can never be set. Ledger row M39 mutates one of these
  * rows; this map is its falsifier.
+ *
+ * ⚠️ `validate-key-serialized` declares the SAME single dependency as
+ * `validate-key` and for the same reason — both are POST /api/validate-key, and
+ * `_validate_mt5_key`'s MT5_GATEWAY_UNREACHABLE 503 is the only counting arm of
+ * that endpoint. A longer budget earns no wider dependency set; over-declaring
+ * here would be the A-01 direction.
  */
 const EXPECTED_DEPENDENCIES: Record<string, string[]> = {
   "validate-key": ["mt5-gateway"],
+  "validate-key-serialized": ["mt5-gateway"],
   "encrypt-key": [],
   bridge: [],
   simulator: [],
@@ -181,9 +203,20 @@ const EXPECTED_DEPENDENCIES: Record<string, string[]> = {
  * rows consistency pin below re-checks that these two hand-typed statements — the
  * registry's and this row table's — cannot drift apart. Raising any 0 here is out
  * of fence unless its audit verdict and its row flip land together.
+ *
+ * ⚠️ `validate-key-serialized`'s 0 IS A VERDICT, NOT AN OVERSIGHT, and it is
+ * written down here so a future reader does not read the gap as one. Two
+ * independent reasons, either sufficient: (a) it is the same live-credential
+ * exchange probe as `validate-key`, non-idempotent by construction — a retry
+ * re-probes the venue; (b) in the breaker's OPEN state `CircuitOpenError` is
+ * thrown BEFORE any fetch, so a retry only re-runs `isBreakerOpen`, charges a
+ * second store round and throws again — structurally wasteful, and a retried
+ * 120 000 ms leg would double the wall-clock SC-4b charges against this route's
+ * Vercel ceiling (RESEARCH Pitfall 5; D-07 is the standing prohibition).
  */
 const EXPECTED_RETRIES: Record<string, number> = {
   "validate-key": 0,
+  "validate-key-serialized": 0,
   "encrypt-key": 0,
   bridge: 1,
   simulator: 1,
@@ -260,12 +293,12 @@ function durationToMs(duration: string): number {
 }
 
 describe("SEAM_BUDGETS — every timeout pinned to a hand-typed literal", () => {
-  it("declares exactly the 13 pinned budget keys (SET equality, not length)", () => {
+  it("declares exactly the 14 pinned budget keys (SET equality, not length)", () => {
     // Sorted SET equality. A length assertion is green under a rename, which is
     // how a call site quietly loses the budget it was supposed to spend.
     expect(
       Object.keys(SEAM_BUDGETS).sort(),
-      "The SeamBudgetKey set drifted from the pinned 13. A key was ADDED, " +
+      "The SeamBudgetKey set drifted from the pinned 14. A key was ADDED, " +
         "REMOVED or RENAMED. Adding one is fine — pin it here in the same " +
         "commit, together with its timeoutMs, so the new call site's budget is " +
         "reviewable as a value rather than inferred from a diff.",
@@ -556,12 +589,20 @@ describe("SEAM_BUDGETS — every timeout pinned to a hand-typed literal", () => 
     });
   });
 
-  it("uses exactly three magnitudes — 15s, 30s and 60s — spelled out", () => {
-    // A human-readable anchor for the three tiers, one representative each, so
+  it("uses exactly four magnitudes — 15s, 30s, 60s and 120s — spelled out", () => {
+    // A human-readable anchor for the four tiers, one representative each, so
     // a reader sees the actual numbers without decoding the it.each above.
+    //
+    // ⚠️ The FOURTH tier arrived with Phase 153.4 / D-26 and is not a free
+    // addition: 120 s is the longest budget in the table, so it — and not
+    // `process-key-sync` — is what the A-25 breaker coupling is now sized
+    // against. The title above went false the instant the row landed while
+    // every assertion in this block stayed green, which is exactly why the
+    // prose moves in the same commit as the row.
     expect(BUDGET_TABLE.bridge?.timeoutMs).toBe(15_000);
     expect(BUDGET_TABLE["validate-key"]?.timeoutMs).toBe(30_000);
     expect(BUDGET_TABLE["process-key-sync"]?.timeoutMs).toBe(60_000);
+    expect(BUDGET_TABLE["validate-key-serialized"]?.timeoutMs).toBe(120_000);
   });
 });
 
@@ -708,31 +749,45 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
     ).toBe(500);
   });
 
-  it("BREAKER_LOCK_TOMBSTONE_S is the literal 60", () => {
+  it("BREAKER_LOCK_TOMBSTONE_S is the literal 90", () => {
     // How much longer the KEY lives than the LOCK it carries. The lock is open
     // until the expiry encoded in its VALUE; the key lingers past that so
     // `recordSeamFailure` can still read WHEN the last lock was armed, which is
     // the whole of the A-25 no-re-arm guard.
+    //
+    // 60 → 90 with Phase 153.4 / D-26, in the SAME commit as the 120 000 ms
+    // `validate-key-serialized` budget: (30 + 90) × 1 000 = 120 000 ≥ 120 000.
+    // The inequality now holds with EQUALITY, so there is no headroom left —
+    // the next budget raise moves this literal again.
     expect(
       BREAKER_LOCK_TOMBSTONE_S,
       "The lock tombstone changed. Shortening it below (longest seam budget − " +
         "cooldown) re-opens A-25: a request admitted before a lock was armed " +
-        "finds no trace of it and re-arms a fresh cooldown on stale evidence.",
-    ).toBe(60);
+        "finds no trace of it and re-arms a fresh cooldown on stale evidence. " +
+        "At the longest budget of 120 000 ms and a 30 s cooldown, 90 is the " +
+        "MINIMUM that still spans it.",
+    ).toBe(90);
   });
 
   it("A-25: the tombstone outlives the longest seam budget", () => {
     // Both sides literal. The worst case the guard must span is a request
     // admitted the instant before a lock is armed and failing at the end of the
-    // longest budget in the table — `process-key-sync` / the dormant handler, at
-    // 60 000 ms. The tombstone therefore has to cover (60 000 − cooldown).
+    // longest budget in the table — since Phase 153.4 / D-26 that is
+    // `validate-key-serialized`, at 120 000 ms, NOT `process-key-sync` at
+    // 60 000 ms. The tombstone therefore has to cover (120 000 − cooldown).
+    //
+    // ⚠️ THIS ASSERTION IS KEPT BESIDE THE DERIVED ONE BELOW, NOT REPLACED BY IT
+    // (D-19). This one restates the longest budget as a hand-typed literal, so
+    // it catches the two BREAKER CONSTANTS moving; it is structurally unable to
+    // catch a budget ROW outgrowing them, which is the derived one's job.
+    // Neither implies the other.
     expect(
       BREAKER_LOCK_TOMBSTONE_S * 1_000,
       "The lock tombstone no longer spans the longest seam budget, so a " +
-        "60s-budget request that failed after a full cooldown can no longer see " +
-        "the lock it overlapped — and re-arms the circuit on evidence it " +
+        "120s-budget request that failed after a full cooldown can no longer " +
+        "see the lock it overlapped — and re-arms the circuit on evidence it " +
         "gathered before the previous trip.",
-    ).toBeGreaterThanOrEqual(60_000 - 30_000);
+    ).toBeGreaterThanOrEqual(120_000 - 30_000);
   });
 
   it("A-25 (DERIVED): the LONGEST budget in the live table fits inside tombstone + cooldown", () => {
@@ -745,7 +800,7 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
     // HAND-TYPED: the only derived side is the longest timeout in the table.
     // Neither implies the other, so both are kept (D-19).
     //
-    // ⛔ The ceiling below is deliberately built from the bare literals 60 and
+    // ⛔ The ceiling below is deliberately built from the bare literals 90 and
     // 30 (seconds). Reading it out of the module under test is the exact defect
     // this file's ONE RULE forbids, and it is precisely what makes the incumbent
     // A-25 pin unable to fail.
@@ -755,16 +810,16 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
     // -Infinity, which passes the ceiling forever while measuring nothing.
     expect(
       Object.keys(SEAM_BUDGETS).length,
-      "The seam budget table parsed with fewer than the 13 rows it carries. " +
+      "The seam budget table parsed with fewer than the 14 rows it carries. " +
         "The derivation below is measuring an empty or renamed table, so its " +
         "ceiling check is vacuous — fix the derivation, never the floor.",
-    ).toBeGreaterThanOrEqual(13);
+    ).toBeGreaterThanOrEqual(14);
     expect(
       longest,
-      "The longest seam budget derived below 60 000 ms. Either a real budget " +
+      "The longest seam budget derived below 120 000 ms. Either a real budget " +
         "was cut (a separate question) or the rows no longer carry timeoutMs " +
         "and the reducer is reading undefined.",
-    ).toBeGreaterThanOrEqual(60_000);
+    ).toBeGreaterThanOrEqual(120_000);
 
     expect(
       longest,
@@ -772,11 +827,20 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
         "(lock tombstone + breaker cooldown), so a request admitted just " +
         "before a lock was armed can fail after the tombstone has expired, " +
         "find no trace of that lock, and re-arm a fresh cooldown on stale " +
-        "evidence. THE NEXT MOVE HERE IS OWNED BY PHASE 153.4 / D-26: it " +
-        "raises the validate-key budget to 120 000 ms AND the lock tombstone " +
-        "from 60 s to 90 s in ONE commit. When that lands, the hand-typed 60 " +
-        "in this expression moves to 90 IN THAT SAME COMMIT — raising the " +
-        "budget alone is the break this assertion exists to catch. " +
+        "evidence. THE STANDING RULE, which Phase 153.4 / D-26 has now " +
+        "exercised once: any budget raised above (lock tombstone + breaker " +
+        "cooldown) × 1 000 must move the tombstone IN THE SAME COMMIT, and " +
+        "the hand-typed seconds in this expression move with it. " +
+        "Raising a budget alone is the break this assertion exists to catch — " +
+        "it is the ONLY assertion in this file that can see it, because every " +
+        "other one restates the longest budget as a literal. ⚠️ THE EQUALITY IS " +
+        "TIGHT TODAY: the longest budget is validate-key-serialized at " +
+        "120 000 ms and the ceiling is exactly (90 + 30) × 1 000 = 120 000, so " +
+        "there is ZERO headroom — the next budget raise of any size moves the " +
+        "tombstone. ⛔ The fix is NEVER to weaken, relax or delete this " +
+        "assertion, and never to substitute the module's own constants for the " +
+        "hand-typed seconds (that is this file's ONE RULE, and it is exactly " +
+        "what made the incumbent literal-vs-literal A-25 pin blind). " +
         "⚠️ D-18's 90 000 ms is SUPERSEDED by D-26: D-18 picked 90 000 only " +
         "because it was the largest budget needing ONE constant changed, i.e. " +
         "it let a test invariant choose a production timeout, and that " +
@@ -784,9 +848,9 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
         "⚠️ D-28 (bounding the MT5 close() separately) is likewise SUPERSEDED " +
         "by D-30, which takes shutdown() off the request path entirely; it is " +
         "named only because the A-25 sizing conversation cites it. Neither " +
-        "superseded decision is implemented by this sub-phase and neither " +
-        "number belongs in this expression.",
-    ).toBeLessThanOrEqual((60 + 30) * 1_000);
+        "superseded decision is implemented and neither number belongs in this " +
+        "expression.",
+    ).toBeLessThanOrEqual((90 + 30) * 1_000);
   });
 
   it("SELF-TEST — the DERIVED A-25 assertion reddens for a budget that outgrows the ceiling", () => {
@@ -806,20 +870,64 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
     // ⚠️ THE SYNTHETIC IS HAND-TYPED 150_000 ON PURPOSE — do NOT rewrite it as
     // `ceiling + 1`. Deriving the synthetic from the module under test is the
     // self-referential oracle this whole file exists to forbid.
-    // ⚠️ AND IT IS 150_000, NOT 120_000. Today's ceiling is (30 + 60) × 1 000 =
-    // 90 000, which 120 000 clears — but D-26 (Phase 153.4) raises the
-    // tombstone to 90 s, making the ceiling exactly (30 + 90) × 1 000 =
-    // 120 000, and `120 000 > 120 000` is FALSE. 150 000 clears BOTH ceilings,
-    // so this SELF-TEST needs no churn and there is no sub-phase boundary at
-    // which it is red. If D-26's successor ever raises the ceiling past
-    // 150 000 s-equivalent, this literal moves in that same commit.
+    // ⚠️ AND IT IS 150_000, NOT 120_000. 153.1-01 chose it ahead of D-26 for
+    // exactly the reason D-26 has now made real: the ceiling was (30 + 60) ×
+    // 1 000 = 90 000, which 120 000 cleared, but Phase 153.4 raised the
+    // tombstone to 90 s and the ceiling is now exactly (30 + 90) × 1 000 =
+    // 120 000 — and `120 000 > 120 000` is FALSE. 150 000 cleared both, so this
+    // SELF-TEST survived that boundary un-red and needed no churn. If a
+    // successor ever raises the ceiling past 150 000, this literal moves in
+    // that same commit.
+    // ⚠️ THE CEILING BELOW IS THE HAND-TYPED `(90 + 30) × 1 000` — THE SAME
+    // EXPRESSION THE ASSERTION ABOVE APPLIES, not the module's own constants.
+    // That is the whole point of a SELF-TEST: it must prove the synthetic
+    // exceeds the ceiling THE ASSERTION UNDER TEST uses. Reading the live
+    // constants instead leaves a real blind spot — raise the assertion's
+    // hand-typed seconds past 150 000 without touching the module and this
+    // SELF-TEST stays green while the assertion it validates has gone
+    // decorative, which is precisely the failure it exists to rule out.
     expect(
       150_000,
-      "A budget of 150 000 ms no longer exceeds (cooldown + tombstone), so the " +
-        "DERIVED A-25 assertion above can no longer redden for ANY table and " +
+      "A budget of 150 000 ms no longer exceeds the DERIVED A-25 assertion's " +
+        "own ceiling, so that assertion can no longer redden for ANY table and " +
         "is decorative. Raise this synthetic above the new ceiling in the same " +
         "commit that raised it (see D-26).",
-    ).toBeGreaterThan((BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S) * 1_000);
+    ).toBeGreaterThan((90 + 30) * 1_000);
+  });
+
+  it("WIZFORM-05 / D-04: the serialized client budget exceeds the 105 s server worst case", () => {
+    // ── THE INVARIANT WIZFORM-05 EXISTS TO CLOSE ──────────────────────────────
+    // Nothing asserted this before Phase 153.4. A client ceiling BELOW the
+    // server's honest worst case does not merely time out early — it abandons
+    // the request before the verdict can land, so the user is told UNKNOWN
+    // about a probe the server was about to answer correctly. That inversion is
+    // the whole defect.
+    //
+    // 105_000 IS HAND-TYPED, and its derivation is written here rather than
+    // imported. What Phase 153.3 ships on the serialized path, in sequence:
+    //   · a 20 s BOUNDED lease acquisition   (services/mt5_concurrency.py)
+    //   · a 75 s end-to-end probe deadline   (routers/exchange.py)
+    //   · a 10 s release that runs OUTSIDE that deadline (routers/exchange.py)
+    // = 105 s. ⛔ Do NOT import or parse a Python constant into a TS test to
+    // "keep this in sync" — a cross-language read would make this assertion
+    // unable to disagree with the thing it is checking.
+    //
+    // The Python side pins the same relationship independently from its own end
+    // (plans 153.3-03 and 153.3-04 assert (lease + deadline + release) × 1000 <
+    // 120 000). Two independent statements of one contract, not one restated
+    // twice: either side can move without the other, and then exactly one of
+    // the two reddens and names which end drifted.
+    expect(
+      BUDGET_TABLE["validate-key-serialized"]?.timeoutMs,
+      "The serialized client budget no longer exceeds the 105 s server worst " +
+        "case (20 s bounded lease wait + 75 s end-to-end probe deadline + 10 s " +
+        "release outside the deadline). The client would abandon the request " +
+        "before the server's honest verdict can land, and the user gets an " +
+        "UNKNOWN for a probe that was about to answer — the exact inversion " +
+        "WIZFORM-05 exists to close. The fix is to RAISE this budget (and " +
+        "BREAKER_LOCK_TOMBSTONE_S with it, D-26) or to LOWER the server chain. " +
+        "⛔ Never to lower this hand-typed 105 000.",
+    ).toBeGreaterThan(105_000);
   });
 
   it("A-14: the cooldown is at least as long as the failure window", () => {
@@ -1006,7 +1114,11 @@ describe("fake ↔ production — the breaker double's tuning cannot drift silen
   });
 
   it("FAKE_LOCK_TOMBSTONE_MS equals the millisecond form of BREAKER_LOCK_TOMBSTONE_S", () => {
-    expect(FAKE_LOCK_TOMBSTONE_MS).toBe(60_000);
+    // 60 000 → 90 000 with Phase 153.4 / D-26. TWO assertions, deliberately:
+    // this one pins the double's own literal, the one below pins that it still
+    // AGREES with production. Only the pair can tell "both moved together" from
+    // "neither moved" — and moving production alone is what D-26 forbids.
+    expect(FAKE_LOCK_TOMBSTONE_MS).toBe(90_000);
     expect(FAKE_LOCK_TOMBSTONE_MS, DRIFT("lock tombstone")).toBe(
       BREAKER_LOCK_TOMBSTONE_S * 1_000,
     );

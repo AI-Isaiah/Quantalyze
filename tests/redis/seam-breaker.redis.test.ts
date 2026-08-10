@@ -148,8 +148,15 @@ const THRESHOLD = 5;
 /** The production cooldown, in seconds. */
 const COOLDOWN_S = 30;
 
-/** How much longer than its cooldown the lock KEY survives, in seconds. */
-const LOCK_TOMBSTONE_S = 60;
+/**
+ * How much longer than its cooldown the lock KEY survives, in seconds.
+ *
+ * 60 → 90 with Phase 153.4 / D-26, which raised the production constant in the
+ * same commit as the 120 000 ms `validate-key-serialized` budget so A-25 still
+ * spans it. Hand-typed here, never imported: a lane that read the core's own
+ * constant could not disagree with it.
+ */
+const LOCK_TOMBSTONE_S = 90;
 
 /**
  * Decode a lock value with a parser typed HERE, by hand.
@@ -441,14 +448,14 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     const lock = await expectLockOpen(LOCK_KEY);
 
     // The KEY outlives the LOCK by the tombstone, so the store TTL is
-    // cooldown + tombstone = 90 s, all three hand-typed. This is the number the
+    // cooldown + tombstone = 120 s, all three hand-typed. This is the number the
     // A-25 guard depends on: without the tombstone an expired lock is simply
     // gone, and a request that overlapped it can re-arm the circuit on evidence
     // gathered before the previous trip.
     const ttlAtTrip = await probe.ttl(LOCK_KEY);
-    expect(ttlAtTrip).toBeGreaterThanOrEqual(89);
-    expect(ttlAtTrip).toBeLessThanOrEqual(90);
-    expect(COOLDOWN_S + LOCK_TOMBSTONE_S).toBe(90);
+    expect(ttlAtTrip).toBeGreaterThanOrEqual(119);
+    expect(ttlAtTrip).toBeLessThanOrEqual(120);
+    expect(COOLDOWN_S + LOCK_TOMBSTONE_S).toBe(120);
 
     // Let a hand-typed 4 seconds of the cooldown burn down, then force a second
     // trip: the counter is exhausted, so the limiter denies and the core reaches
@@ -492,8 +499,8 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     // what stops the tombstone being quietly dropped back to the cooldown —
     // which would leave R-3/R-4 green and silently re-open A-25.
     const ttl = await probe.ttl(LOCK_KEY);
-    expect(ttl).toBeGreaterThanOrEqual(89);
-    expect(ttl).toBeLessThanOrEqual(90);
+    expect(ttl).toBeGreaterThanOrEqual(119);
+    expect(ttl).toBeLessThanOrEqual(120);
 
     const state = await isBreakerOpen(LANE_BUDGET_KEY);
     expect(state.open).toBe(true);
@@ -605,7 +612,7 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     expect((await isBreakerOpen(LANE_BUDGET_KEY)).open).toBe(true);
 
     // Hand-typed 32 s — comfortably PAST it. The KEY is still there (its
-    // tombstone runs to 90 s) and the circuit must nonetheless read CLOSED,
+    // tombstone runs to 120 s) and the circuit must nonetheless read CLOSED,
     // because the expiry that decides that lives in the VALUE. This is the
     // healed-circuit property against real Redis.
     await sleepUntil(trippedAtA + 32000);
@@ -640,7 +647,7 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     // ⚠️ RE-EXPRESSED, NOT RELAXED. This used to assert the key was NULL — the
     // only way the pre-140.2-07 shape could say "no fresh lock was armed". The
     // key is no longer deleted at the cooldown: it lingers as a tombstone until
-    // 90 s. So the same claim is now made two ways, and both are STRICTER than
+    // 120 s. So the same claim is now made two ways, and both are STRICTER than
     // the null check, which could not distinguish "not re-armed" from "the whole
     // key vanished for some unrelated reason":
     //   · the stored value is byte-identical to the one written at the trip, so

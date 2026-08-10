@@ -675,21 +675,28 @@ describe("isBreakerOpen", () => {
   it("G2 — a lock whose span is nonsensical decodes to null and reads CLOSED (LO-02 / TS-39)", async () => {
     const mod = await import("./resilient-fetch");
 
-    // 90 000 ms, hand-typed here: the 30 s cooldown plus the 60 s tombstone,
+    // 120 000 ms, hand-typed here: the 30 s cooldown plus the 90 s tombstone,
     // never `(BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S) * 1000` read back
     // out of the module under test. A legitimate lock cannot outlive the window
     // in which its own key survives.
+    //
+    // ⚠️ 90 000 → 120 000 with Phase 153.4 / D-26, which moved the tombstone
+    // 60 → 90 s in the same commit as the 120 000 ms serialized validate
+    // budget. This ceiling is DERIVED inside the module from those two
+    // constants, so it moves whenever either does — and this hand-typed twin is
+    // the only thing that notices. Moving it is a deliberate act, never a
+    // green-the-diff edit.
     const ARMED_AT = 1_700_000_000_000;
 
     // A span at the ceiling still decodes — the bound rejects the implausible,
     // not the merely long.
     expect(
-      mod.decodeBreakerLock(`open:${ARMED_AT}:${ARMED_AT + 90_000}`),
+      mod.decodeBreakerLock(`open:${ARMED_AT}:${ARMED_AT + 120_000}`),
       "The span bound rejected a lock at exactly the cooldown+tombstone " +
         "ceiling. That is a REAL state (a lock armed and read at the far edge " +
         "of its own tombstone), and rejecting it would silently disarm the " +
         "breaker at exactly the moment it is doing its job.",
-    ).toEqual({ armedAtMs: ARMED_AT, expiresAtMs: ARMED_AT + 90_000 });
+    ).toEqual({ armedAtMs: ARMED_AT, expiresAtMs: ARMED_AT + 120_000 });
     // And the ordinary 30 s cooldown, the case every other test in this file
     // depends on.
     expect(
@@ -707,7 +714,7 @@ describe("isBreakerOpen", () => {
     // One millisecond past the ceiling — the bound is a real edge, not a
     // gesture at a large number.
     expect(
-      mod.decodeBreakerLock(`open:${ARMED_AT}:${ARMED_AT + 90_001}`),
+      mod.decodeBreakerLock(`open:${ARMED_AT}:${ARMED_AT + 120_001}`),
     ).toBeNull();
     // A REVERSED pair: `expiresAtMs < armedAtMs` makes the emitted
     // `cooldownS` negative.
@@ -796,17 +803,18 @@ describe("isBreakerOpen", () => {
         "ahead of the others.",
     ).toBeNull();
 
-    // The bound is a real EDGE, not a gesture at a large number. 90 000 ms is
+    // The bound is a real EDGE, not a gesture at a large number. 120 000 ms is
     // hand-typed here (the cooldown plus the tombstone), exactly as G2 types it,
-    // never read back out of the module under test.
+    // never read back out of the module under test. 90 000 → 120 000 with
+    // Phase 153.4 / D-26 (tombstone 60 → 90 s), for the reason G2 states.
     expect(
-      mod.decodeBreakerLock(`open:${NOW + 60_000}:${NOW + 90_000}`, NOW),
+      mod.decodeBreakerLock(`open:${NOW + 90_000}:${NOW + 120_000}`, NOW),
       "A lock expiring exactly at the ceiling was rejected. That is a REAL " +
         "state — the widest legitimate lock, observed at the instant it was " +
         "armed — and rejecting it disarms the breaker while it is working.",
-    ).toEqual({ armedAtMs: NOW + 60_000, expiresAtMs: NOW + 90_000 });
+    ).toEqual({ armedAtMs: NOW + 90_000, expiresAtMs: NOW + 120_000 });
     expect(
-      mod.decodeBreakerLock(`open:${NOW + 60_001}:${NOW + 90_001}`, NOW),
+      mod.decodeBreakerLock(`open:${NOW + 90_001}:${NOW + 120_001}`, NOW),
     ).toBeNull();
 
     // END TO END, the harm finding 11 actually names: the future-side value
