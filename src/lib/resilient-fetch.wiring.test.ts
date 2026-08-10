@@ -57,7 +57,7 @@ import { installFetchMock, type FetchMock } from "@/test/helpers/fetch";
  *     request unauthenticates, which reads as a total outage.
  *
  * ---------------------------------------------------------------------------
- * PHASE 140.2 / SEAMCORE-08 (ROADMAP SC6, clause c) — THE 13/13 BUDGET-KEY
+ * PHASE 140.2 / SEAMCORE-08 (ROADMAP SC6, clause c) — THE 14/14 BUDGET-KEY
  * CENSUS, AND WHY A CENSUS ALONE IS NOT ENOUGH.
  * ---------------------------------------------------------------------------
  *
@@ -69,29 +69,35 @@ import { installFetchMock, type FetchMock } from "@/test/helpers/fetch";
  * codebase that is exactly three syntactic families:
  *
  *   (i)   an exported wrapper in `src/lib/analytics-client.ts` carrying a
- *         `budgetKey:` property                                        →  9
+ *         `budgetKey:` property                                        → 10
+ *         (nine wrappers; `validateKey` binds TWO rows because it selects
+ *          by venue capability — 153.4-02)
  *   (ii)  an arm of `budgetKeyFor` in `src/lib/process-key-client.ts`  →  2
  *   (iii) a string literal in first-argument position of a core call    →  2
  *         (three lexical sites; the two `fetchLivePermissions` copies are
  *          one binding under two files)
  *                                                                  ------
- *                                                                     13
+ *                                                                     14
  *
  * How the count was re-derived (executor's own search, 2026-07-26 — reproduce
  * it rather than trusting this comment):
  *
- *   grep -rn 'budgetKey: "' src/lib/analytics-client.ts          -> 9
+ *   grep -rn 'budgetKey: "' src/lib/analytics-client.ts          -> 8
+ *   sed -n '/function budgetKeyFor(/,/^}/p' src/lib/analytics-client.ts
+ *                                    -> 2 returned key literals   (153.4-02:
+ *        `validateKey` moved OUT of the literal grep and into this selector,
+ *         so the first line fell 9 -> 8 while family (i) rose 9 -> 10)
  *   sed -n '/function budgetKeyFor(/,/^}/p' src/lib/process-key-client.ts
  *                                    -> 2 returned key literals
  *   grep -rn "resilientFetch(" src | grep -v test                -> 6 files,
  *        of which 3 pass a literal first argument (2 distinct bindings) and
  *        2 pass a variable (families i and ii above); the 6th is the core.
  *
- * Every one of the 13 `SeamBudgetKey` union members has at least one binding:
+ * Every one of the 14 `SeamBudgetKey` union members has at least one binding:
  * no orphan key, no unbound key.
  *
- * ⚠️ THE CENSUS ABOVE IS A CONVENTION. It records that the thirteen bindings
- * which exist today are each pinned; it proves nothing about a FOURTEENTH. A
+ * ⚠️ THE CENSUS ABOVE IS A CONVENTION. It records that the fourteen bindings
+ * which exist today are each pinned; it proves nothing about a FIFTEENTH. A
  * wrapper added next month that reuses an EXISTING budget key adds no pin,
  * breaks no pin, and would redden nothing — the class quietly re-opens and this
  * comment becomes a historical note. The `EXPECTED_BINDINGS` roster at the
@@ -314,8 +320,11 @@ describe("SC-1c — both seam clients invoke the ONE resilience core", () => {
   type AnalyticsClient = typeof import("@/lib/analytics-client");
 
   /**
-   * B-01..B-09 — family (i): the nine exported wrappers in
-   * `analytics-client.ts`, each carrying its own `budgetKey:` property.
+   * B-01..B-09 plus B-14 — family (i): the nine exported wrappers in
+   * `analytics-client.ts`, each carrying its own budget-key binding. TEN pins,
+   * not nine, because `validateKey` binds two rows: it names its key with
+   * `budgetKeyFor(exchange)` rather than a literal, so B-01 (default venue) and
+   * B-14 (serialized venue) are the same wrapper driven with different venues.
    *
    * Every expected value here is a HAND-TYPED string literal. None is read out
    * of `SEAM_BUDGETS`, out of a `SeamBudgetKey`-typed const, or out of anything
@@ -336,6 +345,20 @@ describe("SC-1c — both seam clients invoke the ONE resilience core", () => {
       budgetKey: "validate-key",
       path: "/api/validate-key",
       invoke: (m) => m.validateKey("deribit", "k", "s", undefined, WIRING_TENANT),
+    },
+    {
+      // 153.4-02 / WIZFORM-05 — the SAME wrapper as B-01, on the OTHER budget
+      // row. `validateKey` selects by venue capability, so the only difference
+      // between these two pins is the venue argument and the deadline it buys.
+      // Pinned here as well as in `analytics-client.test.ts` because THIS file
+      // owns the binding class: without a pin the roster would list B-14 with
+      // nothing driving it, and a selector that silently stopped selecting
+      // would still satisfy a source-shape scan.
+      binding: "B-14",
+      wrapper: "validateKey",
+      budgetKey: "validate-key-serialized",
+      path: "/api/validate-key",
+      invoke: (m) => m.validateKey("mt5", "k", "s", undefined, WIRING_TENANT),
     },
     {
       binding: "B-02",
@@ -471,7 +494,7 @@ describe("SC-1c — both seam clients invoke the ONE resilience core", () => {
 });
 
 // ---------------------------------------------------------------------------
-// THE BINDING ROSTER — the mechanism that keeps the 13/13 census honest.
+// THE BINDING ROSTER — the mechanism that keeps the 14/14 census honest.
 // ---------------------------------------------------------------------------
 
 /**
@@ -639,6 +662,36 @@ function chokepointRetry(code: string): string {
 }
 
 /**
+ * The budget keys a `budgetKeyFor`-shaped selector can RETURN, read from the
+ * given source at the given declaration.
+ *
+ * Shared by families (i) and (ii) since 153.4-02, when a SECOND module grew a
+ * selector of this shape. The extraction recipe is family (ii)'s, unchanged, and
+ * its reasoning is written out at `discoverBudgetKeyForArms` below — strip the
+ * arm TESTS so the guard is not coupled to a ternary-vs-switch spelling, then
+ * keep only RETURN positions so a fail-loud `throw` message containing a quoted
+ * string is not reported as a phantom budget key.
+ *
+ * ⚠️ ONE extractor for both selectors is deliberate here, against this file's
+ * general preference for independent duplicated scanners. Those duplicates exist
+ * so two scanners can DISAGREE about the same population; these two read
+ * DIFFERENT populations in different files, so a second copy would give nothing
+ * to disagree with and would simply be a second place to forget.
+ */
+function returnedKeyLiterals(code: string, declaration: string): string[] {
+  const start = code.indexOf(declaration);
+  if (start < 0) return [];
+  const body = code.slice(start, code.indexOf("\n}", start));
+  const withoutArmTests = body
+    .replace(/===\s*"[^"]*"/g, "")
+    .replace(/\bcase\s+"[^"]*"\s*:/g, "");
+  const returned = [...withoutArmTests.matchAll(/\breturn\b[^;]*;/g)]
+    .map((m) => m[0])
+    .join("\n");
+  return [...returned.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+}
+
+/**
  * Family (i) — every exported wrapper in `analytics-client.ts` carrying a
  * `budgetKey:` property, paired with the upstream path of the request it
  * builds.
@@ -660,15 +713,36 @@ function discoverAnalyticsWrappers(): DiscoveredBinding[] {
       index: m.index,
       path: firstLiteralArg(body.slice(m.index + m[0].length)),
     }));
-    for (const keyMatch of body.matchAll(/budgetKey:\s*"([^"]+)"/g)) {
+    // 153.4-02 — TWO SHAPES, and the second one is why this is a `matchAll`
+    // over an alternation rather than a literal scan.
+    //
+    //   `budgetKey: "<literal>"`      — the incumbent shape, one binding.
+    //   `budgetKey: budgetKeyFor(…)`  — a SELECTOR, which binds this call site
+    //                                   to EVERY key the selector can return.
+    //
+    // A wrapper that selects its budget row at run time is still a call site
+    // with a budget, and it has as many bindings as the selector has arms.
+    // Reading only the literal shape would have made `validateKey` vanish from
+    // the census the moment it went venue-aware — the guard reporting a smaller
+    // class than exists, which is the direction that fails silently once the
+    // fence below is relaxed to match.
+    for (const keyMatch of body.matchAll(
+      /budgetKey:\s*(?:"([^"]+)"|budgetKeyFor\()/g,
+    )) {
       const preceding = paths.filter((p) => p.index < keyMatch.index).pop();
-      out.push({
-        family: "i",
-        key: keyMatch[1],
-        path: preceding?.path ?? "<NO REQUEST PATH FOUND>",
-        site: `${ANALYTICS_CLIENT}::${fn.name}`,
-        retry,
-      });
+      const keys =
+        keyMatch[1] !== undefined
+          ? [keyMatch[1]]
+          : returnedKeyLiterals(code, "function budgetKeyFor(");
+      for (const key of keys) {
+        out.push({
+          family: "i",
+          key,
+          path: preceding?.path ?? "<NO REQUEST PATH FOUND>",
+          site: `${ANALYTICS_CLIENT}::${fn.name}`,
+          retry,
+        });
+      }
     }
   });
   return out;
@@ -704,15 +778,10 @@ function discoverAnalyticsWrappers(): DiscoveredBinding[] {
  */
 function discoverBudgetKeyForArms(): DiscoveredBinding[] {
   const code = readCode(PROCESS_KEY_CLIENT);
-  const start = code.indexOf("function budgetKeyFor(");
-  if (start < 0) return [];
-  const body = code.slice(start, code.indexOf("\n}", start));
-  const withoutFlowTests = body
-    .replace(/===\s*"[^"]*"/g, "")
-    .replace(/\bcase\s+"[^"]*"\s*:/g, "");
-  const returned = [...withoutFlowTests.matchAll(/\breturn\b[^;]*;/g)]
-    .map((m) => m[0])
-    .join("\n");
+  // 153.4-02: the extraction recipe described above now lives in
+  // `returnedKeyLiterals`, because `analytics-client.ts` grew a selector of the
+  // same shape. The recipe is byte-unchanged; only its home moved.
+  const returnedKeys = returnedKeyLiterals(code, "function budgetKeyFor(");
 
   const callMatch = /resilientFetch\(\s*\w+\s*,\s*/.exec(code);
   const path = callMatch
@@ -723,9 +792,9 @@ function discoverBudgetKeyForArms(): DiscoveredBinding[] {
   // one retry expression governs them — exactly as one `path` already does.
   const retry = chokepointRetry(code);
 
-  return [...returned.matchAll(/"([^"]+)"/g)].map((m) => ({
+  return returnedKeys.map((key) => ({
     family: "ii" as const,
-    key: m[1],
+    key,
     path,
     site: `${PROCESS_KEY_CLIENT}::budgetKeyFor`,
     retry,
@@ -810,8 +879,13 @@ const ANALYTICS_RETRY = "RETRY_SAFE_ANALYTICS[options.budgetKey]?.retries ?? 0";
 const PROCESS_KEY_RETRY = "retriesForFlow(args.flow_type, args.context)";
 
 /**
- * The 13 bindings, typed HERE as literals — the whole class, one entry per
+ * The 14 bindings, typed HERE as literals — the whole class, one entry per
  * binding, each entry listing every site that binding occupies.
+ *
+ * B-14 (153.4-02) is the second binding of ONE call site: `validateKey` selects
+ * between two budget rows by venue capability, so the site occupies two rows and
+ * appears twice. A roster keyed on call sites rather than bindings could not
+ * express that, and would have had to pick one of the two deadlines to pin.
  *
  * B-12 is one binding at TWO sites: `fetchLivePermissions` exists as two
  * verbatim copies (the route's own cached probe and finalize-wizard's
@@ -862,6 +936,14 @@ const EXPECTED_BINDINGS: ReadonlyArray<{
     ] },
   { id: "B-13", family: "iii", key: "process-key-unified-dormant",
     sites: [{ site: "src/app/api/keys/validate-and-encrypt/route.ts", path: "/process-key", retry: "0" }] },
+  // 153.4-02 / WIZFORM-05 — `validateKey` binds TWO keys, not one. It selects
+  // its row with `budgetKeyFor(exchange)`, whose arms are `validate-key` (B-01,
+  // above, unchanged) and this one, taken only when the venue's probe is
+  // SERIALIZED. Same site, same path and the same chokepoint retry expression:
+  // what differs between B-01 and B-14 is ONLY the deadline, which is the whole
+  // point of the change and exactly what this roster exists to make visible.
+  { id: "B-14", family: "i", key: "validate-key-serialized",
+    sites: [{ site: `${ANALYTICS_CLIENT}::validateKey`, path: "/api/validate-key", retry: ANALYTICS_RETRY }] },
 ];
 
 /**
@@ -882,7 +964,7 @@ const EXPECTED_SEAM_CALL_FILES: string[] = [
   "src/lib/resilient-fetch.ts",
 ];
 
-/** The 13 budget keys these bindings cover — no orphan key, no unbound key. */
+/** The 14 budget keys these bindings cover — no orphan key, no unbound key. */
 const EXPECTED_BOUND_KEYS: string[] = [
   "bridge",
   "encrypt-key",
@@ -897,6 +979,7 @@ const EXPECTED_BOUND_KEYS: string[] = [
   "process-key-unified-dormant",
   "simulator",
   "validate-key",
+  "validate-key-serialized",
 ];
 
 describe("SC6 / SEAMCORE-08 — the budget-key binding class stays closed", () => {
@@ -915,10 +998,10 @@ describe("SC6 / SEAMCORE-08 — the budget-key binding class stays closed", () =
       discovered.length,
       "the binding discovery pass found nothing. The source moved or a pattern " +
         "stopped matching — this guard is now blind, not satisfied.",
-    ).toBeGreaterThanOrEqual(14);
+    ).toBeGreaterThanOrEqual(15);
   });
 
-  it("every discovered binding is classified in the roster (a 14th binding FAILS)", () => {
+  it("every discovered binding is classified in the roster (a 15th binding FAILS)", () => {
     const expectedSites = EXPECTED_BINDINGS.flatMap((b) =>
       b.sites.map((s) =>
         encodeBinding({
@@ -972,13 +1055,13 @@ describe("SC6 / SEAMCORE-08 — the budget-key binding class stays closed", () =
     ).toEqual([]);
   });
 
-  it("the roster covers exactly the 13 budget keys (no orphan key, no unbound key)", () => {
+  it("the roster covers exactly the 14 budget keys (no orphan key, no unbound key)", () => {
     const boundKeys = [...new Set(discovered.map((b) => b.key))].sort();
     expect(
       boundKeys,
       "The set of budget keys actually BOUND to a seam call drifted. A key in " +
         "the table that nothing binds is dead tuning nobody will notice is " +
-        "wrong; a bound key that is not one of these thirteen is a call site " +
+        "wrong; a bound key that is not one of these fourteen is a call site " +
         "running on a row this file never reviewed.",
     ).toEqual([...EXPECTED_BOUND_KEYS].sort());
   });
