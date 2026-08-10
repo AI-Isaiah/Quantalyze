@@ -25,6 +25,10 @@ import {
   seamErrorCode,
   seamHumanMessage,
 } from "@/lib/seam-discriminator";
+// 153.1-02 / 153.4-02 — the venue CAPABILITY predicate. `budgetKeyFor` below
+// reads `VENUE_CAPABILITIES.serialized` through it and never a venue name, so a
+// second serialized venue is covered by editing that record alone.
+import { venueIsSerialized } from "./closed-sets";
 import { CircuitOpenError, SeamBodyReadError } from "./seam-errors";
 import { scrubSeamString } from "./seam-redaction";
 import { mintTenantClaim, type TenantIdentity } from "./tenant-claim";
@@ -654,6 +658,56 @@ function trimCredential(value: string): string {
 }
 
 /**
+ * Which `SEAM_BUDGETS` row does validating a key at THIS venue spend?
+ *
+ * Phase 153.4-02 / WIZFORM-05 / D-01. A venue whose probe is SERIALIZED behind
+ * one shared lease gets the long row (`validate-key-serialized`, 120 000 ms):
+ * the wait is a queue, and the honest verdict must land inside the client's
+ * deadline or the request is abandoned before the answer exists. Every other
+ * venue keeps the incumbent 30 000 ms row, byte-identical to pre-153.4
+ * behaviour.
+ *
+ * ⚠️ TWO DELIBERATE DIVERGENCES FROM `process-key-client.ts`'s `budgetKeyFor`.
+ * They are written down because both look like bugs to a reader who knows the
+ * analog, and "fixing" either one re-introduces a defect this repo has paid for.
+ *
+ *  1. **IT NEVER THROWS.** The analog closes with `const _exhaustive: never =
+ *     flowType; throw …` because `FlowType` is a CLOSED union owned by this
+ *     codebase, so an unhandled member really is a programming error. `exchange`
+ *     here is a caller-supplied `string` that arrives in a wizard form body. An
+ *     unrecognised, empty or absent value is NORMAL INPUT, not a programmer
+ *     mistake, and the fallback is the DEFAULT row — byte-identical to today's
+ *     behaviour for every venue that is not serialized. Throwing would turn a
+ *     typo in a form field into a 500.
+ *
+ *  2. **IT READS THE CAPABILITY, NEVER A VENUE NAME.** No `switch` over venue
+ *     strings, no `if (exchange === …)`. `VENUE_CAPABILITIES.serialized` is the
+ *     single fact, and a SECOND serialized venue is covered by editing that
+ *     record — never this function. An `===` against one venue code would be the
+ *     instance-not-class defect the P140 campaign paid 37 scrapped commits for,
+ *     and `analytics-client.test.ts` scans this function's own body for venue
+ *     literals so it cannot come back silently.
+ *
+ * ⛔ T-140-01 — THE RETURN VALUE IS ONE OF TWO MODULE-CONSTANT LITERALS, and it
+ * reaches `breakerKeysFor(budgetKey)` inside the core. NEVER build it by
+ * interpolating the argument into a template literal (the forbidden shape is
+ * `validate-key-<exchange>`; the prohibition is deliberately written WITHOUT the
+ * template syntax so a grep for an interpolated budget key in this file cannot
+ * be satisfied by this very sentence). A user-influenced breaker key is a
+ * trivial cross-tenant denial of service — one caller could shard the breaker so
+ * it
+ * never trips at all, or mint a key that trips for a whole cohort. The argument
+ * is consulted only as a boolean predicate; it never becomes part of the string.
+ */
+export function budgetKeyFor(
+  exchange: string | null | undefined,
+): SeamBudgetKey {
+  return venueIsSerialized(exchange)
+    ? "validate-key-serialized"
+    : "validate-key";
+}
+
+/**
  * Phase 140.2-09 / TS-04 — `tenant` is REQUIRED and must be server-derived.
  *
  * It is an object rather than a fifth bare `string` because a bare string would
@@ -681,7 +735,11 @@ export async function validateKey(
       api_secret: trimCredential(apiSecret),
       passphrase: passphrase ?? null,
     },
-    { budgetKey: "validate-key", tenantId: tenant.userId },
+    // 153.4-02 / D-01 — THE ONE LITERAL that made the venue-aware budget inert.
+    // ⛔ Do NOT add a `timeoutMs` option here: the override is TESTS ONLY since
+    // 140-05 and is invisible to `seam-budgets.invariant.test.ts`'s SC-4b
+    // arithmetic, so it would grant a budget no invariant checks.
+    { budgetKey: budgetKeyFor(exchange), tenantId: tenant.userId },
   );
   return parseResponse(ValidateKeyResponseSchema, data, "/api/validate-key");
 }

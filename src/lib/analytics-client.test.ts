@@ -2136,3 +2136,223 @@ describe("[140.5-02 / B-02] our own transport failures carry a machine marker, n
     ).toBeUndefined();
   });
 });
+
+/**
+ * Phase 153.4-02 / WIZFORM-05 / D-01 — the venue-aware validate-key budget.
+ *
+ * Four properties, and the last two are the ones that catch the defects this
+ * change is actually exposed to:
+ *
+ *  1. SELECTION. A serialized venue takes the 120 000 ms row; every other
+ *     supported venue takes the incumbent 30 000 ms row. Hand-typed table.
+ *  2. FALLBACK. Unknown / empty / null / undefined venues take the DEFAULT row
+ *     and NEVER throw — `exchange` is a caller-supplied wizard form value, so an
+ *     unrecognised string is normal input, not a programming error.
+ *  3. WIRING. `validateKey` spends the key the selector returns. Testing the
+ *     helper is NOT testing that the call site invokes it: a green helper beside
+ *     a dead call site is exactly the shape that left the 120 000 ms row minted
+ *     but unspent after plan 153.4-01.
+ *  4. CLASS, NOT INSTANCE. The selector's own body is read from disk and scanned
+ *     for venue-name literals. `exchange === "mt5"` would satisfy every
+ *     behavioural assertion above while re-shipping the instance-not-class
+ *     defect the P140 campaign paid 37 scrapped commits for.
+ */
+describe("Phase 153.4-02 / WIZFORM-05 — budgetKeyFor selects the validate budget by CAPABILITY", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+  });
+
+  afterEach(() => {
+    vi.doUnmock("./resilient-fetch");
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * HAND-TYPED, one row per SUPPORTED_EXCHANGES member.
+   *
+   * ⛔ The expected key is a literal here and is deliberately NOT derived from
+   * `VENUE_CAPABILITIES`. Deriving it would restate the implementation's own
+   * lookup and pin nothing — the oracle would agree with any capability record,
+   * including one that flipped `serialized` on a venue whose probe is not
+   * serialized at all.
+   */
+  const VENUE_BUDGET_TABLE: ReadonlyArray<readonly [string, string]> = [
+    ["binance", "validate-key"],
+    ["okx", "validate-key"],
+    ["bybit", "validate-key"],
+    ["deribit", "validate-key"],
+    ["sfox", "validate-key"],
+    ["mt5", "validate-key-serialized"],
+  ];
+
+  it.each(VENUE_BUDGET_TABLE)(
+    "%s spends the %s budget row",
+    async (venue, expectedKey) => {
+      const { budgetKeyFor } = await import("./analytics-client");
+      expect(
+        budgetKeyFor(venue),
+        `"${venue}" must spend "${expectedKey}". Only a venue whose probe is ` +
+          `SERIALIZED behind one shared lease may take the 120 000 ms row; ` +
+          `granting it to a venue that answers in seconds holds a Vercel ` +
+          `invocation four times longer than it needs for no benefit.`,
+      ).toBe(expectedKey);
+    },
+  );
+
+  it("an UNKNOWN venue string falls back to the default row", async () => {
+    const { budgetKeyFor } = await import("./analytics-client");
+    expect(
+      budgetKeyFor("kraken"),
+      "An unrecognised venue must take the DEFAULT 30 000 ms row. If it took " +
+        "the long one, any caller could buy a 120 s lambda hold by inventing a " +
+        "venue name (threat T-153.4-06).",
+    ).toBe("validate-key");
+  });
+
+  it("the EMPTY string falls back to the default row", async () => {
+    const { budgetKeyFor } = await import("./analytics-client");
+    expect(
+      budgetKeyFor(""),
+      "An empty venue must take the DEFAULT row — never claim queueing we " +
+        "cannot observe.",
+    ).toBe("validate-key");
+  });
+
+  it("null falls back to the default row", async () => {
+    const { budgetKeyFor } = await import("./analytics-client");
+    expect(
+      budgetKeyFor(null),
+      "A null venue must take the DEFAULT row.",
+    ).toBe("validate-key");
+  });
+
+  it("undefined falls back to the default row", async () => {
+    const { budgetKeyFor } = await import("./analytics-client");
+    expect(
+      budgetKeyFor(undefined),
+      "An absent venue must take the DEFAULT row.",
+    ).toBe("validate-key");
+  });
+
+  it("a MIXED-CASE serialized venue still selects the serialized row", async () => {
+    const { budgetKeyFor } = await import("./analytics-client");
+    // `canonicalizeExchange` hands back the DISPLAY form ("MT5"), and the wizard
+    // renders that value, so a caller legitimately passes mixed case. The
+    // capability predicate lowercases; if it did not, the uppercase display
+    // value would silently spend the SHORT budget and re-create the exact
+    // premature-abandonment this plan exists to fix.
+    expect(
+      budgetKeyFor("MT5"),
+      "The display-cased venue must select the SAME row as the lowercase code.",
+    ).toBe("validate-key-serialized");
+  });
+
+  it("NEVER throws — a path-traversal-shaped string is normal input, not a fault", async () => {
+    const { budgetKeyFor } = await import("./analytics-client");
+    // The deliberate divergence from `process-key-client.ts`'s analog, whose
+    // `default:` assigns to `never` and throws. That one takes a CLOSED union
+    // this codebase owns; this one takes a wizard form body value.
+    expect(() => budgetKeyFor("../../etc/passwd")).not.toThrow();
+    expect(budgetKeyFor("../../etc/passwd")).toBe("validate-key");
+  });
+
+  it("agrees with SEAM_BUDGETS: the serialized row is 120 000ms and the default 30 000ms", async () => {
+    const { budgetKeyFor } = await import("./analytics-client");
+    const { SEAM_BUDGETS } = await import("./resilient-fetch");
+    // Both figures hand-typed. This is the cross-module link: the selector could
+    // return a perfectly valid key that happens to carry the WRONG magnitude,
+    // and every assertion above would stay green.
+    expect(SEAM_BUDGETS[budgetKeyFor("mt5")].timeoutMs).toBe(120_000);
+    expect(SEAM_BUDGETS[budgetKeyFor("binance")].timeoutMs).toBe(30_000);
+  });
+
+  /**
+   * THE CLASS ASSERTION — and the one that can actually fail under an instance
+   * fix.
+   *
+   * The scan is BOUNDED to the function BODY: from the `export function
+   * budgetKeyFor(` signature to the first line-initial `}` after it. That bound
+   * deliberately excludes the docblock ABOVE the signature, which names venues
+   * in prose, so no comment-stripping is needed.
+   */
+  it("carries NO venue-name literal in its own body — a class fix, not an instance fix", () => {
+    const src = readFileSync(
+      join(process.cwd(), "src/lib/analytics-client.ts"),
+      "utf8",
+    );
+    const sigIdx = src.indexOf("export function budgetKeyFor(");
+    expect(
+      sigIdx,
+      "budgetKeyFor is no longer declared as an exported function in " +
+        "analytics-client.ts, so this scan has nothing to bound. Do not delete " +
+        "this assertion — re-point it.",
+    ).toBeGreaterThan(-1);
+    const closeIdx = src.indexOf("\n}\n", sigIdx);
+    expect(closeIdx).toBeGreaterThan(sigIdx);
+    const body = src.slice(sigIdx, closeIdx);
+
+    const VENUE_LITERALS = /mt5|binance|okx|bybit|deribit|sfox/gi;
+    expect(
+      body.match(VENUE_LITERALS) ?? [],
+      "budgetKeyFor's BODY names a venue. It must read the CAPABILITY " +
+        "(venueIsSerialized -> VENUE_CAPABILITIES.serialized) and nothing else: " +
+        "a second serialized venue is then covered by editing that record, " +
+        "never this function. A venue-name branch here is an instance fix " +
+        "wearing a class fix's name.",
+    ).toEqual([]);
+  });
+
+  /**
+   * THE WIRING ASSERTIONS. A green helper with a dead call site is the failure
+   * these catch — and it is not hypothetical: between plans 153.4-01 and
+   * 153.4-02 the 120 000 ms row existed, was pinned, and was spent by nobody.
+   */
+  async function budgetKeyValidateKeyPassedToCore(
+    venue: string,
+  ): Promise<unknown> {
+    const resilientFetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      headers: {
+        get: (name: string) =>
+          name.toLowerCase() === "content-type" ? "application/json" : null,
+      },
+      json: async () => ({ valid: true, read_only: true }),
+      text: async () => "",
+    });
+    vi.doMock("./resilient-fetch", async () => {
+      const actual =
+        await vi.importActual<typeof import("./resilient-fetch")>(
+          "./resilient-fetch",
+        );
+      return { ...actual, resilientFetch: resilientFetchMock };
+    });
+    const mod = await import("./analytics-client");
+    await mod.validateKey(venue, "api-key", "api-secret", undefined, {
+      userId: TENANT.userId,
+    });
+    // `resilientFetch(budgetKey, path, init)` — the budget key is the FIRST
+    // positional argument, so this reads what the core was actually told.
+    return resilientFetchMock.mock.calls[0]?.[0];
+  }
+
+  it("validateKey('mt5', ...) hands the SERIALIZED budget key to the core", async () => {
+    expect(
+      await budgetKeyValidateKeyPassedToCore("mt5"),
+      "validateKey still spends the default budget for a serialized venue. " +
+        "The selector may be correct while the call site ignores it — that is " +
+        "precisely the state this plan exists to end.",
+    ).toBe("validate-key-serialized");
+  });
+
+  it("validateKey('binance', ...) hands the DEFAULT budget key to the core", async () => {
+    expect(
+      await budgetKeyValidateKeyPassedToCore("binance"),
+      "validateKey must leave every non-serialized venue on the incumbent " +
+        "30 000 ms row — this change is additive, not a blanket raise.",
+    ).toBe("validate-key");
+  });
+});
