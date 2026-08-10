@@ -4,13 +4,13 @@ milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
 stopped_at: Completed 153.2-04-PLAN.md (MT5 declarable AND submittable)
-last_updated: "2026-08-10T06:40:44.605Z"
-last_activity: 2026-08-09
+last_updated: "2026-08-10T20:28:36.792Z"
+last_activity: 2026-08-10
 progress:
   total_phases: 14
   completed_phases: 9
   total_plans: 59
-  completed_plans: 54
+  completed_plans: 55
   percent: 64
 ---
 
@@ -55,10 +55,10 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: 153.2 (WIZFORM-FIELD) -- 153.1 and 153.3 already COMPLETE on the same branch
-Plan: 5 of 05 complete
+Phase: 153.4 (wizform-budget-venue-aware-budget-honest-long-wait) — EXECUTING
+Plan: 2 of 5
 Status: Ready to execute
-Last activity: 2026-08-09
+Last activity: 2026-08-10
 
 ### Phase 142.1 scope (inserted 2026-08-02)
 
@@ -381,7 +381,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [█████████░] 90%
+Progress: [█████████░] 93%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -490,6 +490,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 153.2 P02 | 20min | 2 tasks | 2 files |
 | Phase 153.2 P04 | ~55 min | 3 tasks | 8 modified files |
 | Phase 153.2 P05 | ~75 min | 5 tasks | 9 files |
+| Phase 153.4 P01 | 21min | 3 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -1268,7 +1269,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-10T06:40:44.592Z
+**Last Date:** 2026-08-10T20:28:29.041Z
 **Stopped At:** Completed 153.2-04-PLAN.md (MT5 declarable AND submittable)
 **Resume File:** None
 **Next step:** 153.3 is COMPLETE (6/6); 153.1 is 5/6 (plan 01 Wave-0 gates, plan 02 the capability foundation, plan 03 the WIZFORM-03 class filter, plan 04 the ten new codes, plan 05 the honest codes on finalize-wizard -- all green at HEAD). Execute **153.1-06** next, then 153.2 -> 153.4 on `feat/v1.17-153-wizform`. ⛔ WIZFORM-05 stays unchecked until 153.4 closes the client leg. ⛔ **WIZFORM-03 stays unchecked until 153.2/153.4** -- the mechanism and the capability record exist and are pinned, but NOT ONE `buildEnvelope` call site passes `venue` or `surface`, so an MT5 user still reads "switch to a different exchange" in production. ⛔ **WIZFORM-02 stays unchecked until 153.1-06** -- plan 05 landed the emitting half (25 sites, 19 distinct codes, roster 21, EMITTED-NOT-IN-ROSTER empty), but nothing ASSERTS that reconciliation yet, so a twelfth arm added without a code would ship silently. ⭐ 153.1-06 must map through `SEAM_CODE_TO_WIZARD_CODE` before comparing against the roster, or it reports `CIRCUIT_OPEN` as an uncovered emitter forever.
