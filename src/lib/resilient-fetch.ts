@@ -777,10 +777,41 @@ export const SEAM_ROUTE_BUDGETS: Record<
     budgets: Array<{ key: SeamBudgetKey; calls: number; branch?: string }>;
   }
 > = {
+  // ---------------------------------------------------------------------
+  // TWO EXCLUSIVE VENUE BRANCHES on the three routes that validate a key,
+  // and none of the three rows may be read as their sum.
+  //
+  //   default-venue    (`venueIsSerialized(exchange)` false — binance, okx,
+  //                    bybit, deribit, sfox, and every unknown / empty /
+  //                    absent venue string): the request spends
+  //                    `validate-key` at 30 000 ms, exactly as it did before
+  //                    plan 153.4-02.
+  //   serialized-venue (`venueIsSerialized(exchange)` true — mt5 today):
+  //                    the request spends `validate-key-serialized` at
+  //                    120 000 ms, because the venue's probe queues behind
+  //                    one shared terminal lease and its honest verdict must
+  //                    fit inside the client's deadline (WIZFORM-05 / D-04).
+  //
+  // WHY THEY ARE MUTUALLY EXCLUSIVE. One request carries exactly ONE
+  // `exchange`, and `budgetKeyFor(exchange)` in `analytics-client.ts` returns
+  // exactly one budget key for it. A row that summed both arms would charge a
+  // request for 150 000 ms of validation on a path no request takes.
+  //
+  // LABELLED BY CAPABILITY, NOT BY VENUE FAMILY. `"ccxt"` would be wrong
+  // twice over — sFOX is not ccxt, and a second serialized venue would have
+  // no home. These two labels mirror `VENUE_CAPABILITIES.serialized`, the one
+  // fact the selector reads.
+  //
+  // THE SHARED LEGS ARE DELIBERATELY UNLABELLED. `encrypt-key` (and, on
+  // validate-and-encrypt, the dormant `process-key-unified-dormant` leg) is
+  // spent whichever venue arm was taken, so it carries no `branch` and is
+  // charged to BOTH branches — which is what no label means here.
+  // ---------------------------------------------------------------------
   "src/app/api/keys/validate-and-encrypt/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [
-      { key: "validate-key", calls: 1 },
+      { key: "validate-key", calls: 1, branch: "default-venue" },
+      { key: "validate-key-serialized", calls: 1, branch: "serialized-venue" },
       { key: "encrypt-key", calls: 1 },
       { key: "process-key-unified-dormant", calls: 1 },
     ],
@@ -788,14 +819,16 @@ export const SEAM_ROUTE_BUDGETS: Record<
   "src/app/api/strategies/create-with-key/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [
-      { key: "validate-key", calls: 1 },
+      { key: "validate-key", calls: 1, branch: "default-venue" },
+      { key: "validate-key-serialized", calls: 1, branch: "serialized-venue" },
       { key: "encrypt-key", calls: 1 },
     ],
   },
   "src/app/api/strategies/composite/add-key/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [
-      { key: "validate-key", calls: 1 },
+      { key: "validate-key", calls: 1, branch: "default-venue" },
+      { key: "validate-key-serialized", calls: 1, branch: "serialized-venue" },
       { key: "encrypt-key", calls: 1 },
     ],
   },
