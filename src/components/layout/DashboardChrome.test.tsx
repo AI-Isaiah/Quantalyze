@@ -445,35 +445,70 @@ describe("DashboardChrome — wide fluid-fill variant (Phase 52)", () => {
 // the reason it was missed the first time.
 //
 // ⚠️ WHAT COUNTS AS AN OFFENCE — a *page measure*, not any `max-w-*`. A
-// truncating table cell (`truncate max-w-[160px]`) or a chart wrapper is not
-// competing with the shell for the page's width, and DESIGN.md's rule says so
-// in terms. The signature of a page measure is the centring idiom: a single
-// className carrying BOTH `mx-auto` AND an arbitrary-value `max-w-[Npx]`.
+// truncating table cell (`truncate max-w-[160px]`), a `<p>` of empty-state copy
+// at `max-w-md`, a modal at `w-[480px]` and a chart wrapper are not competing
+// with the shell for the page's width, and DESIGN.md's rule says so in terms.
+// The signature of a page measure is the centring idiom: ONE className carrying
+// BOTH `mx-auto` AND a CONTAINER-sized cap.
+//
+// ⛔ "CONTAINER-SIZED" IS BOTH FORMS, and the second one is not decoration. The
+// original founder bug WAS a Tailwind-named rung: `DashboardChrome` clamping a
+// dense table to `max-w-7xl` (1280px). A sweep that only rejected the
+// arbitrary-value `max-w-[Npx]` form would let the exact original defect ship
+// green. `3xl`(768) and up are container widths; `md`/`lg`/`xl`/`2xl` are
+// sentence widths and stay out deliberately.
+//
+// ⛔ AND IT SCANS `src/components/**` TOO. A body shell does not have to live in
+// the route tree — `PartialDataBanner` sets its own measure and renders inside
+// `ScenarioComposer` on `/allocations`. Scanning only `src/app/(dashboard)/…`
+// would leave a shared dense-table shell free to re-clamp the page from one
+// directory over, which is the same "guard on the wrong side of the coupling"
+// shape WR-06 is about.
 // ═══════════════════════════════════════════════════════════════════════════
 describe("[153.2 WR-06] no surface inside an isWide tree re-clamps the fluid shell", () => {
-  // Mirrors `DashboardChrome`'s own `isWide` allow-list. Kept beside it, in the
-  // same file, so the sweep and the predicate cannot drift apart unnoticed.
-  const WIDE_TREES = [
+  // The first six mirror `DashboardChrome`'s own `isWide` allow-list, kept
+  // beside it in the same file so the sweep and the predicate cannot drift
+  // apart unnoticed. `src/components` is added because shells live there too.
+  const SCANNED_TREES = [
     "src/app/(dashboard)/allocations",
     "src/app/(dashboard)/compare",
     "src/app/(dashboard)/discovery",
     "src/app/(dashboard)/admin",
     "src/app/(dashboard)/portfolios",
     "src/app/(dashboard)/my-strategies",
+    "src/components",
   ];
+
+  /** A container-sized cap: the px form OR a large Tailwind rung. */
+  // ⚠️ NO trailing `\b` after the `]` alternative — `]` is a non-word character,
+  // so a word boundary there can never match and the px form would silently
+  // never fire. (Measured: an earlier draft of this sweep had exactly that bug
+  // and reported 2 offenders where there were 10.)
+  const CONTAINER_CAP =
+    /max-w-(?:\[\d+px\]|3xl\b|4xl\b|5xl\b|6xl\b|7xl\b|screen-[a-z]+\b)/;
 
   /**
    * The documented carve-outs, named so the next reader inherits the exception
-   * instead of rediscovering it (DESIGN.md §Measure ladder). Every entry is
-   * PROSE sitting inside an `isWide` tree: the ladder governs by CONTENT TYPE,
-   * not by URL prefix, and a bounded measure is a genuine readability control
-   * for a paragraph in a way it is not for a table.
+   * instead of rediscovering it (DESIGN.md §Measure ladder). NONE is a dense
+   * table: the ladder governs by CONTENT TYPE, not by URL prefix, and a bounded
+   * measure is a genuine readability control for prose in a way it is not for a
+   * table.
    *
    *   - the four `/admin` text pages — under `/admin` for NAVIGATION reasons
    *     only; RT-W2 (v1.4 Phase 54) set them at rung 1, 1100px.
-   *   - the Overview "factsheet warming up" status block.
+   *   - the Overview "factsheet warming up" status block (prose).
    *   - the discovery-detail "factsheet still computing" fallback article,
    *     which carries the factsheet's own 760px reading measure.
+   *   - `DashboardChrome` itself: this IS the owner, and the cap it carries is
+   *     the NARROW branch of its own ternary (`isWide ? max-w-full : max-w-7xl`).
+   *     Exempting the owner is what makes the rule "sole owner" rather than
+   *     "no owner".
+   *   - `LegalFooter`: site chrome, rendered OUTSIDE the content container, so
+   *     it is not a page measure competing with it.
+   *   - `PartialDataBanner`: a centred 480px notice, not a shell.
+   *   - `StrategyV2Shell`: the `/strategy/[id]` document shell — rung 2. That
+   *     route is deliberately NOT on the `isWide` list (a document, not a data
+   *     surface), so its measure is correct and must not be swept away.
    *
    * ⛔ A dense-table page may not join this list. Adding an entry is a design
    * decision that belongs in DESIGN.md's changelog first.
@@ -491,6 +526,10 @@ describe("[153.2 WR-06] no surface inside an isWide tree re-clamps the fluid she
       "src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx",
       "max-w-[760px]",
     ],
+    ["src/components/layout/DashboardChrome.tsx", "max-w-7xl"],
+    ["src/components/legal/LegalFooter.tsx", "max-w-6xl"],
+    ["src/components/strategy-v2/PartialDataBanner.tsx", "max-w-[480px]"],
+    ["src/components/strategy-v2/StrategyV2Shell.tsx", "max-w-[1200px]"],
   ]);
 
   /** Every `className="…"` / `className={`…`}` string literal in a source file. */
@@ -509,14 +548,14 @@ describe("[153.2 WR-06] no surface inside an isWide tree re-clamps the fluid she
       .map((rel) => `${dir}/${rel}`);
   }
 
-  const files = WIDE_TREES.flatMap(tsxFilesUnder);
+  const files = SCANNED_TREES.flatMap(tsxFilesUnder);
 
-  it("the sweep actually walked the isWide trees (anti-vacuity floor)", () => {
+  it("the sweep actually walked every scanned tree (anti-vacuity floor)", () => {
     // Without this, a renamed directory or a broken glob would make every
     // assertion below iterate an empty list and pass while guarding nothing —
     // the exact shape of guard this milestone exists to delete.
-    expect(files.length).toBeGreaterThan(30);
-    for (const tree of WIDE_TREES) {
+    expect(files.length).toBeGreaterThan(200);
+    for (const tree of SCANNED_TREES) {
       expect(
         files.some((f) => f.startsWith(tree)),
         `no .tsx found under ${tree} — the sweep is not reaching it`,
@@ -524,16 +563,31 @@ describe("[153.2 WR-06] no surface inside an isWide tree re-clamps the fluid she
     }
   });
 
-  it("⭐ no page or body shell inside an isWide tree carries a px page measure", () => {
+  it("the offence pattern matches BOTH cap forms (the regex is itself guarded)", () => {
+    // A `\b` after the `]` alternative silently disables the px form — measured,
+    // not hypothetical. Both forms are asserted here so the sweep below cannot
+    // quietly become a sweep for one of them.
+    expect("mx-auto max-w-[1920px] px-4".match(CONTAINER_CAP)?.[0]).toBe(
+      "max-w-[1920px]",
+    );
+    expect("mx-auto max-w-7xl px-4".match(CONTAINER_CAP)?.[0]).toBe("max-w-7xl");
+    // …and sentence-width rungs and truncating cells stay OUT, so the sweep
+    // cannot drift into flagging every centred paragraph in an empty state.
+    expect("mx-auto max-w-md text-sm").not.toMatch(CONTAINER_CAP);
+    expect("truncate max-w-[160px]").toMatch(CONTAINER_CAP); // caught by the cap…
+    expect("truncate max-w-[160px]".includes("mx-auto")).toBe(false); // …excluded by the idiom
+  });
+
+  it("⭐ no page or body shell reachable from an isWide tree carries a container cap", () => {
     const offenders: string[] = [];
     for (const file of files) {
       const src = readFileSync(join(process.cwd(), file), "utf8");
       for (const cls of classNameStrings(src)) {
         if (!cls.includes("mx-auto")) continue;
-        const cap = cls.match(/max-w-\[\d+px\]/)?.[0];
+        const cap = cls.match(CONTAINER_CAP)?.[0];
         if (!cap) continue;
         if (ALLOWED.get(file) === cap) continue;
-        offenders.push(`${file} → "${cls.trim()}"`);
+        offenders.push(`${file} → "${cap}"`);
       }
     }
     // Named, not counted: a failure must say WHICH surface re-clamped the shell.
