@@ -1172,19 +1172,46 @@ class Mt5Client:
         IF the stale connection's shutdown would block; the abandoned stale shutdown
         can no longer prevent the reconnect.
 
+        ⭐ RE-CUT 2026-08-11 (153.5 / WIZFORM-ABANDON). The reasoning above stays
+        correct and is now ALSO bounded in consequence: the abandoned thread it
+        describes no longer merely "keeps running", it is FENCED — the epoch check
+        immediately before ``stale.shutdown()`` below refuses once the lease has
+        moved on. ⚠️ D-43's honest limit, stated here rather than left for a
+        reviewer to discover: the fence cannot un-send a call already on the wire.
+        If the zombie had already DISPATCHED ``stale.shutdown()`` when the lease
+        released, the pipe still dies for the next holder (``sync_request_timeout``
+        is a purely client-side TTL — verified against the pinned rpyc 5.2.3 wheel
+        — so an in-flight call completes server-side regardless). The fence closes
+        the COMMON case, which is the zombie ARRIVING at the shutdown after the
+        release; the ``_assert_expected_login`` detection bracket therefore stays.
+
         ⭐ THE ONE PERMITTED ``shutdown()`` (153.3 / D-35). Every other teardown in
         this client was deleted, because a ``shutdown()`` on this deployment
         destroys the ONE shared IPC pipe for every concurrent caller. This one
         STAYS, deliberately: with nobody else calling it, a genuinely wedged pipe is
         healed ONLY here (MT5CONC-01), and destroying a pipe that is already wedged
-        is the point rather than the hazard. It is safe to keep because every one of
-        its call sites holds the terminal lease — ``allocator_positions.py`` x2 and
-        ``job_worker.py`` x2, all lexically inside ``async with
-        _mt5_terminal_lock_for(...)`` / ``mt5_terminal_lease(...)`` — so no
-        concurrent caller can be attached when it fires. That is not a belief:
-        ``tests/test_mt5_shutdown_roster.py`` derives BOTH facts from source (this
-        is the only ``shutdown()`` call node in the tree, and every restart call
-        site is lease-enclosed) and reds when a new site appears.
+        is the point rather than the hazard.
+
+        ⭐ WHY IT IS SAFE TO KEEP — RE-CUT 2026-08-11 (153.5 / WIZFORM-ABANDON,
+        finding #5). This block used to say it was safe because *"every one of its
+        call sites holds the terminal lease … that is not a belief:
+        tests/test_mt5_shutdown_roster.py derives BOTH facts from source."* That
+        argument was FALSE on one path and the roster could not see it: its
+        enclosure proof is **lexical**, so it reads the ``shutdown`` as inside the
+        ``async with`` and passes green — while at RUNTIME ``_mt5_bounded_restart``
+        abandons this call at its ~10s bound, the caller unwinds, the lease
+        releases, and the zombie reaches the shutdown under the NEXT holder. The
+        premise the phase-153.3 fix rested on was repaired, not re-asserted.
+
+        It is safe to keep because the epoch fence ENFORCES the premise AT RUNTIME:
+        an entry check, and the load-bearing second check immediately before the
+        ``stale.shutdown()`` below, both comparing this session's bound generation
+        against the terminal's current one. The four lease-enclosed call sites
+        (``allocator_positions.py`` x2, ``job_worker.py`` x2) are still derived from
+        source by ``tests/test_mt5_shutdown_roster.py`` — but that derivation is now
+        understood as the LEXICAL half only, green on the abandonment case by
+        construction. The runtime half lives here and in
+        ``tests/test_mt5_client_contract.py``'s fenced-restart case.
 
         Unlike ``close()`` this does NOT gate on ``self._closed`` and NEVER calls
         ``close()``: restart's contract is teardown+rebuild regardless of prior

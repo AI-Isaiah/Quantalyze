@@ -32,6 +32,7 @@ Regression gates — WHY each case matters (Rule 9):
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 import typing
 from types import SimpleNamespace
@@ -788,3 +789,87 @@ def test_mt5_enabled_server_truth_table(monkeypatch, value, expected) -> None:
     else:
         monkeypatch.setenv("MT5_ENABLED", value)
     assert mt5_enabled_server() is expected
+
+
+# --------------------------------------------------------------------------- #
+# WIZFORM-ABANDON — FINDING #6b: the WORKER connect-stage leak, end to end
+#
+# WHY this matters (Rule 9). `Mt5Adapter.validate`'s connect sits DELIBERATELY
+# outside the close-`finally` below it — its own comment says why ("there is no
+# client to close yet"), and that is correct as far as it goes. What it did not
+# account for is `asyncio.to_thread` work outliving its `wait_for`: the abandoned
+# thread finishes `_build_client` AFTER the caller unwound, producing an rpyc
+# session against the gateway's ONE `ThreadedServer` that no `finally` in this file
+# can see and nothing will ever close. Same mechanism as #6a, different path — and
+# the second member of the class is exactly what this milestone has paid sixteen
+# times for skipping.
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_connect_stage_timeout_leaves_no_rpyc_socket_open(monkeypatch) -> None:
+    """⭐ FINDING #6b at the PATH level.
+
+    ⚠️ Same BALANCE oracle as the #6a sibling, for the same reason: which arm of
+    the construction fence fires depends on where the zombie's thread was when the
+    lease's bump landed, so "the conn the zombie opened was closed" would flake on
+    a run where the property genuinely held. Assert that no conn REMAINS open.
+
+    ⚠️ CI-hang discipline: bounded waits only, gate set in a `finally`, the zombie
+    joined on a signal IT sets.
+    """
+    from services.mt5_client import Mt5SessionAbandoned
+
+    gate = threading.Event()
+    finished = threading.Event()
+    conns: list = []
+    outcomes: list[BaseException] = []
+
+    def _blocking_connect(*, host, port, timeout):
+        # BOUNDED — a gate the test somehow fails to set reds this case rather than
+        # stalling the suite for the 300s THREAD_JOIN_TIMEOUT.
+        gate.wait(0.25)
+        fake = _FakeMt5({})
+        conns.append(fake)
+        return fake
+
+    def _fake_build(host: str, port: int) -> Mt5Client:
+        # The REAL client over the injected seam: the construction fence IS the
+        # behaviour under test, so a stub client would fabricate it.
+        try:
+            return Mt5Client(host, port, _connect=_blocking_connect)
+        except BaseException as exc:  # noqa: BLE001 — recorded, then re-raised
+            outcomes.append(exc)
+            raise
+        finally:
+            finished.set()
+
+    monkeypatch.setattr("services.ingestion.mt5._build_client", _fake_build)
+    # §Q6 patch-target table: `_MT5_PROBE_TIMEOUT_S` is READ by
+    # `services.ingestion.mt5`, so it is patched there. Patching a re-export would
+    # be a SILENT no-op and the real ~35s bound would stay in force (the E2 trap).
+    monkeypatch.setattr("services.ingestion.mt5._MT5_PROBE_TIMEOUT_S", 0.05)
+    monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
+    monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await Mt5Adapter().validate(_req())
+    finally:
+        gate.set()  # ⛔ never leave the zombie parked
+
+    assert finished.wait(5.0), "the abandoned construction never finished"
+
+    open_conns = [c for c in conns if c._MetaTrader5__conn.close_calls == 0]
+    assert open_conns == [], (
+        "the abandoned connect-stage thread left an rpyc session open against the "
+        "gateway's ThreadedServer — this path's connect sits outside the "
+        "close-finally, so nothing here will ever close it (finding #6b)"
+    )
+    # Non-vacuity: the zombie really ran and really was refused.
+    assert outcomes and isinstance(outcomes[0], Mt5SessionAbandoned), (
+        f"the zombie construction was not fenced at all: {outcomes}"
+    )
+    # The terminal key the lease bumped is the one this client would have used —
+    # obtained by CALLING the shipped property, never by retyping its format
+    # (MT5CONC-02 / Pitfall 2: a divergent key fences nothing while looking fixed).
+    assert _expected_terminal_key("mt5-gw.internal", 18812) == "mt5-gw.internal:18812"

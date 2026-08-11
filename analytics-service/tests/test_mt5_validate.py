@@ -49,6 +49,7 @@ from __future__ import annotations
 import asyncio
 import pathlib
 import sys
+import threading
 import time
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1764,3 +1765,111 @@ async def test_pre_probe_refusals_carry_their_own_outcome_category(
     assert validate[0]["ok"] is False
     # No terminal was involved, so no lease was taken and none is reported.
     assert _mt5_events(captured, "lease_wait") == []
+
+
+# --------------------------------------------------------------------------- #
+# WIZFORM-ABANDON — FINDING #6a: the ROUTER connect-stage leak, end to end
+#
+# WHY this matters (Rule 9). `client: Mt5Client | None = None` is assigned from
+# INSIDE `_connect_and_probe`, and the Pitfall-6 release block below it is guarded
+# by `if client is not None:`. On a connect-stage timeout that assignment never
+# happens, so the `finally` releases NOTHING — while the abandoned `to_thread`
+# keeps going and constructs an rpyc session against the gateway's ONE
+# `ThreadedServer` that no code path will ever close. Not a slow bleed: one
+# orphaned socket per timed-out validate, on exactly the path that runs when the
+# gateway is already unhealthy.
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_connect_stage_timeout_leaves_no_rpyc_socket_open(
+    exchange_router, monkeypatch
+):
+    """⭐ FINDING #6a at the PATH level — the sink's construction fence, observed
+    through the route that actually produces the zombie.
+
+    ⚠️ THE ORACLE IS THE OPEN/CLOSE BALANCE, not "the post-connect arm fired".
+    Which arm the zombie takes depends on where its thread was when the lease's
+    bump landed: if it enters `__init__` AFTER the release, the PRE-connect check
+    refuses and no socket is ever opened, and an arm-specific close-count assertion
+    would red on a run where the leak property genuinely HELD. Balance is the
+    property; the arm is an implementation detail of the race.
+
+    ⚠️ CI-HANG DISCIPLINE. pytest-asyncio's loop teardown joins the default
+    executor for `THREAD_JOIN_TIMEOUT = 300`s, so an unbounded park here would
+    stall the suite for five minutes instead of redding. Every wait is bounded, the
+    gate is set in a `finally`, and the zombie is joined on a signal IT sets —
+    never a sleep.
+    """
+    router = exchange_router
+    gate = threading.Event()
+    finished = threading.Event()
+    conns: list = []
+    outcomes: list[BaseException] = []
+
+    class _CountedConn:
+        def __init__(self) -> None:
+            self.close_calls = 0
+            self._config: dict = {}
+
+        def close(self):
+            self.close_calls += 1
+
+    class _CountedTransport:
+        """Only the transport-close seam mt5linux 0.1.9 exposes — this case never
+        gets as far as a session call."""
+
+        def __init__(self) -> None:
+            # Single leading underscore ⇒ NOT re-mangled here; byte-identical to
+            # the attribute mt5linux 0.1.9 sets.
+            self._MetaTrader5__conn = _CountedConn()
+
+    def _blocking_connect(**_ignored):
+        # The gateway connect that outlives its bound. BOUNDED (0.25s), so a gate
+        # the test somehow fails to set reds this case rather than hanging CI.
+        gate.wait(0.25)
+        transport = _CountedTransport()
+        conns.append(transport)
+        return transport
+
+    from services.mt5_client import Mt5Client as _RealMt5Client
+    from services.mt5_client import Mt5SessionAbandoned
+
+    def _build(*args, **kwargs):
+        # The REAL class, deliberately: the behaviour under test is the sink's
+        # construction fence, and a MagicMock client would FABRICATE it.
+        try:
+            return _RealMt5Client(*args, _connect=_blocking_connect, **kwargs)
+        except BaseException as exc:  # noqa: BLE001 — recorded, then re-raised
+            outcomes.append(exc)
+            raise
+        finally:
+            finished.set()
+
+    router.Mt5Client = MagicMock(side_effect=_build)
+    # §Q6 patch-target table: this constant is READ by `routers.exchange`, so it is
+    # patched on the module object the fixture yields. Patching it anywhere else is
+    # a SILENT no-op (the E2 trap) and the real ceiling would stay in force.
+    monkeypatch.setattr(router, "_MT5_VALIDATE_STAGE_TIMEOUT_S", 0.05)
+
+    try:
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+        # The route's own existing connect-timeout envelope, unchanged by the fence.
+        assert ei.value.status_code == 503
+        assert ei.value.detail["code"] == "MT5_GATEWAY_UNREACHABLE"
+    finally:
+        gate.set()  # ⛔ never leave the zombie parked
+
+    assert finished.wait(5.0), "the abandoned construction never finished"
+
+    open_conns = [c for c in conns if c._MetaTrader5__conn.close_calls == 0]
+    assert open_conns == [], (
+        "the abandoned connect-stage thread left an rpyc session open against the "
+        "gateway's ThreadedServer — this route's Pitfall-6 finally sees "
+        "`client is None` and releases nothing, so nothing ever will (finding #6a)"
+    )
+    # Non-vacuity: the zombie really ran and really was refused, so the balance
+    # above is a fence result rather than a thread that never happened.
+    assert outcomes and isinstance(outcomes[0], Mt5SessionAbandoned), (
+        f"the zombie construction was not fenced at all: {outcomes}"
+    )

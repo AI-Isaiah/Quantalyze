@@ -130,6 +130,19 @@ async def _mt5_bounded_restart(client: "Mt5Client") -> None:
     the restart can never mask or replace the caller's transient classification.
     Kept module-level (not nested in the branch) because plan 137-02 reuses it for
     the login-mismatch branch.
+
+    ⭐ RE-CUT 2026-08-11 (153.5 / WIZFORM-ABANDON, finding #5 — THIS IS ITS OWN
+    SITE). "Abandoned at the bound; the thread is never joined" is still true, and
+    joining it was REJECTED (it would block the lease for as long as the hung
+    thread — the WEDGE-01 class D-25 forbids). What changed is the CONSEQUENCE of
+    abandoning it: the zombie is now FENCED. Its ``stale.shutdown()`` — the ONE
+    permitted teardown left in the tree — refuses once this holder's lease has
+    released and bumped the terminal's generation, instead of destroying the single
+    shared IPC pipe under whoever holds the terminal next (``-10004``). The refusal
+    surfaces as ``Mt5SessionAbandoned``, which the broad ``except`` below already
+    swallows with a WARNING, so this function's caller-visible behaviour is
+    unchanged. ⚠️ D-43: the fence cannot un-send a shutdown already dispatched on
+    the wire; it closes the case where the zombie ARRIVES at the shutdown late.
     """
     try:
         await asyncio.wait_for(
@@ -189,10 +202,26 @@ async def _mt5_bounded_restart(client: "Mt5Client") -> None:
 # an error path), but because the epilogue no longer performs terminal IPC AT ALL.
 # `Mt5Client.close()` closes only our own rpyc transport; `mt5.shutdown()` was
 # deleted at the sink, so there is nothing left there to serialize. The argument
-# changed, the conclusion did not. The ONE remaining teardown is
-# `Mt5Client.restart()`, reached only via `_mt5_bounded_restart` — and every one of
-# its call sites is INSIDE this lock, which `tests/test_mt5_shutdown_roster.py`
-# derives from source.
+# changed, the conclusion did not.
+#
+# ⭐ RE-CUT 2026-08-11 (153.5 / WIZFORM-ABANDON, finding #5). The sentence that
+# used to close the paragraph above — "the ONE remaining teardown is
+# `Mt5Client.restart()` … and every one of its call sites is INSIDE this lock,
+# which `tests/test_mt5_shutdown_roster.py` derives from source" — was the D-35
+# safety argument, and it was FALSE on the abandonment path. The four call sites
+# are indeed lexically inside this lock, and the roster does indeed derive that
+# from source; but a `to_thread` restart that outlives its `wait_for` executes
+# AFTER its caller unwound and released, so the lexical enclosure says nothing
+# about where the `shutdown()` actually lands. The roster's enclosure proof is
+# LEXICAL by construction and cannot see this — which is why it is green on the
+# defect today.
+#
+# The claim as it now stands: the ONE remaining teardown is `Mt5Client.restart()`,
+# reached only via `_mt5_bounded_restart`; its four call sites are lease-enclosed
+# (the roster's lexical half, still derived from source); AND the shutdown is
+# fenced at RUNTIME by the per-terminal epoch this lease bumps on release, checked
+# in `Mt5Client.restart` immediately before the `stale.shutdown()`. Two guards, two
+# questions — ⛔ do not try to make the ast roster answer the runtime one.
 _MT5_TERMINAL_LOCKS: dict[str, asyncio.Lock] = {}
 
 
