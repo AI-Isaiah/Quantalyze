@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.57.0.0] - 2026-08-11
+### v1.17 — work that outlives its timeout stops touching the terminal
+
+Phase 153.5. A timeout is a promise the caller stops waiting. It was never a promise the *work*
+stopped running.
+
+**The problem is that Python threads cannot be cancelled.** When `asyncio.wait_for` fires on an
+`asyncio.to_thread` call, the coroutine is abandoned but the thread underneath keeps going — and in
+MT5's case it keeps going *against the one shared terminal*, after its caller has already released
+the lease and the next user's request has taken it. The abandoned thread then reads, writes, or
+restarts a terminal that now belongs to someone else. Nothing in the code said no.
+
+**Two independent mechanisms now say no (D-36).** A per-terminal **epoch** is bumped whenever the
+terminal's identity changes, and every `Mt5Client` binds the epoch it was born under; a
+**lease-occupancy** record tracks who currently holds the terminal. `_assert_live` checks both and
+raises `Mt5SessionAbandoned` rather than letting the call through. Two mechanisms rather than one
+because they fail differently: the epoch catches a terminal that was restarted underneath you, the
+occupancy record catches a lease that simply moved on.
+
+`restart()` carries **two** checks, not one — at entry, and again inline immediately before
+`stale.shutdown()`. The second exists because the window between those two points is precisely
+where an abandoned restart does its damage, and an entry-only check cannot see it.
+
+**The refusal is structurally unabsorbable in the classify arms (D-42).** A fence that raises into a
+broad `except Exception` is not a fence. The classify paths were restructured so `Mt5SessionAbandoned`
+cannot be re-swallowed and reported as some unrelated fault.
+
+**Verification was by mutation, not assertion.** The five load-bearing mechanisms were each
+falsified by mutating the shipped source and observing the red, then restoring. 22/22 must-haves
+verified.
+
+**Also in this release** (fallout from the `xhigh` review of the 153 span, fixed outside a phase):
+the `/compare` route skeleton stopped double-insetting its page box — and its test oracle, which was
+structurally blind to the defect, was replaced with a differential one that reads both sides. The
+composite member embed in `finalize-wizard` now runs `safeParse` instead of an `as unknown as`
+double cast, so a PostgREST shape drift refuses rather than finalising a composite on member data it
+never had.
+
+**Known and carried forward:**
+- The epoch binds **lazily on first touch and never rebinds**, so one `Mt5Client` is usable under
+  exactly one lease for its life. No production path does this today — all five lease sites were
+  ast-verified as one-lease-per-instance — but the constraint is now pinned by a test rather than
+  left implicit.
+- `153.5-VALIDATION.md` was not reconciled after execution: its rows still describe a WEDGE-01
+  oracle that plan 05 measured as unable to see its own mutation. The shipped guard uses the
+  corrected release-window discriminator; the ledger describes the rejected one. Documentation
+  defect, not a code one.
+- **Deferred to Phase 155:** the fence's behaviour against the real gateway (live rpyc sockets, a
+  genuinely wedged Wine terminal) has never been observed — every proof here is against the offline
+  double. D-43 accepts the residue knowingly: an in-flight call still completes server-side, because
+  `sync_request_timeout` is client-side only.
+
 ## [0.56.0.0] - 2026-08-11
 ### v1.17 — a budget the verdict fits inside, and a wait you can watch and stop
 
