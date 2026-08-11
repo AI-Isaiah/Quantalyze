@@ -78,55 +78,19 @@
 --      backstops a future re-grant of table or column UPDATE, and it is the
 --      signal the companion test keys on.
 --
--- Residual, deliberately NOT closed here — CORRECTED 2026-08-11 (Phase 153.6 / D-04)
--- ----------------------------------------------------------------------------------
--- ⚠️ DOCUMENTARY CORRECTION ONLY. This file was applied to production on
--- 2026-08-10. Nothing below this line changes any SQL statement, and editing an
--- already-applied migration's COMMENTS has ZERO effect on any database. What is
--- corrected is the threat model this header stated — the original residual
--- argument rested on a claim that is FALSE, and a security migration whose
--- stated threat model is wrong is worse than one that says nothing.
---
--- ⛔ THE CLAIM THAT WAS WRONG. The original text argued that once client UPDATE
--- was gone a mislabelled row could no longer be restored to its true venue, so
--- the strategy's sync would fail permanently and no credible listing could
--- result — i.e. that a forged `exchange` was SELF-DEFEATING. It was not. (The
--- sentence is PARAPHRASED here rather than quoted, deliberately: leaving the
--- original wording in the file, even underneath a refutation, leaves the
--- falsehood greppable and quotable out of its own context.)
---
--- This migration touches UPDATE only: item 1's
--- own note and the self-verify at line 181 both say INSERT and DELETE are left
--- alone ON PURPOSE, because both are live client paths. So the forger never
--- needed to correct the row back. They could DELETE it and re-INSERT it with
--- whatever `exchange` they liked — the round trip, not the in-place rewrite.
--- 20260723172032 had already widened api_keys_exchange_check to ADMIT the
--- probe-exempt venue, so the forged value was a legal value of the constraint.
--- The route trip was therefore LIVE from this migration until 20260811210000,
--- which is why that migration exists.
---
--- THE CORRECTED RESIDUAL. `exchange` is still CLIENT-SUPPLIED at row creation on
--- the two non-wizard INSERT paths (ApiKeyManager.tsx:254, StrategyForm.tsx:140):
--- the browser calls /api/keys/validate-and-encrypt and then performs the
--- api_keys INSERT itself, so a crafted client can insert a venue that differs
--- from the one the server actually validated. What that buys the forger is a
--- SELF-TARGETED CONTROL BYPASS — mislabelling their OWN key to dodge the
--- submit-time scope-broadening probe on their OWN key. It is not a tenant leak
--- and not a data breach; what is lost is the assurance that a key read-only at
--- Connect had not been broadened to trade before Submit. Real for a product
--- selling verified performance; not a 3am page.
---
--- ✅ CLOSED ELSEWHERE, NOT HERE. 20260811210000_api_keys_attested_venue.sql
--- closes the bypass by removing this column's authority instead of removing the
--- client's ability to write it: the probe gate now reads
--- `api_keys.attested_venue`, which only the two SECURITY DEFINER wizard RPCs can
--- write and which a BEFORE INSERT trigger NULLs on every client INSERT. A
--- mislabelled `exchange` is now a cosmetic lie rather than a control bypass.
--- Moving the api_keys INSERT server-side remains the fuller fix and remains a
--- connect-flow refactor across three components — still not this fix's blast
--- radius. ⚠️ `exchange` also still feeds the strategies.asset_class
--- annualization stamp (√365 vs √252), and THAT reader is still forgeable; it is
--- tracked as 153.6 OQ-2 and is deliberately out of that phase's charter.
+-- Residual, deliberately NOT closed here (logged in TODOS.md)
+-- ----------------------------------------------------------
+-- `exchange` is still CLIENT-SUPPLIED at row creation: the browser calls
+-- /api/keys/validate-and-encrypt and then performs the api_keys INSERT itself,
+-- so a crafted client can insert a venue that differs from the one the server
+-- actually validated. That forgery is self-defeating rather than harmful — the
+-- ciphertext is server-minted and only ever minted for a key confirmed
+-- read-only, and with UPDATE revoked the mislabelled row can never be corrected
+-- back, so the strategy's sync fails permanently and no credible listing
+-- results. Closing it properly means moving the api_keys INSERT server-side
+-- (the route already knows the canonical venue it validated), which is a
+-- connect-flow refactor across three components and is not this fix's blast
+-- radius.
 --
 -- Idempotency
 -- -----------
@@ -186,13 +150,6 @@ COMMENT ON TRIGGER api_keys_lock_exchange ON public.api_keys IS
   'last_sync_at, cursors) never hit it. Companion to the table-level UPDATE '
   'REVOKE in migration 20260810120000.';
 
--- ⚠️ SUPERSEDED AT RUNTIME, left intact here on purpose (D-04, 2026-08-11).
--- The "Read by finalize-wizard as the input to the scope-broadening probe gate"
--- sentence below stopped being true when 20260811210000 moved that gate onto
--- api_keys.attested_venue; that later migration re-stamps this comment (keeping
--- the 20260810120000 marker the SQL test keys on). This statement is NOT edited,
--- because rewriting an applied migration's SQL rewrites history rather than the
--- database. Read the corrected residual in the header above.
 COMMENT ON COLUMN public.api_keys.exchange IS
   'Venue label. SERVER-ATTESTED: table-level UPDATE is revoked from anon and '
   'authenticated (migration 20260810120000) and a SECURITY INVOKER trigger '

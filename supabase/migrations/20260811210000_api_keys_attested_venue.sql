@@ -48,10 +48,41 @@
 -- So the round trip survived: DELETE the row, re-INSERT it with a forged
 -- `exchange`. Both halves are still permitted, and 20260723172032 widened
 -- api_keys_exchange_check to ADMIT the probe-exempt venue, so the forged value
--- is a legal value of the constraint today. 20260810120000's header claimed
--- the mislabelled row "can never be corrected back" and rested its
--- "self-defeating forgery" residual on that claim; the claim is false, and the
--- same commit as this migration corrects it (Phase 153.6 D-04).
+-- is a legal value of the constraint today.
+--
+-- ⛔ THE THREAT-MODEL CORRECTION FOR 20260810120000 LIVES HERE, NOT IN THAT
+-- FILE (Phase 153.6 D-04; relocated by migration re-audit M2-05, which is why
+-- 20260810120000 is byte-identical to `main` on this branch — an APPLIED
+-- migration is not edited, not even in its comments, because the file records
+-- what ran and a later reader cannot tell an amended header from the one the
+-- database saw).
+--
+-- WHAT THAT HEADER GOT WRONG. It argued that once client UPDATE was gone a
+-- mislabelled row could no longer be restored to its true venue, so the
+-- strategy's sync would fail permanently, no credible listing could result, and
+-- a forged `exchange` was therefore SELF-DEFEATING. (Paraphrased deliberately
+-- rather than quoted, so the falsehood is not left greppable in a new file.)
+-- It is false: 20260810120000 touches UPDATE only, and its own text says INSERT
+-- and DELETE are left alone ON PURPOSE because both are live client paths. The
+-- forger never needed to correct the row back — DELETE + re-INSERT is the round
+-- trip, and it was LIVE from 20260810120000 until this migration.
+--
+-- THE CORRECTED RESIDUAL. `exchange` stays CLIENT-SUPPLIED at row creation on
+-- the two non-wizard INSERT paths (ApiKeyManager.tsx:254, StrategyForm.tsx:140):
+-- the browser calls /api/keys/validate-and-encrypt and performs the api_keys
+-- INSERT itself, so it can insert a venue different from the one the server
+-- validated. What that buys is the SELF-TARGETED CONTROL BYPASS calibrated at
+-- the top of this file — not a tenant leak, not a data breach.
+--
+-- ✅ CLOSED BY THIS MIGRATION, by removing that column's AUTHORITY rather than
+-- the client's ability to write it: the probe gate now reads
+-- `api_keys.attested_venue`. ⚠️ 20260810120000's own COMMENT ON COLUMN for
+-- `exchange` — "Read by finalize-wizard as the input to the scope-broadening
+-- probe gate" — stopped being true at that moment; section 7 below re-stamps
+-- that comment on the DATABASE (preserving the 20260810120000 marker the SQL
+-- test keys on), which is the correct place to fix it. ⚠️ `exchange` also still
+-- feeds the strategies.asset_class annualization stamp (√365 vs √252) and THAT
+-- reader is still forgeable — 153.6 OQ-2, deliberately out of charter.
 --
 -- The fix is NOT to lock the column down further (D-02/D-03: no new privilege
 -- change on this table, and the label may stay client-writable). The fix is to
