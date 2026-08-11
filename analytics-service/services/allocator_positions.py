@@ -69,6 +69,7 @@ from services.db import db_execute
 from services.mt5_client import (
     Mt5AccountMismatchError,
     Mt5ClientError,
+    Mt5SessionAbandoned,
     Mt5Session,
 )
 # MT5CONC-02 — the ONE terminal-lock registry, imported from the leaf module
@@ -80,10 +81,20 @@ from services.mt5_client import (
 # given its own env knob: the holdings read (login → account_info) is strictly
 # shorter than the derive read that bound was sized for, and a second knob
 # would be a second thing to retune when the rpyc bound moves.
+# ⚠️ 151 review E2, re-cut by WIZFORM-ABANDON / plan 153.5-03: a monkeypatch on
+# THIS module only binds what THIS module reads. Since the holdings acquisition
+# moved to `mt5_terminal_lease` (D-36 — only the lease has a release hook to bump
+# the abandoned-session epoch from), `_mt5_terminal_lock_for` is a RE-EXPORT here
+# that nothing in this file reads: the lease resolves it from
+# `services.mt5_concurrency`, so a test that wants to intercept the LOCK must
+# patch THAT module. The name is kept in the import because the ONE-registry
+# identity pins (tests/test_mt5_concurrency.py, tests/test_allocator_positions_
+# non_ccxt.py) assert it through this module's binding.
 from services.mt5_concurrency import (
     _MT5_DERIVE_READ_TIMEOUT_S,
     _mt5_bounded_restart,
     _mt5_terminal_lock_for,
+    mt5_terminal_lease,
 )
 from services.positions import fetch_positions
 from services.sfox_client import (
@@ -653,7 +664,17 @@ async def _fetch_mt5_account_rows(
     # extraction, row build) stays OUTSIDE the lock: it is pure computation and
     # holding the terminal through it would serialize work that needs no
     # terminal.
-    async with _mt5_terminal_lock_for(session.client.terminal_key):
+    #
+    # WIZFORM-ABANDON / D-36 — acquired through the LEASE, not the raw Lock: the
+    # lease's `finally` is the ONE release hook, and it is what BUMPS THE TERMINAL
+    # EPOCH so a `to_thread` body that outlived the `wait_for` below is refused
+    # rather than driving the next holder's terminal. `wait_s` is deliberately
+    # omitted (= unbounded acquire, byte-equivalent to the raw
+    # `await lock.acquire()` this replaced): ⛔ the bounded arm's
+    # `Mt5TerminalBusyError` is the INTERACTIVE validate path's contract (D-29),
+    # never this batch poll's — refusing to wait here would drop an allocator's
+    # holdings row whenever the derive job happened to hold the terminal.
+    async with mt5_terminal_lease(session.client.terminal_key):
         try:
             info = await asyncio.wait_for(
                 asyncio.to_thread(_mt5_read), timeout=_MT5_DERIVE_READ_TIMEOUT_S
@@ -668,6 +689,31 @@ async def _fetch_mt5_account_rows(
                 "terminal (FLIPRETRY-01 / MT5CONC-01)"
             )
             await _mt5_bounded_restart(session.client)
+            raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
+        except Mt5SessionAbandoned as exc:
+            # ⭐ WIZFORM-ABANDON / D-40. `Mt5SessionAbandoned` is a plain
+            # `Exception` (D-42), so it matches none of the three sibling arms
+            # here; without this one it left `fetch_allocator_holdings` as a raw
+            # type the caller's dedicated `AllocatorHoldingsSyncTransientError`
+            # arm cannot see — which is how a fault whose user copy is a FIXED
+            # constant ends up as `str(exc)` in an allocator's `sync_error`.
+            #
+            # ⚠️ On the genuinely abandoned path nobody awaits this read, so the
+            # raise reaches no one and this arm never runs (D-39). It exists for
+            # the FALSE-POSITIVE path: a legitimate read refused by the fence
+            # must be retried and must never be dressed as the allocator's fault.
+            #
+            # ⛔ NO `_mt5_bounded_restart`, unlike the two arms around it. Those
+            # heal a pipe that is OURS and wedged; a fence refusal means the
+            # terminal was handed on, so a restart here would fire the one
+            # permitted `mt5.shutdown()` on the NEXT holder's session — the
+            # -10004 cross-holder outage this phase closes.
+            logger.warning(
+                "poll_allocator_positions: mt5 holdings read was refused by the "
+                "abandoned-session fence — classified transient, retrying; NOT "
+                "restarting, because another holder owns the hardware now "
+                "(WIZFORM-ABANDON / D-40)"
+            )
             raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
         except Mt5AccountMismatchError as exc:
             # A mis-routed / stale terminal is an INFRA fault, never user blame:

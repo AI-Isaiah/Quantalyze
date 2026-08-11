@@ -227,7 +227,17 @@ EXPECTED_HTTPEXCEPTION_SUBCLASSES = 1
 #: user's key. A sixth ``VenueTransientHTTPException(424)`` construction; no new
 #: user-facing code is minted (153.1 owns the TS code table) and it is a 4xx like
 #: every other site, so blind spot (b) stays LATENT rather than live.
-EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 10
+#: 10 -> 11 (2026-08-11, Phase 153.5-04 / WIZFORM-ABANDON D-40): the MT5 validate
+#: probe gained an ``except Mt5SessionAbandoned`` arm routing to the SAME transient
+#: shape as a probe-stage timeout. It is a REMOVAL of a 5xx, not an addition: the
+#: abandoned-session fence added in waves 1-2 raises a plain ``Exception`` (D-42, so
+#: no credential-classify arm can absorb an operator fault into a user verdict),
+#: which matched none of this route's arms and left as an unhandled BODYLESS 500 —
+#: exactly the class this census exists to count, and under R-1 a claim of
+#: "service-permanent, do not retry" about the most retryable condition there is.
+#: A seventh ``VenueTransientHTTPException(424)`` construction; no new user-facing
+#: code is minted (153.1 owns the TS code table), so blind spot (b) stays LATENT.
+EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 11
 
 #: Vacuity fence. A scanner that matched nothing would report agreement with the
 #: quarantine forever, so the scan must prove it saw the tree. Loose floors on

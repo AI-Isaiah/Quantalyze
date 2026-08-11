@@ -3971,3 +3971,155 @@ describe("[153.2-05] the rate-limit deny arms carry codes", () => {
     fetchSpy.mockRestore();
   });
 });
+
+/**
+ * 153 review — THE COMPOSITE MEMBER EMBED IS VALIDATED, NOT CAST.
+ *
+ * The O-1 per-member scope-broadening loop used to bind its rows through
+ * `(members ?? []) as unknown as Array<…>`. A double cast asserts a shape the
+ * compiler has no evidence for and checks NOTHING at runtime, so a PostgREST
+ * shape change degraded in SILENCE rather than failing loud.
+ *
+ * ⭐ THE NAMED HAZARD IS AN ARRAY-VALUED EMBED. PostgREST returns a to-one
+ * embed as an object, but the same `select()` returns an ARRAY the moment the
+ * relationship is read as to-many (a duplicated FK, a view swapped under the
+ * table, a schema-cache reload resolving the join differently). Under the cast
+ * that array satisfied the compiler, `member.api_keys?.exchange` read
+ * `undefined`, EVERY member resolved to a `null` venue, and the finalize path
+ * proceeded on member data it never actually had — a silent downgrade of an
+ * ASVS V4 control, wearing a 200.
+ *
+ * ⚠️ WHY THE REFUSAL SHARES `COMPOSITE_MEMBERSHIP_UNKNOWN`. Membership we
+ * cannot read is membership we cannot re-probe, which is exactly what that code
+ * says. A new code would need a new rejection site, and
+ * `wizardErrors.invariant.test.ts` counts those EXACTLY
+ * (`EXPECTED_FINALIZE_REJECTION_SITES`). The user-facing envelope is therefore
+ * shared and only the OPERATOR artefacts fork — which is the half that has to
+ * discriminate, because the two incidents have different remedies.
+ */
+describe("[153 review] a composite member embed of an unexpected shape fails LOUD", () => {
+  /**
+   * The drifted read. Cast at the injection site on purpose: `STATE`'s type
+   * says this cannot happen, and the whole point of the defect is that the
+   * types lied about a runtime shape. A fixture the type could express would
+   * not be the fixture that reproduces it.
+   *
+   * ⚠️ EXACTLY ONE MEMBER, and that is a measurement, not a preference. With
+   * the double cast restored, a ONE-member drift answers **200** — the
+   * composite finalises on member data the route never had, which is the defect
+   * in its pure form. A TWO-member fixture answered 502 instead, because the
+   * second member's key is not wired into the probe mock and its probe failed
+   * for a reason unrelated to the drift. That 502 is a green-looking red: it
+   * would have let this row pass on a route that never validated anything, just
+   * by landing on a different status. One member isolates the property.
+   */
+  function embedAsArray(): typeof STATE.strategyKeysList {
+    return [
+      { api_key_id: MEMBER_KEY_1, api_keys: [{ exchange: "binance" }] },
+    ] as unknown as typeof STATE.strategyKeysList;
+  }
+
+  it("⭐ refuses the finalize instead of probing members it could not read", async () => {
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: null }; // composite
+    STATE.strategyKeysCount = 1;
+    STATE.strategyKeysList = embedAsArray();
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("COMPOSITE_MEMBERSHIP_UNKNOWN");
+
+    // ⛔ THE LOAD-BEARING HALF. A 503 that still probed, or still finalized,
+    // would be the silent degradation with a different status code on it. Under
+    // the double cast this route answered 200 and crossed the seam twice.
+    expect(
+      fetchSpy,
+      "The route probed a member whose venue it could not actually read.",
+    ).not.toHaveBeenCalled();
+    expect(RF.lastCall).toBeNull();
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+      "The composite was FINALIZED on member data the route never had.",
+    ).toBeUndefined();
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("names the SHAPE drift to the operator — not the read-failure sentence", async () => {
+    // The two failures share one envelope, so the log line and the Sentry step
+    // are the ONLY artefacts that tell an operator which incident they have.
+    // Reporting a schema drift as "read failed" sends them to the RLS policy
+    // and the connection pool for a fault that is in the query.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 1;
+    STATE.strategyKeysList = embedAsArray();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    const lines = consoleErr.mock.calls.map((args) =>
+      args.map((a) => String(a)).join(" "),
+    );
+    const drift = lines.find((l) => l.includes("SHAPE unrecognised"));
+    expect(
+      drift,
+      "A composite that will not finalise produced no operator line naming the shape drift.",
+    ).toBeDefined();
+    expect(drift).not.toContain("[object Object]");
+    // The CR-01 read-failure sentence must NOT be what fired — this read did
+    // not fail, it returned rows nobody can use.
+    expect(
+      lines.some((l) => l.includes("composite member list read failed")),
+      "A shape drift was reported as a member-list READ failure.",
+    ).toBe(false);
+
+    const steps = STATE.captureToSentryCalls.map((c) => c.options.tags.step);
+    expect(steps).toContain("composite-member-shape");
+    expect(steps).not.toContain("composite-member-list");
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("CONTROL — every shape production actually returns still finalises", async () => {
+    // ⛔ WITHOUT THIS ROW the two above would also pass on a guard that refused
+    // EVERY composite, which is a worse defect than the one being fixed. All
+    // three legitimate embeds are real runtime states: PostgREST omits the key
+    // in the harness's pre-existing rows, returns `null` when the FK does not
+    // resolve, and returns the object on the happy path. A member with a null
+    // venue is STILL PROBED by the fail-toward rule — that is not drift.
+    const legitimate: Array<[string, typeof STATE.strategyKeysList]> = [
+      ["embed absent", [{ api_key_id: MEMBER_KEY_1 }]],
+      ["embed null", [{ api_key_id: MEMBER_KEY_1, api_keys: null }]],
+      [
+        "embed object",
+        [{ api_key_id: MEMBER_KEY_1, api_keys: { exchange: "binance" } }],
+      ],
+    ];
+
+    const POST = await importPost();
+    for (const [label, list] of legitimate) {
+      RF.lastCall = null;
+      STATE.rpcCalls = [];
+      STATE.strategyRow = { api_key_id: null };
+      STATE.strategyKeysCount = 1;
+      STATE.strategyKeysList = list;
+      const fetchSpy = mockProbeReadOnly();
+
+      const res = await POST(makeReq(VALID_BODY));
+
+      expect(res.status, `"${label}" was refused as a shape drift.`).toBe(200);
+      expect(
+        STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+        `"${label}" did not reach the finalize RPC.`,
+      ).toBeDefined();
+      fetchSpy.mockRestore();
+    }
+  });
+});

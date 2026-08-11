@@ -17,6 +17,18 @@ import { Skeleton } from "@/components/ui/Skeleton";
  * inside it. The fluid-fill measure matches the page (fully fluid, no px cap
  * since the 2026-08-09 founder decision).
  * Closed by an sr-only role="status" liveness hint for assistive tech.
+ *
+ * ⛔ THE ROOT WRAPPER CARRIES NO BOX INSET, AND THAT IS THE WHOLE CONTRACT
+ * (153 review). `loading.tsx` is a Suspense fallback for the PAGE SEGMENT only:
+ * `(dashboard)/layout.tsx` → `DashboardChrome` stays mounted around it and
+ * already supplies the content inset (`px-4 py-6 md:px-8 md:py-8`), exactly as
+ * it does for `compare/page.tsx` — which adds none of its own. This file used
+ * to add `px-6 py-6` on top of that, so the skeleton sat 24px in from the
+ * content it stands in for and the page visibly jumped OUTWARD on arrival —
+ * the precise jump the docblock above claims it prevents. Any padding, margin
+ * or measure added to a wrapper here is the shell's job, not this file's; the
+ * same "the shell is the SOLE owner" rule DESIGN.md states for width
+ * (§Measure ladder) governs the inset. Guarded by `loading.test.tsx`.
  */
 
 // Assume a 3-column comparison while loading (the common multi-select case).
@@ -25,7 +37,7 @@ const METRIC_ROW_COUNT = 9; // mirrors CompareTable's METRICS length
 
 export default function CompareLoading() {
   return (
-    <div className="px-6 py-6 animate-pulse">
+    <div className="animate-pulse">
       {/* Page-header anchor — breadcrumb + title lines. */}
       <Skeleton className="h-4 w-48 mb-4" />
       <Skeleton className="h-9 w-72 mb-8" />

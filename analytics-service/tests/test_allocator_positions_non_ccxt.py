@@ -630,12 +630,16 @@ def mt5_enabled(monkeypatch):
 @pytest.fixture(autouse=True)
 def _reset_terminal_locks():
     """Clear the ONE shared registry between tests so a Lock parked here can
-    never leak into another test (mirrors tests/test_mt5_concurrency.py)."""
+    never leak into another test (mirrors tests/test_mt5_concurrency.py).
+
+    Since WIZFORM-ABANDON / D-36 it also clears the per-terminal EPOCH registry,
+    via the ONE shared helper (RESEARCH Pitfall 8: a leaked epoch fences a client
+    another test builds for the same key — a sixth flake mechanism)."""
     from services import mt5_concurrency
 
-    mt5_concurrency._MT5_TERMINAL_LOCKS.clear()
+    mt5_concurrency.reset_terminal_state_for_tests()
     yield
-    mt5_concurrency._MT5_TERMINAL_LOCKS.clear()
+    mt5_concurrency.reset_terminal_state_for_tests()
 
 
 # ---------------------------------------------------------------------------
@@ -1102,6 +1106,49 @@ async def test_mt5_holdings_read_contends_on_the_shared_terminal_lock(mt5_enable
 
 
 # ---------------------------------------------------------------------------
+# Test 10b — WIZFORM-ABANDON / D-36 / ABANDON-05: the holdings RELEASE advances
+# the terminal epoch. `allocator_positions.py:656` is the call site the author of
+# the "the lease is the ONE release point" claim did NOT have in mind, which is
+# exactly why it is pinned here and not left to the derive-path assertion.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_mt5_holdings_release_bumps_the_terminal_epoch_exactly_once(
+    mt5_enabled,
+):
+    """EXACT delta, hand-typed. The holdings read takes the terminal lease exactly
+    ONCE (the currency gate / row build below it is pure computation and stays
+    outside), so the epoch must advance by exactly 1.
+
+    "It changed" would be green under a DOUBLE bump, and a double bump fences a
+    successor that legitimately holds the terminal. 0 means the acquisition went
+    back to the raw ``asyncio.Lock``, which has no release hook to bump from —
+    silently disarming the abandoned-session fence on this path while every
+    lock-identity and lock-contention assertion above stayed green.
+    """
+    from services.mt5_client import _mt5_epoch_for
+
+    transport = _RecordingMt5Transport(account=_account())
+    session = _session(transport)
+    # The SHIPPED property, never a retyped "host:port": a drifted literal would
+    # measure an unrelated registry slot and read 0 → 0 forever.
+    key = session.client.terminal_key
+    before = _mt5_epoch_for(key)
+
+    rows, warning = await fetch_allocator_holdings("mt5", session, API_KEY_ID)
+
+    # The read really happened — a skipped/gated read would "prove" the delta by
+    # never taking the lease at all.
+    assert warning is None
+    assert len(rows) == 1
+    assert "account_info" in transport.calls
+
+    assert _mt5_epoch_for(key) - before == 1, (
+        f"the holdings read's terminal release must advance the epoch by EXACTLY "
+        f"1 (one lease hold); got {_mt5_epoch_for(key) - before} for key={key!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test 11 — the login bracket: never a wrong-account equity row
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
@@ -1179,6 +1226,91 @@ async def test_mt5_poisoned_equity_is_refused(mt5_enabled, monkeypatch, override
 
     with pytest.raises(AllocatorHoldingsSyncTransientError):
         await fetch_allocator_holdings("mt5", _session(transport), API_KEY_ID)
+
+
+# ---------------------------------------------------------------------------
+# WIZFORM-ABANDON / D-40 — the refusal's CLASSIFICATION on the HOLDINGS path
+#
+# WHY this matters (Rule 9). `Mt5SessionAbandoned` is a plain `Exception` (D-42),
+# so it matches none of this branch's three existing arms. Escaping them it would
+# leave `fetch_allocator_holdings` as a raw exception type the caller's dedicated
+# `AllocatorHoldingsSyncTransientError` arm cannot see — which is how a fault
+# whose user copy is a FIXED constant turns into `str(exc)` leaking Python
+# internals into an allocator's `sync_error` column (the very class
+# `test_user_visible_copy_never_leaks_python_internals` guards).
+# ---------------------------------------------------------------------------
+
+
+class _EpochBumpingTransport(_RecordingMt5Transport):
+    """The ONE shared Wine terminal, whose `login()` advances the terminal
+    generation — i.e. the lease this session began under releases mid-read.
+
+    Bumping from INSIDE the transport is what makes the next session touch be
+    refused by the SHIPPED `_assert_live` rather than by a hand-thrown stand-in,
+    so the test proves the refusal can actually ARRIVE at this arm.
+    """
+
+    def __init__(self, *, account: dict, terminal_key: str) -> None:
+        super().__init__(account=account)
+        self._terminal_key = terminal_key
+
+    def login(self, login, password=None, server=None, timeout=None):  # noqa: ANN001
+        out = super().login(login, password=password, server=server, timeout=timeout)
+        from services.mt5_client import bump_mt5_terminal_epoch
+
+        # The SHIPPED release hook — the same call `mt5_terminal_lease`'s finally
+        # makes. Never a hand-poked registry entry.
+        bump_mt5_terminal_epoch(self._terminal_key)
+        return out
+
+
+@pytest.mark.asyncio
+async def test_mt5_abandoned_session_raises_the_transient_with_the_fixed_copy(
+    mt5_enabled, monkeypatch
+):
+    """⭐ The D-40 holdings arm, driven by the SHIPPED fence.
+
+    The oracles are the TYPE and the `str()` — the user-copy contract every
+    sibling arm on this branch already satisfies — plus the CHAIN, so an operator
+    reading the traceback still sees what actually happened. The internal text
+    never reaches the user; only the fixed constant does.
+    """
+    from services.allocator_positions import (
+        AllocatorHoldingsSyncTransientError,
+        MT5_UNREACHABLE_NOTE,
+    )
+    from services.mt5_client import Mt5SessionAbandoned
+
+    restarts: list[object] = []
+
+    async def _spy_restart(client):
+        restarts.append(client)
+
+    monkeypatch.setattr(ap, "_mt5_bounded_restart", _spy_restart)
+    # "h:1" is what `_session`'s Mt5Client("h", 1, ...) produces; the assertion
+    # below derives it from the shipped property so a drifted literal cannot make
+    # this case vacuous by bumping an unrelated registry slot.
+    transport = _EpochBumpingTransport(account=_account(), terminal_key="h:1")
+    session = _session(transport)
+    assert session.client.terminal_key == "h:1"
+
+    with pytest.raises(AllocatorHoldingsSyncTransientError) as excinfo:
+        await fetch_allocator_holdings("mt5", session, API_KEY_ID)
+
+    # The fence really fired: login ran and `account_info` never reached the
+    # terminal.
+    assert transport.calls == ["initialize", "login"], (
+        f"the fence did not refuse account_info; calls={transport.calls!r}"
+    )
+    # The user-copy contract: the FIXED constant, never str(exc).
+    assert str(excinfo.value) == MT5_UNREACHABLE_NOTE
+    # Chained, so the operator-side cause survives in the traceback.
+    assert isinstance(excinfo.value.__cause__, Mt5SessionAbandoned)
+    # ⛔ No self-harm: a fence refusal means the terminal was handed on, so
+    # restarting it would land on the NEXT holder's session.
+    assert restarts == [], (
+        "the refusal arm restarted a terminal that now belongs to someone else"
+    )
 
 
 # ===========================================================================

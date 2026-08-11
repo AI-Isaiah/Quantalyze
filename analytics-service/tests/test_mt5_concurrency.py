@@ -33,16 +33,23 @@ No network, no database, no MT5 terminal — pure import-graph and identity chec
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
 from services import job_worker as jw
-from services import mt5_concurrency
+from services import mt5_client, mt5_concurrency
+
+# ⚠️ Imported from the module that OWNS them (`services.mt5_client`), never via a
+# re-export. The 151 review-E2 trap: a name reached through a re-export is a
+# DIFFERENT binding, so patching or asserting on it is a silent no-op.
+from services.mt5_client import _mt5_epoch_for, bump_mt5_terminal_epoch
 
 
 @pytest.fixture(autouse=True)
@@ -50,10 +57,15 @@ def _reset_mt5_terminal_locks():
     """MT5CONC-02: clear the module-level per-terminal asyncio.Lock registry between
     tests so a Lock created here (``_mt5_terminal_lock_for`` inserts via setdefault)
     can never leak into another test — including the derive-branch suite, which
-    shares this ONE process-wide registry when pytest runs both files."""
-    mt5_concurrency._MT5_TERMINAL_LOCKS.clear()
+    shares this ONE process-wide registry when pytest runs both files.
+
+    Since WIZFORM-ABANDON / D-36 it also clears the per-terminal EPOCH registry,
+    via the ONE shared helper rather than a second hand-rolled `.clear()` here: a
+    leaked epoch fences a client another test builds for the same key, which under
+    `-n auto --dist loadgroup` is a sixth flake mechanism (RESEARCH Pitfall 8)."""
+    mt5_concurrency.reset_terminal_state_for_tests()
     yield
-    mt5_concurrency._MT5_TERMINAL_LOCKS.clear()
+    mt5_concurrency.reset_terminal_state_for_tests()
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +104,16 @@ def test_registry_object_is_shared_across_modules() -> None:
     assert jw._mt5_terminal_lock_for is mt5_concurrency._mt5_terminal_lock_for
     assert jw._mt5_bounded_restart is mt5_concurrency._mt5_bounded_restart
     assert jw._Mt5PostReadVerificationError is mt5_concurrency._Mt5PostReadVerificationError
+
+    # WIZFORM-ABANDON / plan 153.5-03 — the LEASE is now the acquisition verb at
+    # every production call site (it is the only one with a release hook to bump
+    # the abandoned-session epoch from), so it needs the same one-object pin the
+    # registry has. A `mt5_terminal_lease` re-declared in either consumer would
+    # wrap a DIFFERENT lock registry and bump a DIFFERENT epoch, and every
+    # "the lease was entered" assertion would stay green while the two job kinds
+    # serialized nothing and fenced nothing.
+    assert jw.mt5_terminal_lease is mt5_concurrency.mt5_terminal_lease
+    assert ap.mt5_terminal_lease is mt5_concurrency.mt5_terminal_lease
 
 
 # ---------------------------------------------------------------------------
@@ -355,3 +377,548 @@ def test_busy_error_cannot_be_absorbed_into_a_credential_verdict() -> None:
     message = str(mt5_concurrency.Mt5TerminalBusyError("the MT5 terminal was busy"))
     for leak in ("h:1", "18812", "localhost", "127.0.0.1"):
         assert leak not in message
+
+
+# ---------------------------------------------------------------------------
+# WIZFORM-ABANDON / D-36 — THE LEASE DRIVES THE ABANDONED-THREAD FENCE
+#
+# WHY these matter (Rule 9). `asyncio.to_thread` work is never cancelled: when a
+# caller's `wait_for` fires it unwinds and RELEASES this lease while the abandoned
+# thread keeps driving the SAME process-global MT5 session. The lease is the only
+# thing that knows a terminal has changed hands, so it is where the generation is
+# bumped — and a bump missed on ANY exit path leaves that path's zombies un-fenced
+# while every other path looks fine. Hence one case per exit path, plus the
+# negative: a caller that never held the terminal must not fence the one that does.
+# ---------------------------------------------------------------------------
+
+
+async def test_the_lease_bumps_the_terminal_epoch_on_a_normal_exit() -> None:
+    """The ordinary path. The bump belongs to RELEASE, not to acquisition: bumping
+    on acquire would fence the acquirer's own client on its very first touch."""
+    before = _mt5_epoch_for("h:1")
+
+    async with mt5_concurrency.mt5_terminal_lease("h:1"):
+        assert _mt5_epoch_for("h:1") == before, (
+            "the generation advanced on ACQUISITION — this holder's own session "
+            "would be fenced on its first touch"
+        )
+
+    assert _mt5_epoch_for("h:1") == before + 1
+
+
+async def test_the_lease_bumps_the_terminal_epoch_when_the_body_raises() -> None:
+    """The COMMON path, not the exotic one: the validate body raises on most of
+    its outcomes (auth reject, master reject, mismatch, transient). A bump that
+    lived after the `yield` instead of in the `finally` would leave every failed
+    hold's abandoned threads free to touch the next holder's terminal."""
+    before = _mt5_epoch_for("h:1")
+
+    with pytest.raises(ValueError):
+        async with mt5_concurrency.mt5_terminal_lease("h:1"):
+            raise ValueError("the caller's own failure")
+
+    assert _mt5_epoch_for("h:1") == before + 1
+
+
+async def test_the_lease_bumps_the_terminal_epoch_when_the_holder_is_cancelled() -> None:
+    """⭐ THE PATH THIS PHASE EXISTS FOR. A holder abandoned at its own `wait_for`
+    is cancelled, not returned-from and not raised-through — and it is exactly the
+    holder whose `to_thread` work is still running. If the bump missed this path,
+    the fence would be armed on every path EXCEPT the one that needs it."""
+    before = _mt5_epoch_for("h:1")
+    entered = asyncio.Event()
+
+    async def _holder() -> None:
+        async with mt5_concurrency.mt5_terminal_lease("h:1"):
+            entered.set()
+            await asyncio.sleep(3600)
+
+    task = asyncio.create_task(_holder())
+    await asyncio.wait_for(entered.wait(), timeout=1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert _mt5_epoch_for("h:1") == before + 1
+    assert not mt5_concurrency._mt5_terminal_lock_for("h:1").locked()
+
+
+async def test_a_timed_out_acquisition_bumps_nothing() -> None:
+    """The twin of ``test_lease_bound_expiry_raises_busy_and_never_acquires``, and
+    the same principle one level up: a caller that never held the terminal must
+    change NOTHING about it. A bump placed above the bounded ``wait_for`` would let
+    a queued interactive validate that gave up FENCE the daily job that actually
+    holds the terminal — turning our queue into the other caller's failure."""
+    lock = mt5_concurrency._mt5_terminal_lock_for("h:1")
+    await lock.acquire()  # somebody else holds the terminal
+    before = _mt5_epoch_for("h:1")
+
+    with pytest.raises(mt5_concurrency.Mt5TerminalBusyError):
+        async with mt5_concurrency.mt5_terminal_lease("h:1", wait_s=0.05):
+            pytest.fail("the body must never run when the terminal was never acquired")
+
+    assert _mt5_epoch_for("h:1") == before, (
+        "a timed-out waiter bumped the generation — it just fenced the sessions of "
+        "the holder that is legitimately mid-IPC"
+    )
+    assert lock.locked()
+    lock.release()
+
+
+async def test_the_occupancy_stamp_covers_the_hold_and_is_reset_after_it() -> None:
+    """D-36 AMENDED (ii). The construction fence (plan 02) reads this stamp, so
+    "set for the whole hold, absent outside it" is its entire contract. Reset via
+    the Token — not ``set(None)`` — so a nested lease restores the OUTER value
+    instead of flattening it."""
+    assert mt5_client._MT5_LEASE_OCCUPANCY.get() is None
+    epoch_at_acquire = _mt5_epoch_for("h:1")
+
+    async with mt5_concurrency.mt5_terminal_lease("h:1"):
+        assert mt5_client._MT5_LEASE_OCCUPANCY.get() == ("h:1", epoch_at_acquire)
+
+    assert mt5_client._MT5_LEASE_OCCUPANCY.get() is None, (
+        "the occupancy stamp outlived the lease in the CALLER's context — every "
+        "later construction on this task would look lease-held"
+    )
+
+
+async def test_to_thread_work_carries_a_frozen_copy_of_the_occupancy_stamp() -> None:
+    """⭐ THE PROPERTY THE WHOLE CONSTRUCTION FENCE RESTS ON, re-verified IN-REPO
+    rather than trusted from a research note.
+
+    ``asyncio.to_thread`` copies the caller's ``contextvars.Context`` at spawn, so
+    an abandoned thread keeps carrying the occupancy tuple of the lease it was
+    spawned under EVEN AFTER that lease released in the caller's context. That
+    asymmetry — frozen in the thread, gone in the caller — is precisely what lets
+    plan 02 tell a zombie construction from a live one. If contextvars ever stopped
+    being copy-on-spawn, the construction fence would silently stop working and
+    nothing else in the suite would notice.
+
+    ⚠️ The gate is BOUNDED (0.25s) and set again in a ``finally``. ``asyncio.run``
+    joins the default executor for ``THREAD_JOIN_TIMEOUT = 300``s, so an unbounded
+    ``Event.wait()`` here would stall the WHOLE suite for five minutes instead of
+    redding. The rule this copies from ``test_mt5_derive_branch.py``: a broken lock
+    REDS, it never hangs CI.
+    """
+    gate = threading.Event()
+    started = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    observed: dict[str, object] = {}
+
+    def _abandoned_worker() -> None:
+        loop.call_soon_threadsafe(started.set)
+        gate.wait(0.25)
+        observed["in_thread"] = mt5_client._MT5_LEASE_OCCUPANCY.get()
+
+    epoch_at_acquire = _mt5_epoch_for("h:1")
+    try:
+        async with mt5_concurrency.mt5_terminal_lease("h:1"):
+            # Spawned INSIDE the hold — this is the work that will outlive it.
+            worker = asyncio.create_task(asyncio.to_thread(_abandoned_worker))
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+
+        # ...the lease has now released in the CALLER's context.
+        assert mt5_client._MT5_LEASE_OCCUPANCY.get() is None
+        gate.set()
+        await asyncio.wait_for(worker, timeout=1.0)
+    finally:
+        gate.set()
+
+    assert observed["in_thread"] == ("h:1", epoch_at_acquire), (
+        "the abandoned thread did NOT keep a frozen copy of the occupancy stamp — "
+        "the construction fence (D-36 AMENDED (ii)) has nothing to read"
+    )
+
+
+def test_the_epoch_registry_is_not_re_exported_anywhere() -> None:
+    """The E2 patch-target trap, pre-empted for the epoch.
+
+    ``_MT5_RESTART_TIMEOUT_S`` IS re-exported into ``job_worker``, and a
+    monkeypatch aimed at that copy is a SILENT no-op
+    (``test_mt5_derive_branch.py:869-877``). The epoch registry is deliberately not
+    re-exported anywhere, so there is no second binding for anyone to reach — and
+    this test is what keeps it that way."""
+    from services import allocator_positions as ap
+
+    # Vacuity floor: the owner really does hold it, so the negatives below mean
+    # "not re-exported" rather than "the name was renamed and nobody noticed".
+    assert hasattr(mt5_client, "_MT5_TERMINAL_EPOCHS")
+    assert mt5_concurrency.bump_mt5_terminal_epoch is bump_mt5_terminal_epoch
+
+    assert not hasattr(jw, "_MT5_TERMINAL_EPOCHS"), (
+        "job_worker acquired a binding to the epoch registry — a second name is a "
+        "second patch target, and patching the wrong one is a silent no-op"
+    )
+    assert not hasattr(ap, "_MT5_TERMINAL_EPOCHS"), (
+        "allocator_positions acquired a binding to the epoch registry"
+    )
+
+
+# ---------------------------------------------------------------------------
+# WIZFORM-ABANDON / D-36 / T-153.5-10 — the raw-acquisition class, pinned shut.
+#
+# THE DEFECT THIS EXISTS FOR: at 153.5 HEAD, THREE of the five production
+# terminal acquisitions bypassed `mt5_terminal_lease` and took
+# `_mt5_terminal_lock_for` directly — `job_worker.py:364`, `job_worker.py:3572`
+# (finding #5's OWN path) and `allocator_positions.py:656`. The raw
+# `asyncio.Lock` has no release hook, so those three released the terminal while
+# bumping NOTHING: every abandoned-session fence downstream was disarmed on
+# exactly the paths that motivated it, and the whole suite was green.
+#
+# Plan 153.5-03 converted all three. This test is what stops a fourth from being
+# written — because "we already fixed those three" is how the instance-not-class
+# mistake gets paid for a seventeenth time. It reasons over the AST, never a
+# grep: both edited files still contain the literal string
+# `_mt5_terminal_lock_for` in prose comments explaining why they no longer call
+# it, so a grep-based pin would be permanently red.
+# ---------------------------------------------------------------------------
+
+#: The registry accessor that must never again be entered as a context manager
+#: directly. Acquiring it is fine (`mt5_terminal_lease` does exactly that, as a
+#: plain call); HOLDING it as the async-with target is what skips the release
+#: hook.
+_RAW_LOCK_ACCESSOR = "_mt5_terminal_lock_for"
+
+#: `mt5_concurrency` itself is the ONE legitimate exemption: `mt5_terminal_lease`
+#: is the thing every other module is required to go through, and it necessarily
+#: reaches the registry. It does so as a plain call (`lock = _mt5_terminal_lock_for(k)`),
+#: not an async-with, so it would not be reported anyway — the exclusion is
+#: belt-and-braces and is stated so a future refactor of the lease into
+#: `async with _mt5_terminal_lock_for(k):` does not silently inherit an exemption
+#: it was never granted. ⚠️ Never widen this set to "the file I am editing".
+_RAW_ACQUISITION_EXEMPT_FILES: frozenset[str] = frozenset(
+    {"services/mt5_concurrency.py"}
+)
+
+#: Anti-vacuity floor. MEASURED at 153.5-03: `services/` + `routers/` hold 88
+#: production `.py` files (77 + 11). A pin that walked zero files would pass in
+#: silence, so the walk asserts it saw a plausible fraction of the tree. Hand-
+#: typed deliberately — a floor computed from the same walk it is guarding proves
+#: nothing.
+_PRODUCTION_FILE_FLOOR = 40
+_PRODUCTION_FILES_MEASURED_AT_153_5 = 88
+
+
+def _raw_lock_acquisitions(source: str, rel: str) -> list[tuple[str, int]]:
+    """Every `async with _mt5_terminal_lock_for(...):` item in ``source``.
+
+    BOTH syntactic forms are matched — a bare `_mt5_terminal_lock_for(k)` and an
+    attribute access `mt5_concurrency._mt5_terminal_lock_for(k)` — because a
+    re-import under a module alias is the obvious way for the class to come back.
+    """
+    found: list[tuple[str, int]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.AsyncWith):
+            continue
+        for item in node.items:
+            call = item.context_expr
+            if not isinstance(call, ast.Call):
+                continue
+            func = call.func
+            name = (
+                func.id
+                if isinstance(func, ast.Name)
+                else func.attr
+                if isinstance(func, ast.Attribute)
+                else None
+            )
+            if name == _RAW_LOCK_ACCESSOR:
+                found.append((rel, node.lineno))
+    return found
+
+
+def _production_python_files() -> list[Path]:
+    root = Path(__file__).resolve().parents[1]  # analytics-service/
+    return sorted(
+        p
+        for pkg in ("services", "routers")
+        for p in (root / pkg).rglob("*.py")
+    )
+
+
+def test_no_production_module_acquires_the_raw_terminal_lock() -> None:
+    """Every production terminal acquisition must go through the LEASE.
+
+    The oracle is the release hook, not tidiness: `mt5_terminal_lease`'s `finally`
+    is the only place a terminal hand-over can be observed, so it is the only
+    place the D-36 epoch can be bumped. A raw `async with _mt5_terminal_lock_for(k):`
+    serializes perfectly and fences nothing — which is precisely why this class of
+    defect survived every existing lock test.
+    """
+    root = Path(__file__).resolve().parents[1]
+    files = _production_python_files()
+
+    assert len(files) >= _PRODUCTION_FILE_FLOOR, (
+        f"the walk scanned only {len(files)} production files, below the "
+        f"hand-typed floor of {_PRODUCTION_FILE_FLOOR} "
+        f"({_PRODUCTION_FILES_MEASURED_AT_153_5} were measured across "
+        f"services/ + routers/ at 153.5-03). A pin over an empty or truncated "
+        f"walk passes in silence — fix the walk, never the floor."
+    )
+
+    offenders: list[tuple[str, int]] = []
+    for path in files:
+        rel = path.relative_to(root).as_posix()
+        if rel in _RAW_ACQUISITION_EXEMPT_FILES:
+            continue
+        offenders.extend(_raw_lock_acquisitions(path.read_text(), rel))
+
+    assert not offenders, (
+        f"these sites hold the per-terminal Lock DIRECTLY instead of taking "
+        f"`mt5_terminal_lease`: {offenders}. The raw Lock has no release hook, so "
+        f"the site releases the terminal without bumping the WIZFORM-ABANDON / "
+        f"D-36 epoch — a `to_thread` body that outlived its `wait_for` is then "
+        f"free to drive the NEXT holder's MT5 terminal, unfenced and silent. Take "
+        f"the lease (no `wait_s` for batch callers — the bounded arm's "
+        f"Mt5TerminalBusyError is the interactive path's contract, D-29)."
+    )
+
+
+def test_the_raw_acquisition_scanner_reports_and_does_not_over_report() -> None:
+    """Self-test: the scanner above must BITE on the real shape and must NOT be
+    fooled by the same text in prose.
+
+    Both halves matter. Without the first, the pin is a no-op that would have been
+    green throughout the three-site defect. Without the second, the pin is
+    permanently red — `job_worker.py` and `allocator_positions.py` both still
+    NAME `_mt5_terminal_lock_for` in the comments explaining why they no longer
+    call it, which is exactly why this is an AST walk and not a grep.
+    """
+    offending = (
+        "async def f(k):\n"
+        "    async with _mt5_terminal_lock_for(k):\n"
+        "        pass\n"
+    )
+    assert _raw_lock_acquisitions(offending, "synthetic.py") == [("synthetic.py", 2)]
+
+    # The attribute form — a module-aliased re-import is the obvious way back in.
+    aliased = (
+        "async def f(k):\n"
+        "    async with mt5_concurrency._mt5_terminal_lock_for(k):\n"
+        "        pass\n"
+    )
+    assert _raw_lock_acquisitions(aliased, "synthetic.py") == [("synthetic.py", 2)]
+
+    in_a_docstring = (
+        "async def f(k):\n"
+        '    """Historically this did:\n'
+        "\n"
+        "    async with _mt5_terminal_lock_for(k):\n"
+        "        ...\n"
+        "\n"
+        '    It now takes the lease."""\n'
+        "    async with mt5_terminal_lease(k):\n"
+        "        pass\n"
+    )
+    assert _raw_lock_acquisitions(in_a_docstring, "synthetic.py") == []
+
+    # A plain CALL is not an acquisition — `mt5_terminal_lease` itself does this,
+    # and reporting it would make the exemption above load-bearing rather than
+    # belt-and-braces.
+    plain_call = "def f(k):\n    lock = _mt5_terminal_lock_for(k)\n    return lock\n"
+    assert _raw_lock_acquisitions(plain_call, "synthetic.py") == []
+
+
+# ---------------------------------------------------------------------------
+# WIZFORM-ABANDON / D-36 — THE LATENT CONSTRAINT OF THE LAZY BIND, pinned.
+#
+# ⚠️ NOT A DEFECT TODAY. `Mt5Client._epoch` binds on the FIRST touch and never
+# rebinds — the decision that makes a PREFLIGHT-built client exempt (D-36 AMENDED;
+# an eager construction bind false-positives `job_worker._make_mt5_session`, which
+# builds outside and before the lease). Its unwritten price: ONE `Mt5Client`
+# instance used under TWO lease acquisitions is refused on the SECOND, because its
+# epoch is still the first lease's and the release in between bumped the
+# generation. The holder would be entirely legitimate and would read an
+# `Mt5SessionAbandoned` saying the lease it operated under has ended — classified
+# transient (D-40), i.e. a permanent-looking retry loop, on a path that plainly
+# HELD the lease. That is the most confusing failure this subsystem can produce.
+#
+# The 153.5 verification ast-checked all five lease blocks and confirmed NO
+# production path reuses a client across two of them — so the constraint holds by
+# accident of structure, and nothing pinned it (warning W-153.5-3). These two
+# cases are the pin.
+#
+# The BEHAVIOURAL half — "a fresh client per acquisition is never refused, a
+# reused one is" — lives in `tests/test_mt5_client_contract.py`
+# (`test_one_client_per_lease_acquisition_is_the_shape_the_lazy_bind_assumes`).
+# This half is the STRUCTURAL one: it watches production source for the shape that
+# would make the reuse reachable in the first place.
+#
+# ⛔ THE FIX IS NOT TO WEAKEN `_assert_live`. If a call site ever legitimately
+# needs one client across two leases, the deliberate remedy is to REBIND ON LEASE
+# ENTRY — a new mechanism the lease itself would drive — never to relax the fence
+# and never to re-add a construction-time snapshot (RESEARCH §Open Q-1 rejected
+# that; it refuses legitimate preflight builds).
+# ---------------------------------------------------------------------------
+
+#: The ONE verb every production terminal acquisition goes through (pinned by
+#: `test_no_production_module_acquires_the_raw_terminal_lock` above).
+_LEASE_VERB = "mt5_terminal_lease"
+
+#: ⛔ HAND-TYPED, asserted with `==`, and keyed on `(file, enclosing function)`
+#: rather than line numbers — the 153.5 CONTEXT recorded that two of its four line
+#: citations had ROTTED before the phase was even planned, so a line-keyed roster
+#: would be re-cut for reasons that are not about the invariant.
+#:
+#: MEASURED at 153.5 (five acquisitions, five DISTINCT enclosing functions — which
+#: is the invariant: at most one lease per function means no function can carry a
+#: client from one acquisition into the next).
+_PRODUCTION_LEASE_SITES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("services/allocator_positions.py", "_fetch_mt5_account_rows"),
+        ("services/ingestion/mt5.py", "validate"),
+        ("services/job_worker.py", "_fetch_mt5_account_balance"),
+        ("services/job_worker.py", "run_derive_broker_dailies_job"),
+        ("routers/exchange.py", "_validate_mt5_key_probe"),
+    }
+)
+
+
+def _lease_sites(source: str, rel: str) -> list[tuple[str, str]]:
+    """Every `async with mt5_terminal_lease(...):` in ``source``, as
+    ``(rel, dotted enclosing function name)``.
+
+    Nested defs are reported by their FULL dotted path, so a lease taken inside a
+    closure is not silently attributed to the enclosing coroutine — the closure is
+    a different scope and can hold a different client.
+    """
+    tree = ast.parse(source)
+    parents: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+
+    found: list[tuple[str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncWith):
+            continue
+        for item in node.items:
+            call = item.context_expr
+            if not isinstance(call, ast.Call):
+                continue
+            func = call.func
+            name = (
+                func.id
+                if isinstance(func, ast.Name)
+                else func.attr
+                if isinstance(func, ast.Attribute)
+                else None
+            )
+            if name != _LEASE_VERB:
+                continue
+            chain: list[str] = []
+            cur: ast.AST = node
+            while cur in parents:
+                cur = parents[cur]
+                if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    chain.append(cur.name)
+            found.append((rel, ".".join(reversed(chain))))
+    return found
+
+
+def test_no_production_function_holds_two_terminal_leases() -> None:
+    """⭐ THE PIN FOR THE LAZY BIND'S LATENT CONSTRAINT (W-153.5-3).
+
+    One `Mt5Client` per lease acquisition. The reachable way to break it is a
+    function that takes the lease TWICE with one client spanning both — so this
+    asserts the roster of lease sites is exactly the five measured at 153.5 AND
+    that their enclosing functions are all distinct.
+
+    Reds in both directions, and both reds are useful:
+      * a SIXTH site, or a lease that MOVED, reds the equality — read as "check
+        whether the client this lease touches was already touched under an earlier
+        one"; then re-cut this roster deliberately.
+      * a function holding TWO leases reds the distinctness assertion — that is the
+        shape that produces the confusing refusal, and the failure message says
+        what to do about it.
+
+    ⚠️ HONEST CEILING, stated rather than implied: this is a LEXICAL, per-function
+    property. A client constructed in one function and handed to two others that
+    each take a lease would satisfy every assertion here. The ast walk cannot see
+    that, no walk can see it cheaply, and pretending otherwise is how the sibling
+    roster's "the ONLY thing standing between" claim had to be re-cut. What this
+    pin buys is that the CHEAP shape cannot land silently, and that the constraint
+    is written down where the next reader of a refusal will find it.
+    """
+    root = Path(__file__).resolve().parents[1]
+    files = _production_python_files()
+
+    assert len(files) >= _PRODUCTION_FILE_FLOOR, (
+        f"the walk scanned only {len(files)} production files, below the "
+        f"hand-typed floor of {_PRODUCTION_FILE_FLOOR}. A pin over a truncated "
+        f"walk passes in silence — fix the walk, never the floor."
+    )
+
+    sites: list[tuple[str, str]] = []
+    for path in files:
+        sites.extend(_lease_sites(path.read_text(), path.relative_to(root).as_posix()))
+
+    assert set(sites) == _PRODUCTION_LEASE_SITES, (
+        f"the production terminal-lease roster moved: {sorted(sites)}, expected "
+        f"{sorted(_PRODUCTION_LEASE_SITES)}. Before re-cutting this literal, check "
+        f"the ONE thing it exists for: does the new site touch an `Mt5Client` that "
+        f"was ALREADY touched under a different lease? If so it will be refused "
+        f"with `Mt5SessionAbandoned` — legitimately holding the lease and told the "
+        f"lease has ended — because the lazy bind never rebinds (D-36 AMENDED)."
+    )
+
+    duplicated = sorted({site for site in sites if sites.count(site) > 1})
+    assert not duplicated, (
+        f"these functions take `{_LEASE_VERB}` more than once: {duplicated}. That "
+        f"is the ONE shape in which a single `Mt5Client` can span two acquisitions, "
+        f"and the lazy bind would refuse it on the second — a false refusal of a "
+        f"legitimate holder, surfacing as a permanent-looking transient loop. If "
+        f"the two leases genuinely use DISTINCT client instances this is safe; say "
+        f"so at the site and re-cut this pin. ⛔ The remedy for a genuine reuse is "
+        f"to REBIND ON LEASE ENTRY, never to weaken `Mt5Client._assert_live`."
+    )
+
+
+def test_the_lease_site_scanner_reports_the_reuse_shape_and_ignores_prose() -> None:
+    """Self-test. Without it, a `_lease_sites` that silently returned nothing would
+    make the pin above green forever — the vacuous-derivation failure the sibling
+    rosters carry their floors and self-tests to prevent.
+    """
+    two_in_one_function = (
+        "async def f(k):\n"
+        "    client = build()\n"
+        "    async with mt5_terminal_lease(k):\n"
+        "        client.account_info()\n"
+        "    async with mt5_terminal_lease(k):\n"
+        "        client.account_info()\n"
+    )
+    assert _lease_sites(two_in_one_function, "synthetic.py") == [
+        ("synthetic.py", "f"),
+        ("synthetic.py", "f"),
+    ]
+
+    # The attribute form — a module-aliased import is the obvious way back in.
+    aliased = (
+        "async def f(k):\n"
+        "    async with mt5_concurrency.mt5_terminal_lease(k):\n"
+        "        pass\n"
+    )
+    assert _lease_sites(aliased, "synthetic.py") == [("synthetic.py", "f")]
+
+    # A closure is its OWN scope, and must be reported as such: a lease taken in a
+    # nested def is not the outer coroutine's, and attributing it there would hide
+    # a genuine second acquisition.
+    nested = (
+        "async def outer(k):\n"
+        "    async def inner():\n"
+        "        async with mt5_terminal_lease(k):\n"
+        "            pass\n"
+        "    await inner()\n"
+    )
+    assert _lease_sites(nested, "synthetic.py") == [("synthetic.py", "outer.inner")]
+
+    in_prose = (
+        "async def f(k):\n"
+        '    """Historically:\n'
+        "\n"
+        "    async with mt5_terminal_lease(k):\n"
+        "        ...\n"
+        '    """\n'
+        "    return None\n"
+    )
+    assert _lease_sites(in_prose, "synthetic.py") == []

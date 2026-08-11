@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse, after } from "next/server";
+import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
@@ -131,6 +132,36 @@ export const maxDuration = 300;
  * a genuine cross-file link rather than a table compared against itself.
  */
 const MAX_COMPOSITE_MEMBERS = 10;
+
+/**
+ * 153 review — the shape of ONE composite member row as read by the O-1
+ * per-member scope-broadening loop below (`select("api_key_id, api_keys (
+ * exchange )")` off `strategy_keys`).
+ *
+ * ⛔ THIS REPLACES AN `as unknown as` DOUBLE CAST, and the cast is the defect.
+ * A double cast asserts a shape the compiler has no evidence for and checks
+ * NOTHING at runtime, so a PostgREST shape change degraded in SILENCE: the
+ * named hazard is the embed arriving as an ARRAY (`api_keys: [{ exchange }]`)
+ * rather than a to-one object, at which point `member.api_keys?.exchange` reads
+ * `undefined`, every member resolves to a `null` venue, and the finalize path
+ * proceeds on member data it never actually had. Same class the 140.3-03 note
+ * below records for `LivePermissions` — an `interface` + `as` on an upstream
+ * body — and the same remedy, so this file now has ONE answer to it.
+ *
+ * ⚠️ `api_keys` is `.nullish()`, NOT required, and the two misses are different
+ * things. PostgREST returns the requested embed key as `null` when the FK does
+ * not resolve, and a member whose embed is absent or null is STILL PROBED with
+ * a `null` venue by the fail-toward rule the loop relies on — that is a real
+ * runtime state, not drift, so it must parse. An ARRAY is neither of those and
+ * is refused. Unknown keys are stripped rather than rejected (zod's default):
+ * a column added to `strategy_keys` is not a reason to refuse a finalize.
+ */
+const compositeMemberRowsSchema = z.array(
+  z.object({
+    api_key_id: z.string().nullable(),
+    api_keys: z.object({ exchange: z.string().nullable() }).nullish(),
+  }),
+);
 
 /**
  * 140.3-03 / SEAMUX-07 — the value a body the schema could not read resolves
@@ -1301,16 +1332,58 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         // fan-out stays capped at `MAX_COMPOSITE_MEMBERS` and
         // `SEAM_ROUTE_BUDGETS`'s `calls: 10` plus SC-4e stay exact.
         .limit(MAX_COMPOSITE_MEMBERS + 1);
-      if (membersErr) {
+      // 153 review — VALIDATED, NOT CAST, AND VALIDATED HERE. The parse runs
+      // before the cap arm because a row set we cannot read is not a member
+      // list whose LENGTH means anything; `.length` is the only thing the cap
+      // arm touches, so it is unaffected either way.
+      const memberRowsParsed = compositeMemberRowsSchema.safeParse(
+        members ?? [],
+      );
+      if (membersErr || !memberRowsParsed.success) {
         // A member-list read error also fails CLOSED — never enqueue a
         // composite whose members we could not enumerate to re-probe.
+        //
+        // 153 review — AND A SHAPE WE CANNOT PARSE IS THE SAME REFUSAL, which
+        // is why it lands in THIS arm rather than a new one. Membership we
+        // cannot read is membership we cannot re-probe, so it is literally
+        // `COMPOSITE_MEMBERSHIP_UNKNOWN`; the alternative was a new code, and
+        // a new code needs a new rejection site, which `EXPECTED_FINALIZE_
+        // REJECTION_SITES` counts exactly (wizardErrors.invariant.test.ts).
+        // Inventing taxonomy to describe an ops-side schema drift is not worth
+        // that, so the emit is SHARED and only the operator artefacts fork.
+        //
+        // ⚠️ THE LOG LINE FORKS AND MUST. The read-failure sentence is asserted
+        // verbatim by CR-01's test; a shape drift is a different incident with
+        // a different remedy (fix the query/schema, not retry), so it gets its
+        // own sentence and its own Sentry `step` — otherwise the one artefact
+        // an operator has for a composite that will not finalise points at the
+        // wrong cause.
+        // ⛔ THE DISCRIMINATOR IS A BOOLEAN, NOT THE ERROR BINDING ITSELF, and
+        // that is SEAMCORE-06's rule rather than a style choice: `console.*`
+        // arguments may not contain a bare error-shaped identifier, because
+        // undici embeds this seam's outgoing `Authorization: Bearer` /
+        // `X-Service-Key` / `X-User-Access-Token` headers in `err.message`, and
+        // a credential reaches the Vercel log with nothing at the call site
+        // that looks wrong. Branching on `membersErr` INSIDE the call — even as
+        // a mere truth test — puts that identifier in the argument list and is
+        // refused by `seam-log-coverage.test.ts` (measured: it caught exactly
+        // this shape here). Hoisting the predicate keeps every logged value
+        // provably wrapped in `scrubSeamError`.
+        const membershipShapeDrifted = !membersErr && !memberRowsParsed.success;
+        const membershipFailure = membershipShapeDrifted
+          ? memberRowsParsed.error
+          : membersErr;
         console.error(
-          `[strategies/finalize-wizard] composite member list read failed: ${scrubSeamError(membersErr)}`,
+          membershipShapeDrifted
+            ? `[strategies/finalize-wizard] composite member list SHAPE unrecognised (PostgREST drift; the embed is not the to-one object this route reads): ${scrubSeamError(memberRowsParsed.error)}`
+            : `[strategies/finalize-wizard] composite member list read failed: ${scrubSeamError(membersErr)}`,
         );
-        captureToSentry(membersErr, {
+        captureToSentry(membershipFailure, {
           tags: {
             surface: "finalize-wizard",
-            step: "composite-member-list",
+            step: membershipShapeDrifted
+              ? "composite-member-shape"
+              : "composite-member-list",
           },
           extra: { strategy_id: fields.strategy_id },
         });
@@ -1423,14 +1496,17 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       }
       // `api_key_id` is a to-one FK into `api_keys`, so PostgREST returns a
       // single embedded object at runtime; the generated types predate this
-      // table, so the row shape is asserted the same way `composite/members`
-      // asserts it. A member whose embed comes back `null` yields a `null`
-      // venue — and is therefore STILL PROBED, by the same fail-toward rule the
+      // table. A member whose embed comes back `null` yields a `null` venue —
+      // and is therefore STILL PROBED, by the same fail-toward rule the
       // single-key arm relies on.
-      const memberRows = (members ?? []) as unknown as Array<{
-        api_key_id: string | null;
-        api_keys: { exchange: string | null } | null;
-      }>;
+      //
+      // 153 review — the rows arrive from `compositeMemberRowsSchema.safeParse`
+      // above, so this binding is PROVEN, not asserted. It used to be
+      // `(members ?? []) as unknown as Array<…>`: a double cast that silences
+      // the compiler and verifies nothing, under which an array-valued embed
+      // read back as `undefined` and finalized the composite on member data it
+      // never had. The unreadable-shape refusal is the arm above.
+      const memberRows = memberRowsParsed.data;
       for (const member of memberRows) {
         const memberKeyId =
           typeof member.api_key_id === "string" ? member.api_key_id : null;

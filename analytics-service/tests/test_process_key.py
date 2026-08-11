@@ -4769,3 +4769,144 @@ def test_process_key_sync_our_own_validation_unexpected_fallback_stays_403(clien
     body = r.json()
     assert body["code"] == "VALIDATION_UNEXPECTED"
     assert body["recoverable"] is False
+
+
+# ---------------------------------------------------------------------------
+# WIZFORM-ABANDON / D-40 — the two `adapter.validate` call sites this router had
+# left with NO enclosing try at all (ast-verified in 153.5 research).
+#
+# WHY this matters (Rule 9). `Mt5SessionAbandoned` is a plain `Exception` by
+# design (D-42, so no credential-classify arm anywhere can absorb an operator
+# fault into a user verdict). The consequence HERE was that an adapter raising it
+# produced an unhandled BODYLESS 500 on the wizard's own validate leg — and under
+# STATUS_CONTRACT R-1 a 500 means SERVICE-PERMANENT, "do not retry", which is the
+# exact inverse of the truth. It is also the ONE status this route documents as
+# unreadable to its callers ("a consumer that branches on the status line alone —
+# which TRAP-2 says it may have to, since an unhandled fault is a bodyless 500").
+#
+# ⚠️ PERSPECTIVE. On the genuinely abandoned path nobody awaits the validate, so
+# these arms never run (D-39 — the sink's WARNING is the signal). They exist for
+# the FALSE-POSITIVE path: a legitimate submission that trips the fence must be
+# told "transient, retry", never "your credentials are wrong" and never
+# "permanent".
+#
+# ⚠️ HONEST SCOPE NOTE on the second case. `mt5` is admitted to `onboard`/`resync`
+# only (MT5RECON-01) and both are long-fetch, so `:1586` — the SYNCHRONOUS
+# pipeline's validate — is not reachable by an mt5 body TODAY. It is covered
+# anyway, with the adapter registry stubbed, because the class here is "an
+# unguarded `adapter.validate` call site" and not "the mt5 one": an instance fix
+# at the first site alone leaves this one open the day any lease-taking adapter is
+# admitted to a sync flow. The 153.5 falsifiability ledger picks THIS site,
+# deliberately, as its second-member-of-the-class mutation.
+# ---------------------------------------------------------------------------
+
+
+def test_validate_only_abandoned_session_is_a_coded_transient_never_a_500(
+    client, monkeypatch
+):
+    """Site 1 — `_run_validate_only`, the wizard's validate-and-encrypt leg."""
+    from services.mt5_client import Mt5SessionAbandoned
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    fake = _build_supabase_mock(existing_row=None)
+
+    mt5_adapter = MagicMock()
+    mt5_adapter.validate = AsyncMock(side_effect=Mt5SessionAbandoned("account_info"))
+
+    with patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=mt5_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "onboard",
+                "source": "mt5",
+                "context": {
+                    "wizard_session_id": "wiz-abandoned-validate-only",
+                    "user_id": "u1",
+                    "api_key": "123456",
+                    "api_secret": "investor-pw",
+                    "passphrase": "Broker-Demo",
+                    "step": "validate",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 424, r.text
+    assert r.status_code != 500, (
+        "an abandoned-session refusal fell through to an unhandled bodyless 500 "
+        "on the wizard's validate leg — under R-1 that tells the caller the "
+        "service is PERMANENTLY broken and must not be retried (D-40)"
+    )
+    body = r.json()
+    # ⭐ The BODY, not merely the status integer: a bodyless 500 and a coded
+    # envelope are distinguishable only here, and `code` is what the wizard
+    # renders on.
+    assert body["ok"] is False
+    assert body["code"] == "NETWORK_UNAVAILABLE"
+    assert body["recoverable"] is True
+    assert body["correlation_id"] == _TEST_CID
+    # ⛔ Never a credential accusation. The permanent allow-list is imported LIVE
+    # rather than hand-copied — the invariant is disjointness from whatever the
+    # route treats as caller-fault TODAY.
+    from services import exchange as exchange_svc
+
+    assert body["code"] not in exchange_svc.PERMANENT_VALIDATION_ERROR_CODES
+
+
+def test_sync_pipeline_abandoned_session_is_a_coded_transient_never_a_500(client):
+    """Site 2 — the synchronous pipeline's validate (`:1586` at plan time).
+
+    Same contract, driven through the OTHER route. This is the second member of
+    the class; a fix that covered only `_run_validate_only` leaves it open.
+    """
+    from services.mt5_client import Mt5SessionAbandoned
+
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-abandoned")
+
+    abandoning_adapter = MagicMock()
+    abandoning_adapter.validate = AsyncMock(
+        side_effect=Mt5SessionAbandoned("account_info")
+    )
+
+    with patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=abandoning_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": "wiz-abandoned-sync",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 424, r.text
+    assert r.status_code != 500
+    body = r.json()
+    assert body["ok"] is False
+    assert body["code"] == "NETWORK_UNAVAILABLE"
+    assert body["recoverable"] is True
+    assert body["correlation_id"] == _TEST_CID
+    # This site HAS a verification row, so the envelope carries it — the same key
+    # set every other arm at this site returns.
+    assert body["debug_context"]["verification_id"] == "ver-abandoned"
+
+    from services import exchange as exchange_svc
+
+    assert body["code"] not in exchange_svc.PERMANENT_VALIDATION_ERROR_CODES

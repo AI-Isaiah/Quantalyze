@@ -32,6 +32,7 @@ Regression gates — WHY each case matters (Rule 9):
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 import typing
 from types import SimpleNamespace
@@ -61,10 +62,14 @@ def _reset_mt5_terminal_locks():
     Load-bearing since ``Mt5Adapter.validate`` started taking the lease: these
     tests each run their own ``asyncio.run`` loop, and a Lock left in the registry
     by one of them would be re-entered from a DIFFERENT loop by the next — plus a
-    Lock a failing test left HELD would hang every subsequent validate here."""
-    mt5_concurrency._MT5_TERMINAL_LOCKS.clear()
+    Lock a failing test left HELD would hang every subsequent validate here.
+
+    Since WIZFORM-ABANDON / D-36 it also clears the per-terminal EPOCH registry,
+    via the ONE shared helper (RESEARCH Pitfall 8: a leaked epoch fences a client
+    another test builds for the same key — a sixth flake mechanism)."""
+    mt5_concurrency.reset_terminal_state_for_tests()
     yield
-    mt5_concurrency._MT5_TERMINAL_LOCKS.clear()
+    mt5_concurrency.reset_terminal_state_for_tests()
 
 
 # --------------------------------------------------------------------------- #
@@ -784,3 +789,175 @@ def test_mt5_enabled_server_truth_table(monkeypatch, value, expected) -> None:
     else:
         monkeypatch.setenv("MT5_ENABLED", value)
     assert mt5_enabled_server() is expected
+
+
+# --------------------------------------------------------------------------- #
+# WIZFORM-ABANDON — FINDING #6b: the WORKER connect-stage leak, end to end
+#
+# WHY this matters (Rule 9). `Mt5Adapter.validate`'s connect sits DELIBERATELY
+# outside the close-`finally` below it — its own comment says why ("there is no
+# client to close yet"), and that is correct as far as it goes. What it did not
+# account for is `asyncio.to_thread` work outliving its `wait_for`: the abandoned
+# thread finishes `_build_client` AFTER the caller unwound, producing an rpyc
+# session against the gateway's ONE `ThreadedServer` that no `finally` in this file
+# can see and nothing will ever close. Same mechanism as #6a, different path — and
+# the second member of the class is exactly what this milestone has paid sixteen
+# times for skipping.
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_connect_stage_timeout_leaves_no_rpyc_socket_open(monkeypatch) -> None:
+    """⭐ FINDING #6b at the PATH level.
+
+    ⚠️ Same BALANCE oracle as the #6a sibling, for the same reason: which arm of
+    the construction fence fires depends on where the zombie's thread was when the
+    lease's bump landed, so "the conn the zombie opened was closed" would flake on
+    a run where the property genuinely held. Assert that no conn REMAINS open.
+
+    ⚠️ CI-hang discipline: bounded waits only, gate set in a `finally`, the zombie
+    joined on a signal IT sets.
+    """
+    from services.mt5_client import Mt5SessionAbandoned
+
+    gate = threading.Event()
+    finished = threading.Event()
+    conns: list = []
+    outcomes: list[BaseException] = []
+
+    def _blocking_connect(*, host, port, timeout):
+        # BOUNDED — a gate the test somehow fails to set reds this case rather than
+        # stalling the suite for the 300s THREAD_JOIN_TIMEOUT.
+        gate.wait(0.25)
+        fake = _FakeMt5({})
+        conns.append(fake)
+        return fake
+
+    def _fake_build(host: str, port: int) -> Mt5Client:
+        # The REAL client over the injected seam: the construction fence IS the
+        # behaviour under test, so a stub client would fabricate it.
+        try:
+            return Mt5Client(host, port, _connect=_blocking_connect)
+        except BaseException as exc:  # noqa: BLE001 — recorded, then re-raised
+            outcomes.append(exc)
+            raise
+        finally:
+            finished.set()
+
+    monkeypatch.setattr("services.ingestion.mt5._build_client", _fake_build)
+    # §Q6 patch-target table: `_MT5_PROBE_TIMEOUT_S` is READ by
+    # `services.ingestion.mt5`, so it is patched there. Patching a re-export would
+    # be a SILENT no-op and the real ~35s bound would stay in force (the E2 trap).
+    monkeypatch.setattr("services.ingestion.mt5._MT5_PROBE_TIMEOUT_S", 0.05)
+    monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
+    monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await Mt5Adapter().validate(_req())
+    finally:
+        gate.set()  # ⛔ never leave the zombie parked
+
+    assert finished.wait(5.0), "the abandoned construction never finished"
+
+    open_conns = [c for c in conns if c._MetaTrader5__conn.close_calls == 0]
+    assert open_conns == [], (
+        "the abandoned connect-stage thread left an rpyc session open against the "
+        "gateway's ThreadedServer — this path's connect sits outside the "
+        "close-finally, so nothing here will ever close it (finding #6b)"
+    )
+    # Non-vacuity: the zombie really ran and really was refused.
+    assert outcomes and isinstance(outcomes[0], Mt5SessionAbandoned), (
+        f"the zombie construction was not fenced at all: {outcomes}"
+    )
+    # The terminal key the lease bumped is the one this client would have used —
+    # obtained by CALLING the shipped property, never by retyping its format
+    # (MT5CONC-02 / Pitfall 2: a divergent key fences nothing while looking fixed).
+    assert _expected_terminal_key("mt5-gw.internal", 18812) == "mt5-gw.internal:18812"
+
+
+# --------------------------------------------------------------------------- #
+# WIZFORM-ABANDON / D-40 — the refusal's CLASSIFICATION at the ADAPTER seam
+#
+# WHY this matters (Rule 9). This adapter's documented disposition for every
+# transient is to PROPAGATE the exception untouched (never `valid`, never
+# `auth_failed`, never `wrong_server`) and let the caller classify it honestly —
+# the sFOX F4 posture. An abandoned-session refusal is a transient by
+# construction, so propagation is already the correct behaviour and the explicit
+# arm added beside it changes nothing today. It is written down anyway, and
+# pinned here, so a future broad `except Exception` around the probe cannot
+# silently absorb the refusal into a credential verdict — the class D-42 makes
+# structurally impossible at the sink and this arm keeps impossible at the seam.
+# --------------------------------------------------------------------------- #
+
+
+class _EpochBumpingMt5(_FakeMt5):
+    """The ONE shared Wine terminal, whose `login()` advances the terminal
+    generation — i.e. the lease this session began under releases mid-probe.
+
+    Bumping from INSIDE the transport is what makes the next session touch be
+    refused by the SHIPPED `_assert_live` rather than by a hand-thrown stand-in:
+    the test then proves the refusal can actually ARRIVE at this seam, not merely
+    that the seam would pass the type along if it did.
+    """
+
+    def __init__(self, scenario: dict, terminal_key: str) -> None:
+        super().__init__(scenario)
+        self._terminal_key = terminal_key
+
+    def login(self, login, **kwargs):
+        out = super().login(login, **kwargs)
+        from services.mt5_client import bump_mt5_terminal_epoch
+
+        # The SHIPPED release hook — the same call `mt5_terminal_lease`'s finally
+        # makes. Never a hand-poked registry entry.
+        bump_mt5_terminal_epoch(self._terminal_key)
+        return out
+
+
+def test_an_abandoned_session_refusal_propagates_out_of_validate_unchanged(
+    monkeypatch,
+) -> None:
+    """Type IDENTITY out of `validate`, plus the session-never-leaks invariant.
+
+    ⛔ The two forbidden outcomes are excluded by construction: `pytest.raises`
+    means no `ValidationResult` was returned at all, so this path can produce
+    neither `valid=True` nor an `auth_failed`/`wrong_server` verdict. `close()`
+    still runs in the adapter's finally — `close` is D-41-EXEMPT from the fence
+    precisely so a fenced session can still give up its own socket.
+    """
+    from services.mt5_client import Mt5SessionAbandoned
+
+    key = _expected_terminal_key("mt5-gw.internal", 18812)
+    fake = _EpochBumpingMt5(
+        {
+            "account": _INVESTOR_ACCOUNT,
+            "order_check": _INVESTOR_ORDER_CHECK,
+            "terminal": _HEALTHY_TERMINAL,
+        },
+        key,
+    )
+
+    def _connect(*, host, port, timeout):
+        return fake
+
+    def _fake_build(host: str, port: int) -> Mt5Client:
+        return Mt5Client(host, port, _connect=_connect)
+
+    monkeypatch.setattr("services.ingestion.mt5._build_client", _fake_build)
+    monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
+    monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+
+    with pytest.raises(Mt5SessionAbandoned) as excinfo:
+        asyncio.run(Mt5Adapter().validate(_req()))
+
+    # ⭐ Type IDENTITY, not `isinstance` of some wrapper: the whole point of the
+    # adapter's transient disposition is that the caller sees the ORIGINAL
+    # exception. A re-raise as `Mt5ClientError` would let
+    # `classify_mt5_login_error` reach it, and its `_WRONG_SERVER_TOKENS` would
+    # blame the user's broker server for our own abandoned thread.
+    assert type(excinfo.value) is Mt5SessionAbandoned
+    assert excinfo.value.stage == "account_info"
+    assert not isinstance(excinfo.value, Mt5ClientError)
+    # The session never leaks, and the SHARED terminal IPC is never torn down.
+    assert fake.close_calls == 1
+    assert fake.shutdown_calls == 0

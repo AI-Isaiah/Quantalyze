@@ -25,6 +25,7 @@ from services.mt5_client import (
     Mt5Client,
     Mt5ClientError,
     Mt5AccountMismatchError,
+    Mt5SessionAbandoned,
     MT5_VALIDATE_REQUEST_TIMEOUT_S,
     emit_mt5_stage_event,
 )
@@ -725,6 +726,42 @@ async def _validate_mt5_key_probe(
                 detail=NETWORK_ERROR_DETAIL,
                 recoverable=True,
             )
+        except Mt5SessionAbandoned:
+            # ⭐ WIZFORM-ABANDON / D-40. `Mt5SessionAbandoned` is a PLAIN
+            # `Exception` by design (D-42, so no credential-classify arm can
+            # absorb an operator fault into a user verdict) — which means it
+            # matches NONE of the arms around it and none of the outer handlers
+            # either. Without this arm it left as an unhandled bodyless 500, and
+            # under STATUS_CONTRACT R-1 a 500 says SERVICE-PERMANENT, "do not
+            # retry". That is the exact inverse of the truth: an abandoned
+            # session is the most retryable condition in this subsystem, because
+            # the next request simply gets a fresh lease.
+            #
+            # ⚠️ NOBODY REACHES THIS ON THE GENUINELY ABANDONED PATH. There the
+            # caller has already unwound, so asyncio discards the zombie's raise
+            # (`_copy_future_state` returns early on a cancelled destination) —
+            # which is why the sink LOGS as well as raising (D-39). This arm
+            # exists for the FALSE-POSITIVE path: a legitimate caller that trips
+            # the fence must be told "transient, retry", never "your key or your
+            # broker server is wrong" and never "permanent".
+            #
+            # Disposition is byte-mirrored from the stage-timeout arm above: the
+            # route's EXISTING transient shape, minting no new user-facing code
+            # (153.1 owns that table). WARNING (not exception) — a fence refusal
+            # is a designed outcome, not a Sentry-grade fault — and it names the
+            # decision only: no host, port, terminal key, generation number or
+            # credential (WIZFORM-03 / T-134-01).
+            logger.warning(
+                "validate_key: MT5 session was abandoned by its own lease "
+                "mid-probe — classified transient (WIZFORM-ABANDON / D-40)"
+            )
+            trace.outcome = "transient"
+            raise VenueTransientHTTPException(
+                status_code=424,
+                code="NETWORK_UNAVAILABLE",
+                detail=NETWORK_ERROR_DETAIL,
+                recoverable=True,
+            )
         except Mt5AccountMismatchError:
             # RED-TEAM: a concurrent validate re-logged the shared terminal onto
             # another account mid-probe — an INFRA/concurrency fault, never the
@@ -919,6 +956,38 @@ async def _validate_mt5_key_probe(
                 # leaks. `client is None` means the connect stage never produced one — there
                 # is nothing to release, and the same is true of every pre-construction guard
                 # above, which return before this block is ever entered.
+                #
+                # ⭐ RE-CUT 2026-08-11 (153.5 / WIZFORM-ABANDON, finding #6a). The sentence
+                # above stays TRUE and its consequence has changed. `client` is assigned from
+                # INSIDE `_connect_and_probe`, so on a CONNECT-STAGE timeout the assignment
+                # never happens and this block genuinely releases nothing — while the
+                # abandoned `to_thread` kept running and went on to construct an rpyc session
+                # against the gateway's ONE `ThreadedServer` that no path here would ever
+                # close. That was a leak: one orphaned socket per timed-out validate, on
+                # exactly the path that runs when the gateway is already unhealthy.
+                #
+                # It is no longer one. `Mt5Client.__init__` now reads the lease-occupancy
+                # token `asyncio.to_thread` froze into the zombie's thread (D-36 AMENDED (ii))
+                # and refuses a construction whose spawning lease has already released —
+                # PRE-connect (opening nothing at all) or POST-connect, in which case it
+                # disposes the socket it just opened BEFORE raising. So the orphaned
+                # construction now SELF-disposes at the sink, and "the finally releases
+                # nothing" describes a path where there is correctly nothing left to release
+                # rather than a session going unreleased. Pinned end-to-end by
+                # `tests/test_mt5_validate.py::test_a_connect_stage_timeout_leaves_no_rpyc_socket_open`,
+                # whose oracle is the open/close BALANCE (which arm the zombie takes depends
+                # on where its thread was when the bump landed).
+                #
+                # ⛔ THIS BLOCK STILL MUST NOT BE FENCED. `release`/`close`/
+                # `_teardown_transport` are D-41-EXEMPT from the epoch guard precisely so a
+                # stale client can still give up its OWN socket; guarding them would strand
+                # it and reintroduce the very leak this block exists to prevent — the fix
+                # causing the bug it is fixing.
+                #
+                # ⚠️ One window is narrowed, not closed (D-43): a construction that COMPLETES
+                # between the `wait_for` firing and the lease's bump passes both checks and
+                # still has no recipient. No sink-side mechanism can do better without the
+                # caller-side holder RESEARCH §Open Q-1 ruled out.
                 #
                 # ✅ CLOSED by wave 6 / D-35 (2026-08-09). This block once carried a
                 # present-tense residual saying the WORKER path "still reaches" shutdown()

@@ -19,9 +19,20 @@ one. Import it; NEVER re-declare a terminal-lock dict elsewhere.
 
 Leaf-module invariant (mirrors the ``closed_sets.py`` convention): this module
 MUST NEVER import ``services.job_worker``, nor anything that does. Its only
-in-tree import is one constant from ``services.mt5_client`` — itself a leaf over
-``services.redact`` — so the derive read bound stays single-sourced from the rpyc
-bound it is derived from instead of being re-hardcoded here.
+in-tree imports are from ``services.mt5_client`` — itself a leaf over
+``services.redact``:
+
+  * ``MT5_REQUEST_TIMEOUT_S``, so the derive read bound stays single-sourced from
+    the rpyc bound it is derived from instead of being re-hardcoded here;
+  * ``bump_mt5_terminal_epoch`` / ``begin_mt5_lease_occupancy`` /
+    ``end_mt5_lease_occupancy`` (WIZFORM-ABANDON / D-36), the two fencing
+    primitives the lease drives on release.
+
+⛔ The DIRECTION is unchanged and must stay so. The epoch registry and the
+occupancy ContextVar live in ``mt5_client`` and are imported HERE, never the
+reverse: ``mt5_client`` importing this module would be a circular import, and
+``mt5_terminal_lease`` receives a ``terminal_key`` STRING and nothing else — it
+holds no client reference and structurally cannot bump an instance attribute.
 """
 from __future__ import annotations
 
@@ -34,6 +45,12 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Final
 
 from services.mt5_client import MT5_REQUEST_TIMEOUT_S as _MT5_REQUEST_TIMEOUT_S
+from services.mt5_client import (
+    _reset_mt5_epochs_for_tests,
+    begin_mt5_lease_occupancy,
+    bump_mt5_terminal_epoch,
+    end_mt5_lease_occupancy,
+)
 
 if TYPE_CHECKING:  # annotation only — deliberately NOT a runtime import
     from services.mt5_client import Mt5Client
@@ -113,6 +130,19 @@ async def _mt5_bounded_restart(client: "Mt5Client") -> None:
     the restart can never mask or replace the caller's transient classification.
     Kept module-level (not nested in the branch) because plan 137-02 reuses it for
     the login-mismatch branch.
+
+    ⭐ RE-CUT 2026-08-11 (153.5 / WIZFORM-ABANDON, finding #5 — THIS IS ITS OWN
+    SITE). "Abandoned at the bound; the thread is never joined" is still true, and
+    joining it was REJECTED (it would block the lease for as long as the hung
+    thread — the WEDGE-01 class D-25 forbids). What changed is the CONSEQUENCE of
+    abandoning it: the zombie is now FENCED. Its ``stale.shutdown()`` — the ONE
+    permitted teardown left in the tree — refuses once this holder's lease has
+    released and bumped the terminal's generation, instead of destroying the single
+    shared IPC pipe under whoever holds the terminal next (``-10004``). The refusal
+    surfaces as ``Mt5SessionAbandoned``, which the broad ``except`` below already
+    swallows with a WARNING, so this function's caller-visible behaviour is
+    unchanged. ⚠️ D-43: the fence cannot un-send a shutdown already dispatched on
+    the wire; it closes the case where the zombie ARRIVES at the shutdown late.
     """
     try:
         await asyncio.wait_for(
@@ -172,11 +202,51 @@ async def _mt5_bounded_restart(client: "Mt5Client") -> None:
 # an error path), but because the epilogue no longer performs terminal IPC AT ALL.
 # `Mt5Client.close()` closes only our own rpyc transport; `mt5.shutdown()` was
 # deleted at the sink, so there is nothing left there to serialize. The argument
-# changed, the conclusion did not. The ONE remaining teardown is
-# `Mt5Client.restart()`, reached only via `_mt5_bounded_restart` — and every one of
-# its call sites is INSIDE this lock, which `tests/test_mt5_shutdown_roster.py`
-# derives from source.
+# changed, the conclusion did not.
+#
+# ⭐ RE-CUT 2026-08-11 (153.5 / WIZFORM-ABANDON, finding #5). The sentence that
+# used to close the paragraph above — "the ONE remaining teardown is
+# `Mt5Client.restart()` … and every one of its call sites is INSIDE this lock,
+# which `tests/test_mt5_shutdown_roster.py` derives from source" — was the D-35
+# safety argument, and it was FALSE on the abandonment path. The four call sites
+# are indeed lexically inside this lock, and the roster does indeed derive that
+# from source; but a `to_thread` restart that outlives its `wait_for` executes
+# AFTER its caller unwound and released, so the lexical enclosure says nothing
+# about where the `shutdown()` actually lands. The roster's enclosure proof is
+# LEXICAL by construction and cannot see this — which is why it is green on the
+# defect today.
+#
+# The claim as it now stands: the ONE remaining teardown is `Mt5Client.restart()`,
+# reached only via `_mt5_bounded_restart`; its four call sites are lease-enclosed
+# (the roster's lexical half, still derived from source); AND the shutdown is
+# fenced at RUNTIME by the per-terminal epoch this lease bumps on release, checked
+# in `Mt5Client.restart` immediately before the `stale.shutdown()`. Two guards, two
+# questions — ⛔ do not try to make the ast roster answer the runtime one.
 _MT5_TERMINAL_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def reset_terminal_state_for_tests() -> None:
+    """Clear ALL process-wide per-terminal state — the ONE reset every test module
+    should call, rather than a sixth hand-rolled ``.clear()``.
+
+    Today that is two registries: the ``asyncio.Lock`` registry here and the
+    WIZFORM-ABANDON / D-36 epoch registry in ``services.mt5_client``. Five test
+    modules already hand-cleared the first one; adding the epoch registry to each
+    of them independently is how one of them ends up missing the third registry
+    somebody adds next year. Test modules call THIS; new per-terminal state is
+    added HERE, once.
+
+    Why the epoch registry needs the reset at all (RESEARCH Pitfall 8): a bump
+    leaked out of one test fences a client built by the next, which under
+    ``-n auto --dist loadgroup`` is a SIXTH flake mechanism in a suite that already
+    carries five documented ones.
+
+    ⛔ Test-only. Nothing in production may call it: dropping a live terminal's
+    generation would silently un-fence exactly the abandoned thread the epoch
+    exists to refuse.
+    """
+    _MT5_TERMINAL_LOCKS.clear()
+    _reset_mt5_epochs_for_tests()
 
 
 def _mt5_terminal_lock_for(terminal_key: str) -> asyncio.Lock:
@@ -233,8 +303,23 @@ async def mt5_terminal_lease(
         the body cannot strand the lock;
       * a timed-out acquisition releases NOTHING — it never held the lock, and
         releasing one it does not own would either raise ``RuntimeError`` or hand a
-        second caller a lease over a live IPC region.
+        second caller a lease over a live IPC region. ⛔ For exactly the same
+        reason it BUMPS NOTHING and STAMPS NOTHING: the ``Mt5TerminalBusyError``
+        raise sits ABOVE the ``try`` below, so a caller that never held the
+        terminal cannot fence the caller that does.
     Both are pinned by tests in ``tests/test_mt5_concurrency.py``.
+
+    ⭐ WIZFORM-ABANDON / D-36 — the lease is also where the ABANDONED-THREAD fence
+    is driven, because the lease is the only thing that knows when a terminal has
+    changed hands:
+      * on acquisition it stamps the caller's context with
+        ``(terminal_key, epoch_at_acquire)``. ``asyncio.to_thread`` copies the
+        context at spawn, so work handed off inside the body carries that stamp
+        FROZEN even after this lease releases — which is what lets the
+        construction fence tell a zombie from a live caller (D-36 AMENDED (ii));
+      * on EVERY exit path — normal return, a raising body, a cancelled holder —
+        the ``finally`` bumps the terminal's generation, which fences every
+        subsequent session touch made by work this holder abandoned (D-36 (i)).
     """
     lock = _mt5_terminal_lock_for(terminal_key)
     queued_at = time.monotonic()
@@ -257,6 +342,11 @@ async def mt5_terminal_lease(
                 "the MT5 terminal was still in use when the acquisition bound expired"
             ) from None
 
+    # ONE call, reached only when one of the two acquisition arms above SUCCEEDED
+    # (the bounded arm's expiry raises rather than falling through), so the stamp
+    # covers both arms without a second, drift-prone copy of it.
+    token = begin_mt5_lease_occupancy(terminal_key)
+
     waited_s = time.monotonic() - queued_at
     try:
         if waited_s >= _MT5_LEASE_WAIT_LOG_THRESHOLD_S:
@@ -270,6 +360,18 @@ async def mt5_terminal_lease(
             )
         yield
     finally:
+        # ORDER IS LOAD-BEARING (WIZFORM-ABANDON / D-36).
+        #  1. BUMP BEFORE RELEASE. It makes "no successor can hold the terminal
+        #     while the outgoing generation is still current" true BY
+        #     CONSTRUCTION: the next holder cannot even be scheduled until the
+        #     lock is released, by which point this holder's abandoned threads are
+        #     already stale. Releasing first opens a window — narrow, and no test
+        #     schedules a successor inside it, so this ordering is guaranteed by
+        #     construction and by this comment, not by a red test.
+        #  2. Un-stamp SECOND, so the stamp is live for the whole hold.
+        #  3. Release LAST.
+        bump_mt5_terminal_epoch(terminal_key)
+        end_mt5_lease_occupancy(token)
         lock.release()
 
 

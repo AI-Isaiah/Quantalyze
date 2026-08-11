@@ -50,6 +50,13 @@ from services.closed_sets import CRYPTO_VENUES as _CRYPTO_VENUES
 from services.closed_sets import sfox_enabled_server
 from services.closed_sets import mt5_enabled_server
 from services.metrics import periods_per_year_for_asset_class
+# WIZFORM-ABANDON / D-40 — imported from the module that OWNS it
+# (`services.mt5_client`, a leaf whose only in-tree import is `services.redact`),
+# never through a re-export: a name reached through a re-export is a DIFFERENT
+# binding and an `except` on it would still be a class match, but the import edge
+# would be one nobody can reason about. Two `adapter.validate` call sites below
+# had no enclosing try at all before this phase.
+from services.mt5_client import Mt5SessionAbandoned
 from services.rate_limit import limiter, platform_ceiling_key, tenant_rate_limit_key
 from services.teaser_anchor import TEASER_ANCHOR_STRATEGY_ID
 
@@ -751,7 +758,7 @@ async def _run_validate_only(
     body: "_ProcessKeyBody",
     correlation_id: str,
     started_at: float,
-) -> dict[str, Any]:
+) -> dict[str, Any] | JSONResponse:
     """CR-02 — pre-strategy validation flow.
 
     Runs only `adapter.validate()` (no DB insert, no state-machine
@@ -764,6 +771,10 @@ async def _run_validate_only(
     consuming (`{ ok, code, human_message, debug_context, ... }` for failure;
     `{ valid: true, ... }` for success), so the thin adapters do not need
     to branch on the flow shape.
+
+    ⚠️ The return type widened to include ``JSONResponse`` for the
+    WIZFORM-ABANDON transient arm below, which needs a STATUS as well as a
+    body. Every pre-existing return is untouched and still a bare dict at 200.
     """
     submission = KeySubmissionRequest(
         flow_type=body.flow_type,
@@ -771,7 +782,50 @@ async def _run_validate_only(
         context=body.context,
     )
     adapter = get_adapter(body.source)
-    val = await adapter.validate(submission)
+    try:
+        val = await adapter.validate(submission)
+    except Mt5SessionAbandoned:
+        # ⭐ WIZFORM-ABANDON / D-40. Until this arm existed, `adapter.validate`
+        # here had NO enclosing try at all (ast-verified), and
+        # `Mt5SessionAbandoned` is a plain `Exception` by design (D-42, so no
+        # credential-classify arm anywhere can absorb an operator fault into a
+        # user verdict) — so it left as an unhandled BODYLESS 500 on the wizard's
+        # own validate-and-encrypt leg. Under STATUS_CONTRACT R-1 a 500 means
+        # SERVICE-PERMANENT, "do not retry", the exact inverse of the truth: the
+        # next submission simply gets a fresh lease.
+        #
+        # ⚠️ On the genuinely abandoned path nobody awaits this call, so the arm
+        # never runs (D-39 — the sink's WARNING is the signal). It exists for the
+        # FALSE-POSITIVE path: a legitimate submission that trips the fence must
+        # be told "transient, retry", never that its credentials are wrong.
+        #
+        # Disposition is the route's EXISTING venue-transient shape — the 424
+        # FAILED_DEPENDENCY / `recoverable: True` envelope the synchronous
+        # pipeline's own pre-gate emits (PYAPIFIX-02 H-1). ⛔ No new user-facing
+        # code is minted (153.1 owns that table): `NETWORK_UNAVAILABLE` is an
+        # existing venue code, absent from both permanent allow-lists, and the
+        # copy is the ONE shared transient string this service already uses at
+        # every arm of this class. ⛔ Never a 4xx blaming credentials or the
+        # broker server, and never a 500 with `retryable: false`.
+        #
+        # The log names the decision only — no host, port, terminal key,
+        # generation number or credential (WIZFORM-03 / T-134-01).
+        log.warning(
+            "process_key.validate_only_session_abandoned",
+            source=body.source,
+            correlation_id=correlation_id,
+            duration_ms=int((time.monotonic() - started_at) * 1000),
+        )
+        return JSONResponse(
+            status_code=424,
+            content=_envelope_error(
+                "NETWORK_UNAVAILABLE",
+                exchange_svc.NETWORK_ERROR_DETAIL,
+                correlation_id,
+                None,
+                recoverable=True,
+            ),
+        )
     duration_ms = int((time.monotonic() - started_at) * 1000)
     if not val.valid:
         log.info(
@@ -1583,7 +1637,45 @@ async def process_key(
     adapter = get_adapter(body.source)
 
     # validate
-    val = await adapter.validate(submission)
+    try:
+        val = await adapter.validate(submission)
+    except Mt5SessionAbandoned:
+        # ⭐ WIZFORM-ABANDON / D-40 — the SECOND unguarded `adapter.validate`
+        # site, and it is covered because the class is "an unguarded validate
+        # call site", not "the one an author had in mind". See
+        # `_run_validate_only`'s arm above for the full rationale; the
+        # disposition is the SAME shape this function already emits ~40 lines
+        # below at its PYAPIFIX-02 venue-transient pre-gate — 424 with
+        # `recoverable` STATED rather than derived, and no new code minted.
+        #
+        # ⚠️ Not reachable by an mt5 body TODAY: `mt5` is admitted to
+        # `onboard`/`resync` only (MT5RECON-01) and both are long-fetch, so they
+        # return at the enqueue above. Written anyway — an instance fix at the
+        # first site alone leaves this one open the day any lease-taking adapter
+        # is admitted to a synchronous flow, and the wizard would then meet the
+        # bodyless 500 this phase exists to remove.
+        #
+        # ⛔ NO `transition_strategy_verification` to 'draft' with an errors
+        # array, unlike the scope-rejection arm below. That transition RECORDS A
+        # VERDICT about the caller's key on their verification row; there is no
+        # verdict here, because the terminal was never read. Leaving the row in
+        # its current state is what makes an identical retry able to succeed.
+        log.warning(
+            "process_key.validate_session_abandoned",
+            source=body.source,
+            verification_id=verification_id,
+            correlation_id=correlation_id,
+        )
+        return JSONResponse(
+            status_code=424,
+            content=_envelope_error(
+                "NETWORK_UNAVAILABLE",
+                exchange_svc.NETWORK_ERROR_DETAIL,
+                correlation_id,
+                verification_id,
+                recoverable=True,
+            ),
+        )
     # Unified rejection gate: covers both ordinary validation failures
     # (not val.valid — e.g. AUTH_FAILED, PERMISSION_DENIED) and
     # NEW-C31-01: write-capable key scope violations that must be caught
