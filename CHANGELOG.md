@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.56.0.0] - 2026-08-11
+### v1.17 — a budget the verdict fits inside, and a wait you can watch and stop
+
+Phase 153.4 of the WIZFORM milestone. One complaint: *the wizard gave up before the server had
+finished answering, and while it waited it showed nothing.*
+
+**The client now grants a validation the time its honest verdict actually needs (WIZFORM-BUDGET).**
+Every venue used to share one client timeout, sized for an exchange REST call. MT5 does not answer
+like an exchange: the gateway serializes every request through one terminal behind a bounded lease,
+so the server's own worst case is 105 000 ms — 20 s of bounded lease plus a 75 s end-to-end deadline
+plus a 10 s release that sits outside it. The client was aborting first and reporting a network
+blip. `validate-key-serialized` is now its own seam with a 120 000 ms budget, 15 s of margin over
+the server, and the margin is asserted rather than commented. Because a longer request lifetime
+changes the breaker arithmetic, `BREAKER_LOCK_TOMBSTONE_S` moved 90 → 100 s so the A-25 invariant
+still holds against its 130 000 ms ceiling.
+
+The 120 000 ms figure is **provisional and labelled as such in three places**. It is the founder's
+staleness tolerance, not a measurement — no uncensored successful MT5 validation exists anywhere to
+measure. Phase 155 owns tightening it from real p50/p95.
+
+**A long wait is legible and abortable on both wizard surfaces (WIZFORM-05).** `ValidateWaitCard`
+mounts from the single-key step and from every panel of the composite step, each with its own
+`AbortController`, its own frozen attempt venue, and its own `Stop waiting`. The wait discloses
+what it is doing as it goes: at 40% it explains the queue and reveals the stop control, at 75% it
+turns amber. Stopping is a neutral grey line, never red and never an error envelope — the fields
+survive, focus lands back on submit, and connecting again reconciles to the same key rather than
+storing a second one.
+
+**Known-imprecise, already booked.** The client abort deadline (165 000 ms) was sized against the
+seam branch table's *closed*-breaker column (158 500 ms) when the governing figure is the *failing*
+column (175 500 ms) — the state a stalling seam is actually in when a client deadline fires. The
+guard that should red on this pins the same wrong column, so it cannot. Both halves are booked as
+Phase 153.6 cluster C. The wait is honest today; the last ~10.5 s of it is not yet proven honest.
+
+**Deferred to Phase 155 (MT5-VERIFY):** a real MT5 login completing inside the budget on a trading
+day, and the live composite add-key route accepting the three-field MT5 body. Both are asserted
+against mocks here and have never been observed end to end.
+
 ## [0.55.0.0] - 2026-08-10
 ### v1.17 — the form refuses at the field, and MT5 can finish a submit
 
