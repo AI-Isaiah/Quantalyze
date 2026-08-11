@@ -1869,3 +1869,31 @@ plan resolved by SURFACING it (Rule 7), not by blending.
   is 153.1's. ⚠️ The trigger is not hypothetical-forever: it fires the day any second
   venue gets `VENUE_CAPABILITIES.<venue>.serialized = true`. Whoever adds that row owns
   this sentence. Owner: unassigned; reference 153.4-03, UI-SPEC Surface 1.
+
+### Phase 153.4-04 (the connect step's honest wait) — non-blocking findings, logged per the stopping rule (added 2026-08-11)
+
+- [ ] **`ui/Button.tsx` accepts no `ref`, so a caller cannot move focus to a shared
+  button.** `ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement>`, which carries
+  no `ref`, and the component is a plain function — so `<Button ref={…}>` is a compile
+  error (measured 2026-08-11: `TS2322: Property 'ref' does not exist on type
+  'IntrinsicAttributes & ButtonProps'`). React 19 passes `ref` as an ordinary prop, so the
+  fix is one optional prop spread through `...props`; the reason it was not taken here is
+  the SAME cross-suite carve-out recorded in the 153.4-03 `Button.tsx` item above
+  (`AllocateDialog.test.tsx` asserts that component by identity), plus this phase's
+  UI-SPEC ⛔ on editing `Button.tsx`. Consequence today: `ConnectKeyStep`'s cancel path
+  holds a ref on the submit ROW and queries `button[type="submit"]` inside it to restore
+  focus — correct and asserted, but indirection a `ref` prop would delete. Bundle this
+  with the focus-ring sweep; both edits land in the same file. Owner: the focus sweep.
+- [ ] **`e2e/api-key-flow.spec.ts:41` expects 401 for an Origin-less POST and the route
+  answers 403 — a pre-existing spec drift, not a regression.** Measured 2026-08-11 against
+  a local dev server: `POST /api/keys/validate-and-encrypt` with no `Origin` header →
+  **403**; the identical request WITH `Origin: http://localhost:3000` → **401**
+  `{"error":"Unauthorized"}`, exactly what the spec asserts. `withAuth`
+  (`src/lib/api/withAuth.ts:53`) runs `assertSameOrigin` BEFORE authenticating on every
+  mutating method, so a Playwright `request`-fixture POST is refused as cross-origin
+  before auth is ever consulted. Two cases fail on this (`…returns 401 for
+  unauthenticated request`, `…rejects request with missing fields`). ⚠️ The remedy is to
+  add an `Origin` header to those requests, NOT to relax the CSRF guard — and the same
+  trap is already recorded for the verify-strategy probes. Found while running this
+  phase's e2e gate; out of scope (no file this plan touches is involved). Owner:
+  unassigned. Reference: 153.4-04 verification.
