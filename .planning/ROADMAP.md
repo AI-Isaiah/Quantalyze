@@ -400,7 +400,7 @@ Plans:
 - ⚠️ **`budgetKeyFor` must diverge from its analog deliberately.** `process-key-client.ts:123-134` throws on `default:` via a `never` assignment; this one takes a caller-supplied string, so `default:` **returns `"validate-key"` and never throws**. Write the divergence down or a reviewer will "fix" it back. Never interpolate a wire value into a breaker key (T-140-01).
 - ⚠️ 16 pin sites (RESEARCH Table C) must move together, including the prose restatements that stay green while their premise breaks.
 
-### Phase 153.5: WIZFORM-ABANDON — Work that outlives its timeout (INSERTED, NOT YET PLANNED)
+### Phase 153.5: WIZFORM-ABANDON — Work that outlives its timeout
 
 **Goal**: No `asyncio.to_thread` work can keep touching the MT5 terminal after its `wait_for` fired and its caller released the lease
 **Depends on**: Phase 153.3 (complete) — this closes findings its `/code-review high` deliberately deferred
