@@ -1,7 +1,29 @@
 -- ============================================================================
--- api_keys.attested_venue — the SERVER-ATTESTED venue the probe gate can trust
+-- api_keys.attested_venue — a venue the CLIENT CANNOT SET, for the probe gate
 -- (2026-08-11, Phase 153.6 / PARITY-04, cluster D)
 -- ============================================================================
+--
+-- ⛔⛔ DEPLOY ORDER — READ BEFORE MERGING. THIS MIGRATION MUST BE LIVE ON PROD
+-- BEFORE THE VERCEL DEPLOYMENT THAT READS THE COLUMN.
+-- (153.6 code review WR-03 / migration audit MIG-03.)
+--
+-- Merging to `main` fires the Supabase auto-apply AND the Vercel build, with NO
+-- ordering between them. The TS half already selects `attested_venue`. If the
+-- deployment wins the race, PostgREST answers 42703/PGRST204 and:
+--   * single-key arm  — degrades safely (non-blocking warn, attestedVenue null,
+--     PROBE) but that makes EVERY MT5 wizard submit answer a permanent
+--     KEY_SCOPE_CHECK_UNAVAILABLE for the duration, on this milestone's
+--     headline venue;
+--   * composite arm   — the whole embed read errors, so the fail-CLOSED arm
+--     returns COMPOSITE_MEMBERSHIP_UNKNOWN (503). NO COMPOSITE FINALIZES AT
+--     ALL during the window.
+--
+-- Required procedure: apply this migration to PROD FIRST (Supabase MCP
+-- apply_migration or a manual `supabase db push`), confirm the Supabase Migrate
+-- run is green, and only then merge/promote the deployment. A fresh apply is
+-- exactly what the pre-flight census below is written for. This is recorded in
+-- CONTRIBUTING.md §2 as well — the ordering cannot be enforced from inside this
+-- file, so it lives in the landing procedure.
 --
 -- Calibration, stated once and honoured throughout: this is a SELF-TARGETED
 -- CONTROL BYPASS. An owner mislabels their OWN key to dodge a probe on their
@@ -33,13 +55,21 @@
 --
 -- The fix is NOT to lock the column down further (D-02/D-03: no new privilege
 -- change on this table, and the label may stay client-writable). The fix is to
--- stop the probe gate trusting a client-writable column at all. The venue the
--- server itself validated already exists inside a privileged writer — the
--- wizard never performs a client INSERT, it calls the SECURITY DEFINER RPC
+-- stop the probe gate trusting a client-writable column at all. The wizard
+-- never performs a client INSERT: it calls the SECURITY DEFINER RPC
 -- create_wizard_strategy(p_exchange, ...) (or the composite twin
--- add_wizard_composite_key) and the RPC does the api_keys INSERT itself. That
--- value was simply never stored where the probe could read it. This migration
--- stores it.
+-- add_wizard_composite_key) and the RPC does the api_keys INSERT itself, so
+-- there is a venue value living somewhere no client INSERT can reach. This
+-- migration stores it where the probe can read it.
+--
+-- ⛔ AND IT IS NOT MORE THAN THAT — the 153.6 code review (CR-01) found this
+-- header claiming it was. The RPCs do not VALIDATE p_exchange; they write what
+-- they were called with, and `authenticated` can invoke them directly over
+-- PostgREST with the server-minted ciphertext the browser already holds. So
+-- what this column buys is precisely: a value no CLIENT INSERT can set, whose
+-- forgery through the RPC door is inseparable from forging `exchange` too
+-- (section 1b's CHECK). "Server-attested" in the strong sense — a venue the
+-- server independently confirmed — awaits the deferred connect-flow refactor.
 --
 -- What changes
 -- ------------
@@ -123,9 +153,24 @@
 --
 -- Idempotency
 -- -----------
--- ADD COLUMN IF NOT EXISTS; both RPCs and the trigger function are CREATE OR
--- REPLACE; the trigger is DROPped-if-exists before CREATE; the backfill is
--- WHERE attested_venue IS NULL, so a re-run writes nothing. Safe to re-run.
+-- ADD COLUMN IF NOT EXISTS; the CHECK constraint is added only if absent; both
+-- RPCs and the trigger function are CREATE OR REPLACE; the trigger is
+-- DROPped-if-exists before CREATE.
+--
+-- ⛔ THE BACKFILL IS NOT IDEMPOTENT BY VIRTUE OF ITS NULL PREDICATE, and the
+-- earlier claim that it was ("the backfill is WHERE attested_venue IS NULL, so
+-- a re-run writes nothing — safe to re-run") was FALSE from the moment the
+-- trigger started working (153.6 code review WR-01). After first apply, every
+-- non-privileged client INSERT lands attested_venue = NULL deliberately; an
+-- unbounded re-run would sweep exactly those rows and set attested_venue =
+-- exchange, i.e. retro-attest the forgeable label on the one population the
+-- trigger exists to keep unattested. What actually makes a re-run safe is the
+-- DATED CUTOFF on the backfill (section 6) — it is bounded to rows that predate
+-- this migration, so a re-run cannot reach anything created since. Post-verify
+-- (a) is bounded by the same cutoff, for the same reason: unscoped, it would
+-- have encoded "no unattested row may exist" as an invariant and FORCED the
+-- retro-attestation rather than surfacing it.
+--
 -- The census pre-flight is a read; it stays correct on a re-run because the
 -- backfill does not change any row's `exchange`.
 -- ============================================================================
@@ -137,6 +182,53 @@ SET lock_timeout = '3s';
 -- ───────────────────────────────── 1. the column
 ALTER TABLE public.api_keys
   ADD COLUMN IF NOT EXISTS attested_venue text;
+
+-- ──────────────── 1b. the coupling that makes the attestation worth anything
+-- ⭐ 153.6 code review CR-01. Read this before touching either writer.
+--
+-- What the two wizard RPCs actually guarantee is NARROWER than "the server
+-- validated this venue": they do not validate anything, they write the
+-- `p_exchange` they were CALLED with. Both are EXECUTE-able by `authenticated`
+-- and reachable directly over PostgREST, so a browser holding its own
+-- server-minted ciphertext can issue the RPC itself with any p_exchange it
+-- likes.
+--
+-- The reason that is not a live bypass is a COUPLING: each RPC writes
+-- `exchange` AND `attested_venue` from the SAME parameter, so forging the
+-- attestation also forges the routing label, and an `mt5`-labelled row goes to
+-- the MT5 adapter and never syncs. Until now that coupling was an accident —
+-- nowhere stated as a security property, nowhere tested, and broken by any of:
+-- a distinct p_attested_venue parameter, a service_role writer that sets
+-- attested_venue independently, or a future writer that normalises one column
+-- differently from the other.
+--
+-- This CHECK converts the accident into an enforced invariant: a writer that
+-- lets the two diverge FAILS instead of silently minting a forgeable
+-- attestation. NULL stays legal — it is the scrub trigger's output and means
+-- "unattested", which the gate reads as PROBE.
+--
+-- ⛔ IT DOES NOT MAKE THE VENUE SERVER-VALIDATED. It makes the bypass
+-- impossible to open by accident. The remedy that would make the stronger claim
+-- true — an api_keys INSERT behind a service-role writer that passes the venue
+-- IT validated — is the connect-flow refactor both migrations defer.
+--
+-- Added directly rather than NOT VALID + VALIDATE: at this point in the
+-- transaction the column was just created and every row is NULL, so validation
+-- is trivially satisfied, and the ALTER above already holds ACCESS EXCLUSIVE on
+-- a 29-row table.
+DO $constraint$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid = 'public.api_keys'::regclass
+       AND conname  = 'api_keys_attested_venue_matches_exchange'
+  ) THEN
+    ALTER TABLE public.api_keys
+      ADD CONSTRAINT api_keys_attested_venue_matches_exchange
+      CHECK (attested_venue IS NULL OR attested_venue = exchange);
+  END IF;
+END
+$constraint$;
 
 -- ─────────────────── 2. create_wizard_strategy (re-based on 20260602190000)
 -- Re-based VERBATIM on the LATEST definition, migration
@@ -213,9 +305,15 @@ BEGIN
   END IF;
 
   -- 153.6 / PARITY-04: attested_venue is stamped HERE, inside the SECURITY
-  -- DEFINER body, from the p_exchange the server itself validated at mint
-  -- time. This is the ONLY kind of writer whose value survives the
+  -- DEFINER body, which is the only kind of writer whose value survives the
   -- api_keys_scrub_attested_venue trigger.
+  -- ⛔ p_exchange IS CALLER-SUPPLIED AND IS NOT VALIDATED HERE (CR-01). Both
+  -- columns are written from that ONE parameter deliberately: the CHECK
+  -- api_keys_attested_venue_matches_exchange requires it, so this INSERT
+  -- cannot mint an attestation that disagrees with the routing label. If you
+  -- ever add a separate p_attested_venue, or normalise one column and not the
+  -- other, this INSERT will start failing — that is the constraint doing its
+  -- job, not a bug to route around.
   INSERT INTO api_keys (
     user_id, exchange, label,
     api_key_encrypted, api_secret_encrypted, passphrase_encrypted,
@@ -325,8 +423,10 @@ BEGIN
 
   -- ALWAYS mint a fresh encrypted api_keys row (this IS the per-key add — the
   -- api_keys INSERT column list mirrors create_wizard_strategy verbatim).
-  -- 153.6 / PARITY-04: attested_venue stamped from the server-validated
-  -- p_exchange, exactly as in the single-key twin.
+  -- 153.6 / PARITY-04: attested_venue stamped from the caller-supplied
+  -- p_exchange, exactly as in the single-key twin — and, exactly as there, from
+  -- the SAME parameter as `exchange`, which the CHECK
+  -- api_keys_attested_venue_matches_exchange requires (CR-01).
   INSERT INTO api_keys (
     user_id, exchange, label,
     api_key_encrypted, api_secret_encrypted, passphrase_encrypted,
@@ -427,9 +527,14 @@ DECLARE
   -- counts only, no key material): 29 rows total — deribit 13, okx 9, bybit 5,
   -- mt5 2. Both mt5 rows belong to ONE owner and were created 2026-08-04
   -- (11:37 and 14:20 UTC). These are HAND-TYPED literals on purpose: a count
-  -- compared against its own derivation cannot fail. Re-cut all three together
-  -- from a fresh measurement if the census has moved; never soften the
-  -- comparison to make an apply pass.
+  -- compared against its own derivation cannot fail. Re-cut them from a fresh
+  -- measurement if the census has moved; never soften the comparison to make an
+  -- apply pass.
+  --
+  -- ⚠️ c_pin_total is DELIBERATELY NOT AN ABORT CONDITION — see the NOTICE
+  -- below. It is retained as the reference point the reported delta is measured
+  -- against, so "the table grew by 4 since the census" stays legible in the
+  -- apply log without being fatal. c_pin_mt5 is the one with teeth.
   --
   -- They are named CONSTANTs rather than literals inlined into the comparison
   -- because the abort message must report the pin it actually used. With a
@@ -453,14 +558,32 @@ BEGIN
    WHERE exchange = 'mt5'
      AND (created_at AT TIME ZONE 'UTC')::date = c_pin_date;
 
-  IF v_total = c_pin_total AND v_mt5 = c_pin_mt5 THEN
-    RAISE NOTICE 'Migration 20260811210000 pre-flight OK: census matches the pin exactly (% rows, % mt5) — the backfill below covers precisely the population that was measured.',
-      c_pin_total, c_pin_mt5;
-  ELSIF v_sig >= 1 THEN
-    RAISE EXCEPTION
-      'Migration 20260811210000 ABORT: PROD census drift (found total=%, mt5=%; pinned total=%, mt5=%). Re-measure public.api_keys against khslejtfbuezsmvmtsdn and re-cut the pinned literals before applying. Rolling back.',
-      v_total, v_mt5, c_pin_total, c_pin_mt5
-      USING ERRCODE = 'data_exception';
+  -- ⛔ THE DISCRIMINATOR IS THE SIGNATURE, AND IT IS TESTED FIRST. v_sig >= 1
+  -- means the censused probe-exempt rows are still present, i.e. this IS the
+  -- database that was measured — so a PROD apply can never fall through to the
+  -- lenient branch. That is the two-sided property, unchanged.
+  IF v_sig >= 1 THEN
+    -- ⭐ WHAT THE PIN ACTUALLY PROTECTS is the PROBE-EXEMPT population, not the
+    -- table's size. `mt5` is the only venue with scopeProbeSupported: false
+    -- (src/lib/closed-sets.ts VENUE_CAPABILITIES), so a backfilled deribit/okx/
+    -- bybit/binance/sfox row is attested as its OWN non-exempt venue and is
+    -- probed regardless — it cannot buy a skip, and therefore cannot weaken the
+    -- backfill's argument. Only an unmeasured mt5 row can.
+    IF v_mt5 <> c_pin_mt5 OR v_sig <> c_pin_mt5 THEN
+      RAISE EXCEPTION
+        'Migration 20260811210000 ABORT: probe-exempt census drift (found mt5=%, of which % carry the % signature; pinned mt5=%, all of them signed). An unmeasured probe-exempt row would be backfilled into a probe SKIP on trust this census never established. Re-measure public.api_keys against khslejtfbuezsmvmtsdn and re-cut the pinned literals before applying. Rolling back.',
+        v_mt5, v_sig, c_pin_date, c_pin_mt5
+        USING ERRCODE = 'data_exception';
+    END IF;
+    -- ⛔ THE TOTAL IS REPORTED, NEVER ENFORCED (153.6 migration review MIG-01).
+    -- It was strict-equality once, and that was a latent outage: `api_keys` is
+    -- live and user-mutable, so ONE key connected or deleted between the
+    -- 2026-08-11 census and the merge would abort the PROD auto-apply of a
+    -- security fix — for a number carrying no security value, since a non-exempt
+    -- row is probed either way. The delta is surfaced so drift is still VISIBLE
+    -- in the apply log.
+    RAISE NOTICE 'Migration 20260811210000 pre-flight OK: the probe-exempt population matches the pin (% mt5 rows, all created %). Total api_keys observed % against a pinned % (delta %) — reported, not enforced.',
+      v_mt5, c_pin_date, v_total, c_pin_total, v_total - c_pin_total;
   ELSE
     RAISE NOTICE 'Migration 20260811210000 pre-flight: census signature absent (found total=%, mt5=%; no mt5 row created %) — this is a non-PROD apply (TEST / local / CI). The strict census pin is not applicable here; the structural post-verifies below still enforce.',
       v_total, v_mt5, c_pin_date;
@@ -472,9 +595,27 @@ $census$;
 -- A bounded, DATED snapshot, not an endorsement of the column. See the header
 -- for why fail-toward-probing alone would break every PROD MT5 finalize, and
 -- for the exact residual this leaves behind.
+--
+-- ⛔ THE DATED CUTOFF IS LOAD-BEARING, AND IT IS WHAT MAKES A RE-RUN SAFE
+-- (153.6 code review WR-01). `WHERE attested_venue IS NULL` alone is only
+-- harmless at the instant of first apply. From that moment on, EVERY
+-- non-privileged client INSERT (ApiKeyManager, StrategyForm) deliberately lands
+-- NULL — that is the scrub trigger working. An unbounded re-run would sweep
+-- exactly that population and set attested_venue = exchange, blessing the
+-- forgeable label on precisely the rows the trigger exists to keep unattested.
+-- The cutoff bounds the sweep to rows that PREDATE this migration, so a re-run
+-- writes nothing regardless of what has been inserted since.
+--
+-- ⛔ ONE DECLARATION, TWO USES. The same cutoff bounds post-verify (a) below.
+-- Held in a transaction-local GUC rather than repeated as a literal, because a
+-- verify whose cutoff drifted EARLIER than the backfill's would pass vacuously
+-- — it would simply stop looking at the rows the backfill missed.
+SET LOCAL quantalyze.attest_backfill_cutoff = '2026-08-11 00:00:00+00';
+
 UPDATE public.api_keys
    SET attested_venue = exchange
- WHERE attested_venue IS NULL;
+ WHERE attested_venue IS NULL
+   AND created_at < current_setting('quantalyze.attest_backfill_cutoff')::timestamptz;
 
 -- ───────────── 7. POST-VERIFY: every check ABORTS, none is NOTICE-only
 -- The other half of the 20260419140917 pairing, and the same self-verifying
@@ -482,20 +623,39 @@ UPDATE public.api_keys
 -- these hold on PROD, TEST, local and CI alike.
 DO $verify$
 DECLARE
+  -- ⛔ THIS ARRAY IS A SECOND COPY of the allowlist in
+  -- scrub_client_supplied_attested_venue's body. Check (f) below asserts every
+  -- member of it appears in that body, so the duplication cannot silently
+  -- drift — the two-copies-that-disagree shape is this phase's own subject.
+  c_privileged_roles CONSTANT TEXT[] := ARRAY['postgres', 'service_role', 'supabase_admin'];
+
   v_unattested INT;
   v_cws_src    TEXT;
   v_awck_src   TEXT;
   v_trg        BOOLEAN;
   v_exch_com   TEXT;
+  v_cws_owner  TEXT;
+  v_awck_owner TEXT;
+  v_scrub_src  TEXT;
+  v_role       TEXT;
+  v_chk_valid  BOOLEAN;
 BEGIN
-  -- (a) the backfill actually landed: no row is left unattested.
+  -- (a) the backfill actually landed — SCOPED TO THE POPULATION IT CLAIMED
+  --     (153.6 code review WR-01). This deliberately does NOT assert "no
+  --     unattested row exists anywhere": that would encode the OPPOSITE of the
+  --     intended steady state, in which every client INSERT after this
+  --     migration lands NULL on purpose, and on a re-run it would FORCE the
+  --     retro-attestation the dated cutoff above exists to prevent. The claim
+  --     is narrower and true: every row that PREDATES the migration was
+  --     covered. Same cutoff as the backfill, read from the same GUC.
   SELECT count(*) INTO v_unattested
     FROM public.api_keys
-   WHERE attested_venue IS NULL;
+   WHERE attested_venue IS NULL
+     AND created_at < current_setting('quantalyze.attest_backfill_cutoff')::timestamptz;
   IF v_unattested <> 0 THEN
     RAISE EXCEPTION
-      'Migration 20260811210000 failed: % api_keys rows still have a NULL attested_venue after the backfill — every one of them would be probed, and an MT5 row among them is a permanent KEY_SCOPE_CHECK_UNAVAILABLE. Rolling back.',
-      v_unattested;
+      'Migration 20260811210000 failed: % api_keys rows created before % still have a NULL attested_venue after the backfill — every one of them would be probed, and an MT5 row among them is a permanent KEY_SCOPE_CHECK_UNAVAILABLE. Rolling back.',
+      v_unattested, current_setting('quantalyze.attest_backfill_cutoff');
   END IF;
 
   -- (b) neither re-base took a stale body. The advisory-lock fences are the
@@ -569,18 +729,91 @@ BEGIN
       'Migration 20260811210000 failed: anon acquired EXECUTE on a wizard RPC. Rolling back.';
   END IF;
 
-  RAISE NOTICE 'Migration 20260811210000 post-verify OK: zero unattested rows, both RPC fences intact and stamping attested_venue, scrub trigger attached, 20260810120000 marker preserved, RPC privileges unchanged.';
+  -- (f) THE COMPOSITION THE WHOLE DESIGN RESTS ON, and the one thing nothing
+  --     else here proves: that a DEFINER RPC's INSERT actually SURVIVES the
+  --     scrub trigger. Checks (b) and (c) cannot see this — (b) only greps the
+  --     bodies for the literal `attested_venue`, (c) only checks the trigger is
+  --     attached. Both pass while every attestation is silently NULLed.
+  --
+  --     A SECURITY DEFINER function body runs as its OWNER, so the trigger's
+  --     `current_user IN (...)` test resolves against proowner. If that owner is
+  --     outside the allowlist the failure is SILENT AND TOTAL: every
+  --     wizard-minted key lands unattested, venueSupportsScopeProbe(null)
+  --     answers true, and every MT5 wizard submit returns a permanent
+  --     KEY_SCOPE_CHECK_UNAVAILABLE with no remedy — the exact self-inflicted
+  --     regression the backfill section exists to prevent — while this migration
+  --     reports success. (153.6 code review WR-02 / migration audit MIG-02.)
+  SELECT pg_get_userbyid(proowner) INTO v_cws_owner FROM pg_proc
+   WHERE oid = 'public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid)'::regprocedure;
+  SELECT pg_get_userbyid(proowner) INTO v_awck_owner FROM pg_proc
+   WHERE oid = 'public.add_wizard_composite_key(uuid,text,text,text,text,text,text,text,integer,text,uuid)'::regprocedure;
+
+  IF NOT (v_cws_owner = ANY (c_privileged_roles)) THEN
+    RAISE EXCEPTION
+      'Migration 20260811210000 failed: create_wizard_strategy is owned by %, which the api_keys_scrub_attested_venue trigger does not admit (allowed: %). Every key the wizard mints would be scrubbed to NULL and every MT5 finalize would answer a permanent KEY_SCOPE_CHECK_UNAVAILABLE. Rolling back.',
+      v_cws_owner, array_to_string(c_privileged_roles, ', ');
+  END IF;
+  IF NOT (v_awck_owner = ANY (c_privileged_roles)) THEN
+    RAISE EXCEPTION
+      'Migration 20260811210000 failed: add_wizard_composite_key is owned by %, which the api_keys_scrub_attested_venue trigger does not admit (allowed: %). Every composite key the wizard mints would be scrubbed to NULL. Rolling back.',
+      v_awck_owner, array_to_string(c_privileged_roles, ', ');
+  END IF;
+
+  --     …and the allowlist this block just compared against is really the one
+  --     the trigger enforces. Without this, re-cutting the trigger's list while
+  --     leaving c_privileged_roles behind would make (f) assert against a
+  --     fiction and pass.
+  SELECT pg_get_functiondef('public.scrub_client_supplied_attested_venue()'::regprocedure)
+    INTO v_scrub_src;
+  FOREACH v_role IN ARRAY c_privileged_roles LOOP
+    IF v_scrub_src NOT LIKE ('%''' || v_role || '''%') THEN
+      RAISE EXCEPTION
+        'Migration 20260811210000 failed: the scrub trigger body does not name the role %, so the owner allowlist this post-verify checked is not the one actually enforced. Re-cut both together. Rolling back.',
+        v_role;
+    END IF;
+  END LOOP;
+
+  -- (g) the coupling constraint is present AND VALIDATED (153.6 CR-01). A
+  --     NOT VALID constraint would police new writes while leaving existing
+  --     rows unchecked, so "it exists" is the weaker claim; convalidated is the
+  --     one that says every row in the table satisfies it.
+  SELECT convalidated INTO v_chk_valid FROM pg_constraint
+   WHERE conrelid = 'public.api_keys'::regclass
+     AND conname  = 'api_keys_attested_venue_matches_exchange'
+     AND contype  = 'c';
+  IF v_chk_valid IS NULL THEN
+    RAISE EXCEPTION
+      'Migration 20260811210000 failed: the api_keys_attested_venue_matches_exchange CHECK is absent, so a writer could persist an attested_venue that disagrees with exchange — a forgeable attestation with no forged routing label to pay for it. Rolling back.';
+  END IF;
+  IF NOT v_chk_valid THEN
+    RAISE EXCEPTION
+      'Migration 20260811210000 failed: the api_keys_attested_venue_matches_exchange CHECK exists but is NOT VALID, so rows already in the table were never checked against it. Rolling back.';
+  END IF;
+
+  RAISE NOTICE 'Migration 20260811210000 post-verify OK: zero unattested rows in the backfilled population, both RPC fences intact and stamping attested_venue, both RPCs owned by a role the scrub trigger admits (%/%), scrub trigger attached, 20260810120000 marker preserved, RPC privileges unchanged.',
+    v_cws_owner, v_awck_owner;
 END
 $verify$;
 
 -- ─────────────────────────── 8. the comments (one of them is a test gate)
 COMMENT ON COLUMN public.api_keys.attested_venue IS
-  'SERVER-ATTESTED venue (migration 20260811210000). Written ONLY by the two '
-  'SECURITY DEFINER wizard RPCs, create_wizard_strategy and '
-  'add_wizard_composite_key, from the venue the server itself validated at '
-  'mint time. A client-supplied value is scrubbed to NULL by the '
+  'RPC-WRITTEN venue (migration 20260811210000). ⛔ READ THE GUARANTEE '
+  'PRECISELY, it is narrower than "server-validated": the two SECURITY DEFINER '
+  'wizard RPCs do NOT validate this value, they write the p_exchange they were '
+  'CALLED with, and both are invokable by authenticated over PostgREST. What '
+  'holds is (1) it is written ONLY by those two RPCs — create_wizard_strategy '
+  'and add_wizard_composite_key — and (2) each writes THIS column and exchange '
+  'from ONE parameter, so the two cannot disagree; CHECK constraint '
+  'api_keys_attested_venue_matches_exchange pins that coupling for every '
+  'writer, present and future. The bypass is therefore not free: forging the '
+  'attestation to buy a probe skip also forges the routing label, and an '
+  'mt5-labelled row is handed to the MT5 adapter and never syncs. A '
+  'client-supplied value on a direct INSERT is scrubbed to NULL by the '
   'api_keys_scrub_attested_venue BEFORE INSERT trigger, so a DELETE + '
-  're-INSERT round trip cannot forge one. Read by '
+  're-INSERT round trip cannot forge one either. Making this column truly '
+  'server-VALIDATED needs the deferred connect-flow refactor (an api_keys '
+  'INSERT behind a service-role writer that passes the venue it validated). '
+  'Read by '
   '/api/strategies/finalize-wizard as the SOLE input to the ASVS V4 '
   'scope-broadening probe gate: NULL means PROBE (fail-toward). Never fall '
   'back to api_keys.exchange — that fallback re-opens the bypass this column '

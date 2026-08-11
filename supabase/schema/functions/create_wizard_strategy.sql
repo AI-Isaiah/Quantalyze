@@ -78,9 +78,15 @@ BEGIN
   END IF;
 
   -- 153.6 / PARITY-04: attested_venue is stamped HERE, inside the SECURITY
-  -- DEFINER body, from the p_exchange the server itself validated at mint
-  -- time. This is the ONLY kind of writer whose value survives the
+  -- DEFINER body, which is the only kind of writer whose value survives the
   -- api_keys_scrub_attested_venue trigger.
+  -- ⛔ p_exchange IS CALLER-SUPPLIED AND IS NOT VALIDATED HERE (CR-01). Both
+  -- columns are written from that ONE parameter deliberately: the CHECK
+  -- api_keys_attested_venue_matches_exchange requires it, so this INSERT
+  -- cannot mint an attestation that disagrees with the routing label. If you
+  -- ever add a separate p_attested_venue, or normalise one column and not the
+  -- other, this INSERT will start failing — that is the constraint doing its
+  -- job, not a bug to route around.
   INSERT INTO api_keys (
     user_id, exchange, label,
     api_key_encrypted, api_secret_encrypted, passphrase_encrypted,
