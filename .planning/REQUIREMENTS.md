@@ -794,6 +794,69 @@ cannot be taken without the caveat:
    caller-side holder RESEARCH §Open Q-1 ruled out. Stated at `routers/exchange.py` — *"One window is
    narrowed, not closed (D-43)"* — directly beneath the paragraph that says the leak is closed.
 
+### PARITY — the fixes that only landed on one path (minted at Phase 153.6 planning, 2026-08-11)
+
+> Source: `/code-review xhigh` over the whole 153→153.5 span (2026-08-11, 40 agents, 29 verified
+> findings → 13 distinct defects). Nine land here as five clusters. Three of the four root causes are
+> the SAME failure: a correct fix applied to one path while its twin went untouched, with no guard
+> asserting the two agree — the instance-not-class mistake, found inside the span whose own charter
+> said "fix it at the SINK, not three times". Every requirement below therefore demands the CLASS
+> closure ("what makes the two paths unable to diverge again"), never N point patches.
+> Minted AT planning (not after) so the requirements matrix never reads this phase as satisfying
+> nothing — the W-153.5-1 lesson, recorded verbatim at the WIZFORM-ABANDON header above.
+
+- [ ] **PARITY-01** *(cluster A — adapter parity; 3 findings, ONE cause)*: `services/ingestion/mt5.py`
+  carries every fix `routers/exchange.py` received in Phase 153.3 — **by construction, not by copy**.
+  The probe body (A1 terminal short-circuit that stops `order_check` on an `undetermined` verdict;
+  A2 class-only broad `except` around netref materialization — exception TEXT is a
+  credential-disclosure surface, T-134-01; A3 the operator-fault arm classifying
+  `("permanent", <curated>)` instead of a bare retried-forever `RuntimeError`) lives in ONE shared
+  module (`services/mt5_probe.py`) that BOTH paths call, and an ast parity roster with per-file
+  anti-vacuity floors reds on any hand-written second copy. ⛔ The worker never imports `routers/`
+  (D-07); the two documented divergences (lease bound, timeout chains) stay at the call sites.
+
+- [ ] **PARITY-02** *(cluster B — absorption + telemetry)*: No broad `except` sees
+  `Mt5SessionAbandoned` before its dedicated arm, anywhere upstream of the D-42 classify arms:
+  B1 `_read_terminal` re-raises it ahead of both sibling arms (same edit as A2 — D-14); B2 a
+  stage-1 connect abandon answers 424 `NETWORK_UNAVAILABLE` (transient), never the 503 that counts
+  toward `breaker:mt5-gateway` (D-15: the dedicated D-40 arm was on the WRONG `try` block, not
+  mis-ordered); B3 `Mt5Client._timed` re-raises the fence type WITHOUT emitting `mt5.stage`, making
+  the 153.5 §Q-4 telemetry contract structural for every stage (D-16: fix at `_timed`, never
+  restructure `restart()`), so the D-32 recovery-latency population Phase 155 reads holds only real
+  round-trips.
+
+- [ ] **PARITY-03** *(cluster C — the budget and the oracle that cannot see it)*:
+  `connectAbortDeadlineMsFor` covers the connect routes' **failing**-state worst case on BOTH venue
+  arms — 190 500 ms serialized / 100 500 ms default; the shortfall was the identical per-route
+  10 500 ms (`failing_store − grace = 25 500 − 15 000`) on each arm (D-10a), so a serialized-only fix
+  is this phase committing its own headline mistake. AND the oracle pins the ECONOMICS — "the browser
+  is the LAST party to give up, for the route it aborts, in EVERY breaker state" — quantified over
+  `BREAKER_STATES` in `seam-budgets.invariant.test.ts`, so selecting the wrong column can never again
+  pass (D-11a: falsified by mutation, including the closed-column-only structural mutation).
+  `158_500` appears nowhere as an oracle (the blind pin was `validate-budget.test.ts:226`, NOT the
+  invariant file — D-11 CORRECTED).
+
+- [ ] **PARITY-04** *(cluster D — the venue lock is bypassable; SECURITY, live on PROD; ASVS V4)*:
+  `finalize-wizard`'s scope-broadening probe gate reads a SERVER-attested venue and nothing else —
+  `api_keys.attested_venue`, written ONLY by the two SECURITY DEFINER wizard RPCs
+  (`create_wizard_strategy`, `add_wizard_composite_key`), with a SECURITY INVOKER `BEFORE INSERT`
+  trigger that NULLs any client-supplied value, and NO fallback to `exchange` (NULL ⇒ PROBED, the
+  fail-toward direction). DELETE + re-INSERT with a forged `exchange` becomes irrelevant rather than
+  merely harder. ⛔ D-02: no new GRANT/REVOKE on `api_keys`. D-01d: the backfill pins the PROD census
+  (**29 rows total / 2 mt5**, measured 2026-08-11 against `khslejtfbuezsmvmtsdn`) and its self-verify
+  ABORTS on drift. D-19: both RPC re-bases on their LATEST bodies (F6 advisory-lock fence preserved);
+  any `exchange` column-comment re-stamp preserves the `20260810120000` substring. ⚠️ Calibration:
+  a SELF-targeted control bypass (owner dodging a probe on their own key), not a tenant leak.
+
+- [ ] **PARITY-05** *(cluster E — retry affordance)*: A probe parse miss (a 2xx body the schema
+  cannot read — what a rolling analytics deploy produces) regains a Retry control via a NEW
+  recoverable code (`KEY_SCOPE_CHECK_UNREADABLE`), while the genuinely permanent probe arm keeps
+  `KEY_SCOPE_CHECK_UNAVAILABLE` with no Retry. ⛔ Never reverted to `KEY_NETWORK_TIMEOUT` (that
+  sentence is the lie 153.2-04 removed); never a recoverable action added to the permanent code.
+  D-18 pin inventory exact: `EXPECTED_TABLE_SIZE` 74 → 75 at BOTH sites (re-cut, never deleted);
+  `EXPECTED_FINALIZE_REJECTION_SITES` STAYS 32 — that it does not move is the proof this is a fix,
+  not an addition. `KNOWN_FINALIZE_CODES` gains the member in the SAME commit the route emits it.
+
 ### STALE — No stale screens (founder call 2026-08-04: "no stale screens")
 
 - [ ] **STALE-01**: A wizard screen never shows a state the backend has already left. Two instances
@@ -1151,6 +1214,11 @@ Populated during roadmap creation.
 | ABANDON-05 | Phase 153.5 (v1.17) | ✅ **Complete 2026-08-11** (153.5-01/02/03/05). `Mt5Client.restart()` carries **TWO** epoch checks and the load-bearing one is the SECOND — an inline `_mt5_epoch_for` comparison immediately before the ONE permitted `stale.shutdown()`, because the entry check passes trivially on the very path finding #5 lives on (the legitimate heal runs BEFORE the release that bumps). On the fenced path all three interacting cleanup invariants fire in order — dispose the stale socket anyway, dispose the FRESH WR-01 socket nobody is left to receive, restore `self._closed = True` — and only then raise, so the fix cannot introduce two new leaks. ⭐ **The precondition was missing and was fixed in the same phase:** 3 of the 5 production terminal acquisitions held the raw `asyncio.Lock` and never released through `mt5_terminal_lease`, so the epoch would have advanced on NEITHER worker path and finding #5 would have stayed open with every test green (153.5-03; `job_worker` sync-balance, `job_worker` derive read — finding #5's own path — and `allocator_positions` holdings). Zero raw acquisitions survive in `services/`+`routers/`, pinned by an ast class walk over 88 files with a hand-typed floor of 40. **Falsified, not predicted:** deleting the second check reds `test_a_restart_abandoned_mid_reconnect_never_reaches_the_shared_shutdown` on the CALL-LOG oracle (`assert 1 == 0` shutdown calls), and reverting either worker site reds both the ast pin and that path's exact-delta bump assertion. ⛔ Read with the two ACCEPTED limits above (D-43 in particular: a `shutdown()` already dispatched on the wire cannot be un-sent) |
 | ABANDON-06 | Phase 153.5 (v1.17) | ✅ **Complete 2026-08-11** (153.5-02/04/05). Closed at the sink by a **lease-occupancy `ContextVar`**, not by a construction-time epoch snapshot: `asyncio.to_thread` copies the caller's `contextvars.Context` at spawn, so an abandoned thread carries the OLD occupancy token while the registry moves on. `Mt5Client.__init__` reads that frozen token and refuses PRE-connect (opening nothing) or POST-connect (**disposing the socket first — a bare raise is Pitfall-6 in a new costume**). ⭐ **The preflight exemption is structural, not a maintained special case:** `job_worker._make_mt5_session` builds its client outside and before the lease, so it holds no lease, therefore carries no token, therefore is exempt — which is why the ContextVar beat the snapshot design, whose mitigation was two opt-in call-site edits plus a hand-typed pin (the per-site opt-out list this phase exists to avoid). A signature test derives the constructor's parameter set from source so re-adding a `fence_construction=` opt-in would be a deliberate act. **Falsified:** deleting the POST-connect re-check (the plausible half-fix) reds BOTH the unit case and the two end-to-end balance cases — `test_a_zombie_construction_disposes_its_own_socket_and_refuses`, plus `test_a_connect_stage_timeout_leaves_no_rpyc_socket_open` in `test_mt5_validate.py` (#6a) and `test_ingestion_mt5.py` (#6b), oracled on the open/close BALANCE rather than on which arm fired. ⛔ Read with ACCEPTED limit 2: this NARROWS the leak to the window between the `wait_for` firing and the bump; it does not close it to zero |
 | ABANDON-07 | Phase 153.5 (v1.17) | ✅ **Complete 2026-08-11** (153.5-01/04/05). Closed at the SINK, deliberately — the end-to-end deadline is lexically INSIDE the lease (`exchange.py` encloses the `wait_for`), so the unwind releases the lease and bumps the `terminal_key`-keyed generation, and every subsequent touch by the abandoned probe hits `Mt5Client._assert_live` on all seven fenced verbs (`login`, `account_info`, `terminal_info`, `history_deals_get`, `order_check`, `restart`, `last_error`). ℹ️ **There is no router-path-specific temporal test and that is the design** — a per-call-site temporal pin would be the instance-not-class mistake this milestone has paid for sixteen times. The temporal property is proven generically by `tests/test_mt5_abandon_fence.py`, which drives a REAL `Mt5Client` over the shipped `_connect=` seam through the REAL `mt5_terminal_lease` with the abandonment scheduled by a **test-owned `threading.Event`** (⛔ never a sleep-ordered race — this repo already carries four documented flake mechanisms) and asserts ordering by log INDEX relative to a release marker, never by wall clock. The refusal is **loud as well as raised** (D-39: `asyncio.futures._copy_future_state` silently discards the exception when the destination future is cancelled, so `raise` alone is invisible), is a plain `Exception` with a FIXED message proven disjoint from the live `_WRONG_SERVER_TOKENS`/`_AUTH_TOKENS` tables (D-42 — an operator fault must never become a user accusation), and is classified as **transient at all five caller surfaces** (D-40 — "zero call-site edits" describes the fence, never the disposition; an unhandled plain `Exception` on a FastAPI seam IS a claim, R-1 "service-permanent, do not retry"). **Falsified:** commenting out the epoch comparison reds the runtime guard on the HARM — `a session touch landed AFTER the lease released: [('account_info', 1)]` — while its embedded `neuter_fence=True` control stays green, which is the point |
+| PARITY-01 | Phase 153.6 (v1.17) | Pending — extraction target `services/mt5_probe.py` does not exist yet; the three missing twins verified live at `services/ingestion/mt5.py:247-259` (no short-circuit), `:230-245` (no broad arm), `:338-345` (bare RuntimeError → `classify_exception:721` retry bucket) |
+| PARITY-02 | Phase 153.6 (v1.17) | Pending — B1 `routers/exchange.py:650` absorbs the fence; B2 `:537` answers a breaker-counting 503 (`resilient-fetch.ts:519-525` names the arm); B3 `_timed:793-801` emits `mt5.stage` for a refused restart |
+| PARITY-03 | Phase 153.6 (v1.17) | Pending — deadline 165 000/75 000 vs governing failing figures 175 500/85 500; blind oracle `validate-budget.test.ts:226` pins the closed column (grep-verified: the ONLY `158_500` literal in src/) |
+| PARITY-04 | Phase 153.6 (v1.17) | Pending — SECURITY, live on PROD since 20260810120000 merged; PROD census taken 2026-08-11 (29 rows / 2 mt5); route.ts:1923 third `from("api_keys")` verified NOT on the probe path (a `last_sync_at` denorm UPDATE) — the gate has one authority behind an `api_key_id` presence check |
+| PARITY-05 | Phase 153.6 (v1.17) | Pending — parse miss classified at `finalize-wizard/route.ts:895-906` onto the no-Retry code; `EXPECTED_TABLE_SIZE = 74` at `wizardErrors.test.ts:1486`/`:1750` with the two-declaration meta-test at `:3010-3048` |
 | STALE-01 | Phase 154 (v1.17) | Pending — root cause NOT yet established; investigate before planning |
 | MT5-GOAL-01 | Phase 155 (v1.17 — umbrella acceptance gate) | **Umbrella** — no implementation work of its own; MT5 'works' only when SCEN-01 + OWN-02 close. Exists so `MT5-05 ✅` is never read as 'MT5 works' |
 | SCEN-01 | **Phase 147 (v1.17)** | ⛔ **HIGHEST** — ⭐census corrected: `daily_returns` has **NO production writer**; **0 of 27 REAL** strategies populated vs 15/15 demo seeds. Root-caused: the READER is wrong; use the existing `resolveDailyReturnSeries`. ⚠️`returns_series` is a WEALTH INDEX — must be DIFFERENCED, never forwarded raw |
