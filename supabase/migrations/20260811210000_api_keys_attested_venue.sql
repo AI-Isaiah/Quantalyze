@@ -48,10 +48,41 @@
 -- So the round trip survived: DELETE the row, re-INSERT it with a forged
 -- `exchange`. Both halves are still permitted, and 20260723172032 widened
 -- api_keys_exchange_check to ADMIT the probe-exempt venue, so the forged value
--- is a legal value of the constraint today. 20260810120000's header claimed
--- the mislabelled row "can never be corrected back" and rested its
--- "self-defeating forgery" residual on that claim; the claim is false, and the
--- same commit as this migration corrects it (Phase 153.6 D-04).
+-- is a legal value of the constraint today.
+--
+-- ⛔ THE THREAT-MODEL CORRECTION FOR 20260810120000 LIVES HERE, NOT IN THAT
+-- FILE (Phase 153.6 D-04; relocated by migration re-audit M2-05, which is why
+-- 20260810120000 is byte-identical to `main` on this branch — an APPLIED
+-- migration is not edited, not even in its comments, because the file records
+-- what ran and a later reader cannot tell an amended header from the one the
+-- database saw).
+--
+-- WHAT THAT HEADER GOT WRONG. It argued that once client UPDATE was gone a
+-- mislabelled row could no longer be restored to its true venue, so the
+-- strategy's sync would fail permanently, no credible listing could result, and
+-- a forged `exchange` was therefore SELF-DEFEATING. (Paraphrased deliberately
+-- rather than quoted, so the falsehood is not left greppable in a new file.)
+-- It is false: 20260810120000 touches UPDATE only, and its own text says INSERT
+-- and DELETE are left alone ON PURPOSE because both are live client paths. The
+-- forger never needed to correct the row back — DELETE + re-INSERT is the round
+-- trip, and it was LIVE from 20260810120000 until this migration.
+--
+-- THE CORRECTED RESIDUAL. `exchange` stays CLIENT-SUPPLIED at row creation on
+-- the two non-wizard INSERT paths (ApiKeyManager.tsx:254, StrategyForm.tsx:140):
+-- the browser calls /api/keys/validate-and-encrypt and performs the api_keys
+-- INSERT itself, so it can insert a venue different from the one the server
+-- validated. What that buys is the SELF-TARGETED CONTROL BYPASS calibrated at
+-- the top of this file — not a tenant leak, not a data breach.
+--
+-- ✅ CLOSED BY THIS MIGRATION, by removing that column's AUTHORITY rather than
+-- the client's ability to write it: the probe gate now reads
+-- `api_keys.attested_venue`. ⚠️ 20260810120000's own COMMENT ON COLUMN for
+-- `exchange` — "Read by finalize-wizard as the input to the scope-broadening
+-- probe gate" — stopped being true at that moment; section 7 below re-stamps
+-- that comment on the DATABASE (preserving the 20260810120000 marker the SQL
+-- test keys on), which is the correct place to fix it. ⚠️ `exchange` also still
+-- feeds the strategies.asset_class annualization stamp (√365 vs √252) and THAT
+-- reader is still forgeable — 153.6 OQ-2, deliberately out of charter.
 --
 -- The fix is NOT to lock the column down further (D-02/D-03: no new privilege
 -- change on this table, and the label may stay client-writable). The fix is to
@@ -110,7 +141,7 @@
 --      on the function itself.
 --
 --   5. A count-pinned PRE-FLIGHT census check, then a one-time backfill of
---      attested_venue from exchange, then an ABORTING post-verify block.
+--      attested_venue from exchange.
 --
 --   6. COMMENT ON COLUMN for the new column (it is also the marker the SQL
 --      test's assertion 5 gates on), and a re-stamp of the `exchange` comment
@@ -120,6 +151,10 @@
 --      marker for assertions 2 and 3 of
 --      supabase/tests/test_api_keys_exchange_not_user_writable.sql, and
 --      dropping it turns those assertions into silent SKIPs.
+--
+--   7. An ABORTING post-verify block, LAST — after the comments, so its (d)
+--      canary reads the re-stamp this migration wrote rather than the comment
+--      it replaced (153.6 migration re-audit M2-02).
 --
 -- Why a backfill at all, and why it is not "trusting the column forever"
 -- ---------------------------------------------------------------------
@@ -131,12 +166,21 @@
 --
 -- The backfill is a bounded, DATED snapshot. After it, the column stops being
 -- an authority for every row created afterwards, and the residual is exactly
--- "rows that existed on 2026-08-11 and had ALREADY been forged". Client UPDATE
--- on `exchange` has been unavailable since 20260810120000, so a pre-phase
+-- "rows created before 2026-08-11T00:00Z that had ALREADY been forged". Client
+-- UPDATE on `exchange` has been unavailable since 20260810120000, so a pre-phase
 -- forgery required DELETE + re-INSERT, which leaves a detectable footprint
--- (api_keys.created_at later than the strategy that references the key). The
--- census pin is what converts "we trusted a column" into "we trusted 29
--- specific rows and wrote the number down".
+-- (api_keys.created_at later than the strategy that references the key).
+--
+-- What the census pin converts "we trusted a column" into is NARROWER than an
+-- earlier draft of this header claimed, and the difference is the whole of what
+-- the pin now enforces (153.6 migration reviews MIG-01 and M2-03): it aborts on
+-- the PROBE-EXEMPT population only — 2 mt5 rows, all of them carrying the census
+-- signature — because a backfilled deribit/okx/bybit row is attested as its own
+-- non-exempt venue and is probed regardless, so it cannot buy a skip. The
+-- 29-row TOTAL is REPORTED as a delta and never enforced; `api_keys` is live and
+-- user-mutable, and aborting a security fix's PROD auto-apply over a number
+-- carrying no security value was a latent outage. So: "we trusted 2 specific
+-- probe-exempt rows and wrote them down, and we log how far the rest has moved".
 --
 -- Residual, deliberately NOT closed here
 -- --------------------------------------
@@ -211,6 +255,28 @@ ALTER TABLE public.api_keys
 -- impossible to open by accident. The remedy that would make the stronger claim
 -- true — an api_keys INSERT behind a service-role writer that passes the venue
 -- IT validated — is the connect-flow refactor both migrations defer.
+--
+-- ⛔⛔ AND THE DEFENCE HAS A PRECONDITION. READ IT BEFORE ADDING A VENUE TO
+-- `scopeProbeSupported: false` (153.6 migration re-audit M2-04, recorded here
+-- because it previously lived only in a phase summary).
+--
+-- What this CHECK buys is that the forgery is SELF-DEFEATING, not that it is
+-- impossible: a caller can still mint a row attested `mt5` and skip the probe on
+-- their own key — it costs them `exchange = 'mt5'` too, so the key is routed to
+-- the MT5 adapter and never syncs. That price is only payable because EVERY
+-- probe-exempt venue is currently UNSYNCABLE. `mt5` is the sole member of the
+-- probe-exempt set (src/lib/closed-sets.ts VENUE_CAPABILITIES,
+-- `scopeProbeSupported: false`).
+--
+-- ⛔ ADDING A **SYNCABLE** VENUE TO THAT SET MAKES THE BYPASS FREE. The forger
+-- would then get a probe skip while their key keeps ingesting normally, and this
+-- CHECK would not cost them anything. `closed-sets.ts` already names sFOX as the
+-- plausible next member (its capability row carries an OPEN QUESTION about
+-- exactly this opt-out). If that opt-out is ever granted to a venue that syncs,
+-- remedy (a) — move the api_keys INSERT behind a service-role writer that passes
+-- the venue IT validated, and withdraw `authenticated` EXECUTE from both wizard
+-- RPCs — must land FIRST. This CHECK does not protect against that case, and no
+-- constraint on these two columns can.
 --
 -- Added directly rather than NOT VALID + VALIDATE: at this point in the
 -- transaction the column was just created and every row is NULL, so validation
@@ -527,8 +593,23 @@ DECLARE
   -- counts only, no key material): 29 rows total — deribit 13, okx 9, bybit 5,
   -- mt5 2. Both mt5 rows belong to ONE owner and were created 2026-08-04
   -- (11:37 and 14:20 UTC). These are HAND-TYPED literals on purpose: a count
-  -- compared against its own derivation cannot fail. Re-cut them from a fresh
-  -- measurement if the census has moved; never soften the comparison to make an
+  -- compared against its own derivation cannot fail.
+  --
+  -- ⛔ HOW TO RE-CUT, AND WHY THE DATE IS A SET (153.6 migration re-audit
+  -- M2-01). The abort below requires BOTH that the probe-exempt count equals
+  -- c_pin_mt5 AND that every one of those rows carries the census signature. If
+  -- the signature were a SINGLE date, then the moment PROD's mt5 rows span more
+  -- than one creation day NO choice of literals could satisfy both halves at
+  -- once — v_sig would be strictly below v_mt5 for any single date, and this
+  -- block's own rule forbids softening the comparison, so the migration would
+  -- be structurally un-appliable. c_pin_dates is therefore a SET.
+  --
+  -- To re-cut for a population spanning several days: APPEND each newly
+  -- measured creation date to c_pin_dates and raise c_pin_mt5 to the new
+  -- probe-exempt total. EXACTLY TWO literals move — c_pin_mt5 and c_pin_dates —
+  -- and they must move TOGETHER, because the abort requires all c_pin_mt5 rows
+  -- to be signed. c_pin_total is a reference point only and never needs
+  -- re-cutting (see the NOTICE below). Never soften the comparison to make an
   -- apply pass.
   --
   -- ⚠️ c_pin_total is DELIBERATELY NOT AN ABORT CONDITION — see the NOTICE
@@ -543,20 +624,21 @@ DECLARE
   -- MEASURED on a local PG16 fixture 2026-08-11: mutating the comparison to 28
   -- while the message still said "29/2" aborted correctly but named the wrong
   -- number. One declaration, three uses.
-  c_pin_total CONSTANT INT  := 29;
-  c_pin_mt5   CONSTANT INT  := 2;
-  c_pin_date  CONSTANT DATE := DATE '2026-08-04';
+  c_pin_total CONSTANT INT    := 29;
+  c_pin_mt5   CONSTANT INT    := 2;
+  c_pin_dates CONSTANT DATE[] := ARRAY[DATE '2026-08-04'];
 
   v_total INT;
   v_mt5   INT;
   v_sig   INT;
+  v_dates TEXT := array_to_string(c_pin_dates, ', ');
 BEGIN
   SELECT count(*) INTO v_total FROM public.api_keys;
   SELECT count(*) INTO v_mt5 FROM public.api_keys WHERE exchange = 'mt5';
   SELECT count(*) INTO v_sig
     FROM public.api_keys
    WHERE exchange = 'mt5'
-     AND (created_at AT TIME ZONE 'UTC')::date = c_pin_date;
+     AND (created_at AT TIME ZONE 'UTC')::date = ANY (c_pin_dates);
 
   -- ⛔ THE DISCRIMINATOR IS THE SIGNATURE, AND IT IS TESTED FIRST. v_sig >= 1
   -- means the censused probe-exempt rows are still present, i.e. this IS the
@@ -571,8 +653,8 @@ BEGIN
     -- backfill's argument. Only an unmeasured mt5 row can.
     IF v_mt5 <> c_pin_mt5 OR v_sig <> c_pin_mt5 THEN
       RAISE EXCEPTION
-        'Migration 20260811210000 ABORT: probe-exempt census drift (found mt5=%, of which % carry the % signature; pinned mt5=%, all of them signed). An unmeasured probe-exempt row would be backfilled into a probe SKIP on trust this census never established. Re-measure public.api_keys against khslejtfbuezsmvmtsdn and re-cut the pinned literals before applying. Rolling back.',
-        v_mt5, v_sig, c_pin_date, c_pin_mt5
+        'Migration 20260811210000 ABORT: probe-exempt census drift (found mt5=%, of which % were created on a pinned census date [%]; pinned mt5=%, all of them signed). An unmeasured probe-exempt row would be backfilled into a probe SKIP on trust this census never established. Re-measure public.api_keys against khslejtfbuezsmvmtsdn and re-cut c_pin_mt5 TOGETHER WITH c_pin_dates (append the new creation date) before applying. Rolling back.',
+        v_mt5, v_sig, v_dates, c_pin_mt5
         USING ERRCODE = 'data_exception';
     END IF;
     -- ⛔ THE TOTAL IS REPORTED, NEVER ENFORCED (153.6 migration review MIG-01).
@@ -582,11 +664,11 @@ BEGIN
     -- security fix — for a number carrying no security value, since a non-exempt
     -- row is probed either way. The delta is surfaced so drift is still VISIBLE
     -- in the apply log.
-    RAISE NOTICE 'Migration 20260811210000 pre-flight OK: the probe-exempt population matches the pin (% mt5 rows, all created %). Total api_keys observed % against a pinned % (delta %) — reported, not enforced.',
-      v_mt5, c_pin_date, v_total, c_pin_total, v_total - c_pin_total;
+    RAISE NOTICE 'Migration 20260811210000 pre-flight OK: the probe-exempt population matches the pin (% mt5 rows, all created on a pinned census date [%]). Total api_keys observed % against a pinned % (delta %) — reported, not enforced.',
+      v_mt5, v_dates, v_total, c_pin_total, v_total - c_pin_total;
   ELSE
-    RAISE NOTICE 'Migration 20260811210000 pre-flight: census signature absent (found total=%, mt5=%; no mt5 row created %) — this is a non-PROD apply (TEST / local / CI). The strict census pin is not applicable here; the structural post-verifies below still enforce.',
-      v_total, v_mt5, c_pin_date;
+    RAISE NOTICE 'Migration 20260811210000 pre-flight: census signature absent (found total=%, mt5=%; no mt5 row created on any pinned census date [%]) — this is a non-PROD apply (TEST / local / CI). The strict census pin is not applicable here; the structural post-verifies below still enforce.',
+      v_total, v_mt5, v_dates;
   END IF;
 END
 $census$;
@@ -617,7 +699,72 @@ UPDATE public.api_keys
  WHERE attested_venue IS NULL
    AND created_at < current_setting('quantalyze.attest_backfill_cutoff')::timestamptz;
 
--- ───────────── 7. POST-VERIFY: every check ABORTS, none is NOTICE-only
+-- ─────────────────────────── 7. the comments (one of them is a test gate)
+-- ⛔ THIS SECTION MUST PRECEDE THE POST-VERIFY BLOCK, AND THE ORDER IS THE
+-- WHOLE POINT (153.6 migration re-audit M2-02). Post-verify (d) reads
+-- col_description on api_keys.exchange and asserts that the 20260810120000
+-- marker survived THIS migration's re-stamp. While the re-stamp sat AFTER the
+-- verify block, (d) was reading the comment 20260810120000 itself had written,
+-- so the regression it names — "the re-stamp dropped the marker" — could not
+-- fail it on a first apply. MEASURED on a local PG16 fixture 2026-08-12: in the
+-- old order, a re-stamp with the marker removed COMMITTED while (d) reported
+-- "20260810120000 marker preserved". Everything is inside this file's own
+-- transaction, so no other ordering changes are needed. Do not move it back.
+COMMENT ON COLUMN public.api_keys.attested_venue IS
+  'RPC-WRITTEN venue (migration 20260811210000). ⛔ READ THE GUARANTEE '
+  'PRECISELY, it is narrower than "server-validated": the two SECURITY DEFINER '
+  'wizard RPCs do NOT validate this value, they write the p_exchange they were '
+  'CALLED with, and both are invokable by authenticated over PostgREST. What '
+  'holds is (1) it is written ONLY by those two RPCs — create_wizard_strategy '
+  'and add_wizard_composite_key — and (2) each writes THIS column and exchange '
+  'from ONE parameter, so the two cannot disagree; CHECK constraint '
+  'api_keys_attested_venue_matches_exchange pins that coupling for every '
+  'writer, present and future. The bypass is therefore not free: forging the '
+  'attestation to buy a probe skip also forges the routing label, and an '
+  'mt5-labelled row is handed to the MT5 adapter and never syncs. ⛔ THAT PRICE '
+  'HAS A PRECONDITION: it is only payable while EVERY probe-exempt venue is '
+  'unsyncable, and mt5 is currently the sole member of that set '
+  '(src/lib/closed-sets.ts VENUE_CAPABILITIES, scopeProbeSupported: false). '
+  'Adding a SYNCABLE venue to that set makes the forgery FREE — the skip would '
+  'cost nothing — and requires the deferred remedy (a service-role writer plus '
+  'withdrawing authenticated EXECUTE from both wizard RPCs) to land FIRST. This '
+  'CHECK does not protect against that case. A '
+  'client-supplied value on a direct INSERT is scrubbed to NULL by the '
+  'api_keys_scrub_attested_venue BEFORE INSERT trigger, so a DELETE + '
+  're-INSERT round trip cannot forge one either. Making this column truly '
+  'server-VALIDATED needs the deferred connect-flow refactor (an api_keys '
+  'INSERT behind a service-role writer that passes the venue it validated). '
+  'Read by '
+  '/api/strategies/finalize-wizard as the SOLE input to the ASVS V4 '
+  'scope-broadening probe gate: NULL means PROBE (fail-toward). Never fall '
+  'back to api_keys.exchange — that fallback re-opens the bypass this column '
+  'exists to close. Rows created before 2026-08-11T00:00Z were backfilled from '
+  'exchange under a hand-typed census pin — the cutoff is a dated bound, NOT '
+  '"everything older than the apply", so a row created between that instant and '
+  'the apply lands NULL and is PROBED. The pin ABORTS only on the probe-exempt '
+  'population (2 mt5 rows, all carrying the measured census signature); the '
+  '29-row total is reported as a delta and never enforced, because a non-exempt '
+  'row is probed either way.';
+
+-- ⛔ THE 20260810120000 SUBSTRING BELOW IS LOAD-BEARING. It is the marker
+-- test_api_keys_exchange_not_user_writable.sql:117-127 keys on to arm its
+-- negative assertions; removing it turns them into silent SKIPs (153.6 P4).
+-- What is REMOVED here is the sentence claiming this column is read by
+-- finalize-wizard as the probe gate's input — true when 20260810120000 was
+-- written, false from this migration onward.
+COMMENT ON COLUMN public.api_keys.exchange IS
+  'Venue LABEL, not an attestation. Client UPDATE was withdrawn at the table '
+  'level by migration 20260810120000 and a SECURITY INVOKER trigger backstops '
+  'it, but the value is still client-supplied at row creation on the two '
+  'non-wizard INSERT paths (ApiKeyManager, StrategyForm), so a mislabelled row '
+  'is possible. Input to the strategies.asset_class annualization stamp '
+  '(√365 crypto vs √252 traditional) — that reader deliberately still uses '
+  'this column (153.6 OQ-2, out of scope). NO LONGER the input to the '
+  'finalize-wizard scope-broadening probe gate: since migration '
+  '20260811210000 that gate reads api_keys.attested_venue. Do not re-open '
+  'client UPDATE on this column.';
+
+-- ───────────── 8. POST-VERIFY: every check ABORTS, none is NOTICE-only
 -- The other half of the 20260419140917 pairing, and the same self-verifying
 -- posture as 20260810120000:161-201. Environment-independent by construction:
 -- these hold on PROD, TEST, local and CI alike.
@@ -693,11 +840,16 @@ BEGIN
       'Migration 20260811210000 failed: the api_keys_scrub_attested_venue BEFORE INSERT trigger is not attached — a client could persist a forged attestation. Rolling back.';
   END IF;
 
-  -- (d) P4 canary. The exchange column comment is re-stamped below, and the
-  --     re-stamp MUST keep the 20260810120000 substring: it is the gate that
-  --     arms assertions 2 and 3 of
-  --     supabase/tests/test_api_keys_exchange_not_user_writable.sql. Dropping
-  --     it would not fail that test — it would make it SKIP, which is worse.
+  -- (d) P4 canary. The exchange column comment is re-stamped in section 7
+  --     ABOVE — deliberately, so this reads the comment THIS migration wrote
+  --     rather than the one 20260810120000 left behind (153.6 migration
+  --     re-audit M2-02; while the re-stamp came after this block the check
+  --     could not fail on a first apply). The re-stamp MUST keep the
+  --     20260810120000 substring: it is the gate that arms assertions 2 and 3
+  --     of supabase/tests/test_api_keys_exchange_not_user_writable.sql.
+  --     Dropping it would not fail that test — it would make it SKIP, which is
+  --     worse. ⛔ If you ever move the comments back below this block, this
+  --     check silently stops guarding them.
   SELECT col_description(
            'public.api_keys'::regclass,
            (SELECT attnum FROM pg_attribute
@@ -794,49 +946,5 @@ BEGIN
     v_cws_owner, v_awck_owner;
 END
 $verify$;
-
--- ─────────────────────────── 8. the comments (one of them is a test gate)
-COMMENT ON COLUMN public.api_keys.attested_venue IS
-  'RPC-WRITTEN venue (migration 20260811210000). ⛔ READ THE GUARANTEE '
-  'PRECISELY, it is narrower than "server-validated": the two SECURITY DEFINER '
-  'wizard RPCs do NOT validate this value, they write the p_exchange they were '
-  'CALLED with, and both are invokable by authenticated over PostgREST. What '
-  'holds is (1) it is written ONLY by those two RPCs — create_wizard_strategy '
-  'and add_wizard_composite_key — and (2) each writes THIS column and exchange '
-  'from ONE parameter, so the two cannot disagree; CHECK constraint '
-  'api_keys_attested_venue_matches_exchange pins that coupling for every '
-  'writer, present and future. The bypass is therefore not free: forging the '
-  'attestation to buy a probe skip also forges the routing label, and an '
-  'mt5-labelled row is handed to the MT5 adapter and never syncs. A '
-  'client-supplied value on a direct INSERT is scrubbed to NULL by the '
-  'api_keys_scrub_attested_venue BEFORE INSERT trigger, so a DELETE + '
-  're-INSERT round trip cannot forge one either. Making this column truly '
-  'server-VALIDATED needs the deferred connect-flow refactor (an api_keys '
-  'INSERT behind a service-role writer that passes the venue it validated). '
-  'Read by '
-  '/api/strategies/finalize-wizard as the SOLE input to the ASVS V4 '
-  'scope-broadening probe gate: NULL means PROBE (fail-toward). Never fall '
-  'back to api_keys.exchange — that fallback re-opens the bypass this column '
-  'exists to close. Rows predating this migration were backfilled from '
-  'exchange on 2026-08-11 under a hand-typed census pin (29 rows, 2 of them '
-  'the probe-exempt venue).';
-
--- ⛔ THE 20260810120000 SUBSTRING BELOW IS LOAD-BEARING. It is the marker
--- test_api_keys_exchange_not_user_writable.sql:117-127 keys on to arm its
--- negative assertions; removing it turns them into silent SKIPs (153.6 P4).
--- What is REMOVED here is the sentence claiming this column is read by
--- finalize-wizard as the probe gate's input — true when 20260810120000 was
--- written, false from this migration onward.
-COMMENT ON COLUMN public.api_keys.exchange IS
-  'Venue LABEL, not an attestation. Client UPDATE was withdrawn at the table '
-  'level by migration 20260810120000 and a SECURITY INVOKER trigger backstops '
-  'it, but the value is still client-supplied at row creation on the two '
-  'non-wizard INSERT paths (ApiKeyManager, StrategyForm), so a mislabelled row '
-  'is possible. Input to the strategies.asset_class annualization stamp '
-  '(√365 crypto vs √252 traditional) — that reader deliberately still uses '
-  'this column (153.6 OQ-2, out of scope). NO LONGER the input to the '
-  'finalize-wizard scope-broadening probe gate: since migration '
-  '20260811210000 that gate reads api_keys.attested_venue. Do not re-open '
-  'client UPDATE on this column.';
 
 COMMIT;

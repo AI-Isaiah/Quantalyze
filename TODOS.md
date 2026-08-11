@@ -584,10 +584,23 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   `/api/keys/validate-and-encrypt` and then performs the `api_keys` INSERT **itself**
   (`ApiKeyManager.tsx:254`, `StrategyForm.tsx:140`, `AllocatorExchangeManager.tsx:591`), so a
   crafted client can insert a venue that differs from the one the server actually validated.
-  **Why this is not filed FIX NOW:** the ciphertext is server-minted and only ever minted for a
-  key the server confirmed read-only (`validate-and-encrypt/route.ts:310`), and with UPDATE
-  revoked a mislabelled row can never be corrected back — so the forged strategy's sync fails
-  permanently and no credible listing results. The forgery is self-defeating, not harmful.
+  ⛔ **CORRECTED 2026-08-12 (Phase 153.6 D-04 / migration re-audit M2-05). The original "why
+  this is not filed FIX NOW" rested on a claim that is FALSE**, and it is recorded here rather
+  than by editing `20260810120000`, which is already applied. The argument was: the ciphertext is
+  server-minted and only ever minted for a key the server confirmed read-only
+  (`validate-and-encrypt/route.ts:310`), and with UPDATE withdrawn a mislabelled row could never
+  be restored to its true venue — so the forged strategy's sync would fail permanently, no
+  credible listing could result, and the forgery was self-defeating. **It was not.**
+  `20260810120000` touches UPDATE only and deliberately leaves INSERT and DELETE alone (both are
+  live client paths), so the forger never needed to restore the row: DELETE + re-INSERT under a
+  forged `exchange` was the round trip, and `20260723172032` had already widened
+  `api_keys_exchange_check` to admit the probe-exempt venue. The bypass was LIVE from
+  2026-08-10 until `20260811210000`.
+  ✅ **The probe-gate half is now closed** by `20260811210000_api_keys_attested_venue.sql`, which
+  moves the scope-probe gate off this column onto `api_keys.attested_venue` (RPC-written, scrubbed
+  to NULL on every client INSERT). What remains open here is the INSERT path itself — and
+  ⚠️ `exchange` still feeds the `strategies.asset_class` annualization stamp (√365 vs √252), which
+  is a money-math reader and is still forgeable (153.6 OQ-2).
   **Fix when the connect flow is next opened:** move the INSERT server-side into
   `validate-and-encrypt` (it already knows the canonical venue it validated) and return the new
   row id, then `REVOKE INSERT ON api_keys FROM authenticated`. That is a three-component
