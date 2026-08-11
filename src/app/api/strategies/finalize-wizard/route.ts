@@ -159,7 +159,24 @@ const MAX_COMPOSITE_MEMBERS = 10;
 const compositeMemberRowsSchema = z.array(
   z.object({
     api_key_id: z.string().nullable(),
-    api_keys: z.object({ exchange: z.string().nullable() }).nullish(),
+    api_keys: z
+      .object({
+        exchange: z.string().nullable(),
+        // 153.6-04 / PARITY-04 — the SERVER-ATTESTED venue, and the field the
+        // per-member gate below reads. VALIDATED, never cast, for the reason the
+        // whole schema exists: this is the input to an ASVS V4 control, so a
+        // shape we cannot read must be a refusal rather than a silent `undefined`.
+        //
+        // ⚠️ `.nullable().optional()`, and the OPTIONAL half is deliberate. A row
+        // that carries no attestation KEY at all — a schema cache that has not
+        // seen the column yet, or a projection change — is the same claim as an
+        // attestation of `null`: nothing is attested, so the member is PROBED.
+        // Refusing it instead would turn a column rollout into a
+        // composite-finalize outage, and would refuse in the SAFE direction only
+        // by accident. An array or a number is still rejected.
+        attested_venue: z.string().nullable().optional(),
+      })
+      .nullish(),
   }),
 );
 
@@ -748,11 +765,19 @@ async function runScopeBroadeningProbe(
   //
   // 3. ⭐ THE PREDICATE ANSWERS `true` FOR null, "" AND ANY UNKNOWN VENUE, and
   //    that direction is the whole safety of this line. `venue` is `null`
-  //    whenever the `api_keys.exchange` read faulted, and for a composite member
-  //    whose embed came back empty. Those keys are STILL PROBED. Skipping on
-  //    `null` would silently disable the defence for every key whose venue read
-  //    blipped — a control that fails open on a transient DB error is not a
+  //    whenever the `api_keys` read faulted, for a composite member whose embed
+  //    came back empty, and — since 153.6-04 / PARITY-04 — for every key that
+  //    carries no SERVER ATTESTATION: a row the backfill has not reached, and a
+  //    row whose client-supplied attestation the BEFORE INSERT trigger scrubbed.
+  //    Those keys are STILL PROBED. Skipping on `null` would silently disable the
+  //    defence for every key whose venue read blipped, and would hand the
+  //    exemption back to anyone willing to INSERT a label — a control that fails
+  //    open on a transient DB error, or on a claim by its own subject, is not a
   //    control. Read it through the predicate; never index the capability record.
+  //
+  //    ⛔ `venue` IS THE ATTESTED VENUE AT BOTH CALL SITES. This helper cannot
+  //    enforce that — it takes a string — so the rule is stated at both callers
+  //    and pinned by the PARITY-04 rows in `route.test.ts`.
   //
   // 4. ⛔ It is `venueSupportsScopeProbe(venue)` — a CAPABILITY question — and
   //    never an equality test against a particular venue's name. (The literal
@@ -1158,10 +1183,26 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // 'traditional' on a blip would silently mis-annualize a crypto strategy (√252
   // not √365 → inflated Sharpe), so we leave the correct draft stamp untouched.
   let apiKeyExchange: string | null = null;
+  // 153.6-04 / PARITY-04 — the SERVER-ATTESTED venue, and the ONLY input the
+  // scope-broadening probe gate below is allowed to read.
+  //
+  // ⛔ IT IS A SEPARATE BINDING FROM `apiKeyExchange`, AND THE SEPARATION IS THE
+  // WHOLE FIX. `api_keys.exchange` is client-writable at INSERT — migration
+  // 20260810120000 revoked UPDATE and backstopped it with a trigger, but the
+  // wizard's own client INSERT path depends on INSERT staying open — so a row can
+  // be created carrying a label that CLAIMS the probe exemption. Reading that
+  // label made an ASVS V4 control something the client could switch off by
+  // asking. `attested_venue` is written only by the two SECURITY DEFINER wizard
+  // RPCs and NULLed for every non-privileged INSERT by a BEFORE INSERT trigger.
+  let attestedVenue: string | null = null;
   if (apiKeyId) {
     const { data: keyVenueRow, error: keyVenueErr } = await assetClassAdmin
       .from("api_keys")
-      .select("exchange")
+      // ⚠️ ONE COLUMN ADDED, ZERO EXTRA ROUND TRIPS. The gate must not open a
+      // second seam or a second query: this route's fan-out is pinned cross-file
+      // by SEAM_ROUTE_BUDGETS, and "the security read" is exactly the kind of
+      // extra call that gets added once and never counted.
+      .select("exchange, attested_venue")
       .eq("id", apiKeyId)
       .single();
     if (keyVenueErr) {
@@ -1175,6 +1216,21 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     }
     apiKeyExchange =
       typeof keyVenueRow?.exchange === "string" ? keyVenueRow.exchange : null;
+    // ⚠️ THE PROBE GATE DOES NOT INHERIT THIS READ'S LENIENCY. The error arm
+    // above is non-blocking BY DESIGN for the asset_class stamp — it shrugs and
+    // leaves the draft's own venue-aware stamp intact. For the gate, a read that
+    // faulted simply attests NOTHING, so `attestedVenue` stays null and
+    // `venueSupportsScopeProbe(null)` answers true: the key is PROBED. A control
+    // that fails open on a transient DB error is not a control.
+    //
+    // ⛔ NEVER `?? apiKeyExchange`. A null attestation is a legacy row the
+    // backfill has not reached, or a client INSERT the trigger scrubbed — the two
+    // states this change exists to cover. Falling back to the forgeable column
+    // there would make the whole thing a no-op for every row that has one.
+    attestedVenue =
+      typeof keyVenueRow?.attested_venue === "string"
+        ? keyVenueRow.attested_venue
+        : null;
   }
   //
   // RED-TEAM: for a single-key strategy whose venue we FAILED to resolve
@@ -1191,6 +1247,23 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         "strategy — leaving the draft's venue-aware stamp intact (no √252 overwrite)",
     );
   } else {
+    // ⚠️ 153.6-04 / OQ-2 — THIS STAMP DELIBERATELY STILL READS `apiKeyExchange`,
+    // the forgeable column, and that is a scoped decision rather than an
+    // oversight. PARITY-04's charter is the probe gate; widening it to the
+    // money-math stamp is the natural follow-on and is now a ONE-IDENTIFIER
+    // change (`apiKeyExchange` → `attestedVenue`) because the attestation
+    // mechanism already exists on the read above. It is left for a follow-on
+    // because the residual is self-targeted: a forged label here distorts the
+    // annualization clock (√365 vs √252) of the forger's OWN strategy, where a
+    // forged label on the gate switched off a security control. ⛔ Do not
+    // "fix" this in passing — the swap needs its own oracle over the two
+    // annualization outcomes, which is not in this plan's tests.
+    //
+    // ⛔ THE PRAGMA BELOW MUST STAY WITHIN 8 LINES OF THE MUTATION —
+    // `audit-coverage.test.ts` scans that window, so prose inserted BETWEEN them
+    // silently un-instruments the site (measured: this note, on its first
+    // placement). New commentary goes ABOVE this line, never below it.
+    //
     // @audit-skip: non-security annualization metadata (√365 crypto / √252
     // traditional) written as part of the already-audited strategy finalization;
     // a dedicated audit event would be noise (mirrors the last_sync_at skip below).
@@ -1222,13 +1295,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // scope-broadening defense covers either code path (Phase 19 /
   // Open Question 1 — RETAINED at the thin-adapter layer).
   //
-  // WIZFORM-04 — `apiKeyExchange` is the venue resolved ~50 lines above for the
-  // asset_class stamp; the probe gate reads the SAME value rather than issuing a
-  // second lookup. It is `null` when that read faulted, and the helper's gate
-  // probes on `null` — same conservative direction `skipAssetClassWrite` takes
-  // just above, for the same reason.
+  // WIZFORM-04 — the venue arrives on the SAME read the asset_class stamp issues
+  // ~50 lines above, rather than a second lookup. It is `null` when that read
+  // faulted, and the helper's gate probes on `null` — same conservative direction
+  // `skipAssetClassWrite` takes just above, for the same reason.
+  //
+  // ⭐ 153.6-04 / PARITY-04 — AND IT IS THE ATTESTED VENUE, NOT `apiKeyExchange`.
+  // The two bindings differ precisely on the rows that matter: a key whose
+  // client-supplied label claims the exemption reaches here with a null (or
+  // contradicting) attestation and is PROBED. See the read above for why there is
+  // no fallback between them.
   if (apiKeyId) {
-    const probe = await runScopeBroadeningProbe(apiKeyId, apiKeyExchange);
+    const probe = await runScopeBroadeningProbe(apiKeyId, attestedVenue);
     if (!probe.ok) return probe.response;
   }
 
@@ -1318,7 +1396,17 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // cross-file against SEAM_ROUTE_BUDGETS.
       const { data: members, error: membersErr } = await compositeAdmin
         .from("strategy_keys")
-        .select("api_key_id, api_keys ( exchange )")
+        // 153.6-04 / PARITY-04 — the embed carries the SERVER-ATTESTED venue
+        // alongside the client-writable label, and the per-member gate below
+        // reads the attestation ONLY.
+        //
+        // ⚠️ `exchange` STAYS ON THE PROJECTION even though the gate no longer
+        // reads it: the widening is ADDITIVE on purpose. The embed's shape is what
+        // the 153-review array-drift refusal is written against (`api_keys:
+        // [{ exchange }]`), and narrowing the projection in the same edit that
+        // moves the gate's authority would change two things at once — one of
+        // which nothing tests.
+        .select("api_key_id, api_keys ( exchange, attested_venue )")
         .eq("strategy_id", fields.strategy_id)
         .order("seq", { ascending: true })
         // ⚠️ cap + 1, AND THE +1 IS THE WHOLE POINT (ME-02). `.limit(cap)`
@@ -1511,9 +1599,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         const memberKeyId =
           typeof member.api_key_id === "string" ? member.api_key_id : null;
         if (!memberKeyId) continue;
+        // 153.6-04 / PARITY-04 — THE ATTESTED VENUE, per member, and never
+        // `member.api_keys.exchange`. Gating only the single-key arm on the
+        // attestation would be this phase committing its own headline mistake:
+        // a fix that landed on the path someone happened to test. An absent
+        // embed, an absent attestation field and an explicit `null` all resolve
+        // here to `null` ⇒ the member is PROBED. ⛔ No `??` fallback to the
+        // client-writable label — see the single-key read for why.
         const memberVenue =
-          typeof member.api_keys?.exchange === "string"
-            ? member.api_keys.exchange
+          typeof member.api_keys?.attested_venue === "string"
+            ? member.api_keys.attested_venue
             : null;
         const probe = await runScopeBroadeningProbe(memberKeyId, memberVenue);
         if (!probe.ok) return probe.response;
