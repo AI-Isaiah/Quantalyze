@@ -265,18 +265,53 @@ export const BREAKER_COOLDOWN_S = 30;
  * decorative: the encoded expiry could never be in the past while the key still
  * existed.
  *
- * 90 s, because the guard must span the longest budget in `SEAM_BUDGETS`
- * (`validate-key-serialized`, 120 000 ms) measured from the instant a lock is
- * armed: `(BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S) × 1000 = (30 + 90) ×
- * 1000 = 120 000 ≥ 120 000`, with the cooldown itself absorbing the first 30 s.
+ * ⚠️ THE QUANTITY THIS MUST SPAN IS A REQUEST'S ADMISSION→RECORD LIFETIME, NOT
+ * ITS `timeoutMs` (153.4 review, WR-01). The A-25 predicate is evaluated inside
+ * `recordSeamFailure`, against a key read from the store at RECORDING time — so
+ * the tombstone has to still be readable then, and "then" is later than the
+ * fetch deadline by every store round trip the record path spends first. Sizing
+ * this against `timeoutMs` alone left the key dying ≈9 s BEFORE the read that
+ * needs it, i.e. A-25 violated at exactly the row it was sized against.
  *
- * ⚠️ THE INEQUALITY IS TIGHT ON PURPOSE — it holds with EQUALITY, not with
- * slack. This constant was 60 while the longest budget was 60 000 ms; Phase
- * 153.4 / D-26 raised the serialized validate budget to 120 000 ms and this
- * constant to 90 IN THE SAME COMMIT, because landing the budget alone leaves
- * A-25 false while every literal-vs-literal assertion about it stays green.
- * Any FURTHER budget raise must move this constant again, in its own same
- * commit: there is no headroom left to absorb one.
+ * 100 s, from the worst case admission→record, all four terms named:
+ *
+ *   REQUEST LIFETIME  120 000 ms — the longest lifetime in `SEAM_BUDGETS`,
+ *                     `(1 + retries) × timeoutMs` plus the worst-case retry
+ *                     interval where `retries > 0`. Today that maximum is
+ *                     `validate-key-serialized` at `1 × 120 000` (retries: 0);
+ *                     a RETRIED row is charged its whole leg, so a future row
+ *                     with retries cannot under-count here.
+ *   LIMITER            5 000 ms — `breakerLimiter.limit()` runs BEFORE the trip
+ *                     read. `@upstash/ratelimit`'s `timeout` defaults to 5 000
+ *                     and this module does not override it (see the A-09 note in
+ *                     `recordSeamFailure`, which depends on that default); past
+ *                     it the limiter answers `reason: "timeout"` and we return
+ *                     without reading at all, so 5 000 is a real ceiling.
+ *   TRIP READ          4 250 ms — one bounded store command:
+ *                     `(1 + BREAKER_STORE_RETRIES) × BREAKER_STORE_TIMEOUT_MS +
+ *                     BREAKER_STORE_RETRIES × BREAKER_STORE_BACKOFF_MS`. The
+ *                     same 4 250 SC-4b charges per store command.
+ *   COOLDOWN          −30 000 ms — the key's TTL is `BREAKER_COOLDOWN_S +
+ *                     BREAKER_LOCK_TOMBSTONE_S`, so the cooldown absorbs the
+ *                     first 30 s of that span.
+ *
+ * `(120 000 + 5 000 + 4 250 − 30 000) / 1000 = 99.25 s`, rounded UP to 100. The
+ * ceiling is therefore `(30 + 100) × 1000 = 130 000 ≥ 129 250`, with 750 ms of
+ * deliberate slack and no more.
+ *
+ * ⚠️ THE SLACK IS 750 ms, NOT A BUFFER. This constant was 60 while the longest
+ * budget was 60 000 ms; Phase 153.4 / D-26 raised the serialized validate budget
+ * to 120 000 ms and this constant to 90 in the same commit, and the 153.4 review
+ * then found that 90 covered the BUDGET but not the LIFETIME. Any further budget
+ * raise — or any raise of the store bounds above — must move this constant again
+ * in its own same commit; 750 ms absorbs nothing real.
+ *
+ * ⚠️ AND IT WIDENS `MAX_BREAKER_LOCK_SPAN_MS` WITH IT (153.4 review, IN-04).
+ * That bound is derived from this constant, so a corrupt or mis-written lock
+ * value can now hold every seam route open for 130 s rather than 120 s, and the
+ * clock-skew tolerance recorded in the 141.2 review loosens by the same 10 s.
+ * Both are accepted consequences of the coupling, stated here rather than
+ * discovered later.
  *
  * Pinned in `seam-constants.pin.test.ts` three ways, and the third is the one
  * that can see this coupling break: a literal pin on this constant, the
@@ -285,7 +320,7 @@ export const BREAKER_COOLDOWN_S = 30;
  * from hand-typed breaker literals. The first two catch the constants moving;
  * only the third catches a budget outgrowing them.
  */
-export const BREAKER_LOCK_TOMBSTONE_S = 90;
+export const BREAKER_LOCK_TOMBSTONE_S = 100;
 
 /**
  * Fallback `Retry-After` for a caller that has an open circuit but no hint.
@@ -1098,11 +1133,11 @@ export function encodeBreakerLock(
  * state this module can produce — see `decodeBreakerLock`.
  *
  * DERIVED from the two constants rather than hand-typed, deliberately. The bound
- * means "as long as a lock can possibly be", not "90 000 ms", so retuning either
- * constant has to move it. It cannot drift in silence in either direction:
- * `seam-constants.pin.test.ts` pins both constants literal-against-literal, and
- * the G2 case in `resilient-fetch.test.ts` pins this ceiling against its own
- * hand-typed 90 000 from the outside.
+ * means "as long as a lock can possibly be", not "130 000 ms", so retuning
+ * either constant has to move it. It cannot drift in silence in either
+ * direction: `seam-constants.pin.test.ts` pins both constants
+ * literal-against-literal, and the G2 case in `resilient-fetch.test.ts` pins this
+ * ceiling against its own hand-typed 130 000 from the outside.
  */
 const MAX_BREAKER_LOCK_SPAN_MS =
   (BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S) * 1_000;

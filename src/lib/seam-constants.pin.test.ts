@@ -611,8 +611,34 @@ describe("SEAM_BUDGETS — every timeout pinned to a hand-typed literal", () => 
 });
 
 /**
+ * The worst-case wait between a failed seam attempt and its retry — the FIXED
+ * backoff plus the MAXIMUM jitter, which is added and never subtracted. Typed
+ * HERE as a bare literal rather than read from the module (this file's ONE
+ * RULE); the assertion further up pins the module's own two constants against
+ * this same 500.
+ */
+const WORST_CASE_RETRY_INTERVAL_MS = 500;
+
+/**
  * The ONE reducer both A-25 assertions below run — the real one over the live
  * table, and the SELF-TEST over a synthetic one.
+ *
+ * ⚠️ IT REDUCES OVER A REQUEST'S LIFETIME, NOT OVER `timeoutMs` (153.4 review,
+ * WR-01(b)). A-25's subject is how long a request can be IN FLIGHT, and a row
+ * with `retries: 1` is in flight for both attempts plus the interval between
+ * them. Reducing over `timeoutMs` agreed with that only by accident — the
+ * longest row happens to carry `retries: 0` — so granting
+ * `validate-key-serialized` a retry, or raising a retried row past the longest
+ * un-retried one, would break A-25 while this file's every assertion stayed
+ * green. That is the exact blindness the DERIVED assertion exists to remove.
+ *
+ * ⚠️ IT IS DELIBERATELY THE CONSERVATIVE READING. `resilientFetch` RECAPTURES
+ * `admittedAtMs` per attempt (141.2 / D-09), so the span A-25 literally compares
+ * is ONE attempt's, not the whole leg's. The whole leg is charged anyway,
+ * because the post-return `instrumentBody` closure records against the LAST
+ * attempt's admission at an instant the CALLER chooses, and because a bound that
+ * has to be re-reasoned every time the retry policy moves is a bound that will
+ * be got wrong. Erring long costs tombstone seconds; erring short costs A-25.
  *
  * ⚠️ SHARED ON PURPOSE. A SELF-TEST that re-types the reducer proves that the
  * RE-TYPED code works and says nothing at all about the assertion it claims to
@@ -623,11 +649,39 @@ describe("SEAM_BUDGETS — every timeout pinned to a hand-typed literal", () => 
  * vacuity guard; do not "fix" that here by clamping — a clamp would hide the
  * mis-shape rather than redden it.
  */
-function longestTimeoutMs(
-  table: Readonly<Record<string, { readonly timeoutMs: number }>>,
+function longestRequestLifetimeMs(
+  table: Readonly<
+    Record<string, { readonly timeoutMs: number; readonly retries: number }>
+  >,
 ): number {
-  return Math.max(...Object.values(table).map((row) => row.timeoutMs));
+  return Math.max(
+    ...Object.values(table).map(
+      (row) =>
+        (1 + row.retries) * row.timeoutMs +
+        (row.retries > 0 ? WORST_CASE_RETRY_INTERVAL_MS : 0),
+    ),
+  );
 }
+
+/**
+ * What the record path spends AFTER the fetch deadline fires and BEFORE the trip
+ * read lands — the term the A-25 sizing was missing entirely (153.4 review,
+ * WR-01(a)). Hand-typed, with its derivation stated so a reader can disagree
+ * with it:
+ *
+ *   5 000 — `breakerLimiter.limit()`, which runs first. `@upstash/ratelimit`'s
+ *           `timeout` defaults to 5 000 ms and the core does not override it;
+ *           past that the limiter answers `reason: "timeout"` and
+ *           `recordSeamFailure` returns WITHOUT reading, so this is a ceiling.
+ *   4 250 — the trip `get`: one bounded store command, `(1 + 1) × 2 000 + 1 ×
+ *           250`. The same 4 250 `seam-budgets.invariant.test.ts` charges per
+ *           store command.
+ *
+ * ⛔ Never replace this with `BREAKER_STORE_TIMEOUT_MS`-and-friends read out of
+ * the module: that is this file's ONE RULE, and the whole reason the incumbent
+ * A-25 pins could not see the gap.
+ */
+const RECORD_PATH_OVERHEAD_MS = 9_250;
 
 describe("breaker constants — all six pinned to hand-typed literals", () => {
   it("BREAKER_KEY is the literal 'breaker:railway'", () => {
@@ -753,62 +807,70 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
     ).toBe(500);
   });
 
-  it("BREAKER_LOCK_TOMBSTONE_S is the literal 90", () => {
+  it("BREAKER_LOCK_TOMBSTONE_S is the literal 100", () => {
     // How much longer the KEY lives than the LOCK it carries. The lock is open
     // until the expiry encoded in its VALUE; the key lingers past that so
     // `recordSeamFailure` can still read WHEN the last lock was armed, which is
     // the whole of the A-25 no-re-arm guard.
     //
     // 60 → 90 with Phase 153.4 / D-26, in the SAME commit as the 120 000 ms
-    // `validate-key-serialized` budget: (30 + 90) × 1 000 = 120 000 ≥ 120 000.
-    // The inequality now holds with EQUALITY, so there is no headroom left —
-    // the next budget raise moves this literal again.
+    // `validate-key-serialized` budget; 90 → 100 with the 153.4 review's WR-01,
+    // which found that 90 spanned the fetch BUDGET and not the request's
+    // admission→RECORD lifetime. The key has to be readable when the DOOMED
+    // request records, and recording happens a limiter call (≤5 000 ms) and a
+    // bounded store read (≤4 250 ms) after the deadline fires:
+    // (120 000 + 9 250 − 30 000) / 1000 = 99.25, rounded up.
     expect(
       BREAKER_LOCK_TOMBSTONE_S,
-      "The lock tombstone changed. Shortening it below (longest seam budget − " +
-        "cooldown) re-opens A-25: a request admitted before a lock was armed " +
-        "finds no trace of it and re-arms a fresh cooldown on stale evidence. " +
-        "At the longest budget of 120 000 ms and a 30 s cooldown, 90 is the " +
-        "MINIMUM that still spans it.",
-    ).toBe(90);
+      "The lock tombstone changed. Shortening it below (longest request " +
+        "LIFETIME + the record path's own store work − cooldown) re-opens " +
+        "A-25: a request admitted before a lock was armed finds no trace of it " +
+        "and re-arms a fresh cooldown on stale evidence. At the longest " +
+        "lifetime of 120 000 ms, 9 250 ms of record-path overhead and a 30 s " +
+        "cooldown, 100 is the MINIMUM whole second that still spans it.",
+    ).toBe(100);
   });
 
-  it("A-25: the tombstone outlives the longest seam budget", () => {
+  it("A-25: the tombstone outlives the longest request LIFETIME, overhead included", () => {
     // Both sides literal. The worst case the guard must span is a request
-    // admitted the instant before a lock is armed and failing at the end of the
-    // longest budget in the table — since Phase 153.4 / D-26 that is
+    // admitted the instant before a lock is armed, failing at the end of the
+    // longest lifetime in the table — since Phase 153.4 / D-26 that is
     // `validate-key-serialized`, at 120 000 ms, NOT `process-key-sync` at
-    // 60 000 ms. The tombstone therefore has to cover (120 000 − cooldown).
+    // 60 000 ms — and then RECORDING that failure, which costs a limiter call
+    // and a bounded store read on top (153.4 review, WR-01(a)). The tombstone
+    // has to cover (120 000 + 9 250 − cooldown); it used to cover only
+    // (120 000 − cooldown), so the key died ≈9 s before the read that needs it.
     //
     // ⚠️ THIS ASSERTION IS KEPT BESIDE THE DERIVED ONE BELOW, NOT REPLACED BY IT
-    // (D-19). This one restates the longest budget as a hand-typed literal, so
+    // (D-19). This one restates the longest lifetime as a hand-typed literal, so
     // it catches the two BREAKER CONSTANTS moving; it is structurally unable to
     // catch a budget ROW outgrowing them, which is the derived one's job.
     // Neither implies the other.
     expect(
       BREAKER_LOCK_TOMBSTONE_S * 1_000,
-      "The lock tombstone no longer spans the longest seam budget, so a " +
-        "120s-budget request that failed after a full cooldown can no longer " +
-        "see the lock it overlapped — and re-arms the circuit on evidence it " +
-        "gathered before the previous trip.",
-    ).toBeGreaterThanOrEqual(120_000 - 30_000);
+      "The lock tombstone no longer spans the longest request lifetime PLUS " +
+        "the record path's own store work, so a 120s-budget request that " +
+        "failed after a full cooldown can no longer see the lock it " +
+        "overlapped — and re-arms the circuit on evidence it gathered before " +
+        "the previous trip.",
+    ).toBeGreaterThanOrEqual(120_000 + 9_250 - 30_000);
   });
 
-  it("A-25 (DERIVED): the LONGEST budget in the live table fits inside tombstone + cooldown", () => {
+  it("A-25 (DERIVED): the LONGEST request lifetime in the live table, plus the record path, fits inside tombstone + cooldown", () => {
     // ── WHY THIS STANDS BESIDE THE ASSERTION ABOVE, NOT INSTEAD OF IT ─────────
     // The one above is LITERAL vs LITERAL: it catches the two breaker constants
-    // moving. It cannot catch the COUPLING breaking, because the "60 000" it
+    // moving. It cannot catch the COUPLING breaking, because the "120 000" it
     // compares against is a hand-typed restatement of a fact that lives in the
     // budget table — raise a budget row past the tombstone and that assertion
     // stays green while A-25 is actually violated. This one is DERIVATION vs
-    // HAND-TYPED: the only derived side is the longest timeout in the table.
+    // HAND-TYPED: the only derived side is the longest LIFETIME in the table.
     // Neither implies the other, so both are kept (D-19).
     //
-    // ⛔ The ceiling below is deliberately built from the bare literals 90 and
+    // ⛔ The ceiling below is deliberately built from the bare literals 100 and
     // 30 (seconds). Reading it out of the module under test is the exact defect
     // this file's ONE RULE forbids, and it is precisely what makes the incumbent
     // A-25 pin unable to fail.
-    const longest = longestTimeoutMs(SEAM_BUDGETS);
+    const longest = longestRequestLifetimeMs(SEAM_BUDGETS);
 
     // VACUITY GUARDS. `Math.max` over an empty or mis-shaped table is
     // -Infinity, which passes the ceiling forever while measuring nothing.
@@ -825,26 +887,34 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
         "and the reducer is reading undefined.",
     ).toBeGreaterThanOrEqual(120_000);
 
+    // ⚠️ THE LEFT SIDE CHARGES THE RECORD PATH, AND THAT IS WR-01(a). The
+    // quantity the tombstone must span is admission→RECORD, not admission→
+    // deadline: `recordSeamFailure` reads the key AFTER the fetch has given up,
+    // behind a limiter call and a bounded store read. Comparing the bare
+    // lifetime against the ceiling made the two equal at 120 000 and called it
+    // satisfied, while the actual read landed ≈9 s after the key had gone.
     expect(
-      longest,
-      "A-25 IS BROKEN: the longest seam budget no longer fits inside " +
-        "(lock tombstone + breaker cooldown), so a request admitted just " +
-        "before a lock was armed can fail after the tombstone has expired, " +
-        "find no trace of that lock, and re-arm a fresh cooldown on stale " +
-        "evidence. THE STANDING RULE, which Phase 153.4 / D-26 has now " +
-        "exercised once: any budget raised above (lock tombstone + breaker " +
-        "cooldown) × 1 000 must move the tombstone IN THE SAME COMMIT, and " +
-        "the hand-typed seconds in this expression move with it. " +
+      longest + RECORD_PATH_OVERHEAD_MS,
+      "A-25 IS BROKEN: the longest request LIFETIME plus the record path's own " +
+        "store work no longer fits inside (lock tombstone + breaker cooldown), " +
+        "so a request admitted just before a lock was armed can record its " +
+        "failure after the tombstone has expired, find no trace of that lock, " +
+        "and re-arm a fresh cooldown on stale evidence. THE STANDING RULE, " +
+        "which Phase 153.4 / D-26 has now exercised once: any budget raised " +
+        "above ((lock tombstone + breaker cooldown) × 1 000 − the record-path " +
+        "overhead) must move the tombstone IN THE SAME COMMIT, and the " +
+        "hand-typed seconds in this expression move with it. " +
         "Raising a budget alone is the break this assertion exists to catch — " +
         "it is the ONLY assertion in this file that can see it, because every " +
-        "other one restates the longest budget as a literal. ⚠️ THE EQUALITY IS " +
-        "TIGHT TODAY: the longest budget is validate-key-serialized at " +
-        "120 000 ms and the ceiling is exactly (90 + 30) × 1 000 = 120 000, so " +
-        "there is ZERO headroom — the next budget raise of any size moves the " +
-        "tombstone. ⛔ The fix is NEVER to weaken, relax or delete this " +
-        "assertion, and never to substitute the module's own constants for the " +
-        "hand-typed seconds (that is this file's ONE RULE, and it is exactly " +
-        "what made the incumbent literal-vs-literal A-25 pin blind). " +
+        "other one restates the longest budget as a literal. ⚠️ THE MARGIN IS " +
+        "750 ms: the longest lifetime is validate-key-serialized at 120 000 ms " +
+        "(retries: 0), the overhead is 9 250 ms, and the ceiling is " +
+        "(100 + 30) × 1 000 = 130 000. That is rounding slack, not headroom — " +
+        "the next budget raise of any size moves the tombstone. ⛔ The fix is " +
+        "NEVER to weaken, relax or delete this assertion, never to drop the " +
+        "overhead term, and never to substitute the module's own constants for " +
+        "the hand-typed seconds (that is this file's ONE RULE, and it is " +
+        "exactly what made the incumbent literal-vs-literal A-25 pin blind). " +
         "⚠️ D-18's 90 000 ms is SUPERSEDED by D-26: D-18 picked 90 000 only " +
         "because it was the largest budget needing ONE constant changed, i.e. " +
         "it let a test invariant choose a production timeout, and that " +
@@ -854,49 +924,63 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
         "named only because the A-25 sizing conversation cites it. Neither " +
         "superseded decision is implemented and neither number belongs in this " +
         "expression.",
-    ).toBeLessThanOrEqual((90 + 30) * 1_000);
+    ).toBeLessThanOrEqual((100 + 30) * 1_000);
   });
 
-  it("SELF-TEST — the DERIVED A-25 assertion reddens for a budget that outgrows the ceiling", () => {
+  it("SELF-TEST — the DERIVED A-25 assertion reddens for a lifetime that outgrows the ceiling, and the RETRIED leg is what produces it", () => {
     // A relaxed or mis-shaped reducer that returns a small number would make
     // the assertion above green forever. This runs the SAME reducer over a
     // synthetic table and proves (a) it reports the MAXIMUM, not the first or
-    // the last row, and (b) that maximum genuinely EXCEEDS the ceiling the
-    // real assertion applies.
-    const synthetic = { a: { timeoutMs: 15_000 }, b: { timeoutMs: 150_000 } };
+    // the last row, (b) it charges the RETRY factor rather than the bare
+    // timeoutMs, and (c) that maximum genuinely EXCEEDS the ceiling the real
+    // assertion applies.
+    //
+    // ⚠️ (b) IS THE POINT OF THE THIRD ROW, and it is what WR-01(b) closes. The
+    // winner here is the RETRIED row at 75 000 × 2 + 500 = 150 500, which is
+    // LONGER than the un-retried 120 000 — so a reducer that went back to
+    // `Math.max(row.timeoutMs)` would answer 120 000 and redden this case. The
+    // live table cannot state that today (its longest row carries retries: 0),
+    // which is exactly why the synthetic has to.
+    const synthetic = {
+      short: { timeoutMs: 15_000, retries: 0 },
+      longestSingle: { timeoutMs: 120_000, retries: 0 },
+      retried: { timeoutMs: 75_000, retries: 1 },
+    };
 
     expect(
-      longestTimeoutMs(synthetic),
-      "The shared reducer no longer reports the maximum timeoutMs, so the " +
-        "assertion above is not measuring the longest budget.",
-    ).toBe(150_000);
+      longestRequestLifetimeMs(synthetic),
+      "The shared reducer no longer reports the maximum request LIFETIME — " +
+        "either it stopped taking the maximum, or it dropped the (1 + retries) " +
+        "factor and the retry interval and is measuring timeoutMs again. Either " +
+        "way the assertion above is not measuring how long a request can be in " +
+        "flight, which is the only quantity A-25 is about.",
+    ).toBe(150_500);
 
-    // ⚠️ THE SYNTHETIC IS HAND-TYPED 150_000 ON PURPOSE — do NOT rewrite it as
+    // ⚠️ THE SYNTHETIC IS HAND-TYPED ON PURPOSE — do NOT rewrite it as
     // `ceiling + 1`. Deriving the synthetic from the module under test is the
     // self-referential oracle this whole file exists to forbid.
-    // ⚠️ AND IT IS 150_000, NOT 120_000. 153.1-01 chose it ahead of D-26 for
-    // exactly the reason D-26 has now made real: the ceiling was (30 + 60) ×
-    // 1 000 = 90 000, which 120 000 cleared, but Phase 153.4 raised the
-    // tombstone to 90 s and the ceiling is now exactly (30 + 90) × 1 000 =
-    // 120 000 — and `120 000 > 120 000` is FALSE. 150 000 cleared both, so this
-    // SELF-TEST survived that boundary un-red and needed no churn. If a
-    // successor ever raises the ceiling past 150 000, this literal moves in
-    // that same commit.
-    // ⚠️ THE CEILING BELOW IS THE HAND-TYPED `(90 + 30) × 1 000` — THE SAME
+    // ⚠️ AND ITS LIFETIME CLEARS THE CEILING WITH ROOM. 153.1-01 chose 150 000
+    // ahead of D-26 for exactly the reason D-26 then made real: the ceiling was
+    // (30 + 60) × 1 000 = 90 000, then (30 + 90) × 1 000 = 120 000 — and
+    // `120 000 > 120 000` is FALSE, so a synthetic pinned AT the longest live
+    // budget would have gone decorative at that boundary. It is now
+    // (30 + 100) × 1 000 = 130 000. If a successor ever raises the ceiling past
+    // 150 500, this synthetic moves in that same commit.
+    // ⚠️ THE CEILING BELOW IS THE HAND-TYPED `(100 + 30) × 1 000` — THE SAME
     // EXPRESSION THE ASSERTION ABOVE APPLIES, not the module's own constants.
     // That is the whole point of a SELF-TEST: it must prove the synthetic
     // exceeds the ceiling THE ASSERTION UNDER TEST uses. Reading the live
     // constants instead leaves a real blind spot — raise the assertion's
-    // hand-typed seconds past 150 000 without touching the module and this
+    // hand-typed seconds past 150 500 without touching the module and this
     // SELF-TEST stays green while the assertion it validates has gone
     // decorative, which is precisely the failure it exists to rule out.
     expect(
-      150_000,
-      "A budget of 150 000 ms no longer exceeds the DERIVED A-25 assertion's " +
-        "own ceiling, so that assertion can no longer redden for ANY table and " +
-        "is decorative. Raise this synthetic above the new ceiling in the same " +
-        "commit that raised it (see D-26).",
-    ).toBeGreaterThan((90 + 30) * 1_000);
+      150_500 + RECORD_PATH_OVERHEAD_MS,
+      "A request lifetime of 150 500 ms no longer exceeds the DERIVED A-25 " +
+        "assertion's own ceiling, so that assertion can no longer redden for " +
+        "ANY table and is decorative. Raise this synthetic above the new " +
+        "ceiling in the same commit that raised it (see D-26).",
+    ).toBeGreaterThan((100 + 30) * 1_000);
   });
 
   it("WIZFORM-05 / D-04: the serialized client budget exceeds the 105 s server worst case", () => {
@@ -990,8 +1074,8 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
       VALIDATE_KEY_SERIALIZED_BUDGET_MS,
       "The client's serialized validate budget is no longer 120 000 ms. If that is " +
         "deliberate: the seam row moves in the SAME commit, and a RAISE also moves " +
-        "BREAKER_LOCK_TOMBSTONE_S (D-26 — the A-25 equality is TIGHT at 120 000, " +
-        "zero headroom) plus its four hand-typed twins and the runbook.",
+        "BREAKER_LOCK_TOMBSTONE_S (D-26 — the A-25 margin is 750 ms of rounding " +
+        "slack, not headroom) plus its four hand-typed twins and the runbook.",
     ).toBe(120_000);
   });
 
@@ -1179,11 +1263,12 @@ describe("fake ↔ production — the breaker double's tuning cannot drift silen
   });
 
   it("FAKE_LOCK_TOMBSTONE_MS equals the millisecond form of BREAKER_LOCK_TOMBSTONE_S", () => {
-    // 60 000 → 90 000 with Phase 153.4 / D-26. TWO assertions, deliberately:
-    // this one pins the double's own literal, the one below pins that it still
-    // AGREES with production. Only the pair can tell "both moved together" from
-    // "neither moved" — and moving production alone is what D-26 forbids.
-    expect(FAKE_LOCK_TOMBSTONE_MS).toBe(90_000);
+    // 60 000 → 90 000 with Phase 153.4 / D-26, then → 100 000 with the 153.4
+    // review's WR-01. TWO assertions, deliberately: this one pins the double's
+    // own literal, the one below pins that it still AGREES with production. Only
+    // the pair can tell "both moved together" from "neither moved" — and moving
+    // production alone is what D-26 forbids.
+    expect(FAKE_LOCK_TOMBSTONE_MS).toBe(100_000);
     expect(FAKE_LOCK_TOMBSTONE_MS, DRIFT("lock tombstone")).toBe(
       BREAKER_LOCK_TOMBSTONE_S * 1_000,
     );

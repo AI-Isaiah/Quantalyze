@@ -945,9 +945,10 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
       // being deleted or moved onto the shared `encrypt-key` leg, which would
       // drop a real cost SC-4b is supposed to bound. A HIGHER number means a
       // budget row or a store constant moved — most plausibly the 120 000ms
-      // serialized budget, whose A-25 coupling to BREAKER_LOCK_TOMBSTONE_S is
-      // already at TIGHT EQUALITY (plan 153.4-01), so raising it is never a
-      // one-line change. This branch is the WORST case anywhere in the table
+      // serialized budget, whose A-25 coupling to BREAKER_LOCK_TOMBSTONE_S has
+      // only 750ms of rounding slack (plan 153.4-01, resized by the 153.4
+      // review's WR-01 to span admission→RECORD rather than admission→deadline),
+      // so raising it is never a one-line change. This branch is the WORST case
       // and it has 51 750ms of headroom against the 300 000ms ceiling.
       const worst = branchWorstCases(
         SEAM_ROUTE_BUDGETS["src/app/api/keys/validate-and-encrypt/route.ts"],

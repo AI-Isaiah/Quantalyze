@@ -147,13 +147,17 @@ export const FAKE_WINDOW_MS = 30_000;
  * is the whole of the A-25 no-re-arm guard.
  *
  * 60 000 → 90 000 with Phase 153.4 / D-26, which raised the production constant
- * to 90 s in the same commit as the 120 000 ms `validate-key-serialized`
- * budget. ⚠️ MOVED BY HAND, on purpose: the drift pin's own message forbids
- * closing this gap by reading production's value here, because a double that
- * reads its subject measures itself and stays green through a real change to
- * the seam core.
+ * to 90 s in the same commit as the 120 000 ms `validate-key-serialized` budget;
+ * 90 000 → 100 000 with the 153.4 review (WR-01), which found that 90 s spanned
+ * the fetch BUDGET but not the request's admission→RECORD lifetime — the record
+ * path spends a limiter call and a bounded store read after the deadline fires,
+ * and the key was dying ≈9 s before the read that needs it.
+ *
+ * ⚠️ MOVED BY HAND, on purpose: the drift pin's own message forbids closing this
+ * gap by reading production's value here, because a double that reads its
+ * subject measures itself and stays green through a real change to the seam core.
  */
-export const FAKE_LOCK_TOMBSTONE_MS = 90_000;
+export const FAKE_LOCK_TOMBSTONE_MS = 100_000;
 
 /** Prefix for the fake limiter's per-identifier counters inside the same store. */
 const COUNTER_PREFIX = "__fake_breaker_count__:";
