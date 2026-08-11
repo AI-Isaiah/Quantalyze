@@ -248,6 +248,35 @@ describe("AllocationsTabs — H-0058 scenario draft survives tab-switch (real co
   };
 
   beforeEach(() => {
+    // This suite mounts the REAL composer inside the REAL ScenarioTabContent,
+    // and both fetch on mount: `GET /api/allocator/scenario/saved` (the saved
+    // list), `/api/benchmark/btc` (the overlay series), and — once a strategy
+    // is added — `/api/strategies/<id>/returns`. None of that is the contract
+    // under test, so pin ONE mock that answers each with an empty 200, the
+    // same idiom as AllocationsTabs.scenario-composer.test.tsx.
+    //
+    // ⚠️ NOT a tidy-up. Without a stub of its own this file inherits whatever
+    // `fetch` the worker happens to be carrying — undici's real one (which
+    // REJECTS a relative URL: "Failed to parse URL from
+    // /api/allocator/scenario/saved") when it runs first, or a mock LEAKED by
+    // an earlier file. `unstubGlobals: true` in vitest.config.ts does not
+    // close that door on its own: it restores only what `vi.stubGlobal`
+    // recorded, exactly as the config's note says of `unstubEnvs` and direct
+    // `process.env` writes. Each file installs its own.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        // The returns route treats a 200 whose body has no `daily_returns`
+        // ARRAY as a retryable failure (WR-01 in ScenarioComposer), so answer
+        // it in its own shape rather than with a bare `[]`. The added legs in
+        // this suite carry no history, which is what the composer's
+        // empty-series path already expects.
+        const body = String(input).includes("/returns")
+          ? { daily_returns: [] }
+          : [];
+        return { ok: true, json: async () => body } as Response;
+      }),
+    );
     scenarioHoisted.browseOnAdd = null;
     mockReplace.mockReset();
     mockRefresh.mockReset();
@@ -289,7 +318,7 @@ describe("AllocationsTabs — H-0058 scenario draft survives tab-switch (real co
     }
   });
 
-  it("adding + toggling a strategy in Scenario, leaving to Overview, and re-entering preserves the draft (survives unmount/remount via localStorage)", async () => {
+  it("adding + toggling a strategy in Scenario, leaving to Overview, and re-entering preserves the draft (survives unmount/remount via localStorage)", { timeout: 15_000 }, async () => {
     // Start on the Scenario tab so the REAL composer mounts.
     setSearchParams("tab=scenario");
     const { rerender } = render(<AllocationsTabs {...STUB_PROPS} />);
@@ -297,7 +326,21 @@ describe("AllocationsTabs — H-0058 scenario draft survives tab-switch (real co
     // Wait for the real composer body to mount (the browse drawer renders with
     // it and hands back its onAdd). Then inject two strategies — the interactive
     // rows in the read-only-tokens model.
-    expect(await screen.findByTestId("kpi-strip-mock")).toBeInTheDocument();
+    //
+    // ⚠️ EXPLICIT BUDGET, and the reason this file used to be order-dependent.
+    // `AllocationsTabs` reaches ScenarioComposer through `next/dynamic`, so
+    // this first `findBy` is not waiting on a render — it is waiting on a
+    // RUNTIME MODULE IMPORT of a ~5k-line component and its transitive graph,
+    // paid once per worker process. MEASURED cold in a fresh worker: 1360ms,
+    // i.e. OVER Testing Library's 1000ms default, so the file failed in
+    // isolation and passed only when it happened to run late in a warm worker
+    // — which is what made its verdict look like a parallelism problem. The
+    // second `it` below needs no budget: by then the dynamic chunk is resolved
+    // in this file's module registry. The generous per-test timeout is the
+    // ScenarioCommitDrawer / outcomes idiom, and only a genuine hang pays it.
+    expect(
+      await screen.findByTestId("kpi-strip-mock", undefined, { timeout: 10_000 }),
+    ).toBeInTheDocument();
     expect(scenarioHoisted.browseOnAdd).not.toBeNull();
     await act(async () => {
       scenarioHoisted.browseOnAdd!({

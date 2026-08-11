@@ -46,7 +46,10 @@ vi.mock("next/navigation", () => ({
 // trigger an actual network request when the security tab mounts.
 const mockFetch = vi.fn();
 beforeEach(() => {
-  globalThis.fetch = mockFetch as unknown as typeof globalThis.fetch;
+  // stubGlobal, not `globalThis.fetch = …` — only a stub is undone by
+  // `unstubGlobals: true` (vitest.config.ts). A direct assignment leaks this
+  // mock to every later file in the worker.
+  vi.stubGlobal("fetch", mockFetch as unknown as typeof globalThis.fetch);
   searchParamsState.tab = null;
 });
 afterEach(() => {

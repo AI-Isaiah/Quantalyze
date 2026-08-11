@@ -1,7 +1,8 @@
-import { defineConfig } from "vitest/config";
+import { defineConfig, defaultExclude } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import { resolve } from "path";
 import os from "os";
+import { NODE_ENV_TEST_FILES } from "./vitest.node-env";
 
 // CI-flake mitigation (2026-05-20, per HANDOVER-CI-FLAKES-2026-05-20.md).
 // GitHub Actions runners have 4 logical cores; Vitest's default worker
@@ -14,6 +15,31 @@ import os from "os";
 // and removes the contention floor without losing parallelism on bigger
 // dev machines.
 const MAX_THREADS = Math.max(1, os.cpus().length - 1);
+
+// The whole suite, shared by both projects below (each one narrows it — the
+// jsdom project by excluding the node list, the node project by being that
+// list).
+const INCLUDE = [
+  "src/**/*.test.{ts,tsx}",
+  "tests/a11y/**/*.test.ts",
+  "tests/visual/**/*.test.ts",
+  "tests/visual/**/*.test.tsx",
+  // Phase 18 / FIX-04 — TS↔Python parity test reads both
+  // src/lib/admin/pii-scrub.ts and analytics-service/services/redact.py
+  // via fs.readFileSync to enforce denylist parity across runtimes.
+  "tests/lib/**/*.test.ts",
+  // Phase 19 / BACKBONE-05 + BACKBONE-10 — integration tests for
+  // (a) thin-adapter outbound /process-key fetch shape (headers + body)
+  //     across the 7 converted routes when the unified-backbone flag is on
+  // (b) auto-rollback cron + Sentry env-tag smoke
+  // both globs share the `tests/integration/` directory so a single
+  // `vitest run` invocation picks them up alongside the unit suite.
+  "tests/integration/**/*.test.ts",
+  // B25 — RuleTester fixtures for the local eslint-plugin-quantalyze rules
+  // live next to the rules they exercise (plugin self-containment) and are
+  // run as part of the normal vitest suite.
+  "tools/eslint-plugin-quantalyze/tests/**/*.test.ts",
+];
 
 export default defineConfig({
   plugins: [react()],
@@ -41,28 +67,62 @@ export default defineConfig({
     // either is removed (ledger rows SC-HARNESS-1 and SC-ENV-1).
     unstubGlobals: true,
     unstubEnvs: true,
-    include: [
-      "src/**/*.test.{ts,tsx}",
-      "tests/a11y/**/*.test.ts",
-      "tests/visual/**/*.test.ts",
-      "tests/visual/**/*.test.tsx",
-      // Phase 18 / FIX-04 — TS↔Python parity test reads both
-      // src/lib/admin/pii-scrub.ts and analytics-service/services/redact.py
-      // via fs.readFileSync to enforce denylist parity across runtimes.
-      "tests/lib/**/*.test.ts",
-      // Phase 19 / BACKBONE-05 + BACKBONE-10 — integration tests for
-      // (a) thin-adapter outbound /process-key fetch shape (headers + body)
-      //     across the 7 converted routes when the unified-backbone flag is on
-      // (b) auto-rollback cron + Sentry env-tag smoke
-      // both globs share the `tests/integration/` directory so a single
-      // `vitest run` invocation picks them up alongside the unit suite.
-      "tests/integration/**/*.test.ts",
-      // B25 — RuleTester fixtures for the local eslint-plugin-quantalyze rules
-      // live next to the rules they exercise (plugin self-containment) and are
-      // run as part of the normal vitest suite.
-      "tools/eslint-plugin-quantalyze/tests/**/*.test.ts",
-    ],
+    // ⚠️ EMPTY ON PURPOSE — the projects below own the file sets, and this
+    // must stay empty for them to. `extends: true` merges a project's config
+    // into this one with vite's `mergeConfig`, which CONCATENATES arrays
+    // instead of replacing them: with `INCLUDE` here, the node project's
+    // include resolves to `INCLUDE ∪ NODE_ENV_TEST_FILES` and it runs the
+    // whole suite — MEASURED, 791 files in the node project and 2,736 red
+    // `document is not defined`. Scalars (`environment`) DO override, which is
+    // why the node project can still flip that one.
+    include: [],
     setupFiles: ["src/test-setup.ts"],
+    // Two projects, split ONLY by test environment. jsdom stays the default
+    // and keeps everything except the explicit opt-in list in
+    // vitest.node-env.ts; that list is the node project. Both `extends: true`,
+    // so the react plugin, the `@` alias and every option above (setupFiles,
+    // the unstub pair) are inherited rather than restated — a project that
+    // forgot `setupFiles` would silently lose the env-restore fence, and one
+    // that forgot the plugin could not transform JSX at all.
+    //
+    // WHY. Building a jsdom per file is the largest single cost in a run:
+    // MEASURED at 987s of the 1289s of CPU a green parallel run burns, and 291
+    // of the 791 files never touch a DOM. Same tests, same assertions, no
+    // window.
+    //
+    // ⚠️ The two file sets are COMPLEMENTARY by construction — the node list
+    // is the node project's include and the jsdom project's exclude. Keep it
+    // that way: overlap runs a file twice (inflating the test count and the
+    // coverage denominator), a gap drops it silently.
+    //
+    // ⚠️ `defaultExclude` must be spread back in. Setting `exclude` REPLACES
+    // vitest's default (node_modules, dist, .idea, …) rather than adding to
+    // it, and without it the jsdom project walks node_modules.
+    //
+    // CI-COMPAT, verified rather than assumed (2026-08-12): `--shard=N/2`
+    // still partitions the union of both projects, `--reporter=blob` writes
+    // one report per shard, and `vitest run --merge-reports --coverage` merges
+    // them and enforces the thresholds below on the full-suite numbers.
+    // Coverage is a ROOT option, not a project one, so the split does not
+    // fragment it.
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "jsdom",
+          include: INCLUDE,
+          exclude: [...defaultExclude, ...NODE_ENV_TEST_FILES],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "node",
+          environment: "node",
+          include: NODE_ENV_TEST_FILES,
+        },
+      },
+    ],
     // Coverage tracking — GATED in CI by the `frontend-coverage` job
     // (.github/workflows/ci.yml), which since 2026-07-02 MERGES the two
     // vitest shards' blob reports (`vitest run --merge-reports --coverage`)

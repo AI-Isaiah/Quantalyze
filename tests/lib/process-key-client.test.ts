@@ -35,7 +35,10 @@ describe("postProcessKey 503 path (TC-4)", () => {
     originalToken = process.env.INTERNAL_API_TOKEN;
     delete process.env.INTERNAL_API_TOKEN;
     fetchSpy = vi.fn();
-    globalThis.fetch = fetchSpy as unknown as typeof globalThis.fetch;
+    // stubGlobal, not `globalThis.fetch = …` — only a stub is undone by
+    // `unstubGlobals: true` (vitest.config.ts). A direct assignment leaks this
+    // mock to every later file in the worker.
+    vi.stubGlobal("fetch", fetchSpy as unknown as typeof globalThis.fetch);
     process.env.ANALYTICS_SERVICE_URL = "https://analytics.test";
   });
 

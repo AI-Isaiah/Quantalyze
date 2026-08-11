@@ -45,7 +45,11 @@ function buildResponse(
 }
 
 function mockFetch(impl: () => Promise<Response>) {
-  globalThis.fetch = vi.fn(impl) as unknown as typeof fetch;
+  // stubGlobal, not `globalThis.fetch = …`: only a stub is undone by
+  // `unstubGlobals: true` (vitest.config.ts) / the `vi.unstubAllGlobals()`
+  // below. A direct assignment leaks this mock to every later file in the
+  // worker.
+  vi.stubGlobal("fetch", vi.fn(impl) as unknown as typeof fetch);
 }
 
 describe("<PortfolioImpactPanel>", () => {
@@ -56,9 +60,9 @@ describe("<PortfolioImpactPanel>", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     // A leaked global stub is this repo's known CI-only failure mode (CI Node 22
-    // vs local Node 25). This file assigns `globalThis.fetch` directly rather
-    // than via `vi.stubGlobal`, so the fence costs nothing today and closes the
-    // door if a future case reaches for the stub API.
+    // vs local Node 25). This fence used to be inert prose — the file assigned
+    // `globalThis.fetch` directly, which `vi.unstubAllGlobals()` cannot see —
+    // so `mockFetch` now installs a real stub and this line does real work.
     vi.unstubAllGlobals();
   });
 
