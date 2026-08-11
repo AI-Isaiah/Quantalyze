@@ -123,9 +123,24 @@
 --
 -- Idempotency
 -- -----------
--- ADD COLUMN IF NOT EXISTS; both RPCs and the trigger function are CREATE OR
--- REPLACE; the trigger is DROPped-if-exists before CREATE; the backfill is
--- WHERE attested_venue IS NULL, so a re-run writes nothing. Safe to re-run.
+-- ADD COLUMN IF NOT EXISTS; the CHECK constraint is added only if absent; both
+-- RPCs and the trigger function are CREATE OR REPLACE; the trigger is
+-- DROPped-if-exists before CREATE.
+--
+-- ⛔ THE BACKFILL IS NOT IDEMPOTENT BY VIRTUE OF ITS NULL PREDICATE, and the
+-- earlier claim that it was ("the backfill is WHERE attested_venue IS NULL, so
+-- a re-run writes nothing — safe to re-run") was FALSE from the moment the
+-- trigger started working (153.6 code review WR-01). After first apply, every
+-- non-privileged client INSERT lands attested_venue = NULL deliberately; an
+-- unbounded re-run would sweep exactly those rows and set attested_venue =
+-- exchange, i.e. retro-attest the forgeable label on the one population the
+-- trigger exists to keep unattested. What actually makes a re-run safe is the
+-- DATED CUTOFF on the backfill (section 6) — it is bounded to rows that predate
+-- this migration, so a re-run cannot reach anything created since. Post-verify
+-- (a) is bounded by the same cutoff, for the same reason: unscoped, it would
+-- have encoded "no unattested row may exist" as an invariant and FORCED the
+-- retro-attestation rather than surfacing it.
+--
 -- The census pre-flight is a read; it stays correct on a re-run because the
 -- backfill does not change any row's `exchange`.
 -- ============================================================================
@@ -495,9 +510,27 @@ $census$;
 -- A bounded, DATED snapshot, not an endorsement of the column. See the header
 -- for why fail-toward-probing alone would break every PROD MT5 finalize, and
 -- for the exact residual this leaves behind.
+--
+-- ⛔ THE DATED CUTOFF IS LOAD-BEARING, AND IT IS WHAT MAKES A RE-RUN SAFE
+-- (153.6 code review WR-01). `WHERE attested_venue IS NULL` alone is only
+-- harmless at the instant of first apply. From that moment on, EVERY
+-- non-privileged client INSERT (ApiKeyManager, StrategyForm) deliberately lands
+-- NULL — that is the scrub trigger working. An unbounded re-run would sweep
+-- exactly that population and set attested_venue = exchange, blessing the
+-- forgeable label on precisely the rows the trigger exists to keep unattested.
+-- The cutoff bounds the sweep to rows that PREDATE this migration, so a re-run
+-- writes nothing regardless of what has been inserted since.
+--
+-- ⛔ ONE DECLARATION, TWO USES. The same cutoff bounds post-verify (a) below.
+-- Held in a transaction-local GUC rather than repeated as a literal, because a
+-- verify whose cutoff drifted EARLIER than the backfill's would pass vacuously
+-- — it would simply stop looking at the rows the backfill missed.
+SET LOCAL quantalyze.attest_backfill_cutoff = '2026-08-11 00:00:00+00';
+
 UPDATE public.api_keys
    SET attested_venue = exchange
- WHERE attested_venue IS NULL;
+ WHERE attested_venue IS NULL
+   AND created_at < current_setting('quantalyze.attest_backfill_cutoff')::timestamptz;
 
 -- ───────────── 7. POST-VERIFY: every check ABORTS, none is NOTICE-only
 -- The other half of the 20260419140917 pairing, and the same self-verifying
@@ -511,14 +544,22 @@ DECLARE
   v_trg        BOOLEAN;
   v_exch_com   TEXT;
 BEGIN
-  -- (a) the backfill actually landed: no row is left unattested.
+  -- (a) the backfill actually landed — SCOPED TO THE POPULATION IT CLAIMED
+  --     (153.6 code review WR-01). This deliberately does NOT assert "no
+  --     unattested row exists anywhere": that would encode the OPPOSITE of the
+  --     intended steady state, in which every client INSERT after this
+  --     migration lands NULL on purpose, and on a re-run it would FORCE the
+  --     retro-attestation the dated cutoff above exists to prevent. The claim
+  --     is narrower and true: every row that PREDATES the migration was
+  --     covered. Same cutoff as the backfill, read from the same GUC.
   SELECT count(*) INTO v_unattested
     FROM public.api_keys
-   WHERE attested_venue IS NULL;
+   WHERE attested_venue IS NULL
+     AND created_at < current_setting('quantalyze.attest_backfill_cutoff')::timestamptz;
   IF v_unattested <> 0 THEN
     RAISE EXCEPTION
-      'Migration 20260811210000 failed: % api_keys rows still have a NULL attested_venue after the backfill — every one of them would be probed, and an MT5 row among them is a permanent KEY_SCOPE_CHECK_UNAVAILABLE. Rolling back.',
-      v_unattested;
+      'Migration 20260811210000 failed: % api_keys rows created before % still have a NULL attested_venue after the backfill — every one of them would be probed, and an MT5 row among them is a permanent KEY_SCOPE_CHECK_UNAVAILABLE. Rolling back.',
+      v_unattested, current_setting('quantalyze.attest_backfill_cutoff');
   END IF;
 
   -- (b) neither re-base took a stale body. The advisory-lock fences are the
