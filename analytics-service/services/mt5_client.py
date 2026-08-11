@@ -114,9 +114,10 @@ from __future__ import annotations
 import logging
 import os
 import time
+from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, NoReturn, TypeVar, cast
+from typing import Any, Callable, Final, NoReturn, TypeVar, cast
 
 import structlog
 
@@ -273,6 +274,134 @@ MT5_IPC_TIMEOUTS_MS: dict[str, int] = {
     "login": MT5_LOGIN_TIMEOUT_MS,
 }
 
+# --------------------------------------------------------------------------- #
+# WIZFORM-ABANDON / D-36 (AMENDED) — THE TERMINAL EPOCH REGISTRY.
+#
+# WHY it exists: `asyncio.to_thread` work OUTLIVES its `asyncio.wait_for`. Python
+# threads cannot be interrupted, so when the bound fires the caller unwinds and
+# RELEASES the terminal lease while the abandoned thread keeps driving the SAME
+# process-global MT5 session — under the NEXT holder's lease. The generation
+# counter below is the sink that fences those zombies: the lease bumps a
+# terminal's generation on release, and every session-touching method checks its
+# own bound generation FIRST and refuses on a stale one (`Mt5Client._assert_live`).
+#
+# ⛔ It lives HERE, in `mt5_client.py`, and NOT in `mt5_concurrency.py`, for two
+# independent reasons and either alone is decisive:
+#   * the import edge is strictly ONE-WAY — `mt5_concurrency.py` imports from this
+#     module, whose only in-tree import is `services.redact`, so a registry over
+#     there that this module had to read would be a circular import;
+#   * `mt5_terminal_lease(terminal_key: str, ...)` receives a STRING and nothing
+#     else. It holds no client reference and structurally cannot bump an instance
+#     attribute — which is also why the epoch is keyed by `terminal_key` rather
+#     than carried per-instance. The lease imports `bump_mt5_terminal_epoch`.
+#
+# Keyed by `terminal_key` (host:port — OUR infrastructure identity, the same key
+# `_MT5_TERMINAL_LOCKS` already uses), so every client built against the ONE
+# shared Wine terminal reads the SAME generation.
+#
+# The dict grows unboundedly BY DESIGN (the same rationale as the terminal-lock
+# registry it mirrors): evicting a generation would silently reset a live client's
+# comparison to "fresh" and un-fence exactly the zombie this exists to catch, and
+# terminal cardinality is bounded anyway (v1 = ONE gateway terminal, O(1) keys).
+#
+# ⛔ CROSS-THREAD, DELIBERATELY LOCK-FREE. `_assert_live` runs on an
+# `asyncio.to_thread` worker while the event-loop thread writes this dict from the
+# lease's `finally`. `dict.get` and `dict.__setitem__` on an `int` are single
+# bytecodes under the GIL, so the read can observe the old or the new generation
+# but never a torn one — and either observation is correct (it is precisely the
+# release the fence is racing). Do NOT add a `threading.Lock`: it would put a lock
+# on the hot path of every MT5 round-trip AND raise a lock-ORDERING question
+# against the terminal lease that does not exist today.
+# --------------------------------------------------------------------------- #
+_MT5_TERMINAL_EPOCHS: dict[str, int] = {}
+
+
+def _mt5_epoch_for(terminal_key: str) -> int:
+    """The current generation of one terminal. Unknown key -> generation 0.
+
+    ⛔ `dict.get` with a default, NEVER `setdefault`: a READ must not mint a
+    registry entry. `_assert_live` calls this on every session touch, and a read
+    that wrote would make the "grows unboundedly by design" note above a claim
+    about traffic rather than about terminals.
+    """
+    return _MT5_TERMINAL_EPOCHS.get(terminal_key, 0)
+
+
+def bump_mt5_terminal_epoch(terminal_key: str) -> int:
+    """Advance one terminal's generation and return the new value.
+
+    PUBLIC (no leading underscore) because it deliberately crosses a module
+    boundary: `services.mt5_concurrency.mt5_terminal_lease` calls it from its
+    `finally`, and the worker's raw-lock call sites call it on their own release
+    paths. Everything else about the epoch is private to this module.
+    """
+    nxt = _MT5_TERMINAL_EPOCHS.get(terminal_key, 0) + 1
+    _MT5_TERMINAL_EPOCHS[terminal_key] = nxt
+    return nxt
+
+
+def _reset_mt5_epochs_for_tests() -> None:
+    """Clear the epoch registry between tests (RESEARCH Pitfall 8).
+
+    Five test modules already hand-clear `_MT5_TERMINAL_LOCKS`; a leaked EPOCH
+    would be a sixth flake mechanism under `-n auto --dist loadgroup` (a bump from
+    one test fencing a client built by the next). ⛔ Not called from production
+    code, and not to be: it is reached through the ONE shared
+    `mt5_concurrency.reset_terminal_state_for_tests()` so a future third registry
+    has exactly one home to be added to.
+    """
+    _MT5_TERMINAL_EPOCHS.clear()
+
+
+# --------------------------------------------------------------------------- #
+# WIZFORM-ABANDON / D-36 AMENDED (ii) — LEASE OCCUPANCY.
+#
+# The epoch above fences METHOD CALLS. It cannot fence CONSTRUCTION: in findings
+# #6a/#6b the abandoned thread is parked inside `Mt5Client.__init__`'s blocking
+# connect and makes no subsequent session call, so there is no method for a guard
+# to sit in front of. This ContextVar is the other half — the construction fence
+# reads it (plan 02).
+#
+# WHY a ContextVar rather than a construction-time epoch snapshot: `to_thread`
+# copies the caller's `contextvars.Context` at spawn and `wait_for`'s task
+# inherits it, so an abandoned thread keeps carrying the OLD occupancy tuple while
+# the registry moves on. Critically it also removes a FALSE POSITIVE
+# structurally: `job_worker._make_mt5_session` builds its client in PREFLIGHT,
+# outside and before the lease, so it carries NO token and is exempt — not as a
+# special case someone maintains, but as the honest encoding of "this construction
+# is not happening under anyone's lease".
+#
+# ⛔ The default is an immutable `None`, never a mutable container: a mutable
+# ContextVar default is shared by every context that never `set()` it, so a caller
+# that mutated it in place would corrupt every other request
+# (the `services/exchange.py:56-69` trap).
+#
+# ⛔ It lives in THIS leaf for the same one-way-import reason as the registry:
+# `mt5_concurrency` imports FROM `mt5_client`, never the reverse.
+# --------------------------------------------------------------------------- #
+_MT5_LEASE_OCCUPANCY: ContextVar[tuple[str, int] | None] = ContextVar(
+    "mt5_lease_occupancy", default=None
+)
+
+
+def begin_mt5_lease_occupancy(terminal_key: str) -> Token[tuple[str, int] | None]:
+    """Stamp the current context as operating under a lease on `terminal_key`.
+
+    The stamped generation is the one CURRENT AT ACQUISITION, so a construction
+    fence can tell "built under the lease that is still running" from "built under
+    a lease that has since released" (the zombie).
+    """
+    return _MT5_LEASE_OCCUPANCY.set((terminal_key, _mt5_epoch_for(terminal_key)))
+
+
+def end_mt5_lease_occupancy(token: Token[tuple[str, int] | None]) -> None:
+    """Un-stamp the caller's context via the Token the `begin` returned.
+
+    `Token.reset` (not `set(None)`) so nested leases restore the OUTER value
+    rather than flattening it — the same discipline `logging_config.py:43` uses.
+    """
+    _MT5_LEASE_OCCUPANCY.reset(token)
+
 
 class Mt5ClientError(RuntimeError):
     """Fail-loud typed error carrying the MT5 `(code, text)` from `last_error()`.
@@ -313,6 +442,48 @@ class Mt5AccountMismatchError(Exception):
             f"MT5 account mismatch: expected login {expected}, "
             f"terminal presented {actual}"
         )
+
+
+# The refusal message is a FIXED string and MUST stay one — see
+# `Mt5SessionAbandoned` below for why interpolating the stage would be a defect.
+_MT5_SESSION_ABANDONED_MESSAGE: Final[str] = (
+    "MT5 session abandoned: the lease under which it operated has ended"
+)
+
+
+class Mt5SessionAbandoned(Exception):
+    """WIZFORM-ABANDON / D-36 — a session touch arrived from work that OUTLIVED
+    its `asyncio.wait_for`, after the lease it began under had already released.
+
+    Deliberately a PLAIN ``Exception``, NOT an ``Mt5ClientError`` subclass — the
+    same discipline as ``Mt5AccountMismatchError`` above and
+    ``Mt5TerminalBusyError`` / ``_Mt5PostReadVerificationError`` in
+    ``mt5_concurrency``, and for the same structural reason: the credential
+    classify/stamp arms match on ``Mt5ClientError``, so a fence refusal that
+    inherited from it could be absorbed into a USER-ATTRIBUTED verdict
+    (``auth`` / ``wrong_server``) and blame a working key for OUR abandoned
+    thread. Plain ``Exception`` makes that structurally impossible rather than
+    carefully avoided.
+
+    ⛔ THE MESSAGE IS FIXED AND CARRIES NO STAGE (D-42). The classifier matches by
+    SUBSTRING against ``_WRONG_SERVER_TOKENS`` / ``_AUTH_TOKENS``
+    (``services/mt5_validation.py:66-83``), and the fenced stage names are
+    themselves members of those tables — ``terminal_info`` and ``connect`` contain
+    ``terminal``/``connect``, ``login`` and ``account_info`` contain
+    ``login``/``account``. Interpolating the stage would therefore re-run the
+    documented ``routers/exchange.py:678-684`` incident, where an operator-side
+    refusal became a 400 telling the user their BROKER SERVER was wrong. The stage
+    is kept as an ATTRIBUTE (``self.stage``) for the callers that route on it, and
+    it is safe in the fence's WARNING log — a log line is never classified.
+
+    ⛔ It carries no host, port, terminal key, credential or generation number: the
+    abandoned lease is OUR infrastructure and nothing about it may reach a
+    response body (WIZFORM-03 / T-134-01).
+    """
+
+    def __init__(self, stage: str) -> None:
+        self.stage = stage
+        super().__init__(_MT5_SESSION_ABANDONED_MESSAGE)
 
 
 def _default_connect(*, host: str, port: int, timeout: float) -> Any:
@@ -456,6 +627,65 @@ class Mt5Client:
         self._ipc_timeouts_ms = ipc_timeouts_ms
         self._mt5 = connect(host=host, port=port, timeout=request_timeout_s)
         self._closed = False
+        # WIZFORM-ABANDON / D-36: the terminal generation this session belongs to.
+        # ⛔ UNBOUND at construction and bound LAZILY on the first session touch —
+        # see `_assert_live` for why an eager bind here would be a defect.
+        self._epoch: int | None = None
+
+    def _assert_live(self, stage: str) -> None:
+        """Refuse — LOUDLY — a session touch from work that outlived its bound.
+
+        WIZFORM-ABANDON / D-36. `asyncio.to_thread` work is never cancelled: when
+        the caller's `wait_for` fires it unwinds and RELEASES the terminal lease
+        while the abandoned thread keeps driving the same process-global MT5
+        session, now under the NEXT holder's lease. The lease bumps the terminal's
+        generation on release (`mt5_concurrency.mt5_terminal_lease`), so a zombie's
+        next touch finds its own generation stale and is refused HERE, at the one
+        sink, instead of at N call sites.
+
+        ⭐ LAZY BIND, and it is load-bearing. `job_worker._make_mt5_session` builds
+        its client in PREFLIGHT — outside and before the lease — so a generation
+        stamped at construction would go stale merely because an UNRELATED lease
+        released in that window, and a legitimate derive read would be refused.
+        Binding on FIRST TOUCH costs nothing in fencing power: every zombie's first
+        touch happened under the lease that later released. (Construction itself is
+        fenced by the separate lease-occupancy ContextVar — D-36 AMENDED (ii).)
+
+        ⭐ IT LOGS AS WELL AS RAISES (D-39). `asyncio.futures._copy_future_state`
+        opens with `if dest.cancelled(): return`, so on the abandoned path the
+        destination future is already cancelled and the raise reaches NOBODY. A
+        refusal that only raised would be invisible — the silent-UNKNOWN class this
+        milestone has spent four phases closing. The WARNING is the whole signal.
+
+        ⛔ NOT a `mt5.stage` event. A refusal is not a round-trip; emitting one
+        would pollute the `duration_ms` population Phase 155 depends on with
+        zero-duration non-calls. If a COUNT is ever wanted it needs a distinct
+        event name.
+
+        ⛔ EXEMPT AND MUST STAY EXEMPT (D-41): `__init__`, `close`, `release` and
+        `_teardown_transport`. Since D-35 those touch only OUR OWN rpyc socket, and
+        fencing them would strand it — reintroducing exactly the Pitfall-6 leak
+        that `routers/exchange.py:899-948` exists to prevent, i.e. the fix would
+        cause the bug it is fixing. If you are here to "finish the job" by guarding
+        the teardown verbs: don't.
+        """
+        current = _mt5_epoch_for(self.terminal_key)
+        if self._epoch is None:
+            # First touch — it happens under the lease that owns this session.
+            self._epoch = current
+            return
+        if self._epoch == current:
+            return
+        logger.warning(
+            "Mt5Client._assert_live: refusing the %s round-trip — this session was "
+            "bound to terminal generation %d and the terminal is now on generation "
+            "%d, so the lease it operated under has already been released and "
+            "another holder may own the terminal (WIZFORM-ABANDON / D-36).",
+            stage,
+            self._epoch,
+            current,
+        )
+        raise Mt5SessionAbandoned(stage)
 
     def _timed(self, stage: str, call: Callable[[], _T]) -> _T:
         """Run ONE MT5 round-trip under a `perf_counter` bracket, emitting its
@@ -499,6 +729,12 @@ class Mt5Client:
     def _raise_last(self) -> NoReturn:
         """Capture `last_error()` IMMEDIATELY (the next remote call overwrites it)
         and raise a typed, secret-scrubbed error."""
+        # WIZFORM-ABANDON / D-36 — the fence is the FIRST statement, BEFORE the
+        # try/except below, for a reason specific to this method: that except arm
+        # converts anything it catches into a scrubbed `Mt5ClientError`, and an
+        # `Mt5SessionAbandoned` converted into one is exactly the absorption D-42
+        # makes structurally impossible. Fenced ahead of it, it escapes as itself.
+        self._assert_live("last_error")
         # RED-TEAM: last_error() is itself a raw transport call. If the connection
         # died right after the None-return that triggered _raise_last, this call
         # can RAISE — and outside _guarded_read it would escape as a raw, untyped,
@@ -583,6 +819,10 @@ class Mt5Client:
         EXPECTED investor account under our controlled timeout + read-only
         semantics. initialize() carries no credentials, but its transport text is
         scrubbed on the same fail-loud path for safety."""
+        # WIZFORM-ABANDON / D-36. Ahead of BOTH `_timed` brackets so a refusal
+        # never enters the D-32 `duration_ms` population, and ahead of the except
+        # arms so it cannot be rewritten into a scrubbed `Mt5ClientError`.
+        self._assert_live("login")
         try:
             inited = self._timed(
                 "initialize",
@@ -619,6 +859,9 @@ class Mt5Client:
 
     def account_info(self) -> dict[str, Any]:
         """Current account snapshot as a native dict. None (error) -> typed raise."""
+        # WIZFORM-ABANDON / D-36 — ahead of `_guarded_read` (which would convert
+        # the refusal into an `Mt5ClientError`) and ahead of `_timed`.
+        self._assert_live("account_info")
         info = self._guarded_read(self._mt5.account_info, stage="account_info")
         if info is None:
             self._raise_last()
@@ -651,6 +894,8 @@ class Mt5Client:
         ``services.mt5_validation.classify_trade_capability`` therefore refuses
         (``"undetermined"``) rather than concluding.
         """
+        # WIZFORM-ABANDON / D-36 — ahead of `_guarded_read` and `_timed`.
+        self._assert_live("terminal_info")
         info = self._guarded_read(self._mt5.terminal_info, stage="terminal_info")
         if info is None:
             self._raise_last()
@@ -671,6 +916,8 @@ class Mt5Client:
         coercing here lets EVERY caller work — the worker passes ints, the soak passes
         tz-aware datetimes; a naive/aware datetime → ``int(ts.timestamp())`` (the tz
         offset is immaterial for a range filter)."""
+        # WIZFORM-ABANDON / D-36 — ahead of `_guarded_read` and `_timed`.
+        self._assert_live("history_deals_get")
         _from, _to = _epoch_bound(from_ts), _epoch_bound(to_ts)
         deals = self._guarded_read(
             lambda: self._mt5.history_deals_get(_from, _to), stage="history_deals_get"
@@ -695,6 +942,8 @@ class Mt5Client:
         positional dict with retcode ``-2 'Unnamed arguments not allowed'`` — it wants
         the named request fields (verified live). ``**request`` produces
         ``mt5.order_check(action=…, symbol=…, …)`` which MT5 accepts."""
+        # WIZFORM-ABANDON / D-36 — ahead of `_guarded_read` and `_timed`.
+        self._assert_live("order_check")
         result = self._guarded_read(
             lambda: self._mt5.order_check(**request), stage="order_check"
         )
