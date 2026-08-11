@@ -742,6 +742,17 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
 
 ### Tech-debt / maintainability (opportunistic, don't force)
 
+- **The two wizard connect surfaces keep TWO hand-maintained `EXCHANGES` rosters (added 2026-08-11,
+  153.4 review CR-03).** `ConnectKeyStep.tsx` and `MultiKeyConnectStep.tsx` each hold a private
+  option table, justified by a "State-A neutrality over DRY" docblock. The composite copy fell an
+  entire venue behind — no MT5 card, `MT5_UI_ENABLED` not even imported — so a draft-carried MT5
+  member panel POSTed `passphrase: null`, dropping the broker server, and rendered no field to
+  re-enter it. **Fixed pointwise** (the card + the four third-field overrides are now in the
+  composite roster) **and fenced** (`MultiKeyConnectStep.test.tsx` "[CR-03] … THE CLASS GUARD"
+  compares both surfaces' rendered exchange cards with both flags ON). ⭐ The CLASS fix is one
+  shared option table both steps import — a THIRD module, which the neutrality argument does not
+  forbid (it forbids `ConnectKeyStep` growing an export). Do it the next time a venue is added.
+
 - **⭐ AUDIT METHOD + two more unfalsifiable guards (2026-08-09).** Phase 153 found **14** guards
   that could not fail. The method that finds them, in order of cost:
   1. **Grep triage** on six smells: literal-vs-literal · fixture sized off the constant under test ·

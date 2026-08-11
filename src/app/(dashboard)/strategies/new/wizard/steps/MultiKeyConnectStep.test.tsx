@@ -1044,6 +1044,193 @@ describe("[SFOX-08] MultiKeyConnectStep — flag-gated sFOX panel (token-only)",
   });
 });
 
+/**
+ * 153.4 review CR-03 — AN MT5 MEMBER PANEL MUST NOT DROP THE BROKER SERVER.
+ *
+ * This step keeps its OWN private `EXCHANGES` roster (see DELIBERATE DUPLICATION
+ * at the top of the component), and that roster had no MT5 card while
+ * `ConnectKeyStep`'s did. An MT5 key reaches a member panel by exactly one route —
+ * the UAT/F-4 draft carry-over — which is also the route this file's own
+ * long-wait block drives, so the defect shipped under green tests: the mocks
+ * answered 200 without ever looking at the request body.
+ *
+ * ⭐ THE BODY ASSERTION IS THE LOAD-BEARING ONE. Every other assertion here
+ * (labels, the rendered field, an enabled submit) is satisfiable by a panel that
+ * still posts `passphrase: null`.
+ */
+describe("[CR-03] MultiKeyConnectStep — a draft-carried MT5 panel keeps its broker server", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  /** Flag ON, State A on MT5 and filled, then "+ Add another key window". */
+  async function mt5Panel() {
+    vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
+    vi.resetModules();
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        if (String(input).includes("composite/add-key")) {
+          return jsonResponse(
+            { ok: true, strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID },
+            200,
+          );
+        }
+        return jsonResponse({}, 200);
+      });
+    const { MultiKeyConnectStep: Fresh } = await import("./MultiKeyConnectStep");
+    render(<Fresh wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    fireEvent.change(screen.getByLabelText("MT5 login"), {
+      target: { value: "5000123" },
+    });
+    fireEvent.change(screen.getByLabelText("Investor password"), {
+      target: { value: "investor-pw-xxx" },
+    });
+    fireEvent.change(screen.getByLabelText("Broker server"), {
+      target: { value: "MyBroker-Live" },
+    });
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    return { fetchSpy };
+  }
+
+  it("⭐ the add-key POST carries the broker server the user typed, never null", async () => {
+    const { fetchSpy } = await mt5Panel();
+    const panel0 = screen.getByTestId("key-panel-0");
+    fireEvent.change(within(panel0).getByTestId("key-0-window-start"), {
+      target: { value: "2024-01-01" },
+    });
+    fireEvent.click(within(panel0).getByTestId("key-0-validate"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("key-0-summary")).toBeInTheDocument(),
+    );
+    const addCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("composite/add-key"),
+    )!;
+    const body = JSON.parse((addCall[1] as RequestInit).body as string);
+    expect(body.exchange).toBe("mt5");
+    expect(body.api_key).toBe("5000123");
+    expect(body.api_secret).toBe("investor-pw-xxx");
+    expect(
+      body.passphrase,
+      "the MT5 panel posted no broker server. MT5 collects three credentials " +
+        "into the {api_key, api_secret, passphrase} slots, and the third one is " +
+        "the server the user typed in State A — dropped here, the route can " +
+        "only reject the request or probe against no server at all, and the " +
+        "panel renders no field to put it back.",
+    ).toBe("MyBroker-Live");
+  });
+
+  it("the panel renders the third field, labelled and legible, and gates submit on it", async () => {
+    await mt5Panel();
+    const panel0 = screen.getByTestId("key-panel-0");
+    // Labelled for MT5, not "OKX Passphrase", and NOT masked: a broker server
+    // name is not a credential, and the helper tells the user to copy it exactly.
+    const server = within(panel0).getByTestId("key-0-passphrase");
+    expect(server).toHaveAttribute("type", "text");
+    expect(within(panel0).getByLabelText("Broker server")).toBe(server);
+    expect(within(panel0).getByLabelText("MT5 login")).toBeInTheDocument();
+    expect(within(panel0).getByLabelText("Investor password")).toBeInTheDocument();
+
+    // Emptying it blocks validate — `canValidate` must see requiresPassphrase.
+    fireEvent.change(within(panel0).getByTestId("key-0-window-start"), {
+      target: { value: "2024-01-01" },
+    });
+    expect(within(panel0).getByTestId("key-0-validate")).not.toBeDisabled();
+    fireEvent.change(server, { target: { value: "" } });
+    expect(
+      within(panel0).getByTestId("key-0-validate"),
+      "submit stayed enabled for a request that cannot succeed — the panel does " +
+        "not know this venue needs a third field.",
+    ).toBeDisabled();
+  });
+
+  it("the MT5 card is selected, named, and survives into the validated summary", async () => {
+    const { fetchSpy } = await mt5Panel();
+    const panel0 = screen.getByTestId("key-panel-0");
+    expect(
+      within(panel0).getByTestId("key-0-exchange-mt5"),
+      "the composite roster offers no MT5 card, so the panel's own venue is not " +
+        "selectable and `EXCHANGES.find` misses for every lookup it feeds.",
+    ).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.change(within(panel0).getByTestId("key-0-window-start"), {
+      target: { value: "2024-01-01" },
+    });
+    fireEvent.click(within(panel0).getByTestId("key-0-validate"));
+    await waitFor(() =>
+      expect(screen.getByTestId("key-0-summary")).toBeInTheDocument(),
+    );
+    // `active?.name` — empty when the lookup misses.
+    expect(screen.getByTestId("key-0-summary")).toHaveTextContent("MT5");
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+
+  it("flag OFF: no MT5 card, and every other venue's panel is untouched", async () => {
+    vi.resetModules();
+    const { MultiKeyConnectStep: Fresh } = await import("./MultiKeyConnectStep");
+    render(<Fresh wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    const panel0 = screen.getByTestId("key-panel-0");
+    expect(within(panel0).queryByTestId("key-0-exchange-mt5")).toBeNull();
+    // OKX regression: the third field keeps today's label, helper and MASK.
+    fireEvent.click(within(panel0).getByTestId("key-0-exchange-okx"));
+    const pass = within(panel0).getByTestId("key-0-passphrase");
+    expect(pass).toHaveAttribute("type", "password");
+    expect(within(panel0).getByLabelText("OKX Passphrase")).toBe(pass);
+    expect(pass).toHaveAttribute("placeholder", "Paste the OKX passphrase");
+    expect(panel0).toHaveTextContent(
+      "OKX requires a passphrase in addition to key and secret.",
+    );
+  });
+
+  it("⭐ THE CLASS GUARD: the two connect surfaces offer the SAME venue roster", async () => {
+    // ⭐ THE ASSERTION THAT WOULD HAVE CAUGHT CR-03 BEFORE IT SHIPPED, and that
+    // catches the NEXT venue added to one roster and not the other. This step
+    // keeps a private copy of `ConnectKeyStep`'s `EXCHANGES` on purpose (State-A
+    // neutrality), and the copy silently fell a venue behind. Neither array is
+    // exported, so the rosters are compared through the ONE thing both render:
+    // their exchange cards.
+    vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
+    vi.stubEnv("NEXT_PUBLIC_SFOX_ENABLED", "true");
+    vi.resetModules();
+    const { MultiKeyConnectStep: Fresh } = await import("./MultiKeyConnectStep");
+    const { unmount } = render(
+      <Fresh wizardSessionId={SESSION} onSuccess={vi.fn()} />,
+    );
+
+    // State A delegates to ConnectKeyStep — its cards are that roster.
+    const singleKeyVenues = Array.from(
+      document.querySelectorAll("[data-testid^='wizard-exchange-']"),
+    )
+      .map((el) => el.getAttribute("data-testid")!.replace("wizard-exchange-", ""))
+      .sort();
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    const panelVenues = Array.from(
+      screen
+        .getByTestId("key-panel-0")
+        .querySelectorAll("[data-testid^='key-0-exchange-']"),
+    )
+      .map((el) => el.getAttribute("data-testid")!.replace("key-0-exchange-", ""))
+      .sort();
+
+    // Vacuity floor: the flags really are on and both rosters really were read.
+    expect(singleKeyVenues).toContain("mt5");
+    expect(singleKeyVenues.length).toBeGreaterThanOrEqual(6);
+    expect(
+      panelVenues,
+      "a member panel offers a DIFFERENT set of venues than the single-key form " +
+        "does. A venue present on one and missing from the other produces a " +
+        "panel whose `EXCHANGES.find` misses — no labels, no third field, and a " +
+        "POST that silently drops whatever that venue collects in the " +
+        "passphrase slot (153.4 review CR-03).",
+    ).toEqual(singleKeyVenues);
+    unmount();
+  });
+});
+
 describe("[ONB-01] MultiKeyConnectStep — tap targets (v1.4 flex-compression)", () => {
   it("Move and Remove controls carry explicit >=44px width AND height classes", () => {
     render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);

@@ -26,7 +26,7 @@ import {
 } from "@/lib/wizard/validate-budget";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SupportedExchange } from "@/lib/utils";
-import { SFOX_UI_ENABLED } from "@/lib/utils";
+import { SFOX_UI_ENABLED, MT5_UI_ENABLED } from "@/lib/utils";
 import {
   getWizardCorrelationId,
   wizardFetch,
@@ -60,6 +60,18 @@ import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
  * multi-key panels cannot share ConnectKeyStep's private EXCHANGES/markup. The
  * duplication is intentional — Phase-91 QA should verify the two credential
  * surfaces stay in lockstep (labels, placeholders, secret handling).
+ *
+ * ⚠️ THE LOCKSTEP IS NOW ASSERTED, BECAUSE IT BROKE (153.4 review CR-03). "QA
+ * should verify" is not a mechanism: this roster fell an entire VENUE behind —
+ * `MT5_UI_ENABLED` was not so much as imported here — and the resulting panel
+ * posted `passphrase: null`, silently dropping the broker server, while rendering
+ * no field to put it back. `MultiKeyConnectStep.test.tsx`'s "[CR-03] … THE CLASS
+ * GUARD" case now compares the two surfaces' rendered exchange cards with both
+ * flags ON, so the NEXT venue added to one roster and not the other reds. ⛔ If
+ * that case goes red, add the venue here — never delete the case. The real class
+ * fix (one shared option table both steps import, which the State-A neutrality
+ * argument above does NOT forbid — it forbids ConnectKeyStep growing an export)
+ * is logged in TODOS.md.
  */
 
 function genId(): string {
@@ -85,6 +97,17 @@ interface ExchangeOption {
   requiresSecret?: boolean;
   credentialLabels?: { key: string; secret: string };
   credentialPlaceholders?: { key: string; secret: string };
+  // 153.4 review CR-03 — the four third-field overrides ConnectKeyStep's option
+  // shape already carried and this one did not. Absent → today's OKX strings and
+  // today's masked render, so every existing venue's panel is byte-identical.
+  // MT5 reuses the SAME passphrase slot for the broker SERVER NAME, which is not
+  // a credential, so it relabels the field and unmasks it.
+  passphraseLabel?: string;
+  passphrasePlaceholder?: string;
+  passphraseHelper?: string;
+  passphraseSecret?: boolean;
+  // Optional muted helper under the secret input. Absent → nothing renders.
+  secretHelper?: string;
 }
 
 // Replicated verbatim from ConnectKeyStep (see DELIBERATE DUPLICATION above).
@@ -133,6 +156,42 @@ const EXCHANGES: ExchangeOption[] = [
             key: "Paste the read-only sFOX API token",
             secret: "Paste the read-only sFOX API token",
           },
+        },
+      ]
+    : []),
+  // 153.4 review CR-03 — THE MT5 CARD THIS ROSTER WAS MISSING, gated on the same
+  // flag as its single-key twin.
+  //
+  // ⚠️ ITS ABSENCE WAS NOT COSMETIC. An MT5 key reaches a member panel by exactly
+  // one route — the UAT/F-4 draft carry-over in `enterMulti`, which is the path
+  // plan 153.4-05's own tests drive. With no card, `EXCHANGES.find(e => e.id ===
+  // "mt5")` was `undefined` for that panel, so `requiresPassphrase` defaulted
+  // FALSE and `validatePanel` posted `passphrase: null` — silently dropping the
+  // broker server the user typed in State A — while `KeyPanel` rendered no field
+  // to put it back and `canValidate` did not gate on it. The submit control was
+  // enabled for a request that could not succeed. The same lookup miss also cost
+  // the panel its credential labels ("MT5 login" / "Investor password"), its
+  // investor-vs-master steer, its `aria-pressed` card and its validated summary
+  // name.
+  ...(MT5_UI_ENABLED
+    ? [
+        {
+          id: "mt5" as const,
+          name: "MT5",
+          caption: "Live investor (read-only) login. Forex & CFD.",
+          requiresPassphrase: true,
+          credentialLabels: { key: "MT5 login", secret: "Investor password" },
+          credentialPlaceholders: {
+            key: "Your MT5 account number",
+            secret: "Your read-only investor password",
+          },
+          passphraseLabel: "Broker server",
+          passphraseSecret: false,
+          passphrasePlaceholder: "Exactly as shown in your MT5 terminal",
+          passphraseHelper:
+            "Open your MT5 terminal's login window and copy the server name exactly as it appears there — it is broker-specific and often carries a region or Demo/Live suffix.",
+          secretHelper:
+            "Use your investor (read-only) password — not your master password. A master password can place trades, so we refuse it and store nothing.",
         },
       ]
     : []),
@@ -1671,6 +1730,19 @@ function KeyPanel({
     active?.credentialPlaceholders?.key ?? "Paste the read-only key";
   const secretPlaceholder =
     active?.credentialPlaceholders?.secret ?? "Paste the secret";
+  // 153.4 review CR-03 — the third field's per-venue strings. Every default is
+  // today's hardcoded OKX value, so a panel on any existing venue renders
+  // byte-identically; MT5 relabels the slot to the broker server and unmasks it
+  // (a server NAME is not a credential, and the user must be able to read it
+  // back against the helper that says to copy it exactly).
+  const passphraseLabel = active?.passphraseLabel ?? "OKX Passphrase";
+  const passphrasePlaceholder =
+    active?.passphrasePlaceholder ?? "Paste the OKX passphrase";
+  const passphraseHelper =
+    active?.passphraseHelper ??
+    "OKX requires a passphrase in addition to key and secret. You set this when you created the API key on OKX.";
+  const passphraseSecret = active?.passphraseSecret ?? true;
+  const secretHelper = active?.secretHelper;
   const secretInputId = `key-${index}-api-secret-input`;
   const windowEndId = `key-${index}-window-end`;
 
@@ -1914,25 +1986,33 @@ function KeyPanel({
                     data-testid={`key-${index}-api-secret`}
                     className="mt-1 w-full rounded-md border border-border bg-white px-3 py-2 text-body text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
                   />
+                  {/* Muted (never amber/red) steer under the secret input —
+                      DESIGN.md semantic-color gate: tone is earned by an actual
+                      rejection, not a preemptive warning. MT5 uses it for the
+                      investor-vs-master steer; absent elsewhere. */}
+                  {secretHelper && (
+                    <p className="mt-1 text-micro text-text-muted">
+                      {secretHelper}
+                    </p>
+                  )}
                 </div>
               )}
 
               {requiresPassphrase && (
                 <div>
                   <Input
-                    label="OKX Passphrase"
-                    type={p.showSecret ? "text" : "password"}
+                    label={passphraseLabel}
+                    type={passphraseSecret && !p.showSecret ? "password" : "text"}
                     value={p.passphrase}
                     onChange={(e) =>
                       onUpdate(index, { passphrase: e.target.value })
                     }
-                    placeholder="Paste the OKX passphrase"
+                    placeholder={passphrasePlaceholder}
                     autoComplete="off"
                     data-testid={`key-${index}-passphrase`}
                   />
                   <p className="mt-1 text-micro text-text-muted">
-                    OKX requires a passphrase in addition to key and secret. You
-                    set this when you created the API key on OKX.
+                    {passphraseHelper}
                   </p>
                 </div>
               )}
