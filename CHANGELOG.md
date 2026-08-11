@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.57.0.1] - 2026-08-11
+### CI — the fence tests stop competing with a 2320-row backlog for their own row
+
+Test-infrastructure only. No product code changes.
+
+The `python` CI job has been intermittently red for a while, and the reason turned out to be
+measurable rather than mysterious. On the shared TEST project, pg_cron fans out one
+`derive_broker_dailies` row per api_key at 05:30 UTC — **2320 rows in a single instant** — and
+TEST runs no worker, so nothing ever completes them. The claim RPC orders by
+`priority, next_attempt_at, id`, so all 2320 sort ahead of a row the fence suite seeds hours
+later, and a 50-row batch never reaches it. The helper then correctly returns `None`, and the
+assertions read `assert (None is not None)`.
+
+Phase 97 had already scoped the *return* by job id, which fixed "we got someone else's row". It
+could do nothing about "our row was never in the batch" — the failure that was actually firing.
+
+Each unscoped claim also drains 50 rows `pending → running` permanently, so the suite itself
+grinds the backlog down and the failure count falls through the day: 10, then 10, then 6, then
+clean. That is why two runs of an identical commit disagreed with each other, and why "is it near
+05:30?" was the wrong diagnostic — the failure window runs from 05:30 until CI has drained ~2320
+rows, which on 2026-08-11 was still going at 17:50.
+
+The fix is to claim with `p_kind_include`, so the batch only ever contains the kind the test
+seeded. The backlog becomes structurally invisible rather than unlikely to interfere: no arms race
+over `next_attempt_at`, no cleanup cron to maintain, and immunity to the next fan-out of any other
+kind. Production already worked this way — `main_worker`'s interactive role claims with
+`p_kind_exclude=BACKFILL_KINDS` precisely so a derive fan-out cannot starve interactive work. This
+suite was the last claimant still reading the unscoped global queue, which made the tests strictly
+less isolated than the code they test.
+
+The regression test runs offline with no database and was falsified by mutation: removing
+`p_kind_include` reproduces CI's exact error.
+
+**Not fixed here, and deliberately so:** `test_trigger_rls_audit.py` carries the same unscoped
+shape, but the whole module skips everywhere (it needs `TEST_SUPABASE_DB_URL`, which CI never
+sets). Scoping it means moving to a 4-arg overload with a `TEXT[]` bind that no environment can
+execute today, so it is documented in place instead of blind-edited.
+
 ## [0.57.0.0] - 2026-08-11
 ### v1.17 — work that outlives its timeout stops touching the terminal
 
