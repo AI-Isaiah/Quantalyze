@@ -393,12 +393,48 @@ def test_no_caller_reaches_shutdown_outside_the_permitted_site(
 def test_every_restart_call_site_holds_the_terminal_lease(
     tree_scan: list[_Scan],
 ) -> None:
-    """The surviving teardown is safe ONLY because no concurrent caller can be
-    attached when it fires — i.e. because every path to it holds the terminal.
+    """Every path that reaches the surviving teardown is LEXICALLY inside the
+    terminal lease.
 
     This is what turns "all four call sites happen to be inside a lock today" into
-    a structural property. Note this is the ONLY thing standing between the
-    permitted `shutdown()` and the exact cross-tenant `-10004` D-35 closed.
+    a structural property: a new call site written outside an `async with` reds
+    here, without anybody hand-editing a roster.
+
+    ⭐ RE-CUT 2026-08-11 (153.5 / WIZFORM-ABANDON, finding #5). This docstring used
+    to close with "note this is the ONLY thing standing between the permitted
+    `shutdown()` and the exact cross-tenant `-10004` D-35 closed." That claim was
+    FALSE, and this case is the proof: `mt5_concurrency._mt5_bounded_restart`
+    abandons its `to_thread(client.restart)` at the ~10s bound, its caller unwinds
+    and RELEASES the lease, and the zombie thread arrives at `stale.shutdown()`
+    under the NEXT holder — while this assertion stays GREEN. It has been green on
+    finding #5 for as long as the defect has existed.
+
+    ⛔ That is NOT a bug in this test and must not be "fixed" here. The enclosure
+    proof is LEXICAL by construction — `_Scan.visit_AsyncWith` answers *"is this
+    call WRITTEN inside a lease block?"*, a syntactic question — and abandonment is
+    precisely the case where work escapes its lexical block. The file already
+    encodes the conservative half of that insight (`_visit_function` resets the
+    lease depth at every function boundary, because a closure defined inside a
+    lease may be handed to `to_thread` and RUN long after it released); this is the
+    unconservative half, and it is the CEILING OF STATIC ANALYSIS, not a hole to
+    patch. ⛔ Do not add `to_thread`/`wait_for` proximity heuristics: a static
+    approximation of a temporal property produces false greens or false reds that
+    get weakened until they are green again.
+
+    The temporal half is answered at RUNTIME, by two guards this test does not
+    replace and is not replaced by:
+      * `services/mt5_client.py` — `restart()`'s SECOND epoch check, immediately
+        before the `stale.shutdown()`, with its behavioural case in
+        `tests/test_mt5_client_contract.py`;
+      * `tests/test_mt5_abandon_fence.py` (D-37, guard #16) — a barriered runtime
+        assertion that an abandoned worker's post-release session touch is refused.
+    Its static sibling is `tests/test_mt5_abandon_roster.py`, which asks the same
+    KIND of question this file asks (does every session-touching method carry the
+    check?) about the fence rather than the lease.
+
+    What this assertion still buys, stated honestly: it is the LEXICAL half of the
+    safety argument for the one permitted `shutdown()` — necessary, no longer
+    claimed to be sufficient.
     """
     unheld = [
         (rel, scan.qualnames[(rel, line)], line)
