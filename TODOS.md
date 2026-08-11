@@ -91,9 +91,44 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      fixing the timeout on a one-account architecture buys a working single user, not a working
      product. Decide the architecture before sizing the budget.
 
-0.5 **⛔ INSERT PHASE 153.5 — the abandoned-`to_thread` class (three review findings, ONE defect).**
+0.4 **⛔ PHASE 153.6 — PARITY: the fixes that only landed on one path (BOOKED 2026-08-11, not yet planned).**
+   Raised by `/code-review xhigh` over the whole 153→153.5 span (40 agents, 29 verified findings
+   → 13 distinct defects). **Nine come here**; two were fixed unplanned in the same session; two
+   are deliberately out. Full charter in `.planning/ROADMAP.md` under *Phase 153.6*.
+   ⭐ **The shape is "the fix landed once, not twice."** Three of the four root causes are the
+   same failure — a correct remedy applied to one path while its duplicate went untouched, with
+   no guard asserting the two agree. Found *inside the span whose own charter said "fix it at
+   the SINK, not three times"*. Close each cluster by making the two paths **unable to diverge
+   again**, not with N patches.
+   | Cluster | What |
+   |---|---|
+   | **A** (3) | `services/ingestion/mt5.py` never got 153.3's `routers/exchange.py` fixes: the `order_check` short-circuit (without it `_WRONG_SERVER_TOKENS` turns an operator refusal into a 400 accusing the user's BROKER SERVER — the exact documented incident), the broad materialization catch (an unscrubbed rpyc raise is a credential-disclosure surface, T-134-01), and a bare `RuntimeError` documented PERMANENT that the worker actually **RETRIES** via `classify_exception`'s unknown fall-through |
+   | **B** (3) | broad `except`s re-absorbing `Mt5SessionAbandoned` upstream of D-42's classify arms: one mislabels a fence incident as a gateway fault that never happened; one 503s it into the **mt5-gateway breaker**; plus `restart()` check 2 raising inside `_timed`, emitting the stage event check 1 was placed outside `_timed` to avoid |
+   | **C** (1) | `connectAbortDeadlineMsFor` sized against the branch table's **closed**-breaker column when the governing one is **failing** (175 500 vs 165 000 ms serialized) → CR-01's "nothing was saved" lie is reachable again ~10.5 s before the route finishes writing. ⛔ **Two halves — the number AND the oracle**, which pins the wrong column and so cannot red on it |
+   | **D** (1) | 🔒 **SECURITY, LIVE ON PROD.** `REVOKE UPDATE ON api_keys` is bypassable by DELETE + re-INSERT (`authenticated` keeps INSERT/DELETE; the browser already holds the server-minted ciphertext), and that same client-writable `exchange` is the sole authority for skipping finalize-wizard's ASVS V4 scope probe. ⚠️ SELF-targeted control bypass, **not** a tenant leak. The migration is on `main` and `supabase/migrations/**` auto-applies to PROD. ⛔ Needs a design decision, not a patch |
+   | **E** (1) | a probe parse miss moved off `KEY_NETWORK_TIMEOUT` onto `KEY_SCOPE_CHECK_UNAVAILABLE`, removing Retry for a condition a rolling deploy produces. Here rather than ad-hoc because error codes ripple into 153.1's pinned tables (re-cut, never delete) |
+   📌 **OUT (decided):** MT5 as a **composite member** — 153.4's CR-03 fix made an MT5 composite
+   panel reachable for the first time and `run_stitch_composite_job` has no `mt5` arm, so it
+   permanently `_stamp_failed`s the job. That is a **product decision** (teach the worker MT5, or
+   block MT5 in the composite wizard), natural neighbour **Phase 155**. Also out: the epoch never
+   re-binds (`_assert_live` binds on first touch only, so one `Mt5Client` serves exactly one
+   lease) — no production path does this, all five lease blocks ast-verified, and 153.5 already
+   pinned the constraint naming its future fix (rebind on lease entry).
+
+0.5 **✅ PHASE 153.5 COMPLETE 2026-08-11 — the abandoned-`to_thread` class (three review findings, ONE defect).**
    Raised by the `/code-review high` of Phase 153.3 (2026-08-09, 10 findings reported, 4 fixed
-   immediately). **Being planned now (2026-08-11)** — charter lives in `.planning/ROADMAP.md`
+   immediately). **CLOSED: 5/5 plans, verification passed 22/22 must-haves.** The fence is TWO
+   mechanisms (D-36 as amended) — a `terminal_key`-keyed epoch registry fencing method calls, and
+   a lease-occupancy `ContextVar` fencing construction, since a method-level fence cannot reach
+   finding #6 (the zombie sits inside `__init__`'s blocking connect with no method to guard).
+   Preconditioned on routing the three raw `async with _mt5_terminal_lock_for(...)` acquisitions
+   through the lease — **including finding #5's own path**, without which a bump in the lease
+   `finally` would have left the headline finding open with every test green.
+   ⚠️ **Two limits ACCEPTED, in code not just docs:** the fence cannot un-send an rpyc call already
+   dispatched on the wire (`sync_request_timeout` is client-side only), and a construction
+   *completing* between the `wait_for` firing and the bump still leaks one socket — narrowed, not
+   closed. ⚠️ Its follow-on review findings are booked as **Phase 153.6** (item 0.4 above).
+   Historical charter lives in `.planning/ROADMAP.md`
    § *Phase 153.5*; context at
    `.planning/phases/153.5-wizform-abandon-work-that-outlives-its-timeout/153.5-CONTEXT.md`.
    This entry is the backlog mirror of that charter, not the reminder that it is unplanned.

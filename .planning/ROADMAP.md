@@ -432,6 +432,50 @@ held). Line hints are `as of 2026-08-11` only: **if a hint disagrees with its sy
 - ⚠️ **The AST lease-roster CANNOT catch this.** Its enclosure proof is *lexical* — it reads the `shutdown` as inside the `async with` and passes while the runtime escapes. The fix needs a **runtime** assertion (observe the abandoned thread touching the session after release), never a second static pin. Guard #16 of Phase 153 lives here.
 - 📌 Deferred to **Phase 155**, not here (both need the live latency data D-32 made collectable — do NOT guess): the 60s per-stage ceiling wrapping six round-trips of 45 000ms/55s each, and the 20s interactive lease wait being smaller than the worker's 40s read + 10s restart hold.
 
+### Phase 153.6: PARITY — the fixes that only landed on one path (INSERTED)
+
+**Goal**: Every fix the 153 span made on one path exists on its twin, and no broad `except` re-absorbs a refusal the fence was built to surface
+**Depends on**: Phase 153.3 (the router fixes whose twins are missing), Phase 153.5 (the fence whose refusals are being swallowed), Phase 153.4 (the budget figure being corrected)
+**Requirements**: TBD at planning (derive from the nine findings below)
+**Owns**: `analytics-service/services/ingestion/mt5.py`, `analytics-service/routers/exchange.py`, `analytics-service/services/mt5_client.py`, `src/lib/wizard/validate-budget.ts`, `src/lib/seam-budgets.invariant.test.ts`, `src/app/api/strategies/finalize-wizard/route.ts`, `supabase/migrations/**`, `analytics-service/tests/**`
+**UI hint**: no
+**Plans**: TBD
+
+⭐ **Raised by `/code-review xhigh` over the whole 153→153.5 span (2026-08-11, 40 agents, 29 verified findings → 13 distinct defects).** Nine come here; two were fixed unplanned; two are deliberately out (see the bottom).
+
+⛔ **THE SHAPE OF THIS PHASE IS "the fix landed once, not twice."** Three of the four root causes are the same failure: a correct fix applied to one path while its duplicate went untouched, with no guard asserting the two agree. That is the instance-not-class mistake — found *inside the span whose own charter said "fix it at the SINK, not three times."* Do not close these as N point patches; the question each cluster must answer is **what makes the two paths unable to diverge again**.
+
+**A — Adapter parity (3 findings, ONE cause).** `services/ingestion/mt5.py` never received Phase 153.3's `routers/exchange.py` fixes:
+
+| # | Site | Missing twin |
+|---|---|---|
+| A1 | `ingestion/mt5.py` › `_probe` | the terminal short-circuit that stops `order_check` running when the verdict is already `undetermined` — without it `_WRONG_SERVER_TOKENS` (which carry "terminal") turn an operator-side refusal into a 400 accusing the user their BROKER SERVER is wrong. **This is the exact documented incident the router-side fix was written to prevent.** |
+| A2 | `ingestion/mt5.py` › `_read_terminal` | the broad `except Exception` around netref materialization — without it a transport failure escapes as a raw, unscrubbed rpyc exception. ⚠️ `mt5linux` f-string-interpolates the password into remotely-eval'd source, so exception TEXT is a credential-disclosure surface (T-134-01 / T-153.3-23). Only the exception CLASS is safe. |
+| A3 | `ingestion/mt5.py` (D-31 arm) | raises a bare `RuntimeError` documented PERMANENT, which escapes `Mt5Adapter.validate` into `job_worker.classify_exception`'s `("unknown", str(exc))` fall-through — **so the worker RETRIES a fault that can never clear**, re-running the whole serialized probe against the ONE shared terminal each time, queueing ahead of every other user's validate, and finally showing the user raw internal copy naming investor/master passwords. |
+
+**B — Absorption: broad `except` re-swallowing the fence (2 findings + 1 telemetry split).** D-42 made absorption structurally impossible *for the classify arms*; pre-existing catch-alls upstream reintroduced it.
+- B1 `routers/exchange.py` › `_read_terminal`'s `except Exception` swallows `Mt5SessionAbandoned` → an operator triaging in Railway reads a gateway materialization fault **that never happened**, and the probe continues on a "terminal unreadable" premise that is false.
+- B2 `routers/exchange.py` connect stage: the construction fence's `Mt5SessionAbandoned("connect")` is caught by the broad `except Exception as connect_err` before the dedicated D-40 arm, returning a **503 that counts toward the mt5-gateway breaker** — our own abandoned thread driving the breaker toward opening against a healthy gateway.
+- B3 `mt5_client.py` › `restart()` check 2 raises from INSIDE `_timed`, which emits an `mt5.stage` event with a `duration_ms` measuring a round-trip never made — the exact event check 1 was deliberately placed outside `_timed` to avoid (RESEARCH §Q-4). The two checks disagree about the telemetry contract.
+
+**C — The budget correction, and the oracle that cannot see it (1 finding, 2 halves).** `connectAbortDeadlineMsFor` was sized against the branch table's **closed**-breaker column (~158 500 ms) when the governing figure is the **failing** column (175 500 ms serialized / 85 500 ms default) — the failing state being exactly the state a stalling seam is in when a client deadline fires. So CR-01's "nothing was saved" lie is reachable again ~10.5 s before the route finishes writing the key. ⛔ **Fixing the number alone is half the job: `seam-budgets.invariant.test.ts`'s oracle pins the wrong column and so is structurally unable to red on this.** A guard that cannot fail when the behaviour it names changes is the defect class this span shipped repeatedly.
+
+**D — The venue lock is bypassable (1 finding, SECURITY, live on PROD).** Phase 153.2's CR-01 remedy `REVOKE UPDATE ON api_keys` does not hold: `authenticated` retains table-level **INSERT and DELETE**, and the browser already holds the server-minted ciphertext (`/api/keys/validate-and-encrypt` returns it; `ApiKeyManager.tsx` performs the INSERT), so an owner can DELETE and re-INSERT the same row under a different `exchange`. A `BEFORE UPDATE OF exchange` trigger never fires on that path — **neither the primary gate nor the backstop sees it** — and that same client-writable column is the sole authority for skipping `finalize-wizard`'s ASVS V4 scope-broadening probe. The migration header asserts the opposite ("the mislabelled row can never be corrected back"), which is the premise its own "self-defeating forgery" residual argument rests on; `supabase/tests/test_api_keys_exchange_not_user_writable.sql` proves DELETE survives but never tests the round trip.
+⚠️ **Calibrate honestly: this is a SELF-targeted control bypass, not a tenant leak** — an owner mislabelling their own key to dodge a probe on their own key. What is lost is the assurance that a key read-only at Connect was not broadened to trade. Serious for a product selling verified performance; not a 3am page.
+⚠️ **The migration is already on `main`, and `supabase/migrations/**` auto-applies to PROD on merge — so the hole is live.**
+⛔ **This one needs a real design decision, not a patch** (revoke DELETE too? move the INSERT server-side? stop trusting a client-writable column as the probe gate? a trigger comparing against a server-held record?). The options differ materially in blast radius. Decide it in discuss.
+
+**E — Retry affordance (1 finding).** A probe parse miss was moved off `KEY_NETWORK_TIMEOUT` onto `KEY_SCOPE_CHECK_UNAVAILABLE`, removing the Retry control for a condition that is **not** always permanent — a 2xx body the schema cannot read is also what a rolling analytics deploy produces. Belongs here rather than in an ad-hoc fix because touching a wizard error code ripples into 153.1's pinned code tables (`EXPECTED_TABLE_SIZE` and friends), which must be **re-cut, never deleted**.
+
+📌 **Explicitly OUT of this phase:**
+- **MT5 as a composite member** — the 153.4 CR-03 fix made an MT5 composite panel reachable for the first time, and `run_stitch_composite_job` has no `mt5` arm, so it `_stamp_failed`s the whole job as permanent (`venue 'mt5' is not a supported exchange`). That is a **product decision** (teach the stitch worker MT5, or block MT5 in the composite wizard), not a bug fix. Natural neighbour: Phase 155.
+- **The epoch never re-binds** (`mt5_client.py` `_assert_live` binds on first touch only), so one `Mt5Client` is usable under exactly one lease for its life. No production path does this today — all five lease blocks were ast-verified — and Phase 153.5 already pinned the constraint with a named future fix (rebind on lease entry). Latent, documented, not scheduled.
+- Two trivial findings (compare-route skeleton padding + its blind test oracle; the `as unknown as` composite-embed cast in `finalize-wizard`) were fixed unplanned in the same session.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 153.6 to break down)
+
+
 ### Phase 154: WIZCONT/STALE — Wizard continuity, no stale screens
 
 **Goal**: Re-entering the wizard continues where the founder left off, screens never show a state the backend has already left, and a token-less credential re-connect cannot mint duplicates
