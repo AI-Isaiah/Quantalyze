@@ -538,11 +538,21 @@ UPDATE public.api_keys
 -- these hold on PROD, TEST, local and CI alike.
 DO $verify$
 DECLARE
+  -- ⛔ THIS ARRAY IS A SECOND COPY of the allowlist in
+  -- scrub_client_supplied_attested_venue's body. Check (f) below asserts every
+  -- member of it appears in that body, so the duplication cannot silently
+  -- drift — the two-copies-that-disagree shape is this phase's own subject.
+  c_privileged_roles CONSTANT TEXT[] := ARRAY['postgres', 'service_role', 'supabase_admin'];
+
   v_unattested INT;
   v_cws_src    TEXT;
   v_awck_src   TEXT;
   v_trg        BOOLEAN;
   v_exch_com   TEXT;
+  v_cws_owner  TEXT;
+  v_awck_owner TEXT;
+  v_scrub_src  TEXT;
+  v_role       TEXT;
 BEGIN
   -- (a) the backfill actually landed — SCOPED TO THE POPULATION IT CLAIMED
   --     (153.6 code review WR-01). This deliberately does NOT assert "no
@@ -633,7 +643,52 @@ BEGIN
       'Migration 20260811210000 failed: anon acquired EXECUTE on a wizard RPC. Rolling back.';
   END IF;
 
-  RAISE NOTICE 'Migration 20260811210000 post-verify OK: zero unattested rows, both RPC fences intact and stamping attested_venue, scrub trigger attached, 20260810120000 marker preserved, RPC privileges unchanged.';
+  -- (f) THE COMPOSITION THE WHOLE DESIGN RESTS ON, and the one thing nothing
+  --     else here proves: that a DEFINER RPC's INSERT actually SURVIVES the
+  --     scrub trigger. Checks (b) and (c) cannot see this — (b) only greps the
+  --     bodies for the literal `attested_venue`, (c) only checks the trigger is
+  --     attached. Both pass while every attestation is silently NULLed.
+  --
+  --     A SECURITY DEFINER function body runs as its OWNER, so the trigger's
+  --     `current_user IN (...)` test resolves against proowner. If that owner is
+  --     outside the allowlist the failure is SILENT AND TOTAL: every
+  --     wizard-minted key lands unattested, venueSupportsScopeProbe(null)
+  --     answers true, and every MT5 wizard submit returns a permanent
+  --     KEY_SCOPE_CHECK_UNAVAILABLE with no remedy — the exact self-inflicted
+  --     regression the backfill section exists to prevent — while this migration
+  --     reports success. (153.6 code review WR-02 / migration audit MIG-02.)
+  SELECT pg_get_userbyid(proowner) INTO v_cws_owner FROM pg_proc
+   WHERE oid = 'public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid)'::regprocedure;
+  SELECT pg_get_userbyid(proowner) INTO v_awck_owner FROM pg_proc
+   WHERE oid = 'public.add_wizard_composite_key(uuid,text,text,text,text,text,text,text,integer,text,uuid)'::regprocedure;
+
+  IF NOT (v_cws_owner = ANY (c_privileged_roles)) THEN
+    RAISE EXCEPTION
+      'Migration 20260811210000 failed: create_wizard_strategy is owned by %, which the api_keys_scrub_attested_venue trigger does not admit (allowed: %). Every key the wizard mints would be scrubbed to NULL and every MT5 finalize would answer a permanent KEY_SCOPE_CHECK_UNAVAILABLE. Rolling back.',
+      v_cws_owner, array_to_string(c_privileged_roles, ', ');
+  END IF;
+  IF NOT (v_awck_owner = ANY (c_privileged_roles)) THEN
+    RAISE EXCEPTION
+      'Migration 20260811210000 failed: add_wizard_composite_key is owned by %, which the api_keys_scrub_attested_venue trigger does not admit (allowed: %). Every composite key the wizard mints would be scrubbed to NULL. Rolling back.',
+      v_awck_owner, array_to_string(c_privileged_roles, ', ');
+  END IF;
+
+  --     …and the allowlist this block just compared against is really the one
+  --     the trigger enforces. Without this, re-cutting the trigger's list while
+  --     leaving c_privileged_roles behind would make (f) assert against a
+  --     fiction and pass.
+  SELECT pg_get_functiondef('public.scrub_client_supplied_attested_venue()'::regprocedure)
+    INTO v_scrub_src;
+  FOREACH v_role IN ARRAY c_privileged_roles LOOP
+    IF v_scrub_src NOT LIKE ('%''' || v_role || '''%') THEN
+      RAISE EXCEPTION
+        'Migration 20260811210000 failed: the scrub trigger body does not name the role %, so the owner allowlist this post-verify checked is not the one actually enforced. Re-cut both together. Rolling back.',
+        v_role;
+    END IF;
+  END LOOP;
+
+  RAISE NOTICE 'Migration 20260811210000 post-verify OK: zero unattested rows in the backfilled population, both RPC fences intact and stamping attested_venue, both RPCs owned by a role the scrub trigger admits (%/%), scrub trigger attached, 20260810120000 marker preserved, RPC privileges unchanged.',
+    v_cws_owner, v_awck_owner;
 END
 $verify$;
 
