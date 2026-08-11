@@ -690,7 +690,7 @@ def strategy_id(admin):
 
 
 def _claim_one(
-    admin, worker_id: str, *, want_job_id: str
+    admin, worker_id: str, *, want_job_id: str, kind: str
 ) -> dict[str, Any] | None:
     """Call claim_compute_jobs_with_priority and return OUR row.
 
@@ -707,11 +707,48 @@ def _claim_one(
     snippet) fails at call time with a TypeError instead of silently reverting
     that site to the flaky foreign-row global-head behavior. That keeps the
     fence-flake fix from being able to regress unnoticed offline.
+
+    ⛔ ``kind`` IS WHAT KEEPS THE GLOBAL BACKLOG OUT OF OUR BATCH, and it is the
+    half ``want_job_id`` alone could never cover. Scoping the RETURN fixed
+    "we got someone else's row"; it did nothing about "our row is not in the
+    batch at all", which is the failure that has been reddening `python` since.
+
+    MEASURED on the shared TEST project (2026-08-11, read-only): pg_cron jobid 9
+    fans out ONE `derive_broker_dailies` row per api_key at 05:30 UTC — **2320
+    rows in a single instant** — and TEST runs no worker, so nothing completes
+    them. The claim RPC orders `priority, next_attempt_at, id`, so every one of
+    those rows sorts AHEAD of a row this suite seeds hours later, and a
+    50-row batch never reaches ours. `_claim_one` then correctly returns None
+    and the fence assertions read `assert (None is not None)`.
+
+    Each unscoped claim also drains 50 of those rows `pending -> running`
+    PERMANENTLY (nothing on TEST completes or reaps them; 2325 rows sat
+    `running`, the oldest from 2026-08-03), so the suite slowly grinds the
+    backlog down and the failure COUNT falls through the day — 10, then 10,
+    then 6, then clean. That is why reruns of an identical commit disagreed,
+    and why "is it near 05:30?" is the wrong question: the window runs from
+    05:30 until CI itself has drained ~2320 rows.
+
+    `p_kind_include` makes the backlog STRUCTURALLY INVISIBLE rather than
+    merely unlikely to interfere — no arms race over `next_attempt_at`, no
+    cleanup cron to maintain, and immune to the next fan-out of any other kind.
+    This is exactly what PRODUCTION already does: `main_worker`'s "interactive"
+    role claims with `p_kind_exclude=BACKFILL_KINDS` (= `derive_broker_dailies`,
+    `derive_allocator_equity`) precisely so a derive fan-out cannot starve
+    interactive work. Until now this suite was the only claimant still reading
+    the unscoped global queue — strictly less isolated than the code it tests.
+
+    ``kind`` is REQUIRED and keyword-only for the same reason ``want_job_id``
+    is: a caller that omits it must fail at call time rather than silently
+    reopen the starvation. Pass the kind the test actually seeded — a decoy
+    that must stay visible (see `test_claim_one_decoy_foreign_row_live`) has to
+    share it, or the decoy stops being a decoy.
     """
     res = admin.rpc("claim_compute_jobs_with_priority", {
         "p_batch_size": 50,
         "p_worker_id": worker_id,
         "p_unified_backbone_active": False,
+        "p_kind_include": [kind],
     }).execute()
     rows = res.data or []
     return next((r for r in rows if r["id"] == want_job_id), None)
@@ -728,7 +765,7 @@ def test_claim_stamps_claim_token(admin, strategy_id):
     }).execute().data[0]
     job_id = job["id"]
     try:
-        claimed = _claim_one(admin, "p97-claim-test", want_job_id=job_id)
+        claimed = _claim_one(admin, "p97-claim-test", want_job_id=job_id, kind="sync_trades")
         assert claimed is not None and claimed["id"] == job_id
         assert claimed.get("claim_token") is not None, (
             "claim RPC must populate claim_token on every claim"
@@ -809,7 +846,7 @@ def test_claim_one_decoy_foreign_row_offline():
     stub = _StubAdmin([foreign_row, own_row])
 
     # Scoped arm: returns OUR row despite the foreign row at data[0].
-    claimed = _claim_one(stub, "decoy-offline", want_job_id=own_id)
+    claimed = _claim_one(stub, "decoy-offline", want_job_id=own_id, kind="sync_trades")
     assert claimed is not None and claimed["id"] == own_id, (
         "scoped _claim_one must return OUR job even when a foreign row heads "
         "the claim batch"
@@ -836,10 +873,128 @@ def test_claim_one_decoy_foreign_row_offline():
 
     # Only-foreign batch: the scoped call must return None, never a foreign row.
     only_foreign = _StubAdmin([foreign_row])
-    assert _claim_one(only_foreign, "decoy-offline", want_job_id=own_id) is None, (
+    assert _claim_one(only_foreign, "decoy-offline", want_job_id=own_id, kind="sync_trades") is None, (
         "scoped _claim_one must return None (not a foreign row) when our job "
         "was not in the batch"
     )
+
+
+class _StubQueueAdmin:
+    """Offline model of `claim_compute_jobs_with_priority` that HONOURS
+    `p_kind_include` and `p_batch_size` — the two behaviours the starvation
+    regression turns on.
+
+    `_StubAdmin` above deliberately ignores params (it models only the
+    row-ordering defect). This one models the QUEUE: rows are handed to it in
+    claim order (`priority, next_attempt_at, id` — i.e. oldest-first), it drops
+    rows whose kind is excluded by `p_kind_include`, and it returns at most
+    `p_batch_size`. That is enough to reproduce the shared-TEST-DB starvation
+    without a database.
+    """
+
+    def __init__(self, rows_in_claim_order: list[dict]) -> None:
+        self._rows = rows_in_claim_order
+
+    def rpc(self, name: str, params: dict) -> _StubExecute:
+        assert name == "claim_compute_jobs_with_priority", (
+            f"queue stub only models the claim RPC, got {name!r}"
+        )
+        rows = self._rows
+        include = params.get("p_kind_include")
+        if include is not None:
+            assert isinstance(include, list) and include, (
+                "p_kind_include must be a non-empty list — the RPC signature is "
+                "p_kind_include TEXT[] (migration 20260719073701)"
+            )
+            rows = [r for r in rows if r["kind"] in include]
+        batch = params.get("p_batch_size")
+        assert isinstance(batch, int) and batch > 0, (
+            "p_batch_size must be a positive int — the RPC RAISEs otherwise"
+        )
+        return _StubExecute(rows[:batch])
+
+
+def test_claim_one_survives_a_full_batch_of_foreign_backlog_offline():
+    """OFFLINE repro-gate for the `python`-job flake: a global backlog deeper
+    than one batch must not hide our seeded job.
+
+    ⛔ THIS IS THE HALF `want_job_id` COULD NOT COVER. Scoping the RETURN fixed
+    "we got someone else's row". It did nothing about "our row never made it
+    into the batch", which is what has actually been reddening CI: `_claim_one`
+    dutifully returns None and every fence assertion reads
+    `assert (None is not None)`.
+
+    MEASURED on the shared TEST project (2026-08-11, read-only):
+
+      | fact                                              | value                      |
+      |---------------------------------------------------|----------------------------|
+      | rows inserted at 05:30:00.077672 in ONE instant   | 2320                       |
+      | their kind                                        | `derive_broker_dailies`    |
+      | what this suite seeds                             | `sync_trades`              |
+      | rows in `running` that nothing ever completes     | 2325 (oldest 2026-08-03)   |
+      | claim ordering                                    | priority, next_attempt_at, id |
+
+    Those 2320 rows all carry `next_attempt_at ≈ 05:30`, so they sort ahead of
+    anything this suite seeds hours later and a 50-row batch never reaches ours.
+
+    FALSIFICATION (run it — this is not a prediction): delete
+    `"p_kind_include": [kind]` from `_claim_one` and this test reds with
+    `our seeded job was starved out of the batch by foreign backlog`, because
+    the stub then hands back 50 `derive_broker_dailies` rows and ours is not
+    among them. Restore it and the test greens. The old unscoped arm is
+    asserted directly below so the two behaviours stay visible side by side.
+    """
+    own_id = str(uuid.uuid4())
+    own_row = {
+        "id": own_id,
+        "kind": "sync_trades",
+        "claim_token": str(uuid.uuid4()),
+        "status": "running",
+    }
+    # A full batch of older, foreign-kind rows AHEAD of ours — the 05:30 cron
+    # fan-out, modelled at exactly the batch size so the boundary is the thing
+    # under test rather than an arbitrary large number.
+    backlog = [
+        {
+            "id": str(uuid.uuid4()),
+            "kind": "derive_broker_dailies",
+            "claim_token": str(uuid.uuid4()),
+            "status": "running",
+        }
+        for _ in range(50)
+    ]
+    stub = _StubQueueAdmin([*backlog, own_row])
+
+    claimed = _claim_one(
+        stub, "starvation-offline", want_job_id=own_id, kind="sync_trades"
+    )
+    assert claimed is not None and claimed["id"] == own_id, (
+        "our seeded job was starved out of the batch by foreign backlog — "
+        "_claim_one must scope the CLAIM by kind, not only the RETURN by id"
+    )
+
+    # The pre-fix behaviour, inlined: an unscoped claim takes the batch head,
+    # which is 50 rows of foreign backlog. Our row is not in it at any batch
+    # size the RPC permits, because the backlog is 2320 deep on the real DB.
+    unscoped = stub.rpc("claim_compute_jobs_with_priority", {
+        "p_batch_size": 50,
+        "p_worker_id": "starvation-offline",
+        "p_unified_backbone_active": False,
+    }).execute().data
+    assert all(r["id"] != own_id for r in unscoped), (
+        "the unscoped claim must NOT contain our row — if it does, this test "
+        "has stopped modelling the starvation it exists to pin"
+    )
+    assert len(unscoped) == 50 and {r["kind"] for r in unscoped} == {
+        "derive_broker_dailies"
+    }, "the unscoped batch is entirely foreign backlog — that IS the defect"
+
+    # Foot-gun CLOSED, same rule as `want_job_id`: a caller that omits `kind`
+    # fails at call time rather than silently reopening the starvation.
+    with pytest.raises(TypeError):
+        _claim_one(  # type: ignore[call-arg]
+            stub, "starvation-offline", want_job_id=own_id
+        )
 
 
 def test_claim_one_decoy_foreign_row_live(admin, strategy_id):
@@ -861,7 +1016,7 @@ def test_claim_one_decoy_foreign_row_live(admin, strategy_id):
     decoy_strategy_id = _make_strategy(admin)
     decoy_job_id = _insert_pending_sync_trades(admin, decoy_strategy_id)
     try:
-        claimed = _claim_one(admin, "decoy-live", want_job_id=own_job_id)
+        claimed = _claim_one(admin, "decoy-live", want_job_id=own_job_id, kind="sync_trades")
         assert claimed is not None and claimed["id"] == own_job_id, (
             "scoped _claim_one must return OUR seeded job, not the decoy row"
         )
@@ -901,7 +1056,7 @@ def test_mark_compute_job_failed_writes_error_kind(admin, strategy_id):
     }).execute().data[0]
     job_id = job["id"]
     try:
-        claimed = _claim_one(admin, "hotfix-mark-failed", want_job_id=job_id)
+        claimed = _claim_one(admin, "hotfix-mark-failed", want_job_id=job_id, kind="sync_trades")
         assert claimed is not None and claimed["id"] == job_id
         token = claimed["claim_token"]
 
@@ -942,7 +1097,7 @@ def test_reclaim_invalidates_claim_token(admin, strategy_id):
     }).execute().data[0]
     job_id = job["id"]
     try:
-        claimed = _claim_one(admin, "p97-w1", want_job_id=job_id)
+        claimed = _claim_one(admin, "p97-w1", want_job_id=job_id, kind="sync_trades")
         assert claimed is not None
         token1 = claimed["claim_token"]
         assert token1 is not None
@@ -1113,7 +1268,7 @@ def test_late_mark_done_with_stale_token_raises_serialization_failure(admin, str
     job_id = job["id"]
     try:
         # W1 claim
-        w1 = _claim_one(admin, "p97-w1", want_job_id=job_id)
+        w1 = _claim_one(admin, "p97-w1", want_job_id=job_id, kind="sync_trades")
         assert w1 is not None and w1["id"] == job_id
         token1 = w1["claim_token"]
         assert token1 is not None
@@ -1127,7 +1282,7 @@ def test_late_mark_done_with_stale_token_raises_serialization_failure(admin, str
         }).execute()
 
         # W2 claim
-        w2 = _claim_one(admin, "p97-w2", want_job_id=job_id)
+        w2 = _claim_one(admin, "p97-w2", want_job_id=job_id, kind="sync_trades")
         assert w2 is not None and w2["id"] == job_id
         token2 = w2["claim_token"]
         assert token2 is not None
@@ -1200,7 +1355,7 @@ def test_late_mark_failed_with_stale_token_raises_serialization_failure(admin, s
     }).execute().data[0]
     job_id = job["id"]
     try:
-        w1 = _claim_one(admin, "p97-w1-fail", want_job_id=job_id)
+        w1 = _claim_one(admin, "p97-w1-fail", want_job_id=job_id, kind="sync_trades")
         token1 = w1["claim_token"]
 
         admin.table("compute_jobs").update({
@@ -1210,7 +1365,7 @@ def test_late_mark_failed_with_stale_token_raises_serialization_failure(admin, s
             "p_stale_threshold": "1 second",
         }).execute()
 
-        w2 = _claim_one(admin, "p97-w2-fail", want_job_id=job_id)
+        w2 = _claim_one(admin, "p97-w2-fail", want_job_id=job_id, kind="sync_trades")
         token2 = w2["claim_token"]
         assert token2 != token1
 
@@ -1258,7 +1413,7 @@ def test_mark_done_without_token_raises_strict(admin, strategy_id):
     }).execute().data[0]
     job_id = job["id"]
     try:
-        claimed = _claim_one(admin, "p97-strict", want_job_id=job_id)
+        claimed = _claim_one(admin, "p97-strict", want_job_id=job_id, kind="sync_trades")
         assert claimed is not None and claimed["id"] == job_id, (
             "p97-strict: our seeded job must be the one claimed — the later "
             "status=='running' assertion silently depends on it"
@@ -1562,7 +1717,7 @@ def test_reclaim_per_kind_override_invalidates_claim_token(admin, strategy_id):
     }).execute().data[0]
     job_id = job["id"]
     try:
-        claimed = _claim_one(admin, "p97-w1-perkind", want_job_id=job_id)
+        claimed = _claim_one(admin, "p97-w1-perkind", want_job_id=job_id, kind="sync_trades")
         assert claimed is not None and claimed["id"] == job_id
         token1 = claimed["claim_token"]
         assert token1 is not None
@@ -1643,7 +1798,7 @@ def test_late_mark_done_after_w2_completed_raises_serialization_failure(admin, s
     job_id = job["id"]
     try:
         # W1 claim
-        w1 = _claim_one(admin, "p97-w1-w2-faster", want_job_id=job_id)
+        w1 = _claim_one(admin, "p97-w1-w2-faster", want_job_id=job_id, kind="sync_trades")
         assert w1 is not None and w1["id"] == job_id
         token1 = w1["claim_token"]
         assert token1 is not None
@@ -1657,7 +1812,7 @@ def test_late_mark_done_after_w2_completed_raises_serialization_failure(admin, s
         }).execute()
 
         # W2 claim → token2
-        w2 = _claim_one(admin, "p97-w2-w2-faster", want_job_id=job_id)
+        w2 = _claim_one(admin, "p97-w2-w2-faster", want_job_id=job_id, kind="sync_trades")
         assert w2 is not None and w2["id"] == job_id
         token2 = w2["claim_token"]
         assert token2 != token1
@@ -2745,7 +2900,7 @@ def test_advance_sync_cursor_fence_owned_orphan_backcompat(admin, strategy_id):
         }).execute())
 
     try:
-        claimed = _claim_one(admin, "advance-fence-test", want_job_id=job_id)
+        claimed = _claim_one(admin, "advance-fence-test", want_job_id=job_id, kind="sync_trades")
         assert claimed is not None and claimed["id"] == job_id
         token = claimed["claim_token"]
         assert token is not None

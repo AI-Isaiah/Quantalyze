@@ -162,14 +162,29 @@ test.describe("/strategies/new/wizard?source=csv (Phase 15 / CSV-01..CSV-03)", (
     //    Preview and Submit).
     await page.getByTestId("wizard-csv-preview-continue").click();
 
-    // 9. Strategy-profile (csv_metadata) step renders. A description is
-    //    required to advance (the MetadataStep Submit gate).
+    // 9. Strategy-profile (csv_metadata) step renders. A description AND a
+    //    category are required to advance (the MetadataStep Submit gate) —
+    //    the earlier "a description is required" comment named only half the
+    //    gate, which is why the wait below was missing.
     await expect(
       page.getByRole("heading", { name: "Describe this strategy" }),
     ).toBeVisible({ timeout: 15_000 });
     await page
       .getByLabel("Description")
       .fill("E2E CSV strategy — automated test description.");
+
+    // ⛔ Same unstated precondition as `wizard-axe.spec.ts` — see the long note
+    // there. `category` is required (MetadataStep.tsx:724) and nothing here
+    // selects one; it works only because the step auto-selects `data[0].id`
+    // once the `discovery_categories` fetch resolves (:640). Clicking inside
+    // that window is refused at :815 and the wizard never advances.
+    // Both call sites are fixed together: a wait added to one spec while the
+    // other keeps racing is the same one-path-only fix this repo keeps paying
+    // for.
+    await expect(page.getByLabel("Category")).not.toHaveValue("", {
+      timeout: 15_000,
+    });
+
     await page.getByRole("button", { name: /review and submit/i }).click();
 
     // 10. Phase 53 / APPLY-02 — read-only Review & confirm recap renders
