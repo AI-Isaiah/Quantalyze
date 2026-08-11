@@ -93,15 +93,21 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 0.5 **⛔ INSERT PHASE 153.5 — the abandoned-`to_thread` class (three review findings, ONE defect).**
    Raised by the `/code-review high` of Phase 153.3 (2026-08-09, 10 findings reported, 4 fixed
-   immediately). **Not yet planned — this entry is the reminder.**
+   immediately). **Being planned now (2026-08-11)** — charter lives in `.planning/ROADMAP.md`
+   § *Phase 153.5*; context at
+   `.planning/phases/153.5-wizform-abandon-work-that-outlives-its-timeout/153.5-CONTEXT.md`.
+   This entry is the backlog mirror of that charter, not the reminder that it is unplanned.
    **The one defect:** work handed to `asyncio.to_thread` **outlives its `asyncio.wait_for`**. The
    `wait_for` raises, the caller unwinds and releases the terminal lease, and the abandoned thread
    keeps driving the same process-global MT5 session. Three faces, all in the 153.3 diff:
-   | # | Site | Symptom |
+   📌 **Anchors are SYMBOLS, not line numbers** — the original 153.3-era citations rotted (#6 and
+   #7 were off by ~30 and ~130 lines; #5 still held). Line hints are `as of 2026-08-11` only:
+   **if a hint disagrees with its symbol, the symbol wins.**
+   | # | Site (symbol anchor; line hint as of 2026-08-11) | Symptom |
    |---|---|---|
-   | 5 | `services/mt5_concurrency.py:119` | `_mt5_bounded_restart` abandons at 10s; the one permitted `mt5.shutdown()` can fire **after** the lease is released, under the next holder |
-   | 6 | `routers/exchange.py:483` (+ `services/ingestion/mt5.py:173`) | connect-stage timeout orphans an `Mt5Client` the thread then constructs — `client` was never assigned, so the Pitfall-6 `finally` releases nothing and the rpyc session leaks |
-   | 7 | `routers/exchange.py:689` | the end-to-end deadline fires; the abandoned probe keeps issuing rpyc calls, so D-29's serialization does not hold on the timeout path |
+   | 5 | `services/mt5_concurrency.py` › `_mt5_bounded_restart` — the `wait_for(to_thread(client.restart), timeout=_MT5_RESTART_TIMEOUT_S)` (~L118) | `_mt5_bounded_restart` abandons at 10s; the one permitted `mt5.shutdown()` can fire **after** the lease is released, under the next holder |
+   | 6 | `routers/exchange.py` › `_validate_mt5_key_probe` › nested `_connect_and_probe`, **STAGE 1 — connect** (~L513) (+ `services/ingestion/mt5.py` › `Mt5Adapter.validate`, the `wait_for(to_thread(_build_client))` inside the lease, ~L207) | connect-stage timeout orphans an `Mt5Client` the thread then constructs — `client` was never assigned, so the Pitfall-6 `finally` releases nothing and the rpyc session leaks |
+   | 7 | `routers/exchange.py` › `_validate_mt5_key_probe` — **THE ONE END-TO-END DEADLINE (D-03)**, `wait_for(_connect_and_probe(), timeout=_MT5_VALIDATE_DEADLINE_S)` (~L817) | the end-to-end deadline fires; the abandoned probe keeps issuing rpyc calls, so D-29's serialization does not hold on the timeout path |
    ⭐ **Fix it at the SINK, once — not three times.** Patching three call sites is precisely the
    instance-not-class mistake this milestone has paid for sixteen times, and #5/#6/#7 are the same
    mechanism. Candidate designs (needs a real decision, do NOT let a fixer improvise):

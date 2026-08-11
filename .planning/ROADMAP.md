@@ -411,11 +411,15 @@ Plans:
 
 ⭐ **ONE defect, three faces — fix it at the SINK, not three times.** Work handed to `to_thread` outlives its `wait_for`; the caller unwinds, releases the terminal lease, and the abandoned thread keeps driving the same process-global MT5 session.
 
-| # | Site | Symptom |
+📌 **Anchors below are SYMBOLS, not line numbers** — the original 153.3-era line citations had already
+rotted before this phase was planned (#6 and #7 were off by ~30 and ~130 lines respectively; #5 still
+held). Line hints are `as of 2026-08-11` only: **if a hint disagrees with its symbol, the symbol wins.**
+
+| # | Site (symbol anchor; line hint as of 2026-08-11) | Symptom |
 |---|---|---|
-| 5 | `services/mt5_concurrency.py:119` | `_mt5_bounded_restart` abandons at its 10s bound; the one permitted `mt5.shutdown()` can fire **after** the lease is released, under the next holder |
-| 6 | `routers/exchange.py:483` (+ `services/ingestion/mt5.py:173`) | a connect-stage timeout orphans an `Mt5Client` the thread then constructs — `client` was never assigned, so the Pitfall-6 `finally` releases nothing and the rpyc session leaks |
-| 7 | `routers/exchange.py:689` | the end-to-end deadline fires; the abandoned probe keeps issuing rpyc calls, so D-29's serialization does not hold on the timeout path |
+| 5 | `services/mt5_concurrency.py` › `_mt5_bounded_restart` — the `wait_for(to_thread(client.restart), timeout=_MT5_RESTART_TIMEOUT_S)` (~L118) | `_mt5_bounded_restart` abandons at its 10s bound; the one permitted `mt5.shutdown()` can fire **after** the lease is released, under the next holder |
+| 6 | `routers/exchange.py` › `_validate_mt5_key_probe` › nested `_connect_and_probe`, **STAGE 1 — connect** (~L513) (+ `services/ingestion/mt5.py` › `Mt5Adapter.validate`, the `wait_for(to_thread(_build_client))` inside the lease, ~L207) | a connect-stage timeout orphans an `Mt5Client` the thread then constructs — `client` was never assigned, so the Pitfall-6 `finally` releases nothing and the rpyc session leaks |
+| 7 | `routers/exchange.py` › `_validate_mt5_key_probe` — **THE ONE END-TO-END DEADLINE (D-03)**, `wait_for(_connect_and_probe(), timeout=_MT5_VALIDATE_DEADLINE_S)` (~L817) | the end-to-end deadline fires; the abandoned probe keeps issuing rpyc calls, so D-29's serialization does not hold on the timeout path |
 
 - ⛔ **Patching three call sites is the instance-not-class mistake this milestone has paid for sixteen times.** Candidate designs (a real decision, not a fixer's improvisation): a cancellation-aware wrapper; a generation/epoch counter the terminal checks before each call; or refusing to release the lease until the worker thread confirms it stopped.
 - ⚠️ **The AST lease-roster CANNOT catch this.** Its enclosure proof is *lexical* — it reads the `shutdown` as inside the `async with` and passes while the runtime escapes. The fix needs a **runtime** assertion (observe the abandoned thread touching the session after release), never a second static pin. Guard #16 of Phase 153 lives here.
