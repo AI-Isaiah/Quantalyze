@@ -261,13 +261,16 @@ jobs:
       # Cache vitest's transform graph. Vite persists per-file TS/JSX
       # transforms here; on a warm cache the transform step is largely a
       # no-op. Key on lockfile + vitest config + the src/tests trees.
+      # vitest.node-env.ts is part of the key because it decides which files
+      # run under `environment: "node"` — moving a file between projects
+      # changes how it is transformed, so a stale entry would be wrong.
       - name: Cache vitest transform (node_modules/.vite)
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: node_modules/.vite
-          key: ${{ runner.os }}-vitest-${{ hashFiles('package-lock.json', 'vitest.config.ts') }}-${{ hashFiles('src/**', 'tests/**') }}
+          key: ${{ runner.os }}-vitest-${{ hashFiles('package-lock.json', 'vitest.config.ts', 'vitest.node-env.ts') }}-${{ hashFiles('src/**', 'tests/**') }}
           restore-keys: |
-            ${{ runner.os }}-vitest-${{ hashFiles('package-lock.json', 'vitest.config.ts') }}-
+            ${{ runner.os }}-vitest-${{ hashFiles('package-lock.json', 'vitest.config.ts', 'vitest.node-env.ts') }}-
       # CI speed (2026-07-02): the shards now ALSO emit v8 coverage + a blob
       # report, and the frontend-coverage job merges the blobs and enforces
       # the vitest.config.ts thresholds — deleting the duplicate full-suite
