@@ -907,22 +907,36 @@ async function runScopeBroadeningProbe(
   // not `Object.freeze`; the guarantee here is reference identity, not
   // immutability, and nothing on this path mutates it.)
   //
-  // A body our schema cannot read stays unreadable until a deploy changes one
-  // side or the other: PERMANENT, so it takes KEY_SCOPE_CHECK_UNAVAILABLE (the
-  // code this route already uses for a permanent probe condition, already
-  // rostered, already non-recoverable). The SERVICE-REPORTED probe_error stays
-  // on KEY_NETWORK_TIMEOUT — there the upstream really did try and really did
-  // fail, and a retry is a real remedy.
+  // A body our schema cannot read is not a network blip. The SERVICE-REPORTED
+  // probe_error stays on KEY_NETWORK_TIMEOUT — there the upstream really did try
+  // and really did fail, and a retry is a real remedy.
+  //
+  // ⚠️ 153.6-06 / PARITY-05 — AND IT IS NOT PERMANENT EITHER. 153.2-04 sent this
+  // arm to KEY_SCOPE_CHECK_UNAVAILABLE on the reasoning that the body "stays
+  // unreadable until a deploy changes one side or the other". That sentence is
+  // true and it is satisfied by the deploy that is ALREADY ROLLING: during an
+  // analytics release the old and new pods answer different shapes for a few
+  // minutes, and this arm fires for every finalize in that window. The permanent
+  // code's copy suppresses Retry structurally, so the fix for one dead end built
+  // another one on the wizard's last step. The arm now carries its OWN code,
+  // KEY_SCOPE_CHECK_UNREADABLE, whose copy is honestly recoverable.
+  //
+  // ⛔ The permanent probe-STATUS arm above keeps KEY_SCOPE_CHECK_UNAVAILABLE
+  // untouched. Widening THAT code's actions instead of minting this one would
+  // have leaked a Retry onto an arm where retrying is guaranteed to fail.
+  // ⛔ And never back to KEY_NETWORK_TIMEOUT: the exchange answered, so "we
+  // could not reach the exchange" is the lie 153.2-04 correctly removed.
   //
   // ⚠️ The sentinel's own contract is preserved: it carries NO scope fields, so
   // however these gates are later reordered a parse miss can never present a
-  // scope verdict. Both arms still FAIL CLOSED — nothing is promoted either way.
+  // scope verdict. Both arms still FAIL CLOSED — nothing is promoted either way,
+  // and only what the user is TOLD changed here.
   if (livePerms === PROBE_PARSE_MISS) {
     return {
       ok: false,
       response: NextResponse.json(
         {
-          code: "KEY_SCOPE_CHECK_UNAVAILABLE",
+          code: "KEY_SCOPE_CHECK_UNREADABLE",
           error: "Could not read the key scope response",
         },
         { status: 502, headers: NO_STORE_HEADERS },

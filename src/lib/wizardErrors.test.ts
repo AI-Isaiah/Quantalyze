@@ -1472,6 +1472,29 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * argument applies to the seven metadata refusals, whose whole point is that
    * the user's typing survives the refusal.
    *
+   * **75 at 153.6-06** (PARITY-05), which added `KEY_SCOPE_CHECK_UNREADABLE` —
+   * the TRANSIENT half split back off `KEY_SCOPE_CHECK_UNAVAILABLE` for a probe
+   * body our schema could not read, which is what a half-rolled analytics
+   * deploy serves and therefore clears by itself. The number was READ OUT OF
+   * THIS GUARD'S OWN FAILURE (`expected 75 to be 74`), and the reasoning was
+   * re-run over the entry before it moved.
+   *
+   * THIS guard's population is entries carrying a DESTRUCTIVE action, and
+   * `DESTRUCTIVE_ACTIONS` has exactly one member: `start_fresh`. The new entry
+   * carries `clear_and_retry` + `request_call` — NEITHER `start_fresh` NOR
+   * `try_another_key` — so it is outside the scanned population by construction
+   * and the destructive class below is unchanged at four members.
+   *
+   * ⭐ That exclusion is LOAD-BEARING rather than incidental, and in a way worth
+   * stating because this entry is the first RECOVERABLE one added since 74. The
+   * condition is a deploy of OURS in flight: the draft is intact, the user did
+   * nothing wrong, and the remedy is to wait thirty seconds. `start_fresh`
+   * DELETES that draft and cascades away every `strategy_keys` member under it,
+   * so offering it here would answer "our release is still rolling" by
+   * destroying the user's work. `clear_and_retry` is the whole point of the
+   * entry — it is a control that CAN win, unlike the one on the permanent
+   * sibling it was split off — and it is not destructive.
+   *
    * Deliberately NOT `Object.keys(WIZARD_ERROR_COPY).length`: reading the
    * subject to build the expectation is how a guard stops being able to fail.
    * Bumping the LITERAL when the table legitimately grows is the intended
@@ -1483,7 +1506,7 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * and dies in the other. 153.1-04 added a third guard (at the end of this
    * file) that reads this source and reds when the two literals disagree.
    */
-  const EXPECTED_TABLE_SIZE = 74;
+  const EXPECTED_TABLE_SIZE = 75;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -1743,11 +1766,36 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    *     write could already have landed, this sentence must change in the same
    *     commit.
    *
+   * **75 at 153.6-06** (PARITY-05) — `KEY_SCOPE_CHECK_UNREADABLE`. Read against
+   * all four FORBIDDEN fragments by hand before the number moved. It mentions no
+   * trade fetching and no session field name, and — like its permanent sibling
+   * at 63 — it deliberately does NOT say "our team has been notified" even
+   * though its second bullet asks the user to tell us, which is the fragment's
+   * whole point. The one needing care is again "data is unchanged", because the
+   * entry DOES make a server-state claim: "Nothing about your strategy was lost;
+   * it stays exactly where it is."
+   *
+   * Not the banned string, and OBSERVABLE rather than asserted by the same test
+   * 140.3-15's entry passed and the CSV case failed — and here the ground is a
+   * PINNED assertion rather than a reading of the code: this arm returns from
+   * `runScopeBroadeningProbe` before `finalize_wizard_strategy` is called at
+   * all, and `route.test.ts`'s `[153.6-06 / PARITY-05]` block asserts
+   * `STATE.rpcCalls` holds no `finalize_wizard_strategy` on exactly this path.
+   * The draft row predates the request and this path issues no write.
+   *
+   * ⚠️ ONE CLAUSE IS NEW IN KIND and is the one to re-read if this entry's copy
+   * is ever edited: "a release of ours was mid-rollout". That is a statement
+   * about OUR deploy state, offered as the LIKELY cause rather than as a fact
+   * we checked — the copy says "most often because", and it is hedged for the
+   * same reason the FORBIDDEN list exists. We do not read our own rollout status
+   * on this path, and a sentence asserting we did would be the next member of
+   * this ban list rather than a member of the table.
+   *
    * ⚠️ THIS NUMBER HAS A TWIN in the `[140.3-10 / TRAP-4]` describe above.
    * Moving one without the other is a silent half-fix; the guard added at the
    * end of this file reds when the two literals disagree.
    */
-  const EXPECTED_TABLE_SIZE = 74;
+  const EXPECTED_TABLE_SIZE = 75;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -3051,6 +3099,96 @@ describe("[153.1-04 / WIZFORM-02] the two EXPECTED_TABLE_SIZE pins cannot silent
     // the object I think they are about?" — the question that only has meaning
     // once the two are known to agree.
     expect(declarations[0]).toBe(Object.keys(WIZARD_ERROR_COPY).length);
+  });
+});
+
+/**
+ * [153.6-06 / PARITY-05] THE PROBE-FAILURE PAIR, ASSERTED AS A PAIR.
+ *
+ * `KEY_SCOPE_CHECK_UNAVAILABLE` and `KEY_SCOPE_CHECK_UNREADABLE` describe the
+ * same subsystem failing in two ways that differ by ONE fact — whether the probe
+ * answered — and that fact is exactly what decides whether a retry can win. They
+ * are asserted together, in one block, because every plausible regression here
+ * moves BOTH: sweeping the parse miss back onto the permanent code takes a
+ * working control away from a self-clearing condition, and widening the
+ * permanent code's `actions` to give the parse miss its Retry hands the same
+ * control to an arm where retrying is guaranteed to fail. A block that pinned
+ * only the new entry would catch the first and miss the second.
+ *
+ * ⭐ THE ORACLE IS `buildEnvelope`'s DERIVATION, never the `actions` array. The
+ * claim under test is "a Retry control renders", and that is decided by
+ * `buildEnvelope` reading `actions` against `RECOVERABLE_ACTIONS` and then by
+ * `ErrorEnvelope`'s `showRetry = recoverable && Boolean(onRetry)`. Asserting
+ * `actions` would restate what the table says about itself and would stay green
+ * if the derivation rule ever changed — the convention this file's own import
+ * comment states, applied here in the RECOVERABLE direction for the first time.
+ */
+describe("[153.6-06 / PARITY-05] the probe-failure pair renders opposite controls", () => {
+  it("the parse-miss code derives recoverable — the Retry control renders", () => {
+    const envelope = buildEnvelope("KEY_SCOPE_CHECK_UNREADABLE", "corr-1");
+    expect(
+      envelope.recoverable,
+      "A 2xx body our schema cannot read is what a half-rolled analytics " +
+        "deploy serves. It clears by itself, so a Retry is the honest control — " +
+        "and its absence was the dead end 153.6-06 exists to remove.",
+    ).toBe(true);
+  });
+
+  it("the permanent code stays NON-recoverable — no Retry, unchanged", () => {
+    const envelope = buildEnvelope("KEY_SCOPE_CHECK_UNAVAILABLE", "corr-2");
+    expect(
+      envelope.recoverable,
+      "⛔ T-153.6-E2. The parse miss got its Retry back by MINTING a code, not " +
+        "by widening this one's actions. If this is now true, the affordance " +
+        "leaked onto the arm where a retry is guaranteed to fail.",
+    ).toBe(false);
+  });
+
+  it("the two carry DIFFERENT copy — a shared entry would defeat the split", () => {
+    // The split is only real if the user can tell the two apart. Comparing the
+    // two rendered titles couples this to the table without reading either
+    // expectation out of it.
+    const unreadable = formatKeyError("KEY_SCOPE_CHECK_UNREADABLE");
+    const unavailable = formatKeyError("KEY_SCOPE_CHECK_UNAVAILABLE");
+    expect(unreadable.title).not.toBe(unavailable.title);
+    expect(unreadable.cause).not.toBe(unavailable.cause);
+  });
+
+  it("⛔ the new copy never claims we could not reach the exchange", () => {
+    // THE REMOVED LIE, pinned so it cannot come back through the copy table.
+    // 153.2-04 moved this condition off `KEY_NETWORK_TIMEOUT` precisely because
+    // that entry opens "We could not reach the exchange." — false here, because
+    // the exchange answered and OUR schema could not read the reply. Restoring
+    // the Retry control by restoring that code would have been the easy fix and
+    // would have re-shipped the untruth; this is what makes that route red.
+    const copy = formatKeyError("KEY_SCOPE_CHECK_UNREADABLE");
+    const haystack = [copy.title, copy.cause, ...copy.fix]
+      .join("   ")
+      .toLowerCase();
+    for (const banned of ["reach the exchange", "the exchange did not"]) {
+      expect(
+        haystack.includes(banned),
+        `The parse-miss copy says "${banned}". The exchange ANSWERED — the ` +
+          `body was ours to read and we could not. Blaming the venue for our ` +
+          `own deploy is the lie 153.2-04 removed.`,
+      ).toBe(false);
+    }
+    // The POSITIVE half: it must actually say the thing that makes waiting the
+    // right move. Without this the guard passes on copy that says nothing.
+    expect(
+      /again/i.test(haystack),
+      "The copy must tell the user to try again — the Retry control it now " +
+        "renders is otherwise unexplained.",
+    ).toBe(true);
+  });
+
+  it("the parse-miss entry offers no DRAFT-DESTROYING way out", () => {
+    // The condition is a deploy of ours in flight. `start_fresh` deletes the
+    // draft and cascades away every `strategy_keys` member under it, which
+    // would answer "wait thirty seconds" by destroying the user's work.
+    const copy = formatKeyError("KEY_SCOPE_CHECK_UNREADABLE");
+    expect(copy.actions).not.toContain("start_fresh");
+    expect(copy.actions).not.toContain("try_another_key");
   });
 });
 

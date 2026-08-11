@@ -952,6 +952,19 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
  * founder clicked that Retry five times against a condition of exactly this
  * shape, which is the incident WIZFORM-04 exists to close.
  *
+ * ⚠️ AND RE-CUT ONCE MORE — 153.6-06 / PARITY-05. 153.2-04 was right that the
+ * parse miss is not a network blip and wrong that it is PERMANENT, and the two
+ * are not the same claim. "Until a deploy changes one side or the other" is
+ * satisfied by the deploy that is ALREADY ROLLING: an analytics release changes
+ * the probe body's shape for the minutes between the first new pod and the last
+ * old one, and in that window this arm fires for a condition that clears by
+ * itself. `KEY_SCOPE_CHECK_UNAVAILABLE`'s copy suppresses Retry structurally, so
+ * the fix for one dead end manufactured another. The parse miss now carries
+ * `KEY_SCOPE_CHECK_UNREADABLE` — its own code, honestly recoverable — and the
+ * permanent probe-STATUS arm keeps `KEY_SCOPE_CHECK_UNAVAILABLE` untouched. The
+ * distinction assertion below is unchanged and still load-bearing: the
+ * service-reported arm must not share a code with the parse miss either.
+ *
  * So the two arms now carry DIFFERENT hand-typed literals, and both are still
  * hand-typed rather than imported — the property under test is what the user is
  * told, and importing the route's own string would make each row agree with
@@ -969,12 +982,19 @@ describe("[140.3-03 / SEAMUX-07] the scope probe fails CLOSED on an unreadable 2
     error: "Exchange permission probe failed",
     code: "KEY_NETWORK_TIMEOUT",
   };
-  // 153.2-04 / D-14b — the PARSE-MISS arm, permanent and therefore
-  // non-recoverable. `KEY_SCOPE_CHECK_UNAVAILABLE` carries no recoverable
-  // action, so no Retry control renders at all (the structural suppression).
+  // ⚠️ RE-CUT AGAIN — 153.6-06 / PARITY-05. 153.2-04 put the parse miss on
+  // `KEY_SCOPE_CHECK_UNAVAILABLE`, whose copy is deliberately non-recoverable.
+  // The move off `KEY_NETWORK_TIMEOUT` was right; the destination was not. A 2xx
+  // body our schema cannot read is ALSO what a rolling analytics deploy
+  // produces, so it is not always permanent, and the permanent code's
+  // structural Retry suppression turned a five-minute deploy window into a dead
+  // end. It now carries its OWN code, recoverable, while
+  // `KEY_SCOPE_CHECK_UNAVAILABLE` stays exactly where it was for the genuinely
+  // permanent probe-STATUS arm. ⛔ Never back to `KEY_NETWORK_TIMEOUT`: "we
+  // could not reach the exchange" is the removed lie, and the exchange answered.
   const PARSE_MISS_ENVELOPE = {
     error: "Could not read the key scope response",
-    code: "KEY_SCOPE_CHECK_UNAVAILABLE",
+    code: "KEY_SCOPE_CHECK_UNREADABLE",
   };
 
   function mockProbeBody(body: unknown): ReturnType<typeof vi.spyOn> {
@@ -1128,6 +1148,160 @@ describe("[140.3-03 / SEAMUX-07] the scope probe fails CLOSED on an unreadable 2
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
     ).toBeDefined();
     fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * [153.6-06 / PARITY-05] THE PARSE MISS GETS ITS RETRY BACK, AND THE PERMANENT
+ * ARM DOES NOT.
+ *
+ * ⭐ THE ORACLE IS THE RENDERED TITLE, NEVER THE PRESENCE OF A RETRY CONTROL.
+ * That choice is the whole guard, and it is the OPPOSITE of the trap
+ * `SubmitStep.tsx` records for every other code it admits. A code the route
+ * emits but `KNOWN_FINALIZE_CODES` does not list falls through to `UNKNOWN` —
+ * and `UNKNOWN`'s copy carries `clear_and_retry`, so it IS recoverable and DOES
+ * render a Retry. An assertion phrased as "a Retry renders" would therefore
+ * pass against a completely unwired code, reporting the right control offered
+ * for the wrong reason, with a generic "Something went wrong." where the user
+ * needed "this is our deploy, it clears by itself". Pinning the TITLE is what
+ * distinguishes the two.
+ *
+ * ⚠️ Both titles are HAND-TYPED here, not imported from `WIZARD_ERROR_COPY`.
+ * Reading the subject to build the expectation is how a guard stops being able
+ * to fail: `expect(copy.title).toBe(WIZARD_ERROR_COPY[code].title)` is green for
+ * every possible value of the copy table, including UNKNOWN's.
+ *
+ * ⚠️ Both directions are asserted, in one block, because this plan's failure
+ * mode is a sweep. Handing the parse miss a Retry by widening
+ * `KEY_SCOPE_CHECK_UNAVAILABLE`'s actions would ALSO hand one to the permanent
+ * probe-status arm, where a retry is guaranteed to fail — the T-153.6-E2
+ * elevation. The second `it` is the one that reds if that shortcut is taken.
+ */
+describe("[153.6-06 / PARITY-05] the two probe-failure envelopes are told apart by their COPY", () => {
+  // Hand-typed from the copy table, in this file, on purpose (see the docblock).
+  const UNREADABLE_TITLE = "We could not read the permission check's answer.";
+  const UNAVAILABLE_TITLE = "We could not check this key's permissions.";
+  // `UNKNOWN`'s title, hand-typed for the same reason. This is the string a
+  // roster omission would render — recoverable, so the Retry would still be
+  // there and only this comparison would notice.
+  const UNKNOWN_TITLE = "Something went wrong.";
+
+  it("a parse miss renders the UNREADABLE copy and IS recoverable — Retry returns", async () => {
+    const { buildEnvelope } = await import("@/lib/envelope");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      // A 2xx the schema cannot read: exactly what a half-rolled analytics
+      // deploy serves while the old pods are still answering.
+      new Response(JSON.stringify({ read: true, trade: "maybe" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    consoleErr.mockRestore();
+
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    // The code is read off the ROUTE's answer and fed to the real envelope
+    // builder, so this couples production copy to production classification.
+    const envelope = buildEnvelope(body.code, "corr-parity-05");
+
+    expect(
+      envelope.human_message,
+      "The parse miss must render its OWN copy. `Something went wrong.` means " +
+        "the code reached `UNKNOWN` — which is recoverable, so a Retry-presence " +
+        "assertion would have passed while the user read a generic dead end.",
+    ).toBe(UNREADABLE_TITLE);
+    expect(envelope.human_message).not.toBe(UNKNOWN_TITLE);
+    expect(
+      envelope.recoverable,
+      "A body we could not read is what a rolling deploy produces. It clears " +
+        "on its own, so the Retry control is the honest affordance.",
+    ).toBe(true);
+
+    // ⛔ The security half is UNCHANGED by this plan and is asserted, not
+    // assumed: a probe that did not run must still block the publish.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("a PERMANENT probe status keeps the UNAVAILABLE copy and stays NON-recoverable — no Retry", async () => {
+    const { buildEnvelope } = await import("@/lib/envelope");
+    // 400 — the venue has no probe adapter. `isPermanentProbeStatus` says so,
+    // and no number of retries changes it.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Unsupported exchange: mt5" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    consoleErr.mockRestore();
+
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    const envelope = buildEnvelope(body.code, "corr-parity-05");
+
+    expect(
+      envelope.human_message,
+      "The permanent arm's copy must not move. If this now reads the " +
+        "UNREADABLE title, the two conditions were swept onto one code again — " +
+        "which is the defect being fixed, in the other direction.",
+    ).toBe(UNAVAILABLE_TITLE);
+    expect(
+      envelope.recoverable,
+      "⛔ T-153.6-E2. Giving the parse miss a Retry by adding a recoverable " +
+        "action to `KEY_SCOPE_CHECK_UNAVAILABLE` would leak that control onto " +
+        "THIS arm, where the retry is guaranteed to fail. That shortcut reds here.",
+    ).toBe(false);
+
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("the two arms do not share a code — asserted against what the ROUTE answered", async () => {
+    // Both codes are read out of production on this one run's siblings above;
+    // here they are re-derived in ONE `it` so the claim is about the pair rather
+    // than about two constants declared next to each other in this file.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const parseMissSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ read: true, trade: "maybe" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    let POST = await importPost();
+    const parseMissCode = (await (await POST(makeReq(VALID_BODY))).json()).code;
+    parseMissSpy.mockRestore();
+
+    const permanentSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Unsupported exchange: mt5" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    POST = await importPost();
+    const permanentCode = (await (await POST(makeReq(VALID_BODY))).json()).code;
+    permanentSpy.mockRestore();
+    consoleErr.mockRestore();
+
+    expect(
+      parseMissCode,
+      "The transient parse miss and the permanent probe status shared a code " +
+        "from 153.2-04 until 153.6-06. Merging them again — in either " +
+        "direction — takes a control away from one condition or gives one to " +
+        "the other, and both are user-facing regressions.",
+    ).not.toBe(permanentCode);
   });
 });
 

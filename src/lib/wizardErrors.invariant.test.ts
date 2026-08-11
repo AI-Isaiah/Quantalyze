@@ -542,8 +542,19 @@ const EXPECTED_FINALIZE_REJECTION_SITES = 32;
  * hand-typed split set" rule both describe the ccxt KEY-VALIDATION split: one
  * format guard per route, five codes between them. `finalize-wizard` is
  * deliberately OUTSIDE both — it validates wizard METADATA, not key material,
- * emits `KEY_INVALID_FORMAT` zero times, and its vocabulary is nineteen codes
+ * emits `KEY_INVALID_FORMAT` zero times, and its vocabulary is twenty-two codes
  * that have nothing to do with the split.
+ *
+ * ⚠️ PROSE, NOT A PIN — and it had drifted, which is why the correction is
+ * noted rather than silently applied. "Nineteen" was measured at 153.1-06 and
+ * was never re-cut when 153.2-04/05 put `SEAM_MISCONFIGURED`, `RATE_LIMITED`
+ * and `DRAFT_STATE_INVALID` on the wire (`expectedSites` moved 25 → 27 → 29 and
+ * this sentence did not). 153.6-06 re-measured the derivation directly — 29
+ * sites, 22 distinct codes — rather than adding one to a stale figure, which
+ * would have re-published the drift as a fresh measurement. Nothing here
+ * asserts the number; if it drifts again the cost is a false sentence, not a
+ * false green, which is precisely why it is worth re-measuring rather than
+ * incrementing.
  *
  * ⛔ THE SCOPING IS NOT A WEAKENING, and the diff is where to check that: the
  * two literals stayed `12`, `EXPECTED_SPLIT_CODES` stayed five members, and
@@ -935,9 +946,11 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
     // the five codes 142.2-07 minted and left in place; it is a fact about the
     // ccxt split, not about the wizard's whole vocabulary.
     // ⛔ The other way to make the third entry fit was to WIDEN
-    // EXPECTED_SPLIT_CODES by finalize-wizard's nineteen codes. That would have
-    // turned a closed-set assertion into a list of whatever happens to be
-    // emitted — a guard retired to accommodate a new route.
+    // EXPECTED_SPLIT_CODES by finalize-wizard's twenty-two codes. That would
+    // have turned a closed-set assertion into a list of whatever happens to be
+    // emitted — a guard retired to accommodate a new route. (Prose, re-measured
+    // at 153.6-06; see the SPLIT_ROUTE_LABELS docblock for why the figure moved
+    // by three rather than by one.)
     const split = derived.filter((d) => SPLIT_ROUTE_LABELS.includes(d.label));
     expect(split.length, "SPLIT_ROUTE_LABELS matched no ROUTES entry").toBe(
       SPLIT_ROUTE_LABELS.length,

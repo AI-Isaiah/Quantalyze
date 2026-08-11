@@ -326,6 +326,23 @@ export function SubmitStep({
             // records above.) Like that one, its copy is deliberately
             // NON-recoverable and renders no Retry control.
             "KEY_SCOPE_CHECK_UNAVAILABLE",
+            // 153.6-06 / PARITY-05 — the TRANSIENT half split back off the code
+            // above, admitted HERE IN THE SAME COMMIT the route started
+            // emitting it.
+            //
+            // ⚠️ THE TRAP BITES BACKWARDS ON THIS ONE, and that is why it gets
+            // its own note rather than a reference to the two above. Omit this
+            // line and the code fails the membership check below and falls
+            // through to UNKNOWN — whose copy IS recoverable, so the user would
+            // still get the Retry control this member exists to restore. Every
+            // route-side test AND a "does a Retry render?" assertion would stay
+            // green, while the copy the user actually reads is "Something went
+            // wrong." instead of "a release of ours was mid-rollout; that
+            // usually clears within a few minutes." Right control, wrong
+            // reason, invisible ship. `route.test.ts`'s `[153.6-06 /
+            // PARITY-05]` block pins the rendered TITLE for exactly this
+            // reason.
+            "KEY_SCOPE_CHECK_UNREADABLE",
             "GATE_DRAFT_GONE",
             "GUARD_BLOCKED",
             // Phase 88 / W-4 — composite membership probe fail-closed (503).
