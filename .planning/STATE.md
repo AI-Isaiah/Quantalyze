@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: planning
-stopped_at: Phase 153.5 COMPLETE (5/5, verification passed 22/22). /code-review xhigh over the whole 153->153.5 span returned 13 distinct defects; 9 booked as Phase 153.6 (PARITY), 2 fixed unplanned, 2 deliberately out.
-last_updated: "2026-08-11T15:17:43.477Z"
+stopped_at: Phase 153.6 context gathered
+last_updated: "2026-08-11T18:17:46.797Z"
 last_activity: 2026-08-11
 progress:
   total_phases: 15
@@ -1288,9 +1288,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-11T15:17:18.298Z
-**Stopped At:** Phase 153.5 COMPLETE (5/5, verification passed 22/22). /code-review xhigh over the whole 153->153.5 span returned 13 distinct defects; 9 booked as Phase 153.6 (PARITY), 2 fixed unplanned, 2 deliberately out.
-**Resume File:** None
+**Last Date:** 2026-08-11T18:17:46.783Z
+**Stopped At:** Phase 153.6 context gathered
+**Resume File:** .planning/phases/153.6-parity-the-fixes-that-only-landed-on-one-path/153.6-CONTEXT.md
 **Next step:** Phase 153.6 (PARITY) is booked and NOT yet planned — run `/gsd:plan-phase 153.6`. It carries 9 findings from the `/code-review xhigh` over the whole 153→153.5 span. ⛔ Three of its four root causes are ONE-PATH-ONLY fixes (a correct remedy applied to `routers/exchange.py` while its twin in `services/ingestion/mt5.py` went untouched, with no guard asserting the two agree) — close them as a CLASS, not as N patches. ⭐ The venue-lock bypass (D) is LIVE on PROD (the migration is on `main`, and `supabase/migrations/**` auto-applies on merge) but is a SELF-targeted control bypass, not a tenant leak. ⛔ The budget correction (C) has two halves — the number AND the oracle that pins the wrong column and so cannot red on it. Phases 154 and 155 remain unplanned; 155 is human- and calendar-gated (founder at the MT5 terminal, live funded account, on a trading day).
 
 ⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in
