@@ -59,6 +59,7 @@ from services.mt5_client import (
     Mt5AccountMismatchError,
     Mt5Client,
     Mt5ClientError,
+    Mt5SessionAbandoned,
 )
 from services.mt5_concurrency import mt5_terminal_lease
 from services.mt5_validation import (
@@ -266,6 +267,30 @@ class Mt5Adapter:
                     info, probe, terminal = await asyncio.wait_for(
                         asyncio.to_thread(_probe), timeout=_MT5_PROBE_TIMEOUT_S
                     )
+                except Mt5SessionAbandoned:
+                    # ⭐ WIZFORM-ABANDON / D-40. PROPAGATE untouched — which is
+                    # already what would happen without this arm, and that is
+                    # exactly why the arm is written down. Propagation IS this
+                    # adapter's documented transient disposition (the sFOX F4
+                    # posture every sibling arm below takes), so making it
+                    # EXPLICIT costs nothing today and buys the guarantee that a
+                    # future broad `except Exception` added around this probe
+                    # cannot silently absorb an operator-side refusal into a
+                    # credential verdict. `Mt5SessionAbandoned` is a plain
+                    # `Exception` (D-42) precisely so no classify arm can claim
+                    # it; this arm keeps that true at the seam as well as at the
+                    # sink.
+                    #
+                    # ⚠️ On the genuinely abandoned path nobody is awaiting this
+                    # coroutine, so the raise reaches no one (D-39 — the sink's
+                    # WARNING is the signal). The arm serves the FALSE-POSITIVE
+                    # path: a legitimate probe that trips the fence must surface
+                    # as a retryable transient, never as `valid`, never as
+                    # `auth_failed` and never as `wrong_server`.
+                    #
+                    # close() still runs in the finally below (`close` is
+                    # D-41-EXEMPT from the fence), so the session never leaks.
+                    raise
                 except asyncio.TimeoutError:
                     # Timeout == a hung terminal, NOT the user's credentials. Take the
                     # adapter's transient disposition: PROPAGATE untouched (never

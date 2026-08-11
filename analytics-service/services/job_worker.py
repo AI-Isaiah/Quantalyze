@@ -3515,7 +3515,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     error_kind="permanent",
                 )
             from services.broker_dailies import combine_mt5_deal_ledger
-            from services.mt5_client import Mt5AccountMismatchError, Mt5ClientError
+            from services.mt5_client import (
+                Mt5AccountMismatchError,
+                Mt5ClientError,
+                Mt5SessionAbandoned,
+            )
             from services.mt5_deals import (
                 Mt5DealClassificationError,
                 classify_deal,
@@ -3632,6 +3636,61 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             "derive_broker_dailies: mt5 read exceeded the per-read "
                             "wall-clock bound — retrying rather than wedging the "
                             "worker (FLIPRETRY-01)"
+                        ),
+                        error_kind="transient",
+                    )
+                except Mt5SessionAbandoned:
+                    # ⭐ WIZFORM-ABANDON / D-40. `Mt5SessionAbandoned` is a plain
+                    # `Exception` (D-42), so it matches NONE of the four arms
+                    # around it — before this one it escaped
+                    # `run_derive_broker_dailies_job` outright. That is measured,
+                    # not theorised: plan 153.5-03 watched it escape into a bare
+                    # `asyncio.gather` on 2 of 10 consecutive runs.
+                    #
+                    # ⚠️ On the genuinely abandoned path nobody awaits this read,
+                    # so the raise reaches no one and this arm never runs (D-39 —
+                    # the sink's WARNING is the signal). It exists for the
+                    # FALSE-POSITIVE path: a legitimate read refused by the fence
+                    # must be RETRIED, never charged to the strategy owner.
+                    #
+                    # ⛔ NO `_stamp_strategy_analytics_failed` — same rule as the
+                    # mismatch arm below: we never write a user-attributed
+                    # 'failed' analytics row for a fault of OURS. A fence refusal
+                    # is the purest example there is; the key is fine, the
+                    # credentials are fine, our own thread outlived its bound.
+                    #
+                    # ⛔ NO `_mt5_bounded_restart` — and this one is the opposite
+                    # of the timeout arm above it, deliberately. A timeout means
+                    # OUR pipe is wedged and healing it is right. A fence refusal
+                    # means the terminal has been HANDED ON, so a restart here
+                    # would fire `mt5.shutdown()` on the session of whoever holds
+                    # it now — one ThreadedServer, one MetaTrader5 instance, one
+                    # IPC pipe (EVIDENCE §A2 / C-1) — i.e. it would do to them
+                    # exactly what this phase exists to stop.
+                    #
+                    # ⛔ THE MESSAGE IS CLASSIFIER-TOKEN-FREE (D-42). It lands in
+                    # `compute_jobs.error_message`, and `_WRONG_SERVER_TOKENS` /
+                    # `_AUTH_TOKENS` (`services/mt5_validation.py`) are
+                    # SUBSTRING-matched — "terminal", "session", "connect",
+                    # "login" and "account" are all members, so the words an
+                    # author reaches for first are exactly the ones that would
+                    # re-run the `routers/exchange.py:678-684` incident. The
+                    # class name lives in the log line only; a log is never
+                    # classified.
+                    logger.warning(
+                        "derive_broker_dailies: mt5 read was refused by the "
+                        "abandoned-session fence (label=%s) — classified "
+                        "transient, retrying; NOT restarting, because the "
+                        "refusal means another holder owns the hardware now "
+                        "(WIZFORM-ABANDON / D-40)",
+                        funding_label,
+                    )
+                    return DispatchResult(
+                        outcome=DispatchOutcome.FAILED,
+                        error_message=(
+                            "derive_broker_dailies: mt5 read was refused because "
+                            "the lease it began under had already ended — "
+                            "retrying"
                         ),
                         error_kind="transient",
                     )

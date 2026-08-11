@@ -69,6 +69,7 @@ from services.db import db_execute
 from services.mt5_client import (
     Mt5AccountMismatchError,
     Mt5ClientError,
+    Mt5SessionAbandoned,
     Mt5Session,
 )
 # MT5CONC-02 — the ONE terminal-lock registry, imported from the leaf module
@@ -688,6 +689,31 @@ async def _fetch_mt5_account_rows(
                 "terminal (FLIPRETRY-01 / MT5CONC-01)"
             )
             await _mt5_bounded_restart(session.client)
+            raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
+        except Mt5SessionAbandoned as exc:
+            # ⭐ WIZFORM-ABANDON / D-40. `Mt5SessionAbandoned` is a plain
+            # `Exception` (D-42), so it matches none of the three sibling arms
+            # here; without this one it left `fetch_allocator_holdings` as a raw
+            # type the caller's dedicated `AllocatorHoldingsSyncTransientError`
+            # arm cannot see — which is how a fault whose user copy is a FIXED
+            # constant ends up as `str(exc)` in an allocator's `sync_error`.
+            #
+            # ⚠️ On the genuinely abandoned path nobody awaits this read, so the
+            # raise reaches no one and this arm never runs (D-39). It exists for
+            # the FALSE-POSITIVE path: a legitimate read refused by the fence
+            # must be retried and must never be dressed as the allocator's fault.
+            #
+            # ⛔ NO `_mt5_bounded_restart`, unlike the two arms around it. Those
+            # heal a pipe that is OURS and wedged; a fence refusal means the
+            # terminal was handed on, so a restart here would fire the one
+            # permitted `mt5.shutdown()` on the NEXT holder's session — the
+            # -10004 cross-holder outage this phase closes.
+            logger.warning(
+                "poll_allocator_positions: mt5 holdings read was refused by the "
+                "abandoned-session fence — classified transient, retrying; NOT "
+                "restarting, because another holder owns the hardware now "
+                "(WIZFORM-ABANDON / D-40)"
+            )
             raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
         except Mt5AccountMismatchError as exc:
             # A mis-routed / stale terminal is an INFRA fault, never user blame:
