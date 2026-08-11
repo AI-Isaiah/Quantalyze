@@ -265,13 +265,62 @@ export const BREAKER_COOLDOWN_S = 30;
  * decorative: the encoded expiry could never be in the past while the key still
  * existed.
  *
- * 60 s, because the guard must span the longest budget in `SEAM_BUDGETS`
- * (`process-key-sync`, 60 000 ms) measured from the instant a lock is armed:
- * `BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S = 90 s ≥ 60 s`, with the
- * cooldown itself absorbing the first 30. Pinned in
- * `seam-constants.pin.test.ts`, both as a literal and as that inequality.
+ * ⚠️ THE QUANTITY THIS MUST SPAN IS A REQUEST'S ADMISSION→RECORD LIFETIME, NOT
+ * ITS `timeoutMs` (153.4 review, WR-01). The A-25 predicate is evaluated inside
+ * `recordSeamFailure`, against a key read from the store at RECORDING time — so
+ * the tombstone has to still be readable then, and "then" is later than the
+ * fetch deadline by every store round trip the record path spends first. Sizing
+ * this against `timeoutMs` alone left the key dying ≈9 s BEFORE the read that
+ * needs it, i.e. A-25 violated at exactly the row it was sized against.
+ *
+ * 100 s, from the worst case admission→record, all four terms named:
+ *
+ *   REQUEST LIFETIME  120 000 ms — the longest lifetime in `SEAM_BUDGETS`,
+ *                     `(1 + retries) × timeoutMs` plus the worst-case retry
+ *                     interval where `retries > 0`. Today that maximum is
+ *                     `validate-key-serialized` at `1 × 120 000` (retries: 0);
+ *                     a RETRIED row is charged its whole leg, so a future row
+ *                     with retries cannot under-count here.
+ *   LIMITER            5 000 ms — `breakerLimiter.limit()` runs BEFORE the trip
+ *                     read. `@upstash/ratelimit`'s `timeout` defaults to 5 000
+ *                     and this module does not override it (see the A-09 note in
+ *                     `recordSeamFailure`, which depends on that default); past
+ *                     it the limiter answers `reason: "timeout"` and we return
+ *                     without reading at all, so 5 000 is a real ceiling.
+ *   TRIP READ          4 250 ms — one bounded store command:
+ *                     `(1 + BREAKER_STORE_RETRIES) × BREAKER_STORE_TIMEOUT_MS +
+ *                     BREAKER_STORE_RETRIES × BREAKER_STORE_BACKOFF_MS`. The
+ *                     same 4 250 SC-4b charges per store command.
+ *   COOLDOWN          −30 000 ms — the key's TTL is `BREAKER_COOLDOWN_S +
+ *                     BREAKER_LOCK_TOMBSTONE_S`, so the cooldown absorbs the
+ *                     first 30 s of that span.
+ *
+ * `(120 000 + 5 000 + 4 250 − 30 000) / 1000 = 99.25 s`, rounded UP to 100. The
+ * ceiling is therefore `(30 + 100) × 1000 = 130 000 ≥ 129 250`, with 750 ms of
+ * deliberate slack and no more.
+ *
+ * ⚠️ THE SLACK IS 750 ms, NOT A BUFFER. This constant was 60 while the longest
+ * budget was 60 000 ms; Phase 153.4 / D-26 raised the serialized validate budget
+ * to 120 000 ms and this constant to 90 in the same commit, and the 153.4 review
+ * then found that 90 covered the BUDGET but not the LIFETIME. Any further budget
+ * raise — or any raise of the store bounds above — must move this constant again
+ * in its own same commit; 750 ms absorbs nothing real.
+ *
+ * ⚠️ AND IT WIDENS `MAX_BREAKER_LOCK_SPAN_MS` WITH IT (153.4 review, IN-04).
+ * That bound is derived from this constant, so a corrupt or mis-written lock
+ * value can now hold every seam route open for 130 s rather than 120 s, and the
+ * clock-skew tolerance recorded in the 141.2 review loosens by the same 10 s.
+ * Both are accepted consequences of the coupling, stated here rather than
+ * discovered later.
+ *
+ * Pinned in `seam-constants.pin.test.ts` three ways, and the third is the one
+ * that can see this coupling break: a literal pin on this constant, the
+ * literal-vs-literal A-25 inequality, and the DERIVED A-25 assertion that takes
+ * `Math.max` over the live `SEAM_BUDGETS` and compares it to a ceiling built
+ * from hand-typed breaker literals. The first two catch the constants moving;
+ * only the third catches a budget outgrowing them.
  */
-export const BREAKER_LOCK_TOMBSTONE_S = 60;
+export const BREAKER_LOCK_TOMBSTONE_S = 100;
 
 /**
  * Fallback `Retry-After` for a caller that has an open circuit but no hint.
@@ -414,6 +463,7 @@ export const SEAM_RETRY_JITTER_MAX_MS = 250;
 /** Identifier for a seam call site. One key per distinct budget owner. */
 export type SeamBudgetKey =
   | "validate-key"
+  | "validate-key-serialized"
   | "encrypt-key"
   | "bridge"
   | "simulator"
@@ -547,6 +597,26 @@ export const SEAM_BUDGETS: Record<
     retries: SEAM_RETRIES,
     notes:
       "Live exchange auth probe — genuinely slow and venue-variable (Deribit, Binance, OKX all differ). Was the analytics-client 30s default.",
+  },
+  "validate-key-serialized": {
+    timeoutMs: 120_000,
+    // SAME endpoint, SAME dependency as the row above — POST /api/validate-key,
+    // whose `exchange.py` `_validate_mt5_key` raises MT5_GATEWAY_UNREACHABLE at
+    // service_error(503, dependency="mt5-gateway"). Declared here for the same
+    // reason and no other; the MT5_GATEWAY_UNCONFIGURED arm of that same
+    // function is a 500 and never counts, so the status is again the only thing
+    // separating them. ⚠️ Nothing new is declared: a longer budget does not earn
+    // a wider dependency set.
+    dependencies: ["mt5-gateway"],
+    // ⛔ NEVER a literal 1 here, and never an entry in RETRY_SAFE_ANALYTICS
+    // (its NO verdict is written in `seam-retry-registry.ts`). In the OPEN state
+    // CircuitOpenError is thrown BEFORE fetch, so a retry merely re-runs
+    // isBreakerOpen, charges a second store round and throws again — and a
+    // retried 120 000 ms leg would double the wall-clock SC-4b charges against
+    // this route's Vercel ceiling. D-07 is the standing prohibition.
+    retries: SEAM_RETRIES,
+    notes:
+      "The SERIALIZED-venue arm of the live exchange auth probe — spent by venues whose VENUE_CAPABILITIES.serialized is true (today: MT5), selected by budgetKeyFor(exchange) in analytics-client.ts. One terminal, one account at a time, so a caller's own probe waits behind whoever holds the lease. It must contain a server worst case of 105 s: a 20 s BOUNDED lease acquisition + a 75 s end-to-end probe deadline + a 10 s release that runs OUTSIDE that deadline (Phase 153.3), leaving 15 s of margin. 120 000 ms is PROVISIONAL (D-27): it is the founder's stated staleness tolerance, NOT a measurement — no uncensored successful MT5 validation exists anywhere, so no p50/p95 does either. Phase 153.3's per-stage stage/duration_ms instrumentation is what will produce one, and Phase 155 (MT5-VERIFY) owns tightening this number from that data. RECORDED, NOT MITIGATED (T-153.4-03): this arm holds a Vercel lambda four times longer than the default row, and the only bound is the per-tenant 100/hour limiter on /api/validate-key — the same accepted exposure the process-key-sync row's ME-04 note carries.",
   },
   "encrypt-key": {
     timeoutMs: 30_000,
@@ -742,10 +812,41 @@ export const SEAM_ROUTE_BUDGETS: Record<
     budgets: Array<{ key: SeamBudgetKey; calls: number; branch?: string }>;
   }
 > = {
+  // ---------------------------------------------------------------------
+  // TWO EXCLUSIVE VENUE BRANCHES on the three routes that validate a key,
+  // and none of the three rows may be read as their sum.
+  //
+  //   default-venue    (`venueIsSerialized(exchange)` false — binance, okx,
+  //                    bybit, deribit, sfox, and every unknown / empty /
+  //                    absent venue string): the request spends
+  //                    `validate-key` at 30 000 ms, exactly as it did before
+  //                    plan 153.4-02.
+  //   serialized-venue (`venueIsSerialized(exchange)` true — mt5 today):
+  //                    the request spends `validate-key-serialized` at
+  //                    120 000 ms, because the venue's probe queues behind
+  //                    one shared terminal lease and its honest verdict must
+  //                    fit inside the client's deadline (WIZFORM-05 / D-04).
+  //
+  // WHY THEY ARE MUTUALLY EXCLUSIVE. One request carries exactly ONE
+  // `exchange`, and `budgetKeyFor(exchange)` in `analytics-client.ts` returns
+  // exactly one budget key for it. A row that summed both arms would charge a
+  // request for 150 000 ms of validation on a path no request takes.
+  //
+  // LABELLED BY CAPABILITY, NOT BY VENUE FAMILY. `"ccxt"` would be wrong
+  // twice over — sFOX is not ccxt, and a second serialized venue would have
+  // no home. These two labels mirror `VENUE_CAPABILITIES.serialized`, the one
+  // fact the selector reads.
+  //
+  // THE SHARED LEGS ARE DELIBERATELY UNLABELLED. `encrypt-key` (and, on
+  // validate-and-encrypt, the dormant `process-key-unified-dormant` leg) is
+  // spent whichever venue arm was taken, so it carries no `branch` and is
+  // charged to BOTH branches — which is what no label means here.
+  // ---------------------------------------------------------------------
   "src/app/api/keys/validate-and-encrypt/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [
-      { key: "validate-key", calls: 1 },
+      { key: "validate-key", calls: 1, branch: "default-venue" },
+      { key: "validate-key-serialized", calls: 1, branch: "serialized-venue" },
       { key: "encrypt-key", calls: 1 },
       { key: "process-key-unified-dormant", calls: 1 },
     ],
@@ -753,14 +854,16 @@ export const SEAM_ROUTE_BUDGETS: Record<
   "src/app/api/strategies/create-with-key/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [
-      { key: "validate-key", calls: 1 },
+      { key: "validate-key", calls: 1, branch: "default-venue" },
+      { key: "validate-key-serialized", calls: 1, branch: "serialized-venue" },
       { key: "encrypt-key", calls: 1 },
     ],
   },
   "src/app/api/strategies/composite/add-key/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [
-      { key: "validate-key", calls: 1 },
+      { key: "validate-key", calls: 1, branch: "default-venue" },
+      { key: "validate-key-serialized", calls: 1, branch: "serialized-venue" },
       { key: "encrypt-key", calls: 1 },
     ],
   },
@@ -1030,11 +1133,11 @@ export function encodeBreakerLock(
  * state this module can produce — see `decodeBreakerLock`.
  *
  * DERIVED from the two constants rather than hand-typed, deliberately. The bound
- * means "as long as a lock can possibly be", not "90 000 ms", so retuning either
- * constant has to move it. It cannot drift in silence in either direction:
- * `seam-constants.pin.test.ts` pins both constants literal-against-literal, and
- * the G2 case in `resilient-fetch.test.ts` pins this ceiling against its own
- * hand-typed 90 000 from the outside.
+ * means "as long as a lock can possibly be", not "130 000 ms", so retuning
+ * either constant has to move it. It cannot drift in silence in either
+ * direction: `seam-constants.pin.test.ts` pins both constants
+ * literal-against-literal, and the G2 case in `resilient-fetch.test.ts` pins this
+ * ceiling against its own hand-typed 130 000 from the outside.
  */
 const MAX_BREAKER_LOCK_SPAN_MS =
   (BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S) * 1_000;

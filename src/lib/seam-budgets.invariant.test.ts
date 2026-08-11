@@ -87,17 +87,38 @@ import {
  * ⚠️ NOT every row is at `retries: 0` — that premise was true when this table
  * was written and stopped being true in Phase 141, which flipped FIVE rows to 1
  * (bridge, simulator, portfolio-optimizer, optimize-weights,
- * process-key-enqueue). The first two columns below are all-`retries: 0` routes
- * and are unchanged; `keys/sync` is added as the RETRIED case, so a reader sees
- * a number that actually exercises the (1 + retries) factors:
+ * process-key-enqueue). The first two columns below are all-`retries: 0` routes;
+ * `keys/sync` is the RETRIED case, so a reader sees a number that actually
+ * exercises the (1 + retries) factors.
  *
- *   | state   | validate-and-encrypt (3 calls) | finalize-wizard (composite, 10) | keys/sync (1 call, retries 1) |
- *   |---------|--------------------------------|---------------------------------|-------------------------------|
- *   | closed  | 120 000 + 12 750 = 132 750 ms  | 150 000 + 42 500 = 192 500 ms   |  30 500 +  8 500 =  39 000 ms |
- *   | open    |          0 + 12 750 = 12 750   |          0 + 42 500 =  42 500   |       0 +  4 250 =   4 250    |
- *   | failing | 120 000 + 38 250 = 158 250 ms  | 150 000 + 127 500 = 277 500 ms  |  30 500 + 25 500 =  56 000 ms |
+ * ⭐ EVERY FIGURE BELOW WAS RE-DERIVED FROM A RUN of this file (plan 153.4-02),
+ * not hand-computed and not copied from a research table. The `validate-and-
+ * encrypt` column is now the MAX ACROSS ITS TWO VENUE BRANCHES, i.e. the
+ * serialized one:
+ *
+ *   | state   | validate-and-encrypt (serialized-venue) | finalize-wizard (composite, 10) | keys/sync (1 call, retries 1) |
+ *   |---------|-----------------------------------------|---------------------------------|-------------------------------|
+ *   | closed  | 210 000 + 12 750 = 222 750 ms           | 150 000 +  42 500 = 192 500 ms  |  30 500 +  8 500 =  39 000 ms |
+ *   | open    |           0 + 12 750 =  12 750 ms       |          0 +  42 500 =  42 500  |       0 +  4 250 =   4 250    |
+ *   | failing | 210 000 + 38 250 = 248 250 ms           | 150 000 + 127 500 = 277 500 ms  |  30 500 + 25 500 =  56 000 ms |
  *
  * against a 300 000 ms ceiling.
+ *
+ * ⭐ THE VENUE BRANCHES IN FULL (plan 153.4-02 / WIZFORM-05 / D-01). Three
+ * routes validate a key, and each declares two MUTUALLY EXCLUSIVE venue arms:
+ * `default-venue` spends `validate-key` at 30 000 ms, `serialized-venue` spends
+ * `validate-key-serialized` at 120 000 ms. One request carries one `exchange`
+ * and `budgetKeyFor(exchange)` returns exactly one key for it, so a row that
+ * SUMMED the arms would charge 90 000 ms of validation no request ever spends:
+ *
+ *   | route                             | branch           | closed  | open   | failing |
+ *   |-----------------------------------|------------------|---------|--------|---------|
+ *   | validate-and-encrypt              | serialized-venue | 222 750 | 12 750 | 248 250 |
+ *   | validate-and-encrypt              | default-venue    | 132 750 | 12 750 | 158 250 |
+ *   | create-with-key / composite/add-key | serialized-venue | 158 500 |  8 500 | 175 500 |
+ *   | create-with-key / composite/add-key | default-venue    |  68 500 |  8 500 |  85 500 |
+ *   | finalize-wizard                   | composite        | 192 500 | 42 500 | 277 500 |
+ *   | finalize-wizard                   | single-key       |  58 250 |  8 500 |  83 750 |
  *
  * The retried column is where 141.1 / D-15's correction shows: `keys/sync`'s
  * FAILING store term is 3 commands × (1+1) rounds × 4 250 × 1 call = 25 500,
@@ -105,13 +126,36 @@ import {
  * pinned to hand-typed literals beside the anti-vacuity fence below — 56 000
  * for the retried worst case, and 277 500 for the composite, which the
  * correction must NOT move because every leg on that branch is `retries: 0`.
+ * A THIRD literal oracle now pins the serialized venue arm at 248 250.
  *
- * The tightest case in the whole table is still
- * `finalize-wizard` FAILING at 277 500 ms — **22 500 ms of headroom**, where
- * before this plan the same route declared 55 500 ms and was modelling a branch
- * it does not take when it fans out. Its single-key branch is unchanged
- * (38 500 / 8 500 / 55 500 ms) and is dominated. `create-with-key` remains the
- * two-call shape the old table described (38 500 / 8 500 / 55 500 ms).
+ * ⭐ THE TIGHTEST CASE IN THE WHOLE TABLE IS STILL `finalize-wizard` FAILING at
+ * 277 500 ms — **22 500 ms of headroom** — and the 120 000 ms serialized budget
+ * did NOT take that title from it. The new worst case anywhere is
+ * validate-and-encrypt's serialized branch at 248 250 ms, which leaves
+ * **51 750 ms of headroom**: more than twice finalize-wizard's. Stated here
+ * explicitly rather than left for the reader to recompute, because the previous
+ * revision of this paragraph named the tightest row and a reader who trusts it
+ * would otherwise have to re-derive six numbers to know it still holds.
+ *
+ * ⚠️ THE PARAGRAPH THIS ONE REPLACES CARRIED TWO FALSE CLAIMS, and BOTH were
+ * already false before plan 153.4-02 — the correction is NOT a consequence of
+ * this change, and must not be read as one. It made a single closed/open/failing
+ * triple do duty for two different rows:
+ *   - it attributed that triple to `create-with-key`, which never had those
+ *     figures at all — they were finalize-wizard's SINGLE-KEY numbers restated
+ *     under the wrong route name. create-with-key's default-venue arm is
+ *     68 500 / 8 500 / 85 500.
+ *   - and it called finalize-wizard's single-key branch "unchanged" at that same
+ *     triple, which it stopped being when Phase 141 flipped
+ *     `process-key-enqueue` to retries: 1. That leg alone now costs
+ *     15 000 × (1+1) + 500 backoff, so the branch is 58 250 / 8 500 / 83 750.
+ * Both are corrected in the branch table above, from the run. ⛔ The false triple
+ * itself is deliberately NOT quoted here: this file's own doctrine (see the
+ * marked-quotation note further down) is that a verbatim quotation of refuted
+ * text is a historical record worth keeping — but nothing in this repo can tell
+ * a quotation from a claim, so restating the numerals would leave the wrong
+ * figures greppable in the very file that exists to stop wrong figures. Naming
+ * the DEFECT instead of reprinting it keeps the record and empties the scanner.
  *
  * So this is no longer a comfortable guard for one route, and that is the point:
  * `MAX_COMPOSITE_MEMBERS` is 10 because 11 members would put the failing state
@@ -390,10 +434,17 @@ const EXPECTED_ROUTE_BUDGETS: Record<
     budgets: Array<{ key: string; calls: number; branch?: string }>;
   }
 > = {
+  // 153.4-02 / WIZFORM-05 — the three validate routes each declare TWO
+  // mutually exclusive VENUE branches. `default-venue` is the incumbent
+  // 30 000 ms row; `serialized-venue` is `validate-key-serialized` at
+  // 120 000 ms, taken only when `venueIsSerialized(exchange)` is true. The
+  // `encrypt-key` (and dormant) legs carry NO label: they are spent whichever
+  // arm the request took, so they are charged to BOTH branches.
   "src/app/api/keys/validate-and-encrypt/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [
-      { key: "validate-key", calls: 1 },
+      { key: "validate-key", calls: 1, branch: "default-venue" },
+      { key: "validate-key-serialized", calls: 1, branch: "serialized-venue" },
       { key: "encrypt-key", calls: 1 },
       { key: "process-key-unified-dormant", calls: 1 },
     ],
@@ -401,14 +452,16 @@ const EXPECTED_ROUTE_BUDGETS: Record<
   "src/app/api/strategies/create-with-key/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [
-      { key: "validate-key", calls: 1 },
+      { key: "validate-key", calls: 1, branch: "default-venue" },
+      { key: "validate-key-serialized", calls: 1, branch: "serialized-venue" },
       { key: "encrypt-key", calls: 1 },
     ],
   },
   "src/app/api/strategies/composite/add-key/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [
-      { key: "validate-key", calls: 1 },
+      { key: "validate-key", calls: 1, branch: "default-venue" },
+      { key: "validate-key-serialized", calls: 1, branch: "serialized-venue" },
       { key: "encrypt-key", calls: 1 },
     ],
   },
@@ -870,6 +923,48 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
           `maxDuration to absorb an arithmetic error.`,
       ).toBe(277_500);
     });
+
+    it("153.4-02: the SERIALIZED venue branch is 248 250ms — validate-and-encrypt, failing, hand-typed", () => {
+      // ⭐ THE ORACLE IS A LITERAL, NOT THE FORMULA. 248 250 is hand-computed
+      // from the tables and typed here, exactly as the two oracles above are:
+      //
+      //   request: 120 000 (validate-key-serialized) + 30 000 (encrypt-key)
+      //            + 60 000 (process-key-unified-dormant) = 210 000
+      //            — every leg on this branch is retries: 0, so there is no
+      //              (1 + retries) multiplier and no backoff term
+      //   store:   3 legs x 3 commands x (1+0) rounds x 4 250ms x 1 call
+      //            = 38 250
+      //   total:   248 250
+      //
+      // Deriving it from `SEAM_BUDGETS` inside this test would restate the
+      // arithmetic under test and pin nothing — this repo has shipped three
+      // money-math bugs through six review passes on self-referential oracles.
+      //
+      // WHAT A MOVEMENT MEANS. A LOWER number means a leg stopped being charged
+      // on this branch: the likeliest cause is the `serialized-venue` label
+      // being deleted or moved onto the shared `encrypt-key` leg, which would
+      // drop a real cost SC-4b is supposed to bound. A HIGHER number means a
+      // budget row or a store constant moved — most plausibly the 120 000ms
+      // serialized budget, whose A-25 coupling to BREAKER_LOCK_TOMBSTONE_S has
+      // only 750ms of rounding slack (plan 153.4-01, resized by the 153.4
+      // review's WR-01 to span admission→RECORD rather than admission→deadline),
+      // so raising it is never a one-line change. This branch is the WORST case
+      // and it has 51 750ms of headroom against the 300 000ms ceiling.
+      const worst = branchWorstCases(
+        SEAM_ROUTE_BUDGETS["src/app/api/keys/validate-and-encrypt/route.ts"],
+        "failing",
+      ).find((b) => b.label === "serialized-venue");
+      expect(
+        worst?.worstCaseMs,
+        `validate-and-encrypt's SERIALIZED-VENUE branch now costs ` +
+          `${worst?.worstCaseMs}ms in the failing state; the hand-computed ` +
+          `figure is 248 250ms (210 000 request + 38 250 store). Recompute by ` +
+          `hand from SEAM_BUDGETS and the store constants, and change this ` +
+          `literal only because the inputs changed — never to make a diff pass. ` +
+          `An \`undefined\` here means the branch LABEL is gone, which turns ` +
+          `SC-4b's MAX back into a SUM silently.`,
+      ).toBe(248_250);
+    });
   });
 
   describe("SC-4e / SEAMCORE-10 — the composite fan-out cap is bound to its declaration", () => {
@@ -930,12 +1025,33 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
 
     it("exercises the branch MAX on at least one row — a table of single-path rows would not", () => {
       // Without this, `branchesOf` could be deleted and replaced by the old sum
-      // and only the numbers above would notice. Hand-typed 1: exactly one row
-      // is multi-branch today.
+      // and only the numbers above would notice. Hand-typed 4: exactly four
+      // rows are multi-branch today — the three validate routes, each with its
+      // `default-venue` / `serialized-venue` pair (153.4-02), plus
+      // finalize-wizard's `composite` / `single-key` pair (140.2-10).
+      //
+      // ⛔ NOT a `.length` check. A length is green under a SWAP — one route
+      // losing its labels while another gains a spurious pair reads as four
+      // either way, and the direction that matters (labels DELETED, so the MAX
+      // silently becomes a SUM) over-states the worst case, which no headroom
+      // assertion can notice. The expected array is compared with `toEqual`, so
+      // ORDER is load-bearing and follows declaration order in
+      // SEAM_ROUTE_BUDGETS.
       const multiBranch = Object.entries(SEAM_ROUTE_BUDGETS).filter(
         ([, entry]) => branchesOf(entry.budgets).length > 1,
       );
-      expect(multiBranch.map(([path]) => path)).toEqual([
+      expect(
+        multiBranch.map(([path]) => path),
+        "The multi-branch roster changed. A route DROPPING out of this list " +
+          "means its `branch` labels were deleted and SC-4b silently went back " +
+          "to summing legs from paths no single request takes; a route " +
+          "APPEARING means a new exclusive fan-out was declared and its " +
+          "headroom has not been re-derived. Update this roster deliberately " +
+          "in the same commit, and re-run the header table's figures.",
+      ).toEqual([
+        "src/app/api/keys/validate-and-encrypt/route.ts",
+        "src/app/api/strategies/create-with-key/route.ts",
+        "src/app/api/strategies/composite/add-key/route.ts",
         FINALIZE_WIZARD_ROUTE,
       ]);
       expect(branchesOf(SEAM_ROUTE_BUDGETS[FINALIZE_WIZARD_ROUTE].budgets)

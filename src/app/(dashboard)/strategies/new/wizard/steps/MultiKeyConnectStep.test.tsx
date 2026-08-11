@@ -21,6 +21,7 @@
  * ellipsis) or the UI-SPEC copy table.
  */
 import {
+  act,
   render,
   screen,
   fireEvent,
@@ -1043,6 +1044,193 @@ describe("[SFOX-08] MultiKeyConnectStep — flag-gated sFOX panel (token-only)",
   });
 });
 
+/**
+ * 153.4 review CR-03 — AN MT5 MEMBER PANEL MUST NOT DROP THE BROKER SERVER.
+ *
+ * This step keeps its OWN private `EXCHANGES` roster (see DELIBERATE DUPLICATION
+ * at the top of the component), and that roster had no MT5 card while
+ * `ConnectKeyStep`'s did. An MT5 key reaches a member panel by exactly one route —
+ * the UAT/F-4 draft carry-over — which is also the route this file's own
+ * long-wait block drives, so the defect shipped under green tests: the mocks
+ * answered 200 without ever looking at the request body.
+ *
+ * ⭐ THE BODY ASSERTION IS THE LOAD-BEARING ONE. Every other assertion here
+ * (labels, the rendered field, an enabled submit) is satisfiable by a panel that
+ * still posts `passphrase: null`.
+ */
+describe("[CR-03] MultiKeyConnectStep — a draft-carried MT5 panel keeps its broker server", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  /** Flag ON, State A on MT5 and filled, then "+ Add another key window". */
+  async function mt5Panel() {
+    vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
+    vi.resetModules();
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        if (String(input).includes("composite/add-key")) {
+          return jsonResponse(
+            { ok: true, strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID },
+            200,
+          );
+        }
+        return jsonResponse({}, 200);
+      });
+    const { MultiKeyConnectStep: Fresh } = await import("./MultiKeyConnectStep");
+    render(<Fresh wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    fireEvent.change(screen.getByLabelText("MT5 login"), {
+      target: { value: "5000123" },
+    });
+    fireEvent.change(screen.getByLabelText("Investor password"), {
+      target: { value: "investor-pw-xxx" },
+    });
+    fireEvent.change(screen.getByLabelText("Broker server"), {
+      target: { value: "MyBroker-Live" },
+    });
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    return { fetchSpy };
+  }
+
+  it("⭐ the add-key POST carries the broker server the user typed, never null", async () => {
+    const { fetchSpy } = await mt5Panel();
+    const panel0 = screen.getByTestId("key-panel-0");
+    fireEvent.change(within(panel0).getByTestId("key-0-window-start"), {
+      target: { value: "2024-01-01" },
+    });
+    fireEvent.click(within(panel0).getByTestId("key-0-validate"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("key-0-summary")).toBeInTheDocument(),
+    );
+    const addCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("composite/add-key"),
+    )!;
+    const body = JSON.parse((addCall[1] as RequestInit).body as string);
+    expect(body.exchange).toBe("mt5");
+    expect(body.api_key).toBe("5000123");
+    expect(body.api_secret).toBe("investor-pw-xxx");
+    expect(
+      body.passphrase,
+      "the MT5 panel posted no broker server. MT5 collects three credentials " +
+        "into the {api_key, api_secret, passphrase} slots, and the third one is " +
+        "the server the user typed in State A — dropped here, the route can " +
+        "only reject the request or probe against no server at all, and the " +
+        "panel renders no field to put it back.",
+    ).toBe("MyBroker-Live");
+  });
+
+  it("the panel renders the third field, labelled and legible, and gates submit on it", async () => {
+    await mt5Panel();
+    const panel0 = screen.getByTestId("key-panel-0");
+    // Labelled for MT5, not "OKX Passphrase", and NOT masked: a broker server
+    // name is not a credential, and the helper tells the user to copy it exactly.
+    const server = within(panel0).getByTestId("key-0-passphrase");
+    expect(server).toHaveAttribute("type", "text");
+    expect(within(panel0).getByLabelText("Broker server")).toBe(server);
+    expect(within(panel0).getByLabelText("MT5 login")).toBeInTheDocument();
+    expect(within(panel0).getByLabelText("Investor password")).toBeInTheDocument();
+
+    // Emptying it blocks validate — `canValidate` must see requiresPassphrase.
+    fireEvent.change(within(panel0).getByTestId("key-0-window-start"), {
+      target: { value: "2024-01-01" },
+    });
+    expect(within(panel0).getByTestId("key-0-validate")).not.toBeDisabled();
+    fireEvent.change(server, { target: { value: "" } });
+    expect(
+      within(panel0).getByTestId("key-0-validate"),
+      "submit stayed enabled for a request that cannot succeed — the panel does " +
+        "not know this venue needs a third field.",
+    ).toBeDisabled();
+  });
+
+  it("the MT5 card is selected, named, and survives into the validated summary", async () => {
+    const { fetchSpy } = await mt5Panel();
+    const panel0 = screen.getByTestId("key-panel-0");
+    expect(
+      within(panel0).getByTestId("key-0-exchange-mt5"),
+      "the composite roster offers no MT5 card, so the panel's own venue is not " +
+        "selectable and `EXCHANGES.find` misses for every lookup it feeds.",
+    ).toHaveAttribute("aria-pressed", "true");
+
+    fireEvent.change(within(panel0).getByTestId("key-0-window-start"), {
+      target: { value: "2024-01-01" },
+    });
+    fireEvent.click(within(panel0).getByTestId("key-0-validate"));
+    await waitFor(() =>
+      expect(screen.getByTestId("key-0-summary")).toBeInTheDocument(),
+    );
+    // `active?.name` — empty when the lookup misses.
+    expect(screen.getByTestId("key-0-summary")).toHaveTextContent("MT5");
+    expect(fetchSpy).toHaveBeenCalled();
+  });
+
+  it("flag OFF: no MT5 card, and every other venue's panel is untouched", async () => {
+    vi.resetModules();
+    const { MultiKeyConnectStep: Fresh } = await import("./MultiKeyConnectStep");
+    render(<Fresh wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    const panel0 = screen.getByTestId("key-panel-0");
+    expect(within(panel0).queryByTestId("key-0-exchange-mt5")).toBeNull();
+    // OKX regression: the third field keeps today's label, helper and MASK.
+    fireEvent.click(within(panel0).getByTestId("key-0-exchange-okx"));
+    const pass = within(panel0).getByTestId("key-0-passphrase");
+    expect(pass).toHaveAttribute("type", "password");
+    expect(within(panel0).getByLabelText("OKX Passphrase")).toBe(pass);
+    expect(pass).toHaveAttribute("placeholder", "Paste the OKX passphrase");
+    expect(panel0).toHaveTextContent(
+      "OKX requires a passphrase in addition to key and secret.",
+    );
+  });
+
+  it("⭐ THE CLASS GUARD: the two connect surfaces offer the SAME venue roster", async () => {
+    // ⭐ THE ASSERTION THAT WOULD HAVE CAUGHT CR-03 BEFORE IT SHIPPED, and that
+    // catches the NEXT venue added to one roster and not the other. This step
+    // keeps a private copy of `ConnectKeyStep`'s `EXCHANGES` on purpose (State-A
+    // neutrality), and the copy silently fell a venue behind. Neither array is
+    // exported, so the rosters are compared through the ONE thing both render:
+    // their exchange cards.
+    vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
+    vi.stubEnv("NEXT_PUBLIC_SFOX_ENABLED", "true");
+    vi.resetModules();
+    const { MultiKeyConnectStep: Fresh } = await import("./MultiKeyConnectStep");
+    const { unmount } = render(
+      <Fresh wizardSessionId={SESSION} onSuccess={vi.fn()} />,
+    );
+
+    // State A delegates to ConnectKeyStep — its cards are that roster.
+    const singleKeyVenues = Array.from(
+      document.querySelectorAll("[data-testid^='wizard-exchange-']"),
+    )
+      .map((el) => el.getAttribute("data-testid")!.replace("wizard-exchange-", ""))
+      .sort();
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    const panelVenues = Array.from(
+      screen
+        .getByTestId("key-panel-0")
+        .querySelectorAll("[data-testid^='key-0-exchange-']"),
+    )
+      .map((el) => el.getAttribute("data-testid")!.replace("key-0-exchange-", ""))
+      .sort();
+
+    // Vacuity floor: the flags really are on and both rosters really were read.
+    expect(singleKeyVenues).toContain("mt5");
+    expect(singleKeyVenues.length).toBeGreaterThanOrEqual(6);
+    expect(
+      panelVenues,
+      "a member panel offers a DIFFERENT set of venues than the single-key form " +
+        "does. A venue present on one and missing from the other produces a " +
+        "panel whose `EXCHANGES.find` misses — no labels, no third field, and a " +
+        "POST that silently drops whatever that venue collects in the " +
+        "passphrase slot (153.4 review CR-03).",
+    ).toEqual(singleKeyVenues);
+    unmount();
+  });
+});
+
 describe("[ONB-01] MultiKeyConnectStep — tap targets (v1.4 flex-compression)", () => {
   it("Move and Remove controls carry explicit >=44px width AND height classes", () => {
     render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
@@ -1860,4 +2048,767 @@ describe("[hotfix 2026-08-06] MultiKeyConnectStep — server-emitted SERVICE_UNR
       expect(envelope).toHaveTextContent(title);
     },
   );
+});
+
+/**
+ * Phase 153.4-05 / D-05 / WIZFORM-05 — THE HONEST LONG WAIT, PER PANEL.
+ *
+ * 153.4-04 gave the single-key step an abortable, legible wait. This step is the
+ * other connect surface, and its whole difference is that N member panels
+ * validate INDEPENDENTLY: the card, the ladder, the escape control, the budget
+ * and the deadline all belong to one panel and must be invisible to every other.
+ *
+ * ⭐ FOUR ASSERTIONS EXIST ONLY HERE, and each one is green under a plausible
+ * step-level implementation that every other case in this block would accept:
+ * scope (the card renders in ONE panel's subtree), budget (each panel's ladder is
+ * cut from ITS OWN venue's budget), abort target (cancelling one panel leaves the
+ * other's SIGNAL unaborted) and reorder (a moved panel cancels the request it
+ * actually started).
+ *
+ * ⚠️ EVERY EXPECTED STRING AND NUMBER IS HAND-TYPED, never imported from the
+ * component or from `validate-budget.ts`. Importing them would assert the
+ * component equals itself; the `120` below is the figure the SEAM grants, pinned
+ * to `SEAM_BUDGETS` by the agreement pin in `seam-constants.pin.test.ts`, and a
+ * test that DERIVED it would stay green on a budget that silently moved.
+ *
+ * ⚠️ FAKE TIMERS, and the fetch never resolves. The wait is the subject, so the
+ * clock is an input rather than a race: every threshold is reached by advancing
+ * time, and the only thing that can end a wait in these cases is an abort the
+ * component itself fires.
+ */
+describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, per panel", () => {
+  // ── The two live budgets, in ms, hand-typed ──────────────────────────────────
+  const SERIALIZED_BUDGET_MS = 120_000;
+  const DEFAULT_BUDGET_MS = 30_000;
+  // The ENCRYPT leg the route spends AFTER validate, hand-typed. The browser is
+  // aborting the ROUTE, and `composite/add-key` is validateKey → encryptKey → RPC.
+  const ENCRYPT_BUDGET_MS = 30_000;
+  // The browser's margin OVER the promise it made, hand-typed.
+  const ABORT_GRACE_MS = 15_000;
+  const MOUNT_DELAY_MS = 300;
+  /** When the browser gives up on the ROUTE, hand-typed on the serialized arm. */
+  const SERIALIZED_DEADLINE_MS =
+    SERIALIZED_BUDGET_MS + ENCRYPT_BUDGET_MS + ABORT_GRACE_MS;
+  /** The step's one interval period — the granularity every elapsed figure has. */
+  const TICK_MS = 1_000;
+
+  // ── The copy, hand-typed ────────────────────────────────────────────────────
+  const SIGNING_IN = "Signing in to your broker...";
+  const CHECKING_BINANCE = "Checking your key with Binance...";
+  const WAIT_PROMISE_120 = "We wait up to 120s for your broker to answer.";
+  const QUEUE_LINE =
+    "Still signing in. MetaTrader allows one sign-in at a time, so your check may be waiting behind another.";
+  const SLOW_LINE_120 =
+    "This is slower than usual. We will wait until 120s, then tell you what we found.";
+  const STOP_WAITING = "Stop waiting";
+  const CANCELLED_LINE =
+    "We stopped waiting for your broker. Your key details are still on this page — the check may still be finishing on our side, so give it a moment before validating this key again.";
+  const BUSY_LABEL = "Validating...";
+  const DEADLINE_CAUSE_120 =
+    "We gave your broker 120 seconds to answer and it did not.";
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  /**
+   * A `fetch` that answers nothing and honours its `AbortSignal`.
+   *
+   * ⭐ THE SIGNAL CAPTURE IS THE LOAD-BEARING PART, and doubly so here. A mock
+   * that merely never resolves would let a `Stop waiting` that aborts EVERY
+   * controller look identical to one that aborts the right panel's: both panels'
+   * cards would unmount, both sentences would render, and one user's
+   * credential-carrying POST would have been cancelled for a choice they never
+   * made. The returned array is what the scoped-abort assertions read, in the
+   * order the panels were validated.
+   */
+  function mockAbortableFetch(): AbortSignal[] {
+    const signals: AbortSignal[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
+      const signal = (init as RequestInit | undefined)?.signal ?? null;
+      if (signal) signals.push(signal);
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => {
+          // The shape a real `fetch` rejects with on abort.
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+        });
+      });
+    });
+    return signals;
+  }
+
+  /**
+   * Render a fresh step. `mt5` stubs the flag State A's MT5 card is gated on —
+   * this step's own `EXCHANGES` array has no MT5 card, so the ONLY way a member
+   * panel carries a serialized venue is the one a real user takes: pick MT5 on
+   * the single-key form, then click "+ Add another key window", which carries the
+   * in-progress draft (venue included) into panel 0 (UAT/F-4).
+   */
+  async function renderFresh(withMt5 = false) {
+    if (withMt5) vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
+    vi.resetModules();
+    const { MultiKeyConnectStep: Fresh } = await import("./MultiKeyConnectStep");
+    const onSuccess = vi.fn();
+    render(<Fresh wizardSessionId={SESSION} onSuccess={onSuccess} />);
+    return { onSuccess };
+  }
+
+  /** State A → State B with two empty ccxt panels. */
+  function enterMulti() {
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+  }
+
+  /** State A (MT5 selected + filled) → State B, so panel 0 IS the MT5 key. */
+  function enterMultiFromMt5Draft() {
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    fireEvent.change(screen.getByLabelText("MT5 login"), {
+      target: { value: "5000123" },
+    });
+    fireEvent.change(screen.getByLabelText("Investor password"), {
+      target: { value: "investor-pw-xxx" },
+    });
+    fireEvent.change(screen.getByLabelText("Broker server"), {
+      target: { value: "MyBroker-Live" },
+    });
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+  }
+
+  function panelAt(index: number): HTMLElement {
+    return screen.getByTestId(`key-panel-${index}`);
+  }
+
+  /** Type this panel's credentials. Skipped for a panel seeded from a draft. */
+  function fillCredentials(index: number) {
+    const panel = panelAt(index);
+    fireEvent.change(within(panel).getByTestId(`key-${index}-api-key`), {
+      target: { value: `AK_LIVE_${index}` },
+    });
+    fireEvent.change(within(panel).getByTestId(`key-${index}-api-secret`), {
+      target: { value: `SECRET_${index}` },
+    });
+  }
+
+  /** Non-overlapping windows, so no step-level summary envelope is in play. */
+  function fillWindow(index: number, start: string, end?: string) {
+    const panel = panelAt(index);
+    fireEvent.change(within(panel).getByTestId(`key-${index}-window-start`), {
+      target: { value: start },
+    });
+    if (end !== undefined) {
+      fireEvent.change(within(panel).getByTestId(`key-${index}-window-end`), {
+        target: { value: end },
+      });
+    }
+  }
+
+  function validate(index: number) {
+    fireEvent.click(within(panelAt(index)).getByTestId(`key-${index}-validate`));
+  }
+
+  /** Advance the fake clock and let every resulting update commit. */
+  async function advance(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  function cardIn(index: number): HTMLElement | null {
+    return within(panelAt(index)).queryByTestId("validate-wait-card");
+  }
+
+  function stopWaitingIn(index: number): HTMLElement | null {
+    return within(panelAt(index)).queryByRole("button", { name: STOP_WAITING });
+  }
+
+  /** Every `class` attribute rendered inside an element, joined. */
+  function allClasses(el: HTMLElement): string {
+    return [el, ...Array.from(el.querySelectorAll("*"))]
+      .map((node) => node.getAttribute("class") ?? "")
+      .join(" ");
+  }
+
+  function wizardErrorCalls(): { code: string; step: string }[] {
+    return trackMock.mock.calls
+      .filter((c) => (c as unknown[])[0] === "wizard_error")
+      .map((c) => (c as unknown[])[1] as { code: string; step: string });
+  }
+
+  /**
+   * Two ccxt panels, both filled, neither validated. Timers are FAKE from here.
+   */
+  async function twoCcxtPanels() {
+    const signals = mockAbortableFetch();
+    const rendered = await renderFresh();
+    enterMulti();
+    fillCredentials(0);
+    fillWindow(0, "2024-01-01", "2024-03-01");
+    fillCredentials(1);
+    fillWindow(1, "2024-06-01");
+    vi.useFakeTimers();
+    return { signals, ...rendered };
+  }
+
+  /**
+   * Panel 0 on the serialized venue (carried from the single-key draft), panel 1
+   * on a ccxt venue. Both filled, neither validated. Timers are FAKE from here.
+   */
+  async function mixedVenuePanels() {
+    const signals = mockAbortableFetch();
+    const rendered = await renderFresh(true);
+    enterMultiFromMt5Draft();
+    fillWindow(0, "2024-01-01", "2024-03-01");
+    fillCredentials(1);
+    fillWindow(1, "2024-06-01");
+    vi.useFakeTimers();
+    return { signals, ...rendered };
+  }
+
+  it("a sub-300ms answer never flashes a card — the gate is the step's TICK", async () => {
+    // ⚠️ THE PLAN'S 299/301 ms BOUNDARY, RECONCILED WITH ITS OWN MECHANISM. This
+    // step drives every panel from ONE 1s interval, so `waitElapsedMs` is 0 for
+    // the whole first second and the card cannot appear until the first tick —
+    // which satisfies the 300 ms render gate STRICTLY, without a second timer per
+    // panel. The property asserted is the one UI-SPEC states (a fast answer never
+    // flashes a card), not the literal 301 ms mount the single-key step gets from
+    // its dedicated `setTimeout`.
+    await twoCcxtPanels();
+    validate(1);
+
+    await advance(MOUNT_DELAY_MS - 1);
+    expect(
+      cardIn(1),
+      "the wait card mounted before 300ms. Most validates answer in well under " +
+        "that, and a card that appears and vanishes reads as a fault rather " +
+        "than as a wait (UI-SPEC Surface 1 §Render gate).",
+    ).toBeNull();
+
+    await advance(2);
+    expect(cardIn(1)).toBeNull();
+
+    await advance(TICK_MS);
+    expect(cardIn(1)).not.toBeNull();
+  });
+
+  it("a serialized member panel names what is happening and the deadline it was granted", async () => {
+    await mixedVenuePanels();
+    validate(0);
+    await advance(TICK_MS);
+
+    const shown = cardIn(0)!;
+    expect(shown).toHaveTextContent(SIGNING_IN);
+    expect(
+      shown,
+      "the panel promised no duration on the arm that waits two minutes. The " +
+        "figure must be the budget the seam will actually honour — read from " +
+        "the budget module, never typed into copy (UI-SPEC forbidden item #8).",
+    ).toHaveTextContent(WAIT_PROMISE_120);
+  });
+
+  it("a NON-serialized panel names the venue and promises no wait", async () => {
+    await twoCcxtPanels();
+    validate(1);
+    await advance(TICK_MS);
+
+    const shown = cardIn(1)!;
+    expect(shown).toHaveTextContent(CHECKING_BINANCE);
+    // A 30s promise for a call that usually answers in two is an invented
+    // expectation; the promise belongs to the arm that needs it.
+    expect(shown.textContent).not.toMatch(/We wait up to \d+s/);
+    expect(shown).not.toHaveTextContent(SIGNING_IN);
+  });
+
+  it("escalates at 40% and 75% of THAT panel's budget, and nothing goes red inside it", async () => {
+    await mixedVenuePanels();
+    validate(0);
+    await advance(TICK_MS);
+
+    expect(cardIn(0)).not.toHaveTextContent(QUEUE_LINE);
+    expect(stopWaitingIn(0)).toBeNull();
+
+    // 40% of 120 000 ms = 48 000 ms.
+    await advance(SERIALIZED_BUDGET_MS * 0.4 - TICK_MS);
+    expect(cardIn(0)).toHaveTextContent(QUEUE_LINE);
+    expect(stopWaitingIn(0)).not.toBeNull();
+    expect(allClasses(cardIn(0)!)).not.toContain("text-negative");
+
+    // 75% of 120 000 ms = 90 000 ms.
+    await advance(SERIALIZED_BUDGET_MS * 0.35);
+    const slow = within(panelAt(0)).getByText(SLOW_LINE_120, {
+      ignore: "script, style, [role='status']",
+    });
+    expect(slow.getAttribute("class")).toContain("text-warning");
+    expect(
+      allClasses(cardIn(0)!),
+      "a negative (red) tone appeared while the wait is still INSIDE its " +
+        "budget. Red asserts a permanent failure; this check may still answer " +
+        "correctly.",
+    ).not.toContain("text-negative");
+  });
+
+  it("⭐ ONE panel's wait renders in THAT panel only — never under a sibling", async () => {
+    // The assertion a step-level wait fails and every other case in this block
+    // would accept. Panel 1 is filled and idle; nothing about panel 0's check is
+    // true of it, so nothing about panel 0's check may appear in it.
+    await twoCcxtPanels();
+    validate(0);
+    // Past 40% of the default budget (12 000 ms): card, ladder and escape
+    // control are all up on panel 0.
+    await advance(DEFAULT_BUDGET_MS * 0.4);
+
+    expect(cardIn(0)).not.toBeNull();
+    expect(stopWaitingIn(0)).not.toBeNull();
+    expect(
+      cardIn(1),
+      "an idle panel is rendering a wait card for a request it never made",
+    ).toBeNull();
+    expect(stopWaitingIn(1)).toBeNull();
+    expect(within(panelAt(1)).queryByText(CHECKING_BINANCE)).toBeNull();
+    expect(panelAt(1).getAttribute("aria-busy")).toBeNull();
+    // The busy label is the panel's own too.
+    expect(within(panelAt(1)).getByTestId("key-1-validate")).toHaveTextContent(
+      "Validate & add key",
+    );
+  });
+
+  it("⭐ mixed venues: each panel's ladder is cut from ITS OWN venue's budget", async () => {
+    // ⭐ THE ASSERTION THAT PROVES THE BUDGET IS READ PER PANEL. A single
+    // step-level budget passes every other case in this file: with both panels on
+    // one venue the two arms are indistinguishable. At 12 000 ms the ccxt panel
+    // is past 40% of its 30 000 ms budget and the serialized one is nowhere near
+    // 40% of its 120 000 ms — and a shared budget cannot be both.
+    await mixedVenuePanels();
+    validate(0);
+    validate(1);
+    await advance(DEFAULT_BUDGET_MS * 0.4);
+
+    expect(
+      stopWaitingIn(1),
+      "the ccxt panel reached 40% of its own 30 000 ms budget and offered no " +
+        "escape control — its ladder is being cut from another panel's budget.",
+    ).not.toBeNull();
+    expect(
+      stopWaitingIn(0),
+      "the serialized panel offered an escape control 36 seconds before 40% of " +
+        "its own budget — its ladder is being cut from another panel's budget.",
+    ).toBeNull();
+    // …and each card states its own venue's story.
+    expect(cardIn(0)).toHaveTextContent(SIGNING_IN);
+    expect(cardIn(1)).toHaveTextContent(CHECKING_BINANCE);
+  });
+
+  it("⭐ `Stop waiting` aborts ONE panel's request and leaves the other's running", async () => {
+    const { signals } = await twoCcxtPanels();
+    validate(0);
+    validate(1);
+    await advance(DEFAULT_BUDGET_MS * 0.4);
+
+    fireEvent.click(within(panelAt(0)).getByRole("button", { name: STOP_WAITING }));
+    await advance(0);
+
+    // ⭐ THE REQUEST ACTUALLY STOPPED. Everything else here is local state and
+    // would look identical while the POST ran on.
+    expect(
+      signals[0]?.aborted,
+      "panel 0's in-flight request was not aborted. `Stop waiting` updated the " +
+        "screen while the credential-carrying POST stayed on the wire — the " +
+        "control would be a lie told in the user's favour.",
+    ).toBe(true);
+    // ⭐ AND THE OTHER ONE DID NOT. Only the negative assertion catches an
+    // over-broad abort, which is the failure mode a Map keyed by anything but
+    // the panel id produces.
+    expect(
+      signals[1]?.aborted,
+      "cancelling one panel's wait aborted a SIBLING panel's request. That " +
+        "user made no such choice, and their check is now gone with no error.",
+    ).toBe(false);
+
+    // Panel 0 returns to editing with the neutral line; panel 1 is still waiting.
+    expect(cardIn(0)).toBeNull();
+    const line = within(panelAt(0)).getByTestId("key-0-wait-cancelled");
+    expect(line).toHaveTextContent(CANCELLED_LINE);
+    // ⭐ 153.4 review CR-02 — THE CLAIM THIS BROWSER CANNOT MAKE, at the surface
+    // where it is worst. The abort stops US listening; `composite/add-key` runs
+    // on past validate into `encryptKey` and the add RPC and reads no
+    // `request.signal`, so the key may be stored while this panel sits at
+    // `editing` with `apiKeyId: null` — and this route has no idempotency fence,
+    // so a re-validate mints a SECOND credential. Asserted as a PROPERTY (no
+    // server-outcome claim), so a reworded version of the same lie also reds.
+    expect(
+      line.textContent,
+      "the cancelled line asserts a SERVER-SIDE outcome this browser cannot " +
+        "know. Aborting the fetch does not cancel the invocation, and the route " +
+        "continues into encryptKey + the add RPC.",
+    ).not.toMatch(/nothing (was|is) (saved|stored)|was not (saved|stored)/i);
+    // ⛔ NOT an error envelope and ⛔ not red: the user chose this and nothing
+    // failed (DESIGN.md §Semantic-color gates).
+    expect(within(panelAt(0)).queryByTestId("error-envelope")).toBeNull();
+    expect(line.closest('[role="alert"]')).toBeNull();
+    expect(line.getAttribute("class")).not.toContain("text-negative");
+    expect(cardIn(1)).not.toBeNull();
+    expect(within(panelAt(1)).queryByTestId("key-1-wait-cancelled")).toBeNull();
+    expect(panelAt(1).getAttribute("aria-busy")).toBe("true");
+
+    // Focus lands on the control the user will press next, not on <body>.
+    expect(document.activeElement).toBe(
+      within(panelAt(0)).getByTestId("key-0-validate"),
+    );
+  });
+
+  it("cancelling one panel leaves EVERY panel's typed credentials on the page", async () => {
+    await twoCcxtPanels();
+    validate(0);
+    validate(1);
+    await advance(DEFAULT_BUDGET_MS * 0.4);
+    fireEvent.click(within(panelAt(0)).getByRole("button", { name: STOP_WAITING }));
+    await advance(0);
+
+    for (const index of [0, 1]) {
+      const panel = panelAt(index);
+      expect(
+        (within(panel).getByTestId(`key-${index}-api-key`) as HTMLInputElement)
+          .value,
+      ).toBe(`AK_LIVE_${index}`);
+      expect(
+        (within(panel).getByTestId(`key-${index}-api-secret`) as HTMLInputElement)
+          .value,
+      ).toBe(`SECRET_${index}`);
+    }
+  });
+
+  it("⭐ a REORDERED panel cancels the request it actually started", async () => {
+    // ⭐ THE ASSERTION THAT CATCHES AN INDEX-KEYED CONTROLLER MAP. Panels move,
+    // so the index a validate was launched from is not the index its `Stop
+    // waiting` is pressed from. Keyed by index, this either aborts nothing (the
+    // moved panel's slot is empty) or aborts a sibling's request.
+    const { signals } = await twoCcxtPanels();
+    validate(0);
+    await advance(DEFAULT_BUDGET_MS * 0.4);
+    expect(signals).toHaveLength(1);
+
+    // Panel 0 becomes panel 1; its card and control travel with it.
+    fireEvent.click(within(panelAt(0)).getByTestId("key-0-move-down"));
+    await advance(0);
+    expect(cardIn(1)).not.toBeNull();
+    expect(cardIn(0)).toBeNull();
+
+    fireEvent.click(within(panelAt(1)).getByRole("button", { name: STOP_WAITING }));
+    await advance(0);
+
+    expect(
+      signals[0]?.aborted,
+      "the moved panel's `Stop waiting` did not abort the request that panel " +
+        "started. A controller keyed by position cannot survive a reorder.",
+    ).toBe(true);
+    // The cancelled line follows the panel, not the position it used to hold.
+    expect(
+      within(panelAt(1)).getByTestId("key-1-wait-cancelled"),
+    ).toHaveTextContent(CANCELLED_LINE);
+    expect(within(panelAt(0)).queryByTestId("key-0-wait-cancelled")).toBeNull();
+  });
+
+  it("`Stop waiting` asks for no confirmation — there is nothing to confirm", async () => {
+    // ⚠️ NOT because "nothing is persisted until the key is accepted": that was
+    // CR-02's category error — `composite/add-key`'s VALIDATE leg is pre-encrypt /
+    // pre-RPC, but the user aborts the ROUTE, which runs on into `encryptKey` and
+    // the add RPC and may well store the key. The ground is that the request
+    // finishes or fails on its own either way, so a confirmation step on the one
+    // control whose purpose is escaping a stall protects nothing and is the
+    // opposite of the affordance.
+    await twoCcxtPanels();
+    validate(0);
+    await advance(DEFAULT_BUDGET_MS * 0.4);
+
+    fireEvent.click(within(panelAt(0)).getByRole("button", { name: STOP_WAITING }));
+    await advance(0);
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /are you sure|confirm/i }),
+    ).toBeNull();
+    expect(stopWaitingIn(0)).toBeNull();
+  });
+
+  it("a user cancel is NOT recorded as a seam failure", async () => {
+    // The funnel and the screen must not be able to disagree. A deliberate
+    // cancel logged as `wizard_error` tells an operator the venue is failing
+    // when a user simply chose not to wait (T-153.4-21).
+    await twoCcxtPanels();
+    validate(0);
+    await advance(DEFAULT_BUDGET_MS * 0.4);
+
+    fireEvent.click(within(panelAt(0)).getByRole("button", { name: STOP_WAITING }));
+    await advance(0);
+
+    expect(wizardErrorCalls()).toEqual([]);
+  });
+
+  it("⭐ a panel does NOT give up while the route is still encrypting and storing its key", async () => {
+    // ⭐ 153.4 review CR-01 — THE ASSERTION THE SHIPPED PER-PANEL DEADLINE FAILED.
+    //
+    // The browser aborts a ROUTE, not a seam call: `composite/add-key` spends
+    // `validateKey` THEN `encryptKey` THEN the add RPC, and it reads no
+    // `request.signal`, so the abort stops this tab listening and nothing else. A
+    // deadline of `budget + grace` (135 000 ms here) sits BELOW the route's own
+    // worst case, so it was reachable almost exclusively in the window where
+    // validate had already SUCCEEDED and the route was minting the `api_keys`
+    // row. The panel was then shown "Nothing was saved" — and re-validating
+    // mints a SECOND stored credential for the same key, because this route has
+    // no idempotency fence by construction.
+    await mixedVenuePanels();
+    validate(0);
+    await advance(SERIALIZED_BUDGET_MS + ABORT_GRACE_MS + 1);
+
+    expect(
+      within(panelAt(0)).queryByTestId("error-envelope"),
+      "the panel gave up 30 seconds before the route it is waiting on does. " +
+        "Every second in this window is a request that has PASSED validate and " +
+        "is storing the key — and the verdict rendered here says nothing was " +
+        "saved, while a retry mints a duplicate credential.",
+    ).toBeNull();
+    expect(
+      wizardErrorCalls(),
+      "a seam deadline was reported to the funnel for a request still running " +
+        "INSIDE its route's budget.",
+    ).toEqual([]);
+    expect(cardIn(0)).not.toBeNull();
+    expect(panelAt(0).getAttribute("aria-busy")).toBe("true");
+  });
+
+  it("⭐ a panel past its budget ends in a STATED verdict, and its sibling is untouched", async () => {
+    await mixedVenuePanels();
+    validate(0);
+    // The browser gives up LAST: after the whole ROUTE's budget (validate +
+    // encrypt) plus its own grace, never at the validate budget itself —
+    // aborting there could cut off a verdict already on the wire, or a key
+    // already being stored (153.4 review CR-01).
+    await advance(SERIALIZED_DEADLINE_MS + 1);
+
+    expect(cardIn(0), "the card outlived the request it describes").toBeNull();
+    const envelope = within(panelAt(0)).getByTestId("error-envelope");
+    expect(envelope).toHaveAttribute(
+      "data-error-code",
+      "SEAM_DEADLINE_EXCEEDED",
+    );
+    // The budget WE granted THAT panel, named — hand-typed here, read from the
+    // budget module there.
+    expect(envelope).toHaveTextContent(DEADLINE_CAUSE_120);
+    expect(envelope).toHaveTextContent("Nothing was saved");
+    // ⭐ THE ABSENCE IS THE FIX (PATTERNS Shared Pattern B). The code carries no
+    // recoverable action, so `buildEnvelope` derives `recoverable: false` and no
+    // Retry renders. A Retry here would offer to re-run a two-minute wait that
+    // just proved it does not fit.
+    expect(
+      within(panelAt(0)).queryByRole("button", { name: "Retry" }),
+      "a Retry control was offered for a check that just spent its whole budget",
+    ).toBeNull();
+
+    // The sibling panel never started a check, and a deadline two minutes deep
+    // in someone else's wait says nothing about it.
+    expect(within(panelAt(1)).queryByTestId("error-envelope")).toBeNull();
+    expect(cardIn(1)).toBeNull();
+    expect(
+      (within(panelAt(1)).getByTestId("key-1-api-key") as HTMLInputElement).value,
+    ).toBe("AK_LIVE_1");
+  });
+
+  it("the deadline path records EXACTLY ONE wizard_error, on this step's own funnel step", async () => {
+    // ⚠️ ITS OWN CASE, deliberately. Both must be able to red INDEPENDENTLY: an
+    // envelope assertion that throws first would hide a funnel still reporting
+    // SERVICE_UNREACHABLE, and the funnel is what an operator reads to decide
+    // whether the seam is healthy. The step name is the COMPOSITE one — merging
+    // it into `connect_key` is what made the multi-key path invisible before.
+    await mixedVenuePanels();
+    validate(0);
+    await advance(SERIALIZED_DEADLINE_MS + 1);
+
+    expect(wizardErrorCalls()).toEqual([
+      {
+        wizard_session_id: SESSION,
+        step: "connect_key_multi",
+        code: "SEAM_DEADLINE_EXCEEDED",
+      },
+    ]);
+  });
+
+  it("⭐ the deadline verdict tells the user their key details are still on the page", async () => {
+    // ⛔ THE UNPAID GATE, PAID AT THIS SURFACE TOO. That reassurance bullet
+    // declares REQUIRES_CONNECT_SURFACE and ABSENCE SUPPRESSES it, so a step that
+    // emits this code without passing `surface: "connect"` renders an envelope
+    // that is silent about the credentials the user just spent two minutes
+    // typing — the worst outcome this phase can produce, and a silent one.
+    await mixedVenuePanels();
+    validate(0);
+    await advance(SERIALIZED_DEADLINE_MS + 1);
+
+    expect(within(panelAt(0)).getByTestId("error-envelope")).toHaveTextContent(
+      "Your key details are still on this page.",
+    );
+  });
+
+  it("⭐ a serialized member's failure never offers a remedy that presupposes another venue (D-17)", async () => {
+    // The `venue` half of the same call site, PER PANEL. Absence renders the
+    // substitutable remedy unconditionally, so a user whose broker account IS
+    // the venue was told to "switch to a different exchange".
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "KEY_NETWORK_TIMEOUT" }, 504),
+    );
+    await renderFresh(true);
+    enterMultiFromMt5Draft();
+    fillWindow(0, "2024-01-01", "2024-03-01");
+    validate(0);
+
+    const envelope = await within(panelAt(0)).findByTestId("error-envelope");
+    expect(envelope).toHaveTextContent(
+      "This is your broker account, so there is no other venue to try.",
+    );
+    expect(
+      envelope,
+      "an unwinnable remedy reached a venue that IS the user's account",
+    ).not.toHaveTextContent("switch to a different exchange");
+  });
+
+  it("the panel's busy label stays ASCII `Validating...` for the whole wait", async () => {
+    // ⚠️ SWEPT BACKWARD against `e2e/` — the busy label is read by a Playwright
+    // assertion (`getByRole("button", { name: /Validating/i })`), which needs the
+    // button MOUNTED and still reading it. The wait card renders BESIDE it, never
+    // instead of it, and the spelling stays ASCII (D-21, and this file's own
+    // recorded decision at the top).
+    await mixedVenuePanels();
+    validate(0);
+
+    for (const step of [
+      TICK_MS,
+      SERIALIZED_BUDGET_MS * 0.4 - TICK_MS,
+      SERIALIZED_BUDGET_MS * 0.35,
+    ]) {
+      await advance(step);
+      const button = within(panelAt(0)).getByTestId("key-0-validate");
+      expect(button).toBeInTheDocument();
+      expect(button).toHaveTextContent(BUSY_LABEL);
+      expect(button).toBeDisabled();
+    }
+    expect(cardIn(0)!.textContent).not.toContain("…");
+  });
+
+  it("a validating panel reports aria-busy and drops it afterwards", async () => {
+    await twoCcxtPanels();
+    validate(0);
+    await advance(TICK_MS);
+    expect(panelAt(0).getAttribute("aria-busy")).toBe("true");
+
+    await advance(DEFAULT_BUDGET_MS * 0.4);
+    fireEvent.click(within(panelAt(0)).getByRole("button", { name: STOP_WAITING }));
+    await advance(0);
+
+    // Absent, not `"false"` — the attribute's absence and its false value are
+    // the same state to AT, and one of the two is noise.
+    expect(panelAt(0).getAttribute("aria-busy")).toBeNull();
+  });
+
+  it("⭐ CR-04 THE REAL PATH: '+ Add another key window' mid-validate cannot advance the wizard", async () => {
+    // ⭐ 153.4 review CR-04, driven end to end through the interaction that makes
+    // it reachable. The footer control is NOT disabled while State A's validate
+    // is in flight: clicking it runs `enterMulti`, which unmounts `ConnectKeyStep`
+    // with its request still on the wire and its client deadline cleared by the
+    // same effect cleanup. Up to two minutes later the dead closure called
+    // `onSuccess`, advancing the wizard past connect_key with a SINGLE-KEY
+    // strategy — discarding the two member panels the user has been filling in
+    // ever since.
+    //
+    // The fetch here deliberately IGNORES its signal, so this case tests the
+    // mounted-guard rather than the abort.
+    let resolveFetch!: (res: Response) => void;
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      () => new Promise<Response>((resolve) => (resolveFetch = resolve)),
+    );
+    vi.resetModules();
+    const { MultiKeyConnectStep: Fresh } = await import("./MultiKeyConnectStep");
+    const onSuccess = vi.fn();
+    render(<Fresh wizardSessionId={SESSION} onSuccess={onSuccess} />);
+
+    // State A: fill and submit the single-key form.
+    fireEvent.change(screen.getByPlaceholderText("Paste the read-only key"), {
+      target: { value: "AK_LIVE_xxx" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Paste the secret"), {
+      target: { value: "SECRET_xxx" },
+    });
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+    await advance(TICK_MS);
+
+    // The user goes multi-key mid-wait. State B mounts; State A is gone.
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    await advance(0);
+    expect(screen.getByTestId("multi-key-list")).toBeInTheDocument();
+
+    // …and only THEN does the abandoned single-key request answer 200.
+    resolveFetch(
+      jsonResponse({ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }, 200),
+    );
+    await advance(0);
+
+    expect(
+      onSuccess,
+      "the abandoned single-key request advanced the wizard past connect_key " +
+        "with a single-key strategy, discarding the member panels the user " +
+        "switched modes to build.",
+    ).not.toHaveBeenCalled();
+    // The user is still where they chose to be.
+    expect(screen.getByTestId("multi-key-list")).toBeInTheDocument();
+    expect(screen.getByTestId("key-panel-0")).toBeInTheDocument();
+  });
+
+  it("⭐ unmounting the step aborts EVERY panel's in-flight request", async () => {
+    // ⭐ 153.4 review CR-04, this step's own half. The interval effect's cleanup
+    // clears the tick — which is the ONLY thing enforcing a client deadline on
+    // these requests — but never walked `abortControllersRef`, so an unmounted
+    // step left N credential-carrying POSTs running with no bound at all. That is
+    // exactly the property the interval's docblock claims is closed.
+    const { signals } = await twoCcxtPanels();
+    validate(0);
+    validate(1);
+    await advance(TICK_MS);
+    expect(signals[0]?.aborted).toBe(false);
+    expect(signals[1]?.aborted).toBe(false);
+
+    cleanup();
+    await advance(0);
+
+    expect(
+      signals[0]?.aborted,
+      "a panel's request survived the step's unmount, with the deadline timer " +
+        "torn down by the same cleanup — nothing bounds it now.",
+    ).toBe(true);
+    expect(signals[1]?.aborted).toBe(true);
+    // ⛔ And no funnel noise: leaving is a user action, not N seam failures.
+    expect(wizardErrorCalls()).toEqual([]);
+  });
+
+  it("the FAST path is unchanged: no card, no cancelled line, the panel collapses to its summary", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { ok: true, strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID },
+        200,
+      ),
+    );
+    await renderFresh();
+    enterMulti();
+    fillCredentials(1);
+    fillWindow(1, "2024-06-01");
+    vi.useFakeTimers();
+    validate(1);
+    await advance(0);
+
+    expect(screen.getByTestId("key-1-summary")).toBeInTheDocument();
+    // Time passing after a finished request changes nothing — the wait was torn
+    // down with the request, not left to expire.
+    await advance(SERIALIZED_DEADLINE_MS + 1);
+    expect(screen.queryByTestId("validate-wait-card")).toBeNull();
+    expect(screen.queryByTestId("key-1-wait-cancelled")).toBeNull();
+    expect(wizardErrorCalls()).toEqual([]);
+  });
 });

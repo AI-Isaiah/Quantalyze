@@ -237,9 +237,9 @@ which is a fact we control.
 |---|---|
 | Appears | At t ≥ 40% of budget — the same moment as the first escalation line. Never before (it would flash on the ccxt fast path) |
 | Control | `Button variant="ghost" size="sm"`, label **`Stop waiting`**. Full-opacity focus ring per the focus contract |
-| Semantics | **Not destructive.** `validate-key` is strictly pre-encrypt / pre-RPC (diagnosis 2026-08-05: nothing is persisted server-side), so cancelling loses nothing. ⛔ No confirmation dialog, no `variant="danger"` |
+| Semantics | **Not destructive.** Cancelling costs the user nothing they can act on — the request finishes or fails on its own either way. ⛔ No confirmation dialog, no `variant="danger"`. ⚠️ **CORRECTED (153.4 review CR-02):** this row used to read *"`validate-key` is strictly pre-encrypt / pre-RPC … nothing is persisted server-side, so cancelling loses nothing"*. That is a fact about the SEAM CALL asserted about the ROUTE. The browser aborts `create-with-key` / `composite/add-key`, which run `validateKey` → `encryptKey` → an RPC and read no `request.signal`, so on any run where validate then succeeds the key IS stored |
 | On click | Abort the in-flight request; unmount the card; keep every field value; move focus to the submit button |
-| Resulting state | A **neutral** line where the card was — `text-caption text-text-secondary`, ⛔ not an `ErrorEnvelope`, ⛔ not red: `We stopped waiting. Nothing was saved and your key details are still on this page.` |
+| Resulting state | A **neutral** line where the card was — `text-caption text-text-secondary`, ⛔ not an `ErrorEnvelope`, ⛔ not red. ⛔ **It may not assert a server-side outcome this browser cannot know.** Single-key: `We stopped waiting for your broker. Your key details are still on this page — the check may still be finishing on our side, and connecting again picks up that key rather than storing a second one.` (true because `create-with-key` fences on `wizard_session_id`, at the route AND inside `create_wizard_strategy`'s advisory lock). Composite panel: `We stopped waiting for your broker. Your key details are still on this page — the check may still be finishing on our side, so give it a moment before validating this key again.` (the tail differs because `composite/add-key` has NO such fence by construction — a re-fire mints a second credential) |
 
 ### Accessibility
 
@@ -479,7 +479,8 @@ prose), so the diag block's shape needs no new field.
 | Wait — queue disclosure (40%) | `Still signing in. MetaTrader allows one sign-in at a time, so your check may be waiting behind another.` |
 | Wait — slow disclosure (75%) | `This is slower than usual. We will wait until {budget}s, then tell you what we found.` |
 | Cancel control | `Stop waiting` |
-| Cancelled state | `We stopped waiting. Nothing was saved and your key details are still on this page.` |
+| Cancelled state (single-key) | `We stopped waiting for your broker. Your key details are still on this page — the check may still be finishing on our side, and connecting again picks up that key rather than storing a second one.` |
+| Cancelled state (composite panel) | `We stopped waiting for your broker. Your key details are still on this page — the check may still be finishing on our side, so give it a moment before validating this key again.` |
 | Field hint (description) | `At least 10 characters.` |
 | Field error — empty | `Add a description.` |
 | Field error — under | `Add at least 10 characters — you have {n}.` |

@@ -106,9 +106,14 @@ void _flowVerdictExhaustiveness;
  * The FOUR `SeamBudgetKey`s that are ROUTE budgets, not analytics-seam-function
  * verdicts, and are therefore DELIBERATELY absent from the analytics maps —
  * registry §(c). Hand-typed here so the `Exclude` below cannot quietly absorb a
- * new key: a 14th `SeamBudgetKey` must be classified as an analytics wrapper
+ * new key: a 15th `SeamBudgetKey` must be classified as an analytics wrapper
  * (→ a verdict) or as a route budget (→ this list), and doing NEITHER is a
  * compile error rather than a silent exclusion.
+ *
+ * ⚠️ THAT FENCE HAS NOW FIRED ONCE, IN ANGER. Phase 153.4 / D-26 landed the
+ * 14th key (`validate-key-serialized`) and `npx tsc --noEmit` refused the repo
+ * until it was classified — which is the whole point: an unclassified budget
+ * would otherwise carry NO retry audit verdict at all and nothing would say so.
  */
 type RouteBudgetKey =
   | "keys-permissions"
@@ -116,7 +121,14 @@ type RouteBudgetKey =
   | "process-key-sync"
   | "process-key-unified-dormant";
 
-/** The nine analytics-seam wrapper budget keys (Class E, PATTERNS). */
+/**
+ * The ten analytics-seam wrapper budget keys (Class E, PATTERNS).
+ *
+ * SORTED, because the union assertion below compares sorted arrays. Phase 153.4
+ * / D-26 added `validate-key-serialized`, which sorts immediately AFTER
+ * `validate-key` (a prefix sorts first). It is an analytics-wrapper budget, not
+ * a route budget, so it joins THIS list and not `RouteBudgetKey`.
+ */
 const EXPECTED_ALL_ANALYTICS_KEYS = [
   "bridge",
   "encrypt-key",
@@ -127,6 +139,7 @@ const EXPECTED_ALL_ANALYTICS_KEYS = [
   "portfolio-optimizer",
   "simulator",
   "validate-key",
+  "validate-key-serialized",
 ] as const satisfies readonly SeamBudgetKey[];
 
 type _MissingAnalyticsVerdict = Exclude<
@@ -183,7 +196,7 @@ describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
       ].sort();
       expect(union).toEqual(EXPECTED_ALL_FLOW_KEYS);
     });
-    it("YES∪NO analytics keys cover ALL nine wrappers", () => {
+    it("YES∪NO analytics keys cover ALL ten wrappers", () => {
       const union = [
         ...Object.keys(RETRY_SAFE_ANALYTICS),
         ...Object.keys(RETRY_AUDIT_NO_ANALYTICS),
@@ -436,7 +449,7 @@ describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
   const EXPECTED_FLOW_YES_EVIDENCE = 1; // onboard (resync withdrawn, 141.2/D-03)
   const EXPECTED_ANALYTICS_YES_EVIDENCE = 4; // bridge, simulator, portfolio-optimizer, optimize-weights
   const EXPECTED_FLOW_NO_EVIDENCE = 3; // teaser, csv, resync
-  const EXPECTED_ANALYTICS_NO_EVIDENCE = 5; // validate-key, encrypt-key, match-recompute, portfolio-analytics, match-eval
+  const EXPECTED_ANALYTICS_NO_EVIDENCE = 6; // validate-key, validate-key-serialized, encrypt-key, match-recompute, portfolio-analytics, match-eval
   const EXPECTED_EVIDENCE_STRING_COUNT =
     EXPECTED_FLOW_YES_EVIDENCE +
     EXPECTED_ANALYTICS_YES_EVIDENCE +

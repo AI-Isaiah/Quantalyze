@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
@@ -10,6 +10,12 @@ import {
 } from "@/lib/wizardErrors";
 import { buildEnvelope } from "@/lib/envelope";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
+import { ValidateWaitCard } from "../ValidateWaitCard";
+import {
+  WAIT_CARD_MOUNT_DELAY_MS,
+  connectAbortDeadlineMsFor,
+  validateBudgetSecondsFor,
+} from "@/lib/wizard/validate-budget";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SupportedExchange } from "@/lib/utils";
 import { SFOX_UI_ENABLED, MT5_UI_ENABLED } from "@/lib/utils";
@@ -385,12 +391,226 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
   // failing request's server logs / Sentry tag / compute_jobs.metadata.
   const [correlationId] = useState<string>(() => getWizardCorrelationId());
 
+  /**
+   * 153.4-04 / D-05 / WIZFORM-05 — THE HONEST LONG WAIT.
+   *
+   * 153.4-01/02 granted a serialized venue (MT5) a 120 000 ms validate budget.
+   * Without the state below, that budget buys a two-minute disabled button
+   * reading `Validating...` and nothing else — which D-05 states plainly is a
+   * worse product than the fast wrong answer it replaced.
+   *
+   * All of it is LOCAL to this step. Nothing is threaded through `WizardClient`:
+   * the wait belongs to the request this component made, and `MultiKeyConnectStep`
+   * owns its own per-panel copy of the same shape (plan 153.4-05).
+   */
+  /** When the in-flight validate left the browser, or `null` when none is. */
+  const [waitStartedAt, setWaitStartedAt] = useState<number | null>(null);
+  /**
+   * 153.4 review WR-04 — the SAME stamp, readable synchronously.
+   *
+   * The 300 ms render gate below is a `setTimeout`, i.e. a macrotask; the thing
+   * that used to be its only OFF switch was the timer effect's cleanup, which
+   * React commits on its own schedule. For a validate answering at ~250 ms on a
+   * loaded main thread the order `finally → setShowWaitCard(false)` … `gate →
+   * setShowWaitCard(true)` is reachable, and nothing after it ever turns the card
+   * off again: a ghost card over a finished request, frozen at `0s`, whose
+   * `Stop waiting` (past the 40 % rung) calls `abort()` on a ref the `finally`
+   * already nulled — a control that does nothing.
+   *
+   * ⭐ The gate self-guards on this ref instead of trusting cleanup ordering.
+   * Written beside every `setWaitStartedAt`, and only there, so the two cannot
+   * describe different attempts.
+   *
+   * ⛔ NOT MIRRORED INTO `MultiKeyConnectStep`. That surface is immune BY
+   * CONSTRUCTION — its gate is `p.status === "validating" && p.waitElapsedMs >=
+   * WAIT_CARD_MOUNT_DELAY_MS`, a derivation of render-time state with no timer to
+   * fire late — and adding a ref there would be machinery guarding nothing.
+   */
+  const waitStartedAtRef = useRef<number | null>(null);
+  /** Milliseconds since `waitStartedAt`, ticked once per second (never faster). */
+  const [elapsedMs, setElapsedMs] = useState(0);
+  /**
+   * The 300 ms render gate (UI-SPEC Surface 1). A separate boolean rather than a
+   * comparison in the JSX, because the gate must be a TIMER: a sub-300 ms answer
+   * has to complete before this ever flips, so no card can flash.
+   */
+  const [showWaitCard, setShowWaitCard] = useState(false);
+  /**
+   * The user pressed `Stop waiting`. NOT an error — see the neutral line rendered
+   * below the form. Cleared on the next submit and the moment any field changes.
+   */
+  const [cancelled, setCancelled] = useState(false);
+  /**
+   * The venue of the CURRENT attempt, frozen at submit. The exchange cards stay
+   * clickable while a validate is in flight, and every duration this component
+   * states — the card's promise, the ladder's rungs, the client deadline, and the
+   * `budgetSeconds` the deadline envelope names — must describe the request that
+   * is actually on the wire. Reading live `exchange` would let a mid-flight card
+   * click re-time the deadline and advertise a budget nobody granted (T-153.4-12).
+   */
+  const [attemptExchange, setAttemptExchange] = useState<ExchangeId | null>(null);
+  /** The in-flight validate's controller — the only thing `Stop waiting` touches. */
+  const abortRef = useRef<AbortController | null>(null);
+  /**
+   * WHO aborted. An `AbortError` is indistinguishable at the catch: a user cancel
+   * and a spent budget both arrive as the same rejection, and they are opposite
+   * outcomes — one is a choice that must not be recorded as a failure, the other
+   * is a failure that must be.
+   */
+  const abortReasonRef = useRef<"user" | "deadline" | null>(null);
+  /**
+   * The submit row, so a cancel can put focus back on the submit button
+   * (UI-SPEC Surface 1 §Cancel affordance).
+   *
+   * ⚠️ THE ROW, NOT THE BUTTON, and that is a conflict surfaced rather than
+   * blended (Rule 7). The shared `ui/Button.tsx` is a plain function component
+   * whose props are `ButtonHTMLAttributes` — which carries no `ref` — so
+   * passing a `ref` to `<Button>` is a compile error (TS2322: "Property 'ref'
+   * does not exist"), and this phase's UI-SPEC ⛔ forbids
+   * editing `Button.tsx` (`AllocateDialog.test.tsx` carves it out BY IDENTITY).
+   * Adding a `ref` prop there is the right fix and is logged in TODOS.md; until
+   * then the row holds the ref and the query below finds the one submit control
+   * inside it.
+   */
+  const submitRowRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * 153.4 review CR-04 — is this component still on screen?
+   *
+   * Read by the SUCCESS arm before it calls `onSuccess`. `onSuccess` is threaded
+   * straight through to `WizardClient` and ADVANCES THE WIZARD, so a dead closure
+   * calling it navigates a user who is no longer looking at this form.
+   */
+  const mountedRef = useRef(true);
+
+  /**
+   * 153.4 review CR-04 — UNMOUNTING IS NOT A VERDICT, AND IT MUST NOT PRODUCE ONE.
+   *
+   * The reachable path, in the composite wizard: the user selects MT5, submits (a
+   * 120 s wait), and clicks "+ Add another key window" — which is not disabled
+   * while a validate is in flight. `enterMulti` flips to State B, THIS component
+   * unmounts, and the timer effect's cleanup clears the client deadline with it,
+   * so the request runs on with no controller holding it and no deadline. Up to
+   * two minutes later the still-live closure called
+   * `onSuccess({strategyId, apiKeyId, exchange})`, advancing the wizard past
+   * `connect_key` with a SINGLE-KEY strategy and discarding the member panels the
+   * user had been filling in ever since.
+   *
+   * Two independent stops, deliberately: abort the request (nothing should stay
+   * on the wire for a surface the user has left), and gate the outcome arm on
+   * `mountedRef` so a response that beat the abort still cannot navigate.
+   *
+   * ⚠️ The reason is `"user"` because leaving IS a user action: recording it as a
+   * deadline would put a seam failure in the funnel for a healthy request.
+   */
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      abortReasonRef.current = "user";
+      abortRef.current?.abort();
+    };
+  }, []);
+
   // UAT/F-4: report the in-progress draft up so a switch to multi-key mode can
   // carry it into the first panel instead of discarding it. No-op (single-key
   // wizard) when onDraftChange is absent.
   useEffect(() => {
     onDraftChange?.({ exchange, nickname, apiKey, apiSecret, passphrase });
   }, [onDraftChange, exchange, nickname, apiKey, apiSecret, passphrase]);
+
+  /**
+   * 153.4-04 — the wait's THREE timers, armed together and torn down together.
+   *
+   * Both deps are frozen at submit, so this effect runs exactly once per attempt:
+   * a re-render cannot re-arm the deadline and buy the request another budget.
+   */
+  useEffect(() => {
+    if (waitStartedAt === null) return;
+
+    // 1. The clock. ⛔ Never faster than 1 s — the card renders whole seconds and
+    //    a faster tick buys nothing but renders.
+    const tick = setInterval(() => {
+      setElapsedMs(Date.now() - waitStartedAt);
+    }, 1_000);
+
+    // 2. The render gate. A validate that answers inside 300 ms clears this
+    //    timeout in its `finally` before it can fire, so no card flashes.
+    //
+    //    ⚠️ AND IT SELF-GUARDS (153.4 review WR-04), because "clears it in its
+    //    `finally`" is not something this timer can rely on: the clear happens in
+    //    THIS effect's cleanup, which React commits at its own priority, while the
+    //    timeout is a macrotask that can beat it. If the wait this gate was armed
+    //    for is already over, mounting the card now would leave it mounted — no
+    //    later code turns `showWaitCard` off until the next submit.
+    const mountGate = setTimeout(() => {
+      if (waitStartedAtRef.current !== waitStartedAt) return;
+      setShowWaitCard(true);
+    }, WAIT_CARD_MOUNT_DELAY_MS);
+
+    // 3. The client deadline backstop.
+    //
+    //    ⚠️ IT COVERS THE ROUTE, NOT THE VALIDATE LEG (153.4 review CR-01). The
+    //    thing being aborted is `POST /api/strategies/create-with-key`, which
+    //    spends `validateKey` THEN `encryptKey` THEN the create RPC — and which
+    //    does not read `request.signal`, so this abort has no server-side effect
+    //    whatsoever. A deadline sized on the validate budget alone fired almost
+    //    exclusively in the window where validate had already SUCCEEDED and the
+    //    route was storing the key, and then told the user nothing was saved.
+    //    `connectAbortDeadlineMsFor` covers both legs plus the grace, so this
+    //    verdict is only reachable once the server has genuinely stopped
+    //    answering.
+    //
+    //    WHY A GRACE ON TOP. The seam deadlines fire INSIDE our own route and the
+    //    browser→route hop is not free, so giving up at exactly the route's budget
+    //    could cut off a verdict already on the wire and re-create the silent
+    //    UNKNOWN this whole phase exists to end. The browser gives up LAST — but
+    //    it does give up, so no request can hold this tab open forever
+    //    (T-153.4-16).
+    //
+    //    ⚠️ The figure the copy advertises stays the validate BUDGET (what we
+    //    grant the broker), never this one: the deadline is our margin over the
+    //    promise, not an extension of the promise.
+    const deadline = setTimeout(() => {
+      abortReasonRef.current = "deadline";
+      abortRef.current?.abort();
+    }, connectAbortDeadlineMsFor(attemptExchange));
+
+    return () => {
+      clearInterval(tick);
+      clearTimeout(mountGate);
+      clearTimeout(deadline);
+    };
+  }, [waitStartedAt, attemptExchange]);
+
+  /**
+   * 153.4-04 — a stale cancelled line must never sit under a fresh attempt.
+   *
+   * The same discipline the 140.5-03 comment applies to `retryAfterSeconds`: the
+   * sentence says "your key details are still on this page", and once the user
+   * starts editing those details it is describing an attempt that no longer
+   * matches what they are looking at. Held here rather than in five `onChange`
+   * handlers so a sixth field cannot be added without it.
+   */
+  useEffect(() => {
+    setCancelled(false);
+  }, [exchange, nickname, apiKey, apiSecret, passphrase]);
+
+  /**
+   * 153.4-04 — move focus to the submit button after a cancel (UI-SPEC Surface 1).
+   *
+   * ⚠️ NOT in the click handler. `Stop waiting` lives inside a card that unmounts
+   * on the same interaction, and at the instant of the click the submit button is
+   * still `disabled` — `focus()` on a disabled control is a no-op, so focus would
+   * fall to `<body>` and a keyboard user would lose their place entirely. The
+   * abort resolves a tick later; by the time `cancelled` is true and `submitting`
+   * is false the button is enabled and focusable.
+   */
+  useEffect(() => {
+    if (!cancelled || submitting) return;
+    submitRowRef.current
+      ?.querySelector<HTMLButtonElement>('button[type="submit"]')
+      ?.focus();
+  }, [cancelled, submitting]);
 
   const activeExchange = EXCHANGES.find((e) => e.id === exchange);
   // WR-01: the per-exchange "setup guide" SubAnchors for the flag-gated venues
@@ -452,6 +672,32 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
     setErrorCode(null);
   }, []);
 
+  /**
+   * 153.4-04 — abandon the wait, keep everything else.
+   *
+   * ⛔ NO CONFIRMATION DIALOG. Pressing this costs the user nothing they can act
+   * on: the request is going to finish or fail on its own either way, and a
+   * confirmation step on the one control whose entire purpose is escaping a stall
+   * is the opposite of the affordance.
+   *
+   * ⚠️ ABORTING STOPS THE BROWSER LISTENING; IT DOES NOT STOP THE SERVER WORKING,
+   * AND THE SERVER'S WORK IS NOT ONLY A PROBE. This comment used to close with
+   * "nothing is written on this path — which is exactly why the cancelled copy
+   * can truthfully say nothing was saved". THAT WAS A FACT ABOUT `validate-key`
+   * ASSERTED ABOUT THE ROUTE (153.4 review CR-02). What the user aborts is
+   * `POST /api/strategies/create-with-key`, which runs `validateKey` →
+   * `encryptKey` → `create_wizard_strategy`; the invocation does not read
+   * `request.signal`, so on any run where validate subsequently succeeds the
+   * credential IS encrypted and the `api_keys` + `strategies` rows ARE written,
+   * seconds after we told the user nothing was saved.
+   *
+   * ⛔ The cancelled line below therefore states only what THIS BROWSER knows.
+   */
+  const handleStopWaiting = useCallback(() => {
+    abortReasonRef.current = "user";
+    abortRef.current?.abort();
+  }, []);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (submitting) return;
@@ -459,11 +705,34 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
     // 140.5-03 — cleared WITH the code it belongs to. This is the half a
     // copy-paste of the SyncPreviewStep thread drops (TRAP-3).
     setRetryAfterSeconds(null);
+    // 153.4-04 — a fresh attempt clears the previous one's cancelled line for the
+    // same reason, and starts the wait: the venue is frozen, the clock is stamped
+    // from ONE `Date.now()` the tick then measures against, and the controller is
+    // in place BEFORE the request leaves.
+    setCancelled(false);
+    setAttemptExchange(exchange);
+    setElapsedMs(0);
+    setShowWaitCard(false);
+    // ONE stamp into both the state the effect keys on and the ref the render
+    // gate self-guards against (153.4 review WR-04). Two `Date.now()` calls here
+    // would make the guard compare two different attempts' clocks.
+    const started = Date.now();
+    waitStartedAtRef.current = started;
+    setWaitStartedAt(started);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    abortReasonRef.current = null;
     setSubmitting(true);
+    // Set on the SUCCESS arm only. The `finally` below reads it to decide whether
+    // to re-enable the button — see the comment there.
+    let succeeded = false;
 
     try {
       const res = await wizardFetch("/api/strategies/create-with-key", {
         method: "POST",
+        // `wizardFetch` spreads `init` and overrides only `headers`, so the
+        // signal reaches `fetch` unchanged — no change to that module is needed.
+        signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           exchange,
@@ -559,12 +828,55 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         return;
       }
 
+      // 153.4 review CR-04 — ⛔ NEVER ADVANCE A WIZARD THE USER HAS LEFT. Belt
+      // and braces with the unmount abort above: a response that arrived before
+      // the abort landed still reaches this line from a dead closure, and
+      // `onSuccess` is `WizardClient`'s step advance. The key IS stored on this
+      // path — the composite step's own draft carry-over and its member panels
+      // are what must not be discarded by it.
+      if (!mountedRef.current) return;
+      succeeded = true;
       onSuccess({
         strategyId: data.strategy_id,
         apiKeyId: data.api_key_id,
         exchange,
       });
     } catch (err) {
+      /**
+       * 153.4-04 — AN ABORT IS NOT A TRANSPORT FAILURE, AND THE TWO ABORTS ARE
+       * NOT THE SAME OUTCOME. Branch FIRST, before anything below can classify a
+       * cancel as an outage.
+       *
+       * ⚠️ TRAP-1, re-checked at this edit now that an `AbortSignal` rides the
+       * request: an `AbortError` is a `DOMException` with a fixed name and
+       * message and carries no request, no headers and no body, so it embeds no
+       * credential either — the measurement in the `SERVICE_UNREACHABLE` arm
+       * below still holds unchanged.
+       */
+      if (abortRef.current?.signal.aborted) {
+        if (abortReasonRef.current === "user") {
+          // The user chose this. ⛔ No `errorCode`, ⛔ no `console.error`, and
+          // ⛔ no `wizard_error` event: recording a deliberate cancel as an error
+          // tells an operator the seam is failing when it is not, and it is the
+          // funnel they would use to decide MT5 is broken (T-153.4-15).
+          setCancelled(true);
+          setSubmitting(false);
+          return;
+        }
+        if (abortReasonRef.current === "deadline") {
+          // A real failure, and the funnel must agree with the screen (the
+          // 140.5-03 rule). The envelope names the budget we granted — see the
+          // `budgetSeconds` context below.
+          setErrorCode("SEAM_DEADLINE_EXCEEDED");
+          trackForQuantsEventClient("wizard_error", {
+            wizard_session_id: wizardSessionId,
+            step: "connect_key",
+            code: "SEAM_DEADLINE_EXCEEDED",
+          });
+          setSubmitting(false);
+          return;
+        }
+      }
       // 140.5-03 / SEAMPROSE-03 — OUR HOP, NOT THE EXCHANGE'S.
       //
       // This catch fires when the request to `/api/strategies/create-with-key`
@@ -602,6 +914,25 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
       // re-checked if this call ever starts sending an Authorization header.
       console.error("[wizard:ConnectKeyStep] submit threw:", err);
       setSubmitting(false);
+    } finally {
+      // 153.4-04 — EVERY outcome ends the wait: success, failure, cancel and
+      // deadline alike. A card left mounted over a finished request is the
+      // indefinite spinner in a new costume, so the clock, the render gate and
+      // the controller are cleared here rather than in four arms.
+      //
+      // ⚠️ `setSubmitting(false)` is deliberately NOT unconditional. The success
+      // arm has always left the button disabled while the parent advances the
+      // step — re-enabling it here would open a double-submit window on a key
+      // that has already been stored. Each failing arm clears it itself; this is
+      // the backstop for any arm that ever forgets.
+      // ⚠️ The ref is nulled BESIDE the state, not instead of it: it is what the
+      // render gate reads to discover — synchronously, without waiting for this
+      // update to commit — that the wait it was armed for is over (WR-04).
+      waitStartedAtRef.current = null;
+      setWaitStartedAt(null);
+      setShowWaitCard(false);
+      abortRef.current = null;
+      if (!succeeded) setSubmitting(false);
     }
   }
 
@@ -611,6 +942,31 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         // ZERO. `null` would be carried into the envelope slot and a `0` there
         // is a wait we were never told about.
         retryAfterSeconds: retryAfterSeconds ?? undefined,
+        // 153.4-04 / UI-SPEC Gate A — the budget WE granted, in seconds, and
+        // ONLY for the code that names one. The same rule one line up: the
+        // expression yields `undefined`, never `null` and never `0` — a `0`
+        // here is a budget we never granted, which turns a vague failure into a
+        // specific lie (TRAP-3). It reads the FROZEN attempt venue, so the
+        // figure describes the request that actually ran out of time.
+        budgetSeconds:
+          errorCode === "SEAM_DEADLINE_EXCEEDED"
+            ? validateBudgetSecondsFor(attemptExchange)
+            : undefined,
+        // 153.4-04 / UI-SPEC Gate B — WITHOUT THIS, `SEAM_DEADLINE_EXCEEDED`'s
+        // "Your key details are still on this page." is silently withheld:
+        // that bullet declares `REQUIRES_CONNECT_SURFACE` and absence
+        // SUPPRESSES. A user who waited two minutes and is then told nothing
+        // about the credentials they typed is the worst outcome this phase can
+        // produce, which is why 153.1-04 bound the obligation to the commit
+        // that starts EMITTING the code — this one.
+        surface: "connect",
+        // 153.1-03 / D-17 — the venue, as a lookup key into the closed
+        // capability record (never interpolated into copy). Absence renders the
+        // substitutable remedy unconditionally, so an MT5 user reads "switch to
+        // a different exchange" for a venue that IS their account. Mandated by
+        // this phase's UI-SPEC at the call sites it owns; byte-neutral for every
+        // ccxt venue, where the predicate already answers `true`.
+        venue: attemptExchange ?? exchange,
       })
     : null;
 
@@ -642,7 +998,14 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         </dl>
       </div>
 
-      <form onSubmit={handleSubmit} className="mt-8 space-y-5">
+      {/* 153.4-04 / UI-SPEC Surface 1 — `aria-busy` while a validate is in
+          flight, absent otherwise (never `"false"`: the attribute's absence and
+          its false value are the same state, and one of the two is noise). */}
+      <form
+        onSubmit={handleSubmit}
+        className="mt-8 space-y-5"
+        aria-busy={submitting ? "true" : undefined}
+      >
         {/* Exchange cards */}
         <fieldset>
           <legend className="text-caption font-medium text-text-primary">
@@ -767,13 +1130,51 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
           />
         )}
 
+        {/* 153.4-04 / D-05 — the long wait, made legible. Mounted 300 ms after
+            submit and torn down on every outcome; it renders ABOVE the submit
+            row so the escalation and the `Stop waiting` control sit next to the
+            button they describe. The card is PURE — this step owns the clock,
+            the controller and the mount gate. */}
+        {showWaitCard && (
+          <ValidateWaitCard
+            exchange={attemptExchange ?? exchange}
+            elapsedMs={elapsedMs}
+            onStopWaiting={handleStopWaiting}
+          />
+        )}
+
+        {/* The cancelled state. ⛔ NOT a `WizardErrorEnvelope` and ⛔ never
+            `text-negative`: the user chose this and nothing failed. DESIGN.md
+            §Semantic-color gates — red asserts a permanent failure, and there is
+            no failure here to assert.
+
+            ⛔ NO "NOTHING WAS SAVED" CLAIM (153.4 review CR-02). Aborting stops
+            this browser listening; the route runs on past validate into
+            `encryptKey` and the create RPC, so the key may well be stored — a
+            user who cancels at 48 s of a 120 s MT5 validate was told nothing was
+            saved while their credential was being written. The sentence states
+            the two facts this browser actually knows, plus the one thing that
+            makes the next submit safe: `create-with-key`'s idempotency fence is
+            keyed on `wizard_session_id`, so a re-submit resolves to the draft the
+            abandoned request created instead of minting a second one. */}
+        {cancelled && !submitting && (
+          <p
+            className="text-caption text-text-secondary"
+            data-testid="wizard-connect-wait-cancelled"
+          >
+            We stopped waiting for your broker. Your key details are still on
+            this page — the check may still be finishing on our side, and
+            connecting again picks up that key rather than storing a second one.
+          </p>
+        )}
+
         {/* UAT/F-5: the "+ Add another key window" affordance (footerSlot) sits
             ABOVE the primary CTA — you decide to go multi-key BEFORE validating a
             single key, so the add-window action must precede "Validate key and
             continue". Absent for the single-key wizard → renders nothing. */}
         {footerSlot}
 
-        <div className="flex gap-3">
+        <div className="flex gap-3" ref={submitRowRef}>
           <Button
             type="submit"
             disabled={submitting || !apiKey || (requiresSecret && !apiSecret) || (requiresPassphrase && !passphrase)}

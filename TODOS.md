@@ -742,6 +742,17 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
 
 ### Tech-debt / maintainability (opportunistic, don't force)
 
+- **The two wizard connect surfaces keep TWO hand-maintained `EXCHANGES` rosters (added 2026-08-11,
+  153.4 review CR-03).** `ConnectKeyStep.tsx` and `MultiKeyConnectStep.tsx` each hold a private
+  option table, justified by a "State-A neutrality over DRY" docblock. The composite copy fell an
+  entire venue behind — no MT5 card, `MT5_UI_ENABLED` not even imported — so a draft-carried MT5
+  member panel POSTed `passphrase: null`, dropping the broker server, and rendered no field to
+  re-enter it. **Fixed pointwise** (the card + the four third-field overrides are now in the
+  composite roster) **and fenced** (`MultiKeyConnectStep.test.tsx` "[CR-03] … THE CLASS GUARD"
+  compares both surfaces' rendered exchange cards with both flags ON). ⭐ The CLASS fix is one
+  shared option table both steps import — a THIRD module, which the neutrality argument does not
+  forbid (it forbids `ConnectKeyStep` growing an export). Do it the next time a venue is added.
+
 - **⭐ AUDIT METHOD + two more unfalsifiable guards (2026-08-09).** Phase 153 found **14** guards
   that could not fail. The method that finds them, in order of cost:
   1. **Grep triage** on six smells: literal-vs-literal · fixture sized off the constant under test ·
@@ -1835,3 +1846,140 @@ Both are explicitly OUT OF SCOPE for phase 153 (RESEARCH §Open Questions Q2 and
 
 - [ ] **Should sFOX also opt out of the submit-time scope probe?** `VENUE_CAPABILITIES.sfox` (`src/lib/closed-sets.ts`) asserts NO capability at all, so sFOX's submit path is byte-unchanged — that is D-22, pinned by `closed-sets.test.ts`'s *"sFOX asserts NO capability at all"* assertion. The question stands because sFOX asserts `read_only=True` **structurally** for the same reason MT5 does (`_validate_sfox_key`: the SfoxClient adapter has no order/withdraw/transfer surface, and sFOX exposes no per-key scope endpoint) — the same argument that earned MT5 `scopeProbeSupported: false`. What is unknown: whether the ccxt permissions probe currently *succeeds* for sFOX or has been silently failing on every sFOX submit. ⚠️ This is a SECURITY decision (the scope-broadening probe is ASVS V4) — do not flip it as a tidy-up; measure the probe's current behaviour against a live sFOX key first. Owner: unassigned. Reference: 153.1 D-22, RESEARCH Q2.
 - [ ] **`Validating…` (U+2026) at `CsvUploadStep.tsx:751` is the odd one out.** The four other live sites use ASCII `Validating...` (`ConnectKeyStep.tsx:782`, `MultiKeyConnectStep.tsx:1637`, `ApiKeyForm.tsx:199`, `StrategyForm.tsx:356`), and ASCII is the **recorded superseding decision** (`MultiKeyConnectStep.test.tsx:19-21` states it supersedes the UI-SPEC's typographic form). D-21 settles the spelling; a repo-wide copy sweep to apply it is not in phase 153's scope. ⚠️ Before changing any of these strings, grep `e2e/` — `e2e/api-key-flow.spec.ts:212` matches on the prefix regex `/Validating/i` and survives either form, but that is luck, not a guarantee for the next one. Owner: unassigned. Reference: 153.1 D-21, RESEARCH Q5.
+
+### Phase 153.4-03 (the long-wait card) — non-blocking findings, logged per the stopping rule (added 2026-08-10)
+
+Both are recorded rather than fixed: neither is user-facing today and neither is a
+data-integrity risk, so both sit below the founder stopping rule. Each is a conflict the
+plan resolved by SURFACING it (Rule 7), not by blending.
+
+- [ ] **`ui/Button.tsx:35` cannot be given a full-opacity focus ring by a caller.** It
+  hard-codes `focus-visible:ring-2 focus-visible:ring-accent/50` on EVERY variant, and
+  `cn` (`src/lib/utils.ts:72`) is a plain `filter(Boolean).join(" ")` — **not**
+  tailwind-merge — so a `className` passed in does not override the baked-in utility; it
+  merely appends a second, losing declaration. Consequence for this phase: the UI-SPEC
+  specifies `Button variant="ghost" size="sm"` for `Stop waiting`, but forbidden item #9
+  forbids a `/50` ring on a control this phase creates, so `ValidateWaitCard` renders a
+  plain `<button type="button">` carrying the ghost look plus the verbatim focus
+  contract. ⚠️ Fixing `Button.tsx` is a CROSS-SUITE change, not a one-line edit:
+  `AllocateDialog.test.tsx`'s focus sweep carves `ui/Button.tsx` and `ui/Modal.tsx` out
+  **by identity** and asserts they still carry `ring-accent/50`, so the fix reds an
+  unrelated suite and the carve-out must be deleted in the same commit. Same item as the
+  repo-wide `~20 files still use ring-accent/20 or /50` sweep above — this entry records
+  the *mechanism* (plain-join `cn`) that makes the two primitives un-overridable rather
+  than merely unfixed. Owner: the focus sweep.
+- [ ] **The UI-SPEC's queue-disclosure sentence names `MetaTrader` literally while its
+  render condition is the class-shaped `serialized` capability.** Copy (UI-SPEC Surface 1,
+  40% rung, shipped verbatim in `ValidateWaitCard.tsx`): *"Still signing in. MetaTrader
+  allows one sign-in at a time, so your check may be waiting behind another."* The gate is
+  `venueIsSerialized(exchange)` — correctly a class check, so a second serialized venue
+  would render this line automatically **and would read wrong**, naming a broker the user
+  is not connected to. Not fixed here because the remedy is a copy decision, not a code
+  one (`{VenueName} allows one sign-in at a time` loses the concrete, recognisable noun
+  that makes the sentence land for the only venue that has it today), and the copy table
+  is 153.1's. ⚠️ The trigger is not hypothetical-forever: it fires the day any second
+  venue gets `VENUE_CAPABILITIES.<venue>.serialized = true`. Whoever adds that row owns
+  this sentence. Owner: unassigned; reference 153.4-03, UI-SPEC Surface 1.
+
+### Phase 153.4-04 (the connect step's honest wait) — non-blocking findings, logged per the stopping rule (added 2026-08-11)
+
+- [ ] **`ui/Button.tsx` accepts no `ref`, so a caller cannot move focus to a shared
+  button.** `ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement>`, which carries
+  no `ref`, and the component is a plain function — so `<Button ref={…}>` is a compile
+  error (measured 2026-08-11: `TS2322: Property 'ref' does not exist on type
+  'IntrinsicAttributes & ButtonProps'`). React 19 passes `ref` as an ordinary prop, so the
+  fix is one optional prop spread through `...props`; the reason it was not taken here is
+  the SAME cross-suite carve-out recorded in the 153.4-03 `Button.tsx` item above
+  (`AllocateDialog.test.tsx` asserts that component by identity), plus this phase's
+  UI-SPEC ⛔ on editing `Button.tsx`. Consequence today: `ConnectKeyStep`'s cancel path
+  holds a ref on the submit ROW and queries `button[type="submit"]` inside it to restore
+  focus — correct and asserted, but indirection a `ref` prop would delete. Bundle this
+  with the focus-ring sweep; both edits land in the same file. Owner: the focus sweep.
+- [ ] **`e2e/api-key-flow.spec.ts:41` expects 401 for an Origin-less POST and the route
+  answers 403 — a pre-existing spec drift, not a regression.** Measured 2026-08-11 against
+  a local dev server: `POST /api/keys/validate-and-encrypt` with no `Origin` header →
+  **403**; the identical request WITH `Origin: http://localhost:3000` → **401**
+  `{"error":"Unauthorized"}`, exactly what the spec asserts. `withAuth`
+  (`src/lib/api/withAuth.ts:53`) runs `assertSameOrigin` BEFORE authenticating on every
+  mutating method, so a Playwright `request`-fixture POST is refused as cross-origin
+  before auth is ever consulted. Two cases fail on this (`…returns 401 for
+  unauthenticated request`, `…rejects request with missing fields`). ⚠️ The remedy is to
+  add an `Origin` header to those requests, NOT to relax the CSRF guard — and the same
+  trap is already recorded for the verify-strategy probes. Found while running this
+  phase's e2e gate; out of scope (no file this plan touches is involved). Owner:
+  unassigned. Reference: 153.4-04 verification.
+
+### Phase 153.4-05 (the composite step's honest wait) — non-blocking findings, logged per the stopping rule (added 2026-08-11)
+
+- [x] ~~`MultiKeyConnectStep`'s `EXCHANGES` array has no MT5 card, so a serialized venue
+  reaches a composite member panel only sideways~~ **CLOSED 2026-08-11** by the 153.4 review
+  fix round (CR-03): the MT5 card and its four third-field overrides are in the composite
+  roster, and a class guard compares both surfaces' rendered exchange cards with both flags
+  ON. ⛔ This entry contradicted its own file for a day — the fix was recorded under
+  *Tech-debt / maintainability* ("The two wizard connect surfaces keep TWO hand-maintained
+  `EXCHANGES` rosters") while this one still called the defect "Reachable in production".
+  ONE entry now: the tech-debt one, which carries the residual (the CLASS fix is a shared
+  option table both steps import).
+- [ ] **The composite step's `Loading your saved keys…` banner is the file's one remaining
+  U+2026.** D-21 settles the busy label as ASCII and this plan added no new typographic
+  ellipsis, but the rehydrate banner (a different surface, untouched here) still carries
+  one — as does `CsvUploadStep.tsx:751`. Fold into the repo-wide ellipsis sweep already
+  logged under 153.4-03. Owner: that sweep.
+
+### Phase 153.4 code review — the findings the fix round consciously did NOT fix (added 2026-08-11)
+
+⚠️ **Logged late, and that is the point.** The stopping rule blocks only on user-facing or
+data-integrity defects; everything else gets **logged instead**. The 153.4 fix round closed
+4 criticals + 2 warnings and then recorded the other eight findings nowhere — they survived
+only in `.planning/phases/153.4-*/153.4-REVIEW.md`. The verifier escalated that as F-4. The
+bargain has two halves; this section is the second one. Source: `153.4-REVIEW.md`.
+
+- [ ] **WR-03 — a panel removed mid-validate leaks a credential-carrying POST with no client
+  deadline.** `doRemove` filters the panel out and does nothing else; `anyValidating` then
+  recomputes false, the step's one interval is cleared, and that request keeps only the
+  platform's invocation bound. The `Remove` control is confirmed NOT disabled while
+  validating, so it is UI-reachable. **Non-blocking:** invisible and harmless — the abort
+  buys nothing (neither connect route reads `request.signal`, so it would not stop the key
+  being stored) and `updatePanelById` no-ops for a removed id, so the settled request cannot
+  touch the UI. The interval docblock now states this instead of claiming closure it does not
+  have. Owner: unassigned.
+- [x] ~~WR-04 — `ConnectKeyStep`'s 300 ms mount gate can fire AFTER the request finished~~
+  **FIXED 2026-08-11.** The gate was a macrotask cleared only by the timer effect's cleanup,
+  which React commits at its own priority, so a sub-300 ms answer could leave a ghost card
+  frozen at `0s` whose `Stop waiting` aborted a ref the `finally` had already nulled. Was
+  logged here as *user-facing* — the one of the eight that did not qualify for logging-only.
+  The gate now self-guards on a `waitStartedAtRef`; the regression case drives the ordering
+  and was observed to red without it.
+- [ ] **WR-05 — `validatePanel` dereferences `panelsRef.current[idx]` with no guard**, while
+  its neighbour `handleStopWaiting` opens with `if (!p) return;`. `panelsRef` lags state by
+  one commit, so a click landing between a removal and the sync throws a `TypeError` out of
+  an unawaited async callback. **Non-blocking:** a one-commit ref-sync window nobody has hit.
+  ⭐ Wider than the review reported — `requestRemove` has the same unguarded shape, so fix the
+  CLASS (every `panelsRef.current[idx]` read in this file), not the one line. Owner: unassigned.
+- [ ] **IN-01 — the composite wait card mounts at ~1 s, the single-key one at exactly 300 ms.**
+  The composite gate is `p.waitElapsedMs >= WAIT_CARD_MOUNT_DELAY_MS` and `waitElapsedMs` only
+  moves on the 1 s tick. **Non-blocking:** it satisfies the property (never earlier than
+  300 ms) and is deliberate, documented "please do not 'fix' it by adding one". Residual is a
+  one-line note on the constant that it is a FLOOR at one surface and an exact delay at the
+  other. Owner: unassigned.
+- [ ] **IN-02 — the abort-grace assertion in `validate-budget.test.ts` is near-tautological**
+  (both operands resolve to the same constant, so it restates `WAIT_ABORT_GRACE_MS > 0`).
+  **Non-blocking:** the property that actually matters after CR-01 — the client deadline
+  exceeds the ROUTE's 158 500 ms worst case — is now pinned separately in the same file, so
+  the vacuous line is redundant rather than misleading. Delete it on the next pass through.
+  Owner: unassigned.
+- [ ] **IN-03 — a backward system-clock step renders a negative elapsed figure** in
+  `ValidateWaitCard` (`Math.floor(elapsedMs / 1000)` over a `Date.now()` delta). **Non-blocking:**
+  user-visible but requires an NTP correction or a laptop resume mid-wait. `Math.max(0, …)`
+  costs nothing and keeps the card's one number honest under the Numbers Contract. Owner:
+  unassigned.
+- [x] ~~IN-04 — raising the tombstone widened `MAX_BREAKER_LOCK_SPAN_MS` from 90 s to 120 s~~
+  **ADDRESSED 2026-08-11 by disclosure**, which is all it needed: the derived widening (and the
+  matching loosening of the clock-skew tolerance from the 141.2 review) is now written into the
+  tombstone docblock that otherwise enumerates what moves with the constant. Both consequences
+  were already acceptable; only their absence from the notes was not.
+- [ ] **IN-05 — `handleStopWaiting` can leave a stale `"user"` abort reason with no controller
+  to consume it** (the reason is written before the optional `abort()` call, so pressing the
+  control in a race with the `finally` records one for nothing). **Non-blocking:** provably
+  unread — the next submit clears it. The composite step takes the stricter delete-per-attempt
+  shape; matching it removes the question. Owner: unassigned.
