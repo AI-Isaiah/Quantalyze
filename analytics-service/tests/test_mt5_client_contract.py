@@ -51,6 +51,7 @@ import pytest
 from structlog.testing import capture_logs
 
 import services.mt5_client as mt5_client_mod
+from services import mt5_concurrency
 from services.mt5_client import (
     MT5_INITIALIZE_TIMEOUT_MS,
     MT5_IPC_TIMEOUTS_MS,
@@ -58,8 +59,25 @@ from services.mt5_client import (
     MT5_REQUEST_TIMEOUT_S,
     Mt5Client,
     Mt5ClientError,
+    Mt5SessionAbandoned,
     Mt5Session,
+    bump_mt5_terminal_epoch,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_terminal_state():
+    """WIZFORM-ABANDON / D-36: clear the process-wide per-terminal state (the
+    ``asyncio.Lock`` registry AND the epoch registry) around every test here.
+
+    The epoch cases below BUMP a terminal's generation; a bump leaked out of one
+    test would fence a client another test builds for the same ``host:port``, and
+    under ``-n auto --dist loadgroup`` that is a sixth flake mechanism in a suite
+    that already carries five documented ones (RESEARCH Pitfall 8). ONE shared
+    reset, so a future third registry has exactly one home."""
+    mt5_concurrency.reset_terminal_state_for_tests()
+    yield
+    mt5_concurrency.reset_terminal_state_for_tests()
 
 
 class _FakeNamedTuple:
@@ -1616,3 +1634,200 @@ def test_stage_telemetry_failure_never_changes_what_the_caller_observes(
     assert any(
         "stage telemetry failed to emit" in r.message for r in caplog.records
     ), "the emitter swallowed its own failure silently"
+
+
+# --------------------------------------------------------------------------- #
+# WIZFORM-ABANDON / D-36 — THE ABANDONED-SESSION FENCE AT THE SINK
+#
+# WHY these matter (Rule 9). `asyncio.to_thread` work is NEVER cancelled: when
+# the caller's `wait_for` fires it unwinds and RELEASES the terminal lease while
+# the abandoned thread keeps driving the SAME process-global MT5 session — now
+# under the NEXT holder's lease. The economic harm is not "an exception was not
+# raised"; it is a touch LANDING on somebody else's terminal. Every case below is
+# therefore oracled on the FAKE'S RECORDED CALL LOG — "no post-release session
+# call landed" — never on the exception type alone. That oracle stays true if
+# `Mt5SessionAbandoned` is renamed or re-typed, and it goes false the moment a
+# touch lands, which is the harm itself.
+# --------------------------------------------------------------------------- #
+
+_TERMINAL_HOST = "mt5-gw.internal"
+_TERMINAL_PORT = 18812
+
+
+def _recording_account_info(fake, touches):
+    """Wrap the double's `account_info` so every session touch is RECORDED.
+
+    `_FakeMt5` logs login/initialize/order_check calls but not `account_info`, and
+    the whole oracle here is "did a second touch land". Wrapping (rather than
+    replacing) preserves the scenario's configured return value.
+    """
+    original = fake.account_info
+
+    def _recorded():
+        touches.append("account_info")
+        return original()
+
+    fake.account_info = _recorded
+
+
+def test_a_touch_after_the_lease_released_is_refused_and_never_reaches_the_terminal(
+    caplog,
+):
+    """⭐ THE FENCE (D-36 (i)). A session touch made after the lease that owned this
+    session released must NOT reach the terminal.
+
+    The oracle is the double's call log, not the raise: a fence that raised AFTER
+    forwarding the call would satisfy `pytest.raises` while doing the exact damage
+    it exists to prevent (a zombie thread reading another holder's account).
+    """
+    connect, fake, _rec = _make({"account": _FakeNamedTuple(equity=1000.0)})
+    touches: list[str] = []
+    _recording_account_info(fake, touches)
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    # The FIRST touch happens under the lease that owns this session — it binds.
+    assert client.account_info() == {"equity": 1000.0}
+    assert touches == ["account_info"]
+
+    # ...the caller's wait_for fires, it unwinds, and the lease releases.
+    bump_mt5_terminal_epoch(client.terminal_key)
+
+    with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+        with pytest.raises(Mt5SessionAbandoned):
+            client.account_info()
+
+    assert touches == ["account_info"], (
+        "a session touch landed on the terminal AFTER the lease released — the "
+        "zombie is driving the next holder's session, which is the entire defect"
+    )
+    # D-39: the raise alone is NOT loud. `asyncio.futures._copy_future_state`
+    # returns early when the destination future is cancelled, so on the abandoned
+    # path the exception reaches nobody and the WARNING is the only signal an
+    # operator ever sees.
+    assert any(
+        "WIZFORM-ABANDON" in r.getMessage()
+        for r in caplog.records
+        if r.levelname == "WARNING"
+    ), (
+        "the fence refused silently — with the destination future cancelled the "
+        "raise is discarded, so an unlogged refusal is invisible (D-39)"
+    )
+
+
+def test_a_preflight_built_client_binds_lazily_and_is_not_falsely_refused():
+    """⭐ THE TEST THAT PROVES THE LAZY-BIND DECISION (D-36 AMENDED).
+
+    `job_worker._make_mt5_session` builds its client in PREFLIGHT — outside and
+    BEFORE the lease. If the generation were stamped at CONSTRUCTION, an unrelated
+    lease releasing in that window would leave the fresh client permanently stale
+    and refuse a perfectly legitimate derive read. Binding on FIRST TOUCH costs no
+    fencing power (every zombie's first touch happened under the lease that later
+    released) and removes the false positive STRUCTURALLY rather than by an
+    opt-out list somebody maintains.
+    """
+    connect, fake, _rec = _make({"account": _FakeNamedTuple(equity=7.0)})
+    touches: list[str] = []
+    _recording_account_info(fake, touches)
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    # Somebody ELSE's lease on the same terminal releases between the preflight
+    # build and this client's first use.
+    bump_mt5_terminal_epoch(client.terminal_key)
+
+    assert client.account_info() == {"equity": 7.0}
+    assert touches == ["account_info"], (
+        "an eagerly-bound generation refused a legitimate preflight-built client"
+    )
+
+
+def test_close_still_tears_down_the_transport_on_a_stale_client():
+    """D-41 — `close()` is EXEMPT from the fence and must STAY reachable.
+
+    Since D-35 it touches only OUR OWN rpyc socket. Fencing it would strand that
+    socket on precisely the abandoned path, reintroducing the Pitfall-6 leak
+    `routers/exchange.py:899-948` exists to prevent — the fix causing the bug it
+    is fixing.
+    """
+    connect, fake, _rec = _make({"account": _FakeNamedTuple(equity=1.0)})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    client.account_info()  # bind the generation
+    bump_mt5_terminal_epoch(client.terminal_key)
+
+    client.close()  # must NOT raise
+
+    assert fake._MetaTrader5__conn.close_calls == 1, (
+        "a stale client could not close its own socket — the fence leaked the "
+        "transport it was supposed to protect (D-41 / Pitfall 6)"
+    )
+
+
+def test_release_still_tears_down_the_transport_on_a_stale_client():
+    """D-41, the other exempt teardown name. A separate client because `close()`
+    latches `_closed`, so a `release()` after it would be a structural no-op and
+    could observe nothing."""
+    connect, fake, _rec = _make({"account": _FakeNamedTuple(equity=1.0)})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    client.account_info()  # bind the generation
+    bump_mt5_terminal_epoch(client.terminal_key)
+
+    client.release()  # must NOT raise
+
+    assert fake._MetaTrader5__conn.close_calls == 1, (
+        "a stale client could not release its own socket (D-41 / Pitfall 6)"
+    )
+
+
+def test_session_abandoned_cannot_be_absorbed_into_a_credential_verdict():
+    """STRUCTURAL (D-42), per the `Mt5TerminalBusyError` /
+    `_Mt5PostReadVerificationError` precedent: the classify/stamp arms match on
+    `Mt5ClientError`. If `Mt5SessionAbandoned` subclassed it, OUR abandoned thread
+    could be classified as the USER's `auth` / `wrong_server` failure and a working
+    key blamed for our own timeout."""
+    assert issubclass(Mt5SessionAbandoned, Exception)
+    assert not issubclass(Mt5SessionAbandoned, Mt5ClientError)
+    # The stage survives as an ATTRIBUTE — which is what makes keeping it out of
+    # the message costless for the callers that route on it.
+    assert Mt5SessionAbandoned("account_info").stage == "account_info"
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "login",
+        "account_info",
+        "terminal_info",
+        "history_deals_get",
+        "order_check",
+        "last_error",
+        "restart",
+        "connect",
+    ],
+)
+def test_session_abandoned_message_carries_no_classifier_token(stage):
+    """D-42 — the refusal message must be DISJOINT from the classifier's substring
+    tables, for EVERY stage name the fence can carry.
+
+    `classify_mt5_login_error` matches by SUBSTRING, and the fenced stage names are
+    themselves members of those tables: `terminal_info`/`connect` contain
+    `terminal`/`connect`, `login`/`account_info` contain `login`/`account`. So an
+    exception message that interpolated its stage — the obvious, natural way to
+    write it — would re-run the documented `routers/exchange.py:678-684` incident,
+    where an operator-side refusal became a 400 telling the user their BROKER
+    SERVER was wrong.
+
+    ⚠️ The tables are imported LIVE from `services/mt5_validation.py` on purpose.
+    The invariant is disjointness from whatever the classifier actually matches on
+    TODAY; a hand-copied table would go stale and stay green while the real
+    classifier gained a token. It is not self-referential — the table lives in a
+    DIFFERENT module from the one under test.
+    """
+    from services.mt5_validation import _AUTH_TOKENS, _WRONG_SERVER_TOKENS
+
+    message = str(Mt5SessionAbandoned(stage)).lower()
+    for token in (*_WRONG_SERVER_TOKENS, *_AUTH_TOKENS):
+        assert token not in message, (
+            f"the refusal message for stage {stage!r} contains the classifier "
+            f"token {token!r} — a fenced zombie would be classified as the USER's "
+            "credential failure and a working key blamed for our abandoned thread "
+            "(the routers/exchange.py:678-684 incident)"
+        )
