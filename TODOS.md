@@ -1897,3 +1897,26 @@ plan resolved by SURFACING it (Rule 7), not by blending.
   trap is already recorded for the verify-strategy probes. Found while running this
   phase's e2e gate; out of scope (no file this plan touches is involved). Owner:
   unassigned. Reference: 153.4-04 verification.
+
+### Phase 153.4-05 (the composite step's honest wait) — non-blocking findings, logged per the stopping rule (added 2026-08-11)
+
+- [ ] **`MultiKeyConnectStep`'s `EXCHANGES` array has no MT5 card, so a serialized venue
+  reaches a composite member panel only sideways.** `ConnectKeyStep` appends an MT5 card
+  under `MT5_UI_ENABLED`; this step's replicated array stops at deribit (+ sfox under its
+  own flag). The one path that produces an MT5 member panel today is the UAT/F-4 draft
+  carry-over: pick MT5 on the single-key form, type the three fields, click
+  "+ Add another key window", and panel 0 inherits `exchange: "mt5"`. That panel then
+  renders four exchange cards with NONE pressed, labels the broker-server field as nothing
+  (its `requiresPassphrase` lookup misses), and would POST `passphrase: null` — i.e. the
+  add-key call is missing the broker server. **Reachable in production** (`NEXT_PUBLIC_MT5_ENABLED`
+  is on). 153.4-05 uses exactly this path to prove the per-panel budget is venue-aware, and
+  the wait behaves correctly on it, but the SUBMIT would still fail for a reason the user
+  cannot see. The fix is either the MT5 card (with its three-field labelling) in this
+  array, or an explicit refusal to carry a serialized draft into a composite panel — a
+  product decision, not a defect this plan could take. Owner: unassigned; natural
+  neighbour is Phase 155 (MT5-VERIFY).
+- [ ] **The composite step's `Loading your saved keys…` banner is the file's one remaining
+  U+2026.** D-21 settles the busy label as ASCII and this plan added no new typographic
+  ellipsis, but the rehydrate banner (a different surface, untouched here) still carries
+  one — as does `CsvUploadStep.tsx:751`. Fold into the repo-wide ellipsis sweep already
+  logged under 153.4-03. Owner: that sweep.
