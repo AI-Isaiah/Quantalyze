@@ -52,6 +52,18 @@ merge *is* the apply.
   holds exactly one pending slot, so a third simultaneous arrival cancels a
   pending gate — which renders grey, not red. Do not remove the `needs: python`,
   and do not give the job its own group name; the ⛔ comments in `ci.yml` say why.
+- **⛔ A migration that adds a column the frontend already `SELECT`s must be
+  applied to prod BEFORE the deployment that reads it.** The auto-apply and the
+  Vercel build both fire on the same merge with **no ordering between them**, so
+  "they land together" is not "they land in order". If the deployment wins,
+  PostgREST answers `42703` / `PGRST204` for the duration — and a route that
+  fails CLOSED on an unreadable shape (the correct posture for a security read)
+  turns that window into a full outage of that path, not a degraded one.
+  Procedure: apply the migration first (Supabase MCP `apply_migration` or
+  `supabase db push`), confirm the `Supabase Migrate` run is green, **then**
+  merge/promote. Worked example and the exact blast radius:
+  `20260811210000_api_keys_attested_venue.sql`, whose header carries the same
+  warning (Phase 153.6 WR-03 / MIG-03).
 - The **test project lags prod** (it is not on the auto-apply path — that
   workflow writes only to the prod ref). A PR that adds a column the frontend
   `SELECT`s can fail the e2e gate with "column does not exist" because e2e runs

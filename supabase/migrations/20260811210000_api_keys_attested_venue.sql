@@ -3,6 +3,28 @@
 -- (2026-08-11, Phase 153.6 / PARITY-04, cluster D)
 -- ============================================================================
 --
+-- ⛔⛔ DEPLOY ORDER — READ BEFORE MERGING. THIS MIGRATION MUST BE LIVE ON PROD
+-- BEFORE THE VERCEL DEPLOYMENT THAT READS THE COLUMN.
+-- (153.6 code review WR-03 / migration audit MIG-03.)
+--
+-- Merging to `main` fires the Supabase auto-apply AND the Vercel build, with NO
+-- ordering between them. The TS half already selects `attested_venue`. If the
+-- deployment wins the race, PostgREST answers 42703/PGRST204 and:
+--   * single-key arm  — degrades safely (non-blocking warn, attestedVenue null,
+--     PROBE) but that makes EVERY MT5 wizard submit answer a permanent
+--     KEY_SCOPE_CHECK_UNAVAILABLE for the duration, on this milestone's
+--     headline venue;
+--   * composite arm   — the whole embed read errors, so the fail-CLOSED arm
+--     returns COMPOSITE_MEMBERSHIP_UNKNOWN (503). NO COMPOSITE FINALIZES AT
+--     ALL during the window.
+--
+-- Required procedure: apply this migration to PROD FIRST (Supabase MCP
+-- apply_migration or a manual `supabase db push`), confirm the Supabase Migrate
+-- run is green, and only then merge/promote the deployment. A fresh apply is
+-- exactly what the pre-flight census below is written for. This is recorded in
+-- CONTRIBUTING.md §2 as well — the ordering cannot be enforced from inside this
+-- file, so it lives in the landing procedure.
+--
 -- Calibration, stated once and honoured throughout: this is a SELF-TARGETED
 -- CONTROL BYPASS. An owner mislabels their OWN key to dodge a probe on their
 -- OWN key. It is not a tenant leak and not a data breach. What is lost is the
