@@ -80,10 +80,14 @@ def _reset_mt5_terminal_locks():
     Load-bearing beyond hygiene: an ``asyncio.Lock`` binds to the event loop on its
     first CONTENDED use, and pytest-asyncio gives each test a fresh loop — a lock
     carried over from a contended case would raise "bound to a different event
-    loop" in the next one."""
-    mt5_concurrency._MT5_TERMINAL_LOCKS.clear()
+    loop" in the next one.
+
+    Since WIZFORM-ABANDON / D-36 it also clears the per-terminal EPOCH registry,
+    via the ONE shared helper (RESEARCH Pitfall 8: a leaked epoch fences a client
+    another test builds for the same key — a sixth flake mechanism)."""
+    mt5_concurrency.reset_terminal_state_for_tests()
     yield
-    mt5_concurrency._MT5_TERMINAL_LOCKS.clear()
+    mt5_concurrency.reset_terminal_state_for_tests()
 
 
 @pytest.fixture()

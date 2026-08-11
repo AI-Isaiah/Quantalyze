@@ -630,12 +630,16 @@ def mt5_enabled(monkeypatch):
 @pytest.fixture(autouse=True)
 def _reset_terminal_locks():
     """Clear the ONE shared registry between tests so a Lock parked here can
-    never leak into another test (mirrors tests/test_mt5_concurrency.py)."""
+    never leak into another test (mirrors tests/test_mt5_concurrency.py).
+
+    Since WIZFORM-ABANDON / D-36 it also clears the per-terminal EPOCH registry,
+    via the ONE shared helper (RESEARCH Pitfall 8: a leaked epoch fences a client
+    another test builds for the same key — a sixth flake mechanism)."""
     from services import mt5_concurrency
 
-    mt5_concurrency._MT5_TERMINAL_LOCKS.clear()
+    mt5_concurrency.reset_terminal_state_for_tests()
     yield
-    mt5_concurrency._MT5_TERMINAL_LOCKS.clear()
+    mt5_concurrency.reset_terminal_state_for_tests()
 
 
 # ---------------------------------------------------------------------------

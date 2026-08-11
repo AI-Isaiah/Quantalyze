@@ -61,10 +61,14 @@ def _reset_mt5_terminal_locks():
     Load-bearing since ``Mt5Adapter.validate`` started taking the lease: these
     tests each run their own ``asyncio.run`` loop, and a Lock left in the registry
     by one of them would be re-entered from a DIFFERENT loop by the next — plus a
-    Lock a failing test left HELD would hang every subsequent validate here."""
-    mt5_concurrency._MT5_TERMINAL_LOCKS.clear()
+    Lock a failing test left HELD would hang every subsequent validate here.
+
+    Since WIZFORM-ABANDON / D-36 it also clears the per-terminal EPOCH registry,
+    via the ONE shared helper (RESEARCH Pitfall 8: a leaked epoch fences a client
+    another test builds for the same key — a sixth flake mechanism)."""
+    mt5_concurrency.reset_terminal_state_for_tests()
     yield
-    mt5_concurrency._MT5_TERMINAL_LOCKS.clear()
+    mt5_concurrency.reset_terminal_state_for_tests()
 
 
 # --------------------------------------------------------------------------- #

@@ -353,10 +353,18 @@ def _dq_flags(capture: dict) -> dict:
 def _reset_mt5_terminal_locks():
     """MT5CONC-02: clear the module-level per-terminal asyncio.Lock registry between
     tests so a Lock created by one test (e.g. the concurrent-serialization test) can
-    never leak into another and mask a regression."""
-    jw._MT5_TERMINAL_LOCKS.clear()
+    never leak into another and mask a regression.
+
+    Since WIZFORM-ABANDON / D-36 it also clears the per-terminal EPOCH registry,
+    via the ONE shared helper (RESEARCH Pitfall 8: a leaked epoch fences a client
+    another test builds for the same key — a sixth flake mechanism). Routed
+    through `mt5_concurrency` rather than `jw`: `jw._MT5_TERMINAL_LOCKS` is the
+    very same dict object (Phase 151 moved it into the leaf and job_worker re-binds
+    it), so nothing is lost — and the epoch registry is deliberately NOT re-exported
+    into `jw`, so there is no `jw` name to reach it by."""
+    mt5_conc.reset_terminal_state_for_tests()
     yield
-    jw._MT5_TERMINAL_LOCKS.clear()
+    mt5_conc.reset_terminal_state_for_tests()
 
 
 # ---------------------------------------------------------------------------
