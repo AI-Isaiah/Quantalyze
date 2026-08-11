@@ -27,6 +27,7 @@ import {
 import {
   VALIDATE_KEY_BUDGET_MS,
   VALIDATE_KEY_SERIALIZED_BUDGET_MS,
+  ENCRYPT_KEY_BUDGET_MS,
 } from "./wizard/validate-budget";
 import {
   FAKE_BREAKER_KEY,
@@ -1132,10 +1133,27 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
         "duration in copy, and a promise the seam will not honour is the exact " +
         "repudiation this pin exists to make impossible.",
     ).toBe(VALIDATE_KEY_SERIALIZED_BUDGET_MS);
+    // The THIRD twin, and the one whose divergence is least obvious. The client
+    // does not merely DISPLAY this number — `connectAbortDeadlineMsFor` spends it:
+    // the browser gives up at `validate + encrypt + grace` because the route it
+    // called spends `validateKey → encryptKey → RPC insert`, not validate alone.
+    // Size the client against validate ONLY (the pre-CR-01 shape) and the abort
+    // lands INSIDE the server's own budget, in the window where validate has
+    // already SUCCEEDED and the route is mid-encrypt — so the card tells the user
+    // "nothing was saved" about a key that is at that moment being stored. If this
+    // row rises and the client's copy does not, that defect returns silently.
+    expect(
+      BUDGET_TABLE["encrypt-key"]?.timeoutMs,
+      "The encrypt-key budget and the client's copy of it have diverged. The " +
+        "wizard's abort deadline is validate + encrypt + grace, so a seam-side " +
+        "raise the client did not follow puts the browser's deadline back INSIDE " +
+        "the route's own — reopening CR-01: 'nothing was saved' rendered over a " +
+        "key that is being encrypted and stored.",
+    ).toBe(ENCRYPT_KEY_BUDGET_MS);
 
     // The hand-typed half. Both sides of the equality above live in source files;
     // an editor "fixing" a red pin by moving the CLIENT constant to match a wrong
-    // server value would satisfy it. These two literals are what refuses that.
+    // server value would satisfy it. These three literals are what refuses that.
     expect(
       VALIDATE_KEY_BUDGET_MS,
       "The client's default validate budget is no longer 30 000 ms. If that is " +
@@ -1149,6 +1167,13 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
         "BREAKER_LOCK_TOMBSTONE_S (D-26 — the A-25 margin is 750 ms of rounding " +
         "slack, not headroom) plus its four hand-typed twins and the runbook.",
     ).toBe(120_000);
+    expect(
+      ENCRYPT_KEY_BUDGET_MS,
+      "The client's copy of the encrypt-key budget is no longer 30 000 ms. If " +
+        "that is deliberate, the seam row moves in the SAME commit and both " +
+        "literals in this file move with it — and re-check that the client abort " +
+        "deadline still exceeds the ROUTE's worst case, not just validate's.",
+    ).toBe(30_000);
   });
 
   it("A-14: the cooldown is at least as long as the failure window", () => {
