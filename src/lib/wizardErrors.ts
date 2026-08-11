@@ -168,6 +168,24 @@ export type WizardErrorCode =
   // misconfigured. Splitting them is the whole point — the timeout copy's Retry
   // control was the only affordance offered for a condition retries cannot clear.
   | "KEY_SCOPE_CHECK_UNAVAILABLE"
+  // 153.6-06 / PARITY-05 — the TRANSIENT sibling of the code directly above,
+  // and it is split off that one rather than off KEY_NETWORK_TIMEOUT.
+  //
+  // What it means: the finalize probe answered 2xx and our zod schema could not
+  // read the body. What made MT5-13 classify that as permanent was the sentence
+  // "the body stays unreadable until a deploy changes one side or the other" —
+  // true, and satisfied by the deploy that is ALREADY ROLLING. During an
+  // analytics release the old and new pods answer different shapes for a few
+  // minutes, so this condition clears by itself.
+  //
+  // Why it is not KEY_SCOPE_CHECK_UNAVAILABLE: that code's copy suppresses the
+  // Retry control STRUCTURALLY (it holds no member of RECOVERABLE_ACTIONS), and
+  // it must keep doing so for the probe-STATUS arm, where a retry genuinely
+  // cannot win. Adding a recoverable action there instead of minting this member
+  // would have handed a Retry to both — the affordance leaking onto the arm that
+  // must not have it. ⛔ And never back to KEY_NETWORK_TIMEOUT: "we could not
+  // reach the exchange" is the lie 153.2-04 removed, and the exchange answered.
+  | "KEY_SCOPE_CHECK_UNREADABLE"
   | "KEY_SCOPE_BROADENED"
   | "DRAFT_ALREADY_EXISTS"
   // Sync + gate (SyncPreviewStep) — these wrap strategyGate.ts codes
@@ -1032,6 +1050,30 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     ],
     docsHref: "/security#readonly-key",
     actions: ["request_call"],
+  },
+
+  KEY_SCOPE_CHECK_UNREADABLE: {
+    // RECOVERABLE, on the SAME mechanism as the entry directly above and in the
+    // OPPOSITE direction: `clear_and_retry` IS a member of RECOVERABLE_ACTIONS
+    // (src/lib/envelope.ts), so `buildEnvelope` derives `recoverable: true` and
+    // `ErrorEnvelope` renders the Retry control. That is the entire fix.
+    //
+    // The two entries are deliberately adjacent so the pair is read together.
+    // Their conditions differ by ONE fact — whether the probe answered at all —
+    // and that fact is exactly what decides whether a retry can win. The
+    // permanent one is above; this one is a body we could not read, which is
+    // what a half-rolled analytics deploy serves for the minutes between its
+    // first new pod and its last old one. Suppressing Retry there turned a
+    // self-clearing window into a dead end on the wizard's last step.
+    title: "We could not read the permission check's answer.",
+    cause:
+      "The permission check we run just before publishing did answer, but in a shape we could not read — most often because a release of ours was mid-rollout when you pressed Submit. That usually clears within a few minutes. Nothing about your strategy was lost; it stays exactly where it is.",
+    fix: [
+      "Wait a moment, then try again.",
+      "If it is still happening after a few minutes, tell us — your draft is saved either way.",
+    ],
+    docsHref: "/security#readonly-key",
+    actions: ["clear_and_retry", "request_call"],
   },
 
   KEY_SCOPE_BROADENED: {
