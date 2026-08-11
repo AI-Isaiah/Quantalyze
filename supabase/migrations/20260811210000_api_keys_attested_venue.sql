@@ -527,8 +527,23 @@ DECLARE
   -- counts only, no key material): 29 rows total — deribit 13, okx 9, bybit 5,
   -- mt5 2. Both mt5 rows belong to ONE owner and were created 2026-08-04
   -- (11:37 and 14:20 UTC). These are HAND-TYPED literals on purpose: a count
-  -- compared against its own derivation cannot fail. Re-cut them from a fresh
-  -- measurement if the census has moved; never soften the comparison to make an
+  -- compared against its own derivation cannot fail.
+  --
+  -- ⛔ HOW TO RE-CUT, AND WHY THE DATE IS A SET (153.6 migration re-audit
+  -- M2-01). The abort below requires BOTH that the probe-exempt count equals
+  -- c_pin_mt5 AND that every one of those rows carries the census signature. If
+  -- the signature were a SINGLE date, then the moment PROD's mt5 rows span more
+  -- than one creation day NO choice of literals could satisfy both halves at
+  -- once — v_sig would be strictly below v_mt5 for any single date, and this
+  -- block's own rule forbids softening the comparison, so the migration would
+  -- be structurally un-appliable. c_pin_dates is therefore a SET.
+  --
+  -- To re-cut for a population spanning several days: APPEND each newly
+  -- measured creation date to c_pin_dates and raise c_pin_mt5 to the new
+  -- probe-exempt total. EXACTLY TWO literals move — c_pin_mt5 and c_pin_dates —
+  -- and they must move TOGETHER, because the abort requires all c_pin_mt5 rows
+  -- to be signed. c_pin_total is a reference point only and never needs
+  -- re-cutting (see the NOTICE below). Never soften the comparison to make an
   -- apply pass.
   --
   -- ⚠️ c_pin_total is DELIBERATELY NOT AN ABORT CONDITION — see the NOTICE
@@ -543,20 +558,21 @@ DECLARE
   -- MEASURED on a local PG16 fixture 2026-08-11: mutating the comparison to 28
   -- while the message still said "29/2" aborted correctly but named the wrong
   -- number. One declaration, three uses.
-  c_pin_total CONSTANT INT  := 29;
-  c_pin_mt5   CONSTANT INT  := 2;
-  c_pin_date  CONSTANT DATE := DATE '2026-08-04';
+  c_pin_total CONSTANT INT    := 29;
+  c_pin_mt5   CONSTANT INT    := 2;
+  c_pin_dates CONSTANT DATE[] := ARRAY[DATE '2026-08-04'];
 
   v_total INT;
   v_mt5   INT;
   v_sig   INT;
+  v_dates TEXT := array_to_string(c_pin_dates, ', ');
 BEGIN
   SELECT count(*) INTO v_total FROM public.api_keys;
   SELECT count(*) INTO v_mt5 FROM public.api_keys WHERE exchange = 'mt5';
   SELECT count(*) INTO v_sig
     FROM public.api_keys
    WHERE exchange = 'mt5'
-     AND (created_at AT TIME ZONE 'UTC')::date = c_pin_date;
+     AND (created_at AT TIME ZONE 'UTC')::date = ANY (c_pin_dates);
 
   -- ⛔ THE DISCRIMINATOR IS THE SIGNATURE, AND IT IS TESTED FIRST. v_sig >= 1
   -- means the censused probe-exempt rows are still present, i.e. this IS the
@@ -571,8 +587,8 @@ BEGIN
     -- backfill's argument. Only an unmeasured mt5 row can.
     IF v_mt5 <> c_pin_mt5 OR v_sig <> c_pin_mt5 THEN
       RAISE EXCEPTION
-        'Migration 20260811210000 ABORT: probe-exempt census drift (found mt5=%, of which % carry the % signature; pinned mt5=%, all of them signed). An unmeasured probe-exempt row would be backfilled into a probe SKIP on trust this census never established. Re-measure public.api_keys against khslejtfbuezsmvmtsdn and re-cut the pinned literals before applying. Rolling back.',
-        v_mt5, v_sig, c_pin_date, c_pin_mt5
+        'Migration 20260811210000 ABORT: probe-exempt census drift (found mt5=%, of which % were created on a pinned census date [%]; pinned mt5=%, all of them signed). An unmeasured probe-exempt row would be backfilled into a probe SKIP on trust this census never established. Re-measure public.api_keys against khslejtfbuezsmvmtsdn and re-cut c_pin_mt5 TOGETHER WITH c_pin_dates (append the new creation date) before applying. Rolling back.',
+        v_mt5, v_sig, v_dates, c_pin_mt5
         USING ERRCODE = 'data_exception';
     END IF;
     -- ⛔ THE TOTAL IS REPORTED, NEVER ENFORCED (153.6 migration review MIG-01).
@@ -582,11 +598,11 @@ BEGIN
     -- security fix — for a number carrying no security value, since a non-exempt
     -- row is probed either way. The delta is surfaced so drift is still VISIBLE
     -- in the apply log.
-    RAISE NOTICE 'Migration 20260811210000 pre-flight OK: the probe-exempt population matches the pin (% mt5 rows, all created %). Total api_keys observed % against a pinned % (delta %) — reported, not enforced.',
-      v_mt5, c_pin_date, v_total, c_pin_total, v_total - c_pin_total;
+    RAISE NOTICE 'Migration 20260811210000 pre-flight OK: the probe-exempt population matches the pin (% mt5 rows, all created on a pinned census date [%]). Total api_keys observed % against a pinned % (delta %) — reported, not enforced.',
+      v_mt5, v_dates, v_total, c_pin_total, v_total - c_pin_total;
   ELSE
-    RAISE NOTICE 'Migration 20260811210000 pre-flight: census signature absent (found total=%, mt5=%; no mt5 row created %) — this is a non-PROD apply (TEST / local / CI). The strict census pin is not applicable here; the structural post-verifies below still enforce.',
-      v_total, v_mt5, c_pin_date;
+    RAISE NOTICE 'Migration 20260811210000 pre-flight: census signature absent (found total=%, mt5=%; no mt5 row created on any pinned census date [%]) — this is a non-PROD apply (TEST / local / CI). The strict census pin is not applicable here; the structural post-verifies below still enforce.',
+      v_total, v_mt5, v_dates;
   END IF;
 END
 $census$;
