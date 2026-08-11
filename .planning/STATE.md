@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
-status: verifying
-stopped_at: Completed 153.4-04-PLAN.md (the single-key connect step waits honestly)
-last_updated: "2026-08-11T06:41:57.648Z"
+status: ready_to_plan
+stopped_at: Phase 153.4 complete (5/5) — ready to discuss Phase 153.5
+last_updated: 2026-08-11T08:12:19.530Z
 last_activity: 2026-08-11
 progress:
   total_phases: 14
   completed_phases: 10
   total_plans: 59
-  completed_plans: 59
+  completed_plans: 220
   percent: 71
 ---
 
@@ -55,9 +55,9 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: 153.4 (wizform-budget-venue-aware-budget-honest-long-wait) — EXECUTING
-Plan: 5 of 5
-Status: Phase complete — ready for verification
+Phase: 153.5
+Plan: Not started
+Status: Ready to plan
 Last activity: 2026-08-11
 
 ### Phase 142.1 scope (inserted 2026-08-02)
