@@ -41,6 +41,17 @@ cases below compare the two paths' DISPOSITIONS, never their implementations —
 an assertion that both call the same function proves only that today's code was
 written today. Each drives a fake client through BOTH the router (via the
 ``exchange_module`` fixture) and the adapter (via ``_adapter_req``).
+
+⭐ **TWO GUARDS, TWO QUESTIONS. Do not ask either to do the other's job.**
+
+| Guard | Question it answers | Can it catch a second COPY? |
+|---|---|---|
+| this file (behavioural) | *"do the two paths DISPOSE of the same input identically?"* | ❌ never — two copies that agree today pass every case here, and that is precisely the state 153.3 shipped |
+| ``tests/test_mt5_probe_parity_roster.py`` (structural, 153.6-05) | *"does a hand-written second copy of the probe body EXIST at all?"* | ✅ that is its only job |
+
+The roster cross-references this file the same way. Neither is redundant: a
+single shared body that somebody BREAKS is invisible to the roster (one wrong
+copy is still one copy) and is caught here.
 """
 from __future__ import annotations
 
