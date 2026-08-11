@@ -863,8 +863,11 @@ export function MultiKeyConnectStep({
    * this map. So a step unmounted mid-validate (Continue advancing, a back-nav, a
    * route change) left N credential-carrying POSTs running with no controller
    * holding them and no bound at all, which is the exact property the interval's
-   * own docblock claims is closed ("it does give up, so no request can hold this
-   * tab open forever").
+   * own docblock USED TO claim was closed ("it does give up, so no request can
+   * hold this tab open forever"). ⚠️ That sentence is gone from there now: the
+   * unmount hole this effect closes was not its only counter-example — removing a
+   * validating panel breaks it too, and that one is left open deliberately
+   * (153.4 review WR-03, logged in TODOS.md).
    *
    * ⚠️ The reason is `"user"` per panel because leaving IS a user action:
    * recording it as a deadline would put N seam failures in the funnel for N
@@ -1053,8 +1056,20 @@ export function MultiKeyConnectStep({
    *      fire inside our own route and the reply still has to travel back, so
    *      giving up at exactly the route's budget could cut off a verdict already
    *      on the wire and re-create the silent UNKNOWN this phase exists to end.
-   *      The browser gives up LAST — but it does give up, so no request can hold
-   *      this tab open forever.
+   *      The browser gives up LAST — for every panel this interval is still
+   *      watching.
+   *
+   *      ⚠️ AND THAT IS THE WHOLE OF THE CLAIM. This paragraph used to close
+   *      "so no request can hold this tab open forever", which is false of one
+   *      reachable path (153.4 review WR-03): the `Remove` control is
+   *      deliberately not disabled while a panel is validating, and removing
+   *      such a panel recomputes `anyValidating` to false, clears this one
+   *      interval, and leaves that request with no client bound of OURS — only
+   *      the platform's invocation limit. Left as-is on purpose rather than
+   *      unfixed by oversight: the abort buys nothing there, because neither
+   *      connect route reads `request.signal` (so it would not stop the key
+   *      being stored) and `updatePanelById` no-ops for an id that is gone (so
+   *      the settled request cannot touch the UI). Logged in TODOS.md.
    *   2. THE ELAPSED FIGURE each panel's card renders.
    */
   const anyValidating = panels.some((p) => p.status === "validating");

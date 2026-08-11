@@ -2509,9 +2509,13 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
   });
 
   it("`Stop waiting` asks for no confirmation — there is nothing to confirm", async () => {
-    // `composite/add-key`'s validate is strictly pre-encrypt / pre-RPC: nothing
-    // is persisted until the key is accepted, so a confirmation step on the one
-    // control whose purpose is escaping a stall is the opposite of the affordance.
+    // ⚠️ NOT because "nothing is persisted until the key is accepted": that was
+    // CR-02's category error — `composite/add-key`'s VALIDATE leg is pre-encrypt /
+    // pre-RPC, but the user aborts the ROUTE, which runs on into `encryptKey` and
+    // the add RPC and may well store the key. The ground is that the request
+    // finishes or fails on its own either way, so a confirmation step on the one
+    // control whose purpose is escaping a stall protects nothing and is the
+    // opposite of the affordance.
     await twoCcxtPanels();
     validate(0);
     await advance(DEFAULT_BUDGET_MS * 0.4);

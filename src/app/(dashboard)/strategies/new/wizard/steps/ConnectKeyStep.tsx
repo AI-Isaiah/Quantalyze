@@ -405,6 +405,28 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
    */
   /** When the in-flight validate left the browser, or `null` when none is. */
   const [waitStartedAt, setWaitStartedAt] = useState<number | null>(null);
+  /**
+   * 153.4 review WR-04 — the SAME stamp, readable synchronously.
+   *
+   * The 300 ms render gate below is a `setTimeout`, i.e. a macrotask; the thing
+   * that used to be its only OFF switch was the timer effect's cleanup, which
+   * React commits on its own schedule. For a validate answering at ~250 ms on a
+   * loaded main thread the order `finally → setShowWaitCard(false)` … `gate →
+   * setShowWaitCard(true)` is reachable, and nothing after it ever turns the card
+   * off again: a ghost card over a finished request, frozen at `0s`, whose
+   * `Stop waiting` (past the 40 % rung) calls `abort()` on a ref the `finally`
+   * already nulled — a control that does nothing.
+   *
+   * ⭐ The gate self-guards on this ref instead of trusting cleanup ordering.
+   * Written beside every `setWaitStartedAt`, and only there, so the two cannot
+   * describe different attempts.
+   *
+   * ⛔ NOT MIRRORED INTO `MultiKeyConnectStep`. That surface is immune BY
+   * CONSTRUCTION — its gate is `p.status === "validating" && p.waitElapsedMs >=
+   * WAIT_CARD_MOUNT_DELAY_MS`, a derivation of render-time state with no timer to
+   * fire late — and adding a ref there would be machinery guarding nothing.
+   */
+  const waitStartedAtRef = useRef<number | null>(null);
   /** Milliseconds since `waitStartedAt`, ticked once per second (never faster). */
   const [elapsedMs, setElapsedMs] = useState(0);
   /**
@@ -513,7 +535,15 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
 
     // 2. The render gate. A validate that answers inside 300 ms clears this
     //    timeout in its `finally` before it can fire, so no card flashes.
+    //
+    //    ⚠️ AND IT SELF-GUARDS (153.4 review WR-04), because "clears it in its
+    //    `finally`" is not something this timer can rely on: the clear happens in
+    //    THIS effect's cleanup, which React commits at its own priority, while the
+    //    timeout is a macrotask that can beat it. If the wait this gate was armed
+    //    for is already over, mounting the card now would leave it mounted — no
+    //    later code turns `showWaitCard` off until the next submit.
     const mountGate = setTimeout(() => {
+      if (waitStartedAtRef.current !== waitStartedAt) return;
       setShowWaitCard(true);
     }, WAIT_CARD_MOUNT_DELAY_MS);
 
@@ -683,7 +713,12 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
     setAttemptExchange(exchange);
     setElapsedMs(0);
     setShowWaitCard(false);
-    setWaitStartedAt(Date.now());
+    // ONE stamp into both the state the effect keys on and the ref the render
+    // gate self-guards against (153.4 review WR-04). Two `Date.now()` calls here
+    // would make the guard compare two different attempts' clocks.
+    const started = Date.now();
+    waitStartedAtRef.current = started;
+    setWaitStartedAt(started);
     const controller = new AbortController();
     abortRef.current = controller;
     abortReasonRef.current = null;
@@ -890,6 +925,10 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
       // step — re-enabling it here would open a double-submit window on a key
       // that has already been stored. Each failing arm clears it itself; this is
       // the backstop for any arm that ever forgets.
+      // ⚠️ The ref is nulled BESIDE the state, not instead of it: it is what the
+      // render gate reads to discover — synchronously, without waiting for this
+      // update to commit — that the wait it was armed for is over (WR-04).
+      waitStartedAtRef.current = null;
       setWaitStartedAt(null);
       setShowWaitCard(false);
       abortRef.current = null;

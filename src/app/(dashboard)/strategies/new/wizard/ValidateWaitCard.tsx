@@ -151,10 +151,27 @@ export interface ValidateWaitCardProps {
    */
   elapsedMs: number;
   /**
-   * Abort the in-flight validate. ⛔ NOT DESTRUCTIVE — `validate-key` is strictly
-   * pre-encrypt / pre-RPC and persists nothing server-side, so cancelling loses nothing.
-   * No confirmation dialog and no `danger` styling: a confirmation step on the one
+   * Abort the in-flight validate.
+   *
+   * ⛔ NO CONFIRMATION DIALOG AND NO `danger` STYLING: a confirmation step on the one
    * control whose entire purpose is escaping a stall is the opposite of the affordance.
+   *
+   * ⚠️ THE GROUND FOR THAT IS *NOT* "CANCELLING LOSES NOTHING". This docblock used to
+   * say "`validate-key` is strictly pre-encrypt / pre-RPC and persists nothing
+   * server-side" — a fact about the SEAM CALL asserted about the ROUTE the browser
+   * actually aborts (153.4 review CR-02). Both call sites now say the opposite, and
+   * they are right: `create-with-key` / `composite/add-key` run `validateKey` →
+   * `encryptKey` → the create/add RPC, neither reads `request.signal`, and a Vercel
+   * invocation is not cancelled by a client disconnect — so the key may well be stored
+   * seconds after the abort. The ground that survives is the one
+   * `ConnectKeyStep.tsx` states: the request is going to finish or fail on its own
+   * either way, so there is nothing for a confirmation step to protect.
+   *
+   * ⚠️ The AUTOMATIC abort a caller arms alongside this control is sized ABOVE the
+   * route's own worst case (`connectAbortDeadlineMsFor` = validate + encrypt + grace,
+   * 153.4 review CR-01), so it is only reachable once the server has blown every
+   * deadline it enforces on itself. ⛔ Cancelled copy therefore states only what THIS
+   * BROWSER knows — never a claim about server state.
    */
   onStopWaiting: () => void;
 }

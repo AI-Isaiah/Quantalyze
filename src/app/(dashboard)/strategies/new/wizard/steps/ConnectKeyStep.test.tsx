@@ -1304,6 +1304,75 @@ describe("[153.4-04 / WIZFORM-05] ConnectKeyStep — the honest long wait", () =
     expect(card()).not.toBeNull();
   });
 
+  /**
+   * 153.4 review WR-04 — THE RENDER GATE MUST NOT OUTLIVE THE WAIT IT WAS ARMED FOR.
+   *
+   * The gate is a 300 ms macrotask, and the only thing that used to switch it off
+   * was the timer effect's CLEANUP — which React commits at its own priority, on
+   * the Scheduler's MessageChannel. For a request answering at ~250 ms on a loaded
+   * main thread the order `finally → setShowWaitCard(false)` … `gate →
+   * setShowWaitCard(true)` is reachable, and nothing afterwards turns the card off
+   * again until the next submit.
+   *
+   * ⭐ THE ORDERING IS THE TEST, so it is driven rather than hoped for: resolve the
+   * request, drain the microtasks its `finally` needs, then fire the gate with a
+   * SYNCHRONOUS timer advance — fake timers do not drive MessageChannel, so React
+   * provably has not committed the cleanup at that instant. Remove the
+   * `waitStartedAtRef` check from the gate and this case reds with a card mounted
+   * over a finished request, frozen at `0s`, whose `Stop waiting` would call
+   * `abort()` on a ref the `finally` already nulled.
+   */
+  it("a request that answers just under the gate cannot leave a ghost card behind", async () => {
+    let settle!: (res: Response) => void;
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    const { onSuccess } = await renderFresh("binance");
+    fillAndSubmit("binance");
+
+    await advance(MOUNT_DELAY_MS - 50);
+    expect(card()).toBeNull();
+
+    // The answer lands at 250 ms. A hand-built response, not `new Response`, so the
+    // body is consumed on microtasks alone and the ordering below stays exact.
+    settle({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => ({
+        strategy_id: "33333333-3333-3333-3333-333333333333",
+        api_key_id: "44444444-4444-4444-4444-444444444444",
+      }),
+    } as unknown as Response);
+    for (let i = 0; i < 50; i += 1) await Promise.resolve();
+
+    // ...and the gate fires here, before React has committed the cleanup that
+    // would have cleared it.
+    vi.advanceTimersByTime(100);
+
+    // Now let every pending commit land — fake and real schedulers alike.
+    vi.useRealTimers();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(
+      onSuccess,
+      "the request never completed, so this case is not exercising the race it " +
+        "was written for.",
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      card(),
+      "the 300 ms render gate mounted a wait card over a request that had " +
+        "already answered. Nothing turns `showWaitCard` off again until the next " +
+        "submit, so the user is left with a frozen 0s card whose `Stop waiting` " +
+        "aborts a controller the `finally` already nulled (153.4 review WR-04).",
+    ).toBeNull();
+  });
+
   it("a serialized venue names what is happening and the deadline it was granted", async () => {
     mockAbortableFetch();
     await renderFresh("mt5");
@@ -1421,9 +1490,12 @@ describe("[153.4-04 / WIZFORM-05] ConnectKeyStep — the honest long wait", () =
   });
 
   it("`Stop waiting` asks for no confirmation — there is nothing to confirm", async () => {
-    // `validate-key` is strictly pre-encrypt / pre-RPC: nothing is persisted
-    // server-side, so a confirmation step on the one control whose purpose is
-    // escaping a stall is the opposite of the affordance.
+    // ⚠️ NOT because "nothing is persisted": that was CR-02's category error —
+    // `validate-key` is pre-encrypt / pre-RPC, but what the user aborts is
+    // `create-with-key`, which runs on into `encryptKey` and the create RPC. The
+    // ground is that the request finishes or fails on its own either way, so a
+    // confirmation step on the one control whose purpose is escaping a stall
+    // protects nothing and is the opposite of the affordance.
     mockAbortableFetch();
     await renderFresh("binance");
     fillAndSubmit("binance");

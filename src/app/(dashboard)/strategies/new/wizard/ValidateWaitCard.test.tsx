@@ -261,7 +261,7 @@ describe("[WIZFORM-05] the queue disclosure is gated on the CAPABILITY, not a ve
   });
 });
 
-describe("[WIZFORM-05] `Stop waiting` — non-destructive, and reachable by keyboard", () => {
+describe("[WIZFORM-05] `Stop waiting` — unconfirmed, and reachable by keyboard", () => {
   it("fires the callback on click and shows no confirmation UI", () => {
     const onStopWaiting = vi.fn();
     renderCard({
@@ -273,9 +273,12 @@ describe("[WIZFORM-05] `Stop waiting` — non-destructive, and reachable by keyb
     fireEvent.click(screen.getByRole("button", { name: STOP_WAITING }));
 
     expect(onStopWaiting).toHaveBeenCalledTimes(1);
-    // ⛔ No confirmation step. `validate-key` is strictly pre-encrypt / pre-RPC —
-    // nothing is persisted server-side, so cancelling loses nothing, and a confirmation
-    // on the one control whose purpose is escaping a stall is the opposite affordance.
+    // ⛔ No confirmation step — and NOT because "cancelling loses nothing". That
+    // reasoning (validate-key is pre-encrypt / pre-RPC) was CR-02's category error: the
+    // browser aborts the ROUTE, which runs on past validate and may store the key. The
+    // ground is that the request finishes or fails on its own either way, so a
+    // confirmation on the one control whose purpose is escaping a stall protects
+    // nothing and is the opposite affordance.
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.queryByRole("alertdialog")).toBeNull();
     expect(screen.getAllByRole("button")).toHaveLength(1);
