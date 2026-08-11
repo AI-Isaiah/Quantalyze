@@ -540,6 +540,56 @@ async def _validate_mt5_key_probe(
                 retry_after=RETRY_AFTER_SECONDS["mt5-gateway"],
                 detail="The MetaTrader gateway is not responding. Try again shortly.",
             )
+        except Mt5SessionAbandoned:
+            # ⭐ WIZFORM-ABANDON / 153.6 B2 (D-15). `Mt5SessionAbandoned` is a
+            # PLAIN `Exception` by design (D-42, so no credential-classify arm can
+            # absorb an operator-side refusal into a user verdict) — which means
+            # it matches NONE of the arms around it and is caught by the broad
+            # `except Exception as connect_err:` below. THE CONSTRUCTION FENCE
+            # RAISES IT FROM INSIDE THIS `to_thread` (D-36 AMENDED (ii): the
+            # lease-occupancy ContextVar, checked pre- AND post-connect), so this
+            # is a live arrival and not a theoretical one.
+            #
+            # ⚠️ THIS IS NOT ARM-REORDERING. The dedicated D-40 arm already in
+            # this file sits on the STAGE-2 probe `try`, a different block
+            # entirely; the connect stage had no arm of its own at all.
+            #
+            # ⛔ WHY 424 AND NEVER THE 503 BELOW — the whole of B2. A 503 carrying
+            # `dependency="mt5-gateway"` is not merely a status: it is one of
+            # exactly THREE sites that COUNT toward `breaker:mt5-gateway`
+            # (`src/lib/resilient-fetch.ts`), where a 424 counts nowhere. An
+            # abandoned construction is OUR OWN zombie thread outliving its lease
+            # — it says nothing whatever about the gateway's health, and the very
+            # next request clears it by taking a fresh lease. Answered 503 it
+            # casts votes to trip the breaker against a healthy gateway, and every
+            # user's MT5 validate is then told "the gateway is not responding, try
+            # again shortly" for a fault no retry of theirs caused.
+            #
+            # ⚠️ NOBODY REACHES THIS ON THE GENUINELY ABANDONED PATH. There the
+            # caller has already unwound, so asyncio discards the zombie's raise
+            # (D-39 — which is why the fence LOGS as well as raising). This arm
+            # exists for the FALSE-POSITIVE path: a legitimate caller that trips
+            # the fence must be told "transient, retry".
+            #
+            # Disposition is byte-mirrored from the stage-2 D-40 arm: the route's
+            # EXISTING transient shape, minting no new user-facing code (153.1
+            # owns that table), `trace.outcome` staying inside the existing
+            # category set — the same discipline the `_is_ipc_timeout_ordering_
+            # inversion` branch below follows. WARNING (not exception) — a fence
+            # refusal is a designed outcome, not a Sentry-grade fault — and it
+            # names the DECISION only: no host, port, terminal key, generation
+            # number or credential (S2 / WIZFORM-03 / T-134-01).
+            logger.warning(
+                "validate_key: MT5 session was abandoned by its own lease "
+                "during connect — classified transient (WIZFORM-ABANDON / B2)"
+            )
+            trace.outcome = "transient"
+            raise VenueTransientHTTPException(
+                status_code=424,
+                code="NETWORK_UNAVAILABLE",
+                detail=NETWORK_ERROR_DETAIL,
+                recoverable=True,
+            )
         except Exception as connect_err:  # noqa: BLE001 — connect failure is server/bridge, not the key
             # ⭐ NOT every construction failure is a bridge fault. D-24's ordering
             # guard fires INSIDE this to_thread, and answering it 503 reports a

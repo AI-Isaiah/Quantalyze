@@ -237,7 +237,20 @@ EXPECTED_HTTPEXCEPTION_SUBCLASSES = 1
 #: "service-permanent, do not retry" about the most retryable condition there is.
 #: A seventh ``VenueTransientHTTPException(424)`` construction; no new user-facing
 #: code is minted (153.1 owns the TS code table), so blind spot (b) stays LATENT.
-EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 11
+#: 11 -> 12 (2026-08-11, Phase 153.6-05 / B2): the MT5 validate CONNECT stage gained
+#: its own ``except Mt5SessionAbandoned`` arm, byte-mirroring the D-40 disposition
+#: the PROBE stage got at 10 -> 11 above. Same fence type, DIFFERENT ``try`` — the
+#: construction fence (D-36 AMENDED (ii)) raises from inside ``Mt5Client.__init__``,
+#: which the stage-2 arm cannot see. Like its twin it is a REMOVAL, not an addition:
+#: the refusal was previously absorbed by the broad ``except Exception as
+#: connect_err`` and answered **503 MT5_GATEWAY_UNREACHABLE with
+#: dependency="mt5-gateway"** — one of exactly three sites that COUNT toward
+#: ``breaker:mt5-gateway`` (``src/lib/resilient-fetch.ts``), so our own abandoned
+#: thread was voting to trip the breaker against a healthy gateway. An eighth
+#: ``VenueTransientHTTPException(424)`` construction; no new user-facing code is
+#: minted (153.1 owns the TS code table) and it is a 4xx like every other site, so
+#: blind spot (b) stays LATENT rather than live.
+EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 12
 
 #: Vacuity fence. A scanner that matched nothing would report agreement with the
 #: quarantine forever, so the scan must prove it saw the tree. Loose floors on
