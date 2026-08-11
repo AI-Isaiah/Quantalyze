@@ -683,6 +683,32 @@ function longestRequestLifetimeMs(
  */
 const RECORD_PATH_OVERHEAD_MS = 9_250;
 
+/**
+ * The VACUITY floor under the derived A-25 assertion — the answer to "is the
+ * reducer reading a real table at all", and NOTHING else.
+ *
+ * ⚠️ IT IS DELIBERATELY NOT THE CURRENT MAXIMUM (153.4 review, WR-02). It used
+ * to be 120 000, which — sitting under a ceiling that is also satisfied only at
+ * the top — pinned the longest budget to EXACTLY one admissible value. Phase 155
+ * (MT5-VERIFY) is chartered by Phase 153.4 itself to TIGHTEN the provisional
+ * 120 000 ms serialized budget against a live broker, and when it does, a floor
+ * pinned to today's maximum reds FIRST, with a message whose remedy ("fix the
+ * derivation, never the floor") is exactly wrong for the edit that triggered it.
+ * A guard that accuses the one change it was written in anticipation of is worse
+ * than no guard: the reader learns to move floors.
+ *
+ * 15 000 is the SHORTEST magnitude this file already pins as a literal (`bridge`),
+ * so no real row can fall under it and only a mis-shaped table — `Math.max` over
+ * nothing, i.e. `-Infinity` — can. A deliberate budget CUT then reds only the
+ * assertions that should: the literal `EXPECTED_TIMEOUT_MS` pin and the
+ * client-agreement pin, each of which names the right edit.
+ *
+ * ⚠️ SHARED with the SELF-TEST below on purpose, exactly as the reducer is. A
+ * self-test that re-typed this number could not observe the floor being re-pinned
+ * to the current maximum, which is the regression it exists to catch.
+ */
+const VACUITY_FLOOR_MS = 15_000;
+
 describe("breaker constants — all six pinned to hand-typed literals", () => {
   it("BREAKER_KEY is the literal 'breaker:railway'", () => {
     // MODULE CONSTANT, never interpolated from user input (threat T-140-01):
@@ -882,10 +908,12 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
     ).toBeGreaterThanOrEqual(14);
     expect(
       longest,
-      "The longest seam budget derived below 120 000 ms. Either a real budget " +
-        "was cut (a separate question) or the rows no longer carry timeoutMs " +
-        "and the reducer is reading undefined.",
-    ).toBeGreaterThanOrEqual(120_000);
+      `The longest seam budget derived below ${VACUITY_FLOOR_MS} ms — NO row in ` +
+        "this table is that short, so the reducer is reading an empty or " +
+        "mis-shaped table (rows that no longer carry timeoutMs/retries, or a " +
+        "derivation replaced by something that returns -Infinity) rather than " +
+        "reporting a real cut. Fix the derivation, never this floor.",
+    ).toBeGreaterThanOrEqual(VACUITY_FLOOR_MS);
 
     // ⚠️ THE LEFT SIDE CHARGES THE RECORD PATH, AND THAT IS WR-01(a). The
     // quantity the tombstone must span is admission→RECORD, not admission→
@@ -981,6 +1009,50 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
         "ANY table and is decorative. Raise this synthetic above the new " +
         "ceiling in the same commit that raised it (see D-26).",
     ).toBeGreaterThan((100 + 30) * 1_000);
+  });
+
+  it("SELF-TEST — the vacuity floor catches a MIS-SHAPED table and does NOT catch a legitimate budget cut", () => {
+    // ── WHAT A VACUITY FLOOR IS FOR, AND WHAT IT IS NOT FOR ───────────────────
+    // The floor above answers ONE question: is the reducer measuring a real
+    // table, or is it measuring nothing? `Math.max` over an empty or renamed
+    // table is -Infinity, which satisfies the ceiling forever while asserting
+    // nothing at all. Both halves below run the SAME reducer and the SAME
+    // `VACUITY_FLOOR_MS` the assertion above uses — a self-test that re-typed
+    // either would prove only that the re-typed copy works.
+
+    // (a) THE CASE THE FLOOR EXISTS FOR. A table the reducer cannot read.
+    expect(
+      longestRequestLifetimeMs({}),
+      "The reducer no longer answers -Infinity for an empty table, so the " +
+        "vacuity floor above is guarding against a state that can no longer " +
+        "arise — and something else now hides a mis-shaped table instead.",
+    ).toBe(Number.NEGATIVE_INFINITY);
+    expect(longestRequestLifetimeMs({})).toBeLessThan(VACUITY_FLOOR_MS);
+
+    // (b) THE CASE THE FLOOR MUST NOT CATCH, AND THIS IS WR-02. Phase 155
+    // (MT5-VERIFY) is chartered to tighten the PROVISIONAL 120 000 ms serialized
+    // budget from real instrumentation — a 60 000 ms outcome is an ordinary
+    // result, not a broken derivation. The floor must stay silent for it, so
+    // that the assertions which SHOULD speak (the literal timeout pin and the
+    // client-agreement pin) are the ones the reader is sent to.
+    //
+    // ⛔ If this half reds, someone has re-pinned the floor to the current
+    // maximum. Do not "fix" it by lowering this synthetic — the floor is what is
+    // wrong, and the message on it will be sending its reader to the wrong edit.
+    const tightenedByPhase155 = {
+      bridge: { timeoutMs: 15_000, retries: 1 },
+      "validate-key": { timeoutMs: 30_000, retries: 0 },
+      "validate-key-serialized": { timeoutMs: 60_000, retries: 0 },
+    };
+    expect(
+      longestRequestLifetimeMs(tightenedByPhase155),
+      "A LEGITIMATE budget cut now trips the vacuity floor, so the first thing " +
+        "Phase 155 will see when it tightens the provisional serialized budget " +
+        "is a guard telling it to 'fix the derivation, never the floor' — the " +
+        "wrong instruction for the only change this number was ever expected to " +
+        "undergo. The floor is a shape check, not a budget pin: keep it below " +
+        "every real row.",
+    ).toBeGreaterThanOrEqual(VACUITY_FLOOR_MS);
   });
 
   it("WIZFORM-05 / D-04: the serialized client budget exceeds the 105 s server worst case", () => {
