@@ -1106,6 +1106,49 @@ async def test_mt5_holdings_read_contends_on_the_shared_terminal_lock(mt5_enable
 
 
 # ---------------------------------------------------------------------------
+# Test 10b — WIZFORM-ABANDON / D-36 / ABANDON-05: the holdings RELEASE advances
+# the terminal epoch. `allocator_positions.py:656` is the call site the author of
+# the "the lease is the ONE release point" claim did NOT have in mind, which is
+# exactly why it is pinned here and not left to the derive-path assertion.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_mt5_holdings_release_bumps_the_terminal_epoch_exactly_once(
+    mt5_enabled,
+):
+    """EXACT delta, hand-typed. The holdings read takes the terminal lease exactly
+    ONCE (the currency gate / row build below it is pure computation and stays
+    outside), so the epoch must advance by exactly 1.
+
+    "It changed" would be green under a DOUBLE bump, and a double bump fences a
+    successor that legitimately holds the terminal. 0 means the acquisition went
+    back to the raw ``asyncio.Lock``, which has no release hook to bump from —
+    silently disarming the abandoned-session fence on this path while every
+    lock-identity and lock-contention assertion above stayed green.
+    """
+    from services.mt5_client import _mt5_epoch_for
+
+    transport = _RecordingMt5Transport(account=_account())
+    session = _session(transport)
+    # The SHIPPED property, never a retyped "host:port": a drifted literal would
+    # measure an unrelated registry slot and read 0 → 0 forever.
+    key = session.client.terminal_key
+    before = _mt5_epoch_for(key)
+
+    rows, warning = await fetch_allocator_holdings("mt5", session, API_KEY_ID)
+
+    # The read really happened — a skipped/gated read would "prove" the delta by
+    # never taking the lease at all.
+    assert warning is None
+    assert len(rows) == 1
+    assert "account_info" in transport.calls
+
+    assert _mt5_epoch_for(key) - before == 1, (
+        f"the holdings read's terminal release must advance the epoch by EXACTLY "
+        f"1 (one lease hold); got {_mt5_epoch_for(key) - before} for key={key!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test 11 — the login bracket: never a wrong-account equity row
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio

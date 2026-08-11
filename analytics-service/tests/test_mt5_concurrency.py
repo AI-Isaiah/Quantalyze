@@ -33,6 +33,7 @@ No network, no database, no MT5 terminal — pure import-graph and identity chec
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import subprocess
 import sys
@@ -103,6 +104,16 @@ def test_registry_object_is_shared_across_modules() -> None:
     assert jw._mt5_terminal_lock_for is mt5_concurrency._mt5_terminal_lock_for
     assert jw._mt5_bounded_restart is mt5_concurrency._mt5_bounded_restart
     assert jw._Mt5PostReadVerificationError is mt5_concurrency._Mt5PostReadVerificationError
+
+    # WIZFORM-ABANDON / plan 153.5-03 — the LEASE is now the acquisition verb at
+    # every production call site (it is the only one with a release hook to bump
+    # the abandoned-session epoch from), so it needs the same one-object pin the
+    # registry has. A `mt5_terminal_lease` re-declared in either consumer would
+    # wrap a DIFFERENT lock registry and bump a DIFFERENT epoch, and every
+    # "the lease was entered" assertion would stay green while the two job kinds
+    # serialized nothing and fenced nothing.
+    assert jw.mt5_terminal_lease is mt5_concurrency.mt5_terminal_lease
+    assert ap.mt5_terminal_lease is mt5_concurrency.mt5_terminal_lease
 
 
 # ---------------------------------------------------------------------------
@@ -541,3 +552,168 @@ def test_the_epoch_registry_is_not_re_exported_anywhere() -> None:
     assert not hasattr(ap, "_MT5_TERMINAL_EPOCHS"), (
         "allocator_positions acquired a binding to the epoch registry"
     )
+
+
+# ---------------------------------------------------------------------------
+# WIZFORM-ABANDON / D-36 / T-153.5-10 — the raw-acquisition class, pinned shut.
+#
+# THE DEFECT THIS EXISTS FOR: at 153.5 HEAD, THREE of the five production
+# terminal acquisitions bypassed `mt5_terminal_lease` and took
+# `_mt5_terminal_lock_for` directly — `job_worker.py:364`, `job_worker.py:3572`
+# (finding #5's OWN path) and `allocator_positions.py:656`. The raw
+# `asyncio.Lock` has no release hook, so those three released the terminal while
+# bumping NOTHING: every abandoned-session fence downstream was disarmed on
+# exactly the paths that motivated it, and the whole suite was green.
+#
+# Plan 153.5-03 converted all three. This test is what stops a fourth from being
+# written — because "we already fixed those three" is how the instance-not-class
+# mistake gets paid for a seventeenth time. It reasons over the AST, never a
+# grep: both edited files still contain the literal string
+# `_mt5_terminal_lock_for` in prose comments explaining why they no longer call
+# it, so a grep-based pin would be permanently red.
+# ---------------------------------------------------------------------------
+
+#: The registry accessor that must never again be entered as a context manager
+#: directly. Acquiring it is fine (`mt5_terminal_lease` does exactly that, as a
+#: plain call); HOLDING it as the async-with target is what skips the release
+#: hook.
+_RAW_LOCK_ACCESSOR = "_mt5_terminal_lock_for"
+
+#: `mt5_concurrency` itself is the ONE legitimate exemption: `mt5_terminal_lease`
+#: is the thing every other module is required to go through, and it necessarily
+#: reaches the registry. It does so as a plain call (`lock = _mt5_terminal_lock_for(k)`),
+#: not an async-with, so it would not be reported anyway — the exclusion is
+#: belt-and-braces and is stated so a future refactor of the lease into
+#: `async with _mt5_terminal_lock_for(k):` does not silently inherit an exemption
+#: it was never granted. ⚠️ Never widen this set to "the file I am editing".
+_RAW_ACQUISITION_EXEMPT_FILES: frozenset[str] = frozenset(
+    {"services/mt5_concurrency.py"}
+)
+
+#: Anti-vacuity floor. MEASURED at 153.5-03: `services/` + `routers/` hold 88
+#: production `.py` files (77 + 11). A pin that walked zero files would pass in
+#: silence, so the walk asserts it saw a plausible fraction of the tree. Hand-
+#: typed deliberately — a floor computed from the same walk it is guarding proves
+#: nothing.
+_PRODUCTION_FILE_FLOOR = 40
+_PRODUCTION_FILES_MEASURED_AT_153_5 = 88
+
+
+def _raw_lock_acquisitions(source: str, rel: str) -> list[tuple[str, int]]:
+    """Every `async with _mt5_terminal_lock_for(...):` item in ``source``.
+
+    BOTH syntactic forms are matched — a bare `_mt5_terminal_lock_for(k)` and an
+    attribute access `mt5_concurrency._mt5_terminal_lock_for(k)` — because a
+    re-import under a module alias is the obvious way for the class to come back.
+    """
+    found: list[tuple[str, int]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.AsyncWith):
+            continue
+        for item in node.items:
+            call = item.context_expr
+            if not isinstance(call, ast.Call):
+                continue
+            func = call.func
+            name = (
+                func.id
+                if isinstance(func, ast.Name)
+                else func.attr
+                if isinstance(func, ast.Attribute)
+                else None
+            )
+            if name == _RAW_LOCK_ACCESSOR:
+                found.append((rel, node.lineno))
+    return found
+
+
+def _production_python_files() -> list[Path]:
+    root = Path(__file__).resolve().parents[1]  # analytics-service/
+    return sorted(
+        p
+        for pkg in ("services", "routers")
+        for p in (root / pkg).rglob("*.py")
+    )
+
+
+def test_no_production_module_acquires_the_raw_terminal_lock() -> None:
+    """Every production terminal acquisition must go through the LEASE.
+
+    The oracle is the release hook, not tidiness: `mt5_terminal_lease`'s `finally`
+    is the only place a terminal hand-over can be observed, so it is the only
+    place the D-36 epoch can be bumped. A raw `async with _mt5_terminal_lock_for(k):`
+    serializes perfectly and fences nothing — which is precisely why this class of
+    defect survived every existing lock test.
+    """
+    root = Path(__file__).resolve().parents[1]
+    files = _production_python_files()
+
+    assert len(files) >= _PRODUCTION_FILE_FLOOR, (
+        f"the walk scanned only {len(files)} production files, below the "
+        f"hand-typed floor of {_PRODUCTION_FILE_FLOOR} "
+        f"({_PRODUCTION_FILES_MEASURED_AT_153_5} were measured across "
+        f"services/ + routers/ at 153.5-03). A pin over an empty or truncated "
+        f"walk passes in silence — fix the walk, never the floor."
+    )
+
+    offenders: list[tuple[str, int]] = []
+    for path in files:
+        rel = path.relative_to(root).as_posix()
+        if rel in _RAW_ACQUISITION_EXEMPT_FILES:
+            continue
+        offenders.extend(_raw_lock_acquisitions(path.read_text(), rel))
+
+    assert not offenders, (
+        f"these sites hold the per-terminal Lock DIRECTLY instead of taking "
+        f"`mt5_terminal_lease`: {offenders}. The raw Lock has no release hook, so "
+        f"the site releases the terminal without bumping the WIZFORM-ABANDON / "
+        f"D-36 epoch — a `to_thread` body that outlived its `wait_for` is then "
+        f"free to drive the NEXT holder's MT5 terminal, unfenced and silent. Take "
+        f"the lease (no `wait_s` for batch callers — the bounded arm's "
+        f"Mt5TerminalBusyError is the interactive path's contract, D-29)."
+    )
+
+
+def test_the_raw_acquisition_scanner_reports_and_does_not_over_report() -> None:
+    """Self-test: the scanner above must BITE on the real shape and must NOT be
+    fooled by the same text in prose.
+
+    Both halves matter. Without the first, the pin is a no-op that would have been
+    green throughout the three-site defect. Without the second, the pin is
+    permanently red — `job_worker.py` and `allocator_positions.py` both still
+    NAME `_mt5_terminal_lock_for` in the comments explaining why they no longer
+    call it, which is exactly why this is an AST walk and not a grep.
+    """
+    offending = (
+        "async def f(k):\n"
+        "    async with _mt5_terminal_lock_for(k):\n"
+        "        pass\n"
+    )
+    assert _raw_lock_acquisitions(offending, "synthetic.py") == [("synthetic.py", 2)]
+
+    # The attribute form — a module-aliased re-import is the obvious way back in.
+    aliased = (
+        "async def f(k):\n"
+        "    async with mt5_concurrency._mt5_terminal_lock_for(k):\n"
+        "        pass\n"
+    )
+    assert _raw_lock_acquisitions(aliased, "synthetic.py") == [("synthetic.py", 2)]
+
+    in_a_docstring = (
+        "async def f(k):\n"
+        '    """Historically this did:\n'
+        "\n"
+        "    async with _mt5_terminal_lock_for(k):\n"
+        "        ...\n"
+        "\n"
+        '    It now takes the lease."""\n'
+        "    async with mt5_terminal_lease(k):\n"
+        "        pass\n"
+    )
+    assert _raw_lock_acquisitions(in_a_docstring, "synthetic.py") == []
+
+    # A plain CALL is not an acquisition — `mt5_terminal_lease` itself does this,
+    # and reporting it would make the exemption above load-bearing rather than
+    # belt-and-braces.
+    plain_call = "def f(k):\n    lock = _mt5_terminal_lock_for(k)\n    return lock\n"
+    assert _raw_lock_acquisitions(plain_call, "synthetic.py") == []

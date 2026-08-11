@@ -70,6 +70,11 @@ from services.ingestion.long_fetch import (
 )
 from services.metrics import periods_per_year_for_asset_class
 from services.mt5_client import Mt5Client, Mt5ClientError, Mt5Session
+# ⚠️ Imported from the module that OWNS it (`services.mt5_client`), never through a
+# re-export — a name reached through a re-export is a DIFFERENT binding and an
+# assertion on it is a silent no-op (the 151 review-E2 rule). `job_worker`
+# deliberately does not re-export the epoch registry at all.
+from services.mt5_client import _mt5_epoch_for
 # 151 review E2 — the restart bound is READ from this leaf module, not from
 # `job_worker` (Phase 151 moved the MT5 concurrency symbols out; job_worker only
 # re-exports `_MT5_RESTART_TIMEOUT_S`). A monkeypatch aimed at `jw` is a SILENT
@@ -1102,6 +1107,57 @@ async def test_mt5_concurrent_syncs_serialized(monkeypatch) -> None:
     assert n_other_enter < n_first_exit, (
         f"with the lock neutered the concurrent syncs MUST interleave (else the "
         f"positive assertion is vacuous); got {neutered!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 11b — WIZFORM-ABANDON / D-36 / ABANDON-05: the derive job's terminal RELEASE
+# advances the epoch. This is the precondition for the whole fence: the derive
+# read is finding #5's OWN path, and at HEAD it acquired the raw Lock, which has
+# no release hook. A bump that lived only in `mt5_terminal_lease` would have left
+# this path bumping NOTHING — with every existing test green.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_derive_release_bumps_the_terminal_epoch_exactly_once(
+    monkeypatch,
+) -> None:
+    """EXACT delta, hand-typed, not "changed" and not `len(holds)`.
+
+    A healthy derive job takes the terminal lease exactly ONCE (one
+    `async with mt5_terminal_lease(...)` around the whole IPC region — the
+    post-read combine/persist is deliberately outside it), so the epoch must
+    advance by exactly 1. A "non-zero / it changed" assertion would pass for a
+    DOUBLE bump too, and a double bump is not harmless: the extra generation
+    fences a successor that legitimately holds the terminal (the F8 failure mode
+    plan 01 already had to design against).
+    """
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(
+        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        deals=_canonical_deals(),
+    )
+    ctx, capture = _build_ctx(transport)
+    # ⭐ The SHIPPED property, never a retyped "host:port" — a hand-typed key that
+    # drifts from `Mt5Client.terminal_key` would measure an unrelated registry slot
+    # and read 0 → 0 forever, i.e. pass by measuring nothing.
+    key = ctx.exchange.client.terminal_key
+    before = _mt5_epoch_for(key)
+
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    # The read really happened (otherwise a fails-closed job would "prove" the
+    # bump by never taking the lease at all).
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert any(u[0] == "csv_daily_returns" for u in capture["upserts"])
+    assert "history_deals_get" in transport.calls
+
+    assert _mt5_epoch_for(key) - before == 1, (
+        f"the derive job's terminal release must advance the epoch by EXACTLY 1 "
+        f"(one lease hold); got {_mt5_epoch_for(key) - before} for key={key!r}. "
+        f"0 means the acquisition bypassed `mt5_terminal_lease` and released "
+        f"through the raw Lock, which has no release hook — every downstream "
+        f"abandoned-session fence is disarmed on THE path finding #5 runs on."
     )
 
 
