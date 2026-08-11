@@ -225,6 +225,28 @@ ALTER TABLE public.api_keys
 -- true — an api_keys INSERT behind a service-role writer that passes the venue
 -- IT validated — is the connect-flow refactor both migrations defer.
 --
+-- ⛔⛔ AND THE DEFENCE HAS A PRECONDITION. READ IT BEFORE ADDING A VENUE TO
+-- `scopeProbeSupported: false` (153.6 migration re-audit M2-04, recorded here
+-- because it previously lived only in a phase summary).
+--
+-- What this CHECK buys is that the forgery is SELF-DEFEATING, not that it is
+-- impossible: a caller can still mint a row attested `mt5` and skip the probe on
+-- their own key — it costs them `exchange = 'mt5'` too, so the key is routed to
+-- the MT5 adapter and never syncs. That price is only payable because EVERY
+-- probe-exempt venue is currently UNSYNCABLE. `mt5` is the sole member of the
+-- probe-exempt set (src/lib/closed-sets.ts VENUE_CAPABILITIES,
+-- `scopeProbeSupported: false`).
+--
+-- ⛔ ADDING A **SYNCABLE** VENUE TO THAT SET MAKES THE BYPASS FREE. The forger
+-- would then get a probe skip while their key keeps ingesting normally, and this
+-- CHECK would not cost them anything. `closed-sets.ts` already names sFOX as the
+-- plausible next member (its capability row carries an OPEN QUESTION about
+-- exactly this opt-out). If that opt-out is ever granted to a venue that syncs,
+-- remedy (a) — move the api_keys INSERT behind a service-role writer that passes
+-- the venue IT validated, and withdraw `authenticated` EXECUTE from both wizard
+-- RPCs — must land FIRST. This CHECK does not protect against that case, and no
+-- constraint on these two columns can.
+--
 -- Added directly rather than NOT VALID + VALIDATE: at this point in the
 -- transaction the column was just created and every row is NULL, so validation
 -- is trivially satisfied, and the ALTER above already holds ACCESS EXCLUSIVE on
@@ -668,7 +690,14 @@ COMMENT ON COLUMN public.api_keys.attested_venue IS
   'api_keys_attested_venue_matches_exchange pins that coupling for every '
   'writer, present and future. The bypass is therefore not free: forging the '
   'attestation to buy a probe skip also forges the routing label, and an '
-  'mt5-labelled row is handed to the MT5 adapter and never syncs. A '
+  'mt5-labelled row is handed to the MT5 adapter and never syncs. ⛔ THAT PRICE '
+  'HAS A PRECONDITION: it is only payable while EVERY probe-exempt venue is '
+  'unsyncable, and mt5 is currently the sole member of that set '
+  '(src/lib/closed-sets.ts VENUE_CAPABILITIES, scopeProbeSupported: false). '
+  'Adding a SYNCABLE venue to that set makes the forgery FREE — the skip would '
+  'cost nothing — and requires the deferred remedy (a service-role writer plus '
+  'withdrawing authenticated EXECUTE from both wizard RPCs) to land FIRST. This '
+  'CHECK does not protect against that case. A '
   'client-supplied value on a direct INSERT is scrubbed to NULL by the '
   'api_keys_scrub_attested_venue BEFORE INSERT trigger, so a DELETE + '
   're-INSERT round trip cannot forge one either. Making this column truly '
