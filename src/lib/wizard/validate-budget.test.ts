@@ -177,15 +177,23 @@ describe("[CR-01] connectAbortDeadlineMsFor — the deadline covers BOTH seam le
     expect(ENCRYPT_KEY_BUDGET_MS).toBe(30_000);
   });
 
-  it("the serialized arm gives up at 165 000 ms, the default arm at 75 000 ms", () => {
+  it("the serialized arm gives up at 190 500 ms, the default arm at 100 500 ms", () => {
+    // Hand-typed on the expected side, and both figures move together because
+    // the terms that changed are arm-agnostic: 120 000 / 30 000 validate
+    // + 30 000 encrypt + 25 500 failing-state store + 15 000 grace.
     expect(
       connectAbortDeadlineMsFor("mt5"),
       "the browser's deadline moved off the ROUTE's worst case. Below " +
-        "validate + encrypt it fires while the route is still encrypting and " +
-        "storing a key that validated — and the verdict it renders claims " +
-        "nothing was saved.",
-    ).toBe(165_000);
-    expect(connectAbortDeadlineMsFor("binance")).toBe(75_000);
+        "validate + encrypt + the failing-state store term it fires while the " +
+        "route is still encrypting and storing a key that validated — and the " +
+        "verdict it renders claims nothing was saved.",
+    ).toBe(190_500);
+    expect(
+      connectAbortDeadlineMsFor("binance"),
+      "the DEFAULT arm's deadline moved. It carries the SAME store and grace " +
+        "terms as the serialized one, so a change that moves only one of the " +
+        "two is an instance fix on a class defect (153.6 / PARITY-03).",
+    ).toBe(100_500);
   });
 
   it.each([
@@ -197,7 +205,7 @@ describe("[CR-01] connectAbortDeadlineMsFor — the deadline covers BOTH seam le
     // Same fallback direction, and for the same reason, as `validateBudgetMsFor`:
     // `exchange` is a wizard form value, so an unrecognised string is normal
     // input rather than an error.
-    expect(connectAbortDeadlineMsFor(input)).toBe(75_000);
+    expect(connectAbortDeadlineMsFor(input)).toBe(100_500);
   });
 
   it("⭐ the deadline is STRICTLY LATER than the validate budget the copy advertises", () => {
