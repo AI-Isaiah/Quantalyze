@@ -717,3 +717,208 @@ def test_the_raw_acquisition_scanner_reports_and_does_not_over_report() -> None:
     # belt-and-braces.
     plain_call = "def f(k):\n    lock = _mt5_terminal_lock_for(k)\n    return lock\n"
     assert _raw_lock_acquisitions(plain_call, "synthetic.py") == []
+
+
+# ---------------------------------------------------------------------------
+# WIZFORM-ABANDON / D-36 — THE LATENT CONSTRAINT OF THE LAZY BIND, pinned.
+#
+# ⚠️ NOT A DEFECT TODAY. `Mt5Client._epoch` binds on the FIRST touch and never
+# rebinds — the decision that makes a PREFLIGHT-built client exempt (D-36 AMENDED;
+# an eager construction bind false-positives `job_worker._make_mt5_session`, which
+# builds outside and before the lease). Its unwritten price: ONE `Mt5Client`
+# instance used under TWO lease acquisitions is refused on the SECOND, because its
+# epoch is still the first lease's and the release in between bumped the
+# generation. The holder would be entirely legitimate and would read an
+# `Mt5SessionAbandoned` saying the lease it operated under has ended — classified
+# transient (D-40), i.e. a permanent-looking retry loop, on a path that plainly
+# HELD the lease. That is the most confusing failure this subsystem can produce.
+#
+# The 153.5 verification ast-checked all five lease blocks and confirmed NO
+# production path reuses a client across two of them — so the constraint holds by
+# accident of structure, and nothing pinned it (warning W-153.5-3). These two
+# cases are the pin.
+#
+# The BEHAVIOURAL half — "a fresh client per acquisition is never refused, a
+# reused one is" — lives in `tests/test_mt5_client_contract.py`
+# (`test_one_client_per_lease_acquisition_is_the_shape_the_lazy_bind_assumes`).
+# This half is the STRUCTURAL one: it watches production source for the shape that
+# would make the reuse reachable in the first place.
+#
+# ⛔ THE FIX IS NOT TO WEAKEN `_assert_live`. If a call site ever legitimately
+# needs one client across two leases, the deliberate remedy is to REBIND ON LEASE
+# ENTRY — a new mechanism the lease itself would drive — never to relax the fence
+# and never to re-add a construction-time snapshot (RESEARCH §Open Q-1 rejected
+# that; it refuses legitimate preflight builds).
+# ---------------------------------------------------------------------------
+
+#: The ONE verb every production terminal acquisition goes through (pinned by
+#: `test_no_production_module_acquires_the_raw_terminal_lock` above).
+_LEASE_VERB = "mt5_terminal_lease"
+
+#: ⛔ HAND-TYPED, asserted with `==`, and keyed on `(file, enclosing function)`
+#: rather than line numbers — the 153.5 CONTEXT recorded that two of its four line
+#: citations had ROTTED before the phase was even planned, so a line-keyed roster
+#: would be re-cut for reasons that are not about the invariant.
+#:
+#: MEASURED at 153.5 (five acquisitions, five DISTINCT enclosing functions — which
+#: is the invariant: at most one lease per function means no function can carry a
+#: client from one acquisition into the next).
+_PRODUCTION_LEASE_SITES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("services/allocator_positions.py", "_fetch_mt5_account_rows"),
+        ("services/ingestion/mt5.py", "validate"),
+        ("services/job_worker.py", "_fetch_mt5_account_balance"),
+        ("services/job_worker.py", "run_derive_broker_dailies_job"),
+        ("routers/exchange.py", "_validate_mt5_key_probe"),
+    }
+)
+
+
+def _lease_sites(source: str, rel: str) -> list[tuple[str, str]]:
+    """Every `async with mt5_terminal_lease(...):` in ``source``, as
+    ``(rel, dotted enclosing function name)``.
+
+    Nested defs are reported by their FULL dotted path, so a lease taken inside a
+    closure is not silently attributed to the enclosing coroutine — the closure is
+    a different scope and can hold a different client.
+    """
+    tree = ast.parse(source)
+    parents: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+
+    found: list[tuple[str, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncWith):
+            continue
+        for item in node.items:
+            call = item.context_expr
+            if not isinstance(call, ast.Call):
+                continue
+            func = call.func
+            name = (
+                func.id
+                if isinstance(func, ast.Name)
+                else func.attr
+                if isinstance(func, ast.Attribute)
+                else None
+            )
+            if name != _LEASE_VERB:
+                continue
+            chain: list[str] = []
+            cur: ast.AST = node
+            while cur in parents:
+                cur = parents[cur]
+                if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    chain.append(cur.name)
+            found.append((rel, ".".join(reversed(chain))))
+    return found
+
+
+def test_no_production_function_holds_two_terminal_leases() -> None:
+    """⭐ THE PIN FOR THE LAZY BIND'S LATENT CONSTRAINT (W-153.5-3).
+
+    One `Mt5Client` per lease acquisition. The reachable way to break it is a
+    function that takes the lease TWICE with one client spanning both — so this
+    asserts the roster of lease sites is exactly the five measured at 153.5 AND
+    that their enclosing functions are all distinct.
+
+    Reds in both directions, and both reds are useful:
+      * a SIXTH site, or a lease that MOVED, reds the equality — read as "check
+        whether the client this lease touches was already touched under an earlier
+        one"; then re-cut this roster deliberately.
+      * a function holding TWO leases reds the distinctness assertion — that is the
+        shape that produces the confusing refusal, and the failure message says
+        what to do about it.
+
+    ⚠️ HONEST CEILING, stated rather than implied: this is a LEXICAL, per-function
+    property. A client constructed in one function and handed to two others that
+    each take a lease would satisfy every assertion here. The ast walk cannot see
+    that, no walk can see it cheaply, and pretending otherwise is how the sibling
+    roster's "the ONLY thing standing between" claim had to be re-cut. What this
+    pin buys is that the CHEAP shape cannot land silently, and that the constraint
+    is written down where the next reader of a refusal will find it.
+    """
+    root = Path(__file__).resolve().parents[1]
+    files = _production_python_files()
+
+    assert len(files) >= _PRODUCTION_FILE_FLOOR, (
+        f"the walk scanned only {len(files)} production files, below the "
+        f"hand-typed floor of {_PRODUCTION_FILE_FLOOR}. A pin over a truncated "
+        f"walk passes in silence — fix the walk, never the floor."
+    )
+
+    sites: list[tuple[str, str]] = []
+    for path in files:
+        sites.extend(_lease_sites(path.read_text(), path.relative_to(root).as_posix()))
+
+    assert set(sites) == _PRODUCTION_LEASE_SITES, (
+        f"the production terminal-lease roster moved: {sorted(sites)}, expected "
+        f"{sorted(_PRODUCTION_LEASE_SITES)}. Before re-cutting this literal, check "
+        f"the ONE thing it exists for: does the new site touch an `Mt5Client` that "
+        f"was ALREADY touched under a different lease? If so it will be refused "
+        f"with `Mt5SessionAbandoned` — legitimately holding the lease and told the "
+        f"lease has ended — because the lazy bind never rebinds (D-36 AMENDED)."
+    )
+
+    duplicated = sorted({site for site in sites if sites.count(site) > 1})
+    assert not duplicated, (
+        f"these functions take `{_LEASE_VERB}` more than once: {duplicated}. That "
+        f"is the ONE shape in which a single `Mt5Client` can span two acquisitions, "
+        f"and the lazy bind would refuse it on the second — a false refusal of a "
+        f"legitimate holder, surfacing as a permanent-looking transient loop. If "
+        f"the two leases genuinely use DISTINCT client instances this is safe; say "
+        f"so at the site and re-cut this pin. ⛔ The remedy for a genuine reuse is "
+        f"to REBIND ON LEASE ENTRY, never to weaken `Mt5Client._assert_live`."
+    )
+
+
+def test_the_lease_site_scanner_reports_the_reuse_shape_and_ignores_prose() -> None:
+    """Self-test. Without it, a `_lease_sites` that silently returned nothing would
+    make the pin above green forever — the vacuous-derivation failure the sibling
+    rosters carry their floors and self-tests to prevent.
+    """
+    two_in_one_function = (
+        "async def f(k):\n"
+        "    client = build()\n"
+        "    async with mt5_terminal_lease(k):\n"
+        "        client.account_info()\n"
+        "    async with mt5_terminal_lease(k):\n"
+        "        client.account_info()\n"
+    )
+    assert _lease_sites(two_in_one_function, "synthetic.py") == [
+        ("synthetic.py", "f"),
+        ("synthetic.py", "f"),
+    ]
+
+    # The attribute form — a module-aliased import is the obvious way back in.
+    aliased = (
+        "async def f(k):\n"
+        "    async with mt5_concurrency.mt5_terminal_lease(k):\n"
+        "        pass\n"
+    )
+    assert _lease_sites(aliased, "synthetic.py") == [("synthetic.py", "f")]
+
+    # A closure is its OWN scope, and must be reported as such: a lease taken in a
+    # nested def is not the outer coroutine's, and attributing it there would hide
+    # a genuine second acquisition.
+    nested = (
+        "async def outer(k):\n"
+        "    async def inner():\n"
+        "        async with mt5_terminal_lease(k):\n"
+        "            pass\n"
+        "    await inner()\n"
+    )
+    assert _lease_sites(nested, "synthetic.py") == [("synthetic.py", "outer.inner")]
+
+    in_prose = (
+        "async def f(k):\n"
+        '    """Historically:\n'
+        "\n"
+        "    async with mt5_terminal_lease(k):\n"
+        "        ...\n"
+        '    """\n'
+        "    return None\n"
+    )
+    assert _lease_sites(in_prose, "synthetic.py") == []

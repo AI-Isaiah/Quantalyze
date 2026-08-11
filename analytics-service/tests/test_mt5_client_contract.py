@@ -1742,6 +1742,90 @@ def test_a_preflight_built_client_binds_lazily_and_is_not_falsely_refused():
     )
 
 
+async def test_one_client_per_lease_acquisition_is_the_shape_the_lazy_bind_assumes():
+    """⚠️ A **LATENT CONSTRAINT** of the lazy bind, pinned. NOT a defect today.
+
+    `self._epoch` binds on the FIRST touch and **never rebinds**. That is what
+    makes the preflight case above work, and it carries a constraint nobody wrote
+    down: a single `Mt5Client` instance used under **two** lease acquisitions is
+    refused on the second, because its epoch is still the FIRST lease's and the
+    release in between bumped the generation. The holder would be entirely
+    legitimate — it took the lease, it owns the terminal — and it would read a
+    `Mt5SessionAbandoned` whose message says the lease it operated under has
+    ended. Classified as transient (D-40), that is a permanent-looking retry loop.
+
+    ⭐ **No production path does this** (checked by ast at the 153.5 verification:
+    all five `mt5_terminal_lease` blocks hold exactly one lease per client
+    instance). So the constraint is satisfied today by accident of structure, and
+    this test is the pin that makes the accident deliberate — the half a future
+    reader needs when a refusal appears on a path that plainly held the lease.
+
+    The two halves are one control, one variable:
+      * the PRODUCTION shape — a fresh client per acquisition — is never refused;
+      * the REUSE shape — one client across two acquisitions — is refused, and the
+        refusal is the confusing one described above.
+
+    ⛔ **Do NOT "fix" this by changing the bind semantics.** Re-binding at
+    construction is the design RESEARCH §Open Q-1 rejected (it false-positives the
+    preflight build). If a call site ever legitimately needs to reuse a client
+    across leases, the fix is to **rebind on LEASE ENTRY** — a new, deliberate
+    mechanism the lease would have to drive — never to weaken `_assert_live`. The
+    structural half ("no production function holds two leases") is pinned in
+    `tests/test_mt5_concurrency.py`.
+    """
+    key = f"{_TERMINAL_HOST}:{_TERMINAL_PORT}"
+
+    # -- The PRODUCTION shape: one client per lease acquisition. ---------------
+    for acquisition in (1, 2):
+        async with mt5_concurrency.mt5_terminal_lease(key):
+            connect, fake, _rec = _make({"account": _FakeNamedTuple(equity=1.0)})
+            touches: list[str] = []
+            _recording_account_info(fake, touches)
+            fresh = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+            try:
+                equity = fresh.account_info()
+            except Mt5SessionAbandoned:
+                # The failure path is the WHOLE point of this pin, so it must be
+                # legible rather than a bare exception: a reader arriving here is
+                # almost certainly holding a REUSED client.
+                pytest.fail(
+                    f"a client built inside its OWN lease (acquisition "
+                    f"{acquisition} of 2) was refused. Either a call site now "
+                    f"reuses ONE Mt5Client across TWO lease acquisitions — the "
+                    f"lazy bind never rebinds, so the second is falsely refused "
+                    f"(W-153.5-3) — or the bind semantics changed. This is the "
+                    f"shape every production call site uses, so it is a live "
+                    f"outage on the derive, holdings, validate and adapter paths. "
+                    f"⛔ The remedy for a genuine reuse is to REBIND ON LEASE "
+                    f"ENTRY, never to weaken `_assert_live`."
+                )
+            assert equity == {"equity": 1.0}
+            assert touches == ["account_info"]
+
+    # -- The REUSE shape: the latent trap, so it cannot change silently. -------
+    connect, fake, _rec = _make({"account": _FakeNamedTuple(equity=2.0)})
+    reused = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+
+    async with mt5_concurrency.mt5_terminal_lease(key):
+        assert reused.account_info() == {"equity": 2.0}  # binds THIS generation
+
+    reuse_touches: list[str] = []
+    _recording_account_info(fake, reuse_touches)
+
+    async with mt5_concurrency.mt5_terminal_lease(key):
+        with pytest.raises(Mt5SessionAbandoned) as excinfo:
+            reused.account_info()
+
+    assert reuse_touches == [], (
+        "the reused client's second-lease touch REACHED the terminal. That would "
+        "mean the lazy bind had started rebinding — which is a design change "
+        "(rebind on lease entry), not a warning closure. If that is intended, it "
+        "must be driven by the lease and this pin re-cut deliberately"
+    )
+    assert excinfo.value.stage == "account_info"
+
+
 def test_close_still_tears_down_the_transport_on_a_stale_client():
     """D-41 — `close()` is EXEMPT from the fence and must STAY reachable.
 
