@@ -996,10 +996,62 @@ async def _run_two_concurrent_mt5(neuter_lock: bool) -> list:
     if neuter_lock:
         # A FRESH Lock per call serializes NOTHING — this is exactly what a
         # Session-attached lock (fresh session per job) would do.
+        #
+        # ⚠️ 151 review E2, RE-POINTED by WIZFORM-ABANDON / plan 153.5-03. The
+        # target used to be `services.job_worker._mt5_terminal_lock_for`, which
+        # bound because job_worker READ that name at its own `async with`. It no
+        # longer does: the acquisition goes through `mt5_terminal_lease`, which
+        # resolves `_mt5_terminal_lock_for` from `services.mt5_concurrency`'s OWN
+        # globals. A patch left aimed at `job_worker` is now a SILENT NO-OP.
+        #
+        # ⭐ This one is self-detecting rather than silent, which is why it is safe
+        # to rely on: with the patch mis-aimed the real registry serializes the two
+        # jobs and the interleave assertion below reddens with the fully-contiguous
+        # order log [('A','enter'),('A','exit'),('B','enter'),('B','exit')] —
+        # OBSERVED during 153.5-03 before the re-point. Green here therefore means
+        # the patch genuinely bound.
         patchers.append(
             patch(
-                "services.job_worker._mt5_terminal_lock_for",
+                "services.mt5_concurrency._mt5_terminal_lock_for",
                 new=lambda _k: asyncio.Lock(),
+            )
+        )
+        # ⭐ ONE CONTROL, ONE VARIABLE (WIZFORM-ABANDON / plan 153.5-03). This arm
+        # isolates the **LOCK**; the abandoned-session **FENCE** is a DIFFERENT
+        # variable and must be held still, or the control stops measuring what it
+        # names.
+        #
+        # Why it must be held still here specifically: with the lock neutered, A
+        # and B genuinely interleave against a LIVE epoch registry. Both clients
+        # bind epoch 0 at login; B's lease release bumps it to 1 while A is still
+        # mid-read, so A's POST-read `account_info()` legitimately raises
+        # `Mt5SessionAbandoned`. `run_derive_broker_dailies_job` has no arm for it
+        # (the D-40 classification arms are plan 153.5-04's), so it escapes the job
+        # and fails the bare `asyncio.gather` below INSTEAD of the interleave
+        # assertion this test exists to make.
+        #
+        # OBSERVED, not predicted: 2 failures in 10 consecutive local runs before
+        # this patch was added, each
+        #   `services.mt5_client.Mt5SessionAbandoned: MT5 session abandoned: the
+        #    lease under which it operated has ended`  (mt5_client.py:688)
+        # — i.e. a genuinely timing-ordered flake, the exact kind D-37 forbids
+        # adding to this suite.
+        #
+        # ⛔ Do NOT "fix" this by catching `Mt5SessionAbandoned` in the harness. A
+        # harness that swallows a refusal stays green when a future change makes
+        # the fence fire on a path it should not — the same blindness the E2
+        # re-point above just removed.
+        #
+        # ⚠️ The target is `services.mt5_concurrency`, NOT `services.mt5_client`
+        # that DEFINES the function: `mt5_terminal_lease` binds the name into
+        # mt5_concurrency's globals at import, so that is the reader (E2). MEASURED
+        # in-session — patching `services.mt5_client.bump_mt5_terminal_epoch` leaves
+        # the observed per-lease epoch delta at 1 (a silent no-op); patching
+        # `services.mt5_concurrency.bump_mt5_terminal_epoch` takes it to 0.
+        patchers.append(
+            patch(
+                "services.mt5_concurrency.bump_mt5_terminal_epoch",
+                new=lambda _k: 0,
             )
         )
 

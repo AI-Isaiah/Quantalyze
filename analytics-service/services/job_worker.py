@@ -113,15 +113,29 @@ from services.mt5_client import Mt5Session  # the worker's mt5 exchange holder
 #
 # ⚠️ 151 review E2 — A MONKEYPATCH ON THIS MODULE ONLY BINDS WHAT THIS MODULE
 # READS. Re-exporting a name does not make `monkeypatch.setattr(job_worker, ...)`
-# reach the reader; the reader resolves it from its OWN module globals. Of the
-# six names below, `job_worker` itself reads exactly four —
-# `_MT5_DERIVE_READ_TIMEOUT_S`, `_mt5_bounded_restart`, `_mt5_terminal_lock_for`
-# and `_Mt5PostReadVerificationError` — so only those four are patchable here.
-# `_MT5_RESTART_TIMEOUT_S` and `_MT5_TERMINAL_LOCKS` are re-exports NOTHING here
-# reads: `_mt5_bounded_restart` / `_mt5_terminal_lock_for` read them from
-# `services.mt5_concurrency`, so a test must patch THAT module or its patch is a
-# silent no-op. (It already was one — see tests/test_mt5_derive_branch.py
-# `test_mt5_restart_itself_bounded`.)
+# reach the reader; the reader resolves it from its OWN module globals.
+#
+# ⭐ RE-CUT by WIZFORM-ABANDON / plan 153.5-03 — the read/re-export split MOVED.
+# This module's two terminal acquisitions now go through `mt5_terminal_lease`
+# (D-36: only the lease has a release hook, so only the lease can bump the
+# abandoned-session epoch), so of the seven names below `job_worker` itself
+# reads exactly four:
+#     `_MT5_DERIVE_READ_TIMEOUT_S`, `_mt5_bounded_restart`,
+#     `mt5_terminal_lease`, `_Mt5PostReadVerificationError`
+# — and only those four are patchable here.
+#
+# `_MT5_RESTART_TIMEOUT_S`, `_MT5_TERMINAL_LOCKS` and — NEW, this is the part
+# that changed — `_mt5_terminal_lock_for` are now re-exports NOTHING here reads.
+# `_mt5_bounded_restart` reads the first from `services.mt5_concurrency`, and
+# `mt5_terminal_lease` reads the last two from there too, so a test that wants
+# to intercept the LOCK must patch `services.mt5_concurrency._mt5_terminal_lock_for`
+# — patching it HERE is now a silent no-op. (It already was one for
+# `_MT5_RESTART_TIMEOUT_S` — see tests/test_mt5_derive_branch.py
+# `test_mt5_restart_itself_bounded`; the `neuter_lock` arm of
+# `_run_two_concurrent_mt5` in the same file was re-pointed for exactly this
+# reason.) `_mt5_terminal_lock_for` is kept in the import because the identity
+# pins in tests/test_mt5_concurrency.py assert the ONE-registry invariant
+# through this module's binding.
 from services.mt5_concurrency import (
     _MT5_DERIVE_READ_TIMEOUT_S,
     _MT5_RESTART_TIMEOUT_S,
@@ -129,6 +143,7 @@ from services.mt5_concurrency import (
     _mt5_bounded_restart,
     _mt5_terminal_lock_for,
     _Mt5PostReadVerificationError,
+    mt5_terminal_lease,
 )
 from services.sfox_factory import make_sfox_client
 from services.sfox_read import sfox_transactions_crawl_wallclock_budget_s
@@ -327,9 +342,9 @@ async def _fetch_mt5_account_balance(session: Mt5Session) -> float | None:
     the event loop via ``to_thread``, bounded by the SAME
     ``_MT5_DERIVE_READ_TIMEOUT_S`` ceiling (login+account_info is a strict
     subset of the derive read that bound covers), and serialized under the
-    SAME Phase-137 per-terminal lock (``_MT5_TERMINAL_LOCKS`` /
-    ``_mt5_terminal_lock_for``) so no call ever touches the ONE shared Wine
-    terminal outside the lock discipline.
+    SAME Phase-137 per-terminal lock — since WIZFORM-ABANDON / D-36 acquired
+    through ``mt5_terminal_lease`` over that ONE registry — so no call ever
+    touches the ONE shared Wine terminal outside the lock discipline.
 
     Returns ``account_info().equity`` — balance + floating uPnL of open
     positions (the v1.8 MT5 convention the derive anchor uses) — as the
@@ -361,7 +376,16 @@ async def _fetch_mt5_account_balance(session: Mt5Session) -> float | None:
         return info
 
     try:
-        async with _mt5_terminal_lock_for(session.client.terminal_key):
+        # WIZFORM-ABANDON / D-36 — acquired through the LEASE, not the raw Lock:
+        # the lease's `finally` is the only release hook there is, and it is what
+        # BUMPS THE TERMINAL EPOCH so a `to_thread` body that outlived the
+        # `wait_for` above is refused instead of driving the next holder's
+        # terminal. `wait_s` is deliberately omitted (= unbounded acquire, exactly
+        # what the raw `await lock.acquire()` did): ⛔ the bounded arm's
+        # `Mt5TerminalBusyError` is the INTERACTIVE validate path's contract
+        # (D-29) — a batch worker that refused to wait would drop balance
+        # snapshots whenever the derive job happened to hold the terminal.
+        async with mt5_terminal_lease(session.client.terminal_key):
             info = await asyncio.wait_for(
                 asyncio.to_thread(_read), timeout=_MT5_DERIVE_READ_TIMEOUT_S
             )
@@ -3569,7 +3593,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # extraction, combine, persist below) stays OUTSIDE the lock: it does no
             # terminal IPC, and holding the terminal through the combine would
             # needlessly serialize CPU work that needs no terminal.
-            async with _mt5_terminal_lock_for(_mt5_session.client.terminal_key):
+            #
+            # WIZFORM-ABANDON / D-36 — acquired through the LEASE, not the raw
+            # Lock. This is finding #5's OWN path: the `wait_for` below can walk
+            # away from a `to_thread` body that is still parked in a blocked rpyc
+            # round-trip, and the ONLY thing that can fence that zombie is the
+            # epoch bump in the lease's `finally`. The raw Lock has no release
+            # hook to hang it on. `wait_s` is deliberately omitted (= unbounded
+            # acquire, byte-equivalent to the raw `await lock.acquire()` this
+            # replaced): ⛔ the bounded arm's `Mt5TerminalBusyError` is the
+            # INTERACTIVE validate path's contract (D-29), never the worker's.
+            async with mt5_terminal_lease(_mt5_session.client.terminal_key):
                 try:
                     _mt5_info, _mt5_deals = await asyncio.wait_for(
                         asyncio.to_thread(_mt5_read),
