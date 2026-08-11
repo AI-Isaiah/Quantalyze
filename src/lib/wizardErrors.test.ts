@@ -3103,6 +3103,96 @@ describe("[153.1-04 / WIZFORM-02] the two EXPECTED_TABLE_SIZE pins cannot silent
 });
 
 /**
+ * [153.6-06 / PARITY-05] THE PROBE-FAILURE PAIR, ASSERTED AS A PAIR.
+ *
+ * `KEY_SCOPE_CHECK_UNAVAILABLE` and `KEY_SCOPE_CHECK_UNREADABLE` describe the
+ * same subsystem failing in two ways that differ by ONE fact — whether the probe
+ * answered — and that fact is exactly what decides whether a retry can win. They
+ * are asserted together, in one block, because every plausible regression here
+ * moves BOTH: sweeping the parse miss back onto the permanent code takes a
+ * working control away from a self-clearing condition, and widening the
+ * permanent code's `actions` to give the parse miss its Retry hands the same
+ * control to an arm where retrying is guaranteed to fail. A block that pinned
+ * only the new entry would catch the first and miss the second.
+ *
+ * ⭐ THE ORACLE IS `buildEnvelope`'s DERIVATION, never the `actions` array. The
+ * claim under test is "a Retry control renders", and that is decided by
+ * `buildEnvelope` reading `actions` against `RECOVERABLE_ACTIONS` and then by
+ * `ErrorEnvelope`'s `showRetry = recoverable && Boolean(onRetry)`. Asserting
+ * `actions` would restate what the table says about itself and would stay green
+ * if the derivation rule ever changed — the convention this file's own import
+ * comment states, applied here in the RECOVERABLE direction for the first time.
+ */
+describe("[153.6-06 / PARITY-05] the probe-failure pair renders opposite controls", () => {
+  it("the parse-miss code derives recoverable — the Retry control renders", () => {
+    const envelope = buildEnvelope("KEY_SCOPE_CHECK_UNREADABLE", "corr-1");
+    expect(
+      envelope.recoverable,
+      "A 2xx body our schema cannot read is what a half-rolled analytics " +
+        "deploy serves. It clears by itself, so a Retry is the honest control — " +
+        "and its absence was the dead end 153.6-06 exists to remove.",
+    ).toBe(true);
+  });
+
+  it("the permanent code stays NON-recoverable — no Retry, unchanged", () => {
+    const envelope = buildEnvelope("KEY_SCOPE_CHECK_UNAVAILABLE", "corr-2");
+    expect(
+      envelope.recoverable,
+      "⛔ T-153.6-E2. The parse miss got its Retry back by MINTING a code, not " +
+        "by widening this one's actions. If this is now true, the affordance " +
+        "leaked onto the arm where a retry is guaranteed to fail.",
+    ).toBe(false);
+  });
+
+  it("the two carry DIFFERENT copy — a shared entry would defeat the split", () => {
+    // The split is only real if the user can tell the two apart. Comparing the
+    // two rendered titles couples this to the table without reading either
+    // expectation out of it.
+    const unreadable = formatKeyError("KEY_SCOPE_CHECK_UNREADABLE");
+    const unavailable = formatKeyError("KEY_SCOPE_CHECK_UNAVAILABLE");
+    expect(unreadable.title).not.toBe(unavailable.title);
+    expect(unreadable.cause).not.toBe(unavailable.cause);
+  });
+
+  it("⛔ the new copy never claims we could not reach the exchange", () => {
+    // THE REMOVED LIE, pinned so it cannot come back through the copy table.
+    // 153.2-04 moved this condition off `KEY_NETWORK_TIMEOUT` precisely because
+    // that entry opens "We could not reach the exchange." — false here, because
+    // the exchange answered and OUR schema could not read the reply. Restoring
+    // the Retry control by restoring that code would have been the easy fix and
+    // would have re-shipped the untruth; this is what makes that route red.
+    const copy = formatKeyError("KEY_SCOPE_CHECK_UNREADABLE");
+    const haystack = [copy.title, copy.cause, ...copy.fix]
+      .join("   ")
+      .toLowerCase();
+    for (const banned of ["reach the exchange", "the exchange did not"]) {
+      expect(
+        haystack.includes(banned),
+        `The parse-miss copy says "${banned}". The exchange ANSWERED — the ` +
+          `body was ours to read and we could not. Blaming the venue for our ` +
+          `own deploy is the lie 153.2-04 removed.`,
+      ).toBe(false);
+    }
+    // The POSITIVE half: it must actually say the thing that makes waiting the
+    // right move. Without this the guard passes on copy that says nothing.
+    expect(
+      /again/i.test(haystack),
+      "The copy must tell the user to try again — the Retry control it now " +
+        "renders is otherwise unexplained.",
+    ).toBe(true);
+  });
+
+  it("the parse-miss entry offers no DRAFT-DESTROYING way out", () => {
+    // The condition is a deploy of ours in flight. `start_fresh` deletes the
+    // draft and cascades away every `strategy_keys` member under it, which
+    // would answer "wait thirty seconds" by destroying the user's work.
+    const copy = formatKeyError("KEY_SCOPE_CHECK_UNREADABLE");
+    expect(copy.actions).not.toContain("start_fresh");
+    expect(copy.actions).not.toContain("try_another_key");
+  });
+});
+
+/**
  * [153.1-04 / WIZFORM-02] THE TEN NEW MEMBERS, AS A CLASS.
  *
  * ⚠️ WHY A SWEEP AND NOT TEN CASES. The plan's acceptance criteria were three
