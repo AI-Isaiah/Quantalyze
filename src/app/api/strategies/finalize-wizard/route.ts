@@ -162,7 +162,7 @@ const compositeMemberRowsSchema = z.array(
     api_keys: z
       .object({
         exchange: z.string().nullable(),
-        // 153.6-04 / PARITY-04 — the SERVER-ATTESTED venue, and the field the
+        // 153.6-04 / PARITY-04 — the RPC-written venue, and the field the
         // per-member gate below reads. VALIDATED, never cast, for the reason the
         // whole schema exists: this is the input to an ASVS V4 control, so a
         // shape we cannot read must be a refusal rather than a silent `undefined`.
@@ -1197,8 +1197,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // 'traditional' on a blip would silently mis-annualize a crypto strategy (√252
   // not √365 → inflated Sharpe), so we leave the correct draft stamp untouched.
   let apiKeyExchange: string | null = null;
-  // 153.6-04 / PARITY-04 — the SERVER-ATTESTED venue, and the ONLY input the
-  // scope-broadening probe gate below is allowed to read.
+  // 153.6-04 / PARITY-04 — the venue no client INSERT can set, and the ONLY
+  // input the scope-broadening probe gate below is allowed to read.
   //
   // ⛔ IT IS A SEPARATE BINDING FROM `apiKeyExchange`, AND THE SEPARATION IS THE
   // WHOLE FIX. `api_keys.exchange` is client-writable at INSERT — migration
@@ -1208,6 +1208,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // label made an ASVS V4 control something the client could switch off by
   // asking. `attested_venue` is written only by the two SECURITY DEFINER wizard
   // RPCs and NULLed for every non-privileged INSERT by a BEFORE INSERT trigger.
+  //
+  // ⚠️ WHAT THIS IS NOT (153.6 code review CR-01): it is NOT a venue the server
+  // independently validated. The wizard RPCs write the `p_exchange` they were
+  // CALLED with, and `authenticated` can invoke them directly over PostgREST.
+  // The reason a forged call does not buy a free probe skip is that both RPCs
+  // write `exchange` and `attested_venue` from ONE parameter — pinned by the
+  // CHECK api_keys_attested_venue_matches_exchange (20260811210000) — so forging
+  // the attestation forges the routing label too, and the key never syncs.
+  // Do not upgrade this comment to "server-validated" without the deferred
+  // connect-flow refactor that would make it true.
   let attestedVenue: string | null = null;
   if (apiKeyId) {
     const { data: keyVenueRow, error: keyVenueErr } = await assetClassAdmin
@@ -1410,9 +1420,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // cross-file against SEAM_ROUTE_BUDGETS.
       const { data: members, error: membersErr } = await compositeAdmin
         .from("strategy_keys")
-        // 153.6-04 / PARITY-04 — the embed carries the SERVER-ATTESTED venue
-        // alongside the client-writable label, and the per-member gate below
-        // reads the attestation ONLY.
+        // 153.6-04 / PARITY-04 — the embed carries the RPC-written venue
+        // (client-unsettable, but not independently server-validated — see the
+        // single-key read's note and CR-01) alongside the client-writable
+        // label, and the per-member gate below reads the attestation ONLY.
         //
         // ⚠️ `exchange` STAYS ON THE PROJECTION even though the gate no longer
         // reads it: the widening is ADDITIVE on purpose. The embed's shape is what

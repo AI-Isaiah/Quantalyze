@@ -47,6 +47,19 @@
 --      was scrubbed" would be indistinguishable from "the column never stores
 --      anything".
 --
+--   5d/5e. THE SECOND DOOR (Phase 153.6 code review CR-01). Assertions 2-5c all
+--      exercise the CLIENT INSERT path. The other writer is the wizard RPC
+--      itself — SECURITY DEFINER, EXECUTE-able by `authenticated`, reachable
+--      directly over PostgREST — and it does NOT validate the venue it is
+--      handed. 5d calls it as the row's own owner with a forged p_exchange and
+--      asserts the outcome that is actually true: the call SUCCEEDS, and both
+--      `exchange` and `attested_venue` come back carrying the forged value.
+--      That is the guarantee — the forgery cannot be SELECTIVE, so a probe skip
+--      always costs a routing label the key cannot sync under. 5e then asserts
+--      the coupling is a CHECK constraint rather than a property of today's two
+--      function bodies, because "the current writers happen to agree" is the
+--      shape of claim this phase exists to stop shipping as a control.
+--
 --      ⚠️ WHAT THIS FILE CANNOT PROVE (D-05's honest limit). SQL can assert that
 --      the probe's INPUT is unforgeable. It cannot invoke the probe, so it
 --      cannot assert the probe's OUTCOME — that a row with exchange='mt5' and a
@@ -91,6 +104,8 @@ DECLARE
   v_uid        uuid := gen_random_uuid();
   v_key        uuid := gen_random_uuid();
   v_key5       uuid := gen_random_uuid();
+  v_key_rpc    uuid;
+  v_session    uuid := gen_random_uuid();
   v_fix_live   boolean;
   v_attest_live boolean;
   v_seen       text;
@@ -310,6 +325,97 @@ BEGIN
         v_attested;
     END IF;
     RAISE NOTICE 'Assertion 5c OK: DELETE + re-INSERT with a forged attested_venue SUCCEEDS and stores NULL — the probe gate''s input is unforgeable from the client.';
+
+    -- ---- (5d) THE OTHER DOOR: the RPC, called directly as `authenticated` ----
+    -- Phase 153.6 code review CR-01. Assertions 2-5c all exercise the CLIENT
+    -- INSERT door. They say nothing about the SECOND writer, and it is the one
+    -- the design actually leans on: `create_wizard_strategy` is SECURITY
+    -- DEFINER, holds EXECUTE for `authenticated`, and Supabase exposes
+    -- public-schema functions over PostgREST — so a browser holding its own
+    -- server-minted ciphertext (which /api/keys/validate-and-encrypt hands back)
+    -- can issue the RPC itself with ANY p_exchange it likes. The RPC does NOT
+    -- validate that parameter; it writes it.
+    --
+    -- ⛔ SO THE CLAIM UNDER TEST IS NOT "the RPC refuses a forged venue" — it
+    -- does not, and asserting that would pin a guarantee this system does not
+    -- provide. The claim is that the forgery cannot be SELECTIVE: `exchange` and
+    -- `attested_venue` are written from ONE parameter, so buying a probe skip
+    -- also stamps the routing label that sends the key to an adapter it cannot
+    -- sync under. 5e then pins the constraint that keeps that true for every
+    -- future writer.
+    SET LOCAL ROLE authenticated;
+    v_ins_err := NULL;
+    BEGIN
+      SELECT api_key_id INTO v_key_rpc
+        FROM public.create_wizard_strategy(
+          v_uid,
+          'mt5',              -- the forged, probe-exempt venue
+          'cr01-rpc-door', 'ct', 'ct', NULL, 'dek', 'nonce', 1,
+          'cr01-rpc-draft', v_session
+        );
+    EXCEPTION WHEN OTHERS THEN
+      v_ins_err := SQLSTATE || ' ' || SQLERRM;
+    END;
+    RESET ROLE;
+
+    IF v_ins_err IS NOT NULL THEN
+      RAISE EXCEPTION
+        'TEST FAILED (5d): create_wizard_strategy could not be called by the row owner (%). This is the wizard''s own connect path — a refusal here means connect-a-key is broken, and it also means 5d proves nothing about the RPC door.',
+        v_ins_err;
+    END IF;
+    IF v_key_rpc IS NULL THEN
+      RAISE EXCEPTION
+        'TEST FAILED (5d): create_wizard_strategy returned no api_key_id, so no row was minted and the assertions below would pass vacuously.';
+    END IF;
+
+    SELECT exchange, attested_venue INTO v_after, v_attested
+      FROM public.api_keys WHERE id = v_key_rpc;
+
+    -- The DEFINER body must actually out-run the scrub trigger, or every
+    -- wizard-minted key is unattested and every MT5 finalize is permanently
+    -- KEY_SCOPE_CHECK_UNAVAILABLE. (Distinct from 5b: that seeded as the test
+    -- session''s own role; this is the REAL writer, running as its owner.)
+    IF v_attested IS NULL THEN
+      RAISE EXCEPTION
+        'CR-01/153.6 REGRESSION (5d): a wizard RPC minted a key with attested_venue NULL — the scrub trigger is firing for the RPC''s owner too. Every wizard key would be probed, and for MT5 that is a permanent KEY_SCOPE_CHECK_UNAVAILABLE with no remedy.';
+    END IF;
+    IF v_after IS DISTINCT FROM v_attested THEN
+      RAISE EXCEPTION
+        'CR-01/153.6 REGRESSION (5d): the RPC minted exchange=% with attested_venue=%. The two columns MUST move together — a row where they differ is a probe skip bought without the routing label that pays for it, i.e. a genuinely free forgery.',
+        v_after, v_attested;
+    END IF;
+    RAISE NOTICE 'Assertion 5d OK: the RPC door accepts a forged venue (it validates nothing) but cannot forge SELECTIVELY — exchange and attested_venue both read back %.', v_attested;
+
+    -- ---- (5e) the coupling is a CONSTRAINT, not a coincidence --------------
+    -- 5d shows today''s two writers happen to keep the columns equal. That is
+    -- an argument about the current bodies, and CR-01''s finding was precisely
+    -- that such an argument had been written down as a security property. This
+    -- asserts the invariant is ENFORCED, so a future writer (a distinct
+    -- p_attested_venue, a service_role route, one column normalised and not the
+    -- other) FAILS instead of quietly minting a forgeable attestation.
+    --
+    -- ⚠️ RUN AS THE PRIVILEGED ROLE, and that is anti-vacuity, not convenience.
+    -- As `authenticated` the BEFORE INSERT trigger NULLs attested_venue first,
+    -- so the CHECK is never reached and a "refused" result would be the
+    -- trigger''s doing, not the constraint''s.
+    v_ins_err := NULL;
+    BEGIN
+      INSERT INTO public.api_keys (user_id, exchange, label, api_key_encrypted, attested_venue)
+      VALUES (v_uid, 'binance', 'cr01-divergent', 'x', 'mt5');
+    EXCEPTION WHEN OTHERS THEN
+      v_ins_err := SQLSTATE;
+    END;
+
+    IF v_ins_err IS NULL THEN
+      RAISE EXCEPTION
+        'CR-01/153.6 REGRESSION (5e): a privileged writer persisted exchange=binance with attested_venue=mt5. The api_keys_attested_venue_matches_exchange CHECK is missing, so an attestation can be forged WITHOUT forging the routing label — the coupling 5d relies on is back to being an accident.';
+    END IF;
+    IF v_ins_err <> '23514' THEN
+      RAISE EXCEPTION
+        'CR-01/153.6 (5e): the divergent INSERT was refused with SQLSTATE % rather than 23514 check_violation — it was blocked for the wrong reason, so this assertion is not testing the coupling constraint.',
+        v_ins_err;
+    END IF;
+    RAISE NOTICE 'Assertion 5e OK: a privileged writer CANNOT persist attested_venue <> exchange (refused 23514) — the coupling is enforced, not incidental.';
   ELSE
     RAISE NOTICE 'SKIP (5): migration 20260811210000 not yet applied here (api_keys.attested_venue carries no migration marker comment). The round-trip assertions enforce once the test DB catches up.';
   END IF;

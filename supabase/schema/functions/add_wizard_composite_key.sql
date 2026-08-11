@@ -82,8 +82,10 @@ BEGIN
 
   -- ALWAYS mint a fresh encrypted api_keys row (this IS the per-key add — the
   -- api_keys INSERT column list mirrors create_wizard_strategy verbatim).
-  -- 153.6 / PARITY-04: attested_venue stamped from the server-validated
-  -- p_exchange, exactly as in the single-key twin.
+  -- 153.6 / PARITY-04: attested_venue stamped from the caller-supplied
+  -- p_exchange, exactly as in the single-key twin — and, exactly as there, from
+  -- the SAME parameter as `exchange`, which the CHECK
+  -- api_keys_attested_venue_matches_exchange requires (CR-01).
   INSERT INTO api_keys (
     user_id, exchange, label,
     api_key_encrypted, api_secret_encrypted, passphrase_encrypted,

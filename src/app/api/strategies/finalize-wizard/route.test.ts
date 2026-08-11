@@ -113,7 +113,7 @@ const STATE = vi.hoisted(() => ({
   adminStrategiesError: null as { message: string } | null,
   // H-0323 — exchange returned by admin api_keys SELECT (unified path).
   adminApiKeysExchange: "okx" as string | null,
-  // 153.6-04 / PARITY-04 — the SERVER-ATTESTED venue returned by the same admin
+  // 153.6-04 / PARITY-04 — the RPC-written venue returned by the same admin
   // api_keys SELECT (the route widened it to `select("exchange, attested_venue")`,
   // so both columns arrive on one round trip and both are drivable from a test).
   //
@@ -4105,6 +4105,18 @@ describe("[153.2-04 / WIZFORM-04] the scope probe is gated on a CAPABILITY, and 
  * believes the client", not "the client can no longer lie": the write half is a
  * separate plan, and this half must hold even where that half has not reached.
  *
+ * ⚠️ `attested_venue` IS NOT A SERVER-VALIDATED VENUE, and this docblock used to
+ * say it was (153.6 code review CR-01). The wizard RPCs write the `p_exchange`
+ * they were CALLED with, and `authenticated` can invoke them over PostgREST. The
+ * guarantee that actually holds is narrower and is enough for THIS file's claim:
+ * the column is unsettable from a client INSERT, and both RPCs write it and
+ * `exchange` from one parameter (pinned by the CHECK
+ * api_keys_attested_venue_matches_exchange), so a forged attestation drags the
+ * routing label with it. These rows deliberately set the two columns to
+ * DIFFERENT values to prove which one the gate reads — a state the CHECK
+ * prevents in the database, and that is the point: the fixture is exercising the
+ * gate's READ, not a reachable row state.
+ *
  * ⛔ NULL ⇒ PROBED, AND THERE IS NO FALLBACK TO `exchange`. A legacy row the
  * backfill has not reached, and a row whose client-supplied attestation the
  * trigger scrubbed, are the SAME state to this gate, and it is the state that
@@ -4123,7 +4135,7 @@ describe("[153.2-04 / WIZFORM-04] the scope probe is gated on a CAPABILITY, and 
  * docblock gives: a route that probed and a route that never probed both answer
  * 200, so a status assertion would be green under the defect.
  */
-describe("[153.6-04 / PARITY-04] the probe gate reads the SERVER-attested venue, never the client label", () => {
+describe("[153.6-04 / PARITY-04] the probe gate reads the RPC-written venue, never the client label", () => {
   it("⭐ a forged client label cannot buy a skip — an attested ccxt venue is PROBED", async () => {
     // THE HEADLINE ORACLE. The row claims the exempt venue in the column a
     // client can write at INSERT, and the server attested a venue that answers

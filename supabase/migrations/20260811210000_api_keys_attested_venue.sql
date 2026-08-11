@@ -1,5 +1,5 @@
 -- ============================================================================
--- api_keys.attested_venue — the SERVER-ATTESTED venue the probe gate can trust
+-- api_keys.attested_venue — a venue the CLIENT CANNOT SET, for the probe gate
 -- (2026-08-11, Phase 153.6 / PARITY-04, cluster D)
 -- ============================================================================
 --
@@ -33,13 +33,21 @@
 --
 -- The fix is NOT to lock the column down further (D-02/D-03: no new privilege
 -- change on this table, and the label may stay client-writable). The fix is to
--- stop the probe gate trusting a client-writable column at all. The venue the
--- server itself validated already exists inside a privileged writer — the
--- wizard never performs a client INSERT, it calls the SECURITY DEFINER RPC
+-- stop the probe gate trusting a client-writable column at all. The wizard
+-- never performs a client INSERT: it calls the SECURITY DEFINER RPC
 -- create_wizard_strategy(p_exchange, ...) (or the composite twin
--- add_wizard_composite_key) and the RPC does the api_keys INSERT itself. That
--- value was simply never stored where the probe could read it. This migration
--- stores it.
+-- add_wizard_composite_key) and the RPC does the api_keys INSERT itself, so
+-- there is a venue value living somewhere no client INSERT can reach. This
+-- migration stores it where the probe can read it.
+--
+-- ⛔ AND IT IS NOT MORE THAN THAT — the 153.6 code review (CR-01) found this
+-- header claiming it was. The RPCs do not VALIDATE p_exchange; they write what
+-- they were called with, and `authenticated` can invoke them directly over
+-- PostgREST with the server-minted ciphertext the browser already holds. So
+-- what this column buys is precisely: a value no CLIENT INSERT can set, whose
+-- forgery through the RPC door is inseparable from forging `exchange` too
+-- (section 1b's CHECK). "Server-attested" in the strong sense — a venue the
+-- server independently confirmed — awaits the deferred connect-flow refactor.
 --
 -- What changes
 -- ------------
@@ -153,6 +161,53 @@ SET lock_timeout = '3s';
 ALTER TABLE public.api_keys
   ADD COLUMN IF NOT EXISTS attested_venue text;
 
+-- ──────────────── 1b. the coupling that makes the attestation worth anything
+-- ⭐ 153.6 code review CR-01. Read this before touching either writer.
+--
+-- What the two wizard RPCs actually guarantee is NARROWER than "the server
+-- validated this venue": they do not validate anything, they write the
+-- `p_exchange` they were CALLED with. Both are EXECUTE-able by `authenticated`
+-- and reachable directly over PostgREST, so a browser holding its own
+-- server-minted ciphertext can issue the RPC itself with any p_exchange it
+-- likes.
+--
+-- The reason that is not a live bypass is a COUPLING: each RPC writes
+-- `exchange` AND `attested_venue` from the SAME parameter, so forging the
+-- attestation also forges the routing label, and an `mt5`-labelled row goes to
+-- the MT5 adapter and never syncs. Until now that coupling was an accident —
+-- nowhere stated as a security property, nowhere tested, and broken by any of:
+-- a distinct p_attested_venue parameter, a service_role writer that sets
+-- attested_venue independently, or a future writer that normalises one column
+-- differently from the other.
+--
+-- This CHECK converts the accident into an enforced invariant: a writer that
+-- lets the two diverge FAILS instead of silently minting a forgeable
+-- attestation. NULL stays legal — it is the scrub trigger's output and means
+-- "unattested", which the gate reads as PROBE.
+--
+-- ⛔ IT DOES NOT MAKE THE VENUE SERVER-VALIDATED. It makes the bypass
+-- impossible to open by accident. The remedy that would make the stronger claim
+-- true — an api_keys INSERT behind a service-role writer that passes the venue
+-- IT validated — is the connect-flow refactor both migrations defer.
+--
+-- Added directly rather than NOT VALID + VALIDATE: at this point in the
+-- transaction the column was just created and every row is NULL, so validation
+-- is trivially satisfied, and the ALTER above already holds ACCESS EXCLUSIVE on
+-- a 29-row table.
+DO $constraint$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid = 'public.api_keys'::regclass
+       AND conname  = 'api_keys_attested_venue_matches_exchange'
+  ) THEN
+    ALTER TABLE public.api_keys
+      ADD CONSTRAINT api_keys_attested_venue_matches_exchange
+      CHECK (attested_venue IS NULL OR attested_venue = exchange);
+  END IF;
+END
+$constraint$;
+
 -- ─────────────────── 2. create_wizard_strategy (re-based on 20260602190000)
 -- Re-based VERBATIM on the LATEST definition, migration
 -- 20260602190000_f6_wizard_session_idempotency.sql:62-157. The ONLY changes
@@ -228,9 +283,15 @@ BEGIN
   END IF;
 
   -- 153.6 / PARITY-04: attested_venue is stamped HERE, inside the SECURITY
-  -- DEFINER body, from the p_exchange the server itself validated at mint
-  -- time. This is the ONLY kind of writer whose value survives the
+  -- DEFINER body, which is the only kind of writer whose value survives the
   -- api_keys_scrub_attested_venue trigger.
+  -- ⛔ p_exchange IS CALLER-SUPPLIED AND IS NOT VALIDATED HERE (CR-01). Both
+  -- columns are written from that ONE parameter deliberately: the CHECK
+  -- api_keys_attested_venue_matches_exchange requires it, so this INSERT
+  -- cannot mint an attestation that disagrees with the routing label. If you
+  -- ever add a separate p_attested_venue, or normalise one column and not the
+  -- other, this INSERT will start failing — that is the constraint doing its
+  -- job, not a bug to route around.
   INSERT INTO api_keys (
     user_id, exchange, label,
     api_key_encrypted, api_secret_encrypted, passphrase_encrypted,
@@ -340,8 +401,10 @@ BEGIN
 
   -- ALWAYS mint a fresh encrypted api_keys row (this IS the per-key add — the
   -- api_keys INSERT column list mirrors create_wizard_strategy verbatim).
-  -- 153.6 / PARITY-04: attested_venue stamped from the server-validated
-  -- p_exchange, exactly as in the single-key twin.
+  -- 153.6 / PARITY-04: attested_venue stamped from the caller-supplied
+  -- p_exchange, exactly as in the single-key twin — and, exactly as there, from
+  -- the SAME parameter as `exchange`, which the CHECK
+  -- api_keys_attested_venue_matches_exchange requires (CR-01).
   INSERT INTO api_keys (
     user_id, exchange, label,
     api_key_encrypted, api_secret_encrypted, passphrase_encrypted,
@@ -553,6 +616,7 @@ DECLARE
   v_awck_owner TEXT;
   v_scrub_src  TEXT;
   v_role       TEXT;
+  v_chk_valid  BOOLEAN;
 BEGIN
   -- (a) the backfill actually landed — SCOPED TO THE POPULATION IT CLAIMED
   --     (153.6 code review WR-01). This deliberately does NOT assert "no
@@ -687,6 +751,23 @@ BEGIN
     END IF;
   END LOOP;
 
+  -- (g) the coupling constraint is present AND VALIDATED (153.6 CR-01). A
+  --     NOT VALID constraint would police new writes while leaving existing
+  --     rows unchecked, so "it exists" is the weaker claim; convalidated is the
+  --     one that says every row in the table satisfies it.
+  SELECT convalidated INTO v_chk_valid FROM pg_constraint
+   WHERE conrelid = 'public.api_keys'::regclass
+     AND conname  = 'api_keys_attested_venue_matches_exchange'
+     AND contype  = 'c';
+  IF v_chk_valid IS NULL THEN
+    RAISE EXCEPTION
+      'Migration 20260811210000 failed: the api_keys_attested_venue_matches_exchange CHECK is absent, so a writer could persist an attested_venue that disagrees with exchange — a forgeable attestation with no forged routing label to pay for it. Rolling back.';
+  END IF;
+  IF NOT v_chk_valid THEN
+    RAISE EXCEPTION
+      'Migration 20260811210000 failed: the api_keys_attested_venue_matches_exchange CHECK exists but is NOT VALID, so rows already in the table were never checked against it. Rolling back.';
+  END IF;
+
   RAISE NOTICE 'Migration 20260811210000 post-verify OK: zero unattested rows in the backfilled population, both RPC fences intact and stamping attested_venue, both RPCs owned by a role the scrub trigger admits (%/%), scrub trigger attached, 20260810120000 marker preserved, RPC privileges unchanged.',
     v_cws_owner, v_awck_owner;
 END
@@ -694,12 +775,23 @@ $verify$;
 
 -- ─────────────────────────── 8. the comments (one of them is a test gate)
 COMMENT ON COLUMN public.api_keys.attested_venue IS
-  'SERVER-ATTESTED venue (migration 20260811210000). Written ONLY by the two '
-  'SECURITY DEFINER wizard RPCs, create_wizard_strategy and '
-  'add_wizard_composite_key, from the venue the server itself validated at '
-  'mint time. A client-supplied value is scrubbed to NULL by the '
+  'RPC-WRITTEN venue (migration 20260811210000). ⛔ READ THE GUARANTEE '
+  'PRECISELY, it is narrower than "server-validated": the two SECURITY DEFINER '
+  'wizard RPCs do NOT validate this value, they write the p_exchange they were '
+  'CALLED with, and both are invokable by authenticated over PostgREST. What '
+  'holds is (1) it is written ONLY by those two RPCs — create_wizard_strategy '
+  'and add_wizard_composite_key — and (2) each writes THIS column and exchange '
+  'from ONE parameter, so the two cannot disagree; CHECK constraint '
+  'api_keys_attested_venue_matches_exchange pins that coupling for every '
+  'writer, present and future. The bypass is therefore not free: forging the '
+  'attestation to buy a probe skip also forges the routing label, and an '
+  'mt5-labelled row is handed to the MT5 adapter and never syncs. A '
+  'client-supplied value on a direct INSERT is scrubbed to NULL by the '
   'api_keys_scrub_attested_venue BEFORE INSERT trigger, so a DELETE + '
-  're-INSERT round trip cannot forge one. Read by '
+  're-INSERT round trip cannot forge one either. Making this column truly '
+  'server-VALIDATED needs the deferred connect-flow refactor (an api_keys '
+  'INSERT behind a service-role writer that passes the venue it validated). '
+  'Read by '
   '/api/strategies/finalize-wizard as the SOLE input to the ASVS V4 '
   'scope-broadening probe gate: NULL means PROBE (fail-toward). Never fall '
   'back to api_keys.exchange — that fallback re-opens the bypass this column '
