@@ -50,6 +50,10 @@ from services.ingestion import IngestionAdapter
 from services.ingestion.adapter import KeySubmissionRequest, MetricsSnapshot
 from services.ingestion.mt5 import Mt5Adapter
 from services.mt5_client import Mt5Client, Mt5ClientError
+from services.mt5_probe import (
+    MT5_GATEWAY_MISCONFIGURED_DETAIL,
+    Mt5GatewayMisconfigured,
+)
 from services.mt5_validation import classify_mt5_login_error
 
 
@@ -292,9 +296,19 @@ def test_validate_terminal_trade_disabled_never_returns_readonly(monkeypatch) ->
     trade permission is off (MetaQuotes' default-ON "Disable automatic trading
     through the external Python API"), under which a MASTER password produces the
     identical two negatives. The adapter must NOT return
-    ValidationResult(valid=True, read_only=True); it refuses with the same
-    server-misconfiguration disposition it already uses for an unconfigured
-    gateway, because no retry can clear a setting in our own terminal.
+    ValidationResult(valid=True, read_only=True); it refuses with an operator-fault
+    disposition, because no retry can clear a setting in our own terminal.
+
+    ⭐ RE-CUT at 153.6 / A3 — the pin is STRENGTHENED, not lowered. It used to
+    accept a bare ``RuntimeError`` whose text said "server misconfiguration", and
+    that was the defect: a bare ``RuntimeError`` fell through
+    ``job_worker.classify_exception`` to ``("unknown", str(exc))``, so the worker
+    RETRIED a fault that can never clear — re-running the whole serialized probe
+    against the ONE shared terminal, ahead of every other user's validate — and
+    rendered internal copy naming investor/master passwords to the user. The type
+    is now ``Mt5GatewayMisconfigured`` with its own permanent classify arm, and the
+    copy is the module's curated constant, so the assertions below pin the TYPE and
+    the operator remedy rather than a phrase that carried the leak.
     """
     fake = _install_client(
         monkeypatch,
@@ -305,14 +319,20 @@ def test_validate_terminal_trade_disabled_never_returns_readonly(monkeypatch) ->
         },
     )
 
-    with pytest.raises(RuntimeError) as exc:
+    with pytest.raises(Mt5GatewayMisconfigured) as exc:
         asyncio.run(Mt5Adapter().validate(_req()))
 
-    # Names the operator remedy, never the user's credentials.
+    # The CURATED constant, never interpolated upstream text (T-134-01).
     msg = str(exc.value)
-    assert "server misconfiguration" in msg
+    assert msg == MT5_GATEWAY_MISCONFIGURED_DETAIL
+    # Names the operator remedy...
+    assert "needs an operator" in msg
+    assert "mt5-go-live.md" in msg
+    # ...and never the user's credentials, by value OR by vocabulary.
     assert "investor-pw" not in msg
     assert "Broker-Demo" not in msg
+    for word in ("password", "investor", "master"):
+        assert word not in msg.lower(), f"operator copy names the credential word {word!r}"
     assert fake.close_calls == 1  # close() still runs on the refusal path
     assert fake.shutdown_calls == 0
 
