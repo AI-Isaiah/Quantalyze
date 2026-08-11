@@ -2047,3 +2047,14 @@ bargain has two halves; this section is the second one. Source: `153.4-REVIEW.md
   TEST apply against an already-migrated database, which cannot catch ordering/chain defects.
   Discovered 2026-08-11 while trying to certify phase 153.6's `20260811210000`. A fix would
   likely split CONCURRENTLY statements out of the pipelined path. Owner: unassigned.
+- [ ] **IN-07 — assertion 5's gate marker has no symmetric post-verify** in
+  `20260811210000_api_keys_attested_venue.sql`. Assertion 5 (5a–5e) in
+  `supabase/tests/test_api_keys_exchange_not_user_writable.sql` arms on the `20260811210000`
+  substring in `api_keys.attested_venue`'s column comment. The migration post-verifies the
+  *exchange* marker (check (d)) but has no symmetric check for this one, which gates strictly
+  more. **Measured 2026-08-12 (round-3 audit):** dropping the substring COMMITS the migration
+  and makes the whole 5a–5e family print `SKIP (5)` — a silent loss of the RPC-door coverage.
+  **Non-blocking:** the file carries the marker today and all of 5a–5e were proven to run; the
+  realistic way to lose it is a *future* migration re-stamping that comment, at which point
+  this file's `$verify$` no longer runs, so a symmetric check would buy little. Guard hygiene.
+  Owner: unassigned.
