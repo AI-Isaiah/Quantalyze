@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
-status: planning
+status: executing
 stopped_at: Phase 153.6 context gathered
-last_updated: "2026-08-11T18:17:46.797Z"
-last_activity: 2026-08-11
+last_updated: "2026-08-11T19:59:11.137Z"
+last_activity: 2026-08-11 -- Phase 153.6 execution started
 progress:
   total_phases: 15
   completed_phases: 11
-  total_plans: 64
+  total_plans: 70
   completed_plans: 64
   percent: 73
 ---
@@ -55,10 +55,10 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: 154
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-08-11
+Phase: 153.6 (parity-the-fixes-that-only-landed-on-one-path) — EXECUTING
+Plan: 1 of 6
+Status: Executing Phase 153.6
+Last activity: 2026-08-11 -- Phase 153.6 execution started
 
 ### Phase 142.1 scope (inserted 2026-08-02)
 
