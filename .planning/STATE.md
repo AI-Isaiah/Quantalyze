@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: ready_to_plan
-stopped_at: Phase 153.4 complete (5/5) — ready to discuss Phase 153.5
-last_updated: 2026-08-11T08:12:19.530Z
+stopped_at: Phase 153.5 complete (5/5) — ready to discuss Phase 154
+last_updated: 2026-08-11T14:07:00.840Z
 last_activity: 2026-08-11
 progress:
   total_phases: 14
   completed_phases: 10
   total_plans: 59
-  completed_plans: 220
+  completed_plans: 225
   percent: 71
 ---
 
@@ -55,7 +55,7 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: 153.5
+Phase: 154
 Plan: Not started
 Status: Ready to plan
 Last activity: 2026-08-11
