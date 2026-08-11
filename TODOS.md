@@ -1911,23 +1911,75 @@ plan resolved by SURFACING it (Rule 7), not by blending.
 
 ### Phase 153.4-05 (the composite step's honest wait) — non-blocking findings, logged per the stopping rule (added 2026-08-11)
 
-- [ ] **`MultiKeyConnectStep`'s `EXCHANGES` array has no MT5 card, so a serialized venue
-  reaches a composite member panel only sideways.** `ConnectKeyStep` appends an MT5 card
-  under `MT5_UI_ENABLED`; this step's replicated array stops at deribit (+ sfox under its
-  own flag). The one path that produces an MT5 member panel today is the UAT/F-4 draft
-  carry-over: pick MT5 on the single-key form, type the three fields, click
-  "+ Add another key window", and panel 0 inherits `exchange: "mt5"`. That panel then
-  renders four exchange cards with NONE pressed, labels the broker-server field as nothing
-  (its `requiresPassphrase` lookup misses), and would POST `passphrase: null` — i.e. the
-  add-key call is missing the broker server. **Reachable in production** (`NEXT_PUBLIC_MT5_ENABLED`
-  is on). 153.4-05 uses exactly this path to prove the per-panel budget is venue-aware, and
-  the wait behaves correctly on it, but the SUBMIT would still fail for a reason the user
-  cannot see. The fix is either the MT5 card (with its three-field labelling) in this
-  array, or an explicit refusal to carry a serialized draft into a composite panel — a
-  product decision, not a defect this plan could take. Owner: unassigned; natural
-  neighbour is Phase 155 (MT5-VERIFY).
+- [x] ~~`MultiKeyConnectStep`'s `EXCHANGES` array has no MT5 card, so a serialized venue
+  reaches a composite member panel only sideways~~ **CLOSED 2026-08-11** by the 153.4 review
+  fix round (CR-03): the MT5 card and its four third-field overrides are in the composite
+  roster, and a class guard compares both surfaces' rendered exchange cards with both flags
+  ON. ⛔ This entry contradicted its own file for a day — the fix was recorded under
+  *Tech-debt / maintainability* ("The two wizard connect surfaces keep TWO hand-maintained
+  `EXCHANGES` rosters") while this one still called the defect "Reachable in production".
+  ONE entry now: the tech-debt one, which carries the residual (the CLASS fix is a shared
+  option table both steps import).
 - [ ] **The composite step's `Loading your saved keys…` banner is the file's one remaining
   U+2026.** D-21 settles the busy label as ASCII and this plan added no new typographic
   ellipsis, but the rehydrate banner (a different surface, untouched here) still carries
   one — as does `CsvUploadStep.tsx:751`. Fold into the repo-wide ellipsis sweep already
   logged under 153.4-03. Owner: that sweep.
+
+### Phase 153.4 code review — the findings the fix round consciously did NOT fix (added 2026-08-11)
+
+⚠️ **Logged late, and that is the point.** The stopping rule blocks only on user-facing or
+data-integrity defects; everything else gets **logged instead**. The 153.4 fix round closed
+4 criticals + 2 warnings and then recorded the other eight findings nowhere — they survived
+only in `.planning/phases/153.4-*/153.4-REVIEW.md`. The verifier escalated that as F-4. The
+bargain has two halves; this section is the second one. Source: `153.4-REVIEW.md`.
+
+- [ ] **WR-03 — a panel removed mid-validate leaks a credential-carrying POST with no client
+  deadline.** `doRemove` filters the panel out and does nothing else; `anyValidating` then
+  recomputes false, the step's one interval is cleared, and that request keeps only the
+  platform's invocation bound. The `Remove` control is confirmed NOT disabled while
+  validating, so it is UI-reachable. **Non-blocking:** invisible and harmless — the abort
+  buys nothing (neither connect route reads `request.signal`, so it would not stop the key
+  being stored) and `updatePanelById` no-ops for a removed id, so the settled request cannot
+  touch the UI. The interval docblock now states this instead of claiming closure it does not
+  have. Owner: unassigned.
+- [x] ~~WR-04 — `ConnectKeyStep`'s 300 ms mount gate can fire AFTER the request finished~~
+  **FIXED 2026-08-11.** The gate was a macrotask cleared only by the timer effect's cleanup,
+  which React commits at its own priority, so a sub-300 ms answer could leave a ghost card
+  frozen at `0s` whose `Stop waiting` aborted a ref the `finally` had already nulled. Was
+  logged here as *user-facing* — the one of the eight that did not qualify for logging-only.
+  The gate now self-guards on a `waitStartedAtRef`; the regression case drives the ordering
+  and was observed to red without it.
+- [ ] **WR-05 — `validatePanel` dereferences `panelsRef.current[idx]` with no guard**, while
+  its neighbour `handleStopWaiting` opens with `if (!p) return;`. `panelsRef` lags state by
+  one commit, so a click landing between a removal and the sync throws a `TypeError` out of
+  an unawaited async callback. **Non-blocking:** a one-commit ref-sync window nobody has hit.
+  ⭐ Wider than the review reported — `requestRemove` has the same unguarded shape, so fix the
+  CLASS (every `panelsRef.current[idx]` read in this file), not the one line. Owner: unassigned.
+- [ ] **IN-01 — the composite wait card mounts at ~1 s, the single-key one at exactly 300 ms.**
+  The composite gate is `p.waitElapsedMs >= WAIT_CARD_MOUNT_DELAY_MS` and `waitElapsedMs` only
+  moves on the 1 s tick. **Non-blocking:** it satisfies the property (never earlier than
+  300 ms) and is deliberate, documented "please do not 'fix' it by adding one". Residual is a
+  one-line note on the constant that it is a FLOOR at one surface and an exact delay at the
+  other. Owner: unassigned.
+- [ ] **IN-02 — the abort-grace assertion in `validate-budget.test.ts` is near-tautological**
+  (both operands resolve to the same constant, so it restates `WAIT_ABORT_GRACE_MS > 0`).
+  **Non-blocking:** the property that actually matters after CR-01 — the client deadline
+  exceeds the ROUTE's 158 500 ms worst case — is now pinned separately in the same file, so
+  the vacuous line is redundant rather than misleading. Delete it on the next pass through.
+  Owner: unassigned.
+- [ ] **IN-03 — a backward system-clock step renders a negative elapsed figure** in
+  `ValidateWaitCard` (`Math.floor(elapsedMs / 1000)` over a `Date.now()` delta). **Non-blocking:**
+  user-visible but requires an NTP correction or a laptop resume mid-wait. `Math.max(0, …)`
+  costs nothing and keeps the card's one number honest under the Numbers Contract. Owner:
+  unassigned.
+- [x] ~~IN-04 — raising the tombstone widened `MAX_BREAKER_LOCK_SPAN_MS` from 90 s to 120 s~~
+  **ADDRESSED 2026-08-11 by disclosure**, which is all it needed: the derived widening (and the
+  matching loosening of the clock-skew tolerance from the 141.2 review) is now written into the
+  tombstone docblock that otherwise enumerates what moves with the constant. Both consequences
+  were already acceptable; only their absence from the notes was not.
+- [ ] **IN-05 — `handleStopWaiting` can leave a stale `"user"` abort reason with no controller
+  to consume it** (the reason is written before the optional `abort()` call, so pressing the
+  control in a race with the `finally` records one for nothing). **Non-blocking:** provably
+  unread — the next submit clears it. The composite step takes the stricter delete-per-attempt
+  shape; matching it removes the question. Owner: unassigned.
