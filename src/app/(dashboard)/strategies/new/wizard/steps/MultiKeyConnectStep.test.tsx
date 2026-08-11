@@ -1915,7 +1915,7 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     "This is slower than usual. We will wait until 120s, then tell you what we found.";
   const STOP_WAITING = "Stop waiting";
   const CANCELLED_LINE =
-    "We stopped waiting. Nothing was saved and your key details are still on this page.";
+    "We stopped waiting for your broker. Your key details are still on this page — the check may still be finishing on our side, so give it a moment before validating this key again.";
   const BUSY_LABEL = "Validating...";
   const DEADLINE_CAUSE_120 =
     "We gave your broker 120 seconds to answer and it did not.";
@@ -2241,6 +2241,19 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     expect(cardIn(0)).toBeNull();
     const line = within(panelAt(0)).getByTestId("key-0-wait-cancelled");
     expect(line).toHaveTextContent(CANCELLED_LINE);
+    // ⭐ 153.4 review CR-02 — THE CLAIM THIS BROWSER CANNOT MAKE, at the surface
+    // where it is worst. The abort stops US listening; `composite/add-key` runs
+    // on past validate into `encryptKey` and the add RPC and reads no
+    // `request.signal`, so the key may be stored while this panel sits at
+    // `editing` with `apiKeyId: null` — and this route has no idempotency fence,
+    // so a re-validate mints a SECOND credential. Asserted as a PROPERTY (no
+    // server-outcome claim), so a reworded version of the same lie also reds.
+    expect(
+      line.textContent,
+      "the cancelled line asserts a SERVER-SIDE outcome this browser cannot " +
+        "know. Aborting the fetch does not cancel the invocation, and the route " +
+        "continues into encryptKey + the add RPC.",
+    ).not.toMatch(/nothing (was|is) (saved|stored)|was not (saved|stored)/i);
     // ⛔ NOT an error envelope and ⛔ not red: the user chose this and nothing
     // failed (DESIGN.md §Semantic-color gates).
     expect(within(panelAt(0)).queryByTestId("error-envelope")).toBeNull();

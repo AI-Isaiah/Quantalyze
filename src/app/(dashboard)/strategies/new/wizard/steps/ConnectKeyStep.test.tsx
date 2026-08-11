@@ -1177,7 +1177,7 @@ describe("[153.4-04 / WIZFORM-05] ConnectKeyStep — the honest long wait", () =
     "This is slower than usual. We will wait until 120s, then tell you what we found.";
   const STOP_WAITING = "Stop waiting";
   const CANCELLED_LINE =
-    "We stopped waiting. Nothing was saved and your key details are still on this page.";
+    "We stopped waiting for your broker. Your key details are still on this page — the check may still be finishing on our side, and connecting again picks up that key rather than storing a second one.";
   const BUSY_LABEL = "Validating...";
 
   beforeEach(() => {
@@ -1386,6 +1386,19 @@ describe("[153.4-04 / WIZFORM-05] ConnectKeyStep — the honest long wait", () =
     expect(card()).toBeNull();
     const line = screen.getByTestId("wizard-connect-wait-cancelled");
     expect(line).toHaveTextContent(CANCELLED_LINE);
+    // ⭐ 153.4 review CR-02 — THE CLAIM THIS BROWSER CANNOT MAKE. The abort stops
+    // US listening; `create-with-key` runs on past validate into `encryptKey` and
+    // the create RPC and reads no `request.signal`, so on any run where validate
+    // then succeeds the key IS stored. A user cancelling at 48 s of a 120 s MT5
+    // validate was told nothing was saved while their credential was being
+    // written. Asserted as a PROPERTY (no server-outcome claim), not as the
+    // absence of one sentence, so a reworded version of the same lie also reds.
+    expect(
+      line.textContent,
+      "the cancelled line asserts a SERVER-SIDE outcome this browser cannot " +
+        "know. Aborting the fetch does not cancel the invocation, and the route " +
+        "continues into encryptKey + the create RPC.",
+    ).not.toMatch(/nothing (was|is) (saved|stored)|was not (saved|stored)/i);
     // ⛔ NOT an error envelope and ⛔ not red: the user chose this and nothing
     // failed (DESIGN.md §Semantic-color gates).
     expect(screen.queryByTestId("error-envelope")).toBeNull();

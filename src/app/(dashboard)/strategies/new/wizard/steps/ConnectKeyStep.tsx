@@ -608,16 +608,23 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
   /**
    * 153.4-04 — abandon the wait, keep everything else.
    *
-   * ⛔ NO CONFIRMATION DIALOG. `validate-key` is strictly pre-encrypt / pre-RPC —
-   * nothing is persisted server-side (diagnosis 2026-08-05), so there is nothing
-   * to lose by pressing this, and a confirmation step on the one control whose
-   * entire purpose is escaping a stall is the opposite of the affordance.
+   * ⛔ NO CONFIRMATION DIALOG. Pressing this costs the user nothing they can act
+   * on: the request is going to finish or fail on its own either way, and a
+   * confirmation step on the one control whose entire purpose is escaping a stall
+   * is the opposite of the affordance.
    *
-   * ⚠️ Aborting stops the BROWSER listening; it does not stop the server working.
-   * The Vercel invocation and the MT5 gateway probe run to their own deadlines
-   * (T-153.4-16, recorded not mitigated). That is safe to say nothing about
-   * because nothing is written on this path — which is exactly why the cancelled
-   * copy can truthfully say nothing was saved.
+   * ⚠️ ABORTING STOPS THE BROWSER LISTENING; IT DOES NOT STOP THE SERVER WORKING,
+   * AND THE SERVER'S WORK IS NOT ONLY A PROBE. This comment used to close with
+   * "nothing is written on this path — which is exactly why the cancelled copy
+   * can truthfully say nothing was saved". THAT WAS A FACT ABOUT `validate-key`
+   * ASSERTED ABOUT THE ROUTE (153.4 review CR-02). What the user aborts is
+   * `POST /api/strategies/create-with-key`, which runs `validateKey` →
+   * `encryptKey` → `create_wizard_strategy`; the invocation does not read
+   * `request.signal`, so on any run where validate subsequently succeeds the
+   * credential IS encrypted and the `api_keys` + `strategies` rows ARE written,
+   * seconds after we told the user nothing was saved.
+   *
+   * ⛔ The cancelled line below therefore states only what THIS BROWSER knows.
    */
   const handleStopWaiting = useCallback(() => {
     abortReasonRef.current = "user";
@@ -1054,18 +1061,27 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         )}
 
         {/* The cancelled state. ⛔ NOT a `WizardErrorEnvelope` and ⛔ never
-            `text-negative`: the user chose this, nothing failed, and nothing was
-            saved. DESIGN.md §Semantic-color gates — red asserts a permanent
-            failure, and there is no failure here to assert. Muted neutral is the
-            honest tone, and the sentence states the two facts a user who just
-            abandoned a two-minute wait actually needs. */}
+            `text-negative`: the user chose this and nothing failed. DESIGN.md
+            §Semantic-color gates — red asserts a permanent failure, and there is
+            no failure here to assert.
+
+            ⛔ NO "NOTHING WAS SAVED" CLAIM (153.4 review CR-02). Aborting stops
+            this browser listening; the route runs on past validate into
+            `encryptKey` and the create RPC, so the key may well be stored — a
+            user who cancels at 48 s of a 120 s MT5 validate was told nothing was
+            saved while their credential was being written. The sentence states
+            the two facts this browser actually knows, plus the one thing that
+            makes the next submit safe: `create-with-key`'s idempotency fence is
+            keyed on `wizard_session_id`, so a re-submit resolves to the draft the
+            abandoned request created instead of minting a second one. */}
         {cancelled && !submitting && (
           <p
             className="text-caption text-text-secondary"
             data-testid="wizard-connect-wait-cancelled"
           >
-            We stopped waiting. Nothing was saved and your key details are still
-            on this page.
+            We stopped waiting for your broker. Your key details are still on
+            this page — the check may still be finishing on our side, and
+            connecting again picks up that key rather than storing a second one.
           </p>
         )}
 

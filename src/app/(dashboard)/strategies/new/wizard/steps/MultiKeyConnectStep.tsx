@@ -991,21 +991,30 @@ export function MultiKeyConnectStep({
   /**
    * 153.4-05 — abandon ONE panel's wait, and nothing else.
    *
-   * ⛔ NO CONFIRMATION DIALOG. `composite/add-key`'s validate is strictly
-   * pre-encrypt / pre-RPC — nothing is persisted server-side until the key is
-   * accepted (diagnosis 2026-08-05) — so there is nothing to lose by pressing
-   * this, and a confirmation step on the one control whose purpose is escaping a
-   * stall is the opposite of the affordance.
+   * ⛔ NO CONFIRMATION DIALOG. Pressing this costs the user nothing they can act
+   * on: the request is going to finish or fail on its own either way, and a
+   * confirmation step on the one control whose purpose is escaping a stall is the
+   * opposite of the affordance.
    *
    * The panel is looked up by index through `panelsRef` (the index the user just
    * clicked is current) and everything after that is keyed by its ID, so a
    * reorder between the validate and the cancel cannot redirect the abort.
    *
-   * ⚠️ Aborting stops the BROWSER listening; it does not stop the server
-   * working. The Vercel invocation and the MT5 gateway probe run to their own
-   * deadlines (T-153.4-23, recorded not mitigated) — which is safe to say
-   * nothing about precisely because nothing is written on this path, and that is
-   * what lets the cancelled copy truthfully say nothing was saved.
+   * ⚠️ ABORTING STOPS THE BROWSER LISTENING; IT DOES NOT STOP THE SERVER WORKING,
+   * AND THE SERVER'S WORK IS NOT ONLY A PROBE. This comment used to close with
+   * "nothing is written on this path … which is what lets the cancelled copy
+   * truthfully say nothing was saved". THAT WAS A FACT ABOUT `validate-key`
+   * ASSERTED ABOUT THE ROUTE (153.4 review CR-02). What the user aborts is
+   * `POST /api/strategies/composite/add-key`, which runs `validateKey` →
+   * `encryptKey` → the add RPC and reads no `request.signal`, so on any run where
+   * validate subsequently succeeds the credential IS encrypted and an `api_keys`
+   * row IS written — while this panel sits at `status: "editing"` with
+   * `apiKeyId: null`. ⚠️ And unlike `create-with-key`, this route has NO
+   * existing-draft short-circuit by construction (see DIVERGENCE (1) in
+   * `add-key/route.ts`), so an immediate re-validate mints a SECOND stored
+   * credential for the same key rather than reconciling to the first.
+   *
+   * ⛔ The cancelled line below therefore states only what THIS BROWSER knows.
    */
   const handleStopWaiting = useCallback((idx: number) => {
     const p = panelsRef.current[idx];
@@ -2040,17 +2049,27 @@ function KeyPanel({
         )}
 
         {/* The cancelled state. ⛔ NOT a `WizardErrorEnvelope` and ⛔ never
-            `text-negative`: the user chose this, nothing failed, and nothing was
-            saved. DESIGN.md §Semantic-color gates — red asserts a permanent
-            failure, and there is no failure here to assert. Scoped to this
-            panel, because the other panels' checks are still running. */}
+            `text-negative`: the user chose this and nothing failed. DESIGN.md
+            §Semantic-color gates — red asserts a permanent failure, and there is
+            no failure here to assert. Scoped to this panel, because the other
+            panels' checks are still running.
+
+            ⛔ NO "NOTHING WAS SAVED" CLAIM (153.4 review CR-02). Aborting stops
+            this browser listening; the route runs on past validate into
+            `encryptKey` and the add RPC, so this key may well be stored. ⚠️ The
+            tail differs from the single-key surface's ON PURPOSE and is not
+            copy-drift: `create-with-key` reconciles a re-submit through its
+            `wizard_session_id` idempotency fence, and `composite/add-key` has no
+            such fence by construction — so here the honest steer is to wait
+            rather than to re-fire, which would mint a second credential. */}
         {p.waitCancelled && p.status !== "validating" && (
           <p
             className="mt-3 text-caption text-text-secondary"
             data-testid={`key-${index}-wait-cancelled`}
           >
-            We stopped waiting. Nothing was saved and your key details are still
-            on this page.
+            We stopped waiting for your broker. Your key details are still on
+            this page — the check may still be finishing on our side, so give it
+            a moment before validating this key again.
           </p>
         )}
 
