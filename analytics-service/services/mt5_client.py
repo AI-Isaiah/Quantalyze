@@ -1122,6 +1122,16 @@ class Mt5Client:
         the offline ``_connect`` double, reconnect + best-effort ``shutdown()`` is
         the full exercised surface.
         """
+        # WIZFORM-ABANDON / D-36 — CHECK 1 of 2, the ENTRY check. An
+        # already-abandoned restart must not open an rpyc socket nobody is left to
+        # close. It sits OUTSIDE the `_timed` bracket below deliberately: a refusal
+        # is not a round-trip, and letting one emit an `mt5.stage restart` event
+        # would pollute the D-32 `duration_ms` population Phase 155 reads with
+        # zero-duration non-calls. (It reuses the `restart` stage NAME in the log
+        # only.) ⚠️ This check is the CHEAP half and closes almost nothing on its
+        # own — see check 2.
+        self._assert_live("restart")
+
         # D-32: the WHOLE restart is one timed stage, not two. Recovery latency is
         # what a Phase-155 reader needs (how long a wedged terminal costs us), and
         # the reconnect and the stale disposal are not independently actionable —
@@ -1133,6 +1143,51 @@ class Mt5Client:
                 host=self._host, port=self._port, timeout=self._request_timeout_s
             )
             self._closed = False
+            # ⭐ WIZFORM-ABANDON / D-36 — CHECK 2 of 2, AND IT IS THE LOAD-BEARING
+            # ONE. Finding #5 is precisely the case where the entry check above
+            # already passed and the damage happens LATER: `_mt5_bounded_restart`
+            # gives this call ~10s, then ABANDONS it (a thread cannot be
+            # interrupted); the caller unwinds, its lease releases and bumps the
+            # generation, and this zombie — still parked in the reconnect — arrives
+            # at the shared `stale.shutdown()` below UNDER THE NEXT HOLDER. One
+            # `ThreadedServer`, one `MetaTrader5` instance, one IPC pipe (EVIDENCE
+            # §A2 / C-1), so that late shutdown answers the next holder `-10004 No
+            # IPC connection`. An entry-check-only fix reads as a fix and closes
+            # nothing.
+            #
+            # ⛔ Compared INLINE rather than via `_assert_live`, because the three
+            # cleanup steps below MUST run before the raise — `_assert_live` raises
+            # immediately and would strand two sockets.
+            if self._epoch != _mt5_epoch_for(self.terminal_key):
+                logger.warning(
+                    "Mt5Client.restart: this restart was abandoned by its caller "
+                    "and the terminal has since been handed on (generation %s -> "
+                    "%d) — SKIPPING the shared-IPC shutdown(), which would -10004 "
+                    "the holder that owns the terminal now. Disposing only the "
+                    "sockets that are OURS (WIZFORM-ABANDON / D-36).",
+                    self._epoch,
+                    _mt5_epoch_for(self.terminal_key),
+                )
+                # Three invariants, and all three are required — RESEARCH §Q4.
+                # (1) Skipping the SHARED shutdown must not skip OUR OWN socket
+                #     close; `stale`'s socket is ours on every path (D-35), and the
+                #     un-fenced path below already treats the two as separate
+                #     concerns for exactly this reason.
+                self._teardown_transport(
+                    stale, who="Mt5Client.restart(abandoned)", stage=None
+                )
+                # (2) The FRESH connection WR-01 forces us to open first is dead
+                #     weight here — the caller that would have received it is gone.
+                #     Leaving it open is a NEW leak the fence itself would create.
+                self._teardown_transport(
+                    self._mt5, who="Mt5Client.restart(abandoned)", stage=None
+                )
+                # (3) Restore the latch cleared two lines above. Otherwise a client
+                #     its caller has already given up on is left latched-OPEN, and
+                #     `close()` — exempt from the fence, and quite possibly already
+                #     run by the dispatch epilogue — no-ops forever.
+                self._closed = True
+                raise Mt5SessionAbandoned("restart")
             # Best-effort dispose of the stale connection AFTER the fresh one is live,
             # so a shutdown() that blocks (an abandoned reader still driving `stale`)
             # can never prevent the reconnect. A raising teardown is swallowed like

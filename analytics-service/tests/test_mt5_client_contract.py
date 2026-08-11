@@ -1831,3 +1831,168 @@ def test_session_abandoned_message_carries_no_classifier_token(stage):
             "credential failure and a working key blamed for our abandoned thread "
             "(the routers/exchange.py:678-684 incident)"
         )
+
+
+# --------------------------------------------------------------------------- #
+# WIZFORM-ABANDON — FINDING #5: THE FENCED restart()
+#
+# WHY these matter (Rule 9). `Mt5Client.restart()` carries the ONE surviving
+# `mt5.shutdown()` in the tree, and `mt5linux` serves EVERY rpyc connection from
+# ONE `ThreadedServer` over ONE `MetaTrader5` instance holding ONE IPC pipe. A
+# shutdown from a restart whose caller (`_mt5_bounded_restart`) already abandoned
+# it at the ~10s bound therefore destroys the pipe for the NEXT holder, who
+# observes `-10004 No IPC connection` — a cross-tenant outage minted by our own
+# recovery path.
+#
+# ⭐ AN ENTRY CHECK ALONE CANNOT CLOSE THIS. The legitimate heal runs INSIDE the
+# lease, so at entry the generation is always current and the check passes
+# trivially; the damage happens LATER, when the bound fires mid-reconnect and the
+# lease releases while the zombie is still inside the closure. The load-bearing
+# check is the SECOND one, immediately before `stale.shutdown()`.
+#
+# ⚠️ Three cleanup invariants interact on the fenced path and no pre-153.5 case
+# covered them together — skipping the shutdown must not skip the stale SOCKET
+# close, the `_closed = False` cleared by the WR-01 swap must be restored, and the
+# FRESH connection the WR-01 reconnect just opened must be disposed because nobody
+# is left to receive it. Miss any one and the fence trades one leak for another.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_restart_abandoned_mid_reconnect_never_reaches_the_shared_shutdown(caplog):
+    """⭐ FINDING #5, and the case the plausible half-fix (entry check only) fails.
+
+    The abandonment is scheduled DETERMINISTICALLY — no threads, no sleeps: the
+    injected `_connect` seam bumps the generation as its side effect, which is
+    exactly "the caller's `wait_for` fired and its lease released while this
+    reconnect round-trip was in flight".
+
+    All three cleanup invariants are asserted TOGETHER, deliberately: each one
+    alone is satisfiable by an implementation that leaks one of the other two.
+    """
+    stale = _FakeMt5({})
+    fresh = _FakeMt5({})
+    conns: dict[str, int] = {"n": 0}
+    key = f"{_TERMINAL_HOST}:{_TERMINAL_PORT}"
+
+    def _connect(*, host, port, timeout):
+        conns["n"] += 1
+        if conns["n"] == 1:
+            return stale
+        # ⭐ THE ABANDONMENT, scheduled by the test: the bounded caller gave up on
+        # this restart and its lease released while the reconnect was in flight.
+        bump_mt5_terminal_epoch(key)
+        return fresh
+
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=_connect)
+
+    # ⚠️ The refusal is CAPTURED rather than wrapped in `pytest.raises`, so the
+    # EFFECT-based oracles below run on every implementation. Under the plausible
+    # half-fix (entry check only) a `pytest.raises` wrapper reds first, on the
+    # exception type — which is not the harm. The harm is a shutdown LANDING, and
+    # assertion (a) is what must fail.
+    refusals: list[BaseException] = []
+    with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+        try:
+            client.restart()
+        except Mt5SessionAbandoned as exc:  # noqa: PERF203 — one call, not a loop
+            refusals.append(exc)
+
+    # (a) THE HARM ITSELF — the shared IPC pipe was never destroyed under whoever
+    # holds the terminal now. This is the assertion an entry-check-only fix fails.
+    assert stale.shutdown_calls == 0, (
+        "an abandoned restart still issued the ONE permitted mt5.shutdown() — it "
+        "destroys the single shared IPC pipe for the NEXT holder (-10004), which "
+        "is finding #5 in full"
+    )
+    # (b) ...yet OUR OWN sockets are always ours to close (D-35). Skipping the
+    # shared shutdown must not skip the stale socket close.
+    assert stale._MetaTrader5__conn.close_calls == 1, (
+        "the fenced path skipped the stale SOCKET close along with the shutdown — "
+        "trading a cross-tenant outage for a socket leak"
+    )
+    # (c) ...including the fresh connection WR-01 forces us to open first, which on
+    # this path is dead weight nobody will ever receive.
+    assert fresh._MetaTrader5__conn.close_calls == 1, (
+        "the WR-01 reconnect's FRESH socket was left open on the abandoned path — "
+        "a NEW leak introduced by the fence itself"
+    )
+    # (d) ...and the latch cleared by the swap is restored, or a client its caller
+    # already gave up on is left latched-open and `close()` no-ops forever.
+    assert client._closed is True, (
+        "`_closed` was left False on the abandoned path — `aclose_exchange`'s "
+        "close() (exempt from the fence, and possibly already run) can never "
+        "close this transport again"
+    )
+    # (e) D-39 — the raise alone is discarded by asyncio when the destination
+    # future is cancelled, which on this path it always is. The WARNING is the
+    # only signal an operator ever sees, and it must name what was SKIPPED.
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any(
+        "WIZFORM-ABANDON" in m and "shutdown" in m for m in warnings
+    ), (
+        "the fenced restart skipped the shared shutdown SILENTLY — with the "
+        f"destination future cancelled the raise reaches nobody (D-39). Got: {warnings}"
+    )
+    # (f) ...and it refuses rather than returning as if it had healed anything —
+    # asserted LAST, because the type is the least load-bearing of the six.
+    assert refusals, "the fenced restart returned normally instead of refusing"
+
+
+def test_a_restart_already_abandoned_at_entry_refuses_before_any_io():
+    """The entry check is not the load-bearing one, but it is not decorative: an
+    already-abandoned restart must not open a socket nobody will ever close.
+
+    Oracle is the connect COUNT on the seam — "no fresh transport was built" —
+    not the exception type.
+    """
+    connect, fake, record = _make({"account": _FakeNamedTuple(equity=1.0)})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    client.account_info()  # first touch binds the generation, under the lease
+    assert record["connects"] == 1
+
+    bump_mt5_terminal_epoch(client.terminal_key)  # ...the lease releases
+
+    with pytest.raises(Mt5SessionAbandoned):
+        client.restart()
+
+    assert record["connects"] == 1, (
+        "an already-abandoned restart opened a FRESH rpyc socket that nobody will "
+        "ever close — refusal must precede any I/O"
+    )
+    assert fake.shutdown_calls == 0
+
+
+def test_a_live_restart_under_a_current_generation_is_unchanged_by_the_fence():
+    """⭐ THE REGRESSION HALF. The legitimate heal (MT5CONC-01) runs INSIDE the
+    lease, and an exclusive per-terminal lock means the generation cannot move
+    while it is held — so a restart that completes within its bound must be
+    byte-equivalent to its pre-153.5 behaviour.
+
+    A fence that also broke the heal would leave a genuinely wedged pipe with no
+    remedy at all, which is strictly worse than the defect it closes.
+
+    ⚠️ The generation is BOUND by a read before the restart, deliberately. That is
+    the production shape — a restart is triggered BY a failed read, never on a
+    virgin client — and an unbound client would make this case blind to a fence
+    that refused every already-bound restart.
+    """
+    stale = _FakeMt5({"account": _FakeNamedTuple(login=123, equity=1000.0)})
+    fresh = _FakeMt5({"account": _FakeNamedTuple(login=123, equity=2000.0)})
+    conns: dict[str, int] = {"n": 0}
+
+    def _connect(*, host, port, timeout):
+        conns["n"] += 1
+        return stale if conns["n"] == 1 else fresh
+
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=_connect)
+    assert client.account_info()["equity"] == 1000.0  # binds the generation
+
+    client.restart()  # nothing bumps — nobody released this lease
+
+    assert stale.shutdown_calls == 1  # the ONE permitted, lease-held teardown
+    assert stale._MetaTrader5__conn.close_calls == 1
+    assert fresh.shutdown_calls == 0
+    assert fresh._MetaTrader5__conn.close_calls == 0
+    assert client._closed is False
+    # The healed client is USABLE — the point of the whole recovery path.
+    assert client.account_info()["equity"] == 2000.0
