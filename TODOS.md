@@ -2024,3 +2024,13 @@ bargain has two halves; this section is the second one. Source: `153.4-REVIEW.md
   control in a race with the `finally` records one for nothing). **Non-blocking:** provably
   unread — the next submit clears it. The composite step takes the stricter delete-per-attempt
   shape; matching it removes the question. Owner: unassigned.
+- [ ] **IN-06 — the migration chain cannot be replayed from scratch locally** (`supabase start`
+  / `supabase db reset` both die at `20260416125432_rebalance_drift_weekly_index.sql` with
+  `CREATE INDEX CONCURRENTLY cannot be executed within a pipeline (SQLSTATE 25001)`;
+  **15** migrations under `supabase/migrations/` use `CONCURRENTLY`). **Non-blocking:** CI
+  applies SQL tests against the remote TEST project via `psql`, so nothing in the pipeline
+  depends on a local replay. **Why it matters anyway:** a migration that auto-applies to PROD
+  on merge currently has no from-zero rehearsal environment — the only pre-merge signal is the
+  TEST apply against an already-migrated database, which cannot catch ordering/chain defects.
+  Discovered 2026-08-11 while trying to certify phase 153.6's `20260811210000`. A fix would
+  likely split CONCURRENTLY statements out of the pipelined path. Owner: unassigned.
