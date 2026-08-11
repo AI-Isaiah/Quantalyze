@@ -28,6 +28,7 @@ import {
   VALIDATE_KEY_BUDGET_MS,
   VALIDATE_KEY_SERIALIZED_BUDGET_MS,
   ENCRYPT_KEY_BUDGET_MS,
+  BREAKER_STORE_WORST_CASE_FAILING_MS,
 } from "./wizard/validate-budget";
 import {
   FAKE_BREAKER_KEY,
@@ -1142,6 +1143,14 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
     // already SUCCEEDED and the route is mid-encrypt — so the card tells the user
     // "nothing was saved" about a key that is at that moment being stored. If this
     // row rises and the client's copy does not, that defect returns silently.
+    // …and the FOURTH twin below is the same mechanism widened (153.6 /
+    // PARITY-03): CR-01's first fix covered validate + encrypt + grace, but
+    // compared the result against the routes' CLOSED-breaker worst case, and a
+    // healthy seam is not the seam that keeps a browser waiting long enough to
+    // reach a client deadline. The breaker's own store costs THREE commands per
+    // seam call in the FAILING state where the closed state costs one, and that
+    // difference — 10 500 ms after the grace absorbs part of it — was exactly how
+    // far short the deadline fell, on BOTH venue arms.
     expect(
       BUDGET_TABLE["encrypt-key"]?.timeoutMs,
       "The encrypt-key budget and the client's copy of it have diverged. The " +
@@ -1151,9 +1160,44 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
         "key that is being encrypted and stored.",
     ).toBe(ENCRYPT_KEY_BUDGET_MS);
 
+    // ── THE FOURTH TWIN (153.6 / PARITY-03) ───────────────────────────────────
+    // Unlike the three above, this one has no single row to compare against: the
+    // client's failing-state store term is an ARITHMETIC over three seam-core
+    // constants and two hand-counts. The two hand-counts are typed HERE, and
+    // each is a claim about a specific code path rather than a tuning value:
+    //
+    //   · a connect route (`create-with-key` / `composite/add-key`) makes TWO
+    //     seam calls — `validate-key*` then `encrypt-key` — and the breaker is
+    //     consulted once per seam call;
+    //   · a FAILING seam call issues THREE store commands per attempt: the
+    //     pre-fetch `mget` in `isBreakerOpen`, plus the trip path's `get` (the
+    //     A-25 guard reading when the last lock was armed) and its `set`.
+    //
+    // Both legs are `retries: 0`, so there is no (1 + retries) factor here — if
+    // a connect route's budget row is ever flipped to retries: 1, this pin is
+    // where that shows up, and the client twin must move with it.
+    const CONNECT_ROUTE_SEAM_LEGS = 2;
+    const FAILING_STORE_COMMANDS_PER_SEAM_CALL = 3;
+    const failingStorePerConnectRouteMs =
+      CONNECT_ROUTE_SEAM_LEGS *
+      FAILING_STORE_COMMANDS_PER_SEAM_CALL *
+      ((1 + BREAKER_STORE_RETRIES) * BREAKER_STORE_TIMEOUT_MS +
+        BREAKER_STORE_RETRIES * BREAKER_STORE_BACKOFF_MS);
+    expect(
+      failingStorePerConnectRouteMs,
+      "The breaker's failing-state store cost for a whole connect route and " +
+        "the client's copy of it have diverged. The browser's abort deadline " +
+        "spends this figure, so a store retune the client did not follow puts " +
+        "the deadline back INSIDE the route's own budget and re-opens CR-01: " +
+        "'nothing was saved' rendered over a key that is being encrypted and " +
+        "stored. ⛔ Fix by moving the client twin in the SAME commit — never by " +
+        "importing the store constants into the client module, which is the " +
+        "one edit validate-budget.test.ts's import scan exists to catch.",
+    ).toBe(BREAKER_STORE_WORST_CASE_FAILING_MS);
+
     // The hand-typed half. Both sides of the equality above live in source files;
     // an editor "fixing" a red pin by moving the CLIENT constant to match a wrong
-    // server value would satisfy it. These three literals are what refuses that.
+    // server value would satisfy it. These four literals are what refuses that.
     expect(
       VALIDATE_KEY_BUDGET_MS,
       "The client's default validate budget is no longer 30 000 ms. If that is " +
@@ -1174,6 +1218,18 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
         "literals in this file move with it — and re-check that the client abort " +
         "deadline still exceeds the ROUTE's worst case, not just validate's.",
     ).toBe(30_000);
+    expect(
+      BREAKER_STORE_WORST_CASE_FAILING_MS,
+      "The client's copy of the failing-state store cost is no longer 25 500 " +
+        "ms. Both halves of this pin must hold: without this bare literal, an " +
+        "editor could satisfy the equality above by moving the client twin to " +
+        "match a wrong server derivation, and one assertion without the other " +
+        "is half a guard. If a store constant legitimately moved, recompute " +
+        "2 legs x 3 commands x the per-command worst case by hand and move " +
+        "this literal deliberately — then re-check that the connect deadlines " +
+        "still exceed 175 500 / 85 500 (seam-budgets.invariant.test.ts's " +
+        "'browser is the last party' oracle is what proves they do).",
+    ).toBe(25_500);
   });
 
   it("A-14: the cooldown is at least as long as the failure window", () => {

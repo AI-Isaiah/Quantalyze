@@ -168,10 +168,12 @@ export interface ValidateWaitCardProps {
    * either way, so there is nothing for a confirmation step to protect.
    *
    * ⚠️ The AUTOMATIC abort a caller arms alongside this control is sized ABOVE the
-   * route's own worst case (`connectAbortDeadlineMsFor` = validate + encrypt + grace,
-   * 153.4 review CR-01), so it is only reachable once the server has blown every
-   * deadline it enforces on itself. ⛔ Cancelled copy therefore states only what THIS
-   * BROWSER knows — never a claim about server state.
+   * route's own worst case (`connectAbortDeadlineMsFor` = validate + encrypt +
+   * failing-state store worst case + grace — 153.4 review CR-01, corrected to the
+   * FAILING column by 153.6 / PARITY-03, because the state a route is in when this
+   * deadline fires is the failing one), so it is only reachable once the server has
+   * blown every deadline it enforces on itself. ⛔ Cancelled copy therefore states
+   * only what THIS BROWSER knows — never a claim about server state.
    */
   onStopWaiting: () => void;
 }

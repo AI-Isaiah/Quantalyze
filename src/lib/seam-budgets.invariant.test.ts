@@ -22,6 +22,12 @@ import {
   SEAM_RETRY_BACKOFF_MS,
   SEAM_RETRY_JITTER_MAX_MS,
 } from "./resilient-fetch";
+// Phase 153.6 / PARITY-03 — the CLIENT's own deadline, imported so the economic
+// oracle at the bottom of SC-4b can compare it against the SERVER worst cases
+// this file already computes. The import direction is the safe one: this is a
+// test file reading a client-safe pure module, and `validate-budget.ts` still
+// carries no edge back to the seam core (its own T-153.4-10 source scan).
+import { connectAbortDeadlineMsFor } from "./wizard/validate-budget";
 
 /**
  * SC-4 (SEAM-02) — the seam budget invariant.
@@ -592,6 +598,44 @@ const MAX_COMPOSITE_MEMBERS_DECL = /^const MAX_COMPOSITE_MEMBERS = (\d+)/m;
 const FINALIZE_WIZARD_ROUTE =
   "src/app/api/strategies/finalize-wizard/route.ts";
 
+/**
+ * PARITY-03 / plan 153.6-02 — the routes a BROWSER puts its own deadline on.
+ *
+ * Hand-typed, and deliberately NOT derived by filtering `SEAM_ROUTE_BUDGETS`
+ * for something: the population an oracle iterates must not be computable from
+ * the table the oracle guards, or a filter that stops matching turns the whole
+ * assertion into a loop over nothing. These are the two routes
+ * `connectAbortDeadlineMsFor` is armed against — `ConnectKeyStep.tsx` calls
+ * `POST /api/strategies/create-with-key`, `MultiKeyConnectStep.tsx` calls
+ * `POST /api/strategies/composite/add-key` — and the count is fenced at 2 in
+ * the oracle itself.
+ *
+ * ⚠️ `keys/validate-and-encrypt` is NOT here. The browser does not arm a
+ * connect deadline on it; adding it would compare a deadline nothing spends
+ * against a worst case nothing aborts.
+ */
+const BROWSER_ABORTED_CONNECT_ROUTES = [
+  "src/app/api/strategies/create-with-key/route.ts",
+  "src/app/api/strategies/composite/add-key/route.ts",
+] as const;
+
+/**
+ * The two mutually exclusive venue arms of those routes, each with a
+ * REPRESENTATIVE venue and its HAND-COMPUTED failing-state worst case.
+ *
+ * The venue strings are what a wizard form actually submits, and they select
+ * the arm through `venueIsSerialized` — the same capability predicate the seam
+ * selects the budget row by, never a venue-name equality. A second serialized
+ * venue is covered by `VENUE_CAPABILITIES`, not by editing this roster.
+ *
+ * ⛔ The two figures are hand-computed (derivation in the oracle's docblock),
+ * never read back out of `branchWorstCases`.
+ */
+const CONNECT_VENUE_ARMS = [
+  { branch: "serialized-venue", venue: "mt5", failingWorstCaseMs: 175_500 },
+  { branch: "default-venue", venue: "binance", failingWorstCaseMs: 85_500 },
+] as const;
+
 function readCompositeCapFromDisk(): number {
   const src = readFileSync(join(REPO, FINALIZE_WIZARD_ROUTE), "utf8");
   const m = MAX_COMPOSITE_MEMBERS_DECL.exec(src);
@@ -964,6 +1008,184 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
           `An \`undefined\` here means the branch LABEL is gone, which turns ` +
           `SC-4b's MAX back into a SUM silently.`,
       ).toBe(248_250);
+    });
+
+    /**
+     * PARITY-03 / plan 153.6-02 — ⭐ THE ORACLE PINS THE ECONOMICS, NOT A CELL.
+     *
+     * THE PROPERTY, stated without naming a column: *the browser must be the
+     * LAST party to give up — for the route it aborts, on the venue arm it
+     * takes, in EVERY breaker state.* Only then can a client abort mean "the
+     * server stopped answering", which is the one thing
+     * `SEAM_DEADLINE_EXCEEDED`'s copy claims ("Nothing was saved — your key was
+     * not stored"). Fire it earlier and the card says that over a route that is
+     * at that moment encrypting and storing the key — 153.4 review CR-01, and
+     * neither connect route reads `request.signal`, so the abort stops the
+     * BROWSER listening and nothing else.
+     *
+     * ⛔ WHY IT QUANTIFIES OVER `BREAKER_STATES` INSTEAD OF NAMING A NUMBER.
+     * The oracle this replaces asserted `connectAbortDeadlineMsFor("mt5")`
+     * greater than 158 500 in `wizard/validate-budget.test.ts` — the CLOSED
+     * cell of the create-with-key / serialized-venue row, hand-copied out of
+     * this file's branch table. A hand-copied cell cannot notice that the WRONG
+     * cell was copied, and the wrong one was: a seam that is stalling long
+     * enough for a client deadline to fire is, by construction, in the FAILING
+     * state, whose figure is 175 500. Replacing 158 500 with 175 500 would have
+     * fixed the number and left the defect CLASS intact. Quantifying over every
+     * state is what makes selecting a column structurally impossible.
+     *
+     * THE DERIVATION, HAND-COMPUTED, so the two failing-state literals below are
+     * not read out of the arithmetic they guard (this repo has shipped three
+     * money-math bugs through six review passes on self-referential oracles).
+     * Both connect routes declare two legs, both `retries: 0`:
+     *
+     *   serialized-venue  request: 120 000 (validate-key-serialized) + 30 000
+     *                              (encrypt-key)                    = 150 000
+     *                     store:   2 legs x 3 commands x (1+0) x 4 250 = 25 500
+     *                     failing total                              = 175 500
+     *   default-venue     request:  30 000 (validate-key) + 30 000   =  60 000
+     *                     store:   2 legs x 3 commands x (1+0) x 4 250 = 25 500
+     *                     failing total                              =  85 500
+     *
+     * against client deadlines of 190 500 (serialized) and 100 500 (default) —
+     * each exceeding its route's worst case by exactly `WAIT_ABORT_GRACE_MS`,
+     * the browser→route hop that is not free.
+     *
+     * ⛔ CHANGE THESE LITERALS ONLY BECAUSE THE INPUTS CHANGED — never to make a
+     * diff pass. Recompute by hand from `SEAM_BUDGETS` and the store constants.
+     *
+     * WHICH MUTATIONS RED IT (measured at plan 153.6-02, not predicted):
+     *   · revert `connectAbortDeadlineMsFor` to `validate + encrypt + grace`
+     *     (165 000 / 75 000) → RED on BOTH arms. ⭐ The default arm is the
+     *     second member of the class: the finding named only MT5, but the
+     *     shortfall is `failing_store − grace = 25 500 − 15 000 = 10 500` on
+     *     both, because the store term does not depend on the validate budget.
+     *   · narrow the state quantification to `"closed"` only → RED, three ways
+     *     (the states-covered floor, the governing-state assertion, and the
+     *     failing-state literal). This is the mutation the oracle it replaces
+     *     survived, and the whole reason this one exists.
+     *   · set `STORE_COMMANDS_PER_SEAM_CALL.failing` to 1 → RED (the governing
+     *     state stops being `failing`), alongside the anti-vacuity fence above.
+     */
+    it("PARITY-03: the browser is the last party to give up — both connect routes, both venue arms, EVERY breaker state", () => {
+      // ── THE ANTI-VACUITY FLOOR ────────────────────────────────────────────
+      // Hand-typed 2, in the idiom the roster fences in this file already use.
+      // A loop over an EMPTY roster is green forever, and an oracle that reads
+      // its own population out of a filter would collapse to exactly that if
+      // the filter ever stopped matching.
+      expect(
+        BROWSER_ABORTED_CONNECT_ROUTES.length,
+        "The set of routes the BROWSER aborts is no longer the hand-typed 2 " +
+          "(create-with-key, composite/add-key). If a third connect route grew " +
+          "a client deadline, add it here and re-derive its worst case; if one " +
+          "was removed, this loop just became weaker than it reads.",
+      ).toBe(2);
+      expect(
+        CONNECT_VENUE_ARMS.length,
+        "The connect routes no longer declare exactly two mutually exclusive " +
+          "venue arms. Both are checked on purpose: the defect this oracle " +
+          "closes was present on BOTH and was reported on one.",
+      ).toBe(2);
+
+      for (const routePath of BROWSER_ABORTED_CONNECT_ROUTES) {
+        const entry = SEAM_ROUTE_BUDGETS[routePath];
+        expect(
+          entry,
+          `"${routePath}" is no longer in SEAM_ROUTE_BUDGETS, so this oracle ` +
+            `is asserting nothing about a route the browser still aborts.`,
+        ).toBeDefined();
+
+        for (const arm of CONNECT_VENUE_ARMS) {
+          // Every state, not a chosen one. `branchWorstCases` is this file's
+          // own machinery (the same call SC-4b charges above) — re-deriving the
+          // arithmetic here is how the wrong column got copied in the first
+          // place.
+          const perState = BREAKER_STATES.map((state) => {
+            const branch = branchWorstCases(entry, state).find(
+              (b) => b.label === arm.branch,
+            );
+            if (!branch) {
+              throw new Error(
+                `"${routePath}" no longer declares a "${arm.branch}" branch. ` +
+                  `An \`undefined\` compared with toBeGreaterThan passes ` +
+                  `vacuously, so this throws instead: the branch LABEL being ` +
+                  `deleted turns SC-4b's MAX back into a SUM silently and ` +
+                  `takes this oracle with it.`,
+              );
+            }
+            return { state, worstCaseMs: branch.worstCaseMs };
+          });
+
+          // The states-covered floor. This is the assertion that reds if the
+          // quantification is ever narrowed back to one column.
+          expect(
+            perState.map((p) => p.state),
+            "This oracle no longer walks all three breaker states. Narrowing " +
+              "it to one column is precisely the mistake it exists to make " +
+              "impossible — a stalling seam is in the FAILING state when a " +
+              "client deadline fires, so a deadline sized on any other column " +
+              "is short by the difference between them.",
+          ).toEqual(["closed", "open", "failing"]);
+
+          const governing = perState.reduce((a, b) =>
+            b.worstCaseMs > a.worstCaseMs ? b : a,
+          );
+
+          // STRUCTURAL: the state that governs must be the FAILING one, and it
+          // must cost the hand-computed figure. Together these are what a
+          // closed-only mutation (and a collapsed store model) cannot survive.
+          expect(
+            governing.state,
+            `"${routePath}" [${arm.branch}]'s most expensive breaker state is ` +
+              `now "${governing.state}", not "failing". Either the store model ` +
+              `stopped charging the trip path's extra commands (the failing ` +
+              `state is the only one that pays for them) or this oracle's ` +
+              `quantification was narrowed. Both make the client deadline ` +
+              `below sized against a state no stalling request is in.`,
+          ).toBe("failing");
+          expect(
+            governing.worstCaseMs,
+            `"${routePath}" [${arm.branch}]'s FAILING worst case is now ` +
+              `${governing.worstCaseMs}ms; the hand-computed figure is ` +
+              `${arm.failingWorstCaseMs}ms. Recompute by hand from SEAM_BUDGETS ` +
+              `and the store constants — and if it legitimately moved, the ` +
+              `client deadline in wizard/validate-budget.ts moves WITH it, or ` +
+              `the browser stops being the last party to give up.`,
+          ).toBe(arm.failingWorstCaseMs);
+
+          // ── THE ECONOMICS ───────────────────────────────────────────────
+          expect(
+            connectAbortDeadlineMsFor(arm.venue),
+            `The browser gives up on "${routePath}" after ` +
+              `${connectAbortDeadlineMsFor(arm.venue)}ms for a ${arm.venue} ` +
+              `key, but that route can honestly spend ` +
+              `${governing.worstCaseMs}ms on its ${arm.branch} arm in the ` +
+              `${governing.state} state. The abort therefore fires INSIDE the ` +
+              `server's own budget — in the window where validate has already ` +
+              `SUCCEEDED and the route is encrypting and storing the key — and ` +
+              `the card renders SEAM_DEADLINE_EXCEEDED, whose copy says ` +
+              `"Nothing was saved". ⛔ Fix the DEADLINE (validate + encrypt + ` +
+              `failing-state store worst case + grace), never this assertion.`,
+          ).toBeGreaterThan(governing.worstCaseMs);
+        }
+
+        // …and the same claim stated through `worstBranch`, the function SC-4b
+        // itself charges: the serialized arm is the route's worst branch, so
+        // the serialized deadline must clear the MAX over every state of the
+        // MAX over every branch. Redundant only while the serialized arm stays
+        // the expensive one — which is exactly the premise worth pinning.
+        const routeWorstOverStates = Math.max(
+          ...BREAKER_STATES.map((state) => worstBranch(entry, state).worstCaseMs),
+        );
+        expect(
+          connectAbortDeadlineMsFor("mt5"),
+          `The SERIALIZED client deadline no longer clears "${routePath}"'s ` +
+            `worst branch in its worst state (${routeWorstOverStates}ms). ` +
+            `This is SC-4b's own \`worstBranch\`, so a divergence here means ` +
+            `the browser's deadline and the headroom this file certifies are ` +
+            `describing different routes.`,
+        ).toBeGreaterThan(routeWorstOverStates);
+      }
     });
   });
 
