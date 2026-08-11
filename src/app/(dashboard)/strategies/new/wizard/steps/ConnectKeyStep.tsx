@@ -12,9 +12,8 @@ import { buildEnvelope } from "@/lib/envelope";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { ValidateWaitCard } from "../ValidateWaitCard";
 import {
-  WAIT_ABORT_GRACE_MS,
   WAIT_CARD_MOUNT_DELAY_MS,
-  validateBudgetMsFor,
+  connectAbortDeadlineMsFor,
   validateBudgetSecondsFor,
 } from "@/lib/wizard/validate-budget";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
@@ -483,24 +482,31 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
 
     // 3. The client deadline backstop.
     //
-    //    WHY THE GRACE EXISTS. The budget is the SEAM's deadline and it is
-    //    enforced inside our own route; the browser→route hop is not free. An
-    //    abort at exactly `validateBudgetMsFor(...)` could cut off a verdict that
-    //    is already on the wire and re-create the silent UNKNOWN this whole phase
-    //    exists to end. The grace makes the browser the LAST thing to give up,
-    //    never the first — but it does give up, so no request can hold this tab
-    //    open forever (T-153.4-16).
+    //    ⚠️ IT COVERS THE ROUTE, NOT THE VALIDATE LEG (153.4 review CR-01). The
+    //    thing being aborted is `POST /api/strategies/create-with-key`, which
+    //    spends `validateKey` THEN `encryptKey` THEN the create RPC — and which
+    //    does not read `request.signal`, so this abort has no server-side effect
+    //    whatsoever. A deadline sized on the validate budget alone fired almost
+    //    exclusively in the window where validate had already SUCCEEDED and the
+    //    route was storing the key, and then told the user nothing was saved.
+    //    `connectAbortDeadlineMsFor` covers both legs plus the grace, so this
+    //    verdict is only reachable once the server has genuinely stopped
+    //    answering.
     //
-    //    ⚠️ The figure the copy advertises stays the BUDGET (what we grant the
-    //    broker), never budget + grace: the grace is our margin over the promise,
-    //    not an extension of the promise.
-    const deadline = setTimeout(
-      () => {
-        abortReasonRef.current = "deadline";
-        abortRef.current?.abort();
-      },
-      validateBudgetMsFor(attemptExchange) + WAIT_ABORT_GRACE_MS,
-    );
+    //    WHY A GRACE ON TOP. The seam deadlines fire INSIDE our own route and the
+    //    browser→route hop is not free, so giving up at exactly the route's budget
+    //    could cut off a verdict already on the wire and re-create the silent
+    //    UNKNOWN this whole phase exists to end. The browser gives up LAST — but
+    //    it does give up, so no request can hold this tab open forever
+    //    (T-153.4-16).
+    //
+    //    ⚠️ The figure the copy advertises stays the validate BUDGET (what we
+    //    grant the broker), never this one: the deadline is our margin over the
+    //    promise, not an extension of the promise.
+    const deadline = setTimeout(() => {
+      abortReasonRef.current = "deadline";
+      abortRef.current?.abort();
+    }, connectAbortDeadlineMsFor(attemptExchange));
 
     return () => {
       clearInterval(tick);

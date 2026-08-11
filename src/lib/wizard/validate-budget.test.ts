@@ -3,12 +3,14 @@ import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 
 import {
+  ENCRYPT_KEY_BUDGET_MS,
   VALIDATE_KEY_BUDGET_MS,
   VALIDATE_KEY_SERIALIZED_BUDGET_MS,
   WAIT_ABORT_GRACE_MS,
   WAIT_CARD_MOUNT_DELAY_MS,
   WAIT_QUEUE_FRACTION,
   WAIT_SLOW_FRACTION,
+  connectAbortDeadlineMsFor,
   validateBudgetMsFor,
   validateBudgetSecondsFor,
 } from "./validate-budget";
@@ -149,6 +151,79 @@ describe("[WIZFORM-05] the ladder is FRACTIONS, and the card's timings", () => {
     expect(
       validateBudgetMsFor("mt5") + WAIT_ABORT_GRACE_MS,
     ).toBeGreaterThan(VALIDATE_KEY_SERIALIZED_BUDGET_MS);
+  });
+});
+
+/**
+ * 153.4 review CR-01 — the CLIENT DEADLINE COVERS THE ROUTE, NOT ONE OF ITS LEGS.
+ *
+ * The browser aborts `create-with-key` / `composite/add-key`, and each of those
+ * spends `validateKey` THEN `encryptKey` THEN an RPC. Neither reads
+ * `request.signal`, so the abort stops the BROWSER listening and nothing else. A
+ * deadline sized on the validate leg alone therefore fired almost exclusively in
+ * the window where validate had SUCCEEDED and the route was storing the key — and
+ * `SEAM_DEADLINE_EXCEEDED`'s copy says "Nothing was saved — your key was not
+ * stored".
+ *
+ * Every expected figure below is HAND-TYPED rather than composed from the
+ * constants, for the reason the file docblock gives: an expectation built by
+ * adding the same three constants the function adds cannot disagree with it.
+ */
+describe("[CR-01] connectAbortDeadlineMsFor — the deadline covers BOTH seam legs", () => {
+  it("the encrypt leg is the hand-typed 30 000 ms", () => {
+    // Twin of `SEAM_BUDGETS["encrypt-key"].timeoutMs`. Pinned here on this
+    // module's own terms; the cross-module agreement with the seam table belongs
+    // beside the other two figures in `seam-constants.pin.test.ts`.
+    expect(ENCRYPT_KEY_BUDGET_MS).toBe(30_000);
+  });
+
+  it("the serialized arm gives up at 165 000 ms, the default arm at 75 000 ms", () => {
+    expect(
+      connectAbortDeadlineMsFor("mt5"),
+      "the browser's deadline moved off the ROUTE's worst case. Below " +
+        "validate + encrypt it fires while the route is still encrypting and " +
+        "storing a key that validated — and the verdict it renders claims " +
+        "nothing was saved.",
+    ).toBe(165_000);
+    expect(connectAbortDeadlineMsFor("binance")).toBe(75_000);
+  });
+
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+    ["the empty string", ""],
+    ["an unrecognised venue", "kraken"],
+  ])("%s falls back to the DEFAULT arm's deadline", (_label, input) => {
+    // Same fallback direction, and for the same reason, as `validateBudgetMsFor`:
+    // `exchange` is a wizard form value, so an unrecognised string is normal
+    // input rather than an error.
+    expect(connectAbortDeadlineMsFor(input)).toBe(75_000);
+  });
+
+  it("⭐ the deadline is STRICTLY LATER than the validate budget the copy advertises", () => {
+    // ⭐ THE PROPERTY, stated without naming either figure. The window between
+    // the advertised budget and this deadline is exactly the interval in which
+    // the route has finished validating and is encrypting + storing the key; a
+    // deadline inside it turns a SUCCEEDING request into a "nothing was saved"
+    // verdict. This reds for any future edit that re-ties the deadline to the
+    // validate leg, whatever the budgets happen to be.
+    for (const venue of ["mt5", "binance", null]) {
+      expect(
+        connectAbortDeadlineMsFor(venue),
+        `${venue}'s client deadline no longer clears its validate budget plus ` +
+          `the encrypt leg the route spends after it.`,
+      ).toBeGreaterThanOrEqual(
+        validateBudgetMsFor(venue) + ENCRYPT_KEY_BUDGET_MS,
+      );
+    }
+  });
+
+  it("the serialized deadline clears the route's own worst-case request budget", () => {
+    // The SC-4b figure for the serialized branch of both connect routes, hand
+    // typed from `seam-budgets.invariant.test.ts`'s table: 158 500 ms. The
+    // browser must be the LAST party to give up, so a client abort can only ever
+    // mean the server stopped answering — the state the deadline copy describes.
+    expect(connectAbortDeadlineMsFor("mt5")).toBeGreaterThan(158_500);
   });
 });
 

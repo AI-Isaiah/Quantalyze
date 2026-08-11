@@ -20,9 +20,8 @@ import {
 } from "@/lib/wizardErrors";
 import { ValidateWaitCard } from "../ValidateWaitCard";
 import {
-  WAIT_ABORT_GRACE_MS,
   WAIT_CARD_MOUNT_DELAY_MS,
-  validateBudgetMsFor,
+  connectAbortDeadlineMsFor,
   validateBudgetSecondsFor,
 } from "@/lib/wizard/validate-budget";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
@@ -949,12 +948,21 @@ export function MultiKeyConnectStep({
    *   1. THE CLIENT DEADLINE, evaluated against EACH PANEL'S OWN venue budget. A
    *      composite can mix a serialized venue (120 000 ms) with ccxt ones
    *      (30 000 ms); a shared deadline would abort a two-minute grant after
-   *      forty-five seconds. The abort fires at `budget + WAIT_ABORT_GRACE_MS`
-   *      and never at the budget itself: the seam's deadline fires inside our own
-   *      route and the reply still has to travel back, so giving up at exactly
-   *      the budget could cut off a verdict already on the wire and re-create the
-   *      silent UNKNOWN this phase exists to end. The browser gives up LAST — but
-   *      it does give up, so no request can hold this tab open forever.
+   *      forty-five seconds.
+   *
+   *      ⚠️ THE DEADLINE COVERS THE ROUTE, NOT THE VALIDATE LEG (153.4 review
+   *      CR-01). `composite/add-key` spends `validateKey` THEN `encryptKey` THEN
+   *      the add RPC, and it does not read `request.signal` — this abort has no
+   *      server-side effect at all. Sized on the validate budget alone, the
+   *      deadline fired almost exclusively in the window where validate had
+   *      already SUCCEEDED and the route was minting and storing the key.
+   *      `connectAbortDeadlineMsFor` covers both legs plus the grace, and the
+   *      grace is still there for the reason it always was: the seam deadlines
+   *      fire inside our own route and the reply still has to travel back, so
+   *      giving up at exactly the route's budget could cut off a verdict already
+   *      on the wire and re-create the silent UNKNOWN this phase exists to end.
+   *      The browser gives up LAST — but it does give up, so no request can hold
+   *      this tab open forever.
    *   2. THE ELAPSED FIGURE each panel's card renders.
    */
   const anyValidating = panels.some((p) => p.status === "validating");
@@ -964,8 +972,7 @@ export function MultiKeyConnectStep({
       const now = Date.now();
       for (const p of panelsRef.current) {
         if (p.status !== "validating" || p.waitStartedAt === null) continue;
-        const budgetMs = validateBudgetMsFor(p.waitExchange);
-        if (now - p.waitStartedAt >= budgetMs + WAIT_ABORT_GRACE_MS) {
+        if (now - p.waitStartedAt >= connectAbortDeadlineMsFor(p.waitExchange)) {
           abortReasonsRef.current.set(p.id, "deadline");
           abortControllersRef.current.get(p.id)?.abort();
         }

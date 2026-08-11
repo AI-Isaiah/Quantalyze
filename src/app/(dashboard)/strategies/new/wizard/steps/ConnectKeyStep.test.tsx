@@ -1157,9 +1157,15 @@ describe("[153.4-04 / WIZFORM-05] ConnectKeyStep — the honest long wait", () =
   // ── The two live budgets, in ms, hand-typed ────────────────────────────────
   const SERIALIZED_BUDGET_MS = 120_000;
   const DEFAULT_BUDGET_MS = 30_000;
+  // The ENCRYPT leg the route spends AFTER validate, hand-typed. The browser is
+  // aborting the ROUTE, and the route is `validateKey` → `encryptKey` → RPC.
+  const ENCRYPT_BUDGET_MS = 30_000;
   // The browser's margin OVER the promise it made, hand-typed.
   const ABORT_GRACE_MS = 15_000;
   const MOUNT_DELAY_MS = 300;
+  /** When the browser gives up on the ROUTE, hand-typed on the serialized arm. */
+  const SERIALIZED_DEADLINE_MS =
+    SERIALIZED_BUDGET_MS + ENCRYPT_BUDGET_MS + ABORT_GRACE_MS;
 
   // ── The copy, hand-typed ───────────────────────────────────────────────────
   const SIGNING_IN = "Signing in to your broker...";
@@ -1434,13 +1440,53 @@ describe("[153.4-04 / WIZFORM-05] ConnectKeyStep — the honest long wait", () =
     expect(wizardErrorCalls()).toEqual([]);
   });
 
+  it("⭐ the browser does NOT give up while the route is still encrypting and storing the key", async () => {
+    // ⭐ 153.4 review CR-01 — THE ASSERTION THE SHIPPED DEADLINE FAILED.
+    //
+    // The browser aborts a ROUTE, not a seam call, and `create-with-key` spends
+    // `validateKey` THEN `encryptKey` THEN the create RPC — and reads no
+    // `request.signal`, so the abort has no server-side effect whatsoever. A
+    // deadline of `budget + grace` (135 000 ms here) sits BELOW the route's own
+    // worst case, which meant it was reachable almost exclusively in the window
+    // where validate had already SUCCEEDED and the route was storing the key. The
+    // user was then shown "Nothing was saved — your key was not stored", and the
+    // funnel recorded a seam deadline, for a request that was at that moment
+    // writing their `api_keys` row.
+    //
+    // 149 999 ms is inside that window: past the old deadline, short of the new
+    // one. Nothing may have happened yet.
+    mockAbortableFetch();
+    await renderFresh("mt5");
+    fillAndSubmit("mt5");
+    await advance(SERIALIZED_BUDGET_MS + ABORT_GRACE_MS + 1);
+
+    expect(
+      screen.queryByTestId("error-envelope"),
+      "the browser gave up 30 seconds before the route it is waiting on does. " +
+        "Every second in this window is a request that has PASSED validate and " +
+        "is encrypting and storing the key — and the verdict rendered here " +
+        "tells the user nothing was saved.",
+    ).toBeNull();
+    expect(
+      wizardErrorCalls(),
+      "a seam deadline was reported to the funnel for a request that is still " +
+        "running INSIDE its route's budget. An operator reads this to decide " +
+        "whether the seam is healthy.",
+    ).toEqual([]);
+    // Still waiting, and still saying so.
+    expect(card()).not.toBeNull();
+    expect(screen.getByTestId("wizard-connect-submit")).toBeDisabled();
+  });
+
   it("a wait past the budget ends in a STATED verdict that names the budget and offers no Retry", async () => {
     mockAbortableFetch();
     await renderFresh("mt5");
     fillAndSubmit("mt5");
-    // The browser gives up LAST: at the budget plus its own grace, never at the
-    // budget itself — aborting there could cut off a verdict already on the wire.
-    await advance(SERIALIZED_BUDGET_MS + ABORT_GRACE_MS + 1);
+    // The browser gives up LAST: after the whole ROUTE's budget (validate +
+    // encrypt) plus its own grace, never at the validate budget itself —
+    // aborting there could cut off a verdict already on the wire, or a key
+    // already being stored (153.4 review CR-01).
+    await advance(SERIALIZED_DEADLINE_MS + 1);
 
     expect(card(), "the card outlived the request it describes").toBeNull();
     const envelope = screen.getByTestId("error-envelope");
@@ -1473,7 +1519,7 @@ describe("[153.4-04 / WIZFORM-05] ConnectKeyStep — the honest long wait", () =
     mockAbortableFetch();
     await renderFresh("mt5");
     fillAndSubmit("mt5");
-    await advance(SERIALIZED_BUDGET_MS + ABORT_GRACE_MS + 1);
+    await advance(SERIALIZED_DEADLINE_MS + 1);
 
     expect(wizardErrorCalls()).toEqual([
       {
@@ -1493,7 +1539,7 @@ describe("[153.4-04 / WIZFORM-05] ConnectKeyStep — the honest long wait", () =
     mockAbortableFetch();
     await renderFresh("mt5");
     fillAndSubmit("mt5");
-    await advance(SERIALIZED_BUDGET_MS + ABORT_GRACE_MS + 1);
+    await advance(SERIALIZED_DEADLINE_MS + 1);
 
     expect(screen.getByTestId("error-envelope")).toHaveTextContent(
       "Your key details are still on this page.",

@@ -136,3 +136,53 @@ export const WAIT_SLOW_FRACTION = 0.75;
  * Consumed by plans 153.4-04 and 153.4-05, which own the abort controllers.
  */
 export const WAIT_ABORT_GRACE_MS = 15_000;
+
+/**
+ * The ENCRYPT leg the connect routes spend AFTER validate, in milliseconds.
+ *
+ * Hand-typed twin of `SEAM_BUDGETS["encrypt-key"].timeoutMs`, for the same reason
+ * and under the same rules as the two validate figures above — ⛔ this module may
+ * never import the seam table.
+ *
+ * ⚠️ It is deliberately NOT a copy figure. Nothing the wizard says to the user
+ * names this number; it exists only so the browser's deadline can cover the whole
+ * route rather than one leg of it (see `connectAbortDeadlineMsFor`).
+ */
+export const ENCRYPT_KEY_BUDGET_MS = 30_000;
+
+/**
+ * When the BROWSER gives up on a CONNECT ROUTE, in milliseconds.
+ *
+ * ⛔ NOT `validateBudgetMsFor(exchange) + WAIT_ABORT_GRACE_MS`, and the difference
+ * is a user-facing lie rather than a rounding question (153.4 review CR-01).
+ *
+ * THE BROWSER ABORTS A ROUTE, NOT A SEAM CALL. `POST /api/strategies/create-with-key`
+ * and `POST /api/strategies/composite/add-key` each spend `validateKey` THEN
+ * `encryptKey` THEN a Supabase RPC, and neither route reads `request.signal` — a
+ * client abort has no server-side effect at all. Sizing the deadline against the
+ * validate leg alone put it at 135 000 ms on the serialized arm while the route's
+ * own budget runs to ~158 500 ms, which made the deadline reachable ALMOST
+ * EXCLUSIVELY in the window where validate had already SUCCEEDED and the route was
+ * encrypting and storing the key. The browser then rendered
+ * `SEAM_DEADLINE_EXCEEDED`, whose copy says *"Nothing was saved — your key was not
+ * stored"*, over a request that was at that moment storing it.
+ *
+ * Covering validate + encrypt puts the abort AFTER every deadline the route
+ * enforces on itself, so the verdict is only ever reached when the server has
+ * genuinely stopped answering — which is the condition that copy describes.
+ *
+ * ⚠️ The figure the COPY advertises stays `validateBudgetSecondsFor` — what we
+ * grant the broker. The advertised promise and the abort deadline are deliberately
+ * different numbers, and this widens only the second one.
+ *
+ * ⚠️ Never throws, for the same reason `validateBudgetMsFor` never does: `exchange`
+ * is a wizard form value, so `null`, `undefined`, `""` and an unrecognised string
+ * are all NORMAL input and all land on the default arm.
+ */
+export function connectAbortDeadlineMsFor(
+  exchange: string | null | undefined,
+): number {
+  return (
+    validateBudgetMsFor(exchange) + ENCRYPT_KEY_BUDGET_MS + WAIT_ABORT_GRACE_MS
+  );
+}

@@ -1893,9 +1893,15 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
   // ── The two live budgets, in ms, hand-typed ──────────────────────────────────
   const SERIALIZED_BUDGET_MS = 120_000;
   const DEFAULT_BUDGET_MS = 30_000;
+  // The ENCRYPT leg the route spends AFTER validate, hand-typed. The browser is
+  // aborting the ROUTE, and `composite/add-key` is validateKey → encryptKey → RPC.
+  const ENCRYPT_BUDGET_MS = 30_000;
   // The browser's margin OVER the promise it made, hand-typed.
   const ABORT_GRACE_MS = 15_000;
   const MOUNT_DELAY_MS = 300;
+  /** When the browser gives up on the ROUTE, hand-typed on the serialized arm. */
+  const SERIALIZED_DEADLINE_MS =
+    SERIALIZED_BUDGET_MS + ENCRYPT_BUDGET_MS + ABORT_GRACE_MS;
   /** The step's one interval period — the granularity every elapsed figure has. */
   const TICK_MS = 1_000;
 
@@ -2335,12 +2341,46 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     expect(wizardErrorCalls()).toEqual([]);
   });
 
+  it("⭐ a panel does NOT give up while the route is still encrypting and storing its key", async () => {
+    // ⭐ 153.4 review CR-01 — THE ASSERTION THE SHIPPED PER-PANEL DEADLINE FAILED.
+    //
+    // The browser aborts a ROUTE, not a seam call: `composite/add-key` spends
+    // `validateKey` THEN `encryptKey` THEN the add RPC, and it reads no
+    // `request.signal`, so the abort stops this tab listening and nothing else. A
+    // deadline of `budget + grace` (135 000 ms here) sits BELOW the route's own
+    // worst case, so it was reachable almost exclusively in the window where
+    // validate had already SUCCEEDED and the route was minting the `api_keys`
+    // row. The panel was then shown "Nothing was saved" — and re-validating
+    // mints a SECOND stored credential for the same key, because this route has
+    // no idempotency fence by construction.
+    await mixedVenuePanels();
+    validate(0);
+    await advance(SERIALIZED_BUDGET_MS + ABORT_GRACE_MS + 1);
+
+    expect(
+      within(panelAt(0)).queryByTestId("error-envelope"),
+      "the panel gave up 30 seconds before the route it is waiting on does. " +
+        "Every second in this window is a request that has PASSED validate and " +
+        "is storing the key — and the verdict rendered here says nothing was " +
+        "saved, while a retry mints a duplicate credential.",
+    ).toBeNull();
+    expect(
+      wizardErrorCalls(),
+      "a seam deadline was reported to the funnel for a request still running " +
+        "INSIDE its route's budget.",
+    ).toEqual([]);
+    expect(cardIn(0)).not.toBeNull();
+    expect(panelAt(0).getAttribute("aria-busy")).toBe("true");
+  });
+
   it("⭐ a panel past its budget ends in a STATED verdict, and its sibling is untouched", async () => {
     await mixedVenuePanels();
     validate(0);
-    // The browser gives up LAST: at the budget plus its own grace, never at the
-    // budget itself — aborting there could cut off a verdict already on the wire.
-    await advance(SERIALIZED_BUDGET_MS + ABORT_GRACE_MS + 1);
+    // The browser gives up LAST: after the whole ROUTE's budget (validate +
+    // encrypt) plus its own grace, never at the validate budget itself —
+    // aborting there could cut off a verdict already on the wire, or a key
+    // already being stored (153.4 review CR-01).
+    await advance(SERIALIZED_DEADLINE_MS + 1);
 
     expect(cardIn(0), "the card outlived the request it describes").toBeNull();
     const envelope = within(panelAt(0)).getByTestId("error-envelope");
@@ -2378,7 +2418,7 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     // it into `connect_key` is what made the multi-key path invisible before.
     await mixedVenuePanels();
     validate(0);
-    await advance(SERIALIZED_BUDGET_MS + ABORT_GRACE_MS + 1);
+    await advance(SERIALIZED_DEADLINE_MS + 1);
 
     expect(wizardErrorCalls()).toEqual([
       {
@@ -2397,7 +2437,7 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     // typing — the worst outcome this phase can produce, and a silent one.
     await mixedVenuePanels();
     validate(0);
-    await advance(SERIALIZED_BUDGET_MS + ABORT_GRACE_MS + 1);
+    await advance(SERIALIZED_DEADLINE_MS + 1);
 
     expect(within(panelAt(0)).getByTestId("error-envelope")).toHaveTextContent(
       "Your key details are still on this page.",
@@ -2482,7 +2522,7 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     expect(screen.getByTestId("key-1-summary")).toBeInTheDocument();
     // Time passing after a finished request changes nothing — the wait was torn
     // down with the request, not left to expire.
-    await advance(SERIALIZED_BUDGET_MS + ABORT_GRACE_MS + 1);
+    await advance(SERIALIZED_DEADLINE_MS + 1);
     expect(screen.queryByTestId("validate-wait-card")).toBeNull();
     expect(screen.queryByTestId("key-1-wait-cancelled")).toBeNull();
     expect(wizardErrorCalls()).toEqual([]);
