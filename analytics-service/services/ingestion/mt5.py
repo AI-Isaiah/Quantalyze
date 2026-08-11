@@ -62,11 +62,20 @@ from services.mt5_client import (
     Mt5SessionAbandoned,
 )
 from services.mt5_concurrency import mt5_terminal_lease
+# 153.6 / PARITY-01 — the ONE login+read+probe body, shared with the FastAPI
+# `_validate_mt5_key_probe` branch. This adapter used to carry its own divergent
+# copy; the three fixes 153.3 landed on the router's never reached it. The import
+# direction is worker → services leaf, which is the direction D-07 requires: the
+# adapter must NEVER import `routers.*`.
+from services.mt5_probe import (
+    MT5_GATEWAY_MISCONFIGURED_DETAIL,
+    Mt5GatewayMisconfigured,
+    run_probe,
+)
 from services.mt5_validation import (
     Mt5ValidationError,
     classify_mt5_login_error,
     classify_trade_capability,
-    mt5_probe_request,
     parse_mt5_credentials,
     terminal_trade_permission_off,
 )
@@ -213,50 +222,31 @@ class Mt5Adapter:
                 # Mt5Client is SYNCHRONOUS blocking RPyC — run the login+read+probe body
                 # off the event loop (asyncio.to_thread). Blocking the loop on a hung
                 # terminal reopens the v1.11 WEDGE-01 class.
-                def _assert_expected_login(info: dict[str, Any]) -> None:
-                    # RED-TEAM login bracket, cloned from the worker derive arm
-                    # (MT5CONC-02): a concurrent validate (the FastAPI router path, a
-                    # different process) or another worker replica can re-log the ONE
-                    # shared terminal onto another account mid-probe, so the capability verdict
-                    # could be judged against the WRONG account (a master password wrongly
-                    # accepted as read-only, or an investor login wrongly rejected). STRICT
-                    # equality on the parsed login; a missing "login" field FAILS LOUD.
-                    # Mismatch → Mt5AccountMismatchError (NOT an Mt5ClientError, so the
-                    # classify arm can never absorb it) → propagated transient below.
-                    _actual = info.get("login")
-                    if _actual != login:
-                        raise Mt5AccountMismatchError(login, _actual)
-
-                def _read_terminal() -> dict[str, Any] | None:
-                    # An UNREADABLE terminal must yield NO signal (-> "undetermined"
-                    # -> refusal), and it must NOT flow into the
-                    # classify_mt5_login_error arm below: that table's
-                    # "terminal"/"ipc"/"connect" tokens would classify OUR gateway's
-                    # condition as the user's wrong broker server. Logged secret-free
-                    # with the scrubbed code only.
-                    try:
-                        return client.terminal_info()
-                    except Mt5ClientError as terminal_err:
-                        logger.warning(
-                            "mt5.validate: terminal_info unreadable (code=%s) — "
-                            "capability undetermined",
-                            terminal_err.code,
-                        )
-                        return None
-
+                # ⭐ 153.6 / PARITY-01. THIS is the path the three 153.3 fixes never
+                # reached. It used to carry its own hand-written
+                # `_assert_expected_login` / `_read_terminal` / `_probe` closures,
+                # divergent from the router's by exactly the three fixes:
+                #   A1 — no terminal short-circuit, so `order_check` ran on an
+                #        already-"undetermined" verdict and its refusal came back as
+                #        a 400 blaming the user's broker server;
+                #   A2 — no broad arm around netref materialization, so a raw
+                #        transport raise escaped the whole refusal;
+                #   A3 — see the operator-fault arm below.
+                # There is now ONE body in `services/mt5_probe.py` and both paths call
+                # it, so a fix cannot land on one path only. ⛔ Only the MECHANICS are
+                # shared: this adapter's dispositions (propagate-transient, the sFOX F4
+                # posture) stay here, as do the UNBOUNDED lease and the diverged
+                # timeout chain above, whose rationale is written at those sites.
                 def _probe() -> tuple[
                     dict[str, Any], dict[str, Any], dict[str, Any] | None
                 ]:
-                    client.login(login, investor_pw, server)  # falsy -> Mt5ClientError
-                    info = client.account_info()  # proves auth + read
-                    _assert_expected_login(info)  # PRE-probe bracket
-                    # D-31: the TERMINAL's own state, read once ATTACHED and INSIDE
-                    # the PRE/POST login bracket so the whole probe stays framed by
-                    # the account-mismatch guard.
-                    terminal = _read_terminal()
-                    probe = client.order_check(mt5_probe_request())  # PROBE ONLY
-                    _assert_expected_login(client.account_info())  # POST-probe bracket
-                    return info, probe, terminal
+                    return run_probe(
+                        client,
+                        login=login,
+                        investor_pw=investor_pw,
+                        server=server,
+                        log_prefix="mt5.validate",
+                    )
 
                 try:
                     # LAST-RESORT event-loop ceiling (WR-02): to_thread already keeps
@@ -328,20 +318,30 @@ class Mt5Adapter:
                         # trading through the external Python API", MetaQuotes'
                         # default-ON). No retry can clear it; the remedy is an
                         # operator turning the option off (docs/runbooks/
-                        # mt5-go-live.md). Same RuntimeError shape as the
-                        # unconfigured-gateway case above — a server-side condition,
-                        # NEVER the user's credentials, and it names no credential.
+                        # mt5-go-live.md). A server-side condition, NEVER the user's
+                        # credentials.
+                        #
+                        # ⭐ 153.6 / A3 — A DEDICATED TYPE, not a bare RuntimeError.
+                        # This raise escapes `Mt5Adapter.validate` into
+                        # `job_worker.classify_exception`, and a `RuntimeError` fell
+                        # through to its `("unknown", str(exc))` catch-all: the worker
+                        # RETRIED a fault that can never clear, re-running the whole
+                        # serialized probe against the ONE shared terminal each time,
+                        # queueing ahead of every other user's validate — and rendered
+                        # raw internal copy that named investor/master passwords.
+                        # `Mt5GatewayMisconfigured` has its own `classify_exception`
+                        # arm returning ("permanent", MT5_GATEWAY_MISCONFIGURED_DETAIL).
+                        #
+                        # ⛔ Raised with the module's CURATED constant (its default),
+                        # never with interpolated upstream text: `mt5linux`
+                        # f-string-interpolates the password into remotely-eval'd
+                        # source (T-134-01), and the message is rendered to a human.
                         logger.warning(
                             "mt5.validate: capability undetermined (terminal trade "
                             "permission off) — refusing rather than stamping read-only"
                         )
-                        raise RuntimeError(
-                            "MT5 gateway terminal refuses automated trading (the "
-                            "'Disable automatic trading through the external Python "
-                            "API' option is in force), so an investor password "
-                            "cannot be distinguished from a master password. This "
-                            "is a server misconfiguration, never a credential "
-                            "failure."
+                        raise Mt5GatewayMisconfigured(
+                            MT5_GATEWAY_MISCONFIGURED_DETAIL
                         )
                     if not operator_fault:
                         # Terminal unreadable or detached — our bridge blipping,

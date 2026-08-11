@@ -47,6 +47,7 @@ Regression gates — WHY each case matters (Rule 9):
 from __future__ import annotations
 
 import asyncio
+import logging
 import pathlib
 import sys
 import threading
@@ -1960,3 +1961,88 @@ async def test_an_abandoned_session_refusal_is_transient_never_a_bodyless_500(
     assert len(validate) == 1
     assert validate[0]["outcome"] == "transient"
     assert validate[0]["ok"] is False
+
+
+async def test_an_abandoned_read_terminal_escapes_the_broad_arm_unabsorbed(
+    exchange_router, caplog
+):
+    """⭐ 153.6 / B1 — the broad `except Exception` must NOT swallow the fence.
+
+    The sibling case above fences at `account_info`, which is OUTSIDE any broad
+    handler. This one fences at `terminal_info` — the one read wrapped in a
+    deliberately fail-CLOSED `except Exception` — by advancing the terminal
+    generation from inside the transport's `account_info()`, so the PRE bracket
+    succeeds and the very next session touch is refused by the production
+    `_assert_live`.
+
+    ⚠️ THE STATUS IS NOT THE ORACLE, AND THAT IS THE WHOLE DIFFICULTY. Absorbed,
+    the refusal becomes a `None` terminal read -> "undetermined" -> the
+    terminal-signal-unavailable arm, which answers 424/NETWORK_UNAVAILABLE too —
+    the SAME response D-40 produces. A test that asserted only the status could
+    not tell the two apart and would stay green with the bug restored.
+
+    The DISTINGUISHING oracle is what an operator reads in Railway. Absorbed, the
+    broad arm logs `terminal_info failed to materialize (error_class=...)`: a
+    gateway MATERIALIZATION fault that never happened, on a session that was
+    simply fenced — and the probe then continues on a "terminal unreadable"
+    premise that is false. Unabsorbed, that line is never written and the D-40
+    line names the real cause.
+
+    Reds against `services/mt5_probe.read_terminal` with its
+    `except Mt5SessionAbandoned: raise` arm removed or moved below the broad arm.
+    """
+    from services.mt5_client import bump_mt5_terminal_epoch
+
+    router = exchange_router
+    key = _expected_terminal_key("mt5-gw.internal", 18812)
+
+    transport = MagicMock(name="mt5-transport")
+    transport.login = MagicMock(return_value=True)
+    transport.terminal_info = MagicMock(return_value=_Netref(**_HEALTHY_TERMINAL_INFO))
+    transport.order_check = MagicMock(return_value=_Netref(**_INVESTOR_ORDER_CHECK))
+
+    def _account_info():
+        # The lease this session began under releases while the probe thread is
+        # between its PRE bracket and the terminal read. `bump_mt5_terminal_epoch`
+        # is the SHIPPED release hook — the same call `mt5_terminal_lease`'s
+        # `finally` makes — so the refusal below is the production fence, not a
+        # hand-thrown stand-in.
+        bump_mt5_terminal_epoch(key)
+        return _Netref(**_INVESTOR_ACCOUNT)
+
+    transport.account_info = _account_info
+    _install_real_mt5_client(router, transport)
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+
+    # THE EFFECT ORACLE: the fence really fired at the terminal read, so the
+    # transport was never asked for the terminal snapshot.
+    transport.terminal_info.assert_not_called()
+    transport.order_check.assert_not_called()
+
+    # ⭐ THE DISTINGUISHING ORACLE. The broad arm never claimed a materialization
+    # fault, because the fence type reached its own arm first.
+    assert "failed to materialize" not in caplog.text, (
+        "the broad `except Exception` in read_terminal absorbed the fence refusal "
+        "and reported it as a gateway netref-materialization failure that never "
+        "happened — an operator triaging this reads a fabricated cause, and the "
+        "probe continues on a false 'terminal unreadable' premise (B1)"
+    )
+    assert "capability undetermined" not in caplog.text, (
+        "an absorbed fence refusal degraded into a capability verdict — the exact "
+        "translation D-42 makes structurally impossible at the classify arms and "
+        "B1 reintroduced upstream of them"
+    )
+    # ...and the D-40 line names the real cause.
+    assert "abandoned by its own lease" in caplog.text
+
+    # The disposition is D-40's, unchanged: transient, retryable, never a 500,
+    # never a verdict against the user's key or their broker server.
+    assert ei.value.status_code == 424
+    assert ei.value.code == "NETWORK_UNAVAILABLE"
+    assert ei.value.recoverable is True
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    assert ei.value.detail != MT5_WRONG_SERVER_DETAIL
+    assert ei.value.detail != AUTH_FAILED_DETAIL

@@ -42,10 +42,16 @@ from services.mt5_validation import (
     Mt5ValidationError,
     classify_mt5_login_error,
     classify_trade_capability,
-    mt5_probe_request,
     parse_mt5_credentials,
     terminal_trade_permission_off,
 )
+# 153.6 / PARITY-01 — the ONE login+read+probe body, shared with
+# `services/ingestion/mt5.py`. This router used to carry its own hand-written
+# copy; the three fixes 153.3 landed on that copy never reached the worker's.
+# Importing it is the whole remedy: there is now one body, so a fix cannot land
+# on one path only. `services/mt5_probe.py` is a LEAF over mt5_client +
+# mt5_validation and must never import back into `routers.*` (D-07).
+from services.mt5_probe import run_probe
 from services.db import get_supabase, db_execute, one, rows
 # PYAPI-05 — the status-attributability contract. Every deliberate 5xx/424 in
 # this file goes through service_error so the four classes cannot drift apart
@@ -585,125 +591,28 @@ async def _validate_mt5_key_probe(
         # Mt5Client is SYNCHRONOUS blocking RPyC. Run the login+read+probe body off
         # the event loop and bound it with its own stage ceiling so a hung terminal
         # can never wedge the loop / healthz (WEDGE-01, T-135-12).
-        def _assert_expected_login(info: dict[str, Any]) -> None:
-            # RED-TEAM login bracket, cloned from the worker derive arm (MT5CONC-02):
-            # FastAPI serves validates CONCURRENTLY against the ONE shared terminal,
-            # so a second request's login(...) can switch the terminal onto another
-            # account mid-probe. Without this bracket the capability verdict could be
-            # judged against the WRONG account — a master password wrongly accepted
-            # as read-only (the EoP gate T-135-09 defeated), or an investor login
-            # wrongly rejected. STRICT equality on the parsed login; a missing "login"
-            # field FAILS LOUD, never default-matches. A mismatch → the transient
-            # fail-closed arm below (Mt5AccountMismatchError is NOT an Mt5ClientError,
-            # so the classify arm can never absorb it into a verdict).
-            #
-            # 153.3-04 / D-29: the race this DETECTS is now also PREVENTED in-process
-            # — this whole body runs under `mt5_terminal_lease`, so a second validate
-            # (or an in-process worker read) queues instead of interleaving. The
-            # bracket nonetheless STAYS EXACTLY AS IT IS: an asyncio.Lock serializes
-            # nothing ACROSS REPLICAS, and this is the guarantee that `api_verified`
-            # is never stamped on another account's numbers. A prevention is not a
-            # licence to delete the detection.
-            _actual = info.get("login")
-            if _actual != login:
-                raise Mt5AccountMismatchError(login, _actual)
-
-        def _read_terminal() -> dict[str, Any] | None:
-            # An UNREADABLE terminal must yield NO signal (-> "undetermined" ->
-            # refusal), and it must NOT flow into the classify_mt5_login_error arm
-            # below: that table's "terminal"/"ipc"/"connect" tokens would classify
-            # OUR gateway's condition as the user's wrong broker server and blame
-            # their credentials for it. Caught here, logged secret-free with the
-            # scrubbed code only.
-            #
-            # ⭐ THE GUARDED REGION IS THIS try, AND IT MUST SPAN THE WHOLE READ —
-            # INCLUDING MATERIALIZATION. `Mt5Client.terminal_info` converts a
-            # transport RAISE into a typed `Mt5ClientError` via `_guarded_read`,
-            # but it materializes the rpyc netref AFTER that wrapper has returned.
-            # An `Mt5ClientError`-only catch therefore left a hole exactly the
-            # width of that step: if the connection drops between the call
-            # returning a netref and the netref being read, the failure is a raw
-            # transport exception, it is NOT an `Mt5ClientError`, and it escaped
-            # this refusal entirely — out of `_probe`, past the `except
-            # Mt5ClientError` classify arm, past `validate_key`, to an unhandled
-            # bodyless 500. Under R-1 that status means SERVICE-PERMANENT, "do not
-            # retry" — the opposite of the truth for a dropped connection — and it
-            # is produced by NO arm of this contract, so nothing here chose it.
-            #
-            # ⛔ Fail CLOSED on ANY failure, deliberately: this is the one read
-            # whose absence must yield NO signal. A terminal we could not read
-            # cannot license a read_only verdict (D-31's fail-OPEN), and it must
-            # not reach `classify_mt5_login_error` either, whose
-            # "terminal"/"ipc"/"connect" tokens would blame the user's broker
-            # server for OUR gateway's condition. `Exception`, never
-            # `BaseException`: cancellation and interpreter exits are not "the
-            # terminal is unreadable".
-            try:
-                return connected.terminal_info()
-            except Mt5ClientError as terminal_err:
-                logger.warning(
-                    "validate_key: MT5 terminal_info unreadable (code=%s) — "
-                    "capability undetermined",
-                    terminal_err.code,
-                )
-                return None
-            except Exception as terminal_exc:  # noqa: BLE001 — see the block above
-                # The typed arm above carries a scrubbed MT5 code; this one has no
-                # such guarantee, so it logs the exception CLASS only. Never the
-                # message: an unconverted transport raise is precisely the raw,
-                # unscrubbed rpyc text `_guarded_read` exists to keep out of our
-                # logs (T-134-01).
-                logger.warning(
-                    "validate_key: MT5 terminal_info failed to materialize "
-                    "(error_class=%s) — capability undetermined",
-                    type(terminal_exc).__name__,
-                )
-                return None
-
+        # ⭐ 153.6 / PARITY-01. The login+read+probe MECHANICS live in ONE module,
+        # `services/mt5_probe.py`, which `services/ingestion/mt5.py` calls too.
+        # Until this extraction each path carried its own hand-written copy of the
+        # three bodies below, and 153.3 landed three fixes here that never reached
+        # the worker (A1 the terminal short-circuit, A2 the class-only broad arm,
+        # A3 the operator-fault refusal). A fix can no longer land once.
+        #
+        # ⛔ ONLY the mechanics moved. Every DISPOSITION stays here — the
+        # service_error / VenueTransientHTTPException / HTTPException arms below,
+        # and `trace.outcome` — because they are this path's HTTP contract and the
+        # adapter's are deliberately different. So does the bounded lease
+        # (`_MT5_LEASE_WAIT_S`, the interactive bound) and this path's own stage
+        # timeout: both DIVERGE from the worker's on purpose (D-03/D-26) and their
+        # rationale is written at the sites.
         def _probe() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
-            connected.login(login, investor_pw, server)  # falsy -> Mt5ClientError
-            info = connected.account_info()  # proves auth + read
-            _assert_expected_login(info)  # PRE-probe bracket
-            # D-31: the TERMINAL's own state, read once ATTACHED (it describes the
-            # terminal we are logged into) and INSIDE the PRE/POST login bracket
-            # so the whole probe stays framed by the account-mismatch guard.
-            terminal = _read_terminal()
-            # ⭐ A CONCLUSIVE TERMINAL VERDICT SHORT-CIRCUITS THE PROBE.
-            #
-            # Asked with NO probe result, the ONE capability seam already answers
-            # "undetermined" whenever the terminal signal alone forces a refusal —
-            # unreadable, malformed, detached, or trade permission off. Running
-            # order_check after that cannot improve the verdict, and it can DESTROY
-            # it: under MetaQuotes' default-ON "Disable automatic trading through
-            # the external Python API" — the very setting that makes trade_allowed
-            # false, and the case D-31 was written for — the probe is refused, and
-            # its Mt5ClientError leaves by a different door. classify_mt5_login_error's
-            # _WRONG_SERVER_TOKENS carry "terminal", so that refusal came out as a
-            # 400 telling the user their BROKER SERVER is wrong: an accusation
-            # against the user for a checkbox in OUR gateway, silently replacing
-            # the operator-facing 500 that would have named the real remedy.
-            #
-            # ⛔ This NARROWS what can pre-empt the refusal; it never widens what
-            # can be classified read_only. Branch 5 reaches "undetermined" for
-            # EVERY probe value, so no read_only verdict is newly reachable. The
-            # only verdict the probe could still have changed is trade_capable via
-            # retcode 10009 — itself a refusal, and unobtainable from a terminal
-            # that refuses Python probes at all. The POSITIVE master signal is
-            # untouched: it comes from account_info().trade_allowed, read above and
-            # conclusive before any terminal reasoning.
-            #
-            # The predicate is the SEAM ITSELF, deliberately not a fourth copy of
-            # the shape test — a duplicated four-condition rule drifts, and the
-            # drift would be silent (see terminal_trade_permission_off's docstring).
-            if classify_trade_capability(info, {}, terminal) == "undetermined":
-                # The POST bracket still runs (below): the terminal read we are
-                # about to classify on must belong to OUR account, exactly as the
-                # probe result would have had to.
-                _assert_expected_login(connected.account_info())
-                return info, {}, terminal
-            probe = connected.order_check(mt5_probe_request())  # PROBE ONLY
-            _assert_expected_login(connected.account_info())  # POST-probe bracket
-            return info, probe, terminal
+            return run_probe(
+                connected,
+                login=login,
+                investor_pw=investor_pw,
+                server=server,
+                log_prefix="validate_key",
+            )
 
         try:
             return await asyncio.wait_for(
