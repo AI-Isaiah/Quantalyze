@@ -144,3 +144,148 @@ def test_blank_password_rejected_offline_on_both_paths(
     assert result.human_message == AUTH_FAILED_DETAIL
     assert result.error_code == "AUTH_FAILED"
     assert result.valid is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 153.6 / PARITY-01 — the SHARED probe body (`services/mt5_probe.py`)
+# ---------------------------------------------------------------------------
+# The cases above pin the OFFLINE pre-probe seam. The block below pins the ONLINE
+# probe seam that replaced the second hand-written copy: 153.3 landed three fixes
+# on `routers/exchange.py` and none of them reached `services/ingestion/mt5.py`,
+# because each path carried its own `_read_terminal` / `_probe` closure. There is
+# now ONE body in `services/mt5_probe.py` and both paths call it, so the three
+# fixes cannot land once again.
+#
+# These are UNIT cases over the shared body itself; the two-path cases that prove
+# the CALLERS actually reach it live further below.
+
+
+class _FakeProbeClient:
+    """Duck-typed stand-in for ``Mt5Client``. Records every verb the probe calls,
+    so "``order_check`` was never reached" is asserted as an observation rather
+    than inferred from a return value."""
+
+    def __init__(self, *, account_info, terminal_info=None, terminal_raises=None):
+        self._account_info = account_info
+        self._terminal_info = terminal_info
+        self._terminal_raises = terminal_raises
+        self.calls: list[str] = []
+
+    def login(self, login, password, server) -> None:
+        self.calls.append("login")
+
+    def account_info(self) -> dict:
+        self.calls.append("account_info")
+        return dict(self._account_info)
+
+    def terminal_info(self) -> dict:
+        self.calls.append("terminal_info")
+        if self._terminal_raises is not None:
+            raise self._terminal_raises
+        return dict(self._terminal_info or {})
+
+    def order_check(self, request) -> dict:
+        self.calls.append("order_check")
+        return {"retcode": 10017}
+
+
+def test_read_terminal_reraises_an_abandoned_session_before_the_broad_arm():
+    """⭐ D-09 / D-14 — B1 and A2 are ONE edit.
+
+    `Mt5SessionAbandoned` is a plain `Exception` by design (D-42), so a broad
+    `except Exception` swallows it. Absorbed here it becomes a `None` terminal
+    read: an operator triaging in Railway reads a gateway MATERIALIZATION fault
+    that never happened, and the probe continues on a "terminal unreadable"
+    premise that is false. The fence type must reach its own arm first.
+    """
+    from services.mt5_client import Mt5SessionAbandoned
+    from services.mt5_probe import read_terminal
+
+    client = _FakeProbeClient(
+        account_info={"login": 42},
+        terminal_raises=Mt5SessionAbandoned("lease moved on"),
+    )
+
+    with pytest.raises(Mt5SessionAbandoned):
+        read_terminal(client, log_prefix="unit")
+
+
+def test_read_terminal_materialize_failure_logs_the_class_only(caplog):
+    """A2 / T-134-01. An unconverted transport raise escapes `_guarded_read`'s
+    scrubbing, and `mt5linux` f-string-interpolates the password into the source
+    it evaluates remotely — so the exception MESSAGE is a credential-disclosure
+    surface and only the CLASS is safe to log. The read must still fail CLOSED
+    (None -> "undetermined" -> refusal)."""
+    from services.mt5_probe import read_terminal
+
+    secret = "s3cr3t-investor-pw"
+    client = _FakeProbeClient(
+        account_info={"login": 42},
+        terminal_raises=OSError(f"rpyc eval failed: login(42, {secret}, Broker)"),
+    )
+
+    with caplog.at_level("WARNING"):
+        assert read_terminal(client, log_prefix="unit") is None
+
+    logged = caplog.text
+    assert "error_class=OSError" in logged, logged
+    assert secret not in logged, "the exception MESSAGE reached the log (T-134-01)"
+
+
+def test_run_probe_short_circuits_order_check_on_an_undetermined_terminal():
+    """⭐ A1 — the exact documented incident.
+
+    Under MetaQuotes' default-ON *"Disable automatic trading through the external
+    Python API"* the terminal refuses the probe, and that refusal's
+    `Mt5ClientError` leaves by a different door: `classify_mt5_login_error`'s
+    `_WRONG_SERVER_TOKENS` carry "terminal", so it came out as a 400 telling the
+    user their BROKER SERVER is wrong — an accusation against the user for a
+    checkbox in OUR gateway. Once the seam already answers "undetermined",
+    `order_check` cannot improve the verdict and must not run.
+
+    The POST login bracket still runs: the terminal read we classify on must
+    belong to OUR account, exactly as a probe result would have had to.
+    """
+    from services.mt5_probe import run_probe
+
+    client = _FakeProbeClient(
+        account_info={"login": 42, "trade_allowed": False},
+        terminal_info={"connected": True, "trade_allowed": False},
+    )
+
+    info, probe, terminal = run_probe(
+        client, login=42, investor_pw="pw", server="Broker-Demo", log_prefix="unit"
+    )
+
+    assert "order_check" not in client.calls, client.calls
+    assert probe == {}
+    assert terminal == {"connected": True, "trade_allowed": False}
+    assert info["login"] == 42
+    # POST bracket: account_info is read a SECOND time and re-asserted.
+    assert client.calls.count("account_info") == 2, client.calls
+
+
+def test_mt5_gateway_misconfigured_message_is_curated_and_credential_free():
+    """A3's condition half. The operator-fault copy is a FIXED constant that is
+    rendered to a human, so it must name no credential and must carry no token
+    from the live classification tables — a message containing "terminal" or
+    "server" is one `classify_mt5_login_error` call away from being re-read as
+    "the user's broker server is wrong", which is the very accusation A1 removed.
+    """
+    from services.mt5_validation import _AUTH_TOKENS, _WRONG_SERVER_TOKENS
+    from services.mt5_probe import (
+        MT5_GATEWAY_MISCONFIGURED_DETAIL,
+        Mt5GatewayMisconfigured,
+    )
+
+    text = MT5_GATEWAY_MISCONFIGURED_DETAIL.lower()
+    assert text, "the curated constant is empty — every assertion below is vacuous"
+    for token in (*_WRONG_SERVER_TOKENS, *_AUTH_TOKENS):
+        assert token not in text, f"curated copy carries the classify token {token!r}"
+    for word in ("password", "investor", "master", "secret"):
+        assert word not in text, f"curated copy names the credential word {word!r}"
+
+    # The exception defaults to the constant, so no call site can raise it with
+    # raw remote text by omission.
+    assert str(Mt5GatewayMisconfigured()) == MT5_GATEWAY_MISCONFIGURED_DETAIL
+    assert isinstance(Mt5GatewayMisconfigured(), Exception)
