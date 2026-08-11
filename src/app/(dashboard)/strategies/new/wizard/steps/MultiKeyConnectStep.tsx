@@ -853,6 +853,39 @@ export function MultiKeyConnectStep({
    * is logged in TODOS.md.
    */
   const validateRowRefs = useRef<Map<string, HTMLDivElement | null>>(new Map());
+
+  /**
+   * 153.4 review CR-04 — UNMOUNTING IS NOT A VERDICT, AND NOTHING MAY STAY ON THE
+   * WIRE FOR A SURFACE THE USER HAS LEFT.
+   *
+   * The interval effect's cleanup clears the tick — which is also the ONLY thing
+   * enforcing a client deadline on every panel's request — but it never walked
+   * this map. So a step unmounted mid-validate (Continue advancing, a back-nav, a
+   * route change) left N credential-carrying POSTs running with no controller
+   * holding them and no bound at all, which is the exact property the interval's
+   * own docblock claims is closed ("it does give up, so no request can hold this
+   * tab open forever").
+   *
+   * ⚠️ The reason is `"user"` per panel because leaving IS a user action:
+   * recording it as a deadline would put N seam failures in the funnel for N
+   * healthy requests.
+   *
+   * ⚠️ Both maps are captured in the effect BODY rather than read off the refs
+   * inside the cleanup: the ref OBJECTS are stable for the component's life and
+   * the maps are mutated in place, so the capture sees every controller
+   * `validatePanel` has registered by unmount time. Same shape the react-hooks
+   * exhaustive-deps rule wants for a cleanup that touches a ref.
+   */
+  useEffect(() => {
+    const controllers = abortControllersRef.current;
+    const reasons = abortReasonsRef.current;
+    return () => {
+      for (const [id, controller] of controllers) {
+        reasons.set(id, "user");
+        controller.abort();
+      }
+    };
+  }, []);
   const registerValidateRowRef = useCallback(
     (id: string, el: HTMLDivElement | null) => {
       validateRowRefs.current.set(id, el);

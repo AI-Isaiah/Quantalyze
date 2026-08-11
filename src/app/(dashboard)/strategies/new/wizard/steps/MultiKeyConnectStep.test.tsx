@@ -2704,6 +2704,86 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     expect(panelAt(0).getAttribute("aria-busy")).toBeNull();
   });
 
+  it("⭐ CR-04 THE REAL PATH: '+ Add another key window' mid-validate cannot advance the wizard", async () => {
+    // ⭐ 153.4 review CR-04, driven end to end through the interaction that makes
+    // it reachable. The footer control is NOT disabled while State A's validate
+    // is in flight: clicking it runs `enterMulti`, which unmounts `ConnectKeyStep`
+    // with its request still on the wire and its client deadline cleared by the
+    // same effect cleanup. Up to two minutes later the dead closure called
+    // `onSuccess`, advancing the wizard past connect_key with a SINGLE-KEY
+    // strategy — discarding the two member panels the user has been filling in
+    // ever since.
+    //
+    // The fetch here deliberately IGNORES its signal, so this case tests the
+    // mounted-guard rather than the abort.
+    let resolveFetch!: (res: Response) => void;
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      () => new Promise<Response>((resolve) => (resolveFetch = resolve)),
+    );
+    vi.resetModules();
+    const { MultiKeyConnectStep: Fresh } = await import("./MultiKeyConnectStep");
+    const onSuccess = vi.fn();
+    render(<Fresh wizardSessionId={SESSION} onSuccess={onSuccess} />);
+
+    // State A: fill and submit the single-key form.
+    fireEvent.change(screen.getByPlaceholderText("Paste the read-only key"), {
+      target: { value: "AK_LIVE_xxx" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Paste the secret"), {
+      target: { value: "SECRET_xxx" },
+    });
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+    await advance(TICK_MS);
+
+    // The user goes multi-key mid-wait. State B mounts; State A is gone.
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    await advance(0);
+    expect(screen.getByTestId("multi-key-list")).toBeInTheDocument();
+
+    // …and only THEN does the abandoned single-key request answer 200.
+    resolveFetch(
+      jsonResponse({ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }, 200),
+    );
+    await advance(0);
+
+    expect(
+      onSuccess,
+      "the abandoned single-key request advanced the wizard past connect_key " +
+        "with a single-key strategy, discarding the member panels the user " +
+        "switched modes to build.",
+    ).not.toHaveBeenCalled();
+    // The user is still where they chose to be.
+    expect(screen.getByTestId("multi-key-list")).toBeInTheDocument();
+    expect(screen.getByTestId("key-panel-0")).toBeInTheDocument();
+  });
+
+  it("⭐ unmounting the step aborts EVERY panel's in-flight request", async () => {
+    // ⭐ 153.4 review CR-04, this step's own half. The interval effect's cleanup
+    // clears the tick — which is the ONLY thing enforcing a client deadline on
+    // these requests — but never walked `abortControllersRef`, so an unmounted
+    // step left N credential-carrying POSTs running with no bound at all. That is
+    // exactly the property the interval's docblock claims is closed.
+    const { signals } = await twoCcxtPanels();
+    validate(0);
+    validate(1);
+    await advance(TICK_MS);
+    expect(signals[0]?.aborted).toBe(false);
+    expect(signals[1]?.aborted).toBe(false);
+
+    cleanup();
+    await advance(0);
+
+    expect(
+      signals[0]?.aborted,
+      "a panel's request survived the step's unmount, with the deadline timer " +
+        "torn down by the same cleanup — nothing bounds it now.",
+    ).toBe(true);
+    expect(signals[1]?.aborted).toBe(true);
+    // ⛔ And no funnel noise: leaving is a user action, not N seam failures.
+    expect(wizardErrorCalls()).toEqual([]);
+  });
+
   it("the FAST path is unchanged: no card, no cancelled line, the panel collapses to its summary", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(

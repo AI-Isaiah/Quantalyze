@@ -451,6 +451,43 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
    * inside it.
    */
   const submitRowRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * 153.4 review CR-04 — is this component still on screen?
+   *
+   * Read by the SUCCESS arm before it calls `onSuccess`. `onSuccess` is threaded
+   * straight through to `WizardClient` and ADVANCES THE WIZARD, so a dead closure
+   * calling it navigates a user who is no longer looking at this form.
+   */
+  const mountedRef = useRef(true);
+
+  /**
+   * 153.4 review CR-04 — UNMOUNTING IS NOT A VERDICT, AND IT MUST NOT PRODUCE ONE.
+   *
+   * The reachable path, in the composite wizard: the user selects MT5, submits (a
+   * 120 s wait), and clicks "+ Add another key window" — which is not disabled
+   * while a validate is in flight. `enterMulti` flips to State B, THIS component
+   * unmounts, and the timer effect's cleanup clears the client deadline with it,
+   * so the request runs on with no controller holding it and no deadline. Up to
+   * two minutes later the still-live closure called
+   * `onSuccess({strategyId, apiKeyId, exchange})`, advancing the wizard past
+   * `connect_key` with a SINGLE-KEY strategy and discarding the member panels the
+   * user had been filling in ever since.
+   *
+   * Two independent stops, deliberately: abort the request (nothing should stay
+   * on the wire for a surface the user has left), and gate the outcome arm on
+   * `mountedRef` so a response that beat the abort still cannot navigate.
+   *
+   * ⚠️ The reason is `"user"` because leaving IS a user action: recording it as a
+   * deadline would put a seam failure in the funnel for a healthy request.
+   */
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      abortReasonRef.current = "user";
+      abortRef.current?.abort();
+    };
+  }, []);
 
   // UAT/F-4: report the in-progress draft up so a switch to multi-key mode can
   // carry it into the first panel instead of discarding it. No-op (single-key
@@ -756,6 +793,13 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         return;
       }
 
+      // 153.4 review CR-04 — ⛔ NEVER ADVANCE A WIZARD THE USER HAS LEFT. Belt
+      // and braces with the unmount abort above: a response that arrived before
+      // the abort landed still reaches this line from a dead closure, and
+      // `onSuccess` is `WizardClient`'s step advance. The key IS stored on this
+      // path — the composite step's own draft carry-over and its member panels
+      // are what must not be discarded by it.
+      if (!mountedRef.current) return;
       succeeded = true;
       onSuccess({
         strategyId: data.strategy_id,

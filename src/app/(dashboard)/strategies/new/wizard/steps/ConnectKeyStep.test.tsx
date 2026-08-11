@@ -1656,6 +1656,78 @@ describe("[153.4-04 / WIZFORM-05] ConnectKeyStep — the honest long wait", () =
     expect(wizardErrorCalls()).toEqual([]);
   });
 
+  it("⭐ unmounting mid-validate aborts the request", async () => {
+    // ⭐ 153.4 review CR-04. The reachable path is the composite wizard's
+    // "+ Add another key window", which is NOT disabled while a validate is in
+    // flight: clicking it unmounts this step. Before the fix nothing aborted
+    // `abortRef`, and the timer effect's cleanup cleared the client DEADLINE
+    // along with the tick — so the credential-carrying POST ran on with no
+    // controller holding it and no bound at all.
+    const signals = mockAbortableFetch();
+    vi.resetModules();
+    const { ConnectKeyStep: Fresh } = await import("./ConnectKeyStep");
+    const { unmount } = render(
+      <Fresh wizardSessionId={SESSION} onSuccess={vi.fn()} />,
+    );
+    fillAndSubmit("binance");
+    await advance(MOUNT_DELAY_MS + 1);
+    expect(signals[0]?.aborted).toBe(false);
+
+    unmount();
+    await advance(0);
+
+    expect(
+      signals[0]?.aborted,
+      "the request survived the unmount. Nothing holds it now — not the " +
+        "controller, and not the client deadline the same cleanup just cleared — " +
+        "so a credential-carrying POST runs to whatever the platform allows.",
+    ).toBe(true);
+  });
+
+  it("⭐ a validate that RESOLVES after unmount does not advance the wizard", async () => {
+    // ⭐ 153.4 review CR-04, the half the abort alone does not close. A response
+    // already on the wire when the user left still reaches the success arm from a
+    // dead closure, and `onSuccess` is threaded straight into `WizardClient`'s
+    // step advance. In the composite wizard that means the wizard jumps past
+    // `connect_key` with a SINGLE-KEY strategy, discarding the member panels the
+    // user has been filling in since — up to two minutes after they left.
+    //
+    // The fetch here deliberately IGNORES its signal, which is what isolates the
+    // `mountedRef` guard from the abort above.
+    let resolveFetch!: (res: Response) => void;
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      () => new Promise<Response>((resolve) => (resolveFetch = resolve)),
+    );
+    vi.resetModules();
+    const { ConnectKeyStep: Fresh } = await import("./ConnectKeyStep");
+    const onSuccess = vi.fn();
+    const { unmount } = render(
+      <Fresh wizardSessionId={SESSION} onSuccess={onSuccess} />,
+    );
+    fillAndSubmit("binance");
+    await advance(MOUNT_DELAY_MS + 1);
+
+    unmount();
+    resolveFetch(
+      jsonResponse(
+        {
+          strategy_id: "33333333-3333-3333-3333-333333333333",
+          api_key_id: "44444444-4444-4444-4444-444444444444",
+        },
+        200,
+      ),
+    );
+    await advance(0);
+
+    expect(
+      onSuccess,
+      "a request that resolved after the user left this surface advanced the " +
+        "wizard anyway. On the composite path that discards every member panel " +
+        "typed since, and the user never asked for any of it.",
+    ).not.toHaveBeenCalled();
+    expect(wizardErrorCalls()).toEqual([]);
+  });
+
   it("⭐ this file's `120` is HAND-TYPED, not derived from the module under test", async () => {
     // ⚠️ THE ORACLE-INDEPENDENCE GUARD. Every duration above is a hand-typed
     // twin of a figure the SEAM grants. If this file ever imported
