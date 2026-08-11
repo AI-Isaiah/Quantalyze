@@ -61,7 +61,9 @@ from services.mt5_client import (
     Mt5ClientError,
     Mt5SessionAbandoned,
     Mt5Session,
+    begin_mt5_lease_occupancy,
     bump_mt5_terminal_epoch,
+    end_mt5_lease_occupancy,
 )
 
 
@@ -1996,3 +1998,192 @@ def test_a_live_restart_under_a_current_generation_is_unchanged_by_the_fence():
     assert client._closed is False
     # The healed client is USABLE — the point of the whole recovery path.
     assert client.account_info()["equity"] == 2000.0
+
+
+# --------------------------------------------------------------------------- #
+# WIZFORM-ABANDON — FINDING #6a/#6b: THE FENCED CONSTRUCTION
+#
+# WHY these matter (Rule 9). The method fence (D-36 (i)) cannot reach this class:
+# in #6a/#6b the abandoned thread is parked INSIDE `Mt5Client.__init__`'s blocking
+# connect and makes no subsequent session call, so there is no method for a guard
+# to sit in front of. And on that path nobody is left holding the client — the
+# router's Pitfall-6 `finally` sees `client is None` and releases NOTHING
+# (`routers/exchange.py:899-948`), the adapter's connect sits deliberately outside
+# its close-`finally` ("there is no client to close yet") — so the rpyc session is
+# orphaned against the gateway's `ThreadedServer` with no owner and no reaper.
+#
+# ⭐ THE ORACLE IS THE OPEN/CLOSE BALANCE, never "the post-connect arm fired".
+# Which arm a zombie takes depends on where its thread was when the bump landed;
+# an arm-specific assertion would flake on a run where the property genuinely held.
+#
+# ⭐ THE EXEMPTION IS STRUCTURAL, not an opt-in list. A preflight build
+# (`job_worker._make_mt5_session`, outside and before the lease) holds no lease,
+# therefore carries no occupancy token, therefore is not fenced — the honest
+# encoding of "this construction is not happening under anyone's lease" rather
+# than a special case somebody has to remember to maintain (RESEARCH Open Q-1).
+# --------------------------------------------------------------------------- #
+
+
+def _counting_connect(conns: list):
+    """A `_connect` seam that hands back a FRESH double per call and records each
+    one, so the open/close BALANCE over `conns` is observable."""
+
+    def _connect(*, host, port, timeout):
+        fake = _FakeMt5({})
+        conns.append(fake)
+        return fake
+
+    return _connect
+
+
+def _open_conns(conns: list) -> int:
+    """How many of the sockets this seam opened are still OPEN. The balance
+    oracle: it is arm-agnostic, so it stays honest whichever check fired."""
+    return sum(1 for f in conns if f._MetaTrader5__conn.close_calls == 0)
+
+
+def test_a_zombie_construction_disposes_its_own_socket_and_refuses(caplog):
+    """⭐ FINDING #6 (a and b share this mechanism). The lease releases WHILE the
+    blocking connect is in flight — the #6 shape exactly — and the client that
+    lands afterwards belongs to nobody.
+
+    ⛔ The teardown-before-raise is the load-bearing half. A bare raise after
+    `connect()` leaks the socket, which is Pitfall 6 in a new costume: the exact
+    leak this fence exists to close.
+    """
+    key = f"{_TERMINAL_HOST}:{_TERMINAL_PORT}"
+    conns: list = []
+    inner = _counting_connect(conns)
+
+    def _connect(*, host, port, timeout):
+        # ⭐ THE ABANDONMENT: the caller's `wait_for` fired and its lease released
+        # while this blocking connect was still on the wire.
+        bump_mt5_terminal_epoch(key)
+        return inner(host=host, port=port, timeout=timeout)
+
+    token = begin_mt5_lease_occupancy(key)
+    refusals: list[BaseException] = []
+    try:
+        with caplog.at_level("WARNING", logger="quantalyze.analytics"):
+            try:
+                Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=_connect)
+            except Mt5SessionAbandoned as exc:  # noqa: PERF203 — one call, not a loop
+                refusals.append(exc)
+    finally:
+        end_mt5_lease_occupancy(token)
+
+    assert conns, "the seam never ran — this case would be vacuous"
+    assert _open_conns(conns) == 0, (
+        "the abandoned construction left an rpyc socket OPEN with no owner — the "
+        "router's Pitfall-6 finally sees `client is None` and releases nothing, so "
+        "nothing will ever close it (finding #6)"
+    )
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("WIZFORM-ABANDON" in m for m in warnings), (
+        f"the construction fence refused silently (D-39). Got: {warnings}"
+    )
+    assert refusals, "the abandoned construction returned a client to nobody"
+
+
+def test_a_construction_already_abandoned_at_entry_opens_no_socket_at_all():
+    """The PRE-connect arm. When the lease released before the zombie thread even
+    reached `__init__`, the cheapest correct behaviour is to open nothing —
+    a socket never opened is a socket that cannot leak."""
+    key = f"{_TERMINAL_HOST}:{_TERMINAL_PORT}"
+    conns: list = []
+
+    token = begin_mt5_lease_occupancy(key)
+    refusals: list[BaseException] = []
+    try:
+        bump_mt5_terminal_epoch(key)  # the lease released first
+        try:
+            Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=_counting_connect(conns))
+        except Mt5SessionAbandoned as exc:  # noqa: PERF203 — one call, not a loop
+            refusals.append(exc)
+    finally:
+        end_mt5_lease_occupancy(token)
+
+    assert conns == [], (
+        "an already-abandoned construction opened an rpyc socket anyway — refusal "
+        "must precede the connect when the answer is already known"
+    )
+    assert refusals
+
+
+def test_a_preflight_construction_carries_no_token_and_is_never_fenced():
+    """⭐ THE Q-1 RESOLUTION, as a test. `job_worker._make_mt5_session` builds its
+    client in PREFLIGHT — outside and before the lease. A construction-time epoch
+    SNAPSHOT would refuse it the moment an unrelated lease released in that window,
+    and its mitigation was per-call-site opt-ins plus a hand-typed pin: exactly the
+    opt-out list this phase exists to avoid.
+
+    The ContextVar removes the false positive STRUCTURALLY — no lease, no token, no
+    fence — which is why there is no `fence_construction=` parameter to assert the
+    absence of anywhere else.
+    """
+    key = f"{_TERMINAL_HOST}:{_TERMINAL_PORT}"
+    conns: list = []
+
+    # No `begin_mt5_lease_occupancy` — this build is not happening under a lease.
+    bump_mt5_terminal_epoch(key)  # somebody ELSE's lease releases in the window
+
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=_counting_connect(conns))
+
+    assert client._closed is False
+    assert len(conns) == 1
+    assert _open_conns(conns) == 1, (
+        "a legitimate preflight-built client was fenced at construction and its "
+        "socket torn down — the derive read it was built for can never happen"
+    )
+
+
+def test_no_constructor_parameter_opts_into_the_construction_fence():
+    """The exemption must be STRUCTURAL. A `fence_construction=`-style opt-in was
+    REJECTED with the Q-1 resolution, and this pin makes re-adding one a deliberate
+    act rather than a quiet convenience.
+
+    Derived from the shipped signature, never from a hand-copied list."""
+    import inspect
+
+    params = set(inspect.signature(Mt5Client.__init__).parameters)
+    assert params == {
+        "self",
+        "host",
+        "port",
+        "_connect",
+        "request_timeout_s",
+        "initialize_timeout_ms",
+        "login_timeout_ms",
+    }, f"the constructor grew or lost a parameter: {sorted(params)}"
+
+
+async def test_a_construction_under_a_genuinely_held_lease_cannot_be_refused():
+    """⭐ THE LIVE-PATH PROOF (T-153.5-07 / the PATTERNS "live-path 503 hazard").
+
+    `routers/exchange.py`'s connect stage wraps the construction in a broad
+    `except Exception as connect_err:` that answers **503 MT5_GATEWAY_UNREACHABLE
+    with the mt5-gateway breaker keyed**. If the fence could raise on a LIVE path,
+    a fencing bug would present as a platform-wide outage: the breaker trips,
+    expires, re-probes and re-trips.
+
+    It structurally cannot, and this drives the SHIPPED `mt5_terminal_lease` to
+    prove it rather than re-deriving anything `_assert_live` computes: the lock is
+    EXCLUSIVE per terminal key, so while this lease is held no other holder exists
+    to release one, and therefore the generation cannot move. The oracle is a
+    property of the LOCK, not of the fence.
+    """
+    key = f"{_TERMINAL_HOST}:{_TERMINAL_PORT}"
+    conns: list = []
+
+    async with mt5_concurrency.mt5_terminal_lease(key):
+        client = Mt5Client(
+            _TERMINAL_HOST, _TERMINAL_PORT, _connect=_counting_connect(conns)
+        )
+        # ...and it is a usable client, not merely a non-raising one.
+        assert client._closed is False
+        assert _open_conns(conns) == 1
+
+    # The lease has now released and bumped — which is what makes the assertion
+    # above non-vacuous: the generation the construction was checked against is
+    # genuinely one a release can move.
+    assert client.terminal_key == key

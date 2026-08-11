@@ -625,12 +625,90 @@ class Mt5Client:
         # (which rebuilds the transport with the same wiring) cannot silently drop
         # back to the module constants.
         self._ipc_timeouts_ms = ipc_timeouts_ms
+        # ------------------------------------------------------------------ #
+        # WIZFORM-ABANDON / D-36 AMENDED (ii) — THE CONSTRUCTION FENCE.
+        #
+        # The method fence cannot reach findings #6a/#6b: there, the abandoned
+        # thread is parked inside THIS blocking connect and makes no subsequent
+        # session call, so there is no method for `_assert_live` to sit in front
+        # of. And nobody is left holding the result — `routers/exchange.py`'s
+        # Pitfall-6 `finally` sees `client is None` and releases NOTHING, and the
+        # adapter's connect sits deliberately outside its close-`finally` ("there
+        # is no client to close yet") — so the rpyc session is orphaned against
+        # the gateway's `ThreadedServer` with no owner and no reaper.
+        #
+        # ⭐ THE TOKEN, NOT AN EPOCH SNAPSHOT, AND THAT IS THE WHOLE POINT. This
+        # reads the lease-occupancy ContextVar `asyncio.to_thread` FROZE into the
+        # zombie's thread at spawn. A construction-time epoch snapshot would
+        # false-positive on `job_worker._make_mt5_session`, which builds its
+        # client in PREFLIGHT — outside and before the lease — so an unrelated
+        # release in that window would refuse a legitimate derive read. Here a
+        # preflight build holds no lease, therefore carries NO token, therefore is
+        # exempt: not a special case somebody maintains, but the honest encoding
+        # of "this construction is not happening under anyone's lease"
+        # (RESEARCH Open Q-1). ⛔ Which is also why there is no
+        # `fence_construction=` constructor parameter — that opt-in alternative
+        # was REJECTED with the Q-1 resolution.
+        #
+        # ⚠️ `occupancy_epoch` is NOT `self._epoch`. This one is the generation the
+        # SPAWNING LEASE was on; `self._epoch` is the generation this session's
+        # FIRST TOUCH lands on and stays `None` here (the lazy bind is load-bearing
+        # for the same preflight reason — RESEARCH Pitfall 2 warns against
+        # conflating the two, so they are named distinctly).
+        #
+        # A token for a DIFFERENT terminal is treated as no token at all: the
+        # fence makes no claim across terminals.
+        # ------------------------------------------------------------------ #
+        occupancy = _MT5_LEASE_OCCUPANCY.get()
+        occupancy_epoch: int | None = (
+            occupancy[1]
+            if occupancy is not None and occupancy[0] == self.terminal_key
+            else None
+        )
+        if occupancy_epoch is not None and (
+            _mt5_epoch_for(self.terminal_key) != occupancy_epoch
+        ):
+            # PRE-CONNECT. The answer is already known, so open nothing: a socket
+            # never opened is a socket that cannot leak.
+            logger.warning(
+                "Mt5Client.__init__: refusing to connect — the lease this "
+                "construction was spawned under (generation %d) has already "
+                "released and the terminal is now on generation %d, so this "
+                "client would belong to nobody (WIZFORM-ABANDON / D-36).",
+                occupancy_epoch,
+                _mt5_epoch_for(self.terminal_key),
+            )
+            raise Mt5SessionAbandoned("connect")
         self._mt5 = connect(host=host, port=port, timeout=request_timeout_s)
         self._closed = False
         # WIZFORM-ABANDON / D-36: the terminal generation this session belongs to.
         # ⛔ UNBOUND at construction and bound LAZILY on the first session touch —
         # see `_assert_live` for why an eager bind here would be a defect.
         self._epoch: int | None = None
+        if occupancy_epoch is not None and (
+            _mt5_epoch_for(self.terminal_key) != occupancy_epoch
+        ):
+            # POST-CONNECT — the #6 shape proper: the bound fired and the lease
+            # released WHILE this blocking connect was on the wire.
+            #
+            # ⛔ THE TEARDOWN IS MANDATORY, NOT A COURTESY. A bare raise here
+            # strands the socket we just opened, which is the Pitfall-6 leak in a
+            # new costume — the exact leak this fence exists to close. The verb is
+            # reachable because `_teardown_transport` is deliberately EXEMPT from
+            # the method fence (D-41).
+            logger.warning(
+                "Mt5Client.__init__: the lease this construction was spawned "
+                "under (generation %d) released while the connect was in flight "
+                "and the terminal is now on generation %d — disposing the socket "
+                "nobody is left to receive (WIZFORM-ABANDON / D-36).",
+                occupancy_epoch,
+                _mt5_epoch_for(self.terminal_key),
+            )
+            self._teardown_transport(
+                self._mt5, who="Mt5Client.__init__(abandoned)", stage=None
+            )
+            self._closed = True
+            raise Mt5SessionAbandoned("connect")
 
     def _assert_live(self, stage: str) -> None:
         """Refuse — LOUDLY — a session touch from work that outlived its bound.
