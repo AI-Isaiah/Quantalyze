@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
-stopped_at: Completed 153.4-02-PLAN.md (venue-aware budget selection wired)
-last_updated: "2026-08-10T21:32:13.071Z"
-last_activity: 2026-08-10
+stopped_at: Completed 153.4-04-PLAN.md (the single-key connect step waits honestly)
+last_updated: "2026-08-11T06:12:47.386Z"
+last_activity: 2026-08-11
 progress:
   total_phases: 14
   completed_phases: 9
   total_plans: 59
-  completed_plans: 57
+  completed_plans: 58
   percent: 64
 ---
 
@@ -56,9 +56,9 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 ## Current Position
 
 Phase: 153.4 (wizform-budget-venue-aware-budget-honest-long-wait) — EXECUTING
-Plan: 4 of 5
+Plan: 5 of 5
 Status: Ready to execute
-Last activity: 2026-08-10
+Last activity: 2026-08-11
 
 ### Phase 142.1 scope (inserted 2026-08-02)
 
@@ -381,7 +381,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [██████████] 97%
+Progress: [██████████] 98%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -493,6 +493,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 153.4 P01 | 21min | 3 tasks | 8 files |
 | Phase 153.4 P02 | 30min | 4 tasks | 6 files |
 | Phase 153.4 P03 | 19min | 2 tasks | 6 files |
+| Phase 153.4 P04 | 25min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -575,6 +576,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase ?]: 153.4-02: a call site may SELECT its budget row at run time, so it has as many BINDINGS as the selector has arms — resilient-fetch.wiring.test.ts's roster is keyed on bindings and validateKey now appears twice (B-01 default, B-14 serialized)
 - [Phase ?]: 153.4-02: deleting a branch label moves SC-4b's arithmetic in the OVER-stating direction, so no headroom assertion can ever notice — only the hand-typed four-row multiBranch roster can, and F3 proves SC-4b stays green under the mutation
 - [Phase ?]: 153.4-02: WIZFORM-05 stays PARTIAL — the client selection leg is live but D-05's honest long-wait UI is 153.4-03's, and D-27 leaves 120 000 ms provisional until Phase 155
+- [Phase ?]: 153.4-04: the wait's venue is FROZEN at submit so a mid-flight exchange click cannot re-time the client deadline or advertise a budget nobody granted
+- [Phase ?]: 153.4-04: an AbortError is one rejection with two opposite meanings — a recorded abort REASON separates a user cancel (no error code, no console.error, NO wizard_error) from a spent budget (SEAM_DEADLINE_EXCEEDED + exactly one funnel event)
+- [Phase ?]: 153.4-04: surface: connect + budgetSeconds + venue are passed to buildEnvelope in the SAME commit that starts emitting SEAM_DEADLINE_EXCEEDED — the REQUIRES_CONNECT_SURFACE gate 153.4-02/03 re-homed is paid for the single-key step; 153.4-05 owns the three MultiKeyConnectStep sites
+- [Phase ?]: 153.4-04: the browser gives up LAST — the client deadline fires at budget + WAIT_ABORT_GRACE_MS, never at the budget, or an abort cuts off a verdict already on the wire and re-creates the silent UNKNOWN
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1277,8 +1282,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-10T21:31:43.341Z
-**Stopped At:** Completed 153.4-02-PLAN.md (venue-aware budget selection wired)
+**Last Date:** 2026-08-11T06:12:47.375Z
+**Stopped At:** Completed 153.4-04-PLAN.md (the single-key connect step waits honestly)
 **Resume File:** None
 **Next step:** 153.3 is COMPLETE (6/6); 153.1 is 5/6 (plan 01 Wave-0 gates, plan 02 the capability foundation, plan 03 the WIZFORM-03 class filter, plan 04 the ten new codes, plan 05 the honest codes on finalize-wizard -- all green at HEAD). Execute **153.1-06** next, then 153.2 -> 153.4 on `feat/v1.17-153-wizform`. ⛔ WIZFORM-05 stays unchecked until 153.4 closes the client leg. ⛔ **WIZFORM-03 stays unchecked until 153.2/153.4** -- the mechanism and the capability record exist and are pinned, but NOT ONE `buildEnvelope` call site passes `venue` or `surface`, so an MT5 user still reads "switch to a different exchange" in production. ⛔ **WIZFORM-02 stays unchecked until 153.1-06** -- plan 05 landed the emitting half (25 sites, 19 distinct codes, roster 21, EMITTED-NOT-IN-ROSTER empty), but nothing ASSERTS that reconciliation yet, so a twelfth arm added without a code would ship silently. ⭐ 153.1-06 must map through `SEAM_CODE_TO_WIZARD_CODE` before comparing against the roster, or it reports `CIRCUIT_OPEN` as an uncovered emitter forever.
 
