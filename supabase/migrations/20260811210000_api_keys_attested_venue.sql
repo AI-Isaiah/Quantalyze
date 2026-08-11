@@ -110,7 +110,7 @@
 --      on the function itself.
 --
 --   5. A count-pinned PRE-FLIGHT census check, then a one-time backfill of
---      attested_venue from exchange, then an ABORTING post-verify block.
+--      attested_venue from exchange.
 --
 --   6. COMMENT ON COLUMN for the new column (it is also the marker the SQL
 --      test's assertion 5 gates on), and a re-stamp of the `exchange` comment
@@ -120,6 +120,10 @@
 --      marker for assertions 2 and 3 of
 --      supabase/tests/test_api_keys_exchange_not_user_writable.sql, and
 --      dropping it turns those assertions into silent SKIPs.
+--
+--   7. An ABORTING post-verify block, LAST — after the comments, so its (d)
+--      canary reads the re-stamp this migration wrote rather than the comment
+--      it replaced (153.6 migration re-audit M2-02).
 --
 -- Why a backfill at all, and why it is not "trusting the column forever"
 -- ---------------------------------------------------------------------
@@ -633,7 +637,61 @@ UPDATE public.api_keys
  WHERE attested_venue IS NULL
    AND created_at < current_setting('quantalyze.attest_backfill_cutoff')::timestamptz;
 
--- ───────────── 7. POST-VERIFY: every check ABORTS, none is NOTICE-only
+-- ─────────────────────────── 7. the comments (one of them is a test gate)
+-- ⛔ THIS SECTION MUST PRECEDE THE POST-VERIFY BLOCK, AND THE ORDER IS THE
+-- WHOLE POINT (153.6 migration re-audit M2-02). Post-verify (d) reads
+-- col_description on api_keys.exchange and asserts that the 20260810120000
+-- marker survived THIS migration's re-stamp. While the re-stamp sat AFTER the
+-- verify block, (d) was reading the comment 20260810120000 itself had written,
+-- so the regression it names — "the re-stamp dropped the marker" — could not
+-- fail it on a first apply. MEASURED on a local PG16 fixture 2026-08-12: in the
+-- old order, a re-stamp with the marker removed COMMITTED while (d) reported
+-- "20260810120000 marker preserved". Everything is inside this file's own
+-- transaction, so no other ordering changes are needed. Do not move it back.
+COMMENT ON COLUMN public.api_keys.attested_venue IS
+  'RPC-WRITTEN venue (migration 20260811210000). ⛔ READ THE GUARANTEE '
+  'PRECISELY, it is narrower than "server-validated": the two SECURITY DEFINER '
+  'wizard RPCs do NOT validate this value, they write the p_exchange they were '
+  'CALLED with, and both are invokable by authenticated over PostgREST. What '
+  'holds is (1) it is written ONLY by those two RPCs — create_wizard_strategy '
+  'and add_wizard_composite_key — and (2) each writes THIS column and exchange '
+  'from ONE parameter, so the two cannot disagree; CHECK constraint '
+  'api_keys_attested_venue_matches_exchange pins that coupling for every '
+  'writer, present and future. The bypass is therefore not free: forging the '
+  'attestation to buy a probe skip also forges the routing label, and an '
+  'mt5-labelled row is handed to the MT5 adapter and never syncs. A '
+  'client-supplied value on a direct INSERT is scrubbed to NULL by the '
+  'api_keys_scrub_attested_venue BEFORE INSERT trigger, so a DELETE + '
+  're-INSERT round trip cannot forge one either. Making this column truly '
+  'server-VALIDATED needs the deferred connect-flow refactor (an api_keys '
+  'INSERT behind a service-role writer that passes the venue it validated). '
+  'Read by '
+  '/api/strategies/finalize-wizard as the SOLE input to the ASVS V4 '
+  'scope-broadening probe gate: NULL means PROBE (fail-toward). Never fall '
+  'back to api_keys.exchange — that fallback re-opens the bypass this column '
+  'exists to close. Rows predating this migration were backfilled from '
+  'exchange on 2026-08-11 under a hand-typed census pin (29 rows, 2 of them '
+  'the probe-exempt venue).';
+
+-- ⛔ THE 20260810120000 SUBSTRING BELOW IS LOAD-BEARING. It is the marker
+-- test_api_keys_exchange_not_user_writable.sql:117-127 keys on to arm its
+-- negative assertions; removing it turns them into silent SKIPs (153.6 P4).
+-- What is REMOVED here is the sentence claiming this column is read by
+-- finalize-wizard as the probe gate's input — true when 20260810120000 was
+-- written, false from this migration onward.
+COMMENT ON COLUMN public.api_keys.exchange IS
+  'Venue LABEL, not an attestation. Client UPDATE was withdrawn at the table '
+  'level by migration 20260810120000 and a SECURITY INVOKER trigger backstops '
+  'it, but the value is still client-supplied at row creation on the two '
+  'non-wizard INSERT paths (ApiKeyManager, StrategyForm), so a mislabelled row '
+  'is possible. Input to the strategies.asset_class annualization stamp '
+  '(√365 crypto vs √252 traditional) — that reader deliberately still uses '
+  'this column (153.6 OQ-2, out of scope). NO LONGER the input to the '
+  'finalize-wizard scope-broadening probe gate: since migration '
+  '20260811210000 that gate reads api_keys.attested_venue. Do not re-open '
+  'client UPDATE on this column.';
+
+-- ───────────── 8. POST-VERIFY: every check ABORTS, none is NOTICE-only
 -- The other half of the 20260419140917 pairing, and the same self-verifying
 -- posture as 20260810120000:161-201. Environment-independent by construction:
 -- these hold on PROD, TEST, local and CI alike.
@@ -709,11 +767,16 @@ BEGIN
       'Migration 20260811210000 failed: the api_keys_scrub_attested_venue BEFORE INSERT trigger is not attached — a client could persist a forged attestation. Rolling back.';
   END IF;
 
-  -- (d) P4 canary. The exchange column comment is re-stamped below, and the
-  --     re-stamp MUST keep the 20260810120000 substring: it is the gate that
-  --     arms assertions 2 and 3 of
-  --     supabase/tests/test_api_keys_exchange_not_user_writable.sql. Dropping
-  --     it would not fail that test — it would make it SKIP, which is worse.
+  -- (d) P4 canary. The exchange column comment is re-stamped in section 7
+  --     ABOVE — deliberately, so this reads the comment THIS migration wrote
+  --     rather than the one 20260810120000 left behind (153.6 migration
+  --     re-audit M2-02; while the re-stamp came after this block the check
+  --     could not fail on a first apply). The re-stamp MUST keep the
+  --     20260810120000 substring: it is the gate that arms assertions 2 and 3
+  --     of supabase/tests/test_api_keys_exchange_not_user_writable.sql.
+  --     Dropping it would not fail that test — it would make it SKIP, which is
+  --     worse. ⛔ If you ever move the comments back below this block, this
+  --     check silently stops guarding them.
   SELECT col_description(
            'public.api_keys'::regclass,
            (SELECT attnum FROM pg_attribute
@@ -810,49 +873,5 @@ BEGIN
     v_cws_owner, v_awck_owner;
 END
 $verify$;
-
--- ─────────────────────────── 8. the comments (one of them is a test gate)
-COMMENT ON COLUMN public.api_keys.attested_venue IS
-  'RPC-WRITTEN venue (migration 20260811210000). ⛔ READ THE GUARANTEE '
-  'PRECISELY, it is narrower than "server-validated": the two SECURITY DEFINER '
-  'wizard RPCs do NOT validate this value, they write the p_exchange they were '
-  'CALLED with, and both are invokable by authenticated over PostgREST. What '
-  'holds is (1) it is written ONLY by those two RPCs — create_wizard_strategy '
-  'and add_wizard_composite_key — and (2) each writes THIS column and exchange '
-  'from ONE parameter, so the two cannot disagree; CHECK constraint '
-  'api_keys_attested_venue_matches_exchange pins that coupling for every '
-  'writer, present and future. The bypass is therefore not free: forging the '
-  'attestation to buy a probe skip also forges the routing label, and an '
-  'mt5-labelled row is handed to the MT5 adapter and never syncs. A '
-  'client-supplied value on a direct INSERT is scrubbed to NULL by the '
-  'api_keys_scrub_attested_venue BEFORE INSERT trigger, so a DELETE + '
-  're-INSERT round trip cannot forge one either. Making this column truly '
-  'server-VALIDATED needs the deferred connect-flow refactor (an api_keys '
-  'INSERT behind a service-role writer that passes the venue it validated). '
-  'Read by '
-  '/api/strategies/finalize-wizard as the SOLE input to the ASVS V4 '
-  'scope-broadening probe gate: NULL means PROBE (fail-toward). Never fall '
-  'back to api_keys.exchange — that fallback re-opens the bypass this column '
-  'exists to close. Rows predating this migration were backfilled from '
-  'exchange on 2026-08-11 under a hand-typed census pin (29 rows, 2 of them '
-  'the probe-exempt venue).';
-
--- ⛔ THE 20260810120000 SUBSTRING BELOW IS LOAD-BEARING. It is the marker
--- test_api_keys_exchange_not_user_writable.sql:117-127 keys on to arm its
--- negative assertions; removing it turns them into silent SKIPs (153.6 P4).
--- What is REMOVED here is the sentence claiming this column is read by
--- finalize-wizard as the probe gate's input — true when 20260810120000 was
--- written, false from this migration onward.
-COMMENT ON COLUMN public.api_keys.exchange IS
-  'Venue LABEL, not an attestation. Client UPDATE was withdrawn at the table '
-  'level by migration 20260810120000 and a SECURITY INVOKER trigger backstops '
-  'it, but the value is still client-supplied at row creation on the two '
-  'non-wizard INSERT paths (ApiKeyManager, StrategyForm), so a mislabelled row '
-  'is possible. Input to the strategies.asset_class annualization stamp '
-  '(√365 crypto vs √252 traditional) — that reader deliberately still uses '
-  'this column (153.6 OQ-2, out of scope). NO LONGER the input to the '
-  'finalize-wizard scope-broadening probe gate: since migration '
-  '20260811210000 that gate reads api_keys.attested_venue. Do not re-open '
-  'client UPDATE on this column.';
 
 COMMIT;
