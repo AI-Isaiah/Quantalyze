@@ -1228,6 +1228,91 @@ async def test_mt5_poisoned_equity_is_refused(mt5_enabled, monkeypatch, override
         await fetch_allocator_holdings("mt5", _session(transport), API_KEY_ID)
 
 
+# ---------------------------------------------------------------------------
+# WIZFORM-ABANDON / D-40 — the refusal's CLASSIFICATION on the HOLDINGS path
+#
+# WHY this matters (Rule 9). `Mt5SessionAbandoned` is a plain `Exception` (D-42),
+# so it matches none of this branch's three existing arms. Escaping them it would
+# leave `fetch_allocator_holdings` as a raw exception type the caller's dedicated
+# `AllocatorHoldingsSyncTransientError` arm cannot see — which is how a fault
+# whose user copy is a FIXED constant turns into `str(exc)` leaking Python
+# internals into an allocator's `sync_error` column (the very class
+# `test_user_visible_copy_never_leaks_python_internals` guards).
+# ---------------------------------------------------------------------------
+
+
+class _EpochBumpingTransport(_RecordingMt5Transport):
+    """The ONE shared Wine terminal, whose `login()` advances the terminal
+    generation — i.e. the lease this session began under releases mid-read.
+
+    Bumping from INSIDE the transport is what makes the next session touch be
+    refused by the SHIPPED `_assert_live` rather than by a hand-thrown stand-in,
+    so the test proves the refusal can actually ARRIVE at this arm.
+    """
+
+    def __init__(self, *, account: dict, terminal_key: str) -> None:
+        super().__init__(account=account)
+        self._terminal_key = terminal_key
+
+    def login(self, login, password=None, server=None, timeout=None):  # noqa: ANN001
+        out = super().login(login, password=password, server=server, timeout=timeout)
+        from services.mt5_client import bump_mt5_terminal_epoch
+
+        # The SHIPPED release hook — the same call `mt5_terminal_lease`'s finally
+        # makes. Never a hand-poked registry entry.
+        bump_mt5_terminal_epoch(self._terminal_key)
+        return out
+
+
+@pytest.mark.asyncio
+async def test_mt5_abandoned_session_raises_the_transient_with_the_fixed_copy(
+    mt5_enabled, monkeypatch
+):
+    """⭐ The D-40 holdings arm, driven by the SHIPPED fence.
+
+    The oracles are the TYPE and the `str()` — the user-copy contract every
+    sibling arm on this branch already satisfies — plus the CHAIN, so an operator
+    reading the traceback still sees what actually happened. The internal text
+    never reaches the user; only the fixed constant does.
+    """
+    from services.allocator_positions import (
+        AllocatorHoldingsSyncTransientError,
+        MT5_UNREACHABLE_NOTE,
+    )
+    from services.mt5_client import Mt5SessionAbandoned
+
+    restarts: list[object] = []
+
+    async def _spy_restart(client):
+        restarts.append(client)
+
+    monkeypatch.setattr(ap, "_mt5_bounded_restart", _spy_restart)
+    # "h:1" is what `_session`'s Mt5Client("h", 1, ...) produces; the assertion
+    # below derives it from the shipped property so a drifted literal cannot make
+    # this case vacuous by bumping an unrelated registry slot.
+    transport = _EpochBumpingTransport(account=_account(), terminal_key="h:1")
+    session = _session(transport)
+    assert session.client.terminal_key == "h:1"
+
+    with pytest.raises(AllocatorHoldingsSyncTransientError) as excinfo:
+        await fetch_allocator_holdings("mt5", session, API_KEY_ID)
+
+    # The fence really fired: login ran and `account_info` never reached the
+    # terminal.
+    assert transport.calls == ["initialize", "login"], (
+        f"the fence did not refuse account_info; calls={transport.calls!r}"
+    )
+    # The user-copy contract: the FIXED constant, never str(exc).
+    assert str(excinfo.value) == MT5_UNREACHABLE_NOTE
+    # Chained, so the operator-side cause survives in the traceback.
+    assert isinstance(excinfo.value.__cause__, Mt5SessionAbandoned)
+    # ⛔ No self-harm: a fence refusal means the terminal was handed on, so
+    # restarting it would land on the NEXT holder's session.
+    assert restarts == [], (
+        "the refusal arm restarted a terminal that now belongs to someone else"
+    )
+
+
 # ===========================================================================
 # 151-04 Task 1 — the sFOX balance branch (AUM-05)
 # ===========================================================================

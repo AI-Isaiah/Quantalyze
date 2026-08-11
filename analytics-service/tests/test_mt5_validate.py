@@ -1873,3 +1873,90 @@ async def test_a_connect_stage_timeout_leaves_no_rpyc_socket_open(
     assert outcomes and isinstance(outcomes[0], Mt5SessionAbandoned), (
         f"the zombie construction was not fenced at all: {outcomes}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# WIZFORM-ABANDON / D-40 — the refusal's CLASSIFICATION on this route
+#
+# WHY this matters (Rule 9). `Mt5SessionAbandoned` is a PLAIN `Exception` (D-42,
+# deliberately, so no credential-classify arm can absorb it into a user verdict).
+# The consequence on THIS route is that it matches none of the three `except`
+# arms around the probe and none of the outer handlers either — so before the arm
+# below existed it left as an UNHANDLED BODYLESS 500. Under STATUS_CONTRACT R-1 a
+# 500 means SERVICE-PERMANENT, "do not retry", which is the exact opposite of the
+# truth: an abandoned session is the single most retryable condition in this
+# subsystem, because the next request simply gets a fresh lease.
+#
+# ⚠️ PERSPECTIVE. On the GENUINELY abandoned path nobody is awaiting the probe, so
+# this arm never runs — asyncio discards a fenced zombie's raise (D-39, which is
+# why the sink LOGS as well as raising). The arm exists for the FALSE-POSITIVE
+# path: a legitimate caller that trips the fence must be told "transient, retry",
+# never "your key or your broker server is wrong" and never "permanent".
+# --------------------------------------------------------------------------- #
+
+
+async def test_an_abandoned_session_refusal_is_transient_never_a_bodyless_500(
+    exchange_router,
+):
+    """⭐ The D-40 arm, driven by the SHIPPED fence rather than by an injected
+    exception object.
+
+    The terminal generation is advanced from inside the transport's `login()` —
+    which is exactly what a lease release does — so the NEXT session touch
+    (`account_info`) is refused by the production `_assert_live`, not by a
+    hand-thrown stand-in. That matters: an injected `Mt5SessionAbandoned` would
+    still prove the arm catches the type, but not that the type can actually
+    ARRIVE here from the sink.
+
+    The oracles are the RESPONSE (status + code + recoverable + the emitted
+    outcome category) and the EFFECT (`account_info` never reached the transport).
+    """
+    from services.mt5_client import bump_mt5_terminal_epoch
+
+    router = exchange_router
+    key = _expected_terminal_key("mt5-gw.internal", 18812)
+
+    transport = MagicMock(name="mt5-transport")
+    transport.account_info = MagicMock(return_value=_Netref(**_INVESTOR_ACCOUNT))
+    transport.terminal_info = MagicMock(return_value=_Netref(**_HEALTHY_TERMINAL_INFO))
+    transport.order_check = MagicMock(return_value=_Netref(**_INVESTOR_ORDER_CHECK))
+
+    def _login(*_args, **_kwargs):
+        # The lease this session began under releases while the probe thread is
+        # still inside its round-trip. `bump_mt5_terminal_epoch` is the SHIPPED
+        # release hook — the same call `mt5_terminal_lease`'s finally makes.
+        bump_mt5_terminal_epoch(key)
+        return True
+
+    transport.login = _login
+    _install_real_mt5_client(router, transport)
+
+    with capture_logs() as captured:
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+
+    # THE EFFECT ORACLE, asserted first: the fence really fired, so the read never
+    # reached the terminal. Without it the response assertions below could be
+    # satisfied by some unrelated transient arm.
+    transport.account_info.assert_not_called()
+
+    # 424 = CALLER'S EXCHANGE, the route's EXISTING transient disposition — the
+    # same one the probe-timeout and account-mismatch arms take. No new code is
+    # minted here (153.1 owns the user-facing code table).
+    assert ei.value.status_code == 424
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    assert ei.value.code == "NETWORK_UNAVAILABLE"
+    assert ei.value.recoverable is True
+    # ⛔ The three forbidden translations of an OPERATOR-side refusal.
+    assert ei.value.status_code != 500, (
+        "an abandoned-session refusal fell through to an unhandled bodyless 500 — "
+        "under R-1 that tells the caller the service is PERMANENTLY broken and "
+        "must not be retried, which is the opposite of the truth (D-40)"
+    )
+    assert ei.value.detail != MT5_WRONG_SERVER_DETAIL
+    assert ei.value.detail != AUTH_FAILED_DETAIL
+
+    validate = _mt5_events(captured, "validate")
+    assert len(validate) == 1
+    assert validate[0]["outcome"] == "transient"
+    assert validate[0]["ok"] is False

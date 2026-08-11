@@ -873,3 +873,91 @@ async def test_a_connect_stage_timeout_leaves_no_rpyc_socket_open(monkeypatch) -
     # obtained by CALLING the shipped property, never by retyping its format
     # (MT5CONC-02 / Pitfall 2: a divergent key fences nothing while looking fixed).
     assert _expected_terminal_key("mt5-gw.internal", 18812) == "mt5-gw.internal:18812"
+
+
+# --------------------------------------------------------------------------- #
+# WIZFORM-ABANDON / D-40 — the refusal's CLASSIFICATION at the ADAPTER seam
+#
+# WHY this matters (Rule 9). This adapter's documented disposition for every
+# transient is to PROPAGATE the exception untouched (never `valid`, never
+# `auth_failed`, never `wrong_server`) and let the caller classify it honestly —
+# the sFOX F4 posture. An abandoned-session refusal is a transient by
+# construction, so propagation is already the correct behaviour and the explicit
+# arm added beside it changes nothing today. It is written down anyway, and
+# pinned here, so a future broad `except Exception` around the probe cannot
+# silently absorb the refusal into a credential verdict — the class D-42 makes
+# structurally impossible at the sink and this arm keeps impossible at the seam.
+# --------------------------------------------------------------------------- #
+
+
+class _EpochBumpingMt5(_FakeMt5):
+    """The ONE shared Wine terminal, whose `login()` advances the terminal
+    generation — i.e. the lease this session began under releases mid-probe.
+
+    Bumping from INSIDE the transport is what makes the next session touch be
+    refused by the SHIPPED `_assert_live` rather than by a hand-thrown stand-in:
+    the test then proves the refusal can actually ARRIVE at this seam, not merely
+    that the seam would pass the type along if it did.
+    """
+
+    def __init__(self, scenario: dict, terminal_key: str) -> None:
+        super().__init__(scenario)
+        self._terminal_key = terminal_key
+
+    def login(self, login, **kwargs):
+        out = super().login(login, **kwargs)
+        from services.mt5_client import bump_mt5_terminal_epoch
+
+        # The SHIPPED release hook — the same call `mt5_terminal_lease`'s finally
+        # makes. Never a hand-poked registry entry.
+        bump_mt5_terminal_epoch(self._terminal_key)
+        return out
+
+
+def test_an_abandoned_session_refusal_propagates_out_of_validate_unchanged(
+    monkeypatch,
+) -> None:
+    """Type IDENTITY out of `validate`, plus the session-never-leaks invariant.
+
+    ⛔ The two forbidden outcomes are excluded by construction: `pytest.raises`
+    means no `ValidationResult` was returned at all, so this path can produce
+    neither `valid=True` nor an `auth_failed`/`wrong_server` verdict. `close()`
+    still runs in the adapter's finally — `close` is D-41-EXEMPT from the fence
+    precisely so a fenced session can still give up its own socket.
+    """
+    from services.mt5_client import Mt5SessionAbandoned
+
+    key = _expected_terminal_key("mt5-gw.internal", 18812)
+    fake = _EpochBumpingMt5(
+        {
+            "account": _INVESTOR_ACCOUNT,
+            "order_check": _INVESTOR_ORDER_CHECK,
+            "terminal": _HEALTHY_TERMINAL,
+        },
+        key,
+    )
+
+    def _connect(*, host, port, timeout):
+        return fake
+
+    def _fake_build(host: str, port: int) -> Mt5Client:
+        return Mt5Client(host, port, _connect=_connect)
+
+    monkeypatch.setattr("services.ingestion.mt5._build_client", _fake_build)
+    monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
+    monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+
+    with pytest.raises(Mt5SessionAbandoned) as excinfo:
+        asyncio.run(Mt5Adapter().validate(_req()))
+
+    # ⭐ Type IDENTITY, not `isinstance` of some wrapper: the whole point of the
+    # adapter's transient disposition is that the caller sees the ORIGINAL
+    # exception. A re-raise as `Mt5ClientError` would let
+    # `classify_mt5_login_error` reach it, and its `_WRONG_SERVER_TOKENS` would
+    # blame the user's broker server for our own abandoned thread.
+    assert type(excinfo.value) is Mt5SessionAbandoned
+    assert excinfo.value.stage == "account_info"
+    assert not isinstance(excinfo.value, Mt5ClientError)
+    # The session never leaks, and the SHARED terminal IPC is never torn down.
+    assert fake.close_calls == 1
+    assert fake.shutdown_calls == 0
