@@ -2,10 +2,14 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260602190000_f6_wizard_session_idempotency.sql
--- --------------------------------------------------------------------------
--- STEP 3: idempotent create_wizard_strategy
--- --------------------------------------------------------------------------
+-- source migration: 20260811210000_api_keys_attested_venue.sql
+-- ─────────────────── 2. create_wizard_strategy (re-based on 20260602190000)
+-- Re-based VERBATIM on the LATEST definition, migration
+-- 20260602190000_f6_wizard_session_idempotency.sql:62-157. The ONLY changes
+-- are `attested_venue` in the api_keys INSERT column list and `p_exchange` in
+-- its VALUES. Everything else — the auth.uid() guards, the 'wizdraft:'
+-- advisory-lock idempotency fence, the complete-draft replay, the strategies
+-- INSERT — is byte-identical to that body.
 CREATE OR REPLACE FUNCTION create_wizard_strategy(
   p_user_id UUID,
   p_exchange TEXT,
@@ -73,15 +77,21 @@ BEGIN
     RETURN;
   END IF;
 
+  -- 153.6 / PARITY-04: attested_venue is stamped HERE, inside the SECURITY
+  -- DEFINER body, from the p_exchange the server itself validated at mint
+  -- time. This is the ONLY kind of writer whose value survives the
+  -- api_keys_scrub_attested_venue trigger.
   INSERT INTO api_keys (
     user_id, exchange, label,
     api_key_encrypted, api_secret_encrypted, passphrase_encrypted,
-    dek_encrypted, nonce, kek_version, is_active
+    dek_encrypted, nonce, kek_version, is_active,
+    attested_venue
   )
   VALUES (
     p_user_id, p_exchange, p_label,
     p_api_key_encrypted, p_api_secret_encrypted, p_passphrase_encrypted,
-    p_dek_encrypted, p_nonce, COALESCE(p_kek_version, 1), TRUE
+    p_dek_encrypted, p_nonce, COALESCE(p_kek_version, 1), TRUE,
+    p_exchange
   )
   RETURNING id INTO v_key_id;
 

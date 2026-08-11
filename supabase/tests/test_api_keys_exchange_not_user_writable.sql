@@ -35,6 +35,25 @@
 --   4. POSITIVE (always active): the owner can still DELETE their own key.
 --      Catches an over-broad REVOKE — the migration deliberately touches
 --      UPDATE only, and DELETE is a live client path (ApiKeyManager).
+--   5. THE ROUND TRIP (Phase 153.6 / D-05, gated on 20260811210000). Assertions
+--      2-4 together showed that the in-place rewrite is refused while DELETE and
+--      INSERT both survive — which is precisely the shape of the bypass 2 was
+--      meant to close: DELETE the row, re-INSERT it under a forged venue. This
+--      assertion drives that round trip and asserts the outcome that makes it
+--      harmless: the re-INSERT SUCCEEDS (D-02/D-03 — the client INSERT path
+--      stays open on purpose) AND the stored `attested_venue` reads back NULL,
+--      because the BEFORE INSERT trigger scrubbed the client's value. It is
+--      preceded by a privileged-path positive control, without which "the value
+--      was scrubbed" would be indistinguishable from "the column never stores
+--      anything".
+--
+--      ⚠️ WHAT THIS FILE CANNOT PROVE (D-05's honest limit). SQL can assert that
+--      the probe's INPUT is unforgeable. It cannot invoke the probe, so it
+--      cannot assert the probe's OUTCOME — that a row with exchange='mt5' and a
+--      NULL/foreign attested_venue is actually PROBED. That half lives in
+--      src/app/api/strategies/finalize-wizard/route.test.ts. NEITHER HALF ALONE
+--      DISCHARGES D-05; a reviewer who sees only one of them is looking at half
+--      a guard.
 --
 -- Test DB lag: the shared test DB tracks prod but lags main, so on a PR branch
 -- the migration may not be applied yet (the exploit is still live there). The
@@ -71,12 +90,16 @@ DO $$
 DECLARE
   v_uid        uuid := gen_random_uuid();
   v_key        uuid := gen_random_uuid();
+  v_key5       uuid := gen_random_uuid();
   v_fix_live   boolean;
+  v_attest_live boolean;
   v_seen       text;
   v_after      text;
+  v_attested   text;
   v_raised     boolean;
   v_sqlstate   text;
   v_deleted    int;
+  v_ins_err    text;
 BEGIN
   -- ---- fixture (seeded as the migration/owner role, not as the client) ------
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at, raw_user_meta_data)
@@ -177,8 +200,10 @@ BEGIN
   END IF;
 
   -- ---- (4) POSITIVE: the REVOKE was surgical — DELETE still works -----------
-  -- Runs unconditionally and LAST (it removes the fixture row), so an
-  -- over-broad REVOKE is caught whether or not the negatives were gated out.
+  -- Runs unconditionally and AFTER the gated negatives (it removes the fixture
+  -- row), so an over-broad REVOKE is caught whether or not those were gated out.
+  -- Assertion 5 below runs later still, but on its OWN row and behind its own
+  -- gate, so it cannot make this canary conditional.
   SET LOCAL ROLE authenticated;
   DELETE FROM public.api_keys WHERE id = v_key;
   GET DIAGNOSTICS v_deleted = ROW_COUNT;
@@ -189,6 +214,105 @@ BEGIN
       v_deleted;
   END IF;
   RAISE NOTICE 'Assertion 4 OK: owner can still DELETE its own api_keys row.';
+
+  -- ---- (5) THE ROUND TRIP: DELETE + re-INSERT under a forged attestation ----
+  -- Phase 153.6 / D-05. Its OWN gate, keyed on the NEWER migration's marker —
+  -- the same column-comment idiom and for the same measured reason as the gate
+  -- above (see the header), just pointed at 20260811210000's column. The test DB
+  -- lags main, so on a branch where that migration has not applied this skips
+  -- LOUDLY rather than erroring on a column that does not exist yet. plpgsql
+  -- prepares a statement the first time it RUNS, so the attested_venue
+  -- statements inside this branch are never parsed on a database without the
+  -- column.
+  SELECT COALESCE(
+    col_description(
+      'public.api_keys'::regclass,
+      (SELECT attnum FROM pg_attribute
+        WHERE attrelid = 'public.api_keys'::regclass
+          AND attname = 'attested_venue'
+          AND NOT attisdropped)
+    ) LIKE '%20260811210000%',
+    false
+  ) INTO v_attest_live;
+
+  IF v_attest_live THEN
+    -- (5a) MARKER-PRESENT POSITIVE CONTROL for the gate above (153.6 P4).
+    -- 20260811210000 re-stamps the `exchange` comment, and is required to
+    -- preserve the 20260810120000 substring. Since it sorts AFTER
+    -- 20260810120000, a database carrying its marker must carry the older one
+    -- too. Asserting that here is what turns "the re-stamp dropped the marker"
+    -- into a FAILURE instead of assertions 2 and 3 quietly skipping forever —
+    -- and a skip is the worse outcome, because it looks green.
+    IF NOT v_fix_live THEN
+      RAISE EXCEPTION
+        'CR-01/153.6 REGRESSION (5a): api_keys.attested_venue carries the 20260811210000 marker but api_keys.exchange no longer names 20260810120000. A comment re-stamp dropped the gate marker, so assertions 2 and 3 above SKIPPED rather than ran. Restore the substring in whichever migration re-stamped that comment.';
+    END IF;
+    RAISE NOTICE 'Assertion 5a OK: the 20260810120000 gate marker survived the re-stamp, so assertions 2 and 3 really ran.';
+
+    -- (5b) POSITIVE CONTROL on the PRIVILEGED path, before any negative.
+    -- Seeded as the migration/owner role, so the trigger's privileged-caller
+    -- branch applies and the value must survive. Without this, "the client's
+    -- value was scrubbed" is indistinguishable from "this column never stores
+    -- anything", and 5c would pass vacuously.
+    INSERT INTO public.api_keys (id, user_id, exchange, label, api_key_encrypted, attested_venue)
+    VALUES (v_key5, v_uid, 'binance', 'cr01-roundtrip', 'x', 'binance');
+
+    SELECT attested_venue INTO v_attested FROM public.api_keys WHERE id = v_key5;
+    IF v_attested IS DISTINCT FROM 'binance' THEN
+      RAISE EXCEPTION
+        'TEST FAILED (5b): a privileged INSERT did not persist attested_venue (got %). The scrub trigger is firing for the owner role too, so the wizard RPCs cannot attest anything and every key would be probed — and assertion 5c below would pass for the wrong reason.',
+        v_attested;
+    END IF;
+    RAISE NOTICE 'Assertion 5b OK: the privileged path still stores an attestation (anti-vacuity control for 5c).';
+
+    -- (5c) THE ROUND TRIP as the row's own owner: DELETE, then re-INSERT with a
+    -- forged venue AND a forged attestation. Both halves of the double are
+    -- asserted, because "the INSERT was refused" and "the value was stored"
+    -- are each the weaker claim on their own:
+    --   * the re-INSERT SUCCEEDS — D-02/D-03 keep the client INSERT path open
+    --     deliberately, and a refusal here would mean connect-a-key is broken;
+    --   * the stored attested_venue is NULL — the trigger scrubbed it, so the
+    --     probe gate sees "unattested" and probes.
+    SET LOCAL ROLE authenticated;
+    DELETE FROM public.api_keys WHERE id = v_key5;
+    GET DIAGNOSTICS v_deleted = ROW_COUNT;
+
+    v_ins_err := NULL;
+    BEGIN
+      INSERT INTO public.api_keys (id, user_id, exchange, label, api_key_encrypted, attested_venue)
+      VALUES (v_key5, v_uid, 'mt5', 'cr01-roundtrip', 'x', 'mt5');
+    EXCEPTION WHEN OTHERS THEN
+      v_ins_err := SQLSTATE || ' ' || SQLERRM;
+    END;
+    RESET ROLE;
+
+    IF v_deleted <> 1 THEN
+      RAISE EXCEPTION
+        'TEST FAILED (5c): authenticated could not DELETE its own api_keys row (% rows) — the round trip cannot be exercised at all.',
+        v_deleted;
+    END IF;
+    IF v_ins_err IS NOT NULL THEN
+      RAISE EXCEPTION
+        'TEST FAILED (5c): the client re-INSERT was REFUSED (%). 153.6 D-02/D-03 keep this path open on purpose — the fix is the trigger scrubbing the value, not a privilege change. A refusal here means connect-a-key is broken.',
+        v_ins_err;
+    END IF;
+
+    SELECT exchange, attested_venue INTO v_after, v_attested
+      FROM public.api_keys WHERE id = v_key5;
+    IF v_after IS DISTINCT FROM 'mt5' THEN
+      RAISE EXCEPTION
+        'TEST FAILED (5c): the re-INSERTed row does not carry the forged exchange (got %) — the round trip did not actually happen, so the scrub assertion below proves nothing.',
+        v_after;
+    END IF;
+    IF v_attested IS NOT NULL THEN
+      RAISE EXCEPTION
+        'CR-01/153.6 REGRESSION (5c): a client-supplied attested_venue PERSISTED as % after DELETE + re-INSERT. The api_keys_scrub_attested_venue BEFORE INSERT trigger is not firing for the authenticated role, so a key owner can once again hand the finalize-wizard scope-broadening probe a venue of their choosing and have the ASVS V4 check skipped on their own key.',
+        v_attested;
+    END IF;
+    RAISE NOTICE 'Assertion 5c OK: DELETE + re-INSERT with a forged attested_venue SUCCEEDS and stores NULL — the probe gate''s input is unforgeable from the client.';
+  ELSE
+    RAISE NOTICE 'SKIP (5): migration 20260811210000 not yet applied here (api_keys.attested_venue carries no migration marker comment). The round-trip assertions enforce once the test DB catches up.';
+  END IF;
 END $$;
 
 ROLLBACK;
