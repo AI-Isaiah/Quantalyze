@@ -413,8 +413,8 @@ Plans:
 - [x] 153.5-01-PLAN.md — epoch registry + Mt5SessionAbandoned + occupancy ContextVar + 6-method fence + lease bump + shared test reset (wave 1)
 - [x] 153.5-02-PLAN.md — restart's TWO checks w/ three-invariant fenced cleanup + __init__ construction fence (#5, #6) + rationale re-cuts (wave 2)
 - [x] 153.5-03-PLAN.md — ONE release point: convert the 3 raw-lock worker acquisitions to mt5_terminal_lease; re-point neuter patches; ast class pin (wave 2, parallel with 02)
-- [ ] 153.5-04-PLAN.md — D-40 classification arms at all five caller surfaces incl. process_key's uncovered sites (wave 3)
-- [ ] 153.5-05-PLAN.md — the two guards: ast abandon-roster + D-37 runtime barrier/spy; shutdown-roster docstring re-cut (wave 3, parallel with 04)
+- [x] 153.5-04-PLAN.md — D-40 classification arms at all five caller surfaces incl. process_key's uncovered sites (wave 3)
+- [x] 153.5-05-PLAN.md — the two guards: ast abandon-roster + D-37 runtime barrier/spy; shutdown-roster docstring re-cut (wave 3, parallel with 04)
 
 ⭐ **ONE defect, three faces — fix it at the SINK, not three times.** Work handed to `to_thread` outlives its `wait_for`; the caller unwinds, releases the terminal lease, and the abandoned thread keeps driving the same process-global MT5 session.
 
