@@ -404,10 +404,17 @@ Plans:
 
 **Goal**: No `asyncio.to_thread` work can keep touching the MT5 terminal after its `wait_for` fired and its caller released the lease
 **Depends on**: Phase 153.3 (complete) — this closes findings its `/code-review high` deliberately deferred
-**Requirements**: TBD at planning (derive from the three findings below)
-**Owns**: `analytics-service/services/mt5_concurrency.py`, `routers/exchange.py`, `services/ingestion/mt5.py`, `analytics-service/tests/**`
-**Plans**: TBD
+**Requirements**: ABANDON-05, ABANDON-06, ABANDON-07 (minted at planning 2026-08-11 from the three findings below: ABANDON-05 = finding #5, ABANDON-06 = findings #6a/#6b, ABANDON-07 = finding #7)
+**Owns**: `analytics-service/services/mt5_client.py` (the sink), `services/mt5_concurrency.py`, `routers/exchange.py`, `services/ingestion/mt5.py`, `services/job_worker.py` + `services/allocator_positions.py` (raw-lock→lease conversions found at planning), `routers/process_key.py` (two uncovered `adapter.validate` sites), `analytics-service/tests/**`
+**Plans**: 5 plans in 3 waves
 **UI hint**: no
+
+Plans:
+- [ ] 153.5-01-PLAN.md — epoch registry + Mt5SessionAbandoned + occupancy ContextVar + 6-method fence + lease bump + shared test reset (wave 1)
+- [ ] 153.5-02-PLAN.md — restart's TWO checks w/ three-invariant fenced cleanup + __init__ construction fence (#5, #6) + rationale re-cuts (wave 2)
+- [ ] 153.5-03-PLAN.md — ONE release point: convert the 3 raw-lock worker acquisitions to mt5_terminal_lease; re-point neuter patches; ast class pin (wave 2, parallel with 02)
+- [ ] 153.5-04-PLAN.md — D-40 classification arms at all five caller surfaces incl. process_key's uncovered sites (wave 3)
+- [ ] 153.5-05-PLAN.md — the two guards: ast abandon-roster + D-37 runtime barrier/spy; shutdown-roster docstring re-cut (wave 3, parallel with 04)
 
 ⭐ **ONE defect, three faces — fix it at the SINK, not three times.** Work handed to `to_thread` outlives its `wait_for`; the caller unwinds, releases the terminal lease, and the abandoned thread keeps driving the same process-global MT5 session.
 
