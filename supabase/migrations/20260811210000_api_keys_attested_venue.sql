@@ -427,9 +427,14 @@ DECLARE
   -- counts only, no key material): 29 rows total — deribit 13, okx 9, bybit 5,
   -- mt5 2. Both mt5 rows belong to ONE owner and were created 2026-08-04
   -- (11:37 and 14:20 UTC). These are HAND-TYPED literals on purpose: a count
-  -- compared against its own derivation cannot fail. Re-cut all three together
-  -- from a fresh measurement if the census has moved; never soften the
-  -- comparison to make an apply pass.
+  -- compared against its own derivation cannot fail. Re-cut them from a fresh
+  -- measurement if the census has moved; never soften the comparison to make an
+  -- apply pass.
+  --
+  -- ⚠️ c_pin_total is DELIBERATELY NOT AN ABORT CONDITION — see the NOTICE
+  -- below. It is retained as the reference point the reported delta is measured
+  -- against, so "the table grew by 4 since the census" stays legible in the
+  -- apply log without being fatal. c_pin_mt5 is the one with teeth.
   --
   -- They are named CONSTANTs rather than literals inlined into the comparison
   -- because the abort message must report the pin it actually used. With a
@@ -453,14 +458,32 @@ BEGIN
    WHERE exchange = 'mt5'
      AND (created_at AT TIME ZONE 'UTC')::date = c_pin_date;
 
-  IF v_total = c_pin_total AND v_mt5 = c_pin_mt5 THEN
-    RAISE NOTICE 'Migration 20260811210000 pre-flight OK: census matches the pin exactly (% rows, % mt5) — the backfill below covers precisely the population that was measured.',
-      c_pin_total, c_pin_mt5;
-  ELSIF v_sig >= 1 THEN
-    RAISE EXCEPTION
-      'Migration 20260811210000 ABORT: PROD census drift (found total=%, mt5=%; pinned total=%, mt5=%). Re-measure public.api_keys against khslejtfbuezsmvmtsdn and re-cut the pinned literals before applying. Rolling back.',
-      v_total, v_mt5, c_pin_total, c_pin_mt5
-      USING ERRCODE = 'data_exception';
+  -- ⛔ THE DISCRIMINATOR IS THE SIGNATURE, AND IT IS TESTED FIRST. v_sig >= 1
+  -- means the censused probe-exempt rows are still present, i.e. this IS the
+  -- database that was measured — so a PROD apply can never fall through to the
+  -- lenient branch. That is the two-sided property, unchanged.
+  IF v_sig >= 1 THEN
+    -- ⭐ WHAT THE PIN ACTUALLY PROTECTS is the PROBE-EXEMPT population, not the
+    -- table's size. `mt5` is the only venue with scopeProbeSupported: false
+    -- (src/lib/closed-sets.ts VENUE_CAPABILITIES), so a backfilled deribit/okx/
+    -- bybit/binance/sfox row is attested as its OWN non-exempt venue and is
+    -- probed regardless — it cannot buy a skip, and therefore cannot weaken the
+    -- backfill's argument. Only an unmeasured mt5 row can.
+    IF v_mt5 <> c_pin_mt5 OR v_sig <> c_pin_mt5 THEN
+      RAISE EXCEPTION
+        'Migration 20260811210000 ABORT: probe-exempt census drift (found mt5=%, of which % carry the % signature; pinned mt5=%, all of them signed). An unmeasured probe-exempt row would be backfilled into a probe SKIP on trust this census never established. Re-measure public.api_keys against khslejtfbuezsmvmtsdn and re-cut the pinned literals before applying. Rolling back.',
+        v_mt5, v_sig, c_pin_date, c_pin_mt5
+        USING ERRCODE = 'data_exception';
+    END IF;
+    -- ⛔ THE TOTAL IS REPORTED, NEVER ENFORCED (153.6 migration review MIG-01).
+    -- It was strict-equality once, and that was a latent outage: `api_keys` is
+    -- live and user-mutable, so ONE key connected or deleted between the
+    -- 2026-08-11 census and the merge would abort the PROD auto-apply of a
+    -- security fix — for a number carrying no security value, since a non-exempt
+    -- row is probed either way. The delta is surfaced so drift is still VISIBLE
+    -- in the apply log.
+    RAISE NOTICE 'Migration 20260811210000 pre-flight OK: the probe-exempt population matches the pin (% mt5 rows, all created %). Total api_keys observed % against a pinned % (delta %) — reported, not enforced.',
+      v_mt5, c_pin_date, v_total, c_pin_total, v_total - c_pin_total;
   ELSE
     RAISE NOTICE 'Migration 20260811210000 pre-flight: census signature absent (found total=%, mt5=%; no mt5 row created %) — this is a non-PROD apply (TEST / local / CI). The strict census pin is not applicable here; the structural post-verifies below still enforce.',
       v_total, v_mt5, c_pin_date;
