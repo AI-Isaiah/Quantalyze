@@ -18,6 +18,13 @@ import {
   recogniseSeamErrorCode,
   type WizardErrorCode,
 } from "@/lib/wizardErrors";
+import { ValidateWaitCard } from "../ValidateWaitCard";
+import {
+  WAIT_ABORT_GRACE_MS,
+  WAIT_CARD_MOUNT_DELAY_MS,
+  validateBudgetMsFor,
+  validateBudgetSecondsFor,
+} from "@/lib/wizard/validate-budget";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SupportedExchange } from "@/lib/utils";
 import { SFOX_UI_ENABLED } from "@/lib/utils";
@@ -300,8 +307,88 @@ interface PanelState {
    * Cleared on every fresh validate attempt beside `errorCode` (TRAP-3).
    */
   retryAfterSeconds: number | null;
+  /**
+   * 153.4-05 / D-05 / WIZFORM-05 — when THIS panel's in-flight validate left the
+   * browser, or `null` when none is.
+   *
+   * PER-PANEL for exactly the reason `retryAfterSeconds` above is: panels
+   * validate independently against `composite/add-key`, so panel 3 can be twelve
+   * seconds into a wait while panel 1 has not started one. A single step-level
+   * clock would render panel 3's elapsed figure — and panel 3's escalation —
+   * underneath panel 1.
+   */
+  waitStartedAt: number | null;
+  /**
+   * Milliseconds since `waitStartedAt`, ticked once per second by the ONE
+   * step-level interval (never faster — the card renders whole seconds).
+   *
+   * PER-PANEL, and STORED rather than derived in the JSX: a `Date.now()`
+   * comparison at render time re-times every panel's card whenever anything else
+   * re-renders the step, and the 300 ms render gate below depends on this value
+   * moving on a TICK and not on a render.
+   */
+  waitElapsedMs: number;
+  /**
+   * THIS panel's user pressed `Stop waiting`. ⛔ NOT an error — it renders as a
+   * neutral line, never a `WizardErrorEnvelope`. Cleared on this panel's next
+   * validate and the moment any of its credential fields change.
+   *
+   * PER-PANEL: "we stopped waiting" is true of one member's check and false of
+   * every other one still running. A step-level flag would tell a user who
+   * abandoned panel 3 that nothing is happening on panel 1 either.
+   */
+  waitCancelled: boolean;
+  /**
+   * The venue of THIS panel's CURRENT (or most recent) attempt, frozen when the
+   * validate left the browser.
+   *
+   * PER-PANEL, and FROZEN. The exchange cards stay clickable while a panel's
+   * validate is in flight, and every duration this panel states — the card's
+   * promise, the ladder's rungs, the client deadline and the `budgetSeconds` its
+   * deadline envelope names — must describe the request that is actually on the
+   * wire. Reading live `exchange` would let a mid-flight card click re-time the
+   * deadline and advertise a budget nobody granted (T-153.4-12). A composite may
+   * mix a serialized venue with ccxt ones, and those two arms are 90 seconds
+   * apart, so this is not a theoretical delta.
+   *
+   * ⚠️ Deliberately NOT cleared when the wait ends: the failure envelope is
+   * rendered AFTER the attempt, and it must name the budget that attempt was
+   * granted rather than whatever card is selected by the time it is read.
+   */
+  waitExchange: ExchangeId | null;
   confirmingRemove: boolean;
 }
+
+/**
+ * 153.4-05 — the patch EVERY outcome arm of a panel's validate applies beside
+ * its own fields. A wait that has finished must leave nothing a later render can
+ * read as a wait still running: a card outliving the request it describes is the
+ * indefinite spinner in a new costume, which is what this plan exists to end.
+ *
+ * ⚠️ `waitExchange` is absent on purpose — see its docblock above.
+ */
+const WAIT_CLEARED: Partial<PanelState> = {
+  waitStartedAt: null,
+  waitElapsedMs: 0,
+  waitCancelled: false,
+};
+
+/**
+ * 153.4-05 — the panel fields whose edit invalidates a `Stop waiting` line.
+ *
+ * The sentence says "your key details are still on this page", and once the user
+ * starts changing those details it describes an attempt that no longer matches
+ * what they are looking at. Held in ONE place, read by `updatePanel`, rather
+ * than in six `onChange` handlers — so a seventh field cannot be added without
+ * it (the same discipline `ConnectKeyStep` applies with a single effect).
+ */
+const CREDENTIAL_FIELDS: ReadonlyArray<keyof PanelState> = [
+  "exchange",
+  "nickname",
+  "apiKey",
+  "apiSecret",
+  "passphrase",
+];
 
 function newPanel(): PanelState {
   return {
@@ -319,6 +406,10 @@ function newPanel(): PanelState {
     apiKeyId: null,
     errorCode: null,
     retryAfterSeconds: null,
+    waitStartedAt: null,
+    waitElapsedMs: 0,
+    waitCancelled: false,
+    waitExchange: null,
     confirmingRemove: false,
   };
 }
@@ -487,6 +578,13 @@ function toRehydratedPanel(member: {
     apiKeyId: member.api_key_id,
     errorCode: null,
     retryAfterSeconds: null,
+    // 153.4-05 — a rehydrated panel arrives ALREADY `validated`: it made no
+    // request from this browser, so it has no wait, and the card's gate (which
+    // requires `status === "validating"`) can never fire for it.
+    waitStartedAt: null,
+    waitElapsedMs: 0,
+    waitCancelled: false,
+    waitExchange: null,
     confirmingRemove: false,
   };
 }
@@ -664,6 +762,45 @@ export function MultiKeyConnectStep({
 
   const focusRef = useRef<string | null>(null);
   const cardRefs = useRef<Map<string, HTMLButtonElement | null>>(new Map());
+
+  /**
+   * 153.4-05 — the in-flight validate controllers, KEYED BY `panel.id`.
+   *
+   * ⛔ NEVER BY INDEX. `onMove` reorders panels, so an index captured when a
+   * validate started can point at a DIFFERENT panel by the time that panel's
+   * `Stop waiting` is pressed — the abort would then either miss entirely or
+   * cancel a sibling's credential-carrying POST (T-153.4-18). Entries are
+   * deleted in the validate's `finally`, so the maps cannot grow across attempts.
+   */
+  const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  /**
+   * WHO aborted, per panel. An `AbortError` is ONE rejection with two opposite
+   * meanings — a user's choice, which must never be recorded as a seam failure,
+   * and a spent budget, which must be — and the catch cannot tell them apart
+   * without this. Same key, same lifetime as the controller map.
+   */
+  const abortReasonsRef = useRef<Map<string, "user" | "deadline">>(new Map());
+  /**
+   * The panel whose validate control should receive focus once its cancelled
+   * wait has settled (UI-SPEC Surface 1 §Cancel affordance).
+   */
+  const pendingWaitFocusRef = useRef<string | null>(null);
+  /**
+   * Per-panel validate ROW elements — THE ROW, NOT THE BUTTON. The shared
+   * `ui/Button.tsx` is a plain function component whose props are
+   * `ButtonHTMLAttributes`, which carries no `ref` (TS2322, measured at
+   * 153.4-04), and this phase's UI-SPEC ⛔ forbids editing it because
+   * `AllocateDialog.test.tsx` carves it out BY IDENTITY. The row holds the ref
+   * and the focus effect queries the one button inside it; the `Button` ref gap
+   * is logged in TODOS.md.
+   */
+  const validateRowRefs = useRef<Map<string, HTMLDivElement | null>>(new Map());
+  const registerValidateRowRef = useCallback(
+    (id: string, el: HTMLDivElement | null) => {
+      validateRowRefs.current.set(id, el);
+    },
+    [],
+  );
   // UAT/F-4: the latest unvalidated draft the user typed into the single-key
   // (State A) ConnectKeyStep form. enterMulti seeds the first panel from this so
   // switching to multi-key mode carries the in-progress key over.
@@ -725,9 +862,35 @@ export function MultiKeyConnectStep({
 
   const updatePanel = useCallback(
     (idx: number, patch: Partial<PanelState>) => {
+      // 153.4-05 — a stale cancelled line must never sit under edited details.
+      // Centralised here rather than repeated in each field's `onChange`; an
+      // explicit `waitCancelled` in the patch always wins (the validate path
+      // sets it deliberately).
+      const next =
+        CREDENTIAL_FIELDS.some((f) => f in patch) && !("waitCancelled" in patch)
+          ? { ...patch, waitCancelled: false }
+          : patch;
       setPanels((prev) =>
-        prev.map((p, i) => (i === idx ? { ...p, ...patch } : p)),
+        prev.map((p, i) => (i === idx ? { ...p, ...next } : p)),
       );
+    },
+    [],
+  );
+
+  /**
+   * 153.4-05 — patch a panel by IDENTITY rather than by position.
+   *
+   * ⛔ The validate path may NOT use the index it was called with. `onMove`
+   * reorders panels while a request is in flight, so an outcome written back to
+   * the captured index lands on whichever panel now sits there — writing one
+   * member's failure, cancelled line or verified id onto another's. Every
+   * outcome arm of `validatePanel` goes through here; `updatePanel(idx, patch)`
+   * stays for the synchronous UI edits, where the index is current by
+   * construction because the user just clicked that panel's control.
+   */
+  const updatePanelById = useCallback(
+    (id: string, patch: Partial<PanelState>) => {
+      setPanels((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
     },
     [],
   );
@@ -771,25 +934,141 @@ export function MultiKeyConnectStep({
     [updatePanel],
   );
 
+  /**
+   * 153.4-05 / D-05 — ONE interval drives EVERY validating panel's wait.
+   *
+   * ⛔ NOT one interval per panel. A once-a-second render does not need N timers
+   * disagreeing about "now" (T-153.4-22), and the card is pure precisely so this
+   * step can own a single clock for all of them. The interval is armed while ANY
+   * panel is validating and cleared the moment none is (and on unmount).
+   *
+   * It does two things per tick, both read through `panelsRef` — this file's
+   * "synced in an effect, never written during render" rule — so the callback
+   * never closes over a stale panel list:
+   *
+   *   1. THE CLIENT DEADLINE, evaluated against EACH PANEL'S OWN venue budget. A
+   *      composite can mix a serialized venue (120 000 ms) with ccxt ones
+   *      (30 000 ms); a shared deadline would abort a two-minute grant after
+   *      forty-five seconds. The abort fires at `budget + WAIT_ABORT_GRACE_MS`
+   *      and never at the budget itself: the seam's deadline fires inside our own
+   *      route and the reply still has to travel back, so giving up at exactly
+   *      the budget could cut off a verdict already on the wire and re-create the
+   *      silent UNKNOWN this phase exists to end. The browser gives up LAST — but
+   *      it does give up, so no request can hold this tab open forever.
+   *   2. THE ELAPSED FIGURE each panel's card renders.
+   */
+  const anyValidating = panels.some((p) => p.status === "validating");
+  useEffect(() => {
+    if (!anyValidating) return;
+    const tick = setInterval(() => {
+      const now = Date.now();
+      for (const p of panelsRef.current) {
+        if (p.status !== "validating" || p.waitStartedAt === null) continue;
+        const budgetMs = validateBudgetMsFor(p.waitExchange);
+        if (now - p.waitStartedAt >= budgetMs + WAIT_ABORT_GRACE_MS) {
+          abortReasonsRef.current.set(p.id, "deadline");
+          abortControllersRef.current.get(p.id)?.abort();
+        }
+      }
+      setPanels((prev) =>
+        prev.map((p) =>
+          p.status === "validating" && p.waitStartedAt !== null
+            ? { ...p, waitElapsedMs: now - p.waitStartedAt }
+            : p,
+        ),
+      );
+    }, 1_000);
+    return () => clearInterval(tick);
+  }, [anyValidating]);
+
+  /**
+   * 153.4-05 — abandon ONE panel's wait, and nothing else.
+   *
+   * ⛔ NO CONFIRMATION DIALOG. `composite/add-key`'s validate is strictly
+   * pre-encrypt / pre-RPC — nothing is persisted server-side until the key is
+   * accepted (diagnosis 2026-08-05) — so there is nothing to lose by pressing
+   * this, and a confirmation step on the one control whose purpose is escaping a
+   * stall is the opposite of the affordance.
+   *
+   * The panel is looked up by index through `panelsRef` (the index the user just
+   * clicked is current) and everything after that is keyed by its ID, so a
+   * reorder between the validate and the cancel cannot redirect the abort.
+   *
+   * ⚠️ Aborting stops the BROWSER listening; it does not stop the server
+   * working. The Vercel invocation and the MT5 gateway probe run to their own
+   * deadlines (T-153.4-23, recorded not mitigated) — which is safe to say
+   * nothing about precisely because nothing is written on this path, and that is
+   * what lets the cancelled copy truthfully say nothing was saved.
+   */
+  const handleStopWaiting = useCallback((idx: number) => {
+    const p = panelsRef.current[idx];
+    if (!p) return;
+    abortReasonsRef.current.set(p.id, "user");
+    pendingWaitFocusRef.current = p.id;
+    abortControllersRef.current.get(p.id)?.abort();
+  }, []);
+
+  /**
+   * 153.4-05 — restore focus to the cancelled panel's validate control.
+   *
+   * ⚠️ IN AN EFFECT, NOT IN THE CLICK HANDLER. `Stop waiting` lives inside a card
+   * that unmounts on the same interaction, and at the instant of the click the
+   * validate button is still `disabled` (`canValidate` is false while the panel
+   * is validating). `focus()` on a disabled control is a no-op, so focus would
+   * fall to `<body>` and a keyboard user would lose their place entirely. The
+   * abort settles a tick later; by then the panel is back to `editing` and its
+   * button is focusable again.
+   */
+  useEffect(() => {
+    const id = pendingWaitFocusRef.current;
+    if (!id) return;
+    const target = panels.find((p) => p.id === id);
+    if (!target || target.status === "validating") return;
+    pendingWaitFocusRef.current = null;
+    validateRowRefs.current
+      .get(id)
+      ?.querySelector<HTMLButtonElement>("button")
+      ?.focus();
+  }, [panels]);
+
   const validatePanel = useCallback(
     async (idx: number) => {
       const p = panelsRef.current[idx];
       if (p.status === "validating") return;
+      // 153.4-05 — everything after this line is keyed by IDENTITY. A reorder
+      // while the request is in flight makes `idx` point at a different panel.
+      const panelId = p.id;
       const activeOption = EXCHANGES.find((e) => e.id === p.exchange);
       const requiresPassphrase = activeOption?.requiresPassphrase ?? false;
       const requiresSecret = activeOption?.requiresSecret ?? true;
+      // 153.4-05 — the controller is in place BEFORE the request leaves, and any
+      // reason recorded for a previous attempt is dropped with it.
+      const controller = new AbortController();
+      abortControllersRef.current.set(panelId, controller);
+      abortReasonsRef.current.delete(panelId);
       // 140.5-03 — the wait is cleared WITH the code it belongs to, on every
       // fresh attempt. This is the half a copy-paste of the working thread
       // drops: a wait left from attempt 1 rendered under attempt 2's failure
       // names a duration nobody advertised (TRAP-3).
-      updatePanel(idx, {
+      updatePanelById(panelId, {
         status: "validating",
         errorCode: null,
         retryAfterSeconds: null,
+        // 153.4-05 — the wait starts: ONE `Date.now()` the step's interval then
+        // measures against, the previous attempt's cancelled line retired, and
+        // the venue FROZEN so every duration this panel goes on to state
+        // describes the request actually on the wire.
+        waitStartedAt: Date.now(),
+        waitElapsedMs: 0,
+        waitCancelled: false,
+        waitExchange: p.exchange,
       });
       try {
         const res = await wizardFetch("/api/strategies/composite/add-key", {
           method: "POST",
+          // `wizardFetch` spreads `init` and overrides only `headers`, so the
+          // signal reaches `fetch` unchanged — no change to that module needed.
+          signal: controller.signal,
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             exchange: p.exchange,
@@ -858,7 +1137,8 @@ export function MultiKeyConnectStep({
           // 140.5-03 / SEAMPROSE-02 — the wait rides the HEADER, read through
           // the ONE parser, from the SAME response as the code. Absent header
           // ⇒ `null` ⇒ no wait rendered rather than a zero nobody advertised.
-          updatePanel(idx, {
+          updatePanelById(panelId, {
+            ...WAIT_CLEARED,
             status: "editing",
             errorCode: code,
             retryAfterSeconds: parseRetryAfterSeconds(res.headers),
@@ -871,7 +1151,8 @@ export function MultiKeyConnectStep({
           return;
         }
         setStrategyId(data.strategy_id);
-        updatePanel(idx, {
+        updatePanelById(panelId, {
+          ...WAIT_CLEARED,
           status: "validated",
           apiKeyId: data.api_key_id,
           errorCode: null,
@@ -889,6 +1170,52 @@ export function MultiKeyConnectStep({
           passphrase: "",
         });
       } catch (err) {
+        /**
+         * 153.4-05 — AN ABORT IS NOT A TRANSPORT FAILURE, AND THE TWO ABORTS ARE
+         * NOT THE SAME OUTCOME. Branch FIRST, before anything below can classify
+         * a user's own choice as an outage.
+         *
+         * ⚠️ TRAP-1, re-checked at this edit now that an `AbortSignal` rides the
+         * request: an `AbortError` is a `DOMException` with a fixed name and
+         * message and carries no request, no headers and no body, so it embeds
+         * no credential either — the measurement in the `SERVICE_UNREACHABLE`
+         * arm below still holds unchanged.
+         */
+        if (controller.signal.aborted) {
+          const reason = abortReasonsRef.current.get(panelId);
+          if (reason === "user") {
+            // The user chose this. ⛔ No `errorCode`, ⛔ no `console.error` and
+            // ⛔ no `wizard_error`: recording a deliberate cancel as an error
+            // tells an operator the seam is failing when it is not, and that
+            // funnel is what they would read to decide MT5 is broken
+            // (T-153.4-21).
+            updatePanelById(panelId, {
+              ...WAIT_CLEARED,
+              status: "editing",
+              waitCancelled: true,
+              errorCode: null,
+              retryAfterSeconds: null,
+            });
+            return;
+          }
+          if (reason === "deadline") {
+            // A real failure, and the funnel must agree with the screen (the
+            // 140.5-03 rule this file states twice). The envelope names the
+            // budget we granted — see `budgetSeconds` in `KeyPanel`.
+            updatePanelById(panelId, {
+              ...WAIT_CLEARED,
+              status: "editing",
+              errorCode: "SEAM_DEADLINE_EXCEEDED",
+              retryAfterSeconds: null,
+            });
+            trackForQuantsEventClient("wizard_error", {
+              wizard_session_id: wizardSessionId,
+              step: MULTI_KEY_FUNNEL_STEP,
+              code: "SEAM_DEADLINE_EXCEEDED",
+            });
+            return;
+          }
+        }
         // 140.5-03 / SEAMPROSE-03 — OUR HOP, NOT THE EXCHANGE'S. ⚠️ THIS CATCH
         // AND ITS SIBLING IN `handleContinue` WERE MISSED BY EVERY PRIOR
         // CENSUS: the synthesis named three transport catches and this file
@@ -902,7 +1229,8 @@ export function MultiKeyConnectStep({
         // wrong code, which is the identical false attribution in
         // machine-readable form — an operator reading that funnel would
         // conclude the VENUES are flaky when the fault is ours.
-        updatePanel(idx, {
+        updatePanelById(panelId, {
+          ...WAIT_CLEARED,
           status: "editing",
           errorCode: "SERVICE_UNREACHABLE",
           // No response exists on this path, so no wait was advertised.
@@ -921,9 +1249,15 @@ export function MultiKeyConnectStep({
         // credential value is on the request for a rejection to embed. The
         // typed key material lives in React state, never in `err`.
         console.error("[wizard:MultiKeyConnectStep] add-key threw:", err);
+      } finally {
+        // 153.4-05 — this attempt's controller and its reason die with it, on
+        // EVERY outcome (the `return`s above run this too). Without it the maps
+        // would grow one entry per attempt for the life of the step.
+        abortControllersRef.current.delete(panelId);
+        abortReasonsRef.current.delete(panelId);
       }
     },
-    [updatePanel, wizardSessionId],
+    [updatePanelById, wizardSessionId],
   );
 
   const { fieldErrors, summaryLines } = useMemo(
@@ -1201,8 +1535,10 @@ export function MultiKeyConnectStep({
             fieldError={fieldErrors[i]}
             correlationId={correlationId}
             registerCardRef={registerCardRef}
+            registerValidateRowRef={registerValidateRowRef}
             onUpdate={updatePanel}
             onValidate={validatePanel}
+            onStopWaiting={handleStopWaiting}
             onMove={move}
             onRequestRemove={requestRemove}
             onConfirmRemove={doRemove}
@@ -1278,8 +1614,12 @@ interface KeyPanelProps {
   fieldError?: FieldError;
   correlationId: string;
   registerCardRef: (id: string, el: HTMLButtonElement | null) => void;
+  /** 153.4-05 — the validate ROW, so a cancelled wait can restore focus to it. */
+  registerValidateRowRef: (id: string, el: HTMLDivElement | null) => void;
   onUpdate: (idx: number, patch: Partial<PanelState>) => void;
   onValidate: (idx: number) => void;
+  /** 153.4-05 — abandon THIS panel's wait. Aborts nothing else. */
+  onStopWaiting: (idx: number) => void;
   onMove: (idx: number, dir: -1 | 1) => void;
   onRequestRemove: (idx: number) => void;
   onConfirmRemove: (idx: number) => void;
@@ -1296,8 +1636,10 @@ function KeyPanel({
   fieldError,
   correlationId,
   registerCardRef,
+  registerValidateRowRef,
   onUpdate,
   onValidate,
+  onStopWaiting,
   onMove,
   onRequestRemove,
   onConfirmRemove,
@@ -1316,6 +1658,10 @@ function KeyPanel({
   const secretInputId = `key-${index}-api-secret-input`;
   const windowEndId = `key-${index}-window-end`;
 
+  // 153.4-05 — the venue THIS panel's most recent attempt actually ran against,
+  // falling back to the selected card only when no attempt has been made.
+  const attemptVenue = p.waitExchange ?? p.exchange;
+
   const errorEnvelope = p.errorCode
     ? buildEnvelope(p.errorCode, correlationId, {
         // 140.5-03 / SEAMPROSE-02 — THIS panel's advertised wait, not the
@@ -1323,8 +1669,49 @@ function KeyPanel({
         // `null` in the envelope slot renders as a `0`-second wait we were
         // never told about.
         retryAfterSeconds: p.retryAfterSeconds ?? undefined,
+        // 153.4-05 / UI-SPEC Gate A — the budget WE granted THIS panel, in
+        // seconds, and ONLY for the code that names one. The same rule one line
+        // up: the expression yields `undefined`, never `null` and never `0` — a
+        // `0` here is a budget we never granted, which turns a vague failure
+        // into a specific lie (TRAP-3). Read from the FROZEN attempt venue, so
+        // the figure describes the request that actually ran out of time.
+        budgetSeconds:
+          p.errorCode === "SEAM_DEADLINE_EXCEEDED"
+            ? validateBudgetSecondsFor(attemptVenue)
+            : undefined,
+        // 153.4-05 / UI-SPEC Gate B — WITHOUT THIS, `SEAM_DEADLINE_EXCEEDED`'s
+        // "Your key details are still on this page." is silently withheld: that
+        // bullet declares `REQUIRES_CONNECT_SURFACE` and absence SUPPRESSES. A
+        // user who waited two minutes and is then told nothing about the
+        // credentials they typed is the worst outcome this phase can produce,
+        // which is why 153.1-04 bound the obligation to the commit that starts
+        // EMITTING the code — this one, for the composite surface.
+        surface: "connect",
+        // 153.1-03 / D-17 — the venue, as a lookup key into the closed
+        // capability record (never interpolated into copy). Absence renders the
+        // substitutable remedy unconditionally, so a serialized-venue user reads
+        // "switch to a different exchange" for a venue that IS their account.
+        // PER PANEL, because each member carries its own venue — a step-level
+        // value would answer panel 1's question with panel 3's venue.
+        venue: attemptVenue,
       })
     : null;
+
+  /**
+   * 153.4-05 / UI-SPEC Surface 1 §Render gate — the card's gate is DERIVED, not
+   * stored.
+   *
+   * ⚠️ `waitElapsedMs` moves on the step's 1 s tick, so it is 0 for the whole
+   * first second: a validate that answers in under 300 ms finishes before the
+   * value can ever reach 300 and no card flashes. That is the render gate,
+   * satisfied WITHOUT a second per-panel timer — please do not "fix" it by
+   * adding one. (`ConnectKeyStep` needs an explicit 300 ms timeout because it
+   * gates on a boolean rather than on a ticked figure.)
+   */
+  const showWaitCard =
+    p.status === "validating" &&
+    p.waitStartedAt !== null &&
+    p.waitElapsedMs >= WAIT_CARD_MOUNT_DELAY_MS;
 
   const canValidate =
     !!p.apiKey &&
@@ -1338,6 +1725,11 @@ function KeyPanel({
       <fieldset
         data-testid={`key-panel-${index}`}
         data-panel={index + 1}
+        // 153.4-05 / UI-SPEC Surface 1 — busy while THIS panel's validate is in
+        // flight, absent otherwise (never `"false"`: the attribute's absence and
+        // its false value are the same state to AT, and one of the two is
+        // noise). Per panel, because the other panels are not busy.
+        aria-busy={p.status === "validating" ? "true" : undefined}
         className="rounded-md border border-border bg-white px-4 py-3"
       >
         <legend className="font-metric text-micro uppercase tracking-wider tabular-nums text-text-secondary">
@@ -1626,8 +2018,40 @@ function KeyPanel({
           </div>
         )}
 
+        {/* 153.4-05 / D-05 — THIS panel's long wait, made legible. One card per
+            validating panel, mounted inside the panel it describes so panel 3's
+            wait can never render under panel 1, and torn down on every outcome.
+            The card is PURE — this step owns the clock, the controller and the
+            budget; it renders ABOVE the validate row so the escalation and the
+            `Stop waiting` control sit next to the button they describe. */}
+        {showWaitCard && (
+          <ValidateWaitCard
+            exchange={attemptVenue}
+            elapsedMs={p.waitElapsedMs}
+            onStopWaiting={() => onStopWaiting(index)}
+          />
+        )}
+
+        {/* The cancelled state. ⛔ NOT a `WizardErrorEnvelope` and ⛔ never
+            `text-negative`: the user chose this, nothing failed, and nothing was
+            saved. DESIGN.md §Semantic-color gates — red asserts a permanent
+            failure, and there is no failure here to assert. Scoped to this
+            panel, because the other panels' checks are still running. */}
+        {p.waitCancelled && p.status !== "validating" && (
+          <p
+            className="mt-3 text-caption text-text-secondary"
+            data-testid={`key-${index}-wait-cancelled`}
+          >
+            We stopped waiting. Nothing was saved and your key details are still
+            on this page.
+          </p>
+        )}
+
         {p.status !== "validated" && (
-          <div className="mt-5">
+          <div
+            className="mt-5"
+            ref={(el) => registerValidateRowRef(p.id, el)}
+          >
             <Button
               type="button"
               data-testid={`key-${index}-validate`}
