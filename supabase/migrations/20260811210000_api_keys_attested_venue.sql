@@ -135,12 +135,21 @@
 --
 -- The backfill is a bounded, DATED snapshot. After it, the column stops being
 -- an authority for every row created afterwards, and the residual is exactly
--- "rows that existed on 2026-08-11 and had ALREADY been forged". Client UPDATE
--- on `exchange` has been unavailable since 20260810120000, so a pre-phase
+-- "rows created before 2026-08-11T00:00Z that had ALREADY been forged". Client
+-- UPDATE on `exchange` has been unavailable since 20260810120000, so a pre-phase
 -- forgery required DELETE + re-INSERT, which leaves a detectable footprint
--- (api_keys.created_at later than the strategy that references the key). The
--- census pin is what converts "we trusted a column" into "we trusted 29
--- specific rows and wrote the number down".
+-- (api_keys.created_at later than the strategy that references the key).
+--
+-- What the census pin converts "we trusted a column" into is NARROWER than an
+-- earlier draft of this header claimed, and the difference is the whole of what
+-- the pin now enforces (153.6 migration reviews MIG-01 and M2-03): it aborts on
+-- the PROBE-EXEMPT population only — 2 mt5 rows, all of them carrying the census
+-- signature — because a backfilled deribit/okx/bybit row is attested as its own
+-- non-exempt venue and is probed regardless, so it cannot buy a skip. The
+-- 29-row TOTAL is REPORTED as a delta and never enforced; `api_keys` is live and
+-- user-mutable, and aborting a security fix's PROD auto-apply over a number
+-- carrying no security value was a latent outage. So: "we trusted 2 specific
+-- probe-exempt rows and wrote them down, and we log how far the rest has moved".
 --
 -- Residual, deliberately NOT closed here
 -- --------------------------------------
@@ -669,9 +678,13 @@ COMMENT ON COLUMN public.api_keys.attested_venue IS
   '/api/strategies/finalize-wizard as the SOLE input to the ASVS V4 '
   'scope-broadening probe gate: NULL means PROBE (fail-toward). Never fall '
   'back to api_keys.exchange — that fallback re-opens the bypass this column '
-  'exists to close. Rows predating this migration were backfilled from '
-  'exchange on 2026-08-11 under a hand-typed census pin (29 rows, 2 of them '
-  'the probe-exempt venue).';
+  'exists to close. Rows created before 2026-08-11T00:00Z were backfilled from '
+  'exchange under a hand-typed census pin — the cutoff is a dated bound, NOT '
+  '"everything older than the apply", so a row created between that instant and '
+  'the apply lands NULL and is PROBED. The pin ABORTS only on the probe-exempt '
+  'population (2 mt5 rows, all carrying the measured census signature); the '
+  '29-row total is reported as a delta and never enforced, because a non-exempt '
+  'row is probed either way.';
 
 -- ⛔ THE 20260810120000 SUBSTRING BELOW IS LOAD-BEARING. It is the marker
 -- test_api_keys_exchange_not_user_writable.sql:117-127 keys on to arm its
