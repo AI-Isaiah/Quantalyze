@@ -14,7 +14,10 @@
  * exact mapped code) so the test cannot be satisfied by an UNKNOWN
  * fallback masquerading as the right code.
  */
-import { render, screen, fireEvent } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { act, render, screen, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ConnectKeyStep } from "./ConnectKeyStep";
 
@@ -1126,4 +1129,528 @@ describe("[hotfix 2026-08-06] ConnectKeyStep — server-emitted SERVICE_UNREACHA
       expect(envelope).toHaveTextContent(title);
     },
   );
+});
+
+/**
+ * Phase 153.4-04 / D-05 / WIZFORM-05 — THE HONEST LONG WAIT.
+ *
+ * 153.4-01/02 granted a serialized venue (MT5) a 120 000 ms validate budget.
+ * Before this plan that budget bought a two-minute disabled button reading
+ * `Validating...` and nothing else. Every assertion below is about the four
+ * promises the card makes in exchange for that silence: it appears (but not for
+ * a fast answer), it escalates, it can be abandoned for free, and it ENDS —
+ * with a stated verdict rather than an indefinite spinner.
+ *
+ * ⚠️ EVERY EXPECTED STRING IS HAND-TYPED, never imported from the component or
+ * from `validate-budget.ts`. Importing the constants would assert the component
+ * equals itself; the `120` in the copy below is the number the SEAM grants,
+ * pinned to `SEAM_BUDGETS` by the agreement pin in `seam-constants.pin.test.ts`,
+ * and a test that DERIVED it would go green on a budget that silently moved.
+ * A self-scan at the bottom of this block asserts that property about this file.
+ *
+ * ⚠️ FAKE TIMERS, and the fetch never resolves. The wait is the subject, so the
+ * clock has to be an input rather than a race: every threshold below is reached
+ * by advancing time, and the only thing that can end a wait in these cases is
+ * the abort the component itself fires.
+ */
+describe("[153.4-04 / WIZFORM-05] ConnectKeyStep — the honest long wait", () => {
+  // ── The two live budgets, in ms, hand-typed ────────────────────────────────
+  const SERIALIZED_BUDGET_MS = 120_000;
+  const DEFAULT_BUDGET_MS = 30_000;
+  // The browser's margin OVER the promise it made, hand-typed.
+  const ABORT_GRACE_MS = 15_000;
+  const MOUNT_DELAY_MS = 300;
+
+  // ── The copy, hand-typed ───────────────────────────────────────────────────
+  const SIGNING_IN = "Signing in to your broker...";
+  const CHECKING_BINANCE = "Checking your key with Binance...";
+  const WAIT_PROMISE_120 = "We wait up to 120s for your broker to answer.";
+  const QUEUE_LINE =
+    "Still signing in. MetaTrader allows one sign-in at a time, so your check may be waiting behind another.";
+  const SLOW_LINE_120 =
+    "This is slower than usual. We will wait until 120s, then tell you what we found.";
+  const STOP_WAITING = "Stop waiting";
+  const CANCELLED_LINE =
+    "We stopped waiting. Nothing was saved and your key details are still on this page.";
+  const BUSY_LABEL = "Validating...";
+
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  /**
+   * A `fetch` that answers nothing and honours its `AbortSignal`.
+   *
+   * ⭐ THE SIGNAL CAPTURE IS THE LOAD-BEARING PART. A mock that merely never
+   * resolves would let `Stop waiting` look like it works while the request runs
+   * on: the card would unmount (local state), the sentence would render (local
+   * state), and the credential-carrying POST would still be in flight. The
+   * returned array is what the abort assertions read, and it stays EMPTY if the
+   * component ever stops passing a signal.
+   */
+  function mockAbortableFetch(): AbortSignal[] {
+    const signals: AbortSignal[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
+      const signal = (init as RequestInit | undefined)?.signal ?? null;
+      if (signal) signals.push(signal);
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => {
+          // The shape a real `fetch` rejects with on abort.
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+        });
+      });
+    });
+    return signals;
+  }
+
+  /** Render a fresh step; `mt5` stubs the flag the MT5 card is gated on. */
+  async function renderFresh(venue: "binance" | "mt5") {
+    if (venue === "mt5") vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
+    vi.resetModules();
+    const { ConnectKeyStep: Fresh } = await import("./ConnectKeyStep");
+    const onSuccess = vi.fn();
+    render(<Fresh wizardSessionId={SESSION} onSuccess={onSuccess} />);
+    return { onSuccess };
+  }
+
+  /** Fill the credential fields for a venue and press submit. Timers are FAKE. */
+  function fillAndSubmit(venue: "binance" | "mt5") {
+    if (venue === "mt5") {
+      fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+      fireEvent.change(screen.getByLabelText("MT5 login"), {
+        target: { value: "5000123" },
+      });
+      fireEvent.change(screen.getByLabelText("Investor password"), {
+        target: { value: "investor-pw-xxx" },
+      });
+      fireEvent.change(screen.getByLabelText("Broker server"), {
+        target: { value: "MyBroker-Live" },
+      });
+    } else {
+      fillKeyAndSecret();
+    }
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+  }
+
+  /** Advance the fake clock and let every resulting update commit. */
+  async function advance(ms: number) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  function card(): HTMLElement | null {
+    return screen.queryByTestId("validate-wait-card");
+  }
+
+  /** Every `class` attribute rendered inside an element, joined. */
+  function allClasses(el: HTMLElement): string {
+    return [el, ...Array.from(el.querySelectorAll("*"))]
+      .map((node) => node.getAttribute("class") ?? "")
+      .join(" ");
+  }
+
+  /**
+   * The module specifiers a source file actually IMPORTS — static `from "…"`
+   * edges and dynamic `import("…")` calls — read over comment-stripped source.
+   * A specifier mentioned in prose or held in a plain string is not an edge.
+   */
+  function importSpecifiers(source: string): string[] {
+    const stripped = source
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+      .split("\n")
+      .map((line) => (line.trim().startsWith("//") ? "" : line))
+      .join("\n");
+    return Array.from(
+      stripped.matchAll(
+        /\bfrom\s+["']([^"']+)["']|\bimport\(\s*["']([^"']+)["']\s*\)/g,
+      ),
+    ).map((m) => m[1] ?? m[2]!);
+  }
+
+  function wizardErrorCalls(): { code: string; step: string }[] {
+    return trackMock.mock.calls
+      .filter((c) => (c as unknown[])[0] === "wizard_error")
+      .map((c) => (c as unknown[])[1] as { code: string; step: string });
+  }
+
+  it("a sub-300ms answer never flashes a card — the gate is a TIMER, not a comparison", async () => {
+    mockAbortableFetch();
+    await renderFresh("binance");
+    fillAndSubmit("binance");
+
+    await advance(MOUNT_DELAY_MS - 1);
+    expect(
+      card(),
+      "the wait card mounted before 300ms. Most validates answer in well under " +
+        "that, and a card that appears and vanishes reads as a fault rather than " +
+        "as a wait (UI-SPEC Surface 1 §Render gate).",
+    ).toBeNull();
+
+    await advance(2);
+    expect(card()).not.toBeNull();
+  });
+
+  it("a serialized venue names what is happening and the deadline it was granted", async () => {
+    mockAbortableFetch();
+    await renderFresh("mt5");
+    fillAndSubmit("mt5");
+    await advance(MOUNT_DELAY_MS + 1);
+
+    const shown = card()!;
+    expect(shown).toHaveTextContent(SIGNING_IN);
+    expect(
+      shown,
+      "the card promised no duration on the arm that waits two minutes. The " +
+        "figure must be the budget the seam will actually honour — read from the " +
+        "budget module, never typed into copy (UI-SPEC forbidden item #8).",
+    ).toHaveTextContent(WAIT_PROMISE_120);
+  });
+
+  it("a NON-serialized venue names the venue and promises no wait", async () => {
+    mockAbortableFetch();
+    await renderFresh("binance");
+    fillAndSubmit("binance");
+    await advance(MOUNT_DELAY_MS + 1);
+
+    const shown = card()!;
+    expect(shown).toHaveTextContent(CHECKING_BINANCE);
+    // A 30s promise for a call that usually answers in two is an invented
+    // expectation; the promise belongs to the arm that needs it.
+    expect(shown.textContent).not.toMatch(/We wait up to \d+s/);
+    expect(shown).not.toHaveTextContent(SIGNING_IN);
+  });
+
+  it("escalates at 40% and 75% of the venue's budget, and nothing goes red inside it", async () => {
+    mockAbortableFetch();
+    await renderFresh("mt5");
+    fillAndSubmit("mt5");
+    await advance(MOUNT_DELAY_MS + 1);
+
+    // Below the first rung: no queue disclosure, no escape control.
+    expect(card()).not.toHaveTextContent(QUEUE_LINE);
+    expect(screen.queryByRole("button", { name: STOP_WAITING })).toBeNull();
+
+    // 40% of 120 000 ms = 48 000 ms.
+    await advance(SERIALIZED_BUDGET_MS * 0.4);
+    expect(card()).toHaveTextContent(QUEUE_LINE);
+    expect(screen.getByRole("button", { name: STOP_WAITING })).toBeTruthy();
+    expect(allClasses(card()!)).not.toContain("text-negative");
+
+    // 75% of 120 000 ms = 90 000 ms.
+    await advance(SERIALIZED_BUDGET_MS * 0.35);
+    const slow = screen.getByText(SLOW_LINE_120, {
+      ignore: "script, style, [role='status']",
+    });
+    expect(slow.getAttribute("class")).toContain("text-warning");
+    expect(
+      allClasses(card()!),
+      "a negative (red) tone appeared while the wait is still INSIDE its budget. " +
+        "Red asserts a permanent failure; this check may still answer correctly.",
+    ).not.toContain("text-negative");
+  });
+
+  it("`Stop waiting` aborts the request, keeps every field, and says so in a NEUTRAL line", async () => {
+    const signals = mockAbortableFetch();
+    await renderFresh("binance");
+    fillAndSubmit("binance");
+    // 40% of the DEFAULT budget = 12 000 ms — the ladder is a fraction, so a
+    // ccxt user reaches the escape control at 12s, not at 48s.
+    await advance(DEFAULT_BUDGET_MS * 0.4);
+
+    fireEvent.click(screen.getByRole("button", { name: STOP_WAITING }));
+    await advance(0);
+
+    // ⭐ THE REQUEST ACTUALLY STOPPED. Everything else here is local state and
+    // would look identical while the POST ran on.
+    expect(
+      signals[0]?.aborted,
+      "the in-flight request was not aborted. `Stop waiting` updated the screen " +
+        "while the credential-carrying POST stayed on the wire — the control " +
+        "would be a lie told in the user's favour.",
+    ).toBe(true);
+
+    expect(card()).toBeNull();
+    const line = screen.getByTestId("wizard-connect-wait-cancelled");
+    expect(line).toHaveTextContent(CANCELLED_LINE);
+    // ⛔ NOT an error envelope and ⛔ not red: the user chose this and nothing
+    // failed (DESIGN.md §Semantic-color gates).
+    expect(screen.queryByTestId("error-envelope")).toBeNull();
+    expect(line.closest('[role="alert"]')).toBeNull();
+    expect(line.getAttribute("class")).not.toContain("text-negative");
+
+    // Nothing was lost: the typed credentials are still on the form.
+    expect(
+      (screen.getByPlaceholderText("Paste the read-only key") as HTMLInputElement)
+        .value,
+    ).toBe("AK_LIVE_xxx");
+    expect(
+      (screen.getByPlaceholderText("Paste the secret") as HTMLInputElement).value,
+    ).toBe("SECRET_xxx");
+
+    // Focus lands on the control the user will press next, not on <body>.
+    expect(document.activeElement).toBe(
+      screen.getByTestId("wizard-connect-submit"),
+    );
+  });
+
+  it("`Stop waiting` asks for no confirmation — there is nothing to confirm", async () => {
+    // `validate-key` is strictly pre-encrypt / pre-RPC: nothing is persisted
+    // server-side, so a confirmation step on the one control whose purpose is
+    // escaping a stall is the opposite of the affordance.
+    mockAbortableFetch();
+    await renderFresh("binance");
+    fillAndSubmit("binance");
+    await advance(DEFAULT_BUDGET_MS * 0.4);
+
+    fireEvent.click(screen.getByRole("button", { name: STOP_WAITING }));
+    await advance(0);
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(screen.queryByRole("button", { name: /are you sure|confirm/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: STOP_WAITING })).toBeNull();
+  });
+
+  it("a user cancel is NOT recorded as a seam failure", async () => {
+    // The funnel and the screen must not be able to disagree. A deliberate
+    // cancel logged as `wizard_error` tells an operator MT5 is failing when a
+    // user simply chose not to wait (T-153.4-15).
+    mockAbortableFetch();
+    await renderFresh("binance");
+    fillAndSubmit("binance");
+    await advance(DEFAULT_BUDGET_MS * 0.4);
+
+    fireEvent.click(screen.getByRole("button", { name: STOP_WAITING }));
+    await advance(0);
+
+    expect(wizardErrorCalls()).toEqual([]);
+  });
+
+  it("a wait past the budget ends in a STATED verdict that names the budget and offers no Retry", async () => {
+    mockAbortableFetch();
+    await renderFresh("mt5");
+    fillAndSubmit("mt5");
+    // The browser gives up LAST: at the budget plus its own grace, never at the
+    // budget itself — aborting there could cut off a verdict already on the wire.
+    await advance(SERIALIZED_BUDGET_MS + ABORT_GRACE_MS + 1);
+
+    expect(card(), "the card outlived the request it describes").toBeNull();
+    const envelope = screen.getByTestId("error-envelope");
+    expect(envelope).toHaveAttribute(
+      "data-error-code",
+      "SEAM_DEADLINE_EXCEEDED",
+    );
+    // The budget WE granted, named — hand-typed here, read from the budget
+    // module there.
+    expect(envelope).toHaveTextContent(
+      "We gave your broker 120 seconds to answer and it did not.",
+    );
+    expect(envelope).toHaveTextContent("Nothing was saved");
+    // ⭐ THE ABSENCE IS THE FIX (PATTERNS Shared Pattern B). The code carries
+    // no recoverable action, so `buildEnvelope` derives `recoverable: false` and
+    // no Retry renders. A Retry here would offer to re-run a two-minute wait
+    // that just proved it does not fit.
+    expect(
+      screen.queryByRole("button", { name: "Retry" }),
+      "a Retry control was offered for a check that just spent its whole budget",
+    ).toBeNull();
+  });
+
+  it("the deadline path DOES record a wizard_error, carrying the code the screen shows", async () => {
+    // ⚠️ ITS OWN CASE, deliberately, and not an extra assertion on the envelope
+    // one above. Both must be able to red INDEPENDENTLY: an envelope assertion
+    // that throws first would hide a funnel still reporting SERVICE_UNREACHABLE,
+    // and the funnel is what an operator reads to decide whether the seam is
+    // healthy. The screen and the funnel must not be able to disagree.
+    mockAbortableFetch();
+    await renderFresh("mt5");
+    fillAndSubmit("mt5");
+    await advance(SERIALIZED_BUDGET_MS + ABORT_GRACE_MS + 1);
+
+    expect(wizardErrorCalls()).toEqual([
+      {
+        wizard_session_id: SESSION,
+        step: "connect_key",
+        code: "SEAM_DEADLINE_EXCEEDED",
+      },
+    ]);
+  });
+
+  it("⭐ the deadline verdict tells the user their key details are still on the page", async () => {
+    // ⛔ THE UNPAID GATE, PAID. That reassurance bullet declares
+    // REQUIRES_CONNECT_SURFACE and ABSENCE SUPPRESSES it, so a step that emits
+    // this code without passing `surface: "connect"` renders an envelope that is
+    // silent about the credentials the user just spent two minutes typing —
+    // the worst outcome this phase can produce, and a silent one.
+    mockAbortableFetch();
+    await renderFresh("mt5");
+    fillAndSubmit("mt5");
+    await advance(SERIALIZED_BUDGET_MS + ABORT_GRACE_MS + 1);
+
+    expect(screen.getByTestId("error-envelope")).toHaveTextContent(
+      "Your key details are still on this page.",
+    );
+  });
+
+  it("⭐ an MT5 failure never offers a remedy that presupposes another venue (D-17)", async () => {
+    // The `venue` half of the same call site. Absence renders the substitutable
+    // remedy unconditionally, so an MT5 user — whose broker account IS the venue
+    // — was told to "switch to a different exchange".
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "KEY_NETWORK_TIMEOUT" }, 504),
+    );
+    await renderFresh("mt5");
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    fireEvent.change(screen.getByLabelText("MT5 login"), {
+      target: { value: "5000123" },
+    });
+    fireEvent.change(screen.getByLabelText("Investor password"), {
+      target: { value: "investor-pw-xxx" },
+    });
+    fireEvent.change(screen.getByLabelText("Broker server"), {
+      target: { value: "MyBroker-Live" },
+    });
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveTextContent(
+      "This is your broker account, so there is no other venue to try.",
+    );
+    expect(
+      envelope,
+      "an unwinnable remedy reached a venue that IS the user's account",
+    ).not.toHaveTextContent("switch to a different exchange");
+  });
+
+  it("the submit button stays mounted reading ASCII `Validating...` for the whole wait", async () => {
+    // ⚠️ SWEPT BACKWARD against `e2e/` — the busy label is read by a Playwright
+    // assertion (`getByRole("button", { name: /Validating/i })`), which needs the
+    // button MOUNTED and still reading it. The long-wait card renders BESIDE it,
+    // never instead of it, and the spelling stays ASCII (D-21).
+    mockAbortableFetch();
+    await renderFresh("mt5");
+    fillAndSubmit("mt5");
+
+    for (const step of [MOUNT_DELAY_MS + 1, SERIALIZED_BUDGET_MS * 0.4, SERIALIZED_BUDGET_MS * 0.35]) {
+      await advance(step);
+      const submit = screen.getByTestId("wizard-connect-submit");
+      expect(submit).toBeInTheDocument();
+      expect(submit).toHaveTextContent(BUSY_LABEL);
+      expect(submit).toBeDisabled();
+    }
+    expect(screen.getByTestId("validate-wait-card").textContent).not.toContain(
+      "…",
+    );
+  });
+
+  it("the form reports aria-busy while in flight and drops it afterwards", async () => {
+    mockAbortableFetch();
+    const { container } = { container: document.body };
+    await renderFresh("binance");
+    fillAndSubmit("binance");
+    await advance(MOUNT_DELAY_MS + 1);
+
+    const form = container.querySelector("form")!;
+    expect(form.getAttribute("aria-busy")).toBe("true");
+
+    await advance(DEFAULT_BUDGET_MS * 0.4);
+    fireEvent.click(screen.getByRole("button", { name: STOP_WAITING }));
+    await advance(0);
+
+    // Absent, not `"false"` — the attribute's absence and its false value are
+    // the same state to AT, and one of the two is noise.
+    expect(form.getAttribute("aria-busy")).toBeNull();
+  });
+
+  it("the FAST path is unchanged: no card, no cancelled line, the same success callback", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          strategy_id: "33333333-3333-3333-3333-333333333333",
+          api_key_id: "44444444-4444-4444-4444-444444444444",
+        },
+        200,
+      ),
+    );
+    const { onSuccess } = await renderFresh("binance");
+    fillAndSubmit("binance");
+    await advance(0);
+
+    expect(onSuccess).toHaveBeenCalledWith({
+      strategyId: "33333333-3333-3333-3333-333333333333",
+      apiKeyId: "44444444-4444-4444-4444-444444444444",
+      exchange: "binance",
+    });
+    // The mount timer was cleared by the completion, so time passing changes
+    // nothing.
+    await advance(5_000);
+    expect(card()).toBeNull();
+    expect(screen.queryByTestId("wizard-connect-wait-cancelled")).toBeNull();
+    expect(wizardErrorCalls()).toEqual([]);
+  });
+
+  it("⭐ this file's `120` is HAND-TYPED, not derived from the module under test", async () => {
+    // ⚠️ THE ORACLE-INDEPENDENCE GUARD. Every duration above is a hand-typed
+    // twin of a figure the SEAM grants. If this file ever imported
+    // `validate-budget.ts` — or divided a millisecond budget by 1000 — the copy
+    // assertions would follow a budget change silently, and a card promising a
+    // wait the seam no longer honours would ship green. The repo has paid for
+    // self-referential oracles before; this is the cheap fence.
+    const source = readFileSync(
+      join(
+        process.cwd(),
+        "src/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep.test.tsx",
+      ),
+      "utf8",
+    );
+    // Vacuity floor: the thing the guard is about must be present.
+    expect(source).toContain("120s");
+    expect(source.length).toBeGreaterThan(1_000);
+
+    // ⚠️ AN IMPORT-EDGE SCAN, NOT A SUBSTRING GREP — the house form for
+    // "module X must not import module Y" (`seam-ssr-exposure.pin.test.ts`, and
+    // `validate-budget.test.ts` for this very module). A substring check is
+    // satisfied FOREVER by its own assertion text: the sentence that names the
+    // forbidden module is itself an occurrence of it, and the natural "fix" is
+    // to weaken the guard until it stops complaining. This reads edges.
+    const specifiers = importSpecifiers(source);
+    expect(
+      specifiers.filter((s) => s.includes("validate-budget")),
+      "this test file imports the budget module. Its expectations would then " +
+        "assert the component equals itself, and a budget that moved would take " +
+        "the copy assertions along with it.",
+    ).toEqual([]);
+    // Self-test: the extractor sees an EDGE and not a mention. Without this, an
+    // extractor that matched nothing at all would pass the assertion above.
+    //
+    // ⚠️ THE POSITIVE FIXTURE IS BUILT, NOT WRITTEN OUT, and that is the same
+    // collision one level down: a literal `from "…budget"` sitting in this file
+    // IS an edge to the whole-file scan above, so spelling the fixture would
+    // make the guard fail on itself. Interpolating the quote keeps the fixture
+    // edge-shaped to the extractor and invisible to the scan.
+    const q = '"';
+    expect(
+      importSpecifiers(`import { x } from ${q}@/lib/wizard/validate-budget${q};`),
+    ).toEqual(["@/lib/wizard/validate-budget"]);
+    expect(
+      importSpecifiers('const s = "@/lib/wizard/validate-budget"; // a mention'),
+    ).toEqual([]);
+    // …and it really did read THIS file's edges.
+    expect(specifiers).toContain("@testing-library/react");
+    expect(specifiers).toContain("./ConnectKeyStep");
+
+    expect(
+      /\/\s*1_?000/.test(source),
+      "this test file converts milliseconds to seconds. The seconds figure in " +
+        "copy must be typed out, so a budget change is a visible, reviewed edit.",
+    ).toBe(false);
+  });
 });
