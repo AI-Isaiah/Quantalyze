@@ -218,12 +218,48 @@ describe("[CR-01] connectAbortDeadlineMsFor — the deadline covers BOTH seam le
     }
   });
 
-  it("the serialized deadline clears the route's own worst-case request budget", () => {
-    // The SC-4b figure for the serialized branch of both connect routes, hand
-    // typed from `seam-budgets.invariant.test.ts`'s table: 158 500 ms. The
-    // browser must be the LAST party to give up, so a client abort can only ever
-    // mean the server stopped answering — the state the deadline copy describes.
-    expect(connectAbortDeadlineMsFor("mt5")).toBeGreaterThan(158_500);
+  it("both deadlines clear their route's FAILING-state worst case (PARITY-03)", () => {
+    // ⛔ THE COLUMN IS THE WHOLE POINT, and the previous version of this `it`
+    // got it wrong. It required only "greater than 158 500" — the CLOSED cell of
+    // the create-with-key / serialized-venue row in `seam-budgets.invariant.test.ts`'s
+    // branch table. A stalling seam is not in the closed state: a client deadline
+    // fires precisely when the seam is failing, which is the state that also pays
+    // the breaker's trip-path store commands. The governing figures are the
+    // FAILING ones, hand-typed here from that table:
+    //
+    //   serialized-venue  150 000 request (120 000 validate-key-serialized
+    //                     + 30 000 encrypt-key, both retries: 0)
+    //                   +  25 500 store (2 legs x 3 commands x 4 250)
+    //                   = 175 500
+    //   default-venue      60 000 request (30 000 validate-key + 30 000
+    //                     encrypt-key)
+    //                   +  25 500 store (identical — the store term does not
+    //                     depend on the validate budget, which is why BOTH arms
+    //                     were short by the same 10 500 ms)
+    //                   =  85 500
+    //
+    // The browser must be the LAST party to give up, so a client abort can only
+    // ever mean the server stopped answering — the state the deadline copy
+    // describes.
+    //
+    // ⚠️ THIS IS THE SECONDARY GUARD. The PRIMARY one is
+    // `seam-budgets.invariant.test.ts` › "the browser is the last party to give
+    // up", which quantifies the same property over EVERY breaker state using
+    // that file's own `branchWorstCases`, so no column can be selected at all.
+    // These two literals cannot notice that the wrong CELL was copied; that one
+    // can. Both are kept because this file is where a reader of the client
+    // module looks.
+    expect(
+      connectAbortDeadlineMsFor("mt5"),
+      "the serialized client deadline no longer clears create-with-key / " +
+        "composite/add-key's FAILING-state worst case of 175 500 ms.",
+    ).toBeGreaterThan(175_500);
+    expect(
+      connectAbortDeadlineMsFor("binance"),
+      "the DEFAULT arm's client deadline no longer clears its FAILING-state " +
+        "worst case of 85 500 ms. This arm is the second member of the class: " +
+        "the 153.4 review named only the serialized one, and both were short.",
+    ).toBeGreaterThan(85_500);
   });
 });
 
