@@ -38,6 +38,29 @@ shape, but the whole module skips everywhere (it needs `TEST_SUPABASE_DB_URL`, w
 sets). Scoping it means moving to a 4-arg overload with a `TEXT[]` bind that no environment can
 execute today, so it is documented in place instead of blind-edited.
 
+### CI — the wizard e2e specs stop racing the category auto-select
+
+Second red job in the same hotfix, unrelated mechanism.
+
+`e2e/wizard-axe.spec.ts:169` failed, passed, then failed again across three CI runs on unrelated
+branches — the last one a Python-only diff that cannot touch the page it exercises. The specs fill
+the wizard's Description field and immediately click "Review and submit", but **description is not
+the only required field**: `category` is required too (`MetadataStep.tsx:724`), and neither spec
+selects one. They pass only because `MetadataStep` fetches `discovery_categories` in a mount effect
+and auto-selects the first row when it resolves (`:640`).
+
+Until that fetch lands, `categoryId` is `null`, so a submit clicked inside the window is refused by
+`handleSubmit` (`:815`), which focuses the category select and leaves the wizard where it was. The
+"Review & confirm" heading never renders and the next assertion burns its full 15 s. It is a live
+network race against the seeded TEST project, which is exactly why it was intermittent.
+
+Both call sites now wait for the auto-select to land before clicking. The wait is a real assertion,
+not a sleep: if categories genuinely never load — an RLS regression, or the empty-table dead-end the
+control itself warns about at `:1026` — it times out naming the actual precondition instead of
+failing later at an unrelated heading. `csv-upload-flow.spec.ts:173` had the identical gap and is
+fixed in the same change; its comment claimed only "a description is required to advance", which is
+half the gate and is why the wait was missing in the first place.
+
 ## [0.57.0.0] - 2026-08-11
 ### v1.17 — work that outlives its timeout stops touching the terminal
 
