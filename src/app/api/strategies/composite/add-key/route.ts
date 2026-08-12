@@ -11,6 +11,11 @@ import {
   isMt5EnabledServer,
 } from "@/lib/closed-sets";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+import {
+  pgConstraintName,
+  VENUE_IDENTITY_CONSTRAINT,
+  WIZARD_SESSION_CONSTRAINTS,
+} from "@/lib/api/pgConstraintName";
 import { classifyKeyValidationError } from "@/lib/wizardErrors";
 import { scrubSeamError } from "@/lib/seam-redaction";
 // 140.3-13b / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
@@ -402,10 +407,75 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         error.code,
       );
       if (error.code === "23505") {
+        /**
+         * 154-06 / WIZCONT-02 — TWIN-8, CLOSED AT BOTH COPIES.
+         *
+         * This arm and `create-with-key/route.ts`'s were the SAME
+         * undifferentiated 23505 → DRAFT_ALREADY_EXISTS mapping. Fixing only
+         * the instance the bug was reported against is how this repo grows
+         * divergent twins, so the discrimination lands here too — through the
+         * same `pgConstraintName` leaf, so the two copies cannot drift.
+         *
+         * ⭐ WHY THE VENUE ARM IS ALARM-ONLY HERE, AND WHY THAT IS A DECISION
+         * RATHER THAN A GAP. `api_keys_user_exchange_venue_account_uniq` is
+         * UNREACHABLE on this path today: it only fires on a row carrying a
+         * non-NULL `venue_account_id`, `add_wizard_composite_key` does not
+         * write that column (migration 20260812120000 deliberately left the
+         * composite RPC untouched — TWIN-7), and MT5 — the only venue with an
+         * identity to write — cannot be a composite member anyway (the stitch
+         * worker has no mt5 arm; ROADMAP 153.6 records it as out of scope).
+         *
+         * So seeing it here means a PREMISE HAS CHANGED — the composite path
+         * started writing venue identities — and that is worth an alarm, not a
+         * silent 409. ⛔ It deliberately does NOT get create-with-key's
+         * resolve-toward-the-existing-row arm: that arm's whole justification
+         * is a fence this route does not have, and inventing a dedup here
+         * against an unreachable constraint would be shape without a reason.
+         */
+        const constraint = pgConstraintName(error);
+
+        if (
+          constraint !== null &&
+          !WIZARD_SESSION_CONSTRAINTS.has(constraint)
+        ) {
+          // Both the unreachable venue-identity constraint and any other
+          // unrecognised name land here: report the fact that HAPPENED, never
+          // the one that is merely most common. The name comes from `message`,
+          // which Postgres composes from catalog names only, so it is safe to
+          // log and to tag (`details` — which carries the offending row's
+          // values — is never read; see the leaf).
+          console.error(
+            constraint === VENUE_IDENTITY_CONSTRAINT
+              ? "[strategies/composite/add-key] 23505 named the VENUE-IDENTITY constraint, which this path cannot reach today — add_wizard_composite_key has started writing venue_account_id:"
+              : "[strategies/composite/add-key] 23505 named an UNRECOGNISED constraint:",
+            constraint,
+          );
+          captureToSentry(error, {
+            tags: {
+              surface: "strategies-composite-add-key",
+              step:
+                constraint === VENUE_IDENTITY_CONSTRAINT
+                  ? "draft-rpc-venue-identity-unreachable"
+                  : "draft-rpc-unknown-constraint",
+            },
+            extra: { pg_code: error.code, constraint },
+            secrets: [api_key, apiSecretNormalized, passphraseOrNull],
+          });
+          return NextResponse.json(
+            { code: "UNKNOWN", error: "Could not add composite key" },
+            { status: 500, headers: NO_STORE_HEADERS },
+          );
+        }
+
         // The session already holds a SINGLE-KEY draft (api_key_id set) — the
         // composite draft predicate can't match it, so the INSERT trips
         // strategies_user_wizard_session_uniq. Surface it loud (never silently
         // convert a single-key session into a composite).
+        //
+        // ⭐ BYTE-IDENTICAL to the pre-154 body, and it also catches the
+        // no-name-parseable case: an absent constraint name is the UNKNOWN
+        // case, and the honest answer to "we cannot tell" is the behaviour that
+        // already shipped — not a new one invented from an absence.
         return NextResponse.json(
           {
             code: "DRAFT_ALREADY_EXISTS",
