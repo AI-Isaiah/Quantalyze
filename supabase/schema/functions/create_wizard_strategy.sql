@@ -2,14 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260811210000_api_keys_attested_venue.sql
--- ─────────────────── 2. create_wizard_strategy (re-based on 20260602190000)
--- Re-based VERBATIM on the LATEST definition, migration
--- 20260602190000_f6_wizard_session_idempotency.sql:62-157. The ONLY changes
--- are `attested_venue` in the api_keys INSERT column list and `p_exchange` in
--- its VALUES. Everything else — the auth.uid() guards, the 'wizdraft:'
--- advisory-lock idempotency fence, the complete-draft replay, the strategies
--- INSERT — is byte-identical to that body.
+-- source migration: 20260812120000_api_keys_venue_account_id.sql
 CREATE OR REPLACE FUNCTION create_wizard_strategy(
   p_user_id UUID,
   p_exchange TEXT,
@@ -21,7 +14,8 @@ CREATE OR REPLACE FUNCTION create_wizard_strategy(
   p_nonce TEXT,
   p_kek_version INTEGER,
   p_placeholder_name TEXT,
-  p_wizard_session_id UUID
+  p_wizard_session_id UUID,
+  p_venue_account_id TEXT DEFAULT NULL
 )
 RETURNS TABLE(strategy_id UUID, api_key_id UUID)
 LANGUAGE plpgsql
@@ -87,17 +81,24 @@ BEGIN
   -- ever add a separate p_attested_venue, or normalise one column and not the
   -- other, this INSERT will start failing — that is the constraint doing its
   -- job, not a bug to route around.
+  --
+  -- 154 / WIZCONT-02: venue_account_id is stamped here for the same structural
+  -- reason — this DEFINER body is the only writer whose value survives the
+  -- api_keys_scrub_venue_account_id trigger. ⛔ It is NOT coupled to p_exchange
+  -- and must not be: it identifies an ACCOUNT WITHIN a venue, not the venue. It
+  -- is NULL for every venue that exposes no stable non-secret account id, which
+  -- is every ccxt venue today, and the partial index excludes those rows.
   INSERT INTO api_keys (
     user_id, exchange, label,
     api_key_encrypted, api_secret_encrypted, passphrase_encrypted,
     dek_encrypted, nonce, kek_version, is_active,
-    attested_venue
+    attested_venue, venue_account_id
   )
   VALUES (
     p_user_id, p_exchange, p_label,
     p_api_key_encrypted, p_api_secret_encrypted, p_passphrase_encrypted,
     p_dek_encrypted, p_nonce, COALESCE(p_kek_version, 1), TRUE,
-    p_exchange
+    p_exchange, p_venue_account_id
   )
   RETURNING id INTO v_key_id;
 
