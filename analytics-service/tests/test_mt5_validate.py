@@ -376,6 +376,44 @@ def test_capability_two_signal_fail_open_form_no_longer_exists():
 
 
 # --------------------------------------------------------------------------- #
+# classify_mt5_login_error — the IPC-transport code-gate, tested directly
+#
+# Same oracle discipline as the block above: every code and every expected
+# verdict is a LITERAL typed here, never read out of services.mt5_validation.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("code", "detail"),
+    [
+        (-10004, "No IPC connection"),
+        (-10005, "IPC timeout"),
+    ],
+)
+def test_ipc_transport_codes_are_transient_never_wrong_server(code, detail):
+    """⭐ An IPC-transport failure is OUR outage and must NEVER be stamped as the
+    user's input.
+
+    Both codes mean the gateway's terminal bridge is unreachable — -10004 because
+    it was never attached, -10005 because it stopped answering. Both texts contain
+    "ipc", which ``_WRONG_SERVER_TOKENS`` matches, so without the code-gate they
+    classify as ``wrong_server`` — the PERMANENT arm. That is not a cosmetic
+    mislabel: the wizard then shows "We could not find that broker server." and
+    the caller stops retrying, so a VALID key is rejected for good because OUR
+    infrastructure blipped.
+
+    -10005 was the live case (2026-08-12): a wedged gateway terminal returned
+    ``(-10005, 'IPC timeout')`` and the founder's byte-for-byte CORRECT broker
+    server was blamed. It was NOT covered by the original single-code carve-out —
+    hence the parametrize, which keeps the gate from regressing to either code
+    alone.
+    """
+    from services.mt5_validation import classify_mt5_login_error
+
+    assert classify_mt5_login_error(Mt5ClientError(code, detail)) == "transient"
+
+
+# --------------------------------------------------------------------------- #
 # Go-dark gate — no live probe when disabled
 # --------------------------------------------------------------------------- #
 

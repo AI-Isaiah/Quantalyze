@@ -60,6 +60,19 @@ _TRADE_RETCODE_DONE = 10009  # [ASSUMED]
 # resolved against a live master AND investor login.
 _TRADE_RETCODE_TRADE_DISABLED = 10017  # [ASSUMED — documented, unverified live]
 
+# MT5's IPC-transport failure codes — the terminal bridge itself is unreachable,
+# which is OUR infrastructure, never the user's broker server and never their
+# credentials. BOTH carry "ipc" in their text, so both are code-gated in
+# ``classify_mt5_login_error`` BEFORE the token tables below (see there).
+#
+#   * ``-10004`` "No IPC connection" — the bridge isn't attached at all (gateway
+#     down / mid-redeploy).
+#   * ``-10005`` "IPC timeout" — the TIMEOUT sibling: the bridge is attached but
+#     the terminal stopped answering. Observed LIVE on 2026-08-12 against a wedged
+#     gateway terminal, where the wizard told the user "We could not find that
+#     broker server." for a server string that was byte-for-byte CORRECT.
+_IPC_TRANSPORT_CODES: tuple[int, ...] = (-10004, -10005)
+
 # Server / connection / terminal failure tokens — a login error carrying any of
 # these is a wrong-server / bridge problem, NOT a credential problem, so it must
 # NOT blame the user's password. [ASSUMED] token table pending the live spike.
@@ -263,12 +276,15 @@ def classify_mt5_login_error(
     CLEAR auth token then yields ``"auth"``; anything unrecognized degrades to
     ``"transient"`` (which the caller PROPAGATES untouched — never auth-failed,
     never valid). The token tables are [ASSUMED] pending the live spike."""
-    # -10004 "No IPC connection": the terminal bridge isn't attached (gateway down /
-    # mid-redeploy), NOT a wrong broker server. Code-gate it BEFORE the text tokens —
-    # its "ipc" text would otherwise classify as wrong_server and PERMANENTLY reject a
-    # valid key during a transient gateway outage. It is an infra fault → transient
-    # (the caller propagates untouched, never a user-blame stamp).
-    if err.code == -10004:
+    # _IPC_TRANSPORT_CODES — -10004 "No IPC connection" (the terminal bridge isn't
+    # attached: gateway down / mid-redeploy) and its TIMEOUT sibling -10005 "IPC
+    # timeout" (the bridge is attached but the terminal stopped answering; observed
+    # live on 2026-08-12 against a wedged gateway terminal). NEITHER is a wrong
+    # broker server. Code-gate them BEFORE the text tokens — their "ipc" text would
+    # otherwise classify as wrong_server and PERMANENTLY reject a valid key during a
+    # transient gateway outage. Both are infra faults → transient (the caller
+    # propagates untouched, never a user-blame stamp).
+    if err.code in _IPC_TRANSPORT_CODES:
         return "transient"
     text = str(err).lower()
     if any(tok in text for tok in _WRONG_SERVER_TOKENS):
