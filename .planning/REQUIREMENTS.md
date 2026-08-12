@@ -903,6 +903,100 @@ cannot be taken without the caveat:
   `EXPECTED_FINALIZE_REJECTION_SITES` STAYS 32 — that it does not move is the proof this is a fix,
   not an addition. `KNOWN_FINALIZE_CODES` gains the member in the SAME commit the route emits it.
 
+### CONNECT — the venue the server validated is the venue the server writes (minted at Phase 156 planning, 2026-08-13)
+
+> Closes the **PARITY-04 `threat_flag: deferred-control`** shipped live on PROD in PR #675
+> (CR-01 remedy **(a)** — the connect-flow refactor both `20260810120000` and `20260811210000`
+> defer). ⛔ **Two landings, not one.** Both single-migration orderings produce a total
+> connect-a-key outage window (`156-RESEARCH.md` "Deploy order"), so the phase ships as
+> **PR A** (service-role writer + `GRANT EXECUTE … TO service_role`, `authenticated`'s grant
+> left standing) and **PR B** (`REVOKE … FROM authenticated`, merged only after PR A's route is
+> verified live on PROD). **CONNECT-01 does not close until PR B.**
+>
+> Sub-clauses (`-01b`, `-01c`, `-02b`, `-03b`) are parts of their parent ID, not separate IDs.
+> The five IDs below are the complete minted set.
+
+- [ ] **CONNECT-01** *(SC1 — the RPC door)*: A caller holding a valid session and the
+  server-minted ciphertext cannot set `attested_venue` by any route — not by client INSERT
+  (closed by 153.6's scrub trigger) and **not by calling either wizard RPC directly over
+  PostgREST**. `authenticated` holds no `EXECUTE` on `create_wizard_strategy` or
+  `add_wizard_composite_key`; the call is refused with SQLSTATE **`42501`** and **no row is
+  minted**. Proven by an INVERTED assertion 5d, which today fails *if the door is shut*.
+  **-01b:** the identical assertions exist for the composite twin (new 5f/5g) — 5d alone closes
+  one of two identical doors. **-01c (anti-vacuity + outage guard):** `service_role` **HAS**
+  `EXECUTE` on both, and a privileged call SUCCEEDS and stores `attested_venue = exchange` — a
+  negative-only assertion also passes on a database where the function was dropped.
+  ⛔ **Green-CI trap:** the whole 5a–5e block is gated on
+  `col_description(api_keys.attested_venue) LIKE '%20260811210000%'`
+  (`test_api_keys_exchange_not_user_writable.sql:242-253`). SC5 re-stamps that comment; if the
+  re-stamp drops the substring the block falls to `RAISE NOTICE 'SKIP (5)'` with exit code 0.
+  Any re-stamp preserves `20260811210000`, adds the new migration id, and both markers carry a
+  5a-shaped positive control.
+
+- [ ] **CONNECT-02** *(SC2 — the trace)*: `attested_venue` is written from a venue **this server
+  observed a successful read-only authentication at**, traced end to end. ⚠️ **The ROADMAP's
+  stated trace is through the wrong route:** the wizard never touches
+  `/api/keys/validate-and-encrypt`. `ConnectKeyStep.tsx:787` → `POST /api/strategies/create-with-key`
+  and `MultiKeyConnectStep.tsx:1195` → `POST /api/strategies/composite/add-key`; each route runs
+  `isSupportedExchange` → `validateKey(exchangeNormalized)` → `encryptKey(exchangeNormalized)` →
+  the RPC inside ONE server request under `withAuth`. `/api/keys/validate-and-encrypt` is a
+  **sibling** surface whose three client-INSERT consumers land `attested_venue = NULL` ⇒ PROBED
+  by design — ⛔ **do not change that**, assertion 5c asserts that INSERT still SUCCEEDS.
+  **-02b:** a structural CI invariant makes "the route was rewired" falsifiable — neither wizard
+  RPC name may be reached from a user-scoped client in either route file.
+  ⛔ **The honest ceiling, to be written and not exceeded:** "the venue is the one this server
+  observed a successful read-only authentication at", **never** "the venue cannot be forged".
+  Any server route holding `createAdminClient()` can still pass any uid — the standing
+  `service_role` trust boundary (ADR-0001/ADR-0003).
+
+- [ ] **CONNECT-03** *(SC3 — the wizard still works, and the ownership check survives)*: The
+  wizard works end to end for every venue, single-key **and** composite. ⚠️ Both RPCs need the
+  user-scoped client today *because* their `auth.uid()` guards demand it; a service-role writer
+  makes `auth.uid()` NULL, so the guard cannot be kept and **must not be relaxed**.
+  ⛔ **Trap B (the failure this requirement exists to prevent):**
+  `IF v_auth_uid IS NOT NULL AND v_auth_uid <> p_user_id THEN RAISE` is a **permanent silent
+  no-op** under `service_role` — the ownership check vanishes with no error and no test failure.
+  The final bodies contain **zero** occurrences of `auth.uid()`, asserted structurally from
+  `pg_get_functiondef` by both the migration's post-verify and an outside canary.
+  ⛔ **Trap C:** `current_user` inside a SECDEF body is the function **owner**, so a
+  `current_user` role test always passes — use `auth.role()`.
+  **-03b:** the ownership binding moves **entirely to the route** (`p_user_id` is `withAuth`'s
+  `getUser()`-verified `user.id`, never a request-body field), which makes the route-level unit
+  assertion load-bearing in a way it was not before, and makes `test_wizard_composite_fence.sql`
+  Part 3b (`:167-182`) a **vacuous** green test pinning a deleted control unless it is re-cut to
+  the new boundary.
+  ⛔ **Pitfall 3:** `service_role` has **no** `EXECUTE` on either RPC today and is not a member
+  of `authenticated` — omitting `GRANT EXECUTE … TO service_role` ships a total connect outage.
+  ⛔ **Fail-closed:** a missing `SUPABASE_SERVICE_ROLE_KEY` answers `SEAM_MISCONFIGURED` at 503
+  (already in the code union — no new code is minted) and **never** falls back to the
+  user-scoped client; that fallback re-opens the door and makes every gate here pass vacuously.
+
+- [ ] **CONNECT-04** *(SC4 — the fence stays)*: `CHECK (attested_venue IS NULL OR attested_venue =
+  exchange)` (`api_keys_attested_venue_matches_exchange`) is **KEPT**, not removed as redundant,
+  and re-asserted as present **and** `convalidated` by both new migrations' post-verify. It is the
+  fence that stops a *future* writer letting the two columns diverge, independent of who does the
+  writing. Assertion 5e (SQLSTATE `23514` discipline) is untouched.
+
+- [ ] **CONNECT-05** *(SC5 — the prose stops under-claiming, without over-claiming)*: Every claim
+  153.6 had to weaken is re-strengthened to exactly what is now true — the `attested_venue` column
+  comment, both `COMMENT ON FUNCTION` texts, `finalize-wizard/route.ts:1213-1220` + its test
+  docblock, `create-with-key/route.ts:772-780` and `:102-107` — and the PARITY-04
+  `threat_flag: deferred-control` is cleared. ⛔ `20260811210000` §1b **cannot be edited** (applied
+  migration, `migration-reviewer` invariant 11) — it is superseded by name in the new migration's
+  header. ⚠️ **`venue_account_id` is RESTATED, not closed:** Phase 156 closes its *reachability*
+  half ("only the server can pass it" becomes true); the value still has **no in-database oracle**
+  ("the venue confirmed it" stays false). ⚠️ **IN-04 is restated accurately:** the RPCs run as
+  their **owner** (`postgres`), not as `service_role`, so the scrub trigger's `service_role`
+  allowlist entry is **still unused** — Phase 156 does not become its beneficiary.
+
+**Explicitly OUT of scope** (recorded so they are not re-proposed): the `asset_class` stamp's
+`apiKeyExchange` → `attestedVenue` swap (needs an oracle over √365 vs √252 this phase will not
+have); `add_wizard_composite_key`'s absence from `MUTATING_RPC_NAMES` (a pre-existing
+audit-coverage gap — **logged to `TODOS.md`, not fixed here**, Rule 3); `finalize_wizard_strategy`
+(a third wizard RPC with `authenticated` EXECUTE that writes no `api_keys` row); any backfill or
+re-attestation of existing rows (`20260811210000` WR-01 — an unbounded re-backfill retro-attests
+exactly the rows the trigger deliberately scrubbed).
+
 ### STALE — No stale screens (founder call 2026-08-04: "no stale screens")
 
 - [x] **STALE-01**: A wizard screen never shows a state the backend has already left. Two instances
@@ -1280,6 +1374,11 @@ Populated during roadmap creation.
 | PARITY-03 | Phase 153.6 (v1.17) | ✅ Complete (plan 153.6-02) — deadline 190 500/100 500 on both arms via the arm-agnostic `BREAKER_STORE_WORST_CASE_FAILING_MS = 25 500`; state-quantified oracle "the browser is the last party to give up" in `seam-budgets.invariant.test.ts`, observed RED on both arms pre-fix and RED under the closed-only structural mutation; blind pin re-cut (repo grep for the literal: 1 → 0) |
 | PARITY-04 | Phase 153.6 (v1.17) | 🟢 Code complete + TEST-applied (plans 153.6-03/04, hardened by 153.6-07/09). DB half: `attested_venue`, two re-based SECDEF RPCs, SECURITY INVOKER scrub trigger, `CHECK (attested_venue IS NULL OR attested_venue = exchange)`, date-set census pin, dated-cutoff backfill. Route half: both probe-gate arms read the attestation, no `?? exchange` fallback on the gate path. **Applied to TEST `qmnijlgmdhviwzwfyzlc` 2026-08-12, byte-identical to the file:** 2438 rows → 2320 attested / 118 NULL (all post-cutoff, correctly probed) / 0 pre-cutoff NULL / 0 divergent; CHECK `convalidated=true`; trigger `prosecdef=false`; both RPCs `authenticated`=true `anon`=false. Both gate markers present ⇒ SQL assertions 2/3 and 5a–5e now ARM instead of SKIP. **Three independent migration audits; round 3 CLEAR (0 findings)** with a mutation battery proving the SQL test catches all five mutations that survive the migration's own `$verify$`. ⛔ ACCEPTED RESIDUAL (`threat_flag: deferred-control`): the wizard RPCs still validate nothing and still hold `authenticated` EXECUTE, so a caller can mint an `mt5`-attested key and skip the probe — at the cost of breaking their own key's ingestion. That defence holds ONLY while every probe-exempt venue is unsyncable; adding a syncable venue to `scopeProbeSupported:false` (RESEARCH names sFOX) makes the forgery free and requires remedy (a) — service-role writer + withdraw `authenticated` EXECUTE — FIRST. Goes fully ✅ when CI observes assertion 5 green. |
 | PARITY-05 | Phase 153.6 (v1.17) | ✅ Complete (plan 153.6-06) — `KEY_SCOPE_CHECK_UNREADABLE` minted and wired at all four sites in one commit; RED observed first (5 failed). Both pins re-cut 74 → 75, `.toBe(2)` count and regex shape untouched. `EXPECTED_FINALIZE_REJECTION_SITES = 32` / `KNOWN_CODELESS = 3` / `expectedSites: 29` grep-proven UNMOVED — the D-18 proof this was a fix, not an addition. ⚠️ ledger row E alone reds only `route.test.ts`, which would have licensed the weaker T-153.6-E2 shortcut; rows E-inverse and E-roster were added to close that |
+| CONNECT-01 | Phase 156 (v1.17) | Pending — **closes only at PR B.** `authenticated` EXECUTE withdrawn from both wizard RPCs; assertion 5d INVERTED (42501 + no row minted) and the composite twin 5f/5g minted, both with `service_role`-positive anti-vacuity controls. ⛔ Green-CI trap: the 5a–5e block is gated on a bare `LIKE '%20260811210000%'` on the `attested_venue` column comment — an SC5 re-stamp that drops the substring turns the whole block into `RAISE NOTICE 'SKIP (5)'` at exit code 0 |
+| CONNECT-02 | Phase 156 (v1.17) | Pending — ⚠️ the ROADMAP's SC2 trace is through the WRONG route: the wizard never touches `/api/keys/validate-and-encrypt` (that is a sibling surface for three client-INSERT components whose rows land `attested_venue = NULL` ⇒ PROBED by design, pinned by assertion 5c). The real trace is `ConnectKeyStep`/`MultiKeyConnectStep` → `create-with-key`/`composite/add-key` → `validateKey` → `encryptKey` → the RPC, all in ONE server request under `withAuth`. Honest ceiling: "the venue this server observed a successful read-only authentication at", never "cannot be forged" |
+| CONNECT-03 | Phase 156 (v1.17) | Pending — the ownership check cannot survive in the DB (`auth.uid()` is NULL under `service_role`) and must NOT be relaxed (Trap B is a permanent silent no-op); it moves entirely to the route, which makes `p_user_id === user.id` the load-bearing assertion and `test_wizard_composite_fence.sql` Part 3b vacuous until re-cut. ⛔ `GRANT EXECUTE … TO service_role` is mandatory or connect-a-key is a total outage |
+| CONNECT-04 | Phase 156 (v1.17) | Pending — `api_keys_attested_venue_matches_exchange` KEPT and re-asserted present + `convalidated` by both migrations' post-verify; assertion 5e untouched |
+| CONNECT-05 | Phase 156 (v1.17) | Pending — closes the PARITY-04 `threat_flag: deferred-control`. ⛔ `20260811210000` §1b is superseded by name in the new migration header, never edited (invariant 11). ⚠️ `venue_account_id` is RESTATED not closed (reachability half only); IN-04 stays UNUSED (the RPCs run as owner, not `service_role`) |
 | STALE-01 | Phase 154 (v1.17) | ✅ Done (154-01 investigation → 154-04 + 154-08 fix) — root cause **ESTABLISHED before planning** per this row's own gate: **M2(ii)**, the client coerced a zero-rows read to `"pending"` (`useStrategySyncPoller.ts:228-229`) so the loop never saw the terminal state; M2(i)/M3/M4 ruled out by PROD evidence (every child job `done`, `attempts=1`, `last_error=null`). Cause is client-side ⇒ the Python/SQL arm (154-07) is a recorded NO-OP, not a bandaid. Fix: `?? "pending"` removed, `sync-progress` widened, both `isComposite` gates removed as a class, `queued:false` honoured, single-key repoll twin added, amber-not-red mid-re-derive. T1/T1b/T2b/T3 green with oracles byte-unchanged (`stale.runtime.test.tsx` zero-line diff). ⚠️ No browser pass on the amber state; SQL gate authored but unrun |
 | MT5-GOAL-01 | Phase 155 (v1.17 — umbrella acceptance gate) | **Umbrella** — no implementation work of its own; MT5 'works' only when SCEN-01 + OWN-02 close. Exists so `MT5-05 ✅` is never read as 'MT5 works' |
 | SCEN-01 | **Phase 147 (v1.17)** | ⛔ **HIGHEST** — ⭐census corrected: `daily_returns` has **NO production writer**; **0 of 27 REAL** strategies populated vs 15/15 demo seeds. Root-caused: the READER is wrong; use the existing `resolveDailyReturnSeries`. ⚠️`returns_series` is a WEALTH INDEX — must be DIFFERENCED, never forwarded raw |
