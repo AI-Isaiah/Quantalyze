@@ -2001,15 +2001,24 @@ function installGateSupabaseMock(opts: {
                 ? { data: { exchange: "binance" }, error: null }
                 : {
                     // MT5-11/12 — the gate reads the completeness verdict off
-                    // this row. A null verdict is served as an ABSENT ROW (what
-                    // this double always did), not as a row with a null column:
-                    // production coerces both to null, and keeping the absent
-                    // shape leaves every metric column exactly as unset as
-                    // before.
-                    data:
-                      seriesCompleteness === null
-                        ? null
-                        : { series_completeness: seriesCompleteness },
+                    // this row.
+                    //
+                    // ⚠️ A NULL VERDICT USED TO BE SERVED AS AN ABSENT ROW, on
+                    // the reasoning that "production coerces both to null" so
+                    // the shapes were interchangeable. For the GATE they are.
+                    // For the arm that runs BEFORE the gate they are not, and
+                    // the difference is not observable from here: the status
+                    // poll above answers `complete` for this same
+                    // `strategy_analytics` row, and PostgREST cannot report one
+                    // row as present to one reader and absent to another. The
+                    // absent shape described an impossible world, and a guard
+                    // keyed on `analytics != null` read it as "nothing ever
+                    // computed" — passing here while looping forever in
+                    // production, where the row is INSERTed off the
+                    // `compute_jobs` aggregate alone. The row is now present
+                    // with an unset verdict, which is what a strategy no
+                    // producer has stamped actually looks like.
+                    data: { series_completeness: seriesCompleteness },
                     error: null,
                   },
             ),
@@ -2054,7 +2063,30 @@ describe("[140.4-11] SyncPreviewStep — the destructive control must be EARNED"
     baseProps.onComplete = vi.fn();
     baseProps.onTryAnotherKey = vi.fn();
     fetchImpl = async () => new Response(JSON.stringify({}), { status: 200 });
-    vi.spyOn(globalThis, "fetch").mockImplementation(() => fetchImpl());
+    // The sync-progress piggyback is answered with the real projection, ahead of
+    // the per-scenario `fetchImpl` and without changing its signature. These
+    // cases drive strategies whose compute chain has FINISHED — that is what
+    // makes their zero counts a VERDICT rather than a hole mid-re-derive, and
+    // it is the datum the single-key arm now requires before it may refuse.
+    // Left as the scenario's `{}` body it is not the projection at all, so the
+    // client discards it and the arm sees no evidence either way.
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = typeof input === "string" ? input : String(input);
+      if (url.includes("/sync-progress")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              jobStatus: "done",
+              stalled: false,
+              memberProgress: [],
+              degraded: false,
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      return fetchImpl();
+    });
   });
 
   afterEach(() => {

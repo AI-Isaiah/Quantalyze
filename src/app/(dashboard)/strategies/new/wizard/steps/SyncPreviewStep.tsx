@@ -214,6 +214,32 @@ function isJobInFlight(jobStatus: StitchJobStatus | null): boolean {
 }
 
 /**
+ * 156-PRE / TWIN-1b — POSITIVE evidence that every job this strategy enqueued
+ * has stopped working. It is deliberately NOT `!isJobInFlight(...)`: the two
+ * differ on exactly one member, `null`, and that member is the whole reason
+ * this predicate exists rather than a negation at the call site.
+ *
+ * `null` means "zero `compute_jobs` rows are VISIBLE" (154-04) — which the
+ * client reads not only when nothing was ever enqueued but also on every tick
+ * before the cosmetic sync-progress piggyback has answered (it is issued
+ * fire-and-forget from `onStatus`, so the FIRST terminal poll almost always
+ * runs with `syncProgress` still null), and whenever that route is degraded,
+ * 429-ing or dead. Absence of the datum is therefore not evidence that work
+ * finished — the same reading this file already takes at the poller's
+ * absent-row arm ("ABSENCE IS NOT A VALUE") and at the SF-3 degrade guard ("a
+ * couldn't-read blip is not evidence of not stalled").
+ *
+ * So this answers TRUE only on a status that was actually read back and
+ * actually means finished. A caller that must not act without evidence gets to
+ * ask for evidence; `isJobInFlight` still answers the render's different
+ * question (may we CLAIM a recomputation is happening?), where the safe
+ * default is the opposite one.
+ */
+function jobsHaveFinished(jobStatus: StitchJobStatus | null): boolean {
+  return jobStatus !== null && FINISHED_JOB_STATUSES.includes(jobStatus);
+}
+
+/**
  * A single composite member key, ordered by `seq`. Sourced from
  * `strategy_keys` (owner-RLS) with the `api_keys(exchange, label)` embed
  * (null-safe — the embed can be absent if the join is unavailable).
@@ -502,10 +528,23 @@ export function SyncPreviewStep({
   const [computationStatus, setComputationStatus] = useState<string | null>(null);
   // PROG-02/03 — the last GET /api/strategies/[id]/sync-progress projection.
   // COSMETIC: piggybacked on the poll tick, fail-open (never blocks the
-  // authoritative strategy_analytics poll). Composite-only; null on single-key.
+  // authoritative strategy_analytics poll).
+  //
+  // ⚠️ "Composite-only; null on single-key" USED TO BE THE REST OF THIS LINE and
+  // has not been true since 154-08/TWIN-5 deleted the `if (isComposite)` around
+  // the piggyback fetch: single-key strategies report `jobStatus` too (154-04
+  // widened the route to the latest job of ANY kind). Left stale, it reads as a
+  // licence to treat a null on the single-key arm as "expected" rather than as
+  // the not-yet-answered / degraded reading `jobsHaveFinished` turns on.
   const [syncProgress, setSyncProgress] = useState<SyncProgressResponse | null>(
     null,
   );
+  // 156-PRE — the SAME projection, for the readers that cannot use the state.
+  // The RENDER reads `syncProgress` (it must, or it would not re-render); the
+  // async poll closures read this ref, because a value captured before a commit
+  // is stale by construction there. Both are written together at the one site
+  // that owns the decision (the piggyback handler), so they cannot diverge.
+  const syncProgressRef = useRef<SyncProgressResponse | null>(null);
   // PROG-03 — retry CTA in-flight guard (disables the button, prevents a
   // double re-enqueue). Server-side idempotency is the real defense.
   const [retrying, setRetrying] = useState(false);
@@ -1004,14 +1043,27 @@ export function SyncPreviewStep({
           // or flip `stalled` to false: a couldn't-read blip is not evidence
           // of "not stalled". Keep last-known state until a REAL, non-empty
           // read arrives. A non-empty read (real progress) always replaces.
-          setSyncProgress((prev) => {
-            const incomingEmpty =
-              json.degraded === true || json.memberProgress.length === 0;
-            const havePopulated =
-              prev != null && prev.memberProgress.length > 0;
-            if (incomingEmpty && havePopulated) return prev;
-            return json;
-          });
+          //
+          // 156-PRE — THE DECISION IS TAKEN HERE AND MIRRORED INTO A REF rather
+          // than left inside a `setSyncProgress(prev => …)` updater, because
+          // `onTerminal` (an async closure the poller invokes from a timer) must
+          // read this datum too and CANNOT read it from render state: the whole
+          // poll ladder runs inside one `act()`/tick sequence, so a closure
+          // captured before a commit still sees the value from its own render.
+          // Measured, not assumed — the guard below logged `syncProgress: null`
+          // on all six terminal ticks of a run whose RENDER had the projection.
+          // This is the same hazard `useStrategySyncPoller` documents for its
+          // own callbacks ("the callbacks live in refs read from inside the
+          // timer callbacks"), reaching one datum further. `prev` now comes from
+          // the ref, which is strictly FRESHER than the updater's argument, so
+          // the SF-3 semantics above are unchanged.
+          const prev = syncProgressRef.current;
+          const incomingEmpty =
+            json.degraded === true || json.memberProgress.length === 0;
+          const havePopulated = prev != null && prev.memberProgress.length > 0;
+          const next = incomingEmpty && havePopulated ? prev : json;
+          syncProgressRef.current = next;
+          setSyncProgress(next);
         })
         .catch((progressErr) => {
           console.warn(
@@ -1543,14 +1595,42 @@ export function SyncPreviewStep({
           // trades-backed strategy legitimately has zero daily-return rows, and
           // repolling those would hang every Binance/Bybit onboarding forever.
           // The guarded reading is the one that is INCOHERENT rather than
-          // merely empty: a producer wrote an analytics row for this strategy
-          // (so a computation ran to completion) and yet BOTH of the sources
-          // that computation could have run on measure zero. A completed
-          // producer had data; the one process that manufactures this reading
-          // is the delete window. A strategy that genuinely has nothing has no
-          // analytics row to read, and still earns its honest refusal below —
-          // which `SyncPreviewStep.readfailure.runtime.test.tsx`'s
-          // genuinely-empty counterpart holds down.
+          // merely empty: BOTH of the sources a computation could have run on
+          // measure zero, and yet no producer has reported that it is finished.
+          // The one process that manufactures that reading is the delete window.
+          //
+          // ⚠️ THE THIRD CONJUNCT WAS `analytics != null`, AND ITS PREMISE WAS
+          // FALSE. It stood on "a strategy that genuinely has nothing has no
+          // analytics row to read", but nothing in the system upholds that:
+          // the all-rows-`done` branch of `sync_strategy_analytics_status`
+          // (migration `20260707120000_sync_status_preserve_warnings`) INSERTs
+          // the row from the `compute_jobs` aggregate ALONE — all rows done →
+          // 'complete' — and never consults a trade count. Key-mode is exactly
+          // the case that reaches it with nothing: `run_derive_broker_dailies_job`'s
+          // <2-day branch returns DONE *without* stamping `strategy_analytics`
+          // (`job_worker.py`, "key-mode insufficient-history, no strategy_analytics
+          // stamp"), unlike its strategy-mode sibling, which stamps a terminal
+          // 'failed' precisely so this poller "reaches a gate instead of spinning
+          // forever on a never-arriving 'complete'". The wizard's unified-backbone
+          // path is key-mode, so it had no such stamp — and since 154's poller
+          // returns early on an ABSENT row, `onTerminal` cannot even fire without
+          // one. The conjunct was therefore TRUE at every site that could evaluate
+          // it: the guard collapsed to two zero-counts and repolled forever, with
+          // `showRecomputing` false (the jobs ARE done), so the screen showed the
+          // in-flight ladder for the whole patience window and then a Retry that
+          // re-ran the same empty sync. Pre-154 this state returned
+          // INSUFFICIENT_TRADES at once — the case named "FIX 1 does not fire
+          // when there is no series to have provenance ABOUT" in
+          // `strategyGate.test.ts` still pins that verdict for the same inputs.
+          //
+          // What actually separates the two is whether a producer is still
+          // WORKING, so that is what is asked — of `jobsHaveFinished`, NOT of
+          // `!isJobInFlight`. Requiring positive finished-evidence keeps the
+          // no-evidence reading (`jobStatus === null`: the piggyback has not
+          // answered yet, or its route is degraded) on the repoll side, which is
+          // both the conservative direction and the one T3/T3b pin: they drive
+          // this state with NO in-flight datum and a fix that repolled only on a
+          // reported-running job would redden them.
           //
           // The loop is NOT bounded here — the SCREEN is (UI-SPEC state 3): the
           // amber "recomputing" block renders while the in-flight datum agrees
@@ -1558,7 +1638,9 @@ export function SyncPreviewStep({
           // clock surfaces the interrupted banner and its idempotent Retry.
           // Bounding the repoll with a count would be a new threshold.
           const seriesMayBeMidReDerive =
-            tradeCount === 0 && csvRowCount === 0 && analytics != null;
+            tradeCount === 0 &&
+            csvRowCount === 0 &&
+            !jobsHaveFinished(syncProgressRef.current?.jobStatus ?? null);
           setSeriesRecomputing(seriesMayBeMidReDerive);
           if (seriesMayBeMidReDerive) {
             // A6, second site — see the composite guard's note. This return is

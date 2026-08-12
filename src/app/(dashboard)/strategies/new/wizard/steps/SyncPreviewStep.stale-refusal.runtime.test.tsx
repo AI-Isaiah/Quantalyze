@@ -590,6 +590,68 @@ describe("[154-01 / STALE-01b] a series being re-derived is not a verdict about 
   });
 
   // ═════════════════════════════════════════════════════════════════════════
+  // T3c — THE OTHER DIRECTION. EXPECTED RED BEFORE THE `jobsHaveFinished` FIX.
+  //
+  // T3 pins that an empty series must not become a verdict WHILE work may still
+  // be running. This pins the converse, and the pair is the discrimination: the
+  // SAME zero-trade, zero-series, terminal-status reading, differing ONLY in
+  // the in-flight datum, must reach the OPPOSITE answers. Without it, "never
+  // refuse" satisfies T3 forever and the guard has no floor.
+  //
+  // The state driven here is a genuinely empty account, and it is REACHABLE —
+  // which is precisely what the guard's original third conjunct
+  // (`analytics != null`) denied. `run_derive_broker_dailies_job`'s <2-day
+  // branch returns DONE for key-mode WITHOUT stamping `strategy_analytics`, but
+  // `sync_strategy_analytics_status` INSERTs the row anyway off the
+  // `compute_jobs` aggregate alone (all done → 'complete'), so the row exists
+  // with no trades behind it. The wizard's unified-backbone path is key-mode.
+  //
+  // ⚠️ THE MOCK MUST NOT CONTRADICT ITSELF. The status poll and the heavy read
+  // hit the SAME `strategy_analytics` row for the SAME `strategy_id`; a fixture
+  // answering "complete" to one and "no row" to the other describes a state
+  // PostgREST cannot produce, and a guard keyed on the row's existence passes
+  // it while failing in production. `installClient` answers both from the one
+  // row, which is why this case can bite at all.
+  // ═════════════════════════════════════════════════════════════════════════
+  it("T3c: a genuinely empty account whose jobs have FINISHED gets its honest refusal, not an endless repoll", async () => {
+    const { text, container } = await renderAndSettle(HEAL_DELETE_ROWS, false, {
+      // The producer reported itself finished. Nothing is coming: this zero is
+      // the answer, not a hole in the middle of one.
+      jobStatus: "done",
+    });
+
+    expect(
+      text,
+      `A zero-trade, zero-series strategy whose compute chain has FINISHED was ` +
+        `not told anything. The wizard kept polling a result that will never ` +
+        `change, showing the in-flight ladder ("Usually takes 15-30 seconds") ` +
+        `for the whole patience window and then offering a Retry that re-runs ` +
+        `the same empty sync. The pre-154 behaviour was an immediate ` +
+        `INSUFFICIENT_TRADES (strategyGate.test.ts:338-350) and it was right.`,
+    ).toContain(RENDERED_CODE(CODE_INSUFFICIENT_TRADES));
+
+    // STRUCTURAL, matching T3's fence in the opposite direction: a verdict was
+    // actually rendered, not merely a matching string somewhere in the DOM.
+    expect(container.querySelector("[data-error-code]")).not.toBeNull();
+
+    // The funnel must carry it too — the render and the event are two claims,
+    // and a refusal the funnel never hears about is a blind spot on the exact
+    // onboarding step this phase is about.
+    expect(
+      wizardErrorEvents().length,
+      `The refusal rendered but no wizard_error was reported, so the funnel ` +
+        `cannot see accounts that fail here.`,
+    ).toBeGreaterThan(0);
+
+    // …and it did NOT come dressed as a recomputation. `showRecomputing`
+    // already required the in-flight datum, so an amber block here would mean
+    // the two halves of State Contract 3 had drifted apart again.
+    expect(
+      container.querySelector('[data-testid="wizard-sync-recomputing"]'),
+    ).toBeNull();
+  });
+
+  // ═════════════════════════════════════════════════════════════════════════
   // 154-08 — WHAT THE ARM RENDERS INSTEAD (UI-SPEC State Contract 3).
   //
   // T3 above pins only that a terminal red refusal is the WRONG answer; the
