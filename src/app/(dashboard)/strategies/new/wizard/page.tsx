@@ -68,8 +68,22 @@ export default async function WizardPage({ searchParams }: WizardPageProps) {
   // Phase 154 / WIZCONT-01: the query itself now lives in
   // `@/lib/wizard/draft-query` so this page and the overlay's route handler
   // (`/api/strategies/wizard-draft`) cannot drift apart — one shape, two
-  // callers. A read error still degrades to "no draft" (the helper RETURNS the
-  // error rather than throwing).
+  // callers.
+  //
+  // ⚠️ The helper has TWO error postures, and this page must handle both. The
+  // main select RETURNS `{ error }` (`draft-query.ts:156`), but an UNKNOWABLE
+  // draft kind — a `strategy_keys` count fault, or a null count — THROWS
+  // (`draft-query.ts:172`, `:106`). The route-handler twin has always wrapped
+  // the call in try/catch and says so at its catch arm; this page did not, so
+  // a transient count fault replaced the ENTIRE wizard with the error boundary
+  // while the overlay serving the same helper degraded politely. An earlier
+  // version of this comment asserted the helper "RETURNS the error rather than
+  // throwing" — that was true of one path and false of the other.
+  //
+  // Both callers now fail the same way: no draft offered, wizard still usable.
+  // Failing closed is the right posture (a draft whose branch cannot be
+  // established must not be offered on a GUESSED branch), but failing closed is
+  // not the same as failing loudly at the user.
   //
   // Phase 154 / WIZCONT-01: the helper's branch-matching rule is APPLIED here.
   // `?source=csv` and the API branch are two different flows, and a draft is
@@ -77,7 +91,20 @@ export default async function WizardPage({ searchParams }: WizardPageProps) {
   // the CSV branch would resume the user into a step their upload cannot feed.
   // The rule is IMPORTED, never re-derived: `api_key_id === null` alone cannot
   // tell a CSV draft from a composite one (A4 / Pitfall W-2).
-  const { draft, kind } = await readLatestWizardDraft(supabase, user.id);
+  let draft: Awaited<ReturnType<typeof readLatestWizardDraft>>["draft"] = null;
+  let kind: Awaited<ReturnType<typeof readLatestWizardDraft>>["kind"] = null;
+  try {
+    ({ draft, kind } = await readLatestWizardDraft(supabase, user.id));
+  } catch (err) {
+    // Never surface the raw message — it can carry internal detail (H-0305),
+    // and this is a Server Component, so an uncaught throw here is the whole
+    // page. Degrade to "no draft": the wizard still renders and the user can
+    // start fresh, exactly as the overlay does on the same fault.
+    console.error(
+      "[strategies/new/wizard] draft read failed; rendering without a draft:",
+      err instanceof Error ? err.message : "Draft read failed",
+    );
+  }
   const draftIsOnThisBranch =
     draft !== null && kind !== null && draftMatchesSource(kind, source);
   const initialDraft = draftIsOnThisBranch ? draft : null;
