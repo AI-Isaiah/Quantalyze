@@ -500,6 +500,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ### Roadmap Evolution
 
+- Phase 156 added after Phase 155: CONNECT-REFACTOR — service-role writer + withdraw `authenticated` EXECUTE, closing the CR-01 deferred-control residual shipped live in 153.6. ⛔ sFOX go-live PULLS IT FORWARD (the residual's defence expires when a syncable venue joins scopeProbeSupported:false).
 - Phase 140.1 inserted after Phase 140: PYAPI — Python service contract, status attributability & limiter identity (URGENT)
 - Phase 140.2 inserted after Phase 140: SEAMCORE — Seam core & breaker correctness + harness integrity (URGENT)
 - Phase 140.3 inserted after Phase 140: SEAMUX — Client & wizard seam error surface (URGENT)
