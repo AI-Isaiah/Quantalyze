@@ -146,6 +146,33 @@ function stitchRow(
   };
 }
 
+/**
+ * A NON-stitch job row (`process_key_long`, `sync_trades`, …) as
+ * `get_user_compute_jobs` returns it. The single-key wizard's jobs are all of
+ * these kinds — which is exactly why the route, filtering to `stitch_composite`,
+ * answered IDLE for every single-key strategy that ever had a job in flight.
+ */
+function otherKindRow(
+  kind: string,
+  over: Partial<{
+    status: string;
+    claimed_at: string | null;
+    created_at: string;
+    metadata: Record<string, unknown> | null;
+  }> = {},
+) {
+  return {
+    id: "33333333-3333-3333-3333-333333333333",
+    strategy_id: TEST_STRATEGY_ID,
+    kind,
+    status: over.status ?? "running",
+    claimed_at: over.claimed_at ?? ago(30_000),
+    created_at: over.created_at ?? "2026-07-12T11:50:00.000Z",
+    updated_at: NOW_ISO,
+    metadata: over.metadata === undefined ? {} : over.metadata,
+  };
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 describe("GET /api/strategies/[id]/sync-progress", () => {
@@ -557,6 +584,91 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
     });
     expect(errSpy).toHaveBeenCalled();
     errSpy.mockRestore();
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // 154-04 — BYTE-IDENTITY PINS, WRITTEN AND OBSERVED GREEN *BEFORE* THE
+  // KIND-FILTER WIDENING.
+  //
+  // Plan 154-04 widens this route so a SINGLE-KEY strategy can finally see that
+  // it has a job in flight (today every single-key caller gets IDLE, which is
+  // why the wizard had no way to tell "still working" from "nothing running").
+  // The widening is only safe if composite behaviour does not move, and the way
+  // to know that is to measure composite behaviour first, on the UNMODIFIED
+  // route, and to spell the answer out as bytes rather than as a shape.
+  //
+  // These two cases were added in their own commit and observed green against
+  // the route as it stood. If the widening moves a composite response by so much
+  // as a key order, they redden.
+  // ═══════════════════════════════════════════════════════════════════════
+  it("PIN-COMPOSITE-BYTES: the composite response is byte-identical (pinned pre-widening)", async () => {
+    rpcResult.data = [
+      stitchRow({
+        status: "running",
+        metadata: {
+          member_progress_at: ago(30_000),
+          member_progress: [
+            { seq: 1, exchange: "deribit", label: "D", status: "in_process" },
+          ],
+        },
+      }),
+    ];
+    const res = await call(TEST_STRATEGY_ID);
+    const body = await res.json();
+    // Hand-typed serialization: pins the VALUES *and* the key order, which a
+    // `toEqual` would not. `{jobStatus, stalled, memberProgress}` is the
+    // construction order at route.ts:233 and `{seq, exchange, label, status}` the
+    // projection order at :206-217.
+    expect(JSON.stringify(body)).toBe(
+      '{"jobStatus":"running","stalled":false,"memberProgress":' +
+        '[{"seq":1,"exchange":"deribit","label":"D","status":"in_process"}]}',
+    );
+  });
+
+  it("PIN-COMPOSITE-WINS: a NEWER non-stitch job does not displace the stitch projection (pinned pre-widening)", async () => {
+    // ⭐ The case the widening could plausibly break: a composite strategy whose
+    // most recent job of ANY kind is not the stitch. The stitch is what carries
+    // member progress and the only heartbeat anyone writes, so it must stay the
+    // source of this response no matter what else ran afterwards.
+    rpcResult.data = [
+      otherKindRow("sync_trades", {
+        status: "done",
+        created_at: "2026-07-12T11:59:00.000Z", // newest overall
+      }),
+      stitchRow({
+        status: "running",
+        created_at: "2026-07-12T11:55:00.000Z",
+        metadata: {
+          member_progress_at: ago(30_000),
+          member_progress: [
+            { seq: 1, exchange: "deribit", label: "D", status: "in_process" },
+          ],
+        },
+      }),
+    ];
+    const res = await call(TEST_STRATEGY_ID);
+    expect(JSON.stringify(await res.json())).toBe(
+      '{"jobStatus":"running","stalled":false,"memberProgress":' +
+        '[{"seq":1,"exchange":"deribit","label":"D","status":"in_process"}]}',
+    );
+  });
+
+  it("PIN-SINGLE-KEY-BEFORE: a single-key strategy with a RUNNING job is answered IDLE (the defect, measured)", async () => {
+    // ⛔ THIS PIN RECORDS THE DEFECT, NOT A DESIRED BEHAVIOUR. A single-key
+    // strategy never produces a `stitch_composite` job, so the kind filter at
+    // route.ts:185 discards every row it has and the caller is told there is
+    // nothing in flight — while `process_key_long` is running. That is the
+    // owner-readable evidence STALE-01a's screens needed and could not get.
+    // The widening commit REPLACES this expectation; the replacement is the
+    // point, and having measured the "before" is what makes it legible.
+    rpcResult.data = [otherKindRow("process_key_long", { status: "running" })];
+    const res = await call(TEST_STRATEGY_ID);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      jobStatus: null,
+      stalled: false,
+      memberProgress: [],
+    });
   });
 
   // ── SF-3: a REAL read is NOT degraded (distinct from the couldn't-read blip) ──
