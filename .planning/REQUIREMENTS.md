@@ -614,7 +614,7 @@ D-14 valve.
 
 ### WIZ-CONT — Wizard continuity & credential dedup (founder call 2026-08-04, live MT5-05 run)
 
-- [ ] **WIZCONT-01**: Re-entering "add a strategy" with an existing wizard draft **continues where the
+- [x] **WIZCONT-01**: Re-entering "add a strategy" with an existing wizard draft **continues where the
   founder left off** instead of restarting. ⚠️ **Resume is NOT missing — do not rebuild it.**
   `src/app/(dashboard)/strategies/new/wizard/WizardClient.tsx` — `const [step, setStep] = useState<WizardStepKey>(() => {` :187-191 — already resumes to `sync_preview` when `initialDraft` is present, and the
   server query in `src/app/(dashboard)/strategies/new/wizard/page.tsx` (`const { data: draft } = await supabase` :79 … `.maybeSingle();` :89) correctly finds the row (verified on PROD: the live draft carries
@@ -624,10 +624,22 @@ D-14 valve.
   stale code, per this requirement's own demand to establish the entry path by observation first)*.
   Observed at HEAD: `src/app/(dashboard)/strategies/new/page.tsx` is a **pure `redirect()`** (32 lines,
   forwarding `?source=csv` straight to `/strategies/new/wizard`) — it chooses nothing and re-asks
-  nothing. The draft-blind entry point is **`ContributionWizardOverlay.tsx:146`**, which hardcodes
+  nothing. The draft-blind entry point was **`ContributionWizardOverlay.tsx:146`**, which hardcoded
   `initialDraft={null}` (the explicit Phase 110 deferral) and is the surface reached from
   `+ Strategy` (allocations / scenario) and the My Strategies empty state. Fix the overlay's draft
   awareness, not the state machine and not `/strategies/new`.
+  ✅ **DELIVERED (Phase 154, plan 05)** — the overlay is draft-aware: it defers mounting the wizard
+  until the draft query has answered, so it can no longer mount a `null` draft and race the answer,
+  and a resume banner in `WizardClient` tells the user they were returned to where they left off.
+  The CSV short-circuit is pinned by an explicit truth table rather than inferred, and an e2e spec
+  (`e2e/wizard-resume.spec.ts`) covers the path.
+  ⚠️ **The diagnosis above named ONE overlay renderer; there are five.** `DashboardChrome.tsx:78` is
+  a consumer that neither this entry, PATTERNS.md, nor RESEARCH.md listed, and it was caught only by
+  a failing test after 154-05 landed. Treat "the entry point" as a call-site CLASS, not a line
+  number, if this surface is touched again.
+  ⚠️ **Unverified at close**: the Playwright spec is authored and wired into `ci.yml` but has not been
+  observed green, and no browser pass has been run against the resume banner. Founder confirmation of
+  the landing step is outstanding — see `154-VERIFICATION.md` (status `human_needed`).
 
 - [x] **WIZCONT-02** *(NARROW — was mis-recorded as a data-integrity hole; corrected 2026-08-04 by
   live observation)*: Re-connecting the same credentials from a context that has **lost the wizard
@@ -893,14 +905,29 @@ cannot be taken without the caveat:
 
 ### STALE — No stale screens (founder call 2026-08-04: "no stale screens")
 
-- [ ] **STALE-01**: A wizard screen never shows a state the backend has already left. Two instances
+- [x] **STALE-01**: A wizard screen never shows a state the backend has already left. Two instances
   observed on PROD during the MT5-05 run: (a) the wizard sat on **"Fetching trades…"** after the job
   chain had finished at 11:39:35; (b) the gate rendered a refusal computed from a **stale analytics
   row while a re-derive was in flight**, so the user saw a failure that was already being fixed.
-  ⚠️ **Root cause NOT yet established** — the poll loop was mapped but the investigation was not
-  finished. `src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.tsx` — the docblock above `const RETRY_THRESHOLD_MS = 900_000;` (:112), lines :109-111 — states the loop "has no time-based abort (it stops only on
+  ~~⚠️ **Root cause NOT yet established**~~ — **DISCHARGED 2026-08-12 (Phase 154, plan 01)** against
+  PROD evidence, before any fix was planned. `src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.tsx` — the docblock above `const RETRY_THRESHOLD_MS = 900_000;` (:112), lines :109-111 — states the loop "has no time-based abort (it stops only on
   success / terminal failure / 3 consecutive network errors)", which means it *should* have
-  terminated at 11:39:35; why it did not is the open question. Do not plan a fix before answering it.
+  terminated at 11:39:35.
+  **Mechanism verdict: M2(ii)** (`154-INVESTIGATION.md`) — the DB was terminal and the client was
+  reading nothing; the zero-rows read was coerced to the domain value `"pending"` by
+  `statusRow?.computation_status ?? "pending"` (`useStrategySyncPoller.ts:228-229`), so the loop
+  never saw a terminal state to stop on. **M2(i), M3 and M4 were each RULED OUT by evidence**, not
+  by argument — every declared child job existed and was `status='done'`, `attempts=1`,
+  `last_error=null`. The cause is client-side, which is why the Python/SQL arm (plan 07) is a
+  recorded NO-OP rather than a fix: a change there would have been the bandaid.
+  ✅ **DELIVERED (Phase 154, plans 04 + 08)** — 04 removed the `?? "pending"` fabrication and widened
+  `sync-progress` to single-key callers; 08 removed the two `isComposite` gates that had hidden the
+  stall backstop and the in-flight datum from single-key users, honoured `queued: false`, and added
+  the single-key repoll twin so an empty series under a terminal status repolls instead of rendering
+  a refusal. Mid-re-derive the screen is amber (`role="status"`); red renders only on a CURRENT
+  verdict. The four RED pins T1/T1b/T2b/T3 are green with their oracles byte-unchanged.
+  ⚠️ **Unverified at close**: no browser pass on the amber state; the SQL gate
+  `test_api_keys_venue_identity_uniq.sql` is authored but unrun. See `154-VERIFICATION.md`.
 
 ---
 
@@ -1238,7 +1265,7 @@ Populated during roadmap creation.
 | MT5-13 | **SHIPPED v0.53.0.1** (PR #662, merged `135b6164`) | ✅ Closed 2026-08-04. mt5 branch added to the internal probe (structural read-only triple); permanent probe failures split off `KEY_NETWORK_TIMEOUT` onto `KEY_SCOPE_CHECK_UNAVAILABLE` (no Retry control). Railway `git_sha` confirmed matching before the retry. **MT5-05 discharged the same day** — see OWN-03 for the PROD evidence |
 | MT5-14 | Phase 153.2 (v1.17) | ✅ **Complete 2026-08-09** (153.2-04). MT5 is declarable via the narrow `WIZARD_EXCHANGE_CODES` set and **preselected** from `detectedExchange`, so the venue is never asked twice; the chip is a `<span>`, not a disabled button (D-15). The no-widening pin was re-cut consciously in the same task — both negatives kept and the POSITIVE flag-ON assertion added, so it can no longer pass merely by asserting absence. `CRYPTO_EXCHANGES` stays mt5-free and the public marketing exchange count did not move. This row and the checkbox at `:460` now agree (was warning W-153.2-1, the same class as D-153.2-A) |
 | MT5-15 | Phase 155 (v1.17) | Pending — ALL THREE MT5 strategies on PROD are `complete_with_warnings`; ⚠️ NOT investigated. Do not read `MT5-05 ✅` as 'the numbers are audited'. ⛔ MT5-07 does NOT close this |
-| WIZCONT-01 | Phase 154 (v1.17) | Pending — **OBSERVED**: allocators have NO resume path at all (`/strategies/*` is manager-only; the overlay hardcodes `initialDraft={null}`, Phase 110 deferral) |
+| WIZCONT-01 | Phase 154 (v1.17) | ✅ Done (154-05) — the overlay defers mounting until the draft query answers, so it can no longer mount a `null` draft; resume banner in `WizardClient`; CSV short-circuit pinned by an explicit truth table. ⚠️ The diagnosis named ONE overlay renderer; **there are five** — `DashboardChrome.tsx:78` was missed by the entry, PATTERNS.md and RESEARCH.md alike and caught only by a failing test. ⚠️ `e2e/wizard-resume.spec.ts` authored + CI-wired but NOT observed green; no browser pass; founder confirmation of the landing step outstanding |
 | WIZCONT-02 | Phase 154 (v1.17) | ✅ Done (154-03 DB + 154-06 app/UI) — **MT5 only**; three residuals recorded in the entry (no ccxt venue identity; the RPC parameter is unvalidated so the value is "what the server passed"; the fence reads the column service-role because it is not on the SELECT allowlist). Phase 156 owns the last two. |
 | WIZFORM-01 | Phase 153.2 (v1.17) | ✅ **Complete 2026-08-09** (153.2-01/02/03/05). Every rule the client can evaluate refuses inline at its own field; the submit button is never `disabled` for a validation reason and a refused submit names the count, names the first field and puts the cursor in it, opening the collapsed disclosure first; `AllocateDialog` derives its invalid border from the ARIA state (D-12). ⭐ **153.2-05 closed the last path**: a field-level refusal raised by `finalize-wizard` is routed back to its field by `FIELD_BY_CODE` instead of rendering a terminal envelope, with a totality assertion making an unmapped `METADATA_*` code a RED test rather than a silent fallback. This row and the checkbox at `:656` now agree (was D-153.2-A) |
 | WIZFORM-02 | Phase 153.1 / 153.2 (v1.17) | **Partial — NOT complete.** 153.1-05 coded the eleven `validatePayload` arms and 153.1-06 wired the derived-roster invariant; 153.2-05 coded the limiter's two deny arms, taking `KNOWN_CODELESS_FINALIZE_REJECTIONS` 5 → 3. ⛔ **Three rejections still answer code-less** (500 draft-load, 500 finalize-RPC, 502 upstream-shape) and each needs a NEW copy member — see `D-153.2-D` in the 153.2 deferred ledger. The invariant reds in both directions, so the debt cannot grow while it waits |
@@ -1253,7 +1280,7 @@ Populated during roadmap creation.
 | PARITY-03 | Phase 153.6 (v1.17) | ✅ Complete (plan 153.6-02) — deadline 190 500/100 500 on both arms via the arm-agnostic `BREAKER_STORE_WORST_CASE_FAILING_MS = 25 500`; state-quantified oracle "the browser is the last party to give up" in `seam-budgets.invariant.test.ts`, observed RED on both arms pre-fix and RED under the closed-only structural mutation; blind pin re-cut (repo grep for the literal: 1 → 0) |
 | PARITY-04 | Phase 153.6 (v1.17) | 🟢 Code complete + TEST-applied (plans 153.6-03/04, hardened by 153.6-07/09). DB half: `attested_venue`, two re-based SECDEF RPCs, SECURITY INVOKER scrub trigger, `CHECK (attested_venue IS NULL OR attested_venue = exchange)`, date-set census pin, dated-cutoff backfill. Route half: both probe-gate arms read the attestation, no `?? exchange` fallback on the gate path. **Applied to TEST `qmnijlgmdhviwzwfyzlc` 2026-08-12, byte-identical to the file:** 2438 rows → 2320 attested / 118 NULL (all post-cutoff, correctly probed) / 0 pre-cutoff NULL / 0 divergent; CHECK `convalidated=true`; trigger `prosecdef=false`; both RPCs `authenticated`=true `anon`=false. Both gate markers present ⇒ SQL assertions 2/3 and 5a–5e now ARM instead of SKIP. **Three independent migration audits; round 3 CLEAR (0 findings)** with a mutation battery proving the SQL test catches all five mutations that survive the migration's own `$verify$`. ⛔ ACCEPTED RESIDUAL (`threat_flag: deferred-control`): the wizard RPCs still validate nothing and still hold `authenticated` EXECUTE, so a caller can mint an `mt5`-attested key and skip the probe — at the cost of breaking their own key's ingestion. That defence holds ONLY while every probe-exempt venue is unsyncable; adding a syncable venue to `scopeProbeSupported:false` (RESEARCH names sFOX) makes the forgery free and requires remedy (a) — service-role writer + withdraw `authenticated` EXECUTE — FIRST. Goes fully ✅ when CI observes assertion 5 green. |
 | PARITY-05 | Phase 153.6 (v1.17) | ✅ Complete (plan 153.6-06) — `KEY_SCOPE_CHECK_UNREADABLE` minted and wired at all four sites in one commit; RED observed first (5 failed). Both pins re-cut 74 → 75, `.toBe(2)` count and regex shape untouched. `EXPECTED_FINALIZE_REJECTION_SITES = 32` / `KNOWN_CODELESS = 3` / `expectedSites: 29` grep-proven UNMOVED — the D-18 proof this was a fix, not an addition. ⚠️ ledger row E alone reds only `route.test.ts`, which would have licensed the weaker T-153.6-E2 shortcut; rows E-inverse and E-roster were added to close that |
-| STALE-01 | Phase 154 (v1.17) | Pending — root cause NOT yet established; investigate before planning |
+| STALE-01 | Phase 154 (v1.17) | ✅ Done (154-01 investigation → 154-04 + 154-08 fix) — root cause **ESTABLISHED before planning** per this row's own gate: **M2(ii)**, the client coerced a zero-rows read to `"pending"` (`useStrategySyncPoller.ts:228-229`) so the loop never saw the terminal state; M2(i)/M3/M4 ruled out by PROD evidence (every child job `done`, `attempts=1`, `last_error=null`). Cause is client-side ⇒ the Python/SQL arm (154-07) is a recorded NO-OP, not a bandaid. Fix: `?? "pending"` removed, `sync-progress` widened, both `isComposite` gates removed as a class, `queued:false` honoured, single-key repoll twin added, amber-not-red mid-re-derive. T1/T1b/T2b/T3 green with oracles byte-unchanged (`stale.runtime.test.tsx` zero-line diff). ⚠️ No browser pass on the amber state; SQL gate authored but unrun |
 | MT5-GOAL-01 | Phase 155 (v1.17 — umbrella acceptance gate) | **Umbrella** — no implementation work of its own; MT5 'works' only when SCEN-01 + OWN-02 close. Exists so `MT5-05 ✅` is never read as 'MT5 works' |
 | SCEN-01 | **Phase 147 (v1.17)** | ⛔ **HIGHEST** — ⭐census corrected: `daily_returns` has **NO production writer**; **0 of 27 REAL** strategies populated vs 15/15 demo seeds. Root-caused: the READER is wrong; use the existing `resolveDailyReturnSeries`. ⚠️`returns_series` is a WEALTH INDEX — must be DIFFERENCED, never forwarded raw |
 | SCEN-02 | Phase 152 (v1.17) | Pending — no ownership marker exists; ownership bit deliberately discarded at `src/app/api/strategies/browse/route.ts` (`const isOwnRow = …` :264). ⚠️ additive WIRE change + persisted-schema bump |

@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
-stopped_at: Phase 154 UI-SPEC approved
-last_updated: "2026-08-12T05:11:54.055Z"
-last_activity: 2026-08-11 -- Phase 153.6 execution started
+stopped_at: Phase 154 COMPLETE (8/8 plans, verified) — next: Phase 155 MT5-VERIFY (human/calendar-gated)
+last_updated: "2026-08-12T00:00:00.000Z"
+last_activity: 2026-08-12 -- Phase 154 executed + verified (154-VERIFICATION.md: 3/3 criteria, status human_needed)
 progress:
-  total_phases: 15
-  completed_phases: 12
-  total_plans: 70
-  completed_plans: 73
-  percent: 80
+  total_phases: 16
+  completed_phases: 13
+  total_plans: 81
+  completed_plans: 81
+  percent: 81
 ---
 
 # Project State — Quantalyze
@@ -22,7 +22,7 @@ progress:
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
-**Milestone v1.17 — MT5: usable end-to-end, not merely ingested, Phases 147–155.**
+**Milestone v1.17 — MT5: usable end-to-end, not merely ingested, Phases 147–156.**
 Founder verbatim (2026-08-04, minutes after MT5-05 was discharged on PROD): *"The goal is that
 MT5 works. And at the moment, maybe it ingests the data, but I cannot use it in the scenario,
 and I can still not produce a factsheet."* Scope = **SCEN** (the series actually reaches the
