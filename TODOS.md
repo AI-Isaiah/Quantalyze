@@ -2087,3 +2087,16 @@ bargain has two halves; this section is the second one. Source: `153.4-REVIEW.md
   realistic way to lose it is a *future* migration re-stamping that comment, at which point
   this file's `$verify$` no longer runs, so a symmetric check would buy little. Guard hygiene.
   Owner: unassigned.
+
+### Phase 154-02 (WIZCONT-01 plumbing) — residual recorded while single-sourcing the draft query (added 2026-08-12)
+
+- [ ] **A THIRD latest-wizard-draft read still lives outside the helper** — `src/app/(dashboard)/strategies/page.tsx:41-49`
+  issues the same `source='wizard' AND status='draft' ORDER BY created_at DESC LIMIT 1` read that
+  `src/lib/wizard/draft-query.ts` now single-sources for the two wizard entry points, but with a
+  different column set (`id, name, created_at, review_note`) for a different consumer: the Resume
+  CTA + rejected-draft notice on the strategies list. It could not adopt the helper without widening
+  `InitialDraft` with `review_note`/`created_at` for a page outside Phase 154's scope. Consequence:
+  the /strategies Resume CTA and the wizard's own resume decision can still drift apart. The
+  divergence is NOT silent — `src/__tests__/wizard-draft-query-single-source.test.ts` Scan B pins the
+  latest-reader set to exactly these two files, so a THIRD one reddens. Fold it in when the helper
+  grows a column-set parameter. Owner: unassigned.
