@@ -122,19 +122,48 @@ function pickPlaceholderCodename(): string {
  *     exact defect the migration's HIGH-1 amendment fixed at the DB layer. The
  *     two predicates must be changed together or not at all.
  *
- * Returns `null` for every "cannot resolve" case — no live key, no strategy
- * hanging off it, a read fault, or a missing service-role credential. The
- * caller then falls through to the RPC, exactly as the session fence does on a
- * failed read: the DB index still dedups, so a dark fence costs correctness
- * nothing. It never throws.
+ * Answers `{ kind: "unresolved" }` for every "cannot resolve" case — no live
+ * key, no strategy hanging off it, a read fault, or a missing service-role
+ * credential. The caller then falls through to the RPC, exactly as the session
+ * fence does on a failed read: the DB index still dedups, so a dark fence costs
+ * correctness nothing. It never throws.
  */
+/**
+ * 154.1 / WIZCONT-02 review CR — "NOTHING TO RESUME" AND "SOMEONE ELSE HAS IT"
+ * ARE NOT THE SAME ANSWER, and collapsing them to `null` is what shipped the
+ * defect this type exists to make unrepresentable.
+ *
+ * The resolver used to return `{strategy_id, api_key_id} | null`, so the caller
+ * could only ask "did you find a row?". With the draft filters added (below),
+ * "no draft" would have swallowed the case that matters most — a re-connect
+ * whose account is already held by a FINISHED strategy — and answered it with
+ * `DRAFT_ALREADY_EXISTS`, whose copy promises a session in progress that does
+ * not exist. Three states, three members:
+ *
+ *   · `draft`      — a resumable wizard draft. The WIZCONT-02 happy path: hand
+ *                    the pair back and mark the response `deduped`.
+ *   · `connected`  — the live key exists and a strategy hangs off it, but that
+ *                    strategy has left `draft`. Refusable, with an honest code.
+ *   · `unresolved` — genuinely nothing to say: no live key, no strategy at all,
+ *                    a read fault, or no service-role credential. Fall through.
+ *
+ * ⛔ `strategyName` is the ONLY thing `connected` carries out. Not the id, not
+ * the status, and above all not the venue account id (T-154-06-C).
+ */
+type VenueIdentityResolution =
+  | { kind: "unresolved" }
+  | { kind: "draft"; strategy_id: string; api_key_id: string }
+  | { kind: "connected"; strategyName: string | null };
+
+const UNRESOLVED: VenueIdentityResolution = { kind: "unresolved" };
+
 async function resolveByVenueIdentity(
   supabase: Awaited<ReturnType<typeof createClient>>,
   userId: string,
   exchangeNormalized: string,
   venueAccountId: string,
   secrets: readonly unknown[],
-): Promise<{ strategy_id: string; api_key_id: string } | null> {
+): Promise<VenueIdentityResolution> {
   let liveKeyId: string | null = null;
 
   try {
@@ -172,43 +201,130 @@ async function resolveByVenueIdentity(
       "[strategies/create-with-key] venue-identity fence unavailable; proceeding to RPC (DB index still dedups):",
       scrubSeamError(adminErr, secrets),
     );
-    return null;
+    return UNRESOLVED;
   }
 
-  if (!liveKeyId) return null;
+  if (!liveKeyId) return UNRESOLVED;
 
   // ⭐ BACK ONTO THE USER-SCOPED CLIENT, DELIBERATELY. `strategies` has no
   // column-grant obstacle, so this read does not need the admin client — and
   // routing it through RLS means the row we hand back is provably the caller's
   // own even if the owner filter above were ever weakened. Defence in depth at
   // zero cost.
-  const { data: existingRow, error: existingRowErr } = await supabase
+  //
+  // ⭐ 154.1 REVIEW CR — `source` AND `status` ARE THE TWO FILTERS THIS READ WAS
+  // MISSING, and every sibling reader of a wizard draft already carries both
+  // (`strategies/draft/[id]/route.ts` applies them on its preflight AND again on
+  // the DELETE, precisely so a TOCTOU flip cannot clobber a promoted strategy).
+  // Without them, oldest-first ordering resolves a re-connect onto the user's
+  // ALREADY-FINALIZED strategy and hands the wizard a non-draft to resume:
+  // `finalize_wizard_strategy` then raises `invalid_parameter_value` on its
+  // `v_current_status <> 'draft'` check, which is a 409 that a page refresh
+  // re-runs identically — permanently wedged — while the manager path finalizes
+  // 200 and silently discards the typed metadata. Both halves of that come from
+  // ONE missing pair of filters, so they are added here rather than guarded for
+  // downstream.
+  //
+  // ⛔ THE ORDERING STAYS OLDEST-FIRST and is now scoped to drafts. Oldest first:
+  // `strategies.api_key_id` carries no UNIQUE, so if a row ever shares a key the
+  // ORIGINAL is the one to continue with — and a fence that picked
+  // non-deterministically would be untestable.
+  const { data: draftRow, error: draftRowErr } = await supabase
     .from("strategies")
     .select("id")
     .eq("user_id", userId)
     .eq("api_key_id", liveKeyId)
-    // Oldest first: `strategies.api_key_id` carries no UNIQUE, so if a row ever
-    // shares a key the ORIGINAL is the one to continue with — and a fence that
-    // picked non-deterministically would be untestable.
+    .eq("source", "wizard")
+    .eq("status", "draft")
     .order("created_at", { ascending: true })
     .limit(1)
     .maybeSingle();
 
-  if (existingRowErr) {
+  if (draftRowErr) {
     console.error(
       "[strategies/create-with-key] venue-identity strategy resolve failed; proceeding to RPC (DB index still dedups):",
-      scrubSeamError(existingRowErr, secrets),
-      existingRowErr.code,
+      scrubSeamError(draftRowErr, secrets),
+      draftRowErr.code,
     );
-    return null;
+    return UNRESOLVED;
   }
 
-  // No strategy hangs off the key (an orphan, e.g. its draft was deleted). We
-  // cannot hand back a pair we do not have, so fall through — the RPC's INSERT
-  // then trips the index and the 23505 arm answers the honest 409.
-  if (!existingRow?.id) return null;
+  if (draftRow?.id) {
+    return { kind: "draft", strategy_id: draftRow.id, api_key_id: liveKeyId };
+  }
 
-  return { strategy_id: existingRow.id, api_key_id: liveKeyId };
+  // ⭐ NO DRAFT IS NOT YET AN ANSWER. Two very different situations reach this
+  // line and the caller must be able to tell them apart:
+  //   · nothing hangs off the key at all (an orphan, e.g. its draft was
+  //     deleted) — fall through, let the RPC's INSERT trip the index and let the
+  //     23505 arm answer;
+  //   · a strategy DOES hold this account and has simply left `draft` — the case
+  //     the filters above just started excluding, and the one that must be
+  //     refused with a sentence that is true.
+  // Collapsing them here is exactly the defect being closed, one level down.
+  //
+  // ⛔ NO `status`/`source` FILTER ON THIS READ, deliberately: it exists to
+  // observe the rows the draft read cannot see. `name` is on the caller's own
+  // row through RLS + the explicit owner filter, and it is the ONLY column that
+  // leaves this function for the browser.
+  const { data: ownerRow, error: ownerRowErr } = await supabase
+    .from("strategies")
+    .select("id, name")
+    .eq("user_id", userId)
+    .eq("api_key_id", liveKeyId)
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  if (ownerRowErr) {
+    // Same posture as every other read fault here: we cannot tell which of the
+    // two situations we are in, so we claim neither (Rule 12).
+    console.error(
+      "[strategies/create-with-key] venue-identity owner resolve failed; proceeding to RPC (DB index still dedups):",
+      scrubSeamError(ownerRowErr, secrets),
+      ownerRowErr.code,
+    );
+    return UNRESOLVED;
+  }
+
+  if (!ownerRow?.id) return UNRESOLVED;
+
+  return {
+    kind: "connected",
+    // `strategies.name` is NOT NULL at the database, so the guard is about the
+    // SHAPE we were handed rather than about the column: a non-string here means
+    // the read drifted, and a name we cannot vouch for must become "no name"
+    // rather than a stringified surprise in user-facing copy.
+    strategyName: typeof ownerRow.name === "string" ? ownerRow.name : null,
+  };
+}
+
+/**
+ * 154.1 / WIZCONT-02 review CR — THE ONE REFUSAL BODY, built once for BOTH arms.
+ *
+ * `resolveByVenueIdentity` is consulted twice (the pre-RPC fence and the 23505
+ * race arm), so its `connected` answer has two emitting sites. TWIN-8 is this
+ * file's own record of what happens when one 23505 fact grows a second meaning
+ * and only one copy learns about it, so the body lives in one function and the
+ * arms call it.
+ *
+ * ⛔ `strategy_name` IS OMITTED, NOT NULLED, when there is no name. The wire then
+ * carries exactly what a pre-154.1 error body carried, and the client's
+ * "absence means we were not told" rule (`WizardErrorContext.strategyName`) is a
+ * property of the request rather than of a serializer dropping `null`.
+ *
+ * ⛔ AND THE VENUE ACCOUNT ID NEVER APPEARS HERE. It is not a parameter of this
+ * function, which is the structural reason rather than a promise (T-154-06-C).
+ */
+function venueAlreadyConnectedResponse(strategyName: string | null): NextResponse {
+  return NextResponse.json(
+    {
+      code: "VENUE_ALREADY_CONNECTED",
+      error: "This account is already connected to an existing strategy.",
+      ...(strategyName === null ? {} : { strategy_name: strategyName }),
+    },
+    { status: 409, headers: NO_STORE_HEADERS },
+  );
 }
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
@@ -491,7 +607,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // non-secret by definition — err toward scrubbing it out of telemetry.
       [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId],
     );
-    if (venueMatch) {
+    if (venueMatch.kind === "draft") {
       // ⭐ `deduped` IS ADDITIVE AND APPEARS ON THIS ARM ONLY. The session-fence
       // arm above stays byte-identical: the common case (a double-click) is
       // already safe, already silent, and gets no new UI. This arm is the one
@@ -507,6 +623,23 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         },
         { headers: NO_STORE_HEADERS },
       );
+    }
+    if (venueMatch.kind === "connected") {
+      // 154.1 REVIEW CR — REFUSE, AND SAY WHY TRUTHFULLY. This account is held
+      // by a strategy that is no longer a draft, so there is nothing to resume
+      // and nothing to continue: resuming onto it is what wedged the wizard
+      // (`finalize_wizard_strategy` refuses a non-draft with a 409 a refresh
+      // reproduces exactly) and what let the manager path finalize 200 while
+      // discarding the metadata the user had just typed.
+      //
+      // ⛔ NOT `DRAFT_ALREADY_EXISTS`. Its copy — "A wizard session with this
+      // key is already in progress" — is false in every clause here, and it
+      // sends the user hunting for a draft that does not exist.
+      //
+      // ⭐ SHORT-CIRCUITS BEFORE THE CHARGED SEAM CALLS, exactly like the two
+      // resolve arms above it: a refusal we can make from rows we already read
+      // must not first burn a Railway probe and the venue's validate quota.
+      return venueAlreadyConnectedResponse(venueMatch.strategyName);
     }
   }
 
@@ -707,8 +840,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
                 venueAccountId,
                 [api_key, apiSecretNormalized, passphraseOrNull, venueAccountId],
               )
-            : null;
-          if (venueMatch) {
+            : UNRESOLVED;
+          if (venueMatch.kind === "draft") {
             return NextResponse.json(
               {
                 ok: true,
@@ -719,12 +852,29 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
               { headers: NO_STORE_HEADERS },
             );
           }
+          if (venueMatch.kind === "connected") {
+            // 154.1 REVIEW CR — the SAME refusal as the pre-RPC arm, through the
+            // SAME builder. Re-running the resolver is what makes this arm free:
+            // it inherits the draft/non-draft discrimination without a second
+            // implementation, so the race cannot answer a different sentence
+            // from the fence for an identical database.
+            //
+            // ⭐ Reaching here means the INSERT was refused by the index and
+            // rolled back by Postgres, so the "nothing new was created" clause
+            // in this code's copy holds on this arm too — and on stronger ground
+            // than on the pre-RPC one.
+            return venueAlreadyConnectedResponse(venueMatch.strategyName);
+          }
           // Unresolvable: the colliding key exists but no strategy hangs off it
           // (an orphan), or the resolver is dark. Fall through to the 409 below
           // — honest enough for a race, and deliberately NOT a new
           // WizardErrorCode: minting one would move the copy-table pins
           // (EXPECTED_TABLE_SIZE) for a state the user cannot act on
           // differently anyway.
+          // (154.1: the code minted for the `connected` arm above deliberately
+          // does NOT extend to this one. Here we could not establish that a
+          // strategy holds the account at all, and asserting it would be the
+          // same class of unearned claim in the opposite direction.)
         } else if (
           constraint !== null &&
           !WIZARD_SESSION_CONSTRAINTS.has(constraint)

@@ -57,6 +57,28 @@ import { join, relative } from "node:path";
  *     still drift. Folding it in is tracked as follow-up work, not silently
  *     ignored.
  *
+ *  4. `src/app/api/strategies/create-with-key/route.ts` — NOT a latest-draft
+ *     read, and it CANNOT be one (154.1 / WIZCONT-02 review CR). The venue
+ *     fence asks a different question with a different answer: "is there a
+ *     resumable wizard draft hanging off THIS `api_key_id`?" It is keyed on
+ *     `api_key_id`, not on the user's most recent draft; it orders OLDEST FIRST
+ *     (`ascending: true`) because `strategies.api_key_id` carries no UNIQUE and
+ *     the ORIGINAL row is the one to continue with; and it selects `id` alone,
+ *     because the wizard hydrates from the SSR page and this arm only hands back
+ *     an id + key id pair. Routing it through `readLatestWizardDraft` would
+ *     answer the WRONG ROW (the user's newest draft on any key), reverse the
+ *     ordering the fence's own tests pin, and spend a `strategy_keys`
+ *     head-count probe on a question that never asks about membership.
+ *
+ *     ⭐ THE PAIR IS HERE FOR THE SAME REASON AS ENTRY 2 — it is a fence, not a
+ *     read. Its absence is precisely what this plan fixed: the read carried only
+ *     `user_id` + `api_key_id`, so oldest-first resolved a re-connect onto the
+ *     user's ALREADY-FINALIZED strategy and handed the wizard a non-draft to
+ *     finalize (409-and-wedged on the overlay path; a silent 200 that discarded
+ *     the typed metadata on the manager path). Scan B does not see it — it
+ *     orders ASCENDING — and the `it` below asserts that structurally rather
+ *     than taking it on trust, exactly as entry 2's does.
+ *
  * ── FALSIFIABILITY (demonstrated in development, recorded in 154-02-SUMMARY) ─
  *   Adding a throwaway non-test file under `src/` containing the predicate pair
  *   makes Scan A fail NAMING that file; removing it → green. Adding the
@@ -75,6 +97,10 @@ const ALLOWED_PAIR_CARRIERS: readonly string[] = [
   HELPER,
   "src/app/api/strategies/draft/[id]/route.ts",
   "src/app/(dashboard)/strategies/page.tsx",
+  // 154.1 / WIZCONT-02 review CR — the venue fence's draft-scoped resolve. See
+  // allow-list entry 4 in this file's docblock for why it cannot be the helper,
+  // and the `it` below for the structural half of that claim.
+  "src/app/api/strategies/create-with-key/route.ts",
 ];
 
 /** The files permitted to issue a LATEST-wizard-draft read (Scan B, frozen). */
@@ -179,6 +205,29 @@ describe("Phase 154 WIZCONT-01 — the wizard-draft query is single-sourced", ()
       isLatestRead(src),
       `${rel} now orders + limits the wizard-draft predicate — it has become a ` +
         `latest-draft read and must use ${HELPER}.`,
+    ).toBe(false);
+  });
+
+  it("the venue fence is NOT a latest-draft read either (its allow-list entry is earned)", () => {
+    // 154.1 / WIZCONT-02 review CR. Structural, not taken on trust, and the
+    // ORDERING is the load-bearing half: this fence resolves the OLDEST draft on
+    // one api_key_id, which is a different question from "the user's newest
+    // draft". If it ever flipped to `ascending: false` it would be a second
+    // latest-read wearing a fence's clothes — Scan B would catch it, and this
+    // assertion says so at the one file the reasoning depends on.
+    const rel = "src/app/api/strategies/create-with-key/route.ts";
+    const src = readFileSync(join(REPO_ROOT, rel), "utf8");
+    expect(
+      carriesPair(src),
+      `${rel} lost the source='wizard' + status='draft' pair. Those two filters ` +
+        `are what stop the venue fence resolving a re-connect onto an ` +
+        `ALREADY-FINALIZED strategy and handing the wizard a non-draft to ` +
+        `finalize. Do not "clean up" this allow-list entry by deleting them.`,
+    ).toBe(true);
+    expect(
+      isLatestRead(src),
+      `${rel} now issues a NEWEST-first, limit-1 wizard-draft read — it has ` +
+        `become a latest-draft read and must use ${HELPER}.`,
     ).toBe(false);
   });
 

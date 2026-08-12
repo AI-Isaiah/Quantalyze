@@ -286,6 +286,16 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
     "KEY_HAS_TRADING_PERMS",
     "KEY_HAS_WITHDRAW_PERMS",
     "DRAFT_ALREADY_EXISTS",
+    // 154.1 / WIZCONT-02 review CR — the venue fence's REFUSAL half, admitted
+    // HERE IN THE SAME COMMIT the route starts emitting it. Omit this line and
+    // the code fails the membership check below, falls through to `UNKNOWN` —
+    // whose copy IS recoverable — so the user gets "Try the last action again."
+    // with a Retry control for a submit that is refused identically every time,
+    // and the honest sentence naming their existing strategy ships invisible
+    // while every route-side test stays green. That is the trap `SubmitStep.tsx`
+    // records three times over; it is written out again rather than cited
+    // because this roster is the one the next author will be editing.
+    "VENUE_ALREADY_CONNECTED",
     "KEY_RATE_LIMIT",
     "UNKNOWN",
     // Returned by `classifyKeyValidationError` (src/lib/wizardErrors.ts) — the
@@ -405,6 +415,21 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
   const [retryAfterSeconds, setRetryAfterSeconds] = useState<number | null>(
     null,
   );
+  /**
+   * 154.1 / WIZCONT-02 review CR — the name of the strategy that ALREADY holds
+   * the account this attempt tried to connect, or `null` when the response
+   * named none.
+   *
+   * PER-FAILURE state on exactly the same terms as `retryAfterSeconds` above and
+   * for the same reason (TRAP-3): a name left over from attempt 1, rendered
+   * against attempt 2's failure, points the user at a strategy that has nothing
+   * to do with what just happened — a specific lie in place of a vague one. Both
+   * are set from the SAME response as `errorCode`, so a code and a name can
+   * never describe different failures.
+   */
+  const [existingStrategyName, setExistingStrategyName] = useState<
+    string | null
+  >(null);
   // UX-02: the wizard session correlation id — the SAME id wizardFetch sends
   // on every request below, so the id shown in an error envelope matches the
   // failing request's server logs / Sentry tag / compute_jobs.metadata.
@@ -732,6 +757,10 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
     // 140.5-03 — cleared WITH the code it belongs to. This is the half a
     // copy-paste of the SyncPreviewStep thread drops (TRAP-3).
     setRetryAfterSeconds(null);
+    // 154.1 — the same clearing rule, for the same reason. See the state's own
+    // docblock: a stale name is a specific lie about which strategy is in the
+    // way.
+    setExistingStrategyName(null);
     // 153.4-04 — a fresh attempt clears the previous one's cancelled line for the
     // same reason, and starts the wait: the venue is frozen, the clock is stamped
     // from ONE `Date.now()` the tick then measures against, and the controller is
@@ -781,6 +810,11 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         // strict `=== true` below: a truthy-but-not-true value would be the
         // route drifting, and this is a screen decision, not a coercion.
         deduped?: boolean;
+        // 154.1 / WIZCONT-02 review CR — present ONLY on the route's
+        // `VENUE_ALREADY_CONNECTED` refusal, and only when the route could read
+        // the name off the caller's own row. Typed as optional and read through
+        // a `typeof` check below: absence is "we were not told", never a blank.
+        strategy_name?: string;
         code?: string;
         error?: string;
       };
@@ -850,6 +884,16 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         // yields `null`, which the envelope renders as no wait at all rather
         // than as a zero we were never told (TRAP-3).
         setRetryAfterSeconds(parseRetryAfterSeconds(res.headers));
+        // 154.1 — from the SAME response as the code above, on the same terms:
+        // a name only ever describes the failure it arrived with. A non-string
+        // or a blank is treated as "not told" rather than coerced, so the
+        // envelope renders the unnamed sentence instead of empty quotes.
+        setExistingStrategyName(
+          typeof data.strategy_name === "string" &&
+            data.strategy_name.trim().length > 0
+            ? data.strategy_name
+            : null,
+        );
         trackForQuantsEventClient("wizard_error", {
           wizard_session_id: wizardSessionId,
           step: "connect_key",
@@ -1002,6 +1046,13 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         // this phase's UI-SPEC at the call sites it owns; byte-neutral for every
         // ccxt venue, where the predicate already answers `true`.
         venue: attemptExchange ?? exchange,
+        // 154.1 / WIZCONT-02 review CR — WITHOUT THIS, `VENUE_ALREADY_CONNECTED`
+        // renders its unnamed sentence and the user is told an account of theirs
+        // is already connected without being told to WHAT — on a page where the
+        // whole remedy is to go and open that strategy. `?? undefined` for the
+        // same reason the two lines above use it: absence must reach the copy as
+        // "we were not told", never as an empty string it would print.
+        strategyName: existingStrategyName ?? undefined,
       })
     : null;
 
