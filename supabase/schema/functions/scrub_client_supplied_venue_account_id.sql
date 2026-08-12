@@ -2,7 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260812120000_api_keys_venue_account_id.sql
+-- source migration: 20260812083206_api_keys_venue_account_id.sql
 -- ───────────── 4. the scrub trigger: a client-supplied identity is not evidence
 CREATE OR REPLACE FUNCTION public.scrub_client_supplied_venue_account_id()
 RETURNS TRIGGER

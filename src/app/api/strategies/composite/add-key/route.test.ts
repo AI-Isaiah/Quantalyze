@@ -354,7 +354,7 @@ describe("POST /api/strategies/composite/add-key — ONB-03 per-key add", () => 
  *
  * The twin, stated: this arm and `create-with-key`'s carried the SAME
  * undifferentiated `23505 → DRAFT_ALREADY_EXISTS` mapping. Migration
- * 20260812120000 added a SECOND unique index over `api_keys`, so that mapping
+ * 20260812083206 added a SECOND unique index over `api_keys`, so that mapping
  * is no longer one fact — and closing only the copy the bug was filed against
  * is how divergent twins are born. These cases pin all three branches, and the
  * pre-existing session case above pins that nothing moved for the common one.

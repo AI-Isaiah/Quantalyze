@@ -404,12 +404,12 @@ BEGIN
 
   IF v_dups > 0 THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 ABORT: % duplicate (user_id, exchange, venue_account_id) group(s) among LIVE (disconnected_at IS NULL) rows, so CREATE UNIQUE INDEX api_keys_user_exchange_venue_account_uniq would fail. Resolve the duplicates manually — do NOT delete api_keys rows blindly, strategy_keys membership and synced history hang off them; soft-disconnecting the loser (disconnected_at = now()) frees the slot without losing history. Rolling back.',
+      'Migration 20260812083206 ABORT: % duplicate (user_id, exchange, venue_account_id) group(s) among LIVE (disconnected_at IS NULL) rows, so CREATE UNIQUE INDEX api_keys_user_exchange_venue_account_uniq would fail. Resolve the duplicates manually — do NOT delete api_keys rows blindly, strategy_keys membership and synced history hang off them; soft-disconnecting the loser (disconnected_at = now()) frees the slot without losing history. Rolling back.',
       v_dups
       USING ERRCODE = 'unique_violation';
   END IF;
 
-  RAISE NOTICE 'Migration 20260812120000 pre-flight OK: zero duplicate (user_id, exchange, venue_account_id) groups among live rows (% live rows carry a non-NULL venue_account_id; % disconnected rows do, and are deliberately out of scope).',
+  RAISE NOTICE 'Migration 20260812083206 pre-flight OK: zero duplicate (user_id, exchange, venue_account_id) groups among live rows (% live rows carry a non-NULL venue_account_id; % disconnected rows do, and are deliberately out of scope).',
     (SELECT count(*) FROM public.api_keys
       WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL),
     (SELECT count(*) FROM public.api_keys
@@ -554,7 +554,7 @@ COMMENT ON TRIGGER api_keys_scrub_venue_account_id ON public.api_keys IS
   'Fires on every api_keys INSERT. Non-privileged callers cannot persist a '
   'venue_account_id; NULL then means "no server-confirmed identity", which the '
   'partial index api_keys_user_exchange_venue_account_uniq excludes. Companion '
-  'to migration 20260812120000.';
+  'to migration 20260812083206.';
 
 -- ───── 5. create_wizard_strategy — re-based on 20260811210000, +1 parameter
 --
@@ -777,7 +777,7 @@ COMMENT ON FUNCTION public.create_wizard_strategy(
   'parameters and answers PGRST203 if a second candidate appears, which breaks '
   'connect-a-key for every user. Add parameters by DROP + CREATE (with '
   're-issued grants), never by CREATE OR REPLACE. See migrations 031, 126, 127, '
-  '20260602190000, 20260811210000, 20260812120000.';
+  '20260602190000, 20260811210000, 20260812083206.';
 
 -- ───────────── 6. POST-VERIFY: every check ABORTS, none is NOTICE-only
 -- The 20260419140917 pre-flight/post-verify pairing, same posture as
@@ -819,7 +819,7 @@ BEGIN
    WHERE n.nspname = 'public' AND p.proname = 'create_wizard_strategy';
   IF v_overloads <> 1 THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: % overloads of create_wizard_strategy exist, expected exactly 1. PostgREST resolves rpc() by named parameters and answers PGRST203 when a call matches more than one candidate — connect-a-key would be broken for every user. The DROP of the 11-parameter signature did not take. Rolling back.',
+      'Migration 20260812083206 failed: % overloads of create_wizard_strategy exist, expected exactly 1. PostgREST resolves rpc() by named parameters and answers PGRST203 when a call matches more than one candidate — connect-a-key would be broken for every user. The DROP of the 11-parameter signature did not take. Rolling back.',
       v_overloads;
   END IF;
 
@@ -832,15 +832,15 @@ BEGIN
 
   IF v_cws_src NOT ILIKE '%pg_advisory_xact_lock%' OR v_cws_src NOT ILIKE '%wizdraft:%' THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: create_wizard_strategy lost its wizdraft: advisory-lock fence — the re-base took a stale definition and F6 double-submit idempotency is gone. Rolling back.';
+      'Migration 20260812083206 failed: create_wizard_strategy lost its wizdraft: advisory-lock fence — the re-base took a stale definition and F6 double-submit idempotency is gone. Rolling back.';
   END IF;
   IF v_cws_src NOT ILIKE '%attested_venue%' THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: create_wizard_strategy no longer writes attested_venue — the re-base took a body older than 20260811210000 and silently reverted PR #675. Every wizard-minted key would be unattested and every MT5 finalize would answer a permanent KEY_SCOPE_CHECK_UNAVAILABLE. Rolling back.';
+      'Migration 20260812083206 failed: create_wizard_strategy no longer writes attested_venue — the re-base took a body older than 20260811210000 and silently reverted PR #675. Every wizard-minted key would be unattested and every MT5 finalize would answer a permanent KEY_SCOPE_CHECK_UNAVAILABLE. Rolling back.';
   END IF;
   IF v_cws_src NOT ILIKE '%p_venue_account_id%' OR v_cws_src NOT ILIKE '%venue_account_id%' THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: create_wizard_strategy does not stamp venue_account_id, so the WIZCONT-02 dedup index would govern nothing. Rolling back.';
+      'Migration 20260812083206 failed: create_wizard_strategy does not stamp venue_account_id, so the WIZCONT-02 dedup index would govern nothing. Rolling back.';
   END IF;
   --     …and it stamps the NORMALISED value, not the raw parameter. Losing the
   --     btrim lets ' 5551234' and '5551234' index as different keys, so the
@@ -851,7 +851,7 @@ BEGIN
   IF v_cws_src NOT ILIKE '%btrim(p_venue_account_id)%'
      OR v_cws_src NOT ILIKE '%nullif(btrim(p_venue_account_id)%' THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: create_wizard_strategy stamps venue_account_id WITHOUT the NULLIF(btrim(...), '''') normalisation. Whitespace would make the dedup miss, and a blank field would hit api_keys_venue_account_id_nonblank as an unhandled 23514. Body: %. Rolling back.',
+      'Migration 20260812083206 failed: create_wizard_strategy stamps venue_account_id WITHOUT the NULLIF(btrim(...), '''') normalisation. Whitespace would make the dedup miss, and a blank field would hit api_keys_venue_account_id_nonblank as an unhandled 23514. Body: %. Rolling back.',
       left(v_cws_src, 400);
   END IF;
 
@@ -860,11 +860,11 @@ BEGIN
   --     REVOKE/GRANT pair above actually ran and in the right order.
   IF NOT has_function_privilege('authenticated', c_new_sig, 'EXECUTE') THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: authenticated does NOT have EXECUTE on the new create_wizard_strategy signature — connect-a-key is broken. Rolling back.';
+      'Migration 20260812083206 failed: authenticated does NOT have EXECUTE on the new create_wizard_strategy signature — connect-a-key is broken. Rolling back.';
   END IF;
   IF has_function_privilege('anon', c_new_sig, 'EXECUTE') THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: anon HAS EXECUTE on create_wizard_strategy. DROP destroyed the original ACL and a new function grants EXECUTE to PUBLIC by default, so the REVOKE did not take — this is a privilege escalation on a SECURITY DEFINER function that writes api_keys. Rolling back.';
+      'Migration 20260812083206 failed: anon HAS EXECUTE on create_wizard_strategy. DROP destroyed the original ACL and a new function grants EXECUTE to PUBLIC by default, so the REVOKE did not take — this is a privilege escalation on a SECURITY DEFINER function that writes api_keys. Rolling back.';
   END IF;
 
   -- (d) the index: present, UNIQUE, PARTIAL, and over the right columns in the
@@ -882,15 +882,15 @@ BEGIN
 
   IF v_idx_unique IS NULL THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: index api_keys_user_exchange_venue_account_uniq is absent — the WIZCONT-02 DB backstop does not exist. Rolling back.';
+      'Migration 20260812083206 failed: index api_keys_user_exchange_venue_account_uniq is absent — the WIZCONT-02 DB backstop does not exist. Rolling back.';
   END IF;
   IF NOT v_idx_unique THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: api_keys_user_exchange_venue_account_uniq exists but is NOT UNIQUE, so it dedups nothing. Rolling back.';
+      'Migration 20260812083206 failed: api_keys_user_exchange_venue_account_uniq exists but is NOT UNIQUE, so it dedups nothing. Rolling back.';
   END IF;
   IF NOT v_idx_partial THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: api_keys_user_exchange_venue_account_uniq is not PARTIAL. Without WHERE venue_account_id IS NOT NULL the index governs the all-NULL majority of api_keys, which is every ccxt key. Rolling back.';
+      'Migration 20260812083206 failed: api_keys_user_exchange_venue_account_uniq is not PARTIAL. Without WHERE venue_account_id IS NOT NULL the index governs the all-NULL majority of api_keys, which is every ccxt key. Rolling back.';
   END IF;
 
   -- ⛔ BOTH CONJUNCTS, ASSERTED SEPARATELY. Checking only the first would pass
@@ -907,12 +907,12 @@ BEGIN
      AND indexname = 'api_keys_user_exchange_venue_account_uniq';
   IF v_idx_def NOT ILIKE '%venue_account_id IS NOT NULL%' THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: the index predicate has lost (venue_account_id IS NOT NULL): %. Rolling back.',
+      'Migration 20260812083206 failed: the index predicate has lost (venue_account_id IS NOT NULL): %. Rolling back.',
       v_idx_def;
   END IF;
   IF v_idx_def NOT ILIKE '%disconnected_at IS NULL%' THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: the index predicate is NOT scoped to live keys — it lacks (disconnected_at IS NULL): %. api_keys rows are RETAINED on soft-disconnect (20260422101911), so a lifecycle-blind predicate lets a DEAD row squat the (user, exchange, venue_account_id) slot: the founder re-connecting the same broker login gets 23505, "fail toward the existing row" resolves them onto the disconnected key, and every cron dispatcher skips it — the strategy silently never syncs. NOTE: CREATE UNIQUE INDEX IF NOT EXISTS matches on NAME ONLY and would leave an older predicate in place; this migration DROPs the index first for exactly that reason. Rolling back.',
+      'Migration 20260812083206 failed: the index predicate is NOT scoped to live keys — it lacks (disconnected_at IS NULL): %. api_keys rows are RETAINED on soft-disconnect (20260422101911), so a lifecycle-blind predicate lets a DEAD row squat the (user, exchange, venue_account_id) slot: the founder re-connecting the same broker login gets 23505, "fail toward the existing row" resolves them onto the disconnected key, and every cron dispatcher skips it — the strategy silently never syncs. NOTE: CREATE UNIQUE INDEX IF NOT EXISTS matches on NAME ONLY and would leave an older predicate in place; this migration DROPs the index first for exactly that reason. Rolling back.',
       v_idx_def;
   END IF;
 
@@ -926,7 +926,7 @@ BEGIN
      AND c.relname = 'api_keys_user_exchange_venue_account_uniq';
   IF v_idx_cols IS DISTINCT FROM ARRAY['user_id', 'exchange', 'venue_account_id']::TEXT[] THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: index must cover exactly (user_id, exchange, venue_account_id) in that order, got %. user_id MUST LEAD — a non-tenant-leading unique index over a caller-influenced value is the C-08 cross-tenant leak. Rolling back.',
+      'Migration 20260812083206 failed: index must cover exactly (user_id, exchange, venue_account_id) in that order, got %. user_id MUST LEAD — a non-tenant-leading unique index over a caller-influenced value is the C-08 cross-tenant leak. Rolling back.',
       v_idx_cols;
   END IF;
 
@@ -947,11 +947,11 @@ BEGIN
 
   IF NOT v_trg_venue THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: the api_keys_scrub_venue_account_id BEFORE INSERT trigger is not attached — a client could supply its own venue_account_id and evade the dedup for free. Rolling back.';
+      'Migration 20260812083206 failed: the api_keys_scrub_venue_account_id BEFORE INSERT trigger is not attached — a client could supply its own venue_account_id and evade the dedup for free. Rolling back.';
   END IF;
   IF NOT v_trg_attested THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: the pre-existing api_keys_scrub_attested_venue trigger is GONE — this migration displaced it and re-opened the 153.6 probe-gate bypass. Rolling back.';
+      'Migration 20260812083206 failed: the pre-existing api_keys_scrub_attested_venue trigger is GONE — this migration displaced it and re-opened the 153.6 probe-gate bypass. Rolling back.';
   END IF;
 
   -- (f) THE COMPOSITION NOTHING ELSE PROVES, and it has real teeth HERE that it
@@ -970,7 +970,7 @@ BEGIN
 
   IF NOT (v_cws_owner = ANY (c_privileged_roles)) THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: create_wizard_strategy is owned by %, which the api_keys scrub triggers do not admit (allowed: %). DROP+CREATE re-owned the function to the applying role. Every key the wizard mints would have BOTH attested_venue and venue_account_id scrubbed to NULL. Rolling back.',
+      'Migration 20260812083206 failed: create_wizard_strategy is owned by %, which the api_keys scrub triggers do not admit (allowed: %). DROP+CREATE re-owned the function to the applying role. Every key the wizard mints would have BOTH attested_venue and venue_account_id scrubbed to NULL. Rolling back.',
       v_cws_owner, array_to_string(c_privileged_roles, ', ');
   END IF;
 
@@ -983,7 +983,7 @@ BEGIN
   FOREACH v_role IN ARRAY c_privileged_roles LOOP
     IF v_scrub_src NOT LIKE ('%''' || v_role || '''%') THEN
       RAISE EXCEPTION
-        'Migration 20260812120000 failed: the venue_account_id scrub body does not name the role %, so the owner allowlist this post-verify checked is not the one actually enforced. Re-cut both together. Rolling back.',
+        'Migration 20260812083206 failed: the venue_account_id scrub body does not name the role %, so the owner allowlist this post-verify checked is not the one actually enforced. Re-cut both together. Rolling back.',
         v_role;
     END IF;
   END LOOP;
@@ -996,7 +996,7 @@ BEGIN
        AND prosecdef
   ) THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: scrub_client_supplied_venue_account_id is SECURITY DEFINER, so current_user resolves to its OWNER, the privileged check always passes, and the trigger is a silent no-op. It must be SECURITY INVOKER. Rolling back.';
+      'Migration 20260812083206 failed: scrub_client_supplied_venue_account_id is SECURITY DEFINER, so current_user resolves to its OWNER, the privileged check always passes, and the trigger is a silent no-op. It must be SECURITY INVOKER. Rolling back.';
   END IF;
 
   -- (g) the non-blank CHECK is present AND VALIDATED. Present-but-NOT-VALID is
@@ -1016,11 +1016,11 @@ BEGIN
      AND contype  = 'c';
   IF v_chk_valid IS NULL THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: the api_keys_venue_account_id_nonblank CHECK is absent. '''' is non-NULL, so api_keys_user_exchange_venue_account_uniq would govern it and two DIFFERENT accounts could collide onto one row — resolving one user''s connect onto another account''s credentials. Rolling back.';
+      'Migration 20260812083206 failed: the api_keys_venue_account_id_nonblank CHECK is absent. '''' is non-NULL, so api_keys_user_exchange_venue_account_uniq would govern it and two DIFFERENT accounts could collide onto one row — resolving one user''s connect onto another account''s credentials. Rolling back.';
   END IF;
   IF NOT v_chk_valid THEN
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: api_keys_venue_account_id_nonblank exists but is NOT VALID, so rows already in the table were never checked against it. Rolling back.';
+      'Migration 20260812083206 failed: api_keys_venue_account_id_nonblank exists but is NOT VALID, so rows already in the table were never checked against it. Rolling back.';
   END IF;
 
   --     …and the constraint by that name really is THE ONE DESCRIBED, read back
@@ -1047,13 +1047,13 @@ BEGIN
      AND conname  = 'api_keys_venue_account_id_nonblank';
   IF v_blank_ok IS NOT TRUE THEN  -- IS NOT TRUE, not NOT: a NULL must abort too
     RAISE EXCEPTION
-      'Migration 20260812120000 failed: api_keys_venue_account_id_nonblank is not the constraint it claims to be. Expected CHECK (venue_account_id IS NULL OR btrim(venue_account_id) <> ''''), got: %. Rolling back.',
+      'Migration 20260812083206 failed: api_keys_venue_account_id_nonblank is not the constraint it claims to be. Expected CHECK (venue_account_id IS NULL OR btrim(venue_account_id) <> ''''), got: %. Rolling back.',
       (SELECT pg_get_constraintdef(oid) FROM pg_constraint
         WHERE conrelid = 'public.api_keys'::regclass
           AND conname  = 'api_keys_venue_account_id_nonblank');
   END IF;
 
-  RAISE NOTICE 'Migration 20260812120000 post-verify OK: venue_account_id column + non-blank CHECK (validated) + LIVE-scoped partial UNIQUE (user_id, exchange, venue_account_id) WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL, exactly 1 create_wizard_strategy overload (owner %) stamping the NULLIF(btrim(...)) normalised identity, fence + attested_venue + venue_account_id canaries intact, grants authenticated-yes/anon-no, both api_keys scrub triggers attached, new scrub is SECURITY INVOKER.',
+  RAISE NOTICE 'Migration 20260812083206 post-verify OK: venue_account_id column + non-blank CHECK (validated) + LIVE-scoped partial UNIQUE (user_id, exchange, venue_account_id) WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL, exactly 1 create_wizard_strategy overload (owner %) stamping the NULLIF(btrim(...)) normalised identity, fence + attested_venue + venue_account_id canaries intact, grants authenticated-yes/anon-no, both api_keys scrub triggers attached, new scrub is SECURITY INVOKER.',
     v_cws_owner;
 END
 $verify$;

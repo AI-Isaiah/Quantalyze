@@ -420,7 +420,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
          * RATHER THAN A GAP. `api_keys_user_exchange_venue_account_uniq` is
          * UNREACHABLE on this path today: it only fires on a row carrying a
          * non-NULL `venue_account_id`, `add_wizard_composite_key` does not
-         * write that column (migration 20260812120000 deliberately left the
+         * write that column (migration 20260812083206 deliberately left the
          * composite RPC untouched — TWIN-7), and MT5 — the only venue with an
          * identity to write — cannot be a composite member anyway (the stitch
          * worker has no mt5 arm; ROADMAP 153.6 records it as out of scope).

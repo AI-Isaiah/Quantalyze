@@ -6,7 +6,7 @@
  * `create-with-key/route.ts` and `composite/add-key/route.ts` both mapped ANY
  * 23505 to `DRAFT_ALREADY_EXISTS` ("A wizard session with this key is already
  * in progress."). That was a single-constraint world and the copy was true in
- * it. Migration 20260812120000 adds a SECOND unique index over `api_keys`
+ * it. Migration 20260812083206 adds a SECOND unique index over `api_keys`
  * (`api_keys_user_exchange_venue_account_uniq`), so a 23505 is no longer one
  * fact — and reporting a venue-identity collision as a duplicate DRAFT tells
  * the user something that is simply not the case. Discriminating is the
@@ -58,7 +58,7 @@
 const CONSTRAINT_NAME_PATTERN = /constraint "([A-Za-z0-9_]{1,128})"/;
 
 /**
- * The `api_keys` venue-identity index from migration 20260812120000. A 23505
+ * The `api_keys` venue-identity index from migration 20260812083206. A 23505
  * naming THIS is "these credentials are already connected", never "this wizard
  * session already has a draft".
  */

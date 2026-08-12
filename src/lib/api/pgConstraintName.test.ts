@@ -99,7 +99,7 @@ describe("[154-06 / TWIN-8] pgConstraintName", () => {
    * a typo here is a silent mis-route, and both routes read these constants.
    */
   it("pins the constraint names the routes discriminate on", () => {
-    // supabase/migrations/20260812120000_api_keys_venue_account_id.sql
+    // supabase/migrations/20260812083206_api_keys_venue_account_id.sql
     expect(VENUE_IDENTITY_CONSTRAINT).toBe(
       "api_keys_user_exchange_venue_account_uniq",
     );

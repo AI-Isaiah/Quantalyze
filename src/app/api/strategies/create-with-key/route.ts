@@ -86,7 +86,7 @@ function pickPlaceholderCodename(): string {
  * `api_keys` row carries `strategy_keys` membership and synced history other
  * strategies depend on, so "resolving" a collision by overwriting it would
  * orphan all of that — the DB index refuses the duplicate INSERT precisely so
- * nothing has to be overwritten (migration 20260812120000's own contract).
+ * nothing has to be overwritten (migration 20260812083206's own contract).
  *
  * ⛔ WHY THE ADMIN CLIENT, AND WHY IT IS NOT A SHORTCUT. `api_keys.venue_account_id`
  * is NOT on the column-SELECT allowlist: 20260410225608 revoked table-level
@@ -763,7 +763,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       p_kek_version: kek_version,
       p_placeholder_name: pickPlaceholderCodename(),
       p_wizard_session_id: wizard_session_id,
-      // 154 / WIZCONT-02 — the 12th parameter (20260812120000). The RPC stamps
+      // 154 / WIZCONT-02 — the 12th parameter (20260812083206). The RPC stamps
       // it as `NULLIF(btrim(…), '')` inside the SECURITY DEFINER body, which is
       // the only writer whose value survives the api_keys_scrub_venue_account_id
       // trigger. NULL for every venue that exposes no stable non-secret account
@@ -779,7 +779,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // 156 (CONNECT-REFACTOR), which moves this INSERT behind a service-role
       // writer and withdraws authenticated EXECUTE.
       //
-      // ⚠️ DEPLOY ORDER: migration 20260812120000 must be LIVE before the
+      // ⚠️ DEPLOY ORDER: migration 20260812083206 must be LIVE before the
       // deployment carrying this line. PostgREST resolves rpc() by named
       // parameters — against the cached 11-parameter function this call answers
       // PGRST202 and EVERY connect-a-key submit fails. (It is live on PROD and
@@ -816,7 +816,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         /**
          * 154 / WIZCONT-02 (TWIN-8) — A 23505 IS NO LONGER ONE FACT.
          *
-         * Until migration 20260812120000 this route saw exactly one unique
+         * Until migration 20260812083206 this route saw exactly one unique
          * violation, so mapping every 23505 to DRAFT_ALREADY_EXISTS was true.
          * There are now two, they mean different things, and the copy for one
          * is simply wrong for the other. Read the name Postgres itself quoted

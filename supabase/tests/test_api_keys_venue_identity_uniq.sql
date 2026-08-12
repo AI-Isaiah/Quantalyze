@@ -1,4 +1,4 @@
--- Test for migration 20260812120000 — Phase 154 / WIZCONT-02, the token-less
+-- Test for migration 20260812083206 — Phase 154 / WIZCONT-02, the token-less
 -- credential dedup backstop on api_keys.
 --
 -- ROOT CAUSE the migration fixes: re-connecting the SAME credentials from a
@@ -219,7 +219,7 @@ BEGIN
   END IF;
 
   -- ----- 4. grants: authenticated EXECUTEs, anon does NOT -------------------
-  -- ⛔ NOT A FORMALITY HERE. Migration 20260812120000 uses DROP + CREATE (a
+  -- ⛔ NOT A FORMALITY HERE. Migration 20260812083206 uses DROP + CREATE (a
   -- signature change cannot go through CREATE OR REPLACE), and DROP DESTROYS the
   -- ACL — a freshly created function grants EXECUTE to PUBLIC by default. The
   -- anon assertion below is what catches a re-issue of the function that forgot

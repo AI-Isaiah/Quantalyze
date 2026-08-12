@@ -110,7 +110,7 @@ BEGIN
 
   -- ----- 4. grants: authenticated EXECUTEs, anon does NOT ------------------
   -- ⚠️ THE SIGNATURE GAINED A 12th TYPE (trailing `text`) IN MIGRATION
-  -- 20260812120000 (Phase 154 / WIZCONT-02: p_venue_account_id text DEFAULT
+  -- 20260812083206 (Phase 154 / WIZCONT-02: p_venue_account_id text DEFAULT
   -- NULL). has_function_privilege's text form matches the DECLARED argument
   -- list EXACTLY and ignores defaults, so the old 11-type string does not
   -- resolve to a 12-parameter function — it raises undefined_function and this
