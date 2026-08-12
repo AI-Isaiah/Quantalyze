@@ -3,7 +3,7 @@ phase: 154
 slug: wizcont-stale-wizard-continuity-no-stale-screens
 status: draft
 nyquist_compliant: false
-wave_0_complete: false
+wave_0_complete: true
 created: 2026-08-12
 ---
 
@@ -53,13 +53,14 @@ created: 2026-08-12
 
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
-| TBD | 01 | 0 | STALE-01 | — | Q1/Q2 read-only PROD SELECTs settle which supplier mechanism (M2/M3/M4) fired — **no fix may be designed before this lands** | investigation | Supabase MCP read-only SELECT | n/a | ⬜ pending |
-| TBD | 01 | 0 | STALE-01a | — | **T1:** a poll reading `pending` forever stops claiming "Fetching trades…" after the existing patience window and surfaces an honest state | component (fake timers) | `npx vitest run "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.stale.runtime.test.tsx"` | ❌ W0 | ⬜ pending |
-| TBD | 01 | 0 | STALE-01a | — | **T1b:** with `isComposite === false` and the SF-1 backstop fired, `wizard-sync-interrupted` renders (the `SyncPreviewStep.tsx:2290-2291` gate) | component | same file | ❌ W0 | ⬜ pending |
-| TBD | 01 | 0 | STALE-01a | T-154-02 | **T2:** a `{data: null, error: null}` zero-rows read is **not** coerced to `pending`; the absent row is observable | unit (hook) | `npx vitest run src/hooks/useStrategySyncPoller.test.ts` | ❌ W0 — **no test file for this hook exists today** | ⬜ pending |
-| TBD | 01 | 0 | STALE-01a | — | **T2b:** the kickoff arm does not enter `waiting_for_complete` on a 200 whose body says `queued: false` (M4) | component | `SyncPreviewStep.stale.runtime.test.tsx` | ❌ W0 | ⬜ pending |
-| TBD | 02 | 0 | STALE-01b | — | **T3:** single-key arm, terminal status + zero `csv_daily_returns` rows ⇒ **no** `gate_failed`, no `ErrorEnvelope`, no `wizard_error` event — it repolls | component | `npx vitest run "…/SyncPreviewStep.stale-refusal.runtime.test.tsx"` | ❌ W0 | ⬜ pending |
-| TBD | 02 | 0 | STALE-01b | — | **T3b (symmetry):** the composite arm in the identical state repolls (passes today) — the **pair** makes the divergence the subject, not one arm | component | same file | ❌ W0 | ⬜ pending |
+| 154-01-01 | 01 | 0 | STALE-01 | — | Q1/Q2 read-only PROD SELECTs settle which supplier mechanism (M2/M3/M4) fired — **no fix may be designed before this lands** | investigation | Supabase MCP read-only SELECT | ✅ `154-INVESTIGATION.md` | ✅ done — **verdict M2(ii)**; M3/M4/M2(i) ruled out |
+| 154-01-02 | 01 | 0 | STALE-01a | — | **T1:** a poll reading `pending` forever stops claiming "Fetching trades…" after the existing patience window and surfaces an honest state | component (fake timers) | `npx vitest run "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.stale.runtime.test.tsx"` | ✅ exists | ❌ **red-observed** at `8a74683f` — renders the claim at `1000s` elapsed |
+| 154-01-02 | 01 | 0 | STALE-01a | — | **T1b:** with `isComposite === false` and the SF-1 backstop fired, `wizard-sync-interrupted` renders (the `SyncPreviewStep.tsx:2290-2291` gate) | component | same file | ✅ exists | ❌ **red-observed** at `8a74683f` — `expected null not to be null` |
+| 154-01-02 | 01 | 0 | STALE-01a | T-154-02 | **T2:** a `{data: null, error: null}` zero-rows read is **not** coerced to `pending`; the absent row is observable | unit (hook) | `npx vitest run src/hooks/useStrategySyncPoller.test.ts` | ✅ created (none existed) | ❌ **red-observed** at `8a74683f` — 13 fabrications from 13 empty reads |
+| 154-01-02 | 01 | 0 | STALE-01a | — | **T2b:** the kickoff arm does not enter `waiting_for_complete` on a 200 whose body says `queued: false` (M4) | component | `SyncPreviewStep.stale.runtime.test.tsx` | ✅ exists | ❌ **red-observed** at `8a74683f` |
+| 154-01-02 | 01 | 0 | STALE-01a | — | **SYM-interval (symmetry):** the interval arm reports NOTHING for the identical zero-rows read (TWIN-3) — the **pair** makes the divergence the subject | unit (hook) | `npx vitest run src/hooks/useStrategySyncPoller.test.ts` | ✅ exists | ✅ **green at HEAD** — the module already contains its own correct answer |
+| 154-01-03 | 01 | 0 | STALE-01b | — | **T3:** single-key arm, terminal status + zero `csv_daily_returns` rows ⇒ **no** `gate_failed`, no `ErrorEnvelope`, no `wizard_error` event — it repolls | component | `npx vitest run "…/SyncPreviewStep.stale-refusal.runtime.test.tsx"` | ✅ exists | ❌ **red-observed** — renders `data-error-code="GATE_INSUFFICIENT_TRADES"` ⚠️ **not** the predicted provenance code |
+| 154-01-03 | 01 | 0 | STALE-01b | — | **T3b (symmetry):** the composite arm in the identical state repolls (passes today) — the **pair** makes the divergence the subject, not one arm | component | same file | ✅ exists | ✅ **green at HEAD** — `return "repoll"` at `:1101-1103` |
 | TBD | 02 | — | STALE-01b | — | Amber in-flight state renders `role="status"` + warning tokens, **never** the red envelope; any unknowable count renders `—`, never a stale number | component | same file | ❌ W0 | ⬜ pending |
 | TBD | 01 | — | STALE-01 (backend arm — **only if** Q1/Q2 implicate M3/H-a) | — | `process_key_long` cannot report DONE while its declared child was never enqueued | unit (pytest) | `cd analytics-service && pytest tests/test_long_fetch_follow_on_guard.py -x` | ✅ extend | ⬜ pending |
 | TBD | 01 | — | STALE-01 (DB arm — **only if** implicated) | — | bridge branch (d) / `done_pending_children` behaviour pinned | SQL gate | `supabase/tests/test_*.sql` | ⚠️ extend existing bridge tests, do **not** fork | ⬜ pending |
@@ -80,9 +81,9 @@ created: 2026-08-12
 
 ## Wave 0 Requirements
 
-- [ ] `src/hooks/useStrategySyncPoller.test.ts` — **no test file exists for this hook at all**; covers T2
-- [ ] `src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.stale.runtime.test.tsx` — covers T1, T1b, T2b (STALE-01a)
-- [ ] `src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.stale-refusal.runtime.test.tsx` — covers T3, T3b (STALE-01b)
+- [x] `src/hooks/useStrategySyncPoller.test.ts` — **no test file existed for this hook at all**; covers T2 + the `SYM-interval` twin (landed `8a74683f`)
+- [x] `src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.stale.runtime.test.tsx` — covers T1, T1b, T2b (STALE-01a) (landed `8a74683f`)
+- [x] `src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.stale-refusal.runtime.test.tsx` — covers T3, T3b (STALE-01b)
 - [ ] `supabase/tests/test_api_keys_venue_identity_uniq.sql` — covers WIZCONT-02's DB backstop
 - [ ] `src/__tests__/wizard-draft-query-single-source.test.ts` — the contract test pinning the single-sourced draft query — covers WIZCONT-01's stated criterion
 - [ ] Framework install: **none needed** — vitest, Playwright, pytest all present and wired
@@ -110,10 +111,19 @@ created: 2026-08-12
 | SC-1 (resume) | `ContributionWizardOverlay.tsx`: revert the draft prop to the literal `initialDraft={null}` | overlay resume-banner component test | ⬜ pending | — |
 | SC-1 (resume, 2nd member) | `WizardClient.tsx:198`: restore `if (source === "csv") return "csv_upload";` **above** the `initialDraft` check | CSV-draft resume test in `WizardClient.test.tsx` | ⬜ pending | — |
 | SC-1 (TRAP-4) | `ContributionWizardOverlay.tsx`: make "Start fresh" call the delete directly instead of opening the confirm dialog | confirm-dialog test | ⬜ pending | — |
-| SC-2a (stall) | `SyncPreviewStep.tsx:2290-2291`: re-add the `isComposite &&` gate on the SF-1 stall backstop | T1b | ⬜ pending | — |
-| SC-2a (zero-rows) | `useStrategySyncPoller.ts:228-229`: restore `statusRow?.computation_status ?? "pending"` | T2 | ⬜ pending | — |
-| SC-2b (stale refusal) | `SyncPreviewStep.tsx` single-key arm: remove the `series.length === 0 → repoll` guard | T3 | ⬜ pending | — |
-| SC-2b (2nd member / symmetry) | Remove the **composite** arm's existing R2-5 guard (`:1092-1096`) | T3b | ⬜ pending | — |
+| SC-2a (stall) | `SyncPreviewStep.tsx:2290-2291`: re-add the `isComposite &&` gate on the SF-1 stall backstop | T1b | ✅ **observed** — see note ⭐ | T1b RED at `8a74683f`: `expected null not to be null` |
+| SC-2a (zero-rows) | `useStrategySyncPoller.ts:228-229`: restore `statusRow?.computation_status ?? "pending"` | T2 | ✅ **observed** — see note ⭐ | T2 RED at `8a74683f`: `expected [ 'pending', 'pending', …(11) ] to not include 'pending'` |
+| SC-2b (stale refusal) | `SyncPreviewStep.tsx` single-key arm: remove the `series.length === 0 → repoll` guard | T3 | ✅ **observed** — see note ⭐ | T3 RED: renders `data-error-code="GATE_INSUFFICIENT_TRADES"` + *"We found only 0 filled trade(s) on this key."* |
+| SC-2b (2nd member / symmetry) | Remove the **composite** arm's existing R2-5 guard (`:1092-1096`) | T3b | ⬜ pending — **cannot run in 154-01** | Plan 154-01 forbids touching any production source. T3b is ✅ green at HEAD (the guard is present); the mutation must be run by the plan that greens T3 (154-08). |
+
+⭐ **Why three rows read "observed" without a mutation being applied.** Each of those mutations
+describes *restoring the defect*. At `8a74683f` **the defect is still present** — this plan lands the
+tests before any fix, so HEAD **is** the mutated tree, and the RED runs above are the mutation
+evidence in its strongest available form: the assertion was observed failing against real production
+code, not against a hand-applied edit. ⚠️ **This does NOT discharge the row for the post-fix tree.**
+Once 154-04 / 154-08 land, each mutation must be re-applied to the FIXED source and re-observed —
+otherwise a fix that greens the test by weakening the test is indistinguishable from one that works.
+Owner: the plan that greens each row.
 | SC-3 (dedup) | `create-with-key/route.ts`: drop the venue-identity arm from the fence, keeping only `wizard_session_id` | route dedup integration test | ⬜ pending | — |
 | SC-3 (DB backstop) | Drop the `WHERE … IS NOT NULL` predicate so the index is total, not partial | `test_api_keys_venue_identity_uniq.sql` | ⬜ pending | — |
 | SC-3 (fail-toward) | Make the dedup path UPDATE the existing `api_keys` row instead of returning it | route test asserting `strategy_keys` membership + ciphertext unchanged | ⬜ pending | — |
@@ -130,23 +140,51 @@ created: 2026-08-12
 > The failure this catches: assertions that read their expected value out of the module under test,
 > so the test passes for any implementation.
 
-- [ ] No test imports a **constant** from the module it tests — expected values are **literals** in the test.
+> **Scope of the ticks below: the three Wave-0 files landed by plan 154-01 only.** Plans 154-03/04/07/08
+> add further tests and must re-verify each line against their own files; a tick here is not a
+> phase-wide clearance.
+
+- [x] No test imports a **constant** from the module it tests — expected values are **literals** in the test.
+      Verified: `grep -n "RETRY_THRESHOLD_MS\|WARN_THRESHOLD_MS\|SLOW_HINT_MS\|POLL_BACKOFF_MS\|isComputedAnalytics"`
+      over the three files matches **only prose inside comments** (each match is a line explaining why
+      the identifier is *not* imported). The import lists are three lines each: `vitest`,
+      `@testing-library/react`, and the module under test. Advances are the hand-typed literals
+      `1_000_000` / `30_000` / `60_000`; schedules are the hand-typed `[3000, 3000, 5000]` and `3000`.
       ⚠️ Specifically: T1/T1b must **not** import `RETRY_THRESHOLD_MS` / `WARN_THRESHOLD_MS` from
       `SyncPreviewStep.tsx`. Advance fake time by a literal, or the test passes for any threshold —
       including a regression that moves it.
-- [ ] No assertion compares a value to itself via a re-export, fixture, or table under test.
-      ⚠️ Specifically: the terminal-status assertions must **not** be written against
-      `isComputedAnalytics()` from `closed-sets.ts` — that is the function under test. Pin the
-      literal set `{failed, complete, complete_with_warnings}` and pin it against the **DB CHECK
-      constraint**, which is the independent authority.
-- [ ] Table/registry sizes pinned to a **literal count**, not `len(THE_TABLE)`.
-- [ ] Any fake/double pinned against the real contract it stands in for.
-      ⚠️ Specifically: the poll fake must reproduce PostgREST's real `{data: null, error: null}`
-      zero-rows shape for `.maybeSingle()`, not a hand-invented `{data: undefined}` — T2 is
-      meaningless against a double that cannot produce the shape the bug rides on.
+- [x] No assertion compares a value to itself via a re-export, fixture, or table under test.
+      Verified: `TERMINAL_STATUSES = ["failed", "complete", "complete_with_warnings"]` is hand-typed
+      in `useStrategySyncPoller.test.ts` with an inline citation to the DB CHECK constraint in
+      migration `20260602120000` as its independent authority; `isComputedAnalytics` is never
+      imported. The rendered needles (`"Fetching trades..."`, `code: <CODE>`,
+      `"Stitching your composite track record"`) are all hand-transcribed from the component with
+      file:line comments, never read off `WIZARD_ERROR_COPY` or the component.
+      ⭐ **This discipline paid for itself in T3.** The plan named
+      `RENDERED_CODE("GATE_SERIES_PROVENANCE_UNVERIFIED")` as the needle; measured, HEAD renders
+      `GATE_INSUFFICIENT_TRADES` (the provenance arm requires `csvRowCount > 0`, and the heal-delete
+      window has zero). A name-only needle would have reported T3 **GREEN against the defect**. T3
+      therefore asserts a structural `[data-error-code]` probe — which catches *any* refusal — plus
+      both named codes.
+- [x] Table/registry sizes pinned to a **literal count**, not `len(THE_TABLE)`. (No registry is
+      asserted by the Wave-0 files; the closed set above is the only table-shaped oracle and it is a
+      hand-typed literal.)
+- [x] Any fake/double pinned against the real contract it stands in for.
+      The zero-rows double is the literal `{ data: null, error: null }` and is itself pinned by the
+      `DOUBLE:` case, which asserts the key set and both null values — so a later edit to
+      `{ data: undefined }` reddens instead of silently hollowing T2. The chain double additionally
+      supports **both** await forms (`.maybeSingle()` for the ladder arm, `.single()` for the
+      interval arm); `INTERVAL-CTRL:` exists precisely so `SYM-interval` cannot pass vacuously on a
+      double that rejects rather than reads.
 
 *Deliberate self-referential oracles:* none. If one is introduced, name it here and state what
 independently covers it.
+
+**Vacuity fences (154-01 files).** Every absence assertion carries a positive counterpart
+(`WAITING-CTRL`, `REFUSAL-CTRL`, `LADDER-CTRL`, `INTERVAL-CTRL`) **and** `expect(text.length).toBeGreaterThan(0)`.
+`WAITING-CTRL` and `REFUSAL-CTRL` additionally state the property a fix must NOT break: the in-flight
+sentence is correct *inside* the patience window (the defect is the unbounded claim, not the claim),
+and an unstamped series that genuinely exists still earns its refusal.
 
 ---
 
@@ -160,8 +198,11 @@ independently covers it.
 - [ ] **Every success criterion has a Falsifiability Ledger row**
 - [ ] **Every ledger row is `Observed ✅` with pasted evidence, or explicitly marked skipped-with-reason**
 - [ ] **Oracle Independence checklist complete**
-- [ ] ⛔ **T1/T2/T3 demonstrated RED at the pre-fix commit, with the failing output pasted into the
-      plan ledger** — this is the CONTEXT.md/ROADMAP gate for STALE-01, not a nice-to-have
+- [x] ⛔ **T1/T2/T3 demonstrated RED at the pre-fix commit, with the failing output pasted into the
+      plan ledger** — this is the CONTEXT.md/ROADMAP gate for STALE-01, not a nice-to-have.
+      **Discharged:** T1, T1b, T2, T2b RED at `8a74683f`; T3 RED; `SYM-interval` and T3b GREEN.
+      Failing output pasted verbatim into `154-INVESTIGATION.md` § "RED evidence". Zero production
+      source files were modified to produce it.
 - [ ] `nyquist_compliant: true` set in frontmatter
 
 **Approval:** pending
