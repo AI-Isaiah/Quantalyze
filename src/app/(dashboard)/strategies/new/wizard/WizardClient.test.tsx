@@ -425,6 +425,96 @@ describe("[H-0182] WizardClient — resume banner on LS pointer mismatch", () =>
   });
 });
 
+/**
+ * Phase 154-05 / WIZCONT-01 (TWIN-6) — "the draft is not consulted before the
+ * step is chosen", the CSV half.
+ *
+ * The pre-154 initializer read `if (source === "csv") return "csv_upload";`
+ * BEFORE it looked at `initialDraft`, so a CSV draft never resumed: the branch
+ * chose its step without ever learning a draft existed, and `handleResume`
+ * hard-coded `sync_preview` — an API-branch step with no key behind it.
+ *
+ * These cases assert the ORDER through its consequences, not through the
+ * source: what the founder sees when a draft of each kind is offered.
+ */
+describe("[154-05 / TWIN-6] WizardClient — the draft decides the step, not the branch", () => {
+  // A CSV draft: no api_key_id (the column is null for BOTH csv and composite,
+  // which is exactly why the KIND has to be passed rather than re-derived).
+  const CSV_DRAFT = {
+    ...DRAFT,
+    id: "draft-csv-1",
+    name: "Aurora CSV",
+    api_key_id: null,
+  };
+  const COMPOSITE_DRAFT = {
+    ...DRAFT,
+    id: "draft-composite-1",
+    api_key_id: null,
+  };
+
+  it("a CSV draft resumes ON the CSV branch: banner + csv_upload + the draft bound", async () => {
+    resumeOverrides = { showResumeBanner: true };
+    searchParamsString = "source=csv";
+    render(<WizardClient initialDraft={CSV_DRAFT} initialDraftKind="csv" />);
+
+    // The founder gets the explicit choice (never a silent jump).
+    expect(await screen.findByTestId("wizard-resume")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-start-fresh")).toBeInTheDocument();
+    // The step is csv_upload — the CSV draft's own step.
+    expect(screen.getByTestId("wizard-csv-dropzone")).toBeInTheDocument();
+    // …and the SERVER draft is bound behind it: `strategyId` seeds `canDelete`,
+    // so the chrome's delete-draft control only exists when a draft is loaded.
+    expect(screen.getByTestId("wizard-delete-draft")).toBeInTheDocument();
+    // The banner body is the CSV copy (UI-SPEC state contract 1).
+    expect(
+      screen.getByText(/A CSV upload draft from an earlier session is ready/i),
+    ).toBeInTheDocument();
+  });
+
+  it("Resume on a CSV draft stays on csv_upload — it never lands on sync_preview", async () => {
+    resumeOverrides = { showResumeBanner: true };
+    searchParamsString = "source=csv";
+    render(<WizardClient initialDraft={CSV_DRAFT} initialDraftKind="csv" />);
+
+    fireEvent.click(await screen.findByTestId("wizard-resume"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("wizard-resume")).toBeNull(),
+    );
+
+    expect(screen.getByTestId("wizard-csv-dropzone")).toBeInTheDocument();
+    // handleResume used to hard-code sync_preview for every draft, which would
+    // drop a CSV resume onto an API step with no key behind it.
+    expect(screen.queryByTestId("mock-sync-preview")).toBeNull();
+  });
+
+  it("a COMPOSITE draft resumes on sync_preview, never on csv_upload (A4)", async () => {
+    resumeOverrides = { showResumeBanner: true };
+    render(
+      <WizardClient
+        initialDraft={COMPOSITE_DRAFT}
+        initialDraftKind="composite"
+      />,
+    );
+
+    // api_key_id is null here too — a kind-blind `api_key_id === null ? csv`
+    // rule would have routed this member-bearing draft to the upload step.
+    expect(await screen.findByTestId("mock-sync-preview")).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-csv-dropzone")).toBeNull();
+  });
+
+  it("no draft on the CSV branch still starts fresh on csv_upload (unchanged)", async () => {
+    resumeOverrides = {};
+    searchParamsString = "source=csv";
+    render(<WizardClient initialDraft={null} />);
+
+    expect(await screen.findByTestId("wizard-csv-dropzone")).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-resume")).toBeNull();
+    // No draft ⇒ no strategyId ⇒ no delete control. The positive counterpart to
+    // the first case's assertion, so "renders nothing at all" cannot pass both.
+    expect(screen.queryByTestId("wizard-delete-draft")).toBeNull();
+  });
+});
+
 describe("[H-0182] WizardClient — wizard_start telemetry", () => {
   it("fires wizard_start once after hydration with resume=false for a fresh start", async () => {
     render(<WizardClient initialDraft={null} />);
