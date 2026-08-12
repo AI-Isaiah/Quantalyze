@@ -2,6 +2,7 @@ import { Suspense } from "react";
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { readLatestWizardDraft } from "@/lib/wizard/draft-query";
 import { WizardClient } from "./WizardClient";
 
 /**
@@ -29,22 +30,6 @@ export const metadata: Metadata = {
 };
 
 export const dynamic = "force-dynamic";
-
-interface InitialDraft {
-  id: string;
-  name: string | null;
-  description: string | null;
-  category_id: string | null;
-  strategy_types: string[] | null;
-  subtypes: string[] | null;
-  markets: string[] | null;
-  supported_exchanges: string[] | null;
-  leverage_range: string | null;
-  aum: number | null;
-  max_capacity: number | null;
-  api_key_id: string | null;
-  asset_class: string | null;
-}
 
 interface WizardPageProps {
   searchParams: Promise<{ source?: string }>;
@@ -76,19 +61,18 @@ export default async function WizardPage({ searchParams }: WizardPageProps) {
   // Pull the most recent wizard draft (if any). The WizardClient will
   // decide whether to show the Resume banner based on whether this
   // row matches the localStorage pointer.
-  const { data: draft } = await supabase
-    .from("strategies")
-    .select(
-      "id, name, description, category_id, strategy_types, subtypes, markets, supported_exchanges, leverage_range, aum, max_capacity, api_key_id, asset_class, created_at",
-    )
-    .eq("user_id", user.id)
-    .eq("source", "wizard")
-    .eq("status", "draft")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  const initialDraft: InitialDraft | null = draft ?? null;
+  //
+  // Phase 154 / WIZCONT-01: the query itself now lives in
+  // `@/lib/wizard/draft-query` so this page and the overlay's route handler
+  // (`/api/strategies/wizard-draft`) cannot drift apart — one shape, two
+  // callers. Behavior here is unchanged: a read error still degrades to
+  // "no draft" (the helper RETURNS the error rather than throwing), and the
+  // draft is still passed down verbatim. The branch-matching rule the helper
+  // also exports is APPLIED in 154-05, not here.
+  const { draft: initialDraft } = await readLatestWizardDraft(
+    supabase,
+    user.id,
+  );
 
   return (
     /*
