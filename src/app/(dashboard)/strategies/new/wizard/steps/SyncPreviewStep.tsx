@@ -818,8 +818,10 @@ export function SyncPreviewStep({
         //
         // 154-08 / M4 — `queued` is read ADDITIVELY alongside `composite`.
         // `keys/sync` already puts it on the wire for every unified single-key
-        // reply (`route.ts:660,676`), forwarding the backbone's own job fact;
-        // the composite branch omits it, which is why only the explicit
+        // reply — BOTH 2xx arms of its unified translation block (the
+        // `WIZARD_DUPLICATE` reply and the ordinary accepted one) forward the
+        // backbone's own job fact; the composite branch, which returns
+        // `composite: true` without it, omits it — which is why only the explicit
         // `=== false` is acted on and an ABSENT field keeps the prior meaning.
         // The read is on the RESPONSE only — `process-key-onboard-contract.ts`
         // (whose accepted shape has a bidirectional pytest oracle) is not
@@ -1520,10 +1522,11 @@ export function SyncPreviewStep({
 
           // ── 154-08 / TWIN-1: the single-key R2-5 twin ────────────────────
           //
-          // The composite arm ~300 lines above has treated an empty series as
-          // NOT-yet-terminal since R2-5. `run_derive_broker_dailies_job` does
-          // the SAME wholesale delete→re-upsert of `csv_daily_returns` on the
-          // STRATEGY-mode path (`job_worker.py:2539-2560`), and its failure arm
+          // The composite arm above has treated an empty series as
+          // NOT-yet-terminal since R2-5. `run_derive_broker_dailies_job`
+          // (`analytics-service/services/job_worker.py`) does the SAME wholesale
+          // delete→re-upsert of `csv_daily_returns` — the "series heal-delete"
+          // — on its STRATEGY-mode path, and its failure arm
           // deliberately OMITS `series_completeness` so a prior verdict
           // survives — so a poll landing inside that window reads a terminal
           // status over an empty table and an unstamped row. This arm answered
