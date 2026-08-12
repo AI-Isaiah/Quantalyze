@@ -36,7 +36,10 @@ export type ComputationStatus = StrategyAnalytics["computation_status"];
  *   backoff ladder and holds the final step (wizard: POLL_BACKOFF_MS). Reads via
  *   `.maybeSingle()`; a Supabase error-as-value OR a thrown read increments a
  *   consecutive-error counter that escalates via `onError` at `maxConsecutiveErrors`
- *   (reset on any clean read). On a terminal status (`failed` OR computed) it awaits
+ *   (reset on any clean read). A CLEAN read that found NO ROW
+ *   (`{data:null,error:null}`) is not a status: it consumes `missingRowGracePolls`
+ *   exactly like the interval arm's missing row and reports nothing. On a terminal
+ *   status (`failed` OR computed) it awaits
  *   `onTerminal`; `"repoll"` continues the ladder (R2-5), `"done"` stops. The heavy
  *   composite/single-key arms + their `heavyFetchErrors` escalation stay OUT of the
  *   hook, inside the caller's `onTerminal` closure.
@@ -58,7 +61,13 @@ export interface UseStrategySyncPollerOptions {
   maxConsecutiveErrors?: number;
   /** Interval mode: outer attempt cap; attempt N+1 escalates (SyncProgress: 40). */
   maxAttempts?: number;
-  /** Interval mode: missing-row grace polls; poll N+1 escalates (SyncProgress: 10). */
+  /**
+   * Missing-row grace polls; the poll AFTER the boundary escalates via `onError`
+   * (SyncProgress: 10). Consumed by BOTH arms: the interval arm counts total
+   * attempts, the ladder arm counts CONSECUTIVE absent-row polls (an absent row
+   * is not an error, so it gets its own counter). Left undefined → an absent row
+   * never escalates; the loop keeps polling silently and reports nothing.
+   */
   missingRowGracePolls?: number;
   /** Fired on every clean read with the DB status + error (surface forwards/sets). */
   onStatus: (status: ComputationStatus, error: string | null) => void;
@@ -180,6 +189,12 @@ export function useStrategySyncPoller(opts: UseStrategySyncPollerOptions): void 
     let timerId: number | undefined;
     let tick = 0;
     let consecutiveErrors = 0;
+    // TWIN-3 / C-3: an absent row and a failed read are DIFFERENT FACTS, so they
+    // get different counters. `consecutiveErrors` counts reads that did not
+    // answer; this counts reads that answered "there is no row". Effect-local,
+    // like `consecutiveErrors`/`tick`, so a re-activation restarts the grace.
+    let consecutiveAbsentRows = 0;
+    let warnedAbsentRow = false;
 
     const scheduleNext = () => {
       if (stopped) return;
@@ -225,9 +240,44 @@ export function useStrategySyncPoller(opts: UseStrategySyncPollerOptions): void 
 
         consecutiveErrors = 0;
 
-        const nextStatus = (statusRow?.computation_status ??
-          "pending") as ComputationStatus;
-        const nextError = statusRow?.computation_error ?? null;
+        // STALE-01a / TWIN-3 — ABSENCE IS NOT A VALUE. `{data:null,error:null}`
+        // is PostgREST's answer for zero rows via `.maybeSingle()`: the read
+        // SUCCEEDED and found nothing (no analytics row yet, or the session's RLS
+        // read matched nothing). Neither fact is "the computation is queued", so
+        // no status is reported at all — this arm used to coerce it to "pending",
+        // a value no writer ever wrote, which the loop then read back as
+        // non-terminal and re-scheduled forever (PROD 2026-08-04: the job chain
+        // was terminal at 11:39:35 while the wizard still claimed work in
+        // flight). The interval arm has always done it this way (:151-159); this
+        // is that same answer, in the arm that lacked it.
+        if (!statusRow) {
+          consecutiveAbsentRows += 1;
+          if (!warnedAbsentRow) {
+            // Rule 12 (fail loud): a clean-null read logged NOTHING before, so
+            // the fabrication was unobservable in a browser console. Warn once
+            // per run — the loop may repeat this for many polls.
+            warnedAbsentRow = true;
+            console.warn(
+              `[useStrategySyncPoller] strategy_analytics read found NO ROW [strategy_id=${strategyId}] — ` +
+                `either no strategy_analytics row exists yet, or the session's RLS read matched nothing. ` +
+                `Reporting no status (an absent row is not a computation state).`,
+            );
+          }
+          if (
+            missingRowGracePolls !== undefined &&
+            consecutiveAbsentRows > missingRowGracePolls
+          ) {
+            escalate();
+            return;
+          }
+          scheduleNext();
+          return;
+        }
+
+        consecutiveAbsentRows = 0;
+
+        const nextStatus = statusRow.computation_status as ComputationStatus;
+        const nextError = statusRow.computation_error ?? null;
         onStatusRef.current(nextStatus, nextError);
 
         // Terminal = a hard-failed run OR a computed success (incl.
