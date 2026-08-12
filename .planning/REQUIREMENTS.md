@@ -629,7 +629,7 @@ D-14 valve.
   `+ Strategy` (allocations / scenario) and the My Strategies empty state. Fix the overlay's draft
   awareness, not the state machine and not `/strategies/new`.
 
-- [ ] **WIZCONT-02** *(NARROW — was mis-recorded as a data-integrity hole; corrected 2026-08-04 by
+- [x] **WIZCONT-02** *(NARROW — was mis-recorded as a data-integrity hole; corrected 2026-08-04 by
   live observation)*: Re-connecting the same credentials from a context that has **lost the wizard
   session token** must not create a second strategy + second `api_keys` row.
   ✅ **The common case is ALREADY SAFE, and an earlier draft of this requirement got it wrong.** I
@@ -651,6 +651,35 @@ D-14 valve.
   ⛔ **Fail toward the EXISTING row, never a silent overwrite**: re-connecting must not clobber a key
   whose `strategy_keys` membership and synced history other strategies depend on.
   **Priority: LOW** relative to WIZCONT-01 — it needs a lost token, not ordinary navigation.
+  ✅ **DELIVERED (Phase 154, plans 03 + 06)** as "one fence, two keys": `api_keys.venue_account_id`
+  + the LIVE-scoped partial UNIQUE `api_keys_user_exchange_venue_account_uniq`
+  (`WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL`) at the DB layer;
+  at the app layer a second fence key in `create-with-key` that resolves a token-less re-connect
+  onto the EXISTING (strategy, key) pair read-only, plus constraint-name discrimination on the
+  23505 arms of BOTH wizard-write routes. One neutral line tells the user what happened.
+  ⚠️ **Residual (2026-08-12, Phase 154): only MT5 exposes a venue-confirmed stable non-secret
+  account id at validation** (`ValidationResult` in
+  `analytics-service/services/ingestion/adapter.py:98-123` carries no account-identity field for
+  ccxt venues). Token-less re-connect dedup is live for **MT5 only**; ccxt venues and pre-existing
+  `api_keys` rows (backfilled NULL) remain undeduplicable until a venue identity exists. Deferred
+  by CONTEXT.md decision — cross-venue identity is explicitly out of scope.
+  ⚠️ **Second residual, recorded 154-06: the stamped value is "what the server passed", not "what
+  the venue confirmed".** `authenticated` holds EXECUTE on the SECURITY DEFINER
+  `create_wizard_strategy`, which stamps `p_venue_account_id` **without validation**, so a caller
+  who WANTS a duplicate can still mint one by varying that parameter — exactly as it already can by
+  varying `p_wizard_session_id`. The scrub trigger closes the direct-table-INSERT path, not the RPC
+  path. This raises the floor for the ACCIDENTAL re-connect the requirement is about and **is not an
+  anti-forgery control**. Same CR-01 class as `p_exchange`; owned by **Phase 156
+  (CONNECT-REFACTOR)**, which moves the `api_keys` INSERT behind a service-role writer and withdraws
+  `authenticated` EXECUTE from both wizard RPCs.
+  ⚠️ **Third residual, found during 154-06 execution: the app fence reads `venue_account_id` through
+  the service-role client, because it structurally cannot read it any other way.** The column is not
+  on the `api_keys` SELECT allowlist (20260410225608 + its three extensions), and PostgreSQL requires
+  SELECT privilege on every column a query *references* — a `WHERE` filter included — so the
+  user-scoped client answers 42501 on that read, always. The read is owner-filtered
+  (`.eq("user_id", …)` is load-bearing under a bypassed RLS) and fetches one `id`; it mirrors
+  `finalize-wizard/route.ts:1223`, which reads the sibling non-allowlisted `attested_venue` the same
+  way (153.6-04). Phase 156 absorbs it when the whole INSERT moves behind the service-role writer.
 
 ### WIZFORM — Form errors belong on the form (founder call 2026-08-04, verbatim)
 
@@ -1210,7 +1239,7 @@ Populated during roadmap creation.
 | MT5-14 | Phase 153.2 (v1.17) | ✅ **Complete 2026-08-09** (153.2-04). MT5 is declarable via the narrow `WIZARD_EXCHANGE_CODES` set and **preselected** from `detectedExchange`, so the venue is never asked twice; the chip is a `<span>`, not a disabled button (D-15). The no-widening pin was re-cut consciously in the same task — both negatives kept and the POSITIVE flag-ON assertion added, so it can no longer pass merely by asserting absence. `CRYPTO_EXCHANGES` stays mt5-free and the public marketing exchange count did not move. This row and the checkbox at `:460` now agree (was warning W-153.2-1, the same class as D-153.2-A) |
 | MT5-15 | Phase 155 (v1.17) | Pending — ALL THREE MT5 strategies on PROD are `complete_with_warnings`; ⚠️ NOT investigated. Do not read `MT5-05 ✅` as 'the numbers are audited'. ⛔ MT5-07 does NOT close this |
 | WIZCONT-01 | Phase 154 (v1.17) | Pending — **OBSERVED**: allocators have NO resume path at all (`/strategies/*` is manager-only; the overlay hardcodes `initialDraft={null}`, Phase 110 deferral) |
-| WIZCONT-02 | Phase 154 (v1.17) | Pending — **LOW**; corrected 2026-08-04, the common case is already safe (localStorage session token + `strategies_user_wizard_session_source_uniq`) |
+| WIZCONT-02 | Phase 154 (v1.17) | ✅ Done (154-03 DB + 154-06 app/UI) — **MT5 only**; three residuals recorded in the entry (no ccxt venue identity; the RPC parameter is unvalidated so the value is "what the server passed"; the fence reads the column service-role because it is not on the SELECT allowlist). Phase 156 owns the last two. |
 | WIZFORM-01 | Phase 153.2 (v1.17) | ✅ **Complete 2026-08-09** (153.2-01/02/03/05). Every rule the client can evaluate refuses inline at its own field; the submit button is never `disabled` for a validation reason and a refused submit names the count, names the first field and puts the cursor in it, opening the collapsed disclosure first; `AllocateDialog` derives its invalid border from the ARIA state (D-12). ⭐ **153.2-05 closed the last path**: a field-level refusal raised by `finalize-wizard` is routed back to its field by `FIELD_BY_CODE` instead of rendering a terminal envelope, with a totality assertion making an unmapped `METADATA_*` code a RED test rather than a silent fallback. This row and the checkbox at `:656` now agree (was D-153.2-A) |
 | WIZFORM-02 | Phase 153.1 / 153.2 (v1.17) | **Partial — NOT complete.** 153.1-05 coded the eleven `validatePayload` arms and 153.1-06 wired the derived-roster invariant; 153.2-05 coded the limiter's two deny arms, taking `KNOWN_CODELESS_FINALIZE_REJECTIONS` 5 → 3. ⛔ **Three rejections still answer code-less** (500 draft-load, 500 finalize-RPC, 502 upstream-shape) and each needs a NEW copy member — see `D-153.2-D` in the 153.2 deferred ledger. The invariant reds in both directions, so the debt cannot grow while it waits |
 | WIZFORM-03 | Phase 153.1 / 153.2 / 153.4 (v1.17) | **Partial — NOT complete.** 153.1-03 landed the `fixRequires` class filter and all three venue-conditional entries; 153.2-05 made it LIVE on the submit surface by passing `context.venue` (+ `surface: "submit"`, which also restores `SERVICE_UNREACHABLE`'s `/strategies` bullet). ⚠️ Until then the mechanism was shipped and changed nothing — venue-absence deliberately preserves incumbent copy, and zero call sites passed a venue. ⛔ `ConnectKeyStep` / `MultiKeyConnectStep` are **Phase 153.4's** and still pass neither, so an MT5 user can still read "switch to a different exchange" on the CONNECT step |

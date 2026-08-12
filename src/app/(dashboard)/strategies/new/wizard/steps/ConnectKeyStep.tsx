@@ -324,6 +324,25 @@ export interface ConnectKeySuccess {
   strategyId: string;
   apiKeyId: string;
   exchange: ExchangeId;
+  /**
+   * 154-06 / WIZCONT-02. Present and `true` ONLY when the server resolved this
+   * submit onto a strategy the user already had — a re-connect of credentials
+   * we already hold, from a context that lost the `wizard_session_id` token.
+   * Absent on every other arm, including the ordinary first connect and the F6
+   * session-fence replay (that one is a double-click; it needs no explaining).
+   *
+   * ⭐ IT IS REPORTED UPWARD RATHER THAN RENDERED HERE, AND THAT IS THE WHOLE
+   * REASON THIS FIELD EXISTS. `onSuccess` is `WizardClient`'s step advance: it
+   * calls `setStep("sync_preview")`, so this component UNMOUNTS in the same
+   * commit. A notice rendered inside `ConnectKeyStep` on this path would be
+   * dead markup — it could never paint for a single frame. The strip therefore
+   * lives in `WizardClient`'s chrome, beside the session-expired strip it is
+   * cloned from (UI-SPEC names that strip as its visual donor).
+   *
+   * ⛔ NEVER carries the credential or the venue account id — the server does
+   * not send it and this type must not grow a field for it.
+   */
+  deduped?: boolean;
 }
 
 /**
@@ -758,6 +777,10 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
       const data = (await res.json().catch(() => ({}))) as {
         strategy_id?: string;
         api_key_id?: string;
+        // 154-06 / WIZCONT-02 — the venue-identity dedup marker. Read as a
+        // strict `=== true` below: a truthy-but-not-true value would be the
+        // route drifting, and this is a screen decision, not a coercion.
+        deduped?: boolean;
         code?: string;
         error?: string;
       };
@@ -848,6 +871,10 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         strategyId: data.strategy_id,
         apiKeyId: data.api_key_id,
         exchange,
+        // Spread rather than `deduped: data.deduped === true`, so the payload
+        // every OTHER path emits is byte-identical to the pre-154 one. The
+        // ordinary connect gets no new field and no new UI.
+        ...(data.deduped === true ? { deduped: true } : {}),
       });
     } catch (err) {
       /**
