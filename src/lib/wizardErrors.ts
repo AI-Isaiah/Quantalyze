@@ -188,6 +188,34 @@ export type WizardErrorCode =
   | "KEY_SCOPE_CHECK_UNREADABLE"
   | "KEY_SCOPE_BROADENED"
   | "DRAFT_ALREADY_EXISTS"
+  // 154.1 / WIZCONT-02 review CR — THE HALF OF THE VENUE FENCE THAT HAD NO
+  // HONEST ANSWER, split off `DRAFT_ALREADY_EXISTS` for the same reason every
+  // split above was made: the incumbent sentence is FALSE here, and specifically
+  // false in a way the user can check.
+  //
+  // `DRAFT_ALREADY_EXISTS` says "A draft strategy with the same API key is
+  // already in progress" and offers `resume_draft` / `start_fresh`. When a
+  // re-connect's venue identity resolves onto a strategy that has already LEFT
+  // the draft state (`pending_review`, `published`, `archived`), every clause of
+  // that is wrong: there is no draft, nothing is in progress, there is nothing
+  // to resume, and `start_fresh` — the other control offered — would delete a
+  // draft that does not exist. The user is told to go and find a session that is
+  // not there.
+  //
+  // ⛔ NOT `DRAFT_STATE_INVALID` either, and the distinction is the same one
+  // that entry's own docblock draws for itself: that code means "THIS page is
+  // stale, your draft moved on, reload". Here the caller has no draft and no
+  // stale page — they typed live credentials into a fresh wizard and the account
+  // behind them is already spoken for. Its remedy (`leave_and_return`) would
+  // send them back to a draft that does not exist.
+  //
+  // ⚠️ NON-RECOVERABLE BY CONSTRUCTION — `actions` holds neither member of
+  // `RECOVERABLE_ACTIONS`, so `buildEnvelope` derives `recoverable: false` and no
+  // Retry renders. That is the point rather than an omission: resubmitting the
+  // same account is refused identically, so a Retry control here could only ever
+  // fail again. Same reading `COMPOSITE_TOO_MANY_MEMBERS` and `SEAM_MISCONFIGURED`
+  // are authored under.
+  | "VENUE_ALREADY_CONNECTED"
   // Sync + gate (SyncPreviewStep) — these wrap strategyGate.ts codes
   | "SYNC_TIMEOUT"
   | "SYNC_FAILED"
@@ -1099,6 +1127,50 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     ],
     docsHref: "/security#draft-resume",
     actions: ["resume_draft", "start_fresh"],
+  },
+
+  // 154.1 / WIZCONT-02 review CR — the entry directly above is the one this was
+  // split off, and the two are deliberately adjacent so the pair is read
+  // together. They differ by ONE fact — whether the strategy holding this
+  // account is still a draft — and that fact decides whether "resume it" is a
+  // real instruction or a wild goose chase.
+  //
+  // ⚠️ THE `cause` IS COMPLETE AND TRUE WITH NO NAME (TRAP-3). The strategy's
+  // name is OPTIONAL context: the route reads it from the caller's own row, but
+  // the read can fault, and a sentence built around a name we were not given
+  // would render machinery or a blank. `formatKeyError` prepends the naming
+  // sentence only when `strategyName` is actually present.
+  //
+  // The server-state claim ("nothing new was created…") is OBSERVABLE rather
+  // than asserted, on BOTH emitting arms, which is what the copy-honesty guard
+  // in `wizardErrors.test.ts` requires before a claim like this may ship:
+  //   · the PRE-RPC arm returns before `validateKey`, before `encryptKey` and
+  //     before `create_wizard_strategy` is called at all — pinned by call-count
+  //     assertions in `create-with-key/route.test.ts`, not by reading the code;
+  //   · the 23505 RACE arm is reached because the RPC itself RAISED, so
+  //     Postgres rolled its transaction back. That is a stronger ground than
+  //     the returns-before-write kind, not a weaker one.
+  // Neither arm writes, so "the existing strategy was left exactly as it was"
+  // is a property of the control flow.
+  VENUE_ALREADY_CONNECTED: {
+    title: "This account is already connected to one of your strategies.",
+    cause:
+      "The account behind these details already backs a strategy of yours, and that strategy has moved past the draft stage — so there is no half-finished session to take you back to. One account backs one strategy at a time. Nothing new was created and the existing strategy was left exactly as it was.",
+    fix: [
+      "Open the strategy that already uses this account from your strategies page — it keeps updating from this same account.",
+      "To list a second strategy, connect a different account: a separate broker account, or a different login on the same broker.",
+      "If you believe this account should be free, email security@quantalyze.com before you disconnect anything — disconnecting it stops the existing strategy from updating.",
+    ],
+    docsHref: "/security",
+    // ⛔ NEITHER member of `RECOVERABLE_ACTIONS` (`clear_and_retry`,
+    // `try_another_key`), so `recoverable` derives FALSE and no Retry control
+    // renders — submitting the same account again is refused identically.
+    // ⛔ AND NEITHER `resume_draft` NOR `start_fresh`: there is no draft to
+    // resume, and `start_fresh` DELETES a draft, which on this path would offer
+    // to destroy the finished strategy's own session for a state it did not
+    // cause. Its absence also keeps this entry outside the destructive-action
+    // population the `[140.3-10 / TRAP-4]` scan walks.
+    actions: ["request_call", "expand_log"],
   },
 
   SYNC_TIMEOUT: {
@@ -2297,6 +2369,24 @@ export interface WizardErrorContext {
    * a claim we cannot support.
    */
   surface?: WizardSurface;
+  /**
+   * 154.1 / WIZCONT-02 review CR — the name of the strategy that ALREADY holds
+   * the account the caller just tried to connect, for `VENUE_ALREADY_CONNECTED`.
+   *
+   * ⭐ IT IS THE CALLER'S OWN ROW, AND ONLY EVER THAT. `create-with-key` reads
+   * it through the USER-SCOPED (RLS) client with an explicit `user_id` filter,
+   * so the only name that can reach this field is one the caller typed
+   * themselves and can already see on their own strategies page. ⛔ The venue
+   * account id is NOT carried here and never crosses back to the browser
+   * (T-154-06-C): non-secret is not the same as published.
+   *
+   * OPTIONAL, and absence means "we were not told which strategy" — never a
+   * placeholder and never a guess. The table `cause` is written to be complete
+   * and true with no name; `formatKeyError` prepends the naming sentence only
+   * when this field is present (TRAP-3, the same rule `retryAfterSeconds` and
+   * `charCount` state for numbers).
+   */
+  strategyName?: string;
 }
 
 /**
@@ -2401,6 +2491,25 @@ export function formatKeyError(
       ...base,
       cause:
         `Your trades span ${floored.toFixed(1)} calendar day(s). ` + base.cause,
+    };
+  }
+
+  // 154.1 / WIZCONT-02 review CR — NAME THE STRATEGY WHEN WE WERE GIVEN ITS
+  // NAME, and say nothing extra when we were not. Prepended, exactly like the
+  // two gate arms above: the table sentence stays intact and true on its own,
+  // so an absent or blank name degrades to the unnamed copy rather than to
+  // `undefined` or an empty pair of quotes. The blank check is deliberate —
+  // `strategies.name` is NOT NULL at the database, but a whitespace-only value
+  // would still produce a sentence pointing at nothing.
+  if (
+    code === "VENUE_ALREADY_CONNECTED" &&
+    context?.strategyName !== undefined &&
+    context.strategyName.trim().length > 0
+  ) {
+    return {
+      ...base,
+      cause:
+        `It is connected to "${context.strategyName.trim()}". ` + base.cause,
     };
   }
 

@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
-stopped_at: Phase 153.6 context gathered
-last_updated: "2026-08-11T19:59:11.137Z"
-last_activity: 2026-08-11 -- Phase 153.6 execution started
+stopped_at: Phase 154 COMPLETE (8/8 plans, verified) — next: Phase 155 MT5-VERIFY (human/calendar-gated)
+last_updated: "2026-08-12T00:00:00.000Z"
+last_activity: 2026-08-12 -- Phase 154 executed + verified (154-VERIFICATION.md: 3/3 criteria, status human_needed)
 progress:
-  total_phases: 15
-  completed_phases: 11
-  total_plans: 70
-  completed_plans: 64
-  percent: 73
+  total_phases: 16
+  completed_phases: 13
+  total_plans: 81
+  completed_plans: 81
+  percent: 81
 ---
 
 # Project State — Quantalyze
@@ -22,7 +22,7 @@ progress:
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
-**Milestone v1.17 — MT5: usable end-to-end, not merely ingested, Phases 147–155.**
+**Milestone v1.17 — MT5: usable end-to-end, not merely ingested, Phases 147–156.**
 Founder verbatim (2026-08-04, minutes after MT5-05 was discharged on PROD): *"The goal is that
 MT5 works. And at the moment, maybe it ingests the data, but I cannot use it in the scenario,
 and I can still not produce a factsheet."* Scope = **SCEN** (the series actually reaches the
@@ -1289,9 +1289,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-11T18:17:46.783Z
-**Stopped At:** Phase 153.6 context gathered
-**Resume File:** .planning/phases/153.6-parity-the-fixes-that-only-landed-on-one-path/153.6-CONTEXT.md
+**Last Date:** 2026-08-12T05:11:54.037Z
+**Stopped At:** Phase 154 UI-SPEC approved
+**Resume File:** .planning/phases/154-wizcont-stale-wizard-continuity-no-stale-screens/154-UI-SPEC.md
 **Next step:** Phase 153.6 (PARITY) is booked and NOT yet planned — run `/gsd:plan-phase 153.6`. It carries 9 findings from the `/code-review xhigh` over the whole 153→153.5 span. ⛔ Three of its four root causes are ONE-PATH-ONLY fixes (a correct remedy applied to `routers/exchange.py` while its twin in `services/ingestion/mt5.py` went untouched, with no guard asserting the two agree) — close them as a CLASS, not as N patches. ⭐ The venue-lock bypass (D) is LIVE on PROD (the migration is on `main`, and `supabase/migrations/**` auto-applies on merge) but is a SELF-targeted control bypass, not a tenant leak. ⛔ The budget correction (C) has two halves — the number AND the oracle that pins the wrong column and so cannot red on it. Phases 154 and 155 remain unplanned; 155 is human- and calendar-gated (founder at the MT5 terminal, live funded account, on a trading day).
 
 ⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in

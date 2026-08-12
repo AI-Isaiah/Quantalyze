@@ -156,6 +156,9 @@ vi.mock("./steps/MultiKeyConnectStep", () => ({
       strategyId: string;
       apiKeyId: string;
       exchange: string;
+      // 154-06 / WIZCONT-02 — optional, exactly as `ConnectKeySuccess` declares
+      // it, so the mock cannot claim a shape the real component never sends.
+      deduped?: boolean;
     }) => void;
     onDirtyChange?: (dirty: boolean) => void;
   }) => (
@@ -175,6 +178,23 @@ vi.mock("./steps/MultiKeyConnectStep", () => ({
         }
       >
         Connect success
+      </button>
+      {/* 154-06 / WIZCONT-02: the same advance, but carrying the server's
+          dedup marker — the token-less re-connect that resolved onto a
+          strategy the user already had. */}
+      <button
+        type="button"
+        data-testid="connect-success-deduped"
+        onClick={() =>
+          props.onSuccess?.({
+            strategyId: "strat-existing",
+            apiKeyId: "key-existing",
+            exchange: "okx",
+            deduped: true,
+          })
+        }
+      >
+        Connect success (deduped)
       </button>
       {/* F2: drive the dirty signal so the stepper-gating test can prove a
           forward jump is blocked while connect_key holds unsaved edits. */}
@@ -422,6 +442,96 @@ describe("[H-0182] WizardClient — resume banner on LS pointer mismatch", () =>
       ).toBe(true),
     );
     expect(screen.queryByTestId("wizard-resume")).toBeNull();
+  });
+});
+
+/**
+ * Phase 154-05 / WIZCONT-01 (TWIN-6) — "the draft is not consulted before the
+ * step is chosen", the CSV half.
+ *
+ * The pre-154 initializer read `if (source === "csv") return "csv_upload";`
+ * BEFORE it looked at `initialDraft`, so a CSV draft never resumed: the branch
+ * chose its step without ever learning a draft existed, and `handleResume`
+ * hard-coded `sync_preview` — an API-branch step with no key behind it.
+ *
+ * These cases assert the ORDER through its consequences, not through the
+ * source: what the founder sees when a draft of each kind is offered.
+ */
+describe("[154-05 / TWIN-6] WizardClient — the draft decides the step, not the branch", () => {
+  // A CSV draft: no api_key_id (the column is null for BOTH csv and composite,
+  // which is exactly why the KIND has to be passed rather than re-derived).
+  const CSV_DRAFT = {
+    ...DRAFT,
+    id: "draft-csv-1",
+    name: "Aurora CSV",
+    api_key_id: null,
+  };
+  const COMPOSITE_DRAFT = {
+    ...DRAFT,
+    id: "draft-composite-1",
+    api_key_id: null,
+  };
+
+  it("a CSV draft resumes ON the CSV branch: banner + csv_upload + the draft bound", async () => {
+    resumeOverrides = { showResumeBanner: true };
+    searchParamsString = "source=csv";
+    render(<WizardClient initialDraft={CSV_DRAFT} initialDraftKind="csv" />);
+
+    // The founder gets the explicit choice (never a silent jump).
+    expect(await screen.findByTestId("wizard-resume")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-start-fresh")).toBeInTheDocument();
+    // The step is csv_upload — the CSV draft's own step.
+    expect(screen.getByTestId("wizard-csv-dropzone")).toBeInTheDocument();
+    // …and the SERVER draft is bound behind it: `strategyId` seeds `canDelete`,
+    // so the chrome's delete-draft control only exists when a draft is loaded.
+    expect(screen.getByTestId("wizard-delete-draft")).toBeInTheDocument();
+    // The banner body is the CSV copy (UI-SPEC state contract 1).
+    expect(
+      screen.getByText(/A CSV upload draft from an earlier session is ready/i),
+    ).toBeInTheDocument();
+  });
+
+  it("Resume on a CSV draft stays on csv_upload — it never lands on sync_preview", async () => {
+    resumeOverrides = { showResumeBanner: true };
+    searchParamsString = "source=csv";
+    render(<WizardClient initialDraft={CSV_DRAFT} initialDraftKind="csv" />);
+
+    fireEvent.click(await screen.findByTestId("wizard-resume"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("wizard-resume")).toBeNull(),
+    );
+
+    expect(screen.getByTestId("wizard-csv-dropzone")).toBeInTheDocument();
+    // handleResume used to hard-code sync_preview for every draft, which would
+    // drop a CSV resume onto an API step with no key behind it.
+    expect(screen.queryByTestId("mock-sync-preview")).toBeNull();
+  });
+
+  it("a COMPOSITE draft resumes on sync_preview, never on csv_upload (A4)", async () => {
+    resumeOverrides = { showResumeBanner: true };
+    render(
+      <WizardClient
+        initialDraft={COMPOSITE_DRAFT}
+        initialDraftKind="composite"
+      />,
+    );
+
+    // api_key_id is null here too — a kind-blind `api_key_id === null ? csv`
+    // rule would have routed this member-bearing draft to the upload step.
+    expect(await screen.findByTestId("mock-sync-preview")).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-csv-dropzone")).toBeNull();
+  });
+
+  it("no draft on the CSV branch still starts fresh on csv_upload (unchanged)", async () => {
+    resumeOverrides = {};
+    searchParamsString = "source=csv";
+    render(<WizardClient initialDraft={null} />);
+
+    expect(await screen.findByTestId("wizard-csv-dropzone")).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-resume")).toBeNull();
+    // No draft ⇒ no strategyId ⇒ no delete control. The positive counterpart to
+    // the first case's assertion, so "renders nothing at all" cannot pass both.
+    expect(screen.queryByTestId("wizard-delete-draft")).toBeNull();
   });
 });
 
@@ -685,6 +795,91 @@ describe("[94.1 F1] WizardClient — stale snapshot invalidation on re-connect",
     // the step re-probes the DB for the CURRENT member set (no stale render).
     await screen.findByTestId("mock-sync-preview");
     expect(screen.getByTestId("cached-snapshot")).toHaveTextContent("null");
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 154-06 / WIZCONT-02 — the dedup notice (UI-SPEC State Contract 4).
+ *
+ * ⚠️ IT IS PINNED HERE AND NOT IN `ConnectKeyStep.test.tsx` FOR A MECHANICAL
+ * REASON. The dedup arrives on the SUCCESS path, and success is the step
+ * advance — `handleConnectSuccess` calls `setStep("sync_preview")`, so
+ * `ConnectKeyStep` unmounts in the same commit and any strip of its own could
+ * never paint. Only a test that drives the REAL parent, and therefore the real
+ * step change, can tell a rendered notice from dead markup.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+describe("[154-06 / WIZCONT-02] WizardClient — the dedup notice", () => {
+  /** Hand-typed from 154-UI-SPEC.md's Copywriting table — never imported. */
+  const DEDUP_COPY =
+    "These credentials are already connected. We continued with your existing strategy instead of creating a duplicate.";
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("renders the neutral strip after a connect the server resolved onto the existing strategy", async () => {
+    render(<WizardClient initialDraft={null} />);
+    await screen.findByTestId("mock-connect-step");
+
+    fireEvent.click(screen.getByTestId("connect-success-deduped"));
+    await screen.findByTestId("mock-sync-preview");
+
+    const strip = screen.getByTestId("wizard-dedup-notice");
+    expect(strip).toHaveTextContent(DEDUP_COPY);
+  });
+
+  it("is NEUTRAL, not an error: no ErrorEnvelope, and none of the warning/negative tokens", async () => {
+    // Nothing failed — the user pressed Connect with credentials we already
+    // hold and we continued with the strategy they already had. The semantic
+    // gate in DESIGN.md/UI-SPEC reserves amber for recoverable in-flight states
+    // and red for terminal failures; this is neither.
+    render(<WizardClient initialDraft={null} />);
+    await screen.findByTestId("mock-connect-step");
+
+    fireEvent.click(screen.getByTestId("connect-success-deduped"));
+    await screen.findByTestId("mock-sync-preview");
+
+    expect(screen.queryByTestId("error-envelope")).toBeNull();
+    const cls = screen.getByTestId("wizard-dedup-notice").className;
+    expect(cls).not.toContain("warning");
+    expect(cls).not.toContain("negative");
+    // The session-expired strip's tokens, byte-for-byte — the donor UI-SPEC
+    // names, so the notice cannot drift into a bespoke style.
+    expect(cls).toContain("border-border");
+    expect(cls).toContain("bg-page");
+    expect(cls).toContain("text-caption");
+    expect(cls).toContain("text-text-secondary");
+  });
+
+  it("VACUITY FENCE: an ordinary connect renders NO strip", async () => {
+    render(<WizardClient initialDraft={null} />);
+    await screen.findByTestId("mock-connect-step");
+
+    fireEvent.click(screen.getByTestId("connect-success"));
+    await screen.findByTestId("mock-sync-preview");
+
+    expect(screen.queryByTestId("wizard-dedup-notice")).toBeNull();
+    expect(screen.queryByText(DEDUP_COPY)).toBeNull();
+  });
+
+  it("is SELF-CLEARING: a later ordinary connect takes the notice down", async () => {
+    // A `true` that only ever got set would eventually be a claim about a
+    // different submit than the one on screen.
+    render(<WizardClient initialDraft={null} />);
+    await screen.findByTestId("mock-connect-step");
+
+    fireEvent.click(screen.getByTestId("connect-success-deduped"));
+    await screen.findByTestId("mock-sync-preview");
+    expect(screen.getByTestId("wizard-dedup-notice")).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByTestId("wizard-step-connect_key"));
+    await screen.findByTestId("mock-connect-step");
+    fireEvent.click(screen.getByTestId("connect-success"));
+    await screen.findByTestId("mock-sync-preview");
+
+    expect(screen.queryByTestId("wizard-dedup-notice")).toBeNull();
   });
 });
 

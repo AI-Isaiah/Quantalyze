@@ -2087,3 +2087,74 @@ bargain has two halves; this section is the second one. Source: `153.4-REVIEW.md
   realistic way to lose it is a *future* migration re-stamping that comment, at which point
   this file's `$verify$` no longer runs, so a symmetric check would buy little. Guard hygiene.
   Owner: unassigned.
+
+### Phase 154-02 (WIZCONT-01 plumbing) — residual recorded while single-sourcing the draft query (added 2026-08-12)
+
+- [ ] **A THIRD latest-wizard-draft read still lives outside the helper** — `src/app/(dashboard)/strategies/page.tsx:41-49`
+  issues the same `source='wizard' AND status='draft' ORDER BY created_at DESC LIMIT 1` read that
+  `src/lib/wizard/draft-query.ts` now single-sources for the two wizard entry points, but with a
+  different column set (`id, name, created_at, review_note`) for a different consumer: the Resume
+  CTA + rejected-draft notice on the strategies list. It could not adopt the helper without widening
+  `InitialDraft` with `review_note`/`created_at` for a page outside Phase 154's scope. Consequence:
+  the /strategies Resume CTA and the wizard's own resume decision can still drift apart. The
+  divergence is NOT silent — `src/__tests__/wizard-draft-query-single-source.test.ts` Scan B pins the
+  latest-reader set to exactly these two files, so a THIRD one reddens. Fold it in when the helper
+  grows a column-set parameter. Owner: unassigned.
+
+### Phase 154 ship review — non-blocking findings (logged 2026-08-12, founder stopping rule)
+
+Raised by the `/ship` pre-landing + adversarial reviews. The four that met the blast-radius bar
+(user-facing or data-integrity) were FIXED in v0.59.0.0 and are not listed here. These did not.
+
+- [ ] **C-2 / A-4 — a rotated venue password re-connect reports success and stores nothing.**
+  `create-with-key/route.ts` — the dedup arm returns BEFORE `validateKey`, and keys on the MT5
+  login alone; `api_secret`/`passphrase` are never consulted. A user re-running the wizard to
+  update a rotated investor password is told the account is already connected, while the stored
+  ciphertext still holds the OLD password and the key keeps failing to sync with no signal. Same
+  shape for a typo'd password. ⭐ Highest-value of this batch: silent, and it is the ordinary
+  "I rotated my credentials" path. Needs a product call — update-in-place, or refuse with copy
+  that names the remedy (there is no credential-update UI today; the client UPDATE is revoked).
+- [ ] **A-3 — `venue_account_id` is the MT5 login alone, but a login is only unique within a broker
+  server.** Two accounts at different brokers sharing a login number collide on
+  `(user_id, exchange, venue_account_id)` → wrong-account resolution. Server-qualifying the value
+  (`<broker_server>:<login>`, already carried as `passphrase`) closes it. ⚠️ NOT a patch: the column
+  is live on PROD, so changing what is stored is a migration decision with a backfill question.
+  Not declared anywhere before this review.
+- [ ] **C-1 — an orphaned live key squats the venue-identity slot permanently, behind false copy.**
+  When a live key has no strategy the resolver returns null and the caller answers 409
+  `DRAFT_ALREADY_EXISTS` ("a wizard session with this key is already in progress") — false, and
+  offering no remedy. Reachable because "Try another key" fires `handleDeleteDraft()`
+  fire-and-forget and `draft/[id]/route.ts:213-226` SKIPS the `api_keys` revoke on any RPC error
+  (warn only). The nightly orphan sweep is scoped to keys attached to ≥7-day-old drafts, so an
+  orphan whose strategy is already gone is never a candidate. Pre-154 this simply created a second
+  key row and worked.
+- [ ] **Orphaned `api_keys` rows from a deleted composite draft are never swept.**
+  `cleanup_abandoned_wizard_drafts.sql:19-24,41-49` cannot see them (the draft row is gone, and the
+  keys were never in `strategy_keys`). Found while fixing the composite-draft misclassification;
+  the deletion path is now closed, but rows already orphaned in PROD stay orphaned.
+- [ ] **C-4 — `sync-progress` picks the strictly-newest job of any kind, with no in-flight
+  preference.** A short-circuit `process_key_long` answering `done` in seconds can mask a prior
+  chain's `compute_analytics_from_csv` still `running`, suppressing the amber block in exactly the
+  state the UI-SPEC says must show it. Bounded by the stall backstop. Changing it means revisiting
+  154-04's deliberate two-pass selection.
+- [ ] **C-5 — SF-3's keep-last-known now pins `jobStatus`, which is newly load-bearing.**
+  Composite-only. If a `stitch_composite` row is DELETEd out from under the client (the
+  orphaned-running purge does DELETE in prod), `jobStatus` freezes and `showRecomputing` latches.
+  Bounded by the stall backstop.
+- [ ] **INFO — the `as unknown as …Args` cast on the scenario-commit RPC suppresses all future type
+  checking of that argument object.** `allocator/scenario/commit/route.ts:582-598`. Deliberate: it
+  preserves three explicit `null`s that T_R20/T_R24/CR-01 pin by name against a types regeneration
+  that made DEFAULT-ed params optional. Cost: a later added or renamed required param compiles
+  clean and fails at runtime. Money path.
+- [ ] **Two copy-honesty nits in `SyncPreviewStep.tsx`.** (a) the lead paragraph still asserts a
+  present-tense exchange fetch under the amber/interrupted blocks, where the identical in-card
+  claim was just suppressed as false — gate it on `inFlightClaimIsCurrent` too; (b) with the
+  in-flight claim withheld, the status panel can collapse to a bordered box containing only an
+  unlabeled number.
+- [ ] **Residual: a genuinely-empty account still waits out the patience clock if `/sync-progress`
+  is dead or sustained-429.** The zero-history refusal needs positive finished-evidence, which that
+  route supplies. Closing this needs a threshold, which Phase 154 bans. Declared, not hidden.
+- [ ] **`154-03-TEST-APPLY.md` contradicts itself on whether the SQL gate ran.** §2 records a PASS
+  on TEST; §5 records a post-hoc migration amendment and says the seeded cases have NEVER executed;
+  `154-VERIFICATION.md` says the gate has not been executed. Honest reading: a pre-amendment
+  structural subset ran, the shipped file never has. Correct one of the two records.

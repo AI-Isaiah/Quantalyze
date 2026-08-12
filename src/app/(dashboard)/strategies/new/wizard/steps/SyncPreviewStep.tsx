@@ -52,6 +52,7 @@ import { parseIsoDay, utcEpoch } from "@/lib/dateday";
 import type {
   SyncProgressResponse,
   MemberProgressStatus,
+  StitchJobStatus,
 } from "@/lib/sync-progress";
 
 /**
@@ -186,6 +187,57 @@ const KNOWN_KICKOFF_CODES: Readonly<Record<string, WizardErrorCode>> = {
  * tolerated; three in a row is a real fault the user needs an exit from.
  */
 const MAX_CONSECUTIVE_POLL_ERRORS = 3;
+
+/**
+ * 154-08 — is the `sync-progress` projection reporting work that has not
+ * finished? Pure, and a partition of the EXISTING `StitchJobStatus` union
+ * (`@/lib/sync-progress`, whose domain is the table-wide `compute_jobs.status`
+ * CHECK from migration `20260411144407`) — no new vocabulary, no threshold.
+ *
+ * The FINISHED members are the two that mean "this job will do no further work":
+ * `done` and `failed_final`. Everything else is still moving —
+ * `done_pending_children` most of all, since it names a job whose successors are
+ * exactly the `derive_broker_dailies` / `compute_analytics_from_csv` steps that
+ * perform the series delete→re-upsert, and `failed_retry` is the queue retrying
+ * (progress, not a stall — the same reading `isAutoRetrying` already takes).
+ *
+ * `null` is NOT in flight: after 154-04 it means zero `compute_jobs` rows are
+ * visible for this strategy, i.e. nothing was ever enqueued.
+ */
+const FINISHED_JOB_STATUSES: readonly StitchJobStatus[] = [
+  "done",
+  "failed_final",
+];
+
+function isJobInFlight(jobStatus: StitchJobStatus | null): boolean {
+  return jobStatus !== null && !FINISHED_JOB_STATUSES.includes(jobStatus);
+}
+
+/**
+ * 156-PRE / TWIN-1b — POSITIVE evidence that every job this strategy enqueued
+ * has stopped working. It is deliberately NOT `!isJobInFlight(...)`: the two
+ * differ on exactly one member, `null`, and that member is the whole reason
+ * this predicate exists rather than a negation at the call site.
+ *
+ * `null` means "zero `compute_jobs` rows are VISIBLE" (154-04) — which the
+ * client reads not only when nothing was ever enqueued but also on every tick
+ * before the cosmetic sync-progress piggyback has answered (it is issued
+ * fire-and-forget from `onStatus`, so the FIRST terminal poll almost always
+ * runs with `syncProgress` still null), and whenever that route is degraded,
+ * 429-ing or dead. Absence of the datum is therefore not evidence that work
+ * finished — the same reading this file already takes at the poller's
+ * absent-row arm ("ABSENCE IS NOT A VALUE") and at the SF-3 degrade guard ("a
+ * couldn't-read blip is not evidence of not stalled").
+ *
+ * So this answers TRUE only on a status that was actually read back and
+ * actually means finished. A caller that must not act without evidence gets to
+ * ask for evidence; `isJobInFlight` still answers the render's different
+ * question (may we CLAIM a recomputation is happening?), where the safe
+ * default is the opposite one.
+ */
+function jobsHaveFinished(jobStatus: StitchJobStatus | null): boolean {
+  return jobStatus !== null && FINISHED_JOB_STATUSES.includes(jobStatus);
+}
 
 /**
  * A single composite member key, ordered by `seq`. Sourced from
@@ -476,10 +528,23 @@ export function SyncPreviewStep({
   const [computationStatus, setComputationStatus] = useState<string | null>(null);
   // PROG-02/03 — the last GET /api/strategies/[id]/sync-progress projection.
   // COSMETIC: piggybacked on the poll tick, fail-open (never blocks the
-  // authoritative strategy_analytics poll). Composite-only; null on single-key.
+  // authoritative strategy_analytics poll).
+  //
+  // ⚠️ "Composite-only; null on single-key" USED TO BE THE REST OF THIS LINE and
+  // has not been true since 154-08/TWIN-5 deleted the `if (isComposite)` around
+  // the piggyback fetch: single-key strategies report `jobStatus` too (154-04
+  // widened the route to the latest job of ANY kind). Left stale, it reads as a
+  // licence to treat a null on the single-key arm as "expected" rather than as
+  // the not-yet-answered / degraded reading `jobsHaveFinished` turns on.
   const [syncProgress, setSyncProgress] = useState<SyncProgressResponse | null>(
     null,
   );
+  // 156-PRE — the SAME projection, for the readers that cannot use the state.
+  // The RENDER reads `syncProgress` (it must, or it would not re-render); the
+  // async poll closures read this ref, because a value captured before a commit
+  // is stale by construction there. Both are written together at the one site
+  // that owns the decision (the piggyback handler), so they cannot diverge.
+  const syncProgressRef = useRef<SyncProgressResponse | null>(null);
   // PROG-03 — retry CTA in-flight guard (disables the button, prevents a
   // double re-enqueue). Server-side idempotency is the real defense.
   const [retrying, setRetrying] = useState(false);
@@ -489,6 +554,21 @@ export function SyncPreviewStep({
   // channel, so a genuinely stalled job never becomes an indefinite hang even
   // when the sync-progress route is dead (degrades to IDLE / sustained 429).
   const [stallBackstop, setStallBackstop] = useState(false);
+  // 154-08 / M4 — the kickoff answered 2xx and said, in its own body, that
+  // NOTHING was enqueued (`queued: false`). Until this the arm read exactly one
+  // field (`composite`) and entered `waiting_for_complete` regardless, so a
+  // route telling us plainly that no job exists was rendered as work in flight —
+  // a claim that can never become true, because no analytics row will ever be
+  // written for a job nobody queued. Carries the SAME exit as a stall: the
+  // existing amber banner + its idempotent Retry. No new state, no new copy.
+  const [kickoffEnqueuedNothing, setKickoffEnqueuedNothing] = useState(false);
+  // 154-08 / TWIN-1 — the empty-series repoll is ACTIVE (either arm). A terminal
+  // status over a series that measures zero is the `csv_daily_returns`
+  // delete→re-upsert window, not a verdict, so the arm repolls; this flag is how
+  // the RENDER learns that the wait it is showing is a re-derive rather than a
+  // first crawl, and it is why the in-flight claim below stops being rendered
+  // while it is up (that sentence is false once the status is terminal).
+  const [seriesRecomputing, setSeriesRecomputing] = useState(false);
   const [computationError, setComputationError] = useState<string | null>(null);
   // Composite discriminator (Finding-H / Pitfall 1): threaded from SERVER TRUTH
   // — the `/api/keys/sync` kickoff response's `composite` field (true ONLY when
@@ -774,11 +854,29 @@ export function SyncPreviewStep({
         // 2xx always carries a definite boolean. A parse failure can only be a
         // legacy/empty body (never a real composite, which always emits
         // `composite: true`), so it safely defaults to the single-key arm.
+        //
+        // 154-08 / M4 — `queued` is read ADDITIVELY alongside `composite`.
+        // `keys/sync` already puts it on the wire for every unified single-key
+        // reply — BOTH 2xx arms of its unified translation block (the
+        // `WIZARD_DUPLICATE` reply and the ordinary accepted one) forward the
+        // backbone's own job fact; the composite branch, which returns
+        // `composite: true` without it, omits it — which is why only the explicit
+        // `=== false` is acted on and an ABSENT field keeps the prior meaning.
+        // The read is on the RESPONSE only — `process-key-onboard-contract.ts`
+        // (whose accepted shape has a bidirectional pytest oracle) is not
+        // touched, and nothing about what we SEND changes.
         const kickoff = (await res.json().catch(() => null)) as {
           composite?: boolean;
+          queued?: boolean;
         } | null;
         if (mountedRef.current) {
           if (kickoff?.composite === true) setIsComposite(true);
+          // Both polarities are written on every kickoff, so a retry that DOES
+          // enqueue clears what a previous attempt recorded. `waiting_for_complete`
+          // is still entered — a job may exist from an earlier submission, and
+          // the poll is what would find it — but the screen stops claiming this
+          // kickoff started one.
+          setKickoffEnqueuedNothing(kickoff?.queued === false);
           setPhase("waiting_for_complete");
         }
       } catch (err) {
@@ -846,9 +944,20 @@ export function SyncPreviewStep({
   // error). With a shared counter such a throw oscillates 0→1→0 and never
   // escalates, so the wizard spins forever (H-0197, narrowed to heavy-fetch-only
   // faults). A ref (not a poll-local `let`) so it survives the 1s elapsed-timer
-  // re-renders that recreate the onTerminal closure; per the invariant it never
-  // needs a reset — every non-throwing heavy outcome (passed / gate-fail) stops
-  // the loop, so the only path that repolls is a throw. (A Supabase error
+  // re-renders that recreate the onTerminal closure.
+  //
+  // ⚠️ 154-08 / RESEARCH A6 — THE "NEVER NEEDS A RESET" INVARIANT IS RETIRED.
+  // It is stated here rather than deleted so nobody re-derives it. It read:
+  // "every non-throwing heavy outcome (passed / gate-fail) stops the loop, so
+  // the only path that repolls is a throw." That stopped being true when R2-5
+  // added the composite empty-series `return "repoll"`, and 154-08 adds its
+  // single-key twin — two NON-throwing repolls. Under them a run that blipped
+  // twice and then read cleanly would carry both blips forward and escalate a
+  // HEALTHY heal window to SYNC_FAILED on its next blip: "consecutive" would
+  // stop meaning consecutive. Both repoll sites therefore RESET this counter,
+  // because a clean heavy read is the evidence that the heavy path is healthy.
+  // The catch arm's own `return "repoll"` must NOT reset — that is the throw
+  // this counter exists to count. (A Supabase error
   // returned AS A VALUE on a heavy read throws below — on BOTH arms as of
   // 140.4-02 — so it escalates here. Previously only the composite arm checked;
   // an RLS denial on the single-key `trades` read dropped tradeCount to 0 via
@@ -899,39 +1008,69 @@ export function SyncPreviewStep({
       setComputationStatus((prev) => (prev === nextStatus ? prev : nextStatus));
       setComputationError((prev) => (prev === nextError ? prev : nextError));
 
-      // PROG-02/03 — piggyback the per-key progress projection on this tick
-      // (composite only; no new timer, cadence follows POLL_BACKOFF_MS). This is
-      // COSMETIC: a failure is swallowed with a console.warn and MUST NOT touch
-      // the authoritative strategy_analytics poll. Fire-and-forget so a
-      // slow/hung progress route never delays the status loop; the setState is
-      // guarded by `mountedRef`.
-      if (isComposite) {
-        void wizardFetch(`/api/strategies/${strategyId}/sync-progress`)
-          .then((r) => (r.ok ? r.json() : null))
-          .then((json: SyncProgressResponse | null) => {
-            if (!mountedRef.current || !json) return;
-            // SF-3 — a DEGRADED read (`json.degraded === true`, the route's
-            // rpcError branch) or an EMPTY read that arrives while we already
-            // hold a populated in-flight snapshot must NOT wipe the live panel
-            // or flip `stalled` to false: a couldn't-read blip is not evidence
-            // of "not stalled". Keep last-known state until a REAL, non-empty
-            // read arrives. A non-empty read (real progress) always replaces.
-            setSyncProgress((prev) => {
-              const incomingEmpty =
-                json.degraded === true || json.memberProgress.length === 0;
-              const havePopulated =
-                prev != null && prev.memberProgress.length > 0;
-              if (incomingEmpty && havePopulated) return prev;
-              return json;
-            });
-          })
-          .catch((progressErr) => {
+      // PROG-02/03 — piggyback the per-key progress projection on this tick (no
+      // new timer, cadence follows POLL_BACKOFF_MS). This is COSMETIC: a failure
+      // is swallowed with a console.warn and MUST NOT touch the authoritative
+      // strategy_analytics poll. Fire-and-forget so a slow/hung progress route
+      // never delays the status loop; the setState is guarded by `mountedRef`.
+      //
+      // 154-08 / TWIN-5 — THE `if (isComposite)` THAT STOOD HERE IS GONE. It was
+      // the third of three gates on one axis, and it is the one that made the
+      // other two moot: 154-04 widened `sync-progress/route.ts` so a single-key
+      // strategy's `process_key_long` / `derive_broker_dailies` /
+      // `compute_analytics_from_csv` job reports its status, but the client
+      // never asked, so the widened answer reached no screen. A single-key user
+      // had no in-flight datum for the same reason they had no exit: one
+      // conjunct per site, three sites, one class (M1).
+      void wizardFetch(`/api/strategies/${strategyId}/sync-progress`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((json: SyncProgressResponse | null) => {
+          // `memberProgress` is read unguarded below and again in the render, so
+          // a 2xx whose body is NOT this projection (a proxy/interstitial, a
+          // drifted route) must be refused HERE rather than thrown from inside a
+          // setState updater, where React may re-run it during render and take
+          // the whole step down with it. Shape check, not a cast.
+          if (!mountedRef.current || !json) return;
+          if (!Array.isArray(json.memberProgress)) {
             console.warn(
-              "[wizard:SyncPreviewStep] sync-progress fetch failed (cosmetic, ignored):",
-              progressErr,
+              "[wizard:SyncPreviewStep] sync-progress body is not the projection (cosmetic, ignored)",
             );
-          });
-      }
+            return;
+          }
+          // SF-3 — a DEGRADED read (`json.degraded === true`, the route's
+          // rpcError branch) or an EMPTY read that arrives while we already
+          // hold a populated in-flight snapshot must NOT wipe the live panel
+          // or flip `stalled` to false: a couldn't-read blip is not evidence
+          // of "not stalled". Keep last-known state until a REAL, non-empty
+          // read arrives. A non-empty read (real progress) always replaces.
+          //
+          // 156-PRE — THE DECISION IS TAKEN HERE AND MIRRORED INTO A REF rather
+          // than left inside a `setSyncProgress(prev => …)` updater, because
+          // `onTerminal` (an async closure the poller invokes from a timer) must
+          // read this datum too and CANNOT read it from render state: the whole
+          // poll ladder runs inside one `act()`/tick sequence, so a closure
+          // captured before a commit still sees the value from its own render.
+          // Measured, not assumed — the guard below logged `syncProgress: null`
+          // on all six terminal ticks of a run whose RENDER had the projection.
+          // This is the same hazard `useStrategySyncPoller` documents for its
+          // own callbacks ("the callbacks live in refs read from inside the
+          // timer callbacks"), reaching one datum further. `prev` now comes from
+          // the ref, which is strictly FRESHER than the updater's argument, so
+          // the SF-3 semantics above are unchanged.
+          const prev = syncProgressRef.current;
+          const incomingEmpty =
+            json.degraded === true || json.memberProgress.length === 0;
+          const havePopulated = prev != null && prev.memberProgress.length > 0;
+          const next = incomingEmpty && havePopulated ? prev : json;
+          syncProgressRef.current = next;
+          setSyncProgress(next);
+        })
+        .catch((progressErr) => {
+          console.warn(
+            "[wizard:SyncPreviewStep] sync-progress fetch failed (cosmetic, ignored):",
+            progressErr,
+          );
+        });
     },
     onTerminal: async (nextStatus, nextError) => {
       const supabase = createClient();
@@ -1099,8 +1238,21 @@ export function SyncPreviewStep({
             // stitched composite always persists ≥1 day, so this never hides a
             // real result.
             if (series.length === 0) {
+              // 154-08 / A6 — a NON-THROWING repoll, which is the case
+              // `heavyFetchErrorsRef`'s "never needs a reset" invariant did not
+              // contemplate (it was written when the only repolling path WAS a
+              // throw; this guard, added later, quietly falsified it here first
+              // and the single-key twin below falsifies it a second time).
+              // Without the reset a run that blipped twice and then read
+              // cleanly carries those two forward and escalates a HEALTHY heal
+              // window to SYNC_FAILED on its next blip — "consecutive" would
+              // have stopped meaning consecutive. A clean heavy read is proof
+              // the heavy path is healthy, so the count starts over.
+              heavyFetchErrorsRef.current = 0;
+              if (mountedRef.current) setSeriesRecomputing(true);
               return "repoll";
             }
+            if (mountedRef.current) setSeriesRecomputing(false);
 
             // ── 142.2 review FIX 3: PREVIEW AND PUBLISH MUST AGREE ──────────
             //
@@ -1420,6 +1572,83 @@ export function SyncPreviewStep({
 
           if (!mountedRef.current) return "done";
 
+          // ── 154-08 / TWIN-1: the single-key R2-5 twin ────────────────────
+          //
+          // The composite arm above has treated an empty series as
+          // NOT-yet-terminal since R2-5. `run_derive_broker_dailies_job`
+          // (`analytics-service/services/job_worker.py`) does the SAME wholesale
+          // delete→re-upsert of `csv_daily_returns` — the "series heal-delete"
+          // — on its STRATEGY-mode path, and its failure arm
+          // deliberately OMITS `series_completeness` so a prior verdict
+          // survives — so a poll landing inside that window reads a terminal
+          // status over an empty table and an unstamped row. This arm answered
+          // that with a terminal, loop-stopping red refusal: it did not find a
+          // strategy without a track record, it looked while the table was
+          // empty, and then it stopped looking.
+          //
+          // ⚠️ THIS IS A THIRD STATE, NOT A FOURTH `??`. The arm already
+          // distinguishes a NULL count (unrepresentable → throw, above) from a
+          // ZERO count (a real measurement). What it lacked is "a real zero
+          // that may not be current". The throws above are untouched.
+          //
+          // ⚠️ AND IT IS DELIBERATELY NARROWER THAN `csvRowCount === 0`. A
+          // trades-backed strategy legitimately has zero daily-return rows, and
+          // repolling those would hang every Binance/Bybit onboarding forever.
+          // The guarded reading is the one that is INCOHERENT rather than
+          // merely empty: BOTH of the sources a computation could have run on
+          // measure zero, and yet no producer has reported that it is finished.
+          // The one process that manufactures that reading is the delete window.
+          //
+          // ⚠️ THE THIRD CONJUNCT WAS `analytics != null`, AND ITS PREMISE WAS
+          // FALSE. It stood on "a strategy that genuinely has nothing has no
+          // analytics row to read", but nothing in the system upholds that:
+          // the all-rows-`done` branch of `sync_strategy_analytics_status`
+          // (migration `20260707120000_sync_status_preserve_warnings`) INSERTs
+          // the row from the `compute_jobs` aggregate ALONE — all rows done →
+          // 'complete' — and never consults a trade count. Key-mode is exactly
+          // the case that reaches it with nothing: `run_derive_broker_dailies_job`'s
+          // <2-day branch returns DONE *without* stamping `strategy_analytics`
+          // (`job_worker.py`, "key-mode insufficient-history, no strategy_analytics
+          // stamp"), unlike its strategy-mode sibling, which stamps a terminal
+          // 'failed' precisely so this poller "reaches a gate instead of spinning
+          // forever on a never-arriving 'complete'". The wizard's unified-backbone
+          // path is key-mode, so it had no such stamp — and since 154's poller
+          // returns early on an ABSENT row, `onTerminal` cannot even fire without
+          // one. The conjunct was therefore TRUE at every site that could evaluate
+          // it: the guard collapsed to two zero-counts and repolled forever, with
+          // `showRecomputing` false (the jobs ARE done), so the screen showed the
+          // in-flight ladder for the whole patience window and then a Retry that
+          // re-ran the same empty sync. Pre-154 this state returned
+          // INSUFFICIENT_TRADES at once — the case named "FIX 1 does not fire
+          // when there is no series to have provenance ABOUT" in
+          // `strategyGate.test.ts` still pins that verdict for the same inputs.
+          //
+          // What actually separates the two is whether a producer is still
+          // WORKING, so that is what is asked — of `jobsHaveFinished`, NOT of
+          // `!isJobInFlight`. Requiring positive finished-evidence keeps the
+          // no-evidence reading (`jobStatus === null`: the piggyback has not
+          // answered yet, or its route is degraded) on the repoll side, which is
+          // both the conservative direction and the one T3/T3b pin: they drive
+          // this state with NO in-flight datum and a fix that repolled only on a
+          // reported-running job would redden them.
+          //
+          // The loop is NOT bounded here — the SCREEN is (UI-SPEC state 3): the
+          // amber "recomputing" block renders while the in-flight datum agrees
+          // work is happening, and when it does not, the existing SF-1 patience
+          // clock surfaces the interrupted banner and its idempotent Retry.
+          // Bounding the repoll with a count would be a new threshold.
+          const seriesMayBeMidReDerive =
+            tradeCount === 0 &&
+            csvRowCount === 0 &&
+            !jobsHaveFinished(syncProgressRef.current?.jobStatus ?? null);
+          setSeriesRecomputing(seriesMayBeMidReDerive);
+          if (seriesMayBeMidReDerive) {
+            // A6, second site — see the composite guard's note. This return is
+            // the other non-throwing repoll the invariant did not contemplate.
+            heavyFetchErrorsRef.current = 0;
+            return "repoll";
+          }
+
           const gate = checkStrategyGate({
             apiKeyId,
             tradeCount,
@@ -1552,6 +1781,17 @@ export function SyncPreviewStep({
       if (res.ok && mountedRef.current) {
         statusChangedAtRef.current = Date.now();
         setStallBackstop(false);
+        // 154-08 / M4 — the retry's OWN job fact replaces the kickoff's. Read
+        // from the body rather than assumed from the 2xx, because that is the
+        // whole finding: a 200 is not evidence that anything was enqueued. A
+        // retry that queues work clears the banner; one that again queues
+        // nothing keeps it up, which is the honest outcome and leaves the Retry
+        // control in place. The composite branch omits the field, so `undefined`
+        // keeps the prior meaning exactly as on the kickoff path.
+        const retryBody = (await res.json().catch(() => null)) as {
+          queued?: boolean;
+        } | null;
+        setKickoffEnqueuedNothing(retryBody?.queued === false);
         // F-2b — a successful retry is a legitimate "fresh wait starts now"
         // event, so reset the MOUNT patience clock too, not just the SF-1
         // backstop clock. Both banners key off elapsed clocks (the amber
@@ -2283,12 +2523,39 @@ export function SyncPreviewStep({
   // honestly. Only actionable when the route surfaces the status (channel alive).
   const isAutoRetrying = syncProgress?.jobStatus === "failed_retry";
   // F-1 — the amber recoverable "taking longer" banner (route stall OR the SF-1
-  // backstop). Computed once so the red Error-severity `showRetry` block can be
-  // suppressed when it is up: rendering both at t≈15min stacks two near-duplicate
-  // banners with contradicting severity (red "leave this page" vs amber "retry
-  // safely"). Composite-only (single-key never has the amber banner).
+  // backstop OR a kickoff that enqueued nothing). Computed once so the red
+  // Error-severity `showRetry` block can be suppressed when it is up: rendering
+  // both at t≈15min stacks two near-duplicate banners with contradicting
+  // severity (red "leave this page" vs amber "retry safely").
+  //
+  // 154-08 / TWIN-2 — THE `isComposite &&` CONJUNCT THAT STOOD HERE IS GONE.
+  // The banner markup, its testid, its role="status" and its Retry handler all
+  // already existed; the SF-1 backstop clock already ticked for single-key
+  // strategies (nothing about `stallBackstop` was ever composite-aware). One
+  // conjunct withheld the ONLY exit from `waiting_for_complete` from exactly the
+  // users who had no other one — which is M1, the reason the 2026-08-04 stall
+  // was UNBOUNDED rather than merely wrong, and why the founder's only available
+  // action was to re-run a chain that had already succeeded, three times.
   const showInterruptedBanner =
-    isComposite && (syncProgress?.stalled === true || stallBackstop);
+    syncProgress?.stalled === true || stallBackstop || kickoffEnqueuedNothing;
+  // 154-08 / UI-SPEC State Contract 3 — the amber "we are recomputing" block.
+  // It requires BOTH halves: the arm is repolling an empty series AND the
+  // in-flight datum agrees that a job is still working. Without the second half
+  // the screen would claim a recomputation it has no evidence for; with only the
+  // first it would say nothing at all. When the evidence is absent the repoll
+  // state falls back to the interrupted-banner path above (via the same SF-1
+  // patience clock every other stuck wait uses) — no third exit was invented.
+  const showRecomputing =
+    seriesRecomputing && isJobInFlight(syncProgress?.jobStatus ?? null);
+  // ⛔ "Fetching trades…" / "Trades are being downloaded…" are claims about the
+  // PRESENT (UI-SPEC §2), and both of the states above are states in which the
+  // claim is known to be false: the backstop fired because nothing has advanced
+  // for the whole patience budget, the kickoff said outright that it queued
+  // nothing, and a repoll under a TERMINAL analytics status is not a crawl. The
+  // ladder below is otherwise byte-unchanged — no line was re-copywritten, and
+  // nothing new was authored to replace it. The elapsed counter stays, because
+  // elapsed time is the one thing this screen still knows.
+  const inFlightClaimIsCurrent = !showInterruptedBanner && !showRecomputing;
 
   return (
     <section aria-labelledby="wizard-sync-heading">
@@ -2308,20 +2575,26 @@ export function SyncPreviewStep({
 
       <div className="mt-6 rounded-md border border-border bg-page px-4 py-3">
         <div className="flex items-center gap-3">
-          <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-accent" />
-          <p className="text-body font-medium text-text-primary">
-            {computationStatus === "failed"
-              ? "Sync reported a failure"
-              : phase === "kicking_off"
-                ? "Contacting exchange..."
-                : isComposite
-                  ? computationStatus === "computing"
-                    ? "Trades are being processed…"
-                    : "Trades are being downloaded…"
-                  : computationStatus === "computing"
-                    ? "Computing analytics..."
-                    : "Fetching trades..."}
-          </p>
+          {/* The dot pulses to say "work is happening". It renders under the
+              same condition as the sentence beside it, for the same reason. */}
+          {inFlightClaimIsCurrent && (
+            <>
+              <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-accent" />
+              <p className="text-body font-medium text-text-primary">
+                {computationStatus === "failed"
+                  ? "Sync reported a failure"
+                  : phase === "kicking_off"
+                    ? "Contacting exchange..."
+                    : isComposite
+                      ? computationStatus === "computing"
+                        ? "Trades are being processed…"
+                        : "Trades are being downloaded…"
+                      : computationStatus === "computing"
+                        ? "Computing analytics..."
+                        : "Fetching trades..."}
+              </p>
+            </>
+          )}
           <span className="ml-auto font-metric text-caption tabular-nums text-text-muted">
             {elapsedSeconds}s
           </span>
@@ -2390,6 +2663,36 @@ export function SyncPreviewStep({
           </div>
         )}
       </div>
+
+      {/* 154-08 / STALE-01b — UI-SPEC State Contract 3. The verdict the gate
+          would have rendered is NOT CURRENT while the series it reads is being
+          replaced, so the screen says what is true instead: a recomputation is
+          under way. Amber, because the system is handling it — the semantic
+          gate is that RED renders only on a verdict that IS current, and a red
+          refusal computed from a mid-delete table is precisely the defect. An
+          inline branch, cloning the `wizard-sync-interrupted` banner's shape
+          verbatim (role="status", same tokens) rather than a new component. No
+          count from the stale row is shown: the Numbers Contract forbids a
+          stale number presented as fresh, and there is no number here we could
+          currently know. */}
+      {showRecomputing && (
+        <div
+          data-testid="wizard-sync-recomputing"
+          role="status"
+          className="mt-4 rounded-md border border-warning/40 bg-warning/5 px-4 py-3"
+        >
+          <p className="text-body font-medium text-text-primary">
+            {/* A JS string, not JSX text, so the apostrophe stays a literal
+                apostrophe rather than an `&apos;` entity — the copy is
+                grep-checkable against the UI-SPEC exactly as written there. */}
+            {"Recomputing this strategy's analytics"}
+          </p>
+          <p className="mt-1 text-caption text-text-secondary">
+            The previous result is out of date and is being recalculated. This
+            screen updates when it finishes — your draft is saved.
+          </p>
+        </div>
+      )}
 
       {/* PROG-03 / SF-1 — distinct, recoverable "taking longer" state. Shows
           when the route stall channel fires (`syncProgress.stalled`,

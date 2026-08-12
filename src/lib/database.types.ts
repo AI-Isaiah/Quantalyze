@@ -336,6 +336,7 @@ export type Database = {
           account_balance_usdt: number | null
           api_key_encrypted: string
           api_secret_encrypted: string | null
+          attested_venue: string | null
           created_at: string
           dek_encrypted: string | null
           disconnected_at: string | null
@@ -353,11 +354,13 @@ export type Database = {
           sync_started_at: string | null
           sync_status: string | null
           user_id: string
+          venue_account_id: string | null
         }
         Insert: {
           account_balance_usdt?: number | null
           api_key_encrypted: string
           api_secret_encrypted?: string | null
+          attested_venue?: string | null
           created_at?: string
           dek_encrypted?: string | null
           disconnected_at?: string | null
@@ -375,11 +378,13 @@ export type Database = {
           sync_started_at?: string | null
           sync_status?: string | null
           user_id: string
+          venue_account_id?: string | null
         }
         Update: {
           account_balance_usdt?: number | null
           api_key_encrypted?: string
           api_secret_encrypted?: string | null
+          attested_venue?: string | null
           created_at?: string
           dek_encrypted?: string | null
           disconnected_at?: string | null
@@ -397,6 +402,7 @@ export type Database = {
           sync_started_at?: string | null
           sync_status?: string | null
           user_id?: string
+          venue_account_id?: string | null
         }
         Relationships: [
           {
@@ -423,7 +429,7 @@ export type Database = {
           entity_type: string
           id: string
           metadata: Json | null
-          user_id: string
+          user_id: string | null
         }
         Insert: {
           action: string
@@ -432,7 +438,7 @@ export type Database = {
           entity_type: string
           id?: string
           metadata?: Json | null
-          user_id: string
+          user_id?: string | null
         }
         Update: {
           action?: string
@@ -441,7 +447,7 @@ export type Database = {
           entity_type?: string
           id?: string
           metadata?: Json | null
-          user_id?: string
+          user_id?: string | null
         }
         Relationships: []
       }
@@ -667,6 +673,7 @@ export type Database = {
           parent_job_ids: string[]
           portfolio_id: string | null
           priority: string
+          reclaim_count: number
           status: string
           strategy_id: string | null
           trade_count: number | null
@@ -692,6 +699,7 @@ export type Database = {
           parent_job_ids?: string[]
           portfolio_id?: string | null
           priority?: string
+          reclaim_count?: number
           status?: string
           strategy_id?: string | null
           trade_count?: number | null
@@ -717,6 +725,7 @@ export type Database = {
           parent_job_ids?: string[]
           portfolio_id?: string | null
           priority?: string
+          reclaim_count?: number
           status?: string
           strategy_id?: string | null
           trade_count?: number | null
@@ -889,7 +898,7 @@ export type Database = {
           created_at?: string
           daily_return: number
           date: string
-          id?: number
+          id?: never
           strategy_id?: string | null
           updated_at?: string
         }
@@ -899,11 +908,18 @@ export type Database = {
           created_at?: string
           daily_return?: number
           date?: string
-          id?: number
+          id?: never
           strategy_id?: string | null
           updated_at?: string
         }
         Relationships: [
+          {
+            foreignKeyName: "csv_daily_returns_api_key_id_fkey"
+            columns: ["api_key_id"]
+            isOneToOne: false
+            referencedRelation: "api_keys"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "csv_daily_returns_strategy_id_fkey"
             columns: ["strategy_id"]
@@ -921,7 +937,7 @@ export type Database = {
           rejected_at: string | null
           rejection_reason: string | null
           requested_at: string
-          user_id: string
+          user_id: string | null
         }
         Insert: {
           completed_at?: string | null
@@ -930,7 +946,7 @@ export type Database = {
           rejected_at?: string | null
           rejection_reason?: string | null
           requested_at?: string
-          user_id: string
+          user_id?: string | null
         }
         Update: {
           completed_at?: string | null
@@ -939,24 +955,9 @@ export type Database = {
           rejected_at?: string | null
           rejection_reason?: string | null
           requested_at?: string
-          user_id?: string
+          user_id?: string | null
         }
-        Relationships: [
-          {
-            foreignKeyName: "data_deletion_requests_user_id_fkey"
-            columns: ["user_id"]
-            isOneToOne: false
-            referencedRelation: "profiles"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "data_deletion_requests_user_id_fkey"
-            columns: ["user_id"]
-            isOneToOne: false
-            referencedRelation: "public_profiles"
-            referencedColumns: ["id"]
-          },
-        ]
+        Relationships: []
       }
       deck_strategies: {
         Row: {
@@ -1048,6 +1049,27 @@ export type Database = {
         }
         Relationships: []
       }
+      feature_flags: {
+        Row: {
+          flag_key: string
+          updated_at: string
+          updated_by: string | null
+          value: string
+        }
+        Insert: {
+          flag_key: string
+          updated_at?: string
+          updated_by?: string | null
+          value: string
+        }
+        Update: {
+          flag_key?: string
+          updated_at?: string
+          updated_by?: string | null
+          value?: string
+        }
+        Relationships: []
+      }
       // HAND-PATCHED — do not regenerate this section without verifying
       // migration 115 (notify_attempted_at, notify_succeeded_at,
       // notify_error) is present in the source the regenerator targets.
@@ -1056,6 +1078,8 @@ export type Database = {
       // applied 115, the regen will silently revert these three columns
       // and break tsc on route.ts's `.update({ notify_attempted_at })`
       // calls. audit-2026-05-07 G9.B.7 / red-team specialist regression.
+      // 2026-08-12: regenerated from PROD (khslejtfbuezsmvmtsdn), which HAS
+      // 115 — the three columns survived; only this comment needed re-applying.
       for_quants_leads: {
         Row: {
           created_at: string
@@ -1124,139 +1148,6 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
-      }
-      // HAND-PATCHED — scenarios added by migration 20260621120000
-      // (Phase 23 / PERSIST-01). This block CANNOT be produced by
-      // `supabase gen types typescript` without prod DB access, and a regen
-      // linked to a project missing this migration silently reverts the block
-      // and breaks tsc on the scenario save/update/list routes. Re-apply this
-      // block after any regeneration, and verify migration 20260621120000 is
-      // present in the linked project. (Mirror of the for_quants_leads
-      // tripwire above; pinned by src/lib/database.types.test.ts.)
-      scenarios: {
-        Row: {
-          allocator_id: string
-          created_at: string
-          draft: Json
-          id: string
-          name: string
-          schema_version: number
-          updated_at: string
-        }
-        Insert: {
-          allocator_id: string
-          created_at?: string
-          draft: Json
-          id?: string
-          name: string
-          schema_version: number
-          updated_at?: string
-        }
-        Update: {
-          allocator_id?: string
-          created_at?: string
-          draft?: Json
-          id?: string
-          name?: string
-          schema_version?: number
-          updated_at?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "scenarios_allocator_id_fkey"
-            columns: ["allocator_id"]
-            isOneToOne: false
-            referencedRelation: "profiles"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "scenarios_allocator_id_fkey"
-            columns: ["allocator_id"]
-            isOneToOne: false
-            referencedRelation: "public_profiles"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
-      // HAND-PATCHED — scenario_shares added by migration 20260622120000
-      // (Phase 25 / SHARE-02, SHARE-03). Like the scenarios block above, this
-      // CANNOT be produced by `supabase gen types typescript` without prod DB
-      // access, and a regen linked to a project missing this migration silently
-      // reverts the block and breaks tsc on the share generate/revoke routes
-      // (Plan 25-03) that type `.from("scenario_shares")`. Re-apply this block
-      // after any regeneration, and verify migration 20260622120000 is present
-      // in the linked project. Pinned by src/lib/database.types.test.ts.
-      scenario_shares: {
-        Row: {
-          created_at: string
-          created_by: string
-          id: string
-          revoked_at: string | null
-          scenario_id: string
-          token_hash: string
-        }
-        Insert: {
-          created_at?: string
-          created_by: string
-          id?: string
-          revoked_at?: string | null
-          scenario_id: string
-          token_hash: string
-        }
-        Update: {
-          created_at?: string
-          created_by?: string
-          id?: string
-          revoked_at?: string | null
-          scenario_id?: string
-          token_hash?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "scenario_shares_scenario_id_fkey"
-            columns: ["scenario_id"]
-            isOneToOne: false
-            referencedRelation: "scenarios"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "scenario_shares_created_by_fkey"
-            columns: ["created_by"]
-            isOneToOne: false
-            referencedRelation: "profiles"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "scenario_shares_created_by_fkey"
-            columns: ["created_by"]
-            isOneToOne: false
-            referencedRelation: "public_profiles"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
-      feature_flags: {
-        // Phase 19 / BACKBONE-05 (migration 104). Kill-switch row written by
-        // /api/cron/flag-monitor on auto-rollback. CHECK (value IN ('on','off')).
-        Row: {
-          flag_key: string
-          updated_at: string
-          updated_by: string | null
-          value: string
-        }
-        Insert: {
-          flag_key: string
-          updated_at?: string
-          updated_by?: string | null
-          value: string
-        }
-        Update: {
-          flag_key?: string
-          updated_at?: string
-          updated_by?: string | null
-          value?: string
-        }
-        Relationships: []
       }
       funding_fees: {
         Row: {
@@ -1534,7 +1425,7 @@ export type Database = {
           decision: string
           founder_note?: string | null
           id?: string
-          kind?: Database["public"]["Enums"]["match_decision_kind"]
+          kind: Database["public"]["Enums"]["match_decision_kind"]
           original_holding_ref?: string | null
           original_strategy_id?: string | null
           strategy_id?: string | null
@@ -1785,6 +1676,36 @@ export type Database = {
           },
         ]
       }
+      phase19_soak_daily: {
+        Row: {
+          date_utc: string
+          day_index: number
+          error_events: number
+          error_rate: number
+          notes: string | null
+          recorded_at: string
+          total_events: number
+        }
+        Insert: {
+          date_utc: string
+          day_index: number
+          error_events: number
+          error_rate: number
+          notes?: string | null
+          recorded_at?: string
+          total_events: number
+        }
+        Update: {
+          date_utc?: string
+          day_index?: number
+          error_events?: number
+          error_rate?: number
+          notes?: string | null
+          recorded_at?: string
+          total_events?: number
+        }
+        Relationships: []
+      }
       portfolio_alerts: {
         Row: {
           acknowledged_at: string | null
@@ -1848,6 +1769,7 @@ export type Database = {
           computation_status: string | null
           computed_at: string | null
           correlation_matrix: Json | null
+          data_quality: Json | null
           id: string
           narrative_summary: string | null
           optimizer_suggestions: Json | null
@@ -1873,6 +1795,7 @@ export type Database = {
           computation_status?: string | null
           computed_at?: string | null
           correlation_matrix?: Json | null
+          data_quality?: Json | null
           id?: string
           narrative_summary?: string | null
           optimizer_suggestions?: Json | null
@@ -1898,6 +1821,7 @@ export type Database = {
           computation_status?: string | null
           computed_at?: string | null
           correlation_matrix?: Json | null
+          data_quality?: Json | null
           id?: string
           narrative_summary?: string | null
           optimizer_suggestions?: Json | null
@@ -2085,11 +2009,6 @@ export type Database = {
           closed_at: string | null
           created_at: string
           duration_days: number | null
-          // audit-2026-05-07 C-0156: BIGINT NULL added in migration 114
-          // (20260510182439_positions_schema_rls_g12d.sql). The numeric-
-          // precision contract (src/lib/supabase/numeric-precision.test.ts)
-          // resolves columns through Database['public']['Tables']['positions']['Row'],
-          // so the column was invisible to that gate until now.
           duration_seconds: number | null
           entry_price_avg: number
           exit_price_avg: number | null
@@ -2342,6 +2261,171 @@ export type Database = {
           },
         ]
       }
+      resend_message_correlation: {
+        Row: {
+          correlation_id: string
+          id: number
+          resend_message_id: string
+          sent_at: string
+        }
+        Insert: {
+          correlation_id: string
+          id?: number
+          resend_message_id: string
+          sent_at?: string
+        }
+        Update: {
+          correlation_id?: string
+          id?: number
+          resend_message_id?: string
+          sent_at?: string
+        }
+        Relationships: []
+      }
+      scenario_commit_idempotency: {
+        Row: {
+          allocator_id: string
+          created_at: string
+          idempotency_key: string
+          request_hash: string
+          response: Json
+          schema_version: number
+        }
+        Insert: {
+          allocator_id: string
+          created_at?: string
+          idempotency_key: string
+          request_hash: string
+          response: Json
+          schema_version?: number
+        }
+        Update: {
+          allocator_id?: string
+          created_at?: string
+          idempotency_key?: string
+          request_hash?: string
+          response?: Json
+          schema_version?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "scenario_commit_idempotency_allocator_id_fkey"
+            columns: ["allocator_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "scenario_commit_idempotency_allocator_id_fkey"
+            columns: ["allocator_id"]
+            isOneToOne: false
+            referencedRelation: "public_profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      scenario_shares: {
+        Row: {
+          created_at: string
+          created_by: string
+          id: string
+          revoked_at: string | null
+          scenario_id: string
+          token_hash: string
+        }
+        Insert: {
+          created_at?: string
+          created_by: string
+          id?: string
+          revoked_at?: string | null
+          scenario_id: string
+          token_hash: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string
+          id?: string
+          revoked_at?: string | null
+          scenario_id?: string
+          token_hash?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "scenario_shares_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "scenario_shares_created_by_fkey"
+            columns: ["created_by"]
+            isOneToOne: false
+            referencedRelation: "public_profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "scenario_shares_scenario_id_fkey"
+            columns: ["scenario_id"]
+            isOneToOne: false
+            referencedRelation: "scenarios"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      // HAND-PATCHED — scenarios added by migration 20260621120000
+      // (Phase 23 / PERSIST-01). This block CANNOT be produced by
+      // `supabase gen types typescript` without prod DB access, and a regen
+      // linked to a project missing this migration silently reverts the block
+      // and breaks tsc on the scenario save/update/list routes. Re-apply this
+      // block after any regeneration, and verify migration 20260621120000 is
+      // present in the linked project. (Mirror of the for_quants_leads
+      // tripwire above; pinned by src/lib/database.types.test.ts.)
+      scenarios: {
+        Row: {
+          allocator_id: string
+          created_at: string
+          draft: Json
+          id: string
+          name: string
+          schema_version: number
+          updated_at: string
+        }
+        Insert: {
+          allocator_id: string
+          created_at?: string
+          draft: Json
+          id?: string
+          name: string
+          schema_version: number
+          updated_at?: string
+        }
+        Update: {
+          allocator_id?: string
+          created_at?: string
+          draft?: Json
+          id?: string
+          name?: string
+          schema_version?: number
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "scenarios_allocator_id_fkey"
+            columns: ["allocator_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "scenarios_allocator_id_fkey"
+            columns: ["allocator_id"]
+            isOneToOne: false
+            referencedRelation: "public_profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       strategies: {
         Row: {
           api_key_id: string | null
@@ -2355,6 +2439,7 @@ export type Database = {
           created_at: string
           description: string | null
           disclosure_tier: string
+          fingerprint: Json | null
           id: string
           is_example: boolean
           leverage_range: string | null
@@ -2364,6 +2449,7 @@ export type Database = {
           organization_id: string | null
           partner_tag: string | null
           public_contact_email: string | null
+          returns_denominator_config: Json | null
           review_note: string | null
           source: string
           start_date: string | null
@@ -2387,6 +2473,7 @@ export type Database = {
           created_at?: string
           description?: string | null
           disclosure_tier?: string
+          fingerprint?: Json | null
           id?: string
           is_example?: boolean
           leverage_range?: string | null
@@ -2396,6 +2483,7 @@ export type Database = {
           organization_id?: string | null
           partner_tag?: string | null
           public_contact_email?: string | null
+          returns_denominator_config?: Json | null
           review_note?: string | null
           source?: string
           start_date?: string | null
@@ -2419,6 +2507,7 @@ export type Database = {
           created_at?: string
           description?: string | null
           disclosure_tier?: string
+          fingerprint?: Json | null
           id?: string
           is_example?: boolean
           leverage_range?: string | null
@@ -2428,6 +2517,7 @@ export type Database = {
           organization_id?: string | null
           partner_tag?: string | null
           public_contact_email?: string | null
+          returns_denominator_config?: Json | null
           review_note?: string | null
           source?: string
           start_date?: string | null
@@ -2484,7 +2574,9 @@ export type Database = {
           calmar: number | null
           computation_error: string | null
           computation_status: string
+          computation_warned: boolean
           computed_at: string
+          computing_started_at: string | null
           cumulative_return: number | null
           daily_returns: Json | null
           data_quality_flags: Json | null
@@ -2494,6 +2586,7 @@ export type Database = {
           max_drawdown: number | null
           max_drawdown_duration_days: number | null
           metrics_json: Json | null
+          metrics_json_by_basis: Json | null
           monthly_returns: Json | null
           return_quantiles: Json | null
           returns_series: Json | null
@@ -2515,7 +2608,9 @@ export type Database = {
           calmar?: number | null
           computation_error?: string | null
           computation_status?: string
+          computation_warned?: boolean
           computed_at?: string
+          computing_started_at?: string | null
           cumulative_return?: number | null
           daily_returns?: Json | null
           data_quality_flags?: Json | null
@@ -2525,6 +2620,7 @@ export type Database = {
           max_drawdown?: number | null
           max_drawdown_duration_days?: number | null
           metrics_json?: Json | null
+          metrics_json_by_basis?: Json | null
           monthly_returns?: Json | null
           return_quantiles?: Json | null
           returns_series?: Json | null
@@ -2546,7 +2642,9 @@ export type Database = {
           calmar?: number | null
           computation_error?: string | null
           computation_status?: string
+          computation_warned?: boolean
           computed_at?: string
+          computing_started_at?: string | null
           cumulative_return?: number | null
           daily_returns?: Json | null
           data_quality_flags?: Json | null
@@ -2556,6 +2654,7 @@ export type Database = {
           max_drawdown?: number | null
           max_drawdown_duration_days?: number | null
           metrics_json?: Json | null
+          metrics_json_by_basis?: Json | null
           monthly_returns?: Json | null
           return_quantiles?: Json | null
           returns_series?: Json | null
@@ -2603,6 +2702,119 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "strategy_analytics_series_strategy_id_fkey"
+            columns: ["strategy_id"]
+            isOneToOne: false
+            referencedRelation: "strategies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      strategy_keys: {
+        Row: {
+          api_key_id: string
+          created_at: string
+          id: string
+          owner_id: string
+          seq: number
+          strategy_id: string
+          window_end: string | null
+          window_start: string
+        }
+        Insert: {
+          api_key_id: string
+          created_at?: string
+          id?: string
+          owner_id: string
+          seq: number
+          strategy_id: string
+          window_end?: string | null
+          window_start: string
+        }
+        Update: {
+          api_key_id?: string
+          created_at?: string
+          id?: string
+          owner_id?: string
+          seq?: number
+          strategy_id?: string
+          window_end?: string | null
+          window_start?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "strategy_keys_api_key_id_fkey"
+            columns: ["api_key_id"]
+            isOneToOne: false
+            referencedRelation: "api_keys"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "strategy_keys_strategy_id_fkey"
+            columns: ["strategy_id"]
+            isOneToOne: false
+            referencedRelation: "strategies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      strategy_verifications: {
+        Row: {
+          correlation_id: string | null
+          created_at: string
+          encrypted_credentials: Json | null
+          errors: Json | null
+          expires_at: string | null
+          flow_type: string
+          id: string
+          metrics_snapshot: Json | null
+          public_token: string | null
+          source: string
+          status: string
+          strategy_id: string
+          transitioned_at: string
+          trust_tier: string
+          updated_at: string
+          wizard_session_id: string
+        }
+        Insert: {
+          correlation_id?: string | null
+          created_at?: string
+          encrypted_credentials?: Json | null
+          errors?: Json | null
+          expires_at?: string | null
+          flow_type: string
+          id?: string
+          metrics_snapshot?: Json | null
+          public_token?: string | null
+          source: string
+          status: string
+          strategy_id: string
+          transitioned_at?: string
+          trust_tier: string
+          updated_at?: string
+          wizard_session_id: string
+        }
+        Update: {
+          correlation_id?: string | null
+          created_at?: string
+          encrypted_credentials?: Json | null
+          errors?: Json | null
+          expires_at?: string | null
+          flow_type?: string
+          id?: string
+          metrics_snapshot?: Json | null
+          public_token?: string | null
+          source?: string
+          status?: string
+          strategy_id?: string
+          transitioned_at?: string
+          trust_tier?: string
+          updated_at?: string
+          wizard_session_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "strategy_verifications_strategy_id_fkey"
             columns: ["strategy_id"]
             isOneToOne: false
             referencedRelation: "strategies"
@@ -2859,7 +3071,7 @@ export type Database = {
           },
         ]
       }
-      verification_requests: {
+      verification_requests_legacy: {
         Row: {
           api_key_encrypted: string
           api_secret_encrypted: string | null
@@ -3085,26 +3297,104 @@ export type Database = {
         }
         Relationships: []
       }
+      verification_requests: {
+        Row: {
+          api_key_encrypted: string | null
+          api_secret_encrypted: string | null
+          completed_at: string | null
+          created_at: string | null
+          dek_encrypted: string | null
+          email: string | null
+          exchange: string | null
+          expires_at: string | null
+          id: string | null
+          passphrase_encrypted: string | null
+          public_token: string | null
+          results: Json | null
+          status: string | null
+        }
+        Insert: {
+          api_key_encrypted?: never
+          api_secret_encrypted?: never
+          completed_at?: string | null
+          created_at?: string | null
+          dek_encrypted?: never
+          email?: never
+          exchange?: string | null
+          expires_at?: string | null
+          id?: string | null
+          passphrase_encrypted?: never
+          public_token?: string | null
+          results?: Json | null
+          status?: string | null
+        }
+        Update: {
+          api_key_encrypted?: never
+          api_secret_encrypted?: never
+          completed_at?: string | null
+          created_at?: string | null
+          dek_encrypted?: never
+          email?: never
+          exchange?: string | null
+          expires_at?: string | null
+          id?: string | null
+          passphrase_encrypted?: never
+          public_token?: string | null
+          results?: Json | null
+          status?: string | null
+        }
+        Relationships: []
+      }
     }
     Functions: {
+      _assert_no_public_execute: {
+        Args: { p_function_signature: string }
+        Returns: undefined
+      }
       _assert_owner: {
         Args: { p_context: string; p_row_id: string; p_table: unknown }
         Returns: undefined
       }
-      _enqueue_compute_job_internal: {
-        Args: {
-          p_allocator_id?: string
-          p_api_key_id?: string
-          p_exchange: string
-          p_idempotency_key: string
-          p_kind: string
-          p_metadata: Json
-          p_parent_job_ids: string[]
-          p_portfolio_id: string
-          p_run_at?: string
-          p_strategy_id: string
-        }
-        Returns: string
+      _assert_retention_columns: { Args: never; Returns: undefined }
+      _assert_strategy_visible_to_allocator: {
+        Args: { p_allocator_id: string; p_strategy_id: string }
+        Returns: boolean
+      }
+      _enqueue_compute_job_internal:
+        | {
+            Args: {
+              p_exchange: string
+              p_idempotency_key: string
+              p_kind: string
+              p_metadata: Json
+              p_parent_job_ids: string[]
+              p_portfolio_id: string
+              p_strategy_id: string
+            }
+            Returns: string
+          }
+        | {
+            Args: {
+              p_allocator_id?: string
+              p_api_key_id?: string
+              p_exchange: string
+              p_idempotency_key: string
+              p_kind: string
+              p_metadata: Json
+              p_parent_job_ids: string[]
+              p_portfolio_id: string
+              p_run_at?: string
+              p_strategy_id: string
+            }
+            Returns: string
+          }
+      _scoring_weight_overrides_is_valid: {
+        Args: { p_overrides: Json }
+        Returns: boolean
+      }
+      _validate_scenario_diff: {
+        Args: { p_diff: Json; p_index: number }
+        Returns: undefined
       }
       add_wizard_composite_key: {
         Args: {
@@ -3124,6 +3414,30 @@ export type Database = {
           api_key_id: string
           strategy_id: string
         }[]
+      }
+      admin_role_mutate: {
+        Args: {
+          p_action: string
+          p_actor_id: string
+          p_role: string
+          p_target_id: string
+        }
+        Returns: Json
+      }
+      advance_sync_cursor: {
+        Args: {
+          p_account_balance?: number
+          p_api_key_id: string
+          p_claim_token?: string
+          p_job_id: string
+          p_last_fetched_ts?: string
+          p_last_sync_at?: string
+        }
+        Returns: boolean
+      }
+      api_key_cooldown_remaining: {
+        Args: { p_api_key_id: string; p_cooldown_seconds: number }
+        Returns: number
       }
       check_fan_in_ready: { Args: { p_child_job_id: string }; Returns: boolean }
       claim_compute_jobs: {
@@ -3148,6 +3462,7 @@ export type Database = {
           parent_job_ids: string[]
           portfolio_id: string | null
           priority: string
+          reclaim_count: number
           status: string
           strategy_id: string | null
           trade_count: number | null
@@ -3160,55 +3475,97 @@ export type Database = {
           isSetofReturn: true
         }
       }
-      claim_compute_jobs_with_priority: {
-        Args: {
-          p_batch_size: number
-          p_worker_id: string
-          // Phase 19 / BACKBONE-05 — migration 104 extends the signature
-          // with a 3rd BOOLEAN arg (DEFAULT NULL) so the claim RPC stamps
-          // 'unified_backbone_at_claim' into compute_jobs.metadata for
-          // drain semantics. Optional in the TS surface to keep
-          // backward-compat for any call sites added during the rollout.
-          p_unified_backbone_active?: boolean | null
-        }
+      claim_compute_jobs_with_priority:
+        | {
+            Args: { p_batch_size: number; p_worker_id: string }
+            Returns: {
+              allocator_id: string | null
+              api_key_id: string | null
+              attempts: number
+              claim_token: string | null
+              claimed_at: string | null
+              claimed_by: string | null
+              created_at: string
+              error_kind: string | null
+              exchange: string | null
+              id: string
+              idempotency_key: string | null
+              kind: string
+              last_error: string | null
+              max_attempts: number
+              metadata: Json | null
+              next_attempt_at: string
+              parent_job_ids: string[]
+              portfolio_id: string | null
+              priority: string
+              reclaim_count: number
+              status: string
+              strategy_id: string | null
+              trade_count: number | null
+              updated_at: string
+            }[]
+            SetofOptions: {
+              from: "*"
+              to: "compute_jobs"
+              isOneToOne: false
+              isSetofReturn: true
+            }
+          }
+        | {
+            Args: {
+              p_batch_size: number
+              p_kind_exclude?: string[]
+              p_kind_include?: string[]
+              p_unified_backbone_active?: boolean
+              p_worker_id: string
+            }
+            Returns: {
+              allocator_id: string | null
+              api_key_id: string | null
+              attempts: number
+              claim_token: string | null
+              claimed_at: string | null
+              claimed_by: string | null
+              created_at: string
+              error_kind: string | null
+              exchange: string | null
+              id: string
+              idempotency_key: string | null
+              kind: string
+              last_error: string | null
+              max_attempts: number
+              metadata: Json | null
+              next_attempt_at: string
+              parent_job_ids: string[]
+              portfolio_id: string | null
+              priority: string
+              reclaim_count: number
+              status: string
+              strategy_id: string | null
+              trade_count: number | null
+              updated_at: string
+            }[]
+            SetofOptions: {
+              from: "*"
+              to: "compute_jobs"
+              isOneToOne: false
+              isSetofReturn: true
+            }
+          }
+      cleanup_abandoned_wizard_drafts: {
+        Args: never
         Returns: {
-          allocator_id: string | null
-          api_key_id: string | null
-          attempts: number
-          claim_token: string | null
-          claimed_at: string | null
-          claimed_by: string | null
-          created_at: string
-          error_kind: string | null
-          exchange: string | null
-          id: string
-          idempotency_key: string | null
-          kind: string
-          last_error: string | null
-          max_attempts: number
-          metadata: Json | null
-          next_attempt_at: string
-          parent_job_ids: string[]
-          portfolio_id: string | null
-          priority: string
-          status: string
-          strategy_id: string | null
-          trade_count: number | null
-          updated_at: string
+          deleted_drafts: number
+          swept_keys: number
         }[]
-        SetofOptions: {
-          from: "*"
-          to: "compute_jobs"
-          isOneToOne: false
-          isSetofReturn: true
-        }
       }
       commit_scenario_batch: {
         Args: {
           p_allocator_id: string
           p_diffs: Json
-          p_idempotency_key?: string | null
-          p_request_hash?: string | null
+          p_idempotency_key?: string
+          p_portfolio_fingerprint?: string
+          p_request_hash?: string
         }
         Returns: Json
       }
@@ -3220,6 +3577,7 @@ export type Database = {
           updated_count: number
         }[]
       }
+      compute_similarity: { Args: { a: Json; b: Json }; Returns: number }
       create_allocator_connected_strategy: {
         Args: {
           p_api_key_encrypted: string
@@ -3239,6 +3597,10 @@ export type Database = {
           strategy_id: string
         }[]
       }
+      create_scenario_share: {
+        Args: { p_scenario_id: string; p_token_hash: string }
+        Returns: string
+      }
       create_wizard_strategy: {
         Args: {
           p_api_key_encrypted: string
@@ -3251,6 +3613,7 @@ export type Database = {
           p_passphrase_encrypted: string
           p_placeholder_name: string
           p_user_id: string
+          p_venue_account_id?: string
           p_wizard_session_id: string
         }
         Returns: {
@@ -3262,12 +3625,17 @@ export type Database = {
         Args: { p_roles: string[] }
         Returns: boolean
       }
-      cutover_strategy_metrics_keys: {
-        Args: { p_kinds: Json; p_strategy_id: string }
-        Returns: undefined
+      cutover_strategy_metrics_keys_atomic: {
+        Args: { p_strategy_id: string }
+        Returns: Json
       }
       defer_compute_job: {
-        Args: { p_defer_seconds: number; p_job_id: string; p_reason?: string }
+        Args: {
+          p_claim_token?: string
+          p_defer_seconds: number
+          p_job_id: string
+          p_reason?: string
+        }
         Returns: string
       }
       delete_allocator_api_key: {
@@ -3305,6 +3673,10 @@ export type Database = {
         }
         Returns: string
       }
+      enqueue_derive_broker_dailies_for_allocator_keys: {
+        Args: never
+        Returns: undefined
+      }
       enqueue_poll_allocator_positions_for_all_keys: {
         Args: never
         Returns: number
@@ -3340,6 +3712,16 @@ export type Database = {
         Args: { p_panel_id: string; p_strategy_id: string }
         Returns: Json
       }
+      finalize_csv_strategy: {
+        Args: {
+          p_fmt: string
+          p_strategy_name: string
+          p_terminal_status?: string
+          p_user_id: string
+          p_wizard_session_id: string
+        }
+        Returns: string
+      }
       finalize_wizard_strategy: {
         Args: {
           p_aum: number
@@ -3353,9 +3735,17 @@ export type Database = {
           p_strategy_types: string[]
           p_subtypes: string[]
           p_supported_exchanges: string[]
+          p_terminal_status?: string
           p_user_id: string
         }
         Returns: string
+      }
+      flip_capital_ownership_to_team_review: {
+        Args: { p_strategy_id: string }
+        Returns: {
+          removed_positions: number
+          updated_strategies: number
+        }[]
       }
       get_admin_compute_jobs: {
         Args: {
@@ -3424,6 +3814,7 @@ export type Database = {
           computation_status: string | null
           computed_at: string | null
           correlation_matrix: Json | null
+          data_quality: Json | null
           id: string
           narrative_summary: string | null
           optimizer_suggestions: Json | null
@@ -3441,6 +3832,12 @@ export type Database = {
           total_return_mwr: number | null
           total_return_twr: number | null
         }[]
+        SetofOptions: {
+          from: "*"
+          to: "portfolio_analytics"
+          isOneToOne: false
+          isSetofReturn: true
+        }
       }
       get_published_trust_signals: {
         Args: { p_strategy_ids: string[] }
@@ -3448,6 +3845,15 @@ export type Database = {
           status: string
           strategy_id: string
           trust_tier: string
+        }[]
+      }
+      get_shared_scenario: {
+        Args: { p_token_hash: string }
+        Returns: {
+          draft: Json
+          name: string
+          schema_version: number
+          series: Json
         }[]
       }
       get_user_compute_jobs: {
@@ -3472,6 +3878,16 @@ export type Database = {
           strategy_id: string
           trade_count: number
           updated_at: string
+          user_message: string
+        }[]
+      }
+      get_verified_cohort_rank: {
+        Args: { p_max_dd: number; p_sharpe: number; p_sortino: number }
+        Returns: {
+          cohort_n: number
+          max_dd_pct: number
+          sharpe_pct: number
+          sortino_pct: number
         }[]
       }
       increment_user_session_count: {
@@ -3503,35 +3919,16 @@ export type Database = {
         }
         Returns: string
       }
-      // Migration 117 / P97 fence: the prior 1-arg / 3-arg overloads were
-      // dropped (DROP FUNCTION) so only the fenced signature exists. The
-      // p_claim_token parameter has DEFAULT NULL on the Postgres side, so
-      // it's optional from the TS surface — `null` means "skip fence"
-      // (back-compat for legacy callers like the admin runbook). Workers
-      // that go through the claim path MUST pass the row's claim_token.
-      //
-      // NOTE — these entries (and the `claim_token` additions to
-      // compute_jobs.{Row,Insert,Update} + claim_compute_jobs[_with_priority]
-      // Returns above) are MANUAL forward-edits ahead of the live remote
-      // schema. supabase_mcp.generate_typescript_types currently regenerates
-      // FROM the remote DB, where mig 117 hasn't been applied yet — running
-      // a fresh regen would REGRESS this PR by reverting to the un-fenced
-      // 1-arg / 3-arg signatures. After mig 117 deploys per
-      // docs/runbooks/deploy-mig-117-claim-token-fence.md, a follow-up
-      // regen will (a) reproduce these edits verbatim and (b) pick up
-      // whatever other drift has accumulated (e.g., `reclaim_count` was
-      // added to compute_jobs.Row by a separate unrelated migration that
-      // already shipped — keep that out of this PR).
       mark_compute_job_done: {
-        Args: { p_job_id: string; p_claim_token?: string | null }
+        Args: { p_claim_token?: string; p_job_id: string }
         Returns: undefined
       }
       mark_compute_job_failed: {
         Args: {
+          p_claim_token?: string
           p_error: string
           p_error_kind?: string
           p_job_id: string
-          p_claim_token?: string | null
         }
         Returns: string
       }
@@ -3543,6 +3940,22 @@ export type Database = {
           venue: string
         }[]
       }
+      persist_csv_daily_returns: {
+        Args: { p_rows: Json; p_strategy_id: string; p_user_id: string }
+        Returns: number
+      }
+      phase19_soak_record_day: {
+        Args: {
+          p_date_utc: string
+          p_day_index: number
+          p_error_events: number
+          p_error_rate: number
+          p_notes?: string
+          p_total_events: number
+        }
+        Returns: Json
+      }
+      phase19_soak_status: { Args: { p_since?: string }; Returns: Json }
       reclaim_stuck_compute_jobs: {
         Args: { p_older_than?: string }
         Returns: number
@@ -3551,12 +3964,24 @@ export type Database = {
         Args: { p_api_key_id: string }
         Returns: boolean
       }
+      reconstruct_positions_atomic: {
+        Args: { p_positions: Json; p_strategy_id: string }
+        Returns: undefined
+      }
+      replace_allocator_equity_snapshots: {
+        Args: { p_allocator_id: string; p_depth_months: number; p_rows: Json }
+        Returns: number
+      }
       request_allocator_holdings_sync: {
         Args: { p_api_key_id: string }
         Returns: Json
       }
       reset_stalled_compute_jobs: {
         Args: { p_per_kind_overrides?: Json; p_stale_threshold?: string }
+        Returns: number
+      }
+      reset_stalled_portfolio_analytics: {
+        Args: { p_stale_threshold?: string }
         Returns: number
       }
       sanitize_user: { Args: { p_user_id: string }; Returns: boolean }
@@ -3575,9 +4000,18 @@ export type Database = {
           was_already_sent: boolean
         }[]
       }
+      set_compute_job_progress: {
+        Args: { p_claim_token: string; p_job_id: string; p_progress: Json }
+        Returns: boolean
+      }
       set_wizard_composite_members: {
         Args: { p_members: Json; p_strategy_id: string; p_user_id: string }
         Returns: number
+      }
+      stamp_api_key_429: { Args: { p_api_key_id: string }; Returns: undefined }
+      stamp_first_bridge_surfaced: {
+        Args: { p_user_id: string }
+        Returns: Json
       }
       stamp_first_sync_success: {
         Args: { p_user_id: string }
@@ -3591,7 +4025,16 @@ export type Database = {
         Args: { p_strategy_id: string; p_trades: Json }
         Returns: number
       }
+      test_force_cold_purge: { Args: { p_id: string }; Returns: number }
       test_force_hot_to_cold_move: { Args: never; Returns: number }
+      transition_strategy_verification: {
+        Args: {
+          p_metadata?: Json
+          p_new_status: string
+          p_verification_id: string
+        }
+        Returns: Json
+      }
       update_allocator_mandates: {
         Args: {
           p_clear_fields?: string[]

@@ -349,6 +349,123 @@ describe("POST /api/strategies/composite/add-key — ONB-03 per-key add", () => 
 });
 
 /**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 154-06 / WIZCONT-02 — TWIN-8: this route's 23505 arm discriminates too.
+ *
+ * The twin, stated: this arm and `create-with-key`'s carried the SAME
+ * undifferentiated `23505 → DRAFT_ALREADY_EXISTS` mapping. Migration
+ * 20260812083206 added a SECOND unique index over `api_keys`, so that mapping
+ * is no longer one fact — and closing only the copy the bug was filed against
+ * is how divergent twins are born. These cases pin all three branches, and the
+ * pre-existing session case above pins that nothing moved for the common one.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+describe("[154-06 / TWIN-8] composite/add-key — the 23505 arm discriminates", () => {
+  beforeEach(() => {
+    resetHappyMocks();
+    sentryState.captured.length = 0;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** `captureToSentry` fires through a lazy `import(...).then(...)` chain. */
+  async function awaitCapture() {
+    await vi.waitFor(() =>
+      expect(sentryState.captured.length).toBeGreaterThan(0),
+    );
+    return sentryState.captured[sentryState.captured.length - 1];
+  }
+
+  it("the wizard-session constraint keeps a BYTE-IDENTICAL 409 body", async () => {
+    rpcMock.mockResolvedValue({
+      data: null,
+      error: {
+        code: "23505",
+        message:
+          'duplicate key value violates unique constraint "strategies_user_wizard_session_source_uniq"',
+      },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(409);
+    // Byte-wise: `toEqual` on parsed JSON does not compare key order, and this
+    // body is what the wizard's copy table is pinned against.
+    expect(await res.text()).toBe(
+      '{"code":"DRAFT_ALREADY_EXISTS","error":"A wizard session with this key is already in progress."}',
+    );
+    expect(sentryState.captured).toEqual([]);
+  });
+
+  it("a 23505 naming NO constraint keeps the pre-154 409 (absence is not a value)", async () => {
+    rpcMock.mockResolvedValue({
+      data: null,
+      error: { code: "23505", message: "unique_violation" },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(409);
+    expect(await res.text()).toBe(
+      '{"code":"DRAFT_ALREADY_EXISTS","error":"A wizard session with this key is already in progress."}',
+    );
+  });
+
+  it("the VENUE-IDENTITY constraint is ALARM-ONLY here — it is unreachable, so its arrival is a premise change", async () => {
+    // add_wizard_composite_key does not write venue_account_id (TWIN-7), and
+    // MT5 cannot be a composite member — so this cannot fire today. If it ever
+    // does, a silent 409 would bury the fact that the composite path started
+    // writing venue identities.
+    rpcMock.mockResolvedValue({
+      data: null,
+      error: {
+        code: "23505",
+        message:
+          'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+      },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
+    const capture = await awaitCapture();
+    expect(capture.options.tags?.step).toBe(
+      "draft-rpc-venue-identity-unreachable",
+    );
+    expect(capture.options.extra?.constraint).toBe(
+      "api_keys_user_exchange_venue_account_uniq",
+    );
+  });
+
+  it("an UNRECOGNISED constraint fails LOUD — 500 + Sentry naming it, never the wrong 409", async () => {
+    rpcMock.mockResolvedValue({
+      data: null,
+      error: {
+        code: "23505",
+        message:
+          'duplicate key value violates unique constraint "api_keys_some_future_uniq"',
+      },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
+    const capture = await awaitCapture();
+    expect(capture.options.tags?.step).toBe("draft-rpc-unknown-constraint");
+    expect(capture.options.extra?.constraint).toBe("api_keys_some_future_uniq");
+  });
+});
+
+/**
  * SFOX-03 / 119-CONTEXT Q1 (LOCKED) — the SECURITY-SENSITIVE api_secret carve-out,
  * mirror of the create-with-key sibling. sFOX authenticates with a SINGLE Bearer
  * token (no api_secret). For `exchange === "sfox"` ONLY, the :81 `length < 8` gate

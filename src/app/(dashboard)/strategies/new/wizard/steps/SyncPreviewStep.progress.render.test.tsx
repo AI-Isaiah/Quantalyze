@@ -686,9 +686,24 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
     warnSpy.mockRestore();
   });
 
-  // SINGLE-KEY NEUTRALITY — composite:false kickoff issues NO sync-progress
-  // fetch and renders no panel (no new traffic on the single-key path).
-  it("issues no sync-progress fetch and renders no panel on a single-key kickoff", async () => {
+  // SINGLE-KEY — PREMISE CHANGED BY 154-08 (TWIN-5), NOT WEAKENED.
+  //
+  // ⚠️ This case used to assert `progressFetches).toHaveLength(0)` under the
+  // title "SINGLE-KEY NEUTRALITY … no new traffic on the single-key path". It
+  // was pinning the third of the three `isComposite` gates that, together, left
+  // a single-key user with ZERO exits from `waiting_for_complete` — the M1 half
+  // of the 2026-08-04 stall (154-INVESTIGATION.md). 154-04 widened
+  // `sync-progress/route.ts` so a single-key job reports its status; this
+  // client gate is why that widened answer reached no screen. "No new traffic"
+  // was the cost being paid, and what it bought was a screen the user could not
+  // leave.
+  //
+  // What is UNCHANGED and asserted here as the other half: the per-key panel
+  // stays composite-only. A single-key strategy has no members, the route
+  // returns `memberProgress: []` for every non-stitch job, and the render gate
+  // is still `isComposite && …` — so widening the FETCH did not widen the
+  // PANEL, and a rogue body carrying member rows cannot paint one.
+  it("issues the sync-progress fetch on a single-key kickoff, surfaces the interrupted state, and still renders no per-key panel", async () => {
     kickoffComposite = false;
     installWaitingMock("computing");
     progressOutcome = {
@@ -703,8 +718,23 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
     const progressFetches = fetchSpy.mock.calls.filter((c) =>
       String(c[0]).includes("/sync-progress"),
     );
-    expect(progressFetches).toHaveLength(0);
+    expect(
+      progressFetches.length,
+      "The single-key arm still never asks for the in-flight datum. Widening " +
+        "the route (154-04) changes no screen while this gate stands: the " +
+        "client does not ask, so the answer does not exist as far as the user " +
+        "is concerned.",
+    ).toBeGreaterThan(0);
+
+    // The exit affordance the composite arm always had, now reaching the user
+    // class that had no other one.
+    expect(screen.getByTestId("wizard-sync-interrupted")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /retry sync/i }),
+    ).toBeInTheDocument();
+
+    // …and the per-key panel stays composite-only even though this body carries
+    // three member rows.
     expect(screen.queryByTestId("wizard-member-progress")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("wizard-sync-interrupted")).not.toBeInTheDocument();
   });
 });

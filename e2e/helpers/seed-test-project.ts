@@ -377,6 +377,78 @@ export async function countStrategyKeys(strategyId: string): Promise<number> {
   return count ?? 0;
 }
 
+export interface SeededWizardDraft {
+  strategyId: string;
+  apiKeyId: string;
+  name: string;
+}
+
+/**
+ * Phase 154 / WIZCONT-01 — an API-branch wizard draft owned by `ownerUserId`.
+ *
+ * The (status, source) pair is what makes it resume-eligible: the wizard-draft
+ * read matches `source='wizard' AND status='draft'` and nothing else
+ * (`src/lib/wizard/draft-query.ts`). `api_key_id` is deliberately SET — it is
+ * the discriminator that makes `deriveDraftKind` answer `"api"`; a null there
+ * would send the helper to the composite-vs-CSV membership probe and the draft
+ * would be offered on a different branch.
+ *
+ * The name prefix is the isolation mechanism on the SHARED test DB: the spec
+ * GCs its own rows with `cleanupStrategiesByNamePrefix(prefix)` and asserts on
+ * its OWN seeded row, never on a global count or a global empty state.
+ */
+export async function seedWizardDraft(opts: {
+  ownerUserId: string;
+  namePrefix?: string;
+}): Promise<SeededWizardDraft> {
+  const admin = getAdmin();
+  const prefix = opts.namePrefix ?? "e2e-wizcont-";
+
+  // The key first — the draft references it. Same placeholder-ciphertext idiom
+  // as seedAllocatorBook:645-652; no real credential is ever seeded.
+  const { data: key, error: kErr } = await admin
+    .from("api_keys")
+    .insert({
+      user_id: opts.ownerUserId,
+      exchange: "binance",
+      label: `${prefix}key-${uniqueSuffix(6)}`,
+      api_key_encrypted: "e2e-placeholder-ciphertext",
+      is_active: true,
+    })
+    .select("id")
+    .single();
+  if (kErr || !key) {
+    throw new Error(`[seed] seedWizardDraft (api_key) failed: ${kErr?.message}`);
+  }
+
+  const name = `${prefix}${uniqueSuffix(6)}`;
+  const { data: strategy, error: sErr } = await admin
+    .from("strategies")
+    .insert({
+      user_id: opts.ownerUserId,
+      name,
+      status: "draft",
+      source: "wizard",
+      api_key_id: key.id,
+      benchmark: "BTC",
+      supported_exchanges: ["binance"],
+      strategy_types: ["spot"],
+      subtypes: [],
+      markets: ["BTC"],
+    })
+    .select("id")
+    .single();
+  if (sErr || !strategy) {
+    throw new Error(`[seed] seedWizardDraft (strategy) failed: ${sErr?.message}`);
+  }
+
+  return {
+    strategyId: strategy.id as string,
+    apiKeyId: key.id as string,
+    name,
+  };
+}
+
 export async function seedStrategyWithHistory(opts: {
   days: number;
   name?: string;

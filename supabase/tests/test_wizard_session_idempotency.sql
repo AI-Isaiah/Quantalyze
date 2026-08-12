@@ -109,12 +109,29 @@ BEGIN
   END IF;
 
   -- ----- 4. grants: authenticated EXECUTEs, anon does NOT ------------------
+  -- ⚠️ THE SIGNATURE GAINED A 12th TYPE (trailing `text`) IN MIGRATION
+  -- 20260812083206 (Phase 154 / WIZCONT-02: p_venue_account_id text DEFAULT
+  -- NULL). has_function_privilege's text form matches the DECLARED argument
+  -- list EXACTLY and ignores defaults, so the old 11-type string does not
+  -- resolve to a 12-parameter function — it raises undefined_function and this
+  -- gate fails with a confusing "function does not exist" rather than a grant
+  -- verdict. Re-cut here in the same commit as that migration. The RPC's
+  -- POSITIONAL callers elsewhere in supabase/tests/ are unaffected: an omitted
+  -- trailing defaulted parameter still resolves.
+  --
+  -- ⛔ That migration uses DROP + CREATE, not CREATE OR REPLACE, because a
+  -- signature change via CREATE OR REPLACE would mint a SECOND overload and
+  -- PostgREST would answer PGRST203 to every connect-a-key call. DROP destroys
+  -- the ACL, so these two assertions stopped being a formality: they are now the
+  -- external check that the migration's re-issued REVOKE/GRANT pair took, and in
+  -- particular that `anon` did not inherit the PUBLIC-EXECUTE default a freshly
+  -- created function carries.
   IF NOT has_function_privilege('authenticated',
-        'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid)', 'EXECUTE') THEN
+        'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)', 'EXECUTE') THEN
     RAISE EXCEPTION 'TEST FAILED: authenticated lost EXECUTE on create_wizard_strategy';
   END IF;
   IF has_function_privilege('anon',
-        'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid)', 'EXECUTE') THEN
+        'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)', 'EXECUTE') THEN
     RAISE EXCEPTION 'TEST FAILED: anon must NOT have EXECUTE on create_wizard_strategy';
   END IF;
 

@@ -269,4 +269,45 @@ describe("SyncProgress poll loop — forwarding contract (characterization)", ()
     await tick(30_000);
     expect(mockState.analyticsSelectCount).toBe(0);
   });
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // PIN 9 (154-04) — SIBLING REGRESSION for the shared-hook edit.
+  //
+  // Plan 154-04 changes `useStrategySyncPoller`'s LADDER arm so a clean
+  // `{data:null,error:null}` read stops becoming the fabricated status
+  // "pending". That hook is shared: this component is its OTHER consumer
+  // (interval arm), so the edit reaches here whether or not anyone looked.
+  //
+  // The shape matters. PIN 2 above drives the missing row as PGRST116 — an
+  // error-as-value. This case drives the EXACT shape the ladder fix is about:
+  // a SUCCESSFUL read (`error: null`) that found nothing. The interval arm has
+  // always folded that into the same `if (!data)` grace gate, and it must still
+  // do so: nothing forwarded through the grace window, escalation exactly once
+  // at the boundary, and NO consecutive-error escalation on the way (the
+  // asymmetry vs the wizard that PIN 7 pins for the error-valued shape).
+  // ═══════════════════════════════════════════════════════════════════════
+  it("PIN 9 — CLEAN ZERO-ROWS: {data:null,error:null} consumes grace unchanged (interval arm, 154-04)", async () => {
+    // PostgREST's zero-rows answer with NO error — not PGRST116, not a throw.
+    mockState.analyticsResult = { data: null, error: null };
+    const { onStatusChange } = renderPoller("computing");
+    await tick(0);
+
+    // Polls 1..3 — where the wizard's =3 consecutive-error rule would trip if
+    // the two facts (absent row vs failed read) were ever conflated.
+    await tick(POLL_MS * 3);
+    expect(onStatusChange).not.toHaveBeenCalled();
+
+    // Polls 4..10 — still inside the grace window: no status, no escalation.
+    await tick(POLL_MS * 7);
+    expect(callsWith(onStatusChange, "error")).toBe(0);
+    expect(onStatusChange).not.toHaveBeenCalled();
+
+    // Poll 11 — the grace boundary, and the ONLY escalation source here.
+    await tick(POLL_MS);
+    expect(callsWith(onStatusChange, "error")).toBe(1);
+
+    // The read DID happen on every tick — otherwise the absences above would be
+    // satisfied by a loop that never ran.
+    expect(mockState.analyticsSelectCount).toBe(11);
+  });
 });

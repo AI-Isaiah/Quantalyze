@@ -154,6 +154,131 @@ describe("[H-0189] ConnectKeyStep — server code → wizard_error mapping", () 
 });
 
 /**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 154-06 / WIZCONT-02 — the dedup marker is REPORTED UPWARD, not rendered here.
+ *
+ * ⚠️ WHY THERE IS NO STRIP ASSERTION IN THIS FILE. The dedup arrives on the
+ * SUCCESS path, and success calls `onSuccess`, which is `WizardClient`'s step
+ * advance (`setStep("sync_preview")`) — so this component unmounts in the same
+ * commit. A strip rendered here could not paint for a single frame, and a test
+ * asserting it WOULD STILL PASS, because the test's `onSuccess` is an inert
+ * `vi.fn()` that never advances anything. That is precisely the green-test-over-
+ * dead-UI trap, so the notice lives in `WizardClient`'s chrome beside its
+ * donor, and its rendering is pinned in `WizardClient.test.tsx`.
+ *
+ * What this file owns is the WIRE→PAYLOAD half: the marker the route sends must
+ * reach the parent, and nothing else about the payload may change.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+describe("[154-06 / WIZCONT-02] ConnectKeyStep — the dedup marker reaches the parent", () => {
+  const LOGIN = "AK_LIVE_xxx";
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("forwards deduped:true from the response into the onSuccess payload", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          ok: true,
+          strategy_id: "33333333-3333-3333-3333-333333333333",
+          api_key_id: "44444444-4444-4444-4444-444444444444",
+          deduped: true,
+        },
+        200,
+      ),
+    );
+    const onSuccess = vi.fn();
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={onSuccess} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await vi.waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    expect(onSuccess).toHaveBeenCalledWith({
+      strategyId: "33333333-3333-3333-3333-333333333333",
+      apiKeyId: "44444444-4444-4444-4444-444444444444",
+      exchange: "binance",
+      deduped: true,
+    });
+  });
+
+  it("does NOT invent the marker from a truthy-ish value (strict === true)", async () => {
+    // A screen decision must not be made by coercion: only the literal the
+    // route documents counts.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          ok: true,
+          strategy_id: "33333333-3333-3333-3333-333333333333",
+          api_key_id: "44444444-4444-4444-4444-444444444444",
+          deduped: "yes",
+        },
+        200,
+      ),
+    );
+    const onSuccess = vi.fn();
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={onSuccess} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await vi.waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    // The VACUITY FENCE for the case above: the ordinary payload is byte-for-
+    // byte the pre-154 one, with no `deduped` key at all.
+    expect(onSuccess).toHaveBeenCalledWith({
+      strategyId: "33333333-3333-3333-3333-333333333333",
+      apiKeyId: "44444444-4444-4444-4444-444444444444",
+      exchange: "binance",
+    });
+  });
+
+  it("⛔ never renders the submitted credential anywhere on the deduped path", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          ok: true,
+          strategy_id: "33333333-3333-3333-3333-333333333333",
+          api_key_id: "44444444-4444-4444-4444-444444444444",
+          deduped: true,
+        },
+        200,
+      ),
+    );
+    const { container } = render(
+      <ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />,
+    );
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    /**
+     * T-154-06-C, asserted on the surface where it actually means something.
+     *
+     * ⚠️ MEASURED, NOT ASSUMED: `innerHTML` DOES contain the login, because
+     * React serialises a controlled input's `value` attribute — that is the
+     * user's own field, holding what they just typed, and it is not what
+     * "echo" means here. Asserting against `innerHTML` would therefore fail on
+     * a correct implementation, which is a test that has to be weakened later
+     * and stops being believed.
+     *
+     * `textContent` is the honest surface: it covers every piece of COPY the
+     * component renders — headings, captions, error envelopes, any strip — and
+     * excludes form-field values. A route or component that echoed the
+     * credential into visible text reddens this; the user's own input does not.
+     */
+    expect(container.textContent).not.toContain(LOGIN);
+    // The field itself still holds it — proving the assertion above is scoped,
+    // not vacuous.
+    expect(
+      (screen.getByPlaceholderText("Paste the read-only key") as HTMLInputElement)
+        .value,
+    ).toBe(LOGIN);
+  });
+});
+
+/**
  * Phase 69 — Deribit wizard card (UX-01, SC-1).
  *
  * The wizard exposes Deribit as a fourth exchange card whose credential
@@ -1864,5 +1989,171 @@ describe("[153.4-04 / WIZFORM-05] ConnectKeyStep — the honest long wait", () =
       "this test file converts milliseconds to seconds. The seconds figure in " +
         "copy must be typed out, so a budget change is a visible, reviewed edit.",
     ).toBe(false);
+  });
+});
+
+/**
+ * [154.1 / WIZCONT-02 review CR] ConnectKeyStep — the venue fence's REFUSAL half
+ * reaches its own copy, and brings the strategy's name with it.
+ *
+ * ⚠️ THE ROSTER IS THE WHOLE HAZARD HERE, and it bites SILENTLY. The route half
+ * of this fix can be perfect — an honest 409, an honest code, the name on the
+ * wire — and if `VENUE_ALREADY_CONNECTED` is missing from
+ * `KNOWN_CREATE_WITH_KEY_CODES` the membership check rejects it, the step falls
+ * to `UNKNOWN`, and the user reads "Try the last action again." beside a Retry
+ * control, for a submit that is refused identically every single time. Every
+ * route-side assertion stays green while the fix ships invisible. That trap has
+ * been walked into three times on this surface (140.3-01, 140.4-13, the
+ * 2026-08-06 hotfix), which is why this block asserts the RENDERED code and the
+ * RENDERED sentence rather than the response body.
+ */
+describe("[154.1 / WIZCONT-02] ConnectKeyStep — an already-connected account refuses honestly", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("the 409 renders its OWN copy, never the UNKNOWN dead end", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          code: "VENUE_ALREADY_CONNECTED",
+          error: "This account is already connected to an existing strategy.",
+        },
+        409,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(
+      envelope,
+      "the roster rejected the route's honest code — the user gets " +
+        '"Something went wrong." plus a Retry that cannot work.',
+    ).toHaveAttribute("data-error-code", "VENUE_ALREADY_CONNECTED");
+    // Hand-typed, never imported: the sentence the user actually reads.
+    expect(envelope).toHaveTextContent(
+      "This account is already connected to one of your strategies.",
+    );
+    expect(envelope).not.toHaveTextContent("Try the last action again.");
+    // ⛔ And NOT the sentence this code was split off, which would send them
+    // hunting for a draft that does not exist.
+    expect(envelope).not.toHaveTextContent(
+      "You already have a wizard session open for this key.",
+    );
+  });
+
+  it("NO Retry control renders — the account stays connected however many times you press it", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "VENUE_ALREADY_CONNECTED", error: "refused" }, 409),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await screen.findByTestId("error-envelope");
+    expect(screen.queryByLabelText("Retry")).toBeNull();
+  });
+
+  it("names the strategy that is in the way when the route told us which one", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          code: "VENUE_ALREADY_CONNECTED",
+          error: "This account is already connected to an existing strategy.",
+          strategy_name: "Helios Momentum",
+        },
+        409,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(
+      envelope,
+      "the name arrived on the wire and was dropped on the floor — the user " +
+        "is told an account of theirs is taken without being told by what, on " +
+        "a screen whose entire remedy is to go and open that strategy.",
+    ).toHaveTextContent('It is connected to "Helios Momentum".');
+  });
+
+  it("and says nothing extra when it did NOT (TRAP-3, and the vacuity fence for the case above)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          code: "VENUE_ALREADY_CONNECTED",
+          error: "This account is already connected to an existing strategy.",
+        },
+        409,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).not.toHaveTextContent("It is connected to");
+    // The explanation still renders in full — an absent name withholds a fact,
+    // it does not blank the copy.
+    expect(envelope).toHaveTextContent("One account backs one strategy at a time.");
+  });
+
+  it("the funnel sees the specific code, not UNKNOWN", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "VENUE_ALREADY_CONNECTED", error: "refused" }, 409),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await screen.findByTestId("error-envelope");
+    await vi.waitFor(() => expect(trackMock).toHaveBeenCalled());
+    const payload = trackMock.mock.calls.find(
+      (c) => (c as unknown[])[0] === "wizard_error",
+    )![1] as { code: string; step: string };
+    expect(payload.code).toBe("VENUE_ALREADY_CONNECTED");
+    expect(payload.step).toBe("connect_key");
+  });
+
+  it("a stale name from a previous attempt cannot describe the next failure", async () => {
+    // PER-FAILURE state, the same rule `retryAfterSeconds` states. A name left
+    // over from attempt 1 rendered against attempt 2 points the user at a
+    // strategy that has nothing to do with what just happened.
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            code: "VENUE_ALREADY_CONNECTED",
+            error: "refused",
+            strategy_name: "Helios Momentum",
+          },
+          409,
+        ),
+      )
+      .mockResolvedValue(
+        jsonResponse({ code: "VENUE_ALREADY_CONNECTED", error: "refused" }, 409),
+      );
+
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+    const first = await screen.findByTestId("error-envelope");
+    expect(first).toHaveTextContent('It is connected to "Helios Momentum".');
+
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() =>
+      expect(screen.getByTestId("error-envelope")).not.toHaveTextContent(
+        "Helios Momentum",
+      ),
+    );
   });
 });

@@ -1,0 +1,382 @@
+# Phase 154 — STALE-01 Investigation (Task 154-01-01)
+
+**Run:** 2026-08-12, orchestrator session (Supabase MCP, PROD `khslejtfbuezsmvmtsdn`)
+**Mode:** ⛔ READ-ONLY. `execute_sql` with SELECT statements only. No INSERT/UPDATE/DELETE/DDL was issued.
+
+> This file discharges ROADMAP Phase 154 criterion 2 and the CONTEXT.md investigation gate:
+> *"STALE-01's root cause is investigated and documented BEFORE any fix is planned."*
+> Plans 154-04, 154-07 and 154-08 `depends_on` 154-01 and their fix design is contingent on the
+> verdict below.
+
+---
+
+## Mechanism verdict: M2(ii)
+
+**M2(ii) — the DB was terminal and the client was reading nothing.** The zero-rows/absent read was
+coerced to the domain value `"pending"` by the ladder arm's `statusRow?.computation_status ?? "pending"`
+(`src/hooks/useStrategySyncPoller.ts:228-229`), so the poll loop treated a *finished* job chain as
+still running and polled forever.
+
+Compounded by **M1** (the leading from-code hypothesis, now confirmed as the reason the state was
+*unbounded* rather than merely wrong): a single-key user has **zero exits** from that state, because
+the SF-1 stall backstop is gated behind `isComposite &&` at `SyncPreviewStep.tsx:2290-2291`.
+
+**M3 — RULED OUT by evidence.** **M4 — RULED OUT by evidence.** **M2(i) — RULED OUT by evidence.**
+
+**Founder-quote reading: STRICT.** The screen text was genuinely `"Fetching trades…"`, which is
+reachable only when `phase === "waiting_for_complete"` && `isComposite === false` &&
+`computationStatus ∈ {null, "pending"}` (`SyncPreviewStep.tsx:2315-2323`). The evidence below shows
+the true status was terminal, so the client's `computationStatus` was the fabricated `"pending"` —
+consistent with the strict reading, not RESEARCH A3's loose (`"computing"`) alternative.
+
+---
+
+## Q0 — the MT5 strategies
+
+```sql
+SELECT DISTINCT s.id, s.name, s.status, s.source, s.created_at, 'direct' AS link
+  FROM strategies s JOIN api_keys k ON k.id = s.api_key_id
+ WHERE k.exchange = 'mt5'
+UNION
+SELECT DISTINCT s.id, s.name, s.status, s.source, s.created_at, 'strategy_keys' AS link
+  FROM strategies s
+  JOIN strategy_keys sk ON sk.strategy_id = s.id
+  JOIN api_keys k ON k.id = sk.api_key_id
+ WHERE k.exchange = 'mt5'
+ ORDER BY created_at;
+```
+
+| id | name | status | source | created_at | link |
+|---|---|---|---|---|---|
+| `8d382aaf-4e23-4fc1-85b9-78fafc5c8e54` | Alpha Centauri | private | wizard | 2026-08-04 11:37:40.641101+00 | direct |
+| `4eab92b0-5326-45dd-9781-4df96373ee8a` | Black Swan | private | wizard | 2026-08-04 14:20:43.675863+00 | direct |
+
+⚠️ **Census correction: there are TWO MT5 strategies on PROD, not three.** RESEARCH.md, the ROADMAP
+Phase 155 precondition note, and REQUIREMENTS all say "all THREE PROD MT5 strategies". The `Q0` union
+(which catches composite membership via `strategy_keys` as well as the direct `api_key_id` link)
+returns two. The "three" figure most likely counts **`api_keys` rows** (three MT5 keys), not
+strategies. This does not affect the verdict — Alpha Centauri is the founder's MT5-05 run and is the
+subject — but Phase 155 should not go looking for a third strategy that does not exist.
+
+**Alpha Centauri is the subject:** created 11:37:40, i.e. the run whose screen was observed stuck at
+11:39:35.
+
+---
+
+## Q1 — what the wizard's poll would have read
+
+Run verbatim from `154-RESEARCH.md` § STALE-01 Step 6.
+
+| id | name | analytics_row_exists | computation_status | computed_at | computing_started_at | computation_error | series_completeness | series_rows |
+|---|---|---|---|---|---|---|---|---|
+| `8d382aaf…` | Alpha Centauri | **true** | `complete_with_warnings` | 2026-08-04 **14:20:51.394404**+00 | null | null | ledger_complete | 136 |
+| `4eab92b0…` | Black Swan | true | `complete_with_warnings` | 2026-08-04 14:25:01.4626+00 | null | null | ledger_complete | 136 |
+
+⚠️ **`computed_at` is NOT evidence of the state at 11:39:35 — it is a last-writer-wins column.**
+Alpha Centauri's chain ran **four** times (11:37, 11:52, 12:24, 14:17), so `computed_at` carries the
+*final* run's timestamp. The Step-6 discriminator table keys its M2(ii) row on
+`computed_at ≈ 11:39:35`, which this row appears to fail — **that is an artifact of the overwrite,
+not a refutation.** The authoritative timestamp for the state at the moment of observation is
+`compute_jobs.updated_at` for the `compute_analytics_from_csv` job of the FIRST chain — see Q2.
+
+---
+
+## Q2 — the job aggregate the bridge derives from
+
+Run verbatim from `154-RESEARCH.md` § STALE-01 Step 6. **22 rows, zero non-terminal.** Every row is
+`status = 'done'`, `attempts = 1`, `last_error = null`. Alpha Centauri's chains, in order:
+
+### Chain 1 — the observed run
+
+| kind | status | created_at | claimed_at | updated_at |
+|---|---|---|---|---|
+| `process_key_long` | **done** | 11:37:43.465188 | 11:38:03.913695 | 11:38:05.929446 |
+| `derive_broker_dailies` | **done** | 11:38:05.783174 | 11:38:36.128664 | 11:39:03.004925 |
+| `compute_analytics_from_csv` | **done** | 11:39:02.878829 | 11:39:33.397507 | **11:39:35.342759** ⭐ |
+
+⭐ **This is the 11:39:35 the requirement names.** The terminal write landed at
+`11:39:35.342759`, and `compute_analytics_from_csv` is the job that writes the
+`strategy_analytics` row. The chain was **complete and terminal**, and the analytics row **existed
+with a terminal status**, while the wizard was rendering "Fetching trades…".
+
+### Chains 2-4 — the founder retrying a stuck screen
+
+| chain | process_key_long | derive_broker_dailies | compute_analytics_from_csv |
+|---|---|---|---|
+| 2 | 11:52:37 → done 11:52:41 | 11:52:41 → done 11:53:42 | 11:53:42 → done 11:54:15 |
+| 3 | 12:24:30 → done 12:24:37 | 12:24:37 → done 12:25:40 | 12:25:40 → done 12:26:13 |
+| 4 | 14:17:27 → done 14:17:47 | 14:17:47 → done 14:18:45 (+ 14:19:19 → done 14:20:17) | 14:18:45 → done 14:19:18 (+ 14:20:16 → done 14:20:51) |
+
+Chain 4 also carries a `sync_trades` job (14:18:25 → done 14:19:19). **Three full re-runs of a chain
+that had already succeeded** is the behavioural signature of a user staring at a screen that never
+moved and pressing the button again — independent corroboration that the stall was client-side, not
+a backend failure.
+
+---
+
+## Discriminator table — matched row
+
+From `154-RESEARCH.md` § STALE-01 Step 6:
+
+| Q1/Q2 result | Confirms | Matched? |
+|---|---|---|
+| Q2 returns **zero rows** for the strategy | branch (d) → **M4** | ✗ — 22 rows returned |
+| Q2 has a row at `done_pending_children` with no child of the declared kind | **M3** (+H-a) | ✗ — zero rows in any non-`done` status; every declared child exists |
+| Q1 `analytics_row_exists = false` while Q2 shows all-`done` | bridge never ran → **M2(i)** | ✗ — `analytics_row_exists = true`, and `compute_analytics_from_csv` (the writer) reached `done` at 11:39:35 |
+| Q1 terminal status **with the terminal write at ≈11:39:35** and Q2 all-`done` | the DB was terminal and the **client** was reading nothing → **M2(ii)**, the session/RLS arm | ✅ **MATCHED** — terminal write at `11:39:35.342759` (via `compute_jobs.updated_at`, since `computed_at` was overwritten by three later chains) |
+
+---
+
+## Do (a) and (b) share one cause?
+
+**One root idea, two distinct code sites. A single-site fix discharges neither alone.**
+
+- **Shared root idea:** the client renders a verdict derived from a read it does not know is
+  unauthoritative — an absent/zero-rows answer in (a), a mid-delete-window empty series in (b). In
+  both, "I read nothing" is silently converted into a *positive claim about the world* ("still
+  pending" / "no data, therefore failed") rather than "I do not know yet".
+- **Site (a):** `useStrategySyncPoller.ts:228-229` — `?? "pending"` fabricates a domain value from a
+  null read; and `SyncPreviewStep.tsx:2290-2291` / `:910` gate the only exits behind `isComposite`.
+- **Site (b):** the single-key arm of `SyncPreviewStep.tsx` lacks the composite arm's R2-5
+  `series.length === 0 → repoll` guard (`:1092-1096`), so it renders a terminal red refusal during
+  `run_derive_broker_dailies_job`'s wholesale "series heal-delete"
+  (`analytics-service/services/job_worker.py:2539-2560`).
+
+Fixing (a) leaves the stale refusal live; fixing (b) leaves the unbounded stall live. **Both are in
+scope for this phase**, per the CONTEXT.md decision that names both instances.
+
+---
+
+## Consequences for the dependent plans
+
+| Plan | Contingency | Resolution |
+|---|---|---|
+| **154-04** | Fixes the `?? "pending"` coercion (TWIN-3) + widens the `sync-progress` route filter | ✅ **PROCEED — directly confirmed.** M2(ii) *is* the null-coercion arm. This is now an evidence-backed fix, not a speculative one. |
+| **154-08** | Removes the three `isComposite` gates + adds the single-key R2-5 twin | ✅ **PROCEED — M1 confirmed** as the reason the state was unbounded. |
+| **154-07** | Backend arm, gated on the verdict implicating **M3 / H-a** | ⛔ **NO-OP ARM.** M3 is ruled out: zero `done_pending_children` rows, every declared child job present and `done`, `last_error` null throughout. 154-07 must record `ARM C: NO-OP — verdict was M2(ii)` in its SUMMARY and make no `analytics-service/` or bridge change. |
+
+**No fix mechanism, timeout, or threshold number is proposed in this document.** The existing ladder
+(`SLOW_HINT_MS` 15 s / `WARN_THRESHOLD_MS` 60 s / `RETRY_THRESHOLD_MS` 900 s /
+`MAX_CONSECUTIVE_POLL_ERRORS` 3) is referenced, never moved.
+
+---
+
+## RED evidence
+
+> ⛔ **"The test covers it" is not evidence.** 154-VALIDATION.md § Falsifiability Ledger: *"Observed
+> means run. Paste the failing assertion."* Everything below is pasted from an actual run at the
+> pre-fix commit. No production source file was modified to produce it.
+
+**Run (Task 154-01-02), at HEAD:**
+
+```
+npx vitest run src/hooks/useStrategySyncPoller.test.ts \
+  "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.stale.runtime.test.tsx" \
+  --no-file-parallelism
+# exit 1
+```
+
+```
+ ❯ |jsdom| …/steps/SyncPreviewStep.stale.runtime.test.tsx (4 tests | 3 failed) 126ms
+     × T1: a status frozen at pending past the patience window stops claiming trades are being fetched
+     × T1b: a single-key strategy gets the interrupted-sync affordance the composite arm already gets
+     × T2b: a kickoff 200 whose body says queued:false does not put the wizard in the in-flight claim
+ ❯ |jsdom| src/hooks/useStrategySyncPoller.test.ts (5 tests | 1 failed) 34ms
+     × T2: a zero-rows read is NEVER reported as the fabricated "pending" status
+
+ Test Files  2 failed (2)
+      Tests  4 failed | 5 passed (9)
+```
+
+### T2 — the supplier, pinned at the seam (`useStrategySyncPoller.ts:228-229`)
+
+```
+AssertionError: The poll read NOTHING — PostgREST's { data: null, error: null } zero-rows answer —
+and the hook reported "pending", a value no writer ever wrote. …
+  expected [ 'pending', 'pending', …(11) ] to not include 'pending'
+ ❯ src/hooks/useStrategySyncPoller.test.ts:316:11
+    316|     ).not.toContain("pending");
+```
+
+⭐ **Thirteen fabrications from thirteen empty reads.** This is M2(ii) reproduced in isolation: the
+read succeeded and found nothing, and the hook answered with a domain value.
+
+### T1 — the surface consequence (`SyncPreviewStep.tsx:2313-2323`)
+
+```
+AssertionError: After ~16.7 minutes of a status that never advanced, the wizard is still telling a
+single-key user "Fetching trades…". …
+  expected 'Computing your verified factsheetWe a…' not to contain 'Fetching trades...'
+
+Received: "Computing your verified factsheetWe are fetching your trade history from the exchange
+and computing risk metrics. Usually takes 15–30 seconds.Fetching trades...1000sSync is taking much
+longer than expected. You can leave this page and come back — the draft is saved."
+```
+
+⭐ **Note the rendered elapsed counter: `1000s`.** Sixteen minutes on the clock, the sentence
+unchanged, and the only thing the screen offers is *"you can leave this page"*. That is the founder's
+2026-08-04 screen, reproduced.
+
+### T1b — the mechanism (TWIN-2, `SyncPreviewStep.tsx:2290-2291`)
+
+```
+AssertionError: The SF-1 stall backstop fired — the status has not advanced for the whole patience
+budget — and the amber recoverable banner (with its Retry affordance) was suppressed because
+isComposite is false. …
+  expected null not to be null
+```
+
+The backstop clock ran, the banner markup and the retry handler both exist, and one `isComposite &&`
+conjunct withheld all of it from exactly the users with no other exit.
+
+### T2b — M4's shape (`SyncPreviewStep.tsx:777-783`)
+
+```
+AssertionError: The kickoff answered 200 with "queued: false" … and the wizard entered the waiting
+state anyway …
+  expected 'Computing your verified factsheetWe a…' not to contain 'Fetching trades...'
+```
+
+⚠️ M4 is **ruled out** as the 2026-08-04 supplier (Q2: the work *was* queued and *did* complete).
+T2b is not a replay of the incident — it pins the second route to the same false claim, because the
+honest-kickoff property is worth having independently of which supplier fired once.
+
+### The cases that PASS at HEAD — and why they are load-bearing
+
+| Case | File | Why it must be green |
+|---|---|---|
+| `SYM-interval` | hook | **TWIN-3.** The interval arm (`:151-159`) meets the *identical* `{data:null,error:null}` read with `if (!data) { … return; }` and never calls `onStatus`. The module already contains its own correct answer; the defect is that one module answers one question two ways. |
+| `INTERVAL-CTRL` | hook | Without it `SYM-interval` would pass **vacuously** if `.single()` were unwired in the double (the read would reject, `onStatus` would never fire, and an absence assertion would be satisfied by a broken harness). |
+| `LADDER-CTRL` | hook | Proves the ladder arm *does* read, report and reach `onTerminal` in this harness — so T2's absence assertion means something. |
+| `WAITING-CTRL` | component | Proves the in-flight sentence renders **inside** the patience window. States the property the fix must not break: **the defect is the unbounded claim, not the claim.** Deleting the sentence is not a fix, and this case reddens if a fix over-reaches. |
+| `DOUBLE` | hook | Pins the zero-rows double against PostgREST's real shape. A later edit to `{ data: undefined }` would send T2 green having proved nothing (154-VALIDATION § Oracle Independence, last bullet). |
+
+Every absence assertion additionally carries the vacuity fence `expect(text.length).toBeGreaterThan(0)`
+— a component that rendered nothing at all would otherwise satisfy all of them.
+
+### T3 / T3b — instance (b), the stale refusal (Task 154-01-03)
+
+**Run, at HEAD:**
+
+```
+npx vitest run \
+  "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.stale-refusal.runtime.test.tsx" \
+  --no-file-parallelism
+# exit 1
+```
+
+```
+ ❯ …/SyncPreviewStep.stale-refusal.runtime.test.tsx (3 tests | 1 failed) 70ms
+     × T3: the single-key arm does NOT render a terminal refusal from a mid-re-derive empty series
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 2 passed (3)
+```
+
+```
+AssertionError: The wizard rendered a TERMINAL red envelope during the series heal-delete window. …
+  expected <div role="alert" …(4)>…(4)</div> to be null
+
++ Received:
+<div class="rounded-md border border-negative/30 bg-negative/5 px-4 py-3"
+     data-error-code="GATE_INSUFFICIENT_TRADES"
+     data-testid="error-envelope"
+     role="alert">
+  <p …>This account does not have enough trade history yet.</p>
+  <p …>We found only 0 filled trade(s) on this key. We need at least 5 filled trades
+       before we can compute a verified factsheet. …</p>
+  …
+      code: <code …>GATE_INSUFFICIENT_TRADES</code>
+```
+
+⚠️⚠️ **TWO findings in that rendered DOM, and the second was not anticipated.**
+
+1. **The refusal code is `GATE_INSUFFICIENT_TRADES`, not `GATE_SERIES_PROVENANCE_UNVERIFIED`.**
+   RESEARCH § STALE-01 Step 7 predicted the provenance refusal, and PLAN 154-01 names
+   `RENDERED_CODE("GATE_SERIES_PROVENANCE_UNVERIFIED")` as the needle. **Measured, that needle would
+   have reported T3 GREEN against the exact tree it exists to indict.** `strategyGate.ts:322-325`
+   guards the provenance arm with `csvRowCount > 0`; inside the heal-delete window the count is
+   **zero**, so the gate falls through to the trade floor. The test therefore asserts a STRUCTURAL
+   probe (`[data-error-code]` — catches *any* refusal) **plus** both named codes. This is the
+   needle-matches-three-states near-miss from `readfailure.runtime.test.tsx:93-107` recurring in a
+   new place, caught this time before it could certify anything.
+
+2. **The rendered sentence is `"We found only 0 filled trade(s) on this key."`** — verbatim the
+   fabricated measurement that phase 140.4 / C-3 was opened to delete. 140.4 closed the route where
+   a *failed read* became a zero; this is the same false sentence arriving by a *different* route —
+   a real read taken during a wholesale delete. The class "a momentary state rendered as a fact
+   about the user's money data" is demonstrably **not** closed. Recorded here rather than fixed:
+   this plan lands no fix.
+
+**T3b PASSES at HEAD**, driven through the *identical* empty-series state on the composite arm: it
+returns `"repoll"` at `:1101-1103` and stays in the waiting render. `REFUSAL-CTRL` also passes — a
+series that genuinely exists (10 rows) and that nobody stamped still earns
+`GATE_SERIES_PROVENANCE_UNVERIFIED`, which is the property any fix must NOT break. **The RED/GREEN
+pair is the observed fact**: one function, two arms, one state, two answers.
+
+---
+
+## Conclusion
+
+**Confirmed supplier mechanism: M2(ii)**, with **M1** standing independently as the reason the state
+was unbounded rather than merely wrong.
+
+- **M2(ii), from PROD evidence.** `compute_jobs` shows Alpha Centauri's chain fully terminal —
+  `compute_analytics_from_csv` reached `done` at **11:39:35.342759**, all 22 rows `done`,
+  `attempts = 1`, `last_error` null. The backend had finished; the client was reading nothing; the
+  ladder arm coerced that nothing to `"pending"`. Now reproduced in isolation by **T2**, which
+  observes thirteen fabrications from thirteen empty reads.
+- **M1, from code, no external evidence needed.** The only exits from `waiting_for_complete` are
+  gated behind `isComposite` at three sites (`sync-progress/route.ts:185`, `SyncPreviewStep.tsx:910`,
+  `:2290`). A single-key user has **zero** exits. Now reproduced by **T1b**: the SF-1 backstop fires,
+  the banner markup and retry handler both already exist, and one conjunct withholds them. This is
+  why the founder's only available action was to re-run a chain that had already succeeded — three
+  times.
+- **M3, M4 and M2(i) remain RULED OUT** by the Q1/Q2 evidence above. T2b nonetheless pins M4's shape,
+  because "a 200 that enqueued nothing must not be rendered as work in flight" is worth having
+  independently of which supplier fired on one day.
+
+### Do (a) and (b) share one cause? — the CONTEXT.md question, answered
+
+**ONE ROOT IDEA. TWO DISTINCT CODE SITES. A single-site fix discharges NEITHER alone.**
+
+The root idea: *the client converts a reading it cannot know is current into a positive claim about
+the world.* It fires in both directions —
+
+| | The read | The claim invented from it | Site |
+|---|---|---|---|
+| **(a)** | zero rows / absent | "still pending — forever" | `useStrategySyncPoller.ts:228` (supplier) + `SyncPreviewStep.tsx:2290` (no exit) |
+| **(b)** | an empty table mid-delete | "this strategy has no track record" | the missing single-key R2-5 guard, `SyncPreviewStep.tsx` ~`:1420` |
+
+These are **different files and different functions**. Fixing (a) leaves the stale refusal live;
+fixing (b) leaves the unbounded stall live. The RED set proves this rather than asserting it: T2 and
+T1b redden on (a)'s sites, T3 reddens on (b)'s, and no single edit greens all three. Both are in
+scope for this phase, per the CONTEXT.md decision that names both instances.
+
+### Activated fix plans
+
+| Plan | Arm | Verdict |
+|---|---|---|
+| **154-04** | Fix the `?? "pending"` coercion (TWIN-3) + widen the `sync-progress` route filter | ✅ **ACTIVATED — directly confirmed.** M2(ii) *is* the null-coercion arm. Greens T2 (and T1 / T2b at the surface). Evidence-backed, no longer speculative. |
+| **154-08** | Remove the three `isComposite` gates + add the single-key R2-5 twin | ✅ **ACTIVATED — M1 confirmed.** Greens T1b (gates) and T3 (the twin). ⚠️ RESEARCH A6 applies: the new non-throwing repoll path is exactly the case `heavyFetchErrorsRef`'s "never needs a reset" invariant did not contemplate — re-examine it, or a stale ref escalates a healthy run to `SYNC_FAILED`. |
+| **154-07** | Backend arm, gated on the verdict implicating M3 / H-a | ⛔ **NO-OP ARM.** M3 is ruled out: zero `done_pending_children` rows, every declared child present and `done`, `last_error` null throughout. 154-07 must record `ARM C: NO-OP — verdict was M2(ii)` in its SUMMARY and make **no** `analytics-service/` or bridge change. |
+
+**Neither the SQL arm nor the `process_key` queued-honesty arm is activated** — M2(i) (bridge never
+ran) and M4 (200-but-nothing-queued) are both refuted by Q1/Q2.
+
+⛔ **No fix mechanism, timeout, or threshold number is proposed anywhere in this document.** The
+existing ladder (`SLOW_HINT_MS` 15 s / `WARN_THRESHOLD_MS` 60 s / `RETRY_THRESHOLD_MS` 900 s /
+`MAX_CONSECUTIVE_POLL_ERRORS` 3) is referenced, never moved. The tests advance fake time by
+hand-typed literals so that a fix which merely MOVES a threshold cannot green them.
+
+---
+
+## Residual: what this evidence cannot settle
+
+`compute_jobs` and `strategy_analytics` prove the **server** state at 11:39:35. They cannot prove
+*why* the client's read came back empty — the two candidates inside M2(ii) are a PostgREST
+zero-rows answer under an RLS/session boundary, and a genuine absent-row race. Both are discharged
+by the same fix (stop fabricating a domain value from a null read; make the absent row observable),
+and **T2 pins the fix at the seam regardless of which produced the null**. Distinguishing them would
+need the founder's browser console from 2026-08-04, which no longer exists. Recorded rather than
+guessed.
