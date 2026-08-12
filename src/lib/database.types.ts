@@ -1070,6 +1070,16 @@ export type Database = {
         }
         Relationships: []
       }
+      // HAND-PATCHED — do not regenerate this section without verifying
+      // migration 115 (notify_attempted_at, notify_succeeded_at,
+      // notify_error) is present in the source the regenerator targets.
+      // `supabase gen types typescript --linked` reads from the
+      // CURRENTLY-LINKED project; if linked to a project that hasn't
+      // applied 115, the regen will silently revert these three columns
+      // and break tsc on route.ts's `.update({ notify_attempted_at })`
+      // calls. audit-2026-05-07 G9.B.7 / red-team specialist regression.
+      // 2026-08-12: regenerated from PROD (khslejtfbuezsmvmtsdn), which HAS
+      // 115 — the three columns survived; only this comment needed re-applying.
       for_quants_leads: {
         Row: {
           created_at: string
@@ -2363,6 +2373,14 @@ export type Database = {
           },
         ]
       }
+      // HAND-PATCHED — scenarios added by migration 20260621120000
+      // (Phase 23 / PERSIST-01). This block CANNOT be produced by
+      // `supabase gen types typescript` without prod DB access, and a regen
+      // linked to a project missing this migration silently reverts the block
+      // and breaks tsc on the scenario save/update/list routes. Re-apply this
+      // block after any regeneration, and verify migration 20260621120000 is
+      // present in the linked project. (Mirror of the for_quants_leads
+      // tripwire above; pinned by src/lib/database.types.test.ts.)
       scenarios: {
         Row: {
           allocator_id: string

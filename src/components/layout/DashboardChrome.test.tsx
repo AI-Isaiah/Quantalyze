@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { render, screen, within, fireEvent } from "@testing-library/react";
@@ -256,6 +256,41 @@ describe("DashboardChrome — standard vs full-bleed layout (M-0410)", () => {
  * closed on the wizard's onClose, and closed + router.refresh()'d on onSuccess.
  */
 describe("DashboardChrome — ContributionWizardOverlay host (CONTRIB-01)", () => {
+  // 154-05 ripple. The overlay now DEFERS mounting WizardClient until its
+  // `/api/strategies/wizard-draft` read settles (WIZCONT-01's mount trap:
+  // WizardClient's useState initializers read `initialDraft` once at mount, so
+  // a late-arriving draft would be a silent no-op). DashboardChrome is the
+  // FIFTH overlay consumer and was missed by the plan, PATTERNS.md and
+  // RESEARCH.md alike — it surfaced only in the post-merge suite.
+  //
+  // Two consequences for this file, both real rather than cosmetic:
+  //   1. Without a fetch double the read rejects (jsdom cannot parse a relative
+  //      URL), and while the overlay degrades correctly to "start fresh", it
+  //      does so ASYNCHRONOUSLY — so a synchronous getByTestId ran too early.
+  //   2. The wizard mount is therefore await-able, not immediate.
+  //
+  // ⛔ vi.spyOn, never vi.stubGlobal — a leaked global stub is this repo's known
+  // CI-only (Node 22 vs local 25) failure class. The shape below mirrors the
+  // route's real contract (`{ draft, kind }`), not an invented one.
+  beforeEach(() => {
+    vi.spyOn(globalThis, "fetch").mockImplementation((async (
+      input: RequestInfo | URL,
+    ) => {
+      const url = typeof input === "string" ? input : String(input);
+      if (url.includes("/api/strategies/wizard-draft")) {
+        return new Response(JSON.stringify({ draft: null, kind: null }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected fetch in DashboardChrome test: ${url}`);
+    }) as typeof fetch);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   function renderChrome() {
     navState.pathname = "/allocations";
     render(
@@ -271,23 +306,23 @@ describe("DashboardChrome — ContributionWizardOverlay host (CONTRIB-01)", () =
     expect(screen.queryByTestId("mock-wizard")).toBeNull();
   });
 
-  it("opens the overlay when the desktop 'Add a Strategy' nav action fires", () => {
+  it("opens the overlay when the desktop 'Add a Strategy' nav action fires", async () => {
     const desktopNav = renderChrome();
     fireEvent.click(within(desktopNav).getByText("Add a Strategy"));
-    expect(screen.getByTestId("mock-wizard")).toBeInTheDocument();
+    expect(await screen.findByTestId("mock-wizard")).toBeInTheDocument();
   });
 
-  it("closes the overlay on the wizard onClose", () => {
+  it("closes the overlay on the wizard onClose", async () => {
     const desktopNav = renderChrome();
     fireEvent.click(within(desktopNav).getByText("Add a Strategy"));
-    fireEvent.click(screen.getByTestId("wizard-fire-close"));
+    fireEvent.click(await screen.findByTestId("wizard-fire-close"));
     expect(screen.queryByTestId("mock-wizard")).toBeNull();
   });
 
-  it("closes the overlay AND refreshes on the wizard onSuccess", () => {
+  it("closes the overlay AND refreshes on the wizard onSuccess", async () => {
     const desktopNav = renderChrome();
     fireEvent.click(within(desktopNav).getByText("Add a Strategy"));
-    fireEvent.click(screen.getByTestId("wizard-fire-success"));
+    fireEvent.click(await screen.findByTestId("wizard-fire-success"));
     expect(screen.queryByTestId("mock-wizard")).toBeNull();
     expect(hoisted.refresh).toHaveBeenCalled();
   });
@@ -300,14 +335,19 @@ describe("DashboardChrome — ContributionWizardOverlay host (CONTRIB-01)", () =
   // keyboard trap (WCAG 2.1.2). Opening the overlay changes no route, so the
   // drawer's route-change auto-close never fires; DashboardChrome must close it
   // explicitly. This fails if openContribute stops calling setMenuOpen(false).
-  it("closes the mobile drawer (releasing its Tab trap) when contribute fires from inside it", () => {
+  it("closes the mobile drawer (releasing its Tab trap) when contribute fires from inside it", async () => {
     renderChrome();
     // Open the drawer via the hamburger, then act from WITHIN the drawer dialog.
     fireEvent.click(screen.getByRole("button", { name: "Open menu" }));
     const drawer = screen.getByRole("dialog", { name: "Main navigation" });
     fireEvent.click(within(drawer).getByText("Add a Strategy"));
     // Overlay opened AND the drawer unmounted (window Tab trap torn down).
-    expect(screen.getByTestId("mock-wizard")).toBeInTheDocument();
+    // `findBy` because 154-05 made the wizard mount await the draft read; the
+    // drawer assertion below stays SYNCHRONOUS on purpose — the drawer must be
+    // gone the moment the action fires, not merely by the time the wizard
+    // finishes mounting. Awaiting it too would let a late teardown pass, and a
+    // still-open drawer hijacks every Tab in the overlay (WCAG 2.1.2).
+    expect(await screen.findByTestId("mock-wizard")).toBeInTheDocument();
     expect(
       screen.queryByRole("dialog", { name: "Main navigation" }),
     ).toBeNull();
