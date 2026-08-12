@@ -128,9 +128,12 @@ fix for all three.
 
 ### Integration Points
 
-- `ContributionWizardOverlay.tsx` — consumed by `AllocationsTabs.tsx`,
-  `StrategyBrowseDrawer.tsx`, `MyStrategiesSection.tsx`, `MyStrategiesEmptyState.tsx`. A prop
-  change ripples to all four plus their tests.
+- `ContributionWizardOverlay.tsx` — ⚠️ **consumer list corrected by the pattern mapper
+  (2026-08-12); an earlier draft of this line was wrong.** The real renderers are
+  `MyStrategiesEmptyState.tsx:47`, `MyStrategiesSection.tsx:129`, `AllocationsTabs.tsx:1035`, and
+  `ScenarioComposer.tsx:166`. `StrategyBrowseDrawer.tsx` mentions it **only in comments** and is
+  NOT a renderer. A prop change ripples to those four plus their tests — `ScenarioComposer` is the
+  one most easily missed, since it is absent from RESEARCH.md's list too.
 - `/api/strategies/create-with-key` — the dedup fence.
 - `supabase/migrations/**` — the partial UNIQUE index. ⚠️ Merging to `main` AUTO-APPLIES to PROD;
   apply to TEST via MCP before merge, and run the migration reviewer.
