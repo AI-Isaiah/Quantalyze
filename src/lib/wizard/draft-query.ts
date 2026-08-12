@@ -54,14 +54,22 @@ export interface InitialDraft {
  * composite draft to the CSV step. The composite discriminator that exists in
  * production today is `strategies.api_key_id IS NULL AND a strategy_keys count
  * > 0` (`keys/sync/route.ts:35`), and this is its single definition.
+ *
+ * ⚠️ That discriminator is POSITIVE-ONLY: a count of 0 proves nothing (a
+ * composite draft has no members until its "Continue"), which is why
+ * `deriveDraftKind` answers `null` there instead of falling through to "csv".
  */
 export type WizardDraftKind = "api" | "csv" | "composite";
 
 /** What `readLatestWizardDraft` answers with. */
 export interface WizardDraftRead {
-  /** The most recent wizard draft for the user, or `null` when there is none. */
+  /**
+   * The most recent wizard draft for the user, or `null` when there is none —
+   * or when there IS one but its branch cannot be established (see
+   * `deriveDraftKind`: an unbranded draft is withheld, not guessed).
+   */
   draft: InitialDraft | null;
-  /** The draft's branch, or `null` when there is no draft. */
+  /** The draft's branch. `null` whenever `draft` is null, and only then. */
   kind: WizardDraftKind | null;
   /**
    * The draft SELECT's error, RETURNED rather than thrown.
@@ -86,28 +94,63 @@ const WIZARD_DRAFT_COLUMNS =
   "id, name, description, category_id, strategy_types, subtypes, markets, supported_exchanges, leverage_range, aum, max_capacity, api_key_id, asset_class, created_at";
 
 /**
- * Classify a draft into its wizard branch.
+ * Classify a draft into its wizard branch, or answer `null` when the branch
+ * cannot be established from the row.
  *
  * `member_count` is REQUIRED to be a real measurement whenever `api_key_id` is
  * null. A null count with no error is unrepresentable, and `?? 0` on it would
- * fabricate "csv" for a composite draft — the same fabrication-by-another-route
+ * fabricate a branch for a composite draft — the same fabrication-by-another-route
  * that `keys/sync/route.ts:555-577` and `SyncPreviewStep.tsx:1400-1413` already
  * refuse. Absence is not a value: it throws.
  *
  * `member_count` is ignored (and may be null) when `api_key_id` is set — a
  * single-key draft is decided without a membership probe at all.
+ *
+ * ⛔ ZERO MEMBERS IS `null` (INDETERMINATE), NOT `"csv"`. It used to return
+ * "csv", and that was a data-destroying guess:
+ *
+ *  - `add_wizard_composite_key` writes `strategies` + `api_keys` ONLY
+ *    (`supabase/schema/functions/add_wizard_composite_key.sql:70-101`) — it
+ *    stamps NO `strategy_keys` row. The single writer of `strategy_keys` is
+ *    `set_wizard_composite_members`, which the multi-key step POSTs only from
+ *    its "Continue" handler (`MultiKeyConnectStep.tsx:1474-1484`). So for the
+ *    WHOLE add-keys phase — and for every composite session abandoned before
+ *    Continue — a composite draft sits at exactly `api_key_id IS NULL` with a
+ *    member count of 0.
+ *  - Classified "csv", that draft was offered on the CSV branch: the overlay
+ *    force-switched the tab (`ContributionWizardOverlay.tsx:138`), `WizardClient`
+ *    seeded `strategyId` from it (`:243-245`), and "Start fresh" then issued
+ *    `DELETE /api/strategies/draft/<that id>` (`:819`) — destroying the composite
+ *    draft from a screen the user never asked for.
+ *  - And the guess had no upside, because **there is no such thing as a CSV
+ *    wizard draft**: the only writers of `strategies.source='wizard'` are
+ *    `create_wizard_strategy` (api_key_id NOT NULL) and
+ *    `add_wizard_composite_key` (api_key_id NULL). The CSV branch finalizes into
+ *    a NEW `source='csv'` row (`finalize_csv_strategy`, migration
+ *    20260728120000:278-289) and autosaves `strategyId: ""` throughout, because
+ *    it has no server draft at all. Every row this arm can ever see is an
+ *    API-branch draft — a pre-Continue composite, or a single-key draft orphaned
+ *    by `api_key_id`'s ON DELETE SET NULL.
+ *
+ * `api_key_id === null` alone cannot separate the two (A4 / Pitfall W-2), and no
+ * positive composite marker exists on the row today, so this fails CLOSED: the
+ * caller offers nothing rather than guessing a branch. Nothing resumable is
+ * withheld — before Continue the draft has no members, so the step's rehydration
+ * (`MultiKeyConnectStep.tsx:742`) would answer `[]` anyway. Give
+ * `add_wizard_composite_key` a marker to stamp and this arm can return
+ * "composite" honestly; until then, do NOT restore the guess.
  */
 export function deriveDraftKind(row: {
   api_key_id: string | null;
   member_count: number | null;
-}): WizardDraftKind {
+}): WizardDraftKind | null {
   if (row.api_key_id !== null) return "api";
   if (row.member_count === null) {
     throw new Error(
       "wizard draft kind is unknowable: strategy_keys count was null without an error",
     );
   }
-  return row.member_count > 0 ? "composite" : "csv";
+  return row.member_count > 0 ? "composite" : null;
 }
 
 /**
@@ -176,12 +219,23 @@ export async function readLatestWizardDraft(
     memberCount = count;
   }
 
-  return {
-    draft: row,
-    kind: deriveDraftKind({
-      api_key_id: row.api_key_id,
-      member_count: memberCount,
-    }),
-    error: null,
-  };
+  const kind = deriveDraftKind({
+    api_key_id: row.api_key_id,
+    member_count: memberCount,
+  });
+
+  // ⛔ AN INDETERMINATE KIND WITHHOLDS THE DRAFT ITSELF, not just the label.
+  // Handing back `{draft: row, kind: null}` would be a trap: `WizardClient`
+  // falls back to `source === "csv" ? "csv" : "api"` when it gets a draft with
+  // no kind (`WizardClient.tsx:219-221`), so a caller that forwarded the row
+  // would resurrect the very guess this refuses — on the CSV branch, where
+  // "Start fresh" DELETEs whatever `strategyId` holds. A draft whose branch
+  // cannot be established is not offerable, so it is not offered.
+  //
+  // Both callers already treat this shape as "no draft, start fresh"
+  // (`page.tsx:108-110`, `ContributionWizardOverlay.tsx:162-165`) — the same
+  // fail-closed posture they take for the unknowable-count throw above.
+  if (kind === null) return { draft: null, kind: null, error: null };
+
+  return { draft: row, kind, error: null };
 }
