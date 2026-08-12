@@ -154,6 +154,131 @@ describe("[H-0189] ConnectKeyStep — server code → wizard_error mapping", () 
 });
 
 /**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 154-06 / WIZCONT-02 — the dedup marker is REPORTED UPWARD, not rendered here.
+ *
+ * ⚠️ WHY THERE IS NO STRIP ASSERTION IN THIS FILE. The dedup arrives on the
+ * SUCCESS path, and success calls `onSuccess`, which is `WizardClient`'s step
+ * advance (`setStep("sync_preview")`) — so this component unmounts in the same
+ * commit. A strip rendered here could not paint for a single frame, and a test
+ * asserting it WOULD STILL PASS, because the test's `onSuccess` is an inert
+ * `vi.fn()` that never advances anything. That is precisely the green-test-over-
+ * dead-UI trap, so the notice lives in `WizardClient`'s chrome beside its
+ * donor, and its rendering is pinned in `WizardClient.test.tsx`.
+ *
+ * What this file owns is the WIRE→PAYLOAD half: the marker the route sends must
+ * reach the parent, and nothing else about the payload may change.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+describe("[154-06 / WIZCONT-02] ConnectKeyStep — the dedup marker reaches the parent", () => {
+  const LOGIN = "AK_LIVE_xxx";
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("forwards deduped:true from the response into the onSuccess payload", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          ok: true,
+          strategy_id: "33333333-3333-3333-3333-333333333333",
+          api_key_id: "44444444-4444-4444-4444-444444444444",
+          deduped: true,
+        },
+        200,
+      ),
+    );
+    const onSuccess = vi.fn();
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={onSuccess} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await vi.waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    expect(onSuccess).toHaveBeenCalledWith({
+      strategyId: "33333333-3333-3333-3333-333333333333",
+      apiKeyId: "44444444-4444-4444-4444-444444444444",
+      exchange: "binance",
+      deduped: true,
+    });
+  });
+
+  it("does NOT invent the marker from a truthy-ish value (strict === true)", async () => {
+    // A screen decision must not be made by coercion: only the literal the
+    // route documents counts.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          ok: true,
+          strategy_id: "33333333-3333-3333-3333-333333333333",
+          api_key_id: "44444444-4444-4444-4444-444444444444",
+          deduped: "yes",
+        },
+        200,
+      ),
+    );
+    const onSuccess = vi.fn();
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={onSuccess} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await vi.waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    // The VACUITY FENCE for the case above: the ordinary payload is byte-for-
+    // byte the pre-154 one, with no `deduped` key at all.
+    expect(onSuccess).toHaveBeenCalledWith({
+      strategyId: "33333333-3333-3333-3333-333333333333",
+      apiKeyId: "44444444-4444-4444-4444-444444444444",
+      exchange: "binance",
+    });
+  });
+
+  it("⛔ never renders the submitted credential anywhere on the deduped path", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          ok: true,
+          strategy_id: "33333333-3333-3333-3333-333333333333",
+          api_key_id: "44444444-4444-4444-4444-444444444444",
+          deduped: true,
+        },
+        200,
+      ),
+    );
+    const { container } = render(
+      <ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />,
+    );
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    /**
+     * T-154-06-C, asserted on the surface where it actually means something.
+     *
+     * ⚠️ MEASURED, NOT ASSUMED: `innerHTML` DOES contain the login, because
+     * React serialises a controlled input's `value` attribute — that is the
+     * user's own field, holding what they just typed, and it is not what
+     * "echo" means here. Asserting against `innerHTML` would therefore fail on
+     * a correct implementation, which is a test that has to be weakened later
+     * and stops being believed.
+     *
+     * `textContent` is the honest surface: it covers every piece of COPY the
+     * component renders — headings, captions, error envelopes, any strip — and
+     * excludes form-field values. A route or component that echoed the
+     * credential into visible text reddens this; the user's own input does not.
+     */
+    expect(container.textContent).not.toContain(LOGIN);
+    // The field itself still holds it — proving the assertion above is scoped,
+    // not vacuous.
+    expect(
+      (screen.getByPlaceholderText("Paste the read-only key") as HTMLInputElement)
+        .value,
+    ).toBe(LOGIN);
+  });
+});
+
+/**
  * Phase 69 — Deribit wizard card (UX-01, SC-1).
  *
  * The wizard exposes Deribit as a fourth exchange card whose credential

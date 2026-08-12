@@ -266,6 +266,19 @@ export function WizardClient({
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [toastKey, setToastKey] = useState(0);
   const [sessionExpired, setSessionExpired] = useState(false);
+  /**
+   * 154-06 / WIZCONT-02. True when the last connect was resolved by the server
+   * onto a strategy the user ALREADY had — the token-less re-connect of
+   * credentials we already hold. Drives one neutral line; see the strip below.
+   *
+   * ⭐ IT LIVES HERE, NOT IN `ConnectKeyStep`, FOR A MECHANICAL REASON: the
+   * dedup arrives on the SUCCESS path, and success calls `handleConnectSuccess`
+   * → `setStep("sync_preview")` in the same commit, so `ConnectKeyStep`
+   * unmounts before any strip of its own could paint a single frame. The
+   * notice belongs to the chrome that survives the step change — which is also
+   * where its visual donor, the session-expired strip, already lives.
+   */
+  const [dedupedExisting, setDedupedExisting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [requestCallOpen, setRequestCallOpen] = useState(false);
   const wizardStartFiredRef = useRef(false);
@@ -651,6 +664,12 @@ export function WizardClient({
       // the persisted keys ({A,B,C}). WIZ-05 durability still applies from the
       // persisted COMPLETE composite row, not the discarded in-memory snapshot.
       setSyncSnapshot(null);
+      // 154-06 / WIZCONT-02 — set from THIS result, every time, so it is
+      // self-clearing: an ordinary connect after a deduped one carries no
+      // marker and takes the notice down with it. A `true` that only ever got
+      // set and never cleared would eventually be a claim about a different
+      // submit.
+      setDedupedExisting(result.deduped === true);
       setStep("sync_preview");
       persistPointer("sync_preview", result.strategyId);
       trackForQuantsEventClient("wizard_step_complete_1", {
@@ -893,6 +912,36 @@ export function WizardClient({
               Sign in again
             </a>{" "}
             to continue.
+          </div>
+        )}
+
+        {/*
+          154-06 / WIZCONT-02 — the dedup notice (UI-SPEC State Contract 4).
+
+          ⭐ DELIBERATELY SMALL, AND NEUTRAL. Nothing failed: the user pressed
+          Connect with credentials we already hold and we continued with the
+          strategy they already had. So it is the session-expired strip's exact
+          markup — `rounded-md border border-border bg-page px-3 py-2
+          text-caption text-text-secondary` — and NOT an `ErrorEnvelope`, NOT
+          amber, NOT red. The wizard proceeds exactly as it always does; this
+          line is the entire UI delta, with no confirmation and no fork.
+
+          Gated on `sync_preview` because that is the step the dedup lands the
+          user on — the flow they are already in — rather than following them
+          through metadata and review restating a resolved fact.
+
+          ⛔ IT NEVER NAMES THE CREDENTIAL OR THE ACCOUNT ID, in the copy or in
+          its accessible text. The venue's non-secret identity stays
+          server-side; the route never sends it and this strip has no access to
+          it (T-154-06-C).
+        */}
+        {dedupedExisting && step === "sync_preview" && (
+          <div
+            data-testid="wizard-dedup-notice"
+            className="mb-4 rounded-md border border-border bg-page px-3 py-2 text-caption text-text-secondary"
+          >
+            These credentials are already connected. We continued with your
+            existing strategy instead of creating a duplicate.
           </div>
         )}
 

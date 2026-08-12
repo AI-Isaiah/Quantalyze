@@ -156,6 +156,9 @@ vi.mock("./steps/MultiKeyConnectStep", () => ({
       strategyId: string;
       apiKeyId: string;
       exchange: string;
+      // 154-06 / WIZCONT-02 — optional, exactly as `ConnectKeySuccess` declares
+      // it, so the mock cannot claim a shape the real component never sends.
+      deduped?: boolean;
     }) => void;
     onDirtyChange?: (dirty: boolean) => void;
   }) => (
@@ -175,6 +178,23 @@ vi.mock("./steps/MultiKeyConnectStep", () => ({
         }
       >
         Connect success
+      </button>
+      {/* 154-06 / WIZCONT-02: the same advance, but carrying the server's
+          dedup marker — the token-less re-connect that resolved onto a
+          strategy the user already had. */}
+      <button
+        type="button"
+        data-testid="connect-success-deduped"
+        onClick={() =>
+          props.onSuccess?.({
+            strategyId: "strat-existing",
+            apiKeyId: "key-existing",
+            exchange: "okx",
+            deduped: true,
+          })
+        }
+      >
+        Connect success (deduped)
       </button>
       {/* F2: drive the dirty signal so the stepper-gating test can prove a
           forward jump is blocked while connect_key holds unsaved edits. */}
@@ -685,6 +705,91 @@ describe("[94.1 F1] WizardClient — stale snapshot invalidation on re-connect",
     // the step re-probes the DB for the CURRENT member set (no stale render).
     await screen.findByTestId("mock-sync-preview");
     expect(screen.getByTestId("cached-snapshot")).toHaveTextContent("null");
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 154-06 / WIZCONT-02 — the dedup notice (UI-SPEC State Contract 4).
+ *
+ * ⚠️ IT IS PINNED HERE AND NOT IN `ConnectKeyStep.test.tsx` FOR A MECHANICAL
+ * REASON. The dedup arrives on the SUCCESS path, and success is the step
+ * advance — `handleConnectSuccess` calls `setStep("sync_preview")`, so
+ * `ConnectKeyStep` unmounts in the same commit and any strip of its own could
+ * never paint. Only a test that drives the REAL parent, and therefore the real
+ * step change, can tell a rendered notice from dead markup.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+describe("[154-06 / WIZCONT-02] WizardClient — the dedup notice", () => {
+  /** Hand-typed from 154-UI-SPEC.md's Copywriting table — never imported. */
+  const DEDUP_COPY =
+    "These credentials are already connected. We continued with your existing strategy instead of creating a duplicate.";
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("renders the neutral strip after a connect the server resolved onto the existing strategy", async () => {
+    render(<WizardClient initialDraft={null} />);
+    await screen.findByTestId("mock-connect-step");
+
+    fireEvent.click(screen.getByTestId("connect-success-deduped"));
+    await screen.findByTestId("mock-sync-preview");
+
+    const strip = screen.getByTestId("wizard-dedup-notice");
+    expect(strip).toHaveTextContent(DEDUP_COPY);
+  });
+
+  it("is NEUTRAL, not an error: no ErrorEnvelope, and none of the warning/negative tokens", async () => {
+    // Nothing failed — the user pressed Connect with credentials we already
+    // hold and we continued with the strategy they already had. The semantic
+    // gate in DESIGN.md/UI-SPEC reserves amber for recoverable in-flight states
+    // and red for terminal failures; this is neither.
+    render(<WizardClient initialDraft={null} />);
+    await screen.findByTestId("mock-connect-step");
+
+    fireEvent.click(screen.getByTestId("connect-success-deduped"));
+    await screen.findByTestId("mock-sync-preview");
+
+    expect(screen.queryByTestId("error-envelope")).toBeNull();
+    const cls = screen.getByTestId("wizard-dedup-notice").className;
+    expect(cls).not.toContain("warning");
+    expect(cls).not.toContain("negative");
+    // The session-expired strip's tokens, byte-for-byte — the donor UI-SPEC
+    // names, so the notice cannot drift into a bespoke style.
+    expect(cls).toContain("border-border");
+    expect(cls).toContain("bg-page");
+    expect(cls).toContain("text-caption");
+    expect(cls).toContain("text-text-secondary");
+  });
+
+  it("VACUITY FENCE: an ordinary connect renders NO strip", async () => {
+    render(<WizardClient initialDraft={null} />);
+    await screen.findByTestId("mock-connect-step");
+
+    fireEvent.click(screen.getByTestId("connect-success"));
+    await screen.findByTestId("mock-sync-preview");
+
+    expect(screen.queryByTestId("wizard-dedup-notice")).toBeNull();
+    expect(screen.queryByText(DEDUP_COPY)).toBeNull();
+  });
+
+  it("is SELF-CLEARING: a later ordinary connect takes the notice down", async () => {
+    // A `true` that only ever got set would eventually be a claim about a
+    // different submit than the one on screen.
+    render(<WizardClient initialDraft={null} />);
+    await screen.findByTestId("mock-connect-step");
+
+    fireEvent.click(screen.getByTestId("connect-success-deduped"));
+    await screen.findByTestId("mock-sync-preview");
+    expect(screen.getByTestId("wizard-dedup-notice")).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByTestId("wizard-step-connect_key"));
+    await screen.findByTestId("mock-connect-step");
+    fireEvent.click(screen.getByTestId("connect-success"));
+    await screen.findByTestId("mock-sync-preview");
+
+    expect(screen.queryByTestId("wizard-dedup-notice")).toBeNull();
   });
 });
 
