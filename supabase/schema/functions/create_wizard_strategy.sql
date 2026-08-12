@@ -88,6 +88,29 @@ BEGIN
   -- and must not be: it identifies an ACCOUNT WITHIN a venue, not the venue. It
   -- is NULL for every venue that exposes no stable non-secret account id, which
   -- is every ccxt venue today, and the partial index excludes those rows.
+  --
+  -- ⛔ NOT VALIDATED HERE, and that is a NAMED RESIDUAL, not an oversight.
+  -- `authenticated` holds EXECUTE on this SECURITY DEFINER function, so a
+  -- browser session calling /rest/v1/rpc/create_wizard_strategy directly can
+  -- pass any p_venue_account_id it likes and this body will persist it. The
+  -- scrub trigger closes the DIRECT TABLE INSERT path, NOT this one. Same CR-01
+  -- class as p_exchange immediately above; same owner: PHASE 156
+  -- (CONNECT-REFACTOR) moves this INSERT behind a service-role writer that
+  -- passes the identity IT validated and withdraws authenticated EXECUTE. ⛔ Do
+  -- not "fix" it by adding validation here — the value has no in-database oracle
+  -- to check against, and a plausible-looking check would hide the residual.
+  --
+  -- ⭐ NORMALISED AT THE STAMP SITE: btrim, then blank → NULL. Two reasons, both
+  -- load-bearing. (1) Without btrim, ' 5551234' and '5551234' are DIFFERENT index
+  -- keys, so a stray space from the form makes the dedup MISS entirely and the
+  -- duplicate this migration exists to stop sails through. (2) Without the
+  -- NULLIF, an unset field arriving as '' (or '  ') would be stored as a non-NULL
+  -- value the partial index governs, colliding two GENUINELY DIFFERENT accounts —
+  -- api_keys_venue_account_id_nonblank would REFUSE that INSERT with 23514, which
+  -- the wizard route has no handler for. Mapping blank → NULL means the wizard
+  -- never has to hit its own CHECK: "no identity supplied" and "no identity
+  -- exists" land on the same honest value. Keep this expression and the CHECK in
+  -- agreement — if one gains a wider trim set, so must the other.
   INSERT INTO api_keys (
     user_id, exchange, label,
     api_key_encrypted, api_secret_encrypted, passphrase_encrypted,
@@ -98,7 +121,7 @@ BEGIN
     p_user_id, p_exchange, p_label,
     p_api_key_encrypted, p_api_secret_encrypted, p_passphrase_encrypted,
     p_dek_encrypted, p_nonce, COALESCE(p_kek_version, 1), TRUE,
-    p_exchange, p_venue_account_id
+    p_exchange, NULLIF(btrim(p_venue_account_id), '')
   )
   RETURNING id INTO v_key_id;
 
