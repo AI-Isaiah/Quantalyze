@@ -199,6 +199,9 @@ describe("[154-01 / STALE-01a] useStrategySyncPoller — an absent row is not a 
     // The interval arm logs non-PGRST116 errors; keep the console quiet without
     // losing the ability to restore it.
     vi.spyOn(console, "error").mockImplementation(() => {});
+    // The ladder arm warns ONCE per run on a clean-null read (154-04, Rule 12).
+    // Spied rather than silenced-and-forgotten: GRACE-ladder below asserts on it.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -324,6 +327,67 @@ describe("[154-01 / STALE-01a] useStrategySyncPoller — an absent row is not a 
       "A fabricated non-terminal status also means onTerminal is unreachable, " +
         "so the loop has no exit at all for this read.",
     ).not.toHaveBeenCalled();
+  });
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // GRACE-ladder (154-04) — the EXIT the fix gives the absent-row read.
+  //
+  // T2 above only says what must NOT happen (no fabricated status). On its own,
+  // "report nothing and keep polling" is still a loop with no exit — it just
+  // stops lying while it hangs. This case pins the positive half: when the
+  // caller supplies the grace window the option has always declared (`:61`,
+  // consumed by the interval arm since 95-05 and by the ladder arm since this
+  // plan), a persistently-absent row ESCALATES through the existing `onError`
+  // sink rather than polling forever.
+  //
+  // ⛔ The grace value is a HAND-TYPED literal here and CALLER-SUPPLIED in
+  // production: this plan introduces no new threshold. The ladder walks
+  // 3000/3000/5000, so with a grace of 2 the escalation lands on the third poll,
+  // well inside ADVANCE_MS.
+  // ═════════════════════════════════════════════════════════════════════════
+  it("GRACE-ladder: a persistently absent row escalates via onError at the grace boundary", async () => {
+    const GRACE_POLLS = 2; // hand-typed; not imported, not derived
+    const onStatus = vi.fn();
+    const onTerminal = vi.fn(() => "done" as const);
+    const onError = vi.fn();
+    installZeroRowsClient();
+
+    renderHook(() =>
+      useStrategySyncPoller({
+        enabled: true,
+        strategyId: STRATEGY_ID,
+        schedule: LADDER_SCHEDULE,
+        maxConsecutiveErrors: 3,
+        missingRowGracePolls: GRACE_POLLS,
+        onStatus,
+        onTerminal,
+        onError,
+      }),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ADVANCE_MS);
+    });
+
+    expect(
+      onError,
+      "A row that is absent poll after poll never escalated. The ladder arm is " +
+        "back to an unbounded wait — silent this time instead of lying, but " +
+        "still a state the user cannot leave.",
+    ).toHaveBeenCalled();
+    expect(
+      onStatus,
+      "The escalation path still reported a status for a read that found " +
+        "nothing. Escalating is not licence to fabricate.",
+    ).not.toHaveBeenCalled();
+
+    // Rule 12 — the clean-null read is OBSERVABLE. Before this plan it logged
+    // nothing at all, which is why the 2026-08-04 console (had it survived)
+    // could not have distinguished M2(ii)'s two candidates. Once per run, not
+    // once per poll: a 15-minute wait must not bury the console.
+    const warn = console.warn as unknown as ReturnType<typeof vi.fn>;
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain(STRATEGY_ID);
   });
 
   // ═════════════════════════════════════════════════════════════════════════

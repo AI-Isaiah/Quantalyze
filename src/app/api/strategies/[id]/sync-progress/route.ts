@@ -5,6 +5,15 @@
  * The single owner-scoped, SECRETLESS read the composite wizard polls (95-04)
  * to render per-member stitch progress and a stall banner.
  *
+ * Phase 154 / plan 154-04 — STALE-01a: the job selection is widened from
+ * "latest stitch_composite" to "latest stitch_composite, else latest job of ANY
+ * kind". Purely additive — the fallback is reached only where the route used to
+ * answer IDLE — and it makes `jobStatus` available to SINGLE-KEY strategies,
+ * which produce no stitch job and were therefore told nothing was in flight
+ * while their `process_key_long` was running. `stalled` and `memberProgress`
+ * stay stitch-derived (see the stall block for the false-positive hazard);
+ * `jobStatus: null` now means "zero compute_jobs rows for this strategy".
+ *
  * Why a projection route, not a direct table read (95-VALIDATION decision 1,
  * LOCKED as Option A):
  *   `compute_jobs` is RLS deny-all + REVOKE FROM authenticated. The sanctioned
@@ -64,7 +73,12 @@ export const runtime = "nodejs";
 
 type RouteCtx = { params: Promise<{ id: string }> };
 
-/** The idle response — no visible stitch_composite job for this strategy. */
+/**
+ * The idle response — NO visible compute_jobs row of ANY kind for this
+ * strategy. Narrower than it used to be (154-04): before the kind widening this
+ * also covered "has jobs, none of them a stitch", which is every single-key
+ * strategy that ever ran.
+ */
 const IDLE: SyncProgressResponse = {
   jobStatus: null,
   stalled: false,
@@ -174,33 +188,67 @@ export async function GET(
         });
       }
 
-      // Filter to stitch_composite and pick the LATEST by created_at. The RPC
-      // already orders created_at DESC, but reduce explicitly so the contract
-      // does not silently depend on RPC ordering.
+      // Pick the LATEST job by created_at. The RPC already orders created_at
+      // DESC, but reduce explicitly so the contract does not silently depend on
+      // RPC ordering.
+      //
+      // 154-04 — TWO passes, stitch-PREFERRING, because the two arms want
+      // different things and only one of them existed before:
+      //
+      //   1. `latestStitch` — the composite arm's answer, unchanged. The stitch
+      //      row is the ONLY row that can carry member progress or a heartbeat,
+      //      so whenever one exists it remains the source of this response even
+      //      if some other kind ran afterwards. Composite behaviour is therefore
+      //      byte-identical (pinned by PIN-COMPOSITE-BYTES / PIN-COMPOSITE-WINS,
+      //      written and observed green BEFORE this widening).
+      //
+      //   2. `latestAny` — the fallback, and the whole point of the widening. A
+      //      SINGLE-KEY strategy never produces a stitch_composite job, so the
+      //      old kind filter discarded every row it had and answered IDLE while
+      //      `process_key_long` was running. That hid the one piece of
+      //      owner-readable evidence the wizard needed (STALE-01a / M1): with
+      //      nothing to distinguish "still working" from "nothing running", a
+      //      single-key user had no exit from the in-flight claim.
+      //
+      // ⭐ The widening is ADDITIVE by construction: the fallback is reached
+      // ONLY where the old code returned IDLE. `jobStatus: null` now means
+      // "this strategy has ZERO compute_jobs rows" — a stronger, and far more
+      // useful, statement than "no stitch job".
       const jobRows: ComputeJobRow[] = Array.isArray(rows)
         ? (rows as unknown as ComputeJobRow[])
         : [];
-      let latest: ComputeJobRow | null = null;
+      const isNewer = (row: ComputeJobRow, current: ComputeJobRow | null) =>
+        current === null ||
+        Date.parse(row.created_at ?? "") > Date.parse(current.created_at ?? "");
+      let latestStitch: ComputeJobRow | null = null;
+      let latestAny: ComputeJobRow | null = null;
       for (const row of jobRows) {
-        if (row?.kind !== "stitch_composite") continue;
-        if (
-          latest === null ||
-          Date.parse(row.created_at ?? "") > Date.parse(latest.created_at ?? "")
-        ) {
-          latest = row;
+        if (!row) continue;
+        if (isNewer(row, latestAny)) latestAny = row;
+        if (row.kind === "stitch_composite" && isNewer(row, latestStitch)) {
+          latestStitch = row;
         }
       }
+      const latest: ComputeJobRow | null = latestStitch ?? latestAny;
 
       if (latest === null) {
         return NextResponse.json(IDLE, { status: 200, headers: NO_STORE_HEADERS });
       }
 
+      // Only the stitch worker writes member_progress / member_progress_at, so
+      // both derivations below are gated on the selected row actually BEING a
+      // stitch. (`latest` is the stitch whenever one exists, so this is true
+      // for every composite response — the flag exists to make the non-stitch
+      // fallback's silence explicit rather than incidental.)
+      const isStitch = latest.kind === "stitch_composite";
+
       // Field-by-field member projection — NEVER spread the worker's entry, and
       // touch ONLY member_progress (never last_error / user_message / source /
       // correlation_id / ciphertext).
-      const rawEntries = Array.isArray(latest.metadata?.member_progress)
-        ? (latest.metadata!.member_progress as unknown[])
-        : [];
+      const rawEntries =
+        isStitch && Array.isArray(latest.metadata?.member_progress)
+          ? (latest.metadata!.member_progress as unknown[])
+          : [];
       const memberProgress: MemberProgressEntry[] = rawEntries.map((e) => {
         const entry = (e ?? {}) as Record<string, unknown>;
         return {
@@ -222,10 +270,23 @@ export async function GET(
       // the threshold. Date.parse of a missing/garbage value → NaN, and
       // `NaN > threshold` is false, so an unparseable heartbeat never cries
       // stall. RT-1: NO analytics-table read anywhere in this route.
+      //
+      // ⛔ STALL IS STITCH-ONLY, AND MUST STAY THAT WAY (154-04). The heartbeat
+      // is written by the stitch worker at member boundaries; no other job kind
+      // refreshes anything. For a non-stitch job the fallback would be
+      // `claimed_at`, which is stamped ONCE at claim time and never moves — so a
+      // long, perfectly healthy single-key crawl would cross the 12-minute
+      // threshold and be reported `stalled: true` purely for taking a while.
+      // That false positive is not cosmetic: the client's stall affordance
+      // invites a retry, i.e. it would push users to abort healthy work. A
+      // non-stitch job therefore reports `stalled: false` ALWAYS — this route
+      // has no evidence about it either way, and "no evidence" is not "stalled".
       const jobStatus = (latest.status ?? null) as StitchJobStatus | null;
-      const heartbeat =
-        latest.metadata?.member_progress_at ?? latest.claimed_at ?? null;
+      const heartbeat = isStitch
+        ? (latest.metadata?.member_progress_at ?? latest.claimed_at ?? null)
+        : null;
       const stalled =
+        isStitch &&
         jobStatus === "running" &&
         heartbeat != null &&
         Date.now() - Date.parse(heartbeat) > STALL_THRESHOLD_MS;

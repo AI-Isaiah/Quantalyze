@@ -67,10 +67,15 @@ export interface MemberProgressEntry {
 }
 
 /**
- * The `stitch_composite` compute_jobs status domain (CHECK constraint,
- * migration 20260411144407). `pending` and `running` are in-flight; `done` /
- * `done_pending_children` are terminal-success; `failed_retry` is the queue
- * retrying (progress, NOT a stall); `failed_final` is terminal-failure.
+ * The compute_jobs status domain (CHECK constraint, migration 20260411144407).
+ * `pending` and `running` are in-flight; `done` / `done_pending_children` are
+ * terminal-success; `failed_retry` is the queue retrying (progress, NOT a
+ * stall); `failed_final` is terminal-failure.
+ *
+ * The CHECK is table-wide, so this union is exact for EVERY job kind — which is
+ * what lets 154-04 project the status of a single-key job (`process_key_long`,
+ * `derive_broker_dailies`, `compute_analytics_from_csv`) through the same field
+ * without widening the domain. The name is historical; it is not stitch-only.
  */
 export type StitchJobStatus =
   | "pending"
@@ -85,11 +90,19 @@ export type StitchJobStatus =
  * WHITELIST — these three keys and nothing else. 95-04 consumes this verbatim.
  */
 export interface SyncProgressResponse {
-  /** null = no `stitch_composite` job visible for this strategy (idle). */
+  /**
+   * The latest `stitch_composite` job's status, else (154-04) the latest job of
+   * any kind. null = NO compute_jobs row of any kind is visible for this
+   * strategy — i.e. nothing was ever enqueued, which is a fact worth having.
+   */
   jobStatus: StitchJobStatus | null;
-  /** Server-computed from the JOB heartbeat only — never `strategy_analytics`. */
+  /**
+   * Server-computed from the STITCH JOB heartbeat only — never
+   * `strategy_analytics`, and never a non-stitch job (nothing refreshes a
+   * heartbeat for those, so a long healthy run would read as stalled).
+   */
   stalled: boolean;
-  /** [] until the worker's first member-progress write. */
+  /** [] until the worker's first member-progress write; [] for non-stitch jobs. */
   memberProgress: MemberProgressEntry[];
   /**
    * SF-3 — TRUE only on the `if (rpcError)` degrade branch (the owner-scoped
