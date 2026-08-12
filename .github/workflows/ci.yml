@@ -1782,6 +1782,7 @@ jobs:
               e2e/strategy-v2-axe.spec.ts \
               e2e/composer-axe.spec.ts \
               e2e/wizard-axe.spec.ts \
+              e2e/wizard-resume.spec.ts \
               e2e/composite-onboarding.spec.ts \
               e2e/composite-factsheet-render.spec.ts \
               e2e/sfox-badge.spec.ts \
