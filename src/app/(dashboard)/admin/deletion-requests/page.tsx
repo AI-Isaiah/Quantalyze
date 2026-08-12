@@ -119,7 +119,18 @@ export default async function AdminDeletionRequestsPage() {
               </thead>
               <tbody>
                 {rows.map((r) => {
-                  const profile = profileById.get(r.user_id);
+                  // `user_id` is genuinely NULLABLE on `data_deletion_requests`:
+                  // verified on PROD 2026-08-12 as
+                  // `FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE
+                  // SET NULL`, so Postgres nulls it when the account is deleted
+                  // and the audit row deliberately outlives the user — which is
+                  // the point of a deletion-request ledger. The old generated
+                  // types declared it `string` and hid that until the
+                  // regeneration; a null here means the user is gone, so there
+                  // is no profile to look up.
+                  const profile = r.user_id
+                    ? profileById.get(r.user_id)
+                    : undefined;
                   const status = statusOf(r);
                   const terminalAt = r.completed_at ?? r.rejected_at;
                   return (

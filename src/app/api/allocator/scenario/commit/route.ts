@@ -47,6 +47,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import type { Database } from "@/lib/database.types";
 import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { captureToSentry } from "@/lib/sentry-capture";
@@ -578,7 +579,24 @@ export const POST = withAllocatorAuth(async (req: NextRequest, user: AllocatorUs
       // a book-authored draft carries a non-empty fingerprint by construction
       // (it was seeded from >= 1 holding), so its precondition still runs.
       p_portfolio_fingerprint: portfolioFingerprint,
-    },
+      // ⚠️ The cast exists ONLY to reconcile a types-REPRESENTATION change, and
+      // deliberately does NOT change the wire contract.
+      //
+      // `database.types.ts` (regenerated from PROD 2026-08-12) renders a
+      // DEFAULT-ed RPC parameter as optional — `p_idempotency_key?: string` —
+      // rather than `string | null`, so passing an explicit `null` stopped
+      // typechecking. The three `null`s above are NOT incidental: T_R20, T_R24
+      // and the CR-01 case in route.test.ts each pin them by name, because
+      // "null ⇒ the RPC skips the precondition" is the documented contract.
+      // Verified on PROD before touching this money path:
+      //   commit_scenario_batch(… p_idempotency_key text DEFAULT NULL::text,
+      //   p_request_hash text DEFAULT NULL::text,
+      //   p_portfolio_fingerprint text DEFAULT NULL::text)
+      // so null and an omitted key are equivalent *at the database*. The
+      // asserted wire shape is kept anyway — a type-representation change is
+      // not a reason to rewrite a contract three tests and a prior review
+      // finding hold in place.
+    } as unknown as Database["public"]["Functions"]["commit_scenario_batch"]["Args"],
   );
 
   if (rpcErr) {
