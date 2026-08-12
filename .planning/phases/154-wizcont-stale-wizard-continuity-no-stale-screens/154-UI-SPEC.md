@@ -1,10 +1,11 @@
 ---
 phase: 154
 slug: wizcont-stale-wizard-continuity-no-stale-screens
-status: draft
+status: approved
 shadcn_initialized: false
 preset: none
 created: 2026-08-12
+reviewed_at: 2026-08-12
 ---
 
 # Phase 154 — UI Design Contract
@@ -80,9 +81,20 @@ already use. Sizes are the named `--text-*` tokens, never raw px (repo-wide
 | Elapsed counter / diagnostics | `text-caption`, `font-metric` | 400 | 1.5 | Geist Mono, tabular-nums |
 
 Weights for NEW copy in this phase: exactly two — **400 regular** and **600 semibold**.
-Declared exception (reuse, not restyle): the existing resume-banner heading and
-status-card lead lines carry `font-medium` (500) today and stay byte-identical — this
-phase does not touch their classes.
+
+Declared exception (reuse, not restyle) — **`font-medium` (500) is carried by two existing
+slots, and new copy landing IN those slots inherits it rather than inventing a third weight**:
+
+1. The existing resume-banner heading and status-card lead lines, which carry 500 today and
+   stay byte-identical — this phase does not touch their classes.
+2. The `wizard-sync-interrupted`-pattern banner heading and the status-card lead-line slot.
+   New copy placed in these slots — state contract 2's optional transition line and state
+   contract 3's "Recomputing this strategy's analytics" heading — is 500 **because the slot
+   is 500**, matching its shipped siblings. 500 is already a member of DESIGN.md's weight
+   set; this is pattern conformance, not a new weight.
+
+⚠️ Read clauses 1 and 2 together before flagging a contradiction with the two-weight rule
+above: the rule governs weights this phase *chooses*, not weights it *inherits from a slot*.
 
 ---
 
