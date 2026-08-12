@@ -200,6 +200,10 @@ None.
 - ⚠️ **Hydration discipline still applies** (`WizardClient.tsx:178-196`): the fetched draft arrives *after* mount, and `WizardClient`'s `useState` initializers read `initialDraft` once. 154-PATTERNS Pitfall W-1 gives the two conformant shapes (defer the mount until the read settles, or extend the `key`).
 - **Residual carried forward:** `/strategies` still runs its own latest-draft read (logged in `TODOS.md`); Scan B will redden if anyone adds a third.
 
+## Self-Check: PASSED
+
+All five created source files exist on disk; all four commits (`2e1eca1e`, `303eb1b2`, `ed66be6e`, `6cf384ca`) are present in `git log`. No claimed file or hash is missing.
+
 ---
 *Phase: 154-wizcont-stale-wizard-continuity-no-stale-screens*
 *Completed: 2026-08-12*
