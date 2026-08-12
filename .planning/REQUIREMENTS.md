@@ -619,10 +619,15 @@ D-14 valve.
   `src/app/(dashboard)/strategies/new/wizard/WizardClient.tsx` — `const [step, setStep] = useState<WizardStepKey>(() => {` :187-191 — already resumes to `sync_preview` when `initialDraft` is present, and the
   server query in `src/app/(dashboard)/strategies/new/wizard/page.tsx` (`const { data: draft } = await supabase` :79 … `.maybeSingle();` :89) correctly finds the row (verified on PROD: the live draft carries
   `source='wizard'`, `status='draft'`, so it IS matched). The restart is therefore attributable to the
-  **entry point BEFORE the wizard** — `/strategies/new` is a branch chooser with no draft awareness,
-  so it re-asks API-vs-CSV and the founder experiences "step 1" without the resuming component ever
-  mounting. **Establish the exact entry path first** (this was inferred from code, not observed
-  click-by-click) and fix the chooser, not the state machine.
+  **entry point BEFORE the wizard** — but **not** the one named here originally *(corrected
+  2026-08-12 by Phase 154 observation — the earlier "branch chooser" diagnosis was inferred from
+  stale code, per this requirement's own demand to establish the entry path by observation first)*.
+  Observed at HEAD: `src/app/(dashboard)/strategies/new/page.tsx` is a **pure `redirect()`** (32 lines,
+  forwarding `?source=csv` straight to `/strategies/new/wizard`) — it chooses nothing and re-asks
+  nothing. The draft-blind entry point is **`ContributionWizardOverlay.tsx:146`**, which hardcodes
+  `initialDraft={null}` (the explicit Phase 110 deferral) and is the surface reached from
+  `+ Strategy` (allocations / scenario) and the My Strategies empty state. Fix the overlay's draft
+  awareness, not the state machine and not `/strategies/new`.
 
 - [ ] **WIZCONT-02** *(NARROW — was mis-recorded as a data-integrity hole; corrected 2026-08-04 by
   live observation)*: Re-connecting the same credentials from a context that has **lost the wizard
