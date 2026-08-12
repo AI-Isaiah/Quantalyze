@@ -122,6 +122,41 @@ const COMPOSITE_WAITING_HEADING = "Stitching your composite track record";
 const HEAL_DELETE_ROWS = 0;
 const STAMPED_ROWS = 10;
 
+/**
+ * 154-08 — the amber in-flight block's copy, hand-transcribed from the UI-SPEC
+ * (§ State Contract 3) and from `SyncPreviewStep.tsx`. NEVER imported and never
+ * read off the component: this is the same needle discipline the header block
+ * argues for, and the heading is the string the semantic-colour gate hangs on.
+ */
+const RECOMPUTING_HEADING = "Recomputing this strategy's analytics";
+const RECOMPUTING_BODY =
+  "The previous result is out of date and is being recalculated. This screen updates when it finishes — your draft is saved.";
+
+/**
+ * The warning tokens the UI-SPEC pins for this block, hand-typed. `warning` is
+ * the AMBER family; `negative` is the red one. Asserting both — one present, one
+ * absent — is what makes this a colour-SEMANTICS oracle rather than a class-name
+ * spelling test.
+ */
+const AMBER_TOKENS = ["border-warning/40", "bg-warning/5"];
+
+/**
+ * Stale metrics for the analytics row, hand-typed. A row mid-re-derive still
+ * carries the PREVIOUS run's numbers; the Numbers Contract says none of them may
+ * reach the screen presented as fresh. Chosen to render as distinctive strings
+ * (`formatCagr(0.4242)` → "+42.4%", `formatMetric(1.87)` → "1.87") so a match is
+ * unambiguous.
+ */
+const STALE_METRICS = {
+  cagr: 0.4242,
+  sharpe: 1.87,
+  sortino: 2.53,
+  max_drawdown: -0.1919,
+  volatility: 0.6161,
+  cumulative_return: 0.7373,
+};
+const STALE_RENDERED = ["+42.4%", "1.87", "2.53", "-19.2%", "61.6%", "+73.7%"];
+
 /** Long enough for the kickoff plus several terminal ticks. */
 const SETTLE_MS = 30_000;
 
@@ -215,7 +250,22 @@ const HEAVY_ANALYTICS_ROW = {
  * by construction, its whole track record IS the daily series. That is the
  * shape of the founder's key.
  */
-function installClient(seriesRowCount: number) {
+function installClient(
+  seriesRowCount: number,
+  opts: {
+    /** Merged over `HEAVY_ANALYTICS_ROW` — the stale numbers a re-derive leaves. */
+    analyticsOverrides?: Record<string, unknown>;
+    /**
+     * Per-READ outcome for the single-key `csv_daily_returns` head-count, by
+     * ordinal: `true` = answer a Supabase error (the heavy arm throws), `false`
+     * (and every ordinal past the end) = answer healthily. Drives the A6
+     * counter case by READ ORDINAL rather than by wall-clock, so the sequence is
+     * deterministic and independent of the backoff ladder.
+     */
+    csvFailPlan?: readonly boolean[];
+  } = {},
+) {
+  let csvCountReads = 0;
   currentClientFactory = () => ({
     from: (table: string) => ({
       select: (cols: string) => {
@@ -237,7 +287,9 @@ function installClient(seriesRowCount: number) {
             return chain(() => okRow({ data_quality_flags: null }));
           }
           // The heavy analytics row (both arms).
-          return chain(() => okRow(HEAVY_ANALYTICS_ROW));
+          return chain(() =>
+            okRow({ ...HEAVY_ANALYTICS_ROW, ...(opts.analyticsOverrides ?? {}) }),
+          );
         }
 
         if (table === "trades") {
@@ -248,7 +300,27 @@ function installClient(seriesRowCount: number) {
 
         if (table === "csv_daily_returns") {
           // SINGLE-KEY arm: `head: true` exact count.
-          if (cols === "strategy_id") return chain(() => okCount(seriesRowCount));
+          if (cols === "strategy_id") {
+            return chain(() => {
+              const ordinal = csvCountReads;
+              csvCountReads += 1;
+              return opts.csvFailPlan?.[ordinal] === true
+                ? {
+                    data: null,
+                    count: null,
+                    // A PostgREST error-as-value: the heavy arm binds `error` on
+                    // this member and throws, which is the ONLY path that feeds
+                    // the consecutive heavy-failure counter.
+                    error: {
+                      code: "57014",
+                      message: "canceling statement due to statement timeout",
+                      details: null,
+                      hint: null,
+                    },
+                  }
+                : okCount(seriesRowCount);
+            });
+          }
           // COMPOSITE arm: the full series.
           return chain(() =>
             okList(
@@ -291,11 +363,21 @@ function installClient(seriesRowCount: number) {
 }
 
 /**
- * The kickoff POST succeeds and reports `composite`. The cosmetic sync-progress
- * piggyback (composite only) is answered with a real IDLE body so a parse fault
- * cannot masquerade as the behaviour under test.
+ * The kickoff POST succeeds and reports `composite`. The sync-progress piggyback
+ * — issued for BOTH user classes since 154-08 closed TWIN-5 — is answered with a
+ * real projection body so a parse fault cannot masquerade as the behaviour under
+ * test.
+ *
+ * `jobStatus` defaults to `null`, which after 154-04 means "zero compute_jobs
+ * rows are visible" — i.e. NO evidence that anything is running. That default is
+ * load-bearing for T3 and T3b: they assert the repoll happens on the empty
+ * series ALONE, with no in-flight datum to lean on, so a fix that only repolled
+ * when the route said a job was running would still redden them.
  */
-function installFetchMock(composite: boolean) {
+function installFetchMock(
+  composite: boolean,
+  jobStatus: string | null = null,
+) {
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation(async (input: RequestInfo | URL) => {
@@ -303,7 +385,7 @@ function installFetchMock(composite: boolean) {
       if (url.includes("/sync-progress")) {
         return new Response(
           JSON.stringify({
-            jobStatus: null,
+            jobStatus,
             stalled: false,
             memberProgress: [],
             degraded: false,
@@ -333,9 +415,20 @@ const baseProps = {
  *   advance(0)         → kickoff body parse
  *   advance(SETTLE_MS) → several terminal ticks
  */
-async function renderAndSettle(seriesRowCount: number, composite: boolean) {
-  installClient(seriesRowCount);
-  installFetchMock(composite);
+async function renderAndSettle(
+  seriesRowCount: number,
+  composite: boolean,
+  opts: {
+    jobStatus?: string | null;
+    analyticsOverrides?: Record<string, unknown>;
+    csvFailPlan?: readonly boolean[];
+  } = {},
+) {
+  installClient(seriesRowCount, {
+    analyticsOverrides: opts.analyticsOverrides,
+    csvFailPlan: opts.csvFailPlan,
+  });
+  installFetchMock(composite, opts.jobStatus ?? null);
   const view = render(<SyncPreviewStep {...baseProps} />);
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0);
@@ -494,5 +587,149 @@ describe("[154-01 / STALE-01b] a series being re-derived is not a verdict about 
     ).toContain(COMPOSITE_WAITING_HEADING);
 
     expect(text.length).toBeGreaterThan(0);
+  });
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // 154-08 — WHAT THE ARM RENDERS INSTEAD (UI-SPEC State Contract 3).
+  //
+  // T3 above pins only that a terminal red refusal is the WRONG answer; the
+  // header block says so in as many words. These cases pin the right one, and
+  // the semantic-colour gate that decides between them: AMBER while the system
+  // is still producing the answer, RED only for a verdict that IS current.
+  // ═════════════════════════════════════════════════════════════════════════
+  it("AMBER: with the in-flight datum reporting a running job, the mid-re-derive screen is the amber recomputing block", async () => {
+    const { container } = await renderAndSettle(HEAL_DELETE_ROWS, false, {
+      jobStatus: "running",
+    });
+
+    const block = container.querySelector(
+      '[data-testid="wizard-sync-recomputing"]',
+    );
+    expect(
+      block,
+      `The series is mid-re-derive AND the sync-progress projection says a job ` +
+        `is running, and the screen still says nothing about it. The user is ` +
+        `watching a spinner for work the system can name.`,
+    ).not.toBeNull();
+
+    // A11y — a non-blocking state change, per DESIGN.md's state minimums. The
+    // terminal failure states keep role="alert" via ErrorEnvelope; this is not
+    // one of those, and saying so in the markup is the difference.
+    expect(block?.getAttribute("role")).toBe("status");
+
+    // Copy, hand-typed from the UI-SPEC. Both lines, because the heading alone
+    // does not tell the user their draft survives.
+    expect(block?.textContent).toContain(RECOMPUTING_HEADING);
+    expect(block?.textContent).toContain(RECOMPUTING_BODY);
+
+    // Colour SEMANTICS, not spelling: amber present, red absent.
+    const cls = block?.getAttribute("class") ?? "";
+    for (const token of AMBER_TOKENS) {
+      expect(cls, `the amber block lost its warning token ${token}`).toContain(
+        token,
+      );
+    }
+    expect(cls).not.toContain("negative");
+  });
+
+  it("NO-RED-WHILE-IN-FLIGHT: the recomputing screen renders no error envelope and no wizard_error", async () => {
+    const { container } = await renderAndSettle(HEAL_DELETE_ROWS, false, {
+      jobStatus: "running",
+    });
+
+    expect(
+      container.querySelector("[data-error-code]"),
+      `The screen rendered BOTH the amber "we are recalculating" block and a red ` +
+        `terminal envelope. Amber says "the system is handling this" and red says ` +
+        `"this is the final answer"; a screen that shows the second while the ` +
+        `first is true has told the user the outcome of work that is still running.`,
+    ).toBeNull();
+    expect(wizardErrorEvents()).toEqual([]);
+
+    // Non-vacuity: the amber block IS up, so the absence above is a statement
+    // about this state rather than about a component that rendered nothing.
+    expect(
+      container.querySelector('[data-testid="wizard-sync-recomputing"]'),
+    ).not.toBeNull();
+  });
+
+  it("NO-EVIDENCE: with NO job in flight the amber block is withheld — the screen never claims a recomputation it cannot see", async () => {
+    // jobStatus null (the default) = zero compute_jobs rows visible (154-04).
+    // The arm still repolls — T3 pins that — but the SCREEN says nothing about
+    // a recomputation, because it has no evidence one is happening. This is the
+    // vacuity fence for the AMBER case: without it, a block that rendered
+    // unconditionally would pass that case just as well.
+    const { container } = await renderAndSettle(HEAL_DELETE_ROWS, false);
+
+    expect(
+      container.querySelector('[data-testid="wizard-sync-recomputing"]'),
+      `The screen announced "Recomputing this strategy's analytics" while the ` +
+        `in-flight datum reported no job at all. That is the same defect this ` +
+        `phase closes, pointing the other way: a reading turned into a claim.`,
+    ).toBeNull();
+    // …and it did not fall back to a refusal either.
+    expect(container.querySelector("[data-error-code]")).toBeNull();
+  });
+
+  it("NUMBERS: no stale metric from the mid-re-derive row reaches the screen, and no zero is fabricated in its place", async () => {
+    const { text } = await renderAndSettle(HEAL_DELETE_ROWS, false, {
+      jobStatus: "running",
+      analyticsOverrides: STALE_METRICS,
+    });
+
+    // The row still carries the PREVIOUS run's numbers. Presenting them beside
+    // "recomputing" would be a stale number presented as fresh — the Numbers
+    // Contract's exact prohibition.
+    for (const rendered of STALE_RENDERED) {
+      expect(
+        text,
+        `The screen rendered "${rendered}" off an analytics row whose source ` +
+          `series is mid-replacement. The number is real; it is just not true ` +
+          `any more, and nothing on the screen says so.`,
+      ).not.toContain(rendered);
+    }
+
+    // …nor the other failure direction: an unknowable count rendered as 0.
+    expect(text).not.toContain("0 trade");
+    expect(text).not.toContain("0 days of returns");
+
+    // Non-vacuity: this IS the recomputing screen, and no factsheet/CTA surface
+    // is up to have rendered a metric cell in the first place.
+    expect(text).toContain(RECOMPUTING_HEADING);
+    expect(
+      text,
+      "the wizard reached the passed branch, so the absences above say nothing",
+    ).not.toContain("Use this key and continue");
+  });
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // 154-08 / RESEARCH A6 — THE COUNTER THE NEW REPOLL PATH INVALIDATED.
+  //
+  // `heavyFetchErrorsRef` was documented as never needing a reset, on the
+  // grounds that "the only path that repolls is a throw". The empty-series
+  // repolls (composite's, and now the single-key twin) are NON-throwing, so a
+  // run that blipped twice and then read cleanly used to carry both blips
+  // forward and escalate a HEALTHY heal window to SYNC_FAILED on its next blip.
+  // Read ordinals 1 and 2 fail, 3 succeeds into the repoll, 4 fails: with the
+  // reset the count is 1 and nothing escalates; without it, it is 3.
+  // ═════════════════════════════════════════════════════════════════════════
+  it("A6: a clean read into the repoll state RESETS the consecutive heavy-failure count", async () => {
+    const { container, text } = await renderAndSettle(HEAL_DELETE_ROWS, false, {
+      jobStatus: "running",
+      csvFailPlan: [true, true, false, true],
+    });
+
+    expect(
+      container.querySelector("[data-error-code]"),
+      `A healthy run was escalated to a terminal envelope. Three heavy failures ` +
+        `were counted, but they were not CONSECUTIVE — a clean read landed ` +
+        `between the second and the third, and a clean read is the evidence the ` +
+        `heavy path is healthy. The counter outlived the invariant that said it ` +
+        `never needed a reset.`,
+    ).toBeNull();
+    expect(wizardErrorEvents()).toEqual([]);
+
+    // Positive half — the run is still WAITING, not merely un-refused.
+    expect(text).toContain(RECOMPUTING_HEADING);
   });
 });
