@@ -28,9 +28,24 @@ import { UUID_RE } from "@/lib/utils";
 // silently re-introduce the trap.
 
 describe("deriveWizardResumeOverrides — pure LS-derivation helper", () => {
-  it("returns no overrides when loaded is null (SSR + fresh client)", () => {
+  it("returns no overrides when loaded is null AND there is no draft (SSR + fresh client)", () => {
     expect(deriveWizardResumeOverrides(null, "csv", null)).toEqual({});
-    expect(deriveWizardResumeOverrides(null, "api", "draft-1")).toEqual({});
+    expect(deriveWizardResumeOverrides(null, "api", null)).toEqual({});
+  });
+
+  // Phase 154 / WIZCONT-01. Previously this answered `{}`, so a server draft
+  // reached by a client with NO stored pointer — the ContributionWizardOverlay
+  // opening fresh, a second device, cleared storage, an expired tab nonce —
+  // mounted straight onto the draft's step with no banner: a silent resume.
+  // "The founder always chooses" is the CONTEXT.md lock, so an unpointed draft
+  // is offered exactly like a mismatched pointer.
+  it("offers the banner when a draft exists and there is NO local pointer at all", () => {
+    expect(deriveWizardResumeOverrides(null, "api", "draft-1")).toEqual({
+      showResumeBanner: true,
+    });
+    expect(deriveWizardResumeOverrides(null, "csv", "draft-1")).toEqual({
+      showResumeBanner: true,
+    });
   });
 
   describe("CSV branch", () => {

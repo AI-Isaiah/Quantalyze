@@ -373,7 +373,17 @@ export function deriveWizardResumeOverrides(
   source: "api" | "csv",
   initialDraftId: string | null,
 ): WizardResumeOverrides {
-  if (!loaded) return {};
+  // Phase 154 / WIZCONT-01 — NO local pointer at all is the COMMON case for a
+  // server-side draft, not an edge case: the ContributionWizardOverlay opening
+  // fresh, a different browser or device, cleared storage, or an expired tab
+  // nonce (loadWizardState refuses an unverifiable payload and answers null).
+  //
+  // Returning a bare `{}` here left `showResumeBanner` false while the step
+  // initializer had ALREADY mounted the wizard on the draft's step — a SILENT
+  // resume, with no Resume / Start-fresh choice anywhere on screen. CONTEXT.md
+  // requires the opposite: the founder always chooses. A draft with no pointer
+  // is therefore offered exactly like a MISMATCHED pointer below.
+  if (!loaded) return initialDraftId ? { showResumeBanner: true } : {};
   const out: WizardResumeOverrides = {};
 
   // Phase 140.4 / SEAMRIM-03 — the restore is gated on `source`.

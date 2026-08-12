@@ -37,6 +37,11 @@ import {
 import { wizardFetch } from "@/lib/wizard/wizard-correlation";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { CtaLocation } from "@/lib/analytics";
+// Phase 154 / WIZCONT-01: TYPE-ONLY import (erased at build). The draft shape
+// and its branch discriminator are single-sourced in `@/lib/wizard/draft-query`
+// — this component used to re-declare `InitialDraft` locally, which is the
+// second-shape drift 154-02 exists to prevent.
+import type { InitialDraft, WizardDraftKind } from "@/lib/wizard/draft-query";
 
 /**
  * WizardClient owns the 4-step state machine for /strategies/new/wizard.
@@ -44,25 +49,27 @@ import type { CtaLocation } from "@/lib/analytics";
  * only stores a pointer so a tab close/reopen can resume.
  */
 
-interface InitialDraft {
-  id: string;
-  name: string | null;
-  description: string | null;
-  category_id: string | null;
-  strategy_types: string[] | null;
-  subtypes: string[] | null;
-  markets: string[] | null;
-  supported_exchanges: string[] | null;
-  leverage_range: string | null;
-  aum: number | null;
-  max_capacity: number | null;
-  api_key_id: string | null;
-  asset_class: string | null;
-}
-
 interface WizardClientProps {
   /** Initial draft row from the server (null when no draft exists yet). */
   initialDraft: InitialDraft | null;
+  /**
+   * Phase 154 / WIZCONT-01 — which BRANCH `initialDraft` belongs to.
+   *
+   * The step initializer below consults the draft BEFORE it consults
+   * `source`, and a draft's step depends on its kind: a CSV draft resumes on
+   * `csv_upload` (re-select the file, metadata preserved), an api/composite
+   * draft on `sync_preview`. `api_key_id === null` is true for BOTH a CSV and
+   * a member-bearing composite draft, so the kind CANNOT be re-derived here —
+   * it comes from `deriveDraftKind` in `@/lib/wizard/draft-query`, the one
+   * place that owns the membership probe (A4 / Pitfall W-2).
+   *
+   * Optional and additive: both production callers (the SSR page and
+   * `ContributionWizardOverlay`) pass it, and both first apply
+   * `draftMatchesSource`, so a draft only ever reaches the branch it belongs
+   * to. When it is absent the draft is assumed to belong to the branch it was
+   * handed to — which is byte-identical to the pre-154 behavior.
+   */
+  initialDraftKind?: WizardDraftKind | null;
   /**
    * Phase 110 / CONTRIB-01..02 — which surface mounted the wizard.
    *
@@ -150,6 +157,7 @@ interface CsvPreview {
 
 export function WizardClient({
   initialDraft,
+  initialDraftKind = null,
   entryContext = "manager",
   sourceOverride,
   onSuccess,
@@ -195,10 +203,41 @@ export function WizardClient({
     newWizardSessionId(),
   );
 
+  /**
+   * Phase 154 / WIZCONT-01 (TWIN-6) — the draft's branch, resolved BEFORE any
+   * step is chosen.
+   *
+   * `initialDraftKind` is the authoritative answer and comes from
+   * `deriveDraftKind` (the only place allowed to run the composite-vs-CSV
+   * membership probe). The fallback is NOT a second discriminator: it says
+   * "a draft handed to this branch belongs to this branch", which is exactly
+   * what `draftMatchesSource` guarantees for both production callers, and it
+   * reproduces the pre-154 behavior for a caller that supplies no kind.
+   *
+   * Props only — SSR-deterministic, per the hydration docblock above.
+   */
+  const draftKind: WizardDraftKind | null = initialDraft
+    ? (initialDraftKind ?? (source === "csv" ? "csv" : "api"))
+    : null;
+
+  /**
+   * The step a resumed draft lands on. Read by BOTH the initializer below and
+   * `handleResume` — one expression, because two spellings of "where does this
+   * draft resume" is how the mount and the button drift into disagreeing.
+   */
+  const draftResumeStep: WizardStepKey =
+    draftKind === "csv" ? "csv_upload" : "sync_preview";
+
   const [step, setStep] = useState<WizardStepKey>(() => {
+    // ⭐ THE DRAFT IS CONSULTED FIRST. Before Phase 154 the `source === "csv"`
+    // short-circuit sat above this and returned "csv_upload" without ever
+    // looking at `initialDraft` — so a CSV draft could never resume (the
+    // banner is gated on the draft, and the CSV branch never learned there
+    // was one). That is the same class as the overlay's `initialDraft={null}`:
+    // the step was chosen before the draft was consulted.
+    if (initialDraft) return draftResumeStep;
     if (source === "csv") return "csv_upload";
-    if (!initialDraft) return "connect_key";
-    return "sync_preview";
+    return "connect_key";
   });
 
   const [strategyId, setStrategyId] = useState<string | null>(
@@ -802,15 +841,18 @@ export function WizardClient({
   const handleResume = useCallback(() => {
     if (!initialDraft) return;
     setShowResumeBanner(false);
-    // Honor the server-side draft; jump to sync_preview because the key
-    // is already there but the sync status may be stale.
-    setStep("sync_preview");
-    persistPointer("sync_preview", initialDraft.id);
+    // Honor the server-side draft. `draftResumeStep` is the SAME expression the
+    // mount initializer used: sync_preview for an api/composite draft (the key
+    // is already there but the sync status may be stale), csv_upload for a CSV
+    // draft (Phase 154 — sending a CSV draft to sync_preview would land it on
+    // an API-branch step with no key behind it).
+    setStep(draftResumeStep);
+    persistPointer(draftResumeStep, initialDraft.id);
     trackForQuantsEventClient("wizard_resume", {
       wizard_session_id: wizardSessionId,
       strategy_id: initialDraft.id,
     });
-  }, [initialDraft, persistPointer, wizardSessionId]);
+  }, [initialDraft, draftResumeStep, persistPointer, wizardSessionId]);
 
   /**
    * ⚠️ Phase 140.3-10 / TRAP-4 — `start_fresh` DESTROYS THE DRAFT, so it goes

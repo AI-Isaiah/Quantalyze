@@ -2,7 +2,10 @@ import { Suspense } from "react";
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { readLatestWizardDraft } from "@/lib/wizard/draft-query";
+import {
+  draftMatchesSource,
+  readLatestWizardDraft,
+} from "@/lib/wizard/draft-query";
 import { WizardClient } from "./WizardClient";
 
 /**
@@ -65,14 +68,20 @@ export default async function WizardPage({ searchParams }: WizardPageProps) {
   // Phase 154 / WIZCONT-01: the query itself now lives in
   // `@/lib/wizard/draft-query` so this page and the overlay's route handler
   // (`/api/strategies/wizard-draft`) cannot drift apart — one shape, two
-  // callers. Behavior here is unchanged: a read error still degrades to
-  // "no draft" (the helper RETURNS the error rather than throwing), and the
-  // draft is still passed down verbatim. The branch-matching rule the helper
-  // also exports is APPLIED in 154-05, not here.
-  const { draft: initialDraft } = await readLatestWizardDraft(
-    supabase,
-    user.id,
-  );
+  // callers. A read error still degrades to "no draft" (the helper RETURNS the
+  // error rather than throwing).
+  //
+  // Phase 154 / WIZCONT-01: the helper's branch-matching rule is APPLIED here.
+  // `?source=csv` and the API branch are two different flows, and a draft is
+  // offered only on the branch it belongs to — an api/composite draft handed to
+  // the CSV branch would resume the user into a step their upload cannot feed.
+  // The rule is IMPORTED, never re-derived: `api_key_id === null` alone cannot
+  // tell a CSV draft from a composite one (A4 / Pitfall W-2).
+  const { draft, kind } = await readLatestWizardDraft(supabase, user.id);
+  const draftIsOnThisBranch =
+    draft !== null && kind !== null && draftMatchesSource(kind, source);
+  const initialDraft = draftIsOnThisBranch ? draft : null;
+  const initialDraftKind = draftIsOnThisBranch ? kind : null;
 
   return (
     /*
@@ -102,7 +111,11 @@ export default async function WizardPage({ searchParams }: WizardPageProps) {
       exactly to avoid layout shift.
     */
     <Suspense key={source} fallback={null}>
-      <WizardClient key={source} initialDraft={initialDraft} />
+      <WizardClient
+        key={source}
+        initialDraft={initialDraft}
+        initialDraftKind={initialDraftKind}
+      />
     </Suspense>
   );
 }
