@@ -97,3 +97,40 @@ enforced from inside the migration and must be honoured by whoever lands the PR.
 
 MCP `apply_migration` stamps the ledger with `now()`, not the filename's `20260812120000`. Known,
 accepted for TEST, and consistent with prior phases.
+
+---
+
+## 5. AMENDMENT re-apply (after the reviewer HIGH findings)
+
+`migration-reviewer` and `rls-policy-auditor` returned **3 HIGH / 4 MEDIUM / 1 LOW**. Two HIGHs
+cleared the blocking bar (user-facing / data-integrity) and were fixed in `f35fafea`; the third is
+a Phase 156 residual and was corrected in prose only.
+
+| Finding | Disposition |
+|---|---|
+| **HIGH-1** partial UNIQUE was lifecycle-blind — a soft-disconnected row permanently squats the slot, so re-connecting the same MT5 login 23505s and "fails toward" a **dead** key the cron skips (silently never syncs) | **FIXED** — predicate now `venue_account_id IS NOT NULL AND disconnected_at IS NULL`. ⭐ Required `DROP INDEX` first: `CREATE UNIQUE INDEX IF NOT EXISTS` matches on **name only**, so a re-apply would have left the old predicate live with every assertion green. |
+| **HIGH-2** `''` treated as a real identity → two different accounts collide → silent wrong-account attribution | **FIXED** — `api_keys_venue_account_id_nonblank CHECK (… btrim(…) <> '')` + RPC stamps `NULLIF(btrim(p_venue_account_id), '')` |
+| **HIGH-3** (RLS) `authenticated` holds EXECUTE on the SECDEF RPC, which stamps the identity **verbatim from a caller-supplied parameter** — so a crafted client can still forge it via PostgREST and evade the dedup | **NOT FIXED HERE — by design.** This is the CR-01 class; the remedy (service-role writer + withdraw `authenticated` EXECUTE) is **Phase 156**. The column COMMENT and header were rewritten to stop claiming the value is unforgeable. |
+
+Re-applied to TEST and verified independently:
+
+| Property | Observed |
+|---|---|
+| index predicate | `((venue_account_id IS NOT NULL) AND (disconnected_at IS NULL))` ✅ |
+| nonblank CHECK | `CHECK (((venue_account_id IS NULL) OR (btrim(venue_account_id) <> ''::text)))` ✅ |
+| overloads | 1 ✅ |
+| `anon` EXECUTE | false ✅ |
+| scrub triggers | 2 ✅ |
+
+### Residuals recorded, not fixed
+
+- **Revoked keys deliberately do NOT free the slot.** `sync_status` is rewritten by the worker on
+  every tick, so putting it in a UNIQUE predicate would let a routine background write raise 23505
+  with no user watching. `'revoked'` is recoverable in place via `reconnect_allocator_api_key`.
+- **New residual from HIGH-1:** clearing `disconnected_at` is now index-relevant, so
+  disconnect A → connect same login as B → Reconnect A raises 23505. Judged acceptable: fail-loud
+  on a deliberate click that already has a revert path, versus the silent never-syncs-again it
+  replaces. Pinned by SQL-gate case 6c.
+- The full amended file has **not** been re-applied end-to-end (the delta was). Full-file
+  idempotency is exercised by CI's `sql-tests`.
+- SQL gate section 6 (seeded behavioural cases) has **never executed** — first run is CI.
