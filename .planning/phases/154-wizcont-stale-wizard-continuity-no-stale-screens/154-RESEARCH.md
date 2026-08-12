@@ -1146,24 +1146,37 @@ failure is **not** a flake; reproduce with `PATH=/opt/homebrew/opt/node@22/bin`.
    - Recommendation: run Q1/Q2 (Step 6) as the first task of plan 154-01, **before** writing T1/T2.
      The tests are worth writing either way; the DB answer decides whether the fix must also reach
      Python or SQL (per CONTEXT.md, "fix at the root cause wherever it lives").
+   - **Resolution (2026-08-12 planning): DEFERRED TO 154-01** (gated by depends_on — 154-04/07/08
+     cannot execute before the verdict lands). Deliberate, per ROADMAP criterion 2 ("do not plan a
+     fix before answering it").
 
 2. **Do (a) and (b) share one cause?** CONTEXT.md asks that this be tested, not assumed.
    - Known: they share a root *idea* (a possibly-not-current reading treated as current) but sit at
      **different code sites**.
    - Recommendation: state explicitly in the plan that a single-site fix does not discharge both, and
      keep T1/T2 and T3 as independent red gates.
+   - **Resolution (2026-08-12 planning): DEFERRED TO 154-01** (the shared-cause answer is a required
+     "## Conclusion" deliverable of 154-01 Task 3, gated by depends_on). Deliberate, per ROADMAP
+     criterion 2.
 
 3. **Does the fix belong in `useStrategySyncPoller` (shared with `SyncProgress`) or in the wizard's callbacks?**
    - Known: the hook is deliberately parametrized because the two surfaces poll differently, and the
      interval arm has a *pinned asymmetry* (no consecutive-error escalation).
    - Recommendation: default to the wizard's own callbacks; if the class genuinely spans both, say so
      and add a `SyncProgress` regression test in the same commit.
+   - **Resolution (2026-08-12 planning): RESOLVED — 154-04** fixes the hook (the class spans both
+     surfaces) AND adds the `SyncProgress.poll.test.tsx` regression in the same plan.
 
 4. **`ValidationResult`'s account-identity contract across venues.** See A2. One read settles it.
+   - **Resolution (2026-08-12 planning): RESOLVED — 154-03** (ValidationResult read verified
+     2026-08-12: no account-identity field for ccxt venues; MT5-only scope locked, residual
+     recorded by 154-06 Task 3).
 
 5. **Does the wizard need to react to `queued: false` (M4)?** Even if Q1/Q2 exonerate it, the kickoff
    arm ignoring a field the server sends is a live hole. Recommendation: cover with T2b regardless —
    it is cheap and it is the same class ("the client infers state the server already told it").
+   - **Resolution (2026-08-12 planning): RESOLVED — 154-01** lands T2b regardless of the mechanism
+     verdict (154-08 Task 1's kickoff-honesty arm greens it).
 
 ---
 

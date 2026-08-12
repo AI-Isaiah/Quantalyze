@@ -66,7 +66,7 @@ created: 2026-08-12
 | TBD | 03 | — | WIZCONT-01 | — | Overlay opened with an existing API draft renders the resume banner (`wizard-resume` + `wizard-start-fresh`) **and `sync_preview` actually renders** on Resume | component | `npx vitest run "src/app/(dashboard)/allocations/components/ContributionWizardOverlay.test.tsx"` | ✅ extend | ⬜ pending |
 | TBD | 03 | — | WIZCONT-01 | T-154-01 | "Start fresh" **opens the confirm-delete dialog** and never deletes directly (TRAP-4 standing invariant) | component | same | ✅ exists | ⬜ pending |
 | TBD | 03 | — | WIZCONT-01 | — | A **CSV** draft resumes: `WizardClient` with `source="csv"` + a CSV `initialDraft` does not short-circuit to `csv_upload` (`WizardClient.tsx:198`) | component | `npx vitest run "src/app/(dashboard)/strategies/new/wizard/WizardClient.test.tsx"` | ✅ extend | ⬜ pending |
-| TBD | 03 | 0 | WIZCONT-01 | — | The overlay's draft read and `wizard/page.tsx` issue the **same** query shape (both import one helper) | contract test | `npx vitest run src/__tests__/contracts/` | ❌ W0 | ⬜ pending |
+| TBD | 03 | 0 | WIZCONT-01 | — | The overlay's draft read and `wizard/page.tsx` issue the **same** query shape (both import one helper) | contract test | `npx vitest run src/__tests__/wizard-draft-query-single-source.test.ts` | ❌ W0 | ⬜ pending |
 | TBD | 03 | — | WIZCONT-01 | — | E2E: open overlay from My Strategies empty state with a **seeded** draft → banner → Resume → `sync_preview` | e2e | `npx playwright test e2e/api-key-flow.spec.ts` | ✅ extend — ⚠️ assert the **seeded draft id**, never global empty-state | ⬜ pending |
 | TBD | 04 | — | WIZCONT-02 | T-154-03 | Second `create-with-key` with the same MT5 login and a **different** `wizard_session_id` returns the **existing** row; no second `api_keys` row; `strategy_keys` membership untouched | integration (route) | `npx vitest run "src/app/api/strategies/create-with-key/route.test.ts"` | ✅ extend | ⬜ pending |
 | TBD | 04 | 0 | WIZCONT-02 | T-154-03 | The partial UNIQUE exists, **is partial** (`WHERE … IS NOT NULL`), and rejects the duplicate | SQL gate | `supabase/tests/test_api_keys_venue_identity_uniq.sql` | ❌ W0 | ⬜ pending |
@@ -84,7 +84,7 @@ created: 2026-08-12
 - [ ] `src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.stale.runtime.test.tsx` — covers T1, T1b, T2b (STALE-01a)
 - [ ] `src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.stale-refusal.runtime.test.tsx` — covers T3, T3b (STALE-01b)
 - [ ] `supabase/tests/test_api_keys_venue_identity_uniq.sql` — covers WIZCONT-02's DB backstop
-- [ ] A contract test pinning the single-sourced draft query — covers WIZCONT-01's stated criterion
+- [ ] `src/__tests__/wizard-draft-query-single-source.test.ts` — the contract test pinning the single-sourced draft query — covers WIZCONT-01's stated criterion
 - [ ] Framework install: **none needed** — vitest, Playwright, pytest all present and wired
 
 ---
