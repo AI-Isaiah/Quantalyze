@@ -1,5 +1,74 @@
 # Changelog
 
+## [0.59.0.0] - 2026-08-12
+### v1.17 — the wizard remembers where you were, and stops describing a state the backend has already left
+
+Phase 154 closes three requirements, and the review that gated it found four more defects of
+the same family: a screen making a claim the server had stopped supporting. Every fix below
+ships with a mutation run against it — reverting the fix must redden a named test, or the
+test was not a guard.
+
+### Fixed
+
+**Re-entering "add a strategy" continues your draft instead of restarting it.** Resume was
+never missing — `WizardClient` already resumed when handed a draft. The entry point before
+the wizard was the problem: `ContributionWizardOverlay` hardcoded `initialDraft={null}` (an
+explicit Phase 110 deferral), so every route through `+ Strategy` re-asked everything. The
+overlay now fetches the draft on open and defers mounting the wizard until that read answers,
+so it can no longer mount a null draft and race its own fetch. The diagnosis named one
+overlay renderer; there are five, and `DashboardChrome.tsx:78` was caught only by a failing
+test.
+
+**Re-connecting the same credentials without a wizard session resolves onto the existing key
+instead of minting a duplicate.** Identity comes from `api_keys.venue_account_id` — a stable
+non-secret the venue returns — never from ciphertext, which re-encrypts differently every
+time. A partial UNIQUE index scoped to live rows enforces it at the DB, and an app-layer
+fence resolves the re-connect read-only, so `strategy_keys` membership and synced history are
+never clobbered. Today only MT5 supplies such an identity; ccxt venues remain unfenced and
+that is written down rather than implied.
+
+**The wizard no longer sits on "Fetching trades…" after the work has finished.** Root cause
+was established against production before anything was planned: the client coerced a
+zero-rows read into the domain value `"pending"` (`useStrategySyncPoller.ts`), so the poll
+loop never saw the terminal state it was waiting for. The server was correct and terminal the
+whole time. Fixing this in the Python worker would have been the bandaid — the backend arm of
+this phase is a recorded no-op with the evidence attached.
+
+**Single-key users get the exits composites already had.** Two `isComposite` gates hid the
+stall backstop and the in-flight datum from anyone who connected one key, which is most
+people. Removed as a class, not point-fixed: re-introducing the gate on the second twin
+reddens exactly one test, which is what makes it a class fix rather than a coincidence.
+
+**A refusal is never computed from a series being re-derived.** Mid-re-derive the screen is
+amber and says so; red is reserved for a verdict that is current.
+
+### Fixed — found by the pre-landing review
+
+**An account that has never traded is no longer trapped in an unwinnable wait.** The
+mid-re-derive guard assumed "a strategy with nothing has no analytics row". False for the
+wizard's own path: key-mode returns DONE without stamping, and the status bridge then writes
+`complete` off the job aggregate alone. A never-traded account repolled forever behind
+"usually takes 15–30 seconds". It now gets its honest insufficient-history refusal. Three
+test harnesses had been mocking a state PostgREST cannot produce — status `complete` with a
+no-row read — which is what certified the bug; all three now model reality.
+
+**Re-connecting an already-onboarded account no longer dead-ends.** The dedup fence resolved
+onto *finalized* strategies, so the wizard resumed onto a non-draft and finalize refused it
+with a 409 that a refresh could not clear. The fence now resolves only onto drafts, and a
+finished strategy owning the identity gets a truthful refusal naming it, rather than "a
+wizard session is already in progress".
+
+**A composite draft can no longer be deleted by the CSV branch.** During the add-keys phase a
+composite draft has no `api_key_id` and no members yet, so it was classified `"csv"` — which
+force-switched the tab and offered a Start-fresh that deleted it. A draft whose branch cannot
+be established is now withheld entirely, not guessed. (The `"csv"` arm turned out to be
+inhabitable only by API-branch drafts: no CSV wizard draft exists.)
+
+**The wizard page degrades on an unreadable draft instead of erroring out.** Its helper throws
+on an unknowable draft kind; the route handler caught that, the page did not, so a transient
+fault replaced the whole wizard with an error boundary. Both callers now fail the same way —
+closed, but quietly.
+
 ## [0.58.0.0] - 2026-08-12
 ### v1.17 — a key can no longer skip its own scope check, and the fixes that reached one path now reach both
 
