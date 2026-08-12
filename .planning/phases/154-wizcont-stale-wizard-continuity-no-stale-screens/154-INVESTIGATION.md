@@ -161,6 +161,101 @@ scope for this phase**, per the CONTEXT.md decision that names both instances.
 
 ---
 
+## RED evidence
+
+> ⛔ **"The test covers it" is not evidence.** 154-VALIDATION.md § Falsifiability Ledger: *"Observed
+> means run. Paste the failing assertion."* Everything below is pasted from an actual run at the
+> pre-fix commit. No production source file was modified to produce it.
+
+**Run (Task 154-01-02), at HEAD:**
+
+```
+npx vitest run src/hooks/useStrategySyncPoller.test.ts \
+  "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.stale.runtime.test.tsx" \
+  --no-file-parallelism
+# exit 1
+```
+
+```
+ ❯ |jsdom| …/steps/SyncPreviewStep.stale.runtime.test.tsx (4 tests | 3 failed) 126ms
+     × T1: a status frozen at pending past the patience window stops claiming trades are being fetched
+     × T1b: a single-key strategy gets the interrupted-sync affordance the composite arm already gets
+     × T2b: a kickoff 200 whose body says queued:false does not put the wizard in the in-flight claim
+ ❯ |jsdom| src/hooks/useStrategySyncPoller.test.ts (5 tests | 1 failed) 34ms
+     × T2: a zero-rows read is NEVER reported as the fabricated "pending" status
+
+ Test Files  2 failed (2)
+      Tests  4 failed | 5 passed (9)
+```
+
+### T2 — the supplier, pinned at the seam (`useStrategySyncPoller.ts:228-229`)
+
+```
+AssertionError: The poll read NOTHING — PostgREST's { data: null, error: null } zero-rows answer —
+and the hook reported "pending", a value no writer ever wrote. …
+  expected [ 'pending', 'pending', …(11) ] to not include 'pending'
+ ❯ src/hooks/useStrategySyncPoller.test.ts:316:11
+    316|     ).not.toContain("pending");
+```
+
+⭐ **Thirteen fabrications from thirteen empty reads.** This is M2(ii) reproduced in isolation: the
+read succeeded and found nothing, and the hook answered with a domain value.
+
+### T1 — the surface consequence (`SyncPreviewStep.tsx:2313-2323`)
+
+```
+AssertionError: After ~16.7 minutes of a status that never advanced, the wizard is still telling a
+single-key user "Fetching trades…". …
+  expected 'Computing your verified factsheetWe a…' not to contain 'Fetching trades...'
+
+Received: "Computing your verified factsheetWe are fetching your trade history from the exchange
+and computing risk metrics. Usually takes 15–30 seconds.Fetching trades...1000sSync is taking much
+longer than expected. You can leave this page and come back — the draft is saved."
+```
+
+⭐ **Note the rendered elapsed counter: `1000s`.** Sixteen minutes on the clock, the sentence
+unchanged, and the only thing the screen offers is *"you can leave this page"*. That is the founder's
+2026-08-04 screen, reproduced.
+
+### T1b — the mechanism (TWIN-2, `SyncPreviewStep.tsx:2290-2291`)
+
+```
+AssertionError: The SF-1 stall backstop fired — the status has not advanced for the whole patience
+budget — and the amber recoverable banner (with its Retry affordance) was suppressed because
+isComposite is false. …
+  expected null not to be null
+```
+
+The backstop clock ran, the banner markup and the retry handler both exist, and one `isComposite &&`
+conjunct withheld all of it from exactly the users with no other exit.
+
+### T2b — M4's shape (`SyncPreviewStep.tsx:777-783`)
+
+```
+AssertionError: The kickoff answered 200 with "queued: false" … and the wizard entered the waiting
+state anyway …
+  expected 'Computing your verified factsheetWe a…' not to contain 'Fetching trades...'
+```
+
+⚠️ M4 is **ruled out** as the 2026-08-04 supplier (Q2: the work *was* queued and *did* complete).
+T2b is not a replay of the incident — it pins the second route to the same false claim, because the
+honest-kickoff property is worth having independently of which supplier fired once.
+
+### The cases that PASS at HEAD — and why they are load-bearing
+
+| Case | File | Why it must be green |
+|---|---|---|
+| `SYM-interval` | hook | **TWIN-3.** The interval arm (`:151-159`) meets the *identical* `{data:null,error:null}` read with `if (!data) { … return; }` and never calls `onStatus`. The module already contains its own correct answer; the defect is that one module answers one question two ways. |
+| `INTERVAL-CTRL` | hook | Without it `SYM-interval` would pass **vacuously** if `.single()` were unwired in the double (the read would reject, `onStatus` would never fire, and an absence assertion would be satisfied by a broken harness). |
+| `LADDER-CTRL` | hook | Proves the ladder arm *does* read, report and reach `onTerminal` in this harness — so T2's absence assertion means something. |
+| `WAITING-CTRL` | component | Proves the in-flight sentence renders **inside** the patience window. States the property the fix must not break: **the defect is the unbounded claim, not the claim.** Deleting the sentence is not a fix, and this case reddens if a fix over-reaches. |
+| `DOUBLE` | hook | Pins the zero-rows double against PostgREST's real shape. A later edit to `{ data: undefined }` would send T2 green having proved nothing (154-VALIDATION § Oracle Independence, last bullet). |
+
+Every absence assertion additionally carries the vacuity fence `expect(text.length).toBeGreaterThan(0)`
+— a component that rendered nothing at all would otherwise satisfy all of them.
+
+---
+
 ## Residual: what this evidence cannot settle
 
 `compute_jobs` and `strategy_analytics` prove the **server** state at 11:39:35. They cannot prove
