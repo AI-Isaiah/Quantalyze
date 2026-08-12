@@ -112,13 +112,21 @@ const MUST_STAMP_NO_STORE: readonly string[] = [
   "portfolio-strategies/allocation/route.ts",
   "strategies/[id]/ownership/route.ts",
   "strategies/[id]/name/route.ts",
+  // Phase 154 (WIZCONT-01) — GET /api/strategies/wizard-draft returns the
+  // caller's own wizard DRAFT row (name, description, AUM, capacity, linked
+  // api_key_id). That is squarely the tenant-data class this gate locks — the
+  // sibling `strategies/draft/[id]/route.ts` is the precedent — so the route
+  // joins the allowlist at creation rather than waiting for the next audit
+  // cycle. Its own route.test.ts additionally pins `private, no-store` on the
+  // 200-with-draft, the 200-null and the 500 arms.
+  "strategies/wizard-draft/route.ts",
 ];
 
 describe("no-store coverage: audited tenant-data routes stamp NO_STORE_HEADERS", () => {
   // Vacuity guard: a typo that drops entries from the allowlist must fail,
   // not silently shrink the gate.
-  it("locks the full audited tenant-data surface (36 routes)", () => {
-    expect(MUST_STAMP_NO_STORE.length).toBe(36);
+  it("locks the full audited tenant-data surface (37 routes)", () => {
+    expect(MUST_STAMP_NO_STORE.length).toBe(37);
     expect(new Set(MUST_STAMP_NO_STORE).size).toBe(MUST_STAMP_NO_STORE.length);
   });
 
