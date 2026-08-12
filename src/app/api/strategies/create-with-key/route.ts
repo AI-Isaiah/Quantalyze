@@ -99,8 +99,8 @@ function pickPlaceholderCodename(): string {
  * re-connect would land on a 409 instead of the existing row. That is the
  * failure this whole plan exists to remove.
  *
- * The precedent is this same flow, one phase old: `finalize-wizard/route.ts:1223`
- * reads the SIBLING non-allowlisted column `attested_venue` through
+ * The precedent is this same flow, one phase old: the `attested_venue` read in
+ * `finalize-wizard/route.ts` reaches the SIBLING non-allowlisted column through
  * `createAdminClient()` for the same structural reason (153.6-04 / PARITY-04).
  * ⭐ AND IT IS THE DIRECTION PHASE 156 IS ALREADY GOING — CONNECT-REFACTOR moves
  * this route's `api_keys` INSERT behind a service-role writer, so this read
@@ -459,8 +459,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
    * venue that hands back a STABLE NON-SECRET ACCOUNT ID at validation can be
    * fenced this way, and today that is MT5 alone: the broker login, which
    * `analytics-service/services/mt5_probe.py` asserts against the gateway. The
-   * ccxt adapter's `ValidationResult`
-   * (analytics-service/services/ingestion/adapter.py:98-123) carries NO
+   * ccxt adapter's `ValidationResult` dataclass
+   * (`analytics-service/services/ingestion/adapter.py`) carries NO
    * account-identity field at all, so every ccxt venue has nothing to stamp,
    * stays NULL, and the partial index excludes it. Recorded as a residual in
    * REQUIREMENTS.md rather than papered over.
