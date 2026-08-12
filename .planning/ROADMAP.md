@@ -492,7 +492,17 @@ Plans:
   2. STALE-01's root cause is investigated and documented BEFORE any fix is planned — the poll loop should have terminated at 11:39:35 and did not; why is the open question. After the fix: the wizard never sits on "Fetching trades…" after the job chain has finished, and never renders a refusal computed from a stale analytics row while a re-derive is in flight.
   3. Re-connecting the same credentials from a context that has LOST the wizard-session token (different browser/profile, cleared localStorage, incognito) fails TOWARD the existing row — identity from a stable non-secret venue value where one exists, never uniqueness on ciphertext, and never a silent overwrite of a key whose `strategy_keys` membership other strategies depend on (WIZCONT-02 — LOW priority within the phase; the common case is already safe).
 
-**Plans**: TBD
+**Plans**: 8 plans in 3 waves
+
+Plans:
+- [ ] 154-01-PLAN.md — STALE-01 investigation gate: Q1/Q2 PROD discriminator + T1/T2/T3 RED (wave 1)
+- [ ] 154-02-PLAN.md — WIZCONT-01 plumbing: single-sourced draft query + wizard-draft route + REQUIREMENTS correction (wave 1)
+- [ ] 154-03-PLAN.md — WIZCONT-02 DB: venue_account_id column, partial UNIQUE, scrub trigger, RPC re-base, TEST apply (wave 1)
+- [ ] 154-04-PLAN.md — STALE-01a shared fix: poller absent-row honesty (TWIN-3) + sync-progress widening (wave 2)
+- [ ] 154-05-PLAN.md — WIZCONT-01 resume UX: overlay deferred mount + CSV short-circuit truth table + e2e (wave 2)
+- [ ] 154-06-PLAN.md — WIZCONT-02 app: one-fence-two-keys, 23505 discrimination (TWIN-8), dedup notice (wave 2)
+- [ ] 154-07-PLAN.md — STALE-01 supplier arm (CONTINGENT on 154-01 verdict): Python/SQL root-cause fix or recorded NO-OP (wave 2)
+- [ ] 154-08-PLAN.md — STALE-01 honest screens: un-gated backstop, R2-5 twin, amber state, ledger closure (wave 3)
 **UI hint**: yes
 
 ### Phase 155: MT5-VERIFY — The numbers are true, live on a trading day
@@ -523,7 +533,7 @@ Plans:
 | 151. AUM book + sizing | 7/7 | Complete    | 2026-08-07 |
 | 152. SCEN composer legibility | 6/6 | Complete    | 2026-08-07 |
 | 153. WIZFORM + MT5-14 | 0/? | Not started | - |
-| 154. WIZCONT + STALE | 0/? | Not started | - |
+| 154. WIZCONT + STALE | 0/8 | Not started | - |
 | 155. MT5-VERIFY + acceptance | 0/? | Not started | - |
 
 ## Requirement Coverage (v1.17)
