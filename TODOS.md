@@ -2037,7 +2037,9 @@ bargain has two halves; this section is the second one. Source: `153.4-REVIEW.md
   control in a race with the `finally` records one for nothing). **Non-blocking:** provably
   unread — the next submit clears it. The composite step takes the stricter delete-per-attempt
   shape; matching it removes the question. Owner: unassigned.
-- [ ] **IN-06 — the migration chain cannot be replayed from scratch locally** (`supabase start`
+### Phase 153.6 (PARITY) — infrastructure findings surfaced while shipping, logged per stopping rule (added 2026-08-12)
+
+- [ ] **P156-IN-01 — the migration chain cannot be replayed from scratch locally** (`supabase start`
   / `supabase db reset` both die at `20260416125432_rebalance_drift_weekly_index.sql` with
   `CREATE INDEX CONCURRENTLY cannot be executed within a pipeline (SQLSTATE 25001)`;
   **15** migrations under `supabase/migrations/` use `CONCURRENTLY`). **Non-blocking:** CI
@@ -2047,7 +2049,7 @@ bargain has two halves; this section is the second one. Source: `153.4-REVIEW.md
   TEST apply against an already-migrated database, which cannot catch ordering/chain defects.
   Discovered 2026-08-11 while trying to certify phase 153.6's `20260811210000`. A fix would
   likely split CONCURRENTLY statements out of the pipelined path. Owner: unassigned.
-- [ ] **IN-07 — assertion 5's gate marker has no symmetric post-verify** in
+- [ ] **P156-IN-02 — assertion 5's gate marker has no symmetric post-verify** in
   `20260811210000_api_keys_attested_venue.sql`. Assertion 5 (5a–5e) in
   `supabase/tests/test_api_keys_exchange_not_user_writable.sql` arms on the `20260811210000`
   substring in `api_keys.attested_venue`'s column comment. The migration post-verifies the
