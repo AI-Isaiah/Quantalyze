@@ -208,7 +208,10 @@ beforeEach(() => {
   rateLimitResult.success = true;
   rateLimitResult.retryAfter = 0;
   fetchCalls = [];
-  globalThis.fetch = mockFetch as unknown as typeof globalThis.fetch;
+  // stubGlobal, not `globalThis.fetch = …` — only a stub is undone by
+  // `unstubGlobals: true` (vitest.config.ts). A direct assignment leaks this
+  // mock to every later file in the worker.
+  vi.stubGlobal("fetch", mockFetch as unknown as typeof globalThis.fetch);
   process.env.ANALYTICS_SERVICE_URL = "https://analytics.test";
   process.env.INTERNAL_API_TOKEN = "test-internal-token";
 });
@@ -517,7 +520,7 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
         return Promise.reject(err);
       },
     );
-    globalThis.fetch = abortingFetch as unknown as typeof globalThis.fetch;
+    vi.stubGlobal("fetch", abortingFetch as unknown as typeof globalThis.fetch);
 
     try {
       const { POST } = await import("@/app/api/verify-strategy/route");
@@ -537,7 +540,7 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
       expect(typeof body.human_message).toBe("string");
     } finally {
       // Restore the default mock for subsequent tests.
-      globalThis.fetch = mockFetch as unknown as typeof globalThis.fetch;
+      vi.stubGlobal("fetch", mockFetch as unknown as typeof globalThis.fetch);
     }
   });
 

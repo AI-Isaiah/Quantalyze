@@ -145,6 +145,14 @@ from services.mt5_concurrency import (
     _Mt5PostReadVerificationError,
     mt5_terminal_lease,
 )
+# 153.6 / A3 — the operator-fault type + its curated copy, for the
+# classify_exception arm. worker -> services leaf, the correct direction (D-07):
+# `services/mt5_probe.py` imports only mt5_client + mt5_validation and can never
+# import back into this module.
+from services.mt5_probe import (
+    MT5_GATEWAY_MISCONFIGURED_DETAIL,
+    Mt5GatewayMisconfigured,
+)
 from services.sfox_factory import make_sfox_client
 from services.sfox_read import sfox_transactions_crawl_wallclock_budget_s
 
@@ -632,6 +640,33 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
             "permanent",
             "Credentials could not be decrypted — key may have rotated",
         )
+
+    # 153.6 / A3. The MT5 gateway terminal refuses automated trading (MetaQuotes'
+    # default-ON "Disable automatic trading through the external Python API"), so
+    # an investor login cannot be distinguished from a master one and no read-only
+    # verdict is available. PERMANENT: it is a setting in OUR gateway and no retry
+    # can clear it. Before this arm the adapter raised a bare RuntimeError, which
+    # fell through to the ("unknown", str(exc)) catch-all at the bottom — and
+    # `unknown` RETRIES, so the worker re-ran the whole SERIALIZED probe against
+    # the ONE shared terminal on every attempt, queueing ahead of every other
+    # user's validate, for a fault that can never clear.
+    #
+    # Ships a FIXED message for the same reason the InvalidToken arm above does:
+    # str(exc) is not safe to render here. `mt5linux` f-string-interpolates the
+    # password into the source it evaluates remotely (T-134-01 / T-153.3-23), so
+    # any text originating upstream is a credential-disclosure surface — and the
+    # pre-fix copy named investor and master passwords to the user outright.
+    #
+    # ⛔ Placed ABOVE the ccxt hierarchy and the fall-through, per this function's
+    # most-specific-first contract. THIS ARM IS THE ONE DISPOSITION (D-17/OQ-4),
+    # deliberately: not a DispatchResult(error_kind="permanent") in long_fetch and
+    # not an HTTPException(422). The sink arm also covers process_key.py's other
+    # adapter.validate call sites, and importing FastAPI into an ingestion adapter
+    # would invert the dependency direction D-07 forbids. Do not "also" add either
+    # of the sibling conventions — two dispositions for one fault is the drift
+    # this phase exists to remove.
+    if isinstance(exc, Mt5GatewayMisconfigured):
+        return ("permanent", MT5_GATEWAY_MISCONFIGURED_DETAIL)
 
     # FastAPI HTTPException — analytics_runner raises 400 for "Insufficient
     # trade history" and similar pre-condition failures that no amount of

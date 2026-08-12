@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.58.0.0] - 2026-08-12
+### v1.17 — a key can no longer skip its own scope check, and the fixes that reached one path now reach both
+
+Phase 153.6 closes five clusters of the same defect: a fix that landed on one code path and
+never reached its twin. Each cluster shipped with a mutation run against it, because the
+recurring lesson of this phase is that a guard nobody falsified is not a guard.
+
+### Fixed
+
+**A key can no longer be labelled its way past the scope probe.** `api_keys.exchange` is
+client-writable, so a user could hand-set the venue and the submit-time scope-broadening
+check would believe it. The gate now reads a new `attested_venue` column that a direct client
+INSERT cannot set — a `BEFORE INSERT` trigger scrubs any client-supplied value to NULL — and
+NULL means *probe*, never "assume fine". A `CHECK` pins `attested_venue` to `exchange` so the
+two can never diverge. Migration `20260811210000`, applied to TEST and verified: 2320 rows
+attested, 118 post-cutoff rows correctly left unattested, none divergent.
+
+**MT5 key validation behaves the same on both paths.** Three fixes that reached
+`routers/exchange.py` had never reached `services/ingestion/mt5.py` or the job worker: the
+`order_check` short-circuit, the materialization-failure arm, and the classification of an
+operator misconfiguration. All three now live in one shared `services/mt5_probe.py` that both
+callers use, guarded by an ast roster that fails if a second copy of the probe body ever
+appears.
+
+**A gateway fault no longer reads as a credential problem.** `Mt5GatewayMisconfigured` is
+classified permanent with copy that names no credential. A stage-1 session abandon answers
+424 instead of a 503 blaming `mt5-gateway`, and a refused restart no longer emits an
+`mt5.stage` event that would pollute recovery-latency reporting.
+
+**The connect wait no longer gives up before the route does.** The client deadline was sized
+against the circuit breaker's healthy column; the state a route is actually in when a client
+deadline fires is the failing one. Both venue arms were short by the same 10.5 seconds. They
+are now 190,500 ms and 100,500 ms, each clearing its route by exactly the intended grace.
+
+**A probe that returns an unreadable answer offers Retry again.** A parse miss was classified
+onto the same no-Retry code as a permanent refusal, leaving users with a dead end on a
+transient fault. It now has its own recoverable code.
+
+### Changed
+
+**The test suite runs in half the time.** 291 test files that never touch a DOM now run under
+`environment: "node"` instead of jsdom, cutting environment setup CPU from 1556s to 627s.
+A test that only passed inside a warm worker — it waited on a `next/dynamic` import measured at
+1359 ms against a 1000 ms default — was given an honest budget rather than left to flake, and
+eight files that leaked `globalThis.fetch` now install it through `vi.stubGlobal` so it is
+restored. Full suite: 181s, 11,652 passing, none failing.
+
 ## [0.57.0.1] - 2026-08-11
 ### CI — the fence tests stop competing with a 2320-row backlog for their own row
 

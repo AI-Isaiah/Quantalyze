@@ -2,12 +2,12 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260710180000_wizard_composite.sql
--- --------------------------------------------------------------------------
--- FUNCTION 1: add_wizard_composite_key — composite-draft fence + per-key add.
--- Signature is column-for-column identical to create_wizard_strategy so the
--- route's encrypt+persist call site is a drop-in sibling.
--- --------------------------------------------------------------------------
+-- source migration: 20260811210000_api_keys_attested_venue.sql
+-- ────────────────── 3. add_wizard_composite_key (re-based on 20260710180000)
+-- Re-based VERBATIM on the LATEST definition, migration
+-- 20260710180000_wizard_composite.sql:53-141, with the same two additions.
+-- The DISTINCT 'wizcomposite:' advisory-lock space and the lazy composite-draft
+-- creation are byte-identical to that body.
 CREATE OR REPLACE FUNCTION public.add_wizard_composite_key(
   p_user_id UUID,
   p_exchange TEXT,
@@ -82,15 +82,21 @@ BEGIN
 
   -- ALWAYS mint a fresh encrypted api_keys row (this IS the per-key add — the
   -- api_keys INSERT column list mirrors create_wizard_strategy verbatim).
+  -- 153.6 / PARITY-04: attested_venue stamped from the caller-supplied
+  -- p_exchange, exactly as in the single-key twin — and, exactly as there, from
+  -- the SAME parameter as `exchange`, which the CHECK
+  -- api_keys_attested_venue_matches_exchange requires (CR-01).
   INSERT INTO api_keys (
     user_id, exchange, label,
     api_key_encrypted, api_secret_encrypted, passphrase_encrypted,
-    dek_encrypted, nonce, kek_version, is_active
+    dek_encrypted, nonce, kek_version, is_active,
+    attested_venue
   )
   VALUES (
     p_user_id, p_exchange, p_label,
     p_api_key_encrypted, p_api_secret_encrypted, p_passphrase_encrypted,
-    p_dek_encrypted, p_nonce, COALESCE(p_kek_version, 1), TRUE
+    p_dek_encrypted, p_nonce, COALESCE(p_kek_version, 1), TRUE,
+    p_exchange
   )
   RETURNING id INTO v_key_id;
 

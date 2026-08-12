@@ -91,7 +91,34 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      fixing the timeout on a one-account architecture buys a working single user, not a working
      product. Decide the architecture before sizing the budget.
 
-0.4 **⛔ PHASE 153.6 — PARITY: the fixes that only landed on one path (BOOKED 2026-08-11, not yet planned).**
+0.3 **🔒⛔ THE PROBE GATE'S ATTESTATION IS NOT SERVER-VALIDATED — candidate for PHASE 154 (raised 2026-08-12, shipped-with-residual in 153.6 / PR #675).**
+   Phase 153.6 closed the *client-INSERT* door on the finalize-wizard scope probe: `attested_venue`
+   is scrubbed to NULL by a `BEFORE INSERT` trigger, NULL means PROBE, and a `CHECK` pins
+   `attested_venue = exchange` so the two cannot diverge. **It did not close the RPC door.**
+   `create_wizard_strategy` and `add_wizard_composite_key` validate nothing, write the
+   caller-supplied `p_exchange` verbatim into `attested_venue`, and still hold
+   `GRANT EXECUTE … TO authenticated` — reachable directly over PostgREST, with the browser
+   already holding the server-minted ciphertext (`/api/keys/validate-and-encrypt` returns it).
+   So a caller can still mint an `mt5`-attested key and skip the ASVS V4 scope probe.
+   ⭐ **Why it is not exploitable today, and why that is not a control:** the RPC derives BOTH
+   `exchange` and `attested_venue` from ONE parameter, so forging the attestation also forges the
+   ingestion label — and `mt5`, the only probe-exempt venue, cannot sync a ccxt key. The attack is
+   self-defeating **by accident of the current venue set**, not by design.
+   ⛔ **The expiry condition is concrete:** the day a **syncable** venue joins
+   `scopeProbeSupported: false` in `src/lib/closed-sets.ts`, the forgery becomes FREE. Phase 153.6
+   RESEARCH names **sFOX** as the plausible next member, and sFOX go-live is already booked
+   (item 3 below). Whoever adds that venue must close this FIRST.
+   **The fix (remedy (a), deferred deliberately in 153.6):** move the `api_keys` INSERT behind a
+   **service-role writer that passes the venue IT validated**, and **withdraw `authenticated`
+   EXECUTE** on both RPCs. This is the "connect-flow refactor" both `20260810120000` and
+   `20260811210000` defer. It is the only option that makes the column's own claim true.
+   Recorded as `threat_flag: deferred-control` in `REQUIREMENTS.md` (PARITY-04), in
+   `20260811210000`'s section 1b, and in the `attested_venue` column comment — so a venue author
+   meets it at the point of change, not in a phase summary.
+   📌 **Suggested as the Phase 154 subject** over the roadmap's queued item, since the residual is
+   live on PROD and its expiry is gated on another already-booked workstream.
+
+0.4 **⛔ PHASE 153.6 — PARITY: the fixes that only landed on one path (✅ SHIPPED 2026-08-12 as PR #675, v0.58.0.0 — residual above).**
    Raised by `/code-review xhigh` over the whole 153→153.5 span (40 agents, 29 verified findings
    → 13 distinct defects). **Nine come here**; two were fixed unplanned in the same session; two
    are deliberately out. Full charter in `.planning/ROADMAP.md` under *Phase 153.6*.
@@ -584,10 +611,23 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   `/api/keys/validate-and-encrypt` and then performs the `api_keys` INSERT **itself**
   (`ApiKeyManager.tsx:254`, `StrategyForm.tsx:140`, `AllocatorExchangeManager.tsx:591`), so a
   crafted client can insert a venue that differs from the one the server actually validated.
-  **Why this is not filed FIX NOW:** the ciphertext is server-minted and only ever minted for a
-  key the server confirmed read-only (`validate-and-encrypt/route.ts:310`), and with UPDATE
-  revoked a mislabelled row can never be corrected back — so the forged strategy's sync fails
-  permanently and no credible listing results. The forgery is self-defeating, not harmful.
+  ⛔ **CORRECTED 2026-08-12 (Phase 153.6 D-04 / migration re-audit M2-05). The original "why
+  this is not filed FIX NOW" rested on a claim that is FALSE**, and it is recorded here rather
+  than by editing `20260810120000`, which is already applied. The argument was: the ciphertext is
+  server-minted and only ever minted for a key the server confirmed read-only
+  (`validate-and-encrypt/route.ts:310`), and with UPDATE withdrawn a mislabelled row could never
+  be restored to its true venue — so the forged strategy's sync would fail permanently, no
+  credible listing could result, and the forgery was self-defeating. **It was not.**
+  `20260810120000` touches UPDATE only and deliberately leaves INSERT and DELETE alone (both are
+  live client paths), so the forger never needed to restore the row: DELETE + re-INSERT under a
+  forged `exchange` was the round trip, and `20260723172032` had already widened
+  `api_keys_exchange_check` to admit the probe-exempt venue. The bypass was LIVE from
+  2026-08-10 until `20260811210000`.
+  ✅ **The probe-gate half is now closed** by `20260811210000_api_keys_attested_venue.sql`, which
+  moves the scope-probe gate off this column onto `api_keys.attested_venue` (RPC-written, scrubbed
+  to NULL on every client INSERT). What remains open here is the INSERT path itself — and
+  ⚠️ `exchange` still feeds the `strategies.asset_class` annualization stamp (√365 vs √252), which
+  is a money-math reader and is still forgeable (153.6 OQ-2).
   **Fix when the connect flow is next opened:** move the INSERT server-side into
   `validate-and-encrypt` (it already knows the canonical venue it validated) and return the new
   row id, then `REVOKE INSERT ON api_keys FROM authenticated`. That is a three-component
@@ -2024,3 +2064,26 @@ bargain has two halves; this section is the second one. Source: `153.4-REVIEW.md
   control in a race with the `finally` records one for nothing). **Non-blocking:** provably
   unread — the next submit clears it. The composite step takes the stricter delete-per-attempt
   shape; matching it removes the question. Owner: unassigned.
+### Phase 153.6 (PARITY) — infrastructure findings surfaced while shipping, logged per stopping rule (added 2026-08-12)
+
+- [ ] **P156-IN-01 — the migration chain cannot be replayed from scratch locally** (`supabase start`
+  / `supabase db reset` both die at `20260416125432_rebalance_drift_weekly_index.sql` with
+  `CREATE INDEX CONCURRENTLY cannot be executed within a pipeline (SQLSTATE 25001)`;
+  **15** migrations under `supabase/migrations/` use `CONCURRENTLY`). **Non-blocking:** CI
+  applies SQL tests against the remote TEST project via `psql`, so nothing in the pipeline
+  depends on a local replay. **Why it matters anyway:** a migration that auto-applies to PROD
+  on merge currently has no from-zero rehearsal environment — the only pre-merge signal is the
+  TEST apply against an already-migrated database, which cannot catch ordering/chain defects.
+  Discovered 2026-08-11 while trying to certify phase 153.6's `20260811210000`. A fix would
+  likely split CONCURRENTLY statements out of the pipelined path. Owner: unassigned.
+- [ ] **P156-IN-02 — assertion 5's gate marker has no symmetric post-verify** in
+  `20260811210000_api_keys_attested_venue.sql`. Assertion 5 (5a–5e) in
+  `supabase/tests/test_api_keys_exchange_not_user_writable.sql` arms on the `20260811210000`
+  substring in `api_keys.attested_venue`'s column comment. The migration post-verifies the
+  *exchange* marker (check (d)) but has no symmetric check for this one, which gates strictly
+  more. **Measured 2026-08-12 (round-3 audit):** dropping the substring COMMITS the migration
+  and makes the whole 5a–5e family print `SKIP (5)` — a silent loss of the RPC-door coverage.
+  **Non-blocking:** the file carries the marker today and all of 5a–5e were proven to run; the
+  realistic way to lose it is a *future* migration re-stamping that comment, at which point
+  this file's `$verify$` no longer runs, so a symmetric check would buy little. Guard hygiene.
+  Owner: unassigned.

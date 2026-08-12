@@ -1091,7 +1091,11 @@ describe("AllocatorExchangeManager — migration 075 soft-disconnect + Reconnect
         headers: { "Content-Type": "application/json" },
       }),
     );
-    globalThis.fetch = fetchMockReconnect as unknown as typeof fetch;
+    // stubGlobal, not `globalThis.fetch = …` — only a stub is undone by
+    // `unstubGlobals: true` (vitest.config.ts), and this describe (unlike its
+    // siblings above) has no afterEach of its own. A direct assignment leaks
+    // this mock to every later file in the worker.
+    vi.stubGlobal("fetch", fetchMockReconnect as unknown as typeof fetch);
   });
 
   it("disconnected key renders in the Disconnected section with a Reconnect button (no Sync / Disconnect)", () => {

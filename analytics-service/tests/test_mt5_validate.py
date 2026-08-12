@@ -47,6 +47,7 @@ Regression gates — WHY each case matters (Rule 9):
 from __future__ import annotations
 
 import asyncio
+import logging
 import pathlib
 import sys
 import threading
@@ -1959,4 +1960,210 @@ async def test_an_abandoned_session_refusal_is_transient_never_a_bodyless_500(
     validate = _mt5_events(captured, "validate")
     assert len(validate) == 1
     assert validate[0]["outcome"] == "transient"
+    assert validate[0]["ok"] is False
+
+
+async def test_an_abandoned_read_terminal_escapes_the_broad_arm_unabsorbed(
+    exchange_router, caplog
+):
+    """⭐ 153.6 / B1 — the broad `except Exception` must NOT swallow the fence.
+
+    The sibling case above fences at `account_info`, which is OUTSIDE any broad
+    handler. This one fences at `terminal_info` — the one read wrapped in a
+    deliberately fail-CLOSED `except Exception` — by advancing the terminal
+    generation from inside the transport's `account_info()`, so the PRE bracket
+    succeeds and the very next session touch is refused by the production
+    `_assert_live`.
+
+    ⚠️ THE STATUS IS NOT THE ORACLE, AND THAT IS THE WHOLE DIFFICULTY. Absorbed,
+    the refusal becomes a `None` terminal read -> "undetermined" -> the
+    terminal-signal-unavailable arm, which answers 424/NETWORK_UNAVAILABLE too —
+    the SAME response D-40 produces. A test that asserted only the status could
+    not tell the two apart and would stay green with the bug restored.
+
+    The DISTINGUISHING oracle is what an operator reads in Railway. Absorbed, the
+    broad arm logs `terminal_info failed to materialize (error_class=...)`: a
+    gateway MATERIALIZATION fault that never happened, on a session that was
+    simply fenced — and the probe then continues on a "terminal unreadable"
+    premise that is false. Unabsorbed, that line is never written and the D-40
+    line names the real cause.
+
+    Reds against `services/mt5_probe.read_terminal` with its
+    `except Mt5SessionAbandoned: raise` arm removed or moved below the broad arm.
+    """
+    from services.mt5_client import bump_mt5_terminal_epoch
+
+    router = exchange_router
+    key = _expected_terminal_key("mt5-gw.internal", 18812)
+
+    transport = MagicMock(name="mt5-transport")
+    transport.login = MagicMock(return_value=True)
+    transport.terminal_info = MagicMock(return_value=_Netref(**_HEALTHY_TERMINAL_INFO))
+    transport.order_check = MagicMock(return_value=_Netref(**_INVESTOR_ORDER_CHECK))
+
+    def _account_info():
+        # The lease this session began under releases while the probe thread is
+        # between its PRE bracket and the terminal read. `bump_mt5_terminal_epoch`
+        # is the SHIPPED release hook — the same call `mt5_terminal_lease`'s
+        # `finally` makes — so the refusal below is the production fence, not a
+        # hand-thrown stand-in.
+        bump_mt5_terminal_epoch(key)
+        return _Netref(**_INVESTOR_ACCOUNT)
+
+    transport.account_info = _account_info
+    _install_real_mt5_client(router, transport)
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+
+    # THE EFFECT ORACLE: the fence really fired at the terminal read, so the
+    # transport was never asked for the terminal snapshot.
+    transport.terminal_info.assert_not_called()
+    transport.order_check.assert_not_called()
+
+    # ⭐ THE DISTINGUISHING ORACLE. The broad arm never claimed a materialization
+    # fault, because the fence type reached its own arm first.
+    assert "failed to materialize" not in caplog.text, (
+        "the broad `except Exception` in read_terminal absorbed the fence refusal "
+        "and reported it as a gateway netref-materialization failure that never "
+        "happened — an operator triaging this reads a fabricated cause, and the "
+        "probe continues on a false 'terminal unreadable' premise (B1)"
+    )
+    assert "capability undetermined" not in caplog.text, (
+        "an absorbed fence refusal degraded into a capability verdict — the exact "
+        "translation D-42 makes structurally impossible at the classify arms and "
+        "B1 reintroduced upstream of them"
+    )
+    # ...and the D-40 line names the real cause.
+    assert "abandoned by its own lease" in caplog.text
+
+    # The disposition is D-40's, unchanged: transient, retryable, never a 500,
+    # never a verdict against the user's key or their broker server.
+    assert ei.value.status_code == 424
+    assert ei.value.code == "NETWORK_UNAVAILABLE"
+    assert ei.value.recoverable is True
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    assert ei.value.detail != MT5_WRONG_SERVER_DETAIL
+    assert ei.value.detail != AUTH_FAILED_DETAIL
+
+
+# --------------------------------------------------------------------------- #
+# 153.6 / B2 — the CONNECT-STAGE abandon, and why the status is the whole point
+#
+# WHY this matters (Rule 9 — the economics, not the arm's own shape). The
+# construction fence (D-36 AMENDED (ii)) raises `Mt5SessionAbandoned("connect")`
+# from INSIDE `Mt5Client.__init__`, i.e. inside the stage-1 connect `to_thread`.
+# The stage-2 probe try has carried a dedicated D-40 arm since 153.5; the stage-1
+# try never did, so the fence landed in `except Exception as connect_err:` and was
+# answered **503 MT5_GATEWAY_UNREACHABLE with dependency="mt5-gateway"**.
+#
+# ⛔ THAT STATUS IS A BREAKER VOTE, not just a number. `src/lib/resilient-fetch.ts`
+# names this exact arm as one of only three sites that COUNT toward
+# `breaker:mt5-gateway`; a 424 counts nowhere. So an abandoned thread OF OUR OWN —
+# a fault that says nothing at all about the gateway's health, and that the very
+# next request clears by taking a fresh lease — was casting votes to trip the
+# breaker against a perfectly healthy gateway, and every user's MT5 validate was
+# told "the gateway is not responding, try again shortly" for it.
+#
+# ⚠️ D-15: this is NOT arm-reordering. The dedicated arm at the top of this file's
+# comment sits on a DIFFERENT `try` (stage 2, the probe). Stage 1 needed its own.
+#
+# ⚠️ The SIBLING obligations, pinned elsewhere in this file and deliberately not
+# duplicated here: an `asyncio.TimeoutError` on the same try still takes its own
+# arm (`test_a_connect_stage_timeout_leaves_no_rpyc_socket_open`), and an
+# unrelated construction failure still answers the transient 503
+# (`test_an_unrelated_construction_valueerror_stays_transient`). The new arm may
+# only NARROW what reaches the 503.
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_connect_stage_abandon_is_transient_and_never_the_counting_503(
+    exchange_router,
+):
+    """⭐ 153.6 / B2, driven by the SHIPPED construction fence rather than by an
+    injected exception object.
+
+    The REAL `Mt5Client` runs over an injected `_connect` seam that bumps the
+    terminal generation as its side effect — which is exactly "the caller's
+    `wait_for` fired and its lease released while this blocking connect was on the
+    wire" (finding #6's shape). The occupancy token the fence compares against is
+    the one the router's own `mt5_terminal_lease` published, carried into the
+    connect thread by `asyncio.to_thread`'s context copy. Nothing here hand-throws
+    the type, so this also proves it can ARRIVE at the stage-1 `try` at all.
+
+    THE ORACLE IS THE STATUS, and unusually for this suite that is the strong
+    oracle rather than the weak one: 503-with-`dependency="mt5-gateway"` IS the
+    breaker vote, so the difference between the two dispositions is the difference
+    between a self-inflicted platform outage and a retry that works.
+    """
+    from services.mt5_client import Mt5Client as _RealMt5Client
+    from services.mt5_client import bump_mt5_terminal_epoch
+
+    router = exchange_router
+    key = _expected_terminal_key("mt5-gw.internal", 18812)
+    transport = MagicMock(name="mt5-transport")
+    connects: list[int] = []
+
+    def _connect(**_ignored):
+        # ⭐ THE ABANDONMENT: the lease this construction was spawned under
+        # releases while the blocking connect is still in flight. The POST-connect
+        # arm of the construction fence then disposes the socket and refuses.
+        connects.append(1)
+        bump_mt5_terminal_epoch(key)
+        return transport
+
+    factory = MagicMock(
+        side_effect=lambda *a, **kw: _RealMt5Client(*a, _connect=_connect, **kw)
+    )
+    router.Mt5Client = factory
+
+    with capture_logs() as captured:
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+
+    # NON-VACUITY, asserted first: the seam really ran, so the refusal below is the
+    # production fence firing POST-connect and not some earlier guard.
+    assert connects == [1], (
+        "the connect seam never ran — this case would be proving nothing about the "
+        "construction fence"
+    )
+    transport.login.assert_not_called()
+
+    # ⭐ THE DISPOSITION. 424 = CALLER'S EXCHANGE, the route's EXISTING transient
+    # shape, byte-mirrored from the stage-2 D-40 arm. No new user-facing code is
+    # minted (153.1 owns that table).
+    assert ei.value.status_code == 424
+    assert ei.value.code == "NETWORK_UNAVAILABLE"
+    assert ei.value.recoverable is True
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+
+    # ⛔ THE OTHER HALF, and the one B2 is about. A 503 here is a vote to trip
+    # `breaker:mt5-gateway` — cast by our own abandoned thread, against a gateway
+    # that answered the connect perfectly well.
+    assert ei.value.status_code != 503, (
+        "an abandoned CONNECT was answered 503 MT5_GATEWAY_UNREACHABLE — one of "
+        "exactly three sites that count toward breaker:mt5-gateway "
+        "(src/lib/resilient-fetch.ts). The fault is our own zombie thread, not "
+        "gateway health, and the next request clears it by taking a fresh lease "
+        "(B2)"
+    )
+    assert "mt5-gateway" not in repr(ei.value.detail), (
+        "the refusal still carries the gateway dependency name — the breaker-keyed "
+        "body shape, on a fault that is not the gateway's"
+    )
+    assert not (ei.value.headers or {}).get("Retry-After"), (
+        "the transient MT5 arms do not advertise a gateway Retry-After; only the "
+        "breaker-counting 503 does"
+    )
+    # ...and never a verdict against the user's key or their broker server.
+    assert ei.value.detail != MT5_WRONG_SERVER_DETAIL
+    assert ei.value.detail != AUTH_FAILED_DETAIL
+
+    # The emitted outcome moves with the disposition: `transient`, never the
+    # `gateway_unreachable` category the 503 arms stamp.
+    validate = _mt5_events(captured, "validate")
+    assert len(validate) == 1, f"expected one validate outcome event: {captured}"
+    assert validate[0]["outcome"] == "transient"
+    assert validate[0]["outcome"] != "gateway_unreachable"
     assert validate[0]["ok"] is False

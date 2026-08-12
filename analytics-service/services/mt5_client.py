@@ -790,6 +790,32 @@ class Mt5Client:
         started_at = time.perf_counter()
         try:
             result = call()
+        except Mt5SessionAbandoned:
+            # ⛔ NOT a `mt5.stage` event. A refusal is not a round-trip; emitting
+            # one would pollute the `duration_ms` population Phase 155 depends on
+            # with zero-duration non-calls. If a COUNT is ever wanted it needs a
+            # distinct event name. (153.6 / B3 — the sentence is `_assert_live`'s
+            # own, quoted deliberately: the two fences must state ONE contract.)
+            #
+            # ⭐ WHY THE ARM IS HERE AND NOT AT THE ONE CALL SITE. `restart()`'s
+            # check 1 already sits OUTSIDE this bracket for exactly this reason,
+            # and every `_assert_live` fence is written ahead of its `_timed` for
+            # it too — but check 2 CANNOT be: three cleanup invariants must run
+            # before its raise, so it is inline and inside. Making the contract
+            # structural HERE means it holds for every stage, including whichever
+            # fence somebody adds inside a bracket next.
+            #
+            # ⛔ FENCE TYPE ONLY, and that is the whole safety argument.
+            # `Mt5SessionAbandoned` is raised at exactly four sites, all our own
+            # fences (`__init__` x2, `_assert_live`, `restart`'s check 2 —
+            # grep-verified), so nothing from transport can hide behind it.
+            # Widening this to `Exception` would delete the FAILURE half of the
+            # D-32 population, which is the censored measurement D-32 exists to
+            # replace; `tests/test_mt5_client_contract.py`'s positive control
+            # reds if anyone tries.
+            #
+            # Re-raised bare: same object, same type, same `__traceback__`.
+            raise
         except BaseException as exc:  # noqa: BLE001 — re-raised bare on the next line
             emit_mt5_stage_event(
                 stage,

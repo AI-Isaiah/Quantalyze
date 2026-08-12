@@ -1160,12 +1160,21 @@ describe("[153.4-04 / WIZFORM-05] ConnectKeyStep — the honest long wait", () =
   // The ENCRYPT leg the route spends AFTER validate, hand-typed. The browser is
   // aborting the ROUTE, and the route is `validateKey` → `encryptKey` → RPC.
   const ENCRYPT_BUDGET_MS = 30_000;
+  // The BREAKER'S OWN STORE for the whole route in the FAILING state, hand-typed:
+  // 2 seam legs x 3 commands x 4 250 ms. The failing state is the one a route is
+  // in when a client deadline fires — a healthy seam never keeps the browser this
+  // long — so it, not the closed state's 8 500, is what the deadline must cover
+  // (153.6 / PARITY-03).
+  const BREAKER_STORE_FAILING_MS = 25_500;
   // The browser's margin OVER the promise it made, hand-typed.
   const ABORT_GRACE_MS = 15_000;
   const MOUNT_DELAY_MS = 300;
   /** When the browser gives up on the ROUTE, hand-typed on the serialized arm. */
   const SERIALIZED_DEADLINE_MS =
-    SERIALIZED_BUDGET_MS + ENCRYPT_BUDGET_MS + ABORT_GRACE_MS;
+    SERIALIZED_BUDGET_MS +
+    ENCRYPT_BUDGET_MS +
+    BREAKER_STORE_FAILING_MS +
+    ABORT_GRACE_MS;
 
   // ── The copy, hand-typed ───────────────────────────────────────────────────
   const SIGNING_IN = "Signing in to your broker...";

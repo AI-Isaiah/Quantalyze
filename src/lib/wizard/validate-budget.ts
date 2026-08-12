@@ -151,6 +151,47 @@ export const WAIT_ABORT_GRACE_MS = 15_000;
 export const ENCRYPT_KEY_BUDGET_MS = 30_000;
 
 /**
+ * The BREAKER'S OWN STORE, in the FAILING state, for one whole connect route —
+ * in milliseconds.
+ *
+ * Hand-typed twin of the store term `seam-budgets.invariant.test.ts` charges in
+ * SC-4b, for the same reason and under the same rules as the three budget
+ * figures above — ⛔ this module may never import the seam table, and this one
+ * could not be imported even if it were allowed to: it is not a single exported
+ * constant anywhere, it is an arithmetic over three of them.
+ *
+ * ITS DERIVATION, WRITTEN OUT so a reader never has to re-derive it:
+ *
+ *   2 seam legs on a connect route (`validate-key*` then `encrypt-key`)
+ *     x STORE_COMMANDS_PER_SEAM_CALL.failing = 3 commands per seam call
+ *       (the pre-fetch `mget`, plus the trip path's `get` and `set`)
+ *     x STORE_COMMAND_WORST_CASE_MS = 4 250 ms per command
+ *       ( = (1 + BREAKER_STORE_RETRIES) x BREAKER_STORE_TIMEOUT_MS
+ *           + BREAKER_STORE_RETRIES x BREAKER_STORE_BACKOFF_MS
+ *         = 2 x 2 000 + 1 x 250 )
+ *   = 25 500 ms
+ *
+ * ⚠️ THE FAILING STATE, DELIBERATELY, AND THAT IS THE WHOLE POINT (PARITY-03).
+ * The closed state charges one command per seam call (8 500 ms for the route);
+ * the failing state charges three. A client deadline is only ever REACHED when
+ * the seam is stalling, and a stalling seam is what puts the breaker in the
+ * failing state — so the closed figure describes a route the browser never
+ * waits on. Sizing the deadline on it is the 153.6 defect this constant exists
+ * to close.
+ *
+ * ⚠️ It is deliberately NOT a copy figure, exactly like `ENCRYPT_KEY_BUDGET_MS`.
+ * Nothing the wizard says to the user names this number; it exists only so the
+ * browser's deadline can cover the whole route rather than the legs of it that
+ * happen to have their own budget rows.
+ *
+ * ⛔ IT IS NOT PER-VENUE. The store cost does not depend on the validate budget,
+ * which is why both venue arms were short by the identical 10 500 ms
+ * (`25 500 − WAIT_ABORT_GRACE_MS`) and why one edit inside
+ * `connectAbortDeadlineMsFor`'s arm-agnostic body fixes both.
+ */
+export const BREAKER_STORE_WORST_CASE_FAILING_MS = 25_500;
+
+/**
  * When the BROWSER gives up on a CONNECT ROUTE, in milliseconds.
  *
  * ⛔ NOT `validateBudgetMsFor(exchange) + WAIT_ABORT_GRACE_MS`, and the difference
@@ -161,15 +202,38 @@ export const ENCRYPT_KEY_BUDGET_MS = 30_000;
  * `encryptKey` THEN a Supabase RPC, and neither route reads `request.signal` — a
  * client abort has no server-side effect at all. Sizing the deadline against the
  * validate leg alone put it at 135 000 ms on the serialized arm while the route's
- * own budget runs to ~158 500 ms, which made the deadline reachable ALMOST
+ * own budget runs far past it, which made the deadline reachable ALMOST
  * EXCLUSIVELY in the window where validate had already SUCCEEDED and the route was
  * encrypting and storing the key. The browser then rendered
  * `SEAM_DEADLINE_EXCEEDED`, whose copy says *"Nothing was saved — your key was not
  * stored"*, over a request that was at that moment storing it.
  *
- * Covering validate + encrypt puts the abort AFTER every deadline the route
- * enforces on itself, so the verdict is only ever reached when the server has
- * genuinely stopped answering — which is the condition that copy describes.
+ * ⛔ THE GOVERNING FIGURE IS THE FAILING COLUMN, NOT THE CLOSED ONE (PARITY-03).
+ * The first fix for CR-01 covered validate + encrypt + grace and compared the
+ * result against the CLOSED-breaker worst case of these routes. That column
+ * describes a healthy seam — and a healthy seam does not keep a browser waiting
+ * long enough to reach a client deadline. The state a route is in WHEN THIS
+ * DEADLINE FIRES is the failing one, whose figures are (from
+ * `seam-budgets.invariant.test.ts`'s branch table):
+ *
+ *   | connect route, per branch | closed  | failing |
+ *   |---------------------------|---------|---------|
+ *   | serialized-venue          | 158 500 | 175 500 |
+ *   | default-venue             |  68 500 |  85 500 |
+ *
+ * so the deadline must cover 175 500 / 85 500, not 158 500 / 68 500. Covering
+ * validate + encrypt + the failing-state store worst case + grace puts the abort
+ * AFTER every deadline the route enforces on itself — 190 500 ms on the
+ * serialized arm and 100 500 ms on the default one, each exceeding its route's
+ * failing worst case by exactly the grace — so the verdict is only ever reached
+ * when the server has genuinely stopped answering, which is the condition that
+ * copy describes. Both remain far under the routes' 300 000 ms `maxDuration`.
+ *
+ * ⭐ THE STORE TERM IS ARM-AGNOSTIC, so this body is too. The shortfall was
+ * `25 500 − 15 000 = 10 500 ms` on BOTH arms, identical because the breaker's
+ * store cost does not depend on the validate budget. A fix that corrected only
+ * the serialized arm would have been this repo's own headline mistake — an
+ * instance fix wearing a class fix's clothes.
  *
  * ⚠️ The figure the COPY advertises stays `validateBudgetSecondsFor` — what we
  * grant the broker. The advertised promise and the abort deadline are deliberately
@@ -183,6 +247,9 @@ export function connectAbortDeadlineMsFor(
   exchange: string | null | undefined,
 ): number {
   return (
-    validateBudgetMsFor(exchange) + ENCRYPT_KEY_BUDGET_MS + WAIT_ABORT_GRACE_MS
+    validateBudgetMsFor(exchange) +
+    ENCRYPT_KEY_BUDGET_MS +
+    BREAKER_STORE_WORST_CASE_FAILING_MS +
+    WAIT_ABORT_GRACE_MS
   );
 }

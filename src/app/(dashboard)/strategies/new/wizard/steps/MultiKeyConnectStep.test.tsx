@@ -2083,14 +2083,36 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
   // The ENCRYPT leg the route spends AFTER validate, hand-typed. The browser is
   // aborting the ROUTE, and `composite/add-key` is validateKey → encryptKey → RPC.
   const ENCRYPT_BUDGET_MS = 30_000;
+  // The BREAKER'S OWN STORE for the whole route in the FAILING state, hand-typed:
+  // 2 seam legs x 3 commands x 4 250 ms. The failing state is the one a route is
+  // in when a client deadline fires — a healthy seam never keeps the browser this
+  // long — so it, not the closed state's 8 500, is what the deadline must cover
+  // (153.6 / PARITY-03).
+  const BREAKER_STORE_FAILING_MS = 25_500;
   // The browser's margin OVER the promise it made, hand-typed.
   const ABORT_GRACE_MS = 15_000;
   const MOUNT_DELAY_MS = 300;
   /** When the browser gives up on the ROUTE, hand-typed on the serialized arm. */
   const SERIALIZED_DEADLINE_MS =
-    SERIALIZED_BUDGET_MS + ENCRYPT_BUDGET_MS + ABORT_GRACE_MS;
+    SERIALIZED_BUDGET_MS +
+    ENCRYPT_BUDGET_MS +
+    BREAKER_STORE_FAILING_MS +
+    ABORT_GRACE_MS;
   /** The step's one interval period — the granularity every elapsed figure has. */
   const TICK_MS = 1_000;
+  /**
+   * When the panel LOOP actually acts on that deadline, hand-typed.
+   *
+   * ⚠️ THIS STEP HAS NO PER-PANEL `setTimeout`. It enforces every panel's
+   * deadline from the single 1 000 ms interval above, so a deadline that is not
+   * a whole number of ticks is acted on at the FIRST TICK AT OR AFTER it:
+   * 190 500 → 191 000. That rounding is UP, which is the safe direction — the
+   * browser still gives up LAST, by up to one tick more. It became visible when
+   * 153.6 / PARITY-03 moved the deadline off a round 165 000, and it is written
+   * down rather than absorbed into a `+ 1` because the ROUNDING is a property of
+   * this step that the single-key step does not share.
+   */
+  const SERIALIZED_DEADLINE_TICK_MS = 191_000;
 
   // ── The copy, hand-typed ────────────────────────────────────────────────────
   const SIGNING_IN = "Signing in to your broker...";
@@ -2584,7 +2606,7 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     // encrypt) plus its own grace, never at the validate budget itself —
     // aborting there could cut off a verdict already on the wire, or a key
     // already being stored (153.4 review CR-01).
-    await advance(SERIALIZED_DEADLINE_MS + 1);
+    await advance(SERIALIZED_DEADLINE_TICK_MS);
 
     expect(cardIn(0), "the card outlived the request it describes").toBeNull();
     const envelope = within(panelAt(0)).getByTestId("error-envelope");
@@ -2622,7 +2644,7 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     // it into `connect_key` is what made the multi-key path invisible before.
     await mixedVenuePanels();
     validate(0);
-    await advance(SERIALIZED_DEADLINE_MS + 1);
+    await advance(SERIALIZED_DEADLINE_TICK_MS);
 
     expect(wizardErrorCalls()).toEqual([
       {
@@ -2641,7 +2663,7 @@ describe("[153.4-05 / WIZFORM-05] MultiKeyConnectStep — the honest long wait, 
     // typing — the worst outcome this phase can produce, and a silent one.
     await mixedVenuePanels();
     validate(0);
-    await advance(SERIALIZED_DEADLINE_MS + 1);
+    await advance(SERIALIZED_DEADLINE_TICK_MS);
 
     expect(within(panelAt(0)).getByTestId("error-envelope")).toHaveTextContent(
       "Your key details are still on this page.",

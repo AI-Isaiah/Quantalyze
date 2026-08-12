@@ -436,10 +436,10 @@ held). Line hints are `as of 2026-08-11` only: **if a hint disagrees with its sy
 
 **Goal**: Every fix the 153 span made on one path exists on its twin, and no broad `except` re-absorbs a refusal the fence was built to surface
 **Depends on**: Phase 153.3 (the router fixes whose twins are missing), Phase 153.5 (the fence whose refusals are being swallowed), Phase 153.4 (the budget figure being corrected)
-**Requirements**: TBD at planning (derive from the nine findings below)
+**Requirements**: PARITY-01, PARITY-02, PARITY-03, PARITY-04, PARITY-05 (minted at planning 2026-08-11; defined + traced in `.planning/REQUIREMENTS.md` — the W-153.5-1 debt is NOT repeated)
 **Owns**: `analytics-service/services/ingestion/mt5.py`, `analytics-service/routers/exchange.py`, `analytics-service/services/mt5_client.py`, `src/lib/wizard/validate-budget.ts`, `src/lib/seam-budgets.invariant.test.ts`, `src/app/api/strategies/finalize-wizard/route.ts`, `supabase/migrations/**`, `analytics-service/tests/**`
 **UI hint**: no
-**Plans**: TBD
+**Plans**: 6 plans
 
 ⭐ **Raised by `/code-review xhigh` over the whole 153→153.5 span (2026-08-11, 40 agents, 29 verified findings → 13 distinct defects).** Nine come here; two were fixed unplanned; two are deliberately out (see the bottom).
 
@@ -456,7 +456,7 @@ held). Line hints are `as of 2026-08-11` only: **if a hint disagrees with its sy
 **B — Absorption: broad `except` re-swallowing the fence (2 findings + 1 telemetry split).** D-42 made absorption structurally impossible *for the classify arms*; pre-existing catch-alls upstream reintroduced it.
 - B1 `routers/exchange.py` › `_read_terminal`'s `except Exception` swallows `Mt5SessionAbandoned` → an operator triaging in Railway reads a gateway materialization fault **that never happened**, and the probe continues on a "terminal unreadable" premise that is false.
 - B2 `routers/exchange.py` connect stage: the construction fence's `Mt5SessionAbandoned("connect")` is caught by the broad `except Exception as connect_err` before the dedicated D-40 arm, returning a **503 that counts toward the mt5-gateway breaker** — our own abandoned thread driving the breaker toward opening against a healthy gateway.
-- B3 `mt5_client.py` › `restart()` check 2 raises from INSIDE `_timed`, which emits an `mt5.stage` event with a `duration_ms` measuring a round-trip never made — the exact event check 1 was deliberately placed outside `_timed` to avoid (RESEARCH §Q-4). The two checks disagree about the telemetry contract.
+- B3 `mt5_client.py` › `restart()` check 2 raises from INSIDE `_timed`, which emits an `mt5.stage restart ok=False` event for a restart that was deliberately REFUSED. (Wording corrected per 153.6 D-16: the reconnect round-trip DID happen by the time check 2 fires, so `duration_ms` is real elapsed time — the defect is that a refusal enters the D-32 recovery-latency population Phase 155 reads, under a stage name real round-trips also use; that pollution is the exact thing check 1 was deliberately placed outside `_timed` to avoid, 153.5 RESEARCH §Q-4.) The two checks disagree about the telemetry contract.
 
 **C — The budget correction, and the oracle that cannot see it (1 finding, 2 halves).** `connectAbortDeadlineMsFor` was sized against the branch table's **closed**-breaker column (~158 500 ms) when the governing figure is the **failing** column (175 500 ms serialized / 85 500 ms default) — the failing state being exactly the state a stalling seam is in when a client deadline fires. So CR-01's "nothing was saved" lie is reachable again ~10.5 s before the route finishes writing the key. ⛔ **Fixing the number alone is half the job: `seam-budgets.invariant.test.ts`'s oracle pins the wrong column and so is structurally unable to red on this.** A guard that cannot fail when the behaviour it names changes is the defect class this span shipped repeatedly.
 
@@ -473,7 +473,12 @@ held). Line hints are `as of 2026-08-11` only: **if a hint disagrees with its sy
 - Two trivial findings (compare-route skeleton padding + its blind test oracle; the `as unknown as` composite-embed cast in `finalize-wizard`) were fixed unplanned in the same session.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 153.6 to break down)
+- [x] 153.6-01-PLAN.md — Cluster A + B1: extract `services/mt5_probe.py`, rewire both paths, A3 permanent classification (wave 1)
+- [x] 153.6-02-PLAN.md — Cluster C: failing-column deadline on BOTH arms + the state-quantified economic oracle (wave 1)
+- [x] 153.6-03-PLAN.md — Cluster D (DB): `attested_venue` migration, INVOKER trigger, count-pinned backfill, RPC re-bases, SQL round-trip test (wave 1)
+- [x] 153.6-04-PLAN.md — Cluster D (route): the probe gate reads the attestation, never `exchange`; class sweeps re-pointed (wave 1)
+- [x] 153.6-05-PLAN.md — Cluster B remainder (B2 connect-stage arm, B3 `_timed` suppression) + the ast parity roster (wave 2)
+- [x] 153.6-06-PLAN.md — Cluster E: `KEY_SCOPE_CHECK_UNREADABLE` recoverable code + pin re-cuts 74→75, 32 UNMOVED (wave 2)
 
 
 ### Phase 154: WIZCONT/STALE — Wizard continuity, no stale screens

@@ -2024,6 +2024,131 @@ def test_a_restart_abandoned_mid_reconnect_never_reaches_the_shared_shutdown(cap
     assert refusals, "the fenced restart returned normally instead of refusing"
 
 
+def test_a_fence_refusal_emits_no_stage_event_while_a_real_failure_still_does():
+    """⭐ 153.6 / B3 — the telemetry contract, made STRUCTURAL at the sink.
+
+    `restart()`'s check 2 is the one fence that raises from INSIDE the `_timed`
+    bracket, and it has to: three cleanup steps must run before the raise, so it
+    is written inline rather than via `_assert_live` (which raises at once and
+    would strand two sockets). `_timed`'s `except BaseException` therefore emitted
+    an `mt5.stage restart` event for a restart that DELIBERATELY DID NOTHING.
+
+    WHY THAT IS THE BUG (Rule 9 — the economics). `mt5.stage` `duration_ms` is the
+    recovery-latency population Phase 155 reads to decide what a wedged terminal
+    costs us. A refusal is not a round-trip; it is a near-zero-duration non-call.
+    Feeding refusals into that population drags the measured recovery latency
+    toward zero exactly when abandonment is most frequent — the census says
+    recovery is cheap precisely because it never happened. `_assert_live`'s
+    docstring already writes this contract down for the fences that sit outside
+    the bracket (⛔ "If a COUNT is ever wanted it needs a distinct event name");
+    the arm under test extends it to the one that cannot.
+
+    ⛔ THE POSITIVE CONTROL IS NOT OPTIONAL, and it is asserted on the SAME stage
+    through the SAME bracket. "No abandon event was emitted" is satisfied
+    perfectly by a `_timed` that emits nothing at all — the guard would then be
+    certifying that the instrument had been switched off. The second half drives a
+    GENUINE reconnect failure and demands its `ok=False` event, so only the fence
+    type can be suppressed.
+    """
+    key = f"{_TERMINAL_HOST}:{_TERMINAL_PORT}"
+
+    # ── HALF 1: the abandoned restart, the one fence inside the bracket ──────
+    stale = _FakeMt5({})
+    fresh = _FakeMt5({})
+    conns: dict[str, int] = {"n": 0}
+
+    def _connect(*, host, port, timeout):
+        conns["n"] += 1
+        if conns["n"] == 1:
+            return stale
+        # ⭐ THE ABANDONMENT, scheduled by the test exactly as the sibling case
+        # above schedules it: the bounded caller gave up on this restart and its
+        # lease released while the reconnect round-trip was in flight.
+        bump_mt5_terminal_epoch(key)
+        return fresh
+
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=_connect)
+
+    with capture_logs() as refused:
+        with pytest.raises(Mt5SessionAbandoned) as ei:
+            client.restart()
+
+    # Non-vacuity: the reconnect really ran, so the refusal below is check 2
+    # firing mid-bracket rather than the entry check refusing before any I/O.
+    assert conns["n"] == 2, "the reconnect never happened — nothing was in the bracket"
+
+    # ⭐ THE CONTRACT, stated over EVERY stage rather than over `restart`. The
+    # class name is hand-typed: an oracle importing it from the module under test
+    # could not fail a rename.
+    abandon_events = [
+        e for e in _stage_events(refused)
+        if e.get("error_class") == "Mt5SessionAbandoned"
+    ]
+    assert abandon_events == [], (
+        "a fence REFUSAL was recorded as an mt5.stage round-trip "
+        f"({abandon_events}). It is a near-zero-duration non-call, and it enters "
+        "the D-32 duration_ms population Phase 155 reads for recovery latency — "
+        "so the census reports recovery as cheap precisely on the runs where it "
+        "never happened (B3). If a COUNT of refusals is ever wanted it needs a "
+        "DISTINCT event name, exactly as _assert_live's docstring says."
+    )
+    assert _stage_events(refused, "restart") == [], (
+        "the refused restart emitted a `restart` stage event of some other shape "
+        "— the suppression must be the whole event, not merely the error_class"
+    )
+    # ...and the exception escapes UNCHANGED (the `_timed` docstring's ⛔).
+    assert type(ei.value) is Mt5SessionAbandoned
+    assert ei.value.stage == "restart"
+
+    # ── HALF 2: the fences that already sit OUTSIDE the bracket stay silent ──
+    # `_assert_live` refuses ahead of `_timed`, so no event is emitted today
+    # either. Asserted anyway: the contract is "no stage event EVER carries this
+    # class", and a future refactor that moved a fence inside the bracket would
+    # otherwise reintroduce B3 on a stage nobody was watching.
+    connect2, fake2, _rec2 = _make({"account": _FakeNamedTuple(equity=1.0)})
+    client2 = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect2)
+    client2.account_info()  # binds the generation
+    bump_mt5_terminal_epoch(client2.terminal_key)  # ...the lease releases
+
+    with capture_logs() as fenced_read:
+        with pytest.raises(Mt5SessionAbandoned):
+            client2.account_info()
+
+    assert [
+        e for e in _stage_events(fenced_read)
+        if e.get("error_class") == "Mt5SessionAbandoned"
+    ] == [], "a method-fence refusal reached the D-32 population"
+
+    # ── HALF 3: THE POSITIVE CONTROL — same stage, same bracket, real failure ──
+    boom = RuntimeError("rpyc connection refused by peer")
+    stale3 = _FakeMt5({})
+    conns3: dict[str, int] = {"n": 0}
+
+    def _connect3(*, host, port, timeout):
+        conns3["n"] += 1
+        if conns3["n"] == 1:
+            return stale3
+        raise boom  # a GENUINE reconnect failure, not a fence refusal
+
+    client3 = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=_connect3)
+
+    with capture_logs() as failed:
+        with pytest.raises(RuntimeError):
+            client3.restart()
+
+    restart_events = _stage_events(failed, "restart")
+    assert len(restart_events) == 1, (
+        "a REAL restart failure stopped emitting its stage event "
+        f"({failed}). The B3 suppression must be keyed on the fence TYPE alone; "
+        "widened to every exception it silently deletes the failure half of the "
+        "recovery-latency population — the censored measurement D-32 exists to "
+        "replace."
+    )
+    assert restart_events[0]["ok"] is False
+    assert restart_events[0]["error_class"] == "RuntimeError"
+    assert isinstance(restart_events[0]["duration_ms"], int)
+
+
 def test_a_restart_already_abandoned_at_entry_refuses_before_any_io():
     """The entry check is not the load-bearing one, but it is not decorative: an
     already-abandoned restart must not open a socket nobody will ever close.

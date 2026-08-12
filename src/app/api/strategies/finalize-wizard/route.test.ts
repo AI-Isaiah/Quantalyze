@@ -113,6 +113,20 @@ const STATE = vi.hoisted(() => ({
   adminStrategiesError: null as { message: string } | null,
   // H-0323 — exchange returned by admin api_keys SELECT (unified path).
   adminApiKeysExchange: "okx" as string | null,
+  // 153.6-04 / PARITY-04 — the RPC-written venue returned by the same admin
+  // api_keys SELECT (the route widened it to `select("exchange, attested_venue")`,
+  // so both columns arrive on one round trip and both are drivable from a test).
+  //
+  // ⭐ IT IS A SEPARATE FIELD FROM `adminApiKeysExchange` ON PURPOSE, and the
+  // separation IS the fixture. `exchange` is client-writable at INSERT (the
+  // 20260810120000 lock only revoked UPDATE), so the two columns can DISAGREE on a
+  // real row: that is the forged label. A harness that derived one from the other
+  // could not express the state cluster D exists to close.
+  //
+  // Default mirrors `adminApiKeysExchange`'s "okx" so the baseline row is an
+  // ordinary post-backfill key that agrees with itself; the NULL (legacy /
+  // trigger-scrubbed) state is driven EXPLICITLY by the rows that test it.
+  adminApiKeysAttestedVenue: "okx" as string | null,
   // H-0323 — forced error on admin api_keys.exchange SELECT (unified
   // path) so the keyRowErr fallback branch is reachable from tests.
   adminApiKeysSelectError: null as { message: string } | null,
@@ -128,9 +142,18 @@ const STATE = vi.hoisted(() => ({
   // exchange )` embed the route now selects, so a member's VENUE is drivable
   // from a test. OPTIONAL: every pre-existing row omits it, which is exactly the
   // "embed came back empty" case, and those members must still be probed.
+  //
+  // 153.6-04 / PARITY-04 — the embed gained `attested_venue`, and it is OPTIONAL
+  // for the same reason `api_keys` itself is: a member row that carries only
+  // `exchange` is a real state (a legacy row, or the shape a pre-migration schema
+  // cache returns), and by the fail-toward rule it must PARSE and be PROBED rather
+  // than refuse the finalize.
   strategyKeysList: [] as Array<{
     api_key_id: string | null;
-    api_keys?: { exchange: string | null } | null;
+    api_keys?: {
+      exchange: string | null;
+      attested_venue?: string | null;
+    } | null;
   }> | null,
   // CR-01: typed as an open record, not `{ message: string }`. A Supabase error
   // on the NON-throwing path is a PLAIN parsed-JSON object carrying `code`,
@@ -284,7 +307,15 @@ vi.mock("@/lib/supabase/admin", () => ({
               single: async () => ({
                 data: STATE.adminApiKeysSelectError
                   ? null
-                  : { exchange: STATE.adminApiKeysExchange },
+                  : {
+                      exchange: STATE.adminApiKeysExchange,
+                      // 153.6-04 — the row carries BOTH columns because the route
+                      // asks for both on ONE read. The mock ignores the
+                      // projection string, which is what lets the same chain serve
+                      // the widened asset_class/probe read AND the narrower
+                      // `resolvedSource` read further down the route.
+                      attested_venue: STATE.adminApiKeysAttestedVenue,
+                    },
                 error: STATE.adminApiKeysSelectError,
               }),
             }),
@@ -528,6 +559,7 @@ beforeEach(async () => {
   STATE.adminStrategyName = "Alpha Centauri";
   STATE.adminStrategiesError = null;
   STATE.adminApiKeysExchange = "okx";
+  STATE.adminApiKeysAttestedVenue = "okx";
   STATE.adminApiKeysSelectError = null;
   STATE.strategyKeysCount = 0;
   STATE.strategyKeysCountError = null;
@@ -920,6 +952,19 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
  * founder clicked that Retry five times against a condition of exactly this
  * shape, which is the incident WIZFORM-04 exists to close.
  *
+ * ⚠️ AND RE-CUT ONCE MORE — 153.6-06 / PARITY-05. 153.2-04 was right that the
+ * parse miss is not a network blip and wrong that it is PERMANENT, and the two
+ * are not the same claim. "Until a deploy changes one side or the other" is
+ * satisfied by the deploy that is ALREADY ROLLING: an analytics release changes
+ * the probe body's shape for the minutes between the first new pod and the last
+ * old one, and in that window this arm fires for a condition that clears by
+ * itself. `KEY_SCOPE_CHECK_UNAVAILABLE`'s copy suppresses Retry structurally, so
+ * the fix for one dead end manufactured another. The parse miss now carries
+ * `KEY_SCOPE_CHECK_UNREADABLE` — its own code, honestly recoverable — and the
+ * permanent probe-STATUS arm keeps `KEY_SCOPE_CHECK_UNAVAILABLE` untouched. The
+ * distinction assertion below is unchanged and still load-bearing: the
+ * service-reported arm must not share a code with the parse miss either.
+ *
  * So the two arms now carry DIFFERENT hand-typed literals, and both are still
  * hand-typed rather than imported — the property under test is what the user is
  * told, and importing the route's own string would make each row agree with
@@ -937,12 +982,19 @@ describe("[140.3-03 / SEAMUX-07] the scope probe fails CLOSED on an unreadable 2
     error: "Exchange permission probe failed",
     code: "KEY_NETWORK_TIMEOUT",
   };
-  // 153.2-04 / D-14b — the PARSE-MISS arm, permanent and therefore
-  // non-recoverable. `KEY_SCOPE_CHECK_UNAVAILABLE` carries no recoverable
-  // action, so no Retry control renders at all (the structural suppression).
+  // ⚠️ RE-CUT AGAIN — 153.6-06 / PARITY-05. 153.2-04 put the parse miss on
+  // `KEY_SCOPE_CHECK_UNAVAILABLE`, whose copy is deliberately non-recoverable.
+  // The move off `KEY_NETWORK_TIMEOUT` was right; the destination was not. A 2xx
+  // body our schema cannot read is ALSO what a rolling analytics deploy
+  // produces, so it is not always permanent, and the permanent code's
+  // structural Retry suppression turned a five-minute deploy window into a dead
+  // end. It now carries its OWN code, recoverable, while
+  // `KEY_SCOPE_CHECK_UNAVAILABLE` stays exactly where it was for the genuinely
+  // permanent probe-STATUS arm. ⛔ Never back to `KEY_NETWORK_TIMEOUT`: "we
+  // could not reach the exchange" is the removed lie, and the exchange answered.
   const PARSE_MISS_ENVELOPE = {
     error: "Could not read the key scope response",
-    code: "KEY_SCOPE_CHECK_UNAVAILABLE",
+    code: "KEY_SCOPE_CHECK_UNREADABLE",
   };
 
   function mockProbeBody(body: unknown): ReturnType<typeof vi.spyOn> {
@@ -1096,6 +1148,160 @@ describe("[140.3-03 / SEAMUX-07] the scope probe fails CLOSED on an unreadable 2
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
     ).toBeDefined();
     fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * [153.6-06 / PARITY-05] THE PARSE MISS GETS ITS RETRY BACK, AND THE PERMANENT
+ * ARM DOES NOT.
+ *
+ * ⭐ THE ORACLE IS THE RENDERED TITLE, NEVER THE PRESENCE OF A RETRY CONTROL.
+ * That choice is the whole guard, and it is the OPPOSITE of the trap
+ * `SubmitStep.tsx` records for every other code it admits. A code the route
+ * emits but `KNOWN_FINALIZE_CODES` does not list falls through to `UNKNOWN` —
+ * and `UNKNOWN`'s copy carries `clear_and_retry`, so it IS recoverable and DOES
+ * render a Retry. An assertion phrased as "a Retry renders" would therefore
+ * pass against a completely unwired code, reporting the right control offered
+ * for the wrong reason, with a generic "Something went wrong." where the user
+ * needed "this is our deploy, it clears by itself". Pinning the TITLE is what
+ * distinguishes the two.
+ *
+ * ⚠️ Both titles are HAND-TYPED here, not imported from `WIZARD_ERROR_COPY`.
+ * Reading the subject to build the expectation is how a guard stops being able
+ * to fail: `expect(copy.title).toBe(WIZARD_ERROR_COPY[code].title)` is green for
+ * every possible value of the copy table, including UNKNOWN's.
+ *
+ * ⚠️ Both directions are asserted, in one block, because this plan's failure
+ * mode is a sweep. Handing the parse miss a Retry by widening
+ * `KEY_SCOPE_CHECK_UNAVAILABLE`'s actions would ALSO hand one to the permanent
+ * probe-status arm, where a retry is guaranteed to fail — the T-153.6-E2
+ * elevation. The second `it` is the one that reds if that shortcut is taken.
+ */
+describe("[153.6-06 / PARITY-05] the two probe-failure envelopes are told apart by their COPY", () => {
+  // Hand-typed from the copy table, in this file, on purpose (see the docblock).
+  const UNREADABLE_TITLE = "We could not read the permission check's answer.";
+  const UNAVAILABLE_TITLE = "We could not check this key's permissions.";
+  // `UNKNOWN`'s title, hand-typed for the same reason. This is the string a
+  // roster omission would render — recoverable, so the Retry would still be
+  // there and only this comparison would notice.
+  const UNKNOWN_TITLE = "Something went wrong.";
+
+  it("a parse miss renders the UNREADABLE copy and IS recoverable — Retry returns", async () => {
+    const { buildEnvelope } = await import("@/lib/envelope");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      // A 2xx the schema cannot read: exactly what a half-rolled analytics
+      // deploy serves while the old pods are still answering.
+      new Response(JSON.stringify({ read: true, trade: "maybe" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    consoleErr.mockRestore();
+
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    // The code is read off the ROUTE's answer and fed to the real envelope
+    // builder, so this couples production copy to production classification.
+    const envelope = buildEnvelope(body.code, "corr-parity-05");
+
+    expect(
+      envelope.human_message,
+      "The parse miss must render its OWN copy. `Something went wrong.` means " +
+        "the code reached `UNKNOWN` — which is recoverable, so a Retry-presence " +
+        "assertion would have passed while the user read a generic dead end.",
+    ).toBe(UNREADABLE_TITLE);
+    expect(envelope.human_message).not.toBe(UNKNOWN_TITLE);
+    expect(
+      envelope.recoverable,
+      "A body we could not read is what a rolling deploy produces. It clears " +
+        "on its own, so the Retry control is the honest affordance.",
+    ).toBe(true);
+
+    // ⛔ The security half is UNCHANGED by this plan and is asserted, not
+    // assumed: a probe that did not run must still block the publish.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("a PERMANENT probe status keeps the UNAVAILABLE copy and stays NON-recoverable — no Retry", async () => {
+    const { buildEnvelope } = await import("@/lib/envelope");
+    // 400 — the venue has no probe adapter. `isPermanentProbeStatus` says so,
+    // and no number of retries changes it.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Unsupported exchange: mt5" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    consoleErr.mockRestore();
+
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    const envelope = buildEnvelope(body.code, "corr-parity-05");
+
+    expect(
+      envelope.human_message,
+      "The permanent arm's copy must not move. If this now reads the " +
+        "UNREADABLE title, the two conditions were swept onto one code again — " +
+        "which is the defect being fixed, in the other direction.",
+    ).toBe(UNAVAILABLE_TITLE);
+    expect(
+      envelope.recoverable,
+      "⛔ T-153.6-E2. Giving the parse miss a Retry by adding a recoverable " +
+        "action to `KEY_SCOPE_CHECK_UNAVAILABLE` would leak that control onto " +
+        "THIS arm, where the retry is guaranteed to fail. That shortcut reds here.",
+    ).toBe(false);
+
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("the two arms do not share a code — asserted against what the ROUTE answered", async () => {
+    // Both codes are read out of production on this one run's siblings above;
+    // here they are re-derived in ONE `it` so the claim is about the pair rather
+    // than about two constants declared next to each other in this file.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const parseMissSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ read: true, trade: "maybe" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    let POST = await importPost();
+    const parseMissCode = (await (await POST(makeReq(VALID_BODY))).json()).code;
+    parseMissSpy.mockRestore();
+
+    const permanentSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Unsupported exchange: mt5" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    POST = await importPost();
+    const permanentCode = (await (await POST(makeReq(VALID_BODY))).json()).code;
+    permanentSpy.mockRestore();
+    consoleErr.mockRestore();
+
+    expect(
+      parseMissCode,
+      "The transient parse miss and the permanent probe status shared a code " +
+        "from 153.2-04 until 153.6-06. Merging them again — in either " +
+        "direction — takes a control away from one condition or gives one to " +
+        "the other, and both are user-facing regressions.",
+    ).not.toBe(permanentCode);
   });
 });
 
@@ -3614,32 +3820,44 @@ describe("POST /api/strategies/finalize-wizard — OWN-03 capital-ownership mark
  * is a different derivation from the route's own branch — not the route's
  * behaviour compared against itself.
  */
+/**
+ * Proof the seam was never crossed, by both routes to it.
+ *
+ * 153.6-04 — hoisted out of the WIZFORM-04 `describe` so the PARITY-04 block
+ * below asserts through the SAME two helpers. Two copies of "did the probe run?"
+ * is how one copy quietly stops meaning it.
+ */
+function expectNoSeamCall(fetchSpy: ReturnType<typeof vi.spyOn>): void {
+  expect(
+    RF.lastCall,
+    "The resilience core was entered, so a live permissions probe was issued " +
+      "for a venue that has no per-key scope surface to report — the demand " +
+      "WIZFORM-04 removes.",
+  ).toBeNull();
+  expect(fetchSpy).not.toHaveBeenCalled();
+}
+
+/** Proof the seam WAS crossed, on the keys-permissions budget. */
+function expectSeamProbed(): void {
+  expect(
+    RF.lastCall,
+    "The scope-broadening probe did NOT run. It is an ASVS V4 control: a key " +
+      "broadened to trade/withdraw between Connect and Submit is caught here, " +
+      "and skipping it for a venue that can answer is a real hole.",
+  ).not.toBeNull();
+  expect(RF.lastCall!.budgetKey).toBe("keys-permissions");
+  expect(RF.lastCall!.path).toContain("/permissions?force_refresh=true");
+}
+
 describe("[153.2-04 / WIZFORM-04] the scope probe is gated on a CAPABILITY, and fails toward probing", () => {
-  /** Proof the seam was never crossed, by both routes to it. */
-  function expectNoSeamCall(fetchSpy: ReturnType<typeof vi.spyOn>): void {
-    expect(
-      RF.lastCall,
-      "The resilience core was entered, so a live permissions probe was issued " +
-        "for a venue that has no per-key scope surface to report — the demand " +
-        "WIZFORM-04 removes.",
-    ).toBeNull();
-    expect(fetchSpy).not.toHaveBeenCalled();
-  }
-
-  /** Proof the seam WAS crossed, on the keys-permissions budget. */
-  function expectSeamProbed(): void {
-    expect(
-      RF.lastCall,
-      "The scope-broadening probe did NOT run. It is an ASVS V4 control: a key " +
-        "broadened to trade/withdraw between Connect and Submit is caught here, " +
-        "and skipping it for a venue that can answer is a real hole.",
-    ).not.toBeNull();
-    expect(RF.lastCall!.budgetKey).toBe("keys-permissions");
-    expect(RF.lastCall!.path).toContain("/permissions?force_refresh=true");
-  }
-
   it("an MT5 single-key submit crosses the keys-permissions seam ZERO times (D-06)", async () => {
     STATE.adminApiKeysExchange = "mt5";
+    // 153.6-04 / PARITY-04 — the key is ATTESTED as mt5, which is what a key
+    // minted by the wizard RPC looks like. The capability record still governs
+    // the skip; only the AUTHORITY for the venue moved from the client-writable
+    // column to the server-attested one, so this row keeps its D-06 meaning and
+    // gains a truthful fixture.
+    STATE.adminApiKeysAttestedVenue = "mt5";
     // The read-only mock is installed DELIBERATELY: if the route still probed,
     // this row would pass on the response and fail only here. The spy is the
     // assertion, not the setup.
@@ -3654,6 +3872,7 @@ describe("[153.2-04 / WIZFORM-04] the scope probe is gated on a CAPABILITY, and 
 
   it("a ccxt submit still probes, byte-identically — binance", async () => {
     STATE.adminApiKeysExchange = "binance";
+    STATE.adminApiKeysAttestedVenue = "binance";
     const fetchSpy = mockProbeReadOnly();
 
     const POST = await importPost();
@@ -3670,6 +3889,7 @@ describe("[153.2-04 / WIZFORM-04] the scope probe is gated on a CAPABILITY, and 
     // currently SUCCEEDS for it is unknown, so D-22 pins it unchanged and the
     // question is logged rather than answered.
     STATE.adminApiKeysExchange = "sfox";
+    STATE.adminApiKeysAttestedVenue = "sfox";
     const fetchSpy = mockProbeReadOnly();
 
     const POST = await importPost();
@@ -3680,10 +3900,14 @@ describe("[153.2-04 / WIZFORM-04] the scope probe is gated on a CAPABILITY, and 
   });
 
   it("⭐ an UNRESOLVED venue is STILL probed — the control fails TOWARD probing", async () => {
-    // `api_keys.exchange` read faulted, so the route holds `null`. Skipping on
-    // null would silently disable the scope-broadening defence for every key
-    // whose venue read blipped — a control that fails open on a transient DB
-    // error is not a control (RESEARCH Pitfall 4 / ASVS V4).
+    // The api_keys read faulted, so the route holds `null` for the attested
+    // venue. Skipping on null would silently disable the scope-broadening
+    // defence for every key whose venue read blipped — a control that fails open
+    // on a transient DB error is not a control (RESEARCH Pitfall 4 / ASVS V4).
+    //
+    // ⛔ 153.6-04 — the failed read is ALSO why the probe gate must not inherit
+    // the asset_class stamp's non-blocking leniency. That arm is allowed to shrug
+    // and leave the draft's stamp alone; this one has to probe.
     STATE.adminApiKeysSelectError = { message: "transient read fault" };
     const fetchSpy = mockProbeReadOnly();
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -3701,6 +3925,7 @@ describe("[153.2-04 / WIZFORM-04] the scope probe is gated on a CAPABILITY, and 
     // DB ahead of the registry). The registry's answer for "I do not know this
     // venue" must be "probe it".
     STATE.adminApiKeysExchange = "some-venue-we-have-never-heard-of";
+    STATE.adminApiKeysAttestedVenue = "some-venue-we-have-never-heard-of";
     const fetchSpy = mockProbeReadOnly();
 
     const POST = await importPost();
@@ -3728,18 +3953,33 @@ describe("[153.2-04 / WIZFORM-04] the scope probe is gated on a CAPABILITY, and 
     ).toBeGreaterThan(0);
     expect(nonProbing.length).toBeLessThan(SUPPORTED_EXCHANGES.length);
 
+    // ⭐ 153.6-04 / PARITY-04 — THE SWEEP DRIVES THE ATTESTATION, AND PINS THE
+    // CLIENT-WRITABLE COLUMN TO A LABEL THAT CLAIMS EXEMPTION ON EVERY ITERATION.
+    // `exchange` is writable by the client at INSERT (the 20260810120000 lock
+    // revoked UPDATE only), so a gate that reads it can be told to skip. Holding
+    // it at a non-probing label for the whole sweep means a gate reading the
+    // WRONG column skips every venue — and every probing venue reds here.
+    //
+    // ⛔ The label is TAKEN FROM the opt-out set, never hand-named: naming a venue
+    // is the instance-fix habit this sweep exists to catch, and `nonProbing` is
+    // already fenced non-empty above.
+    const forgedLabel = nonProbing[0];
+
     const POST = await importPost();
     for (const venue of SUPPORTED_EXCHANGES) {
       RF.lastCall = null;
-      STATE.adminApiKeysExchange = venue;
+      STATE.adminApiKeysExchange = forgedLabel;
+      STATE.adminApiKeysAttestedVenue = venue;
       const fetchSpy = mockProbeReadOnly();
       await POST(makeReq(VALID_BODY));
       const shouldProbe = venueSupportsScopeProbe(venue);
       expect(
         RF.lastCall !== null,
-        `venue "${venue}": the route ${RF.lastCall ? "probed" : "skipped"} but ` +
-          `its capability row says it should ${shouldProbe ? "probe" : "skip"}. ` +
-          `The gate must read the CAPABILITY, never a venue name.`,
+        `attested venue "${venue}" (client label "${forgedLabel}"): the route ` +
+          `${RF.lastCall ? "probed" : "skipped"} but its capability row says it ` +
+          `should ${shouldProbe ? "probe" : "skip"}. The gate must read the ` +
+          `CAPABILITY of the ATTESTED venue — never a venue name, and never the ` +
+          `client-writable label.`,
       ).toBe(shouldProbe);
       fetchSpy.mockRestore();
     }
@@ -3753,19 +3993,40 @@ describe("[153.2-04 / WIZFORM-04] the scope probe is gated on a CAPABILITY, and 
     const { SUPPORTED_EXCHANGES, venueSupportsScopeProbe } = await import(
       "@/lib/closed-sets"
     );
+    const nonProbing = SUPPORTED_EXCHANGES.filter(
+      (v) => !venueSupportsScopeProbe(v),
+    );
+    // Anti-vacuity, restated for THIS sweep rather than borrowed from the one
+    // above: this loop now needs a non-probing label of its own, and a floor that
+    // lives in the other `it` cannot fence a derivation that happens here.
+    expect(
+      nonProbing.length,
+      "No venue opts out of the probe, so this sweep proves nothing. If the " +
+        "capability was removed, WIZFORM-04 was reverted.",
+    ).toBeGreaterThan(0);
+    expect(nonProbing.length).toBeLessThan(SUPPORTED_EXCHANGES.length);
+    // 153.6-04 — same forged-label discipline as the single-key sweep: the
+    // member's client-writable `exchange` claims exemption on every iteration, so
+    // a per-member gate reading it skips the whole set.
+    const forgedLabel = nonProbing[0];
+
     const POST = await importPost();
     for (const venue of SUPPORTED_EXCHANGES) {
       RF.lastCall = null;
       STATE.strategyRow = { api_key_id: null };
       STATE.strategyKeysCount = 1;
       STATE.strategyKeysList = [
-        { api_key_id: MEMBER_KEY_1, api_keys: { exchange: venue } },
+        {
+          api_key_id: MEMBER_KEY_1,
+          api_keys: { exchange: forgedLabel, attested_venue: venue },
+        },
       ];
       const fetchSpy = mockProbeReadOnly();
       await POST(makeReq(VALID_BODY));
       expect(
         RF.lastCall !== null,
-        `composite member on venue "${venue}" did not match its capability row.`,
+        `composite member attested "${venue}" (client label "${forgedLabel}") ` +
+          `did not match its capability row.`,
       ).toBe(venueSupportsScopeProbe(venue));
       fetchSpy.mockRestore();
     }
@@ -3811,6 +4072,7 @@ describe("[153.2-04 / WIZFORM-04] the scope probe is gated on a CAPABILITY, and 
     // route is capped on and feeds breaker:railway. This fix REMOVES calls; it
     // must never multiply them. One submit, one crossing.
     STATE.adminApiKeysExchange = "binance";
+    STATE.adminApiKeysAttestedVenue = "binance";
     const fetchSpy = mockProbeReadOnly();
 
     const POST = await importPost();
@@ -3818,6 +4080,187 @@ describe("[153.2-04 / WIZFORM-04] the scope probe is gated on a CAPABILITY, and 
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(RF.lastCall!.init.retriesOverride).toBe(0);
+    fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * Phase 153.6-04 / PARITY-04 — the probe gate stops believing the client.
+ *
+ * ── WHAT WAS BROKEN ─────────────────────────────────────────────────────────
+ *
+ * WIZFORM-04 gave the ASVS V4 scope-broadening probe a per-venue exemption and
+ * read the venue off `api_keys.exchange`. Migration 20260810120000 revoked
+ * client UPDATE on that column and backstopped it with a trigger — but INSERT
+ * was deliberately left open (the wizard's own client-side INSERT path depends
+ * on it). So the column is still client-writable at the one moment that matters:
+ * a row can be created carrying a label that CLAIMS the exemption, and the gate
+ * would honour it. The exemption was reachable by asking for it.
+ *
+ * ── THE DELIVERABLE, IN ONE SENTENCE ────────────────────────────────────────
+ *
+ * ⭐ The gate reads `attested_venue` — written only by the two SECURITY DEFINER
+ * wizard RPCs and NULLed by a BEFORE INSERT trigger for every non-privileged
+ * caller — and NOTHING else. The framing that binds is "the probe no longer
+ * believes the client", not "the client can no longer lie": the write half is a
+ * separate plan, and this half must hold even where that half has not reached.
+ *
+ * ⚠️ `attested_venue` IS NOT A SERVER-VALIDATED VENUE, and this docblock used to
+ * say it was (153.6 code review CR-01). The wizard RPCs write the `p_exchange`
+ * they were CALLED with, and `authenticated` can invoke them over PostgREST. The
+ * guarantee that actually holds is narrower and is enough for THIS file's claim:
+ * the column is unsettable from a client INSERT, and both RPCs write it and
+ * `exchange` from one parameter (pinned by the CHECK
+ * api_keys_attested_venue_matches_exchange), so a forged attestation drags the
+ * routing label with it. These rows deliberately set the two columns to
+ * DIFFERENT values to prove which one the gate reads — a state the CHECK
+ * prevents in the database, and that is the point: the fixture is exercising the
+ * gate's READ, not a reachable row state.
+ *
+ * ⛔ NULL ⇒ PROBED, AND THERE IS NO FALLBACK TO `exchange`. A legacy row the
+ * backfill has not reached, and a row whose client-supplied attestation the
+ * trigger scrubbed, are the SAME state to this gate, and it is the state that
+ * must fail TOWARD the control. Falling back to `exchange` when the attestation
+ * is null would make the whole change a no-op for every row that has one — the
+ * hole that never closes (RESEARCH Q4.4).
+ *
+ * ── WHY THESE ROWS ARE SHAPED THE WAY THEY ARE ──────────────────────────────
+ *
+ * ⚠️ EVERY ROW SETS THE TWO COLUMNS TO DIFFERENT VALUES. A fixture where they
+ * agree cannot tell the two gates apart, and the WIZFORM-04 block above is full
+ * of such fixtures by construction (they predate the distinction). Disagreement
+ * is the entire experiment.
+ *
+ * ⚠️ ASSERTED ON THE SEAM, NOT THE RESPONSE, for the reason the WIZFORM-04
+ * docblock gives: a route that probed and a route that never probed both answer
+ * 200, so a status assertion would be green under the defect.
+ */
+describe("[153.6-04 / PARITY-04] the probe gate reads the RPC-written venue, never the client label", () => {
+  it("⭐ a forged client label cannot buy a skip — an attested ccxt venue is PROBED", async () => {
+    // THE HEADLINE ORACLE. The row claims the exempt venue in the column a
+    // client can write at INSERT, and the server attested a venue that answers
+    // permissions probes. The attestation wins, so the probe runs.
+    STATE.adminApiKeysExchange = "mt5";
+    STATE.adminApiKeysAttestedVenue = "binance";
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectSeamProbed();
+    fetchSpy.mockRestore();
+  });
+
+  it("⭐ a NULL attestation is PROBED even when the client label claims the exemption", async () => {
+    // The legacy-unbackfilled row and the trigger-scrubbed row look identical
+    // from here, and both must be probed. ⛔ THIS ROW IS WHAT FORBIDS THE
+    // FALLBACK: a gate that read `attested_venue ?? exchange` would answer "mt5"
+    // here, skip, and be green on every other row in this block.
+    STATE.adminApiKeysExchange = "mt5";
+    STATE.adminApiKeysAttestedVenue = null;
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectSeamProbed();
+    fetchSpy.mockRestore();
+  });
+
+  it("an attested non-probing venue still SKIPS — only the authority moved, not the capability", async () => {
+    // ⛔ THE COUNTERWEIGHT, and it is not optional. Without it, "reads the
+    // attestation" is indistinguishable from "probes unconditionally" — which
+    // would pass both rows above while re-breaking every MT5 submit WIZFORM-04
+    // unblocked. The capability record still governs; the client label is the
+    // one that stopped mattering.
+    STATE.adminApiKeysExchange = "binance";
+    STATE.adminApiKeysAttestedVenue = "mt5";
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectNoSeamCall(fetchSpy);
+    fetchSpy.mockRestore();
+  });
+
+  it("⭐ composite: a member's forged label cannot buy a skip either — the attestation governs", async () => {
+    // The same three properties down the OTHER arm. Gating one arm is the
+    // instance fix wearing a different hat, and this route has shipped exactly
+    // that mistake before (WIZFORM-04's own composite gap).
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 1;
+    STATE.strategyKeysList = [
+      {
+        api_key_id: MEMBER_KEY_1,
+        api_keys: { exchange: "mt5", attested_venue: "binance" },
+      },
+    ];
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectSeamProbed();
+    fetchSpy.mockRestore();
+  });
+
+  it("composite: a member with a NULL attestation is PROBED, whatever its label claims", async () => {
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 1;
+    STATE.strategyKeysList = [
+      {
+        api_key_id: MEMBER_KEY_1,
+        api_keys: { exchange: "mt5", attested_venue: null },
+      },
+    ];
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectSeamProbed();
+    fetchSpy.mockRestore();
+  });
+
+  it("composite: a member with NO attestation field at all still PARSES and is PROBED", async () => {
+    // The embed shape a pre-migration schema cache returns, and the shape every
+    // pre-existing fixture in this file carries. It must PARSE — refusing it
+    // would turn a column rollout into a composite-finalize outage — and by the
+    // fail-toward rule it is probed.
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 1;
+    STATE.strategyKeysList = [
+      { api_key_id: MEMBER_KEY_1, api_keys: { exchange: "mt5" } },
+    ];
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(
+      res.status,
+      "A member row without the attestation column was refused as a shape drift.",
+    ).toBe(200);
+    expectSeamProbed();
+    fetchSpy.mockRestore();
+  });
+
+  it("composite: an attested non-probing member still SKIPS — the counterweight, per member", async () => {
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 1;
+    STATE.strategyKeysList = [
+      {
+        api_key_id: MEMBER_KEY_1,
+        api_keys: { exchange: "binance", attested_venue: "mt5" },
+      },
+    ];
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectNoSeamCall(fetchSpy);
     fetchSpy.mockRestore();
   });
 });

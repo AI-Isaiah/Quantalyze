@@ -1051,7 +1051,12 @@ export function MultiKeyConnectStep({
    *      server-side effect at all. Sized on the validate budget alone, the
    *      deadline fired almost exclusively in the window where validate had
    *      already SUCCEEDED and the route was minting and storing the key.
-   *      `connectAbortDeadlineMsFor` covers both legs plus the grace, and the
+   *      `connectAbortDeadlineMsFor` covers validate + encrypt + the
+   *      FAILING-state store worst case + the grace — the failing column
+   *      rather than the closed one (153.6 / PARITY-03), because a seam that
+   *      is stalling long enough to reach this deadline is by construction the
+   *      seam whose breaker is failing, and the failing state charges three
+   *      store commands per seam call where the closed state charges one. The
    *      grace is still there for the reason it always was: the seam deadlines
    *      fire inside our own route and the reply still has to travel back, so
    *      giving up at exactly the route's budget could cut off a verdict already

@@ -556,9 +556,17 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
     //    whatsoever. A deadline sized on the validate budget alone fired almost
     //    exclusively in the window where validate had already SUCCEEDED and the
     //    route was storing the key, and then told the user nothing was saved.
-    //    `connectAbortDeadlineMsFor` covers both legs plus the grace, so this
-    //    verdict is only reachable once the server has genuinely stopped
-    //    answering.
+    //    `connectAbortDeadlineMsFor` covers validate + encrypt + the
+    //    FAILING-state store worst case + the grace, so this verdict is only
+    //    reachable once the server has genuinely stopped answering.
+    //
+    //    ⛔ THE FAILING COLUMN, NOT THE CLOSED ONE (153.6 / PARITY-03). The
+    //    first version of this deadline covered both legs plus the grace and
+    //    was compared against the route's CLOSED-breaker worst case — a figure
+    //    that describes a healthy seam, which is never the seam that keeps a
+    //    browser waiting this long. The breaker's own store costs three
+    //    commands per seam call in the failing state instead of one, and that
+    //    difference is what the deadline was short by, on BOTH venue arms.
     //
     //    WHY A GRACE ON TOP. The seam deadlines fire INSIDE our own route and the
     //    browser→route hop is not free, so giving up at exactly the route's budget
