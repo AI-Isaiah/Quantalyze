@@ -1500,13 +1500,35 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * Bumping the LITERAL when the table legitimately grows is the intended
    * maintenance cost; replacing it with a derived value removes the guard.
    *
+   * **76 at 154.1** (the WIZCONT-02 review CR), which added
+   * `VENUE_ALREADY_CONNECTED` — the refusal for a re-connect whose venue account
+   * is already held by a strategy that has LEFT the draft state. Split off
+   * `DRAFT_ALREADY_EXISTS`, whose every clause ("a draft… already in progress",
+   * resume it, or start fresh) is false once the holder is finalized. The number
+   * was READ OUT OF THIS GUARD'S OWN FAILURE (`expected 76 to be 75`), and the
+   * reasoning was re-run over the entry before it moved.
+   *
+   * THIS guard's population is entries carrying a DESTRUCTIVE action, and
+   * `DESTRUCTIVE_ACTIONS` has exactly one member: `start_fresh`. The new entry
+   * carries `request_call` + `expand_log` — NEITHER `start_fresh` NOR either
+   * recoverable action — so it is outside the scanned population by construction
+   * and the destructive class below is unchanged at four members.
+   *
+   * ⭐ That exclusion is LOAD-BEARING rather than incidental, and it is the
+   * sharpest instance of this guard's own subject so far. The entry it was split
+   * from DOES offer `start_fresh`, and that is correct there: a draft exists and
+   * deleting it is a real choice. Here there is no draft, so the SAME control
+   * would delete the finished strategy's own wizard session — offering to
+   * destroy the very thing the copy tells the user to go and open, for a state
+   * they did not cause.
+   *
    * ⚠️ THIS NUMBER HAS A TWIN. The same literal is pinned in the
    * `[140.3-12 / SEAMUX-04]` describe below, and moving one without the other
    * is a silent half-fix — the shrink-detection it buys survives in one scan
    * and dies in the other. 153.1-04 added a third guard (at the end of this
    * file) that reads this source and reds when the two literals disagree.
    */
-  const EXPECTED_TABLE_SIZE = 75;
+  const EXPECTED_TABLE_SIZE = 76;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -1791,11 +1813,36 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * on this path, and a sentence asserting we did would be the next member of
    * this ban list rather than a member of the table.
    *
+   * **76 at 154.1** (the WIZCONT-02 review CR) — `VENUE_ALREADY_CONNECTED`. Read
+   * against all four FORBIDDEN fragments by hand before the number moved. It
+   * mentions no notification, no trade fetching and no session field name — it
+   * says "half-finished session" precisely so the mechanism's column name never
+   * reaches the user. The one needing care is again "data is unchanged", because
+   * the entry DOES make a server-state claim: "Nothing new was created and the
+   * existing strategy was left exactly as it was."
+   *
+   * Not the banned string, and OBSERVABLE rather than asserted — and it has to
+   * hold on BOTH of the arms that emit this code, which is why it is spelled out
+   * per arm at the entry itself:
+   *   · the PRE-RPC arm returns before `validateKey`, before `encryptKey` and
+   *     before `create_wizard_strategy` is called at all. That is a pinned
+   *     assertion rather than a reading of the code: `create-with-key`'s
+   *     `[154.1]` block asserts `rpcMock`, `validateKeyMock`, `encryptKeyMock`
+   *     and the asset-class update were ALL uncalled on exactly this path.
+   *   · the 23505 RACE arm is only reached because the RPC itself RAISED, so
+   *     Postgres rolled the whole SECURITY DEFINER transaction back — the same
+   *     stronger ground `DRAFT_STATE_INVALID` stands on at 74.
+   *
+   * ⚠️ ONE CLAUSE IS WORTH RE-READING if this entry is ever edited: "that
+   * strategy has moved past the draft stage". That is a claim about the row we
+   * just READ, not an inference — the refusal exists precisely because the
+   * draft-scoped read found nothing and the unscoped one found a row.
+   *
    * ⚠️ THIS NUMBER HAS A TWIN in the `[140.3-10 / TRAP-4]` describe above.
    * Moving one without the other is a silent half-fix; the guard added at the
    * end of this file reds when the two literals disagree.
    */
-  const EXPECTED_TABLE_SIZE = 75;
+  const EXPECTED_TABLE_SIZE = 76;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -3374,5 +3421,134 @@ describe("[153.1-04 / WIZFORM-02] the ten new members offer no false affordance"
         `${n} seconds lost its plural — the ternary is inverted or too wide.`,
       ).toContain(`${n} seconds to answer`);
     }
+  });
+});
+
+/**
+ * [154.1 / WIZCONT-02 review CR] `VENUE_ALREADY_CONNECTED` — a refusal that is
+ * TRUE, and that offers no control which cannot work.
+ *
+ * ⚠️ WHAT THIS MEMBER REPLACED. `create-with-key`'s venue fence used to resolve a
+ * re-connect onto ANY strategy hanging off the live key, finalized ones
+ * included, and every arm downstream answered `DRAFT_ALREADY_EXISTS` — "A wizard
+ * session with this key is already in progress", with `resume_draft` and
+ * `start_fresh`. Once the resolver was narrowed to real drafts, that sentence
+ * became the fall-through for a user whose account is held by a FINISHED
+ * strategy, where all of it is false: there is no draft, nothing is in progress,
+ * there is nothing to resume, and `start_fresh` would delete a draft that is not
+ * there.
+ *
+ * These are the COPY half of the fix. The route half — that the arm exists,
+ * refuses, writes nothing, and names the strategy — is pinned in
+ * `create-with-key/route.test.ts`'s `[154.1]` block.
+ */
+describe("[154.1 / WIZCONT-02] VENUE_ALREADY_CONNECTED — the honest refusal", () => {
+  it("is a union member with copy of its OWN — not the UNKNOWN fallback", () => {
+    // A code in the union with no entry renders UNKNOWN exactly as an unknown
+    // code does, which is the silent-ship failure every roster note in this
+    // repo warns about.
+    expect(Object.keys(WIZARD_ERROR_COPY)).toContain("VENUE_ALREADY_CONNECTED");
+    expect(formatKeyError("VENUE_ALREADY_CONNECTED").title).not.toBe(
+      WIZARD_ERROR_COPY.UNKNOWN.title,
+    );
+  });
+
+  it("is DISTINCT copy from DRAFT_ALREADY_EXISTS, not an alias of it", () => {
+    const split = formatKeyError("VENUE_ALREADY_CONNECTED");
+    const parent = WIZARD_ERROR_COPY.DRAFT_ALREADY_EXISTS;
+    expect(split.title).not.toBe(parent.title);
+    expect(split.cause).not.toBe(parent.cause);
+  });
+
+  it("makes NEITHER of the two claims that were false about a finished strategy", () => {
+    const copy = WIZARD_ERROR_COPY.VENUE_ALREADY_CONNECTED;
+    const haystack = [copy.title, copy.cause, ...copy.fix]
+      .join("   ")
+      .toLowerCase();
+    // These are the two sentences the user acted on and could not satisfy: they
+    // went looking for a session that is not there.
+    expect(
+      haystack,
+      "the split kept the parent's claim that a session is under way.",
+    ).not.toContain("in progress");
+    expect(
+      haystack,
+      "there is no draft to resume — that is the entire reason this member " +
+        "exists.",
+    ).not.toContain("resume");
+  });
+
+  it("offers NO Retry control — resubmitting the same account is refused identically", () => {
+    // Behaviour, not copy: `envelope.ts` derives `recoverable` from `actions`,
+    // and neither member of RECOVERABLE_ACTIONS is present.
+    expect(
+      buildEnvelope("VENUE_ALREADY_CONNECTED", "corr-1541").recoverable,
+      "a Retry button here can only ever fail again — the account stays " +
+        "connected until the user acts on the EXISTING strategy.",
+    ).toBe(false);
+    // The UNKNOWN contrast is what keeps the assertion above discriminating: an
+    // envelope that rendered no controls at all would satisfy it vacuously.
+    expect(buildEnvelope("UNKNOWN", "corr-1541").recoverable).toBe(true);
+  });
+
+  it("offers NO start_fresh — the one destructive control, and there is no draft to delete", () => {
+    // The parent entry DOES offer it, correctly: a draft exists there. Here the
+    // same control would delete the FINISHED strategy's own wizard session —
+    // destroying the very thing the copy tells the user to go and open.
+    expect(WIZARD_ERROR_COPY.DRAFT_ALREADY_EXISTS.actions).toContain(
+      "start_fresh",
+    );
+    expect(WIZARD_ERROR_COPY.VENUE_ALREADY_CONNECTED.actions).not.toContain(
+      "start_fresh",
+    );
+    expect(WIZARD_ERROR_COPY.VENUE_ALREADY_CONNECTED.actions).not.toContain(
+      "resume_draft",
+    );
+  });
+
+  it("names NO strategy when it was not given one (TRAP-3)", () => {
+    const bare = formatKeyError("VENUE_ALREADY_CONNECTED");
+    // Absence means "we were not told which strategy" — never a placeholder,
+    // never an empty pair of quotes. The table sentence must stand alone.
+    expect(
+      [bare.title, bare.cause, ...bare.fix].join(" "),
+      "the copy printed the interpolation machinery, or an empty name.",
+    ).not.toMatch(/\{strategyName\}|""|It is connected to/);
+    expect(bare.cause.length).toBeGreaterThan(20);
+  });
+
+  it("...and DOES name it when it was given one, so the rule above is a gate not a deletion", () => {
+    const named = formatKeyError("VENUE_ALREADY_CONNECTED", {
+      strategyName: "Helios Momentum",
+    });
+    expect(named.cause).toContain('It is connected to "Helios Momentum".');
+    // The table sentence survives the prepend — the naming line ADDS a fact, it
+    // does not replace the explanation.
+    expect(named.cause).toContain(
+      WIZARD_ERROR_COPY.VENUE_ALREADY_CONNECTED.cause,
+    );
+  });
+
+  it("a BLANK name degrades to the unnamed sentence rather than empty quotes", () => {
+    // `strategies.name` is NOT NULL at the database, but whitespace is not a
+    // name, and a sentence pointing at nothing is worse than one that points at
+    // nothing in particular.
+    for (const blank of ["", "   ", "\t\n"]) {
+      expect(
+        formatKeyError("VENUE_ALREADY_CONNECTED", { strategyName: blank }).cause,
+        `a ${JSON.stringify(blank)} name produced a naming sentence.`,
+      ).toBe(WIZARD_ERROR_COPY.VENUE_ALREADY_CONNECTED.cause);
+    }
+  });
+
+  it("the naming arm is SCOPED to this code — it cannot leak onto a neighbour", () => {
+    // The arm keys on the code as well as on the context field. Passing the
+    // context to a different member must leave that member byte-identical, or
+    // an unrelated failure starts naming a strategy that has nothing to do with
+    // it.
+    expect(
+      formatKeyError("DRAFT_ALREADY_EXISTS", { strategyName: "Helios Momentum" })
+        .cause,
+    ).toBe(WIZARD_ERROR_COPY.DRAFT_ALREADY_EXISTS.cause);
   });
 });
