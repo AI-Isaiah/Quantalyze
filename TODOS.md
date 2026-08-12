@@ -91,7 +91,34 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      fixing the timeout on a one-account architecture buys a working single user, not a working
      product. Decide the architecture before sizing the budget.
 
-0.4 **⛔ PHASE 153.6 — PARITY: the fixes that only landed on one path (BOOKED 2026-08-11, not yet planned).**
+0.3 **🔒⛔ THE PROBE GATE'S ATTESTATION IS NOT SERVER-VALIDATED — candidate for PHASE 154 (raised 2026-08-12, shipped-with-residual in 153.6 / PR #675).**
+   Phase 153.6 closed the *client-INSERT* door on the finalize-wizard scope probe: `attested_venue`
+   is scrubbed to NULL by a `BEFORE INSERT` trigger, NULL means PROBE, and a `CHECK` pins
+   `attested_venue = exchange` so the two cannot diverge. **It did not close the RPC door.**
+   `create_wizard_strategy` and `add_wizard_composite_key` validate nothing, write the
+   caller-supplied `p_exchange` verbatim into `attested_venue`, and still hold
+   `GRANT EXECUTE … TO authenticated` — reachable directly over PostgREST, with the browser
+   already holding the server-minted ciphertext (`/api/keys/validate-and-encrypt` returns it).
+   So a caller can still mint an `mt5`-attested key and skip the ASVS V4 scope probe.
+   ⭐ **Why it is not exploitable today, and why that is not a control:** the RPC derives BOTH
+   `exchange` and `attested_venue` from ONE parameter, so forging the attestation also forges the
+   ingestion label — and `mt5`, the only probe-exempt venue, cannot sync a ccxt key. The attack is
+   self-defeating **by accident of the current venue set**, not by design.
+   ⛔ **The expiry condition is concrete:** the day a **syncable** venue joins
+   `scopeProbeSupported: false` in `src/lib/closed-sets.ts`, the forgery becomes FREE. Phase 153.6
+   RESEARCH names **sFOX** as the plausible next member, and sFOX go-live is already booked
+   (item 3 below). Whoever adds that venue must close this FIRST.
+   **The fix (remedy (a), deferred deliberately in 153.6):** move the `api_keys` INSERT behind a
+   **service-role writer that passes the venue IT validated**, and **withdraw `authenticated`
+   EXECUTE** on both RPCs. This is the "connect-flow refactor" both `20260810120000` and
+   `20260811210000` defer. It is the only option that makes the column's own claim true.
+   Recorded as `threat_flag: deferred-control` in `REQUIREMENTS.md` (PARITY-04), in
+   `20260811210000`'s section 1b, and in the `attested_venue` column comment — so a venue author
+   meets it at the point of change, not in a phase summary.
+   📌 **Suggested as the Phase 154 subject** over the roadmap's queued item, since the residual is
+   live on PROD and its expiry is gated on another already-booked workstream.
+
+0.4 **⛔ PHASE 153.6 — PARITY: the fixes that only landed on one path (✅ SHIPPED 2026-08-12 as PR #675, v0.58.0.0 — residual above).**
    Raised by `/code-review xhigh` over the whole 153→153.5 span (40 agents, 29 verified findings
    → 13 distinct defects). **Nine come here**; two were fixed unplanned in the same session; two
    are deliberately out. Full charter in `.planning/ROADMAP.md` under *Phase 153.6*.
