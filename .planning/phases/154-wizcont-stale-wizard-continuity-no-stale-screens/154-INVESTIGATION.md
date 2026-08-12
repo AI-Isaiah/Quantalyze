@@ -254,6 +254,121 @@ honest-kickoff property is worth having independently of which supplier fired on
 Every absence assertion additionally carries the vacuity fence `expect(text.length).toBeGreaterThan(0)`
 — a component that rendered nothing at all would otherwise satisfy all of them.
 
+### T3 / T3b — instance (b), the stale refusal (Task 154-01-03)
+
+**Run, at HEAD:**
+
+```
+npx vitest run \
+  "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.stale-refusal.runtime.test.tsx" \
+  --no-file-parallelism
+# exit 1
+```
+
+```
+ ❯ …/SyncPreviewStep.stale-refusal.runtime.test.tsx (3 tests | 1 failed) 70ms
+     × T3: the single-key arm does NOT render a terminal refusal from a mid-re-derive empty series
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 2 passed (3)
+```
+
+```
+AssertionError: The wizard rendered a TERMINAL red envelope during the series heal-delete window. …
+  expected <div role="alert" …(4)>…(4)</div> to be null
+
++ Received:
+<div class="rounded-md border border-negative/30 bg-negative/5 px-4 py-3"
+     data-error-code="GATE_INSUFFICIENT_TRADES"
+     data-testid="error-envelope"
+     role="alert">
+  <p …>This account does not have enough trade history yet.</p>
+  <p …>We found only 0 filled trade(s) on this key. We need at least 5 filled trades
+       before we can compute a verified factsheet. …</p>
+  …
+      code: <code …>GATE_INSUFFICIENT_TRADES</code>
+```
+
+⚠️⚠️ **TWO findings in that rendered DOM, and the second was not anticipated.**
+
+1. **The refusal code is `GATE_INSUFFICIENT_TRADES`, not `GATE_SERIES_PROVENANCE_UNVERIFIED`.**
+   RESEARCH § STALE-01 Step 7 predicted the provenance refusal, and PLAN 154-01 names
+   `RENDERED_CODE("GATE_SERIES_PROVENANCE_UNVERIFIED")` as the needle. **Measured, that needle would
+   have reported T3 GREEN against the exact tree it exists to indict.** `strategyGate.ts:322-325`
+   guards the provenance arm with `csvRowCount > 0`; inside the heal-delete window the count is
+   **zero**, so the gate falls through to the trade floor. The test therefore asserts a STRUCTURAL
+   probe (`[data-error-code]` — catches *any* refusal) **plus** both named codes. This is the
+   needle-matches-three-states near-miss from `readfailure.runtime.test.tsx:93-107` recurring in a
+   new place, caught this time before it could certify anything.
+
+2. **The rendered sentence is `"We found only 0 filled trade(s) on this key."`** — verbatim the
+   fabricated measurement that phase 140.4 / C-3 was opened to delete. 140.4 closed the route where
+   a *failed read* became a zero; this is the same false sentence arriving by a *different* route —
+   a real read taken during a wholesale delete. The class "a momentary state rendered as a fact
+   about the user's money data" is demonstrably **not** closed. Recorded here rather than fixed:
+   this plan lands no fix.
+
+**T3b PASSES at HEAD**, driven through the *identical* empty-series state on the composite arm: it
+returns `"repoll"` at `:1101-1103` and stays in the waiting render. `REFUSAL-CTRL` also passes — a
+series that genuinely exists (10 rows) and that nobody stamped still earns
+`GATE_SERIES_PROVENANCE_UNVERIFIED`, which is the property any fix must NOT break. **The RED/GREEN
+pair is the observed fact**: one function, two arms, one state, two answers.
+
+---
+
+## Conclusion
+
+**Confirmed supplier mechanism: M2(ii)**, with **M1** standing independently as the reason the state
+was unbounded rather than merely wrong.
+
+- **M2(ii), from PROD evidence.** `compute_jobs` shows Alpha Centauri's chain fully terminal —
+  `compute_analytics_from_csv` reached `done` at **11:39:35.342759**, all 22 rows `done`,
+  `attempts = 1`, `last_error` null. The backend had finished; the client was reading nothing; the
+  ladder arm coerced that nothing to `"pending"`. Now reproduced in isolation by **T2**, which
+  observes thirteen fabrications from thirteen empty reads.
+- **M1, from code, no external evidence needed.** The only exits from `waiting_for_complete` are
+  gated behind `isComposite` at three sites (`sync-progress/route.ts:185`, `SyncPreviewStep.tsx:910`,
+  `:2290`). A single-key user has **zero** exits. Now reproduced by **T1b**: the SF-1 backstop fires,
+  the banner markup and retry handler both already exist, and one conjunct withholds them. This is
+  why the founder's only available action was to re-run a chain that had already succeeded — three
+  times.
+- **M3, M4 and M2(i) remain RULED OUT** by the Q1/Q2 evidence above. T2b nonetheless pins M4's shape,
+  because "a 200 that enqueued nothing must not be rendered as work in flight" is worth having
+  independently of which supplier fired on one day.
+
+### Do (a) and (b) share one cause? — the CONTEXT.md question, answered
+
+**ONE ROOT IDEA. TWO DISTINCT CODE SITES. A single-site fix discharges NEITHER alone.**
+
+The root idea: *the client converts a reading it cannot know is current into a positive claim about
+the world.* It fires in both directions —
+
+| | The read | The claim invented from it | Site |
+|---|---|---|---|
+| **(a)** | zero rows / absent | "still pending — forever" | `useStrategySyncPoller.ts:228` (supplier) + `SyncPreviewStep.tsx:2290` (no exit) |
+| **(b)** | an empty table mid-delete | "this strategy has no track record" | the missing single-key R2-5 guard, `SyncPreviewStep.tsx` ~`:1420` |
+
+These are **different files and different functions**. Fixing (a) leaves the stale refusal live;
+fixing (b) leaves the unbounded stall live. The RED set proves this rather than asserting it: T2 and
+T1b redden on (a)'s sites, T3 reddens on (b)'s, and no single edit greens all three. Both are in
+scope for this phase, per the CONTEXT.md decision that names both instances.
+
+### Activated fix plans
+
+| Plan | Arm | Verdict |
+|---|---|---|
+| **154-04** | Fix the `?? "pending"` coercion (TWIN-3) + widen the `sync-progress` route filter | ✅ **ACTIVATED — directly confirmed.** M2(ii) *is* the null-coercion arm. Greens T2 (and T1 / T2b at the surface). Evidence-backed, no longer speculative. |
+| **154-08** | Remove the three `isComposite` gates + add the single-key R2-5 twin | ✅ **ACTIVATED — M1 confirmed.** Greens T1b (gates) and T3 (the twin). ⚠️ RESEARCH A6 applies: the new non-throwing repoll path is exactly the case `heavyFetchErrorsRef`'s "never needs a reset" invariant did not contemplate — re-examine it, or a stale ref escalates a healthy run to `SYNC_FAILED`. |
+| **154-07** | Backend arm, gated on the verdict implicating M3 / H-a | ⛔ **NO-OP ARM.** M3 is ruled out: zero `done_pending_children` rows, every declared child present and `done`, `last_error` null throughout. 154-07 must record `ARM C: NO-OP — verdict was M2(ii)` in its SUMMARY and make **no** `analytics-service/` or bridge change. |
+
+**Neither the SQL arm nor the `process_key` queued-honesty arm is activated** — M2(i) (bridge never
+ran) and M4 (200-but-nothing-queued) are both refuted by Q1/Q2.
+
+⛔ **No fix mechanism, timeout, or threshold number is proposed anywhere in this document.** The
+existing ladder (`SLOW_HINT_MS` 15 s / `WARN_THRESHOLD_MS` 60 s / `RETRY_THRESHOLD_MS` 900 s /
+`MAX_CONSECUTIVE_POLL_ERRORS` 3) is referenced, never moved. The tests advance fake time by
+hand-typed literals so that a fix which merely MOVES a threshold cannot green them.
+
 ---
 
 ## Residual: what this evidence cannot settle
