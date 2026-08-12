@@ -219,7 +219,19 @@ describe("GET /api/strategies/wizard-draft — happy path", () => {
     expect(eqCalls).toContainEqual(["strategy_id", DRAFT_ID]);
   });
 
-  it("a keyless draft with zero members resolves as CSV", async () => {
+  it("a keyless draft with ZERO members is withheld — 200 {draft:null, kind:null}, never kind 'csv'", async () => {
+    // ⭐ THE REGRESSION PIN, at the wire the overlay actually reads. This is the
+    // state of EVERY composite draft during the add-keys phase:
+    // `add_wizard_composite_key` writes strategies + api_keys and no
+    // strategy_keys row (only set_wizard_composite_members does, on the
+    // multi-key step's Continue).
+    //
+    // Answering `kind: "csv"` here was the first link of a destructive chain:
+    // ContributionWizardOverlay:138 force-switches the tab on that exact string,
+    // WizardClient:243-245 seeds `strategyId` from the draft, and "Start fresh"
+    // DELETEs it (WizardClient:819) — so a founder who clicked "+ Strategy"
+    // landed on CSV upload and was offered a button that destroyed their
+    // composite draft. Both the id and the string must stay off the wire.
     draftReadMock.mockResolvedValue({
       data: leakyDraftRow({ api_key_id: null }),
       error: null,
@@ -227,8 +239,14 @@ describe("GET /api/strategies/wizard-draft — happy path", () => {
     memberCountMock.mockResolvedValue({ count: 0, error: null });
 
     const GET = await importGet();
-    const body = await (await GET(makeReq())).json();
-    expect(body.kind).toBe("csv");
+    const res = await GET(makeReq());
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ draft: null, kind: null });
+    expect(JSON.stringify(body)).not.toContain(DRAFT_ID);
+    // The probe DID run — this is a measured answer, not a skipped read.
+    expect(eqCalls).toContainEqual(["strategy_id", DRAFT_ID]);
   });
 });
 
