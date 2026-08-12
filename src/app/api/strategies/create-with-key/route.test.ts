@@ -1396,6 +1396,39 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     expect(consoleErr).toHaveBeenCalled();
   });
 
+  it("the SECOND read faulting degrades the same way — a live key with an unreadable strategy still submits", async () => {
+    // The fence issues TWO reads and only the FIRST one's fault arm was pinned.
+    // This is the other one: `api_keys` answered a live row, then the
+    // user-scoped `strategies` resolve failed (an RLS blip, a PostgREST 503).
+    // The dangerous implementations are both plausible — 500 the submit, or
+    // treat the error-as-value's `data: null` as "no strategy" and hand back a
+    // half-resolved pair — so the assertions pin the honest third option: log,
+    // fall through, let the DB index be the backstop. `deduped` must be ABSENT,
+    // because nothing was actually resolved.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    venueKeyLookupMock.mockResolvedValue({
+      data: { id: EXISTING_KEY_ID },
+      error: null,
+    });
+    venueStrategyLookupMock.mockResolvedValue({
+      data: null,
+      error: { code: "42501", message: "permission denied for table strategies" },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+    expect(res.status).toBe(200);
+    expect(rpcMock).toHaveBeenCalledTimes(1);
+    const json = await res.json();
+    expect(json.deduped).toBeUndefined();
+    expect(json.strategy_id).toBe(STRATEGY_ID);
+    expect(json.api_key_id).toBe(API_KEY_ID);
+    // Rule 12 — a dark fence that says nothing is indistinguishable from a
+    // fence that found nothing, and only one of those is a bug worth paging on.
+    expect(consoleErr).toHaveBeenCalled();
+  });
+
   it("a MISSING service-role credential degrades to a dark fence, never to a failed submit", async () => {
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
     adminClientThrows.value = true;
