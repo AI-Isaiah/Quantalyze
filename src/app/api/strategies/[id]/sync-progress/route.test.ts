@@ -482,20 +482,14 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
     expect(body.stalled).toBe(false);
   });
 
-  it("returns {jobStatus:null, stalled:false, memberProgress:[]} 200 when no stitch_composite job exists", async () => {
-    // Only a non-composite kind is visible for this strategy.
-    rpcResult.data = [
-      {
-        id: "99999999-9999-9999-9999-999999999999",
-        strategy_id: TEST_STRATEGY_ID,
-        kind: "sync_trades",
-        status: "running",
-        claimed_at: ago(30_000),
-        created_at: NOW_ISO,
-        updated_at: NOW_ISO,
-        metadata: {},
-      },
-    ];
+  it("returns {jobStatus:null, stalled:false, memberProgress:[]} 200 when NO job of any kind exists", async () => {
+    // ⚠️ 154-04 CHANGED THIS CASE'S PREMISE, not its expectation. It used to
+    // drive a RUNNING `sync_trades` row and assert IDLE — pinning the very
+    // hiding STALE-01a turned on: a job was in flight and the route said
+    // nothing was. IDLE now means what it says, so the premise is the empty
+    // job list. The old premise's new answer is asserted by
+    // WIDEN-SINGLE-KEY-RUNNING below.
+    rpcResult.data = [];
     const res = await call(TEST_STRATEGY_ID);
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -653,22 +647,133 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
     );
   });
 
-  it("PIN-SINGLE-KEY-BEFORE: a single-key strategy with a RUNNING job is answered IDLE (the defect, measured)", async () => {
-    // ⛔ THIS PIN RECORDS THE DEFECT, NOT A DESIRED BEHAVIOUR. A single-key
-    // strategy never produces a `stitch_composite` job, so the kind filter at
-    // route.ts:185 discards every row it has and the caller is told there is
-    // nothing in flight — while `process_key_long` is running. That is the
-    // owner-readable evidence STALE-01a's screens needed and could not get.
-    // The widening commit REPLACES this expectation; the replacement is the
-    // point, and having measured the "before" is what makes it legible.
+  // ═══════════════════════════════════════════════════════════════════════
+  // 154-04 — THE WIDENED ARM. These replace PIN-SINGLE-KEY-BEFORE, which
+  // measured the same input answering IDLE against the pre-widening route
+  // (commit "test(154-04): pin sync-progress composite bytes …").
+  // ═══════════════════════════════════════════════════════════════════════
+  it("WIDEN-SINGLE-KEY-RUNNING: a single-key RUNNING job is now visible as jobStatus", async () => {
+    // The exact input PIN-SINGLE-KEY-BEFORE drove to `jobStatus: null`.
     rpcResult.data = [otherKindRow("process_key_long", { status: "running" })];
     const res = await call(TEST_STRATEGY_ID);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
-      jobStatus: null,
-      stalled: false,
-      memberProgress: [],
+      jobStatus: "running",
+      stalled: false, // never stalled for a non-stitch kind — see below
+      memberProgress: [], // no worker writes member_progress for this kind
     });
+  });
+
+  it("WIDEN-SINGLE-KEY-DONE: a finished single-key job reports 'done'", async () => {
+    rpcResult.data = [
+      otherKindRow("compute_analytics_from_csv", { status: "done" }),
+    ];
+    const body = await (await call(TEST_STRATEGY_ID)).json();
+    expect(body.jobStatus).toBe("done");
+    expect(body.stalled).toBe(false);
+  });
+
+  it("WIDEN-SINGLE-KEY-LATEST: the newest single-key job wins, whatever its kind", async () => {
+    // A real single-key chain: process_key_long → derive_broker_dailies →
+    // compute_analytics_from_csv. The caller wants where the chain IS, so the
+    // newest row answers even though the earlier ones are terminal.
+    rpcResult.data = [
+      otherKindRow("process_key_long", {
+        status: "done",
+        created_at: "2026-07-12T11:37:43.000Z",
+      }),
+      otherKindRow("derive_broker_dailies", {
+        status: "done",
+        created_at: "2026-07-12T11:38:05.000Z",
+      }),
+      otherKindRow("compute_analytics_from_csv", {
+        status: "running",
+        created_at: "2026-07-12T11:39:02.000Z",
+      }),
+    ];
+    const body = await (await call(TEST_STRATEGY_ID)).json();
+    expect(body.jobStatus).toBe("running");
+  });
+
+  it("WIDEN-NO-FALSE-STALL: an ANCIENT claimed_at on a single-key job is NOT stalled", async () => {
+    // ⭐ THE HAZARD THE WIDENING MUST NOT INTRODUCE. `claimed_at` is stamped
+    // once at claim time and never refreshed; only the stitch worker writes a
+    // real heartbeat. A naive widening would read this 13-minute-old claim as
+    // evidence of a stall and invite the user to abort a healthy long crawl —
+    // manufacturing exactly the kind of false claim about the world that this
+    // phase exists to delete. `stalled` is stitch-derived, so: false.
+    rpcResult.data = [
+      otherKindRow("process_key_long", {
+        status: "running",
+        claimed_at: ago(13 * 60_000), // past STALL_THRESHOLD_MS
+      }),
+    ];
+    const body = await (await call(TEST_STRATEGY_ID)).json();
+    expect(body.jobStatus).toBe("running");
+    expect(body.stalled).toBe(false);
+  });
+
+  it("WIDEN-REDACTION: the widened arm leaks no metadata, ciphertext or last_error", async () => {
+    // T-95-07 extends to the new arm: it is a projection, not a passthrough.
+    // Even a rogue writer's blob on a NON-stitch row must not cross the wire.
+    rpcResult.data = [
+      {
+        ...otherKindRow("process_key_long", {
+          status: "running",
+          metadata: {
+            source: "keys/sync",
+            correlation_id: "cid-abcdef",
+            api_key_encrypted: "SECRETVALUE",
+            api_secret_encrypted: "SECRETVALUE",
+            passphrase_encrypted: "SECRETVALUE",
+            dek_encrypted: "SECRETVALUE",
+            nonce: "SECRETVALUE",
+            // A rogue member_progress on a kind that has no members must NOT
+            // be projected either — the entries are stitch-gated.
+            member_progress: [
+              { seq: 1, exchange: "mt5", label: "L", status: "in_process" },
+            ],
+            member_progress_at: ago(30_000),
+          },
+        }),
+        last_error: "SECRETVALUE: raw worker traceback",
+      },
+    ];
+    const res = await call(TEST_STRATEGY_ID);
+    const body = await res.json();
+    expect(Object.keys(body).sort()).toEqual([
+      "jobStatus",
+      "memberProgress",
+      "stalled",
+    ]);
+    expect(body.memberProgress).toEqual([]);
+    const serialized = JSON.stringify(body);
+    for (const forbidden of [
+      "metadata",
+      "correlation_id",
+      "source",
+      "member_progress_at",
+      "claimed_at",
+      "last_error",
+      "SECRETVALUE",
+      "api_key_encrypted",
+      "api_secret_encrypted",
+      "passphrase_encrypted",
+      "dek_encrypted",
+      "nonce",
+    ]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+  });
+
+  it("WIDEN-RT-1: the widened arm still never queries strategy_analytics", async () => {
+    // The RT-1 invariant is what makes the amber state trustworthy; a new arm
+    // is a new chance to break it. Structural, like the original pin.
+    rpcResult.data = [otherKindRow("process_key_long", { status: "running" })];
+    const res = await call(TEST_STRATEGY_ID);
+    expect(res.status).toBe(200);
+    expect(fromCalls).not.toContain("strategy_analytics");
+    expect(fromCalls).toContain("strategies");
   });
 
   // ── SF-3: a REAL read is NOT degraded (distinct from the couldn't-read blip) ──
