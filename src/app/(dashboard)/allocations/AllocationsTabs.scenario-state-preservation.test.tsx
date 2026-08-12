@@ -412,14 +412,26 @@ describe("AllocationsTabs — H-0058 scenario draft survives tab-switch (real co
     ).toBe("true");
   });
 
-  it("a fresh draft (no persisted state, no prior edit) re-enters Scenario cleanly with read-only holdings (no spurious mismatch across mounts)", async () => {
+  // ⛔ The 15s test budget and the 10s findBy budgets below are NOT padding, and they
+  // are NOT inheritable from the test above. `AllocationsTabs` loads `ScenarioComposer`
+  // through `next/dynamic`, so the FIRST `findByTestId` in a cold worker waits on a
+  // runtime module import of a ~5k-line component graph — measured at 1359.769 ms
+  // against Testing Library's 1000 ms default. Relying on "the test above already
+  // warmed the module registry" makes this test's verdict depend on file order: it
+  // passes in a full run and fails the moment someone `it.skip`s the test above, splits
+  // this file, or runs `-t "fresh draft"` alone. That is the exact order-dependence
+  // 153.6-08 removed from the first test; leaving it here would fix one path and not
+  // its twin, which is this phase's whole subject.
+  it("a fresh draft (no persisted state, no prior edit) re-enters Scenario cleanly with read-only holdings (no spurious mismatch across mounts)", { timeout: 15_000 }, async () => {
     // No prior edit. Mount scenario, leave, re-enter. This pins that the
     // unmount/remount cycle does NOT recompute a fingerprint that spuriously
     // differs from the just-written draft (the failure mode the finding calls
     // out: "fingerprint recomputation differs across mounts").
     setSearchParams("tab=scenario");
     const { rerender } = render(<AllocationsTabs {...STUB_PROPS} />);
-    expect(await screen.findByTestId("kpi-strip-mock")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("kpi-strip-mock", undefined, { timeout: 10_000 }),
+    ).toBeInTheDocument();
     // Read-only-tokens model: a fresh draft has no added strategies → no toggle
     // switches at all (holdings are read-only).
     expect(screen.queryAllByRole("switch")).toHaveLength(0);
@@ -431,7 +443,9 @@ describe("AllocationsTabs — H-0058 scenario draft survives tab-switch (real co
     rerender(<AllocationsTabs {...STUB_PROPS} />);
 
     // Composer remounts cleanly: body present, still no switches…
-    expect(await screen.findByTestId("kpi-strip-mock")).toBeInTheDocument();
+    expect(
+      await screen.findByTestId("kpi-strip-mock", undefined, { timeout: 10_000 }),
+    ).toBeInTheDocument();
     expect(screen.queryAllByRole("switch")).toHaveLength(0);
     // …and no fingerprint-mismatch banner on a clean re-entry.
     expect(screen.queryByText(/Keep my draft/i)).toBeNull();
