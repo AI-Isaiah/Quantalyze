@@ -522,6 +522,32 @@ Plans:
 **Notes**: Re-homed from v1.16 Phase 142.3 (which was split out of 142.2 at the D-14 valve on 2026-08-03 and will NOT run as a v1.16 phase). ⛔ Do not archive the milestone or advertise MT5 until this phase passes — v1.15's failure mode was shipping 6/6 green with both open items intact.
 ⚠️ PRECONDITION (found 2026-08-05): all 3 PROD MT5 keys sit at `sync_status='error'` — `'Mt5Session' object has no attribute 'fetch_balance'` (+ sibling `'…' has no attribute 'id'` in `fetch_daily_pnl`, Sentry QUANTALYZE-K). No MT5 sync completes, so this phase cannot start until it is fixed. Owned by a HOTFIX PR landing right after Phase 149 (founder call 2026-08-05: short fix, not an inserted phase); if the hotfix reveals a deeper defect, insert a phase before this one.
 
+### Phase 156: CONNECT-REFACTOR — the venue the server validated is the venue the server writes
+
+**Goal**: `api_keys.attested_venue` becomes what its name claims — the venue **the server itself validated**, not a parameter the caller chose. The wizard's `api_keys` INSERT moves behind a service-role writer that passes the venue it validated at mint time, and `authenticated` EXECUTE is withdrawn from `create_wizard_strategy` and `add_wizard_composite_key`. This is CR-01 remedy **(a)** — the "connect-flow refactor" that both `20260810120000` and `20260811210000` defer.
+
+**Depends on**: Phase 155 (sequenced after MT5-VERIFY per founder call 2026-08-12 — the residual cannot be armed by MT5 work, see the trigger below).
+
+⛔ **PULL-FORWARD TRIGGER — sFOX go-live.** Phase 153.6 shipped remedy **(b)**: a `CHECK` pins `attested_venue = exchange`, so the probe-skip forgery drags the ingestion label with it and the key never syncs. **That defence is a property of the current venue set, not a control.** It holds only while every probe-exempt venue is unsyncable. `mt5` is the sole member today and cannot sync ccxt credentials — which is exactly why MT5 work (153.x, 154, 155) cannot arm this. The moment a **syncable** venue joins `scopeProbeSupported: false` in `src/lib/closed-sets.ts`, the forgery becomes FREE. Phase 153.6 RESEARCH names **sFOX** as the plausible next member, and sFOX go-live is already booked (TODOS 🔴 item 3). **If sFOX is scheduled before 155 completes, this phase moves ahead of it.**
+
+**Requirements**: TBD (mint at planning; closes the PARITY-04 `threat_flag: deferred-control`)
+
+**Success Criteria** (what must be TRUE):
+
+  1. A caller holding a valid session and the server-minted ciphertext **cannot** set `attested_venue` by any route — not by client INSERT (already closed by the scrub trigger in 153.6), and not by calling the wizard RPCs directly over PostgREST. Proven by a SQL assertion that calls the RPC as `authenticated` and is REFUSED, replacing 153.6's assertion 5d, which today passes *because* it asserts the door is open.
+  2. `attested_venue` is written from a venue the server **verified against the live venue API at mint time**, not from a request parameter — traced from `/api/keys/validate-and-encrypt` through to the INSERT.
+  3. The wizard still works end to end for every venue, single-key and composite. ⚠️ Both RPCs currently need the **user-scoped** client because their `auth.uid()` guards demand it; moving to a service-role writer must not lose that ownership check — the row must still be provably the caller's.
+  4. The `CHECK (attested_venue IS NULL OR attested_venue = exchange)` from 153.6 is **kept**, not removed as redundant. It is the fence that stops a future writer letting the two columns diverge, independent of who does the writing.
+  5. Every prose claim that 153.6 had to weaken is re-strengthened to match: the `attested_venue` column comment, `20260811210000`'s section 1b, `REQUIREMENTS.md` PARITY-04, and the `threat_flag` is cleared.
+
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 156 to break down)
+
+**Notes**: Raised by `gsd-code-reviewer` as blocker **CR-01** during Phase 153.6 and shipped as an accepted residual in PR #675 (v0.58.0.0). Full reasoning: `.planning/phases/153.6-parity-the-fixes-that-only-landed-on-one-path/153.6-REVIEW.md` (CR-01, both remedies stated) and `153.6-07-SUMMARY.md` (why (b) was chosen and what it does NOT buy). ⚠️ The residual is **live on PROD** as of 2026-08-12.
+
+
 ## Progress
 
 | Phase | Plans Complete | Status | Completed |
@@ -533,8 +559,9 @@ Plans:
 | 151. AUM book + sizing | 7/7 | Complete    | 2026-08-07 |
 | 152. SCEN composer legibility | 6/6 | Complete    | 2026-08-07 |
 | 153. WIZFORM + MT5-14 | 0/? | Not started | - |
-| 154. WIZCONT + STALE | 7/8 | In Progress|  |
+| 154. WIZCONT + STALE | 8/8 | In Progress|  |
 | 155. MT5-VERIFY + acceptance | 0/? | Not started | - |
+| 156. CONNECT-REFACTOR | 0/? | Not started | - |
 
 ## Requirement Coverage (v1.17)
 
@@ -1241,35 +1268,10 @@ Plans:
 ## Current position
 
 **v1.17 MT5 — usable end-to-end, not merely ingested** — roadmap created 2026-08-04, Phases
-147–155 (revised same day: Phase 148 split into 148 owner-factsheet / 149 NAV ranking /
+147–156 (revised same day: Phase 148 split into 148 owner-factsheet / 149 NAV ranking /
 150 OWN-03 portfolio question after NAV-01 was sharpened to ranking parity). v1.16 is ⏸️ PARKED at 68% (13/19 phases, 119/127 plans) — resume at Phase 143 after
 v1.17; Phase 144 carries the live WR-02 DELETE-vs-reset founder decision.
 Next: `/gsd:plan-phase 147`.
-
-### Phase 156: CONNECT-REFACTOR — the venue the server validated is the venue the server writes
-
-**Goal**: `api_keys.attested_venue` becomes what its name claims — the venue **the server itself validated**, not a parameter the caller chose. The wizard's `api_keys` INSERT moves behind a service-role writer that passes the venue it validated at mint time, and `authenticated` EXECUTE is withdrawn from `create_wizard_strategy` and `add_wizard_composite_key`. This is CR-01 remedy **(a)** — the "connect-flow refactor" that both `20260810120000` and `20260811210000` defer.
-
-**Depends on**: Phase 155 (sequenced after MT5-VERIFY per founder call 2026-08-12 — the residual cannot be armed by MT5 work, see the trigger below).
-
-⛔ **PULL-FORWARD TRIGGER — sFOX go-live.** Phase 153.6 shipped remedy **(b)**: a `CHECK` pins `attested_venue = exchange`, so the probe-skip forgery drags the ingestion label with it and the key never syncs. **That defence is a property of the current venue set, not a control.** It holds only while every probe-exempt venue is unsyncable. `mt5` is the sole member today and cannot sync ccxt credentials — which is exactly why MT5 work (153.x, 154, 155) cannot arm this. The moment a **syncable** venue joins `scopeProbeSupported: false` in `src/lib/closed-sets.ts`, the forgery becomes FREE. Phase 153.6 RESEARCH names **sFOX** as the plausible next member, and sFOX go-live is already booked (TODOS 🔴 item 3). **If sFOX is scheduled before 155 completes, this phase moves ahead of it.**
-
-**Requirements**: TBD (mint at planning; closes the PARITY-04 `threat_flag: deferred-control`)
-
-**Success Criteria** (what must be TRUE):
-
-  1. A caller holding a valid session and the server-minted ciphertext **cannot** set `attested_venue` by any route — not by client INSERT (already closed by the scrub trigger in 153.6), and not by calling the wizard RPCs directly over PostgREST. Proven by a SQL assertion that calls the RPC as `authenticated` and is REFUSED, replacing 153.6's assertion 5d, which today passes *because* it asserts the door is open.
-  2. `attested_venue` is written from a venue the server **verified against the live venue API at mint time**, not from a request parameter — traced from `/api/keys/validate-and-encrypt` through to the INSERT.
-  3. The wizard still works end to end for every venue, single-key and composite. ⚠️ Both RPCs currently need the **user-scoped** client because their `auth.uid()` guards demand it; moving to a service-role writer must not lose that ownership check — the row must still be provably the caller's.
-  4. The `CHECK (attested_venue IS NULL OR attested_venue = exchange)` from 153.6 is **kept**, not removed as redundant. It is the fence that stops a future writer letting the two columns diverge, independent of who does the writing.
-  5. Every prose claim that 153.6 had to weaken is re-strengthened to match: the `attested_venue` column comment, `20260811210000`'s section 1b, `REQUIREMENTS.md` PARITY-04, and the `threat_flag` is cleared.
-
-**Plans:** 0 plans
-
-Plans:
-- [ ] TBD (run /gsd-plan-phase 156 to break down)
-
-**Notes**: Raised by `gsd-code-reviewer` as blocker **CR-01** during Phase 153.6 and shipped as an accepted residual in PR #675 (v0.58.0.0). Full reasoning: `.planning/phases/153.6-parity-the-fixes-that-only-landed-on-one-path/153.6-REVIEW.md` (CR-01, both remedies stated) and `153.6-07-SUMMARY.md` (why (b) was chosen and what it does NOT buy). ⚠️ The residual is **live on PROD** as of 2026-08-12.
 
 ---
 
