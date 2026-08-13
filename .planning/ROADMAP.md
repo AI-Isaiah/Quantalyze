@@ -492,7 +492,7 @@ Plans:
 **Requirements**: WIZFORM-02 (the ONE requirement the 153 span failed — see `153-VERIFICATION.md`, status `failed`, 5/6)
 **Owns**: `src/lib/seam-venue-vocabulary.invariant.test.ts`, `src/lib/wizardErrors.invariant.test.ts`, `src/lib/wizardErrors.ts`, `src/app/api/strategies/create-with-key/route.ts`, `src/app/api/strategies/finalize-wizard/route.ts`
 **UI hint**: no — copy members only, no new surface
-**Plans**: TBD
+**Plans**: 3 plans in 3 waves (strictly sequential: 02 greens 01's designed red; 03 contends with 02 on `wizardErrors.ts` / `wizardErrors.test.ts`)
 
 ⛔ **Raised by the retroactive Phase 153 SPAN verification (2026-08-13, `failed`, 5/6).** THIRD live instance, hit by the founder on PROD 2026-08-12 while dogfooding MT5. The server classified the failure completely and the wizard rendered *"We could not classify this failure, so we cannot tell you what happened or whether your last action took effect."*
 
@@ -509,7 +509,9 @@ Plans:
 📌 **On completion, Phase 153's parent checkbox may finally tick** — it is unticked today because the span did not meet its own goal, not because a child is outstanding.
 
 **Plans**:
-- TBD (planned via `--prd .planning/phases/153.7-.../153.7-PRD.md`, extracted from TODOS.md FIX NOW #6)
+- [ ] 153.7-01-PLAN.md — Mechanism: parameterised root + call-shape matcher (AST cross-checked) + pin re-cuts + reach/both-shapes assertions + tmpdir falsifier — ENDS RED BY DESIGN naming the 20 undisposed codes (wave 1)
+- [ ] 153.7-02-PLAN.md — The 20 dispositions: 8 verdict rows (replay-tested through classifyKeyValidationError) + 12 individually-measured WITHOUT_VERDICT rows — greens 01's red (wave 2)
+- [ ] 153.7-03-PLAN.md — Three coded finalize rejections (ledger 3→0, sites 29→32, total pinned 32) + twin regression on BOTH key routes + prose re-cuts + TODOS.md deferral (wave 3)
 
 
 ### Phase 154: WIZCONT/STALE — Wizard continuity, no stale screens
