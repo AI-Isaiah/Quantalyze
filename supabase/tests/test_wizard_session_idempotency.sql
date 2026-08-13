@@ -26,6 +26,31 @@ DECLARE
   v_idx_cols   TEXT[];
   v_fn_src     TEXT;
 BEGIN
+  -- ----- 0. A3: the CONNECTION ROLE, diagnosed rather than assumed ----------
+  -- ⭐ WHY THIS IS THE FIRST THING THE FILE DOES. Phase 156 Migration B
+  -- (20260814120000) REVOKEs `authenticated` EXECUTE on both wizard RPCs. The
+  -- `sql-tests` lane's connecting role is NOT `authenticated` — it holds EXECUTE
+  -- by OWNERSHIP or SUPERUSER, which no REVOKE touches — and
+  -- `156-MEASUREMENTS.md` § A3 measured it as `postgres` or `supabase_admin`,
+  -- both of which survive that REVOKE. This line is what says so OUT LOUD if
+  -- that ever stops being true, instead of letting the suite's RPC-invoking
+  -- gates (test_wizard_composite_fence.sql, test_csv_finalize_double_submit.sql,
+  -- test_api_keys_exchange_not_user_writable.sql) fail with a spray of confusing
+  -- `insufficient_privilege` assertions that read like a code regression.
+  --
+  -- ⛔ NO fixture GRANT and NO `SET LOCAL ROLE` remedy is applied here, and that
+  -- is a DECISION, not an omission: `156-09-PLAN.md` Task 1 directs that when
+  -- § A3 records a superuser-or-owner role — which it does — no remedy arm is
+  -- taken, because an unnecessary fixture grant weakens this gate. A grant to
+  -- `authenticated` in particular would silently re-open the very door
+  -- Migration B shuts and would green section 4's inverted pin for the wrong
+  -- reason. If this RAISE ever fires, read that plan's ordered arms; do not
+  -- improvise one here.
+  IF NOT has_function_privilege(current_user,
+        'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'TEST BLOCKED (0): the connection role % holds no EXECUTE on create_wizard_strategy, so this suite''s direct wizard-RPC call sites cannot run at all. This failure is ENVIRONMENTAL, not a regression — nothing about the schema or the migration is being reported here. See 156-MEASUREMENTS.md A3.', current_user;
+  END IF;
+
   -- ----- 1. strategies.wizard_session_id column exists and is uuid ----------
   SELECT data_type INTO v_col_type
     FROM information_schema.columns
@@ -108,7 +133,19 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED: create_wizard_strategy must remain SECURITY DEFINER';
   END IF;
 
-  -- ----- 4. grants: authenticated EXECUTEs, anon does NOT ------------------
+  -- ----- 4. grants: ONLY service_role EXECUTEs; anon and authenticated do NOT
+  -- ⭐ THE POLARITY ON `authenticated` IS INVERTED AS OF PHASE 156 / CONNECT-01
+  -- (migration 20260814120000, Migration B). Until then this file asserted that
+  -- `authenticated` HELD EXECUTE, because the browser called the RPC directly.
+  -- It no longer does: PostgREST exposes every public function at
+  -- /rest/v1/rpc/<name>, so while `authenticated` held EXECUTE any browser
+  -- session could POST this SECURITY DEFINER writer itself and mint an
+  -- attestation. The GRANT layer is the one door a browser cannot walk around,
+  -- so the grant is withdrawn and THIS ASSERTION IS THE DURABLE GUARD:
+  -- a re-GRANT — deliberate, or silently re-applied by Supabase's
+  -- pg_default_acl on any future DROP + CREATE of this function
+  -- (`156-MEASUREMENTS.md` § A4; it already bit 20260812083206 for `anon`) —
+  -- re-opens that door, and must red CI rather than reach production.
   -- ⚠️ THE SIGNATURE GAINED A 12th TYPE (trailing `text`) IN MIGRATION
   -- 20260812083206 (Phase 154 / WIZCONT-02: p_venue_account_id text DEFAULT
   -- NULL). has_function_privilege's text form matches the DECLARED argument
@@ -122,18 +159,43 @@ BEGIN
   -- ⛔ That migration uses DROP + CREATE, not CREATE OR REPLACE, because a
   -- signature change via CREATE OR REPLACE would mint a SECOND overload and
   -- PostgREST would answer PGRST203 to every connect-a-key call. DROP destroys
-  -- the ACL, so these two assertions stopped being a formality: they are now the
-  -- external check that the migration's re-issued REVOKE/GRANT pair took, and in
-  -- particular that `anon` did not inherit the PUBLIC-EXECUTE default a freshly
-  -- created function carries.
-  IF NOT has_function_privilege('authenticated',
+  -- the ACL, so these assertions stopped being a formality: they are now the
+  -- external check that the migration's re-issued REVOKE/GRANT statements took,
+  -- and in particular that neither `anon` nor `authenticated` inherited the
+  -- PUBLIC-EXECUTE default a freshly created function carries.
+  IF has_function_privilege('authenticated',
         'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)', 'EXECUTE') THEN
-    RAISE EXCEPTION 'TEST FAILED: authenticated lost EXECUTE on create_wizard_strategy';
+    RAISE EXCEPTION 'TEST FAILED: authenticated HOLDS EXECUTE on create_wizard_strategy — Phase 156 / CONNECT-01 withdrew it (migration 20260814120000). A re-GRANT re-opens the direct PostgREST door: any browser session holding an authenticated JWT can POST /rest/v1/rpc/create_wizard_strategy and mint an attested_venue of its choosing. If no migration did this deliberately, a DROP + CREATE re-granted it silently via pg_default_acl — re-issue the REVOKE in that same migration.';
   END IF;
   IF has_function_privilege('anon',
         'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)', 'EXECUTE') THEN
     RAISE EXCEPTION 'TEST FAILED: anon must NOT have EXECUTE on create_wizard_strategy';
   END IF;
 
-  RAISE NOTICE 'PASS: F6 wizard-session idempotency invariants intact (column + partial-unique + advisory-lock fence + grants).';
+  -- ⛔ WHY A POSITIVE IS NEEDED ALONGSIDE THE NEGATIVES — AND NOT FOR THE REASON
+  -- USUALLY GIVEN. The familiar argument is that a negative
+  -- (`has_function_privilege(...) = FALSE`) also passes on a database where the
+  -- function was DROPPED, so the pair cannot tell "the door is shut" from "the
+  -- building is gone".
+  -- ⚠️ THAT PREMISE IS FALSE FOR THE TEXT FORM OF THE SIGNATURE USED HERE, and it
+  -- was MEASURED false on PostgreSQL 16 rather than reasoned about:
+  -- `has_function_privilege('authenticated', '<signature text>', 'EXECUTE')`
+  -- does NOT return FALSE for a function that does not exist — it RAISES
+  -- undefined_function (42883), which under `psql -v ON_ERROR_STOP=1` aborts the
+  -- file and fails the job. A dropped function is therefore already caught,
+  -- loudly, by the negatives themselves. Do not re-introduce the folk version of
+  -- this comment; it would justify the right assertion with the wrong reason.
+  --
+  -- ⭐ THE REAL GAP THIS POSITIVE CLOSES is the one mistake Migration B could
+  -- actually make on its own terms: a REVOKE that goes ONE ROLE TOO FAR. If
+  -- `service_role` loses EXECUTE while anon and authenticated stay correctly shut
+  -- out, every negative above reads EXACTLY as intended and connect-a-key is
+  -- nonetheless totally broken. No negative can see that. This line can — which
+  -- is why its message names the OUTAGE rather than the privilege.
+  IF NOT has_function_privilege('service_role',
+        'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'TEST FAILED: CONNECT-A-KEY IS BROKEN — service_role holds no EXECUTE on create_wizard_strategy. Since Phase 156 (20260814120000) it is the ONLY role that may write a wizard draft, so every single-key connect answers 42501. A REVOKE went one role too far, or the function was dropped. The fix is to re-GRANT, not to retry.';
+  END IF;
+
+  RAISE NOTICE 'PASS: F6 wizard-session idempotency invariants intact (column + partial-unique + advisory-lock fence + service_role-only grants).';
 END $$;

@@ -24,10 +24,13 @@
 -- PREDICATE LOSING EITHER CONJUNCT (`venue_account_id IS NOT NULL` or
 -- `disconnected_at IS NULL`); the api_keys_venue_account_id_nonblank CHECK going
 -- missing or turning NOT VALID; the RPC losing its NULLIF(btrim(...)) identity
--- normalisation; the RPC re-based on a stale body (losing the F6 fence or the
--- attested_venue stamp from PR #675); a SECOND overload of the RPC appearing;
--- either grant polarity lost; the scrub trigger missing or its function turned
--- SECURITY DEFINER. Section 6 adds the BEHAVIOURAL half: it seeds real api_keys
+-- normalisation; EITHER wizard RPC re-based on a stale body (losing its F6 /
+-- ONB-03 advisory-lock fence or the attested_venue stamp from PR #675); a SECOND
+-- overload of EITHER RPC appearing; any grant polarity lost — including
+-- `authenticated` REGAINING EXECUTE, whose polarity Phase 156 / CONNECT-01
+-- inverted (see section 4); either body losing its auth.role() gate or
+-- reintroducing auth.uid() (section 3c); the scrub trigger missing or its
+-- function turned SECURITY DEFINER. Section 6 adds the BEHAVIOURAL half: it seeds real api_keys
 -- rows and proves the index and the CHECK actually fire, so none of the
 -- structural assertions above can pass vacuously against a constraint that
 -- exists but does nothing.
@@ -39,6 +42,13 @@ DO $$
 DECLARE
   c_sig CONSTANT TEXT :=
     'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)';
+  -- ⚠️ ELEVEN types, not twelve. add_wizard_composite_key has no
+  -- p_venue_account_id — the composite path stamps no venue identity. The arity
+  -- asymmetry is real; has_function_privilege's text form matches the DECLARED
+  -- argument list EXACTLY, so borrowing c_sig's 12 types here would raise
+  -- undefined_function and report "function does not exist" instead of a verdict.
+  k_sig CONSTANT TEXT :=
+    'add_wizard_composite_key(uuid,text,text,text,text,text,text,text,integer,text,uuid)';
 
   v_col_type    TEXT;
   v_idx_def     TEXT;
@@ -47,6 +57,18 @@ DECLARE
   v_idx_partial BOOLEAN;
   v_overloads   INT;
   v_fn_src      TEXT;
+  v_fn_src_k    TEXT;   -- add_wizard_composite_key, raw definition
+  -- ⛔ COMMENT-STRIPPED COPIES, used ONLY by the auth.role()/auth.uid() lines
+  -- below. `pg_get_functiondef` reconstructs from `prosrc`, which stores the
+  -- source VERBATIM — comments included — and BOTH post-156 bodies discuss
+  -- auth.uid() at length in prose explaining why it is absent. A raw
+  -- `NOT ILIKE '%auth.uid()%'` would therefore red against the very body it
+  -- exists to certify, on the strength of that body's own documentation. The
+  -- strip is line-comment only and mirrors migration 20260814120000's own
+  -- post-verify; if a `--` is ever added inside a string literal in either body,
+  -- revisit these assertions rather than widening the strip blindly.
+  v_fn_code     TEXT;   -- create_wizard_strategy, comments stripped
+  v_fn_code_k   TEXT;   -- add_wizard_composite_key, comments stripped
   v_trg_secdef  BOOLEAN;
   v_chk_valid   BOOLEAN;
   v_chk_def     TEXT;
@@ -218,18 +240,117 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (3): create_wizard_strategy stamps venue_account_id WITHOUT the NULLIF(btrim(...), '''') normalisation — whitespace would make the dedup miss, and a blank field would hit api_keys_venue_account_id_nonblank as an unhandled 23514';
   END IF;
 
-  -- ----- 4. grants: authenticated EXECUTEs, anon does NOT -------------------
+  -- ----- 3b. add_wizard_composite_key: the SAME canary, which it never had ---
+  -- ⭐ THE TWIN THIS FILE WAS MISSING. Everything in section 3 above pins
+  -- create_wizard_strategy against a stale re-base. Its composite sibling — ONE
+  -- CONTRACT WITH TWO ENTRY POINTS — had no such pin anywhere in supabase/tests,
+  -- so a re-base that reverted only the composite body would have shipped
+  -- silently. Phase 153.6 exists because a fix landed on one of these two and not
+  -- the other, and the Phase 153 span verification found that class still open on
+  -- 2026-08-13. Change one, pin both.
+  SELECT count(*) INTO v_overloads
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'add_wizard_composite_key';
+  IF v_overloads <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (3b): expected exactly 1 add_wizard_composite_key overload in public, found % — PostgREST resolves rpc() by NAMED PARAMETERS and answers PGRST203 when two candidates match, which breaks every composite key add', v_overloads;
+  END IF;
+
+  SELECT pg_get_functiondef(p.oid) INTO v_fn_src_k
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public' AND p.proname = 'add_wizard_composite_key';
+  IF v_fn_src_k IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (3b): add_wizard_composite_key function is missing';
+  END IF;
+
+  -- Each string names a guarantee a stale re-base would silently revert, and the
+  -- migration whose body it would be reverted TO.
+  IF v_fn_src_k NOT ILIKE '%pg_advisory_xact_lock%' OR v_fn_src_k NOT ILIKE '%wizcomposite:%' THEN
+    RAISE EXCEPTION 'TEST FAILED (3b): add_wizard_composite_key lost its wizcomposite: advisory-lock fence — a re-base took a body older than 20260710180000, and the ONB-03 per-(user, session) DRAFT fence is gone: a double-click now mints TWO composite drafts. ⛔ The lock space is DISTINCT from the single-key wizdraft: space on purpose; a body holding wizdraft: here has been re-based onto the wrong twin';
+  END IF;
+  IF v_fn_src_k NOT ILIKE '%attested_venue%' THEN
+    RAISE EXCEPTION 'TEST FAILED (3b): add_wizard_composite_key no longer writes attested_venue — a re-base took a body older than 20260811210000 and reverted PR #675 on the COMPOSITE half only. Every composite member lands with a NULL attestation, so every MT5 finalize answers a permanent KEY_SCOPE_CHECK_UNAVAILABLE (156-RESEARCH.md Pitfall 8). The single-key assertions in section 3 above would still be GREEN — that asymmetry is exactly why this block exists';
+  END IF;
+
+  -- ----- 3c. BOTH bodies: auth.role() PRESENT, auth.uid() ABSENT ------------
+  -- ⭐ THE TRAP-B STRUCTURAL GUARD, ASSERTED FROM THE OUTSIDE. Migration
+  -- 20260814120000's own post-verify (e) checks this too — but a post-verify runs
+  -- ONCE, at apply, inside the file that carries it. THIS copy survives that
+  -- migration being edited, re-based, replayed from a stale snapshot, or reverted
+  -- by a later one, because it re-runs in sql-tests on every PR forever.
+  --
+  -- ⛔ WHY auth.uid()'s ABSENCE IS THE ASSERTION AND NOT ITS PRESENCE — this
+  -- polarity looks backwards and a future reader will be tempted to "correct" it.
+  -- `156-MEASUREMENTS.md` § A2 MEASURED auth.uid() IS NULL for a service_role
+  -- client, and since 20260814120000 service_role is the ONLY caller these bodies
+  -- admit. So a body carrying auth.uid() under a service_role caller does not
+  -- have a STRICTER ownership check — it has a PERMANENT SILENT NO-OP: the
+  -- comparison never fires, raises nothing, and fails no test, exactly the
+  -- `_assert_owner` shape at 20260411144407:300-302. Ownership is bound at the
+  -- route (p_user_id is withAuth's getUser()-verified user.id, ADR-0022), and
+  -- reintroducing a DB-tier comparison would announce a control that is not there.
+  v_fn_code   := regexp_replace(v_fn_src,   '--[^\n]*', '', 'g');
+  v_fn_code_k := regexp_replace(v_fn_src_k, '--[^\n]*', '', 'g');
+
+  IF v_fn_code NOT LIKE '%auth.role()%' THEN
+    RAISE EXCEPTION 'TEST FAILED (3c): create_wizard_strategy has NO auth.role() gate in its code — the caller-role check migration 20260814120000 installed is gone, so the in-body half of CONNECT-01 is absent and only the GRANT layer is left standing';
+  END IF;
+  IF v_fn_code_k NOT LIKE '%auth.role()%' THEN
+    RAISE EXCEPTION 'TEST FAILED (3c): add_wizard_composite_key has NO auth.role() gate in its code — the caller-role check migration 20260814120000 installed is gone on the COMPOSITE half';
+  END IF;
+  IF v_fn_code LIKE '%auth.uid()%' THEN
+    RAISE EXCEPTION 'TEST FAILED (3c): create_wizard_strategy CODE contains auth.uid(). Under the service_role caller that is now its only admitted caller, auth.uid() IS NULL (156-MEASUREMENTS.md A2), so any ownership comparison built on it is a PERMANENT SILENT NO-OP — it never fires and never fails. This is not a stricter check, it is a decorative one. Delete it; do not relax it. Ownership is bound at the route.';
+  END IF;
+  IF v_fn_code_k LIKE '%auth.uid()%' THEN
+    RAISE EXCEPTION 'TEST FAILED (3c): add_wizard_composite_key CODE contains auth.uid(). Under a service_role caller it IS NULL (156-MEASUREMENTS.md A2), so the comparison is a PERMANENT SILENT NO-OP — a decorative ownership check, not a stricter one. Delete it; do not relax it. Ownership is bound at the route.';
+  END IF;
+
+  -- ----- 4. grants: ONLY service_role EXECUTEs; anon and authenticated do NOT
   -- ⛔ NOT A FORMALITY HERE. Migration 20260812083206 uses DROP + CREATE (a
   -- signature change cannot go through CREATE OR REPLACE), and DROP DESTROYS the
   -- ACL — a freshly created function grants EXECUTE to PUBLIC by default. The
-  -- anon assertion below is what catches a re-issue of the function that forgot
-  -- the REVOKE, i.e. a privilege escalation onto a SECURITY DEFINER function
-  -- that writes api_keys and strategies.
-  IF NOT has_function_privilege('authenticated', c_sig, 'EXECUTE') THEN
-    RAISE EXCEPTION 'TEST FAILED (4): authenticated lost EXECUTE on create_wizard_strategy — connect-a-key is broken';
+  -- assertions below are what catch a re-issue of the function that forgot the
+  -- REVOKE, i.e. a privilege escalation onto a SECURITY DEFINER function that
+  -- writes api_keys and strategies.
+  --
+  -- ⭐ THE `authenticated` POLARITY IS INVERTED AS OF PHASE 156 / CONNECT-01
+  -- (migration 20260814120000). This assertion previously required
+  -- `authenticated` to HOLD EXECUTE. PostgREST publishes every public function at
+  -- /rest/v1/rpc/<name>, so that grant let any browser session POST this writer
+  -- directly and mint its own attested_venue — the bypass the venue-identity
+  -- machinery in this very file exists to close. The grant is withdrawn, and
+  -- because Supabase's pg_default_acl silently RE-GRANTS anon and authenticated
+  -- on any future DROP + CREATE (`156-MEASUREMENTS.md` § A4 — it already bit
+  -- 20260812083206 for anon), this line is the durable guard that reds CI rather
+  -- than letting the door reopen in production.
+  IF has_function_privilege('authenticated', c_sig, 'EXECUTE') THEN
+    RAISE EXCEPTION 'TEST FAILED (4): authenticated HOLDS EXECUTE on create_wizard_strategy — Phase 156 / CONNECT-01 withdrew it (migration 20260814120000). A re-GRANT re-opens the direct PostgREST door and a browser session can mint an attested_venue of its choosing, which is precisely the forgery this file''s venue-identity assertions assume is impossible. If no migration did this deliberately, a DROP + CREATE re-granted it silently via pg_default_acl — re-issue the REVOKE in that same migration.';
   END IF;
   IF has_function_privilege('anon', c_sig, 'EXECUTE') THEN
     RAISE EXCEPTION 'TEST FAILED (4): anon must NOT have EXECUTE on create_wizard_strategy';
+  END IF;
+
+  -- ⛔ THE OUTAGE GUARD — and NOT the "a dropped function would green the
+  -- negatives" argument, which is FALSE for the TEXT signature form used here and
+  -- was MEASURED false on PostgreSQL 16: has_function_privilege RAISES
+  -- undefined_function (42883) for a function that does not exist rather than
+  -- returning FALSE, and under `psql -v ON_ERROR_STOP=1` that aborts this file.
+  -- A dropped RPC is therefore already caught loudly by the negatives above, and
+  -- by section 3/3b's `pg_get_functiondef` reads before them.
+  --
+  -- ⭐ WHAT NO NEGATIVE CAN SEE is a REVOKE that went ONE ROLE TOO FAR:
+  -- `service_role` losing EXECUTE while anon and authenticated stay correctly
+  -- shut out. Every assertion above then reads exactly as intended while every
+  -- connect-a-key answers 42501 — since 20260814120000 service_role is the only
+  -- role permitted to write a wizard draft, and the only role our two Next routes
+  -- hold. These POSITIVES are the only lines that fail in that state, which is
+  -- why they are worded as an OUTAGE rather than a privilege.
+  IF NOT has_function_privilege('service_role', c_sig, 'EXECUTE') THEN
+    RAISE EXCEPTION 'TEST FAILED (4): CONNECT-A-KEY IS BROKEN — service_role holds no EXECUTE on create_wizard_strategy. Since 20260814120000 it is the ONLY role that may write a wizard draft, so every connect answers 42501. A REVOKE went one role too far, or the function was dropped. The fix is to re-GRANT, not to retry.';
+  END IF;
+  IF NOT has_function_privilege('service_role', k_sig, 'EXECUTE') THEN
+    RAISE EXCEPTION 'TEST FAILED (4): CONNECT-A-KEY IS BROKEN — service_role holds no EXECUTE on add_wizard_composite_key, so every COMPOSITE key add answers 42501. A REVOKE went one role too far, or the function was dropped. Re-GRANT; do not retry.';
   END IF;
 
   -- ----- 5. the scrub trigger, and that it is SECURITY INVOKER --------------
@@ -256,7 +377,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (5): the api_keys_scrub_venue_account_id trigger function is SECURITY DEFINER, so current_user resolves to its owner, the privileged check always passes, and the trigger is a silent no-op — it must be SECURITY INVOKER';
   END IF;
 
-  RAISE NOTICE 'PASS (structural): WIZCONT-02 identity invariants intact (api_keys.venue_account_id text + non-blank CHECK, validated + tenant-leading partial-UNIQUE (user_id, exchange, venue_account_id) WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL + exactly one create_wizard_strategy overload carrying the wizdraft:/attested_venue/p_venue_account_id/NULLIF(btrim()) canaries + grants authenticated-yes/anon-no + SECURITY INVOKER scrub trigger attached).';
+  RAISE NOTICE 'PASS (structural): WIZCONT-02 identity invariants intact (api_keys.venue_account_id text + non-blank CHECK, validated + tenant-leading partial-UNIQUE (user_id, exchange, venue_account_id) WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL + exactly one create_wizard_strategy overload carrying the wizdraft:/attested_venue/p_venue_account_id/NULLIF(btrim()) canaries + exactly one add_wizard_composite_key overload carrying the wizcomposite:/attested_venue canaries + BOTH bodies gating on auth.role() with ZERO auth.uid() + grants service_role-only, anon and authenticated shut out + SECURITY INVOKER scrub trigger attached).';
 END $$;
 
 

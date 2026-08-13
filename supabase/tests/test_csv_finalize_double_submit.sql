@@ -209,8 +209,26 @@ BEGIN
   -- (user_id, wizard_session_id) INDEX FAILS. Parts 1-3 pass under both shapes.
   -- Deleting or weakening it silently deletes the whole reason `source` is in the
   -- key, and re-opens a PERMANENT first-submit failure for the affected user.
+  -- Service-role-shaped call.
+  --
+  -- ⭐ WHY THIS CHANGED IN PHASE 156, and why it is the ONLY claim in this file
+  -- that changes. It precedes the `create_wizard_strategy` call below — a WIZARD
+  -- RPC, whose body Migration B (20260814120000) narrowed to
+  -- `auth.role() = 'service_role'`, deleting the auth.uid() comparison this
+  -- claim's `'role', 'authenticated'` used to satisfy. That call is DELIBERATELY
+  -- NOT wrapped in an EXCEPTION handler (see the note at the control itself), so
+  -- under the old claim a 42501 would propagate and, under ON_ERROR_STOP=1, kill
+  -- this whole file — not with a message about the `source` column, but with an
+  -- authorization error from a fixture that simply called the wrong way.
+  -- ⛔ Part 1's claim above is NOT touched and must not be: it precedes
+  -- `finalize_csv_strategy`, which is not a wizard RPC, is untouched by Phase
+  -- 156, and still reads auth.uid(). Flipping it would silently change what
+  -- Parts 1-3 mean.
+  -- `sub` is retained: the body no longer reads it, but the fixture still says
+  -- whose draft this is meant to be, and the row's ownership is asserted from
+  -- `p_user_id` immediately below.
   PERFORM set_config('request.jwt.claims',
-    json_build_object('sub', uid_b::text, 'role', 'authenticated')::text, true);
+    json_build_object('sub', uid_b::text, 'role', 'service_role')::text, true);
 
   -- Use the REAL API-path writer, so the control is about the genuine
   -- cross-source scenario rather than a row this test shaped to suit itself.
