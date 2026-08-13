@@ -449,6 +449,58 @@ true for 146 and half of 142–145, and **false for 141**.
      copy-by-code only.** Do not re-open it as an unfinished half of this item. The wizard renders
      copy keyed on the code and deliberately renders no server-supplied string.
 
+6. **⛔ WIZFORM-02's class is OPEN — the mt5-gateway fault family renders `code: UNKNOWN`.**
+   Found 2026-08-13 by the retroactive Phase 153 SPAN verification
+   (`.planning/phases/153-.../153-VERIFICATION.md`, status `failed`, 5/6 requirements).
+   **THIRD live instance**, hit by the founder on PROD 2026-08-12 while dogfooding MT5.
+
+   The server classified the failure completely — `routers/exchange.py:866` raises
+   `service_error(500, "MT5_GATEWAY_UNCONFIGURED", dependency="mt5-gateway",
+   retryable=False, …)` with operator-directed copy — and the wizard rendered
+   *"We could not classify this failure, so we cannot tell you what happened or whether
+   your last action took effect."*
+
+   ⭐ **The derived-roster remedy was genuinely built and genuinely works** (falsified:
+   mutating an emitted code literal in `finalize-wizard/route.ts` reds two assertions by
+   name). It misses this code for **two structural reasons, either sufficient alone**:
+
+   | Guard | Directory root | Emission shape matched |
+   |---|---|---|
+   | `wizardErrors.invariant.test.ts` | 3 Next route files | `NextResponse.json({code, error}, {status})` |
+   | `seam-venue-vocabulary.invariant.test.ts` | `analytics-service/services/**/*.py` | `error_code =` assignment |
+
+   `routers/exchange.py` is in **neither** — wrong root (`routers/`, not `services/`) **and**
+   wrong shape (a **positional** arg to `service_error(...)`, not an `error_code=` assignment).
+   Relocating the file alone would not make it visible. Measured from HEAD: both
+   `MT5_GATEWAY_UNCONFIGURED` and its retryable sibling `MT5_GATEWAY_UNREACHABLE` classify to
+   `{ code: "UNKNOWN", status: 500 }`, and both are absent from **both halves** of the
+   coverage law — no verdict row *and* no recorded no-verdict — so their absence could never
+   have been loud.
+
+   ⛔ **The fix is NOT "add two rows."** That closes two instances and reproduces the defect a
+   fourth time. The real question is whether the coverage law's boundary
+   (400-family-wizard-route vs 500-family-router) is the right one — the verification says it
+   is not, because the requirement is written about *what the user sees and what the server
+   classified*. Needs a founder scoping call before any code.
+
+   ⚠️ **Do NOT re-open WIZFORM-05 as part of this.** The 45,169/45,159/45,177 ms figures from
+   the same incident are `_MT5_VALIDATE_INITIALIZE_TIMEOUT_MS = 45000` — the innermost,
+   deliberately-first-firing layer. The verdict arrived at 45 s against a 120 s budget; the
+   30 s inversion is genuinely gone (`worst_case_ms == 105_000 < 120_000`, 67 pytest green).
+   What failed *after* arrival is WIZFORM-02. Lengthening the budget fixes nothing.
+
+   📌 Consequence for bookkeeping: **Phase 153's parent checkbox must stay unticked** — the
+   span did not meet its own goal. 153.1–153.6 all shipped and 153.6 verified
+   `passed_with_concerns`; the parent is the thing that failed.
+
+7. **Doc defects in the 153 records (non-blocking, logged per the founder stopping rule).**
+   (a) `REQUIREMENTS.md:1366` claims `ConnectKeyStep`/`MultiKeyConnectStep` "still pass neither"
+   `surface` nor `venue`; at HEAD both pass `surface: "connect"` **and** `venue`, and the row
+   directly beneath at `:1368` says so — two adjacent rows contradict. WIZFORM-03 is closed
+   *further* than its own record admits. (b) `ROADMAP.md` Phase 153's success-criteria list is
+   misnumbered — it runs 1, 2, 3, **5**, 4, **5**, so "SC5" is ambiguous in any report.
+   (c) `REQUIREMENTS.md:1434` rollup reads "153 WIZFORM-01..04 + MT5-14", omitting WIZFORM-05.
+
 ---
 
 ## 🟡 FIX MID-TERM
