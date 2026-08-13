@@ -8,8 +8,18 @@
 -- function at /rest/v1/rpc/<name>. An ASVS V4 control enforced only in the Next
 -- route is enforced only in the tier the caller can skip — the browser holds an
 -- `authenticated` JWT and can POST the RPC directly. The GRANT layer is the one
--- door a browser cannot walk around. The in-body gate is defence-in-depth for
--- the day someone re-grants (see ⛔ (vi)).
+-- door a browser cannot walk around.
+--
+-- ⚠️ THE IN-BODY GATE IS NOT MERELY DEFENCE-IN-DEPTH FOR A FUTURE RE-GRANT — IT
+-- IS AN ACTIVE CONTROL TODAY, and getting this wrong is what hid a real
+-- breakage. `auth.role()` reads `request.jwt.claims`, which is ORTHOGONAL to
+-- which database role holds EXECUTE. Callers that hold EXECUTE by OWNERSHIP
+-- rather than by GRANT — `postgres`, `supabase_admin`, migration sessions and
+-- the psql SQL-test harness — sail straight past the REVOKE and land on this
+-- gate. That is precisely why six `supabase/tests/**` call sites that invoke
+-- these RPCs under an `authenticated` claim now refuse (see ⛔ (vi)); the
+-- trigger analysis in ⛔ (vii) correctly found no trigger callers but did not
+-- consider non-trigger owner-role ones.
 --
 -- PRECONDITION, AND IT WAS EVIDENCE NOT ASSUMPTION: Migration A
 -- (20260813150106) shipped first, and both routes were observed calling the
@@ -50,6 +60,14 @@
 --     remains UNUSED by this phase: the stamps below survive because the writer
 --     is the OWNER, not because the caller is service_role. This migration does
 --     not become that entry's beneficiary and does not remove it.
+--     ⚠️ `20260812083206:517` says the opposite — that the service_role allowlist
+--     entry "is ON PURPOSE and it is what makes Phase 156 work". THIS PARAGRAPH
+--     IS THE OPERATIVE ONE (Rule 7: pick one, say why). That file anticipated a
+--     design in which the ROUTE inserts into api_keys directly under a
+--     service-role client; Phase 156 did not take that design — it routes the
+--     write through these SECURITY DEFINER functions, whose bodies run as
+--     `postgres` and therefore match the 'postgres' allowlist entry. A reader
+--     diffing the two is not looking at a regression.
 --
 -- ⛔ (v) WHERE THE OWNERSHIP CHECK NOW LIVES: NOT IN THE DATABASE.
 --     The auth.uid() comparison is DELETED here, not relaxed. `p_user_id` is
@@ -88,12 +106,19 @@
 --             REVOKE ALL ON FUNCTION … FROM PUBLIC, anon, authenticated;
 --             GRANT EXECUTE ON FUNCTION … TO service_role;
 --         in the same migration.
---     The durable enforcement is the CI-run SQL gate assertion **5h** in
---     `supabase/tests/test_api_keys_exchange_not_user_writable.sql`, which arms
---     itself from `pg_get_functiondef` rather than from any comment marker and
---     re-runs on every PR. Without 5h this phase closes the hole once and the
---     next DROP+CREATE reopens it silently — the instance-not-class failure
---     Phase 153.6 was convened to end.
+--     ⛔ THE DURABLE ENFORCEMENT DOES NOT EXIST YET. It is assertion **5h** in
+--     `supabase/tests/test_api_keys_exchange_not_user_writable.sql`, specified by
+--     `156-08-PLAN.md` Task 3, which must arm itself from `pg_get_functiondef`
+--     rather than from any comment marker so it re-runs on every PR. As of this
+--     migration's authoring that file's assertions stop at 5e and `5h` appears
+--     nowhere in the repository.
+--     ⛔ THEREFORE: this migration MUST NOT MERGE WITHOUT plan 08 (5f/5g/5h) AND
+--     plan 09 in the SAME PR. Merging it alone both reddens `sql-tests` — six
+--     existing gate call sites invoke these RPCs as `authenticated` and three
+--     more pin `authenticated` as HAVING EXECUTE — and, because branch
+--     protection is deferred on this repo, applies to PROD anyway. Without 5h
+--     this phase closes the hole once and the next DROP+CREATE reopens it
+--     silently — the instance-not-class failure Phase 153.6 was convened to end.
 --
 -- ⛔ (vii) INVARIANT 17 PRE-EMPTED — this file DOES contain
 --     `REVOKE … FROM authenticated`, so here is the trigger analysis that shows
@@ -458,19 +483,26 @@ COMMENT ON COLUMN public.api_keys.attested_venue IS
   'writes THIS column and exchange from ONE parameter, so the two cannot '
   'disagree, pinned for every writer present and future by CHECK constraint '
   'api_keys_attested_venue_matches_exchange, and (3) since 20260814120000 those '
-  'RPCs are invokable ONLY by service_role: authenticated and anon hold no '
+  'RPCs are invokable ONLY by service_role over PostgREST: authenticated and '
+  'anon hold no '
   'EXECUTE, so a browser session can no longer POST /rest/v1/rpc/ directly and '
   'mint an attestation. The value is therefore THE VENUE THIS SERVER OBSERVED A '
   'SUCCESSFUL READ-ONLY AUTHENTICATION AT. ⛔ It is NOT "unforgeable": any '
   'server route holding a service-role client can still pass any value, which '
   'is the standing service_role trust boundary (ADR-0001/ADR-0003), not a '
-  'defect this column can close. ⛔ THE REVOKE IS NOT SELF-ENFORCING — Supabase '
+  'defect this column can close — and note specifically that the scrub trigger '
+  'allowlist INCLUDES service_role, so a service-role client doing a plain '
+  'INSERT INTO api_keys writes this column UNSCRUBBED, which is why clause (1) '
+  'is a statement about the BROWSER TIER and not a database-level invariant. '
+  '⛔ THE REVOKE IS NOT SELF-ENFORCING — Supabase '
   'pg_default_acl re-grants anon and authenticated on any DROP + CREATE of '
   'either function (it bit 20260812083206 for anon); assertion 5h in '
   'test_api_keys_exchange_not_user_writable.sql is what fails CI if a later '
   'migration reopens it. A client-supplied value on a direct INSERT is scrubbed '
-  'to NULL by the api_keys_scrub_attested_venue BEFORE INSERT trigger, so a '
-  'DELETE + re-INSERT round trip cannot forge one either. Read by '
+  'to NULL by the api_keys_scrub_attested_venue BEFORE INSERT trigger FOR anon '
+  'AND authenticated CALLERS, so a DELETE + re-INSERT round trip cannot forge '
+  'one from the browser tier; it does NOT stop a service-role direct INSERT. '
+  'Read by '
   '/api/strategies/finalize-wizard as the SOLE input to the ASVS V4 '
   'scope-broadening probe gate: NULL means PROBE (fail-toward). Never fall '
   'back to api_keys.exchange — that fallback re-opens the bypass this column '
@@ -535,6 +567,23 @@ DECLARE
     'public.add_wizard_composite_key(uuid,text,text,text,text,text,text,text,integer,text,uuid)';
   v_create_def TEXT;
   v_composite_def TEXT;
+  -- ⛔ COMMENT-STRIPPED COPIES. Every (d)/(e) substring test below runs against
+  -- THESE, never against the raw definition. `pg_get_functiondef` reconstructs
+  -- the body from `prosrc`, which stores the source VERBATIM — comments included
+  -- — so a raw match is wrong in BOTH directions:
+  --   * it FALSIFIES the absence test — the Trap B comment block above explains
+  --     why auth.uid() must be absent and, in doing so, contains the literal
+  --     string. Matching the raw definition would abort this migration's own
+  --     apply on the strength of its own documentation.
+  --   * it SATISFIES the presence tests — a body that dropped the attested_venue
+  --     stamp, the advisory-lock fence or the gate while keeping its explanatory
+  --     comment would pass. That is precisely the class Migration A shipped: a
+  --     canary that passed on the exact stale re-base it existed to catch.
+  -- ⚠️ The strip is line-comment only. It would also blank a `--` occurring
+  -- inside a string literal; neither body contains one, and if one is ever added
+  -- these assertions must be revisited rather than the strip widened blindly.
+  v_create_code TEXT;
+  v_composite_code TEXT;
   v_owner TEXT;
   v_comment TEXT;
 BEGIN
@@ -567,22 +616,24 @@ BEGIN
 
   v_create_def := pg_get_functiondef(v_create_sig::regprocedure);
   v_composite_def := pg_get_functiondef(v_composite_sig::regprocedure);
+  v_create_code := regexp_replace(v_create_def, '--[^\n]*', '', 'g');
+  v_composite_code := regexp_replace(v_composite_def, '--[^\n]*', '', 'g');
 
   -- (d) STALE-RE-BASE CANARY. Each body must still carry its OWN advisory-lock
   -- space and the attested_venue stamp. A re-base onto a pre-20260812083206
   -- source would also drop the venue_account_id normalisation, so that is
   -- asserted on its load-bearing half (the bare column name is satisfiable by a
   -- comment; `NULLIF(btrim(` is not).
-  IF v_create_def NOT LIKE '%wizdraft:%' THEN
+  IF v_create_code NOT LIKE '%wizdraft:%' THEN
     RAISE EXCEPTION 'post-verify (d): create_wizard_strategy lost its wizdraft: advisory-lock fence — stale re-base';
   END IF;
-  IF v_composite_def NOT LIKE '%wizcomposite:%' THEN
+  IF v_composite_code NOT LIKE '%wizcomposite:%' THEN
     RAISE EXCEPTION 'post-verify (d): add_wizard_composite_key lost its wizcomposite: advisory-lock fence — stale re-base';
   END IF;
-  IF v_create_def NOT LIKE '%attested_venue%' OR v_composite_def NOT LIKE '%attested_venue%' THEN
+  IF v_create_code NOT LIKE '%attested_venue%' OR v_composite_code NOT LIKE '%attested_venue%' THEN
     RAISE EXCEPTION 'post-verify (d): a wizard RPC lost its attested_venue stamp — stale re-base';
   END IF;
-  IF v_create_def NOT LIKE '%NULLIF(btrim(p_venue_account_id)%' THEN
+  IF v_create_code NOT LIKE '%NULLIF(btrim(p_venue_account_id)%' THEN
     RAISE EXCEPTION 'post-verify (d): create_wizard_strategy lost the btrim/NULLIF normalisation at its venue_account_id stamp site — stale re-base onto a pre-20260812083206 body';
   END IF;
 
@@ -591,17 +642,28 @@ BEGIN
   -- it. Here auth.uid() must be ABSENT: under service_role it is NULL, so any
   -- retained comparison is a permanent silent no-op (Trap B). A reader diffing
   -- the two files will be tempted to "correct" this back — do not.
-  IF v_create_def NOT LIKE '%auth.role()%' THEN
+  IF v_create_code NOT LIKE '%auth.role()%' THEN
     RAISE EXCEPTION 'post-verify (e): create_wizard_strategy has no auth.role() gate';
   END IF;
-  IF v_composite_def NOT LIKE '%auth.role()%' THEN
+  IF v_composite_code NOT LIKE '%auth.role()%' THEN
     RAISE EXCEPTION 'post-verify (e): add_wizard_composite_key has no auth.role() gate';
   END IF;
-  IF v_create_def LIKE '%auth.uid()%' THEN
+  IF v_create_code LIKE '%auth.uid()%' THEN
     RAISE EXCEPTION 'post-verify (e): create_wizard_strategy still contains auth.uid() — under service_role it is NULL, so a retained comparison is a permanent silent no-op. Delete it, do not relax it.';
   END IF;
-  IF v_composite_def LIKE '%auth.uid()%' THEN
+  IF v_composite_code LIKE '%auth.uid()%' THEN
     RAISE EXCEPTION 'post-verify (e): add_wizard_composite_key still contains auth.uid() — under service_role it is NULL, so a retained comparison is a permanent silent no-op. Delete it, do not relax it.';
+  END IF;
+  -- (e2) The CODE-ONLY tell. `v_auth_uid` is the identifier a stale re-base onto
+  -- a pre-Migration-B body drags back in, and it appears in no comment in either
+  -- new body — so unlike the tests above it cannot be satisfied or falsified by
+  -- prose, with or without the strip. Belt and braces for the assertion that
+  -- carries this migration's whole point.
+  IF v_create_code LIKE '%v_auth_uid%' THEN
+    RAISE EXCEPTION 'post-verify (e2): create_wizard_strategy still declares or compares v_auth_uid — stale re-base onto a pre-Migration-B body';
+  END IF;
+  IF v_composite_code LIKE '%v_auth_uid%' THEN
+    RAISE EXCEPTION 'post-verify (e2): add_wizard_composite_key still declares or compares v_auth_uid — stale re-base onto a pre-Migration-B body';
   END IF;
 
   -- (f) Both stay SECURITY DEFINER, owned inside the scrub triggers' allowlist.
