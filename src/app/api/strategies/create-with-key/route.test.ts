@@ -98,6 +98,51 @@ vi.mock("@/lib/analytics-client", () => ({
 }));
 
 const rpcMock = vi.fn();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⭐ PHASE 156 / CONNECT-02 — WHICH CLIENT REACHED THE RPC, RECORDED PER CALL.
+//
+// `create_wizard_strategy` becomes a SERVICE-ROLE writer: `authenticated` loses
+// EXECUTE and the route must reach it through `createAdminClient()`. `rpcMock`
+// alone cannot see that change — it answers the same verdict whichever client
+// dialled it, so "the route still uses the user-scoped client" and "the route
+// was rewired" are INDISTINGUISHABLE through it and every argument assertion
+// below would pass either way. `rpcCallSites` is the discriminator: each `.rpc`
+// double stamps its own name before delegating to the shared verdict mock.
+//
+// ⚠️ WHY `userScopedRpc` DELEGATES BY DEFAULT INSTEAD OF THROWING ON SIGHT.
+// A user-scoped `rpc` that threw unconditionally would red ~40 pre-existing
+// cases for the width of the RED window (this file lands red on purpose between
+// plan 02 and plan 04) — noise that hides the five assertions the window exists
+// to observe, which is G11's failure mode pointed the other way. The throw is
+// therefore ARMED by the one case whose subject it is (`userScopedRpcIsFatal`),
+// and every other case keeps failing or passing for its own original reason.
+// The discrimination does not depend on the throw: `rpcCallSites` records the
+// wrong client whether or not the arm is live.
+// ─────────────────────────────────────────────────────────────────────────────
+const rpcCallSites: Array<"admin" | "user-scoped"> = [];
+const userScopedRpcIsFatal = { value: false };
+
+/** The USER-SCOPED `.rpc` — the client Phase 156 forbids for this write. */
+function userScopedRpc(...args: unknown[]) {
+  rpcCallSites.push("user-scoped");
+  if (userScopedRpcIsFatal.value) {
+    throw new Error(
+      "Phase 156 / CONNECT-02: create_wizard_strategy was reached through the " +
+        "USER-SCOPED supabase client (@/lib/supabase/server). It is a " +
+        "service-role writer and must be reached through createAdminClient() " +
+        "(@/lib/supabase/admin) only.",
+    );
+  }
+  return rpcMock(...args);
+}
+
+/** The SERVICE-ROLE `.rpc` — the only sanctioned writer after Phase 156. */
+function adminRpc(...args: unknown[]) {
+  rpcCallSites.push("admin");
+  return rpcMock(...args);
+}
+
 // F6 pre-Railway idempotency fence: the route does
 // `from("strategies").select(...).eq("user_id").eq("wizard_session_id").maybeSingle()`
 // BEFORE validate/encrypt. Default to "no existing draft" so the existing
@@ -204,7 +249,11 @@ function makeSelectBuilder(table: string) {
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
-    rpc: (...args: unknown[]) => rpcMock(...args),
+    // ⛔ PHASE 156 / CONNECT-02 — this `.rpc` is the WRONG DOOR and exists only
+    // to be caught using it. `create_wizard_strategy` is a service-role writer;
+    // reaching it from here is the user-scoped fallback the phase closes. See
+    // the `rpcCallSites` docblock above for why the throw is armed per-case.
+    rpc: (...args: unknown[]) => userScopedRpc(...args),
     from: (table: string) => ({
       select: () => makeSelectBuilder(table),
       update: (...args: unknown[]) => assetClassUpdateMock(...args),
@@ -222,8 +271,29 @@ vi.mock("@/lib/supabase/server", () => ({
  * `finalize-wizard/route.ts:1223` reads the sibling `attested_venue` through
  * the admin client.
  *
- * `adminClientThrows` drives the missing-SUPABASE_SERVICE_ROLE_KEY case, which
- * must degrade to a dark fence and never to a failed submit.
+ * `adminClientThrows` drives the missing-SUPABASE_SERVICE_ROLE_KEY case. ⚠️ FOR
+ * THE VENUE-IDENTITY FENCE, and only for it, that must degrade to a dark fence
+ * and never to a failed submit — the DB's unique index is still the backstop,
+ * so a missing credential is not a reason to fail a submit that would otherwise
+ * succeed. That sentence is unchanged and the fence behaviour it describes is
+ * still tested (`resolveByVenueIdentity`'s catch arm, route.ts:195-205).
+ *
+ * ⛔ AND IT IS THE OPPOSITE FOR THE RPC (Phase 156 / CONNECT-03). This mock now
+ * serves TWO consumers: the fence's `from(...).select(...)` AND the wizard
+ * RPC, because `create_wizard_strategy` becomes a service-role writer that
+ * `authenticated` may not call at all. When the service key is absent the RPC
+ * cannot be dialled by any client, so the honest answer is 503
+ * SEAM_MISCONFIGURED with NOTHING submitted — never a silent fallback onto the
+ * user-scoped client, which is precisely the door this phase closes and would
+ * make every gate in it pass vacuously.
+ *
+ * ⚠️ NOT `importActual`-EXTENDED, deliberately, and it is the one place in this
+ * file that departs from the extend-don't-replace convention at :83-91. The
+ * real `@/lib/supabase/admin` exports exactly one symbol, `createAdminClient`,
+ * whose whole body is "read two env vars and open a live service-role
+ * connection". There is no pure helper to preserve and nothing to drift
+ * against — importActual here would either throw on the missing env or open a
+ * real client against a real project from a unit test.
  */
 const adminClientThrows = { value: false };
 vi.mock("@/lib/supabase/admin", () => ({
@@ -232,6 +302,7 @@ vi.mock("@/lib/supabase/admin", () => ({
       throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY for admin operations");
     }
     return {
+      rpc: (...args: unknown[]) => adminRpc(...args),
       from: (table: string) => ({ select: () => makeSelectBuilder(table) }),
     };
   },
@@ -1460,15 +1531,30 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     expect(consoleErr).toHaveBeenCalled();
   });
 
-  it("a MISSING service-role credential degrades to a dark fence, never to a failed submit", async () => {
+  it("[156 / CONNECT-03] a MISSING service-role credential fails CLOSED on the MT5 path too — 503, nothing submitted", async () => {
+    // ⛔ THIS CASE'S EXPECTATION WAS INVERTED BY PHASE 156, and the inversion is
+    // the reason plan 02 lands before plan 04. It previously read "degrades to a
+    // dark fence, never to a failed submit" and asserted 200 + one RPC call.
+    // That was correct while the RPC rode the USER-SCOPED client: the fence
+    // needed the service key, the write did not, so a missing key cost only the
+    // fence. After 156 the write needs it too — `authenticated` has no EXECUTE —
+    // so there is no client left to submit with. Leaving this case as it stood
+    // would have made the file GREEN on a route that kept a user-scoped
+    // fallback, i.e. green on the bug (Pitfall 5).
+    //
+    // ⭐ The fence's OWN dark-degradation is unchanged and still tested — by the
+    // READ-FAULT cases above (`a fence READ FAULT falls through to the RPC`),
+    // which reach the fence with a healthy admin client and a failing SELECT.
+    // That is the arm that still describes the fence; this one never did.
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
     adminClientThrows.value = true;
 
     const POST = await importPost();
     const res = await POST(makeReq(MT5_RECONNECT_BODY));
 
-    expect(res.status).toBe(200);
-    expect(rpcMock).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SEAM_MISCONFIGURED");
+    expect(rpcMock).not.toHaveBeenCalled();
     expect(consoleErr).toHaveBeenCalled();
   });
 
@@ -2047,6 +2133,232 @@ describe("POST /api/strategies/create-with-key — circuit-breaker trip (SEAM-04
     expect((await res.json()).code).toBe("KEY_NETWORK_TIMEOUT");
     // Retry-After is breaker-specific — it must NOT appear on other 5xx paths.
     expect(res.headers.get("Retry-After")).toBeNull();
+    consoleErr.mockRestore();
+  });
+});
+
+/**
+ * ⭐ PHASE 156 / CONNECT-REFACTOR — the post-156 contract of the wizard write,
+ * written down BEFORE the route implements it (plan 04 owns the route).
+ *
+ * ⛔ EVERY CASE BELOW IS EXPECTED TO FAIL UNTIL PLAN 04 LANDS. That is the
+ * point: `route.test.ts:229-238`'s docblock previously asserted that a missing
+ * service key "must degrade to a dark fence and never to a failed submit" — a
+ * sentence that is true of the venue fence and becomes FALSE of the RPC. A test
+ * suite written after the route would have passed on a route that kept a
+ * user-scoped fallback, which is the bug (Pitfall 5).
+ *
+ * ⚠️ WHAT "FAILS FOR THE RIGHT REASON" MEANS HERE, case by case. The route
+ * ALREADY passes `p_user_id: user.id` and the already-normalised
+ * `exchangeNormalized`, so CONNECT-02's and CONNECT-03b's argument claims are
+ * true today and CANNOT red on their own account — the plan says so ("no new
+ * plumbing is needed for the identity — only a new assertion"). What is false
+ * today is WHICH CLIENT carries those arguments, so each case asserts the
+ * client FIRST, with a named message, and the argument claims behind it. In the
+ * red window they red on the client; in the green window every assertion runs.
+ *
+ * ⚠️ Every name carries the literal token `156` so the intended failures can be
+ * grepped out of a failure list rather than inferred from an exit code — a
+ * `node_modules`-less worktree exits 1 exactly as a failing test does.
+ */
+describe("[156 / CONNECT-02 + CONNECT-03] create-with-key — the service-role writer contract", () => {
+  /** A uid the CALLER supplies. It must reach nothing. */
+  const ATTACKER_UID = "beefbeef-beef-4eef-8eef-beefbeefbeef";
+
+  /**
+   * ⚠️ `binance`, spelled out, and it is load-bearing. See the literal-anchor
+   * assertion below for why a body that agrees with itself is not enough.
+   */
+  const BINANCE_BODY = {
+    exchange: "binance",
+    api_key: "binance-key-with-enough-chars",
+    api_secret: "binance-secret-with-enough-chars",
+    label: "156 contract key",
+    wizard_session_id: WIZARD_SESSION_ID,
+  };
+
+  beforeEach(() => {
+    adminClientThrows.value = false;
+    userScopedRpcIsFatal.value = false;
+    rpcCallSites.length = 0;
+    capturedSelects.length = 0;
+    sentryState.captured.length = 0;
+    validateKeyMock.mockReset();
+    encryptKeyMock.mockReset();
+    rpcMock.mockReset();
+    draftLookupMock.mockReset();
+    assetClassUpdateMock.mockClear();
+
+    draftLookupMock.mockResolvedValue({ data: null, error: null });
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: true,
+      permissions: ["read"],
+    });
+    encryptKeyMock.mockResolvedValue({
+      api_key_encrypted: "encrypted-blob-base64",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: null,
+      nonce: null,
+      kek_version: 1,
+    });
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+      error: null,
+    });
+  });
+
+  afterEach(() => {
+    adminClientThrows.value = false;
+    userScopedRpcIsFatal.value = false;
+    vi.restoreAllMocks();
+  });
+
+  it("156 — create_wizard_strategy is reached through the ADMIN (service-role) client", async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq(BINANCE_BODY));
+
+    expect(res.status).toBe(200);
+    expect(
+      rpcCallSites,
+      "CONNECT-02: after Phase 156 `authenticated` holds no EXECUTE on " +
+        "create_wizard_strategy, so the ONLY client that can perform this " +
+        "write is createAdminClient(). Recorded call sites:",
+    ).toEqual(["admin"]);
+    const [rpcName] = rpcMock.mock.calls[0];
+    expect(rpcName).toBe("create_wizard_strategy");
+  });
+
+  it("156 — the USER-SCOPED client is never the one that reaches it (armed, not inferred)", async () => {
+    // ⭐ THE ANTI-VACUITY HALF OF THE CASE ABOVE. Arming the user-scoped double
+    // makes the wrong client FATAL rather than merely unrecorded, so a route
+    // that kept the fallback cannot answer 200 by accident and be read as
+    // rewired. This is `156-VALIDATION.md` SC2 Mutation A's oracle: re-point the
+    // `.rpc` receiver at the user-scoped binding and this case reds.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    userScopedRpcIsFatal.value = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(BINANCE_BODY));
+
+    expect(
+      rpcCallSites.filter((s) => s === "user-scoped"),
+      "CONNECT-02: the user-scoped supabase client must never carry this " +
+        "write. Every entry below is a call that went through the wrong door.",
+    ).toEqual([]);
+    expect(res.status).toBe(200);
+    consoleErr.mockRestore();
+  });
+
+  it('156 — the venue WRITTEN is the venue VALIDATED: three-way identity, anchored on the literal "binance"', async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq(BINANCE_BODY));
+
+    expect(res.status).toBe(200);
+    expect(
+      rpcCallSites,
+      "CONNECT-02: the venue coupling is only a guarantee if the writer is " +
+        "the service-role client — a user-scoped call carries the same three " +
+        "values and proves nothing about the door they went through.",
+    ).toEqual(["admin"]);
+
+    const [, rpcArgs] = rpcMock.mock.calls[0];
+    const pExchange = (rpcArgs as Record<string, unknown>).p_exchange;
+    const validatedVenue = validateKeyMock.mock.calls[0][0];
+    const encryptedVenue = encryptKeyMock.mock.calls[0][0];
+
+    // (a) IDENTITY — the right oracle for the COUPLING claim, because it holds
+    // for every venue and does not have to be re-typed when one is added.
+    expect(
+      pExchange,
+      "CONNECT-02: the value written as p_exchange must be the SAME value the " +
+        "server successfully authenticated against.",
+    ).toBe(validatedVenue);
+    expect(pExchange).toBe(encryptedVenue);
+
+    // (b) LITERAL ANCHOR — ⛔ KEEP BOTH. Identity alone is satisfied by ANY
+    // value so long as all three agree, so a normalisation defect that
+    // corrupted `exchangeNormalized` BEFORE all three consumers would keep (a)
+    // green forever (`156-VALIDATION.md` SC2, Mutation C, which is exactly that
+    // mutation). The literal alone would re-introduce the per-venue brittleness
+    // (a) exists to avoid. Neither half can see what the other sees.
+    expect(
+      pExchange,
+      "CONNECT-02: the body said binance; a shared corruption that agreed with " +
+        "itself would satisfy the identity assertion above and still write the " +
+        "wrong venue.",
+    ).toBe("binance");
+    expect(validatedVenue).toBe("binance");
+  });
+
+  it("156 — p_user_id is withAuth's user.id, and NO request-body field can reach it", async () => {
+    // ⭐ THIS IS NOW THE SOLE OWNERSHIP BINDING. Phase 156 deletes `auth.uid()`
+    // from both RPC bodies (`156-MEASUREMENTS.md` A2: it is NULL under a
+    // service-role client, so any surviving check is a permanent silent no-op),
+    // and the DB therefore stops comparing p_user_id to anything. What used to
+    // be defence-in-depth at the route is the whole control after this phase —
+    // see `156-PATTERNS.md` Finding B, whose re-cut of the composite fence's
+    // Part 3b points at this very case.
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        ...BINANCE_BODY,
+        user_id: ATTACKER_UID,
+        p_user_id: ATTACKER_UID,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(
+      rpcCallSites,
+      "CONNECT-03b: the ownership binding is only meaningful on the writer " +
+        "that actually holds EXECUTE.",
+    ).toEqual(["admin"]);
+
+    const [, rpcArgs] = rpcMock.mock.calls[0];
+    const args = rpcArgs as Record<string, unknown>;
+    expect(
+      args.p_user_id,
+      "CONNECT-03b: p_user_id must come from withAuth's verified session.",
+    ).toBe(MOCK_USER.id);
+    // ⛔ And the caller's value must not have landed ANYWHERE on the wire — not
+    // in a differently-named parameter, not smuggled into the label. Asserted
+    // over the whole argument object so a parameter added later is covered
+    // without anyone remembering to extend this test.
+    expect(
+      JSON.stringify(args),
+      "CONNECT-03b: a body-supplied uid reached the service-role writer, " +
+        "which has BYPASSRLS — this is the elevation T-156-05 names.",
+    ).not.toContain(ATTACKER_UID);
+  });
+
+  it("156 — a MISSING SUPABASE_SERVICE_ROLE_KEY answers 503 SEAM_MISCONFIGURED and submits NOTHING", async () => {
+    // ⛔ NOT a 200, NOT a 500, and NOT a success by any other path. `binance`
+    // is deliberate: it exercises a venue with NO identity fence, so the only
+    // thing the service key is needed for here is the WRITE. A 200 means a
+    // user-scoped fallback survived somewhere.
+    //
+    // 503 + SEAM_MISCONFIGURED is the code the two wizard routes ALREADY emit
+    // for a server-side misconfiguration (route.ts:504-511, wizardErrors.ts:430
+    // and :2166-2183, ratelimit.ts:325-326). ⛔ No new member is minted into the
+    // wizard code union — `EXPECTED_TABLE_SIZE` pins it and PARITY-05's ledger
+    // polices it.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    adminClientThrows.value = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(BINANCE_BODY));
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.code).toBe("SEAM_MISCONFIGURED");
+    expect(
+      rpcMock,
+      "T-156-07: the copy for SEAM_MISCONFIGURED promises 'nothing was " +
+        "submitted and nothing was changed'. That must be literally true.",
+    ).not.toHaveBeenCalled();
+    expect(rpcCallSites).toEqual([]);
     consoleErr.mockRestore();
   });
 });
