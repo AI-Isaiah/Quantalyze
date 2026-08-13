@@ -106,12 +106,14 @@
 --             REVOKE ALL ON FUNCTION … FROM PUBLIC, anon, authenticated;
 --             GRANT EXECUTE ON FUNCTION … TO service_role;
 --         in the same migration.
---     ⛔ THE DURABLE ENFORCEMENT DOES NOT EXIST YET. It is assertion **5h** in
---     `supabase/tests/test_api_keys_exchange_not_user_writable.sql`, specified by
---     `156-08-PLAN.md` Task 3, which must arm itself from `pg_get_functiondef`
---     rather than from any comment marker so it re-runs on every PR. As of this
---     migration's authoring that file's assertions stop at 5e and `5h` appears
---     nowhere in the repository.
+--     ⭐ THE DURABLE ENFORCEMENT IS ASSERTION **5h**, and it EXISTS as of plan
+--     156-08 (commit `bab2655c`) in
+--     `supabase/tests/test_api_keys_exchange_not_user_writable.sql`. It arms
+--     itself from `pg_get_functiondef` and the live ACL, NOT from any comment
+--     marker, so it re-runs on every PR and cannot be disarmed by editing prose.
+--     Plan 08 proved it on a PG16 fixture by performing an actual DROP + CREATE
+--     with no grants: `pg_default_acl` re-granted anon and authenticated, and
+--     with the marker also stripped 5h was the ONLY assertion that reddened.
 --     ⛔ THEREFORE: this migration MUST NOT MERGE WITHOUT plan 08 (5f/5g/5h) AND
 --     plan 09 in the SAME PR. Merging it alone both reddens `sql-tests` — six
 --     existing gate call sites invoke these RPCs as `authenticated` and three
@@ -463,13 +465,15 @@ GRANT EXECUTE ON FUNCTION public.add_wizard_composite_key(
 
 -- ────────────────── 4. attested_venue column comment — the SC5 re-strengthening
 -- ⛔⛔ THE 20260811210000 SUBSTRING BELOW IS LOAD-BEARING AND SO IS 20260814120000.
--- `test_api_keys_exchange_not_user_writable.sql:242-253` gates its ENTIRE 5a-5e
--- block on `col_description(...) LIKE '%20260811210000%'`. If a re-stamp drops
--- that 14-digit substring the whole block falls through to
--- `RAISE NOTICE 'SKIP (5)'` at :419-421 — a NOTICE, exit code 0, GREEN CI, and
+-- `test_api_keys_exchange_not_user_writable.sql` gates its ENTIRE 5a-5h block on
+-- `col_description(...) LIKE '%20260811210000%'`. If a re-stamp drops that
+-- 14-digit substring the whole block falls through to its
+-- `RAISE NOTICE 'SKIP (5)'` — a NOTICE, exit code 0, GREEN CI, and
 -- ZERO COVERAGE on the assertions this phase exists to add. This re-stamp
 -- PRESERVES 20260811210000 and ADDS 20260814120000, and the new marker is what
--- plan 08's 5f/5g key on, so the two cross-check each other.
+-- plan 08's 5f/5g key on, so the two cross-check each other. ⚠️ Line numbers are
+-- deliberately omitted: plans 08/09 grew that file from 424 to ~864 lines, and a
+-- pinned line reference would now point a reader at an unrelated assertion.
 --
 -- ⚠️ THIS SECTION SITS BEFORE THE `DO $verify$` BLOCK DELIBERATELY.
 -- `20260811210000:702-712` records the MEASURED failure of the other order:
@@ -624,16 +628,16 @@ BEGIN
   -- source would also drop the venue_account_id normalisation, so that is
   -- asserted on its load-bearing half (the bare column name is satisfiable by a
   -- comment; `NULLIF(btrim(` is not).
-  IF v_create_code NOT LIKE '%wizdraft:%' THEN
+  IF strpos(v_create_code, 'wizdraft:') = 0 THEN
     RAISE EXCEPTION 'post-verify (d): create_wizard_strategy lost its wizdraft: advisory-lock fence — stale re-base';
   END IF;
-  IF v_composite_code NOT LIKE '%wizcomposite:%' THEN
+  IF strpos(v_composite_code, 'wizcomposite:') = 0 THEN
     RAISE EXCEPTION 'post-verify (d): add_wizard_composite_key lost its wizcomposite: advisory-lock fence — stale re-base';
   END IF;
-  IF v_create_code NOT LIKE '%attested_venue%' OR v_composite_code NOT LIKE '%attested_venue%' THEN
+  IF strpos(v_create_code, 'attested_venue') = 0 OR strpos(v_composite_code, 'attested_venue') = 0 THEN
     RAISE EXCEPTION 'post-verify (d): a wizard RPC lost its attested_venue stamp — stale re-base';
   END IF;
-  IF v_create_code NOT LIKE '%NULLIF(btrim(p_venue_account_id)%' THEN
+  IF strpos(v_create_code, 'NULLIF(btrim(p_venue_account_id)') = 0 THEN
     RAISE EXCEPTION 'post-verify (d): create_wizard_strategy lost the btrim/NULLIF normalisation at its venue_account_id stamp site — stale re-base onto a pre-20260812083206 body';
   END IF;
 
@@ -642,27 +646,32 @@ BEGIN
   -- it. Here auth.uid() must be ABSENT: under service_role it is NULL, so any
   -- retained comparison is a permanent silent no-op (Trap B). A reader diffing
   -- the two files will be tempted to "correct" this back — do not.
-  IF v_create_code NOT LIKE '%auth.role()%' THEN
+  IF strpos(v_create_code, 'auth.role()') = 0 THEN
     RAISE EXCEPTION 'post-verify (e): create_wizard_strategy has no auth.role() gate';
   END IF;
-  IF v_composite_code NOT LIKE '%auth.role()%' THEN
+  IF strpos(v_composite_code, 'auth.role()') = 0 THEN
     RAISE EXCEPTION 'post-verify (e): add_wizard_composite_key has no auth.role() gate';
   END IF;
-  IF v_create_code LIKE '%auth.uid()%' THEN
+  IF strpos(v_create_code, 'auth.uid()') > 0 THEN
     RAISE EXCEPTION 'post-verify (e): create_wizard_strategy still contains auth.uid() — under service_role it is NULL, so a retained comparison is a permanent silent no-op. Delete it, do not relax it.';
   END IF;
-  IF v_composite_code LIKE '%auth.uid()%' THEN
+  IF strpos(v_composite_code, 'auth.uid()') > 0 THEN
     RAISE EXCEPTION 'post-verify (e): add_wizard_composite_key still contains auth.uid() — under service_role it is NULL, so a retained comparison is a permanent silent no-op. Delete it, do not relax it.';
   END IF;
-  -- (e2) The CODE-ONLY tell. `v_auth_uid` is the identifier a stale re-base onto
-  -- a pre-Migration-B body drags back in, and it appears in no comment in either
-  -- new body — so unlike the tests above it cannot be satisfied or falsified by
-  -- prose, with or without the strip. Belt and braces for the assertion that
-  -- carries this migration's whole point.
-  IF v_create_code LIKE '%v_auth_uid%' THEN
+  -- (e2) `v_auth_uid` is the identifier a stale re-base onto a pre-Migration-B
+  -- body drags back in: Migration A declares `v_auth_uid UUID := auth.uid();`
+  -- and compares it, both as CODE, so a re-base onto that body trips this.
+  -- ⚠️ CORRECTION, and it matters: an earlier draft of this comment claimed
+  -- `v_auth_uid` appears in NO comment and so needs no strip. THAT IS FALSE — it
+  -- appears twice in §1's Trap B illustration (`IF v_auth_uid IS NOT NULL …`).
+  -- (e2) is therefore strip-DEPENDENT exactly like (d)/(e), and is a code-only
+  -- tell ONLY against v_create_code / v_composite_code. Do not "simplify" it back
+  -- onto the raw definition: that re-introduces the abort-on-own-documentation
+  -- defect this file was already fixed for once.
+  IF strpos(v_create_code, 'v_auth_uid') > 0 THEN
     RAISE EXCEPTION 'post-verify (e2): create_wizard_strategy still declares or compares v_auth_uid — stale re-base onto a pre-Migration-B body';
   END IF;
-  IF v_composite_code LIKE '%v_auth_uid%' THEN
+  IF strpos(v_composite_code, 'v_auth_uid') > 0 THEN
     RAISE EXCEPTION 'post-verify (e2): add_wizard_composite_key still declares or compares v_auth_uid — stale re-base onto a pre-Migration-B body';
   END IF;
 
@@ -710,10 +719,10 @@ BEGIN
                AND attname = 'attested_venue'
                AND NOT attisdropped)
          ) INTO v_comment;
-  IF v_comment IS NULL OR v_comment NOT LIKE '%20260811210000%' THEN
+  IF v_comment IS NULL OR strpos(v_comment, '20260811210000') = 0 THEN
     RAISE EXCEPTION 'post-verify (h): the attested_venue comment lost the 20260811210000 marker — test_api_keys_exchange_not_user_writable.sql would SKIP its entire 5a-5e block with exit code 0';
   END IF;
-  IF v_comment NOT LIKE '%20260814120000%' THEN
+  IF strpos(v_comment, '20260814120000') = 0 THEN
     RAISE EXCEPTION 'post-verify (h): the attested_venue comment does not carry this migration id — plan 08 assertions 5f/5g key on it';
   END IF;
 

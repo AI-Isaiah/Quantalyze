@@ -2,88 +2,155 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260813150106_wizard_rpcs_service_role_writer.sql
+-- source migration: 20260814120000_wizard_rpcs_revoke_authenticated.sql
 -- ═══════════════════════════════════════════════════════════════════════════
--- Phase 156 (CONNECT-REFACTOR) — Migration A of two.
+-- Phase 156 (CONNECT-REFACTOR) — Migration B of two. THIS IS THE SC1 CHANGE.
 --
--- WHAT: both wizard RPCs accept a `service_role` caller, and `service_role` is
--- explicitly granted EXECUTE on both. `authenticated` KEEPS its grant and KEEPS
--- its full auth.uid() ownership check.
+-- WHAT: withdraw `authenticated` EXECUTE from both wizard RPCs and narrow both
+-- bodies to a `service_role`-only gate carrying ZERO auth.uid().
 --
--- WHY: CR-01 remedy (a). `p_exchange` and `p_venue_account_id` are caller-
--- supplied and unvalidated inside these SECURITY DEFINER bodies, and today
--- `authenticated` holds EXECUTE — so a browser session can POST
--- /rest/v1/rpc/create_wizard_strategy directly and mint an api_keys row whose
--- attested_venue disagrees with the venue the server actually validated. The
--- remedy is to move the write behind a server-side writer that passes the
--- identity IT validated. This is 153.6's PARITY-04 `threat_flag: deferred-control`.
+-- WHY HERE AND NOT IN THE ROUTE: PostgREST exposes every `public`-schema
+-- function at /rest/v1/rpc/<name>. An ASVS V4 control enforced only in the Next
+-- route is enforced only in the tier the caller can skip — the browser holds an
+-- `authenticated` JWT and can POST the RPC directly. The GRANT layer is the one
+-- door a browser cannot walk around.
 --
--- ⛔ (i) THIS FILE ALONE DOES NOT CLOSE CONNECT-01. It is deliberately ADDITIVE.
---     The follow-up migration `..._wizard_rpcs_withdraw_authenticated.sql`
---     (Phase 156 plan 07) is what withdraws `authenticated` EXECUTE and deletes
---     the `authenticated` arm below. Until it lands, a direct browser RPC call
---     still works exactly as it does today, with today's guarantees.
+-- ⚠️ THE IN-BODY GATE IS NOT MERELY DEFENCE-IN-DEPTH FOR A FUTURE RE-GRANT — IT
+-- IS AN ACTIVE CONTROL TODAY, and getting this wrong is what hid a real
+-- breakage. `auth.role()` reads `request.jwt.claims`, which is ORTHOGONAL to
+-- which database role holds EXECUTE. Callers that hold EXECUTE by OWNERSHIP
+-- rather than by GRANT — `postgres`, `supabase_admin`, migration sessions and
+-- the psql SQL-test harness — sail straight past the REVOKE and land on this
+-- gate. That is precisely why six `supabase/tests/**` call sites that invoke
+-- these RPCs under an `authenticated` claim now refuse (see ⛔ (vi)); the
+-- trigger analysis in ⛔ (vii) correctly found no trigger callers but did not
+-- consider non-trigger owner-role ones.
 --
---     The split is bought by ONE direction, not two. MIGRATION-FIRST is the real
---     hazard: revoking `authenticated` EXECUTE while the old deploy is still
---     calling with the user-scoped client 42501s every connect-a-key for the
---     width of the merge window (CONTRIBUTING.md §2 — "the merge IS the apply" —
---     and the Vercel build fires on the SAME merge with NO ordering between
---     them). Deploy-first is not symmetric: `service_role` already holds EXECUTE
---     (see §3), so a new deploy calling with the admin client works before any
---     migration lands.
+-- PRECONDITION, AND IT WAS EVIDENCE NOT ASSUMPTION: Migration A
+-- (20260813150106) shipped first, and both routes were observed calling the
+-- service_role arm ON PRODUCTION before this file was authored —
+-- `.planning/phases/156-.../156-LIVE-ACCEPTANCE.md`, status: pass, rows 1-5.
+-- Row 3 recorded a single-key connect, row 4 a composite whose SECOND member
+-- was minted by add_wizard_composite_key. That is why this REVOKE removes a
+-- path our own code provably no longer takes.
 --
--- ⛔ (ii) THE TRANSITIONAL GATE'S ARMS ARE BRANCHED, NEVER UNIONED.
---     `service_role`  → proceed (the new writer; ownership is bound at the route).
---     `authenticated` → the EXISTING auth.uid() checks run UNCHANGED.
---     anything else / NULL → insufficient_privilege.
+-- ⛔ (i) RE-APPLY HAZARD (G7/G8) — NOW ARMED, NOT THEORETICAL.
+--     `20260811210000:869-882` and `20260812083206:861-868` post-verify that
+--     `authenticated` HAS EXECUTE on these functions. On an ordered fresh
+--     replay they run BEFORE this file and pass. But RE-APPLYING EITHER OF
+--     THEM AFTER THIS MIGRATION WILL ABORT with their own post-verify error.
+--     That is an ordered migration history behaving correctly, not a defect —
+--     do NOT soften those assertions and do NOT edit those files (invariant 11).
+--     If you hit it, see `docs/runbooks/migration-failure.md`.
 --
---     ⛔ The shape that must NOT be written is the flat union:
---         IF v_jwt_role NOT IN ('authenticated','service_role') THEN RAISE …
---     with the uid comparison deleted. That deletes the cross-user elevation
---     guard (T-88-03) for a role that STILL HOLDS EXECUTE for the whole PR-A
---     window — strictly worse than the residual this phase closes. A declaration
---     (`v_auth_uid UUID := auth.uid();`) is NOT a comparison; the comparison
---     `v_auth_uid <> p_user_id` is the guard, and post-verify (e2) below aborts
---     the apply if it is missing.
+-- ⛔ (ii) `20260811210000_api_keys_attested_venue.sql` §1b (:225-290, incl. :277)
+--     reads as if the connect-flow refactor is still deferred. It is SUPERSEDED
+--     BY THIS FILE and must NEVER be edited — it is applied to PROD and TEST.
 --
---     ⚠️ The width that `156-PATTERNS.md` §1 rejects in `log_audit_event_service`
---     is the FINAL body's width. That verdict is correct and stands — plan 07
---     installs the final, `service_role`-only body. A two-arm transitional gate
---     is not that shape.
+-- ⛔ (iii) THE HONEST CEILING — what this does NOT buy.
+--     Any server route holding `createAdminClient()` can still pass ANY
+--     p_user_id and ANY p_exchange. That is the standing service_role trust
+--     boundary (ADR-0001/ADR-0003), identical to `log_audit_event_service`,
+--     which the Python worker calls with a uid of its choosing. What changed is
+--     precisely this and nothing more:
+--         "any browser session can forge an attestation"
+--       → "only our own server code can".
+--     ⛔ Write the guarantee as "the venue is the one THIS SERVER OBSERVED a
+--     successful read-only authentication at". NEVER write "the venue cannot be
+--     forged" — that claim is false and would license removing the probe gate.
 --
--- ⛔ (iii) `20260811210000_api_keys_attested_venue.sql` §1b (:225-290, incl. :277)
---     reads as if Phase 156 is still deferred. It is SUPERSEDED BY THIS FILE and
---     must NEVER be edited — it is applied to PROD and TEST, and migration-reviewer
---     invariant 11 makes any edit an immediate CRITICAL.
---
--- ⛔ (iv) RE-APPLY HAZARD (G7/G8). `20260811210000:869-882` and
---     `20260812083206:861-868` post-verify that `authenticated` HAS EXECUTE.
---     After the follow-up migration withdraws it, re-applying either of those
---     files OUT OF ORDER would abort. That is the correct behaviour of an
---     ordered migration history, not a defect to route around — do not soften
---     those assertions.
---
--- ⛔ (v) IN-04, RESTATED ACCURATELY. These functions are SECURITY DEFINER owned
+-- ⛔ (iv) IN-04, RESTATED ACCURATELY. These functions are SECURITY DEFINER owned
 --     by `postgres`, so their bodies run as `postgres` — NOT as `service_role`.
---     The api_keys scrub triggers' `service_role` allowlist entry therefore stays
---     UNUSED by this phase: the stamps below survive because the writer is the
---     OWNER, not because the caller is `service_role`. This phase does not become
---     that entry's beneficiary and does not remove it.
+--     The api_keys scrub triggers' `service_role` allowlist entry therefore
+--     remains UNUSED by this phase: the stamps below survive because the writer
+--     is the OWNER, not because the caller is service_role. This migration does
+--     not become that entry's beneficiary and does not remove it.
+--     ⚠️ `20260812083206:517` says the opposite — that the service_role allowlist
+--     entry "is ON PURPOSE and it is what makes Phase 156 work". THIS PARAGRAPH
+--     IS THE OPERATIVE ONE (Rule 7: pick one, say why). That file anticipated a
+--     design in which the ROUTE inserts into api_keys directly under a
+--     service-role client; Phase 156 did not take that design — it routes the
+--     write through these SECURITY DEFINER functions, whose bodies run as
+--     `postgres` and therefore match the 'postgres' allowlist entry. A reader
+--     diffing the two is not looking at a regression.
 --
--- CREATE OR REPLACE, never DROP+CREATE. `20260812083206:739-747` records why:
--- "DROP DESTROYS [the ACL]. A freshly created function's default ACL grants
--- EXECUTE to PUBLIC… That is a privilege ESCALATION introduced by the act of
--- dropping, silently, with no error." REPLACE also preserves the COMMENT and
--- keeps `test_api_keys_venue_identity_uniq.sql:41`'s signature pin valid.
--- No signature changes here: 12 args and 11 args, unchanged.
+-- ⛔ (v) WHERE THE OWNERSHIP CHECK NOW LIVES: NOT IN THE DATABASE.
+--     The auth.uid() comparison is DELETED here, not relaxed. `p_user_id` is
+--     `withAuth`'s getUser()-verified `user.id` (ADR-0022 layer 2), and the
+--     GRANT layer is what makes trusting it sound: only our server can call
+--     this at all. The surviving control is the route-level assertion in
+--     src/app/api/strategies/create-with-key/route.test.ts and its composite
+--     twin, plus the CONNECT-02b structural guard
+--     (src/__tests__/phase-156-wizard-rpc-writer-guard.test.ts) which reds if
+--     any wizard-RPC call site is bound from a user-scoped client.
+--
+-- ⛔⛔ (vi) THE `REVOKE` IN THIS FILE IS NOT DURABLE — AND THAT IS A CLASS.
+--     `156-MEASUREMENTS.md` § A4 (measured, Wave 0): Supabase's `pg_default_acl`
+--     for `public` functions granted by role `postgres` is
+--         postgres=X  anon=X  authenticated=X  service_role=X
+--     so EVERY function `postgres` creates in `public` is AUTOMATICALLY granted
+--     EXECUTE to `anon` AND `authenticated`. This REVOKE takes effect when it
+--     runs — and ANY FUTURE MIGRATION THAT `DROP`s AND RE-`CREATE`s EITHER
+--     FUNCTION SILENTLY RE-GRANTS BOTH ROLES, with no error and nothing in the
+--     diff to read.
+--
+--     ⚠️ Not hypothetical. `20260812083206` (three days before this phase) did
+--     exactly a DROP + CREATE on create_wizard_strategy, and its post-verify at
+--     :867 exists BECAUSE THE AUTHOR HIT THIS FOR `anon` — "DROP destroyed the
+--     original ACL and a new function grants EXECUTE to PUBLIC by default, so
+--     the REVOKE did not take."
+--
+--     ⛔ NOTHING IN THIS FILE CAN CLOSE IT. A post-verify runs ONCE, at apply,
+--     on this migration; the migration that reopens the door is one nobody has
+--     written yet.
+--
+--     ⭐ THE STANDING RULE, for whoever writes the next migration touching
+--     either wizard RPC:
+--         ANY migration that DROPs and re-CREATEs create_wizard_strategy or
+--         add_wizard_composite_key MUST re-issue
+--             REVOKE ALL ON FUNCTION … FROM PUBLIC, anon, authenticated;
+--             GRANT EXECUTE ON FUNCTION … TO service_role;
+--         in the same migration.
+--     ⛔ THE DURABLE ENFORCEMENT DOES NOT EXIST YET. It is assertion **5h** in
+--     `supabase/tests/test_api_keys_exchange_not_user_writable.sql`, specified by
+--     `156-08-PLAN.md` Task 3, which must arm itself from `pg_get_functiondef`
+--     rather than from any comment marker so it re-runs on every PR. As of this
+--     migration's authoring that file's assertions stop at 5e and `5h` appears
+--     nowhere in the repository.
+--     ⛔ THEREFORE: this migration MUST NOT MERGE WITHOUT plan 08 (5f/5g/5h) AND
+--     plan 09 in the SAME PR. Merging it alone both reddens `sql-tests` — six
+--     existing gate call sites invoke these RPCs as `authenticated` and three
+--     more pin `authenticated` as HAVING EXECUTE — and, because branch
+--     protection is deferred on this repo, applies to PROD anyway. Without 5h
+--     this phase closes the hole once and the next DROP+CREATE reopens it
+--     silently — the instance-not-class failure Phase 153.6 was convened to end.
+--
+-- ⛔ (vii) INVARIANT 17 PRE-EMPTED — this file DOES contain
+--     `REVOKE … FROM authenticated`, so here is the trigger analysis that shows
+--     it breaks no DML path. MEASURED by grep over supabase/migrations/**:
+--       * no trigger function PERFORMs or SELECTs either wizard RPC (zero hits
+--         for `PERFORM .*_wizard_` / `FROM (create|add)_wizard`);
+--       * `api_keys` carries `api_keys_scrub_attested_venue`,
+--         `api_keys_scrub_venue_account_id` (both SECURITY INVOKER),
+--         `api_keys_lock_exchange`, `api_keys_stamp_first_added` and
+--         `api_keys_published_composite_delete_guard`;
+--       * `strategies` carries `guard_wizard_draft_updates_trigger`,
+--         `guard_strategies_publish_transition_trigger`,
+--         `strategies_reject_sentinel` and
+--         `trg_strategies_team_review_mark_guard`.
+--     None of them invokes either function, so no INSERT/UPDATE/DELETE by any
+--     role acquires a 42501 from this REVOKE. The only callers are the two Next
+--     routes, which hold service_role.
+--
+-- CREATE OR REPLACE, never DROP+CREATE — see (vi) for exactly what DROP costs.
+-- No signature changes: 12 args and 11 args, unchanged.
 -- ═══════════════════════════════════════════════════════════════════════════
 
 
--- ────────────────── 1. create_wizard_strategy (re-based on 20260812083206)
--- Re-based VERBATIM from supabase/schema/functions/create_wizard_strategy.sql,
--- whose `-- source migration:` header names 20260812083206 as the latest source.
--- The ONLY region that differs from that snapshot is the DECLARE/guard block.
+-- ────────────────── 1. create_wizard_strategy — service_role only
+-- Re-based VERBATIM from supabase/schema/functions/create_wizard_strategy.sql
+-- (source migration 20260813150106 = Migration A). The ONLY regions that differ
+-- from that snapshot are the DECLARE block (v_auth_uid is DELETED) and the gate.
 CREATE OR REPLACE FUNCTION create_wizard_strategy(
   p_user_id UUID,
   p_exchange TEXT,
@@ -106,70 +173,54 @@ SET lock_timeout = '3s'
 AS $$
 DECLARE
   v_jwt_role TEXT;
-  v_auth_uid UUID := auth.uid();
   v_key_id UUID;
   v_strategy_id UUID;
 BEGIN
-  -- ⭐ TRANSITIONAL TWO-ARM GATE (Phase 156 Migration A). Deleted by the
-  -- follow-up migration, which leaves ONLY the service_role arm.
+  -- ⭐ FINAL GATE (Phase 156 Migration B). Migration A's `authenticated` arm is
+  -- DELETED. Only service_role may write a wizard draft.
   --
-  -- Read the role behind a fail-closed wrapper, carried from
+  -- Fail-closed wrapper carried from
   -- `20260515113753_log_audit_event_service_hardened.sql:130-160`: a malformed
   -- request.jwt.claims makes auth.role() RAISE rather than return NULL. NULL
-  -- then falls to the ELSE arm and is REFUSED — strictly safer than a bare
-  -- COALESCE, and it composes with one.
+  -- then fails the IS DISTINCT FROM test and is REFUSED.
   --
-  -- ⚠️ THE WRAPPER COVERS auth.role() ONLY. `v_auth_uid := auth.uid()` sits in
-  -- DECLARE, which is evaluated BEFORE this block, so a malformed claims payload
-  -- still raises uncaught there. That is pre-existing (the pre-156 bodies have
-  -- the same DECLARE) and it fails CLOSED — the raise happens before any write —
-  -- so it is an ugly error, not a hole. Do not "fix" it by moving the
-  -- initialisation into the wrapper without checking what the routes map the
-  -- resulting SQLSTATE to.
+  -- ⛔ THE WIDTH OF THAT PRECEDENT IS REJECTED. log_audit_event_service admits
+  -- `auth.role() IN ('authenticated','service_role')` at 20260515113753:148.
+  -- `authenticated` is THE EXACT CALLER THIS PHASE EXISTS TO LOCK OUT; admitting
+  -- it here would make this layer a permanent no-op, so that a future GRANT leak
+  -- would pass BOTH layers. Carry that file's auth.role() choice, its fail-closed
+  -- wrapper, its self-contained REVOKE/GRANT and its body canary. Reject its
+  -- width. (156-PATTERNS.md §1; Rule 7 — pick one, say why, never average.)
   --
-  -- ⛔ auth.role(), never current_user and never session_user. Inside a SECURITY
-  -- DEFINER body current_user is the OWNER, so a gate written on it always
-  -- passes — the bug that made `prevent_profile_role_change` a no-op
-  -- (`20260811210000:518-523`, `20260411103316:313-321`). session_user is
-  -- `authenticator` for every PostgREST request.
+  -- ⛔ TRAP B — WHY auth.uid() IS ABSENT RATHER THAN RELAXED. `156-MEASUREMENTS.md`
+  -- § A2 MEASURED auth.uid() IS NULL for a service_role client. So a "relaxed"
+  -- comparison kept for safety — `IF v_auth_uid IS NOT NULL AND v_auth_uid <>
+  -- p_user_id` — would be a PERMANENT SILENT NO-OP: the ownership check vanishes
+  -- with no error, no 42501, and no test failure. Deleting it is HONEST; keeping
+  -- a decorative one is the `_assert_owner` shape at 20260411144407:300-302 that
+  -- this phase must not reproduce. Post-verify (e) below aborts the apply if the
+  -- literal `auth.uid()` reappears in either body.
+  --
+  -- ⛔ TRAP C — NEVER current_user / session_user. Inside a SECURITY DEFINER body
+  -- current_user is the OWNER, so a gate written on it ALWAYS PASSES — the bug
+  -- that made `prevent_profile_role_change` a no-op (20260811210000:518-523,
+  -- 20260411103316:313-321). session_user is `authenticator` for every PostgREST
+  -- request. auth.role() reads the JWT claim, which is the thing we mean.
   BEGIN
     v_jwt_role := auth.role();
   EXCEPTION WHEN OTHERS THEN
     v_jwt_role := NULL;
   END;
 
-  IF v_jwt_role = 'service_role' THEN
-    -- The Phase 156 writer. Ownership is bound at the route (p_user_id ===
-    -- withAuth's user.id under a session the route authenticated), NOT here.
-    -- ⛔ Do NOT add an auth.uid() check to this arm: `156-MEASUREMENTS.md` § A2
-    -- MEASURED auth.uid() IS NULL for a service-role client, so any uid-based
-    -- check here is a PERMANENT SILENT NO-OP — the `_assert_owner` shape at
-    -- `20260411144407:300-302` this phase must not copy.
-    NULL;
-  ELSIF v_jwt_role = 'authenticated' THEN
-    -- ⛔ UNCHANGED IN TEXT AND ERRCODE from the pre-156 body. This arm is the
-    -- ENTIRE reason the merge window is safe: `authenticated` still holds
-    -- EXECUTE (§3 deliberately does not revoke it), so the cross-user elevation
-    -- guard T-88-03 must remain fully intact for it.
-    IF v_auth_uid IS NULL THEN
-      RAISE EXCEPTION 'create_wizard_strategy called without an auth session'
-        USING ERRCODE = 'insufficient_privilege';
-    END IF;
-
-    IF v_auth_uid <> p_user_id THEN
-      RAISE EXCEPTION 'create_wizard_strategy: p_user_id (%) does not match auth.uid (%)',
-        p_user_id, v_auth_uid
-        USING ERRCODE = 'insufficient_privilege';
-    END IF;
-  ELSE
+  IF v_jwt_role IS DISTINCT FROM 'service_role' THEN
     RAISE EXCEPTION 'create_wizard_strategy: caller role (%) may not write wizard drafts',
       COALESCE(v_jwt_role, '<none>')
       USING ERRCODE = 'insufficient_privilege';
   END IF;
 
-  -- Under the service_role arm auth.uid() is NULL, so p_user_id is the ONLY
-  -- carrier of the owning identity and a NULL would silently mint an ownerless
-  -- draft. Refuse it explicitly rather than let the FK or a later read decide.
+  -- auth.uid() is NULL under service_role, so p_user_id is the ONLY carrier of
+  -- the owning identity and a NULL would silently mint an ownerless draft.
+  -- Refuse it explicitly rather than let the FK or a later read decide.
   IF p_user_id IS NULL THEN
     RAISE EXCEPTION 'create_wizard_strategy: p_user_id must not be NULL'
       USING ERRCODE = 'invalid_parameter_value';
@@ -180,8 +231,6 @@ BEGIN
   -- (auto-released on commit/rollback; advisory locks are not subject to
   -- lock_timeout), then return any draft already created for this
   -- (user, session) instead of minting a duplicate strategies + api_keys pair.
-  -- A client double-click or browser retry now resolves to the SAME draft
-  -- rather than two drafts + two encrypted-secret rows.
   PERFORM pg_advisory_xact_lock(
     hashtext('wizdraft:' || p_user_id::text || ':' || p_wizard_session_id::text)
   );
@@ -192,7 +241,7 @@ BEGIN
   -- key — fall through so the INSERT trips strategies_user_wizard_session_uniq
   -- (23505 → the route's recoverable DRAFT_ALREADY_EXISTS 409) instead of
   -- returning a NULL api_key_id the route would reject with a permanent 500
-  -- (red-team MEDIUM-1: route fence requires api_key_id; the two fences must agree).
+  -- (red-team MEDIUM-1: route fence requires api_key_id; the two must agree).
   SELECT s.id, s.api_key_id
     INTO v_strategy_id, v_key_id
     FROM strategies s
@@ -202,7 +251,6 @@ BEGIN
    LIMIT 1;
 
   IF v_strategy_id IS NOT NULL THEN
-    -- Idempotent replay: hand back the existing draft, no new rows.
     RETURN QUERY SELECT v_strategy_id, v_key_id;
     RETURN;
   END IF;
@@ -212,39 +260,31 @@ BEGIN
   -- api_keys_scrub_attested_venue trigger.
   -- ⛔ p_exchange IS STILL CALLER-SUPPLIED AND STILL NOT VALIDATED HERE. Both
   -- columns are written from that ONE parameter deliberately: the CHECK
-  -- api_keys_attested_venue_matches_exchange requires it, so this INSERT
-  -- cannot mint an attestation that disagrees with the routing label. If you
-  -- ever add a separate p_attested_venue, or normalise one column and not the
-  -- other, this INSERT will start failing — that is the constraint doing its
-  -- job, not a bug to route around.
+  -- api_keys_attested_venue_matches_exchange requires it, so this INSERT cannot
+  -- mint an attestation that disagrees with the routing label.
   --
-  -- ⭐ CR-01 STATUS UNDER MIGRATION A: the residual NARROWS but does not close.
-  -- Once the deploy switches to the service-role writer, the value reaching
-  -- p_exchange is the one the SERVER validated. But `authenticated` still holds
-  -- EXECUTE for the width of this window, so the direct-RPC path is still open
-  -- and the guarantee is still "trusted caller", not "enforced here". The
-  -- follow-up migration is what makes the writer the ONLY caller.
+  -- ⭐ CR-01 STATUS UNDER MIGRATION B: CLOSED for the browser, BOUNDED for us.
+  -- `authenticated` no longer holds EXECUTE (§3), so the direct-RPC path is shut
+  -- and the only callers are our two routes, which pass the venue the server
+  -- observed a successful read-only authentication at. The residual that REMAINS
+  -- is the service_role trust boundary itself — see header ⛔ (iii). Do not read
+  -- this as "the venue cannot be forged".
   --
   -- 154 / WIZCONT-02: venue_account_id is stamped here for the same structural
-  -- reason — this DEFINER body is the only writer whose value survives the
-  -- api_keys_scrub_venue_account_id trigger. ⛔ It is NOT coupled to p_exchange
-  -- and must not be: it identifies an ACCOUNT WITHIN a venue, not the venue. It
-  -- is NULL for every venue that exposes no stable non-secret account id, which
-  -- is every ccxt venue today, and the partial index excludes those rows.
+  -- reason. ⛔ It is NOT coupled to p_exchange and must not be: it identifies an
+  -- ACCOUNT WITHIN a venue, not the venue. It is NULL for every venue that
+  -- exposes no stable non-secret account id, which is every ccxt venue today,
+  -- and the partial index excludes those rows.
   -- ⛔ Do not "fix" it by adding validation here — the value has no in-database
   -- oracle to check against, and a plausible-looking check would hide the residual.
   --
-  -- ⭐ NORMALISED AT THE STAMP SITE: btrim, then blank → NULL. Two reasons, both
-  -- load-bearing. (1) Without btrim, ' 5551234' and '5551234' are DIFFERENT index
-  -- keys, so a stray space from the form makes the dedup MISS entirely and the
-  -- duplicate this migration exists to stop sails through. (2) Without the
-  -- NULLIF, an unset field arriving as '' (or '  ') would be stored as a non-NULL
-  -- value the partial index governs, colliding two GENUINELY DIFFERENT accounts —
-  -- api_keys_venue_account_id_nonblank would REFUSE that INSERT with 23514, which
-  -- the wizard route has no handler for. Mapping blank → NULL means the wizard
-  -- never has to hit its own CHECK: "no identity supplied" and "no identity
-  -- exists" land on the same honest value. Keep this expression and the CHECK in
-  -- agreement — if one gains a wider trim set, so must the other.
+  -- ⭐ NORMALISED AT THE STAMP SITE: btrim, then blank → NULL. (1) Without btrim,
+  -- ' 5551234' and '5551234' are DIFFERENT index keys, so a stray space from the
+  -- form makes the dedup MISS entirely. (2) Without the NULLIF, an unset field
+  -- arriving as '' would be stored as a non-NULL value the partial index governs,
+  -- colliding two GENUINELY DIFFERENT accounts — api_keys_venue_account_id_nonblank
+  -- would REFUSE that INSERT with 23514, which the wizard route has no handler
+  -- for. Keep this expression and the CHECK in agreement.
   INSERT INTO api_keys (
     user_id, exchange, label,
     api_key_encrypted, api_secret_encrypted, passphrase_encrypted,
