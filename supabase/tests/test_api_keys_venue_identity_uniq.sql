@@ -69,6 +69,10 @@ DECLARE
   -- revisit these assertions rather than widening the strip blindly.
   v_fn_code     TEXT;   -- create_wizard_strategy, comments stripped
   v_fn_code_k   TEXT;   -- add_wizard_composite_key, comments stripped
+  v_b_live      BOOLEAN;  -- 20260814120000 narrowed the SINGLE-KEY body
+  v_b_live_k    BOOLEAN;  -- 20260814120000 narrowed the COMPOSITE body
+  v_auth_exec   BOOLEAN;  -- authenticated holds EXECUTE on the single-key RPC
+  v_auth_exec_k BOOLEAN;  -- authenticated holds EXECUTE on the composite RPC
   v_trg_secdef  BOOLEAN;
   v_chk_valid   BOOLEAN;
   v_chk_def     TEXT;
@@ -299,11 +303,104 @@ BEGIN
   IF v_fn_code_k NOT LIKE '%auth.role()%' THEN
     RAISE EXCEPTION 'TEST FAILED (3c): add_wizard_composite_key has NO auth.role() gate in its code — the caller-role check migration 20260814120000 installed is gone on the COMPOSITE half';
   END IF;
-  IF v_fn_code LIKE '%auth.uid()%' THEN
-    RAISE EXCEPTION 'TEST FAILED (3c): create_wizard_strategy CODE contains auth.uid(). Under the service_role caller that is now its only admitted caller, auth.uid() IS NULL (156-MEASUREMENTS.md A2), so any ownership comparison built on it is a PERMANENT SILENT NO-OP — it never fires and never fails. This is not a stricter check, it is a decorative one. Delete it; do not relax it. Ownership is bound at the route.';
+
+  -- ----- 3d. IS MIGRATION B LIVE ON *THIS* DATABASE? ------------------------
+  -- ⭐ THE MERGE-ORDER PROBLEM. Migration 20260814120000 (Migration B) cannot be
+  -- applied to the shared TEST database ahead of the merge: `origin/main`'s
+  -- copies of these gate files still require `authenticated` to HOLD EXECUTE, so
+  -- an early apply would red `sql-tests` for main and for every concurrent PR
+  -- sharing that database. The auth.uid()-absence pair below and section 4's
+  -- `authenticated` negative therefore describe a state TEST does not yet have.
+  -- The answer is not to weaken them — it is to arm them from the state of the
+  -- database they are actually running against.
+  --
+  -- ⛔ THE DETECTOR IS LIVE STATE, NEVER A COMMENT MARKER, AND NEVER THE THING IT
+  -- ARMS. Three candidates were measured on a local PG16 fixture and two are
+  -- wrong: `auth.role()` is present in the Migration A body AND the Migration B
+  -- body (it discriminates NOTHING — which is why the two assertions ABOVE stay
+  -- unconditional, they are true in both states); and
+  -- `has_function_privilege('authenticated', …)` is exactly what section 4
+  -- asserts, so arming on it would make that assertion vacuous — it would only
+  -- run in the case where the ACL is already what we want.
+  --
+  -- The signal is the identifier `v_auth_uid` in the COMMENT-STRIPPED body:
+  -- Migration A declares AND compares it as CODE (`v_auth_uid UUID :=
+  -- auth.uid();`, `IF v_auth_uid <> p_user_id`) because its `authenticated` arm
+  -- needs it; Migration B deletes both and keeps the name only in prose.
+  --
+  -- ⛔⛔ THE STRIP IS MANDATORY AND WAS MEASURED. On a PG16 fixture carrying
+  -- Migration B, the RAW pg_get_functiondef of create_wizard_strategy matches
+  -- '%v_auth_uid%' — TRUE — because Migration B's Trap B comment block explains
+  -- at length why the identifier is absent and thereby contains it. A raw
+  -- detector reads "not live" on precisely the database it guards, leaving these
+  -- assertions permanently un-armed and silently green. ⚠️ MEASURED IN THE SAME
+  -- RUN: the COMPOSITE twin's raw definition reads FALSE in that same state, so a
+  -- raw detector would arm one twin and not the other — the instance-not-class
+  -- shape, reproduced inside its own remedy. The strip these two variables
+  -- already carry (for the reason recorded at their declaration) is the same one.
+  v_b_live      := v_fn_code   NOT LIKE '%v_auth_uid%';
+  v_b_live_k    := v_fn_code_k NOT LIKE '%v_auth_uid%';
+  v_auth_exec   := has_function_privilege('authenticated', c_sig, 'EXECUTE');
+  v_auth_exec_k := has_function_privilege('authenticated', k_sig, 'EXECUTE');
+
+  -- ----- 3e. BOTH OR NEITHER: an incoherent state REDS, it never skips -------
+  -- ⭐ THIS IS WHAT KEEPS THE SKIPS BELOW HONEST. A skip is truthful only while
+  -- the database is in one of the two states this file recognises; every
+  -- half-state must fail loudly instead. Three are distinguishable:
+  --
+  --  (a) ONE TWIN NARROWED, THE OTHER NOT. Migration B rewrites both bodies in
+  --      one file, so they cannot legitimately disagree — this is the
+  --      instance-not-class defect caught in the schema rather than the diff.
+  --  (b) BODY NARROWED, GRANT STILL STANDING — the worst state available.
+  --      Migration B DELETES the auth.uid() ownership comparison rather than
+  --      relaxing it, on the express premise that only service_role can reach the
+  --      function. Body-without-REVOKE means `authenticated` can POST
+  --      /rest/v1/rpc/create_wizard_strategy against a body that no longer checks
+  --      ownership at all and mint a row owned by ANY p_user_id it names — a
+  --      cross-tenant write, strictly worse than either migration alone, and it
+  --      would also forge the venue_account_id identity this entire file exists
+  --      to make trustworthy.
+  --  (c) GRANT REVOKED, BODY STILL MIGRATION A. A partial apply, or a later
+  --      migration re-based a body onto a stale source.
+  IF v_b_live <> v_b_live_k THEN
+    RAISE EXCEPTION 'TEST FAILED (3e-a): THE TWO WIZARD RPCs ARE IN DIFFERENT STATES. create_wizard_strategy narrowed=%, add_wizard_composite_key narrowed=% (read from each comment-stripped body''s v_auth_uid). Migration 20260814120000 rewrites BOTH bodies in one file, so they cannot legitimately disagree: a migration landed on one twin and not the other. That is the instance-not-class defect Phase 153.6 was convened to end — and this file already carries section 3b precisely because the composite twin had no canary of its own. Change one, change both, in the same migration.', v_b_live, v_b_live_k;
   END IF;
-  IF v_fn_code_k LIKE '%auth.uid()%' THEN
-    RAISE EXCEPTION 'TEST FAILED (3c): add_wizard_composite_key CODE contains auth.uid(). Under a service_role caller it IS NULL (156-MEASUREMENTS.md A2), so the comparison is a PERMANENT SILENT NO-OP — a decorative ownership check, not a stricter one. Delete it; do not relax it. Ownership is bound at the route.';
+  -- ⛔ SCOPED TO THE **COMPOSITE** GRANT, AND THE SCOPE IS THE POINT. The
+  -- single-key half of this state — bodies narrowed AND `authenticated` holding
+  -- EXECUTE on create_wizard_strategy — is EXACTLY the condition under which
+  -- section 4's own assertion fires, and that assertion is armed on v_b_live, so
+  -- it is REACHABLE there. Repeating it here would be PROVABLY DEAD CODE, which
+  -- in the phase whose subject is decorative controls is the worst thing to add.
+  -- What section 4 CANNOT see is the composite twin's grant: it pins k_sig for
+  -- `service_role` only, never for `authenticated`. That gap is what this covers,
+  -- and it is the same gap section 3b exists for one layer down.
+  IF v_b_live AND v_auth_exec_k THEN
+    RAISE EXCEPTION 'TEST FAILED (3e-b): INCOHERENT HALF-STATE, AND IT IS THE WORST ONE. Both wizard RPC bodies carry NO v_auth_uid, so migration 20260814120000 narrowed them — but `authenticated` STILL HOLDS EXECUTE on add_wizard_composite_key. Migration B DELETES the auth.uid() ownership comparison rather than relaxing it, on the premise that only service_role can reach these functions. With the body narrowed and the grant standing, any browser session can POST /rest/v1/rpc/add_wizard_composite_key and mint an api_keys row owned by ANY p_user_id it names, carrying a venue_account_id of its choosing — a cross-tenant write that also forges the very identity this file exists to make trustworthy. ⚠️ This file pins the composite ACL for service_role only, so this line is the ONLY place it watches `authenticated` on that twin; the single-key twin is covered by section 4''s own assertion below. Re-issue REVOKE ALL ON FUNCTION public.add_wizard_composite_key(uuid,text,text,text,text,text,text,text,integer,text,uuid) FROM PUBLIC, anon, authenticated; in a migration NOW.';
+  END IF;
+  IF NOT v_b_live AND NOT (v_auth_exec AND v_auth_exec_k) THEN
+    RAISE EXCEPTION 'TEST FAILED (3e-c): INCOHERENT HALF-STATE. `authenticated` has lost EXECUTE on at least one wizard RPC (create_wizard_strategy=%, add_wizard_composite_key=%) — so 20260814120000 §3 ran here — but the bodies still declare v_auth_uid, i.e. they are still the Migration A (20260813150106) two-arm bodies. Either §1/§2 of that migration did not apply, or a later migration re-based the bodies onto a stale source. This must not be reported as a skip.', v_auth_exec, v_auth_exec_k;
+  END IF;
+
+  -- ⚠️ ARMED, AND NOT VACUOUSLY SO. The arming reads `v_auth_uid`; the assertion
+  -- reads `auth.uid()`. Those are different strings and the implication does not
+  -- run backwards: a body that dropped the variable but kept an inline
+  -- `IF auth.uid() <> p_user_id` — the exact "relax it rather than delete it"
+  -- edit Trap B warns against, and the most likely way this regresses — arms this
+  -- check and then FAILS it. That is the whole point.
+  -- ⛔ On a Migration-A database the bodies carry auth.uid() BY DESIGN: the
+  -- `authenticated` arm needs it, and Migration A deliberately keeps that arm so
+  -- the two migrations can merge in sequence with no window in which
+  -- connect-a-key is broken. Asserting its absence there would red CI for a
+  -- database that is exactly where it belongs.
+  IF v_b_live THEN
+    IF v_fn_code LIKE '%auth.uid()%' THEN
+      RAISE EXCEPTION 'TEST FAILED (3c): create_wizard_strategy CODE contains auth.uid(). Under the service_role caller that is now its only admitted caller, auth.uid() IS NULL (156-MEASUREMENTS.md A2), so any ownership comparison built on it is a PERMANENT SILENT NO-OP — it never fires and never fails. This is not a stricter check, it is a decorative one. Delete it; do not relax it. Ownership is bound at the route.';
+    END IF;
+    IF v_fn_code_k LIKE '%auth.uid()%' THEN
+      RAISE EXCEPTION 'TEST FAILED (3c): add_wizard_composite_key CODE contains auth.uid(). Under a service_role caller it IS NULL (156-MEASUREMENTS.md A2), so the comparison is a PERMANENT SILENT NO-OP — a decorative ownership check, not a stricter one. Delete it; do not relax it. Ownership is bound at the route.';
+    END IF;
+  ELSE
+    RAISE NOTICE 'SKIP (3c, the auth.uid()-ABSENCE pair ONLY): migration 20260814120000 (Phase 156 Migration B) is NOT applied to this database — both wizard RPC bodies still declare v_auth_uid, i.e. they are the Migration A (20260813150106) two-arm bodies, whose `authenticated` arm REQUIRES auth.uid() and whose presence is therefore CORRECT here. EXACTLY TWO assertions were skipped: "create_wizard_strategy code contains no auth.uid()" and the same for add_wizard_composite_key. Still RUN in section 3c: BOTH auth.role()-PRESENCE assertions (true under Migration A and B alike) and all three 3e both-or-neither coherence checks. Sections 1, 2, 3, 3b, 5 and 6 are untouched by this condition.';
   END IF;
 
   -- ----- 4. grants: ONLY service_role EXECUTEs; anon and authenticated do NOT
@@ -324,8 +421,20 @@ BEGIN
   -- on any future DROP + CREATE (`156-MEASUREMENTS.md` § A4 — it already bit
   -- 20260812083206 for anon), this line is the durable guard that reds CI rather
   -- than letting the door reopen in production.
-  IF has_function_privilege('authenticated', c_sig, 'EXECUTE') THEN
-    RAISE EXCEPTION 'TEST FAILED (4): authenticated HOLDS EXECUTE on create_wizard_strategy — Phase 156 / CONNECT-01 withdrew it (migration 20260814120000). A re-GRANT re-opens the direct PostgREST door and a browser session can mint an attested_venue of its choosing, which is precisely the forgery this file''s venue-identity assertions assume is impossible. If no migration did this deliberately, a DROP + CREATE re-granted it silently via pg_default_acl — re-issue the REVOKE in that same migration.';
+  --
+  -- ⚠️ ARMED ON v_b_live (section 3d), for the reason recorded there: on a
+  -- database carrying Migration A ALONE, `authenticated` HOLDING EXECUTE is the
+  -- CORRECT state, because Migration A deliberately does not revoke it.
+  -- ⛔ THE SKIP IS NARROW: it covers this ONE assertion. The `anon` negative and
+  -- BOTH `service_role` positives below stay UNCONDITIONAL — true under Migration
+  -- A and Migration B alike — so section 4 can never go entirely inert, and
+  -- section 3e has already reddened every incoherent state before this point.
+  IF v_b_live THEN
+    IF v_auth_exec THEN
+      RAISE EXCEPTION 'TEST FAILED (4): authenticated HOLDS EXECUTE on create_wizard_strategy — Phase 156 / CONNECT-01 withdrew it (migration 20260814120000). A re-GRANT re-opens the direct PostgREST door and a browser session can mint an attested_venue of its choosing, which is precisely the forgery this file''s venue-identity assertions assume is impossible. If no migration did this deliberately, a DROP + CREATE re-granted it silently via pg_default_acl — re-issue the REVOKE in that same migration.';
+    END IF;
+  ELSE
+    RAISE NOTICE 'SKIP (4, the `authenticated` negative ONLY): migration 20260814120000 (Phase 156 Migration B) is NOT applied to this database — both wizard RPC bodies still declare v_auth_uid, i.e. they are the Migration A (20260813150106) two-arm bodies, under which `authenticated` HOLDING EXECUTE is the CORRECT and intended state. EXACTLY ONE assertion was skipped: "authenticated must NOT hold EXECUTE on create_wizard_strategy". Still RUN in section 4: the anon negative and BOTH service_role outage positives. This assertion arms itself the moment Migration B lands; nothing needs editing to re-enable it.';
   END IF;
   IF has_function_privilege('anon', c_sig, 'EXECUTE') THEN
     RAISE EXCEPTION 'TEST FAILED (4): anon must NOT have EXECUTE on create_wizard_strategy';
@@ -377,7 +486,16 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (5): the api_keys_scrub_venue_account_id trigger function is SECURITY DEFINER, so current_user resolves to its owner, the privileged check always passes, and the trigger is a silent no-op — it must be SECURITY INVOKER';
   END IF;
 
-  RAISE NOTICE 'PASS (structural): WIZCONT-02 identity invariants intact (api_keys.venue_account_id text + non-blank CHECK, validated + tenant-leading partial-UNIQUE (user_id, exchange, venue_account_id) WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL + exactly one create_wizard_strategy overload carrying the wizdraft:/attested_venue/p_venue_account_id/NULLIF(btrim()) canaries + exactly one add_wizard_composite_key overload carrying the wizcomposite:/attested_venue canaries + BOTH bodies gating on auth.role() with ZERO auth.uid() + grants service_role-only, anon and authenticated shut out + SECURITY INVOKER scrub trigger attached).';
+  -- ⛔ STATE-AWARE, AND NOT COSMETICALLY. The unconditional wording claims "ZERO
+  -- auth.uid()" and "authenticated shut out" — both FALSE of a run that skipped
+  -- those three assertions, and both printed as a PASS. A summary line that
+  -- overstates a skipped run is the silent-green failure this phase exists to
+  -- end, emitted by the file's own last statement. Say what actually ran.
+  IF v_b_live THEN
+    RAISE NOTICE 'PASS (structural): WIZCONT-02 identity invariants intact (api_keys.venue_account_id text + non-blank CHECK, validated + tenant-leading partial-UNIQUE (user_id, exchange, venue_account_id) WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL + exactly one create_wizard_strategy overload carrying the wizdraft:/attested_venue/p_venue_account_id/NULLIF(btrim()) canaries + exactly one add_wizard_composite_key overload carrying the wizcomposite:/attested_venue canaries + BOTH bodies gating on auth.role() with ZERO auth.uid() + grants service_role-only, anon and authenticated shut out + SECURITY INVOKER scrub trigger attached).';
+  ELSE
+    RAISE NOTICE 'PASS WITH 3 SKIPS (structural): WIZCONT-02 identity invariants intact (api_keys.venue_account_id text + non-blank CHECK, validated + tenant-leading partial-UNIQUE (user_id, exchange, venue_account_id) WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL + exactly one create_wizard_strategy overload carrying the wizdraft:/attested_venue/p_venue_account_id/NULLIF(btrim()) canaries + exactly one add_wizard_composite_key overload carrying the wizcomposite:/attested_venue canaries + BOTH bodies gating on auth.role() + bodies and grants coherent with each other + anon shut out + service_role holds EXECUTE on both + SECURITY INVOKER scrub trigger attached). ⚠️ NOT asserted on this run: that either body is free of auth.uid(), and that `authenticated` holds no EXECUTE — migration 20260814120000 is not applied to this database, and under the Migration A body both are false BY DESIGN. See the two SKIP notices above.';
+  END IF;
 END $$;
 
 

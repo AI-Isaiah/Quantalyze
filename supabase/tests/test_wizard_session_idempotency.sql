@@ -25,6 +25,13 @@ DECLARE
   v_idx_def    TEXT;
   v_idx_cols   TEXT[];
   v_fn_src     TEXT;
+  -- ⛔ COMMENT-STRIPPED COPY. Used ONLY by the Migration-B detector in section
+  -- 3e; section 3's canaries deliberately keep reading the RAW definition, which
+  -- is correct for them (they assert PRESENCE, and a comment cannot fake the
+  -- absence they would report). See 3e for why the strip is mandatory here.
+  v_fn_code    TEXT;
+  v_b_live     BOOLEAN;   -- migration 20260814120000 is applied to THIS database
+  v_auth_exec  BOOLEAN;   -- authenticated currently holds EXECUTE
 BEGIN
   -- ----- 0. A3: the CONNECTION ROLE, diagnosed rather than assumed ----------
   -- ⭐ WHY THIS IS THE FIRST THING THE FILE DOES. Phase 156 Migration B
@@ -133,6 +140,88 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED: create_wizard_strategy must remain SECURITY DEFINER';
   END IF;
 
+  -- ----- 3e. IS MIGRATION B LIVE ON *THIS* DATABASE? ------------------------
+  -- ⭐ WHY THIS EXISTS AT ALL — THE MERGE-ORDER PROBLEM, STATED ONCE FOR THE
+  -- WHOLE PHASE. Migration 20260814120000 (Migration B) CANNOT be applied to the
+  -- shared TEST database ahead of the merge: `origin/main`'s copies of these same
+  -- gate files still require `authenticated` to HOLD EXECUTE, so an early apply
+  -- would red `sql-tests` for main and for every concurrent PR sharing that
+  -- database. Section 4 below therefore asserts a state TEST does not yet have,
+  -- and asserting it unconditionally reds THIS PR instead. The resolution is not
+  -- to weaken section 4 — it is to arm it from the state of the database it is
+  -- actually running against.
+  --
+  -- ⛔ THE DETECTOR READS LIVE STATE, NEVER A COMMENT MARKER, and never the thing
+  -- it is arming. Three candidates were MEASURED on a local PG16 fixture carrying
+  -- each state, and two of them are wrong:
+  --
+  --   * `auth.role()` — present in the Migration A body AND the Migration B body.
+  --     It discriminates NOTHING; an assertion armed on it is armed always, which
+  --     is the failure this whole exercise exists to avoid, inverted.
+  --   * `has_function_privilege('authenticated', …)` — this is the very thing
+  --     section 4 asserts. Arming on it makes that assertion VACUOUS: it would
+  --     only run in the case where the ACL is already what we want.
+  --   * ⛔⛔ THE **RAW** `pg_get_functiondef` — WRONG, AND MEASURED WRONG, NOT
+  --     REASONED ABOUT. `pg_get_functiondef` reconstructs the body from `prosrc`,
+  --     which stores the source VERBATIM INCLUDING COMMENTS, and Migration B's
+  --     Trap B comment block discusses `v_auth_uid` and `auth.uid()` at length
+  --     while explaining why they are absent. On a PG16 fixture carrying
+  --     Migration B, `pg_get_functiondef(create_wizard_strategy) LIKE
+  --     '%v_auth_uid%'` reads **TRUE**. A raw-matched detector would therefore
+  --     read "Migration B is not live" on precisely the database it exists to
+  --     guard, leaving section 4 PERMANENTLY UN-ARMED and silently green. Worse,
+  --     the composite twin's raw definition reads FALSE in the same state (its
+  --     comments do not mention the identifier), so a raw detector would arm on
+  --     one twin and not the other — the instance-not-class shape again.
+  --     ⚠️ This trap has now been hit THREE times independently: by migration
+  --     20260814120000's own post-verify (e2), by plan 156-08's assertion 5h, and
+  --     here. Do not "simplify" the strip away.
+  --
+  -- The surviving signal is the identifier `v_auth_uid` in the COMMENT-STRIPPED
+  -- body. Migration A declares and compares it as CODE (`v_auth_uid UUID :=
+  -- auth.uid();`, `IF v_auth_uid <> p_user_id`) because its `authenticated` arm
+  -- needs it; Migration B deletes both, keeping the name only in prose.
+  -- ⚠️ v_fn_src is fetched by proname above, so it is one arbitrary row if a
+  -- second overload ever appears. That is not re-checked here on purpose — the
+  -- overload count is pinned once for the suite at
+  -- test_api_keys_venue_identity_uniq.sql section 3, and duplicating it here
+  -- would be a second place to forget to update.
+  v_fn_code := regexp_replace(v_fn_src, '--[^\n]*', '', 'g');
+  v_b_live  := v_fn_code NOT LIKE '%v_auth_uid%';
+
+  v_auth_exec := has_function_privilege('authenticated',
+    'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)', 'EXECUTE');
+
+  -- ----- 3f. BOTH OR NEITHER — the half-state must RED, not skip -------------
+  -- ⭐ THIS IS WHAT STOPS SECTION 4'S SKIP BEING A HOLE. A skip is honest only
+  -- while the database is in one of the two states this file recognises. There
+  -- are two INCOHERENT states, and NEITHER may reach the skip:
+  --
+  --   (i) BODY NARROWED, GRANT STILL STANDING — the strictly worst state this
+  --       file can observe, because Migration B DELETES the auth.uid() ownership
+  --       comparison rather than relaxing it, on the express premise that only
+  --       service_role can reach the function at all. Body-without-REVOKE means
+  --       any browser session can POST /rest/v1/rpc/create_wizard_strategy
+  --       against a body that no longer checks ownership AT ALL and mint a draft
+  --       owned by ANY p_user_id it names — a cross-tenant write.
+  --       ⛔ IT IS NOT CHECKED HERE, AND THAT IS DELIBERATE. `v_b_live AND
+  --       v_auth_exec` is EXACTLY the condition under which section 4's own
+  --       assertion fires, and section 4 is armed on v_b_live, so it is REACHABLE
+  --       in precisely that state. A check here would be PROVABLY DEAD CODE — and
+  --       in the phase whose entire subject is controls that look like controls
+  --       and assert nothing, shipping an unreachable assertion would be the
+  --       worst possible thing to add. Section 4 also carries the pg_default_acl
+  --       REMEDY text an operator needs. One statement, in one place, alive.
+  --  (ii) GRANT REVOKED, BODY STILL MIGRATION A. This one has NO other home. It
+  --       is the state in which section 4 would SKIP — v_b_live is false — while
+  --       the database is demonstrably not in the Migration-A state that skip
+  --       claims. Left unchecked it is a silent green: something applied §3 of
+  --       Migration B without §1/§2, or a later migration re-based the body onto
+  --       a stale source, and the file reports a clean skip either way.
+  IF v_auth_exec IS FALSE AND NOT v_b_live THEN
+    RAISE EXCEPTION 'TEST FAILED (3f): INCOHERENT HALF-STATE. `authenticated` holds no EXECUTE on create_wizard_strategy — so migration 20260814120000 §3 ran here — but the body still declares v_auth_uid, i.e. it is still the Migration A (20260813150106) two-arm body. Either §1/§2 of that migration did not apply, or a later migration re-based the body onto a stale source. This is not a state any deployment should be in, and it must not be reported as a skip.';
+  END IF;
+
   -- ----- 4. grants: ONLY service_role EXECUTEs; anon and authenticated do NOT
   -- ⭐ THE POLARITY ON `authenticated` IS INVERTED AS OF PHASE 156 / CONNECT-01
   -- (migration 20260814120000, Migration B). Until then this file asserted that
@@ -163,9 +252,26 @@ BEGIN
   -- external check that the migration's re-issued REVOKE/GRANT statements took,
   -- and in particular that neither `anon` nor `authenticated` inherited the
   -- PUBLIC-EXECUTE default a freshly created function carries.
-  IF has_function_privilege('authenticated',
-        'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)', 'EXECUTE') THEN
-    RAISE EXCEPTION 'TEST FAILED: authenticated HOLDS EXECUTE on create_wizard_strategy — Phase 156 / CONNECT-01 withdrew it (migration 20260814120000). A re-GRANT re-opens the direct PostgREST door: any browser session holding an authenticated JWT can POST /rest/v1/rpc/create_wizard_strategy and mint an attested_venue of its choosing. If no migration did this deliberately, a DROP + CREATE re-granted it silently via pg_default_acl — re-issue the REVOKE in that same migration.';
+  --
+  -- ⚠️ ARMED ON v_b_live (section 3e), because on a database carrying Migration A
+  -- ALONE `authenticated` HOLDING EXECUTE is the CORRECT state — Migration A
+  -- deliberately does not revoke it, so that the two migrations can merge in
+  -- sequence without a window in which connect-a-key is broken. Asserting the
+  -- post-B state there would red CI for a database that is exactly where it is
+  -- supposed to be. The skip below is therefore a statement about the DATABASE,
+  -- never about this claim's validity.
+  -- ⛔ THE SKIP IS NARROW ON PURPOSE: it covers this ONE assertion. The `anon`
+  -- negative and the `service_role` positive below stay UNCONDITIONAL, because
+  -- both are true under Migration A and Migration B alike, so this file can never
+  -- go entirely inert. Section 3f above has already made every INCOHERENT state
+  -- red rather than reach this branch at all.
+  IF v_b_live THEN
+    IF v_auth_exec THEN
+      RAISE EXCEPTION 'TEST FAILED: authenticated HOLDS EXECUTE on create_wizard_strategy — Phase 156 / CONNECT-01 withdrew it (migration 20260814120000). A re-GRANT re-opens the direct PostgREST door: any browser session holding an authenticated JWT can POST /rest/v1/rpc/create_wizard_strategy and mint an attested_venue of its choosing. If no migration did this deliberately, a DROP + CREATE re-granted it silently via pg_default_acl — re-issue the REVOKE in that same migration.';
+    END IF;
+    RAISE NOTICE 'Section 4 OK: migration 20260814120000 is live here (create_wizard_strategy''s code carries no v_auth_uid) and `authenticated` holds NO EXECUTE on it.';
+  ELSE
+    RAISE NOTICE 'SKIP (section 4, the `authenticated` negative ONLY): migration 20260814120000 (Phase 156 Migration B) is NOT applied to this database — create_wizard_strategy''s comment-stripped body still declares v_auth_uid, i.e. it is the Migration A (20260813150106) two-arm body, under which `authenticated` HOLDING EXECUTE is the CORRECT and intended state. EXACTLY ONE assertion was skipped: "authenticated must NOT hold EXECUTE on create_wizard_strategy". Everything else in this file RAN — the column, the partial-unique index, all four body canaries, the anon negative, the service_role positive, and the section 3f both-or-neither coherence checks. This assertion arms itself the moment Migration B lands; nothing needs editing to re-enable it.';
   END IF;
   IF has_function_privilege('anon',
         'create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text)', 'EXECUTE') THEN
@@ -197,5 +303,14 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED: CONNECT-A-KEY IS BROKEN — service_role holds no EXECUTE on create_wizard_strategy. Since Phase 156 (20260814120000) it is the ONLY role that may write a wizard draft, so every single-key connect answers 42501. A REVOKE went one role too far, or the function was dropped. The fix is to re-GRANT, not to retry.';
   END IF;
 
-  RAISE NOTICE 'PASS: F6 wizard-session idempotency invariants intact (column + partial-unique + advisory-lock fence + service_role-only grants).';
+  -- ⛔ THE SUMMARY LINE IS STATE-AWARE, AND THAT IS NOT COSMETIC. A fixed
+  -- "service_role-only grants" PASS printed on a run that SKIPPED the
+  -- `authenticated` negative is a green report of coverage the run did not have
+  -- — the exact silent-green shape this phase exists to stop shipping. Say what
+  -- actually ran.
+  IF v_b_live THEN
+    RAISE NOTICE 'PASS: F6 wizard-session idempotency invariants intact (column + partial-unique + advisory-lock fence + service_role-only grants, ALL assertions armed — Migration B is live here).';
+  ELSE
+    RAISE NOTICE 'PASS WITH 1 SKIP: F6 wizard-session idempotency invariants intact (column + partial-unique + advisory-lock fence + anon shut out + service_role holds EXECUTE). ⚠️ NOT asserted on this run: that `authenticated` holds no EXECUTE — Migration B (20260814120000) is not applied to this database. See the SKIP notice above.';
+  END IF;
 END $$;
