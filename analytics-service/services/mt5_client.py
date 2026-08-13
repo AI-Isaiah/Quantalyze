@@ -111,6 +111,7 @@ Contract:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -545,6 +546,39 @@ def _materialize(obj: Any) -> dict[str, Any]:
     if asdict is None:
         raise Mt5ClientError(0, "MT5 returned a non-namedtuple/degenerate shape")
     return {str(k): _coerce(v) for k, v in asdict().items()}
+
+
+# The name the remote materializer is bound to in the rpyc server namespace, and
+# the source that defines it. See `Mt5Client._materialize_rows` for WHY this runs
+# on the far side of the wire; the short version is that `_materialize` costs ONE
+# ROUND-TRIP PER FIELD, so materializing N deals client-side costs O(N x fields)
+# round-trips (MEASURED 2026-08-13, live gateway: 60ms/deal, 29.9s for 493 deals
+# against a 40s bound — MT5DEAL-01).
+#
+# ⛔ This source is a STRING executed in a REMOTE interpreter, so it cannot import
+# from this module, cannot be type-checked, and must stay self-contained. It is a
+# deliberate mirror of `_coerce` + `_materialize` above: the same scalar pass-list,
+# the same stringify-everything-else fallback, and the same fail-loud on a
+# degenerate (non-namedtuple) shape. ⚠️ Change one, change both — the contract tests
+# exec THIS STRING against the offline doubles, so a divergence reds them.
+_REMOTE_MATERIALIZE_FN = "_qz_materialize_deals"
+_REMOTE_MATERIALIZE_SRC = f"""
+import json as _qz_json
+
+
+def {_REMOTE_MATERIALIZE_FN}(deals):
+    rows = []
+    for deal in deals:
+        asdict = getattr(deal, "_asdict", None)
+        if asdict is None:
+            raise TypeError("MT5 returned a non-namedtuple/degenerate shape")
+        rows.append({{
+            str(k): (v if v is None or isinstance(v, (bool, int, float, str))
+                     else str(v))
+            for k, v in asdict().items()
+        }})
+    return _qz_json.dumps(rows)
+"""
 
 
 class Mt5Client:
@@ -1028,7 +1062,63 @@ class Mt5Client:
         )
         if deals is None:
             self._raise_last()
-        return [_materialize(d) for d in deals]
+        return self._materialize_rows(deals)
+
+    def _materialize_rows(self, deals: Any) -> list[dict[str, Any]]:
+        """Materialize a netref tuple of deals in ONE wire crossing (MT5DEAL-01).
+
+        ⭐ WHY THIS IS NOT `[_materialize(d) for d in deals]`. That comprehension
+        reads like local work and is not: `deals` is an rpyc NETREF, so iterating it
+        is a round-trip per element, `d._asdict()` is another, and every `k, v` of
+        the returned remote mapping is another pair. MEASURED on the live gateway
+        2026-08-13 from inside the worker container: **60ms per deal**, 29.9s for
+        493 deals — against `_MT5_DERIVE_READ_TIMEOUT_S` (40s). That is why
+        `derive_broker_dailies` failed FLIPRETRY-01 on every attempt for the first
+        real account with history, while every stage event said `ok=true`: the cost
+        was NOT in any single bounded call, so no rpyc `sync_request_timeout` (30s)
+        could ever fire and no `mt5.stage` event covered it. The same probe measured
+        this implementation at **18.5ms** for 495 deals.
+
+        ⛔ The bound is NOT the thing to raise. The old cost is O(deals x fields)
+        round-trips, so a bigger ceiling only buys a bigger account before the same
+        failure returns (~15k deals exhausts the 900s outer derive budget), and the
+        worker serializes on ONE shared Wine terminal, so the wait is charged to
+        every other key too. This path is O(1) crossings + one payload, so the 40s
+        bound goes back to being a WEDGE detector rather than an account-size limit.
+
+        The per-deal work is shipped to the far side as source (`conn.execute`) and
+        the result crosses once as a JSON `str` — a by-value type, so rpyc copies it
+        instead of handing back another proxy. Re-executed per call rather than
+        cached: `restart()` replaces the connection (and with it the namespace), and
+        one extra round-trip is ~1ms against the 30s that caching would risk getting
+        wrong after a reconnect.
+        """
+        # WIZFORM-ABANDON / D-36 — ahead of `_guarded_read` and `_timed`, and NOT
+        # redundant with the fence `history_deals_get` already passed: the fetch it
+        # sits behind takes seconds against a real account, which is exactly the
+        # window in which a `wait_for` walks away and the lease passes to someone
+        # else. Fencing only the fetch would leave this crossing driving the ONE
+        # shared IPC pipe under the NEXT holder.
+        self._assert_live("history_deals_materialize")
+        conn = getattr(self._mt5, "_MetaTrader5__conn", None)
+        if conn is None:
+            # Same seam `close()`/`release()` depend on. Absent ⇒ we cannot push the
+            # loop across the wire, and silently falling back to the client-side
+            # comprehension would restore the 40s defect invisibly. Fail loud.
+            raise Mt5ClientError(
+                0, "MT5 rpyc transport is not reachable for deal materialization"
+            )
+
+        def _remote_call() -> str:
+            conn.execute(_REMOTE_MATERIALIZE_SRC)
+            return cast(str, conn.namespace[_REMOTE_MATERIALIZE_FN](deals))
+
+        # Through `_guarded_read` for the SAME two reasons every other read is: a
+        # remote traceback carries the interpolated source line (credential
+        # disclosure, T-134-01) and must be scrubbed, and the stage bracket is the
+        # instrumentation whose absence is what hid this defect for a whole phase.
+        payload = self._guarded_read(_remote_call, stage="history_deals_materialize")
+        return cast(list[dict[str, Any]], json.loads(payload))
 
     def order_check(self, request: dict[str, Any]) -> dict[str, Any]:
         """PROBE ONLY. Materialize an `order_check` result to a native dict; `None`
