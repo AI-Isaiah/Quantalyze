@@ -857,7 +857,7 @@ BEGIN
     -- the whole 5-block is inert. The other is the inner `SKIP (5d/5f/5g)` above:
     -- 20260811210000 present but 20260814120000 absent ⇒ Migration B is not
     -- applied here and only the RPC-door assertions are inert.
-    RAISE NOTICE 'SKIP (5): migration 20260811210000 not yet applied here (api_keys.attested_venue carries no 20260811210000 marker comment), so the ENTIRE 5a-5g block is inert — not merely the RPC-door assertions, which have their own SKIP (5d/5f/5g) notice keyed on 20260814120000. The round-trip assertions enforce once the test DB catches up.';
+    RAISE NOTICE 'SKIP (5): migration 20260811210000 not yet applied here (api_keys.attested_venue carries no 20260811210000 marker comment), so the ENTIRE 5a-5h block is inert — not merely the RPC-door assertions, which have their own SKIP (5d/5f/5g) notice keyed on 20260814120000. The round-trip assertions enforce once the test DB catches up.';
   END IF;
 END $$;
 
