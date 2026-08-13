@@ -250,6 +250,22 @@ drifts.
 **7. `test_api_keys_exchange_not_user_writable.sql` shows +141 lines in the working tree** — that is
 plan 08's concurrent work in this shared checkout. I did not touch it and did not stage it.
 
+**8. ⚠️ SHARED-CHECKOUT RACE — my first commit attempt silently no-oped, and the orchestrator should
+know the mechanism.** Plans 08 and 09 ran concurrently in the **same main checkout** (worktrees were
+fenced off because GSD worktree agents get no `node_modules`). Plan 08 committed, then ran
+`git reset HEAD~1` and re-committed — visible in the reflog as
+`commit 020d00c2 → reset: moving to HEAD~1 → commit 47dc0d45`. My `git add` of five files landed in
+the index just before that reset, so my `git commit` reported **"nothing to commit, working tree
+clean"** while `git log -1 -- <file>` still showed only old commits. **No work was lost** — the files
+and the index recovered on the next read, and the retry committed cleanly as `a7542b6f` — but a
+`git reset --hard` or `git clean` in the concurrent agent at that instant *would* have destroyed
+uncommitted work in four files with no warning.
+⭐ **Verified after the fact:** plan 08's four commits touch **only**
+`test_api_keys_exchange_not_user_writable.sql`, and `a7542b6f` touches only this plan's five files —
+no cross-contamination in either direction. ⛔ Two agents sharing one index is not safe; a "commit
+reported success/no-op" reading is not trustworthy under it. Future concurrent waves should either
+serialise the commit step or give each plan its own checkout with `node_modules` linked in.
+
 ---
 
 ## Known Stubs
