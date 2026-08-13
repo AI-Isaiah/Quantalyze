@@ -59,6 +59,7 @@ unpublished strategy; AUM-05 will hit sFOX the day its flag flips. **A fix scope
 - [x] **Phase 152: SCEN — Composer legibility** - Ownership marker, clickable rows with a working factsheet link, labelled numbers, no duplicate browse entries (completed 2026-08-07)
 - [ ] **Phase 153: WIZFORM — Form errors belong on the form (+ MT5 declarable)** - Inline field validation, honest error codes from emitting sites, transient infra absorbed not surfaced, venue-appropriate copy, MT5 preselected in metadata
 - [x] **Phase 154: WIZCONT/STALE — Wizard continuity, no stale screens** - Draft-aware entry chooser, stale-screen root cause investigated BEFORE fixed (verdict M2(ii)), token-less credential dedup toward the existing row (completed 2026-08-12)
+- [ ] **Phase 153.7: WIZFORM-02-CLASS — every code that can reach a user is covered** (INSERTED 2026-08-14) - The coverage law's population is DERIVED from every user-reachable code (`analytics-service/**`, positional `service_error(...)` as well as `error_code =`), and a code absent from BOTH halves reds CI; closes the one requirement the 153 span failed. ⛔ NOT "add two rows" — see TODOS.md FIX NOW #6
 - [ ] **Phase 155: MT5-VERIFY — The numbers are true, live on a trading day** - Server-UTC offset measured, external-oracle parity on the live funded account, five surfaces agree, discrepancies fixed (uncapped), warnings explained; MT5-GOAL-01 acceptance gate
 - [x] **Phase 156: CONNECT-REFACTOR — the venue the server validated is the venue the server writes** ✅ **COMPLETE 2026-08-13** - `attested_venue` written by a service-role writer from the venue this server observed a successful read-only authentication at; `authenticated` EXECUTE withdrawn from both wizard RPCs; closes the PARITY-04 deferred control (CR-01, was live on PROD). Shipped as TWO PRs with a live PROD gate between them. ⛔ The pull-forward-ahead-of-155 trigger (sFOX go-live) is now moot — the residual it protected against is closed
 
@@ -482,6 +483,33 @@ Plans:
 - [x] 153.6-04-PLAN.md — Cluster D (route): the probe gate reads the attestation, never `exchange`; class sweeps re-pointed (wave 1)
 - [x] 153.6-05-PLAN.md — Cluster B remainder (B2 connect-stage arm, B3 `_timed` suppression) + the ast parity roster (wave 2)
 - [x] 153.6-06-PLAN.md — Cluster E: `KEY_SCOPE_CHECK_UNREADABLE` recoverable code + pin re-cuts 74→75, 32 UNMOVED (wave 2)
+
+
+### Phase 153.7: WIZFORM-02-CLASS — every code that can reach a user is covered (INSERTED)
+
+**Goal**: WIZFORM-02's CLASS closes — the coverage law's population is derived from every code that can reach a user-facing surface, so a server-classified failure can never again render `code: UNKNOWN`; and a newly-minted `service_error(...)` code with no disposition reds CI by name instead of arriving on a user's screen
+**Depends on**: Phase 153.1 (the pinned code tables being re-cut), Phase 153.6 (the `VENUE_WIRE_CODE_TO_VERDICT` / `VENUE_WIRE_CODES_WITHOUT_VERDICT` halves this widens)
+**Requirements**: WIZFORM-02 (the ONE requirement the 153 span failed — see `153-VERIFICATION.md`, status `failed`, 5/6)
+**Owns**: `src/lib/seam-venue-vocabulary.invariant.test.ts`, `src/lib/wizardErrors.invariant.test.ts`, `src/lib/wizardErrors.ts`, `src/app/api/strategies/create-with-key/route.ts`, `src/app/api/strategies/finalize-wizard/route.ts`
+**UI hint**: no — copy members only, no new surface
+**Plans**: TBD
+
+⛔ **Raised by the retroactive Phase 153 SPAN verification (2026-08-13, `failed`, 5/6).** THIRD live instance, hit by the founder on PROD 2026-08-12 while dogfooding MT5. The server classified the failure completely and the wizard rendered *"We could not classify this failure, so we cannot tell you what happened or whether your last action took effect."*
+
+⭐ **BOUNDARY DECISION (2026-08-13, autonomous — reversible).** The coverage law's boundary becomes **"every code that can reach a user-facing surface"**, not "codes emitted in a particular directory in a particular syntactic shape". The current boundary is an artifact of how the scanners were written, not a product rule: no one decided a 500 from `routers/` deserves less honesty than a 400 from a Next route, and the user cannot tell the difference. Full rationale + scope: **TODOS.md FIX NOW #6**.
+
+⛔ **THE SHAPE OF THIS PHASE IS "the guard's REACH was wrong, not its mechanism."** The derived-roster remedy was genuinely built and genuinely works (falsified: mutating an emitted code literal reds two assertions by name). It misses `routers/exchange.py` for **two structural reasons, either sufficient alone** — wrong root (`routers/`, not `services/`) AND wrong shape (a **positional** arg to `service_error(...)`, not an `error_code =` assignment). Fixing either alone leaves the file invisible.
+
+⛔ **The fix is NOT "add two rows."** Landing `MT5_GATEWAY_UNCONFIGURED` and `MT5_GATEWAY_UNREACHABLE` as verdict rows *without* widening the scanner and adding the both-halves assertion is exactly the fourth instance of this defect.
+
+⭐ **The actual defect is an ASYMMETRY, above any individual missing code.** Both codes are absent from **both halves** of the coverage law — no verdict row *and* no recorded no-verdict — so their absence could never have been loud. The phase does not close until a code missing from both halves is a CI failure.
+
+⚠️ **Do NOT re-open WIZFORM-05 as part of this.** The 45,169/45,159/45,177 ms figures from the same incident are `_MT5_VALIDATE_INITIALIZE_TIMEOUT_MS = 45000` — the innermost, deliberately-first-firing layer. The verdict arrived at 45 s against a 120 s budget; the 30 s inversion is genuinely gone. What failed *after* arrival is WIZFORM-02. Lengthening the budget fixes nothing.
+
+📌 **On completion, Phase 153's parent checkbox may finally tick** — it is unticked today because the span did not meet its own goal, not because a child is outstanding.
+
+**Plans**:
+- TBD (planned via `--prd .planning/phases/153.7-.../153.7-PRD.md`, extracted from TODOS.md FIX NOW #6)
 
 
 ### Phase 154: WIZCONT/STALE — Wizard continuity, no stale screens
