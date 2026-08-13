@@ -1209,15 +1209,29 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // asking. `attested_venue` is written only by the two SECURITY DEFINER wizard
   // RPCs and NULLed for every non-privileged INSERT by a BEFORE INSERT trigger.
   //
-  // ⚠️ WHAT THIS IS NOT (153.6 code review CR-01): it is NOT a venue the server
-  // independently validated. The wizard RPCs write the `p_exchange` they were
-  // CALLED with, and `authenticated` can invoke them directly over PostgREST.
-  // The reason a forged call does not buy a free probe skip is that both RPCs
-  // write `exchange` and `attested_venue` from ONE parameter — pinned by the
-  // CHECK api_keys_attested_venue_matches_exchange (20260811210000) — so forging
-  // the attestation forges the routing label too, and the key never syncs.
-  // Do not upgrade this comment to "server-validated" without the deferred
-  // connect-flow refactor that would make it true.
+  // ⭐ WHAT THIS NOW IS (Phase 156 / CONNECT-01 — the connect-flow refactor that
+  // 153.6's CR-01 deferred, and this comment used to say was still owed). Both
+  // wizard RPCs are reached from the SERVER, inside the same request that
+  // already ran `validateKey` against the live venue, and as of migration
+  // 20260814120000 `authenticated` holds NO EXECUTE on either of them — a
+  // browser cannot reach /rest/v1/rpc/create_wizard_strategy or
+  // /rest/v1/rpc/add_wizard_composite_key over PostgREST at all.
+  //
+  // ⛔ THE CEILING, AND DO NOT EXCEED IT: the venue is the one this server
+  // observed a successful read-only authentication at. NEVER write "the venue
+  // cannot be forged" — any server route holding `createAdminClient()` can
+  // still pass any uid and any venue string. That is the standing `service_role`
+  // trust boundary (ADR-0001/ADR-0003), identical to
+  // `log_audit_event_service(p_user_id, …)`, and it is unchanged by 156. What
+  // changed is exactly this: "any browser session can forge an attestation"
+  // became "only our own server code can".
+  //
+  // ⭐ AND THE CHECK STAYS (CONNECT-04). Both RPCs still write `exchange` and
+  // `attested_venue` from ONE parameter, pinned by the CHECK
+  // api_keys_attested_venue_matches_exchange (20260811210000). That coupling was
+  // 153.6's whole defence; it is now an independently useful fence against a
+  // FUTURE writer letting the two columns diverge, so it is KEPT deliberately
+  // rather than retired as redundant.
   let attestedVenue: string | null = null;
   if (apiKeyId) {
     const { data: keyVenueRow, error: keyVenueErr } = await assetClassAdmin

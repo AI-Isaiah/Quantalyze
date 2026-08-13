@@ -106,13 +106,18 @@ function pickPlaceholderCodename(): string {
  * route's `api_keys` INSERT through a service-role writer (the `rpcAdmin`
  * binding at the `.rpc` call below), so this read needed no unpicking.
  *
- * ⚠️ TRANSITIONAL, AND THE HALF THAT HAS NOT HAPPENED YET MATTERS. Migration A
- * (`20260813150106_wizard_rpcs_service_role_writer.sql`) only ADMITS a
- * `service_role` caller; `authenticated` STILL holds EXECUTE on
- * `create_wizard_strategy` and still passes the full `auth.uid()` ownership
- * check. Until the follow-up `..._wizard_rpcs_withdraw_authenticated.sql`
- * (Phase 156 plan 07) withdraws it, a browser can still reach the RPC directly —
- * this route is the only SANCTIONED writer, not yet the only POSSIBLE one.
+ * ⭐ AND THE OTHER HALF HAS LANDED TOO. Migration A
+ * (`20260813150106_wizard_rpcs_service_role_writer.sql`) only ADMITTED a
+ * `service_role` caller while leaving `authenticated`'s grant standing;
+ * Migration B (`20260814120000_wizard_rpcs_revoke_authenticated.sql`) WITHDREW
+ * it. `authenticated` holds no EXECUTE on `create_wizard_strategy`, and the
+ * body's own gate refuses any caller whose `auth.role()` is not `service_role`,
+ * so a direct PostgREST call answers 42501 and mints nothing. This route is now
+ * the only POSSIBLE writer, not merely the sanctioned one.
+ * ⛔ THE CEILING: the venue is the one this server observed a successful
+ * read-only authentication at. NEVER "the venue cannot be forged" — any server
+ * route holding `createAdminClient()` can still pass any uid and any venue
+ * string, the standing `service_role` trust boundary (ADR-0001/ADR-0003).
  *
  * ⭐ THREE FILTERS, EACH LOAD-BEARING:
  *   · `.eq("user_id", …)` — the admin client BYPASSES RLS, so tenant scoping
@@ -761,12 +766,19 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
      * ⭐ PHASE 156 / CONNECT-02 — THE WRITE LEAVES THE BROWSER'S CREDENTIAL.
      *
      * `create_wizard_strategy` is a service-role writer as of Migration A
-     * (`20260813150106_wizard_rpcs_service_role_writer.sql`): the value written
+     * (`20260813150106_wizard_rpcs_service_role_writer.sql`) and a
+     * service-role-ONLY writer as of Migration B
+     * (`20260814120000_wizard_rpcs_revoke_authenticated.sql`): the value written
      * as `p_exchange` is only a guarantee if the server is the one that wrote
-     * it, and while a browser could dial the RPC with a venue of its choosing,
-     * the closed-set gate, the `validateKey` read-only verdict and the
-     * `encryptKey` binding above were all bypassable. This binding is what makes
-     * the route the writer.
+     * it, and while a browser could once dial the RPC with a venue of its
+     * choosing — making the closed-set gate, the `validateKey` read-only verdict
+     * and the `encryptKey` binding above all bypassable — `authenticated` now
+     * holds no EXECUTE on it. This binding is what makes the route the writer.
+     * ⛔ THE CEILING: the venue is the one this server observed a successful
+     * read-only authentication at. NEVER "the venue cannot be forged" — any
+     * server route holding `createAdminClient()` can still pass any uid and any
+     * venue string, the standing `service_role` trust boundary
+     * (ADR-0001/ADR-0003).
      *
      * ⛔ TWO ADMIN CLIENTS NOW LIVE IN THIS FILE, WITH OPPOSITE FAILURE
      * POSTURES, AND THAT IS DELIBERATE — do not unify them.
@@ -837,20 +849,23 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       //
       // ⛔ WHAT THIS DOES NOT BUY, STATED SO NOBODY LATER ASSUMES IT DOES.
       //
-      // The REACHABILITY half is CLOSING (Phase 156 / CONNECT-02): this call now
-      // rides `rpcAdmin`, so the sanctioned path passes only what the server
-      // derived. ⚠️ It is closing, not closed — `authenticated` still holds
-      // EXECUTE until plan 07's `..._wizard_rpcs_withdraw_authenticated.sql`
-      // lands, so a browser session can still call
-      // /rest/v1/rpc/create_wizard_strategy directly with an identity of its
-      // choosing.
+      // The REACHABILITY half is now CLOSED (Phase 156 / CONNECT-02, CONNECT-05):
+      // this call rides `rpcAdmin`, and `20260814120000` withdrew
+      // `authenticated`'s EXECUTE, so /rest/v1/rpc/create_wizard_strategy is
+      // unreachable from a browser session and the ONLY value this parameter can
+      // carry is the one the server derived above.
       //
-      // ⛔ AND THE OTHER HALF DOES NOT MOVE AT ALL. The RPC still does not
-      // validate the parameter and there is NO in-database oracle for a venue
-      // account id. Even after plan 07 the stored value is "what the server
-      // passed", NOT "what the venue confirmed" — it raises the floor for the
-      // ACCIDENTAL token-less re-entry this phase is about, and it is not an
-      // anti-forgery control. Same CR-01 class as `p_exchange`.
+      // ⛔ AND THE OTHER HALF DID NOT MOVE AT ALL — 156 RESTATED IT, it did not
+      // close it. The RPC still does not validate the parameter and there is NO
+      // in-database oracle for a venue account id: nothing in the database can
+      // ask MT5 whether this login is real. The stored value is "what the server
+      // passed", NEVER "what the venue confirmed". It raises the floor for the
+      // ACCIDENTAL token-less re-entry this fence is about, and it is not an
+      // anti-forgery control. This is the residual CR-01 class that survives
+      // Phase 156, at exactly this scope and no wider — logged in `TODOS.md`
+      // under "Phase 156 (CONNECT)". ⚠️ Distinct from TODOS **A-3**, which is
+      // about this value's SHAPE (a login is unique only within a broker
+      // server); this is about its PROVENANCE.
       //
       // ⚠️ DEPLOY ORDER: migration 20260812083206 must be LIVE before the
       // deployment carrying this line. PostgREST resolves rpc() by named
