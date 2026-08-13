@@ -60,7 +60,7 @@ unpublished strategy; AUM-05 will hit sFOX the day its flag flips. **A fix scope
 - [ ] **Phase 153: WIZFORM — Form errors belong on the form (+ MT5 declarable)** - Inline field validation, honest error codes from emitting sites, transient infra absorbed not surfaced, venue-appropriate copy, MT5 preselected in metadata
 - [x] **Phase 154: WIZCONT/STALE — Wizard continuity, no stale screens** - Draft-aware entry chooser, stale-screen root cause investigated BEFORE fixed (verdict M2(ii)), token-less credential dedup toward the existing row (completed 2026-08-12)
 - [ ] **Phase 155: MT5-VERIFY — The numbers are true, live on a trading day** - Server-UTC offset measured, external-oracle parity on the live funded account, five surfaces agree, discrepancies fixed (uncapped), warnings explained; MT5-GOAL-01 acceptance gate
-- [ ] **Phase 156: CONNECT-REFACTOR — the venue the server validated is the venue the server writes** - `attested_venue` written by a service-role writer from a server-verified venue; `authenticated` EXECUTE withdrawn from both wizard RPCs; closes the PARITY-04 deferred control (CR-01, live on PROD). ⛔ Pull forward AHEAD of 155 if sFOX go-live is scheduled first
+- [x] **Phase 156: CONNECT-REFACTOR — the venue the server validated is the venue the server writes** ✅ **COMPLETE 2026-08-13** - `attested_venue` written by a service-role writer from the venue this server observed a successful read-only authentication at; `authenticated` EXECUTE withdrawn from both wizard RPCs; closes the PARITY-04 deferred control (CR-01, was live on PROD). Shipped as TWO PRs with a live PROD gate between them. ⛔ The pull-forward-ahead-of-155 trigger (sFOX go-live) is now moot — the residual it protected against is closed
 
 ## Phase Details
 
@@ -525,7 +525,7 @@ Plans:
 **Notes**: Re-homed from v1.16 Phase 142.3 (which was split out of 142.2 at the D-14 valve on 2026-08-03 and will NOT run as a v1.16 phase). ⛔ Do not archive the milestone or advertise MT5 until this phase passes — v1.15's failure mode was shipping 6/6 green with both open items intact.
 ⚠️ PRECONDITION (found 2026-08-05): all 3 PROD MT5 keys sit at `sync_status='error'` — `'Mt5Session' object has no attribute 'fetch_balance'` (+ sibling `'…' has no attribute 'id'` in `fetch_daily_pnl`, Sentry QUANTALYZE-K). No MT5 sync completes, so this phase cannot start until it is fixed. Owned by a HOTFIX PR landing right after Phase 149 (founder call 2026-08-05: short fix, not an inserted phase); if the hotfix reveals a deeper defect, insert a phase before this one.
 
-### Phase 156: CONNECT-REFACTOR — the venue the server validated is the venue the server writes
+### Phase 156: CONNECT-REFACTOR — the venue the server validated is the venue the server writes ✅ COMPLETE 2026-08-13
 
 **Goal**: `api_keys.attested_venue` becomes what its name claims — the venue **the server itself validated**, not a parameter the caller chose. The wizard's `api_keys` INSERT moves behind a service-role writer that passes the venue it validated at mint time, and `authenticated` EXECUTE is withdrawn from `create_wizard_strategy` and `add_wizard_composite_key`. This is CR-01 remedy **(a)** — the "connect-flow refactor" that both `20260810120000` and `20260811210000` defer.
 
@@ -533,7 +533,7 @@ Plans:
 
 ⛔ **PULL-FORWARD TRIGGER — sFOX go-live.** Phase 153.6 shipped remedy **(b)**: a `CHECK` pins `attested_venue = exchange`, so the probe-skip forgery drags the ingestion label with it and the key never syncs. **That defence is a property of the current venue set, not a control.** It holds only while every probe-exempt venue is unsyncable. `mt5` is the sole member today and cannot sync ccxt credentials — which is exactly why MT5 work (153.x, 154, 155) cannot arm this. The moment a **syncable** venue joins `scopeProbeSupported: false` in `src/lib/closed-sets.ts`, the forgery becomes FREE. Phase 153.6 RESEARCH names **sFOX** as the plausible next member, and sFOX go-live is already booked (TODOS 🔴 item 3). **If sFOX is scheduled before 155 completes, this phase moves ahead of it.**
 
-**Requirements**: CONNECT-01, CONNECT-02, CONNECT-03, CONNECT-04, CONNECT-05 (minted at planning 2026-08-13; closes the PARITY-04 `threat_flag: deferred-control`). Sub-clauses `-01b`/`-01c`/`-02b`/`-03b` are parts of their parent ID, not separate IDs.
+**Requirements**: CONNECT-01, CONNECT-02, CONNECT-03, CONNECT-04, CONNECT-05 — ✅ **all five complete 2026-08-13** (minted at planning the same day; the PARITY-04 deferred-control threat flag is CLEARED). Sub-clauses `-01b`/`-01c`/`-02b`/`-03b` are parts of their parent ID, not separate IDs.
 
 **Success Criteria** (what must be TRUE):
 
@@ -541,9 +541,10 @@ Plans:
   2. `attested_venue` is written from a venue the server **verified against the live venue API at mint time**, not from a request parameter — traced from `/api/keys/validate-and-encrypt` through to the INSERT.
   3. The wizard still works end to end for every venue, single-key and composite. ⚠️ Both RPCs currently need the **user-scoped** client because their `auth.uid()` guards demand it; moving to a service-role writer must not lose that ownership check — the row must still be provably the caller's.
   4. The `CHECK (attested_venue IS NULL OR attested_venue = exchange)` from 153.6 is **kept**, not removed as redundant. It is the fence that stops a future writer letting the two columns diverge, independent of who does the writing.
-  5. Every prose claim that 153.6 had to weaken is re-strengthened to match: the `attested_venue` column comment, `20260811210000`'s section 1b, `REQUIREMENTS.md` PARITY-04, and the `threat_flag` is cleared.
+  5. Every prose claim that 153.6 had to weaken is re-strengthened to match: the `attested_venue` column comment, `20260811210000`'s section 1b, `REQUIREMENTS.md` PARITY-04, and the deferred-control threat flag is cleared.
+     ⚠️ **SC5 amended in flight:** `20260811210000` §1b was **NOT** edited — it is an applied migration and `migration-reviewer` invariant 11 makes any edit a CRITICAL. It is superseded **by name** in Migration B's header ⛔ (ii). The criterion is met by supersession, not by amendment; a future reader diffing §1b against the current system is not looking at a regression.
 
-**Plans:** 2/10 executed — 10 plans in 8 waves, shipping as **TWO PRs** (`156-RESEARCH.md` "Deploy order": both
+**Plans:** ✅ **10/10 executed** — 10 plans in 8 waves, shipping as **TWO PRs** (`156-RESEARCH.md` "Deploy order": both
 single-migration orderings produce a total connect-a-key outage window, so Migration A grants
 `service_role` while leaving `authenticated`'s grant standing, and Migration B withdraws it only
 after PR A's route is verified live on PROD). ⛔ **SC1 does not close until PR B.**
@@ -551,16 +552,28 @@ after PR A's route is verified live on PROD). ⛔ **SC1 does not close until PR 
 Plans:
 - [x] 156-01-PLAN.md — Wave 0: measure A1/A2/A3/A4 against TEST (does a service-key client really reach `auth.role() = 'service_role'` with `auth.uid()` NULL?) — the whole privilege design rests on two facts RESEARCH could not settle
 - [x] 156-02-PLAN.md — [PR A] Re-cut both route test files to the post-156 contract and observe them RED (admin-client receiver, `p_user_id === user.id`, 503 `SEAM_MISCONFIGURED`) — incl. the composite twin's missing admin mock
-- [ ] 156-03-PLAN.md — [PR A] Migration A: transitional two-arm role gate (branched, never unioned) + `GRANT EXECUTE … TO service_role` on both RPCs; applied to TEST, PR-Y2 renamed, snapshots regenerated
-- [ ] 156-04-PLAN.md — [PR A] Swap both wizard routes onto `createAdminClient()`, fail-closed on a missing service key, pragma moved with the mutation
-- [ ] 156-05-PLAN.md — [PR A] CONNECT-02b structural guard (a second user-scoped writer reds a normal test run) + TODOS entries for the two logged-not-fixed items + version bump
-- [ ] 156-06-PLAN.md — ⛔ **THE HARD BOUNDARY**: ship PR A, then verify the service-role writer live on PROD in a real browser (single-key AND composite) before PR B is authored
-- [ ] 156-07-PLAN.md — [PR B] Migration B: `REVOKE … FROM authenticated`, both bodies narrowed to `auth.role() = 'service_role'` with **zero** `auth.uid()`, column comment re-stamped ⛔ preserving the `20260811210000` gate marker
-- [ ] 156-08-PLAN.md — [PR B] Invert assertion 5d (42501 + nothing minted) and mint its missing composite twin 5f/5g, plus the two marker cross-checks that stop the block SKIPping green
-- [ ] 156-09-PLAN.md — [PR B] Flip G1/G2, re-shape the six direct RPC call sites whose `authenticated` role claim the new gate refuses, replace Part 3b's now-vacuous guarantee, twin the stale-re-base canary
-- [ ] 156-10-PLAN.md — [PR B] Re-strengthen the five prose sites to exactly what is true, clear the PARITY-04 `threat_flag: deferred-control`, full-suite phase gate
+- [x] 156-03-PLAN.md — [PR A] Migration A: transitional two-arm role gate (branched, never unioned) + `GRANT EXECUTE … TO service_role` on both RPCs; applied to TEST, PR-Y2 renamed, snapshots regenerated
+- [x] 156-04-PLAN.md — [PR A] Swap both wizard routes onto `createAdminClient()`, fail-closed on a missing service key, pragma moved with the mutation
+- [x] 156-05-PLAN.md — [PR A] CONNECT-02b structural guard (a second user-scoped writer reds a normal test run) + TODOS entries for the two logged-not-fixed items + version bump
+- [x] 156-06-PLAN.md — ⛔ **THE HARD BOUNDARY**: ship PR A, then verify the service-role writer live on PROD in a real browser (single-key AND composite) before PR B is authored
+- [x] 156-07-PLAN.md — [PR B] Migration B: `REVOKE … FROM authenticated`, both bodies narrowed to `auth.role() = 'service_role'` with **zero** `auth.uid()`, column comment re-stamped ⛔ preserving the `20260811210000` gate marker
+- [x] 156-08-PLAN.md — [PR B] Invert assertion 5d (42501 + nothing minted) and mint its missing composite twin 5f/5g, plus the two marker cross-checks that stop the block SKIPping green
+- [x] 156-09-PLAN.md — [PR B] Flip G1/G2, re-shape the six direct RPC call sites whose `authenticated` role claim the new gate refuses, replace Part 3b's now-vacuous guarantee, twin the stale-re-base canary
+- [x] 156-10-PLAN.md — [PR B] Re-strengthen the five prose sites to exactly what is true, clear the PARITY-04 `threat_flag: deferred-control`, full-suite phase gate
 
-**Notes**: Raised by `gsd-code-reviewer` as blocker **CR-01** during Phase 153.6 and shipped as an accepted residual in PR #675 (v0.58.0.0). Full reasoning: `.planning/phases/153.6-parity-the-fixes-that-only-landed-on-one-path/153.6-REVIEW.md` (CR-01, both remedies stated) and `153.6-07-SUMMARY.md` (why (b) was chosen and what it does NOT buy). ⚠️ The residual is **live on PROD** as of 2026-08-12.
+**Notes**: Raised by `gsd-code-reviewer` as blocker **CR-01** during Phase 153.6 and shipped as an accepted residual in PR #675 (v0.58.0.0). Full reasoning: `.planning/phases/153.6-parity-the-fixes-that-only-landed-on-one-path/153.6-REVIEW.md` (CR-01, both remedies stated) and `153.6-07-SUMMARY.md` (why (b) was chosen and what it does NOT buy). ⚠️ The residual was **live on PROD** from 2026-08-12; **closed 2026-08-13**.
+
+⭐ **THE WORKED EXAMPLE — copy this shape for the next privilege change.** The phase shipped as **TWO PRs with a live PROD gate between them**, because both single-migration orderings produce a total connect-a-key outage window:
+
+  · **PR A (#680, v0.60.0.0, merged `25e28d3a`)** — Migration A grants `service_role` and keeps a **transitional two-arm role gate (BRANCHED, never unioned)**, because a `service_role`-only body would have refused the still-live old deploy. Both routes swap onto `createAdminClient()`.
+  · **THE GATE** — `156-LIVE-ACCEPTANCE.md`, `status: pass`, rows 1–5 (+ optional row 6, MT5). A real browser against real PROD: a single-key connect at 19:02:40 UTC and a 2-member Deribit composite whose SECOND member was minted by `add_wizard_composite_key`. ⭐ The gate sits **between** the landings so PR B cannot convert a working-but-open state into a broken-and-closed one, and so that the REVOKE removes a path our own code was **observed** no longer taking rather than inferred not to take from a unit suite that mocks the very client under test.
+  · **PR B** — Migration B revokes `authenticated`, deletes the transitional arm, and lands the SQL gates + prose in the SAME PR (merging the migration alone reddens `sql-tests`).
+
+⚠️ **The most transferable defect of the phase, which recurred THREE times independently:** `pg_get_functiondef` returns `prosrc` VERBATIM **including comments**, so any assertion matching a function body must strip `--` comments first. It bit Migration B's own post-verify (which would have aborted its apply on its own Trap B documentation), plan 08's assertion 5h (permanently un-armed and silently green on exactly the database it guards), and plan 09's state-adaptive arming (armed one twin and not the other — measured end-to-end as letting a re-granted `authenticated` EXECUTE exit 0 green).
+
+⚠️ **The related class: assertions that pass for the WRONG reason.** Migration A shipped a canary that passed on precisely the stale re-base it existed to catch; `test_wizard_composite_fence.sql` Parts 3b/3c would have passed VACUOUSLY after Migration B (catching the role refusal, never reaching the cross-user condition they name) and were **re-cut rather than left reporting safety they no longer provided**; plans 08 and 09 each shipped a provably unreachable assertion and each caught it with their own mutation battery.
+
+⛔ **`REVOKE` is not durable, and that is a CLASS.** Supabase's `pg_default_acl` re-grants `anon` and `authenticated` on any `DROP`+`CREATE`. Nothing in a migration can close this — a post-verify runs once, at apply, and the migration that reopens the door is one nobody has written yet. The durable enforcement is **assertion 5h**, armed from the function body and the live ACL rather than from a comment marker, proven on a PG16 fixture by an actual DROP+CREATE where it was the ONLY assertion that reddened.
 
 
 ## Progress
@@ -576,7 +589,7 @@ Plans:
 | 153. WIZFORM + MT5-14 | 0/? | Not started | - |
 | 154. WIZCONT + STALE | 8/8 | Complete   | 2026-08-12 |
 | 155. MT5-VERIFY + acceptance | 0/? | Not started | - |
-| 156. CONNECT-REFACTOR | 2/10 | In Progress (2 PRs; PR A red until 156-04) | - |
+| 156. CONNECT-REFACTOR | 10/10 | Complete (2 PRs, live PROD gate between them) | 2026-08-13 |
 
 ## Requirement Coverage (v1.17)
 
@@ -591,7 +604,7 @@ Plans:
 | 153 | WIZFORM-01, WIZFORM-02, WIZFORM-03, WIZFORM-04, MT5-14 |
 | 154 | WIZCONT-01, WIZCONT-02, STALE-01 |
 | 155 | MT5-06, MT5-07, MT5-08, MT5-09, MT5-10, MT5-15, MT5-GOAL-01 (umbrella) |
-| 156 | CONNECT-01, CONNECT-02, CONNECT-03, CONNECT-04, CONNECT-05 |
+| 156 | CONNECT-01, CONNECT-02, CONNECT-03, CONNECT-04, CONNECT-05 ✅ (all five complete 2026-08-13; also closes PARITY-04, whose deferred control 153.6 could not take inside its own phase) |
 
 29/29 in-scope requirement IDs mapped (28 work + 1 umbrella), each to exactly one phase. No
 orphans, no duplicates. OWN-01 excluded (already met — CONTRIB-03, verified in code 2026-08-04).

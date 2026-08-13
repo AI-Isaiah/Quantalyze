@@ -4086,6 +4086,7 @@ describe("[153.2-04 / WIZFORM-04] the scope probe is gated on a CAPABILITY, and 
 
 /**
  * Phase 153.6-04 / PARITY-04 — the probe gate stops believing the client.
+ * Phase 156 / CONNECT-01 — and the client can no longer reach the writer either.
  *
  * ── WHAT WAS BROKEN ─────────────────────────────────────────────────────────
  *
@@ -4101,21 +4102,30 @@ describe("[153.2-04 / WIZFORM-04] the scope probe is gated on a CAPABILITY, and 
  *
  * ⭐ The gate reads `attested_venue` — written only by the two SECURITY DEFINER
  * wizard RPCs and NULLed by a BEFORE INSERT trigger for every non-privileged
- * caller — and NOTHING else. The framing that binds is "the probe no longer
- * believes the client", not "the client can no longer lie": the write half is a
- * separate plan, and this half must hold even where that half has not reached.
+ * caller — and NOTHING else. The framing that binds THIS FILE is still "the
+ * probe no longer believes the client": every assertion below must hold on its
+ * own, on a row of any provenance, and none of them may lean on who was able to
+ * write the row. That independence is why the write half could land as a
+ * separate phase without re-cutting a single case here.
  *
- * ⚠️ `attested_venue` IS NOT A SERVER-VALIDATED VENUE, and this docblock used to
- * say it was (153.6 code review CR-01). The wizard RPCs write the `p_exchange`
- * they were CALLED with, and `authenticated` can invoke them over PostgREST. The
- * guarantee that actually holds is narrower and is enough for THIS file's claim:
- * the column is unsettable from a client INSERT, and both RPCs write it and
- * `exchange` from one parameter (pinned by the CHECK
- * api_keys_attested_venue_matches_exchange), so a forged attestation drags the
- * routing label with it. These rows deliberately set the two columns to
- * DIFFERENT values to prove which one the gate reads — a state the CHECK
- * prevents in the database, and that is the point: the fixture is exercising the
- * gate's READ, not a reachable row state.
+ * ⭐ THE WRITE HALF HAS NOW LANDED (Phase 156 / CONNECT-01). This docblock used
+ * to say `attested_venue` was NOT a server-validated venue, because the RPCs
+ * wrote the `p_exchange` they were CALLED with and `authenticated` could invoke
+ * them over PostgREST. Both routes now call them from the server inside the same
+ * request that ran `validateKey`, and migration 20260814120000 withdrew
+ * `authenticated` EXECUTE from both — a browser cannot reach either RPC.
+ * ⛔ THE CEILING: the venue is the one this server observed a successful
+ * read-only authentication at. NEVER "the venue cannot be forged" — any server
+ * route holding `createAdminClient()` can still pass any uid and any venue
+ * (ADR-0001/ADR-0003). Do not delete a case below on the strength of the write
+ * half; the gate's job is to fail toward probing regardless.
+ *
+ * ⭐ THE CHECK IS STILL THE COUPLING (CONNECT-04). Both RPCs write
+ * `attested_venue` and `exchange` from one parameter, pinned by the CHECK
+ * api_keys_attested_venue_matches_exchange. These rows deliberately set the two
+ * columns to DIFFERENT values to prove which one the gate reads — a state the
+ * CHECK prevents in the database, and that is the point: the fixture is
+ * exercising the gate's READ, not a reachable row state.
  *
  * ⛔ NULL ⇒ PROBED, AND THERE IS NO FALLBACK TO `exchange`. A legacy row the
  * backfill has not reached, and a row whose client-supplied attestation the
@@ -4135,7 +4145,7 @@ describe("[153.2-04 / WIZFORM-04] the scope probe is gated on a CAPABILITY, and 
  * docblock gives: a route that probed and a route that never probed both answer
  * 200, so a status assertion would be green under the defect.
  */
-describe("[153.6-04 / PARITY-04] the probe gate reads the RPC-written venue, never the client label", () => {
+describe("[153.6-04 / PARITY-04 · 156 / CONNECT-01] the probe gate reads the server-written venue, never the client label", () => {
   it("⭐ a forged client label cannot buy a skip — an attested ccxt venue is PROBED", async () => {
     // THE HEADLINE ORACLE. The row claims the exempt venue in the column a
     // client can write at INSERT, and the server attested a venue that answers

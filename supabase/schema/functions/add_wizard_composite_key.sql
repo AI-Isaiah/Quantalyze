@@ -2,11 +2,12 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260813150106_wizard_rpcs_service_role_writer.sql
--- ────────────────── 2. add_wizard_composite_key (re-based on 20260811210000)
--- Re-based VERBATIM from supabase/schema/functions/add_wizard_composite_key.sql.
--- The DISTINCT 'wizcomposite:' advisory-lock space and the lazy composite-draft
--- creation are preserved byte-for-byte. Same single-region change as §1.
+-- source migration: 20260814120000_wizard_rpcs_revoke_authenticated.sql
+-- ────────────────── 2. add_wizard_composite_key — service_role only
+-- The single-key twin's gate, verbatim. ⛔ The two functions are ONE CONTRACT
+-- WITH TWO ENTRY POINTS; 153.6 exists because a fix landed on one of them and
+-- not the other, and the Phase 153 span verification found that class still open
+-- on 2026-08-13. Change one, change both, in the same migration.
 CREATE OR REPLACE FUNCTION public.add_wizard_composite_key(
   p_user_id UUID,
   p_exchange TEXT,
@@ -28,36 +29,20 @@ SET lock_timeout = '3s'
 AS $$
 DECLARE
   v_jwt_role TEXT;
-  v_auth_uid UUID := auth.uid();
   v_key_id UUID;
   v_strategy_id UUID;
 BEGIN
-  -- ⭐ TRANSITIONAL TWO-ARM GATE — the single-key twin's, verbatim. The two
-  -- functions are one contract with two entry points; 153.6 exists because a
-  -- fix landed on one of them and not the other. Change one, change both.
+  -- See the single-key twin for the full rationale: fail-closed wrapper, the
+  -- rejected width of the log_audit_event_service precedent, Trap B (why
+  -- auth.uid() is ABSENT rather than relaxed — it is a permanent silent no-op
+  -- under service_role) and Trap C (never current_user in a DEFINER body).
   BEGIN
     v_jwt_role := auth.role();
   EXCEPTION WHEN OTHERS THEN
     v_jwt_role := NULL;
   END;
 
-  IF v_jwt_role = 'service_role' THEN
-    -- See the single-key twin: ownership is bound at the route, and an
-    -- auth.uid() check in THIS arm would be a permanent silent no-op
-    -- (`156-MEASUREMENTS.md` § A2 measured auth.uid() IS NULL here).
-    NULL;
-  ELSIF v_jwt_role = 'authenticated' THEN
-    IF v_auth_uid IS NULL THEN
-      RAISE EXCEPTION 'add_wizard_composite_key called without an auth session'
-        USING ERRCODE = 'insufficient_privilege';
-    END IF;
-
-    IF v_auth_uid <> p_user_id THEN
-      RAISE EXCEPTION 'add_wizard_composite_key: p_user_id (%) does not match auth.uid (%)',
-        p_user_id, v_auth_uid
-        USING ERRCODE = 'insufficient_privilege';
-    END IF;
-  ELSE
+  IF v_jwt_role IS DISTINCT FROM 'service_role' THEN
     RAISE EXCEPTION 'add_wizard_composite_key: caller role (%) may not write wizard drafts',
       COALESCE(v_jwt_role, '<none>')
       USING ERRCODE = 'insufficient_privilege';
@@ -70,8 +55,7 @@ BEGIN
 
   -- Idempotency fence for the DRAFT only (ONB-03: the per-KEY add proceeds).
   -- DISTINCT 'wizcomposite:' lock space so the single-key 'wizdraft:' fence is
-  -- untouched. Serializes concurrent adds for this (user, session) so two calls
-  -- resolve to ONE composite draft instead of two.
+  -- untouched.
   PERFORM pg_advisory_xact_lock(
     hashtext('wizcomposite:' || p_user_id::text || ':' || p_wizard_session_id::text)
   );
@@ -105,13 +89,11 @@ BEGIN
     RETURNING id INTO v_strategy_id;
   END IF;
 
-  -- ALWAYS mint a fresh encrypted api_keys row (this IS the per-key add — the
-  -- api_keys INSERT column list mirrors create_wizard_strategy verbatim).
+  -- ALWAYS mint a fresh encrypted api_keys row (this IS the per-key add).
   -- 153.6 / PARITY-04: attested_venue stamped from the caller-supplied
-  -- p_exchange, exactly as in the single-key twin — and, exactly as there, from
-  -- the SAME parameter as `exchange`, which the CHECK
-  -- api_keys_attested_venue_matches_exchange requires (CR-01). The same
-  -- narrows-but-does-not-close status recorded in §1 applies here unchanged.
+  -- p_exchange, exactly as in the single-key twin — and from the SAME parameter
+  -- as `exchange`, which api_keys_attested_venue_matches_exchange requires.
+  -- The CR-01 status recorded in §1 applies here unchanged.
   INSERT INTO api_keys (
     user_id, exchange, label,
     api_key_encrypted, api_secret_encrypted, passphrase_encrypted,

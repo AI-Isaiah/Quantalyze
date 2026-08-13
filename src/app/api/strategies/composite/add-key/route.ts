@@ -88,13 +88,22 @@ import type { User } from "@supabase/supabase-js";
  * that client, so the swap left it dead. The sibling's identical-looking binding
  * has three live consumers and stays.
  *
- * ⚠️ TRANSITIONAL. Migration A
- * (`20260813150106_wizard_rpcs_service_role_writer.sql`) only ADMITS a
- * `service_role` caller; `authenticated` STILL holds EXECUTE on
- * `add_wizard_composite_key` and still passes the full `auth.uid()` ownership
- * check. The follow-up `..._wizard_rpcs_withdraw_authenticated.sql` (Phase 156
- * plan 07) is what withdraws it. Until then this route is the only SANCTIONED
- * writer, not yet the only POSSIBLE one.
+ * ⭐ AND THE DOOR IS SHUT ON THIS TWIN TOO — which is the whole point of having
+ * written it here as well. Migration A
+ * (`20260813150106_wizard_rpcs_service_role_writer.sql`) only ADMITTED a
+ * `service_role` caller; Migration B
+ * (`20260814120000_wizard_rpcs_revoke_authenticated.sql`) WITHDREW
+ * `authenticated`'s EXECUTE on `add_wizard_composite_key`, and the body's own
+ * gate refuses any caller whose `auth.role()` is not `service_role`, so a direct
+ * PostgREST call answers 42501 and mints nothing. This route is now the only
+ * POSSIBLE writer, not merely the sanctioned one. The SQL gates that prove it
+ * are the composite-specific 5f/5g in
+ * `supabase/tests/test_api_keys_exchange_not_user_writable.sql` — minted by this
+ * phase precisely because 5d alone closed one of two identical doors.
+ * ⛔ THE CEILING: the venue is the one this server observed a successful
+ * read-only authentication at. NEVER "the venue cannot be forged" — any server
+ * route holding `createAdminClient()` can still pass any uid and any venue
+ * string, the standing `service_role` trust boundary (ADR-0001/ADR-0003).
  */
 
 /**

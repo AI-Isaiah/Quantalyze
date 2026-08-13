@@ -2343,7 +2343,8 @@ named files are unmodified by the phase, so neither was quietly half-done.
   standard to land an audit decision on. Reference: `156-RESEARCH.md` Open Question 4.
 
 - [ ] **The `asset_class` annualization stamp still reads the forgeable `apiKeyExchange` rather than
-  `attestedVenue`.** `src/app/api/strategies/finalize-wizard/route.ts:1275-1285`. Phase 153.6-04
+  `attestedVenue`.** `src/app/api/strategies/finalize-wizard/route.ts:1288-1299` (the stamp itself at
+  `:1311`; the coordinate moved +13 when `156-10` re-strengthened the prose above it). Phase 153.6-04
   (PARITY-04) moved the *probe gate* onto the server-attested venue and left this stamp behind
   deliberately; Phase 156 attests the venue at connect time but does not widen that swap either. The
   residual is **self-targeted**: a forged venue label here distorts the annualization clock (√365
@@ -2353,3 +2354,18 @@ named files are unmodified by the phase, so neither was quietly half-done.
   does not have — see the standing annualization landmine in
   `project_blend_annualization_unknown_assetclass_optimistic`. Reference: `156-RESEARCH.md` Open
   Question 3.
+
+- [ ] **`p_venue_account_id` has no in-database oracle — Phase 156 closed its REACHABILITY half and
+  RESTATED the rest** (added 2026-08-13 by `156-10`; the plan assumed this was already logged and it
+  was not). `src/app/api/strategies/create-with-key/route.ts` at the `p_venue_account_id` argument,
+  and `create_wizard_strategy`'s `COMMENT ON FUNCTION`
+  (`20260814120000_wizard_rpcs_revoke_authenticated.sql:536-550`). ⭐ **What Phase 156 DID close:**
+  after Migration B only the server can pass the value at all, so "a browser chose this account id"
+  is no longer reachable. ⛔ **What it did NOT close, and cannot:** nothing in the database can ask
+  MT5 whether a login is real, so the stored value is *"what the server passed"*, never *"what the
+  venue confirmed"* — the same CR-01 class as `p_exchange`, at a narrower scope. An oracle means
+  calling the venue, which is an application-tier probe; the MT5 gateway already performs one at
+  validate time, so persisting *its verdict* alongside the value is the plausible remedy and needs
+  its own decision (it is a migration + backfill question on a column that is live on PROD).
+  ⚠️ **Distinct from A-3 above:** A-3 is about this value's *shape* (a login is unique only within a
+  broker server); this entry is about its *provenance*. Fixing either does not fix the other.

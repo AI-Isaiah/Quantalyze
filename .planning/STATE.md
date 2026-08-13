@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
-stopped_at: Phase 156 plan 02 complete (PR A wave 2)
-last_updated: "2026-08-13T14:13:40.308Z"
-last_activity: 2026-08-13 -- Phase 156 plan 02 executed (route contracts observed RED; no route, migration or SQL gate touched)
+stopped_at: Phase 156 plan 10 complete (PR B authored, not yet opened)
+last_updated: "2026-08-13T23:40:00.000Z"
+last_activity: 2026-08-13 -- Phase 156 plan 10 executed (five prose sites re-strengthened, PARITY-04 deferred control closed, phase gate run)
 progress:
   total_phases: 16
-  completed_phases: 13
+  completed_phases: 14
   total_plans: 88
-  completed_plans: 83
-  percent: 81
+  completed_plans: 88
+  percent: 87
 ---
 
 # Project State — Quantalyze
@@ -55,10 +55,22 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: 156 (connect-refactor — the venue the server validated is the venue the server writes) — EXECUTING
-Plan: 2 of 10 complete (PR A: waves 0–2 done; 156-03 next)
-Status: Executing Phase 156. ⛔ The phase branch is RED ON PURPOSE between wave 2 and wave 3 — `156-02` wrote the post-156 route contract as failing assertions BEFORE `156-04` touches a route (Pitfall 5: a test written after the route would pass on a route that kept a user-scoped fallback). 11 named failures across the two wizard route test files are expected until 156-04 lands. Do not "fix" CI by changing a route in an earlier wave.
-Last activity: 2026-08-13 -- Phase 156 plan 02 executed (route contracts observed RED; no route, migration or SQL gate touched)
+Phase: 156 (connect-refactor — the venue the server validated is the venue the server writes) — ✅ COMPLETE 2026-08-13
+Plan: 10 of 10 complete. PR A shipped as v0.60.0.0 (merge `25e28d3a`) and is LIVE ON PROD; PR B is authored on `feat/phase-156-migration-b` and NOT yet opened.
+Status: Phase 156 complete. ⚠️ **Read this before assuming the control is live:** Migration B (`20260814120000_wizard_rpcs_revoke_authenticated.sql`) is applied to **no database** — merging PR B is what applies it. The SQL gates plans 08/09 wrote are **state-adaptive**: they SKIP on a pre-Migration-B database and ARM after, so a green `sql-tests` on PR B is green *with the four new RPC-door assertions SKIPping*. That is by design (applying Migration B to TEST before the gates land would red `sql-tests` on every open PR), but it means **nothing in the 5d/5f/5g/5h set has been observed armed-and-green in CI**. The first run after Migration B reaches TEST is the observation.
+Last activity: 2026-08-13 -- Phase 156 plan 10 executed (five prose sites re-strengthened, PARITY-04's deferred control closed, ROADMAP/REQUIREMENTS/STATE ledgers closed, phase gate run)
+
+⚠️ **Progress counters reconciled 2026-08-13 (plan 156-10), and the reconciliation is stated because
+the numbers moved by more than this phase's own delta.** `total_phases: 16` is v1.17's ten phases plus
+the six 153.x splits; `percent` is phase-weighted (`completed_phases / total_phases`), NOT plan-weighted
+— 13/16 was 81. `completed_plans` now reads 88 = every AUTHORED v1.17 plan: phases 153 and 155 contribute
+**zero** because they were never planned, not because their plans are outstanding. ⚠️ The previous value
+`83` over-counted by 3 against a disk census (80 SUMMARY files before this phase's last eight); it was
+hand-set at some point and is not reproducible from `.planning/phases/`. ⛔ Do NOT run
+`state.update-progress` to "fix" this: it recalculates from SUMMARY.md counts on disk and Phase 156 has
+two plans that deliberately produced no SUMMARY (**156-06**, whose artifact is `156-LIVE-ACCEPTANCE.md`,
+and **156-07**, whose output is Migration B itself) — the verb would write 8/10 for a phase that ran all
+ten.
 
 ⚠️ **Corrected 2026-08-13:** this block read `Phase: 153.6 … EXECUTING, Plan: 1 of 6` until now.
 153.6 shipped on `main` (PR #675, commit 54a0d26d) and the position had not been advanced since.
@@ -507,6 +519,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ### Roadmap Evolution
 
 - Phase 156 added after Phase 155: CONNECT-REFACTOR — service-role writer + withdraw `authenticated` EXECUTE, closing the CR-01 deferred-control residual shipped live in 153.6. ⛔ sFOX go-live PULLS IT FORWARD (the residual's defence expires when a syncable venue joins scopeProbeSupported:false).
+- Phase 156 PULLED FORWARD AHEAD OF 155 (founder call 2026-08-13) and ✅ **COMPLETE the same day, 10/10 plans**. 155 stayed blocked on three gates none of 156's work could clear (a founder at the terminal on a trading day, a working MT5 validate, and a tolerance number that does not exist and must not be invented), while sFOX go-live was already booked — so waiting bought nothing and left a live-on-PROD deferred control open for longer. ⭐ Shipped as **TWO PRs with a live PROD gate between them** (PR A = v0.60.0.0 `25e28d3a`, gate = `156-LIVE-ACCEPTANCE.md` rows 1–5 pass, PR B = Migration B + gates + prose). This is the worked example a future privilege change copies: both single-migration orderings produce a total connect-a-key outage window.
 - Phase 140.1 inserted after Phase 140: PYAPI — Python service contract, status attributability & limiter identity (URGENT)
 - Phase 140.2 inserted after Phase 140: SEAMCORE — Seam core & breaker correctness + harness integrity (URGENT)
 - Phase 140.3 inserted after Phase 140: SEAMUX — Client & wizard seam error surface (URGENT)
@@ -526,6 +539,14 @@ Load-bearing sequencing (real dependencies, do not reorder):
      every decision an executor tried to record was silently dropped. Diagnosed 2026-08-09.
      The sibling "### Decisions (execution-time, Phase N)" headings below are fine — only the
      FIRST match is used as the append target, and they are historical archives. -->
+
+*(execution-time, Phase 156 — CONNECT-REFACTOR, 2026-08-13)*
+
+- **D-156-1 — the transitional gate's two arms are BRANCHED, never UNIONED.** Migration A admits a `service_role` caller on one arm and keeps the full `auth.uid()` ownership check on the `authenticated` arm; Migration B deletes the second arm. A `service_role`-only body in Migration A would have refused the still-live old deploy — a total connect-a-key outage for the whole rollout window. ⛔ A UNIONed condition (`auth.role() = 'service_role' OR auth.uid() = p_user_id`) was rejected: it reads as equivalent and is not, because under `service_role` `auth.uid()` is NULL, so the union silently degrades to "service_role always wins" for every caller and the ownership check becomes unreachable rather than transitional.
+- **D-156-2 — the live PROD gate sits BETWEEN the two landings, not after both.** PR A ships the writer; a real browser then connects a real single key and a real 2-member composite on PROD; only then is Migration B authored. ⭐ The point is directional: PR B can only *close* a door, so gating it on observed-working PROD behaviour means the REVOKE removes a path our own code was **observed** no longer taking. Gating after both landings would have allowed converting a working-but-open state into a broken-and-closed one, which is strictly worse than the residual being closed.
+- **D-156-3 — `SEAM_MISCONFIGURED` at 503 is REUSED, no new code minted,** for the missing-service-key fail-closed arm in both connect routes. Both routes already emit it for server-side misconfiguration, its copy's promise ("nothing submitted, nothing changed") is literally true at that return, and it does not blame the user's key. ⭐ Minting a new member would have moved `EXPECTED_TABLE_SIZE` and the `KNOWN_FINALIZE_CODES` union that PARITY-05's ledger polices — pins that exist precisely so a code addition is a deliberate act. Reuse keeps them unmoved, which is itself the proof this was a fix and not an addition.
+- **D-156-4 — `156-PATTERNS.md` REJECTS the precedent's `IN (...)` width (Rule 7: pick one, say why).** `log_audit_event_service` (audit-2026-05-07 P919) gates in-body on `v_role NOT IN ('authenticated','service_role')`, and three of that precedent's four elements were carried verbatim — `auth.role()` rather than `current_user` (Trap C: inside a SECDEF body `current_user` is the OWNER, so a `current_user` test always passes), the `BEGIN … EXCEPTION WHEN OTHERS THEN v_role := NULL` fail-closed wrapper, and `v_role IS NULL → RAISE`. ⛔ The **width** was rejected: `authenticated` is the exact caller this phase exists to lock out, so admitting it in-body would make the in-body gate a **permanent no-op** — a future GRANT leak would then pass BOTH the grant layer and the body. `<> 'service_role'` instead. ⭐ The precedent's width is defensible *there* (`log_audit_event_service` has an authenticated caller by design) and a security hole *here*; the divergence is written down so a reader diffing the two is not looking at an oversight.
+- ⚠️ **Phase 156 did NOT close two things, and both are logged in `TODOS.md` § Phase 156 rather than half-done:** the `asset_class` annualization stamp still reads the forgeable `apiKeyExchange` (self-targeted residual; needs its own √365-vs-√252 oracle), and `p_venue_account_id` has no in-database oracle (reachability half closed, provenance half not — nothing in the database can ask MT5 whether a login is real). A third, `add_wizard_composite_key`'s absence from `MUTATING_RPC_NAMES`, is a pre-existing audit-coverage gap deliberately left logged-not-fixed.
 
 *(requirements-time, from research Open Decisions 1–8)*
 
