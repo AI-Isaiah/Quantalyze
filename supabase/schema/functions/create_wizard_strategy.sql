@@ -111,12 +111,14 @@
 --             REVOKE ALL ON FUNCTION … FROM PUBLIC, anon, authenticated;
 --             GRANT EXECUTE ON FUNCTION … TO service_role;
 --         in the same migration.
---     ⛔ THE DURABLE ENFORCEMENT DOES NOT EXIST YET. It is assertion **5h** in
---     `supabase/tests/test_api_keys_exchange_not_user_writable.sql`, specified by
---     `156-08-PLAN.md` Task 3, which must arm itself from `pg_get_functiondef`
---     rather than from any comment marker so it re-runs on every PR. As of this
---     migration's authoring that file's assertions stop at 5e and `5h` appears
---     nowhere in the repository.
+--     ⭐ THE DURABLE ENFORCEMENT IS ASSERTION **5h**, and it EXISTS as of plan
+--     156-08 (commit `bab2655c`) in
+--     `supabase/tests/test_api_keys_exchange_not_user_writable.sql`. It arms
+--     itself from `pg_get_functiondef` and the live ACL, NOT from any comment
+--     marker, so it re-runs on every PR and cannot be disarmed by editing prose.
+--     Plan 08 proved it on a PG16 fixture by performing an actual DROP + CREATE
+--     with no grants: `pg_default_acl` re-granted anon and authenticated, and
+--     with the marker also stripped 5h was the ONLY assertion that reddened.
 --     ⛔ THEREFORE: this migration MUST NOT MERGE WITHOUT plan 08 (5f/5g/5h) AND
 --     plan 09 in the SAME PR. Merging it alone both reddens `sql-tests` — six
 --     existing gate call sites invoke these RPCs as `authenticated` and three
