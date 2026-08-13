@@ -112,6 +112,11 @@ DECLARE
   v_session_c  uuid := gen_random_uuid();
   v_fix_live   boolean;
   v_attest_live boolean;
+  -- Migration B's own marker on the SAME column comment. Gates ONLY the
+  -- RPC-door assertions (5d/5d+/5f/5g), so a database carrying Migration A but
+  -- not Migration B skips those three cleanly instead of failing for a state it
+  -- is legitimately in. 5b/5c/5e stay on v_attest_live.
+  v_revoke_live boolean;
   v_seen       text;
   v_after      text;
   v_attested   text;
@@ -264,6 +269,57 @@ BEGIN
     false
   ) INTO v_attest_live;
 
+  -- The SECOND marker, on the SAME comment: Phase 156 Migration B. It arms only
+  -- the RPC-door assertions, because those are the ones that are legitimately
+  -- FALSE on a database carrying Migration A alone — during PR A's window
+  -- `authenticated` still holds EXECUTE on purpose, and asserting otherwise
+  -- there would red CI for a correct state.
+  SELECT COALESCE(
+    col_description(
+      'public.api_keys'::regclass,
+      (SELECT attnum FROM pg_attribute
+        WHERE attrelid = 'public.api_keys'::regclass
+          AND attname = 'attested_venue'
+          AND NOT attisdropped)
+    ) LIKE '%20260814120000%',
+    false
+  ) INTO v_revoke_live;
+
+  -- ---- (5a′) THE OLDER MARKER MUST SURVIVE THE NEWER RE-STAMP --------------
+  -- ⛔ DELIBERATELY OUTSIDE `IF v_attest_live`, and that placement is the whole
+  -- assertion: inside that branch v_attest_live is true by construction, so the
+  -- check would be unreachable. The failure it exists to catch is exactly the
+  -- arm where the block skips.
+  -- 20260814120000 §4 RE-STAMPS the attested_venue comment and is required to
+  -- preserve the 20260811210000 substring. Since it sorts AFTER 20260811210000,
+  -- a database carrying its marker must carry the older one too. This is 5a's
+  -- reasoning applied one generation forward: without it, a re-stamp that
+  -- dropped the old substring would make the ENTIRE 5-block fall through to a
+  -- NOTICE with exit code 0 — green CI, zero coverage, and nobody looking.
+  IF v_revoke_live AND NOT v_attest_live THEN
+    RAISE EXCEPTION
+      'CR-01/156 REGRESSION (5a''): api_keys.attested_venue carries the 20260814120000 marker but no longer carries 20260811210000. Migration 20260814120000 (Phase 156 Migration B) re-stamps that comment and MUST preserve the older substring — a re-stamp dropped it, so the entire 5a-5g block SKIPPED with exit code 0 rather than running. Restore the substring in whichever migration re-stamped the comment.';
+  END IF;
+
+  -- ---- (5a″) PRIVILEGE STATE AND MARKER MUST AGREE -------------------------
+  -- ⭐ THE CROSS-CHECK THAT CLOSES THE TRAP IN THE DIRECTION THAT BITES. The
+  -- marker is prose; the ACL is state. If this database HAS Migration B — read
+  -- from has_function_privilege, NEVER from the comment, or the cross-check has
+  -- only one source — then the marker must say so. Without this, a re-stamp
+  -- that dropped the new id would leave the door correctly shut, 5d/5d+/5f/5g
+  -- silently skipped, and CI green: the precise shape that lets a LATER
+  -- regression through unobserved, because by then nobody is looking at a gate
+  -- that has been reporting success for months.
+  -- ⚠️ to_regprocedure rather than a bare cast: `::regprocedure` ERRORS on a
+  -- database where the function does not exist, and a missing function is 5d+'s
+  -- and 5g's business to report, not this cross-check's.
+  IF to_regprocedure(v_create_sig) IS NOT NULL
+     AND NOT has_function_privilege('authenticated', v_create_sig, 'EXECUTE')
+     AND NOT v_revoke_live THEN
+    RAISE EXCEPTION
+      'CR-01/156 REGRESSION (5a"): authenticated holds NO EXECUTE on create_wizard_strategy — so this database DOES carry migration 20260814120000 — but api_keys.attested_venue does not carry the 20260814120000 marker. The RPC-door assertions 5d/5d+/5f/5g therefore SKIPPED with exit code 0 on a database they were written to guard. A comment re-stamp dropped the id; restore it in whichever migration re-stamped that comment.';
+  END IF;
+
   IF v_attest_live THEN
     -- (5a) MARKER-PRESENT POSITIVE CONTROL for the gate above (153.6 P4).
     -- 20260811210000 re-stamps the `exchange` comment, and is required to
@@ -340,145 +396,257 @@ BEGIN
     END IF;
     RAISE NOTICE 'Assertion 5c OK: DELETE + re-INSERT with a forged attested_venue SUCCEEDS and stores NULL — the probe gate''s input is unforgeable from the client.';
 
-    -- ---- (5d) THE OTHER DOOR: the RPC, called directly as `authenticated` ----
-    -- Phase 153.6 code review CR-01, and INVERTED by Phase 156 Migration B
-    -- (20260814120000). Assertions 2-5c all exercise the CLIENT INSERT door.
-    -- They say nothing about the SECOND writer, and it is the one the design
-    -- actually leans on: `create_wizard_strategy` is SECURITY DEFINER and
-    -- Supabase exposes public-schema functions over PostgREST, so until
-    -- 20260814120000 a browser holding its own server-minted ciphertext (which
-    -- /api/keys/validate-and-encrypt hands back) could POST
-    -- /rest/v1/rpc/create_wizard_strategy with ANY p_exchange it liked and have
-    -- that value stamped as the server''s attestation. The RPC does not validate
-    -- that parameter; it writes it.
-    --
-    -- ⭐ WHAT CHANGED, AND WHY THIS ASSERTION FLIPPED POLARITY. Before Migration
-    -- B this block asserted the call SUCCEEDS, because it did, and the only
-    -- guarantee available was that the forgery could not be SELECTIVE. Migration
-    -- B withdrew `authenticated` EXECUTE and narrowed both bodies to a
-    -- service_role-only gate, so the browser tier can no longer reach the writer
-    -- at all. Asserting the old success here would now assert the vulnerability.
-    --
-    -- ⛔ WHAT IS STILL NOT CLAIMED. Not "the venue cannot be forged". Any server
-    -- route holding a service-role client can still pass any p_exchange — the
-    -- standing service_role trust boundary (ADR-0001/ADR-0003). The guarantee is
-    -- "the venue THIS SERVER OBSERVED a successful read-only authentication at".
-    -- The stronger reading would license removing the probe gate.
-    --
-    -- Three parts, because each on its own is the weaker claim:
-    --   (i)   the PRIVILEGE is gone, asserted in BOTH directions. "authenticated
-    --         lacks EXECUTE" also reads TRUE on a database where the function
-    --         was DROPPED, so service_role''s EXECUTE is asserted beside it.
-    --   (ii)  the call is REFUSED, and refused with SQLSTATE 42501. ⚠️ After
-    --         Migration B two distinct mechanisms both answer 42501 — the GRANT
-    --         layer (this call, which shifts the database role) and the in-body
-    --         auth.role() gate (callers holding EXECUTE by OWNERSHIP, which sail
-    --         past the REVOKE). Both are correct and this does not distinguish
-    --         them; any OTHER sqlstate means it was blocked for the wrong reason
-    --         and this assertion is not testing the grant.
-    --   (iii) NOTHING WAS MINTED. "An error was raised" would still pass if some
-    --         arm had already written the row.
-    SELECT count(*) INTO v_rows_before FROM public.api_keys WHERE user_id = v_uid;
+    IF v_revoke_live THEN
+      -- ---- (5d) THE OTHER DOOR: the RPC, called directly as `authenticated` ----
+      -- Phase 153.6 code review CR-01, and INVERTED by Phase 156 Migration B
+      -- (20260814120000). Assertions 2-5c all exercise the CLIENT INSERT door.
+      -- They say nothing about the SECOND writer, and it is the one the design
+      -- actually leans on: `create_wizard_strategy` is SECURITY DEFINER and
+      -- Supabase exposes public-schema functions over PostgREST, so until
+      -- 20260814120000 a browser holding its own server-minted ciphertext (which
+      -- /api/keys/validate-and-encrypt hands back) could POST
+      -- /rest/v1/rpc/create_wizard_strategy with ANY p_exchange it liked and have
+      -- that value stamped as the server''s attestation. The RPC does not validate
+      -- that parameter; it writes it.
+      --
+      -- ⭐ WHAT CHANGED, AND WHY THIS ASSERTION FLIPPED POLARITY. Before Migration
+      -- B this block asserted the call SUCCEEDS, because it did, and the only
+      -- guarantee available was that the forgery could not be SELECTIVE. Migration
+      -- B withdrew `authenticated` EXECUTE and narrowed both bodies to a
+      -- service_role-only gate, so the browser tier can no longer reach the writer
+      -- at all. Asserting the old success here would now assert the vulnerability.
+      --
+      -- ⛔ WHAT IS STILL NOT CLAIMED. Not "the venue cannot be forged". Any server
+      -- route holding a service-role client can still pass any p_exchange — the
+      -- standing service_role trust boundary (ADR-0001/ADR-0003). The guarantee is
+      -- "the venue THIS SERVER OBSERVED a successful read-only authentication at".
+      -- The stronger reading would license removing the probe gate.
+      --
+      -- Three parts, because each on its own is the weaker claim:
+      --   (i)   the PRIVILEGE is gone, asserted in BOTH directions. "authenticated
+      --         lacks EXECUTE" also reads TRUE on a database where the function
+      --         was DROPPED, so service_role''s EXECUTE is asserted beside it.
+      --   (ii)  the call is REFUSED, and refused with SQLSTATE 42501. ⚠️ After
+      --         Migration B two distinct mechanisms both answer 42501 — the GRANT
+      --         layer (this call, which shifts the database role) and the in-body
+      --         auth.role() gate (callers holding EXECUTE by OWNERSHIP, which sail
+      --         past the REVOKE). Both are correct and this does not distinguish
+      --         them; any OTHER sqlstate means it was blocked for the wrong reason
+      --         and this assertion is not testing the grant.
+      --   (iii) NOTHING WAS MINTED. "An error was raised" would still pass if some
+      --         arm had already written the row.
+      SELECT count(*) INTO v_rows_before FROM public.api_keys WHERE user_id = v_uid;
 
-    IF has_function_privilege('authenticated', v_create_sig, 'EXECUTE') THEN
-      RAISE EXCEPTION
-        'CONNECT-01 REGRESSION (5d): authenticated holds EXECUTE on create_wizard_strategy. Migration 20260814120000 revoked it; a later migration re-granted it, or DROPped and re-CREATEd the function so Supabase pg_default_acl re-granted it silently. Any browser session can POST /rest/v1/rpc/create_wizard_strategy and mint an attestation of its choosing.';
-    END IF;
-    IF NOT has_function_privilege('service_role', v_create_sig, 'EXECUTE') THEN
-      RAISE EXCEPTION
-        'OUTAGE (5d): service_role lacks EXECUTE on create_wizard_strategy — a REVOKE went one role too far and EVERY connect-a-key is broken. This is also the anti-vacuity control for the assertion above: without it, "authenticated cannot call it" would pass on a database where the function no longer exists.';
-    END IF;
+      IF has_function_privilege('authenticated', v_create_sig, 'EXECUTE') THEN
+        RAISE EXCEPTION
+          'CONNECT-01 REGRESSION (5d): authenticated holds EXECUTE on create_wizard_strategy. Migration 20260814120000 revoked it; a later migration re-granted it, or DROPped and re-CREATEd the function so Supabase pg_default_acl re-granted it silently. Any browser session can POST /rest/v1/rpc/create_wizard_strategy and mint an attestation of its choosing.';
+      END IF;
+      IF NOT has_function_privilege('service_role', v_create_sig, 'EXECUTE') THEN
+        RAISE EXCEPTION
+          'OUTAGE (5d): service_role lacks EXECUTE on create_wizard_strategy — a REVOKE went one role too far and EVERY connect-a-key is broken. This is also the anti-vacuity control for the assertion above: without it, "authenticated cannot call it" would pass on a database where the function no longer exists.';
+      END IF;
 
-    PERFORM set_config('request.jwt.claims',
-                       json_build_object('sub', v_uid::text, 'role', 'authenticated')::text,
-                       true);
-    SET LOCAL ROLE authenticated;
-    v_key_rpc  := NULL;
-    v_sqlstate := NULL;
-    v_ins_err  := NULL;
-    BEGIN
-      SELECT api_key_id INTO v_key_rpc
-        FROM public.create_wizard_strategy(
-          v_uid,
-          'mt5',              -- the forged, probe-exempt venue
-          'cr01-rpc-door', 'ct', 'ct', NULL, 'dek', 'nonce', 1,
-          'cr01-rpc-draft', v_session
-        );
-    EXCEPTION WHEN OTHERS THEN
-      v_sqlstate := SQLSTATE;
-      v_ins_err  := SQLERRM;
-    END;
-    RESET ROLE;
-    PERFORM set_config('request.jwt.claims', NULL, true);
+      PERFORM set_config('request.jwt.claims',
+                         json_build_object('sub', v_uid::text, 'role', 'authenticated')::text,
+                         true);
+      SET LOCAL ROLE authenticated;
+      v_key_rpc  := NULL;
+      v_sqlstate := NULL;
+      v_ins_err  := NULL;
+      BEGIN
+        SELECT api_key_id INTO v_key_rpc
+          FROM public.create_wizard_strategy(
+            v_uid,
+            'mt5',              -- the forged, probe-exempt venue
+            'cr01-rpc-door', 'ct', 'ct', NULL, 'dek', 'nonce', 1,
+            'cr01-rpc-draft', v_session
+          );
+      EXCEPTION WHEN OTHERS THEN
+        v_sqlstate := SQLSTATE;
+        v_ins_err  := SQLERRM;
+      END;
+      RESET ROLE;
+      PERFORM set_config('request.jwt.claims', NULL, true);
 
-    IF v_sqlstate IS NULL THEN
-      RAISE EXCEPTION
-        'CONNECT-01 REGRESSION (5d): create_wizard_strategy was CALLED SUCCESSFULLY by an authenticated browser session. The RPC does not validate p_exchange, so this is a browser minting its own attested_venue and buying itself a skip of the finalize-wizard scope-broadening probe.';
-    END IF;
-    IF v_sqlstate <> '42501' THEN
-      RAISE EXCEPTION
-        'CONNECT-01 (5d): the authenticated RPC call was refused with SQLSTATE % (%) rather than 42501 insufficient_privilege — it was blocked for the wrong reason, so this assertion is not testing the grant or the in-body role gate.',
-        v_sqlstate, v_ins_err;
-    END IF;
+      IF v_sqlstate IS NULL THEN
+        RAISE EXCEPTION
+          'CONNECT-01 REGRESSION (5d): create_wizard_strategy was CALLED SUCCESSFULLY by an authenticated browser session. The RPC does not validate p_exchange, so this is a browser minting its own attested_venue and buying itself a skip of the finalize-wizard scope-broadening probe.';
+      END IF;
+      IF v_sqlstate <> '42501' THEN
+        RAISE EXCEPTION
+          'CONNECT-01 (5d): the authenticated RPC call was refused with SQLSTATE % (%) rather than 42501 insufficient_privilege — it was blocked for the wrong reason, so this assertion is not testing the grant or the in-body role gate.',
+          v_sqlstate, v_ins_err;
+      END IF;
 
-    SELECT count(*) INTO v_rows_after FROM public.api_keys WHERE user_id = v_uid;
-    IF v_rows_after <> v_rows_before THEN
-      RAISE EXCEPTION
-        'CONNECT-01 REGRESSION (5d): the refused RPC call still changed the api_keys row count for this user (% -> %). "An error was raised" is the weaker claim; a row minted anyway is the actual harm.',
-        v_rows_before, v_rows_after;
-    END IF;
-    RAISE NOTICE 'Assertion 5d OK: authenticated holds no EXECUTE on create_wizard_strategy, the direct call is refused 42501, and no row was minted.';
+      SELECT count(*) INTO v_rows_after FROM public.api_keys WHERE user_id = v_uid;
+      IF v_rows_after <> v_rows_before THEN
+        RAISE EXCEPTION
+          'CONNECT-01 REGRESSION (5d): the refused RPC call still changed the api_keys row count for this user (% -> %). "An error was raised" is the weaker claim; a row minted anyway is the actual harm.',
+          v_rows_before, v_rows_after;
+      END IF;
+      RAISE NOTICE 'Assertion 5d OK: authenticated holds no EXECUTE on create_wizard_strategy, the direct call is refused 42501, and no row was minted.';
 
-    -- ---- (5d+) ANTI-VACUITY POSITIVE CONTROL on the privileged path ---------
-    -- Shaped on 5b, and load-bearing for the same reason: without it, "refused"
-    -- is indistinguishable from "the signature drifted" or "the function is
-    -- gone" — i.e. from CONNECT-A-KEY IS BROKEN, which 5d alone would
-    -- green-light. Service-role-shaped call, the
-    -- test_api_key_delete_atomicity.sql:261 idiom: RESET ROLE (so EXECUTE is
-    -- held by ownership) plus a service_role JWT claim (so the in-body
-    -- auth.role() gate admits it). Both doors must open for our own server.
-    PERFORM set_config('request.jwt.claims', '{"role":"service_role"}', true);
-    v_key_rpc := NULL;
-    v_ins_err := NULL;
-    BEGIN
-      SELECT api_key_id INTO v_key_rpc
-        FROM public.create_wizard_strategy(
-          v_uid,
-          'mt5',
-          'cr01-rpc-privileged', 'ct', 'ct', NULL, 'dek', 'nonce', 1,
-          'cr01-rpc-draft', v_session
-        );
-    EXCEPTION WHEN OTHERS THEN
-      v_ins_err := SQLSTATE || ' ' || SQLERRM;
-    END;
-    PERFORM set_config('request.jwt.claims', NULL, true);
+      -- ---- (5d+) ANTI-VACUITY POSITIVE CONTROL on the privileged path ---------
+      -- Shaped on 5b, and load-bearing for the same reason: without it, "refused"
+      -- is indistinguishable from "the signature drifted" or "the function is
+      -- gone" — i.e. from CONNECT-A-KEY IS BROKEN, which 5d alone would
+      -- green-light. Service-role-shaped call, the
+      -- test_api_key_delete_atomicity.sql:261 idiom: RESET ROLE (so EXECUTE is
+      -- held by ownership) plus a service_role JWT claim (so the in-body
+      -- auth.role() gate admits it). Both doors must open for our own server.
+      PERFORM set_config('request.jwt.claims', '{"role":"service_role"}', true);
+      v_key_rpc := NULL;
+      v_ins_err := NULL;
+      BEGIN
+        SELECT api_key_id INTO v_key_rpc
+          FROM public.create_wizard_strategy(
+            v_uid,
+            'mt5',
+            'cr01-rpc-privileged', 'ct', 'ct', NULL, 'dek', 'nonce', 1,
+            'cr01-rpc-draft', v_session
+          );
+      EXCEPTION WHEN OTHERS THEN
+        v_ins_err := SQLSTATE || ' ' || SQLERRM;
+      END;
+      PERFORM set_config('request.jwt.claims', NULL, true);
 
-    IF v_ins_err IS NOT NULL THEN
-      RAISE EXCEPTION
-        'OUTAGE (5d+): create_wizard_strategy REFUSED a service-role-shaped call (%). This is the wizard''s own connect path and the only remaining caller — a refusal here means connect-a-key is broken for every user, and it also means 5d''s negative proves nothing.',
-        v_ins_err;
-    END IF;
-    IF v_key_rpc IS NULL THEN
-      RAISE EXCEPTION
-        'OUTAGE (5d+): create_wizard_strategy returned no api_key_id under a service-role-shaped call, so no row was minted and 5d''s negative is vacuous.';
-    END IF;
+      IF v_ins_err IS NOT NULL THEN
+        RAISE EXCEPTION
+          'OUTAGE (5d+): create_wizard_strategy REFUSED a service-role-shaped call (%). This is the wizard''s own connect path and the only remaining caller — a refusal here means connect-a-key is broken for every user, and it also means 5d''s negative proves nothing.',
+          v_ins_err;
+      END IF;
+      IF v_key_rpc IS NULL THEN
+        RAISE EXCEPTION
+          'OUTAGE (5d+): create_wizard_strategy returned no api_key_id under a service-role-shaped call, so no row was minted and 5d''s negative is vacuous.';
+      END IF;
 
-    SELECT exchange, attested_venue INTO v_after, v_attested
-      FROM public.api_keys WHERE id = v_key_rpc;
-    -- The DEFINER body must still out-run the scrub trigger, or every
-    -- wizard-minted key is unattested and every MT5 finalize is permanently
-    -- KEY_SCOPE_CHECK_UNAVAILABLE. (Distinct from 5b: that seeded as the test
-    -- session's own role; this is the REAL writer, running as its owner.)
-    IF v_attested IS NULL THEN
-      RAISE EXCEPTION
-        'CR-01/153.6 REGRESSION (5d+): a wizard RPC minted a key with attested_venue NULL — the scrub trigger is firing for the RPC''s owner too. Every wizard key would be probed, and for MT5 that is a permanent KEY_SCOPE_CHECK_UNAVAILABLE with no remedy.';
+      SELECT exchange, attested_venue INTO v_after, v_attested
+        FROM public.api_keys WHERE id = v_key_rpc;
+      -- The DEFINER body must still out-run the scrub trigger, or every
+      -- wizard-minted key is unattested and every MT5 finalize is permanently
+      -- KEY_SCOPE_CHECK_UNAVAILABLE. (Distinct from 5b: that seeded as the test
+      -- session's own role; this is the REAL writer, running as its owner.)
+      IF v_attested IS NULL THEN
+        RAISE EXCEPTION
+          'CR-01/153.6 REGRESSION (5d+): a wizard RPC minted a key with attested_venue NULL — the scrub trigger is firing for the RPC''s owner too. Every wizard key would be probed, and for MT5 that is a permanent KEY_SCOPE_CHECK_UNAVAILABLE with no remedy.';
+      END IF;
+      IF v_after IS DISTINCT FROM v_attested THEN
+        RAISE EXCEPTION
+          'CR-01/153.6 REGRESSION (5d+): the RPC minted exchange=% with attested_venue=%. The two columns MUST move together — a row where they differ is a probe skip bought without the routing label that pays for it, i.e. a genuinely free forgery.',
+          v_after, v_attested;
+      END IF;
+      RAISE NOTICE 'Assertion 5d+ OK: the privileged path still mints a key and stores attested_venue = exchange (%), so 5d''s refusal means "shut", not "gone".', v_attested;
+
+      -- ---- (5f/5g) THE TWIN DOOR: add_wizard_composite_key -------------------
+      -- ⭐ THIS PAIR EXISTS BECAUSE ITS ABSENCE IS THE DEFECT CLASS. 5d/5d+ close
+      -- ONE of two identical doors. `add_wizard_composite_key` is the same
+      -- contract with a second entry point — same SECURITY DEFINER, same
+      -- attested_venue stamp from the same unvalidated p_exchange, same PostgREST
+      -- exposure — and before this file was extended it had NO assertion anywhere
+      -- in this repository. Phase 153.6 was convened precisely because a fix
+      -- landed on one twin and not the other, and the Phase 153 span verification
+      -- found that class still open on 2026-08-13. Closing 5d without 5f/5g would
+      -- reproduce it inside the very phase that exists to end it.
+      --
+      -- Structure is 5d/5d+ verbatim in intent: privilege polarity both ways,
+      -- refusal with SQLSTATE exactly 42501, zero row delta, then a privileged
+      -- positive so "refused" cannot mean "gone". The wizard session id is
+      -- DISTINCT (v_session_c), so this exercises the 'wizcomposite:' advisory
+      -- lock space and does not collide with 5d+'s 'wizdraft:' draft on
+      -- strategies_user_wizard_session_uniq.
+      SELECT count(*) INTO v_rows_before FROM public.api_keys WHERE user_id = v_uid;
+
+      IF has_function_privilege('authenticated', v_composite_sig, 'EXECUTE') THEN
+        RAISE EXCEPTION
+          'CONNECT-01 REGRESSION (5f): authenticated holds EXECUTE on add_wizard_composite_key. Migration 20260814120000 revoked it from BOTH wizard RPCs; a later migration re-granted it, or DROPped and re-CREATEd this function so Supabase pg_default_acl re-granted it silently. The composite door is open even if the single-key door is shut — that asymmetry is the exact defect class Phase 153.6 exists to end.';
+      END IF;
+      IF NOT has_function_privilege('service_role', v_composite_sig, 'EXECUTE') THEN
+        RAISE EXCEPTION
+          'OUTAGE (5f): service_role lacks EXECUTE on add_wizard_composite_key — a REVOKE went one role too far and EVERY composite connect-a-key is broken. This is also the anti-vacuity control: without it, "authenticated cannot call it" would pass on a database where the function no longer exists.';
+      END IF;
+
+      PERFORM set_config('request.jwt.claims',
+                         json_build_object('sub', v_uid::text, 'role', 'authenticated')::text,
+                         true);
+      SET LOCAL ROLE authenticated;
+      v_key_rpc  := NULL;
+      v_sqlstate := NULL;
+      v_ins_err  := NULL;
+      BEGIN
+        SELECT api_key_id INTO v_key_rpc
+          FROM public.add_wizard_composite_key(
+            v_uid,
+            'mt5',              -- the forged, probe-exempt venue
+            'cr01-composite-door', 'ct', 'ct', NULL, 'dek', 'nonce', 1,
+            'cr01-composite-draft', v_session_c
+          );
+      EXCEPTION WHEN OTHERS THEN
+        v_sqlstate := SQLSTATE;
+        v_ins_err  := SQLERRM;
+      END;
+      RESET ROLE;
+      PERFORM set_config('request.jwt.claims', NULL, true);
+
+      IF v_sqlstate IS NULL THEN
+        RAISE EXCEPTION
+          'CONNECT-01 REGRESSION (5f): add_wizard_composite_key was CALLED SUCCESSFULLY by an authenticated browser session. The composite twin does not validate p_exchange either, so this is a browser minting its own attested_venue on every member key of a composite and buying a skip of the finalize-wizard scope-broadening probe.';
+      END IF;
+      IF v_sqlstate <> '42501' THEN
+        RAISE EXCEPTION
+          'CONNECT-01 (5f): the authenticated composite RPC call was refused with SQLSTATE % (%) rather than 42501 insufficient_privilege — it was blocked for the wrong reason, so this assertion is not testing the grant or the in-body role gate.',
+          v_sqlstate, v_ins_err;
+      END IF;
+
+      SELECT count(*) INTO v_rows_after FROM public.api_keys WHERE user_id = v_uid;
+      IF v_rows_after <> v_rows_before THEN
+        RAISE EXCEPTION
+          'CONNECT-01 REGRESSION (5f): the refused composite RPC call still changed the api_keys row count for this user (% -> %). "An error was raised" is the weaker claim; a row minted anyway is the actual harm.',
+          v_rows_before, v_rows_after;
+      END IF;
+      RAISE NOTICE 'Assertion 5f OK: authenticated holds no EXECUTE on add_wizard_composite_key, the direct call is refused 42501, and no row was minted.';
+
+      -- (5g) the composite twin's anti-vacuity positive control.
+      PERFORM set_config('request.jwt.claims', '{"role":"service_role"}', true);
+      v_key_rpc := NULL;
+      v_ins_err := NULL;
+      BEGIN
+        SELECT api_key_id INTO v_key_rpc
+          FROM public.add_wizard_composite_key(
+            v_uid,
+            'mt5',
+            'cr01-composite-privileged', 'ct', 'ct', NULL, 'dek', 'nonce', 1,
+            'cr01-composite-draft', v_session_c
+          );
+      EXCEPTION WHEN OTHERS THEN
+        v_ins_err := SQLSTATE || ' ' || SQLERRM;
+      END;
+      PERFORM set_config('request.jwt.claims', NULL, true);
+
+      IF v_ins_err IS NOT NULL THEN
+        RAISE EXCEPTION
+          'OUTAGE (5g): add_wizard_composite_key REFUSED a service-role-shaped call (%). This is the composite wizard''s per-key writer and the only remaining caller — a refusal here means composite connect-a-key is broken for every user, and it also means 5f''s negative proves nothing.',
+          v_ins_err;
+      END IF;
+      IF v_key_rpc IS NULL THEN
+        RAISE EXCEPTION
+          'OUTAGE (5g): add_wizard_composite_key returned no api_key_id under a service-role-shaped call, so no row was minted and 5f''s negative is vacuous.';
+      END IF;
+
+      SELECT exchange, attested_venue INTO v_after, v_attested
+        FROM public.api_keys WHERE id = v_key_rpc;
+      IF v_attested IS NULL THEN
+        RAISE EXCEPTION
+          'CR-01/153.6 REGRESSION (5g): add_wizard_composite_key minted a key with attested_venue NULL — the scrub trigger is firing for the RPC''s owner too. Every composite member key would be probed, and for MT5 that is a permanent KEY_SCOPE_CHECK_UNAVAILABLE with no remedy.';
+      END IF;
+      IF v_after IS DISTINCT FROM v_attested THEN
+        RAISE EXCEPTION
+          'CR-01/153.6 REGRESSION (5g): the composite RPC minted exchange=% with attested_venue=%. The two columns MUST move together — a row where they differ is a probe skip bought without the routing label that pays for it.',
+          v_after, v_attested;
+      END IF;
+      RAISE NOTICE 'Assertion 5g OK: the privileged path still mints a composite member key and stores attested_venue = exchange (%), so 5f''s refusal means "shut", not "gone".', v_attested;
+    ELSE
+      RAISE NOTICE 'SKIP (5d/5f/5g): migration 20260814120000 (Phase 156 Migration B) is not applied here — api_keys.attested_venue carries the 20260811210000 marker but not this one, so authenticated legitimately still holds EXECUTE on both wizard RPCs. The RPC-door assertions enforce once the test DB catches up.';
     END IF;
-    IF v_after IS DISTINCT FROM v_attested THEN
-      RAISE EXCEPTION
-        'CR-01/153.6 REGRESSION (5d+): the RPC minted exchange=% with attested_venue=%. The two columns MUST move together — a row where they differ is a probe skip bought without the routing label that pays for it, i.e. a genuinely free forgery.',
-        v_after, v_attested;
-    END IF;
-    RAISE NOTICE 'Assertion 5d+ OK: the privileged path still mints a key and stores attested_venue = exchange (%), so 5d''s refusal means "shut", not "gone".', v_attested;
 
     -- ---- (5e) the coupling is a CONSTRAINT, not a coincidence --------------
     -- 5d shows today''s two writers happen to keep the columns equal. That is
@@ -510,116 +678,14 @@ BEGIN
         v_ins_err;
     END IF;
     RAISE NOTICE 'Assertion 5e OK: a privileged writer CANNOT persist attested_venue <> exchange (refused 23514) — the coupling is enforced, not incidental.';
-
-    -- ---- (5f/5g) THE TWIN DOOR: add_wizard_composite_key -------------------
-    -- ⭐ THIS PAIR EXISTS BECAUSE ITS ABSENCE IS THE DEFECT CLASS. 5d/5d+ close
-    -- ONE of two identical doors. `add_wizard_composite_key` is the same
-    -- contract with a second entry point — same SECURITY DEFINER, same
-    -- attested_venue stamp from the same unvalidated p_exchange, same PostgREST
-    -- exposure — and before this file was extended it had NO assertion anywhere
-    -- in this repository. Phase 153.6 was convened precisely because a fix
-    -- landed on one twin and not the other, and the Phase 153 span verification
-    -- found that class still open on 2026-08-13. Closing 5d without 5f/5g would
-    -- reproduce it inside the very phase that exists to end it.
-    --
-    -- Structure is 5d/5d+ verbatim in intent: privilege polarity both ways,
-    -- refusal with SQLSTATE exactly 42501, zero row delta, then a privileged
-    -- positive so "refused" cannot mean "gone". The wizard session id is
-    -- DISTINCT (v_session_c), so this exercises the 'wizcomposite:' advisory
-    -- lock space and does not collide with 5d+'s 'wizdraft:' draft on
-    -- strategies_user_wizard_session_uniq.
-    SELECT count(*) INTO v_rows_before FROM public.api_keys WHERE user_id = v_uid;
-
-    IF has_function_privilege('authenticated', v_composite_sig, 'EXECUTE') THEN
-      RAISE EXCEPTION
-        'CONNECT-01 REGRESSION (5f): authenticated holds EXECUTE on add_wizard_composite_key. Migration 20260814120000 revoked it from BOTH wizard RPCs; a later migration re-granted it, or DROPped and re-CREATEd this function so Supabase pg_default_acl re-granted it silently. The composite door is open even if the single-key door is shut — that asymmetry is the exact defect class Phase 153.6 exists to end.';
-    END IF;
-    IF NOT has_function_privilege('service_role', v_composite_sig, 'EXECUTE') THEN
-      RAISE EXCEPTION
-        'OUTAGE (5f): service_role lacks EXECUTE on add_wizard_composite_key — a REVOKE went one role too far and EVERY composite connect-a-key is broken. This is also the anti-vacuity control: without it, "authenticated cannot call it" would pass on a database where the function no longer exists.';
-    END IF;
-
-    PERFORM set_config('request.jwt.claims',
-                       json_build_object('sub', v_uid::text, 'role', 'authenticated')::text,
-                       true);
-    SET LOCAL ROLE authenticated;
-    v_key_rpc  := NULL;
-    v_sqlstate := NULL;
-    v_ins_err  := NULL;
-    BEGIN
-      SELECT api_key_id INTO v_key_rpc
-        FROM public.add_wizard_composite_key(
-          v_uid,
-          'mt5',              -- the forged, probe-exempt venue
-          'cr01-composite-door', 'ct', 'ct', NULL, 'dek', 'nonce', 1,
-          'cr01-composite-draft', v_session_c
-        );
-    EXCEPTION WHEN OTHERS THEN
-      v_sqlstate := SQLSTATE;
-      v_ins_err  := SQLERRM;
-    END;
-    RESET ROLE;
-    PERFORM set_config('request.jwt.claims', NULL, true);
-
-    IF v_sqlstate IS NULL THEN
-      RAISE EXCEPTION
-        'CONNECT-01 REGRESSION (5f): add_wizard_composite_key was CALLED SUCCESSFULLY by an authenticated browser session. The composite twin does not validate p_exchange either, so this is a browser minting its own attested_venue on every member key of a composite and buying a skip of the finalize-wizard scope-broadening probe.';
-    END IF;
-    IF v_sqlstate <> '42501' THEN
-      RAISE EXCEPTION
-        'CONNECT-01 (5f): the authenticated composite RPC call was refused with SQLSTATE % (%) rather than 42501 insufficient_privilege — it was blocked for the wrong reason, so this assertion is not testing the grant or the in-body role gate.',
-        v_sqlstate, v_ins_err;
-    END IF;
-
-    SELECT count(*) INTO v_rows_after FROM public.api_keys WHERE user_id = v_uid;
-    IF v_rows_after <> v_rows_before THEN
-      RAISE EXCEPTION
-        'CONNECT-01 REGRESSION (5f): the refused composite RPC call still changed the api_keys row count for this user (% -> %). "An error was raised" is the weaker claim; a row minted anyway is the actual harm.',
-        v_rows_before, v_rows_after;
-    END IF;
-    RAISE NOTICE 'Assertion 5f OK: authenticated holds no EXECUTE on add_wizard_composite_key, the direct call is refused 42501, and no row was minted.';
-
-    -- (5g) the composite twin's anti-vacuity positive control.
-    PERFORM set_config('request.jwt.claims', '{"role":"service_role"}', true);
-    v_key_rpc := NULL;
-    v_ins_err := NULL;
-    BEGIN
-      SELECT api_key_id INTO v_key_rpc
-        FROM public.add_wizard_composite_key(
-          v_uid,
-          'mt5',
-          'cr01-composite-privileged', 'ct', 'ct', NULL, 'dek', 'nonce', 1,
-          'cr01-composite-draft', v_session_c
-        );
-    EXCEPTION WHEN OTHERS THEN
-      v_ins_err := SQLSTATE || ' ' || SQLERRM;
-    END;
-    PERFORM set_config('request.jwt.claims', NULL, true);
-
-    IF v_ins_err IS NOT NULL THEN
-      RAISE EXCEPTION
-        'OUTAGE (5g): add_wizard_composite_key REFUSED a service-role-shaped call (%). This is the composite wizard''s per-key writer and the only remaining caller — a refusal here means composite connect-a-key is broken for every user, and it also means 5f''s negative proves nothing.',
-        v_ins_err;
-    END IF;
-    IF v_key_rpc IS NULL THEN
-      RAISE EXCEPTION
-        'OUTAGE (5g): add_wizard_composite_key returned no api_key_id under a service-role-shaped call, so no row was minted and 5f''s negative is vacuous.';
-    END IF;
-
-    SELECT exchange, attested_venue INTO v_after, v_attested
-      FROM public.api_keys WHERE id = v_key_rpc;
-    IF v_attested IS NULL THEN
-      RAISE EXCEPTION
-        'CR-01/153.6 REGRESSION (5g): add_wizard_composite_key minted a key with attested_venue NULL — the scrub trigger is firing for the RPC''s owner too. Every composite member key would be probed, and for MT5 that is a permanent KEY_SCOPE_CHECK_UNAVAILABLE with no remedy.';
-    END IF;
-    IF v_after IS DISTINCT FROM v_attested THEN
-      RAISE EXCEPTION
-        'CR-01/153.6 REGRESSION (5g): the composite RPC minted exchange=% with attested_venue=%. The two columns MUST move together — a row where they differ is a probe skip bought without the routing label that pays for it.',
-        v_after, v_attested;
-    END IF;
-    RAISE NOTICE 'Assertion 5g OK: the privileged path still mints a composite member key and stores attested_venue = exchange (%), so 5f''s refusal means "shut", not "gone".', v_attested;
   ELSE
-    RAISE NOTICE 'SKIP (5): migration 20260811210000 not yet applied here (api_keys.attested_venue carries no migration marker comment). The round-trip assertions enforce once the test DB catches up.';
+    -- ⚠️ TWO DISTINCT SKIPPABLE STATES, and an operator reading a skip must be
+    -- able to tell WHICH. This one is the outer marker: no 20260811210000 on the
+    -- attested_venue comment ⇒ migration 20260811210000 is not applied here, so
+    -- the whole 5-block is inert. The other is the inner `SKIP (5d/5f/5g)` above:
+    -- 20260811210000 present but 20260814120000 absent ⇒ Migration B is not
+    -- applied here and only the RPC-door assertions are inert.
+    RAISE NOTICE 'SKIP (5): migration 20260811210000 not yet applied here (api_keys.attested_venue carries no 20260811210000 marker comment), so the ENTIRE 5a-5g block is inert — not merely the RPC-door assertions, which have their own SKIP (5d/5f/5g) notice keyed on 20260814120000. The round-trip assertions enforce once the test DB catches up.';
   END IF;
 END $$;
 
