@@ -481,7 +481,30 @@ true for 146 and half of 142–145, and **false for 141**.
    fourth time. The real question is whether the coverage law's boundary
    (400-family-wizard-route vs 500-family-router) is the right one — the verification says it
    is not, because the requirement is written about *what the user sees and what the server
-   classified*. Needs a founder scoping call before any code.
+   classified*.
+
+   ⭐ **DECIDED 2026-08-13 (autonomous, founder asleep; reverse it if you disagree).** The boundary
+   becomes **"every code that can reach a user-facing surface"**, not "codes emitted in a
+   particular directory in a particular syntactic shape". Rationale: the current boundary is an
+   artifact of *how the scanners were written*, not of any product rule — no one ever decided that
+   a 500 from `routers/` deserves less honesty than a 400 from a Next route, and the user cannot
+   tell the difference. Both scanners already prove the mechanism works; only their reach is wrong.
+
+   **Scope that follows from the decision** (a phase, not a patch):
+   1. Widen the Python scanner's root from `analytics-service/services/**` to `analytics-service/**`.
+   2. Teach it the **positional** `service_error(<status>, "<CODE>", …)` shape, not just
+      `error_code = "<CODE>"` assignments. ⚠️ These are the two independent misses — fixing either
+      alone still leaves `routers/exchange.py` invisible.
+   3. Re-cut the pinned code tables (the 153.1 `EXPECTED_TABLE_SIZE` family) — **never delete them**;
+      the re-cut is the deliberate act that records the widening.
+   4. Add a coverage assertion that FAILS when a discovered code has neither a verdict row nor a
+      recorded no-verdict. ⭐ Today's absence was silent because the code was missing from **both**
+      halves — that asymmetry is the actual defect, above any individual missing code.
+   5. Falsifiability: add a new `service_error(...)` code in `routers/` with no verdict row and
+      prove the gate reds. A fix that cannot fail this way has not closed the class.
+
+   ⚠️ Do NOT bundle this with the two known codes as a shortcut — landing `MT5_GATEWAY_UNCONFIGURED`
+   and `MT5_GATEWAY_UNREACHABLE` as rows *without* steps 1/2/4 is exactly the fourth instance.
 
    ⚠️ **Do NOT re-open WIZFORM-05 as part of this.** The 45,169/45,159/45,177 ms figures from
    the same incident are `_MT5_VALIDATE_INITIALIZE_TIMEOUT_MS = 45000` — the innermost,
