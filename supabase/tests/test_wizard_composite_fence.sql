@@ -82,8 +82,15 @@ DECLARE
   uid_a       UUID := gen_random_uuid();  -- composite fence tenant
   uid_wrong   UUID := gen_random_uuid();  -- auth-guard mismatch identity
   uid_c       UUID := gen_random_uuid();  -- single-key regression tenant
+  uid_d       UUID := gen_random_uuid();  -- 156: service_role-arm tenant
   session_a   UUID := gen_random_uuid();
   session_c   UUID := gen_random_uuid();
+  session_d   UUID := gen_random_uuid();  -- 156: service_role single-key session
+  session_d2  UUID := gen_random_uuid();  -- 156: service_role composite session
+  session_spoof UUID := gen_random_uuid(); -- 156: refused-call session (never minted)
+  v_strat_sr  UUID;
+  v_key_sr    UUID;
+  v_attested  TEXT;
   v_strat1    UUID;
   v_key1      UUID;
   v_strat2    UUID;
@@ -94,6 +101,7 @@ DECLARE
   v_key_sk2   UUID;
   v_api_key   UUID;
   row_cnt     INTEGER;
+  row_cnt_before INTEGER;
   raised      BOOLEAN;
   err_msg     TEXT;
 BEGIN
@@ -110,6 +118,16 @@ BEGIN
           'test-wizcomp-fence-' || uid_c || '@quantalyze.test', now(), now());
   INSERT INTO profiles (id, display_name, email, role)
   VALUES (uid_c, 'wizcomp fence c', 'test-wizcomp-fence-' || uid_c || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role, display_name = EXCLUDED.display_name;
+
+  -- 156: the service_role-arm tenant. Seeded like the others because the
+  -- service_role path still writes REAL rows subject to the same FKs — the arm
+  -- skips the ownership CHECK, not the ownership COLUMN.
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid_d, '00000000-0000-0000-0000-000000000000',
+          'test-wizcomp-fence-' || uid_d || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid_d, 'wizcomp fence d', 'test-wizcomp-fence-' || uid_d || '@quantalyze.test', 'manager')
   ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role, display_name = EXCLUDED.display_name;
 
   -- ======================================================================
@@ -180,6 +198,153 @@ BEGIN
   IF NOT raised THEN
     RAISE EXCEPTION 'TEST FAILED (Part 3b): add_wizard_composite_key accepted a call whose p_user_id <> auth.uid() — cross-user elevation (T-88-03)';
   END IF;
+
+  -- ======================================================================
+  -- Part 3c — Phase 156: the SINGLE-KEY twin of Part 3b
+  -- ======================================================================
+  -- ⭐ WHY THIS EXISTS. Part 3b has guarded add_wizard_composite_key's
+  -- cross-user raise since it was written; create_wizard_strategy's IDENTICAL
+  -- guard had NO behavioural test anywhere in supabase/tests. Phase 156
+  -- restructures that guard on BOTH functions, so the untested one was about to
+  -- be edited with no net under it. That is the one-path-only pattern Phase
+  -- 153.6 was convened to end — here applied to the tests rather than the code.
+  --
+  -- ⛔ This asserts BEHAVIOUR, not text. Migration A's post-verify (e2) greps
+  -- pg_get_functiondef for the comparison, but a post-verify only runs in the
+  -- migration that carries it; it does not protect the function from the NEXT
+  -- migration. This case runs in the sql-tests CI job on every PR forever.
+  -- ⚠️ ELEVEN positional args against the 12-arg signature is LEGAL —
+  -- p_venue_account_id defaults NULL, and Part 4a already calls it this way. Do
+  -- not "fix" it into an arity mismatch; the 12-arg pin lives at
+  -- test_api_keys_venue_identity_uniq.sql:41.
+  SELECT count(*) INTO row_cnt_before FROM public.api_keys WHERE user_id = uid_c;
+
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', uid_wrong::text, 'role', 'authenticated')::text, true);
+  raised := FALSE;
+  BEGIN
+    PERFORM public.create_wizard_strategy(
+      uid_c, 'binance', 'spoofed single', 'e', 's', 'p', 'd', 'n', 1,
+      'spoof single', session_spoof);
+  EXCEPTION WHEN insufficient_privilege THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3c): create_wizard_strategy accepted a call whose p_user_id <> auth.uid() — cross-user elevation (T-88-03), the single-key twin of Part 3b';
+  END IF;
+
+  -- ⭐ "An error was raised" is the WEAKER claim. A body that raised AFTER the
+  -- INSERT, or that raised from some later statement entirely, satisfies it
+  -- while a row already exists. Assert the row delta is ZERO.
+  SELECT count(*) INTO row_cnt FROM public.api_keys WHERE user_id = uid_c;
+  IF row_cnt <> row_cnt_before THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3c): the REFUSED create_wizard_strategy call still minted % api_keys row(s) for uid_c — the raise landed after the write (T-88-03)', row_cnt - row_cnt_before;
+  END IF;
+
+  -- ======================================================================
+  -- Part 3d — Phase 156: the service_role arm ACTUALLY WORKS
+  -- ======================================================================
+  -- ⛔ THE MOST LOAD-BEARING CASE IN THIS FILE, and the one whose absence is
+  -- most dangerous. Migration A's post-verify (a) asserts service_role HOLDS
+  -- EXECUTE — but `156-MEASUREMENTS.md` § A4 measured that it already did,
+  -- inherited from pg_default_acl, so (a) reads TRUE on a database where the
+  -- GRANT was never written AND where the in-body arm does not work at all.
+  -- Nothing else invokes the function as service_role.
+  --
+  -- The follow-up migration DELETES the authenticated arm. If the service_role
+  -- arm were broken, that migration would break EVERY connect-a-key with no
+  -- test having failed. This case is the only thing standing between that and
+  -- production.
+  --
+  -- No 'sub' claim is presented — deliberately. `156-MEASUREMENTS.md` § A2
+  -- measured auth.uid() IS NULL for a real service-role client, so a test that
+  -- supplied a sub would be testing a shape production never sends.
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('role', 'service_role')::text, true);
+
+  -- ⚠️ The refusal is caught and RE-RAISED with this file's own message. Without
+  -- the catch, a body lacking the service_role arm raises its OWN
+  -- "called without an auth session" (auth.uid() IS NULL under a service-role
+  -- caller) and the gate reports the symptom instead of the cause.
+  BEGIN
+    SELECT strategy_id, api_key_id INTO v_strat_sr, v_key_sr
+      FROM public.create_wizard_strategy(
+        uid_d, 'binance', 'service-role single', 'enc', 'sec', 'pass', 'dek',
+        'nonce', 1, 'SR draft D', session_d);
+  EXCEPTION WHEN insufficient_privilege THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3d): create_wizard_strategy REFUSED a service_role caller (%) — the Phase 156 writer arm is absent or broken. The follow-up migration withdraws authenticated EXECUTE, so shipping this would break EVERY connect-a-key.', SQLERRM;
+  END;
+
+  IF v_strat_sr IS NULL OR v_key_sr IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3d): create_wizard_strategy returned NULL ids under a service_role caller — the Phase 156 writer arm does not work, and the follow-up migration would break every connect';
+  END IF;
+
+  -- The row is owned by p_user_id, which is the ONLY carrier of identity in
+  -- this arm (auth.uid() is NULL here). If this ever reads NULL or someone
+  -- else's id, the route-bound ownership contract is broken.
+  SELECT user_id::text INTO err_msg FROM public.api_keys WHERE id = v_key_sr;
+  IF err_msg IS DISTINCT FROM uid_d::text THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3d): the service-role-written api_keys row is owned by %, expected p_user_id % — ownership is route-bound and must be carried verbatim', err_msg, uid_d;
+  END IF;
+
+  -- The stamps must survive. They survive because the body runs as its OWNER
+  -- (SECURITY DEFINER), NOT because the caller is service_role — if this ever
+  -- reads NULL, the scrub trigger is seeing a non-owner writer.
+  SELECT attested_venue INTO v_attested FROM public.api_keys WHERE id = v_key_sr;
+  IF v_attested IS DISTINCT FROM 'binance' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3d): attested_venue is % under the service_role arm, expected binance — the SECDEF stamp did not survive the scrub trigger', COALESCE(v_attested, '<null>');
+  END IF;
+
+  -- The composite twin must accept the same caller. One contract, two entry
+  -- points — 153.6 exists because a change landed on only one of them.
+  SELECT strategy_id, api_key_id INTO v_strat_sr, v_key_sr
+    FROM public.add_wizard_composite_key(
+      uid_d, 'bybit', 'service-role composite', 'enc', 'sec', 'pass', 'dek',
+      'nonce', 1, 'SR composite D', session_d2);
+  IF v_strat_sr IS NULL OR v_key_sr IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3d): add_wizard_composite_key returned NULL ids under a service_role caller — the writer arm landed on only ONE of the two RPCs';
+  END IF;
+
+  -- ======================================================================
+  -- Part 3e — Phase 156: every OTHER role is REFUSED (the ELSE arm)
+  -- ======================================================================
+  -- The gate has three outcomes and the third had no test. A gate that admits
+  -- everything it does not recognise is not a gate.
+  --
+  -- (i) A recognised-but-unprivileged role.
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('role', 'authenticator')::text, true);
+  raised := FALSE;
+  BEGIN
+    PERFORM public.create_wizard_strategy(
+      uid_d, 'binance', 'authenticator', 'e', 's', 'p', 'd', 'n', 1,
+      'authenticator', session_spoof);
+  EXCEPTION WHEN insufficient_privilege THEN
+    raised := TRUE;
+  END;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3e-i): create_wizard_strategy accepted a caller whose role is neither authenticated nor service_role — the ELSE arm does not refuse';
+  END IF;
+
+  -- (ii) NO claims at all — a direct libpq caller (pg_cron, the Python worker).
+  -- auth.role() returns NULL, which matches neither arm and MUST fall to ELSE.
+  -- ⭐ This is the fail-CLOSED property. If the gate ever defaulted a NULL role
+  -- to "proceed", every unauthenticated database connection would become a
+  -- wizard writer.
+  PERFORM set_config('request.jwt.claims', NULL, true);
+  raised := FALSE;
+  BEGIN
+    PERFORM public.add_wizard_composite_key(
+      uid_d, 'binance', 'no claims', 'e', 's', 'p', 'd', 'n', 1,
+      'no claims', session_spoof);
+  EXCEPTION WHEN insufficient_privilege THEN
+    raised := TRUE;
+  END;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 3e-ii): add_wizard_composite_key accepted a caller presenting NO jwt claims — the gate does not fail closed';
+  END IF;
+
+  RAISE NOTICE 'Parts 3c-3e OK (156): single-key cross-user guard fires, the service_role writer arm works on BOTH RPCs with stamps intact, and every other role is refused.';
 
   -- ======================================================================
   -- Part 4 — single-key regression: create_wizard_strategy UNCHANGED

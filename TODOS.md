@@ -24,6 +24,49 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
+0a. **⛔ MT5GW-COPY-01 — the operator-facing "gateway misconfigured" message names the ONE setting
+   that is already correct, and sends the operator to the wrong checkbox.** Founder-hit on PROD
+   2026-08-13 while dogfooding, immediately after the MT5DEAL-01 fix (v0.59.0.2) let the sync reach
+   this stage for the first time.
+
+   `MT5_GATEWAY_MISCONFIGURED_DETAIL` (`services/mt5_probe.py:74-79`) states *"the 'Disable automatic
+   trading through the external Python API' option is in force"*. **MEASURED on the live gateway,
+   it is NOT in force**, and never was:
+
+   | source | reading |
+   |---|---|
+   | `terminal_info().tradeapi_disabled` | `False` — the named option is OFF |
+   | `terminal_info().trade_allowed` | `False` — ⬅ the actual blocker |
+   | `Config/terminal.ini` `[Experts]` (UTF-16) | `Api=0`, **`Enabled=0`**, `Account=1`, `Profile=1` |
+
+   The false premise is written into the code as an assertion, at `services/mt5_probe.py:243-245`:
+   *"under MetaQuotes' default-ON 'Disable automatic trading through the external Python API' — **the
+   very setting that makes trade_allowed false**"*. It is not that setting. `Enabled` (Options →
+   Expert Advisors → **"Allow algorithmic trading"**) is what makes `trade_allowed` false. `Api` is a
+   separate, independent checkbox. The same false equivalence is repeated at
+   `services/mt5_client.py:988`, `services/job_worker.py:645`, `services/ingestion/mt5.py:318`,
+   `routers/exchange.py:854` and `services/mt5_validation.py:174` — ⛔ **fix the CLASS, not the one
+   string**; six sites carry it.
+
+   ⭐ **Why it recurs rather than being a one-time misconfiguration.** `Account=1`/`Profile=1` arm
+   MT5 to set `Enabled=0` **on every account change**, and the worker calls `login()` on every job.
+   So an operator who ticks "Allow algorithmic trading" alone fixes it until the next sync. This is
+   exactly why the 2026-08-12 connect succeeded once (`outcome="read_only"`, 489ms, straight after a
+   VNC visit) and every later attempt did not.
+
+   **Remedy (two parts, both needed):**
+   1. Copy: name `Enabled` / "Allow algorithmic trading" and the `Account`/`Profile` auto-disable
+      flags. ⚠️ The message is constrained — `tests/test_mt5_validate_parity.py::test_mt5_gateway_misconfigured_message_is_curated_and_credential_free`
+      forbids any token from `_WRONG_SERVER_TOKENS`/`_AUTH_TOKENS`, so it may not contain
+      "terminal" or "server". Rewrite within that fence; do not relax the fence.
+   2. Better: **read the distinguishing flags and say which one is set.** Both are already on the
+      `terminal_info()` dict the probe holds (`tradeapi_disabled` vs `trade_allowed`), so the
+      message can be derived instead of guessed — the same "don't hand-write a verdict the data
+      already carries" remedy as WIZFORM-02.
+
+   Same defect class as **FIX NOW #6 (WIZFORM-02)**: a hand-written message asserting a cause the
+   server never established. Here it cost an operator a wrong-checkbox hunt on a live go-live.
+
 0. **⛔ MT5 ARCHITECTURE — the shared gateway cannot safely serve more than ONE user, and the
    read-only guarantee can fail OPEN.** Found 2026-08-08 by the platform research that Phase 134
    specified but never executed (`153-EVIDENCE-mt5-platform.md`, `153-EVIDENCE-mt5-latency.md`).
@@ -448,6 +491,81 @@ true for 146 and half of 142–145, and **false for 141**.
      ⛔ **The "surface the server's `error` string" half was REJECTED by founder decision D-05 —
      copy-by-code only.** Do not re-open it as an unfinished half of this item. The wizard renders
      copy keyed on the code and deliberately renders no server-supplied string.
+
+6. **⛔ WIZFORM-02's class is OPEN — the mt5-gateway fault family renders `code: UNKNOWN`.**
+   Found 2026-08-13 by the retroactive Phase 153 SPAN verification
+   (`.planning/phases/153-.../153-VERIFICATION.md`, status `failed`, 5/6 requirements).
+   **THIRD live instance**, hit by the founder on PROD 2026-08-12 while dogfooding MT5.
+
+   The server classified the failure completely — `routers/exchange.py:866` raises
+   `service_error(500, "MT5_GATEWAY_UNCONFIGURED", dependency="mt5-gateway",
+   retryable=False, …)` with operator-directed copy — and the wizard rendered
+   *"We could not classify this failure, so we cannot tell you what happened or whether
+   your last action took effect."*
+
+   ⭐ **The derived-roster remedy was genuinely built and genuinely works** (falsified:
+   mutating an emitted code literal in `finalize-wizard/route.ts` reds two assertions by
+   name). It misses this code for **two structural reasons, either sufficient alone**:
+
+   | Guard | Directory root | Emission shape matched |
+   |---|---|---|
+   | `wizardErrors.invariant.test.ts` | 3 Next route files | `NextResponse.json({code, error}, {status})` |
+   | `seam-venue-vocabulary.invariant.test.ts` | `analytics-service/services/**/*.py` | `error_code =` assignment |
+
+   `routers/exchange.py` is in **neither** — wrong root (`routers/`, not `services/`) **and**
+   wrong shape (a **positional** arg to `service_error(...)`, not an `error_code=` assignment).
+   Relocating the file alone would not make it visible. Measured from HEAD: both
+   `MT5_GATEWAY_UNCONFIGURED` and its retryable sibling `MT5_GATEWAY_UNREACHABLE` classify to
+   `{ code: "UNKNOWN", status: 500 }`, and both are absent from **both halves** of the
+   coverage law — no verdict row *and* no recorded no-verdict — so their absence could never
+   have been loud.
+
+   ⛔ **The fix is NOT "add two rows."** That closes two instances and reproduces the defect a
+   fourth time. The real question is whether the coverage law's boundary
+   (400-family-wizard-route vs 500-family-router) is the right one — the verification says it
+   is not, because the requirement is written about *what the user sees and what the server
+   classified*.
+
+   ⭐ **DECIDED 2026-08-13 (autonomous, founder asleep; reverse it if you disagree).** The boundary
+   becomes **"every code that can reach a user-facing surface"**, not "codes emitted in a
+   particular directory in a particular syntactic shape". Rationale: the current boundary is an
+   artifact of *how the scanners were written*, not of any product rule — no one ever decided that
+   a 500 from `routers/` deserves less honesty than a 400 from a Next route, and the user cannot
+   tell the difference. Both scanners already prove the mechanism works; only their reach is wrong.
+
+   **Scope that follows from the decision** (a phase, not a patch):
+   1. Widen the Python scanner's root from `analytics-service/services/**` to `analytics-service/**`.
+   2. Teach it the **positional** `service_error(<status>, "<CODE>", …)` shape, not just
+      `error_code = "<CODE>"` assignments. ⚠️ These are the two independent misses — fixing either
+      alone still leaves `routers/exchange.py` invisible.
+   3. Re-cut the pinned code tables (the 153.1 `EXPECTED_TABLE_SIZE` family) — **never delete them**;
+      the re-cut is the deliberate act that records the widening.
+   4. Add a coverage assertion that FAILS when a discovered code has neither a verdict row nor a
+      recorded no-verdict. ⭐ Today's absence was silent because the code was missing from **both**
+      halves — that asymmetry is the actual defect, above any individual missing code.
+   5. Falsifiability: add a new `service_error(...)` code in `routers/` with no verdict row and
+      prove the gate reds. A fix that cannot fail this way has not closed the class.
+
+   ⚠️ Do NOT bundle this with the two known codes as a shortcut — landing `MT5_GATEWAY_UNCONFIGURED`
+   and `MT5_GATEWAY_UNREACHABLE` as rows *without* steps 1/2/4 is exactly the fourth instance.
+
+   ⚠️ **Do NOT re-open WIZFORM-05 as part of this.** The 45,169/45,159/45,177 ms figures from
+   the same incident are `_MT5_VALIDATE_INITIALIZE_TIMEOUT_MS = 45000` — the innermost,
+   deliberately-first-firing layer. The verdict arrived at 45 s against a 120 s budget; the
+   30 s inversion is genuinely gone (`worst_case_ms == 105_000 < 120_000`, 67 pytest green).
+   What failed *after* arrival is WIZFORM-02. Lengthening the budget fixes nothing.
+
+   📌 Consequence for bookkeeping: **Phase 153's parent checkbox must stay unticked** — the
+   span did not meet its own goal. 153.1–153.6 all shipped and 153.6 verified
+   `passed_with_concerns`; the parent is the thing that failed.
+
+7. **Doc defects in the 153 records (non-blocking, logged per the founder stopping rule).**
+   (a) `REQUIREMENTS.md:1366` claims `ConnectKeyStep`/`MultiKeyConnectStep` "still pass neither"
+   `surface` nor `venue`; at HEAD both pass `surface: "connect"` **and** `venue`, and the row
+   directly beneath at `:1368` says so — two adjacent rows contradict. WIZFORM-03 is closed
+   *further* than its own record admits. (b) `ROADMAP.md` Phase 153's success-criteria list is
+   misnumbered — it runs 1, 2, 3, **5**, 4, **5**, so "SC5" is ambiguous in any report.
+   (c) `REQUIREMENTS.md:1434` rollup reads "153 WIZFORM-01..04 + MT5-14", omitting WIZFORM-05.
 
 ---
 
@@ -2158,3 +2276,32 @@ Raised by the `/ship` pre-landing + adversarial reviews. The four that met the b
   on TEST; §5 records a post-hoc migration amendment and says the seeded cases have NEVER executed;
   `154-VERIFICATION.md` says the gate has not been executed. Honest reading: a pre-amendment
   structural subset ran, the shipped file never has. Correct one of the two records.
+
+### Phase 156 (CONNECT) — the two things this phase deliberately did NOT fix (added 2026-08-13)
+
+Both were raised at planning, decided out of scope there (`156-RESEARCH.md` § "Open Questions" 3 and
+4), and are logged here rather than patched in passing. Plan `156-05`'s acceptance asserts BOTH
+named files are unmodified by the phase, so neither was quietly half-done.
+
+- [ ] **`add_wizard_composite_key` is absent from `MUTATING_RPC_NAMES` while its single-key twin
+  `create_wizard_strategy` is present.** `src/__tests__/audit-coverage.test.ts:203-217` — the array
+  that decides which `.rpc(` call sites the audit-coverage gate polices. The composite twin writes
+  the same two tables (`strategies` + `api_keys`) through the same wizard path, so its omission is a
+  real audit-coverage gap, and it **pre-dates Phase 156** — 156 only made it visible by touching
+  both call sites at once. ⛔ **Not fixed here:** adding the name creates an audit-emission
+  obligation on `src/app/api/strategies/composite/add-key/route.ts`, a route this phase is already
+  rewiring onto the service-role client; the correct answer is probably the same `@audit-skip:
+  wizard draft` pragma its twin carries (`create-with-key/route.ts:815`), but "probably" is not a
+  standard to land an audit decision on. Reference: `156-RESEARCH.md` Open Question 4.
+
+- [ ] **The `asset_class` annualization stamp still reads the forgeable `apiKeyExchange` rather than
+  `attestedVenue`.** `src/app/api/strategies/finalize-wizard/route.ts:1275-1285`. Phase 153.6-04
+  (PARITY-04) moved the *probe gate* onto the server-attested venue and left this stamp behind
+  deliberately; Phase 156 attests the venue at connect time but does not widen that swap either. The
+  residual is **self-targeted**: a forged venue label here distorts the annualization clock (√365
+  crypto vs √252 traditional) of the forger's OWN strategy, where a forged label on the gate
+  switched off a security control. ⛔ **Not fixed here:** it is a one-identifier change with a
+  two-outcome money-math blast radius, and it needs its own oracle over √365 vs √252 that this phase
+  does not have — see the standing annualization landmine in
+  `project_blend_annualization_unknown_assetclass_optimistic`. Reference: `156-RESEARCH.md` Open
+  Question 3.

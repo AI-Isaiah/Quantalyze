@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
-stopped_at: Phase 154 COMPLETE (8/8 plans, verified) — next: Phase 155 MT5-VERIFY (human/calendar-gated)
-last_updated: "2026-08-12T00:00:00.000Z"
-last_activity: 2026-08-12 -- Phase 154 executed + verified (154-VERIFICATION.md: 3/3 criteria, status human_needed)
+stopped_at: Phase 156 plan 02 complete (PR A wave 2)
+last_updated: "2026-08-13T14:13:40.308Z"
+last_activity: 2026-08-13 -- Phase 156 plan 02 executed (route contracts observed RED; no route, migration or SQL gate touched)
 progress:
   total_phases: 16
   completed_phases: 13
-  total_plans: 81
-  completed_plans: 81
+  total_plans: 88
+  completed_plans: 83
   percent: 81
 ---
 
@@ -55,10 +55,15 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: 153.6 (parity-the-fixes-that-only-landed-on-one-path) — EXECUTING
-Plan: 1 of 6
-Status: Executing Phase 153.6
-Last activity: 2026-08-11 -- Phase 153.6 execution started
+Phase: 156 (connect-refactor — the venue the server validated is the venue the server writes) — EXECUTING
+Plan: 2 of 10 complete (PR A: waves 0–2 done; 156-03 next)
+Status: Executing Phase 156. ⛔ The phase branch is RED ON PURPOSE between wave 2 and wave 3 — `156-02` wrote the post-156 route contract as failing assertions BEFORE `156-04` touches a route (Pitfall 5: a test written after the route would pass on a route that kept a user-scoped fallback). 11 named failures across the two wizard route test files are expected until 156-04 lands. Do not "fix" CI by changing a route in an earlier wave.
+Last activity: 2026-08-13 -- Phase 156 plan 02 executed (route contracts observed RED; no route, migration or SQL gate touched)
+
+⚠️ **Corrected 2026-08-13:** this block read `Phase: 153.6 … EXECUTING, Plan: 1 of 6` until now.
+153.6 shipped on `main` (PR #675, commit 54a0d26d) and the position had not been advanced since.
+⚠️ The **Session → Next step** paragraph at the foot of this file is still stale for the same reason
+(it says 153.6 "is booked and NOT yet planned"). Left as found — out of this plan's scope.
 
 ### Phase 142.1 scope (inserted 2026-08-02)
 
@@ -495,6 +500,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 153.4 P03 | 19min | 2 tasks | 6 files |
 | Phase 153.4 P04 | 25min | 2 tasks | 4 files |
 | Phase 153.4 P05 | 35min | 2 tasks | 4 files |
+| Phase 156 P02 | ~24 min | 2 tasks | 2 modified files |
 
 ## Accumulated Context
 
@@ -587,6 +593,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase ?]: 153.4-05: every validate OUTCOME patches its panel by IDENTITY (updatePanelById), not by the index the request was launched from — a mid-flight reorder would write one member's failure, cancelled line or verified key id onto another panel
 - [Phase ?]: 153.4-05: PanelState gained a FOURTH wait field beyond the plan's three — waitExchange, the venue frozen at validate — because the exchange cards stay clickable mid-flight and every duration a panel states must describe the request actually on the wire (T-153.4-12)
 - [Phase ?]: 153.4-05: the composite card's 300 ms render gate is the step's 1 s TICK, not a per-panel timer — waitElapsedMs is 0 for the whole first second, so a sub-300 ms answer cannot flash a card, and N panels do not mean N timers (T-153.4-22)
+- [Phase 156]: 156-02: the wrong-door supabase mock DELEGATES by default and its throw is ARMED per-case — an unconditional throw would red every pre-existing wizard route case for the width of the RED window (G11's noise problem, inverted)
+- [Phase 156]: 156-02: CONNECT-02/03 left UNCHECKED in REQUIREMENTS.md — this plan wrote the contract as failing tests only; 156-04 makes it true
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1289,9 +1297,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-12T05:11:54.037Z
-**Stopped At:** Phase 154 UI-SPEC approved
-**Resume File:** .planning/phases/154-wizcont-stale-wizard-continuity-no-stale-screens/154-UI-SPEC.md
+**Last Date:** 2026-08-13T14:12:05.599Z
+**Stopped At:** Phase 156 plan 02 complete (PR A wave 2)
+**Resume File:** .planning/phases/156-connect-refactor-the-venue-the-server-validated-is-the-venue/156-03-PLAN.md
 **Next step:** Phase 153.6 (PARITY) is booked and NOT yet planned — run `/gsd:plan-phase 153.6`. It carries 9 findings from the `/code-review xhigh` over the whole 153→153.5 span. ⛔ Three of its four root causes are ONE-PATH-ONLY fixes (a correct remedy applied to `routers/exchange.py` while its twin in `services/ingestion/mt5.py` went untouched, with no guard asserting the two agree) — close them as a CLASS, not as N patches. ⭐ The venue-lock bypass (D) is LIVE on PROD (the migration is on `main`, and `supabase/migrations/**` auto-applies on merge) but is a SELF-targeted control bypass, not a tenant leak. ⛔ The budget correction (C) has two halves — the number AND the oracle that pins the wrong column and so cannot red on it. Phases 154 and 155 remain unplanned; 155 is human- and calendar-gated (founder at the MT5 terminal, live funded account, on a trading day).
 
 ⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in
