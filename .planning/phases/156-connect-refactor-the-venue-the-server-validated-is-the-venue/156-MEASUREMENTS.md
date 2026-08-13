@@ -53,7 +53,55 @@ Ownership binding therefore lives entirely at the route (`p_user_id === user.id`
 **INVOKER**; Trap C's warning (that `current_user` in a **SECURITY DEFINER** body resolves to the
 OWNER, not the caller) is unaffected by this reading and still stands.
 
-## A3 — the `sql-tests` CI connection role · **BLOCKED, NOT MEASURED**
+## A3 — the `sql-tests` CI connection role · **RESOLVED: PASS (by inference, 2026-08-13)**
+
+⚠️ **This is an INFERENCE from measured facts, not a direct reading of the CI connection.** It is
+recorded as PASS because the chain is short and every link is verified, and because its falsifier is
+named below. If you obtain `TEST_SUPABASE_DB_URL`, the direct command in the "still open" note further
+down remains the cheaper confirmation.
+
+**The chain:**
+
+1. The `sql-tests` gate files **call these RPCs directly** — verified in-repo:
+   `test_api_keys_exchange_not_user_writable.sql:350` and `test_csv_finalize_double_submit.sql:218`
+   (`FROM public.create_wizard_strategy(`), `test_wizard_composite_fence.sql:124,129,175`
+   (`FROM`/`PERFORM public.add_wizard_composite_key(`).
+2. Those runs **pass** — CI runs `31652912059` and `31609751159` on `main` both green, and
+   `sql-tests` on PR #678 ran `1m16s` (real work, not the `E2E_TEST_DB_CONFIGURED` no-op).
+3. ⭐ `set_config('request.jwt.claims', …)` sets **GUCs, not the database role**. `EXECUTE` is
+   therefore checked against the **connecting** role, which those `set_config` calls never change.
+4. ⇒ the connecting role **holds EXECUTE today**.
+5. Measured: among **all** `rolcanlogin` roles, only **two** hold EXECUTE on `create_wizard_strategy`:
+
+   | role | EXECUTE | owner | super | bypassrls |
+   |---|---|---|---|---|
+   | `postgres` | ✅ | ✅ **owner** | ❌ | ✅ |
+   | `supabase_admin` | ✅ | ❌ | ✅ | ✅ |
+   | `authenticator`, `cli_login_postgres`, `pgbouncer`, `supabase_auth_admin`, `supabase_etl_admin`, `supabase_read_only_user`, `supabase_replication_admin`, `supabase_storage_admin` | ❌ | ❌ | — | — |
+
+6. ⇒ the CI role is `postgres` **or** `supabase_admin`. **Both survive PR B's
+   `REVOKE … FROM authenticated`**: an owner retains EXECUTE on its own function, and a superuser
+   bypasses the ACL entirely.
+
+**Verdict: A3 PASS.** The seven direct RPC call sites in `supabase/tests/` survive the PR-B `REVOKE`
+at the **grant layer**. ⇒ `156-09-PLAN.md` Task 1's ordered A3-FAIL branch should **not** fire; per
+that plan's own inverse rule ("if A3 measured superuser-or-owner, take **no** arm"), the executor
+takes no arm. ⛔ Leave the branch in place — it is the documented remedy if this inference is wrong.
+
+**What would falsify this:** the gate files' RPC calls not actually being reached at runtime (an
+earlier `RAISE` short-circuiting the file before them), which would break link 2→4. They are plain
+`FROM`/`PERFORM` calls in the main body, so this is unlikely but not impossible to construct.
+
+**Still cheaper to confirm directly, if the secret ever surfaces:**
+```
+psql "$TEST_SUPABASE_DB_URL" -c "SELECT current_user, session_user, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS is_super"
+```
+⚠️ `psql` is not installed on this machine (`brew install libpq`), and `TEST_SUPABASE_DB_URL` is a
+GitHub Actions secret that cannot be read back — which is what made the direct route unavailable.
+
+<details><summary>Original BLOCKED note (superseded 2026-08-13, kept for the record)</summary>
+
+### A3 — the `sql-tests` CI connection role · BLOCKED, NOT MEASURED
 
 **Required command** (unchanged, for whoever can run it):
 ```
@@ -70,6 +118,8 @@ would be a false PASS for the same reason it is in A1.
 `156-09-PLAN.md` Task 1 already carries the ordered A3-FAIL branch (fixture-level `GRANT` →
 `SET LOCAL ROLE postgres` → STOP-and-report), so a FAIL-shaped A3 has a planned remedy rather than
 an improvisation. **Resolve A3 before PR B, not before PR A.**
+
+</details>
 
 ## A4 — today's ACL · **MEASURED — AND IT FALSIFIES `156-RESEARCH.md` FINDING 3**
 
