@@ -24,6 +24,54 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
+00. **⛔ SHARELINK-01 — "Copy Link" hands out a URL that 404s for every recipient, and reports
+   "Link copied!" while doing it.** Founder-hit on PROD 2026-08-13 while dogfooding: copied the
+   share link for strategy "Umbra" (`status='private'`), sent it, recipient got the app 404.
+
+   **Not a routing bug — the privacy gate working as designed.** `src/app/factsheet/[id]/v2/page.tsx`
+   runs two lanes: Lane A matches `(id, status='published')`, Lane B matches owner-owned rows but
+   only when the request carries a session. A recipient has no session, Lane A finds nothing,
+   `notFound()` fires. The page even logs it: *"no row matched (id, status='published') on the
+   PUBLISHED lane and the request carries no session, so the owner lane was not attempted."*
+
+   **The defect is the affordance.** `FactsheetView.tsx:1565` renders the Share button gated ONLY on
+   `!scenarioMode` — no publish-state check — then flashes **"Link copied!"**, a success message for
+   an action that cannot succeed. The correct rule already exists one screen over at
+   `src/app/(dashboard)/strategies/page.tsx:174`: `{s.status === "published" && <ShareableLink …/>}`.
+   ⛔ Same affordance, same rule, gated in one place and not the other — **fix the CLASS**, both
+   sites, not the one component. The `OwnerUnpublishedNotice` banner (`FactsheetView.tsx:690`) does
+   say "only you can see this", and its own comment predicts the owner will "share the URL anyway",
+   but nothing connects it to the button.
+
+   **⭐ FOUNDER DECISION 2026-08-13: a link produced by "Copy Link" must ALWAYS be viewable by its
+   recipient.** Chosen model = **revocable share token**, explicitly NOT "any strategy readable by
+   its id". Rationale: the id must stay a NON-secret. Ids leak structurally — browser history,
+   `Referer`, analytics, screenshots, support tickets, `/compare?ids=` — so making the id the key
+   would be unrevokable and would retroactively expose the 13 existing non-published rows
+   (4 `private`, 8 `pending_review`, 1 `archived`) to anyone who ever saw an id.
+
+   Shape: unguessable per-strategy token, `?s=<token>`; Copy Link mints-or-reuses; a revoke control
+   regenerates it and kills old links; the bare `/factsheet/<id>` URL stays owner-only.
+
+   ⛔ **THE LANDMINE — do not let a token render poison the public cache.** `page.tsx` caches keyed
+   `factsheet-v2:${id}`, **id-first**, and its entry is served to anonymous readers for the full TTL.
+   The file already carries this warning twice for the OWNER lane ("an owner-built entry would be
+   served to anonymous readers"). A token lane has the identical hazard and must be cached under a
+   key that includes the token, or not cached at all. A token-lane response landing in the id-keyed
+   entry publishes a private strategy to every anonymous visitor — strictly worse than the bug being
+   fixed.
+
+   Second dead end found in the same trace, decide with it: `StrategyActions` branches on `draft` /
+   `pending_review` / `published` / `archived` then `return null`, so **`status='private'` gets zero
+   actions** and a contribution-flow strategy (`finalize-wizard/route.ts:1000` sets
+   `terminalStatus = entryContext === "contribution" ? "private" : "pending_review"`) can never leave
+   `private` from the UI. Open product question: are contribution records meant to be permanently
+   private? If yes, leave it; if no, `private` needs a publish path.
+
+   Size: migration + read lane + UI + revoke + cache-key change ⇒ **plan as a GSD phase**, not a
+   patch. Do NOT start it on `feat/phase-156-connect-refactor` — Phase 156's Migration B is still
+   pending against `strategies`.
+
 0a. **⛔ MT5GW-COPY-01 — the operator-facing "gateway misconfigured" message names the ONE setting
    that is already correct, and sends the operator to the wrong checkbox.** Founder-hit on PROD
    2026-08-13 while dogfooding, immediately after the MT5DEAL-01 fix (v0.59.0.2) let the sync reach
