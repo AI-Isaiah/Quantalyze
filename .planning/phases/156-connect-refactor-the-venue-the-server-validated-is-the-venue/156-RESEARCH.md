@@ -548,29 +548,54 @@ This is a privilege/refactor phase, so the inventory applies.
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+⚠️ **All five were decided at planning on 2026-08-13.** Nothing below is open. Each carries a
+**DECIDED** line naming the plan that owns the decision; the *Recommendation* lines are kept as the
+reasoning that produced it, not as a live question.
 
 1. **One migration or two?**
    - Known: both merge orderings (deploy-first, migration-first) produce a total connect-a-key outage window.
    - Unclear: whether the founder accepts a short window in exchange for one file.
    - **Recommendation:** two migrations — *(i)* re-base bodies to accept `service_role` **and** grant it EXECUTE, keeping `authenticated`'s grant; ship the route swap; verify on PROD; *(ii)* a second migration withdrawing `authenticated`. Zero window. SC1's gate arms against (ii)'s marker. This is a planning decision, not a research finding.
+   - ✅ **DECIDED — two migrations, and the split is hard.** Migration A (`156-03`) is additive:
+     `GRANT EXECUTE … TO service_role` on both RPCs with `authenticated`'s grant **and** its
+     `auth.uid()` ownership guard left standing, under a **branched** two-arm gate (D-156-1) —
+     never a flat union. Migration B (`156-07`) withdraws `authenticated`. Between them sits
+     `156-06`, a blocking live gate on PROD: rows 1–5 must read PASS in a real browser before
+     Migration B is authored at all. Owners: `156-03`, `156-06`, `156-07`.
 
 2. **Does the `venue_account_id` residual close here too?**
    - Known: 156 makes `p_venue_account_id` unreachable by a browser, which is half of its CR-01-class residual (`create-with-key:766-782`, `20260812083206:772-775`).
    - Unclear: whether the founder wants the *other* half (the value still has no in-database oracle) declared closed or restated.
    - **Recommendation:** restate precisely — "only the server can pass it" is now true; "the venue confirmed it" is still not. Do not silently upgrade the claim.
+   - ✅ **DECIDED — RESTATED, not closed.** `venue_account_id`'s residual is **half**-closed: after
+     156 only the server can pass it, and it still has no in-database oracle. `156-10` Task 1 writes
+     exactly that and no more; `REQUIREMENTS.md:1381` already carries the restatement. ⛔ The claim
+     is not upgraded to "the venue confirmed it". Owner: `156-10`.
 
 3. **Should the `asset_class` stamp also move to `attestedVenue`?**
    - Known: `finalize-wizard:1275-1285` deliberately still reads the forgeable `apiKeyExchange` for the annualization stamp, calling the swap "a ONE-IDENTIFIER change" left for a follow-on because it needs its own oracle over √365 vs √252.
    - **Recommendation:** **out of scope.** Its own note says the swap needs an oracle this plan will not have. Log it; do not do it in passing (Rule 3).
+   - ✅ **DECIDED — OUT OF SCOPE, logged to `TODOS.md`.** `156-05` Task 2 writes the entry naming
+     `finalize-wizard/route.ts:1275-1285` and the reason: the swap needs its own oracle over √365
+     vs √252 that this phase does not have. `156-05`'s acceptance asserts that file is
+     **unmodified**. Owner: `156-05` Task 2.
 
 4. **Should `add_wizard_composite_key` join `MUTATING_RPC_NAMES`?**
    - Known: `audit-coverage.test.ts:204-216` lists `create_wizard_strategy` but not the composite twin — a real audit-coverage gap.
    - **Recommendation:** log to `TODOS.md`. It is not this phase's charter and it would add an audit-emission obligation to a route this phase is already rewiring.
+   - ✅ **DECIDED — LOGGED, not fixed.** `156-05` Task 2 writes the entry naming
+     `src/__tests__/audit-coverage.test.ts:204-216`, and its acceptance asserts that file is
+     **unmodified** by this phase. Owner: `156-05` Task 2.
 
 5. **IN-04 — `service_role` in the scrub-trigger allowlist.**
    - Known: 153.6's review filed it as "a standing exemption with no current beneficiary". **Phase 156 does not become the beneficiary** — the RPCs run as their *owner* (`postgres`), not as `service_role`, so the exemption is still unused.
    - **Recommendation:** re-state IN-04's status accurately in the new migration's header (still unused; still pre-authorises the next server route that INSERTs from a request body). Do not remove `service_role` from the allowlist in this phase — the removal is a separate blast radius.
+   - ✅ **DECIDED — RESTATED as STILL UNUSED; the allowlist entry stays.** `156-03` Task 1 §0(v)
+     writes it into Migration A's header: these RPCs run as their **owner** (`postgres`), not as
+     `service_role`, so the scrub trigger's `service_role` allowlist entry remains unused and this
+     phase does not become its beneficiary. ⛔ No plan removes it. Owner: `156-03` Task 1.
 
 ---
 

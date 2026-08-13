@@ -92,6 +92,7 @@ Phase 156 **deletes** `auth.uid()` from the body. This assertion keeps passing �
 | `supabase/tests/test_wizard_session_idempotency.sql` | mod | SQL gate (privilege pin) | batch assertion | `20260811210000:869-882` post-verify (e) | exact |
 | `supabase/tests/test_wizard_composite_fence.sql` | mod | SQL gate (behaviour + privilege) | batch assertion | `test_api_key_delete_atomicity.sql:140-190, :259-262` (role-shaped calls) | exact |
 | `supabase/tests/test_csv_finalize_double_submit.sql` | mod ⚠️ **not in RESEARCH's edit list** | SQL gate (behaviour) | batch assertion | same as above | exact |
+| `supabase/tests/test_api_keys_venue_identity_uniq.sql` | mod | SQL gate (structural: signature pin + single-overload + `pg_get_functiondef` canary) | batch assertion | itself — `:174-208`, the `create_wizard_strategy` canary block being twinned for the composite | exact |
 | `src/__tests__/phase-156-wizard-rpc-writer-guard.test.ts` | NEW | test (source-scan structural invariant) | batch / file-walk | `src/__tests__/strategies-published-sole-writer-guard.test.ts` | **exact** |
 | `supabase/schema/functions/create_wizard_strategy.sql` | mod (generated) | generated artifact | — | `npm run schema:functions` — ⛔ never hand-edit | n/a |
 | `supabase/schema/functions/add_wizard_composite_key.sql` | mod (generated) | generated artifact | — | same | n/a |
