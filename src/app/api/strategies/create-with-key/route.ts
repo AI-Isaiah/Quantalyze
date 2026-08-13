@@ -102,9 +102,17 @@ function pickPlaceholderCodename(): string {
  * The precedent is this same flow, one phase old: the `attested_venue` read in
  * `finalize-wizard/route.ts` reaches the SIBLING non-allowlisted column through
  * `createAdminClient()` for the same structural reason (153.6-04 / PARITY-04).
- * ⭐ AND IT IS THE DIRECTION PHASE 156 IS ALREADY GOING — CONNECT-REFACTOR moves
- * this route's `api_keys` INSERT behind a service-role writer, so this read
- * needs no unpicking when it lands.
+ * ⭐ AND PHASE 156 HAS NOW MOVED IN THAT DIRECTION — CONNECT-REFACTOR routes this
+ * route's `api_keys` INSERT through a service-role writer (the `rpcAdmin`
+ * binding at the `.rpc` call below), so this read needed no unpicking.
+ *
+ * ⚠️ TRANSITIONAL, AND THE HALF THAT HAS NOT HAPPENED YET MATTERS. Migration A
+ * (`20260813150106_wizard_rpcs_service_role_writer.sql`) only ADMITS a
+ * `service_role` caller; `authenticated` STILL holds EXECUTE on
+ * `create_wizard_strategy` and still passes the full `auth.uid()` ownership
+ * check. Until the follow-up `..._wizard_rpcs_withdraw_authenticated.sql`
+ * (Phase 156 plan 07) withdraws it, a browser can still reach the RPC directly —
+ * this route is the only SANCTIONED writer, not yet the only POSSIBLE one.
  *
  * ⭐ THREE FILTERS, EACH LOAD-BEARING:
  *   · `.eq("user_id", …)` — the admin client BYPASSES RLS, so tenant scoping
@@ -521,6 +529,14 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // layer (create_wizard_strategy's advisory-lock + select-existing fence and
   // the strategies_user_wizard_session_uniq backstop) still guarantees no
   // duplicate rows even if two first-time submits race past this check.
+  // ⚠️ PHASE 156 — THIS BINDING SURVIVES ON PURPOSE, and its consumers are now a
+  // short closed list: this idempotency fence, `resolveByVenueIdentity`'s
+  // owner-scoped `strategies` reads, and the `asset_class` force-derive at the
+  // end. All three are owner-scoped work that RLS should keep policing. The one
+  // thing it no longer carries is the `create_wizard_strategy` write — that is
+  // `rpcAdmin`'s, and routing it back here would re-open CONNECT-02.
+  // (⛔ The composite twin's identical-looking binding WAS deleted, because
+  // there the RPC was its only consumer. Do not "mirror" that deletion here.)
   const supabase = await createClient();
   const { data: existingDraft, error: existingDraftErr } = await supabase
     .from("strategies")
@@ -741,6 +757,56 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       );
     }
 
+    /**
+     * ⭐ PHASE 156 / CONNECT-02 — THE WRITE LEAVES THE BROWSER'S CREDENTIAL.
+     *
+     * `create_wizard_strategy` is a service-role writer as of Migration A
+     * (`20260813150106_wizard_rpcs_service_role_writer.sql`): the value written
+     * as `p_exchange` is only a guarantee if the server is the one that wrote
+     * it, and while a browser could dial the RPC with a venue of its choosing,
+     * the closed-set gate, the `validateKey` read-only verdict and the
+     * `encryptKey` binding above were all bypassable. This binding is what makes
+     * the route the writer.
+     *
+     * ⛔ TWO ADMIN CLIENTS NOW LIVE IN THIS FILE, WITH OPPOSITE FAILURE
+     * POSTURES, AND THAT IS DELIBERATE — do not unify them.
+     *   · `resolveByVenueIdentity`'s `admin` (:170) is FAIL-SOFT: a missing
+     *     credential degrades to a dark fence and the connect still succeeds,
+     *     because the partial UNIQUE index is a real backstop for the duplicate
+     *     it prevents.
+     *   · This one is FAIL-HARD: there is no backstop for a write that never
+     *     happened, and the only alternative — falling back to the user-scoped
+     *     `supabase` — re-opens the exact door Phase 156 exists to close and
+     *     would make every gate in it pass vacuously.
+     * Hence a DISTINCT name (`rpcAdmin`), a distinct scope, and a distinct
+     * lifetime from the fence's `admin`.
+     *
+     * 503 `SEAM_MISCONFIGURED` is the code both this route (:504-511) and its
+     * composite twin already emit for a server-side misconfiguration, so no new
+     * member is minted into the wizard code union. It does not blame the user's
+     * key, and its copy's promise — nothing submitted, nothing changed — is
+     * literally true here: this returns BEFORE any RPC attempt.
+     */
+    let rpcAdmin: ReturnType<typeof createAdminClient>;
+    try {
+      rpcAdmin = createAdminClient();
+    } catch (adminErr) {
+      // Rule 12 — fail LOUD. Scrubbed with this request's own secrets, the same
+      // way the fence at :200-203 logs its own miss; only the outcome differs.
+      console.error(
+        "[strategies/create-with-key] no service-role credential for the wizard write; refusing the submit (nothing was written):",
+        scrubSeamError(adminErr, [
+          api_key,
+          apiSecretNormalized,
+          passphraseOrNull,
+        ]),
+      );
+      return NextResponse.json(
+        { code: "SEAM_MISCONFIGURED", error: "Service credential unavailable" },
+        { status: 503, headers: NO_STORE_HEADERS },
+      );
+    }
+
     // The generated types declare these RPC params as non-null strings, but
     // the underlying SQL function (per migration 031 + the envelope-encryption
     // contract above) accepts nulls for api_secret/passphrase/dek/nonce.
@@ -751,7 +817,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // creation is audited at finalize time in
     // src/app/api/strategies/finalize-wizard/route.ts. Per audit-2026-05-07
     // P692 + ADR-0023 (taxonomy follow-up tracked separately).
-    const { data, error } = await supabase.rpc("create_wizard_strategy", {
+    const { data, error } = await rpcAdmin.rpc("create_wizard_strategy", {
       p_user_id: user.id,
       p_exchange: exchangeNormalized,
       p_label: labelOrDefault,
@@ -769,15 +835,22 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // trigger. NULL for every venue that exposes no stable non-secret account
       // id, which is every ccxt venue today.
       //
-      // ⛔ WHAT THIS DOES NOT BUY, STATED SO NOBODY LATER ASSUMES IT DOES: the
-      // RPC does not validate the parameter, and `authenticated` holds EXECUTE
-      // on it, so a browser session can call /rest/v1/rpc/create_wizard_strategy
-      // directly with an identity of its choosing. The stored value is "what the
-      // server passed", NOT "what the venue confirmed" — it raises the floor for
-      // the ACCIDENTAL token-less re-entry this phase is about, and it is not an
-      // anti-forgery control. Same CR-01 class as `p_exchange`; remedy is Phase
-      // 156 (CONNECT-REFACTOR), which moves this INSERT behind a service-role
-      // writer and withdraws authenticated EXECUTE.
+      // ⛔ WHAT THIS DOES NOT BUY, STATED SO NOBODY LATER ASSUMES IT DOES.
+      //
+      // The REACHABILITY half is CLOSING (Phase 156 / CONNECT-02): this call now
+      // rides `rpcAdmin`, so the sanctioned path passes only what the server
+      // derived. ⚠️ It is closing, not closed — `authenticated` still holds
+      // EXECUTE until plan 07's `..._wizard_rpcs_withdraw_authenticated.sql`
+      // lands, so a browser session can still call
+      // /rest/v1/rpc/create_wizard_strategy directly with an identity of its
+      // choosing.
+      //
+      // ⛔ AND THE OTHER HALF DOES NOT MOVE AT ALL. The RPC still does not
+      // validate the parameter and there is NO in-database oracle for a venue
+      // account id. Even after plan 07 the stored value is "what the server
+      // passed", NOT "what the venue confirmed" — it raises the floor for the
+      // ACCIDENTAL token-less re-entry this phase is about, and it is not an
+      // anti-forgery control. Same CR-01 class as `p_exchange`.
       //
       // ⚠️ DEPLOY ORDER: migration 20260812083206 must be LIVE before the
       // deployment carrying this line. PostgREST resolves rpc() by named
