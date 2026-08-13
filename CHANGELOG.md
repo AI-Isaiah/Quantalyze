@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.60.0.0] - 2026-08-13
+### v1.17 — connecting a key writes under the server's own credential, not the browser's
+
+⚠️ **This is landing 1 of 2 for Phase 156 / CONNECT-01. It does not close it.** The wizard's two
+write RPCs now *also* accept the server's `service_role` credential, and both routes now use it —
+but `authenticated` still holds EXECUTE on both, deliberately. Withdrawing it in the same landing
+would have taken connect-a-key down for the length of the merge window, because merging
+`supabase/migrations/**` applies to production while the Vercel build races it with no ordering
+between the two. **The withdrawal ships in the follow-up PR**, gated on a live production check that
+the new writer works, and only CONNECT-01's second landing closes the requirement.
+
+### Changed
+
+**Connecting an exchange key no longer writes under the browser's credential.**
+`create_wizard_strategy` and its composite twin `add_wizard_composite_key` are now reached through
+the server's service-role client instead of the caller's JWT-bearing one, so the venue the server
+validated is the venue that gets stored — the client cannot relabel the row on the way in. The RPC
+bodies branch explicitly on the caller's role rather than accepting a flat union of both: a
+`service_role` caller is trusted to have already established ownership, while an `authenticated`
+caller still hits the same `auth.uid() = p_user_id` refusal it always did. Nothing about who can
+own what changed; only which credential performs the write.
+
+**A missing service credential now refuses the submit instead of quietly falling back.** If
+`SUPABASE_SERVICE_ROLE_KEY` is absent, both routes answer 503 `SEAM_MISCONFIGURED` **before any RPC
+attempt** — so the message's promise, nothing submitted and nothing changed, is literally true. The
+alternative (falling back to the user-scoped client) would have made a misconfigured deploy silently
+resume writing exactly the way this change exists to stop.
+
+### Added
+
+**A guard that makes the rewiring hard to undo by accident.**
+`src/__tests__/phase-156-wizard-rpc-writer-guard.test.ts` scans all of `src/**` — `.tsx` and
+`src/lib/**` included, not just the two route directories — and reds if a third file ever calls
+either wizard RPC, or if either call site's receiver stops being bound from `createAdminClient()`.
+It ships with both of its failure modes actually reproduced and the resulting messages pasted into
+the file, because a guard nobody has watched fail is not yet known to be able to fail.
+
 ## [0.59.0.0] - 2026-08-12
 ### v1.17 — the wizard remembers where you were, and stops describing a state the backend has already left
 
