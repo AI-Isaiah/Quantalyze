@@ -1,6 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { validateKey, encryptKey } from "@/lib/analytics-client";
-import { createClient } from "@/lib/supabase/server";
+// PHASE 156 / CONNECT-02 — the ONLY supabase client this file has. The
+// user-scoped `@/lib/supabase/server` import that used to sit here was deleted
+// with the RPC swap: the `.rpc` was its sole consumer, and leaving an unused
+// user-scoped client next to an admin one is how the next reader re-wires the
+// wrong door. ⚠️ The single-key twin KEEPS its user-scoped binding — there it
+// still serves the idempotency fence, the venue-identity resolve and the
+// asset_class derive. Deadness was confirmed by grep, per file, never assumed
+// from the mirror.
+import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { STRATEGY_NAMES } from "@/lib/constants";
@@ -65,6 +73,28 @@ import type { User } from "@supabase/supabase-js";
  * ordering (validate BEFORE spending a token), validateKey read-only
  * enforcement, encryptKey reuse, uniform { code } error classification, and the
  * H-0305 no-raw-upstream-strings posture — mirrors the analog verbatim.
+ *
+ * ⭐ PHASE 156 / CONNECT-02 — THE SERVICE-ROLE WRITER IS **NOT** A FOURTH
+ * DIVERGENCE, and that is the point of naming it here. `add_wizard_composite_key`
+ * is reached through `createAdminClient()`, a missing service key answers 503
+ * SEAM_MISCONFIGURED before any RPC attempt, and both are shape-identical to the
+ * sibling — a plan that fixed only the famous single-key route would have
+ * shipped the instance and left the class, which is the defect 153.6 already
+ * cost this repo once.
+ *
+ * ⚠️ The DELETED user-scoped `@/lib/supabase/server` binding is likewise not a
+ * new divergence: it follows from (1) and (3). With no app-layer draft SELECT
+ * and no asset_class force-derive, the `.rpc` was this file's ONLY consumer of
+ * that client, so the swap left it dead. The sibling's identical-looking binding
+ * has three live consumers and stays.
+ *
+ * ⚠️ TRANSITIONAL. Migration A
+ * (`20260813150106_wizard_rpcs_service_role_writer.sql`) only ADMITS a
+ * `service_role` caller; `authenticated` STILL holds EXECUTE on
+ * `add_wizard_composite_key` and still passes the full `auth.uid()` ownership
+ * check. The follow-up `..._wizard_rpcs_withdraw_authenticated.sql` (Phase 156
+ * plan 07) is what withdraws it. Until then this route is the only SANCTIONED
+ * writer, not yet the only POSSIBLE one.
  */
 
 /**
@@ -272,7 +302,11 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // mint a NEW key (ONB-03), so that short-circuit is intentionally omitted. The
   // RPC's 'wizcomposite:' advisory-lock + select-existing fence supplies the
   // DRAFT dedup (double-click safety) without blocking the per-key add.
-  const supabase = await createClient();
+  //
+  // ⛔ PHASE 156 — the user-scoped `supabase` binding that used to sit on the
+  // line below is GONE, not moved. See the header block: divergences (1) and (3)
+  // leave this file with no app-layer SELECT and no asset_class derive, so once
+  // the RPC moved to the service-role writer nothing was left for it to serve.
 
   const exchangeNormalized = exchange.toLowerCase();
   const passphraseOrNull =
@@ -372,6 +406,48 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       );
     }
 
+    /**
+     * ⭐ PHASE 156 / CONNECT-02 — THE WRITE LEAVES THE BROWSER'S CREDENTIAL.
+     *
+     * Shape-identical to the single-key sibling's `rpcAdmin` block, deliberately:
+     * `add_wizard_composite_key` became a service-role writer in the SAME
+     * Migration A as its twin, and the value written as `p_exchange` is only a
+     * guarantee if the server is the one that wrote it.
+     *
+     * ⛔ FAIL-HARD, WITH NO FALLBACK. There is no backstop for a write that never
+     * happened, and falling back to a user-scoped client would re-open the exact
+     * door Phase 156 exists to close — and make every gate in it pass vacuously.
+     * (The sibling additionally carries a FAIL-SOFT admin client for its
+     * venue-identity fence; this file has no fence, so the ambiguity that forced
+     * a distinct name over there does not exist here. The name is kept anyway so
+     * the two diffs read as one change.)
+     *
+     * 503 `SEAM_MISCONFIGURED` is the code this route already emits for a
+     * server-side misconfiguration (the limiter arm above), so no new member is
+     * minted into the wizard code union. It does not blame the user's key, and
+     * its copy's promise — nothing submitted, nothing changed — is literally
+     * true: this returns BEFORE any RPC attempt.
+     */
+    let rpcAdmin: ReturnType<typeof createAdminClient>;
+    try {
+      rpcAdmin = createAdminClient();
+    } catch (adminErr) {
+      // Rule 12 — fail LOUD, scrubbed with this request's own secrets, the same
+      // three values every other log site in this file names.
+      console.error(
+        "[strategies/composite/add-key] no service-role credential for the wizard write; refusing the submit (nothing was written):",
+        scrubSeamError(adminErr, [
+          api_key,
+          apiSecretNormalized,
+          passphraseOrNull,
+        ]),
+      );
+      return NextResponse.json(
+        { code: "SEAM_MISCONFIGURED", error: "Service credential unavailable" },
+        { status: 503, headers: NO_STORE_HEADERS },
+      );
+    }
+
     // The generated types declare these RPC params as non-null strings, but
     // the underlying SQL function accepts nulls for api_secret/passphrase/dek/
     // nonce (envelope-encryption contract above). Cast the args object to
@@ -386,7 +462,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // strategies + api_keys not yet user-visible. The user-visible creation is
     // audited at finalize time in
     // src/app/api/strategies/finalize-wizard/route.ts.
-    const { data, error } = await supabase.rpc("add_wizard_composite_key", {
+    const { data, error } = await rpcAdmin.rpc("add_wizard_composite_key", {
       p_user_id: user.id,
       p_exchange: exchangeNormalized,
       p_label: labelOrDefault,
