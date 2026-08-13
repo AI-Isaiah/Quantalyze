@@ -285,3 +285,103 @@ None — no new network, auth, file-access or schema surface. All four files are
 - `.planning/phases/156-…/156-09-SUMMARY.md` — FOUND
 - All four files compile under `psql -v ON_ERROR_STOP=1`; no parse errors.
 - Commit hash recorded in the phase log.
+
+---
+
+## Follow-up (2026-08-13): sequencing fix — the gates are now STATE-ADAPTIVE
+
+**Commit:** `b8419767` · **Files:** the three gate files below (`test_csv_finalize_double_submit.sql` deliberately unchanged)
+
+### The defect this closes
+
+`migration-reviewer` found (HIGH) that Migration B (`20260814120000`) must **not**
+be applied to the shared TEST database ahead of the merge: `origin/main`'s copies
+of these same gate files still require `authenticated` to HOLD EXECUTE, so an
+early apply would red `sql-tests` for main and for every concurrent PR sharing
+that database. But this plan left the gates asserting the POST-Migration-B state
+**unconditionally**, which redded PR B itself. Measured baseline on a PG16
+fixture carrying Migration A alone — i.e. today's TEST — was **3 of 4 files RED**.
+
+### The arming signal, and the two wrong ones
+
+Each gate now arms from **live state**, in the shape plan 08 proved: the presence
+of `v_auth_uid` in the **comment-stripped** function body. Migration A declares
+and compares it as *code*; Migration B deletes both and keeps the name only in
+prose.
+
+⛔ **The strip is mandatory and was MEASURED.** On a fixture carrying Migration B,
+the RAW `pg_get_functiondef` of `create_wizard_strategy` still matches
+`'%v_auth_uid%'` — its own Trap B comment explains the absence and thereby
+contains the string. Measured in the same run: the **composite** twin's raw
+definition reads FALSE in that identical state, so a raw detector would arm one
+twin and not the other. End-to-end counterfactual: with a raw-matched detector,
+re-granting `authenticated` EXECUTE on a Migration-B database — the exact
+CONNECT-01 regression — **exits 0, green, undetected**. Third independent
+encounter with this trap (migration post-verify (e2), plan 08's 5h, here).
+
+Rejected: `auth.role()` (present in **both** bodies — discriminates nothing) and
+`has_function_privilege('authenticated', …)` (the very thing being asserted —
+arming on it makes the assertion vacuous).
+
+### Against the SKIP-with-exit-0 hazard
+
+- Every skip `RAISE NOTICE`s loudly, naming **exactly** which assertions were
+  skipped, which still ran, and why the skipped state is legitimate.
+- Every summary `NOTICE` is **state-aware**. The previous fixed wording would
+  have printed *"BOTH bodies gating on auth.role() with ZERO auth.uid() … anon
+  and authenticated shut out"* as a **PASS** on a run that skipped all three of
+  those claims — the silent-green failure this phase exists to end, emitted by
+  the file's own last statement.
+- **Both-or-neither coherence checks** make every incoherent half-state **RED**
+  rather than skip: twin divergence, body-narrowed-but-grant-standing (the worst
+  state — Migration B *deletes* the ownership comparison, so this permits a
+  cross-tenant write), and grant-revoked-but-body-still-Migration-A (the state
+  that would otherwise skip **silently**).
+- ⭐ Each coherence check is **scoped to the cell no armed assertion can reach**.
+  A first draft duplicated section 4's exact condition, making one of the two
+  provably dead code — the (5h′) defect plan 08 called out, reproduced. Caught by
+  the mutation battery and fixed; `m4`/`m5` below confirm each armed assertion
+  still fires on its own ground.
+
+### Evidence — local PG16.13 fixture, purpose-built, re-based verbatim
+
+⛔ **Nothing was applied to any database.** No `supabase db push`, no MCP, no
+shared DB touched. `sql-tests` has **not** been observed green in CI against
+TEST; that remains undischarged until PR B merges.
+
+Three fidelity checks passed before any conclusion was drawn: (1) the fixture's
+function ACL after Migration A reproduces `156-MEASUREMENTS.md` § A4 byte for
+byte (`postgres=X/postgres, authenticated=X/postgres, service_role=X/postgres`);
+(2) Migration B's own post-verify (a)–(h) passes on it; (3) plan 08's
+**untouched** gate reproduces its documented profile exactly (2 skips on
+Migration-A, 0 on Migration-B).
+
+| State | idempotency | composite_fence | venue_identity | csv_double_submit |
+|---|---|---|---|---|
+| Migration A (today's TEST) | green, 1 skip | green, 3 skips | green, 2 skips | green, 0 skips |
+| Migration B applied | green, **0 skips** | green, **0 skips** | green, **0 skips** | green, 0 skips |
+| body narrowed, grant standing | **RED** 3f/§4 | **RED** 3a-2b | **RED** 3e-b | green (out of scope) |
+| grant revoked, body Migration A | **RED** 3f | **RED** 3a-2c | **RED** 3e-c | green (out of scope) |
+| twin divergence (one RPC only) | green, 0 skips¹ | **RED** 3a-2a | **RED** 3e-a | green (out of scope) |
+| `authenticated` re-granted, single-key | **RED** §4 | **RED** 3a-2b | **RED** §4 | green (out of scope) |
+| `authenticated` re-granted, composite | green, 0 skips¹ | **RED** Part 3a | **RED** 3e-b | green (out of scope) |
+
+¹ Correct, not a gap: `test_wizard_session_idempotency.sql` reads only
+`create_wizard_strategy`, and in those two states that twin is fully coherent, so
+it runs **all** its assertions. Twin divergence is caught by the two files that
+read both twins — duplicating it a third time would add a pin that already exists
+twice.
+
+### `test_csv_finalize_double_submit.sql` — unchanged, and why
+
+Measured **green on both states**, so it was left alone. Its `create_wizard_strategy`
+call site already presents a `'role', 'service_role'` claim, which Migration A's
+`service_role` arm admits (`20260813150106:136`) and Migration B's gate admits;
+its `finalize_csv_strategy` call sites are not wizard RPCs and are untouched by
+Phase 156. Adding skip machinery to a file with nothing to skip would have
+introduced a silent-green path rather than closed one.
+
+⚠️ **Residual, stated rather than hidden:** that file *would* fail on a
+**pre-Migration-A** database, whose body has no `service_role` arm. That state is
+unreachable for TEST — Migration A is on `origin/main` and auto-applies — so it
+is recorded, not guarded.
