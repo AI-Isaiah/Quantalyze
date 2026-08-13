@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.60.0.1] - 2026-08-13
+### Operator tooling — read the MT5 terminal's state without a VNC session
+
+`scripts/mt5-diag.sh` prints the live MT5 terminal's capability flags in one
+command. It exists because MT5GW-COPY-01 recurs: `[Experts] Enabled=0` makes
+`terminal_info().trade_allowed` false, which fails the capability seam and blocks
+every MT5 connect — and until now diagnosing that meant a VNC session and clicking
+through Tools > Options.
+
+⛔ The script is read-only by construction: `initialize()` + `terminal_info()`,
+never `login()`. A `login()` counts as an account change, and while
+`[Experts] Account=1` is armed MT5 re-clears `Enabled` on every account change, so
+a probe that logged in would re-break the exact condition it is measuring.
+
+Also files **SHARELINK-01** in `TODOS.md`: the factsheet "Copy Link" button is
+gated only on `!scenarioMode`, so it hands out a URL that 404s for every recipient
+of a non-published strategy and reports "Link copied!" while doing it. The correct
+publish-state gate already exists one screen over in the strategies list. Records
+the founder's decision that share links get a **revocable token**, explicitly not
+id-as-key.
+
+No user-facing behaviour changed.
+
 ## [0.60.0.0] - 2026-08-13
 ### v1.17 — connecting a key writes under the server's own credential, not the browser's
 
