@@ -4,6 +4,7 @@ artifact: VALIDATION
 status: authored
 nyquist_validation: true
 authored: 2026-08-13
+revised: 2026-08-13 — Wave-0 measurements (156-MEASUREMENTS.md A4) added the SC1-durability row
 covers: [CONNECT-01, CONNECT-02, CONNECT-03, CONNECT-04, CONNECT-05]
 plans: ["156-01", "156-02", "156-03", "156-04", "156-05", "156-06", "156-07", "156-08", "156-09", "156-10"]
 ---
@@ -18,8 +19,8 @@ read that section first. This file supplies the two things it does not: a consol
 source, and an **Oracle Independence** checklist.
 
 ⚠️ **Why this file exists at all.** The substance was present but scattered — plans 03, 05, 08 and
-09 demand **fourteen** pasted red-under-mutation proofs between them, and nothing mapped SC1–SC5
-onto those mutations. A mutation that no success criterion claims is a mutation nobody will notice
+09 demand **a pasted red-under-mutation proof for every row of the inventory below**, and nothing
+mapped SC1–SC5 onto those mutations. A mutation that no success criterion claims is a mutation nobody will notice
 is missing. Writing the ledger is what surfaced the SC4 hole (row 4 below).
 
 ---
@@ -32,7 +33,7 @@ is missing. Writing the ledger is what surfaced the SC4 hole (row 4 below).
 | 8b | No watch-mode / interactive command in any `<automated>` | ✅ `vitest run`, `psql -f`, `tsc --noEmit` only |
 | 8c | No per-task gate routed through the E2E lane | ✅ `e2e-seeded` appears only in plan 06's live gate, which is a checkpoint, not a task gate |
 | 8d | No `MISSING — Wave 0 must create …` stubs | ✅ every gate this phase asserts against either exists or is created by a named task in the same phase |
-| 8e | Verify commands are pipeline-honest | ✅ **as of this revision** — plan 08's two `psql \| tee` pipelines now run under `set -o pipefail`; plan 09 already used `\|\| exit 1`; plan 03 Task 4 uses `set -o pipefail` |
+| 8e | Verify commands are pipeline-honest | ✅ **as of this revision** — plan 08's **three** `psql \| tee` pipelines now run under `set -o pipefail`; plan 09 already used `\|\| exit 1`; plan 03 Task 4 uses `set -o pipefail` |
 | **8f** | Consolidated Falsifiability Ledger + Oracle Independence checklist | ✅ **this file** |
 
 ---
@@ -56,6 +57,29 @@ reverted.** No mutation is applied to TEST (`qmnijlgmdhviwzwfyzlc`) and none, ev
 | **Owned by** | `156-08` Task 1 acceptance (i); `156-09` Task 1 acceptance |
 | **Must stay GREEN** | the `service_role`-TRUE positives, the `anon` assertions, and 5b/5c/5e — a mutation that reds everything proves nothing about *which* control fired |
 | **Independence** | The oracle reads the ACL via `has_function_privilege` and the SQLSTATE from a real call. It never reads the migration file, so a migration that lies about itself cannot green it. |
+
+### SC1 (durability) — the `REVOKE` stays revoked across future migrations
+
+⚠️ **Distinct from the row above, and the distinction is the point.** The SC1 row proves the `REVOKE`
+**happened**. This row proves it **stays happened**. The observable mutation is nearly the same
+statement; the failure model, the oracle and the owning task are all different. A ledger that
+collapsed the two would record the class as covered when only the instance is.
+
+| | |
+|---|---|
+| **Why this row exists** | `156-MEASUREMENTS.md` § A4 (Wave 0, **measured**): Supabase's `pg_default_acl` for `public` functions granted by role `postgres` is `postgres=X anon=X authenticated=X service_role=X`. **Any** future migration that `DROP`s and re-`CREATE`s either wizard RPC silently re-grants EXECUTE to `authenticated` **and** `anon` — no error, nothing in the diff. `20260812083206` (Phase 154) did exactly that three days before this phase, and its post-verify at `:867` exists *because the author hit it for `anon`*. ⛔ Migration B cannot guard this: its post-verify runs once, at apply, on a migration that has already shipped. |
+| **Mutation (i)** | On the fixture: `GRANT EXECUTE ON FUNCTION public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text) TO authenticated;` |
+| **Must turn RED** | **5h** in `test_api_keys_exchange_not_user_writable.sql`, naming `create_wizard_strategy`, `pg_default_acl`, and the remedy. |
+| **Mutation (ii)** | The same `GRANT … TO authenticated` against the **11-arg** `add_wizard_composite_key`. |
+| **Must turn RED** | **5h** again, **independently**, naming that function. ⭐ Without this second mutation the gate could cover one twin and the ledger would not know — the exact instance-not-class shape this phase was convened to end. |
+| **Mutation (iii)** | `GRANT EXECUTE … TO anon` on either signature. ⛔ (i)+(iii) together reproduce **precisely** the ACL state a `DROP`+`CREATE` leaves behind, without dropping the function. |
+| **Must turn RED** | 5h's `anon` arm. |
+| **Mutation (iv)** | `REVOKE EXECUTE … FROM service_role` on either signature. |
+| **Must turn RED** | 5h's positive, with the *outage*-worded message — the anti-vacuity half, which is what catches a `REVOKE` that went one role too far. |
+| **Owned by** | `156-08` Task 3 acceptance — **all four reds pasted** into `156-08-SUMMARY.md` |
+| **Must stay GREEN** | 5b, 5c, 5e and assertions 1–4 under all four. Each mutation is a bare `GRANT`/`REVOKE` that touches no row, so `153.6-07-SUMMARY.md`'s 5b-interception hazard cannot apply — and that isolation is deliberate, not luck. |
+| **Independence** | ⛔ The oracle is a `supabase/tests/test_*.sql` file in the `sql-tests` CI lane, re-run on **every** PR — not a post-verify inside the migration, which is the migration checking itself, once. And 5h arms itself from `pg_get_functiondef` (`auth.uid()` absent ⇒ Migration B is live), **not** from a `col_description` marker: the mechanism this whole file distrusts most — a comment re-stamp that silently un-arms a block — cannot un-arm the gate that guards against it. `(5h′)` and `(5a‴)` red when the body says Migration B is live but a marker has gone missing. |
+| **PR-A behaviour, stated so no one has to infer it** | 5h **skips**, it is not inverted. On a Migration-A-only database the bodies still carry `auth.uid()`, so 5h is un-armed by construction; and PR A's copy of the file does not contain 5h at all, since plan 08 lands in PR B. ⛔ A gate that is red for the width of a landing is as bad as one that never fires — this one is neither. |
 
 ### SC2 — `attested_venue` is written from a venue the server verified at mint time
 
@@ -121,6 +145,13 @@ that the oracle and the subject are separate artifacts.
       body assertions are the migration checking itself. Part 3c and the `test_api_keys_venue_identity_uniq.sql`
       canaries assert `pg_get_functiondef` **from outside the migration chain**, so they survive
       the migration being edited, re-based, or replayed from a stale snapshot.
+- [ ] **SC1's `REVOKE` is not self-enforcing, and its guard is not in the migration.**
+      `pg_default_acl` re-grants `anon` and `authenticated` on any `DROP`+`CREATE` of a `public`
+      function owned by `postgres` (`156-MEASUREMENTS.md` § A4). A post-verify runs **once**, at
+      apply; the migration that reopens the door has not been written yet. **5h** lives in
+      `supabase/tests/test_*.sql`, runs in `sql-tests` on every PR, and arms from
+      `pg_get_functiondef` rather than a comment marker — ⛔ a gate that guards against silent
+      un-doing must not itself be armed by something that can be silently un-done.
 - [ ] **SC4's oracle is not post-verify (g).** 5e is an independent behavioural assertion; (g) is
       not counted toward SC4 on its own. ⚠️ This was the gap.
 - [ ] **Every negative is paired with a positive.** `has_function_privilege('authenticated', …) =
@@ -172,6 +203,10 @@ that the oracle and the subject are separate artifacts.
 | 15 | Re-GRANT `authenticated` — neither 3b nor 3c reds (vacuity proof) | `156-09` Task 2 | SC3 |
 | 16 | Pre-`20260811210000` body restored — `attested_venue` canary reds | `156-09` Task 3 | SC3 |
 | 17 | Relaxed `auth.uid()` comparison reintroduced — canary reds | `156-09` Task 3 | SC3 |
+| 18 | GRANT `authenticated` EXECUTE on the **12-arg** sig — 5h reds | `156-08` Task 3 | **SC1-durability** |
+| 19 | GRANT `authenticated` EXECUTE on the **11-arg** sig — 5h reds **independently** | `156-08` Task 3 | **SC1-durability** |
+| 20 | GRANT `anon` EXECUTE — 5h's `anon` arm reds (with #18, the post-`DROP`+`CREATE` ACL state) | `156-08` Task 3 | **SC1-durability** |
+| 21 | REVOKE `service_role` EXECUTE — 5h's positive reds, outage-worded | `156-08` Task 3 | **SC1-durability** |
 
 ⛔ Every one of these is **observed and pasted** into the owning plan's `-SUMMARY.md` — with **one
 stated exception, row 2**. A row with an asserted-but-unpasted proof is not closed.
@@ -183,7 +218,7 @@ from plan 02's **RED-first discipline** instead: the case is authored in wave 1 
 purpose, before plan 04 changes the route, so the red is observed as a matter of course rather than
 manufactured by a mutation. ⛔ The inventory previously implied a paste that no plan asks for — a
 ledger that overstates its own evidence is precisely the defect this file exists to prevent, so the
-row is annotated rather than quietly counted. Rows 1 and 3–17 are demanded-with-paste as written.
+row is annotated rather than quietly counted. Rows 1 and 3–21 are demanded-with-paste as written.
 
 ---
 
@@ -191,7 +226,8 @@ row is annotated rather than quietly counted. Rows 1 and 3–17 are demanded-wit
 
 | SC | Has a mutation that reds a production-independent oracle? |
 |----|-----------------------------------------------------------|
-| SC1 | ✅ #5, #6, #11, #12 |
+| SC1 | ✅ #5, #6, #11, #12 — the `REVOKE` **happened** |
+| SC1-durability | ✅ #18–#21 — it **stays happened**. Added by this revision, after `156-MEASUREMENTS.md` § A4 measured the `pg_default_acl` re-grant that makes a one-shot `REVOKE` insufficient. Previously **uncovered**: nothing in the ten plans reddened when a future `DROP`+`CREATE` re-opened the door |
 | SC2 | ✅ #3, #4 pasted; #2 via `156-02`'s RED-first discipline (annotated in the inventory, not a demanded paste) |
 | SC3 | ✅ #1, #13, #14, #15, #16, #17 + plan 06 row 4 (live) |
 | SC4 | ✅ #8 — **added by this revision**; previously covered only by the migration's own post-verify (g) |
