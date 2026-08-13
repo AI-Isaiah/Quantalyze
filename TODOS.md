@@ -24,6 +24,49 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
+0a. **⛔ MT5GW-COPY-01 — the operator-facing "gateway misconfigured" message names the ONE setting
+   that is already correct, and sends the operator to the wrong checkbox.** Founder-hit on PROD
+   2026-08-13 while dogfooding, immediately after the MT5DEAL-01 fix (v0.59.0.2) let the sync reach
+   this stage for the first time.
+
+   `MT5_GATEWAY_MISCONFIGURED_DETAIL` (`services/mt5_probe.py:74-79`) states *"the 'Disable automatic
+   trading through the external Python API' option is in force"*. **MEASURED on the live gateway,
+   it is NOT in force**, and never was:
+
+   | source | reading |
+   |---|---|
+   | `terminal_info().tradeapi_disabled` | `False` — the named option is OFF |
+   | `terminal_info().trade_allowed` | `False` — ⬅ the actual blocker |
+   | `Config/terminal.ini` `[Experts]` (UTF-16) | `Api=0`, **`Enabled=0`**, `Account=1`, `Profile=1` |
+
+   The false premise is written into the code as an assertion, at `services/mt5_probe.py:243-245`:
+   *"under MetaQuotes' default-ON 'Disable automatic trading through the external Python API' — **the
+   very setting that makes trade_allowed false**"*. It is not that setting. `Enabled` (Options →
+   Expert Advisors → **"Allow algorithmic trading"**) is what makes `trade_allowed` false. `Api` is a
+   separate, independent checkbox. The same false equivalence is repeated at
+   `services/mt5_client.py:988`, `services/job_worker.py:645`, `services/ingestion/mt5.py:318`,
+   `routers/exchange.py:854` and `services/mt5_validation.py:174` — ⛔ **fix the CLASS, not the one
+   string**; six sites carry it.
+
+   ⭐ **Why it recurs rather than being a one-time misconfiguration.** `Account=1`/`Profile=1` arm
+   MT5 to set `Enabled=0` **on every account change**, and the worker calls `login()` on every job.
+   So an operator who ticks "Allow algorithmic trading" alone fixes it until the next sync. This is
+   exactly why the 2026-08-12 connect succeeded once (`outcome="read_only"`, 489ms, straight after a
+   VNC visit) and every later attempt did not.
+
+   **Remedy (two parts, both needed):**
+   1. Copy: name `Enabled` / "Allow algorithmic trading" and the `Account`/`Profile` auto-disable
+      flags. ⚠️ The message is constrained — `tests/test_mt5_validate_parity.py::test_mt5_gateway_misconfigured_message_is_curated_and_credential_free`
+      forbids any token from `_WRONG_SERVER_TOKENS`/`_AUTH_TOKENS`, so it may not contain
+      "terminal" or "server". Rewrite within that fence; do not relax the fence.
+   2. Better: **read the distinguishing flags and say which one is set.** Both are already on the
+      `terminal_info()` dict the probe holds (`tradeapi_disabled` vs `trade_allowed`), so the
+      message can be derived instead of guessed — the same "don't hand-write a verdict the data
+      already carries" remedy as WIZFORM-02.
+
+   Same defect class as **FIX NOW #6 (WIZFORM-02)**: a hand-written message asserting a cause the
+   server never established. Here it cost an operator a wrong-checkbox hunt on a live go-live.
+
 0. **⛔ MT5 ARCHITECTURE — the shared gateway cannot safely serve more than ONE user, and the
    read-only guarantee can fail OPEN.** Found 2026-08-08 by the platform research that Phase 134
    specified but never executed (`153-EVIDENCE-mt5-platform.md`, `153-EVIDENCE-mt5-latency.md`).
