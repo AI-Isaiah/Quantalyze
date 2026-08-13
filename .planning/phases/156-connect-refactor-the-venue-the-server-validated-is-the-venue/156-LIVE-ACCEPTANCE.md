@@ -2,7 +2,7 @@
 phase: 156-connect-refactor-the-venue-the-server-validated-is-the-venue
 plan: 06
 artifact: live-acceptance
-status: blocked
+status: pass
 verified_on: 2026-08-13
 verified_against: production
 gates: 156-07
@@ -63,10 +63,12 @@ failure means `GRANT … TO service_role` did not land.
 rather than a ccxt venue (deviation, see below). Neither falsifier appeared: no
 `SEAM_MISCONFIGURED`, no privilege error, and the row was minted.
 
-⭐ **The write is provably the RPC's, not a client INSERT.** The `strategies` row ("Golden Ratio",
-`supported_exchanges = {mt5}`) and the `api_keys` row share an **identical microsecond timestamp**,
-`19:02:40.164344+00` — one transaction, which is `create_wizard_strategy` creating both atomically.
-A client-side two-step could not produce that.
+⭐ **The write is provably the RPC's, not a client INSERT.** The `strategies` row (created as
+"Golden Ratio", since renamed by the founder to "Umbra"; `supported_exchanges = {MT5}`) and the
+`api_keys` row share an **identical microsecond timestamp**, `19:02:40.164344+00` — one transaction,
+which is `create_wizard_strategy` creating both atomically. A client-side two-step could not produce
+that, and a count at that exact timestamp returns exactly 1 strategy, so the match is not a
+collision.
 **Verdict:** PASS
 
 ---
@@ -75,13 +77,21 @@ A client-side two-step could not produce that.
 **Falsifier:** the first member succeeds and a later one fails — the twin diverged. That is exactly
 the defect class Phase 153.6 exists because of, and row 3 cannot detect it.
 
-**Observed:** ⛔ **NOT PERFORMED.** The founder holds a single exchange key, and a composite needs
-≥2 members. What IS proven for the composite twin: its `service_role` arm exists on PROD and keeps
-the cross-user guard (row 5's query covers both functions); Migration A's Part 3d behaviourally
-proved the arm works on **both** RPCs against TEST; and the CONNECT-02b guard proves the composite
-route binds its receiver from `createAdminClient()`. What is **NOT** proven: the composite *route*,
-in production, reaching that arm with a service-role client.
-**Verdict:** ⛔ NOT VERIFIED — this is the sole open gate item.
+**Observed:** Founder built a **2-member Deribit composite** on PROD. Strategy "Jade Serpent"
+(`supported_exchanges = {deribit}`) and its **first** member key share the identical microsecond
+timestamp `19:28:27.579764+00` — one transaction, `create_wizard_strategy`. The **second** member key
+was minted at `19:29:18.397491+00`, 51 seconds later, with **no new strategy row**, so it arrived via
+the composite add-key path (`add_wizard_composite_key`) rather than the single-key twin. Final state:
+`member_keys = 2`, both `deribit`, both `attested_venue = exchange`, both stamped.
+
+⭐ The falsifier was "the first member succeeds and a later one fails". **The later member
+succeeded.** The composite route reaching the `service_role` arm in production is now observed, not
+inferred.
+
+(Aside, and it confirms the pre-flight reasoning: two ccxt keys on the SAME venue coexisted without
+tripping `api_keys_user_exchange_venue_account_uniq`, because ccxt keys carry
+`venue_account_id IS NULL` and that index is PARTIAL on `WHERE venue_account_id IS NOT NULL`.)
+**Verdict:** PASS
 
 ---
 
@@ -118,17 +128,25 @@ broken. The connect obtained a `venue_account_id`, which requires a successful M
 
 **Rows 1–5 must all read PASS before plan 07 authors Migration B.**
 
-**Rows 1, 2, 3, 5 PASS. Row 4 is NOT VERIFIED. The gate is therefore NOT cleared and
-`status: blocked` stands — Migration B is not authored.**
+⭐ **Rows 1–5 all PASS. The gate is CLEARED.** Row 6 also passed as a bonus. Plan 07 may author
+Migration B.
 
-Migration B withdraws `authenticated` EXECUTE from **both** RPCs. Landing it while the composite
-route is unexercised in production would convert a state that is *working but open* into one that is
-*broken and closed* for composite connects, and no test in the suite would fail.
+## What PR B may now assume
 
-**To clear row 4:** exchange keys carry `venue_account_id IS NULL`, and the duplicate-account unique
-index is PARTIAL (`WHERE venue_account_id IS NOT NULL`), so **two ccxt keys on the same exchange do
-not collide**. A second read-only API key at the founder's existing venue is enough to build a
-composite and close this row as designed.
+Both wizard RPCs' `service_role` arms are **exercised in production by our own code**, through both
+routes: the single-key route (row 3) and the composite route including a non-first member (row 4).
+Migration B's `REVOKE … FROM authenticated` therefore removes a path our own application provably no
+longer takes. That is the claim the two-landing split was built to establish, and it is now evidence
+rather than inference.
+
+⛔ **What PR B may NOT assume: that nothing else still uses the `authenticated` arm.** Any other
+client holding an `authenticated` JWT against these RPCs starts failing with `42501` the instant
+Migration B applies — a browser tab sitting mid-wizard on the old bundle, or an unreleased Preview
+deploy built before PR A. That breakage is the intended effect of the change, not a defect, but it
+is also the reason **PR B must not be merged during an active wizard session window**.
+
+⚠️ At the time this gate was recorded the founder was actively connecting keys on PROD. Merging PR B
+in that window would 42501 their in-flight wizard. Hold the merge until the session is idle.
 
 ## Deviations
 
