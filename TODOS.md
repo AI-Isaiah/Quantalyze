@@ -2276,3 +2276,32 @@ Raised by the `/ship` pre-landing + adversarial reviews. The four that met the b
   on TEST; §5 records a post-hoc migration amendment and says the seeded cases have NEVER executed;
   `154-VERIFICATION.md` says the gate has not been executed. Honest reading: a pre-amendment
   structural subset ran, the shipped file never has. Correct one of the two records.
+
+### Phase 156 (CONNECT) — the two things this phase deliberately did NOT fix (added 2026-08-13)
+
+Both were raised at planning, decided out of scope there (`156-RESEARCH.md` § "Open Questions" 3 and
+4), and are logged here rather than patched in passing. Plan `156-05`'s acceptance asserts BOTH
+named files are unmodified by the phase, so neither was quietly half-done.
+
+- [ ] **`add_wizard_composite_key` is absent from `MUTATING_RPC_NAMES` while its single-key twin
+  `create_wizard_strategy` is present.** `src/__tests__/audit-coverage.test.ts:203-217` — the array
+  that decides which `.rpc(` call sites the audit-coverage gate polices. The composite twin writes
+  the same two tables (`strategies` + `api_keys`) through the same wizard path, so its omission is a
+  real audit-coverage gap, and it **pre-dates Phase 156** — 156 only made it visible by touching
+  both call sites at once. ⛔ **Not fixed here:** adding the name creates an audit-emission
+  obligation on `src/app/api/strategies/composite/add-key/route.ts`, a route this phase is already
+  rewiring onto the service-role client; the correct answer is probably the same `@audit-skip:
+  wizard draft` pragma its twin carries (`create-with-key/route.ts:815`), but "probably" is not a
+  standard to land an audit decision on. Reference: `156-RESEARCH.md` Open Question 4.
+
+- [ ] **The `asset_class` annualization stamp still reads the forgeable `apiKeyExchange` rather than
+  `attestedVenue`.** `src/app/api/strategies/finalize-wizard/route.ts:1275-1285`. Phase 153.6-04
+  (PARITY-04) moved the *probe gate* onto the server-attested venue and left this stamp behind
+  deliberately; Phase 156 attests the venue at connect time but does not widen that swap either. The
+  residual is **self-targeted**: a forged venue label here distorts the annualization clock (√365
+  crypto vs √252 traditional) of the forger's OWN strategy, where a forged label on the gate
+  switched off a security control. ⛔ **Not fixed here:** it is a one-identifier change with a
+  two-outcome money-math blast radius, and it needs its own oracle over √365 vs √252 that this phase
+  does not have — see the standing annualization landmine in
+  `project_blend_annualization_unknown_assetclass_optimistic`. Reference: `156-RESEARCH.md` Open
+  Question 3.
