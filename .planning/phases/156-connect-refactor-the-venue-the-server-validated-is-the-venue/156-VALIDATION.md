@@ -156,7 +156,7 @@ that the oracle and the subject are separate artifacts.
 | # | Mutation | Plan / Task | SC |
 |---|----------|-------------|-----|
 | 1 | Flat-union `create_wizard_strategy` body on the fixture | `156-03` Task 4 | SC3 |
-| 2 | Corrupt `exchangeNormalized` before all three consumers | `156-02` Tasks 1–2 | SC2 |
+| 2 | Corrupt `exchangeNormalized` before all three consumers | `156-02` Tasks 1–2 — ⚠️ **not demanded as a pasted proof**, see the note below | SC2 |
 | 3 | Third `.rpc` writer added under `src/` (incl. `.tsx`, `src/lib/**`) | `156-05` Task 1 Scan A | SC2 |
 | 4 | Route `.rpc` receiver re-pointed to the user-scoped binding | `156-05` Task 1 Scan B | SC2 |
 | 5 | Re-GRANT `authenticated` EXECUTE — 5d reds | `156-08` Task 1 (i) | SC1 |
@@ -173,8 +173,17 @@ that the oracle and the subject are separate artifacts.
 | 16 | Pre-`20260811210000` body restored — `attested_venue` canary reds | `156-09` Task 3 | SC3 |
 | 17 | Relaxed `auth.uid()` comparison reintroduced — canary reds | `156-09` Task 3 | SC3 |
 
-⛔ Every one of these is **observed and pasted** into the owning plan's `-SUMMARY.md`. A row with an
-asserted-but-unpasted proof is not closed.
+⛔ Every one of these is **observed and pasted** into the owning plan's `-SUMMARY.md` — with **one
+stated exception, row 2**. A row with an asserted-but-unpasted proof is not closed.
+
+⚠️ **Row 2 — corrected this revision.** `156-02`'s acceptance criteria require the literal-anchored
+`"binance"` case to **exist** in both twins; they do **not** demand this mutation be applied,
+observed and pasted, and no criterion is being added here to make them. Row 2's falsifiability comes
+from plan 02's **RED-first discipline** instead: the case is authored in wave 1 and lands RED on
+purpose, before plan 04 changes the route, so the red is observed as a matter of course rather than
+manufactured by a mutation. ⛔ The inventory previously implied a paste that no plan asks for — a
+ledger that overstates its own evidence is precisely the defect this file exists to prevent, so the
+row is annotated rather than quietly counted. Rows 1 and 3–17 are demanded-with-paste as written.
 
 ---
 
@@ -183,7 +192,7 @@ asserted-but-unpasted proof is not closed.
 | SC | Has a mutation that reds a production-independent oracle? |
 |----|-----------------------------------------------------------|
 | SC1 | ✅ #5, #6, #11, #12 |
-| SC2 | ✅ #2, #3, #4 |
+| SC2 | ✅ #3, #4 pasted; #2 via `156-02`'s RED-first discipline (annotated in the inventory, not a demanded paste) |
 | SC3 | ✅ #1, #13, #14, #15, #16, #17 + plan 06 row 4 (live) |
 | SC4 | ✅ #8 — **added by this revision**; previously covered only by the migration's own post-verify (g) |
 | SC5 | ✅ repo grep + the observed-green `sql-tests` gate on the ledger flip |
