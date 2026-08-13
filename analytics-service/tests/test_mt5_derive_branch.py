@@ -108,6 +108,18 @@ class _FakeRpycConn:
     def __init__(self, calls: list) -> None:
         self._calls = calls
         self.close_calls = 0
+        # rpyc classic's remote-namespace seam (MT5DEAL-01). `history_deals_get`
+        # materializes deals on the FAR side of the wire, because doing it here
+        # costs one round-trip per deal per field — MEASURED 60ms/deal live, 29.9s
+        # for 493 deals against a 40s bound. `execute()` really execs, so these
+        # doubles run the REAL remote source instead of a stand-in that could drift.
+        self.namespace: dict = {}
+        self.execute_calls = 0
+
+    def execute(self, src: str) -> None:
+        self.execute_calls += 1
+        self._calls.append("execute")
+        exec(src, self.namespace)  # noqa: S102 — running the real source is the point
 
     def close(self):
         self.close_calls += 1
@@ -419,6 +431,9 @@ async def test_mt5_routes_one_backbone(monkeypatch) -> None:
         "login",
         "account_info",
         "history_deals_get",
+        # MT5DEAL-01: deals materialize on the FAR side of the wire, so the
+        # source crossing is a real round-trip and is recorded as one.
+        "execute",
         "account_info",
     ]
 
@@ -1234,11 +1249,14 @@ async def test_mt5_login_bracket_post_hijack(monkeypatch) -> None:
     # The deal read DID run (PRE passed), then the POST bracket re-read and rejected
     # — the first four terminal calls are the full read sequence (a trailing
     # "shutdown" from the bounded restart follows).
-    assert transport.calls[:5] == [
+    assert transport.calls[:6] == [
         "initialize",
         "login",
         "account_info",
         "history_deals_get",
+        # MT5DEAL-01: deals materialize on the FAR side of the wire, so the
+        # source crossing is a real round-trip and is recorded as one.
+        "execute",
         "account_info",
     ]
     assert "shutdown" in transport.calls  # the bounded restart fired
@@ -1319,6 +1337,9 @@ async def test_mt5_post_read_transient_blip_is_not_permanent(monkeypatch) -> Non
         "login",
         "account_info",
         "history_deals_get",
+        # MT5DEAL-01: deals materialize on the FAR side of the wire, so the
+        # source crossing is a real round-trip and is recorded as one.
+        "execute",
         "account_info",
     ]
     # NO permanent user-blame stamp and NO partial series (the economic read

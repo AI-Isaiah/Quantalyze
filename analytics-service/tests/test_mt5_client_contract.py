@@ -96,6 +96,57 @@ class _FakeNamedTuple:
         return dict(self._fields_dict)
 
 
+class _RemoteNamespace(dict):
+    """The rpyc server namespace. A callable fetched from it runs with the owning
+    connection's `remote_frame_active` flag raised, which is how an offline test
+    tells CLIENT-side work from FAR-side work in a single process."""
+
+    def __init__(self, conn) -> None:
+        super().__init__()
+        self._conn = conn
+
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        if not callable(value):
+            return value
+
+        def _on_the_far_side(*args, **kwargs):
+            self._conn.remote_frame_active = True
+            try:
+                return value(*args, **kwargs)
+            finally:
+                self._conn.remote_frame_active = False
+
+        return _on_the_far_side
+
+
+class _WireFencedDeals:
+    """A netref-shaped deal tuple that REFUSES per-element access from the client.
+
+    This is the cost model, made executable. Against the live gateway each local
+    touch of a deal proxy is an RPyC round-trip; 493 deals cost 29.9s that way
+    (MEASURED 2026-08-13) and blew the 40s read bound. In-process that cost is
+    invisible, so the double converts it into the thing a test can see: iterating
+    from the client side is an error, iterating from the far side is fine.
+    """
+
+    def __init__(self, rows, conn) -> None:
+        self._rows = tuple(rows)
+        self._conn = conn
+
+    def __iter__(self):
+        if not self._conn.remote_frame_active:
+            raise AssertionError(
+                "per-deal access happened on the CLIENT side of the wire — that is "
+                "one RPyC round-trip per deal (60ms/deal live), the MT5DEAL-01 "
+                "defect that made derive_broker_dailies unrunnable"
+            )
+        return iter(self._rows)
+
+    def __len__(self):
+        return len(self._rows)
+
+
 class _FakeRpycConn:
     """The rpyc connection object `mt5linux.MetaTrader5` hangs off its name-mangled
     `_MetaTrader5__conn` attribute — the ONLY transport-close seam 0.1.9 exposes
@@ -109,6 +160,20 @@ class _FakeRpycConn:
         self._scenario = scenario
         self.close_calls = 0
         self._config: dict = {}
+        # rpyc classic's remote-namespace seam. Shaped, not mocked: `execute()`
+        # really execs the source into a namespace dict, so the contract tests
+        # exercise the REAL remote materializer source (`_REMOTE_MATERIALIZE_SRC`)
+        # offline rather than a re-implementation of it that could silently drift.
+        self.namespace: dict = _RemoteNamespace(self)
+        self.execute_calls = 0
+        # True only while a function fetched from `namespace` is executing — the
+        # offline stand-in for "this frame is running on the far side of the wire".
+        # `_WireFencedDeals` reads it to catch per-deal access on the CLIENT side.
+        self.remote_frame_active = False
+
+    def execute(self, src: str) -> None:
+        self.execute_calls += 1
+        exec(src, self.namespace)  # noqa: S102 — the point is to run the real source
 
     def close(self):
         self.close_calls += 1
@@ -902,6 +967,54 @@ def test_history_deals_populated_materializes_each_deal():
     assert deals[1]["time"] == 1700086400
 
 
+def test_deal_materialization_costs_no_client_side_per_deal_access():
+    """⭐ MT5DEAL-01 REGRESSION. Materializing N deals must cost O(1) wire crossings,
+    not O(N).
+
+    WHY THIS MATTERS, not just what it does: `[_materialize(d) for d in deals]` reads
+    like local work but `deals` is an rpyc netref, so it is a round-trip per element
+    and per field. MEASURED on the live gateway from inside the worker container
+    2026-08-13: 60ms/deal, 29.9s for 493 deals, against a 40s `wait_for`. Every
+    `mt5.stage` event said `ok=true` and no rpyc `sync_request_timeout` (30s) could
+    fire, because the cost was never inside ONE bounded call — so the only symptom a
+    user ever saw was FLIPRETRY-01, on every retry, forever, for the first account
+    with real history.
+
+    ⛔ This test must fail if the loop moves back to the client, which is why the
+    double refuses per-element access outside a far-side frame rather than merely
+    counting calls. It is deliberately NOT an assertion about elapsed time: in-process
+    the defect is fast, and a timing oracle here would pass while production hangs.
+    """
+    connect, fake, _rec = _make({})
+    conn = fake._MetaTrader5__conn
+    rows = [_FakeNamedTuple(profit=float(i), time=1700000000 + i) for i in range(64)]
+    fake._scenario["deals"] = _WireFencedDeals(rows, conn)
+
+    client = Mt5Client("host", 18812, _connect=connect)
+    deals = client.history_deals_get(0, 1)
+
+    assert len(deals) == 64
+    assert all(isinstance(d, dict) for d in deals)
+    assert deals[7]["profit"] == 7.0
+    assert deals[7]["time"] == 1700000007
+    # O(1) in the deal count: the source is pushed once and invoked once, whether
+    # there are 64 deals or 64,000.
+    assert conn.execute_calls == 1
+
+
+def test_deal_materialization_reports_absent_transport_rather_than_falling_back():
+    """No rpyc transport ⇒ typed raise, NEVER a quiet client-side comprehension.
+
+    A fallback here would be the worst outcome available: correct results, restored
+    60ms/deal, and no signal at all — the defect back in production wearing a green
+    test suite.
+    """
+    connect, _fake, _rec = _make({"no_transport": True, "deals": ()})
+    client = Mt5Client("host", 18812, _connect=connect)
+    with pytest.raises(Mt5ClientError):
+        client.history_deals_get(0, 1)
+
+
 def test_materialize_degenerate_shape_raises():
     """A deal without ._asdict() is a degenerate shape -> fail loud, never coerce."""
 
@@ -1475,9 +1588,14 @@ def test_a_failing_read_emits_its_event_and_reraises_the_identical_error():
 
 
 def test_every_mt5_round_trip_emits_its_stage_event():
-    """Every one of the NINE MT5 round-trips emits — asserted by driving each
+    """Every one of the TEN MT5 round-trips emits — asserted by driving each
     method against the double and comparing the collected stage names to a
     hand-typed set.
+
+    ⭐ `history_deals_materialize` is the tenth, and it is here because it was
+    MISSING for a whole phase: the per-deal materialization was untimed, so the 30s
+    it burned on the live gateway appeared in no event and the only visible symptom
+    was a 40s outer timeout with every stage reporting `ok=true` (MT5DEAL-01).
 
     ⛔ The expected set is typed out here rather than read from
     `services.mt5_client`: an oracle that derives its expectation from the thing
@@ -1513,6 +1631,7 @@ def test_every_mt5_round_trip_emits_its_stage_event():
         "account_info",
         "terminal_info",
         "history_deals_get",
+        "history_deals_materialize",
         "order_check",
         "close",
         "release",

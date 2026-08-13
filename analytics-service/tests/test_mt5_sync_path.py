@@ -71,6 +71,18 @@ class _FakeRpycConn:
     def __init__(self, calls: list) -> None:
         self._calls = calls
         self.close_calls = 0
+        # rpyc classic's remote-namespace seam (MT5DEAL-01). `history_deals_get`
+        # materializes deals on the FAR side of the wire, because doing it here
+        # costs one round-trip per deal per field — MEASURED 60ms/deal live, 29.9s
+        # for 493 deals against a 40s bound. `execute()` really execs, so these
+        # doubles run the REAL remote source instead of a stand-in that could drift.
+        self.namespace: dict = {}
+        self.execute_calls = 0
+
+    def execute(self, src: str) -> None:
+        self.execute_calls += 1
+        self._calls.append("execute")
+        exec(src, self.namespace)  # noqa: S102 — running the real source is the point
 
     def close(self):
         self.close_calls += 1
