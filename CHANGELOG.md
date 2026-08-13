@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.61.0.0] - 2026-08-13
+### v1.17 — the wizard's write is the server's alone (Phase 156, landing 2 of 2)
+
+⭐ **This closes CONNECT-01.** `authenticated` no longer holds EXECUTE on
+`create_wizard_strategy` or `add_wizard_composite_key`, and both bodies now gate on
+`auth.role() = 'service_role'` and nothing wider. A browser session can no longer POST
+`/rest/v1/rpc/create_wizard_strategy` directly and mint an `api_keys` row whose
+`attested_venue` disagrees with the venue the server actually validated.
+
+**Why the grant layer and not the route.** PostgREST exposes every `public`-schema function,
+so a control enforced only in the Next route is enforced only in the tier the caller can skip.
+The GRANT is the one door a browser cannot walk around.
+
+⛔ **What this does NOT buy.** Any server route holding a service-role client can still pass any
+venue. That is the standing `service_role` trust boundary (ADR-0001/ADR-0003), unchanged. The
+accurate guarantee is: **the venue is the one this server observed a successful read-only
+authentication at** — not that the venue cannot be forged.
+
+**Why two landings.** Both single-migration orderings produce a connect-a-key outage: the merge
+IS the apply, and the Vercel build races it with no ordering between them. Landing 1 (v0.60.0.0)
+granted `service_role` while leaving `authenticated` standing, so either side of the race worked.
+This landing withdraws the grant, and only after the new writer was **observed working on
+production** — a real single-key connect and a real 2-member composite, recorded in
+`156-LIVE-ACCEPTANCE.md`.
+
+**The ownership check moved, it did not vanish.** `auth.uid()` is deleted from both bodies rather
+than relaxed: it is NULL under `service_role`, so a retained comparison would be a permanent
+silent no-op. Ownership is now bound at the route from `withAuth`'s `getUser()`-verified id, and
+the structural guard `phase-156-wizard-rpc-writer-guard.test.ts` reds if any wizard-RPC call site
+is ever bound from a user-scoped client again.
+
+⛔ **The REVOKE is not self-enforcing, and that is a class.** Supabase's `pg_default_acl`
+re-grants `anon` and `authenticated` on any `DROP`+`CREATE` — it already bit migration
+`20260812083206` for `anon`. Assertion **5h** is the durable guard: it arms from
+`pg_get_functiondef` and the live ACL rather than from any comment marker, so it re-runs on every
+PR. It was proven by performing a real `DROP`+`CREATE` with no grants, where it was the **only**
+assertion that reddened.
+
+### Fixed
+- Both wizard RPC gate files and three sibling SQL gates are now **state-adaptive**: they arm from
+  the live function body and skip loudly on a database without Migration B, so this PR need not
+  pre-apply the migration to the shared TEST database and red every concurrent PR.
+
 ## [0.60.0.1] - 2026-08-13
 ### Operator tooling — read the MT5 terminal's state without a VNC session
 
