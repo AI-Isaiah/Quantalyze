@@ -47,18 +47,49 @@
 --      was scrubbed" would be indistinguishable from "the column never stores
 --      anything".
 --
---   5d/5e. THE SECOND DOOR (Phase 153.6 code review CR-01). Assertions 2-5c all
---      exercise the CLIENT INSERT path. The other writer is the wizard RPC
---      itself — SECURITY DEFINER, EXECUTE-able by `authenticated`, reachable
---      directly over PostgREST — and it does NOT validate the venue it is
---      handed. 5d calls it as the row's own owner with a forged p_exchange and
---      asserts the outcome that is actually true: the call SUCCEEDS, and both
---      `exchange` and `attested_venue` come back carrying the forged value.
---      That is the guarantee — the forgery cannot be SELECTIVE, so a probe skip
---      always costs a routing label the key cannot sync under. 5e then asserts
---      the coupling is a CHECK constraint rather than a property of today's two
---      function bodies, because "the current writers happen to agree" is the
---      shape of claim this phase exists to stop shipping as a control.
+--   5d-5h. THE SECOND DOOR (Phase 153.6 code review CR-01; door SHUT by Phase
+--      156 Migration B, 20260814120000). Assertions 2-5c all exercise the CLIENT
+--      INSERT path. The other writer is the wizard RPC itself — SECURITY
+--      DEFINER, reachable directly over PostgREST — and it does NOT validate the
+--      venue it is handed.
+--
+--      ⚠️ 5d FLIPPED POLARITY IN PHASE 156, AND A READER WHO MISSES THAT WILL
+--      MISREAD THE WHOLE BLOCK. Before 20260814120000, `authenticated` held
+--      EXECUTE and 5d asserted the call SUCCEEDS, because it did; the only
+--      guarantee available was that the forgery could not be SELECTIVE.
+--      20260814120000 withdrew that EXECUTE and narrowed both bodies to a
+--      service_role-only gate, so 5d now asserts the call is REFUSED — three
+--      ways, because each alone is weaker: the privilege is gone (asserted in
+--      both directions, since "authenticated cannot call it" also reads true of
+--      a function that was DROPPED), the refusal carries SQLSTATE 42501, and the
+--      api_keys row count is unchanged.
+--
+--      5d+ and 5g are the anti-vacuity positives: the SAME calls made
+--      service-role-shaped must SUCCEED and store attested_venue = exchange, so
+--      "refused" can never quietly mean CONNECT-A-KEY IS BROKEN.
+--      5f/5g are the composite twin, `add_wizard_composite_key`, which had NO
+--      assertion anywhere in this repository until Phase 156. The two RPCs are
+--      ONE CONTRACT WITH TWO ENTRY POINTS; 153.6 exists because a fix landed on
+--      one of them and not the other.
+--      5e asserts the exchange/attested_venue coupling is a CHECK constraint
+--      rather than a property of today's two function bodies, because "the
+--      current writers happen to agree" is the shape of claim this phase exists
+--      to stop shipping as a control.
+--      5h asserts the ACL CLASS — neither `authenticated` nor `anon` holds
+--      EXECUTE on EITHER signature, and `service_role` holds it on both. It
+--      exists because the REVOKE is ONE-SHOT: Supabase's pg_default_acl
+--      re-grants `anon` and `authenticated` on any DROP + CREATE of a public
+--      function owned by `postgres`, and a migration post-verify cannot guard
+--      that (it runs once, at apply, on a migration already shipped). ⛔ 5h is
+--      armed from pg_get_functiondef, NOT from a comment marker, because a
+--      marker-armed assertion can be disarmed by editing prose.
+--
+--      ⛔ WHAT IS STILL NOT CLAIMED: not "the venue cannot be forged". Any
+--      server route holding a service-role client can still pass any value —
+--      the standing service_role trust boundary (ADR-0001/ADR-0003). The
+--      guarantee is "the venue THIS SERVER OBSERVED a successful read-only
+--      authentication at". The stronger reading would license removing the
+--      probe gate.
 --
 --      ⚠️ WHAT THIS FILE CANNOT PROVE (D-05's honest limit). SQL can assert that
 --      the probe's INPUT is unforgeable. It cannot invoke the probe, so it
@@ -117,6 +148,9 @@ DECLARE
   -- not Migration B skips those three cleanly instead of failing for a state it
   -- is legitimately in. 5b/5c/5e stay on v_attest_live.
   v_revoke_live boolean;
+  -- 5h's arming source, and it is deliberately NOT a marker: read from the
+  -- function BODY via pg_get_functiondef. See the block that computes it.
+  v_revoke_landed boolean;
   v_seen       text;
   v_after      text;
   v_attested   text;
@@ -284,6 +318,44 @@ BEGIN
     ) LIKE '%20260814120000%',
     false
   ) INTO v_revoke_live;
+
+  -- ---- 5h's ARMING SOURCE: THE FUNCTION BODY, NOT ANY COMMENT MARKER -------
+  -- ⛔ COMPUTED BEFORE THE `IF v_attest_live` BRANCH ON PURPOSE, so BOTH arms
+  -- can read it — (5a‴) in the ELSE needs it precisely when the marker gate has
+  -- failed.
+  --
+  -- ⛔ WHY NOT v_revoke_live, AND WHY NOT ANY col_description. 5h exists because
+  -- a DROP+CREATE or a comment re-stamp can silently undo state. Arming it on
+  -- the mechanism it distrusts would reproduce the defect: a re-stamp that
+  -- dropped the id would leave the door RE-OPENED, 5h skipped, and CI green.
+  -- v_revoke_live keeps gating 5d/5d+/5f/5g; this is the SECOND, INDEPENDENT
+  -- source — the same two-sources discipline (5a′)/(5a″) apply above.
+  --
+  -- The structural signature of Migration B is the ABSENCE of auth.uid():
+  -- Migration A's bodies carry it (its `authenticated` arm needs it), Migration
+  -- B's carry none. 20260814120000's post-verify (e) and
+  -- test_wizard_session_idempotency.sql's canary pin that independently.
+  --
+  -- ⛔⛔ THE COMMENT STRIP IS LOAD-BEARING AND WAS MEASURED, NOT ASSUMED. On a
+  -- PG16 fixture carrying Migration B, the RAW pg_get_functiondef STILL contains
+  -- the literal `auth.uid()` — Migration B's own Trap B comment block explains
+  -- at length why auth.uid() must be absent and, in doing so, contains the
+  -- string. pg_get_functiondef reconstructs the body from prosrc, which stores
+  -- the source VERBATIM including comments. A naive raw match therefore reads
+  -- FALSE on exactly the database 5h exists to guard, leaving it PERMANENTLY
+  -- UN-ARMED and silently green — this file's own signature failure, committed
+  -- by its own remedy. 20260814120000's post-verify strips the same way for the
+  -- same reason.
+  -- ⚠️ to_regprocedure, not `::regprocedure`: the cast ERRORS on a database
+  -- where the function does not exist, where 5h's correct behaviour is to NOT
+  -- ARM (a missing function is 5d+'s and 5g's business to report).
+  SELECT COALESCE(
+    regexp_replace(
+      pg_get_functiondef(to_regprocedure(v_create_sig)),
+      '--[^\n]*', '', 'g'
+    ) NOT LIKE '%auth.uid()%',
+    false
+  ) INTO v_revoke_landed;
 
   -- ---- (5a′) THE OLDER MARKER MUST SURVIVE THE NEWER RE-STAMP --------------
   -- ⛔ DELIBERATELY OUTSIDE `IF v_attest_live`, and that placement is the whole
@@ -678,7 +750,107 @@ BEGIN
         v_ins_err;
     END IF;
     RAISE NOTICE 'Assertion 5e OK: a privileged writer CANNOT persist attested_venue <> exchange (refused 23514) — the coupling is enforced, not incidental.';
+
+
+    -- ---- (5h′) MARKER-VS-BODY CROSS-CHECK -----------------------------------
+    -- ⛔ ORDERED BEFORE 5h DELIBERATELY, AND THE ORDER IS THE ASSERTION. Placed
+    -- AFTER 5h this is provably DEAD CODE, which in the phase whose whole
+    -- subject is decorative controls would be the worst possible thing to ship.
+    -- The proof: (5h′) needs v_revoke_landed AND NOT v_revoke_live. Reaching it
+    -- requires (5a″) to have stayed silent, which requires `authenticated` to
+    -- HOLD EXECUTE on create_wizard_strategy; and it requires 5h to have stayed
+    -- silent, which — 5h being armed, since v_revoke_landed is true — requires
+    -- `authenticated` NOT to hold it. Contradiction, so it could never fire.
+    --
+    -- ⭐ STRICTLY STRONGER THAN (5a″), and the difference is the case that
+    -- actually kills you. (5a″) infers "Migration B is live" FROM the missing
+    -- privilege, so it only speaks while the ACL is still correct. After a
+    -- DROP + CREATE re-granted `authenticated` AND a re-stamp dropped the id,
+    -- (5a″)'s premise is false. This reads the BODY, which a re-grant does not
+    -- change, so its premise is still true and it still reds. That double
+    -- failure is exactly the state in which 5d/5d+/5f/5g are asleep AND the door
+    -- is open — the worst state this file can be in, and the only assertion that
+    -- names BOTH halves of it.
+    IF v_revoke_landed AND NOT v_revoke_live THEN
+      RAISE EXCEPTION
+        'CR-01/156 REGRESSION (5h''): create_wizard_strategy''s body carries ZERO auth.uid(), so this database demonstrably carries migration 20260814120000 (Phase 156 Migration B) — but api_keys.attested_venue does not carry the 20260814120000 marker, so assertions 5d, 5d+, 5f and 5g SILENTLY SKIPPED with exit code 0. A comment re-stamp dropped the id. ⛔ 5h has NOT run either: after restoring the substring, re-run this gate and check the ACL on BOTH wizard signatures, because a DROP + CREATE that re-granted anon or authenticated would have been invisible for as long as the marker was missing. Restore the id in whichever migration re-stamped that comment; do not delete these assertions.';
+    END IF;
+    -- ---- (5h) THE ACL CLASS: the assertion that makes the REVOKE *STAY* -----
+    -- ⛔ WHY THIS EXISTS. 20260814120000's `REVOKE … FROM authenticated` is NOT
+    -- DURABLE. Measured (156-MEASUREMENTS.md § A4): Supabase's pg_default_acl
+    -- for `public` functions granted by role `postgres` is
+    --     postgres=X  anon=X  authenticated=X  service_role=X
+    -- so EVERY function `postgres` creates in `public` is AUTOMATICALLY granted
+    -- EXECUTE to `anon` AND `authenticated`. Any future migration that DROPs and
+    -- re-CREATEs either wizard RPC silently re-grants both — no error, nothing
+    -- in the diff to read. Not hypothetical: 20260812083206 did exactly that on
+    -- create_wizard_strategy three days before Phase 156, and its post-verify at
+    -- :867 exists BECAUSE THE AUTHOR HIT THIS FOR `anon`.
+    --
+    -- ⛔ A MIGRATION POST-VERIFY CANNOT CLOSE THIS. It runs ONCE, at apply, on a
+    -- migration that has already shipped; the migration that reopens the door is
+    -- one nobody has written yet. Only a gate in supabase/tests/test_*.sql,
+    -- re-run by `sql-tests` on every PR, can. That is this block.
+    --
+    -- ⭐ BOTH TWINS IN ONE PLACE IS THE POINT. `anon` is asserted today only
+    -- per-function and in two different files — test_wizard_session_idempotency
+    -- covers create_wizard_strategy, test_wizard_composite_fence covers
+    -- add_wizard_composite_key — so NO SINGLE GATE ASSERTS THE CLASS. 5h does,
+    -- and the class is what this phase is about. Six assertions: two roles that
+    -- must NOT hold EXECUTE and one that MUST, across both signatures.
+    IF v_revoke_landed THEN
+      -- Anti-vacuity for the twin: has_function_privilege on a text signature
+      -- ERRORS if the function is gone, and "the composite RPC vanished" should
+      -- read as itself, not as a parse failure.
+      IF to_regprocedure(v_composite_sig) IS NULL THEN
+        RAISE EXCEPTION
+          'CONNECT-01 (5h): add_wizard_composite_key(uuid,text,text,text,text,text,text,text,integer,text,uuid) does not exist, so its ACL cannot be asserted at all. The two wizard RPCs are ONE CONTRACT WITH TWO ENTRY POINTS — if a migration dropped or re-signatured the composite twin, composite connect-a-key is broken and this gate is blind to the half it was written to cover.';
+      END IF;
+
+      IF has_function_privilege('authenticated', v_create_sig, 'EXECUTE') THEN
+        RAISE EXCEPTION
+          'CONNECT-01 REGRESSION (5h): authenticated holds EXECUTE on create_wizard_strategy. MECHANISM: Supabase pg_default_acl for public functions granted by role postgres is postgres=X anon=X authenticated=X service_role=X, so a DROP + CREATE of a public function owned by postgres SILENTLY RE-GRANTS anon and authenticated — no error, nothing in the diff to read (it bit 20260812083206, whose post-verify at :867 exists for that reason). REMEDY: the migration that re-created this function must re-issue, in the same migration, REVOKE ALL ON FUNCTION public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text) FROM PUBLIC, anon, authenticated; and GRANT EXECUTE ON FUNCTION public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text) TO service_role;';
+      END IF;
+      IF has_function_privilege('anon', v_create_sig, 'EXECUTE') THEN
+        RAISE EXCEPTION
+          'CONNECT-01 REGRESSION (5h): anon holds EXECUTE on create_wizard_strategy — an UNAUTHENTICATED caller can POST /rest/v1/rpc/create_wizard_strategy. MECHANISM: Supabase pg_default_acl re-grants anon on any DROP + CREATE of a public function owned by postgres (this is the exact regression 20260812083206:867 was written to catch). REMEDY: re-issue REVOKE ALL ON FUNCTION … FROM PUBLIC, anon, authenticated; and GRANT EXECUTE ON FUNCTION … TO service_role; in the migration that re-created it.';
+      END IF;
+      IF NOT has_function_privilege('service_role', v_create_sig, 'EXECUTE') THEN
+        RAISE EXCEPTION
+          'OUTAGE (5h): service_role lacks EXECUTE on create_wizard_strategy — a REVOKE went one role too far and EVERY connect-a-key is broken for every user. This is also the anti-vacuity positive for the two assertions above, which both read TRUE on a database where the function no longer exists. REMEDY: GRANT EXECUTE ON FUNCTION public.create_wizard_strategy(uuid,text,text,text,text,text,text,text,integer,text,uuid,text) TO service_role;';
+      END IF;
+
+      IF has_function_privilege('authenticated', v_composite_sig, 'EXECUTE') THEN
+        RAISE EXCEPTION
+          'CONNECT-01 REGRESSION (5h): authenticated holds EXECUTE on add_wizard_composite_key. MECHANISM: Supabase pg_default_acl for public functions granted by role postgres is postgres=X anon=X authenticated=X service_role=X, so a DROP + CREATE SILENTLY RE-GRANTS anon and authenticated (it bit 20260812083206, post-verify :867). ⭐ Note the single-key twin may still be correctly shut — that asymmetry is the instance-not-class failure Phase 153.6 was convened to end. REMEDY: the migration that re-created this function must re-issue, in the same migration, REVOKE ALL ON FUNCTION public.add_wizard_composite_key(uuid,text,text,text,text,text,text,text,integer,text,uuid) FROM PUBLIC, anon, authenticated; and GRANT EXECUTE ON FUNCTION public.add_wizard_composite_key(uuid,text,text,text,text,text,text,text,integer,text,uuid) TO service_role;';
+      END IF;
+      IF has_function_privilege('anon', v_composite_sig, 'EXECUTE') THEN
+        RAISE EXCEPTION
+          'CONNECT-01 REGRESSION (5h): anon holds EXECUTE on add_wizard_composite_key — an UNAUTHENTICATED caller can POST /rest/v1/rpc/add_wizard_composite_key. MECHANISM: Supabase pg_default_acl re-grants anon on any DROP + CREATE of a public function owned by postgres (20260812083206:867 is the in-repo precedent). REMEDY: re-issue REVOKE ALL ON FUNCTION … FROM PUBLIC, anon, authenticated; and GRANT EXECUTE ON FUNCTION … TO service_role; in the migration that re-created it.';
+      END IF;
+      IF NOT has_function_privilege('service_role', v_composite_sig, 'EXECUTE') THEN
+        RAISE EXCEPTION
+          'OUTAGE (5h): service_role lacks EXECUTE on add_wizard_composite_key — a REVOKE went one role too far and EVERY composite connect-a-key is broken for every user. This is also the anti-vacuity positive for the two assertions above. REMEDY: GRANT EXECUTE ON FUNCTION public.add_wizard_composite_key(uuid,text,text,text,text,text,text,text,integer,text,uuid) TO service_role;';
+      END IF;
+      RAISE NOTICE 'Assertion 5h OK: the ACL CLASS holds — neither authenticated nor anon holds EXECUTE on EITHER wizard RPC, and service_role holds it on both. A future DROP + CREATE that lets pg_default_acl re-grant them reds here, on every PR.';
+    ELSE
+      RAISE NOTICE 'SKIP (5h): Migration B is not applied here — both wizard RPC bodies still carry auth.uid(), so authenticated legitimately still holds EXECUTE (the PR-A window). 5h enforces once the REVOKE lands.';
+    END IF;
+
   ELSE
+    -- ---- (5a‴) THE OUTER MARKER'S OWN DURABILITY ---------------------------
+    -- ⭐ This converts THIS FILE'S OLDEST SILENT-GREEN PATH into a red, from a
+    -- source no comment re-stamp can reach. Reaching this ELSE means the whole
+    -- 5-block is inert. That is legitimate on a database predating
+    -- 20260811210000 — and a catastrophe on one that carries Migration B, whose
+    -- own §4 re-stamps this very comment and is REQUIRED to preserve the older
+    -- substring. The body says Migration B landed; the comment says the block
+    -- may sleep. Believe the body.
+    IF v_revoke_landed THEN
+      RAISE EXCEPTION
+        'CR-01/156 REGRESSION (5a‴): create_wizard_strategy''s body carries ZERO auth.uid(), so migration 20260814120000 (Phase 156 Migration B) IS applied here — but the 20260811210000 marker has been dropped from the api_keys.attested_venue comment, so the ENTIRE 5a-5h block skipped with exit code 0 on a fully-migrated database. Every assertion this file makes about the RPC door, the scrub trigger and the coupling CHECK has been reporting green while asserting nothing. Restore the 20260811210000 substring in whichever migration re-stamped that comment.';
+    END IF;
+
     -- ⚠️ TWO DISTINCT SKIPPABLE STATES, and an operator reading a skip must be
     -- able to tell WHICH. This one is the outer marker: no 20260811210000 on the
     -- attested_venue comment ⇒ migration 20260811210000 is not applied here, so
