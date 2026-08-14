@@ -2489,3 +2489,21 @@ named files are unmodified by the phase, so neither was quietly half-done.
   its own decision (it is a migration + backfill question on a column that is live on PROD).
   ⚠️ **Distinct from A-3 above:** A-3 is about this value's *shape* (a login is unique only within a
   broker server); this entry is about its *provenance*. Fixing either does not fix the other.
+
+### Phase 153.7 ship gate — one unnamed vitest flake, recorded rather than lost (added 2026-08-14)
+
+- [ ] **`FLAKE-153.7-01` — the full local vitest suite failed exactly one test once, in parallel
+  mode, and I could not name it.** ⚠️ **This is a known-unknown on purpose.** Evidence, in order:
+  run 1 (`vitest run`, default parallel) → `Test Files 1 failed | 780 passed | 19 skipped`,
+  `Tests 1 failed | 11852 passed`; run 2 (identical command, no code change between) → exit 0;
+  run 3 (`vitest run --no-file-parallelism`) → `781 passed | 19 skipped`, `11853 passed`, exit 0.
+  Two clean full runs against one failure, so the phase gate is green and Phase 153.7 shipped on it.
+  ⛔ **Why this is written down instead of shrugged off:** the failing run's output was not captured,
+  so the test has no name. An unnamed flake that fires once locally is the shape that later fires in
+  a CI shard and reads as a regression in whatever PR happens to be open — costing a bisect against
+  an innocent diff. If a single-test failure appears in a vitest shard and does not reproduce under
+  `--no-file-parallelism`, check this entry BEFORE bisecting.
+  **What would close it:** capture a failing run (`vitest run > /tmp/run.txt 2>&1` in a loop until
+  non-zero) and name the test; then either fix the race or pin the file to `--no-file-parallelism`.
+  ⚠️ Local is Node 25, CI is Node 22 — reproduce under
+  `PATH=/opt/homebrew/opt/node@22/bin:$PATH` before concluding it is local-only.
