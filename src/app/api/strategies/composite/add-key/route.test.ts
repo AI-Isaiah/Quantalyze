@@ -1309,6 +1309,53 @@ describe("[140.3-13b / SEAMUX-08] POST /api/strategies/composite/add-key — Sen
     expect(validateKeyMock).not.toHaveBeenCalled();
     await expectNoCapture();
   });
+
+  /**
+   * [153.7-03 / WIZFORM-02-CLASS] the mt5-gateway family, ON THIS ROUTE — the
+   * TWIN of the case at the same arm in `create-with-key/route.test.ts`.
+   *
+   * ⚠️ THE TWIN IS THE POINT, and it is deliberately not "covered" by the other
+   * file. The verdict is ONE row in shared `wizardErrors.ts`, so it reached
+   * both routes at once and there was no one-route half-fix to catch. What a
+   * shared-table test cannot see is a future ROUTE-LOCAL change that re-opens
+   * the path here alone — and this catch block names the live example itself:
+   * pre-stringifying the caught value before classification sends a breaker
+   * trip to the terminal UNKNOWN/500 instead of the retryable 503. Fixing one
+   * path of a byte-identical pair is this milestone's most repeated mistake, so
+   * the alarm is installed on both.
+   *
+   * ⛔ The assertions are byte-identical to the twin's on purpose. A divergence
+   * here would mean the two routes had stopped answering the same wire code the
+   * same way, which is the fact worth failing on.
+   */
+  it("[153.7-03] MT5_GATEWAY_UNREACHABLE renders SERVICE_UNREACHABLE/503, and is NOT captured as unclassified", async () => {
+    validateKeyMock.mockRejectedValue(
+      Object.assign(
+        new Error("The MetaTrader gateway is not responding. Try again shortly."),
+        {
+          name: "AnalyticsUpstreamError",
+          status: 503,
+          seamCode: "MT5_GATEWAY_UNREACHABLE",
+          dependency: "mt5-gateway",
+        },
+      ),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    const json = await res.json();
+    expect(json.code).toBe("SERVICE_UNREACHABLE");
+    expect(json.code).not.toBe("UNKNOWN");
+    // ⛔ NOT `SERVICE_UNAVAILABLE_RETRY` — its "nothing was submitted" is
+    // knowable for a breaker that DECLINED to send and false-by-construction
+    // for a socket connect that WAS attempted and never answered.
+    expect(json.code).not.toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    await expectNoCapture();
+  });
 });
 
 /**

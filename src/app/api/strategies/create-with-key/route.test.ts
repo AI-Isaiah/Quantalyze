@@ -2681,6 +2681,61 @@ describe("[140.3-13b / SEAMUX-08] POST /api/strategies/create-with-key — Sentr
     expect(validateKeyMock).not.toHaveBeenCalled();
     await expectNoCapture();
   });
+
+  /**
+   * [153.7-03 / WIZFORM-02-CLASS] the mt5-gateway family, ON THIS ROUTE.
+   *
+   * ⚠️ WHY A ROUTE-LOCAL TEST FOR A FIX THAT IS NOT ROUTE-LOCAL. The verdict
+   * lives in ONE row of `VENUE_WIRE_CODE_TO_VERDICT` in shared
+   * `wizardErrors.ts`, so it reached this route and `composite/add-key` in the
+   * same commit — there was never a one-route half-fix to catch. What CAN
+   * still happen is a future route-local change that quietly re-opens the path:
+   * the add-key catch's own comment names the live example, pre-stringifying
+   * the caught value before classification, which sends a breaker trip to the
+   * terminal UNKNOWN/500 instead of the retryable 503. A shared-table test
+   * cannot see that; only a test that runs THIS handler can. Fixing one path
+   * of a byte-identical pair is this milestone's single most repeated mistake,
+   * so both routes carry the alarm and the twin case is deliberately written
+   * to the same shape.
+   *
+   * The mock reproduces what the seam really throws: the wire code on
+   * `seamCode` and the emitter's own `detail=` sentence as the message, both
+   * read from `_connect_and_probe` in the exchange router.
+   */
+  it("[153.7-03] MT5_GATEWAY_UNREACHABLE renders SERVICE_UNREACHABLE/503, and is NOT captured as unclassified", async () => {
+    validateKeyMock.mockRejectedValue(
+      Object.assign(
+        new Error("The MetaTrader gateway is not responding. Try again shortly."),
+        {
+          name: "AnalyticsUpstreamError",
+          status: 503,
+          seamCode: "MT5_GATEWAY_UNREACHABLE",
+          dependency: "mt5-gateway",
+        },
+      ),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    const json = await res.json();
+    expect(json.code).toBe("SERVICE_UNREACHABLE");
+    // The whole point, stated as its own assertion so the failure names it.
+    expect(json.code).not.toBe("UNKNOWN");
+    // ⛔ NOT `SERVICE_UNAVAILABLE_RETRY`. Its copy says nothing was submitted —
+    // knowable for a breaker that DECLINED to send, false-by-construction for a
+    // socket connect that WAS attempted and never answered. That trap is
+    // written into the shared table beside the row this asserts.
+    expect(json.code).not.toBe("SERVICE_UNAVAILABLE_RETRY");
+    // Fail-closed: classified before any encryption or DB insert.
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    // A classified verdict must not fire the unclassified-key-error capture —
+    // the `code === "UNKNOWN"` arm — or the noise this route was quiet about
+    // comes back for a failure we now answer precisely.
+    await expectNoCapture();
+  });
 });
 
 /**
