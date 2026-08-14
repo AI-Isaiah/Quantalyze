@@ -267,7 +267,24 @@ const ROUTES: readonly RouteUnderTest[] = [
     // member and `RATE_LIMITED` is translated to itself by
     // `SEAM_CODE_TO_WIZARD_CODE` before the roster is consulted (verified at
     // source, not assumed).
-    expectedSites: 29,
+    //
+    // 29 → 32 (153.7-03 / WIZFORM-02-CLASS). ⛔ NO GUARD WAS ADDED — this is
+    // the same good-news direction as the move above it, and it is the LAST
+    // one available on this route: the three rejections that still answered
+    // code-less now carry `DRAFT_LOOKUP_FAILED`, `DRAFT_FINALIZE_FAILED` and
+    // `SEAM_RESPONSE_UNREADABLE`, so all three crossed OUT of the code-less
+    // ledger and INTO this population. The sum is what proves nothing was
+    // invented: `EXPECTED_FINALIZE_REJECTION_SITES` is unchanged at 32, and
+    // `KNOWN_CODELESS_FINALIZE_REJECTIONS` falls 3 → 0 by the same three, so
+    // 32 − 32 = 0. A plan that had invented three rejections to "fix" would
+    // have moved that literal too.
+    //
+    // All three DID need a roster edit, unlike the 153.2-05 pair — none is a
+    // wire code and none is translated by `SEAM_CODE_TO_WIZARD_CODE`, so the
+    // membership check in `SubmitStep.tsx` is genuinely reached for them. The
+    // three rows land in the SAME commit the route starts emitting them
+    // (verified at source, not assumed).
+    expectedSites: 32,
   },
 ];
 
@@ -481,13 +498,36 @@ function deriveRejectionSites(
  * constant and its assertion collapse into "every rejection carries a code",
  * which is where WIZFORM-02's criterion actually lands.
  *
- * The three, by status, measured from stripped source (⚠️ a raw-source scan
- * with a fixed look-ahead window under-reports this population — it loses an
- * arm sitting behind a `console.error` block, which is the 14-vs-12 lesson
- * again in a new costume):
- *   · 500 — `"Could not load draft"`, the strategy lookup's failure.
- *   · 500 — `"Could not finalize wizard draft"`, the RPC's generic failure.
- *   · 502 — `"Upstream service returned unexpected response"`.
+ * ⭐⭐ 3 → 0 (153.7-03 / WIZFORM-02-CLASS). THE LEDGER IS EMPTY, AND THE
+ * COLLAPSE CONDITION THIS DOCBLOCK PRE-AUTHORISED IS THE ONE THAT WAS REACHED.
+ * The three rows that stood here — the 500 draft lookup, the 500 finalize-RPC
+ * tail and the 502 upstream-shape arm — are DELETED rather than annotated,
+ * which is exactly what the failure message below instructs for the downward
+ * direction. Each was fixed the way that message names: a code on the arm plus
+ * a member in `KNOWN_FINALIZE_CODES`, never a bump of this literal.
+ *
+ * ⛔ THE CONSTANT AND ITS ASSERTION STAY, and at zero they are stronger than
+ * they have ever been rather than redundant. `expect(codeless.length).toBe(0)`
+ * IS "every rejection this route makes carries a code" — the sentence this
+ * docblock said the number would collapse into, and where WIZFORM-02's
+ * criterion actually lands. Deleting the pair now would retire the guard at the
+ * exact moment it became able to state the property outright, and the next
+ * code-less arm would ship in silence.
+ *
+ * ⚠️ THE THREE COPY MEMBERS THE OLD NOTE SAID WERE OWED WERE WRITTEN, not
+ * borrowed. Each was authored against the claim its own arm makes observable:
+ * `DRAFT_LOOKUP_FAILED` may say nothing was changed (its arm is a SELECT that
+ * errored, with no write anywhere before it); `DRAFT_FINALIZE_FAILED` may NOT
+ * (the generic tail also catches a transport failure that could lose the answer
+ * to a write that landed); `SEAM_RESPONSE_UNREADABLE` may claim neither outcome
+ * (its upstream answered 2xx, so the submission was accepted and only the
+ * result is unreadable). Three arms, three different truths — which is why one
+ * shared member would have shipped a false sentence on two of them.
+ *
+ * The arithmetic, in the form `EXPECTED_FINALIZE_REJECTION_SITES` records it:
+ * `expectedSites` 29 → 32, this ledger 3 → 0, the total UNCHANGED at 32, so
+ * 32 − 32 = 0. A plan that had invented three rejections would have moved that
+ * total.
  *
  * ⭐ 5 → 3 (153.2-05 / WIZFORM-02). THE TWO LIMITER ARMS ARE FIXED, so their
  * rows are DELETED here rather than annotated — the direction the failure
@@ -512,8 +552,17 @@ function deriveRejectionSites(
  * `wizardErrors.ts` — Phase 153.1's file — plus three roster members, and it is
  * user-facing copy that wants the same care every other entry there got. It is
  * NOT deleted from this ledger to make a number smaller.
+ *
+ * ⭐ DISCHARGED at 153.7-03, and the paragraph above is kept rather than
+ * rewritten because it is the record of what was owed and it priced the work
+ * correctly: three copy members plus three roster rows, and its reason for
+ * deferring — that none of the incumbent entries could carry these three
+ * without asserting something false — held when it was finally checked. Two of
+ * the three members it named were newly minted; the draft-read one adopted the
+ * token `keys/sync` had already minted for the same fact, so the vocabulary
+ * gained two names, not three.
  */
-const KNOWN_CODELESS_FINALIZE_REJECTIONS = 3;
+const KNOWN_CODELESS_FINALIZE_REJECTIONS = 0;
 
 /**
  * Every rejection site on `finalize-wizard`, coded or not (measured 153.1-06).

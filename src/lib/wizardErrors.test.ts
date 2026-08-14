@@ -1745,13 +1745,31 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * Offering to destroy it for a fault they did not cause, and cannot clear,
    * would be the destructive-only class in its worst form.
    *
+   * **77 → 80 at 153.7-03** (WIZFORM-02-CLASS), which added
+   * `DRAFT_LOOKUP_FAILED`, `DRAFT_FINALIZE_FAILED` and
+   * `SEAM_RESPONSE_UNREADABLE` — the copy for the last three `finalize-wizard`
+   * rejections that answered with no code at all, taking that route's code-less
+   * ledger to zero. THIS guard's reasoning was re-run over each of the three
+   * before the number moved, and the answer is the same for all three: their
+   * `actions` are `clear_and_retry` + `request_call` (twice) and
+   * `leave_and_return` + `request_call` + `expand_log` — NO `start_fresh` on
+   * any of them — so all three sit outside the scanned population by
+   * construction and the destructive class below is unchanged at four members.
+   *
+   * ⭐ The exclusion is load-bearing on the same ground as the two entries
+   * above, and most sharply on `SEAM_RESPONSE_UNREADABLE`: that entry is
+   * reached when a submission was ACCEPTED upstream and only its answer was
+   * unreadable, so `start_fresh` would offer to delete the draft behind a
+   * strategy that may already exist — destroying the record the copy sends the
+   * user to go and check.
+   *
    * ⚠️ THIS NUMBER HAS A TWIN. The same literal is pinned in the
    * `[140.3-12 / SEAMUX-04]` describe below, and moving one without the other
    * is a silent half-fix — the shrink-detection it buys survives in one scan
    * and dies in the other. 153.1-04 added a third guard (at the end of this
    * file) that reads this source and reds when the two literals disagree.
    */
-  const EXPECTED_TABLE_SIZE = 77;
+  const EXPECTED_TABLE_SIZE = 80;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2086,11 +2104,44 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * future edit that "improves" the copy by adding that clause re-opens the
    * defect it was minted to avoid.
    *
+   * **77 → 80 at 153.7-03** (WIZFORM-02-CLASS) — `DRAFT_LOOKUP_FAILED`,
+   * `DRAFT_FINALIZE_FAILED`, `SEAM_RESPONSE_UNREADABLE`. All three were read
+   * against all four FORBIDDEN fragments by hand before the number moved. None
+   * mentions notification, trade fetching or a session field name — and the
+   * last of those is a near miss worth recording: `SEAM_RESPONSE_UNREADABLE`'s
+   * arm sits one function away from the dedupe mechanism, and the obvious
+   * reassurance ("submitting again resolves to the strategy that already
+   * exists") was DELIBERATELY NOT WRITTEN, because that promise rests on a
+   * partial unique index predicated on a NON-NULL wizard session id and this
+   * route forwards the id through a conditional spread. True for most drafts,
+   * silently false for the rest — which is exactly the shape 140.4-03 recorded
+   * when the same guarantee was published ahead of its mechanism.
+   *
+   * ⭐ "data is unchanged" is again the fragment needing care, and the three
+   * entries answer it DIFFERENTLY, which is the reason they are three members
+   * and not one:
+   *   · `DRAFT_LOOKUP_FAILED` DOES make a server-state claim — "Nothing was
+   *     submitted and nothing was changed". Not the banned string, and
+   *     observable rather than asserted: its arm is a `.maybeSingle()` SELECT
+   *     that errored, and the handler contains no `.insert`, `.update`,
+   *     `.upsert`, `.delete` or `.rpc` before it. A read that fails cannot have
+   *     written, which is the strongest ground of the three.
+   *   · `DRAFT_FINALIZE_FAILED` MAKES NO SUCH CLAIM, on purpose. It is the
+   *     generic tail of the RPC's error branch, so it catches both a SQL raise
+   *     (transaction rolled back, nothing landed) and a transport failure that
+   *     can lose the answer to a write that DID land. It says we cannot confirm
+   *     — true in both worlds — and that omission is the entry's whole point.
+   *   · `SEAM_RESPONSE_UNREADABLE` MAY NOT CLAIM EITHER OUTCOME. Its upstream
+   *     answered 2xx, so the submission was accepted and only the result is
+   *     unreadable. "Nothing was saved" would be false whenever the onboard
+   *     landed; "it went through" would be a guess about a body we could not
+   *     parse. The copy states what the 2xx establishes and nothing further.
+   *
    * ⚠️ THIS NUMBER HAS A TWIN in the `[140.3-10 / TRAP-4]` describe above.
    * Moving one without the other is a silent half-fix; the guard added at the
    * end of this file reds when the two literals disagree.
    */
-  const EXPECTED_TABLE_SIZE = 77;
+  const EXPECTED_TABLE_SIZE = 80;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(

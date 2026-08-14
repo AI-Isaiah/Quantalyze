@@ -275,6 +275,50 @@ export type WizardErrorCode =
   // to this") and `GATE_DRAFT_GONE` says the draft is not there at all. This
   // draft exists, is the caller's, and has simply MOVED ON.
   | "DRAFT_STATE_INVALID"
+  // 153.7-03 / WIZFORM-02-CLASS — TWO OF THE THREE `finalize-wizard`
+  // REJECTIONS THAT ANSWERED WITH NO CODE AT ALL. Both were recorded as known
+  // debt by 153.1-06's ledger and both are fixed here; the third
+  // (`SEAM_RESPONSE_UNREADABLE`) sits with the seam family below because its
+  // fault is the seam's, not the draft's.
+  //
+  // ⭐ `DRAFT_LOOKUP_FAILED` IS NOT A NEW NAME — it is the token this repo
+  // already uses for exactly this fact. `keys/sync`'s draft-read split minted
+  // it, and its own comment records that it copied the template from THIS
+  // route's `wizard_session_id` draft read. `verify-strategy` states the rule
+  // when it mints `VERIFY_PERSIST_FAILED` on that precedent: same fact ⇒ same
+  // token. Minting a second name for one fact is how a vocabulary starts lying,
+  // so this member adopts the existing token and gives it copy.
+  //
+  // WHAT EACH ONE MAY CLAIM, measured at its own arm rather than shared:
+  //   · `DRAFT_LOOKUP_FAILED` — the arm is a `.maybeSingle()` SELECT that
+  //     errored, and nothing in the handler writes before it (no `.insert`,
+  //     `.update`, `.upsert`, `.delete` or `.rpc` precedes it). "Nothing was
+  //     submitted and nothing was changed" is a fact about a read, so it is
+  //     knowable in the way 140.3-15 requires and the CSV case lacked.
+  //   · `DRAFT_FINALIZE_FAILED` — the GENERIC tail of the finalize RPC's error
+  //     branch, reached only after P0002/02000, 42501 and 22023 have been split
+  //     off. That residue holds two different worlds: a SQL raise (Postgres
+  //     rolled the SECURITY DEFINER transaction back, so nothing landed) and a
+  //     transport failure reaching PostgREST (the write MAY have landed). So
+  //     this copy must NOT say nothing was saved — it says we cannot confirm,
+  //     which is true in both worlds.
+  //
+  // ⚠️ NOT `DRAFT_STATE_INVALID` for either, and it would assert something
+  // false: that member says the draft MOVED ON — a fact the 22023 arm above
+  // establishes by reading the RPC's own SQLSTATE. Neither of these two knows
+  // anything about the draft's state; one could not read it and the other could
+  // not finish writing it.
+  | "DRAFT_LOOKUP_FAILED"
+  // RECOVERABLE, deliberately, and on the opposite mechanism to the members
+  // above it: `clear_and_retry` IS a member of `RECOVERABLE_ACTIONS`
+  // (src/lib/envelope.ts), so `buildEnvelope` derives `recoverable: true` and
+  // the Retry control renders. A retry here can WIN — the common causes are a
+  // pool blip, a deadlock and a serialization failure — and a retry cannot
+  // HARM, because `finalize_wizard_strategy` is state-guarded: run a second
+  // time against a draft that already finalized it raises 22023, which the arm
+  // above answers as `DRAFT_STATE_INVALID` rather than creating a second
+  // strategy. Both halves are why the control is offered.
+  | "DRAFT_FINALIZE_FAILED"
   // Phase 17 NEW — CSV branch absorption (DESIGN-05).
   | "CSV_PARSE_FAILED"
   | "CSV_SCHEMA_VIOLATION"
@@ -477,6 +521,43 @@ export type WizardErrorCode =
   // mechanism `SEAM_MISCONFIGURED` and `ALLOCATION_NOT_ALLOCATABLE` use. All
   // three wire codes it homes are `retryable=False` at their emitters.
   | "SEAM_INTERNAL_FAULT"
+  // 153.7-03 / WIZFORM-02-CLASS — the THIRD code-less `finalize-wizard`
+  // rejection, and the only one of the three whose outcome is genuinely
+  // unknowable. The unified arm's upstream answered **2xx** with a body that
+  // fails `isProcessKeyOnboardResponse`, so the submission was ACCEPTED and we
+  // cannot read what was done with it. A partial deploy, a field rename or a
+  // proxy that strips the body all produce it.
+  //
+  // ⭐ THE COPY'S HARDEST CONSTRAINT IS WHAT IT MAY NOT SAY. Every other member
+  // near it can state whether anything was saved; this one cannot, in either
+  // direction. "Nothing was saved" is false whenever the onboard really did
+  // land, and "it went through" is a guess about a body we could not parse. The
+  // entry therefore claims only what the 2xx establishes — the submission
+  // reached the service — and sends the user to the one place that settles it.
+  //
+  // ⚠️ AND IT MAY NOT PROMISE DEDUPE. `CSV_SUBMIT_NO_STRATEGY_ID` can say a
+  // resubmit resolves to the strategy that already exists, because the partial
+  // unique index behind that promise is predicated on a NON-NULL wizard session
+  // id and the CSV path always writes one. This arm forwards the id with a
+  // CONDITIONAL SPREAD — a draft carrying none sends no id at all — so the
+  // promise would be true for most users and silently false for the rest. That
+  // is the exact shape 140.4-03 recorded when this guarantee was published
+  // before the mechanism could keep it.
+  //
+  // NOT recoverable, deliberately: `actions` carries neither member of
+  // `RECOVERABLE_ACTIONS` (src/lib/envelope.ts), so no Retry control renders.
+  // ⛔ THE ABSENCE IS THE POINT and it is NOT the usual reason. Retrying is not
+  // futile here — it is UNPREDICTABLE, because neither we nor the user knows
+  // what the first submission did. A one-click Retry on an unconfirmed submit
+  // is a control whose effect the person pressing it cannot foresee, so the
+  // remedy is ordered instead: look first, then decide.
+  //
+  // ⚠️ NOT `SEAM_INTERNAL_FAULT` above and NOT `KEY_SCOPE_CHECK_UNREADABLE`,
+  // and each asserts something false: `SEAM_INTERNAL_FAULT` says the check
+  // never completed and no key was stored — here a whole onboarding may have
+  // completed; `KEY_SCOPE_CHECK_UNREADABLE` is about the pre-publish permission
+  // probe, a read whose failure changes nothing.
+  | "SEAM_RESPONSE_UNREADABLE"
   // 153.1-04 / UI-SPEC Gate A — the answer did not arrive inside the time WE
   // granted. Distinguishable client-side: our own abort fired and no transport
   // error was observed, so this is OUR deadline expiring, not the broker
@@ -1580,6 +1661,58 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["leave_and_return", "expand_log"],
   },
 
+  // 153.7-03 / WIZFORM-02-CLASS — the first two of the three code-less
+  // `finalize-wizard` rejections. Until this plan both rendered the UNKNOWN
+  // card — "We could not classify this failure" — for failures the route
+  // classified well enough to pick a status and write a sentence about.
+  //
+  // Both entries are written under the measured-truth gate 140.3-15 set: a
+  // claim about server state is made only where the ARM makes it observable.
+  // That gate is why these two entries differ on exactly one clause, and the
+  // difference is the whole reason they are separate members.
+  DRAFT_LOOKUP_FAILED: {
+    title: "We could not read this draft.",
+    cause:
+      "A read of your draft failed on our side before anything else ran. Nothing was submitted and nothing was changed — the fault is in our database, not in your key, your exchange or your data. Reads like this usually succeed on the next attempt.",
+    fix: [
+      "Wait a moment and try again — the read usually succeeds on retry.",
+      "If it keeps failing, email security@quantalyze.com with the correlation id below. Your draft is saved either way.",
+    ],
+    docsHref: "/security#sync-timing",
+    // RECOVERABLE: `clear_and_retry` is a member of `RECOVERABLE_ACTIONS`
+    // (src/lib/envelope.ts), so `buildEnvelope` derives `recoverable: true` and
+    // the Retry control renders. Correct here — the arm is a transient read
+    // failure, which is the same condition `WIZARD_KEYS_LOAD_FAILED` above is
+    // recoverable for, and this entry is modelled on it.
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  DRAFT_FINALIZE_FAILED: {
+    title: "We could not finish submitting this strategy.",
+    cause:
+      "The last write failed, and the database's answer was not one we have a specific reply for. We cannot confirm from here whether anything was recorded, so we are not going to claim either way. The fault is on our side, not in your key or your exchange.",
+    fix: [
+      "Try again. Submitting is state-guarded: if the first attempt did go through, the next one tells you the draft has already moved on rather than creating a second strategy.",
+      "If it keeps failing, email security@quantalyze.com with the correlation id below.",
+    ],
+    docsHref: "/security",
+    // RECOVERABLE, and both halves of that decision were checked rather than
+    // assumed. A retry CAN win: the residue this arm catches is dominated by
+    // transient database conditions. A retry cannot HARM: a second finalize
+    // against a draft that already finalized raises 22023, which the arm above
+    // this one answers as `DRAFT_STATE_INVALID` — an honest, non-recoverable
+    // card — instead of writing a duplicate.
+    //
+    // ⚠️ THE COPY DOES NOT SAY "nothing was saved", and that omission is
+    // deliberate. This arm is the GENERIC tail of the RPC error branch, so it
+    // also catches a transport failure reaching PostgREST, where the write may
+    // have landed and the answer was lost. The stronger sentence is true for a
+    // SQL raise and false for that case, and shipping it would be the same
+    // unobservable claim the `FORBIDDEN` list's "data is unchanged" entry
+    // exists to ban.
+    actions: ["clear_and_retry", "request_call"],
+  },
+
   // ============================================================
   // Phase 17 NEW — CSV branch absorption (DESIGN-05).
   // Source-of-truth for the 17 CSV-branch error codes Phase 15 left
@@ -2269,6 +2402,38 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     // cannot work. `request_call` keeps a way out that can actually resolve it;
     // `expand_log` opens the correlation id the first fix line asks for.
     actions: ["request_call", "expand_log"],
+  },
+
+  // 153.7-03 / WIZFORM-02-CLASS — the third code-less `finalize-wizard`
+  // rejection, and the one that is hard for the opposite reason to its two
+  // siblings above: the fault is easy to describe and the OUTCOME is unknown.
+  //
+  // The unified arm's upstream answered 2xx with a body the onboard contract
+  // guard rejects, so the submission was accepted and its result is unreadable.
+  // Every sentence below is bounded by that: the entry states the one thing the
+  // 2xx establishes, refuses both outcome claims, and puts the user in front of
+  // the record that settles it.
+  SEAM_RESPONSE_UNREADABLE: {
+    title: "We could not read the service's answer to your submission.",
+    cause:
+      "Your submission reached the service that processes it and the service did answer — but in a shape we do not recognise, most often because a release of ours was mid-rollout. So we cannot tell you whether the strategy was accepted, and we would rather say that than guess.",
+    fix: [
+      "Open your strategies list first. If the submission went through, the strategy is there with its review status.",
+      "If it is not there after a minute, submit again.",
+      "If this keeps happening, email security@quantalyze.com with the correlation id below.",
+    ],
+    docsHref: "/security",
+    // ⛔ NOT recoverable: `actions` carries neither member of
+    // `RECOVERABLE_ACTIONS` (src/lib/envelope.ts), so `buildEnvelope` derives
+    // `recoverable: false` and no Retry control renders — and the reason is
+    // NOT the usual one. Retrying is not futile here, it is UNPREDICTABLE:
+    // nobody, including us, knows what the first submission did. A one-click
+    // Retry on an unconfirmed submit is a control whose effect the person
+    // pressing it cannot foresee, so the remedy is ordered instead and
+    // `leave_and_return` carries the first step of it — the same control
+    // `WIZARD_DUPLICATE` uses to send a user to the record rather than at the
+    // button again.
+    actions: ["leave_and_return", "request_call", "expand_log"],
   },
 
   // 153.1-04 / UI-SPEC Gate A — copy authored from the spec's field table.
