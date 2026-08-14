@@ -1669,6 +1669,66 @@ describe("[153.7 review W-153.7-1] every CLASSIFIER-returned code is admitted by
     }
   });
 
+  /**
+   * ⭐ W-153.7-4 — THE FACT THE CORRECTED PROSE RESTS ON, ASSERTED SO IT STAYS
+   * TRUE.
+   *
+   * `REQUIREMENTS.md`'s WIZFORM-02 rollup used to write the residue as *"six
+   * analytics-service codes still render `UNKNOWN` … plus `KEY_UNDECRYPTABLE` on
+   * `keys/[id]/permissions`"*. Measured, that route's terminal answers
+   * `PROBE_FAILED` / `PROBE_BACKEND_UNAVAILABLE` / `PROBE_TIMEOUT` /
+   * `PROBE_RATE_LIMITED` / `CIRCUIT_OPEN` and **`UNKNOWN` is not in its
+   * vocabulary at all** — so the sentence overstated the residue by one code,
+   * and the `TODOS.md` entry (which says the real defect is a wrong REMEDY
+   * sentence) was the one telling the truth. The rollup is corrected.
+   *
+   * ⛔ WHAT THIS TEST IS AND IS NOT. It does NOT pin the prose — pinning a
+   * sentence is the anti-pattern, and a documentation correction cannot have a
+   * test that fails without it. It pins the MEASUREMENT the corrected sentence
+   * and the TODOS item both rest on. The day this route starts minting `UNKNOWN`,
+   * both records become wrong AND a wizard-adjacent surface starts rendering
+   * `"UNKNOWN: …"` through `KeyPermissionBadge` — so CI should say so rather
+   * than leaving two documents to rot quietly.
+   *
+   * ⚠️ THE COMMENT STRIP IS LOAD-BEARING, exactly as this file's header argues:
+   * the route's own docblock QUOTES `{code:"UNKNOWN", status:500}` while
+   * explaining why it does not use it. A raw grep reports the opposite of the
+   * truth here.
+   */
+  it("[W-153.7-4] keys/[id]/permissions mints no UNKNOWN — the measurement the rollup was corrected to", () => {
+    const source = stripped(
+      join(REPO, "src/app/api/keys/[id]/permissions/route.ts"),
+    );
+
+    // POSITIVE CONTROL FIRST. A path typo or a moved route would make the
+    // negative below pass over an empty string.
+    for (const code of [
+      "PROBE_FAILED",
+      "PROBE_BACKEND_UNAVAILABLE",
+      "PROBE_TIMEOUT",
+      "PROBE_RATE_LIMITED",
+      "CIRCUIT_OPEN",
+    ]) {
+      expect(
+        source.includes(`"${code}"`),
+        `keys/[id]/permissions no longer mints ${code}. Either its private ` +
+          `PROBE_* cascade changed (see the TODOS.md item that owns giving it a ` +
+          `coverage law) or this scan is reading the wrong file — and a scan ` +
+          `reading nothing would pass the assertion below for the worst reason.`,
+      ).toBe(true);
+    }
+
+    expect(
+      source.includes('"UNKNOWN"'),
+      `keys/[id]/permissions now mints UNKNOWN. TWO records go stale the moment ` +
+        `it does — REQUIREMENTS.md's WIZFORM-02 residue sentence and the ` +
+        `TODOS.md item, both of which say this route's defect is a wrong REMEDY ` +
+        `sentence rather than an UNKNOWN card — and its wizard-adjacent ` +
+        `consumer KeyPermissionBadge renders the route's own { code, error } as ` +
+        `plain "CODE: message" text, so a user reads the literal word UNKNOWN.`,
+    ).toBe(false);
+  });
+
   it("SELF-TEST — a code the ALIAS TABLE answers needs no roster row", () => {
     // The admission rule has two limbs and only one of them is exercised by the
     // real data at HEAD in an obvious way. `SEAM_MISCONFIGURED` is the live
