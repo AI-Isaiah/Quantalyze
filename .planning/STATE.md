@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
-stopped_at: Phase 153.7 plan 01 complete (mechanism landed RED BY DESIGN — do not green it here)
-last_updated: "2026-08-14T05:20:00.000Z"
-last_activity: 2026-08-14 -- Phase 153.7 plan 01 executed (scanner reach widened root + shape, population 17 to 37, exactly one designed failure naming the 20 undisposed codes)
+stopped_at: Phase 153.7 plan 02 complete (all 20 codes dispositioned — plan 01's designed red is GREEN)
+last_updated: "2026-08-14T07:50:00.000Z"
+last_activity: 2026-08-14 -- Phase 153.7 plan 02 executed (8 verdict rows + 12 measured exemptions; SEAM_INTERNAL_FAULT minted; neuter-proof FL-1 recorded)
 progress:
   total_phases: 17
   completed_phases: 14
   total_plans: 91
-  completed_plans: 89
-  percent: 82
+  completed_plans: 90
+  percent: 83
 ---
 
 # Project State — Quantalyze
@@ -56,9 +56,9 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 ## Current Position
 
 Phase: 153.7 (WIZFORM-02-CLASS — every code that can reach a user is covered) — executing, branch `feat/phase-153.7-wizform-02-class`
-Plan: 1 of 3 complete (`153.7-01-SUMMARY.md`).
-Status: ⭐ **`src/lib/seam-venue-vocabulary.invariant.test.ts` IS RED ON PURPOSE and that is the deliverable.** The scanner's population went 17 → **37** codes (root widened to `analytics-service/**` with three pinned, reasoned exclusions; the `service_error` / `service_error_response` / `service_error_body` / `VenueTransientHTTPException` call family taught with per-callee argument slots). Exactly ONE test fails — the pre-existing "EVERY derived code has an explicit disposition" assertion — naming exactly the **20** undisposed codes. ⛔ **Do NOT green it by adding disposition rows here**: those 20 rows are Plan 02's entire job, and landing them early collapses the phase's red→green proof. ⚠️ This branch must not be merged before Plan 02.
-Last activity: 2026-08-14 -- Phase 153.7 plan 01 executed (deriveEmitterSites root-parameterised, call-shape matcher cross-checked exactly against an independently regenerated Python `ast` census, pin family re-cut, reach + both-shapes assertions and a tmpdir falsifier added)
+Plan: 2 of 3 complete (`153.7-01-SUMMARY.md`, `153.7-02-SUMMARY.md`).
+Status: ⭐ **Plan 01's designed red is GREEN, and that is the phase's red→green proof.** `seam-venue-vocabulary.invariant.test.ts` is 20/20: all **37** derived codes are dispositioned — 8 verdict rows in `VENUE_WIRE_CODE_TO_VERDICT` for the codes that reach `classifyKeyValidationError`, 12 individually-measured rows in `VENUE_WIRE_CODES_WITHOUT_VERDICT` for the ones that render through another classifier. The 8×`UNKNOWN`/500 replay red was recorded BEFORE the rows landed (commit `7122ee7e`) and is quoted verbatim in the summary. ⚠️ **One wizard copy member was MINTED** — `SEAM_INTERNAL_FAULT`, `EXPECTED_TABLE_SIZE` 76 → 77 at both declarations — because `SEAM_MISCONFIGURED`'s "we stopped before sending the request" is measurably FALSE at `INTERNAL`'s emitter and at one of `MT5_GATEWAY_UNCONFIGURED`'s four. It needed 2 roster rows; `SEAM_MISCONFIGURED` needed none (both key steps translate through `SEAM_CODE_TO_WIZARD_CODE` first — measured, and it contradicts the plan's constraint 6). ⚠️ Plan 03 still owes the three code-less finalize rejections, the twin route regressions and the TODOS.md deferral before WIZFORM-02 may be ticked.
+Last activity: 2026-08-14 -- Phase 153.7 plan 02 executed (20 dispositions landed, FL-1 neuter-proof recorded, no route file touched)
 
 ⭐ Two receipts worth not re-deriving: the matcher's output agrees with the AST census on all four
 metrics (42 call sites, 2 literal-less, 22 distinct call-shape codes, per-file table identical) —
