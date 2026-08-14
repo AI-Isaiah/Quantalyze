@@ -2962,6 +2962,178 @@ export const VENUE_WIRE_CODES_WITHOUT_VERDICT: ReadonlyMap<string, string> =
         "Rendered by CsvValidationEnvelope through WIZARD_ERROR_COPY, never by " +
         "this classifier.",
     ],
+    // ── 153.7-02 / WIZFORM-02-CLASS — the twelve codes the widened scan found
+    // that reach a user through some OTHER classifier ────────────────────────
+    //
+    // ⚠️ READ THIS BEFORE ADDING A THIRTEENTH. These twelve are TWELVE DIFFERENT
+    // MEASUREMENTS, not one disposition applied twelve times. `CSV_FORMAT_UNSUPPORTED`
+    // above is the shortest row in this table and it works only because it
+    // explicitly back-references a sibling in the same family; twelve rows of
+    // that shape would make this half of the coverage law cover everything and
+    // assert nothing, which is the exact defect 153.7 exists to close. Each row
+    // below names ITS OWN consuming route and ITS OWN arm, and each was read at
+    // that arm rather than inferred from the code's name.
+    //
+    // ⭐ SEVERAL OF THESE STILL RENDER AS `UNKNOWN`, and the rows say so instead
+    // of hiding it. That residue is REAL and it is recorded rather than papered
+    // over — but it is not fixable from this table, because none of the routes
+    // below calls `classifyKeyValidationError` at all. A verdict row for them
+    // would be a change that cannot reach the surface it claims to fix, which is
+    // a worse outcome than an honest exemption: it would read as a fix in the
+    // diff and green the coverage law for nothing.
+    //
+    // Anchors are SYMBOLS throughout — functions, arms and machine codes — and
+    // that is load-bearing here in a way it is not elsewhere: a `file.py:NNN`
+    // inside one of these STRINGS would pass the citation guard, whose own
+    // self-test asserts that a citation in a string literal is not an offence.
+    // The rot would ship with the guard as its alibi.
+    [
+      "UNAUTHENTICATED",
+      "Detail: 'Unauthorized', 401, raised by the `_gate_process_key` middleware " +
+        "gate in main.py and reachable on the `/process-key` paths ONLY. It is " +
+        "relayed to the browser BYTE-FOR-BYTE with its own status by " +
+        "`postProcessKey` in process-key-client, which forwards a non-ok JSON " +
+        "body unchanged and never classifies it, so it renders through the " +
+        "SyncPreview and CSV surfaces rather than through any key-connect step. " +
+        "⚠️ ONE NAME, TWO VOCABULARIES, recorded and deliberately NOT renamed: " +
+        "six Next routes of our own mint `code: \"UNAUTHENTICATED\"` from " +
+        "TypeScript for a missing Supabase session (portfolio-optimizer, " +
+        "scenario/optimize, simulator, admin/match/recompute, admin/match/eval, " +
+        "admin/strategy-review). Same precedent as RATE_LIMITED, which is our " +
+        "limiter in one vocabulary and a venue throttle in the other: a shared " +
+        "name is a fact to state, not a collision to fix by renaming.",
+    ],
+    [
+      "INTERNAL_TOKEN_UNCONFIGURED",
+      "Detail: 'Service not configured', 500, from the UNSET-SECRET arm of the " +
+        "same `_gate_process_key` gate — the arm that runs FIRST, before any " +
+        "comparison, precisely so an unset secret cannot compare equal to an " +
+        "empty bearer and admit the request. It shares that gate with " +
+        "UNAUTHENTICATED and NOT its disposition: this one is OUR " +
+        "misconfiguration answered 500 retryable:false, where the sibling is a " +
+        "caller fault answered 401. Both are relayed unclassified by " +
+        "`postProcessKey`, so neither reaches this function. A verdict row here " +
+        "would state a wizard verdict for a path with no wizard on it.",
+    ],
+    [
+      "KEY_MISSING_EXCHANGE",
+      "Detail: 'This API key has no exchange set and cannot be probed.', 422, " +
+        "from `get_key_permissions` in internal.py — the caller's own stored row " +
+        "carrying a NULL exchange column. It lands in the keys/[id]/permissions " +
+        "route, which runs a FOURTH classifier with a private PROBE_* vocabulary. " +
+        "Measured through that route's arms: the body is JSON with a nested " +
+        "envelope, so the thrown message is the human sentence rather than the " +
+        "`Upstream <status>` fallback, and it matches neither the config " +
+        "sentinels nor the timeout needles — it exits as PROBE_FAILED 502 with " +
+        "'Could not check key scopes. Try again.' That route's docblock records " +
+        "why it is separate: routed through THIS classifier, five of its six real " +
+        "messages fall to UNKNOWN/500, because every fault reachable there is a " +
+        "proxy-infrastructure fault and this function classifies key faults.",
+    ],
+    [
+      "KEY_UNDECRYPTABLE",
+      "Detail: 'This stored key could not be decrypted. It must be reconnected.', " +
+        "500 retryable:false, from `decrypt_credentials` failing inside " +
+        "`get_key_permissions`. It shares the permissions route with " +
+        "KEY_MISSING_EXCHANGE and is worth its own row because its REMEDY is " +
+        "different and is the only actionable one in the pair: the user must " +
+        "reconnect the key, and today the PROBE_FAILED envelope tells them to " +
+        "'try again' — which cannot work for a ciphertext that will never " +
+        "decrypt. That is a real gap, it belongs to the permissions route's own " +
+        "vocabulary, and a row in this table cannot close it because that route " +
+        "never calls this function.",
+    ],
+    [
+      "ADMIN_CHECK_UNAVAILABLE",
+      "Detail: 'actor admin check temporarily unavailable — please retry', 503, " +
+        "from `recompute` in match.py when the actor's admin lookup fails. It " +
+        "reaches only the admin match-recompute route, which forwards an upstream " +
+        "4xx with the upstream's own machine code but sends everything 500-and-up " +
+        "to its terminal arm — so a 503 answers the admin client as UNKNOWN/500 " +
+        "with generic copy plus a Sentry capture. The route is admin-only and " +
+        "never touches a key, so no wizard verdict is true of it; the honest fix " +
+        "is a status-aware arm in that route, not a row here.",
+    ],
+    [
+      "ROLE_CHECK_UNAVAILABLE",
+      "Detail: 'profile role check temporarily unavailable — please retry', 503, " +
+        "from `recompute` in match.py. Listed SEPARATELY from " +
+        "ADMIN_CHECK_UNAVAILABLE rather than folded into it, because they are two " +
+        "different lookups failing — the actor's admin flag and the profile's " +
+        "role — and collapsing them is how a guard stops being able to tell an " +
+        "operator which check went down. Same route, same terminal arm, same " +
+        "reason a wizard verdict would be a fabrication: the match-recompute " +
+        "surface has no key-connect step and no key.",
+    ],
+    [
+      "SCORING_FAILED",
+      "Detail: 'Scoring failed on our side. This has been logged.', 500 " +
+        "retryable:false, from the match engine's scoring pass in `recompute`. " +
+        "Unlike its two 503 siblings on the same route this one is PERMANENT — " +
+        "the engine raised, and an identical retry re-raises — which is exactly " +
+        "why it must not borrow a KEY_* verdict: every retryable member in this " +
+        "table would offer a Retry control against a computation that fails the " +
+        "same way each time. It renders through the admin route's terminal arm, " +
+        "which is where the honest remedy belongs.",
+    ],
+    [
+      "EVAL_WINDOW_TOO_LARGE",
+      "A 400 from `eval_metrics` in match.py whose detail is COMPOSED at the " +
+        "emitter (page count, page size and an optional hint), so no fixed string " +
+        "can be quoted here — the first code in this table with that property, " +
+        "and the reason its row names the shape instead. It is also the only one " +
+        "of the twelve that already arrives INTACT: the admin match-eval route " +
+        "forwards 4xx with `code: err.seamCode`, so the client receives " +
+        "EVAL_WINDOW_TOO_LARGE verbatim at status 400. A row in this table would " +
+        "translate a code that is already being read correctly, one vocabulary " +
+        "further from its consumer.",
+    ],
+    [
+      "EVAL_FAILED",
+      "Detail: 'Eval failed on our side. This has been logged.', 500, the " +
+        "unclassified residue of `eval_metrics` after its own typed arms have " +
+        "run. It is the sibling of EVAL_WINDOW_TOO_LARGE on the same handler and " +
+        "takes the OPPOSITE path out of the admin match-eval route: 500 misses " +
+        "the 4xx forward and lands on the terminal arm. Being the producer's own " +
+        "declared residue, mapping it to a specific wizard verdict would " +
+        "manufacture a diagnosis the emitter explicitly declined to make — the " +
+        "same ground VALIDATION_UNEXPECTED stands on above, reached from a " +
+        "different service entry point.",
+    ],
+    [
+      "ANALYTICS_ROW_NOT_CREATED",
+      "Detail: 'Could not start the analytics computation — please retry.', 503, " +
+        "from `_compute_portfolio_analytics` in portfolio.py when the analytics " +
+        "row insert returns nothing. ⭐ IT REACHES NO USER AT ALL TODAY, and that " +
+        "is measured rather than assumed: its only TypeScript entry point is " +
+        "`computePortfolioAnalytics` in analytics-client, which has ZERO " +
+        "production callers — a fact independently pinned in that module's own " +
+        "test roster, in resilient-fetch's budget census and in the seam retry " +
+        "registry. It is dispositioned here so the coverage law does not have to " +
+        "guess, and the day a caller appears the row is what a reviewer will read.",
+    ],
+    [
+      "PORTFOLIO_ANALYTICS_FAILED",
+      "Detail: 'Portfolio analytics computation failed', 500, the outer catch of " +
+        "the same `_compute_portfolio_analytics` computation. It shares " +
+        "ANALYTICS_ROW_NOT_CREATED's zero-caller state and differs on the one " +
+        "thing a disposition turns on: the sibling fires BEFORE the computation " +
+        "starts and says 'please retry', while this one fires after it ran and " +
+        "failed. If this endpoint ever gains a caller they need two different " +
+        "sentences, which is the whole reason they are two rows and not a family " +
+        "note.",
+    ],
+    [
+      "SIMULATION_FAILED",
+      "Detail: 'Portfolio impact simulation failed', 500, from " +
+        "`portfolio_simulator` in simulator.py. Its consumer is the simulator " +
+        "route, which — like the two admin match routes — forwards 4xx with the " +
+        "upstream code and answers everything 500-and-up from its own terminal " +
+        "arm, here with 'Portfolio impact simulation failed.' and code UNKNOWN. " +
+        "That surface is the portfolio impact panel, which has no key, no draft " +
+        "and no connect step, so every KEY_* and SEAM_* member in this table " +
+        "would be describing a wizard the user is not in.",
+    ],
   ]);
 
 /**
