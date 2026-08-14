@@ -1312,6 +1312,213 @@ describe("[140.3-05 / TS-35] the wire code decides before the substring cascade 
 });
 
 // ══════════════════════════════════════════════════════════════════════════
+// Phase 153.7-02 / WIZFORM-02-CLASS — the EIGHT analytics-service codes that
+// reach `classifyKeyValidationError` and had no verdict row.
+//
+// ⭐ WHY THESE EIGHT AND NOT THE TWENTY. 153.7-01 widened the Python emitter
+// scan (root `analytics-service/**`, plus the `service_error(...)` /
+// `service_error_body(...)` / `service_error_response(...)` /
+// `VenueTransientHTTPException(code=…)` call shapes) from 17 codes to 37, and
+// left 20 with no disposition. Twelve of the twenty render through a DIFFERENT
+// classifier and take a reasoned `VENUE_WIRE_CODES_WITHOUT_VERDICT` row. These
+// eight are raised inside `validate_key` / `encrypt_key` (`routers/exchange.py`)
+// or by the `verify_service_key` HTTP middleware (`main.py`), all of which sit
+// under the `try` that `create-with-key` and `composite/add-key` catch — so
+// every one of them arrives at this classifier as `err.seamCode`.
+//
+// ⭐ THE MEASURED HARM, recorded here because it is what these cases exist to
+// stop regressing: at 153.7-01's HEAD all eight replays below answered
+// `{ code: "UNKNOWN", status: 500 }` — the terminal that admits knowing nothing
+// — and `ConnectKeyStep` / `MultiKeyConnectStep` rendered "We could not
+// classify this failure" for a fault the server had classified precisely. The
+// eight-code family is NOT MT5-specific: `EXCHANGE_PROBE_FAILED` is a 424 with
+// `retryable=True` and `dependency=<the caller's venue>` on EVERY venue.
+//
+// ⚠️ THE MESSAGES BELOW ARE THE REAL PYTHON `detail=` ARGUMENTS, byte-copied
+// from their emitters, and each case carries a NO-CODE CONTROL asserting the
+// same sentence still lands where the substring cascade puts it. That control
+// is what makes "the machine code moved the verdict" checkable instead of
+// asserted — the same construction the 140.3-05 block above uses.
+// ══════════════════════════════════════════════════════════════════════════
+describe("[153.7-02 / WIZFORM-02-CLASS] every code that reaches classifyKeyValidationError has a verdict", () => {
+  /** A seam client throw: a plain Error carrying the own `seamCode` property. */
+  function seamThrow(message: string, seamCode: string): Error {
+    return Object.assign(new Error(message), { seamCode });
+  }
+
+  it("MT5_GATEWAY_UNCONFIGURED renders the permanent our-side fault, not UNKNOWN/500", () => {
+    // Four emitters, all reached from `validate_key`: the unset-env and
+    // malformed-port arms of `_validate_mt5_key_probe`, the D-24 IPC ordering
+    // inversion inside `_connect_and_probe`, and the D-31 `undetermined`
+    // refusal when the gateway terminal has trade permission off. All four are
+    // `retryable=False` — an operator must act, so no retry affordance may
+    // render.
+    const detail =
+      "The MetaTrader gateway is not configured. This needs an operator, not a retry.";
+    expect(classifyKeyValidationError(seamThrow(detail, "MT5_GATEWAY_UNCONFIGURED"))).toEqual({
+      code: "SEAM_INTERNAL_FAULT",
+      status: 500,
+    });
+    // NO-CODE CONTROL: the cascade cannot read this sentence, so the verdict
+    // above is the table's doing and not a reworded predicate's.
+    expect(classifyKeyValidationError(new Error(detail))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("MT5_GATEWAY_UNREACHABLE renders the no-answer verdict, never the breaker's", () => {
+    // Two emitters, both in `_connect_and_probe`: the connect-stage
+    // `asyncio.TimeoutError` and the broad connect failure. `retryable=True`
+    // with a Retry-After. ⛔ NEVER `SERVICE_UNAVAILABLE_RETRY` — its copy says
+    // "this request was never sent", which is knowable for a breaker that
+    // DECLINED to send and false-by-construction here, where the connect WAS
+    // attempted. `classifyKeyValidationError`'s own transport block writes that
+    // trap down; this row is the case that proves it was obeyed.
+    const detail = "The MetaTrader gateway is not responding. Try again shortly.";
+    const verdict = classifyKeyValidationError(
+      seamThrow(detail, "MT5_GATEWAY_UNREACHABLE"),
+    );
+    expect(verdict).toEqual({ code: "SERVICE_UNREACHABLE", status: 503 });
+    expect(
+      verdict.code,
+      "A request that WAS issued must never be told nothing was submitted.",
+    ).not.toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(classifyKeyValidationError(new Error(detail))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("EGRESS_PROXY_MISCONFIGURED renders the stopped-before-sending verdict", () => {
+    // `_validate_sfox_key`: `make_sfox_client` raises at CONSTRUCTION, above
+    // the `get_balances()` try, so no request left the process and nothing
+    // changed. That is what makes SEAM_MISCONFIGURED's "we stopped before
+    // sending the request. Nothing was submitted and nothing was changed"
+    // knowable here rather than assumed.
+    const detail =
+      "The service's outbound proxy is misconfigured. This needs an operator, not a retry.";
+    expect(classifyKeyValidationError(seamThrow(detail, "EGRESS_PROXY_MISCONFIGURED"))).toEqual({
+      code: "SEAM_MISCONFIGURED",
+      status: 500,
+    });
+    expect(classifyKeyValidationError(new Error(detail))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("SERVICE_KEY_UNCONFIGURED renders the stopped-before-sending verdict", () => {
+    // `verify_service_key` is Starlette HTTP middleware and refuses BEFORE
+    // `call_next`, so no handler ran, no venue was contacted and no row was
+    // written. ⚠️ This is a RENDERING disposition only — the gate itself is
+    // untouched, and the copy names a remedy rather than the secret.
+    const detail = "Service not configured";
+    expect(classifyKeyValidationError(seamThrow(detail, "SERVICE_KEY_UNCONFIGURED"))).toEqual({
+      code: "SEAM_MISCONFIGURED",
+      status: 500,
+    });
+    expect(classifyKeyValidationError(new Error(detail))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("KEK_UNAVAILABLE renders the stopped-before-sending verdict", () => {
+    // `encrypt_key`'s first statement is `get_kek()`; its RuntimeError fires
+    // before any ciphertext exists and before the storage RPC is reached, so
+    // nothing was submitted and nothing was changed.
+    const detail =
+      "Credential encryption is not configured. This needs an operator, not a retry.";
+    expect(classifyKeyValidationError(seamThrow(detail, "KEK_UNAVAILABLE"))).toEqual({
+      code: "SEAM_MISCONFIGURED",
+      status: 500,
+    });
+    expect(classifyKeyValidationError(new Error(detail))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("EXCHANGE_PROBE_FAILED — the venue-agnostic 424 — renders the probe verdict", () => {
+    // `validate_key`'s `except ccxt.BaseError` arm: a venue-attributable escape
+    // from `validate_key_permissions`, 424, `retryable=True`,
+    // `dependency=req.exchange`. Same verdict and status as the incumbent
+    // `PROBE_FAILED` row, because it is the same fact told by a different
+    // producer.
+    const detail =
+      "Your exchange did not complete the permission check. This is a problem at the venue — try again shortly.";
+    expect(classifyKeyValidationError(seamThrow(detail, "EXCHANGE_PROBE_FAILED"))).toEqual({
+      code: "KEY_PROBE_FAILED",
+      status: 503,
+    });
+    expect(classifyKeyValidationError(new Error(detail))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("ADAPTER_INIT_FAILED renders the permanent our-side fault", () => {
+    // `validate_key`'s `create_exchange` catch. The emitter's own comment
+    // measures the property this verdict rests on: `create_exchange` is a dict
+    // lookup, a dict build and two attribute sets — ZERO network I/O — so a
+    // ccxt signature change, a missing extra or an OOM is OURS and permanent.
+    const detail =
+      "Something went wrong on our side while opening this connection. Nothing is wrong with your key.";
+    expect(classifyKeyValidationError(seamThrow(detail, "ADAPTER_INIT_FAILED"))).toEqual({
+      code: "SEAM_INTERNAL_FAULT",
+      status: 500,
+    });
+    expect(classifyKeyValidationError(new Error(detail))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("INTERNAL renders the permanent our-side fault, never a transient-upstream sentence", () => {
+    // `validate_key`'s generic escape from `validate_key_permissions`. The
+    // venue probe HAD been issued, so no "we stopped before sending" copy may
+    // carry it; and `retryable=False`, so no "transient upstream issue" copy
+    // may either — `KEY_PROBE_FAILED` would render a Retry control against a
+    // fault that fails identically on every attempt.
+    const detail =
+      "Something went wrong on our side while checking this key. Nothing is wrong with your key.";
+    const verdict = classifyKeyValidationError(seamThrow(detail, "INTERNAL"));
+    expect(verdict).toEqual({ code: "SEAM_INTERNAL_FAULT", status: 500 });
+    expect(
+      verdict.code,
+      "A permanent fault in our own code must not be dressed as a transient " +
+        "upstream blip with a Retry control.",
+    ).not.toBe("KEY_PROBE_FAILED");
+    expect(classifyKeyValidationError(new Error(detail))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("none of the eight verdicts offers a control that cannot work", () => {
+    // ⭐ THE BEHAVIOURAL HALF, derived rather than restated: `buildEnvelope`
+    // decides `recoverable` from `actions` against `RECOVERABLE_ACTIONS`, and
+    // `ErrorEnvelope` renders Retry iff `recoverable && onRetry`. The four
+    // permanent codes are `retryable=False` at their emitters, so a Retry
+    // control on them is a false affordance — the 2026-08-08 defect the founder
+    // hit. The two transient ones must keep theirs.
+    for (const code of ["SEAM_MISCONFIGURED", "SEAM_INTERNAL_FAULT"] as const) {
+      expect(
+        buildEnvelope(code as WizardErrorCode, "corr-153-7").recoverable,
+        `${code} is raised with retryable=False upstream; a Retry control cannot clear it.`,
+      ).toBe(false);
+    }
+    for (const code of ["SERVICE_UNREACHABLE", "KEY_PROBE_FAILED"] as const) {
+      expect(
+        buildEnvelope(code as WizardErrorCode, "corr-153-7").recoverable,
+        `${code} is raised with retryable=True upstream; the Retry control must stay.`,
+      ).toBe(true);
+    }
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
 // Phase 140.3-10 / TRAP-4 — no error state offers a destructive control as its
 // only way forward.
 //
