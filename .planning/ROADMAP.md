@@ -1477,8 +1477,14 @@ terminal's.
 rather than resets, which loses PROD jobs; the charter already decides it (terminal `failed`
 UPDATE, never a bare DELETE) and a reaper that deletes rows it should have reset is **not
 revertible**.
-Next: `/gsd:plan-phase 145` (145 and 146 first — lower risk, no migration; then 143, then 144
-last, per the founder's 2026-08-14 call to land migrations unattended).
+Next: `/gsd:plan-phase 143`. ⛔ **Run 143 → 144 → 145 → 146 in that order — it is a declared
+dependency chain, not a preference:** 143 depends on 142, 144 on 143, 145 on 144, and 146 is
+sequenced last *so its gap list comes from a fresh grep* (running it earlier audits a codebase
+about to change). ⚠️ A risk-first reordering (145/146 before the migrations) was proposed on
+2026-08-14 and **rejected — it inverted 145's dependency on 144.** Note the consequence: 144 is
+SECOND, not last, so it does not get a long PROD-soak behind it. Its safety must come from the
+change itself — assert the migration writes a terminal `failed` state and issues NO `DELETE`,
+prove it on TEST, and verify on PROD before 145 begins.
 
 ---
 
