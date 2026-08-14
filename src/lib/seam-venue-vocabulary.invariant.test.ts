@@ -145,7 +145,16 @@ const SCAN_EXCLUSIONS: readonly ScanExclusion[] = [
       "CSV_PARSE_FAILED. Admitting those three fictions into a population " +
       "whose whole job is to name REAL emitters would make every disposition " +
       "written for them a lie about the service.",
-    removesSites: 51,
+    // 51 → 57 (2026-08-14, Phase 153.7-01 / WIZFORM-02). ⛔ NOTHING WAS
+    // EXCLUDED — the SHAPE widened. 51 was the assignment-only delta; the call
+    // scan sees six more sites, all `VenueTransientHTTPException(code=…)`
+    // constructions inside `test_validate_key_venue_transient.py`. RESEARCH
+    // measured ZERO `service_error*` calls under `tests/`, which was true and
+    // is why the fourth callee needed its own measurement rather than an
+    // inherited assumption. The code list does NOT move: that file's literals
+    // are EXCHANGE_UNAVAILABLE / NETWORK_UNAVAILABLE / RATE_LIMITED, all three
+    // already in the population from real emitters.
+    removesSites: 57,
     removesCodes: [
       "CSV_PARSE_FAILED",
       "SOME_FUTURE_CODE",
@@ -164,7 +173,15 @@ const SCAN_EXCLUSIONS: readonly ScanExclusion[] = [
       "code. It mints no code literal of its own — and the count pin, not this " +
       "prose, is what keeps that true: the day a real literal is minted here " +
       "the pin moves and this exclusion has to be argued again.",
-    removesSites: 0,
+    // 0 → 2 (2026-08-14, Phase 153.7-01 / WIZFORM-02). ⛔ NOTHING WAS
+    // EXCLUDED — the SHAPE widened. Under the assignment-only scan this file
+    // removed NOTHING (it assigns no `error_code`), so the pin was honestly 0
+    // and the exclusion was inert. The call scan now sees its two internal
+    // `service_error_body(code, ...)` pass-throughs. ⭐ Both are LITERAL-LESS,
+    // which is the measured form of Assumption A4 — "this module mints no code
+    // of its own": the removed-codes list stays EMPTY, and that emptiness is
+    // the whole justification for the exclusion.
+    removesSites: 2,
     removesCodes: [],
   },
   {
@@ -268,6 +285,163 @@ function rhsWindow(src: string, from: number): string {
 }
 
 /**
+ * THE SECOND MINTING SHAPE — the one whose absence is why WIZFORM-02 failed.
+ *
+ * `routers/exchange.py` does not assign `error_code`; it raises
+ * `service_error(500, "MT5_GATEWAY_UNCONFIGURED", …)`. A scanner that knows
+ * only the assignment shape cannot see a single router code, and because every
+ * disposition check in this file is an ABSENCE assertion, it stays green while
+ * seeing nothing. That is fail-OPEN, and it is what shipped.
+ *
+ * ⚠️ THE ARGUMENT SLOT IS NOT CONSTANT ACROSS CALLEES, and a single "second
+ * positional argument" rule is WRONG for one of the four:
+ *   · `service_error(status_code, code, *, …)`          → positional 1
+ *   · `service_error_response(status_code, code, *, …)` → positional 1
+ *   · `service_error_body(code, *, …)`                  → positional 0. It has
+ *     NO status argument at all, so a constant rule reads its code out of the
+ *     status slot and silently mints nothing.
+ *   · `VenueTransientHTTPException(*, status_code, code, …)` → keyword-only, so
+ *     the code is `code=`. Including this fourth shape adds ZERO codes today
+ *     (its only literals are NETWORK_UNAVAILABLE and RATE_LIMITED, both already
+ *     discovered by the assignment scan) and closes a live hole: a new 424
+ *     venue code minted ONLY here would otherwise be invisible.
+ *
+ * The `"kw:code"` entries are read from the `code=` keyword; the numeric
+ * entries are read from that POSITIONAL slot, falling back to a `code=` keyword
+ * if the call was written in keyword form.
+ */
+const CALLEE_ARG_SLOT: ReadonlyMap<string, number | "kw:code"> = new Map<
+  string,
+  number | "kw:code"
+>([
+  ["VenueTransientHTTPException", "kw:code"],
+  ["service_error", 1],
+  ["service_error_body", 0],
+  ["service_error_response", 1],
+]);
+
+const CALLEE_CALL_RE = new RegExp(
+  `(?<![A-Za-z0-9_.])(${[...CALLEE_ARG_SLOT.keys()].join("|")})\\s*\\(`,
+  "g",
+);
+
+/** A call argument is the code ONLY when the whole argument is one literal. */
+const CALL_CODE_ARG_RE = /^["']([A-Z][A-Z0-9_]{2,})["']$/;
+
+/** `name=value` at argument top level — `==` is a comparison, not a keyword. */
+const KEYWORD_ARG_RE = /^\s*([A-Za-z_]\w*)\s*=(?!=)/;
+
+/**
+ * Which characters of `src` are inside an ORDINARY string literal.
+ *
+ * ⚠️ THIS IS NOT OPTIONAL, and the reason is a documented property of the
+ * tokenizer this file depends on: `stripCommentsPreserveLines(src, "py")` blanks
+ * `#` comments and triple-quoted strings but DELIBERATELY PRESERVES ordinary
+ * string contents (`source-scan.ts`, semantics rule 2 — "a `//` inside a string
+ * is not a comment"). So `f"Use service_error() for 5xx"`, which
+ * `error_contract.py`'s own status validator raises, survives stripping and
+ * matches a naive callee needle. Measured across this tree, in-string mentions
+ * were 6 of the 9 false positives an unguarded regex produces.
+ *
+ * ⛔ This is an EXPRESSION-POSITION check, not a reliance on the exclusions.
+ * `SCAN_EXCLUSIONS` happens to remove every in-tree case today; if this mask
+ * were dropped in favour of that coincidence, the next root widening would
+ * re-open the hole silently. The SELF-TEST below fixes the mask, not the
+ * exclusion, as the thing being relied on.
+ *
+ * Triple-quoted strings are already blank, so a single-quote state machine that
+ * resets at a newline is exact for what remains.
+ */
+function stringMask(src: string): Uint8Array {
+  const mask = new Uint8Array(src.length);
+  let quote: string | null = null;
+  for (let i = 0; i < src.length; i += 1) {
+    const c = src[i];
+    if (quote === null) {
+      if (c === '"' || c === "'") {
+        quote = c;
+        mask[i] = 1;
+      }
+      continue;
+    }
+    mask[i] = 1;
+    if (c === "\\") {
+      if (i + 1 < src.length) mask[i + 1] = 1;
+      i += 1;
+    } else if (c === quote) {
+      quote = null;
+    } else if (c === "\n") {
+      // Unterminated on this logical line. Reset rather than run away and
+      // blank the rest of the file, which would make the scan go silent.
+      quote = null;
+    }
+  }
+  return mask;
+}
+
+/**
+ * The arguments of a call whose `(` is at `openParen`, split at depth-1 commas.
+ *
+ * This is `rhsWindow`'s depth tracker generalised. Multi-line calls are handled
+ * BY CONSTRUCTION — every production emitter in `routers/` is written one
+ * argument per line across five to eight lines.
+ *
+ * ⛔ NO CHARACTER CAP. The Next-route matcher carries `EMITTER_BODY_MAX_CHARS`
+ * because it has no bracket structure to lean on; these calls do. A cap here
+ * would recreate the exact "one long `detail=` string goes invisible" failure
+ * the wizardErrors invariant documents.
+ *
+ * Returns `null` when the call never closes — treated as literal-less by the
+ * caller, so a tokenizer failure lands in the declared blind spot and reds,
+ * rather than vanishing.
+ */
+function callArguments(
+  src: string,
+  mask: Uint8Array,
+  openParen: number,
+): string[] | null {
+  const args: string[] = [];
+  let depth = 0;
+  let start = openParen + 1;
+  for (let i = openParen; i < src.length; i += 1) {
+    if (mask[i]) continue;
+    const c = src[i];
+    if (c === "(" || c === "[" || c === "{") depth += 1;
+    else if (c === ")" || c === "]" || c === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        const last = src.slice(start, i);
+        if (last.trim() !== "") args.push(last);
+        return args;
+      }
+    } else if (c === "," && depth === 1) {
+      args.push(src.slice(start, i));
+      start = i + 1;
+    }
+  }
+  return null;
+}
+
+/** The code literal a call mints, or `null` when it forwards a computed one. */
+function codeArgumentOf(callee: string, args: string[]): string | null {
+  const slot = CALLEE_ARG_SLOT.get(callee)!;
+  const positional: string[] = [];
+  const keywords = new Map<string, string>();
+  for (const arg of args) {
+    const kw = KEYWORD_ARG_RE.exec(arg);
+    if (kw) keywords.set(kw[1], arg.slice(arg.indexOf("=", kw.index) + 1));
+    else positional.push(arg);
+  }
+  const raw =
+    slot === "kw:code"
+      ? keywords.get("code")
+      : (positional[slot] ?? keywords.get("code"));
+  if (raw === undefined) return null;
+  const lit = CALL_CODE_ARG_RE.exec(raw.trim());
+  return lit ? lit[1] : null;
+}
+
+/**
  * THE ONE SCANNER, exercised by BOTH the disk walk and every SELF-TEST below.
  * A self-test that ran a second copy of this logic would prove nothing about
  * the scanner that produces the census (`test_raw_5xx_census.py`'s rule,
@@ -289,6 +463,46 @@ function scanStrippedSource(stripped: string): RawSite[] {
     while ((lit = CODE_LITERAL_RE.exec(rhs)) !== null) codes.push(lit[1]);
     sites.push({ index: m.index, shape: "assignment", callee: null, codes });
   }
+
+  const mask = stringMask(stripped);
+  CALLEE_CALL_RE.lastIndex = 0;
+  let call: RegExpExecArray | null;
+  while ((call = CALLEE_CALL_RE.exec(stripped)) !== null) {
+    // GUARD 1 — an in-string MENTION is not a call. See stringMask's docblock.
+    if (mask[call.index]) continue;
+    // GUARD 2 — a DEFINITION is not a call, and that means `class` as well as
+    // `def`. `def service_error(` in error_contract.py is 3 of the 9 measured
+    // false positives, and the exclusion of that file is not what this relies
+    // on.
+    // ⭐ `class` was NOT in the researched false-positive census, and it was
+    // caught by the mandatory cross-check against the independent Python AST
+    // census rather than by review: `class VenueTransientHTTPException(
+    // HTTPException):` is a class-definition head, `ast` does not report it as
+    // a Call, and the two derivations disagreed 3 vs 2. The census enumerated
+    // `def` because it was run over the three `service_error*` names, where
+    // `class` can never precede — adding a CLASS callee added a hazard class
+    // with it. That disagreement is the reason this guard is two words wide.
+    if (
+      /\b(?:def|class)\s+$/.test(
+        stripped.slice(Math.max(0, call.index - 24), call.index),
+      )
+    )
+      continue;
+    const callee = call[1];
+    const args = callArguments(stripped, mask, call.index + call[0].length - 1);
+    const code = args === null ? null : codeArgumentOf(callee, args);
+    sites.push({
+      index: call.index,
+      shape: "call",
+      callee,
+      // MULTIPLICITY AND BLIND SPOTS PRESERVED: a forwarded, computed code
+      // yields `[]` and is COUNTED into dynamicishByFile, never dropped.
+      // Dropping it would let a future dynamic router code shrink the
+      // population without reddening anything.
+      codes: code === null ? [] : [code],
+    });
+  }
+
   return sites.sort((a, b) => a.index - b.index);
 }
 
@@ -537,6 +751,146 @@ describe("[140.5-02 / SEAMPROSE-03] every EMITTED Python error_code has a TypeSc
       "analytics-service/services/ingestion/okx.py": 1,
       "analytics-service/services/ingestion/sfox.py": 1,
     });
+  });
+
+  /** The ONE scanner, over a source string. Never a second copy of the logic. */
+  const scanFixture = (src: string) =>
+    scanStrippedSource(stripCommentsPreserveLines(src, "py"));
+
+  it("SELF-TEST — a multi-line `service_error(status, CODE, …)` call is read, and a `def` of it is not", () => {
+    // BOTH POLARITIES. The positive half is the exact shape that carries
+    // MT5_GATEWAY_UNCONFIGURED in exchange.py, written one argument per line
+    // across six lines; the negative half is the definition head in
+    // error_contract.py. ⚠️ The negative half does NOT lean on that file's
+    // exclusion — this fixture has no path at all, so what is being proved is
+    // the `def` guard itself.
+    const raised = scanFixture(
+      [
+        "        raise service_error(",
+        "            500,",
+        '            "MT5_GATEWAY_UNCONFIGURED",',
+        '            dependency="mt5-gateway",',
+        "            retryable=False,",
+        '            detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",',
+        "        )",
+      ].join("\n"),
+    );
+    expect(raised.map((s) => s.codes)).toEqual([["MT5_GATEWAY_UNCONFIGURED"]]);
+    expect(raised.map((s) => s.shape)).toEqual(["call"]);
+
+    // NEGATIVE HALF: the definition mints nothing. A scanner that counted it
+    // would put the parameter NAME, or the first thing that looks like a code,
+    // into a population that is supposed to name real emitters.
+    expect(
+      scanFixture(
+        [
+          "def service_error(",
+          "    status_code: int,",
+          "    code: str,",
+          "    *,",
+          "    retryable: bool,",
+          ") -> HTTPException:",
+        ].join("\n"),
+      ),
+    ).toEqual([]);
+
+    // ⭐ AND THE OTHER DEFINITION KEYWORD. The fourth callee is a CLASS, so
+    // `class VenueTransientHTTPException(HTTPException):` is a definition head
+    // that looks exactly like a call with one positional argument. This case
+    // was NOT in the researched false-positive census — it was found by the
+    // cross-check against the independent Python AST census, which reports no
+    // Call node here, and it is why the guard says `def|class` rather than
+    // `def`. A regression here is silent: the site yields no literal, so it
+    // lands in the blind-spot pin and reads as an honest dynamic emitter.
+    expect(
+      scanFixture("class VenueTransientHTTPException(HTTPException):"),
+    ).toEqual([]);
+  });
+
+  it("SELF-TEST — a callee name inside a STRING literal is a mention, not a call", () => {
+    // ⚠️ THE LOAD-BEARING NEGATIVE. `stripCommentsPreserveLines(src,"py")`
+    // deliberately PRESERVES ordinary string contents, so this sentence — which
+    // error_contract.py's status validator really raises — survives stripping
+    // and matches a naive needle. 6 of the 9 measured false positives are this
+    // class. What rejects it is `stringMask`, an expression-position check;
+    // the exclusion of error_contract.py is a SECOND, independent reason and is
+    // deliberately not what this asserts.
+    expect(
+      scanFixture(
+        'raise ValueError(f"Use service_error() for 5xx. got {status_code!r}")',
+      ),
+    ).toEqual([]);
+    // ...and a `detail=` string that happens to contain an UPPER_SNAKE word is
+    // not a code either: the code argument must be the WHOLE argument.
+    expect(
+      scanFixture(
+        'raise service_error(500, "REAL_CODE", detail="not a DECOY_CODE here")',
+      ).flatMap((s) => s.codes),
+    ).toEqual(["REAL_CODE"]);
+  });
+
+  it("SELF-TEST — every CALLEE_ARG_SLOT member reads the code from ITS OWN slot", () => {
+    // ⚠️ One fixture per member, because the slot is not constant. The
+    // `service_error_body` case is the trap: it takes the code FIRST, so a
+    // constant "second positional" rule reads `retryable=` or nothing at all.
+    const fixtures: [string, string, string][] = [
+      ["service_error", 'raise service_error(500, "POSITIONAL_ONE", retryable=False)', "POSITIONAL_ONE"],
+      [
+        "service_error_response",
+        'return service_error_response(424, "RESPONSE_ONE", retryable=True)',
+        "RESPONSE_ONE",
+      ],
+      [
+        "service_error_body",
+        'body = service_error_body("CODE_FIRST", retryable=False, detail="x")',
+        "CODE_FIRST",
+      ],
+      [
+        "VenueTransientHTTPException",
+        'raise VenueTransientHTTPException(status_code=424, code="KEYWORD_ONLY", recoverable=True)',
+        "KEYWORD_ONLY",
+      ],
+    ];
+    expect(
+      fixtures.map(([callee]) => callee).sort(),
+      "a callee was added to or dropped from CALLEE_ARG_SLOT without a slot " +
+        "fixture — the slot is the thing most likely to be silently wrong",
+    ).toEqual([...CALLEE_ARG_SLOT.keys()].sort());
+    for (const [callee, src, expected] of fixtures) {
+      expect(
+        scanFixture(src).flatMap((s) => s.codes),
+        `${callee} did not read its code out of slot ` +
+          `${String(CALLEE_ARG_SLOT.get(callee))}`,
+      ).toEqual([expected]);
+    }
+    // NEGATIVE HALF: reading `service_error_body` as if it were
+    // `service_error` would find the code in the SECOND argument. It must not.
+    expect(
+      scanFixture('body = service_error_body("CODE_FIRST", detail="SECOND_SLOT_DECOY")')
+        .flatMap((s) => s.codes),
+    ).toEqual(["CODE_FIRST"]);
+  });
+
+  it("SELF-TEST — a call that FORWARDS a computed code is counted, not dropped", () => {
+    // The `Counter`-not-`frozenset` discipline. A forwarded code yields no
+    // literal, and the site still has to appear — in dynamicishByFile — or a
+    // future dynamic router code shrinks the population in silence. Both live
+    // shapes: a subscript forward and a dict-lookup forward.
+    const forwards = scanFixture(
+      [
+        "        raise VenueTransientHTTPException(",
+        "            status_code=424,",
+        '            code=validation["error_code"],',
+        "        )",
+        "        raise service_error(500, result.error_code, retryable=False)",
+      ].join("\n"),
+    );
+    expect(forwards.map((s) => s.shape)).toEqual(["call", "call"]);
+    expect(
+      forwards.map((s) => s.codes),
+      "a literal-less code argument must yield a SITE with no codes, never no " +
+        "site at all",
+    ).toEqual([[], []]);
   });
 
   it("SELF-TEST — the `tests` exclusion skips a fixture code, and the SAME content outside it is read", () => {
