@@ -320,8 +320,43 @@ const CALLEE_ARG_SLOT: ReadonlyMap<string, number | "kw:code"> = new Map<
   ["service_error_response", 1],
 ]);
 
+/**
+ * ⭐ 153.7 review WR-03 — THE QUALIFIED CALL IS A CALL, and admitting it closes
+ * the LAST instance of the fail-open class this phase closed for the root and
+ * for the shape.
+ *
+ * The matcher used to open `(?<![A-Za-z0-9_.])`. The `.` in that lookbehind was
+ * there to reject attribute noise, and it also rejected the legitimate
+ * module-qualified form the emitters could be written in at any time:
+ *
+ *     raise error_contract.service_error(500, "NEW_CODE", …)
+ *     raise errors.VenueTransientHTTPException(code="NEW_CODE", …)
+ *
+ * ⛔ AND THE FAILURE MODE WAS THE WORST ONE AVAILABLE. Such a site yielded no
+ * site AT ALL — not a literal-less one — so it did not even land in
+ * `dynamicishByFile`, where an honest dynamic emitter is COUNTED. Every
+ * disposition, fossil and exclusivity check in this file is an ABSENCE
+ * assertion, so a code minted only that way would be invisible and NOTHING
+ * would red. That is the same shape as scanning only `services/` (fixed at
+ * 153.7-01) and as knowing only the assignment shape (fixed at 153.7-01).
+ *
+ * Measured 2026-08-14: ZERO qualified calls exist in `analytics-service/**`
+ * outside `tests/`, so this was latent rather than live — which is exactly when
+ * it is cheap to close, and exactly when a reviewer is tempted to leave it.
+ *
+ * ⚠️ THE `def` / `class` GUARD IS WHAT KEEPS DOING THE REJECTING, unchanged: the
+ * qualifier group is OPTIONAL, so a bare `def service_error(` still matches here
+ * and is still thrown out by GUARD 2 in `scanStrippedSource`. The lookbehind
+ * keeps `[A-Za-z0-9_]` so `_service_error(` and `my_service_error(` remain
+ * non-matches — only the DOT was surrendered, and only in front of a qualifier
+ * that is itself a bare identifier.
+ *
+ * A dotted chain longer than one segment (`a.b.service_error(`) still matches on
+ * its final segment, because `b` is preceded by `.`, which the lookbehind no
+ * longer forbids. The SELF-TEST below fixes both forms.
+ */
 const CALLEE_CALL_RE = new RegExp(
-  `(?<![A-Za-z0-9_.])(${[...CALLEE_ARG_SLOT.keys()].join("|")})\\s*\\(`,
+  `(?<![A-Za-z0-9_])(?:[A-Za-z_]\\w*\\s*\\.\\s*)?(${[...CALLEE_ARG_SLOT.keys()].join("|")})\\s*\\(`,
   "g",
 );
 
@@ -974,6 +1009,32 @@ describe("[140.5-02 / SEAMPROSE-03] every EMITTED Python error_code has a TypeSc
         ].join("\n"),
       );
 
+      // ⭐ 153.7 review WR-03 — THE SECOND SYNTHETIC FILE, and it is a different
+      // hazard from the first, not a copy of it. The first proves the composed
+      // guard reds for a NEW code; this one proves it reds for a new code
+      // written the MODULE-QUALIFIED way, which the matcher rejected outright
+      // until this fix. A rejected site yields no site at all — not even a
+      // literal-less one — so it escapes `dynamicishByFile` too and every
+      // absence assertion in this file stays green while a code reaches a user.
+      // Neutering the qualifier group in `CALLEE_CALL_RE` must red THIS
+      // assertion by name.
+      writeFileSync(
+        join(tmp, "routers", "zzz_qualified.py"),
+        [
+          "from services import error_contract",
+          "",
+          "async def probe_something_else() -> None:",
+          "    if not configured:",
+          "        raise error_contract.service_error(",
+          "            500,",
+          '            "ZZZ_FALSIFIER_QUALIFIED_CODE",',
+          '            dependency="zzz-gateway",',
+          "            retryable=False,",
+          '            detail="A synthetic MODULE-QUALIFIED emitter. WR-03: the matcher used to reject this shape and see nothing at all.",',
+          "        )",
+        ].join("\n"),
+      );
+
       const synthetic = new Set(
         deriveEmitterSites(tmp).flatMap((s) => s.codes),
       );
@@ -989,8 +1050,15 @@ describe("[140.5-02 / SEAMPROSE-03] every EMITTED Python error_code has a TypeSc
         "A brand-new undisposed code, raised as service_error(...) under a " +
           "routers/ directory, did NOT come back from the composed guard. " +
           "That is the exact condition WIZFORM-02 failed on, and a fix that " +
-          "cannot fail this way has closed instances, not the class.",
-      ).toEqual(["ZZZ_FALSIFIER_ROUTER_CODE"]);
+          "cannot fail this way has closed instances, not the class. ⚠️ If the " +
+          "BARE code came back and the QUALIFIED one did not, the regression is " +
+          "in CALLEE_CALL_RE's optional qualifier group (153.7 review WR-03) — " +
+          "and note what that costs: a qualified call yields NO SITE, so it " +
+          "misses dynamicishByFile as well and nothing else in this file reds.",
+      ).toEqual([
+        "ZZZ_FALSIFIER_QUALIFIED_CODE",
+        "ZZZ_FALSIFIER_ROUTER_CODE",
+      ]);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -1047,6 +1115,70 @@ describe("[140.5-02 / SEAMPROSE-03] every EMITTED Python error_code has a TypeSc
     // lands in the blind-spot pin and reads as an honest dynamic emitter.
     expect(
       scanFixture("class VenueTransientHTTPException(HTTPException):"),
+    ).toEqual([]);
+  });
+
+  it("SELF-TEST — a MODULE-QUALIFIED call is read, and the def/class guard still rejects a definition", () => {
+    // ⭐ 153.7 review WR-03. The matcher's lookbehind used to include `.`, which
+    // rejected this shape outright — and a rejected site is not a literal-less
+    // site: it never reaches `dynamicishByFile` either, so a code minted only
+    // this way was invisible to every ABSENCE assertion in this file. Zero such
+    // calls exist in the tree today, which is what makes this the cheap moment
+    // to close it and the tempting moment to skip it.
+    expect(
+      scanFixture(
+        [
+          "        raise error_contract.service_error(",
+          "            500,",
+          '            "QUALIFIED_CODE",',
+          '            dependency="zzz-gateway",',
+          "            retryable=False,",
+          '            detail="A qualified emitter is still an emitter.",',
+          "        )",
+        ].join("\n"),
+      ).flatMap((s) => s.codes),
+    ).toEqual(["QUALIFIED_CODE"]);
+
+    // The keyword-slot callee, qualified, with whitespace around the dot — the
+    // second form the widened matcher admits.
+    expect(
+      scanFixture(
+        'raise errors . VenueTransientHTTPException(status_code=424, code="QUALIFIED_KW_CODE")',
+      ).flatMap((s) => s.codes),
+    ).toEqual(["QUALIFIED_KW_CODE"]);
+
+    // A DOTTED CHAIN longer than one segment matches on its final segment: `b`
+    // is preceded by `.`, which the widened lookbehind no longer forbids. Stated
+    // as a case because "only one qualifier segment is allowed" would be a real
+    // hole and is NOT what shipped.
+    expect(
+      scanFixture('raise services.error_contract.service_error(500, "CHAINED_CODE")').flatMap(
+        (s) => s.codes,
+      ),
+    ).toEqual(["CHAINED_CODE"]);
+
+    // ⛔ THE NEGATIVE HALVES, which are what make the widening safe rather than
+    // merely permissive.
+    //
+    // 1. The lookbehind still forbids an IDENTIFIER character, so a different
+    //    function whose name merely ENDS with a callee name is not a callee.
+    expect(
+      scanFixture('raise my_service_error(500, "NOT_OUR_EMITTER")'),
+    ).toEqual([]);
+    // 2. The `def`/`class` guard is untouched and still does the rejecting —
+    //    the qualifier group is OPTIONAL, so a bare definition head still
+    //    matches the regex and must still be thrown out.
+    expect(
+      scanFixture(
+        ["def service_error(", "    status_code: int,", ") -> HTTPException:"].join("\n"),
+      ),
+    ).toEqual([]);
+    // 3. And a qualified mention inside a STRING is still a mention. This is the
+    //    one the widening could plausibly have re-opened: the match now begins
+    //    at the QUALIFIER, so `stringMask` has to be consulted at that index and
+    //    not at the callee's.
+    expect(
+      scanFixture('    raise ValueError("Use error_contract.service_error() for 5xx")'),
     ).toEqual([]);
   });
 
