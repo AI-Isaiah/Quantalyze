@@ -2528,3 +2528,15 @@ named files are unmodified by the phase, so neither was quietly half-done.
   class regrows after being closed. ⭐ Distinct from the five admin/simulator 5xx-terminal-arm
   routes already logged above: different mechanism (these mint `UNKNOWN` directly, those lose a
   code in a forwarding arm), so closing one does not close the other. Audit warning W7.
+
+- [ ] **`PLANNING-PROJECTREF-01` — the PROD and TEST Supabase project refs are written into tracked
+  `.planning/` files, against the standing "never record the PROD project ref in `.planning/`"
+  rule.** Found 2026-08-14 by a no-allowlist sweep at the v1.17 close (gitleaks itself: **no leaks
+  found** — this is below its threshold, which is why the rule exists separately). Occurrences
+  include `REQUIREMENTS.md:910,1433`, `STATE.md:1336`, `TODOS.md:584,1477,1554,1641`.
+  ⭐ **Assess the actual exposure before spending effort:** a Supabase project ref is the subdomain
+  of `NEXT_PUBLIC_SUPABASE_URL` and therefore ships in every browser bundle already — it is not a
+  credential and redacting it buys no security. The real issue is that a stated rule and the repo
+  state disagree, and an unenforced rule teaches people to ignore the enforced ones.
+  **Decide one way:** either scrub + add a CI grep, or amend the rule to name refs as non-secret
+  and keep the prohibition for keys/JWTs/connection strings only. ⛔ Do NOT half-do it.
