@@ -1227,6 +1227,8 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   intended pandas, pin the uv version used for locking, regen once, commit. (Surfaced by the
   v0.49.1.0 MT5-deps ship; the rpyc line was hand-added to avoid triggering this drift.)
 - **No `docs/architecture/` ADRs** — every decision is implicit in code; actively-inconsistent
+
+  ⛔ **FALSE AS WRITTEN — corrected 2026-08-14.** `docs/architecture/` contains **18 ADRs** (`adr-0001` … `adr-0024`), and `REQUIREMENTS.md:1001-1002` cites ADR-0001/ADR-0003 by name. This line is the same ledger-vs-reality class the v1.17 milestone audit was convened over, found by the ADR conflict synthesis. ⭐ What IS true, and is the useful residue: the ADRs are **not all current** — `.planning/INGEST-CONFLICTS.md` records 4 blockers where an ADR contradicts HEAD.
   mechanisms to codify + consolidate: multiple auth wrappers, multiple cron mechanisms
   (vercel.json vs `pg_cron`+`pg_net`), multiple admin checks. (17 existing decisions to
   document + 5 open questions per the 2026-04 architecture audit.)
