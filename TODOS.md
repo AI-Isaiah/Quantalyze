@@ -2507,3 +2507,24 @@ named files are unmodified by the phase, so neither was quietly half-done.
   non-zero) and name the test; then either fix the race or pin the file to `--no-file-parallelism`.
   ⚠️ Local is Node 25, CI is Node 22 — reproduce under
   `PATH=/opt/homebrew/opt/node@22/bin:$PATH` before concluding it is local-only.
+
+### v1.17 milestone-audit residuals — logged per the stopping rule (added 2026-08-14)
+
+- [ ] **`E2E-NAV-01` — NAV-01's entire surface has NO e2e coverage.** MEASURED at the v1.17 close:
+  `grep -rn "my-strategies" e2e/` returns **nothing**. Phase 149 shipped 5/5 with a passing
+  VERIFICATION, so this is not a broken feature — it is an unproven one, and the distinction
+  matters because the surface is the allocator's way in from the sidebar.
+  ⚠️ **Wider and worse:** `api-key-flow`, `sync-analytics-flow`, `full-flow` and `csv-upload-flow`
+  specs all EXIST but are wired into **no CI batch** — they never run. `wizard-resume.spec.ts` is
+  the milestone's one real browser proof (`ci.yml:1785`). A spec that exists and never executes is
+  more dangerous than a missing one: it reads as coverage in a file listing.
+  Also uncovered: OWN-02's adversarial anon-404. **What closes it:** wire the four orphaned specs
+  into a CI batch, then add a `my-strategies` spec. Audit warning W6.
+
+- [ ] **`UNKNOWN-DIALOGS-01` — three surfaces Phases 150/151 minted render `code: UNKNOWN`, outside
+  the coverage law's reach.** `AllocateDialog`, `RenameStrategyDialog`, `MarkOwnershipDialog`.
+  ⚠️ **Not a WIZFORM-02 violation as worded** — that law is wizard-scoped and these are dashboard
+  dialogs — but it is the SAME CLASS on surfaces this milestone created, which is exactly how the
+  class regrows after being closed. ⭐ Distinct from the five admin/simulator 5xx-terminal-arm
+  routes already logged above: different mechanism (these mint `UNKNOWN` directly, those lose a
+  code in a forwarding arm), so closing one does not close the other. Audit warning W7.

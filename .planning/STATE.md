@@ -1,9 +1,9 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.17
-milestone_name: MT5 — usable end-to-end, not merely ingested
-status: executing
-stopped_at: Phase 153.7 COMPLETE (3/3 plans — WIZFORM-02 ticked; Phase 153 parent left for the verifier)
+milestone: v1.18
+milestone_name: MT5-VERIFY & founder confirmations
+status: blocked_on_founder
+stopped_at: v1.17 CLOSED 2026-08-14 (scope amended — Phase 155 carried to v1.18). v1.18 Phases 155 + 157 both founder-gated; agent work continues on v1.16 Phases 143-146.
 last_updated: "2026-08-14T08:30:00.000Z"
 last_activity: 2026-08-14 -- Phase 153.7 plan 03 executed, phase COMPLETE (three finalize rejections coded, ledger 3 → 0, twin regressions neuter-proven, WIZFORM-02 ticked)
 progress:
@@ -22,7 +22,23 @@ progress:
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
-**Milestone v1.17 — MT5: usable end-to-end, not merely ingested, Phases 147–156.**
+⛔ **v1.17 CLOSED 2026-08-14 as "MT5 — ingested, wizardable, surfaced" (Phases 147–154, 156).**
+Its original title claimed *"usable end-to-end"*. Phase 155 (MT5-VERIFY — the live trading-day
+parity run) was **REMOVED from scope and carried to v1.18**, taking MT5-06..10, MT5-15 and the
+umbrella acceptance MT5-GOAL-01 with it. A bounded alternative — move 155 to TODOS and tick v1.17
+complete — was offered and **declined**, precisely because it would leave every ledger reading
+"usable end-to-end" while our numbers had never been compared to the broker's.
+⚠️ **This paragraph was itself a v1.17-MILESTONE-AUDIT blocker (B1).** The amendment landed in
+`ROADMAP.md` only; this file went on asserting the refused claim for several hours. If you are
+amending scope, `git show --stat` the commit — one file is almost always wrong.
+
+⭐ **Current milestone: v1.18 — MT5-VERIFY & founder confirmations (Phases 155, 157).** EVERY
+phase in it is founder-gated. Blocked on (1) new MT5 investor passwords — the founder changed them
+~2026-08-14, so stored credentials are stale and the three PROD keys will flip to `error`, which
+is **EXPECTED, not a regression** — and (2) the founder at the MT5 terminal on a **trading day**.
+Agent-deliverable work therefore continues on **v1.16 (PARKED, Phases 143–146)**.
+
+**Historical scope statement for v1.17, retained:**
 Founder verbatim (2026-08-04, minutes after MT5-05 was discharged on PROD): *"The goal is that
 MT5 works. And at the moment, maybe it ingests the data, but I cannot use it in the scenario,
 and I can still not produce a factsheet."* Scope = **SCEN** (the series actually reaches the

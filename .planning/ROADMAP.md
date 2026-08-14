@@ -119,7 +119,7 @@ unpublished strategy; AUM-05 will hit sFOX the day its flag flips. **A fix scope
 - [x] **Phase 150: OWN-03 — The wizard asks whose capital this is** - Own-capital-with-allocation vs verifying-a-team question at allocator finalize; (b) stays the default and a no-op; only an explicit (a) creates the portfolio position (money-path reviewed) (completed 2026-08-06)
 - [x] **Phase 151: AUM — A book you can reach and a size you can set** - Direct AUM input, non-ccxt holdings-sync crash fixed as a CLASS (MT5 + latent sFOX), all-or-nothing book gate fixed incl. cross-role contamination, honest refusal copy (completed 2026-08-07)
 - [x] **Phase 152: SCEN — Composer legibility** - Ownership marker, clickable rows with a working factsheet link, labelled numbers, no duplicate browse entries (completed 2026-08-07)
-- [ ] **Phase 153: WIZFORM — Form errors belong on the form (+ MT5 declarable)** - Inline field validation, honest error codes from emitting sites, transient infra absorbed not surfaced, venue-appropriate copy, MT5 preselected in metadata. 📌 **NOW TICKABLE, left for the verifier (2026-08-14).** The span verification failed on WIZFORM-02 alone (5/6); Phase 153.7 closed all four of its `missing` items and the requirement is ticked in REQUIREMENTS.md. ⛔ Deliberately NOT self-ticked here: a SPAN verdict is the verifier's to issue, not the executor's, and the last time this box was ticked ahead of its evidence is what produced the retroactive verification in the first place
+- [x] **Phase 153: WIZFORM — Form errors belong on the form (+ MT5 declarable)** ✅ **GOAL MET 2026-08-14 — via the INSERTED Phase 153.7, not by the original span.** Inline field validation, honest error codes from emitting sites, transient infra absorbed not surfaced, venue-appropriate copy, MT5 preselected in metadata. ⭐ **The mechanism is named on purpose and a bare tick would erase it:** the 153.1→153.6 span verdict REMAINS `failed` 5/6 in `153-VERIFICATION.md` and must not be rewritten — that file is the historical record that the span shipped short on WIZFORM-02. Phase 153.7 closed all four of its `missing` items, re-derived from source by the v1.17 milestone audit (router-vocabulary disposition at `wizardErrors.ts:3081`; population root widened at `seam-venue-vocabulary.invariant.test.ts:89` plus the `service_error` callee family at `:318`; boundary decision with per-exclusion reasons and count pins at `SCAN_EXCLUSIONS:134`; `KNOWN_CODELESS_FINALIZE_REJECTIONS = 0`), with both invariants executed at this tree — 2 files / 60 tests passed
 - [x] **Phase 154: WIZCONT/STALE — Wizard continuity, no stale screens** - Draft-aware entry chooser, stale-screen root cause investigated BEFORE fixed (verdict M2(ii)), token-less credential dedup toward the existing row (completed 2026-08-12)
 - [x] **Phase 153.7: WIZFORM-02-CLASS — every code that can reach a user is covered** ✅ **COMPLETE 2026-08-14** (INSERTED 2026-08-14) - The coverage law's population is DERIVED from every user-reachable code (`analytics-service/**`, positional `service_error(...)` as well as `error_code =`), and a code absent from BOTH halves reds CI; closes the one requirement the 153 span failed. 3/3 plans: population 17 → 37, all 37 dispositioned, and the last three code-less `finalize-wizard` rejections coded (ledger 3 → 0 with `EXPECTED_FINALIZE_REJECTION_SITES` never edited). **WIZFORM-02 ticked.** ⛔ NOT "add two rows" — see TODOS.md FIX NOW #6
 - [→] **Phase 155: MT5-VERIFY — The numbers are true, live on a trading day** — ➡️ **CARRIED OUT OF v1.17 TO v1.18 on 2026-08-14.** Not started, not dropped, not ticked. Server-UTC offset measured, external-oracle parity on the live funded account, five surfaces agree, discrepancies fixed (uncapped), warnings explained; MT5-GOAL-01 acceptance gate. ⛔ Founder-gated twice over: new investor passwords AND the founder at the terminal on a trading day. Detail block below is retained in place; the milestone header at the top of this file owns its blockers
@@ -730,7 +730,7 @@ Plans:
 | 150. OWN-03 portfolio question | 8/8 | Complete    | 2026-08-07 |
 | 151. AUM book + sizing | 7/7 | Complete    | 2026-08-07 |
 | 152. SCEN composer legibility | 6/6 | Complete    | 2026-08-07 |
-| 153. WIZFORM + MT5-14 | 0/? | Not started | - |
+| 153. WIZFORM + MT5-14 | span complete | Goal met via inserted 153.7 (span verdict stays `failed` 5/6) | 2026-08-14 |
 | 153.7. WIZFORM-02-CLASS (INSERTED) | 3/3 | Complete (shipped v0.62.0.0, merge `c4555fd0`) | 2026-08-14 |
 | 154. WIZCONT + STALE | 8/8 | Complete   | 2026-08-12 |
 | 155. MT5-VERIFY + acceptance | 0/? | ➡️ **CARRIED to v1.18** | - |
@@ -759,13 +759,20 @@ agent-deliverable and does not gate the milestone close.
 | 150 | OWN-03 |
 | 151 | AUM-01, AUM-02, AUM-03, AUM-04, AUM-05 |
 | 152 | SCEN-02, SCEN-03, SCEN-04, SCEN-05 |
+| 150 | OWN-05 |
 | 153 | WIZFORM-01, WIZFORM-02, WIZFORM-03, WIZFORM-04, MT5-14 |
+| 153.x | WIZFORM-05 (the validate-budget split; ⛔ explicitly FENCED OUT of 153.7) |
 | 154 | WIZCONT-01, WIZCONT-02, STALE-01 |
-| 155 | MT5-06, MT5-07, MT5-08, MT5-09, MT5-10, MT5-15, MT5-GOAL-01 (umbrella) |
+| 155 | ➡️ MT5-06, MT5-07, MT5-08, MT5-09, MT5-10, MT5-15, MT5-GOAL-01 (umbrella) — **CARRIED TO v1.18 on 2026-08-14. Not delivered in v1.17.** |
 | 156 | CONNECT-01, CONNECT-02, CONNECT-03, CONNECT-04, CONNECT-05 ✅ (all five complete 2026-08-13; also closes PARITY-04, whose deferred control 153.6 could not take inside its own phase) |
 
-29/29 in-scope requirement IDs mapped (28 work + 1 umbrella), each to exactly one phase. No
-orphans, no duplicates. OWN-01 excluded (already met — CONTRIB-03, verified in code 2026-08-04).
+**31 in-scope requirement IDs mapped (30 work + 1 umbrella), each to exactly one phase.**
+⚠️ **Corrected 2026-08-14 — this table said "29/29 mapped, no orphans" while omitting TWO
+requirements** (`OWN-05` and `WIZFORM-05`, both added after it was written). Milestone-audit
+warning **W2**. A completeness claim that predates the last two additions is worse than no claim:
+it reads as a checked invariant when it is a stale count. ⭐ **24 of the 31 were DELIVERED in
+v1.17; the 7 on the Phase 155 row were CARRIED to v1.18** and are not v1.17 gaps.
+No duplicates. OWN-01 excluded (already met — CONTRIB-03, verified in code 2026-08-04).
 ⛔ Everything in SEAM / JOB / RATE / PYAPI* / SEAMCORE / SEAMUX remains v1.16 (PARKED below).
 Revised 2026-08-04 after NAV-01 was sharpened: the approved Phase 148 (OWN-02/03/04 + NAV-01)
 split into 148/149/150; later phases renumbered +2 (149→151 … 153→155) with dependencies intact.
@@ -1454,11 +1461,24 @@ Plans:
 
 ## Current position
 
-**v1.17 MT5 — usable end-to-end, not merely ingested** — roadmap created 2026-08-04, Phases
-147–156 (revised same day: Phase 148 split into 148 owner-factsheet / 149 NAV ranking /
-150 OWN-03 portfolio question after NAV-01 was sharpened to ranking parity). v1.16 is ⏸️ PARKED at 68% (13/19 phases, 119/127 plans) — resume at Phase 143 after
-v1.17; Phase 144 carries the live WR-02 DELETE-vs-reset founder decision.
-Next: `/gsd:plan-phase 147`.
+⭐ **CURRENT: v1.18 MT5-VERIFY & founder confirmations (Phases 155, 157)** — created 2026-08-14.
+⛔ **Every phase is founder-gated**; nothing here is agent-deliverable. Blocked on (1) new MT5
+investor passwords and (2) the founder at the terminal on a trading day. See the milestone header
+at the top of this file.
+
+✅ **v1.17 MT5 — ingested, wizardable, surfaced** — CLOSED 2026-08-14, 10 phases delivered
+(147–154, 156), shipped through v0.62.0.0. ⚠️ Its original title said *"usable end-to-end, not
+merely ingested"*; Phase 155 was carried to v1.18 and the title was amended to match what was
+actually delivered. ⛔ **MT5 is NOT advertised** — nobody has compared our numbers to the
+terminal's.
+
+➡️ **NEXT AGENT WORK: v1.16, PARKED at 68% (13/19 phases, 119/127 plans).** Resume at Phase 143.
+⚠️ Phase 144 carries the live WR-02 DELETE-vs-reset decision — the orphaned-running purge DELETEs
+rather than resets, which loses PROD jobs; the charter already decides it (terminal `failed`
+UPDATE, never a bare DELETE) and a reaper that deletes rows it should have reset is **not
+revertible**.
+Next: `/gsd:plan-phase 145` (145 and 146 first — lower risk, no migration; then 143, then 144
+last, per the founder's 2026-08-14 call to land migrations unattended).
 
 ---
 
