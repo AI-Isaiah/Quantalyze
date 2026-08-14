@@ -417,9 +417,17 @@ would read as a fix in the diff, green the coverage law, and **reach no user sur
   153.7-02 that say so explicitly: `KEY_MISSING_EXCHANGE` (422), `KEY_UNDECRYPTABLE` (500), and
   `internal.py`'s `KEK_UNAVAILABLE` (500).
   ⚠️ **`KEY_UNDECRYPTABLE` is the one with a real user cost**, not just a wrong label: its only
-  actionable remedy is to **reconnect the key**, and this route's `PROBE_FAILED` envelope tells the
-  user to *try again* — a control that cannot work, which is the affordance class the whole 153
-  span exists to remove.
+  actionable remedy is to **reconnect the key**, and this route answers it on the arm whose copy
+  reads *"Could not check key scopes. Try again."* — an instruction that cannot work, which is the
+  affordance class the whole 153 span exists to remove.
+  ⭐ **Measured 2026-08-14, and it is why this is NOT an open WIZFORM-02 instance.** The route's
+  one wizard-side consumer is `KeyPermissionBadge`, rendered from `SyncPreviewStep` (and from the
+  strategy edit page). That component does **not** build a `wizardErrors` envelope at all — it
+  renders the route's own `{ code, error }` as `"CODE: message"` text — so nothing on this path
+  renders the `UNKNOWN` card, and WIZFORM-02's criterion ("no wizard failure renders `code: UNKNOWN`
+  when the server DID classify it") is not violated here. What is wrong is the **accuracy of a
+  remedy sentence** in a private vocabulary no coverage law watches. Same class, different
+  criterion — record it as its own item rather than re-opening a closed requirement.
   Shape when it is picked up: give the private cascade a derived-population law of the same form
   the venue vocabulary now has (hand-typed roster, both-halves disposition assertion, vacuity
   floor), rather than deleting the cascade in favour of the shared classifier — deleting it is the
