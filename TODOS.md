@@ -395,6 +395,58 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
   Same defect family as the `### Decisions` heading drift already annotated in `STATE.md`.
   ⚠️ `state.record-metric` is also NOT idempotent — running it twice appends a duplicate row.
 
+### Phase 153.7 (WIZFORM-02-CLASS) — recorded deferrals (added 2026-08-14)
+
+Both items below are **deliberate** deferrals from 153.7, not oversights. That phase widened the
+seam-vocabulary coverage law from `analytics-service/services/**` + assignment-shape to
+`analytics-service/**` + the `service_error(...)` call family (17 → 37 codes), dispositioned all
+37, and coded the last three `finalize-wizard` rejections. Neither item below is reachable from
+`wizardErrors.ts`, which is why neither was fixed there: a verdict row for any of these codes
+would read as a fix in the diff, green the coverage law, and **reach no user surface at all**.
+
+- [ ] **The `keys/[id]/permissions` route runs its own private `PROBE_*` substring cascade — a
+  FOURTH classifier, with no coverage law over it.** It never calls `classifyKeyValidationError`
+  (measured: the only two production call sites are `strategies/create-with-key` and
+  `strategies/composite/add-key`; this route mentions it in comments only). Its own docblock
+  records **why** it stays separate: routing its messages through the shared classifier would send
+  **five of its six** to `UNKNOWN`/500. That is a defensible reason to keep the cascade and **not**
+  a reason for it to be uncovered.
+  ⭐ **This is the next instance of the WIZFORM-02 class**, and the LOCKED boundary from 153.7's
+  context — *"every code that can reach a user-facing surface"* — reaches it by its own words.
+  Three analytics-service codes land here and were given `VENUE_WIRE_CODES_WITHOUT_VERDICT` rows at
+  153.7-02 that say so explicitly: `KEY_MISSING_EXCHANGE` (422), `KEY_UNDECRYPTABLE` (500), and
+  `internal.py`'s `KEK_UNAVAILABLE` (500).
+  ⚠️ **`KEY_UNDECRYPTABLE` is the one with a real user cost**, not just a wrong label: its only
+  actionable remedy is to **reconnect the key**, and this route's `PROBE_FAILED` envelope tells the
+  user to *try again* — a control that cannot work, which is the affordance class the whole 153
+  span exists to remove.
+  Shape when it is picked up: give the private cascade a derived-population law of the same form
+  the venue vocabulary now has (hand-typed roster, both-halves disposition assertion, vacuity
+  floor), rather than deleting the cascade in favour of the shared classifier — deleting it is the
+  change its docblock measured as making things worse.
+
+- [ ] **Five routes answer every upstream 5xx as `code: "UNKNOWN"` through a terminal arm that
+  forwards 4xx faithfully.** ⚠️ **A SECOND, DISTINCT item from the one above** — different
+  mechanism, different routes, and it is recorded separately so neither is closed by fixing the
+  other. Measured per-arm at 153.7-02 while dispositioning the twelve Group-B codes.
+  The shape is one arm repeated: `4xx` is forwarded with `code: err.seamCode` (so the upstream
+  vocabulary survives), and everything `5xx` falls to a terminal `{ code: "UNKNOWN" }` + a Sentry
+  capture — so the *more severe* half of the vocabulary is the half that loses its code. The five
+  codes still rendering `UNKNOWN` on their own surfaces:
+  `ADMIN_CHECK_UNAVAILABLE` (503) and `ROLE_CHECK_UNAVAILABLE` (503) — admin match-recompute, and
+  collapsing the pair hides **which** check went down; `SCORING_FAILED` (500) — same route, and
+  unlike its two 503 siblings it is **permanent**, so every retryable member would offer a Retry
+  that cannot work; `EVAL_FAILED` (500) — admin match-eval, the opposite path out of the same
+  handler whose `EVAL_WINDOW_TOO_LARGE` (400) **does** survive intact through the 4xx arm;
+  `SIMULATION_FAILED` (500) — `/api/simulator`.
+  ⚠️ **Lower user-impact than the item above, and the reason is worth keeping**: four of the five
+  are admin-only surfaces with no key, no draft and no connect step, and the fifth is the portfolio
+  impact panel. They are recorded because the *mechanism* is the same one that produced the
+  WIZFORM-02 defect on the wizard, not because the blast radius is comparable.
+  Cheap first step when picked up: decide whether the 4xx-forward arm should widen to any status
+  carrying a recognised `seamCode`, which is one edit per route and would close all five — versus
+  minting per-code members, which is five copy decisions.
+
 ### v1.14 Smoothed-MTM go-live blockers — FIXED in the v1.14 landing (2026-07-23)
 Surfaced by the /ship Fable red team; the safety-critical ones fixed in the landing PR so
 flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM factsheet.

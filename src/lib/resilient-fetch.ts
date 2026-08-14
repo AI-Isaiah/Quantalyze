@@ -501,10 +501,34 @@ export type SeamBudgetKey =
  *
  * ⚠️ EVERY ENTRY IS EVIDENCE, NOT INTUITION. Derived by enumerating every
  * `dependency=` argument in `analytics-service/routers/**` together with the
- * status it is raised at. THIRTEEN such arguments exist and all thirteen are
+ * status it is raised at. FIFTEEN such arguments exist and all fifteen are
  * accounted for below — that completeness is the property worth having, because
  * a MISSING row silently under-declares a real breaker key, which is a worse
  * failure than a wrong coordinate. Re-derived at HEAD on 2026-07-30 (140.5-07).
+ *
+ * ── ⭐ RE-CUT 2026-08-14 (153.7-03 / WIZFORM-02-CLASS) ──────────────────────
+ *
+ * THIRTEEN → FIFTEEN, and the two arrivals are `MT5_GATEWAY_UNCONFIGURED`
+ * emitters this table had recorded as `(×2)` when a Python `ast` census of the
+ * same population reports FOUR. ⛔ NOT A NEW BREAKER KEY AND NOT AN
+ * UNDER-DECLARATION FOUND LATE: both are `500`s, so both were already inert by
+ * the R-1 rule stated below, and `mt5-gateway` was already declared for the
+ * counting `503` row. The COUNTING set is unchanged — re-measured this session,
+ * the only `503` `dependency=` sites in `routers/**` are the two
+ * `MT5_GATEWAY_UNREACHABLE` raises plus `supabase` in `recompute` (×2) and
+ * `_compute_portfolio_analytics` (×1), exactly the three rows below.
+ *
+ * ⚠️ AND THE ENCLOSING SYMBOLS WERE WRONG, which is the more interesting half
+ * because it is the failure mode this docblock's own next paragraph warns
+ * about, one abstraction up. `_validate_mt5_key` STILL EXISTS in `exchange.py`
+ * — so nothing was dangling and no grep would have caught it — but it encloses
+ * NONE of the six gateway emitters. A reader following either row landed in a
+ * real function and found nothing, with no signal that the anchor had rotted.
+ * Measured enclosures at HEAD: `MT5_GATEWAY_UNREACHABLE` → `_connect_and_probe`
+ * (×2); `MT5_GATEWAY_UNCONFIGURED` → `_validate_mt5_key_probe` (×3) +
+ * `_connect_and_probe` (×1). A symbol anchor survives line drift; it does not
+ * survive a refactor that splits the function it names, and this is what that
+ * looks like.
  *
  * ⚠️ ROWS ARE ANCHORED TO SYMBOLS — FUNCTION AND MACHINE CODE — NOT TO LINE
  * NUMBERS, and that is a correction, not a style preference. The previous
@@ -521,7 +545,7 @@ export type SeamBudgetKey =
  *
  *   | dependency  | site                                                  | reached by               |
  *   |-------------|-------------------------------------------------------|--------------------------|
- *   | mt5-gateway | `exchange.py` `_validate_mt5_key` — `MT5_GATEWAY_UNREACHABLE` (×2: connect timeout, connect failure) | POST /api/validate-key |
+ *   | mt5-gateway | `exchange.py` `_connect_and_probe` — `MT5_GATEWAY_UNREACHABLE` (×2: connect timeout, connect failure) | POST /api/validate-key |
  *   | supabase    | `portfolio.py` `_compute_portfolio_analytics` — `ANALYTICS_ROW_NOT_CREATED` | /api/portfolio-analytics |
  *   | supabase    | `match.py` `recompute` — `ADMIN_CHECK_UNAVAILABLE`, `ROLE_CHECK_UNAVAILABLE` | /api/match/recompute     |
  *
@@ -534,10 +558,12 @@ export type SeamBudgetKey =
  *                       `KEK_UNAVAILABLE`
  *       `egress-proxy`— `exchange.py` `_validate_sfox_key` —
  *                       `EGRESS_PROXY_MISCONFIGURED`
- *       `mt5-gateway` — `exchange.py` `_validate_mt5_key` —
- *                       `MT5_GATEWAY_UNCONFIGURED` (×2: absent host/port,
- *                       malformed port). ⚠️ SAME FUNCTION AND SAME DEPENDENCY as
- *                       the counting row above; only the STATUS separates them.
+ *       `mt5-gateway` — `exchange.py` `_validate_mt5_key_probe` (×3: absent
+ *                       host/port, malformed port, and the D-31 `undetermined`
+ *                       arm) + `_connect_and_probe` (×1) —
+ *                       `MT5_GATEWAY_UNCONFIGURED`. ⚠️ `_connect_and_probe` is
+ *                       the SAME FUNCTION AND SAME DEPENDENCY as the counting
+ *                       row above; only the STATUS separates them.
  *   · `424`, never counts, and the name is the CALLER'S VENUE rather than a
  *     dependency of ours (§4 — it must never become a breaker key):
  *       `internal.py` `get_key_permissions` — `EXCHANGE_PROBE_FAILED`;

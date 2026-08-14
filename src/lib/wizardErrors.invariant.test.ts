@@ -1260,10 +1260,20 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
     // if it lands somewhere WIZARD_ERROR_COPY can answer for.
     expect(union.has("SERVICE_UNAVAILABLE_RETRY")).toBe(true);
     // The table is NOT an identity rule, and this is what proves the widening
-    // did not quietly legalise every wire code. `SEAM_DEGRADED` and the venue
-    // codes are named in the table's own docblock as codes that correctly
-    // answer UNKNOWN; if either started resolving, an unlisted emitter would be
-    // admitted by the membership assertions above without anyone deciding so.
+    // did not quietly legalise every wire code. Both names below are absent
+    // from it on purpose; if either started resolving, an unlisted emitter
+    // would be admitted by the membership assertions above without anyone
+    // deciding so.
+    //
+    // ⚠️ RE-CUT 2026-08-14 (153.7-03). This comment used to say the table's
+    // docblock names these as codes that "correctly answer UNKNOWN", which is
+    // no longer true of the second one and was never true in the way it read:
+    // `MT5_GATEWAY_UNREACHABLE` now has a row in `VENUE_WIRE_CODE_TO_VERDICT`
+    // answering `SERVICE_UNREACHABLE`/503, and its UNKNOWN was the live
+    // WIZFORM-02 defect rather than a correct verdict. ⭐ THE ASSERTION IS
+    // UNCHANGED AND IS STILL RIGHT — that is the point worth keeping. The two
+    // tables are separate mechanisms read at different call sites, so a verdict
+    // row neither implies nor needs an alias row. Only the prose was wrong.
     expect(alias.has("SEAM_DEGRADED")).toBe(false);
     expect(alias.has("MT5_GATEWAY_UNREACHABLE")).toBe(false);
   });

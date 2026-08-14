@@ -3518,9 +3518,24 @@ export function classifyKeyValidationError(error: unknown): {
  *
  * WHY THE TABLE IS EXPLICIT RATHER THAN AN IDENTITY. A seam code and a wizard
  * code are different vocabularies that happen to agree on these two names
- * today. `SEAM_DEGRADED`, `MT5_GATEWAY_UNREACHABLE` and the venue codes have no
- * wizard member and correctly answer `UNKNOWN`; writing the mapping as
- * `code as WizardErrorCode` would silently admit every one of them.
+ * today. `SEAM_DEGRADED` and the venue codes have no wizard member of their own
+ * name; writing the mapping as `code as WizardErrorCode` would silently admit
+ * every one of them.
+ *
+ * ⚠️ RE-CUT 2026-08-14 (153.7-03 / WIZFORM-02-CLASS). The sentence above used
+ * to name `MT5_GATEWAY_UNREACHABLE` alongside `SEAM_DEGRADED` and add that all
+ * of them "correctly answer UNKNOWN". That premise is gone: 153.7-02 gave the
+ * code a row in `VENUE_WIRE_CODE_TO_VERDICT`, which answers
+ * `SERVICE_UNREACHABLE` at 503 — and answering UNKNOWN for it was never
+ * "correct", it was the live WIZFORM-02 defect, measured on PROD. The code is
+ * kept as an example of what an IDENTITY RULE would wrongly admit, which is the
+ * claim this paragraph actually needs and the only one still true of it: it has
+ * no wizard member of its own name, and it is absent from THIS table on
+ * purpose. The two tables are separate mechanisms — a verdict row is read from
+ * the thrown error's `seamCode` inside `classifyKeyValidationError`, this table
+ * from a body's `code` at a different call site — so a verdict row neither
+ * implies nor needs an alias row, and `wizardErrors.invariant.test.ts` asserts
+ * that this table still does NOT contain it.
  *
  * ⚠️ 140.3-05 / SEAMUX-01 — THE ONE DECISION ABOUT `CIRCUIT_OPEN`. Three
  * production sites answer a breaker trip with the WIRE code `CIRCUIT_OPEN`
