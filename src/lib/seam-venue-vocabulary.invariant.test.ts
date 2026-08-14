@@ -543,23 +543,83 @@ function deriveEmitterSites(
  * HERE, by name, on the day it is written — even if someone remembers to add a
  * TypeScript row at the same time.
  *
- * Measured at 140.5-02 under the predicate above: 17 distinct codes.
+ * ── ⭐ RE-CUT 17 → 37 (2026-08-14, Phase 153.7-01 / WIZFORM-02) ─────────────
+ *
+ * ⛔ THE PREDICATE CHANGED, not just the count, so this is a re-cut and not an
+ * increment — and the new predicate is restated here IN FULL rather than left
+ * to be inferred from a diff:
+ *
+ *   ROOT:  every `*.py` under `analytics-service/**` (was
+ *          `analytics-service/services/**`), recursive, MINUS the three
+ *          recorded `SCAN_EXCLUSIONS` — a `tests` path segment,
+ *          `services/error_contract.py`, and the gitignored local artefact
+ *          directories — each carrying its own reason and count pin.
+ *   STRIP: `stripCommentsPreserveLines(src, "py")`, as before.
+ *   SHAPE 1 (unchanged): every bare / subscript / kwarg assignment to
+ *          `error_code`, RHS bounded at the first depth-0 comma or newline,
+ *          every `"[A-Z][A-Z0-9_]{2,}"` literal inside it.
+ *   SHAPE 2 (new): every CALL to a `CALLEE_ARG_SLOT` member at expression
+ *          position — not a `def`/`class` head, not inside a string literal —
+ *          reading the code from THAT CALLEE'S OWN slot: positional 1 for
+ *          `service_error` and `service_error_response`, positional 0 for
+ *          `service_error_body`, the `code=` keyword for
+ *          `VenueTransientHTTPException`. The argument must be the WHOLE
+ *          literal; a computed argument yields no code and is counted into the
+ *          blind-spot pin.
+ *
+ * WHY IT CHANGED. The Phase 153 span failed WIZFORM-02 with a server-classified
+ * failure reaching a user as `code: UNKNOWN`. This guard was green throughout —
+ * because `routers/exchange.py` fails BOTH old filters, being outside
+ * `services/` and raising `service_error(...)` rather than assigning. The
+ * mechanism was never wrong; its REACH was. The boundary is now the one the
+ * phase locked: every code that can reach a user-facing surface.
+ *
+ * MEASURED at 153.7-01 under the predicate above: 37 distinct codes, from 30
+ * assignment sites and 42 call sites. ⭐ The root move contributed ZERO new
+ * codes — both `error_code =` assignments outside `services/` are literal-less
+ * forwards — so all 20 arrivals come from SHAPE 2. Cross-checked member for
+ * member against an independent Python `ast` census (the mechanism
+ * `analytics-service/tests/test_raw_5xx_census.py` uses), which agrees exactly:
+ * 42 call sites, 2 literal-less, 22 distinct call-shape codes, per-file counts
+ * identical. Two independent derivations agreeing is the oracle independence
+ * this file demands everywhere else; a roster checked against its own
+ * derivation is the defect this phase exists to close.
  */
 const EXPECTED_EMITTED_CODES: readonly string[] = [
+  "ADAPTER_INIT_FAILED",
+  "ADMIN_CHECK_UNAVAILABLE",
+  "ANALYTICS_ROW_NOT_CREATED",
   "AUTH_FAILED",
   "CSV_FORMAT_UNSUPPORTED",
   "CSV_TOO_LARGE",
   "CSV_VALIDATION_FAILED",
   "DDOS_PROTECTION",
+  "EGRESS_PROXY_MISCONFIGURED",
+  "EVAL_FAILED",
+  "EVAL_WINDOW_TOO_LARGE",
+  "EXCHANGE_PROBE_FAILED",
   "EXCHANGE_UNAVAILABLE",
+  "INTERNAL",
+  "INTERNAL_TOKEN_UNCONFIGURED",
+  "KEK_UNAVAILABLE",
+  "KEY_MISSING_EXCHANGE",
+  "KEY_UNDECRYPTABLE",
   "MISSING_SCOPE",
+  "MT5_GATEWAY_UNCONFIGURED",
+  "MT5_GATEWAY_UNREACHABLE",
   "MT5_MASTER_PASSWORD",
   "MT5_WRONG_SERVER",
   "NETWORK_UNAVAILABLE",
   "PERMISSION_DENIED",
+  "PORTFOLIO_ANALYTICS_FAILED",
   "PROBE_FAILED",
   "RATE_LIMITED",
+  "ROLE_CHECK_UNAVAILABLE",
+  "SCORING_FAILED",
+  "SERVICE_KEY_UNCONFIGURED",
+  "SIMULATION_FAILED",
   "TRADE_SCOPE",
+  "UNAUTHENTICATED",
   "UNSUPPORTED_EXCHANGE",
   "VALIDATION_UNEXPECTED",
   "WITHDRAW_SCOPE",
@@ -573,8 +633,48 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
  * fails SILENT rather than loud. An absence assertion over an empty derivation
  * reads as protection while measuring nothing, and `it.each([])` is zero cases,
  * which is a passing suite.
+ *
+ * 10 → 22 (2026-08-14, Phase 153.7-01 / WIZFORM-02). The arithmetic, stated so
+ * the next re-cut does not have to guess the rule: 0.6 × 37 measured codes =
+ * 22.2, floored to 22. ⛔ NEVER `derived.size`, and never `0.6 * derived.size`
+ * either — `expect(derived.size).toBeGreaterThanOrEqual(derived.size)` cannot
+ * fail, and this file's own `expectedSites` sibling records that three money
+ * bugs survived six review passes behind exactly that shape.
+ *
+ * ⚠️ The floor catches a TOTAL scanner break, not a partial one. Under-reach is
+ * what this phase exists to close, and under-reach is invisible to every
+ * absence assertion in this file — the hand-typed roster above, the reach pin
+ * and the both-shapes assertion are what stand against it.
  */
-const DERIVED_FLOOR = 10;
+const DERIVED_FLOOR = 22;
+
+/**
+ * ⭐ THE REACH PIN — hand-typed, because today nothing else asserts WHERE the
+ * scanner looked.
+ *
+ * `dynamicishByFile` pins what the scan could not read. This pins what it was
+ * pointed at. Dropping `routers/` from the walk, or dropping a callee from
+ * `CALLEE_ARG_SLOT`, would shrink the population SILENTLY — every disposition,
+ * fossil and exclusivity check in this file is an ABSENCE assertion and a
+ * scanner that finds less satisfies all of them. That is the exact fail-open
+ * this guard shipped once already.
+ *
+ * Structural model: `SEAM_CITATION_SURFACE`'s roster pin in
+ * `seam-citations.invariant.test.ts` — a hand-typed population, length-pinned,
+ * existence-checked, with the widening rule stated in the failure message.
+ *
+ * WIDENING RULE: a new emitter subtree or a new minting callee is a REAL
+ * change and belongs here, typed by hand, in the same commit as the code that
+ * introduced it. Deleting a row to make this pass is always the wrong fix.
+ */
+const REACH_ROOT = "analytics-service";
+const REACH_SUBTREES: readonly string[] = ["main.py", "routers", "services"];
+const REACH_CALLEES: readonly string[] = [
+  "VenueTransientHTTPException",
+  "service_error",
+  "service_error_body",
+  "service_error_response",
+];
 
 describe("[140.5-02 / SEAMPROSE-03] every EMITTED Python error_code has a TypeScript disposition", () => {
   const sites = deriveEmitterSites(ANALYTICS_ROOT);
@@ -586,10 +686,16 @@ describe("[140.5-02 / SEAMPROSE-03] every EMITTED Python error_code has a TypeSc
       `Derived only ${derived.size} distinct error_code literals from ` +
         `analytics-service/**/*.py minus SCAN_EXCLUSIONS (floor ` +
         `${DERIVED_FLOOR}). PREDICATE: ` +
-        `comment-stripped via stripCommentsPreserveLines(src,"py"), then every ` +
-        `bare / subscript / kwarg assignment to error_code, RHS bounded at the ` +
-        `first depth-0 comma or newline, all "[A-Z][A-Z0-9_]{2,}" literals ` +
-        `inside it. A number this low means the SCANNER broke, not that the ` +
+        `comment-stripped via stripCommentsPreserveLines(src,"py"), then BOTH ` +
+        `minting shapes. SHAPE 1 — every bare / subscript / kwarg assignment ` +
+        `to error_code, RHS bounded at the first depth-0 comma or newline, all ` +
+        `"[A-Z][A-Z0-9_]{2,}" literals inside it. SHAPE 2 — every call to a ` +
+        `CALLEE_ARG_SLOT member at expression position (not a def/class head, ` +
+        `not inside a string), argument list split at depth-1 commas, code ` +
+        `read from that callee's OWN slot: positional 1 for service_error and ` +
+        `service_error_response, positional 0 for service_error_body, the ` +
+        `code= keyword for VenueTransientHTTPException. A number this low ` +
+        `means the SCANNER broke, not that the ` +
         `service stopped emitting codes — and a broken scanner makes every ` +
         `assertion below pass vacuously.`,
     ).toBeGreaterThanOrEqual(DERIVED_FLOOR);
@@ -739,8 +845,20 @@ describe("[140.5-02 / SEAMPROSE-03] every EMITTED Python error_code has a TypeSc
     // why the derived population is UNCHANGED by the root move and only this
     // pin records it. If a root widening ever moves the population instead of
     // this pin, an exclusion is wrong — stop and re-measure.
+    //
+    // 10 → 12 keys (2026-08-14, Phase 153.7-01 / WIZFORM-02). The CALL shape
+    // has literal-less sites too, and they are counted on exactly the same rule
+    // rather than dropped: `exchange.py` and `portfolio.py` each raise one
+    // `VenueTransientHTTPException(code=<computed>)` forwarding a code the
+    // validation result already carries. ⭐ Dropping a literal-less CALL
+    // instead of counting it is the failure mode this pin exists for — a future
+    // dynamic ROUTER code would then shrink the population with nothing
+    // reddening, which is the same silence that let MT5_GATEWAY_UNCONFIGURED
+    // reach a user as UNKNOWN.
     ).toEqual({
       "analytics-service/routers/cron.py": 1,
+      "analytics-service/routers/exchange.py": 1,
+      "analytics-service/routers/portfolio.py": 1,
       "analytics-service/routers/process_key.py": 1,
       "analytics-service/services/ingestion/binance.py": 1,
       "analytics-service/services/ingestion/bybit.py": 1,
@@ -751,6 +869,131 @@ describe("[140.5-02 / SEAMPROSE-03] every EMITTED Python error_code has a TypeSc
       "analytics-service/services/ingestion/okx.py": 1,
       "analytics-service/services/ingestion/sfox.py": 1,
     });
+  });
+
+  it("REACH PIN — the scan is pointed at the roots and callees it claims", () => {
+    // ⭐ NOT a second disposition check. This is the converse: the disposition
+    // check asserts an ABSENCE over `derived`, and every absence assertion is
+    // satisfied by a scanner that looks nowhere. This asserts a PRESENCE about
+    // where it looked, so under-reach reds by name instead of shrinking the
+    // population in silence.
+    expect(
+      relative(process.cwd(), ANALYTICS_ROOT).split(sep).join("/"),
+      "the scan root moved. The boundary is 'every code that can reach a " +
+        "user-facing surface', not a subtree — re-narrowing it is what let a " +
+        "routers/ code reach a user as UNKNOWN while this file stayed green.",
+    ).toBe(REACH_ROOT);
+
+    expect(
+      [...CALLEE_ARG_SLOT.keys()].sort(),
+      "a minting callee was dropped from CALLEE_ARG_SLOT. Every code that " +
+        "callee mints leaves the population at once, and nothing else in this " +
+        "file can tell: the disposition, fossil and exclusivity checks are all " +
+        "absence assertions and a smaller population satisfies all three. " +
+        "Adding a callee is a real widening and belongs in REACH_CALLEES, " +
+        "hand-typed, in the same commit as the code that introduced it.",
+    ).toEqual([...REACH_CALLEES].sort());
+
+    // ...and the walk must actually REACH each pinned subtree on disk. A
+    // pinned root that the walker never descends into is a claim, not a fact.
+    const scannedTops = new Set(
+      sites.map((s) => s.file.split(sep).join("/").split("/")[1]),
+    );
+    for (const subtree of REACH_SUBTREES) {
+      expect(
+        scannedTops.has(subtree),
+        `the walk produced no emitter site under analytics-service/${subtree}. ` +
+          `Either an exclusion now swallows it, or the walker stopped ` +
+          `descending. routers/ is the one that failed WIZFORM-02.`,
+      ).toBe(true);
+    }
+  });
+
+  it("BOTH SHAPES are present in the discovered set — proven, not inspected", () => {
+    // PRD success criterion 1. Two lines that make "the shape matcher silently
+    // stopped matching" impossible to ship green: MISSING_SCOPE can ONLY arrive
+    // via the assignment shape (exchange.py's parenthesised multi-line ternary)
+    // and MT5_GATEWAY_UNCONFIGURED can ONLY arrive via the call shape
+    // (`raise service_error(500, "MT5_GATEWAY_UNCONFIGURED", …)`), so one of
+    // each is a live proof that both halves of the discovery are running.
+    expect(
+      derived.has("MISSING_SCOPE"),
+      "the ASSIGNMENT shape found nothing. MISSING_SCOPE is set by " +
+        "exchange.py's parenthesised multi-line ternary and is the single " +
+        "worst code to lose — it is the one that was already rendering " +
+        "UNKNOWN/500 for a key scope the exchange named precisely.",
+    ).toBe(true);
+    expect(
+      derived.has("MT5_GATEWAY_UNCONFIGURED"),
+      "the CALL shape found nothing. MT5_GATEWAY_UNCONFIGURED is raised as " +
+        "service_error(500, ...) in routers/exchange.py and is the code the " +
+        "Phase 153 span measured reaching a user as UNKNOWN. Its absence here " +
+        "means the population has silently reverted to the reach that failed.",
+    ).toBe(true);
+
+    // ⚠️ And the PROVENANCE, so the pair cannot be satisfied by accident: each
+    // code must be carried by a site of the shape it is supposed to prove.
+    const shapesOf = (code: string) =>
+      [
+        ...new Set(
+          sites.filter((s) => s.codes.includes(code)).map((s) => s.shape),
+        ),
+      ].sort();
+    expect(shapesOf("MISSING_SCOPE")).toEqual(["assignment"]);
+    expect(shapesOf("MT5_GATEWAY_UNCONFIGURED")).toEqual(["call"]);
+  });
+
+  it("FALSIFIER — a NEW undisposed service_error(...) code in routers/ reds the gate, by name", () => {
+    // ⭐ THIS ROW IS THE PHASE'S DEFINITION OF DONE. Layers 1 and 2 (the
+    // SELF-TESTs and the reach pin) prove the predicate matches the shape and
+    // that the scan is pointed at the real tree. Neither proves the COMPOSED
+    // guard reds. This does: the REAL `deriveEmitterSites(root)` over a
+    // synthetic root, through the REAL disposition filter — both live Maps,
+    // not a copy of them.
+    //
+    // ⛔ NOT a throwaway `.py` committed under `analytics-service/routers/`.
+    // That file would be found by this scan, by `test_raw_5xx_census.py` and by
+    // mypy/ruff, and deleting it later would re-open the hole. mkdtempSync is
+    // the established in-repo idiom (`gitleaks-allowlist.test.ts` and four
+    // siblings); no new technique.
+    const tmp = mkdtempSync(join(tmpdir(), "seam-venue-falsifier-"));
+    try {
+      mkdirSync(join(tmp, "routers"), { recursive: true });
+      writeFileSync(
+        join(tmp, "routers", "zzz.py"),
+        [
+          "async def probe_something() -> None:",
+          "    if not configured:",
+          "        raise service_error(",
+          "            500,",
+          '            "ZZZ_FALSIFIER_ROUTER_CODE",',
+          '            dependency="zzz-gateway",',
+          "            retryable=False,",
+          '            detail="A synthetic emitter. If this stops being discovered, the guard has gone blind.",',
+          "        )",
+        ].join("\n"),
+      );
+
+      const synthetic = new Set(
+        deriveEmitterSites(tmp).flatMap((s) => s.codes),
+      );
+      const undisposed = [...synthetic]
+        .filter(
+          (code) =>
+            !VENUE_WIRE_CODE_TO_VERDICT.has(code) &&
+            !VENUE_WIRE_CODES_WITHOUT_VERDICT.has(code),
+        )
+        .sort();
+      expect(
+        undisposed,
+        "A brand-new undisposed code, raised as service_error(...) under a " +
+          "routers/ directory, did NOT come back from the composed guard. " +
+          "That is the exact condition WIZFORM-02 failed on, and a fix that " +
+          "cannot fail this way has closed instances, not the class.",
+      ).toEqual(["ZZZ_FALSIFIER_ROUTER_CODE"]);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 
   /** The ONE scanner, over a source string. Never a second copy of the logic. */
