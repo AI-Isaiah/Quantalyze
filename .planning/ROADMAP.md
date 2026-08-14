@@ -62,6 +62,87 @@ accident of sequencing.** Nothing here can be delivered by an agent. The milesto
 
 ---
 
+## Current Milestone: v1.19 JOB/RATE — job-lifecycle reliability and the rate limits that hold (Phases 143–146)
+
+**Goal:** A compute job that is dropped, orphaned, or half-written is DETECTED and terminates visibly — and every authed route that reaches the Python service carries the right limit, enforced by something a new route cannot silently bypass.
+
+⭐ **Created 2026-08-14 by carrying Phases 143–146 out of v1.16, which closed scoped-down at 15 phases.** The phase NUMBERS are unchanged on purpose: `REQUIREMENTS.md` and `TODOS.md` cite them by number in dozens of places, and renumbering would break every one of those references to buy nothing.
+
+⭐ **Why this is a milestone and not a v1.16 resumption:** GSD models ONE current milestone and v1.18 already held that slot while being entirely founder-gated. Working four phases under a header that says PARKED is the ledger-vs-reality drift that produced four blockers in the v1.17 audit. This milestone is also the one that is fully **agent-deliverable** — v1.18 cannot move without the founder at an MT5 terminal.
+
+**Requirements:** JOB-04, JOB-05, JOB-06, JOB-08, RATE-01, RATE-02, RATE-03, RATE-04, RATE-05 (9 total)
+
+⛔ **EXECUTION ORDER IS 143 → 144 → 145 → 146 AND IT IS A DECLARED DEPENDENCY CHAIN, not a preference.** 143 depends on Phase 142 (complete); 144 on 143; 145 on 144. 146 depends on nothing upstream but is sequenced LAST *because its deliverable is a fresh grep* — run earlier it audits a codebase about to change and reads as coverage it does not have. ⚠️ A risk-first reordering (145/146 first, 144 last) was proposed on 2026-08-14 and rejected for inverting 145's dependency.
+
+⚠️ **143 and 144 carry pg_cron MIGRATIONS. Merging `supabase/migrations/**` to `main` AUTO-APPLIES to PROD.** Founder call 2026-08-14: land them unattended. ⛔ **144 is the dangerous one and it runs SECOND, so it gets no long PROD soak** — the sequencing mitigation does not exist here. Its safety comes from the change itself: assert the migration writes a terminal `failed` state and issues NO `DELETE`, prove it on TEST, verify on PROD before 145 begins. A reaper that deletes rows it should have reset is **not revertible**.
+
+⭐ **Two phases are MEASURE-FIRST by design and must not be shortcut:** 144 SC4 requires a committed PROD measurement of the stale-`pending` population BEFORE any sweep is scoped ("zero on prod" is a valid, budget-saving outcome), and 145 SC1 requires a committed reproduction attempt of the 42501 claim BEFORE a fix is scoped ("could not reproduce" likewise).
+
+**Plans**: TBD — none of these four has ever been planned; no phase directory exists for any of them.
+
+---
+
+### Phase 143: JOB — Dropped-enqueue reconciliation sweep
+
+**Goal**: "`after()` never ran at all" enqueue drops — architecturally invisible from inside the route handler — are detected by absence and healed
+**Depends on**: Phase 142 (same three-table triangle; scheduled as one non-racing mechanism)
+**Requirements**: JOB-04
+**Success Criteria** (what must be TRUE):
+
+  1. A strategy with persisted daily-returns data but NO `compute_jobs` row of ANY status and no terminal `strategy_analytics` row, past a grace window, is re-enqueued by a pg_cron sweep and a Sentry alert fires — the hole the in-closure `writeFailedStrategyAnalyticsPlaceholder` guard structurally cannot catch.
+  2. Running the sweep twice in a row produces no duplicate job (re-enqueue is idempotent via the existing partial unique index).
+  3. A strategy inside the grace window, or with any existing job row, or with a terminal analytics row, is never touched by the sweep.
+
+**Plans**: TBD
+**Note**: Constrained by JOB-07 (Phase 142) — sweep runs in pg_cron, never the worker loop. Needs a short design pass on "what counts as orphaned" per strategy source (csv vs wizard vs resync) before it becomes one migration.
+
+### Phase 144: JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence
+
+**Goal**: An orphaned `running` compute job terminates VISIBLY — pollers break out, the audit trail survives — resolving the founder's open WR-02 DELETE-vs-reset call
+**Depends on**: Phase 143 (JOB sequence; independent mechanism on `compute_jobs`)
+**Requirements**: JOB-05, JOB-08
+**Success Criteria** (what must be TRUE):
+
+  1. An orphaned `running` `compute_jobs` row (past the UNCHANGED 4h `claimed_at` threshold) transitions to a terminal `failed` status instead of being DELETEd — so a wizard poller sees a real outcome and the row survives for audit until the existing 30/90-day retention crons delete it.
+  2. Detection latency drops from ~24h to the tightened cadence (e.g. hourly) while a legitimate batch-tail job under 4h is never touched — the threshold, not the frequency, is what protects live jobs (the WORKER-04 2h→4h lesson).
+  3. The change ships as a NEW migration layered on `20260720120000` (the shipped migration is never edited), reconciling the TEST-DELETE / PROD-reset split into ONE behavior.
+  4. A committed measurement of the stale-`pending` `compute_jobs` population **on PROD** exists BEFORE any stale-`pending` sweep is scoped, and the gap is closed EITHER by adding `pending` as a fourth swept status (using SC 1's terminal-UPDATE pattern, never `DELETE`) OR by an explicit WON'T-FIX carrying that measurement — "zero on prod" is a valid, budget-saving outcome. The retention family covers `done` (jobid 4), `failed_*` (jobid 8) and orphaned `running` (jobid 11); stale `pending` is the one status an undrained enqueue cron produces and the only one nothing sweeps.
+
+**Plans**: TBD
+**Note**: The "fence flake also clears" claim is observation-only, NOT an acceptance criterion (research correction #4). Constrained by JOB-07 (pg_cron only).
+**Note (SC 4 / JOB-08, added 2026-08-03)**: routed here from `TODOS.md` § CI / test-infra ratchet — same table, same cron family this phase already edits, and SC 3's TEST-vs-PROD split is the same gap. Full evidence and the two ⛔ traps (never `DELETE` pending; never `cron.unschedule(9)`) are in `REQUIREMENTS.md` § JOB-08. ⚠️ The gap is CERTAIN on the TEST project and UNMEASURED on prod — that asymmetry is why SC 4 is measure-first rather than build-first.
+
+### Phase 145: JOB — csv-finalize atomicity (reproduce-first)
+
+**Goal**: A mid-request csv-finalize failure leaves no orphan strategy row — and no budget is spent re-fixing the likely-stale 42501 bug
+**Depends on**: Phase 144 (JOB sequence; order-independent within JOB — last because its scope needs the reproduction result first)
+**Requirements**: JOB-06
+**Success Criteria** (what must be TRUE):
+
+  1. A documented reproduction attempt of the 42501 / `PROCESS_KEY_UNIFIED_BACKBONE` claim against current `main` exists (committed pass/fail) BEFORE any fix is scoped — "could not reproduce" is a valid, budget-saving outcome.
+  2. A fault injected between `finalize_csv_strategy`, `persist_csv_daily_returns`, and the `after()` enqueue leaves no orphan strategy row — either the steps share one SECURITY DEFINER transaction, or explicit compensating cleanup runs + Sentry alerts (the choice recorded per the reproduction outcome and the CONTRIB-02 `p_terminal_status` owner-only variant's survival).
+  3. Happy-path csv-finalize behavior is unchanged — including the CONTRIB-02 owner-only private-finalize path if the RPCs are folded.
+
+**Plans**: TBD
+**Note**: Constrained by JOB-07 (any cleanup mechanism stays off the worker loop).
+
+### Phase 146: RATE — Audit + close the two verified gaps
+
+**Goal**: Every authed route hitting the Python service has the RIGHT rate limit — and a newly-added route can't silently ship with none
+**Depends on**: Nothing upstream (mechanical; sequenced last so its gap list comes from a fresh grep)
+**Requirements**: RATE-01, RATE-02, RATE-03, RATE-04, RATE-05
+**Success Criteria** (what must be TRUE):
+
+  1. A committed kickoff re-grep artifact lists every `src/app/api` route calling either seam client × its `checkLimit` status — the authoritative gap list, replacing the stale `TODOS.md` route list (which named seven routes that were already limited).
+  2. Burst requests to `admin/match/eval` beyond a per-`user.id` limit sized to real eval-tooling cadence receive `429` + `Retry-After`.
+  3. Requests hitting Railway's `routers/match.py` (`/recompute`, `/eval`) directly — bypassing Vercel with a leaked `X-Service-Key` — are rejected `429` by server-side slowapi limits mirroring `portfolio.py`'s pattern (defense-in-depth).
+  4. A committed audit of the seven existing limiter VALUES against real Python-side cost exists, with adjustments applied where a value was wrong — the substantive remaining RATE question.
+  5. A `withRateLimit(handler, limiter)` HOF exists and composes alongside `withAuth`/`withRole`, wired on the routes this phase touches — so the no-CI-gate hand-wiring weakness has a structural successor.
+
+**Plans**: TBD
+
+---
+
 ## v1.17 phase detail, retained (Phases 147–156)
 
 **Goal:** MT5 *works* in the founder's sense rather than the wizard's — it ingests (done), it
@@ -779,7 +860,23 @@ split into 148/149/150; later phases renumbered +2 (149→151 … 153→155) wit
 
 ---
 
-## ⏸️ PARKED Milestone: v1.16 Production Resilience & Reliability (Phases 140–146)
+## ✅ CLOSED Milestone: v1.16 Production Resilience & Reliability (Phases 140–142) — CLOSED 2026-08-14
+
+⚠️ **SCOPE AMENDED ON CLOSE, and the amendment is dated on purpose.** This milestone ran 140–146
+and sat ⏸️ PARKED at 13/19 phases for weeks. Phases **143, 144, 145 and 146 were CARRIED to the new
+milestone v1.19 JOB/RATE** on 2026-08-14 — not dropped, not ticked, and not renumbered. With them
+went JOB-04, JOB-05, JOB-06, JOB-08 and RATE-01..05.
+
+**Why carried rather than resumed:** GSD models ONE current milestone, and v1.18 already held that
+slot. Working four phases under a header reading PARKED is precisely the ledger-vs-reality drift
+that produced four blockers in the v1.17 milestone audit. Fifteen phases that shipped weeks ago
+also should not share a milestone with four that have never been planned.
+
+⛔ **What v1.16 actually earns:** the shared resilience core and breaker, the Python service
+contract, the wizard/client seam surface, retry-with-backoff, and the stuck-computing reaper.
+⛔ **What it does NOT earn:** dropped-enqueue detection, orphaned-`running` visible termination,
+csv-finalize atomicity, or a rate limit a new route cannot bypass. Those are v1.19's, and none has
+been started.
 
 ⛔ **PARKED 2026-08-04 at 68% — NOT shipped, NOT complete.** 13/19 phases complete, 119/127
 plans (68%). Outstanding: **Phase 143** (dropped-enqueue reconciliation sweep), **Phase 144**
@@ -836,10 +933,10 @@ factsheet on a spinner that never resolves.
 - [x] **Phase 141.1: SEAMBACKOFF — Retry-After-aware backoff, breaker recalibration, and SEAM-05 evidence re-derivation** (INSERTED) - Scope from the 8-agent review campaign over 141; **zero user-facing and zero data-integrity defects found**, so no retry verdict changed and no budget row was un-flipped. 9/9 plans (completed 2026-07-31). VERIFICATION was `gaps_found` 19/20 and is now **passed** 20/20 on re-verification 2026-08-01 — all three gaps had been closed in the tree by post-verification work and the file was simply never re-run: D-06's last stale coordinate became a symbol anchor at `22332e34` (the whole self-relative-citation class is now absent from `resilient-fetch.ts`), the two deferred ledgers were reconciled so TODOS.md and `deferred-items.md` both carry all four `DEF-141.1-*` ids, and the Falsifiability Ledger closed at 20/20 observed with `nyquist_compliant: true`
 - [x] **Phase 141.2: SEAMFIX — close the 141.1 code-review findings: duplicate onboard verification write, flag-monitor denominator integrity, breaker re-arm** (INSERTED) - 25 findings from the xhigh review (30 agents) deduped to 13; outcome is **twelve remediated, one dispositioned** — finding 8's retry↔limiter amplification is ACCEPTED, not fixed, and is stated as STILL LIVE everywhere it is summarised. Closes the duplicate `strategy_verifications` write on the money path (onboard's retry is now refused unless the call carries a truthy `wizard_session_id`, decided at the single chokepoint) and the three monitoring-integrity regressions D-16 shipped (unbounded `.select()` → `head: true` count, attacker-movable dedup deleted outright, read error now a distinct `denominator_read_failed` outcome rather than zero traffic). 6/6 plans (completed 2026-08-01). VERIFICATION was `human_needed` 17/17 and is now **passed** — three of its four production probes were discharged read-only on 2026-08-01 (42 rows / 42 distinct `correlation_id` / 0 `wizard:` prefix, flow_type resync 20 · csv 20 · onboard 2; unbounded `.select()` returned exactly 1000 rows at HTTP 200 with `error: null` against 7351 total, reproducing the silent truncation; all five breaker keys ABSENT, keeping finding 10 framed as hardening). The fourth — a real Railway-edge 503 carrying a malformed `Retry-After` — stays **Manual-Only and is not a gap**: it cannot be induced, and the only contract-bound 503 emitter we own structurally cannot emit one. ⏳ On PR #656, **not yet merged**
 - [x] **Phase 142: JOB — strategy_analytics stuck-computing reaper + computing_started_at DDL** - Writer-stamped transition timestamp + pg_cron reaper to terminal `failed` + threshold-math CI invariant + WEDGE-01 regression test (completed 2026-08-02)
-- [ ] **Phase 143: JOB — Dropped-enqueue reconciliation sweep** - pg_cron sweep finds strategies with data but NO compute-job row (the "`after()` never ran" hole) and idempotently re-enqueues + alerts
-- [ ] **Phase 144: JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence** - New migration layered on 20260720120000: terminal `failed` instead of bare DELETE, tightened cadence, 4h threshold unchanged
-- [ ] **Phase 145: JOB — csv-finalize atomicity (reproduce-first)** - Reproduce the stale 42501 claim before scoping; close the real non-transactional finalize gap so a partial failure leaves no orphan strategy
-- [ ] **Phase 146: RATE — Audit + close the two verified gaps** - Kickoff re-grep gap list; limit `admin/match/eval` + Python `routers/match.py`; audit the seven existing limiter VALUES; `withRateLimit` HOF
+- [→] **Phase 143: JOB — Dropped-enqueue reconciliation sweep** — ➡️ **CARRIED to milestone v1.19 on 2026-08-14.** Never started; charter moved intact to the v1.19 section at the top of this file, number unchanged
+- [→] **Phase 144: JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence** — ➡️ **CARRIED to milestone v1.19 on 2026-08-14.** Never started; charter moved intact to the v1.19 section at the top of this file, number unchanged
+- [→] **Phase 145: JOB — csv-finalize atomicity (reproduce-first)** — ➡️ **CARRIED to milestone v1.19 on 2026-08-14.** Never started; charter moved intact to the v1.19 section at the top of this file, number unchanged
+- [→] **Phase 146: RATE — Audit + close the two verified gaps** — ➡️ **CARRIED to milestone v1.19 on 2026-08-14.** Never started; charter moved intact to the v1.19 section at the top of this file, number unchanged
 
 ## v1.16 Phase Details (PARKED)
 
@@ -1339,65 +1436,6 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 142.3 to break down)
 
-### Phase 143: JOB — Dropped-enqueue reconciliation sweep
-
-**Goal**: "`after()` never ran at all" enqueue drops — architecturally invisible from inside the route handler — are detected by absence and healed
-**Depends on**: Phase 142 (same three-table triangle; scheduled as one non-racing mechanism)
-**Requirements**: JOB-04
-**Success Criteria** (what must be TRUE):
-
-  1. A strategy with persisted daily-returns data but NO `compute_jobs` row of ANY status and no terminal `strategy_analytics` row, past a grace window, is re-enqueued by a pg_cron sweep and a Sentry alert fires — the hole the in-closure `writeFailedStrategyAnalyticsPlaceholder` guard structurally cannot catch.
-  2. Running the sweep twice in a row produces no duplicate job (re-enqueue is idempotent via the existing partial unique index).
-  3. A strategy inside the grace window, or with any existing job row, or with a terminal analytics row, is never touched by the sweep.
-
-**Plans**: TBD
-**Note**: Constrained by JOB-07 (Phase 142) — sweep runs in pg_cron, never the worker loop. Needs a short design pass on "what counts as orphaned" per strategy source (csv vs wizard vs resync) before it becomes one migration.
-
-### Phase 144: JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence
-
-**Goal**: An orphaned `running` compute job terminates VISIBLY — pollers break out, the audit trail survives — resolving the founder's open WR-02 DELETE-vs-reset call
-**Depends on**: Phase 143 (JOB sequence; independent mechanism on `compute_jobs`)
-**Requirements**: JOB-05, JOB-08
-**Success Criteria** (what must be TRUE):
-
-  1. An orphaned `running` `compute_jobs` row (past the UNCHANGED 4h `claimed_at` threshold) transitions to a terminal `failed` status instead of being DELETEd — so a wizard poller sees a real outcome and the row survives for audit until the existing 30/90-day retention crons delete it.
-  2. Detection latency drops from ~24h to the tightened cadence (e.g. hourly) while a legitimate batch-tail job under 4h is never touched — the threshold, not the frequency, is what protects live jobs (the WORKER-04 2h→4h lesson).
-  3. The change ships as a NEW migration layered on `20260720120000` (the shipped migration is never edited), reconciling the TEST-DELETE / PROD-reset split into ONE behavior.
-  4. A committed measurement of the stale-`pending` `compute_jobs` population **on PROD** exists BEFORE any stale-`pending` sweep is scoped, and the gap is closed EITHER by adding `pending` as a fourth swept status (using SC 1's terminal-UPDATE pattern, never `DELETE`) OR by an explicit WON'T-FIX carrying that measurement — "zero on prod" is a valid, budget-saving outcome. The retention family covers `done` (jobid 4), `failed_*` (jobid 8) and orphaned `running` (jobid 11); stale `pending` is the one status an undrained enqueue cron produces and the only one nothing sweeps.
-
-**Plans**: TBD
-**Note**: The "fence flake also clears" claim is observation-only, NOT an acceptance criterion (research correction #4). Constrained by JOB-07 (pg_cron only).
-**Note (SC 4 / JOB-08, added 2026-08-03)**: routed here from `TODOS.md` § CI / test-infra ratchet — same table, same cron family this phase already edits, and SC 3's TEST-vs-PROD split is the same gap. Full evidence and the two ⛔ traps (never `DELETE` pending; never `cron.unschedule(9)`) are in `REQUIREMENTS.md` § JOB-08. ⚠️ The gap is CERTAIN on the TEST project and UNMEASURED on prod — that asymmetry is why SC 4 is measure-first rather than build-first.
-
-### Phase 145: JOB — csv-finalize atomicity (reproduce-first)
-
-**Goal**: A mid-request csv-finalize failure leaves no orphan strategy row — and no budget is spent re-fixing the likely-stale 42501 bug
-**Depends on**: Phase 144 (JOB sequence; order-independent within JOB — last because its scope needs the reproduction result first)
-**Requirements**: JOB-06
-**Success Criteria** (what must be TRUE):
-
-  1. A documented reproduction attempt of the 42501 / `PROCESS_KEY_UNIFIED_BACKBONE` claim against current `main` exists (committed pass/fail) BEFORE any fix is scoped — "could not reproduce" is a valid, budget-saving outcome.
-  2. A fault injected between `finalize_csv_strategy`, `persist_csv_daily_returns`, and the `after()` enqueue leaves no orphan strategy row — either the steps share one SECURITY DEFINER transaction, or explicit compensating cleanup runs + Sentry alerts (the choice recorded per the reproduction outcome and the CONTRIB-02 `p_terminal_status` owner-only variant's survival).
-  3. Happy-path csv-finalize behavior is unchanged — including the CONTRIB-02 owner-only private-finalize path if the RPCs are folded.
-
-**Plans**: TBD
-**Note**: Constrained by JOB-07 (any cleanup mechanism stays off the worker loop).
-
-### Phase 146: RATE — Audit + close the two verified gaps
-
-**Goal**: Every authed route hitting the Python service has the RIGHT rate limit — and a newly-added route can't silently ship with none
-**Depends on**: Nothing upstream (mechanical; sequenced last so its gap list comes from a fresh grep)
-**Requirements**: RATE-01, RATE-02, RATE-03, RATE-04, RATE-05
-**Success Criteria** (what must be TRUE):
-
-  1. A committed kickoff re-grep artifact lists every `src/app/api` route calling either seam client × its `checkLimit` status — the authoritative gap list, replacing the stale `TODOS.md` route list (which named seven routes that were already limited).
-  2. Burst requests to `admin/match/eval` beyond a per-`user.id` limit sized to real eval-tooling cadence receive `429` + `Retry-After`.
-  3. Requests hitting Railway's `routers/match.py` (`/recompute`, `/eval`) directly — bypassing Vercel with a leaked `X-Service-Key` — are rejected `429` by server-side slowapi limits mirroring `portfolio.py`'s pattern (defense-in-depth).
-  4. A committed audit of the seven existing limiter VALUES against real Python-side cost exists, with adjustments applied where a value was wrong — the substantive remaining RATE question.
-  5. A `withRateLimit(handler, limiter)` HOF exists and composes alongside `withAuth`/`withRole`, wired on the routes this phase touches — so the no-CI-gate hand-wiring weakness has a structural successor.
-
-**Plans**: TBD
-
 ## v1.16 Progress (PARKED)
 
 | Phase | Plans Complete | Status | Completed |
@@ -1407,10 +1445,10 @@ Plans:
 | 140.1.1. PYAPI-FIX (INSERTED) | 7/7 | Complete    | 2026-07-26 |
 | 141. SEAM retry (audit-gated) | 4/4 | Complete    | 2026-07-31 |
 | 142. JOB reaper + DDL | 6/6 | Complete   | 2026-08-02 |
-| 143. JOB dropped-enqueue sweep | 0/? | Not started | - |
-| 144. JOB WR-02 terminal UPDATE | 0/? | Not started | - |
-| 145. JOB csv-finalize atomicity | 0/? | Not started | - |
-| 146. RATE audit + close | 0/? | Not started | - |
+| 143. JOB dropped-enqueue sweep | 0/? | ➡️ **CARRIED to v1.19** | - |
+| 144. JOB WR-02 terminal UPDATE | 0/? | ➡️ **CARRIED to v1.19** | - |
+| 145. JOB csv-finalize atomicity | 0/? | ➡️ **CARRIED to v1.19** | - |
+| 146. RATE audit + close | 0/? | ➡️ **CARRIED to v1.19** | - |
 
 ## Requirement Coverage (v1.16)
 

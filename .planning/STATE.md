@@ -1,11 +1,11 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.18
-milestone_name: MT5-VERIFY & founder confirmations
-status: blocked_on_founder
-stopped_at: v1.17 CLOSED 2026-08-14 (scope amended — Phase 155 carried to v1.18). v1.18 Phases 155 + 157 both founder-gated; agent work continues on v1.16 Phases 143-146.
+milestone: v1.19
+milestone_name: JOB/RATE — job-lifecycle reliability and the rate limits that hold
+status: ready_to_plan
+stopped_at: v1.17 CLOSED and v1.16 CLOSED, both scope-amended (2026-08-14). v1.18 (155, 157) is founder-gated and cannot move. ⭐ ACTIVE AGENT WORK = v1.19 Phases 143→144→145→146, carried out of v1.16 with numbers unchanged. Next: /gsd-plan-phase 143.
 last_updated: "2026-08-14T08:30:00.000Z"
-last_activity: 2026-08-14 -- Phase 153.7 plan 03 executed, phase COMPLETE (three finalize rejections coded, ledger 3 → 0, twin regressions neuter-proven, WIZFORM-02 ticked)
+last_activity: 2026-08-14 -- v1.17 shipped + closed (v0.62.0.0/.1), v1.16 closed scoped-down, v1.19 JOB/RATE opened carrying Phases 143-146, gsd-core v1.10.0 migration + onboard, 37 stale branches adjudicated by content (4 keepers pushed), 18 ADRs synthesized (4 contradict HEAD)
 progress:
   total_phases: 17
   completed_phases: 15
