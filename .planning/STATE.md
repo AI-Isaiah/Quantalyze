@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
-stopped_at: Phase 156 plan 10 complete (PR B authored, not yet opened)
-last_updated: "2026-08-13T23:40:00.000Z"
-last_activity: 2026-08-13 -- Phase 156 plan 10 executed (five prose sites re-strengthened, PARITY-04 deferred control closed, phase gate run)
+stopped_at: Phase 153.7 plan 01 complete (mechanism landed RED BY DESIGN — do not green it here)
+last_updated: "2026-08-14T05:20:00.000Z"
+last_activity: 2026-08-14 -- Phase 153.7 plan 01 executed (scanner reach widened root + shape, population 17 to 37, exactly one designed failure naming the 20 undisposed codes)
 progress:
-  total_phases: 16
+  total_phases: 17
   completed_phases: 14
-  total_plans: 88
-  completed_plans: 88
-  percent: 87
+  total_plans: 91
+  completed_plans: 89
+  percent: 82
 ---
 
 # Project State — Quantalyze
@@ -55,6 +55,22 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
+Phase: 153.7 (WIZFORM-02-CLASS — every code that can reach a user is covered) — executing, branch `feat/phase-153.7-wizform-02-class`
+Plan: 1 of 3 complete (`153.7-01-SUMMARY.md`).
+Status: ⭐ **`src/lib/seam-venue-vocabulary.invariant.test.ts` IS RED ON PURPOSE and that is the deliverable.** The scanner's population went 17 → **37** codes (root widened to `analytics-service/**` with three pinned, reasoned exclusions; the `service_error` / `service_error_response` / `service_error_body` / `VenueTransientHTTPException` call family taught with per-callee argument slots). Exactly ONE test fails — the pre-existing "EVERY derived code has an explicit disposition" assertion — naming exactly the **20** undisposed codes. ⛔ **Do NOT green it by adding disposition rows here**: those 20 rows are Plan 02's entire job, and landing them early collapses the phase's red→green proof. ⚠️ This branch must not be merged before Plan 02.
+Last activity: 2026-08-14 -- Phase 153.7 plan 01 executed (deriveEmitterSites root-parameterised, call-shape matcher cross-checked exactly against an independently regenerated Python `ast` census, pin family re-cut, reach + both-shapes assertions and a tmpdir falsifier added)
+
+⭐ Two receipts worth not re-deriving: the matcher's output agrees with the AST census on all four
+metrics (42 call sites, 2 literal-less, 22 distinct call-shape codes, per-file table identical) —
+and the cross-check **found a real bug review would not have**: `class
+VenueTransientHTTPException(HTTPException):` was being read as a call, silently, because the site
+yields no literal and so presented as an honest dynamic emitter. Guard is now `def|class`. Second
+receipt: the one-off manual mutation (a real undisposed `service_error(...)` written into
+`routers/`, run, reverted) reddened **two** assertions by name, which is FL-3, the phase's
+definition of done.
+
+### Retained — Phase 156 close-out (COMPLETE 2026-08-13, do NOT lose this)
+
 Phase: 156 (connect-refactor — the venue the server validated is the venue the server writes) — ✅ COMPLETE 2026-08-13
 Plan: 10 of 10 complete. PR A shipped as v0.60.0.0 (merge `25e28d3a`) and is LIVE ON PROD; PR B is authored on `feat/phase-156-migration-b` and NOT yet opened.
 Status: Phase 156 complete. ⚠️ **Read this before assuming the control is live:** Migration B (`20260814120000_wizard_rpcs_revoke_authenticated.sql`) is applied to **no database** — merging PR B is what applies it. The SQL gates plans 08/09 wrote are **state-adaptive**: they SKIP on a pre-Migration-B database and ARM after, so a green `sql-tests` on PR B is green *with the four new RPC-door assertions SKIPping*. That is by design (applying Migration B to TEST before the gates land would red `sql-tests` on every open PR), but it means **nothing in the 5d/5f/5g/5h set has been observed armed-and-green in CI**. The first run after Migration B reaches TEST is the observation.
@@ -71,6 +87,15 @@ hand-set at some point and is not reproducible from `.planning/phases/`. ⛔ Do 
 two plans that deliberately produced no SUMMARY (**156-06**, whose artifact is `156-LIVE-ACCEPTANCE.md`,
 and **156-07**, whose output is Migration B itself) — the verb would write 8/10 for a phase that ran all
 ten.
+
+⚠️ **Re-cut 2026-08-14 (plan 153.7-01), by HAND and on the same rule.** `total_phases` 16 → **17**
+(Phase 153.7 was INSERTED 2026-08-14, so it is a seventh 153.x split, not one of the six);
+`total_plans` 88 → **91** (153.7 authors three); `completed_plans` 88 → **89** (this plan);
+`completed_phases` stays **14** because 153.7 is two plans from done; `percent` 87 → **82** on the
+same phase-weighted rule (14/17 = 82). ⛔ `state.advance-plan` and `state.update-progress` were run
+once and **reverted**: they are pointed at Phase 156, and they overwrote the hand-written Migration-B
+warning above with "Phase complete — ready for verification" while setting `completed_phases` 14 → 13.
+That is the failure mode the ⛔ two paragraphs up predicts; it is recorded here rather than repeated.
 
 ⚠️ **Corrected 2026-08-13:** this block read `Phase: 153.6 … EXECUTING, Plan: 1 of 6` until now.
 153.6 shipped on `main` (PR #675, commit 54a0d26d) and the position had not been advanced since.
@@ -513,6 +538,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 153.4 P04 | 25min | 2 tasks | 4 files |
 | Phase 153.4 P05 | 35min | 2 tasks | 4 files |
 | Phase 156 P02 | ~24 min | 2 tasks | 2 modified files |
+| Phase 153.7 P01 | ~22 min | 3 tasks | 1 modified file |
 
 ## Accumulated Context
 
