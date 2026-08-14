@@ -1152,7 +1152,7 @@ describe("[140.3-13b / SEAMUX-08] POST /api/strategies/composite/add-key — Sen
     await vi.waitFor(() =>
       expect(
         sentryState.captured.length,
-        "nothing was captured — the classifier's UNKNOWN terminal is the only place an unclassified key-connect failure is ever reported",
+        "nothing was captured — OUR_DEFECT_KEY_ERROR_CODES is the whole population this route reports, and it is the only place an our-defect key-connect failure is ever reported",
       ).toBeGreaterThan(0),
     );
     return sentryState.captured[sentryState.captured.length - 1];
@@ -1308,6 +1308,97 @@ describe("[140.3-13b / SEAMUX-08] POST /api/strategies/composite/add-key — Sen
     expect(res.status).toBe(429);
     expect(validateKeyMock).not.toHaveBeenCalled();
     await expectNoCapture();
+  });
+
+  /**
+   * [153.7-03 / WIZFORM-02-CLASS] the mt5-gateway family, ON THIS ROUTE — the
+   * TWIN of the case at the same arm in `create-with-key/route.test.ts`.
+   *
+   * ⚠️ THE TWIN IS THE POINT, and it is deliberately not "covered" by the other
+   * file. The verdict is ONE row in shared `wizardErrors.ts`, so it reached
+   * both routes at once and there was no one-route half-fix to catch. What a
+   * shared-table test cannot see is a future ROUTE-LOCAL change that re-opens
+   * the path here alone — and this catch block names the live example itself:
+   * pre-stringifying the caught value before classification sends a breaker
+   * trip to the terminal UNKNOWN/500 instead of the retryable 503. Fixing one
+   * path of a byte-identical pair is this milestone's most repeated mistake, so
+   * the alarm is installed on both.
+   *
+   * ⛔ The assertions are byte-identical to the twin's on purpose. A divergence
+   * here would mean the two routes had stopped answering the same wire code the
+   * same way, which is the fact worth failing on.
+   */
+  it("[153.7-03] MT5_GATEWAY_UNREACHABLE renders SERVICE_UNREACHABLE/503, and is NOT captured as unclassified", async () => {
+    validateKeyMock.mockRejectedValue(
+      Object.assign(
+        new Error("The MetaTrader gateway is not responding. Try again shortly."),
+        {
+          name: "AnalyticsUpstreamError",
+          status: 503,
+          seamCode: "MT5_GATEWAY_UNREACHABLE",
+          dependency: "mt5-gateway",
+        },
+      ),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    const json = await res.json();
+    expect(json.code).toBe("SERVICE_UNREACHABLE");
+    expect(json.code).not.toBe("UNKNOWN");
+    // ⛔ NOT `SERVICE_UNAVAILABLE_RETRY` — its "nothing was submitted" is
+    // knowable for a breaker that DECLINED to send and false-by-construction
+    // for a socket connect that WAS attempted and never answered.
+    expect(json.code).not.toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    // ⚠️ "Classified" is no longer the predicate for silence — see the
+    // OUR-DEFECT twin below, which is the other half of this pair.
+    await expectNoCapture();
+  });
+
+  /**
+   * ⭐ 153.7 review WR-02, ON THIS ROUTE — the TWIN of the case at the same arm
+   * in `create-with-key/route.test.ts`, and duplicated for the same reason every
+   * other pair in these two files is: the predicate lives in ONE shared set, but
+   * only a test that runs THIS handler can see a route-local re-narrowing of it.
+   *
+   * `INTERNAL` is `validate_key_permissions`' bare `except Exception` escape.
+   * 153.7-02 gave it a verdict row — right for the user — and silently moved it
+   * out of the `code === "UNKNOWN"` capture arm, which is wrong for us. It pages
+   * again, and it must keep paging on BOTH key routes.
+   */
+  it("[WR-02] an INTERNAL seam fault renders SEAM_INTERNAL_FAULT/500 AND IS STILL captured — it is our defect", async () => {
+    validateKeyMock.mockRejectedValue(
+      Object.assign(
+        new Error(
+          "Something went wrong on our side while checking this key. Nothing is wrong with your key.",
+        ),
+        {
+          name: "AnalyticsUpstreamError",
+          status: 500,
+          seamCode: "INTERNAL",
+        },
+      ),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    const json = await res.json();
+    expect(json.code).toBe("SEAM_INTERNAL_FAULT");
+    expect(json.code).not.toBe("UNKNOWN");
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+
+    const { err, options } = await nextCapture();
+    expect(options.tags?.surface).toBe("strategies-composite-add-key");
+    expect(options.tags?.step).toBe("unclassified-key-error");
+    expect(options.extra?.exchange).toBe("okx");
+    expect(err).toBeInstanceOf(Error);
   });
 });
 

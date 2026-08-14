@@ -395,6 +395,126 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
   Same defect family as the `### Decisions` heading drift already annotated in `STATE.md`.
   ⚠️ `state.record-metric` is also NOT idempotent — running it twice appends a duplicate row.
 
+### Phase 153.7 (WIZFORM-02-CLASS) — recorded deferrals (added 2026-08-14)
+
+Both items below are **deliberate** deferrals from 153.7, not oversights. That phase widened the
+seam-vocabulary coverage law from `analytics-service/services/**` + assignment-shape to
+`analytics-service/**` + the `service_error(...)` call family (17 → 37 codes), dispositioned all
+37, and coded the last three `finalize-wizard` rejections. Neither item below is reachable from
+`wizardErrors.ts`, which is why neither was fixed there: a verdict row for any of these codes
+would read as a fix in the diff, green the coverage law, and **reach no user surface at all**.
+
+- [ ] **The `keys/[id]/permissions` route runs its own private `PROBE_*` substring cascade — a
+  FOURTH classifier, with no coverage law over it.** It never calls `classifyKeyValidationError`
+  (measured: the only two production call sites are `strategies/create-with-key` and
+  `strategies/composite/add-key`; this route mentions it in comments only). Its own docblock
+  records **why** it stays separate: routing its messages through the shared classifier would send
+  **five of its six** to `UNKNOWN`/500. That is a defensible reason to keep the cascade and **not**
+  a reason for it to be uncovered.
+  ⭐ **This is the next instance of the WIZFORM-02 class**, and the LOCKED boundary from 153.7's
+  context — *"every code that can reach a user-facing surface"* — reaches it by its own words.
+  Three analytics-service codes land here and were given `VENUE_WIRE_CODES_WITHOUT_VERDICT` rows at
+  153.7-02 that say so explicitly: `KEY_MISSING_EXCHANGE` (422), `KEY_UNDECRYPTABLE` (500), and
+  `internal.py`'s `KEK_UNAVAILABLE` (500).
+  ⚠️ **`KEY_UNDECRYPTABLE` is the one with a real user cost**, not just a wrong label: its only
+  actionable remedy is to **reconnect the key**, and this route answers it on the arm whose copy
+  reads *"Could not check key scopes. Try again."* — an instruction that cannot work, which is the
+  affordance class the whole 153 span exists to remove.
+  ⭐ **Measured 2026-08-14, and it is why this is NOT an open WIZFORM-02 instance.** The route's
+  one wizard-side consumer is `KeyPermissionBadge`, rendered from `SyncPreviewStep` (and from the
+  strategy edit page). That component does **not** build a `wizardErrors` envelope at all — it
+  renders the route's own `{ code, error }` as `"CODE: message"` text — so nothing on this path
+  renders the `UNKNOWN` card, and WIZFORM-02's criterion ("no wizard failure renders `code: UNKNOWN`
+  when the server DID classify it") is not violated here. What is wrong is the **accuracy of a
+  remedy sentence** in a private vocabulary no coverage law watches. Same class, different
+  criterion — record it as its own item rather than re-opening a closed requirement.
+  Shape when it is picked up: give the private cascade a derived-population law of the same form
+  the venue vocabulary now has (hand-typed roster, both-halves disposition assertion, vacuity
+  floor), rather than deleting the cascade in favour of the shared classifier — deleting it is the
+  change its docblock measured as making things worse.
+
+- [ ] **Five routes answer every upstream 5xx as `code: "UNKNOWN"` through a terminal arm that
+  forwards 4xx faithfully.** ⚠️ **A SECOND, DISTINCT item from the one above** — different
+  mechanism, different routes, and it is recorded separately so neither is closed by fixing the
+  other. Measured per-arm at 153.7-02 while dispositioning the twelve Group-B codes.
+  The shape is one arm repeated: `4xx` is forwarded with `code: err.seamCode` (so the upstream
+  vocabulary survives), and everything `5xx` falls to a terminal `{ code: "UNKNOWN" }` + a Sentry
+  capture — so the *more severe* half of the vocabulary is the half that loses its code. The five
+  codes still rendering `UNKNOWN` on their own surfaces:
+  `ADMIN_CHECK_UNAVAILABLE` (503) and `ROLE_CHECK_UNAVAILABLE` (503) — admin match-recompute, and
+  collapsing the pair hides **which** check went down; `SCORING_FAILED` (500) — same route, and
+  unlike its two 503 siblings it is **permanent**, so every retryable member would offer a Retry
+  that cannot work; `EVAL_FAILED` (500) — admin match-eval, the opposite path out of the same
+  handler whose `EVAL_WINDOW_TOO_LARGE` (400) **does** survive intact through the 4xx arm;
+  `SIMULATION_FAILED` (500) — `/api/simulator`.
+  ⚠️ **Lower user-impact than the item above, and the reason is worth keeping**: four of the five
+  are admin-only surfaces with no key, no draft and no connect step, and the fifth is the portfolio
+  impact panel. They are recorded because the *mechanism* is the same one that produced the
+  WIZFORM-02 defect on the wizard, not because the blast radius is comparable.
+  Cheap first step when picked up: decide whether the 4xx-forward arm should widen to any status
+  carrying a recognised `seamCode`, which is one edit per route and would close all five — versus
+  minting per-code members, which is five copy decisions.
+
+### Phase 153.7 review + verification — findings routed onward (added 2026-08-14)
+
+The 153.7 fix round closed WR-01, WR-02, WR-03, W-153.7-1 (with a real guard, not a note),
+W-153.7-2 and W-153.7-4 in code. The three below are recorded rather than fixed, each for a
+stated reason. ⛔ Neither of the first two is a 153.7 regression — both are pre-existing and are
+listed now only because 153.7 is what made them reachable or re-read them.
+
+- [ ] **`ROSTER-DERIVE-01` — the two key-step rosters are still HAND-TYPED, and the class fix has
+  no owner until this line does.** `KNOWN_CREATE_WITH_KEY_CODES` (`ConnectKeyStep.tsx`) and
+  `KNOWN_ADD_KEY_CODES` (`MultiKeyConnectStep.tsx`) are hand-maintained allow-lists. Their own
+  docblock used to assign the derived-roster class fix to *"Phase 153 / WIZFORM-02"* — which is
+  now **ticked COMPLETE** (`REQUIREMENTS.md`), so that pointer named a closed requirement and the
+  fix was ownerless. **This item is that owner**; both docblocks now cite it by name.
+  ⭐ **WHAT CHANGED IN THE MEANTIME, so this is no longer a silent hazard.** 153.7's verifier
+  MEASURED that deleting `"SEAM_INTERNAL_FAULT",` from either roster left the whole suite green
+  while the wizard rendered `UNKNOWN` **with a Retry control** against `retryable=False` faults —
+  the 2026-08-05 `SERVICE_UNREACHABLE` incident shape. The 153.7 fix round closed that with
+  `[153.7 review W-153.7-1]` in `wizardErrors.invariant.test.ts`: the classifier-reachable
+  population is derived (cascade literals by source scan + the LIVE `VENUE_WIRE_CODE_TO_VERDICT`)
+  and checked against each roster under the translate-first admission rule. **A missing roster row
+  now reds CI by name.** So what remains is DUPLICATION, not exposure.
+  What is blocked: nothing ships wrong today. What unblocks it: deriving both rosters from the
+  route contract instead of typing them, so the guard has nothing left to catch.
+  ⚠️ **The obvious shortcut is wrong and is written down so it is not re-attempted:** merging the
+  two rosters. They are separate on purpose (`ConnectKeyStep`'s docblock argues it at length — a
+  step admits the codes ITS route emits, not the whole vocabulary), and a merged set would pass the
+  guard while admitting each route's codes at the other.
+
+- [ ] **`WR-04` (pre-existing) — `MT5_GATEWAY_UNREACHABLE`'s server-advertised `Retry-After` is
+  dropped, so the user gets a Retry control with no interval and hammers a gateway that told us how
+  long to wait.** `analytics-service/routers/exchange.py:626-634` raises it with
+  `retry_after=RETRY_AFTER_SECONDS["mt5-gateway"]`. `AnalyticsUpstreamError` carries `status`,
+  `seamCode` and `dependency` — **no retry-after field** — and both key routes stamp `Retry-After`
+  only for `err instanceof CircuitOpenError`. So `parseRetryAfterSeconds(res.headers)` in
+  `ConnectKeyStep` / `MultiKeyConnectStep` resolves `null` and the envelope renders no wait.
+  ⚠️ **Listed now, not before, because 153.7 is what makes this code render a RECOVERABLE envelope
+  for the first time** (`MT5_GATEWAY_UNREACHABLE` → `SERVICE_UNREACHABLE`, 503). The missing wait
+  is reachable rather than theoretical as of that commit. `src/__tests__/contracts/REGISTRY.md`
+  already records the parent gap as *"coverage-law row 3 and nothing guards its completeness"*.
+  What is blocked: an honest wait on the one venue that publishes one. What unblocks it: a fourth
+  optional constructor argument on `AnalyticsUpstreamError` fed from the nested envelope's
+  `retry_after`, relayed by both key-route catches exactly the way `CircuitOpenError.retryAfterS`
+  already is. ⛔ Not fixed in the 153.7 round: it is a seam-contract change across the Python
+  envelope, the TS error class and two route catches — a plan, not a review fix.
+
+- [ ] **`W-153.7-3` (pre-existing, low) — coverage-law row 1 enumerates exactly THREE Next route
+  files, which is narrower than the phase goal's wording.** `ROUTES` in
+  `wizardErrors.invariant.test.ts` still lists `create-with-key`, `composite/add-key` and
+  `finalize-wizard`, and matches only literal `NextResponse.json({ code: "X" }, { status })` sites.
+  **Six** of our own Next routes mint `code: "UNAUTHENTICATED"` in TypeScript (named in the
+  UNAUTHENTICATED exemption row) and sit outside any derived population.
+  153.7's declared scope was the PYTHON half plus the four `missing` items — all discharged — so
+  this is out of scope rather than skipped. It is recorded because it **bounds the literal claim**
+  *"every code that can reach a user-facing surface"*: that claim is true of the analytics-service
+  vocabulary and not yet of the Next-minted one.
+  What is blocked: nothing user-facing. What unblocks it: extend `ROUTES` to the Next routes that
+  mint codes, or state the boundary in the file's docblock the way `EXPECTED_EMITTED_CODES` now
+  states its exclusions — ⛔ the one thing that must not happen is the claim staying broader than
+  the mechanism.
+
 ### v1.14 Smoothed-MTM go-live blockers — FIXED in the v1.14 landing (2026-07-23)
 Surfaced by the /ship Fable red team; the safety-critical ones fixed in the landing PR so
 flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM factsheet.
@@ -2369,3 +2489,21 @@ named files are unmodified by the phase, so neither was quietly half-done.
   its own decision (it is a migration + backfill question on a column that is live on PROD).
   ⚠️ **Distinct from A-3 above:** A-3 is about this value's *shape* (a login is unique only within a
   broker server); this entry is about its *provenance*. Fixing either does not fix the other.
+
+### Phase 153.7 ship gate — one unnamed vitest flake, recorded rather than lost (added 2026-08-14)
+
+- [ ] **`FLAKE-153.7-01` — the full local vitest suite failed exactly one test once, in parallel
+  mode, and I could not name it.** ⚠️ **This is a known-unknown on purpose.** Evidence, in order:
+  run 1 (`vitest run`, default parallel) → `Test Files 1 failed | 780 passed | 19 skipped`,
+  `Tests 1 failed | 11852 passed`; run 2 (identical command, no code change between) → exit 0;
+  run 3 (`vitest run --no-file-parallelism`) → `781 passed | 19 skipped`, `11853 passed`, exit 0.
+  Two clean full runs against one failure, so the phase gate is green and Phase 153.7 shipped on it.
+  ⛔ **Why this is written down instead of shrugged off:** the failing run's output was not captured,
+  so the test has no name. An unnamed flake that fires once locally is the shape that later fires in
+  a CI shard and reads as a regression in whatever PR happens to be open — costing a bisect against
+  an innocent diff. If a single-test failure appears in a vitest shard and does not reproduce under
+  `--no-file-parallelism`, check this entry BEFORE bisecting.
+  **What would close it:** capture a failing run (`vitest run > /tmp/run.txt 2>&1` in a loop until
+  non-zero) and name the test; then either fix the race or pin the file to `--no-file-parallelism`.
+  ⚠️ Local is Node 25, CI is Node 22 — reproduce under
+  `PATH=/opt/homebrew/opt/node@22/bin:$PATH` before concluding it is local-only.

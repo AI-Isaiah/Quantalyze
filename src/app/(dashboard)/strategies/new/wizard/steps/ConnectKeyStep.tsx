@@ -322,12 +322,53 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
     // `WIZARD_ERROR_COPY` (verified: SERVICE_UNREACHABLE,
     // KEY_MISSING_READ_SCOPE, KEY_PERMISSION_DENIED entries exist in
     // `wizardErrors.ts`). This is exactly the hand-typed allow-list edit the
-    // docblock above warns about — the CLASS fix (a roster DERIVED from the
-    // route contract instead of hand-maintained) stays with Phase 153 /
-    // WIZFORM-02; do not grow this list further, derive it there.
+    // docblock above warns about.
+    //
+    // ⭐ THE CLASS FIX HAS AN OWNER AGAIN — `ROSTER-DERIVE-01` in `TODOS.md`
+    // (153.7 verification W-153.7-2). This line used to read *"the CLASS fix …
+    // stays with Phase 153 / WIZFORM-02; do not grow this list further, derive
+    // it there"*, and BOTH halves of that sentence had expired: WIZFORM-02 is
+    // ticked COMPLETE in `REQUIREMENTS.md`, so the pointer named a closed
+    // requirement, and 153.7 grew this list anyway (`SEAM_INTERNAL_FAULT`,
+    // below) without deriving it. A pointer at a closed requirement is how a
+    // class fix becomes nobody's.
+    //
+    // ⚠️ AND THE INSTRUCTION IT CARRIED IS NOW WRONG AS WRITTEN. "Do not grow
+    // this list" cannot be obeyed: every new classifier verdict MUST be admitted
+    // here in the same commit, or the step rejects the honest code and renders
+    // UNKNOWN with a Retry control. What changed is that growing it is no longer
+    // SILENT — `[153.7 review W-153.7-1]` in `wizardErrors.invariant.test.ts`
+    // derives the classifier-reachable population (the cascade's literals plus
+    // the LIVE `VENUE_WIRE_CODE_TO_VERDICT`) and reds BY NAME when this roster
+    // does not admit a member of it. That guard exists because deleting one line
+    // from this set was MEASURED at 153.7 to leave 312 tests green while
+    // re-creating the 2026-08-05 incident.
+    //
+    // So: grow it when the classifier does, in the same commit, and read
+    // `ROSTER-DERIVE-01` before deciding the duplication is acceptable forever.
     "SERVICE_UNREACHABLE",
     "KEY_MISSING_READ_SCOPE",
     "KEY_PERMISSION_DENIED",
+    // 153.7-02 / WIZFORM-02-CLASS — admitted HERE IN THE SAME COMMIT the shared
+    // classifier starts returning it. `VENUE_WIRE_CODE_TO_VERDICT` now answers
+    // for `MT5_GATEWAY_UNCONFIGURED`, `ADAPTER_INIT_FAILED` and `INTERNAL` with
+    // `SEAM_INTERNAL_FAULT`; omit this line and the membership check rejects the
+    // honest code, the step renders `UNKNOWN` — whose copy IS recoverable — and
+    // the user gets "Try the last action again." with a Retry control for three
+    // faults the service marked `retryable=False`. That is the same trap the
+    // `VENUE_ALREADY_CONNECTED` note above records, and the same one the 2026-08-05
+    // `SERVICE_UNREACHABLE` incident below it records.
+    //
+    // ⚠️ ITS FOUR SIBLING VERDICTS COST NOTHING HERE, and the asymmetry is worth
+    // stating rather than leaving to be rediscovered: `SERVICE_UNREACHABLE` and
+    // `KEY_PROBE_FAILED` are already members, and `SEAM_MISCONFIGURED` — which
+    // that same batch maps `EGRESS_PROXY_MISCONFIGURED`, `SERVICE_KEY_UNCONFIGURED`
+    // and `KEK_UNAVAILABLE` onto — is resolved by the TRANSLATE-FIRST hop through
+    // `SEAM_CODE_TO_WIZARD_CODE` and never reaches this set, exactly as the
+    // docblock above says. `SEAM_INTERNAL_FAULT` is deliberately absent from that
+    // table (we mint it; no service puts it on the wire), so this roster is the
+    // only thing standing for it.
+    "SEAM_INTERNAL_FAULT",
   ]);
 
 export interface ConnectKeySuccess {

@@ -4576,3 +4576,97 @@ describe("[153 review] a composite member embed of an unexpected shape fails LOU
     }
   });
 });
+
+/**
+ * [153.7-03 / WIZFORM-02-CLASS] the last three code-less rejections, ON THE
+ * WIRE.
+ *
+ * ⚠️ WHY THIS BLOCK EXISTS WHEN `wizardErrors.invariant.test.ts` ALREADY PINS
+ * ALL THREE. That guard reads this route's SOURCE and counts sites — it proves
+ * the literal is written in the file. It cannot prove the literal reaches the
+ * RESPONSE BODY, because it never executes the handler. The two oracles fail
+ * for different reasons: reorder an arm to `{ error, code }` and the source
+ * scan reds while the body is unchanged; change the arm's shape so the branch
+ * is unreachable and the body loses its code while the source scan stays green.
+ * Testing the wiring rather than the literal is the standing lesson here.
+ *
+ * Each case asserts the CODE, not just the status or the sentence — the
+ * pre-existing tests on two of these arms asserted `body.error` and would have
+ * stayed green through the whole year these three answered code-less.
+ */
+describe("[153.7-03 / WIZFORM-02-CLASS] every finalize rejection carries its code", () => {
+  it("the draft-read failure answers DRAFT_LOOKUP_FAILED, never a bare 500", async () => {
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.strategyError = { message: "connection reset by peer" };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("DRAFT_LOOKUP_FAILED");
+    // The claim the copy makes — "nothing was submitted and nothing was
+    // changed" — is only honest while this arm really does precede every
+    // write. Assert the finalize RPC was never reached rather than trusting a
+    // reading of the handler.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+    // ⛔ H-0305: the scrubbed upstream sentence must not ride out on the wire.
+    expect(JSON.stringify(body)).not.toContain("connection reset");
+
+    consoleErr.mockRestore();
+  });
+
+  it("the finalize RPC's generic tail answers DRAFT_FINALIZE_FAILED", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    routeThroughLegacyFinalize();
+    STATE.rpcResult = {
+      data: null,
+      error: { code: "XX001", message: "internal_error: oops at line 42" },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("DRAFT_FINALIZE_FAILED");
+    // ⛔ NOT `DRAFT_STATE_INVALID`. That member says the draft MOVED ON, a fact
+    // the 22023 arm establishes from the RPC's own SQLSTATE. This tail knows
+    // nothing about the draft's state, and it is non-recoverable copy — so
+    // answering it here would suppress a Retry that can genuinely win.
+    expect(body.code).not.toBe("DRAFT_STATE_INVALID");
+    expect(JSON.stringify(body)).not.toContain("oops at line 42");
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("the unreadable upstream answer carries SEAM_RESPONSE_UNREADABLE", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.processKeyResult = {
+      ok: true,
+      body: { queued: "yes", verification_id: "ver-1" },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.code).toBe("SEAM_RESPONSE_UNREADABLE");
+    // The contract-violation capture is what makes the drift alertable, and it
+    // must survive the arm gaining a code.
+    expect(
+      STATE.captureToSentryCalls.find(
+        (c) => c.options.tags.step === "unified-response-parse",
+      ),
+    ).toBeDefined();
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+});

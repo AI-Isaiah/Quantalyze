@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
-stopped_at: Phase 156 plan 10 complete (PR B authored, not yet opened)
-last_updated: "2026-08-13T23:40:00.000Z"
-last_activity: 2026-08-13 -- Phase 156 plan 10 executed (five prose sites re-strengthened, PARITY-04 deferred control closed, phase gate run)
+stopped_at: Phase 153.7 COMPLETE (3/3 plans — WIZFORM-02 ticked; Phase 153 parent left for the verifier)
+last_updated: "2026-08-14T08:30:00.000Z"
+last_activity: 2026-08-14 -- Phase 153.7 plan 03 executed, phase COMPLETE (three finalize rejections coded, ledger 3 → 0, twin regressions neuter-proven, WIZFORM-02 ticked)
 progress:
-  total_phases: 16
-  completed_phases: 14
-  total_plans: 88
-  completed_plans: 88
-  percent: 87
+  total_phases: 17
+  completed_phases: 15
+  total_plans: 91
+  completed_plans: 91
+  percent: 88
 ---
 
 # Project State — Quantalyze
@@ -55,6 +55,33 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
+Phase: 153.7 (WIZFORM-02-CLASS — every code that can reach a user is covered) — ✅ **COMPLETE 2026-08-14**, branch `feat/phase-153.7-wizform-02-class`
+Plan: 3 of 3 complete (`153.7-01-SUMMARY.md`, `153.7-02-SUMMARY.md`, `153.7-03-SUMMARY.md`).
+Status: ⭐⭐ **WIZFORM-02 IS TICKED — all four `missing` items from `153-VERIFICATION.md` are discharged.** Plan 03 coded the last three code-less `finalize-wizard` rejections: `KNOWN_CODELESS_FINALIZE_REJECTIONS` **3 → 0**, `expectedSites` 29 → 32, and `EXPECTED_FINALIZE_REJECTION_SITES` **never edited** at 32, so 32 − 32 = 0 is the proof nothing was invented. The ledger constant and its assertion were KEPT: at zero the assertion *is* "every rejection carries a code", which is where WIZFORM-02's criterion lands. Three copy members, one per ARM rather than per subject, because each may claim a different amount about server state — `DRAFT_LOOKUP_FAILED` (a SELECT that errored, so "nothing was changed" is observable; token REUSED from `keys/sync`, not a synonym), `DRAFT_FINALIZE_FAILED` (the generic tail also catches a transport failure that can lose the answer to a write that landed, so it may NOT say nothing was saved), `SEAM_RESPONSE_UNREADABLE` (upstream answered **2xx** — the submission was accepted and only the result is unreadable, so it may claim NEITHER outcome; non-recoverable because a retry there is *unpredictable*, not futile). `EXPECTED_TABLE_SIZE` **77 → 80** in lockstep at both declarations; 3 roster rows in `KNOWN_FINALIZE_CODES`.
+
+⚠️ **Two neuter-proofs, both recorded, both restored.** (a) Deleting the shared `MT5_GATEWAY_UNREACHABLE` verdict row reds the twin regressions on **BOTH** key routes together (503 → 500) plus the classifier replay naming `UNKNOWN` — zero production route edits in that commit, only two `.test.ts` files. (b) Neutering ONE finalize arm reds **three independent oracles** (the wire test by name, `expectedSites` 32 → 31, the ledger 0 → 1) while `EXPECTED_FINALIZE_REJECTION_SITES` stays satisfied at 32 — the two-pin division of labour demonstrated rather than asserted.
+
+⚠️ **The honesty check that could have stopped the tick was RUN, not skipped.** Six analytics-service codes still render `UNKNOWN` on their own surfaces. Five are admin/simulator terminal arms — no key, no draft, no connect step. The sixth, `KEY_UNDECRYPTABLE`, lands on `keys/[id]/permissions`, and that route **IS** reachable from a wizard surface (`SyncPreviewStep` renders `KeyPermissionBadge`). Measured: that component never builds a `wizardErrors` envelope — it renders the route's own `{ code, error }` as `"CODE: message"` text — so **no `UNKNOWN` card is rendered there**. Its defect is a remedy sentence ("try again" where the only remedy is to reconnect). Both residues are recorded as **SEPARATE** TODOS.md items under *Phase 153.7 — recorded deferrals*.
+
+📌 **Phase 153's parent checkbox is now TICKABLE and was deliberately LEFT for the verifier** — a span verdict is the verifier's to issue, and ticking that box ahead of its evidence is what produced the retroactive verification in the first place.
+
+⚠️ **One prose correction worth carrying:** `resilient-fetch.ts`'s `dependency=` census claimed completeness at **13** sites; an `ast` re-measure found **15**. Both arrivals are `500`s, so no breaker key and no counting row changed — but the pin now reads 15, and a new `503` site there is a real breaker key. The same measure found `_validate_mt5_key` was a **wrong** symbol (it still exists and encloses none of the six gateway emitters), which is why no grep would have caught it.
+
+--- Prior status, retained ---
+⭐ **Plan 01's designed red is GREEN, and that is the phase's red→green proof.** `seam-venue-vocabulary.invariant.test.ts` is 20/20: all **37** derived codes are dispositioned — 8 verdict rows in `VENUE_WIRE_CODE_TO_VERDICT` for the codes that reach `classifyKeyValidationError`, 12 individually-measured rows in `VENUE_WIRE_CODES_WITHOUT_VERDICT` for the ones that render through another classifier. The 8×`UNKNOWN`/500 replay red was recorded BEFORE the rows landed (commit `7122ee7e`) and is quoted verbatim in the summary. ⚠️ **One wizard copy member was MINTED** — `SEAM_INTERNAL_FAULT`, `EXPECTED_TABLE_SIZE` 76 → 77 at both declarations — because `SEAM_MISCONFIGURED`'s "we stopped before sending the request" is measurably FALSE at `INTERNAL`'s emitter and at one of `MT5_GATEWAY_UNCONFIGURED`'s four. It needed 2 roster rows; `SEAM_MISCONFIGURED` needed none (both key steps translate through `SEAM_CODE_TO_WIZARD_CODE` first — measured, and it contradicts the plan's constraint 6). ⚠️ Plan 03 still owes the three code-less finalize rejections, the twin route regressions and the TODOS.md deferral before WIZFORM-02 may be ticked.
+Last activity: 2026-08-14 -- Phase 153.7 plan 03 executed — PHASE COMPLETE (ledger 3 → 0 with the 32 total untouched, twin regressions neuter-proven on both key routes, prose re-cuts, two TODOS.md deferrals, WIZFORM-02 ticked)
+
+⭐ Two receipts worth not re-deriving: the matcher's output agrees with the AST census on all four
+metrics (42 call sites, 2 literal-less, 22 distinct call-shape codes, per-file table identical) —
+and the cross-check **found a real bug review would not have**: `class
+VenueTransientHTTPException(HTTPException):` was being read as a call, silently, because the site
+yields no literal and so presented as an honest dynamic emitter. Guard is now `def|class`. Second
+receipt: the one-off manual mutation (a real undisposed `service_error(...)` written into
+`routers/`, run, reverted) reddened **two** assertions by name, which is FL-3, the phase's
+definition of done.
+
+### Retained — Phase 156 close-out (COMPLETE 2026-08-13, do NOT lose this)
+
 Phase: 156 (connect-refactor — the venue the server validated is the venue the server writes) — ✅ COMPLETE 2026-08-13
 Plan: 10 of 10 complete. PR A shipped as v0.60.0.0 (merge `25e28d3a`) and is LIVE ON PROD; PR B is authored on `feat/phase-156-migration-b` and NOT yet opened.
 Status: Phase 156 complete. ⚠️ **Read this before assuming the control is live:** Migration B (`20260814120000_wizard_rpcs_revoke_authenticated.sql`) is applied to **no database** — merging PR B is what applies it. The SQL gates plans 08/09 wrote are **state-adaptive**: they SKIP on a pre-Migration-B database and ARM after, so a green `sql-tests` on PR B is green *with the four new RPC-door assertions SKIPping*. That is by design (applying Migration B to TEST before the gates land would red `sql-tests` on every open PR), but it means **nothing in the 5d/5f/5g/5h set has been observed armed-and-green in CI**. The first run after Migration B reaches TEST is the observation.
@@ -71,6 +98,15 @@ hand-set at some point and is not reproducible from `.planning/phases/`. ⛔ Do 
 two plans that deliberately produced no SUMMARY (**156-06**, whose artifact is `156-LIVE-ACCEPTANCE.md`,
 and **156-07**, whose output is Migration B itself) — the verb would write 8/10 for a phase that ran all
 ten.
+
+⚠️ **Re-cut 2026-08-14 (plan 153.7-01), by HAND and on the same rule.** `total_phases` 16 → **17**
+(Phase 153.7 was INSERTED 2026-08-14, so it is a seventh 153.x split, not one of the six);
+`total_plans` 88 → **91** (153.7 authors three); `completed_plans` 88 → **89** (this plan);
+`completed_phases` stays **14** because 153.7 is two plans from done; `percent` 87 → **82** on the
+same phase-weighted rule (14/17 = 82). ⛔ `state.advance-plan` and `state.update-progress` were run
+once and **reverted**: they are pointed at Phase 156, and they overwrote the hand-written Migration-B
+warning above with "Phase complete — ready for verification" while setting `completed_phases` 14 → 13.
+That is the failure mode the ⛔ two paragraphs up predicts; it is recorded here rather than repeated.
 
 ⚠️ **Corrected 2026-08-13:** this block read `Phase: 153.6 … EXECUTING, Plan: 1 of 6` until now.
 153.6 shipped on `main` (PR #675, commit 54a0d26d) and the position had not been advanced since.
@@ -513,6 +549,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 153.4 P04 | 25min | 2 tasks | 4 files |
 | Phase 153.4 P05 | 35min | 2 tasks | 4 files |
 | Phase 156 P02 | ~24 min | 2 tasks | 2 modified files |
+| Phase 153.7 P01 | ~22 min | 3 tasks | 1 modified file |
 
 ## Accumulated Context
 

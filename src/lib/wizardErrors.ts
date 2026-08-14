@@ -275,6 +275,50 @@ export type WizardErrorCode =
   // to this") and `GATE_DRAFT_GONE` says the draft is not there at all. This
   // draft exists, is the caller's, and has simply MOVED ON.
   | "DRAFT_STATE_INVALID"
+  // 153.7-03 / WIZFORM-02-CLASS — TWO OF THE THREE `finalize-wizard`
+  // REJECTIONS THAT ANSWERED WITH NO CODE AT ALL. Both were recorded as known
+  // debt by 153.1-06's ledger and both are fixed here; the third
+  // (`SEAM_RESPONSE_UNREADABLE`) sits with the seam family below because its
+  // fault is the seam's, not the draft's.
+  //
+  // ⭐ `DRAFT_LOOKUP_FAILED` IS NOT A NEW NAME — it is the token this repo
+  // already uses for exactly this fact. `keys/sync`'s draft-read split minted
+  // it, and its own comment records that it copied the template from THIS
+  // route's `wizard_session_id` draft read. `verify-strategy` states the rule
+  // when it mints `VERIFY_PERSIST_FAILED` on that precedent: same fact ⇒ same
+  // token. Minting a second name for one fact is how a vocabulary starts lying,
+  // so this member adopts the existing token and gives it copy.
+  //
+  // WHAT EACH ONE MAY CLAIM, measured at its own arm rather than shared:
+  //   · `DRAFT_LOOKUP_FAILED` — the arm is a `.maybeSingle()` SELECT that
+  //     errored, and nothing in the handler writes before it (no `.insert`,
+  //     `.update`, `.upsert`, `.delete` or `.rpc` precedes it). "Nothing was
+  //     submitted and nothing was changed" is a fact about a read, so it is
+  //     knowable in the way 140.3-15 requires and the CSV case lacked.
+  //   · `DRAFT_FINALIZE_FAILED` — the GENERIC tail of the finalize RPC's error
+  //     branch, reached only after P0002/02000, 42501 and 22023 have been split
+  //     off. That residue holds two different worlds: a SQL raise (Postgres
+  //     rolled the SECURITY DEFINER transaction back, so nothing landed) and a
+  //     transport failure reaching PostgREST (the write MAY have landed). So
+  //     this copy must NOT say nothing was saved — it says we cannot confirm,
+  //     which is true in both worlds.
+  //
+  // ⚠️ NOT `DRAFT_STATE_INVALID` for either, and it would assert something
+  // false: that member says the draft MOVED ON — a fact the 22023 arm above
+  // establishes by reading the RPC's own SQLSTATE. Neither of these two knows
+  // anything about the draft's state; one could not read it and the other could
+  // not finish writing it.
+  | "DRAFT_LOOKUP_FAILED"
+  // RECOVERABLE, deliberately, and on the opposite mechanism to the members
+  // above it: `clear_and_retry` IS a member of `RECOVERABLE_ACTIONS`
+  // (src/lib/envelope.ts), so `buildEnvelope` derives `recoverable: true` and
+  // the Retry control renders. A retry here can WIN — the common causes are a
+  // pool blip, a deadlock and a serialization failure — and a retry cannot
+  // HARM, because `finalize_wizard_strategy` is state-guarded: run a second
+  // time against a draft that already finalized it raises 22023, which the arm
+  // above answers as `DRAFT_STATE_INVALID` rather than creating a second
+  // strategy. Both halves are why the control is offered.
+  | "DRAFT_FINALIZE_FAILED"
   // Phase 17 NEW — CSV branch absorption (DESIGN-05).
   | "CSV_PARSE_FAILED"
   | "CSV_SCHEMA_VIOLATION"
@@ -428,6 +472,92 @@ export type WizardErrorCode =
   // `recoverable: false` and `ErrorEnvelope` renders NO Retry control. The
   // absence IS the fix, on the same mechanism `COMPOSITE_TOO_MANY_MEMBERS` uses.
   | "SEAM_MISCONFIGURED"
+  // Phase 153.7-02 / WIZFORM-02-CLASS — a PERMANENT fault in our own service
+  // that stopped a key check, where the more precise `SEAM_MISCONFIGURED` above
+  // would assert something measurably false at the emitter.
+  //
+  // ⭐ IT WAS MINTED ONLY AFTER THE FOUR CANDIDATES WERE MEASURED PER EMITTER,
+  // and the rule that picked it is stated so the next author can re-run it: take
+  // the MOST SPECIFIC member every one of whose claims is true at EVERY emitter
+  // that can reach `classifyKeyValidationError`. Three wire codes have no such
+  // member:
+  //   · `INTERNAL` — `validate_key`'s generic escape from
+  //     `validate_key_permissions`. The venue probe HAD been issued, so
+  //     `SEAM_MISCONFIGURED`'s "we stopped before sending the request" is
+  //     false-by-construction; and it is `retryable=False`, so
+  //     `KEY_PROBE_FAILED`'s "a transient upstream issue" is false too — and
+  //     that member is recoverable, so it would render a Retry control against a
+  //     fault that fails identically every time.
+  //   · `ADAPTER_INIT_FAILED` — `create_exchange` raising. Nothing was sent (the
+  //     emitter measures that itself: a dict lookup, a dict build and two
+  //     attribute sets, zero network I/O), but the cause is a ccxt signature
+  //     change, a missing extra or an OOM. "Our own configuration is wrong" names
+  //     the wrong thing.
+  //   · `MT5_GATEWAY_UNCONFIGURED` — four emitters. Three fire before the gateway
+  //     is contacted at all, but the D-31 `undetermined` arm in
+  //     `_validate_mt5_key_probe` fires AFTER the terminal ran and refused to
+  //     classify, so "we stopped before sending the request" is false at one of
+  //     the four. A member that is true at three of four emitters is exactly the
+  //     shape this milestone exists to stop shipping.
+  //
+  // WHAT IT DELIBERATELY DOES NOT SAY. It makes no claim about WHERE the fault
+  // stopped us, because that is the clause that differs across the three codes.
+  // It claims only what is true at all of them: the fault is ours, the check did
+  // not complete, no key was stored, and retrying re-runs the same fault.
+  //
+  // ⚠️ NOT A DUPLICATE OF THE NEAR-MISSES:
+  //   · SEAM_MISCONFIGURED — narrower and still correct where it applies; this
+  //     phase keeps it for `EGRESS_PROXY_MISCONFIGURED`, `SERVICE_KEY_UNCONFIGURED`
+  //     and `KEK_UNAVAILABLE`, whose emitters DO fire before any outbound request
+  //     and before any state change. Do not collapse the two.
+  //   · SEAM_DEADLINE_EXCEEDED — our budget expired. Here the work FAILED; no
+  //     deadline was involved.
+  //   · UNKNOWN — "we could not classify this failure". The server classified it
+  //     precisely; rendering UNKNOWN for it is the defect being closed.
+  //
+  // NOT recoverable, deliberately: `actions` carries neither member of
+  // `RECOVERABLE_ACTIONS` (src/lib/envelope.ts), so `buildEnvelope` derives
+  // `recoverable: false` and `ErrorEnvelope` renders NO Retry control — the same
+  // mechanism `SEAM_MISCONFIGURED` and `ALLOCATION_NOT_ALLOCATABLE` use. All
+  // three wire codes it homes are `retryable=False` at their emitters.
+  | "SEAM_INTERNAL_FAULT"
+  // 153.7-03 / WIZFORM-02-CLASS — the THIRD code-less `finalize-wizard`
+  // rejection, and the only one of the three whose outcome is genuinely
+  // unknowable. The unified arm's upstream answered **2xx** with a body that
+  // fails `isProcessKeyOnboardResponse`, so the submission was ACCEPTED and we
+  // cannot read what was done with it. A partial deploy, a field rename or a
+  // proxy that strips the body all produce it.
+  //
+  // ⭐ THE COPY'S HARDEST CONSTRAINT IS WHAT IT MAY NOT SAY. Every other member
+  // near it can state whether anything was saved; this one cannot, in either
+  // direction. "Nothing was saved" is false whenever the onboard really did
+  // land, and "it went through" is a guess about a body we could not parse. The
+  // entry therefore claims only what the 2xx establishes — the submission
+  // reached the service — and sends the user to the one place that settles it.
+  //
+  // ⚠️ AND IT MAY NOT PROMISE DEDUPE. `CSV_SUBMIT_NO_STRATEGY_ID` can say a
+  // resubmit resolves to the strategy that already exists, because the partial
+  // unique index behind that promise is predicated on a NON-NULL wizard session
+  // id and the CSV path always writes one. This arm forwards the id with a
+  // CONDITIONAL SPREAD — a draft carrying none sends no id at all — so the
+  // promise would be true for most users and silently false for the rest. That
+  // is the exact shape 140.4-03 recorded when this guarantee was published
+  // before the mechanism could keep it.
+  //
+  // NOT recoverable, deliberately: `actions` carries neither member of
+  // `RECOVERABLE_ACTIONS` (src/lib/envelope.ts), so no Retry control renders.
+  // ⛔ THE ABSENCE IS THE POINT and it is NOT the usual reason. Retrying is not
+  // futile here — it is UNPREDICTABLE, because neither we nor the user knows
+  // what the first submission did. A one-click Retry on an unconfirmed submit
+  // is a control whose effect the person pressing it cannot foresee, so the
+  // remedy is ordered instead: look first, then decide.
+  //
+  // ⚠️ NOT `SEAM_INTERNAL_FAULT` above and NOT `KEY_SCOPE_CHECK_UNREADABLE`,
+  // and each asserts something false: `SEAM_INTERNAL_FAULT` says the check
+  // never completed and no key was stored — here a whole onboarding may have
+  // completed; `KEY_SCOPE_CHECK_UNREADABLE` is about the pre-publish permission
+  // probe, a read whose failure changes nothing.
+  | "SEAM_RESPONSE_UNREADABLE"
   // 153.1-04 / UI-SPEC Gate A — the answer did not arrive inside the time WE
   // granted. Distinguishable client-side: our own abort fired and no transport
   // error was observed, so this is OUR deadline expiring, not the broker
@@ -1531,6 +1661,58 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["leave_and_return", "expand_log"],
   },
 
+  // 153.7-03 / WIZFORM-02-CLASS — the first two of the three code-less
+  // `finalize-wizard` rejections. Until this plan both rendered the UNKNOWN
+  // card — "We could not classify this failure" — for failures the route
+  // classified well enough to pick a status and write a sentence about.
+  //
+  // Both entries are written under the measured-truth gate 140.3-15 set: a
+  // claim about server state is made only where the ARM makes it observable.
+  // That gate is why these two entries differ on exactly one clause, and the
+  // difference is the whole reason they are separate members.
+  DRAFT_LOOKUP_FAILED: {
+    title: "We could not read this draft.",
+    cause:
+      "A read of your draft failed on our side before anything else ran. Nothing was submitted and nothing was changed — the fault is in our database, not in your key, your exchange or your data. Reads like this usually succeed on the next attempt.",
+    fix: [
+      "Wait a moment and try again — the read usually succeeds on retry.",
+      "If it keeps failing, email security@quantalyze.com with the correlation id below. Your draft is saved either way.",
+    ],
+    docsHref: "/security#sync-timing",
+    // RECOVERABLE: `clear_and_retry` is a member of `RECOVERABLE_ACTIONS`
+    // (src/lib/envelope.ts), so `buildEnvelope` derives `recoverable: true` and
+    // the Retry control renders. Correct here — the arm is a transient read
+    // failure, which is the same condition `WIZARD_KEYS_LOAD_FAILED` above is
+    // recoverable for, and this entry is modelled on it.
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  DRAFT_FINALIZE_FAILED: {
+    title: "We could not finish submitting this strategy.",
+    cause:
+      "The last write failed, and the database's answer was not one we have a specific reply for. We cannot confirm from here whether anything was recorded, so we are not going to claim either way. The fault is on our side, not in your key or your exchange.",
+    fix: [
+      "Try again. Submitting is state-guarded: if the first attempt did go through, the next one tells you the draft has already moved on rather than creating a second strategy.",
+      "If it keeps failing, email security@quantalyze.com with the correlation id below.",
+    ],
+    docsHref: "/security",
+    // RECOVERABLE, and both halves of that decision were checked rather than
+    // assumed. A retry CAN win: the residue this arm catches is dominated by
+    // transient database conditions. A retry cannot HARM: a second finalize
+    // against a draft that already finalized raises 22023, which the arm above
+    // this one answers as `DRAFT_STATE_INVALID` — an honest, non-recoverable
+    // card — instead of writing a duplicate.
+    //
+    // ⚠️ THE COPY DOES NOT SAY "nothing was saved", and that omission is
+    // deliberate. This arm is the GENERIC tail of the RPC error branch, so it
+    // also catches a transport failure reaching PostgREST, where the write may
+    // have landed and the answer was lost. The stronger sentence is true for a
+    // SQL raise and false for that case, and shipping it would be the same
+    // unobservable claim the `FORBIDDEN` list's "data is unchanged" entry
+    // exists to ban.
+    actions: ["clear_and_retry", "request_call"],
+  },
+
   // ============================================================
   // Phase 17 NEW — CSV branch absorption (DESIGN-05).
   // Source-of-truth for the 17 CSV-branch error codes Phase 15 left
@@ -2181,6 +2363,103 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["request_call", "expand_log"],
   },
 
+  // 153.7-02 / WIZFORM-02-CLASS — copy authored under the same three
+  // constraints TS-38's entry above was, plus a fourth this one adds.
+  //   1. It must not blame the venue or the user. All three wire codes it homes
+  //      say so themselves: "Nothing is wrong with your key."
+  //   2. It must not invite a retry. All three are `retryable=False` upstream,
+  //      and `actions` below carries neither member of `RECOVERABLE_ACTIONS`, so
+  //      the Retry control does not render.
+  //   3. It must claim only what is knowable. "No key was stored" is safe here
+  //      because all three emitters live inside `validate_key`, which BOTH key
+  //      routes call before `encryptKey` and before the create RPC — the same
+  //      ordering `create-with-key`'s own pre-RPC assertions pin. It is a fact
+  //      about a write that was never reached, not a guess about one whose
+  //      outcome we never learned.
+  //   4. ⭐ IT MUST NOT NAME WHERE WE STOPPED. That is the clause that made
+  //      `SEAM_MISCONFIGURED` unusable for these three (see the union member's
+  //      comment), so the sentence is written to be true whether the fault fired
+  //      before, during or after an outbound call. A future edit that adds
+  //      "before we sent anything" re-opens exactly the defect this entry was
+  //      minted to avoid.
+  //   5. ⭐ AND IT MUST NOT PREDICT WHAT A SECOND ATTEMPT WOULD DO — 153.7 review
+  //      WR-01, and it is constraint 3 ("claim only what is knowable") applied to
+  //      the one clause that had escaped it. The entry shipped saying "Retrying
+  //      will not clear it: the same fault runs again until we fix it", which is
+  //      the SAME true-at-three-of-four defect the member was minted to avoid,
+  //      one clause down:
+  //        · `MT5_GATEWAY_UNCONFIGURED` — true. An unset env, a malformed port
+  //          and the D-31 refusal all re-run identically until an operator acts.
+  //        · `ADAPTER_INIT_FAILED` — FALSE at a third of its own declared cause
+  //          set. The emitter's comment (`routers/exchange.py`) enumerates "a
+  //          ccxt signature change, an ImportError on a missing extra or an
+  //          OOM". An OOM clears on retry.
+  //        · `INTERNAL` — UNKNOWABLE. It is `validate_key_permissions`' bare
+  //          `except Exception` residue, open by construction, so "the same
+  //          fault runs again" is not a thing anyone can assert about it. This
+  //          is exactly the shape `DRAFT_FINALIZE_FAILED` (below) was careful
+  //          NOT to claim about its own generic tail.
+  //      ⚠️ THE ABSENT RETRY CONTROL IS NOT WHAT CHANGED, and must not change.
+  //      `recoverable: false` is still correct and is still DERIVED: all three
+  //      wire codes are `retryable=False` at the emitter, and `actions` below
+  //      carries neither member of `RECOVERABLE_ACTIONS`. What was wrong was the
+  //      copy explaining that absence with a PREDICTION we cannot make. It now
+  //      explains it with what we actually know — that we cannot say whether a
+  //      second attempt would get further — which is true at all three.
+  //
+  // No env variable name, no route name, no status, no dependency: the reader
+  // gets the remedy and the limits, never the subsystem.
+  SEAM_INTERNAL_FAULT: {
+    title: "Something failed on our side while we checked this key.",
+    cause:
+      "The check stopped on a fault in our own service — not in your key, your exchange or your data. We never store a key we could not check, so no key was stored. We cannot tell you whether a second attempt would get further, so we are not offering one here.",
+    fix: [
+      "Email security@quantalyze.com with the correlation id below. A fault in our own service is ours to fix, whether or not it repeats.",
+      "Nothing needs undoing on your side. Your key was not stored.",
+    ],
+    docsHref: "/security",
+    // ⚠️ NO `clear_and_retry` AND NO `try_another_key` — the two members of
+    // `RECOVERABLE_ACTIONS` (src/lib/envelope.ts). Their absence derives
+    // `recoverable: false` and suppresses the Retry control, and that BEHAVIOUR
+    // is half of what this entry exists to change: `KEY_PROBE_FAILED`, the
+    // nearest member by subject, IS recoverable and would offer a control that
+    // cannot work. `request_call` keeps a way out that can actually resolve it;
+    // `expand_log` opens the correlation id the first fix line asks for.
+    actions: ["request_call", "expand_log"],
+  },
+
+  // 153.7-03 / WIZFORM-02-CLASS — the third code-less `finalize-wizard`
+  // rejection, and the one that is hard for the opposite reason to its two
+  // siblings above: the fault is easy to describe and the OUTCOME is unknown.
+  //
+  // The unified arm's upstream answered 2xx with a body the onboard contract
+  // guard rejects, so the submission was accepted and its result is unreadable.
+  // Every sentence below is bounded by that: the entry states the one thing the
+  // 2xx establishes, refuses both outcome claims, and puts the user in front of
+  // the record that settles it.
+  SEAM_RESPONSE_UNREADABLE: {
+    title: "We could not read the service's answer to your submission.",
+    cause:
+      "Your submission reached the service that processes it and the service did answer — but in a shape we do not recognise, most often because a release of ours was mid-rollout. So we cannot tell you whether the strategy was accepted, and we would rather say that than guess.",
+    fix: [
+      "Open your strategies list first. If the submission went through, the strategy is there with its review status.",
+      "If it is not there after a minute, submit again.",
+      "If this keeps happening, email security@quantalyze.com with the correlation id below.",
+    ],
+    docsHref: "/security",
+    // ⛔ NOT recoverable: `actions` carries neither member of
+    // `RECOVERABLE_ACTIONS` (src/lib/envelope.ts), so `buildEnvelope` derives
+    // `recoverable: false` and no Retry control renders — and the reason is
+    // NOT the usual one. Retrying is not futile here, it is UNPREDICTABLE:
+    // nobody, including us, knows what the first submission did. A one-click
+    // Retry on an unconfirmed submit is a control whose effect the person
+    // pressing it cannot foresee, so the remedy is ordered instead and
+    // `leave_and_return` carries the first step of it — the same control
+    // `WIZARD_DUPLICATE` uses to send a user to the record rather than at the
+    // button again.
+    actions: ["leave_and_return", "request_call", "expand_log"],
+  },
+
   // 153.1-04 / UI-SPEC Gate A — copy authored from the spec's field table.
   //
   // ⛔ THE MISSING RETRY IS THE FEATURE. The 2026-08-08 panel offered Retry
@@ -2727,6 +3006,86 @@ export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   ["PERMISSION_DENIED", { code: "KEY_PERMISSION_DENIED", status: 400 }],
   ["WITHDRAW_SCOPE", { code: "KEY_HAS_WITHDRAW_PERMS", status: 400 }],
   ["TRADE_SCOPE", { code: "KEY_HAS_TRADING_PERMS", status: 400 }],
+  // ── 153.7-02 / WIZFORM-02-CLASS — the eight `service_error(...)` codes ─────
+  //
+  // ⭐ THE MEASURED FACT THAT PUT THEM HERE. Until this batch the rows above
+  // covered only the codes the `services/**` ASSIGNMENT scan could see. 153.7-01
+  // widened that scan to `analytics-service/**` and to the four call shapes, and
+  // the population went 17 → 37 with twenty codes disposed nowhere. Replayed
+  // through this very function with their REAL wire code and their REAL Python
+  // `detail=` string, all eight below answered `{ code: "UNKNOWN", status: 500 }`
+  // — "we could not classify this failure" — for faults the service had
+  // classified precisely. The other twelve render through a different classifier
+  // and take reasoned rows in `VENUE_WIRE_CODES_WITHOUT_VERDICT` instead.
+  //
+  // ⚠️ THE FAMILY IS NOT MT5-SPECIFIC. It was FOUND through the mt5-gateway
+  // incident, but `EXCHANGE_PROBE_FAILED` is a 424 with `retryable=True` and
+  // `dependency=<the caller's venue>` raised by `validate_key`'s
+  // `except ccxt.BaseError` arm on EVERY venue — the ordinary "your exchange did
+  // not finish the permission check" case, rendering as the terminal that admits
+  // knowing nothing.
+  //
+  // HOW EACH MEMBER WAS CHOSEN, because a plausible member is not a true one.
+  // Rule: take the most specific member every one of whose claims is measured
+  // TRUE at EVERY emitter that can reach this function. Two members' copy makes
+  // a "nothing was submitted" claim, and that claim is knowable only where no
+  // request was issued (the trap is written out at the transport block below and
+  // was the whole of 140.3-12) — so each candidate was read at its emitter
+  // rather than matched on its name.
+  //
+  //   MT5_GATEWAY_UNREACHABLE — 503, `retryable=True`, with a Retry-After. BOTH
+  //     emitters are the connect stage of `_connect_and_probe`: the stage
+  //     deadline firing, and the broad connect failure. The socket connect WAS
+  //     attempted and no answer came back, which is `SERVICE_UNREACHABLE`'s
+  //     sentence exactly. ⛔ NEVER `SERVICE_UNAVAILABLE_RETRY`: its copy says the
+  //     request was never sent, which is knowable for a breaker that DECLINED to
+  //     send and false-by-construction here. Status 503 rather than 502 because
+  //     the emitter's own status is 503 and it stamps a Retry-After, which is
+  //     defined for 503 — the wire answer stays the one the service chose.
+  //   EXCHANGE_PROBE_FAILED — 424, `retryable=True`, `dependency=req.exchange`.
+  //     Same fact as the incumbent `PROBE_FAILED` row three screens up (the probe
+  //     ran against the venue and did not complete), told by a different
+  //     producer, so it takes the same member and the same 503.
+  //   EGRESS_PROXY_MISCONFIGURED — 500, `retryable=False`. `_validate_sfox_key`
+  //     raises at client CONSTRUCTION, ABOVE the `get_balances()` try, so no
+  //     request left the process and no state changed. That is what makes
+  //     `SEAM_MISCONFIGURED`'s "we stopped before sending the request. Nothing
+  //     was submitted and nothing was changed" knowable here rather than assumed.
+  //   SERVICE_KEY_UNCONFIGURED — 500, `retryable=False`. `verify_service_key` is
+  //     HTTP middleware and refuses BEFORE `call_next`, so no handler ran, no
+  //     venue was contacted and no row was written. The purest case for that
+  //     copy. ⚠️ RENDERING ONLY — no gate logic is touched by this row, and the
+  //     copy names a remedy, never the secret.
+  //   KEK_UNAVAILABLE — 500, `retryable=False`. `encrypt_key`'s first statement
+  //     is `get_kek()`; its RuntimeError fires before any ciphertext exists and
+  //     before the create RPC is reached, so the same claim holds.
+  //   MT5_GATEWAY_UNCONFIGURED, ADAPTER_INIT_FAILED, INTERNAL — all 500 and all
+  //     `retryable=False`, and NONE of them can honestly take the copy above.
+  //     `INTERNAL` fires after the venue probe was issued; `ADAPTER_INIT_FAILED`
+  //     is a code fault, not a setting; `MT5_GATEWAY_UNCONFIGURED`'s D-31
+  //     `undetermined` emitter fires after the gateway terminal ran and refused
+  //     to classify, so the claim is false at one of its four emitters. They take
+  //     `SEAM_INTERNAL_FAULT`, minted in this plan for exactly that gap — see its
+  //     union-member comment for the per-emitter measurement. ⛔ Not
+  //     `KEY_PROBE_FAILED`: it is recoverable, so it would render a Retry control
+  //     against three faults that fail identically on every attempt.
+  //
+  // ROSTER COST, measured rather than assumed. `SEAM_MISCONFIGURED` needs NO
+  // roster edit at either key step: both read `recogniseSeamErrorCode` FIRST and
+  // `SEAM_CODE_TO_WIZARD_CODE` already carries the row, so the membership check
+  // is never reached — which is what `ConnectKeyStep`'s own docblock says, and
+  // adding it to the roster would contradict that file's stated design.
+  // `SEAM_INTERNAL_FAULT` is deliberately NOT in that table (it is minted by us,
+  // not put on the wire by another service), so it takes the two roster rows.
+  // `SERVICE_UNREACHABLE` and `KEY_PROBE_FAILED` are already in both.
+  ["MT5_GATEWAY_UNCONFIGURED", { code: "SEAM_INTERNAL_FAULT", status: 500 }],
+  ["MT5_GATEWAY_UNREACHABLE", { code: "SERVICE_UNREACHABLE", status: 503 }],
+  ["EGRESS_PROXY_MISCONFIGURED", { code: "SEAM_MISCONFIGURED", status: 500 }],
+  ["SERVICE_KEY_UNCONFIGURED", { code: "SEAM_MISCONFIGURED", status: 500 }],
+  ["KEK_UNAVAILABLE", { code: "SEAM_MISCONFIGURED", status: 500 }],
+  ["EXCHANGE_PROBE_FAILED", { code: "KEY_PROBE_FAILED", status: 503 }],
+  ["ADAPTER_INIT_FAILED", { code: "SEAM_INTERNAL_FAULT", status: 500 }],
+  ["INTERNAL", { code: "SEAM_INTERNAL_FAULT", status: 500 }],
 ]);
 
 /**
@@ -2791,6 +3150,178 @@ export const VENUE_WIRE_CODES_WITHOUT_VERDICT: ReadonlyMap<string, string> =
       "CSV-surface code AND the static fallback of the DYNAMIC emitter below. " +
         "Rendered by CsvValidationEnvelope through WIZARD_ERROR_COPY, never by " +
         "this classifier.",
+    ],
+    // ── 153.7-02 / WIZFORM-02-CLASS — the twelve codes the widened scan found
+    // that reach a user through some OTHER classifier ────────────────────────
+    //
+    // ⚠️ READ THIS BEFORE ADDING A THIRTEENTH. These twelve are TWELVE DIFFERENT
+    // MEASUREMENTS, not one disposition applied twelve times. `CSV_FORMAT_UNSUPPORTED`
+    // above is the shortest row in this table and it works only because it
+    // explicitly back-references a sibling in the same family; twelve rows of
+    // that shape would make this half of the coverage law cover everything and
+    // assert nothing, which is the exact defect 153.7 exists to close. Each row
+    // below names ITS OWN consuming route and ITS OWN arm, and each was read at
+    // that arm rather than inferred from the code's name.
+    //
+    // ⭐ SEVERAL OF THESE STILL RENDER AS `UNKNOWN`, and the rows say so instead
+    // of hiding it. That residue is REAL and it is recorded rather than papered
+    // over — but it is not fixable from this table, because none of the routes
+    // below calls `classifyKeyValidationError` at all. A verdict row for them
+    // would be a change that cannot reach the surface it claims to fix, which is
+    // a worse outcome than an honest exemption: it would read as a fix in the
+    // diff and green the coverage law for nothing.
+    //
+    // Anchors are SYMBOLS throughout — functions, arms and machine codes — and
+    // that is load-bearing here in a way it is not elsewhere: a `file.py:NNN`
+    // inside one of these STRINGS would pass the citation guard, whose own
+    // self-test asserts that a citation in a string literal is not an offence.
+    // The rot would ship with the guard as its alibi.
+    [
+      "UNAUTHENTICATED",
+      "Detail: 'Unauthorized', 401, raised by the `_gate_process_key` middleware " +
+        "gate in main.py and reachable on the `/process-key` paths ONLY. It is " +
+        "relayed to the browser BYTE-FOR-BYTE with its own status by " +
+        "`postProcessKey` in process-key-client, which forwards a non-ok JSON " +
+        "body unchanged and never classifies it, so it renders through the " +
+        "SyncPreview and CSV surfaces rather than through any key-connect step. " +
+        "⚠️ ONE NAME, TWO VOCABULARIES, recorded and deliberately NOT renamed: " +
+        "six Next routes of our own mint `code: \"UNAUTHENTICATED\"` from " +
+        "TypeScript for a missing Supabase session (portfolio-optimizer, " +
+        "scenario/optimize, simulator, admin/match/recompute, admin/match/eval, " +
+        "admin/strategy-review). Same precedent as RATE_LIMITED, which is our " +
+        "limiter in one vocabulary and a venue throttle in the other: a shared " +
+        "name is a fact to state, not a collision to fix by renaming.",
+    ],
+    [
+      "INTERNAL_TOKEN_UNCONFIGURED",
+      "Detail: 'Service not configured', 500, from the UNSET-SECRET arm of the " +
+        "same `_gate_process_key` gate — the arm that runs FIRST, before any " +
+        "comparison, precisely so an unset secret cannot compare equal to an " +
+        "empty bearer and admit the request. It shares that gate with " +
+        "UNAUTHENTICATED and NOT its disposition: this one is OUR " +
+        "misconfiguration answered 500 retryable:false, where the sibling is a " +
+        "caller fault answered 401. Both are relayed unclassified by " +
+        "`postProcessKey`, so neither reaches this function. A verdict row here " +
+        "would state a wizard verdict for a path with no wizard on it.",
+    ],
+    [
+      "KEY_MISSING_EXCHANGE",
+      "Detail: 'This API key has no exchange set and cannot be probed.', 422, " +
+        "from `get_key_permissions` in internal.py — the caller's own stored row " +
+        "carrying a NULL exchange column. It lands in the keys/[id]/permissions " +
+        "route, which runs a FOURTH classifier with a private PROBE_* vocabulary. " +
+        "Measured through that route's arms: the body is JSON with a nested " +
+        "envelope, so the thrown message is the human sentence rather than the " +
+        "`Upstream <status>` fallback, and it matches neither the config " +
+        "sentinels nor the timeout needles — it exits as PROBE_FAILED 502 with " +
+        "'Could not check key scopes. Try again.' That route's docblock records " +
+        "why it is separate: routed through THIS classifier, five of its six real " +
+        "messages fall to UNKNOWN/500, because every fault reachable there is a " +
+        "proxy-infrastructure fault and this function classifies key faults.",
+    ],
+    [
+      "KEY_UNDECRYPTABLE",
+      "Detail: 'This stored key could not be decrypted. It must be reconnected.', " +
+        "500 retryable:false, from `decrypt_credentials` failing inside " +
+        "`get_key_permissions`. It shares the permissions route with " +
+        "KEY_MISSING_EXCHANGE and is worth its own row because its REMEDY is " +
+        "different and is the only actionable one in the pair: the user must " +
+        "reconnect the key, and today the PROBE_FAILED envelope tells them to " +
+        "'try again' — which cannot work for a ciphertext that will never " +
+        "decrypt. That is a real gap, it belongs to the permissions route's own " +
+        "vocabulary, and a row in this table cannot close it because that route " +
+        "never calls this function.",
+    ],
+    [
+      "ADMIN_CHECK_UNAVAILABLE",
+      "Detail: 'actor admin check temporarily unavailable — please retry', 503, " +
+        "from `recompute` in match.py when the actor's admin lookup fails. It " +
+        "reaches only the admin match-recompute route, which forwards an upstream " +
+        "4xx with the upstream's own machine code but sends everything 500-and-up " +
+        "to its terminal arm — so a 503 answers the admin client as UNKNOWN/500 " +
+        "with generic copy plus a Sentry capture. The route is admin-only and " +
+        "never touches a key, so no wizard verdict is true of it; the honest fix " +
+        "is a status-aware arm in that route, not a row here.",
+    ],
+    [
+      "ROLE_CHECK_UNAVAILABLE",
+      "Detail: 'profile role check temporarily unavailable — please retry', 503, " +
+        "from `recompute` in match.py. Listed SEPARATELY from " +
+        "ADMIN_CHECK_UNAVAILABLE rather than folded into it, because they are two " +
+        "different lookups failing — the actor's admin flag and the profile's " +
+        "role — and collapsing them is how a guard stops being able to tell an " +
+        "operator which check went down. Same route, same terminal arm, same " +
+        "reason a wizard verdict would be a fabrication: the match-recompute " +
+        "surface has no key-connect step and no key.",
+    ],
+    [
+      "SCORING_FAILED",
+      "Detail: 'Scoring failed on our side. This has been logged.', 500 " +
+        "retryable:false, from the match engine's scoring pass in `recompute`. " +
+        "Unlike its two 503 siblings on the same route this one is PERMANENT — " +
+        "the engine raised, and an identical retry re-raises — which is exactly " +
+        "why it must not borrow a KEY_* verdict: every retryable member in this " +
+        "table would offer a Retry control against a computation that fails the " +
+        "same way each time. It renders through the admin route's terminal arm, " +
+        "which is where the honest remedy belongs.",
+    ],
+    [
+      "EVAL_WINDOW_TOO_LARGE",
+      "A 400 from `eval_metrics` in match.py whose detail is COMPOSED at the " +
+        "emitter (page count, page size and an optional hint), so no fixed string " +
+        "can be quoted here — the first code in this table with that property, " +
+        "and the reason its row names the shape instead. It is also the only one " +
+        "of the twelve that already arrives INTACT: the admin match-eval route " +
+        "forwards 4xx with `code: err.seamCode`, so the client receives " +
+        "EVAL_WINDOW_TOO_LARGE verbatim at status 400. A row in this table would " +
+        "translate a code that is already being read correctly, one vocabulary " +
+        "further from its consumer.",
+    ],
+    [
+      "EVAL_FAILED",
+      "Detail: 'Eval failed on our side. This has been logged.', 500, the " +
+        "unclassified residue of `eval_metrics` after its own typed arms have " +
+        "run. It is the sibling of EVAL_WINDOW_TOO_LARGE on the same handler and " +
+        "takes the OPPOSITE path out of the admin match-eval route: 500 misses " +
+        "the 4xx forward and lands on the terminal arm. Being the producer's own " +
+        "declared residue, mapping it to a specific wizard verdict would " +
+        "manufacture a diagnosis the emitter explicitly declined to make — the " +
+        "same ground VALIDATION_UNEXPECTED stands on above, reached from a " +
+        "different service entry point.",
+    ],
+    [
+      "ANALYTICS_ROW_NOT_CREATED",
+      "Detail: 'Could not start the analytics computation — please retry.', 503, " +
+        "from `_compute_portfolio_analytics` in portfolio.py when the analytics " +
+        "row insert returns nothing. ⭐ IT REACHES NO USER AT ALL TODAY, and that " +
+        "is measured rather than assumed: its only TypeScript entry point is " +
+        "`computePortfolioAnalytics` in analytics-client, which has ZERO " +
+        "production callers — a fact independently pinned in that module's own " +
+        "test roster, in resilient-fetch's budget census and in the seam retry " +
+        "registry. It is dispositioned here so the coverage law does not have to " +
+        "guess, and the day a caller appears the row is what a reviewer will read.",
+    ],
+    [
+      "PORTFOLIO_ANALYTICS_FAILED",
+      "Detail: 'Portfolio analytics computation failed', 500, the outer catch of " +
+        "the same `_compute_portfolio_analytics` computation. It shares " +
+        "ANALYTICS_ROW_NOT_CREATED's zero-caller state and differs on the one " +
+        "thing a disposition turns on: the sibling fires BEFORE the computation " +
+        "starts and says 'please retry', while this one fires after it ran and " +
+        "failed. If this endpoint ever gains a caller they need two different " +
+        "sentences, which is the whole reason they are two rows and not a family " +
+        "note.",
+    ],
+    [
+      "SIMULATION_FAILED",
+      "Detail: 'Portfolio impact simulation failed', 500, from " +
+        "`portfolio_simulator` in simulator.py. Its consumer is the simulator " +
+        "route, which — like the two admin match routes — forwards 4xx with the " +
+        "upstream code and answers everything 500-and-up from its own terminal " +
+        "arm, here with 'Portfolio impact simulation failed.' and code UNKNOWN. " +
+        "That surface is the portfolio impact panel, which has no key, no draft " +
+        "and no connect step, so every KEY_* and SEAM_* member in this table " +
+        "would be describing a wizard the user is not in.",
     ],
   ]);
 
@@ -2998,6 +3529,62 @@ export function classifyKeyValidationError(error: unknown): {
 }
 
 /**
+ * ⭐ 153.7 review WR-02 — THE VERDICTS THAT ARE **OUR OWN DEFECT**, named
+ * explicitly, because `code === "UNKNOWN"` had stopped being a proxy for it.
+ *
+ * ── WHAT WENT WRONG, AND WHY IT WAS SILENT ──────────────────────────────────
+ *
+ * Both key routes page Sentry (`step: "unclassified-key-error"`) on the
+ * classifier's terminal verdict, and both justify the exclusion of everything
+ * else in one sentence: *"None is our defect and none should page anyone."*
+ * That sentence was TRUE while the only recognised verdicts were the breaker
+ * short-circuit, the timeout and the caller-fault family.
+ *
+ * 153.7-02 added `VENUE_WIRE_CODE_TO_VERDICT` rows for `INTERNAL` and
+ * `ADAPTER_INIT_FAILED` — `validate_key_permissions`' bare `except Exception`
+ * residue and a `create_exchange` failure — and both are OURS by the Python
+ * emitter's own words. Before that commit they resolved to `UNKNOWN` and
+ * PAGED; after it they are recognised, so the predicate excluded them and the
+ * new route tests asserted the silence. Classifying a fault better is not a
+ * reason to stop hearing about it, and nothing in the diff said we had.
+ *
+ * ── WHY A SET AND NOT AN AMENDED COMMENT ────────────────────────────────────
+ *
+ * Amending the sentence to say "…except the two we now recognise, which the
+ * Python side captures anyway" was the cheaper option and was rejected: the
+ * Python capture is an incidental `LoggingIntegration` side effect of
+ * `logger.exception`, it carries none of the Next-side `surface` / `exchange`
+ * tags, and it would leave the SAME trap armed for the next our-defect verdict
+ * anyone adds — the recognised set is going to keep growing, that is what
+ * WIZFORM-02-CLASS is for. Naming the population makes the policy mechanical
+ * instead of a proxy that decays every time the classifier gets better.
+ *
+ * ⛔ MEMBERSHIP IS A PAGING DECISION, NOT A SEVERITY LABEL. Add a code here
+ * only when the fault is in code or configuration WE own — never a venue
+ * refusal, a caller fault, a breaker trip or a timeout. `SEAM_INTERNAL_FAULT`
+ * qualifies at all three of its wire codes (`MT5_GATEWAY_UNCONFIGURED`,
+ * `ADAPTER_INIT_FAILED`, `INTERNAL`); `SEAM_MISCONFIGURED` never reaches this
+ * check on the key routes (its wire codes are translated at the step, and the
+ * classifier hands the route the wizard code directly), so it is deliberately
+ * absent rather than forgotten — add it the day a key route can answer it.
+ *
+ * ⚠️ ONE SET, BOTH ROUTES. `create-with-key` and `composite/add-key` are
+ * byte-identical twins at this arm, and fixing one path of that pair is this
+ * milestone's most repeated mistake. A route-local literal would drift on the
+ * next edit; this import cannot.
+ */
+export const OUR_DEFECT_KEY_ERROR_CODES: ReadonlySet<WizardErrorCode> =
+  new Set<WizardErrorCode>([
+    // The classifier's terminal — a failure we could not name at all.
+    "UNKNOWN",
+    // 153.7-02's minted member. `INTERNAL` and `ADAPTER_INIT_FAILED` are our
+    // defect by the emitter's own words; `MT5_GATEWAY_UNCONFIGURED` is our
+    // operator configuration. All three are worth a page and none is the
+    // caller's doing.
+    "SEAM_INTERNAL_FAULT",
+  ]);
+
+/**
  * Phase 140.3-01 / TS-09 — the RECOGNITION BRANCH for a seam machine code.
  *
  * Maps a stable `code` read off a seam error body (via
@@ -3011,9 +3598,24 @@ export function classifyKeyValidationError(error: unknown): {
  *
  * WHY THE TABLE IS EXPLICIT RATHER THAN AN IDENTITY. A seam code and a wizard
  * code are different vocabularies that happen to agree on these two names
- * today. `SEAM_DEGRADED`, `MT5_GATEWAY_UNREACHABLE` and the venue codes have no
- * wizard member and correctly answer `UNKNOWN`; writing the mapping as
- * `code as WizardErrorCode` would silently admit every one of them.
+ * today. `SEAM_DEGRADED` and the venue codes have no wizard member of their own
+ * name; writing the mapping as `code as WizardErrorCode` would silently admit
+ * every one of them.
+ *
+ * ⚠️ RE-CUT 2026-08-14 (153.7-03 / WIZFORM-02-CLASS). The sentence above used
+ * to name `MT5_GATEWAY_UNREACHABLE` alongside `SEAM_DEGRADED` and add that all
+ * of them "correctly answer UNKNOWN". That premise is gone: 153.7-02 gave the
+ * code a row in `VENUE_WIRE_CODE_TO_VERDICT`, which answers
+ * `SERVICE_UNREACHABLE` at 503 — and answering UNKNOWN for it was never
+ * "correct", it was the live WIZFORM-02 defect, measured on PROD. The code is
+ * kept as an example of what an IDENTITY RULE would wrongly admit, which is the
+ * claim this paragraph actually needs and the only one still true of it: it has
+ * no wizard member of its own name, and it is absent from THIS table on
+ * purpose. The two tables are separate mechanisms — a verdict row is read from
+ * the thrown error's `seamCode` inside `classifyKeyValidationError`, this table
+ * from a body's `code` at a different call site — so a verdict row neither
+ * implies nor needs an alias row, and `wizardErrors.invariant.test.ts` asserts
+ * that this table still does NOT contain it.
  *
  * ⚠️ 140.3-05 / SEAMUX-01 — THE ONE DECISION ABOUT `CIRCUIT_OPEN`. Three
  * production sites answer a breaker trip with the WIRE code `CIRCUIT_OPEN`

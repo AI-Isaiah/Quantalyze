@@ -1,5 +1,66 @@
 # Changelog
 
+## [0.62.0.0] - 2026-08-14
+### v1.17 — every error code that can reach a user is covered (Phase 153.7)
+
+⭐ **This closes WIZFORM-02**, the one requirement the 153 span failed (`153-VERIFICATION.md`,
+status `failed`, 5/6). A wizard failure no longer renders `code: UNKNOWN` for a code the backend
+named precisely — and, more durably, a *new* undisposed code now reds CI **by name** instead of
+falling through a substring cascade to whatever an English sentence happens to earn.
+
+**The mechanism worked; its REACH was wrong.** That distinction is the whole phase. The coverage
+law already existed and already passed — it just ran over a population of 17 codes derived from
+one directory and one call shape. Widening the root to `analytics-service/**` (minus three pinned
+exclusions, each carrying its own reason and count pin) and teaching the scanner the four-callee
+`service_error(...)` family alongside `error_code =` took the population to **37**. Twenty of
+those had no answer of any kind.
+
+**Landed red on purpose.** The population widened in one commit and stayed red — one failing test
+naming all twenty codes — until the dispositions landed in the next. A green first commit would
+have meant the widening never happened. The red→green transition is in the history, not in a
+claim about it.
+
+All 37 now carry an explicit answer: **8 verdict rows** in `VENUE_WIRE_CODE_TO_VERDICT` for the
+codes that reach `classifyKeyValidationError`, and **12 individually-measured exemptions** in
+`VENUE_WIRE_CODES_WITHOUT_VERDICT`. ⚠️ The twelve are twelve different measurements, each naming
+its own consuming route and its own arm — not one disposition applied twelve times. Twelve copies
+of a back-referencing one-liner would make this half of the law cover everything and assert
+nothing, which is the exact defect the phase exists to close.
+
+**A new copy member was minted rather than reused.** `SEAM_INTERNAL_FAULT` exists because
+`SEAM_MISCONFIGURED`'s "we stopped before sending the request" is measurably **false** at
+`INTERNAL`'s emitter (which fires after the venue probe went out) and at `ADAPTER_INIT_FAILED`.
+The obvious fallback, `SERVICE_UNREACHABLE`, is worse: it is recoverable, so it would render a
+Retry control against three faults that cannot clear. ⚠️ Its copy also stops short of predicting
+that a retry *cannot* help — `ADAPTER_INIT_FAILED`'s emitter names an OOM among its causes, and an
+OOM does clear. It says what we know and declines to guess.
+
+**The last three code-less finalize rejections got codes**, and the pin that proves it is the one
+that did not move: `KNOWN_CODELESS_FINALIZE_REJECTIONS` went 3 → 0 while
+`EXPECTED_FINALIZE_REJECTION_SITES` held at **32**, so 32 − 32 = 0. Sites do not disappear; they
+acquire codes. They got three members, not one shared member — `DRAFT_FINALIZE_FAILED` may not
+claim "nothing was saved" because its tail also catches a transport failure, and
+`SEAM_RESPONSE_UNREADABLE` may claim neither outcome because its upstream answered 2xx.
+
+⛔ **RESIDUE, NAMED NOT HIDDEN.** Five analytics-service codes still render `UNKNOWN` on
+**non-wizard** surfaces (four admin, one simulator), through a terminal arm that forwards 4xx with
+the upstream code but answers every 5xx as `UNKNOWN` — so the *more severe* half of the vocabulary
+is the half that loses its code. None is fixable from the wizard's table, because none of those
+routes calls `classifyKeyValidationError` at all. Recorded in `TODOS.md` as its own item rather
+than papered over with a verdict row that could not reach the surface it claimed to fix.
+
+**Guards added for the two hops nothing watched.** A code returned by
+`classifyKeyValidationError` never appears as a literal in its route, so the route-contract
+cross-check could not see it — deleting a member from either key step's roster left the entire
+suite green while the wizard would have rendered `UNKNOWN` with a Retry control against permanent
+faults. That hop is now guarded per-route. The scanner also now reads a module-qualified
+`error_contract.service_error(...)`, which previously yielded no site at all — the same fail-open
+shape the phase closed for the root and the call form.
+
+Every falsifiability-ledger mutation was applied, run, and reverted rather than asserted: deleting
+a verdict row reds the law, its replay, **and both key routes** together; narrowing the root reds
+seven assertions including the reach pin; bumping the 32 pin reds the reconciliation.
+
 ## [0.61.0.0] - 2026-08-13
 ### v1.17 — the wizard's write is the server's alone (Phase 156, landing 2 of 2)
 

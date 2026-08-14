@@ -448,6 +448,39 @@ export function SubmitStep({
             "METADATA_CAPITAL_OWNERSHIP_INVALID",
             "DRAFT_STATE_INVALID",
             "COMPOSITE_UNSUPPORTED_UNIFIED",
+            // ─────────────────────────────────────────────────────────────
+            // Phase 153.7-03 / WIZFORM-02-CLASS — the THREE codes
+            // `finalize-wizard` starts emitting in THIS SAME COMMIT, on three
+            // arms that until now answered with no code at all.
+            //
+            // They are the last of the ledger 153.1-06 opened: each one put a
+            // user in front of "We could not classify this failure" for a
+            // failure the route classified well enough to pick a status and
+            // write a sentence about. With these three the ledger reads zero.
+            //
+            // OMIT ANY LINE BELOW and that code fails the membership check at
+            // the bottom of this block and falls through to UNKNOWN — which is
+            // where all three already are, so the fix would ship invisible
+            // with every route-side test green. That trap is recorded three
+            // times above and was walked into anyway (140.3-01).
+            //
+            // ⚠️ Two behaviours worth knowing before editing this group:
+            //   · `DRAFT_LOOKUP_FAILED` and `DRAFT_FINALIZE_FAILED` are
+            //     RECOVERABLE and render the Retry control. Both are faults
+            //     whose retry can genuinely win, and the finalize one cannot
+            //     harm either: a second finalize against a draft that already
+            //     finalized answers `DRAFT_STATE_INVALID` rather than writing
+            //     a duplicate.
+            //   · `SEAM_RESPONSE_UNREADABLE` is deliberately NON-recoverable
+            //     and renders NO Retry control — and NOT because a retry would
+            //     be futile. Its upstream answered 2xx, so the submission was
+            //     accepted and only the result is unreadable; a one-click
+            //     Retry on an unconfirmed submit is a control whose effect the
+            //     person pressing it cannot foresee. Its copy orders the
+            //     remedy instead: open the strategies list, then decide.
+            "DRAFT_LOOKUP_FAILED",
+            "DRAFT_FINALIZE_FAILED",
+            "SEAM_RESPONSE_UNREADABLE",
           ],
         );
         // 140.4-12 / SEAMRIM-08 — EACH LIST OWNS ITS OWN VOCABULARY, AND

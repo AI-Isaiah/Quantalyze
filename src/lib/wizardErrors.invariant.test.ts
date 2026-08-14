@@ -4,6 +4,12 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { stripCommentsPreserveLines } from "./source-scan";
+// ⭐ W-153.7-1 — the LIVE verdict table, imported rather than re-parsed. It is
+// one of the two doors a code leaves `classifyKeyValidationError` by, and the
+// only one with no literal anywhere in the source (`return verdict`). Reading
+// the real Map is what makes a NEW row join this file's population with no test
+// edit — the property the 153.7-02 roster regression needed and did not have.
+import { VENUE_WIRE_CODE_TO_VERDICT } from "./wizardErrors";
 
 /**
  * Phase 142.2-07 / MT5-04 (D-05) — A WIZARD ERROR CODE IS INERT UNLESS IT LANDS
@@ -267,7 +273,24 @@ const ROUTES: readonly RouteUnderTest[] = [
     // member and `RATE_LIMITED` is translated to itself by
     // `SEAM_CODE_TO_WIZARD_CODE` before the roster is consulted (verified at
     // source, not assumed).
-    expectedSites: 29,
+    //
+    // 29 → 32 (153.7-03 / WIZFORM-02-CLASS). ⛔ NO GUARD WAS ADDED — this is
+    // the same good-news direction as the move above it, and it is the LAST
+    // one available on this route: the three rejections that still answered
+    // code-less now carry `DRAFT_LOOKUP_FAILED`, `DRAFT_FINALIZE_FAILED` and
+    // `SEAM_RESPONSE_UNREADABLE`, so all three crossed OUT of the code-less
+    // ledger and INTO this population. The sum is what proves nothing was
+    // invented: `EXPECTED_FINALIZE_REJECTION_SITES` is unchanged at 32, and
+    // `KNOWN_CODELESS_FINALIZE_REJECTIONS` falls 3 → 0 by the same three, so
+    // 32 − 32 = 0. A plan that had invented three rejections to "fix" would
+    // have moved that literal too.
+    //
+    // All three DID need a roster edit, unlike the 153.2-05 pair — none is a
+    // wire code and none is translated by `SEAM_CODE_TO_WIZARD_CODE`, so the
+    // membership check in `SubmitStep.tsx` is genuinely reached for them. The
+    // three rows land in the SAME commit the route starts emitting them
+    // (verified at source, not assumed).
+    expectedSites: 32,
   },
 ];
 
@@ -481,13 +504,36 @@ function deriveRejectionSites(
  * constant and its assertion collapse into "every rejection carries a code",
  * which is where WIZFORM-02's criterion actually lands.
  *
- * The three, by status, measured from stripped source (⚠️ a raw-source scan
- * with a fixed look-ahead window under-reports this population — it loses an
- * arm sitting behind a `console.error` block, which is the 14-vs-12 lesson
- * again in a new costume):
- *   · 500 — `"Could not load draft"`, the strategy lookup's failure.
- *   · 500 — `"Could not finalize wizard draft"`, the RPC's generic failure.
- *   · 502 — `"Upstream service returned unexpected response"`.
+ * ⭐⭐ 3 → 0 (153.7-03 / WIZFORM-02-CLASS). THE LEDGER IS EMPTY, AND THE
+ * COLLAPSE CONDITION THIS DOCBLOCK PRE-AUTHORISED IS THE ONE THAT WAS REACHED.
+ * The three rows that stood here — the 500 draft lookup, the 500 finalize-RPC
+ * tail and the 502 upstream-shape arm — are DELETED rather than annotated,
+ * which is exactly what the failure message below instructs for the downward
+ * direction. Each was fixed the way that message names: a code on the arm plus
+ * a member in `KNOWN_FINALIZE_CODES`, never a bump of this literal.
+ *
+ * ⛔ THE CONSTANT AND ITS ASSERTION STAY, and at zero they are stronger than
+ * they have ever been rather than redundant. `expect(codeless.length).toBe(0)`
+ * IS "every rejection this route makes carries a code" — the sentence this
+ * docblock said the number would collapse into, and where WIZFORM-02's
+ * criterion actually lands. Deleting the pair now would retire the guard at the
+ * exact moment it became able to state the property outright, and the next
+ * code-less arm would ship in silence.
+ *
+ * ⚠️ THE THREE COPY MEMBERS THE OLD NOTE SAID WERE OWED WERE WRITTEN, not
+ * borrowed. Each was authored against the claim its own arm makes observable:
+ * `DRAFT_LOOKUP_FAILED` may say nothing was changed (its arm is a SELECT that
+ * errored, with no write anywhere before it); `DRAFT_FINALIZE_FAILED` may NOT
+ * (the generic tail also catches a transport failure that could lose the answer
+ * to a write that landed); `SEAM_RESPONSE_UNREADABLE` may claim neither outcome
+ * (its upstream answered 2xx, so the submission was accepted and only the
+ * result is unreadable). Three arms, three different truths — which is why one
+ * shared member would have shipped a false sentence on two of them.
+ *
+ * The arithmetic, in the form `EXPECTED_FINALIZE_REJECTION_SITES` records it:
+ * `expectedSites` 29 → 32, this ledger 3 → 0, the total UNCHANGED at 32, so
+ * 32 − 32 = 0. A plan that had invented three rejections would have moved that
+ * total.
  *
  * ⭐ 5 → 3 (153.2-05 / WIZFORM-02). THE TWO LIMITER ARMS ARE FIXED, so their
  * rows are DELETED here rather than annotated — the direction the failure
@@ -512,8 +558,17 @@ function deriveRejectionSites(
  * `wizardErrors.ts` — Phase 153.1's file — plus three roster members, and it is
  * user-facing copy that wants the same care every other entry there got. It is
  * NOT deleted from this ledger to make a number smaller.
+ *
+ * ⭐ DISCHARGED at 153.7-03, and the paragraph above is kept rather than
+ * rewritten because it is the record of what was owed and it priced the work
+ * correctly: three copy members plus three roster rows, and its reason for
+ * deferring — that none of the incumbent entries could carry these three
+ * without asserting something false — held when it was finally checked. Two of
+ * the three members it named were newly minted; the draft-read one adopted the
+ * token `keys/sync` had already minted for the same fact, so the vocabulary
+ * gained two names, not three.
  */
-const KNOWN_CODELESS_FINALIZE_REJECTIONS = 3;
+const KNOWN_CODELESS_FINALIZE_REJECTIONS = 0;
 
 /**
  * Every rejection site on `finalize-wizard`, coded or not (measured 153.1-06).
@@ -1211,10 +1266,20 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
     // if it lands somewhere WIZARD_ERROR_COPY can answer for.
     expect(union.has("SERVICE_UNAVAILABLE_RETRY")).toBe(true);
     // The table is NOT an identity rule, and this is what proves the widening
-    // did not quietly legalise every wire code. `SEAM_DEGRADED` and the venue
-    // codes are named in the table's own docblock as codes that correctly
-    // answer UNKNOWN; if either started resolving, an unlisted emitter would be
-    // admitted by the membership assertions above without anyone deciding so.
+    // did not quietly legalise every wire code. Both names below are absent
+    // from it on purpose; if either started resolving, an unlisted emitter
+    // would be admitted by the membership assertions above without anyone
+    // deciding so.
+    //
+    // ⚠️ RE-CUT 2026-08-14 (153.7-03). This comment used to say the table's
+    // docblock names these as codes that "correctly answer UNKNOWN", which is
+    // no longer true of the second one and was never true in the way it read:
+    // `MT5_GATEWAY_UNREACHABLE` now has a row in `VENUE_WIRE_CODE_TO_VERDICT`
+    // answering `SERVICE_UNREACHABLE`/503, and its UNKNOWN was the live
+    // WIZFORM-02 defect rather than a correct verdict. ⭐ THE ASSERTION IS
+    // UNCHANGED AND IS STILL RIGHT — that is the point worth keeping. The two
+    // tables are separate mechanisms read at different call sites, so a verdict
+    // row neither implies nor needs an alias row. Only the prose was wrong.
     expect(alias.has("SEAM_DEGRADED")).toBe(false);
     expect(alias.has("MT5_GATEWAY_UNREACHABLE")).toBe(false);
   });
@@ -1319,5 +1384,376 @@ describe("[142.2-07 / MT5-04] every emitted wizard code clears the union AND its
       "IN_FINALIZE_ROSTER",
     ]);
     expect(deriveRoster(fake, "KNOWN_LATER_CODES")).toEqual(["IN_THE_LATER_ONE"]);
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * ⭐ W-153.7-1 — THE LAST HOP, WHICH WAS THE ONE HOP NOTHING GUARDED.
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * ── THE MEASUREMENT THAT PUT THIS FILE HERE ─────────────────────────────────
+ *
+ * 153.7's verifier deleted the line `"SEAM_INTERNAL_FAULT",` from
+ * `KNOWN_CREATE_WITH_KEY_CODES` and ran the four files that plausibly cover it:
+ * `ConnectKeyStep.test.tsx`, `wizardErrors.test.ts`,
+ * `wizardErrors.invariant.test.ts` and `seam-venue-vocabulary.invariant.test.ts`.
+ * **312 passed, 0 failed.** With that one line gone the wizard renders
+ * `code: UNKNOWN` — *"We could not classify this failure"*, **with a Retry
+ * control** — for `MT5_GATEWAY_UNCONFIGURED`, `ADAPTER_INIT_FAILED` and
+ * `INTERNAL`, three faults the service marks `retryable=False`. That is the
+ * exact shape of the 2026-08-05 `SERVICE_UNREACHABLE` incident this roster's own
+ * docblock records, re-created in silence.
+ *
+ * ── WHY THE INCUMBENT GUARD ABOVE COULD NOT SEE IT ──────────────────────────
+ *
+ * `ROUTES`' coverage assertion derives its population with `deriveEmittedCodes`,
+ * which matches `NextResponse.json({ code: "<LITERAL>", error: … }, …)` in the
+ * ROUTE source. That is why the three new `finalize-wizard` codes ARE covered —
+ * they are literals in `finalize-wizard/route.ts`. But a code returned by
+ * `classifyKeyValidationError` is **never a literal in the route**: both key
+ * routes write `const { code, status } = classifyKeyValidationError(err)` and
+ * then `NextResponse.json({ code }, …)` — a shorthand, computed value. The whole
+ * classifier-returned half of both rosters therefore sits outside `expectedSites`
+ * entirely. The asymmetry is structural, not an oversight in the predicate.
+ *
+ * ── THE POPULATION, AND WHY IT IS DERIVED TWO WAYS ──────────────────────────
+ *
+ * A code can leave `classifyKeyValidationError` by exactly two doors, and each
+ * needs its own derivation because each is invisible to the other's:
+ *
+ *   A. THE CASCADE — `return { code: "X", status: N }` written as a literal in
+ *      the function body. Source-scanned, bounded to that function.
+ *   B. THE VERDICT TABLE — `VENUE_WIRE_CODE_TO_VERDICT.get(seamCode)`, returned
+ *      as `return verdict`, a computed value with no literal anywhere. Read from
+ *      the LIVE exported Map, so a new row joins this population with no test
+ *      edit — which is the property the 153.7-02 regression needed and did not
+ *      have.
+ *
+ * ⛔ NEITHER HALF MAY BE A HAND-TYPED LIST. The rosters stay hand-typed (that is
+ * this file's stated design and `ConnectKeyStep`'s), but the population they are
+ * checked AGAINST must be derived, or the guard becomes two hand-typed lists
+ * agreeing with each other — a self-referential oracle, which is the one
+ * construction this repo has already paid for three times.
+ *
+ * ⚠️ ADMISSION IS TRANSLATE-FIRST, MEMBERSHIP-SECOND — the same rule the
+ * incumbent assertion uses, and the same one both steps implement
+ * (`recogniseSeamErrorCode(seamErrorCode(data))` runs before the roster check).
+ * A code the alias table answers needs no roster row, and adding one would be a
+ * type error. `SEAM_MISCONFIGURED` is the live case.
+ */
+const CLASSIFIER_STEPS: readonly {
+  readonly label: string;
+  readonly rosterFile: string;
+  readonly rosterName: string;
+}[] = [
+  {
+    label: "create-with-key → ConnectKeyStep",
+    rosterFile: join(WIZARD_STEPS, "ConnectKeyStep.tsx"),
+    rosterName: "KNOWN_CREATE_WITH_KEY_CODES",
+  },
+  {
+    label: "composite/add-key → MultiKeyConnectStep",
+    rosterFile: join(WIZARD_STEPS, "MultiKeyConnectStep.tsx"),
+    rosterName: "KNOWN_ADD_KEY_CODES",
+  },
+];
+
+/**
+ * Every code the CASCADE returns as a literal, bounded to
+ * `classifyKeyValidationError`'s own body.
+ *
+ * ⚠️ THE BOUND IS LOAD-BEARING IN BOTH DIRECTIONS. Unbounded, this would sweep
+ * `recogniseSeamErrorCode` and every other `return { code: … }` in a 3600-line
+ * module, inventing population members no key route can produce and forcing
+ * roster rows for them. Bounded too tightly (a regex that matches nothing) it
+ * returns `[]` and the assertion passes over half a population.
+ *
+ * ⛔ THE CLOSING ANCHOR IS `\n}\n` — A BRACE ALONE ON ITS LINE — AND NOT THE
+ * FIRST COLUMN-ZERO `}`, WHICH IS THE BUG THIS COMMENT EXISTS TO STOP BEING
+ * REINTRODUCED. `classifyKeyValidationError`'s return type is a MULTI-LINE
+ * OBJECT LITERAL:
+ *
+ *     export function classifyKeyValidationError(error: unknown): {
+ *       code: WizardErrorCode;
+ *       status: number;
+ *     } {
+ *
+ * so the first column-zero `}` closes the TYPE, three lines in, and a body
+ * bounded there contains no `return` at all. Written that way this scanner
+ * returned ZERO codes and the membership assertion below passed over an empty
+ * population — a guard that cannot fail, which is worse than no guard. It was
+ * caught by the vacuity floor and not by review, which is the argument for the
+ * floor. The type's closing line is `} {`, so `\n}\n` skips it; the function's
+ * own closer is a brace alone on its line. The SELF-TEST reproduces the exact
+ * signature shape.
+ */
+function deriveClassifierCascadeCodes(source: string): string[] {
+  const start = source.indexOf("export function classifyKeyValidationError");
+  if (start < 0) return [];
+  const tail = source.slice(start);
+  const end = /\n\}\n/.exec(tail);
+  if (end === null) return [];
+  const body = tail.slice(0, end.index);
+  return [
+    ...body.matchAll(/return\s*\{\s*code:\s*"([A-Z][A-Z0-9_]*)"/g),
+  ].map((m) => m[1]);
+}
+
+describe("[153.7 review W-153.7-1] every CLASSIFIER-returned code is admitted by its key step", () => {
+  const unionSource = stripped(UNION_SOURCE);
+  const alias = new Map(deriveAliasPairs(unionSource));
+
+  // DOOR A — the cascade's literals, from source.
+  const cascade = deriveClassifierCascadeCodes(unionSource);
+  // DOOR B — the verdict table, from the LIVE exported Map. Not a copy of it,
+  // and not a re-parse of its declaration: a new row must join this population
+  // with no edit here.
+  const verdicts = [...VENUE_WIRE_CODE_TO_VERDICT.values()].map((v) => v.code);
+
+  const reachable = [...new Set([...cascade, ...verdicts])].sort();
+
+  it("the population is NOT VACUOUS — BOTH doors, separately", () => {
+    // ⭐ SEPARATELY, and that is the point of two assertions rather than one on
+    // the union. The two derivations are independent mechanisms with
+    // independent ways to break, and a healthy total would hide a dead half:
+    // the cascade alone clears any sane floor on the union, so a verdict table
+    // that parsed as empty — the exact 153.7-02 regression this guard exists
+    // for — would pass a union-only check silently.
+    expect(
+      cascade.length,
+      `Only ${cascade.length} literal verdicts were scanned out of ` +
+        `classifyKeyValidationError's body (10 measured at 153.7). A number ` +
+        `near zero means the BOUND broke — either the declaration anchor or the ` +
+        `column-zero closing brace — and a broken bound makes the assertion ` +
+        `below pass over an empty population.`,
+    ).toBeGreaterThanOrEqual(10);
+
+    expect(
+      verdicts.length,
+      "VENUE_WIRE_CODE_TO_VERDICT is empty. That table is the ONLY door " +
+        "through which a wire code reaches a wizard card, so an empty one " +
+        "makes this whole guard vacuous.",
+    ).toBeGreaterThanOrEqual(8);
+
+    expect(alias.size, "SEAM_CODE_TO_WIZARD_CODE parsed as empty").toBeGreaterThan(3);
+  });
+
+  it.each(CLASSIFIER_STEPS.map((s) => s.label))(
+    "%s: the roster parsed, and it is not a stub",
+    (label) => {
+      const step = CLASSIFIER_STEPS.find((s) => s.label === label)!;
+      const roster = deriveRoster(stripped(step.rosterFile), step.rosterName);
+      expect(
+        roster.length,
+        `${step.rosterName} parsed as ${roster.length} members. A roster that ` +
+          `parsed as [] admits nothing, and the assertion below would then ` +
+          `report EVERY code as missing rather than passing — but a roster that ` +
+          `parsed as one or two would report a plausible-looking subset. Pin ` +
+          `the floor so neither reads as a real finding.`,
+      ).toBeGreaterThan(10);
+    },
+  );
+
+  it.each(CLASSIFIER_STEPS.map((s) => s.label))(
+    "%s: no classifier verdict can reach the step and be rejected as unrecognised",
+    (label) => {
+      const step = CLASSIFIER_STEPS.find((s) => s.label === label)!;
+      const roster = new Set(deriveRoster(stripped(step.rosterFile), step.rosterName));
+
+      const missing = reachable
+        .filter((code) => !alias.has(code) && !roster.has(code))
+        .sort();
+
+      expect(
+        missing,
+        `${step.rosterName} does not admit ${missing.length} code(s) that ` +
+          `classifyKeyValidationError can return, and SEAM_CODE_TO_WIZARD_CODE ` +
+          `does not translate them either. THE USER-VISIBLE CONSEQUENCE, ` +
+          `measured on this exact hop at 153.7: the step rejects the honest ` +
+          `code, renders UNKNOWN — "We could not classify this failure" — and ` +
+          `UNKNOWN's copy IS recoverable, so a Retry control appears against a ` +
+          `fault the service marked retryable=False. That is the 2026-08-05 ` +
+          `SERVICE_UNREACHABLE incident, and it ships with every other test ` +
+          `green. ⛔ THE REMEDY IS A ROW IN ${step.rosterName} in the SAME ` +
+          `commit the classifier starts returning the code — never a deletion ` +
+          `from the verdict table, and never a merge of the two rosters (they ` +
+          `are separate on purpose; see ConnectKeyStep's docblock).`,
+      ).toEqual([]);
+    },
+  );
+
+  it("SELF-TEST — the bound clears the MULTI-LINE RETURN TYPE and stops at the function's own brace", () => {
+    // ⛔ THE SIGNATURE SHAPE IS THE POINT, not decoration. The real function's
+    // return type is a multi-line object literal, so a bound anchored on the
+    // first column-zero `}` stops INSIDE the signature and yields zero codes —
+    // which is what the first draft of this scanner did, and it made the
+    // membership assertion below unfailable. Reproduced here so the fixture
+    // reds if anyone re-narrows the anchor.
+    const fake = [
+      "export function somethingEarlier(): void {",
+      '  return { code: "BEFORE_THE_FUNCTION", status: 400 };',
+      "}",
+      "",
+      "export function classifyKeyValidationError(error: unknown): {",
+      "  code: WizardErrorCode;",
+      "  status: number;",
+      "} {",
+      '  if (a) return { code: "INSIDE_ONE", status: 503 };',
+      "  if (b) {",
+      '    return { code: "INSIDE_TWO", status: 400 };',
+      "  }",
+      '  return { code: "INSIDE_TERMINAL", status: 500 };',
+      "}",
+      "",
+      "export function somethingLater(): void {",
+      '  return { code: "AFTER_THE_FUNCTION", status: 400 };',
+      "}",
+    ].join("\n");
+
+    expect(deriveClassifierCascadeCodes(fake)).toEqual([
+      "INSIDE_ONE",
+      "INSIDE_TWO",
+      "INSIDE_TERMINAL",
+    ]);
+
+    // And a missing declaration yields [] rather than the whole file — which is
+    // why the vacuity floor above is the thing that catches a renamed function,
+    // not this.
+    expect(deriveClassifierCascadeCodes("const x = 1;\n")).toEqual([]);
+  });
+
+  /**
+   * ⭐ W-153.7-2 — A CLASS FIX WITH NO OWNER IS A CLASS FIX THAT DOES NOT HAPPEN.
+   *
+   * Both rosters' docblocks assigned the derived-roster class fix to *"Phase 153
+   * / WIZFORM-02"*. That requirement is ticked **COMPLETE** in `REQUIREMENTS.md`
+   * as of 2026-08-14 — and 153.7 grew both lists anyway — so the pointer named a
+   * closed requirement and the work became nobody's. It was not in `TODOS.md`
+   * either (grepped by the verifier).
+   *
+   * ⛔ THIS IS NOT A PROSE-STYLE ASSERTION, and the distinction matters under
+   * this project's stopping rule: it is a two-sided REFERENTIAL INTEGRITY check
+   * between a comment and the single backlog file. It reds if the citation is
+   * removed from either roster (ownerless again) **or** if the `TODOS.md` item is
+   * deleted while the comments still point at it (a dangling pointer, which is
+   * the same defect wearing the other shoe). Neither side can be "fixed" by
+   * editing the other into agreement without the owner actually existing.
+   *
+   * The ID is deliberately a short stable token rather than a sentence, so a
+   * reword of either docblock cannot break this while the ownership survives.
+   */
+  it("[W-153.7-2] both rosters cite a LIVE owner for the derived-roster class fix", () => {
+    const OWNER_ID = "ROSTER-DERIVE-01";
+
+    const todos = readFileSync(join(REPO, "TODOS.md"), "utf-8");
+    expect(
+      todos.includes(OWNER_ID),
+      `TODOS.md carries no ${OWNER_ID} item, but both key-step rosters cite it ` +
+        `as the owner of the derived-roster class fix. A dangling pointer is ` +
+        `the same defect as no pointer: add the item back, or re-point both ` +
+        `docblocks at whoever really owns it.`,
+    ).toBe(true);
+
+    for (const step of CLASSIFIER_STEPS) {
+      // ⚠️ Read the RAW source, not the comment-stripped one. The citation IS a
+      // comment — `stripped()` would blank exactly what is under test.
+      const raw = readFileSync(step.rosterFile, "utf-8");
+      expect(
+        raw.includes(OWNER_ID),
+        `${step.rosterName}'s docblock no longer cites ${OWNER_ID}. That roster ` +
+          `is hand-typed and something has to own deriving it; without a live ` +
+          `citation the class fix is nobody's, which is exactly how it sat ` +
+          `pointed at a CLOSED requirement from 2026-08-06 to 2026-08-14.`,
+      ).toBe(true);
+    }
+  });
+
+  /**
+   * ⭐ W-153.7-4 — THE FACT THE CORRECTED PROSE RESTS ON, ASSERTED SO IT STAYS
+   * TRUE.
+   *
+   * `REQUIREMENTS.md`'s WIZFORM-02 rollup used to write the residue as *"six
+   * analytics-service codes still render `UNKNOWN` … plus `KEY_UNDECRYPTABLE` on
+   * `keys/[id]/permissions`"*. Measured, that route's terminal answers
+   * `PROBE_FAILED` / `PROBE_BACKEND_UNAVAILABLE` / `PROBE_TIMEOUT` /
+   * `PROBE_RATE_LIMITED` / `CIRCUIT_OPEN` and **`UNKNOWN` is not in its
+   * vocabulary at all** — so the sentence overstated the residue by one code,
+   * and the `TODOS.md` entry (which says the real defect is a wrong REMEDY
+   * sentence) was the one telling the truth. The rollup is corrected.
+   *
+   * ⛔ WHAT THIS TEST IS AND IS NOT. It does NOT pin the prose — pinning a
+   * sentence is the anti-pattern, and a documentation correction cannot have a
+   * test that fails without it. It pins the MEASUREMENT the corrected sentence
+   * and the TODOS item both rest on. The day this route starts minting `UNKNOWN`,
+   * both records become wrong AND a wizard-adjacent surface starts rendering
+   * `"UNKNOWN: …"` through `KeyPermissionBadge` — so CI should say so rather
+   * than leaving two documents to rot quietly.
+   *
+   * ⚠️ THE COMMENT STRIP IS LOAD-BEARING, exactly as this file's header argues:
+   * the route's own docblock QUOTES `{code:"UNKNOWN", status:500}` while
+   * explaining why it does not use it. A raw grep reports the opposite of the
+   * truth here.
+   */
+  it("[W-153.7-4] keys/[id]/permissions mints no UNKNOWN — the measurement the rollup was corrected to", () => {
+    const source = stripped(
+      join(REPO, "src/app/api/keys/[id]/permissions/route.ts"),
+    );
+
+    // POSITIVE CONTROL FIRST. A path typo or a moved route would make the
+    // negative below pass over an empty string.
+    for (const code of [
+      "PROBE_FAILED",
+      "PROBE_BACKEND_UNAVAILABLE",
+      "PROBE_TIMEOUT",
+      "PROBE_RATE_LIMITED",
+      "CIRCUIT_OPEN",
+    ]) {
+      expect(
+        source.includes(`"${code}"`),
+        `keys/[id]/permissions no longer mints ${code}. Either its private ` +
+          `PROBE_* cascade changed (see the TODOS.md item that owns giving it a ` +
+          `coverage law) or this scan is reading the wrong file — and a scan ` +
+          `reading nothing would pass the assertion below for the worst reason.`,
+      ).toBe(true);
+    }
+
+    expect(
+      source.includes('"UNKNOWN"'),
+      `keys/[id]/permissions now mints UNKNOWN. TWO records go stale the moment ` +
+        `it does — REQUIREMENTS.md's WIZFORM-02 residue sentence and the ` +
+        `TODOS.md item, both of which say this route's defect is a wrong REMEDY ` +
+        `sentence rather than an UNKNOWN card — and its wizard-adjacent ` +
+        `consumer KeyPermissionBadge renders the route's own { code, error } as ` +
+        `plain "CODE: message" text, so a user reads the literal word UNKNOWN.`,
+    ).toBe(false);
+  });
+
+  it("SELF-TEST — a code the ALIAS TABLE answers needs no roster row", () => {
+    // The admission rule has two limbs and only one of them is exercised by the
+    // real data at HEAD in an obvious way. `SEAM_MISCONFIGURED` is the live
+    // proof of the other: it IS a classifier verdict (three wire codes resolve
+    // to it) and it is deliberately in NEITHER key roster, because both steps
+    // translate through SEAM_CODE_TO_WIZARD_CODE first. If this stops holding,
+    // the assertion above is silently running on one limb.
+    expect(
+      reachable,
+      "SEAM_MISCONFIGURED left the classifier-reachable population, so the " +
+        "alias limb of the admission rule is no longer exercised by real data.",
+    ).toContain("SEAM_MISCONFIGURED");
+    expect(
+      alias.has("SEAM_MISCONFIGURED"),
+      "SEAM_CODE_TO_WIZARD_CODE no longer carries SEAM_MISCONFIGURED, so the " +
+        "translate-first hop the two key steps rely on has gone — and the code " +
+        "now needs a row in BOTH rosters instead.",
+    ).toBe(true);
+    for (const step of CLASSIFIER_STEPS) {
+      expect(
+        deriveRoster(stripped(step.rosterFile), step.rosterName),
+        `${step.rosterName} gained SEAM_MISCONFIGURED. That is a hand-typed ` +
+          `allow-list edit for a code the ONE shared table already answers ` +
+          `(coverage-law row 1), and it contradicts that step's own docblock.`,
+      ).not.toContain("SEAM_MISCONFIGURED");
+    }
   });
 });

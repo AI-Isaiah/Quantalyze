@@ -17,7 +17,10 @@ import {
   VENUE_IDENTITY_CONSTRAINT,
   WIZARD_SESSION_CONSTRAINTS,
 } from "@/lib/api/pgConstraintName";
-import { classifyKeyValidationError } from "@/lib/wizardErrors";
+import {
+  classifyKeyValidationError,
+  OUR_DEFECT_KEY_ERROR_CODES,
+} from "@/lib/wizardErrors";
 import { scrubSeamError } from "@/lib/seam-redaction";
 // 154 / WIZCONT-02 — read-only, owner-filtered, and used for EXACTLY ONE column.
 // See `resolveByVenueIdentity` for why the user-scoped client structurally
@@ -1154,11 +1157,23 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // "UNKNOWN"`. Reading the classifier's verdict is what makes the policy
     // mechanical at this site instead of a re-implementation of its cascade.
     //
-    // Everything the classifier DID recognise is excluded for free and for the
-    // policy's own reasons: `SERVICE_UNAVAILABLE_RETRY` is the breaker
+    // Most of what the classifier DID recognise is excluded for free and for
+    // the policy's own reasons: `SERVICE_UNAVAILABLE_RETRY` is the breaker
     // short-circuit, `KEY_NETWORK_TIMEOUT` the timeout, and every
     // `KEY_INVALID_SIGNATURE` / `KEY_AUTH_FAILED` / `KEY_MT5_*` verdict is a
-    // caller fault. None is our defect and none should page anyone.
+    // caller fault. None of those is our defect and none should page anyone.
+    //
+    // ⭐ BUT "RECOGNISED" STOPPED MEANING "NOT OURS" AT 153.7-02, WHICH IS WHY
+    // THE PREDICATE IS A SET AND NO LONGER `code === "UNKNOWN"` (153.7 review
+    // WR-02). That plan gave `INTERNAL` and `ADAPTER_INIT_FAILED` verdict rows
+    // resolving to `SEAM_INTERNAL_FAULT`. Both are OUR defect by the Python
+    // emitter's own words — `INTERNAL` is literally `validate_key_permissions`'
+    // unclassified-exception escape — and before that commit both resolved to
+    // `UNKNOWN` and PAGED. Classifying a fault better is not a reason to stop
+    // hearing about it, so the population is now named explicitly in
+    // `OUR_DEFECT_KEY_ERROR_CODES` (shared, one set, both key routes) instead of
+    // being inferred from the classifier's terminal. The sentence above and the
+    // code below now say the same thing again.
     //
     // ⚠️ PLACEMENT IS DELIBERATE — AFTER the classify call and BEFORE the
     // `headers` computation, so this route's breaker cell (CONTEXT: "the best in
@@ -1166,7 +1181,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // shared classifier unmodified, the status is still derived from the
     // classifier, and the conditional `Retry-After` below still branches on the
     // same `err instanceof CircuitOpenError`.
-    if (code === "UNKNOWN") {
+    if (OUR_DEFECT_KEY_ERROR_CODES.has(code)) {
       captureToSentry(err, {
         tags: { surface: "strategies-create-with-key", step: "unclassified-key-error" },
         extra: { exchange: exchangeNormalized },

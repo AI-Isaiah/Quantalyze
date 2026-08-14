@@ -1118,8 +1118,19 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       "[strategies/finalize-wizard] strategy lookup failed:",
       scrubSeamError(strategyErr),
     );
+    // 153.7-03 / WIZFORM-02-CLASS — the code this arm never carried. It was one
+    // of the three rejections 153.1-06 recorded as known debt: the route picked
+    // a status and wrote a sentence, then answered code-less, so SubmitStep
+    // rendered "We could not classify this failure" for a failure it had
+    // classified exactly.
+    //
+    // ⭐ `DRAFT_LOOKUP_FAILED` IS NOT A NEW TOKEN. `keys/sync`'s draft-read
+    // split already mints it for this same fact, and its comment records that
+    // it copied the template from this arm. Same fact ⇒ same token, which is
+    // the rule `verify-strategy` states when it mints `VERIFY_PERSIST_FAILED`
+    // on that precedent.
     return NextResponse.json(
-      { error: "Could not load draft" },
+      { code: "DRAFT_LOOKUP_FAILED", error: "Could not load draft" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }
@@ -1880,8 +1891,20 @@ async function runLegacyFinalize(args: {
         { status: 409, headers: NO_STORE_HEADERS },
       );
     }
+    // 153.7-03 / WIZFORM-02-CLASS — the second of the three code-less
+    // rejections, and the GENERIC TAIL of this branch: every SQLSTATE the three
+    // arms above did not claim, plus a transport failure reaching PostgREST.
+    //
+    // ⚠️ THAT RESIDUE IS WHY THE COPY IS THE WEAKER SENTENCE. A SQL raise rolls
+    // the SECURITY DEFINER transaction back and nothing lands; a transport
+    // failure can lose the answer to a write that did. `DRAFT_FINALIZE_FAILED`
+    // therefore says we cannot confirm rather than that nothing was saved,
+    // which is true in both worlds. Narrowing this arm to claim more would mean
+    // splitting it, and splitting it would move
+    // `EXPECTED_FINALIZE_REJECTION_SITES` — the pin whose non-movement is the
+    // proof this plan fixed arms instead of inventing them.
     return NextResponse.json(
-      { error: "Could not finalize wizard draft" },
+      { code: "DRAFT_FINALIZE_FAILED", error: "Could not finalize wizard draft" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }
@@ -2471,8 +2494,20 @@ async function unifiedFinalizeWizardHandler(args: {
           : null,
     },
   });
+  // 153.7-03 / WIZFORM-02-CLASS — the last of the three code-less rejections.
+  //
+  // ⚠️ THIS ONE IS NOT LIKE ITS TWO SIBLINGS, and the difference is the whole
+  // reason it gets its own member. The upstream answered 2xx: the submission
+  // WAS accepted and only its result is unreadable. So the copy behind
+  // `SEAM_RESPONSE_UNREADABLE` may not say nothing was saved (false whenever
+  // the onboard really landed) and may not say it went through (a guess about a
+  // body we could not parse). It claims only what the 2xx establishes and sends
+  // the user to the strategies list, which is the record that settles it.
   return NextResponse.json(
-    { error: "Upstream service returned unexpected response" },
+    {
+      code: "SEAM_RESPONSE_UNREADABLE",
+      error: "Upstream service returned unexpected response",
+    },
     { status: 502, headers: NO_STORE_HEADERS },
   );
 }
