@@ -1,6 +1,68 @@
 # Roadmap: Quantalyze
 
-## Current Milestone: v1.17 MT5 — usable end-to-end, not merely ingested (Phases 147–155)
+## Shipped Milestone: v1.17 MT5 — ingested, wizardable, surfaced (Phases 147–154, 156) ✅ CLOSED 2026-08-14
+
+⚠️ **SCOPE AMENDED 2026-08-14, and the amendment is the point.** This milestone originally ran
+147–155 and its title claimed *"usable end-to-end, not merely ingested"*. Phase 155 (MT5-VERIFY —
+the live trading-day parity run against the terminal's own figures) was **REMOVED from scope and
+carried to v1.18**. It was neither silently dropped nor ticked unmet. With it went MT5-06, MT5-07,
+MT5-08, MT5-09, MT5-10, MT5-15 and the umbrella acceptance MT5-GOAL-01.
+
+**Founder decision (2026-08-14).** A bounded alternative — move 155 to TODOS.md and tick v1.17
+complete — was offered and **declined**, on the grounds that it would leave every ledger reading
+"MT5 usable end-to-end" while our numbers had never once been compared to the broker's.
+
+⛔ **CLOSED but NOT ARCHIVED, and MT5 is NOT advertised.** What v1.17 actually earns: MT5
+*ingests*, is *declarable in the wizard*, *projects in a scenario*, has a *viewable factsheet*,
+and the wizard's write is the server's alone. What it does NOT earn: any claim that the
+performance we render matches the terminal's. Nobody has compared them.
+
+⭐ **MT5-GOAL-01 was written as a tripwire against exactly this reading** — it exists, in its own
+words, "so 'MT5-05 ✅' can never again be mistaken for 'MT5 works'." Carrying it into v1.18 keeps
+the tripwire armed. Discharging it by relocation would have disarmed it, which is precisely
+v1.15's failure mode: shipped 6/6 green with both open items intact.
+
+---
+
+## Current Milestone: v1.18 MT5-VERIFY & founder confirmations (Phases 155, 157)
+
+**Goal:** The numbers Quantalyze renders for the live funded MT5 account are proven true against
+the terminal's own figures — and the handful of observations only the founder can make are made.
+
+⛔ **EVERY phase in this milestone is founder-gated. That is its defining property, not an
+accident of sequencing.** Nothing here can be delivered by an agent. The milestone was created on
+2026-08-14 so that the agent-deliverable work in v1.17 could close without waiting on a calendar.
+
+**Blocked on, both required:**
+
+1. ⛔ **New MT5 investor passwords.** The founder changed the account passwords on/around
+   2026-08-14, so the stored credentials are stale and will not authenticate. MEASURED on PROD
+   that day: three `mt5` keys exist (labels `FX-AI_V`, `MM2`, `MM3` — ⚠️ **there is NO key
+   labelled `MM1`**, so the founder's "MM1 and MM2 are erroring" does not map 1:1 onto stored
+   rows; **re-verify ALL THREE at reconnect**), all `disconnected_at IS NULL`, all
+   `sync_status='complete'` with `last_sync_at` 04:01–04:07 UTC — those are the last *successful*
+   syncs, taken **before** the change.
+   ⛔ **When these flip to `error`, that is EXPECTED. Do not investigate it as a code defect.**
+2. ⛔ **The founder physically at the MT5 terminal, on a TRADING day**, with the live funded
+   account's read-only investor password. A demo account, the v1.15 soak account, or a weekend run
+   does not satisfy it.
+
+**Settled inputs — do not re-litigate:**
+
+- Parity tolerance **1%, INCLUDING open P&L** (founder call 2026-08-14). Adjustable later; keep it
+  a named test constant, never a hardcoded literal.
+- ⭐ **The measurement window MUST end before the day of the run.** `broker_dailies` anchors to
+  today — initial capital is derived as `current_equity − total_pnl` — so reconstruction error
+  accrues *backward into the past*. Comparing today's equity is therefore near-tautological, and a
+  historical window is the only one that can actually fail.
+
+**Requirements:** MT5-06, MT5-07, MT5-08, MT5-09, MT5-10, MT5-15, MT5-GOAL-01 (umbrella acceptance)
+
+⛔ **Do not advertise MT5 until Phase 155 passes.** Carried verbatim from v1.17.
+
+---
+
+## v1.17 phase detail, retained (Phases 147–156)
 
 **Goal:** MT5 *works* in the founder's sense rather than the wizard's — it ingests (done), it
 projects in a scenario, and its factsheet is viewable by the allocator who uploaded it.
@@ -57,10 +119,11 @@ unpublished strategy; AUM-05 will hit sFOX the day its flag flips. **A fix scope
 - [x] **Phase 150: OWN-03 — The wizard asks whose capital this is** - Own-capital-with-allocation vs verifying-a-team question at allocator finalize; (b) stays the default and a no-op; only an explicit (a) creates the portfolio position (money-path reviewed) (completed 2026-08-06)
 - [x] **Phase 151: AUM — A book you can reach and a size you can set** - Direct AUM input, non-ccxt holdings-sync crash fixed as a CLASS (MT5 + latent sFOX), all-or-nothing book gate fixed incl. cross-role contamination, honest refusal copy (completed 2026-08-07)
 - [x] **Phase 152: SCEN — Composer legibility** - Ownership marker, clickable rows with a working factsheet link, labelled numbers, no duplicate browse entries (completed 2026-08-07)
-- [ ] **Phase 153: WIZFORM — Form errors belong on the form (+ MT5 declarable)** - Inline field validation, honest error codes from emitting sites, transient infra absorbed not surfaced, venue-appropriate copy, MT5 preselected in metadata. 📌 **NOW TICKABLE, left for the verifier (2026-08-14).** The span verification failed on WIZFORM-02 alone (5/6); Phase 153.7 closed all four of its `missing` items and the requirement is ticked in REQUIREMENTS.md. ⛔ Deliberately NOT self-ticked here: a SPAN verdict is the verifier's to issue, not the executor's, and the last time this box was ticked ahead of its evidence is what produced the retroactive verification in the first place
+- [x] **Phase 153: WIZFORM — Form errors belong on the form (+ MT5 declarable)** ✅ **GOAL MET 2026-08-14 — via the INSERTED Phase 153.7, not by the original span.** Inline field validation, honest error codes from emitting sites, transient infra absorbed not surfaced, venue-appropriate copy, MT5 preselected in metadata. ⭐ **The mechanism is named on purpose and a bare tick would erase it:** the 153.1→153.6 span verdict REMAINS `failed` 5/6 in `153-VERIFICATION.md` and must not be rewritten — that file is the historical record that the span shipped short on WIZFORM-02. Phase 153.7 closed all four of its `missing` items, re-derived from source by the v1.17 milestone audit (router-vocabulary disposition at `wizardErrors.ts:3081`; population root widened at `seam-venue-vocabulary.invariant.test.ts:89` plus the `service_error` callee family at `:318`; boundary decision with per-exclusion reasons and count pins at `SCAN_EXCLUSIONS:134`; `KNOWN_CODELESS_FINALIZE_REJECTIONS = 0`), with both invariants executed at this tree — 2 files / 60 tests passed
 - [x] **Phase 154: WIZCONT/STALE — Wizard continuity, no stale screens** - Draft-aware entry chooser, stale-screen root cause investigated BEFORE fixed (verdict M2(ii)), token-less credential dedup toward the existing row (completed 2026-08-12)
 - [x] **Phase 153.7: WIZFORM-02-CLASS — every code that can reach a user is covered** ✅ **COMPLETE 2026-08-14** (INSERTED 2026-08-14) - The coverage law's population is DERIVED from every user-reachable code (`analytics-service/**`, positional `service_error(...)` as well as `error_code =`), and a code absent from BOTH halves reds CI; closes the one requirement the 153 span failed. 3/3 plans: population 17 → 37, all 37 dispositioned, and the last three code-less `finalize-wizard` rejections coded (ledger 3 → 0 with `EXPECTED_FINALIZE_REJECTION_SITES` never edited). **WIZFORM-02 ticked.** ⛔ NOT "add two rows" — see TODOS.md FIX NOW #6
-- [ ] **Phase 155: MT5-VERIFY — The numbers are true, live on a trading day** - Server-UTC offset measured, external-oracle parity on the live funded account, five surfaces agree, discrepancies fixed (uncapped), warnings explained; MT5-GOAL-01 acceptance gate
+- [→] **Phase 155: MT5-VERIFY — The numbers are true, live on a trading day** — ➡️ **CARRIED OUT OF v1.17 TO v1.18 on 2026-08-14.** Not started, not dropped, not ticked. Server-UTC offset measured, external-oracle parity on the live funded account, five surfaces agree, discrepancies fixed (uncapped), warnings explained; MT5-GOAL-01 acceptance gate. ⛔ Founder-gated twice over: new investor passwords AND the founder at the terminal on a trading day. Detail block below is retained in place; the milestone header at the top of this file owns its blockers
+- [→] **Phase 157: FOUNDER-CONFIRM — the observations only the founder can make** — ➡️ **v1.18** (CREATED 2026-08-14). Discharges the human-verification items Phases 153.7 and 154 left open: the resume banner, the amber recomputing block, the four new copy members rendering (with NO Retry on `SEAM_INTERNAL_FAULT`), and the `MT5_SPIKE_INVESTOR_PASSWORD` rotation
 - [x] **Phase 156: CONNECT-REFACTOR — the venue the server validated is the venue the server writes** ✅ **COMPLETE 2026-08-13** - `attested_venue` written by a service-role writer from the venue this server observed a successful read-only authentication at; `authenticated` EXECUTE withdrawn from both wizard RPCs; closes the PARITY-04 deferred control (CR-01, was live on PROD). Shipped as TWO PRs with a live PROD gate between them. ⛔ The pull-forward-ahead-of-155 trigger (sFOX go-live) is now moot — the residual it protected against is closed
 
 ## Phase Details
@@ -555,7 +618,56 @@ Plans:
 
 **Plans**: TBD
 **Notes**: Re-homed from v1.16 Phase 142.3 (which was split out of 142.2 at the D-14 valve on 2026-08-03 and will NOT run as a v1.16 phase). ⛔ Do not archive the milestone or advertise MT5 until this phase passes — v1.15's failure mode was shipping 6/6 green with both open items intact.
-⚠️ PRECONDITION (found 2026-08-05): all 3 PROD MT5 keys sit at `sync_status='error'` — `'Mt5Session' object has no attribute 'fetch_balance'` (+ sibling `'…' has no attribute 'id'` in `fetch_daily_pnl`, Sentry QUANTALYZE-K). No MT5 sync completes, so this phase cannot start until it is fixed. Owned by a HOTFIX PR landing right after Phase 149 (founder call 2026-08-05: short fix, not an inserted phase); if the hotfix reveals a deeper defect, insert a phase before this one.
+⚠️ **PRECONDITION — REPLACED 2026-08-14. Read this before re-deriving anything.**
+
+**The blocker is stale credentials, not broken code.** The founder changed the MT5 account
+passwords on/around 2026-08-14, so the stored credentials will no longer authenticate. Only the
+founder can supply the new read-only investor passwords. See the v1.18 milestone header for the
+measured PROD state and the ⚠️ `MM1` label mismatch (three keys exist: `FX-AI_V`, `MM2`, `MM3` —
+**no key is labelled `MM1`**, so re-verify all three at reconnect).
+⛔ **When the three keys flip to `sync_status='error'`, that is EXPECTED. Do not open an
+investigation.**
+
+~~PRECONDITION (found 2026-08-05): all 3 PROD MT5 keys sit at `sync_status='error'` —
+`'Mt5Session' object has no attribute 'fetch_balance'`...~~ — ⭐ **STALE, and it was a trap.** That
+hotfix **landed** as `e0493913` (PR #667, "MT5 key-sync routing for Mt5Session + wizard roster
+stopgap"). MT5 sync has worked since: PROD synced all three keys at 04:01–04:07 UTC on 2026-08-14,
+`sync_error` empty on every row. The note is struck through rather than deleted because a red MT5
+key plus a roadmap note pointing at `Mt5Session.fetch_balance` is a near-perfect way to send the
+next session bisecting a bug that was fixed nine days earlier.
+
+### Phase 157: FOUNDER-CONFIRM — the observations only the founder can make
+
+**Goal**: The handful of checks no test can perform are performed, so the requirements resting on
+them stop resting on an assumption
+**Depends on**: Nothing. Can run in any order relative to 155, in the same sitting.
+**Requirements**: none of its own — it discharges human-verification items left open by Phases
+153.7 and 154
+**Success Criteria** (what must be TRUE):
+
+  1. **The 2026-08-04 wizard restart is confirmed gone.** Open `+ Strategy` with a live wizard
+     draft present: the resume banner appears, and Resume lands on the draft's step rather than
+     step 1. ⚠️ The MECHANICS are already covered — `e2e/wizard-resume.spec.ts` ran **green on main
+     at `5d43df6b`** (2026-08-13 22:32, `e2e-seeded`; the job asserts its seed secret is non-empty
+     and fails loud otherwise, so the `HAS_SEED_ENV` skip predicate was false and the test really
+     executed). What no test can cover: the founder is the only person who witnessed the original
+     restart, so only they can say it is gone.
+  2. **The amber `wizard-sync-recomputing` block is seen on screen.** Heading *"Recomputing this
+     strategy's analytics"*; no red envelope, no metric numbers; contrast and spacing per
+     `154-UI-SPEC.md`. No browser pass has ever been run on this block.
+  3. **The four copy members Phase 153.7 minted are seen rendering in a real wizard** —
+     `SEAM_INTERNAL_FAULT`, `DRAFT_LOOKUP_FAILED`, `DRAFT_FINALIZE_FAILED`,
+     `SEAM_RESPONSE_UNREADABLE`. ⭐ `SEAM_INTERNAL_FAULT` must render with **NO Retry control** —
+     that single check doubles as the regression catch for the classifier→roster hop
+     (`W-153.7-1`), where a missing roster member leaves the whole suite green while the wizard
+     offers a Retry against a permanent fault.
+  4. **`MT5_SPIKE_INVESTOR_PASSWORD` is rotated.** It sits in plaintext in Railway env and was
+     printed to a session scrollback. Founder-only: they hold the credential.
+
+**Plans**: TBD
+**Notes**: ⚠️ Criterion 3 shrinks to a glance if the component render tests land first — they are
+agent-deliverable and tracked outside this milestone. Criterion 2 likewise: a localhost browser
+pass can pre-verify the block, leaving the founder only a confirmation.
 
 ### Phase 156: CONNECT-REFACTOR — the venue the server validated is the venue the server writes ✅ COMPLETE 2026-08-13
 
@@ -618,10 +730,24 @@ Plans:
 | 150. OWN-03 portfolio question | 8/8 | Complete    | 2026-08-07 |
 | 151. AUM book + sizing | 7/7 | Complete    | 2026-08-07 |
 | 152. SCEN composer legibility | 6/6 | Complete    | 2026-08-07 |
-| 153. WIZFORM + MT5-14 | 0/? | Not started | - |
+| 153. WIZFORM + MT5-14 | span complete | Goal met via inserted 153.7 (span verdict stays `failed` 5/6) | 2026-08-14 |
+| 153.7. WIZFORM-02-CLASS (INSERTED) | 3/3 | Complete (shipped v0.62.0.0, merge `c4555fd0`) | 2026-08-14 |
 | 154. WIZCONT + STALE | 8/8 | Complete   | 2026-08-12 |
-| 155. MT5-VERIFY + acceptance | 0/? | Not started | - |
+| 155. MT5-VERIFY + acceptance | 0/? | ➡️ **CARRIED to v1.18** | - |
 | 156. CONNECT-REFACTOR | 10/10 | Complete (2 PRs, live PROD gate between them) | 2026-08-13 |
+
+**v1.17 closes at 10 phases delivered** (147, 148, 149, 150, 151, 152, 153, 153.7, 154, 156).
+⚠️ Phase 153's own SPAN verdict is still the verifier's to issue — every one of its `missing`
+items is closed and WIZFORM-02 is ticked in REQUIREMENTS.md, but the box at line 122 is
+deliberately left for `gsd-verifier` rather than self-ticked. That re-verification is
+agent-deliverable and does not gate the milestone close.
+
+### v1.18 Progress
+
+| Phase | Plans Complete | Status | Completed |
+|-------|----------------|--------|-----------|
+| 155. MT5-VERIFY + acceptance | 0/? | ⛔ Blocked — founder at terminal + new passwords | - |
+| 157. FOUNDER-CONFIRM | 0/? | ⛔ Blocked — founder observations | - |
 
 ## Requirement Coverage (v1.17)
 
@@ -633,13 +759,20 @@ Plans:
 | 150 | OWN-03 |
 | 151 | AUM-01, AUM-02, AUM-03, AUM-04, AUM-05 |
 | 152 | SCEN-02, SCEN-03, SCEN-04, SCEN-05 |
+| 150 | OWN-05 |
 | 153 | WIZFORM-01, WIZFORM-02, WIZFORM-03, WIZFORM-04, MT5-14 |
+| 153.x | WIZFORM-05 (the validate-budget split; ⛔ explicitly FENCED OUT of 153.7) |
 | 154 | WIZCONT-01, WIZCONT-02, STALE-01 |
-| 155 | MT5-06, MT5-07, MT5-08, MT5-09, MT5-10, MT5-15, MT5-GOAL-01 (umbrella) |
+| 155 | ➡️ MT5-06, MT5-07, MT5-08, MT5-09, MT5-10, MT5-15, MT5-GOAL-01 (umbrella) — **CARRIED TO v1.18 on 2026-08-14. Not delivered in v1.17.** |
 | 156 | CONNECT-01, CONNECT-02, CONNECT-03, CONNECT-04, CONNECT-05 ✅ (all five complete 2026-08-13; also closes PARITY-04, whose deferred control 153.6 could not take inside its own phase) |
 
-29/29 in-scope requirement IDs mapped (28 work + 1 umbrella), each to exactly one phase. No
-orphans, no duplicates. OWN-01 excluded (already met — CONTRIB-03, verified in code 2026-08-04).
+**31 in-scope requirement IDs mapped (30 work + 1 umbrella), each to exactly one phase.**
+⚠️ **Corrected 2026-08-14 — this table said "29/29 mapped, no orphans" while omitting TWO
+requirements** (`OWN-05` and `WIZFORM-05`, both added after it was written). Milestone-audit
+warning **W2**. A completeness claim that predates the last two additions is worse than no claim:
+it reads as a checked invariant when it is a stale count. ⭐ **24 of the 31 were DELIVERED in
+v1.17; the 7 on the Phase 155 row were CARRIED to v1.18** and are not v1.17 gaps.
+No duplicates. OWN-01 excluded (already met — CONTRIB-03, verified in code 2026-08-04).
 ⛔ Everything in SEAM / JOB / RATE / PYAPI* / SEAMCORE / SEAMUX remains v1.16 (PARKED below).
 Revised 2026-08-04 after NAV-01 was sharpened: the approved Phase 148 (OWN-02/03/04 + NAV-01)
 split into 148/149/150; later phases renumbered +2 (149→151 … 153→155) with dependencies intact.
@@ -1328,11 +1461,30 @@ Plans:
 
 ## Current position
 
-**v1.17 MT5 — usable end-to-end, not merely ingested** — roadmap created 2026-08-04, Phases
-147–156 (revised same day: Phase 148 split into 148 owner-factsheet / 149 NAV ranking /
-150 OWN-03 portfolio question after NAV-01 was sharpened to ranking parity). v1.16 is ⏸️ PARKED at 68% (13/19 phases, 119/127 plans) — resume at Phase 143 after
-v1.17; Phase 144 carries the live WR-02 DELETE-vs-reset founder decision.
-Next: `/gsd:plan-phase 147`.
+⭐ **CURRENT: v1.18 MT5-VERIFY & founder confirmations (Phases 155, 157)** — created 2026-08-14.
+⛔ **Every phase is founder-gated**; nothing here is agent-deliverable. Blocked on (1) new MT5
+investor passwords and (2) the founder at the terminal on a trading day. See the milestone header
+at the top of this file.
+
+✅ **v1.17 MT5 — ingested, wizardable, surfaced** — CLOSED 2026-08-14, 10 phases delivered
+(147–154, 156), shipped through v0.62.0.0. ⚠️ Its original title said *"usable end-to-end, not
+merely ingested"*; Phase 155 was carried to v1.18 and the title was amended to match what was
+actually delivered. ⛔ **MT5 is NOT advertised** — nobody has compared our numbers to the
+terminal's.
+
+➡️ **NEXT AGENT WORK: v1.16, PARKED at 68% (13/19 phases, 119/127 plans).** Resume at Phase 143.
+⚠️ Phase 144 carries the live WR-02 DELETE-vs-reset decision — the orphaned-running purge DELETEs
+rather than resets, which loses PROD jobs; the charter already decides it (terminal `failed`
+UPDATE, never a bare DELETE) and a reaper that deletes rows it should have reset is **not
+revertible**.
+Next: `/gsd:plan-phase 143`. ⛔ **Run 143 → 144 → 145 → 146 in that order — it is a declared
+dependency chain, not a preference:** 143 depends on 142, 144 on 143, 145 on 144, and 146 is
+sequenced last *so its gap list comes from a fresh grep* (running it earlier audits a codebase
+about to change). ⚠️ A risk-first reordering (145/146 before the migrations) was proposed on
+2026-08-14 and **rejected — it inverted 145's dependency on 144.** Note the consequence: 144 is
+SECOND, not last, so it does not get a long PROD-soak behind it. Its safety must come from the
+change itself — assert the migration writes a terminal `failed` state and issues NO `DELETE`,
+prove it on TEST, and verify on PROD before 145 begins.
 
 ---
 

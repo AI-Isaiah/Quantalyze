@@ -20,7 +20,30 @@ Allocators act on Bridge recommendations and see whether those suggestions
 actually worked — and can model the impact of composition changes before they
 make them.
 
-## Current Milestone: v1.17 MT5 — usable end-to-end, not merely ingested (started 2026-08-04)
+## Current Milestone: v1.18 MT5-VERIFY & founder confirmations (started 2026-08-14)
+
+⛔ **Every phase in v1.18 is founder-gated** — Phase 155 (live trading-day parity against the
+terminal's own figures) and Phase 157 (the observations only the founder can make). Blocked on new
+MT5 investor passwords AND the founder at the terminal on a trading day. Agent-deliverable work
+continues on **v1.16 (PARKED, Phases 143–146)**.
+
+⭐ **Parity tolerance is settled at 1%, INCLUDING open P&L** (founder call 2026-08-14). The
+measurement window MUST end before the day of the run: `broker_dailies` anchors to today
+(`initial capital = current_equity − total_pnl`), so error accrues *backward* and comparing today's
+equity is near-tautological.
+
+---
+
+## ✅ Shipped: v1.17 MT5 — ingested, wizardable, surfaced (2026-08-04 → 2026-08-14)
+
+⚠️ **Scope amended on close.** The original title claimed *"usable end-to-end, not merely
+ingested"*. Phase 155 (MT5-VERIFY) was **carried to v1.18**, taking MT5-06..10, MT5-15 and
+MT5-GOAL-01 with it. What v1.17 earns: MT5 ingests, is declarable in the wizard, projects in a
+scenario, has a viewable factsheet, and the wizard's write is the server's alone. ⛔ What it does
+**NOT** earn: any claim that the performance we render matches the broker's. **Nobody has compared
+them.** Do not advertise MT5 until Phase 155 passes.
+
+**Historical goal statement, retained:**
 
 **Goal:** MT5 *works* in the founder's sense rather than the wizard's — it ingests (done), it projects
 in a scenario, and its factsheet is viewable by the allocator who uploaded it.
@@ -45,8 +68,10 @@ in a scenario, and its factsheet is viewable by the allocator who uploaded it.
   refusal copy names a control that was deliberately never built.
 - **WIZ — the wizard stops costing submits.** Inline field errors, a resume path for allocators,
   credential dedup, no stale screens, and MT5 selectable as its own venue.
-- **MT5-VERIFY — the numbers are true.** Server-UTC offset measured live, rendered performance checked
-  against an external oracle, on a live funded account on a real trading day.
+- ➡️ **MT5-VERIFY — the numbers are true.** Server-UTC offset measured live, rendered performance
+  checked against an external oracle, on a live funded account on a real trading day.
+  ⛔ **CARRIED TO v1.18 on 2026-08-14 — this was NOT delivered in v1.17.** Listed here because it
+  was in the original scope statement; struck from the delivered set.
 
 ⭐ **Defining constraint: almost NONE of this is an MT5 defect.** MT5 is the first venue to traverse
 the whole path from a cold start, so it is exposing pre-existing holes in the surfaces AFTER

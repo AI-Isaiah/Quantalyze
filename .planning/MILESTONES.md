@@ -1,5 +1,31 @@
 # Milestones
 
+
+## v1.17 — MT5: ingested, wizardable, surfaced (CLOSED 2026-08-14, v0.53.x → v0.62.0.0, Phases 147–154 + 156)
+
+⚠️ **Scope amended on close, and the amendment is the headline.** Originally *"MT5 — usable
+end-to-end, not merely ingested"* (147–155). Phase 155 (MT5-VERIFY — the live trading-day parity
+run) was **carried to v1.18**, taking MT5-06..10, MT5-15 and the umbrella acceptance MT5-GOAL-01.
+A bounded alternative — move 155 to TODOS and tick v1.17 complete — was offered and **declined**.
+⛔ **Do not advertise MT5.** Our rendered numbers have never been compared to the terminal's.
+
+- **147 SCEN-01** — the scenario engine receives the real series (silent money-path correctness bug, not MT5-specific).
+- **148 OWN** — the owner can view the full factsheet of their own unpublished strategy, no cache disclosure.
+- **149 NAV-01** — my-strategies, a ranking at discovery parity. ⚠️ Zero e2e coverage (TODOS `E2E-NAV-01`).
+- **150 OWN-03** — the wizard asks whose capital this is; the money-path write isolated.
+- **151 AUM** — a book you can reach and a size you can set.
+- **152 SCEN** — composer legibility.
+- **153 WIZFORM (+153.1–153.7)** — form errors belong on the form; MT5 declarable. ⭐ Goal met via the INSERTED 153.7; the 153.1→153.6 span verdict REMAINS `failed` 5/6 as the historical record that the span shipped short on WIZFORM-02.
+- **153.7 WIZFORM-02-CLASS** — the coverage law's population went 17 → 37 codes and a new undisposed code now reds CI *by name*. Landed RED by design, greened only by the dispositions.
+- **154 WIZCONT/STALE** — draft-aware entry, stale-screen root cause found BEFORE it was fixed, token-less credential dedup toward the existing row.
+- **156 CONNECT-REFACTOR** — the venue the server validated is the venue the server writes; `authenticated` EXECUTE withdrawn from both wizard RPCs. Two PRs with a live PROD gate between them.
+
+**Audit:** `v1.17-MILESTONE-AUDIT.md` — `gaps_found` 82/100. All four blockers were ledger-honesty,
+zero source changes, all closed before archiving. ⭐ Three of the four were the *refused claim
+resurfacing in a file the amendment commit never touched* — the lesson being that a scope
+amendment landing in one file is almost always incomplete.
+**Archive:** `milestones/v1.17-ROADMAP.md` + `v1.17-REQUIREMENTS.md`.
+
 ## v1.15 MetaTrader 5 — live api_verified account sync — SHIPPED + LIVE (2026-07-25)
 
 **Phases:** 134–139 (6, all complete) | **Timeline:** 2026-07-23 → 2026-07-25
@@ -17,7 +43,7 @@ broker server).
 
 - **134 MT5SPIKE** — offline `Mt5Client`/`Mt5ClientError` RPyC facade + 25-test contract + `scripts/mt5_spike.py` four-leg live harness. mt5linux supply-chain verified + pinned.
 - **135 MT5SRC** — `'mt5'` first-class Source lockstep; worker read-only validate branch (3-cred, master rejection, wrong-server distinct); 3 key routes; RED-guarded 4-CHECK migration `20260723172032` (prod-verified).
-- **136 MT5RECON** — `combine_mt5_deal_ledger` → daily NAV → backbone + `api_verified`; √252 mutation-guarded; ground-truth parity vs `account_info().equity`; deposit-day-not-a-spike; fail-loud unclassifiable DEAL_TYPE.
+- **136 MT5RECON** — `combine_mt5_deal_ledger` → daily NAV → backbone + `api_verified`; √252 mutation-guarded; ground-truth parity vs `account_info().equity`; deposit-day-not-a-spike; fail-loud unclassifiable DEAL_TYPE. ⚠️ **"ground-truth parity" here means the OFFLINE reconstruction anchor only — a single `account_info().equity` read used to anchor the ledger. It is NOT a trading-day comparison of rendered performance against the terminal's own figures, which has never been done and is v1.18 Phase 155 (MT5-07/08).** Qualified 2026-08-14 (v1.17 milestone audit, W4): this line is where someone asking *"have MT5 numbers ever been checked?"* would land, and unqualified it answers yes.
 - **137 MT5CONC** — `to_thread`+`wait_for` + terminal-restart-on-timeout (WEDGE-01 lesson); per-terminal lock + `login==expected` bracket so `api_verified` never stamps the wrong account.
 - **138 MT5UI** — flag-gated wizard (`NEXT_PUBLIC_MT5_ENABLED`, OFF=byte-identical) 3-field + investor-pw guide + `api_verified` badge + all-roles e2e.
 - **139 MT5GOLIVE** — soak runner `scripts/mt5_soak.py` + `docs/runbooks/mt5-go-live.md` + `deploy/mt5-gateway/`; founder LIVE-ops legs done 2026-07-25.

@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.62.0.1] - 2026-08-14
+### chore: v1.17 closed — scope amended, not overclaimed
+
+**v1.17 closes as "MT5 — ingested, wizardable, surfaced", not "usable end-to-end".** Phase 155
+(the live trading-day parity run against the terminal's own figures) was **carried to a new
+milestone v1.18**, taking MT5-06..10, MT5-15 and the umbrella acceptance MT5-GOAL-01. A bounded
+alternative — move 155 to the backlog and tick v1.17 complete — was offered and declined.
+⛔ **MT5 is not advertised.** Our rendered numbers have never been compared to the broker's.
+
+**The milestone audit returned `gaps_found` (82/100) with four blockers, all ledger-honesty and
+zero source changes** — and three of them were the refused claim resurfacing in files the
+amendment commit never touched. `STATE.md` still read *"usable end-to-end"* in both frontmatter
+and body: the exact sentence the founder had declined, in the exact place the decision said it
+must not appear. ⭐ The lesson worth keeping: a scope amendment that shows one file in
+`git show --stat` is almost always incomplete.
+
+Four requirements delivered on 2026-08-05 (**SCEN-01**, OWN-02, OWN-04, NAV-01) were still
+unticked with their original problem statements intact, so `REQUIREMENTS.md` alone said the silent
+money-path bug and the owner factsheet had never shipped — an error that invites re-planning work
+that already exists. **WIZFORM-03** was blocked by a disposition sentence that was simply false at
+HEAD; re-measured before ticking, every wizard-copy call site in `src/` supplies a venue.
+
+**Phase 153's span verdict is issued with its mechanism named** — goal met via the inserted Phase
+153.7, while `153-VERIFICATION.md` keeps `status: failed` 5/6 as the historical record that the
+span shipped short. A bare tick would have erased that.
+
+⛔ `.planning/REQUIREMENTS.md` was deliberately **not** deleted, contrary to the stock
+milestone-completion step: it also carries v1.16's 79 parked requirement rows (live work resuming
+at Phase 143) and v1.18's carried MT5 rows.
+
 ## [0.62.0.0] - 2026-08-14
 ### v1.17 — every error code that can reach a user is covered (Phase 153.7)
 
