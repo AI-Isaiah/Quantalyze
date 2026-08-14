@@ -3529,6 +3529,62 @@ export function classifyKeyValidationError(error: unknown): {
 }
 
 /**
+ * ⭐ 153.7 review WR-02 — THE VERDICTS THAT ARE **OUR OWN DEFECT**, named
+ * explicitly, because `code === "UNKNOWN"` had stopped being a proxy for it.
+ *
+ * ── WHAT WENT WRONG, AND WHY IT WAS SILENT ──────────────────────────────────
+ *
+ * Both key routes page Sentry (`step: "unclassified-key-error"`) on the
+ * classifier's terminal verdict, and both justify the exclusion of everything
+ * else in one sentence: *"None is our defect and none should page anyone."*
+ * That sentence was TRUE while the only recognised verdicts were the breaker
+ * short-circuit, the timeout and the caller-fault family.
+ *
+ * 153.7-02 added `VENUE_WIRE_CODE_TO_VERDICT` rows for `INTERNAL` and
+ * `ADAPTER_INIT_FAILED` — `validate_key_permissions`' bare `except Exception`
+ * residue and a `create_exchange` failure — and both are OURS by the Python
+ * emitter's own words. Before that commit they resolved to `UNKNOWN` and
+ * PAGED; after it they are recognised, so the predicate excluded them and the
+ * new route tests asserted the silence. Classifying a fault better is not a
+ * reason to stop hearing about it, and nothing in the diff said we had.
+ *
+ * ── WHY A SET AND NOT AN AMENDED COMMENT ────────────────────────────────────
+ *
+ * Amending the sentence to say "…except the two we now recognise, which the
+ * Python side captures anyway" was the cheaper option and was rejected: the
+ * Python capture is an incidental `LoggingIntegration` side effect of
+ * `logger.exception`, it carries none of the Next-side `surface` / `exchange`
+ * tags, and it would leave the SAME trap armed for the next our-defect verdict
+ * anyone adds — the recognised set is going to keep growing, that is what
+ * WIZFORM-02-CLASS is for. Naming the population makes the policy mechanical
+ * instead of a proxy that decays every time the classifier gets better.
+ *
+ * ⛔ MEMBERSHIP IS A PAGING DECISION, NOT A SEVERITY LABEL. Add a code here
+ * only when the fault is in code or configuration WE own — never a venue
+ * refusal, a caller fault, a breaker trip or a timeout. `SEAM_INTERNAL_FAULT`
+ * qualifies at all three of its wire codes (`MT5_GATEWAY_UNCONFIGURED`,
+ * `ADAPTER_INIT_FAILED`, `INTERNAL`); `SEAM_MISCONFIGURED` never reaches this
+ * check on the key routes (its wire codes are translated at the step, and the
+ * classifier hands the route the wizard code directly), so it is deliberately
+ * absent rather than forgotten — add it the day a key route can answer it.
+ *
+ * ⚠️ ONE SET, BOTH ROUTES. `create-with-key` and `composite/add-key` are
+ * byte-identical twins at this arm, and fixing one path of that pair is this
+ * milestone's most repeated mistake. A route-local literal would drift on the
+ * next edit; this import cannot.
+ */
+export const OUR_DEFECT_KEY_ERROR_CODES: ReadonlySet<WizardErrorCode> =
+  new Set<WizardErrorCode>([
+    // The classifier's terminal — a failure we could not name at all.
+    "UNKNOWN",
+    // 153.7-02's minted member. `INTERNAL` and `ADAPTER_INIT_FAILED` are our
+    // defect by the emitter's own words; `MT5_GATEWAY_UNCONFIGURED` is our
+    // operator configuration. All three are worth a page and none is the
+    // caller's doing.
+    "SEAM_INTERNAL_FAULT",
+  ]);
+
+/**
  * Phase 140.3-01 / TS-09 — the RECOGNITION BRANCH for a seam machine code.
  *
  * Maps a stable `code` read off a seam error body (via

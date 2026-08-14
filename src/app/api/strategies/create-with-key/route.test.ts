@@ -2503,7 +2503,7 @@ describe("[140.3-13b / SEAMUX-08] POST /api/strategies/create-with-key — Sentr
     await vi.waitFor(() =>
       expect(
         sentryState.captured.length,
-        "nothing was captured — the classifier's UNKNOWN terminal is the only place an unclassified key-connect failure is ever reported",
+        "nothing was captured — OUR_DEFECT_KEY_ERROR_CODES is the whole population this route reports, and it is the only place an our-defect key-connect failure is ever reported",
       ).toBeGreaterThan(0),
     );
     return sentryState.captured[sentryState.captured.length - 1];
@@ -2731,10 +2731,65 @@ describe("[140.3-13b / SEAMUX-08] POST /api/strategies/create-with-key — Sentr
     // Fail-closed: classified before any encryption or DB insert.
     expect(encryptKeyMock).not.toHaveBeenCalled();
     expect(rpcMock).not.toHaveBeenCalled();
-    // A classified verdict must not fire the unclassified-key-error capture —
-    // the `code === "UNKNOWN"` arm — or the noise this route was quiet about
-    // comes back for a failure we now answer precisely.
+    // A classified verdict that is NOT our defect must not fire the capture, or
+    // the noise this route was quiet about comes back for a failure we now
+    // answer precisely. ⚠️ "Classified" is no longer the predicate — see the
+    // OUR-DEFECT case below, which is the other half of this pair.
     await expectNoCapture();
+  });
+
+  /**
+   * ⭐ 153.7 review WR-02 — CLASSIFYING A FAULT BETTER IS NOT A REASON TO STOP
+   * HEARING ABOUT IT.
+   *
+   * Until 153.7-02, a seam throw carrying `seamCode: "INTERNAL"` fell off the
+   * classifier's cascade to `UNKNOWN` and PAGED. That plan gave it a verdict row
+   * resolving to `SEAM_INTERNAL_FAULT` — an unambiguous improvement for the user
+   * — and, as a side effect nobody wrote down, moved it out of the
+   * `code === "UNKNOWN"` capture arm. `INTERNAL` is `validate_key_permissions`'
+   * bare `except Exception` escape: the single most page-worthy thing this seam
+   * can answer, and it went silent on the Next side in a commit whose test
+   * asserted the silence.
+   *
+   * ⛔ THE ASSERTION IS THE CAPTURE, NOT THE CODE. The verdict half is already
+   * covered by the shared-table replay in `wizardErrors.test.ts`; what only a
+   * route test can see is whether THIS handler still reports it. Both are
+   * asserted here so a future re-narrowing of the predicate reds by name rather
+   * than by an absence nobody is looking at.
+   */
+  it("[WR-02] an INTERNAL seam fault renders SEAM_INTERNAL_FAULT/500 AND IS STILL captured — it is our defect", async () => {
+    validateKeyMock.mockRejectedValue(
+      Object.assign(
+        new Error(
+          "Something went wrong on our side while checking this key. Nothing is wrong with your key.",
+        ),
+        {
+          name: "AnalyticsUpstreamError",
+          status: 500,
+          seamCode: "INTERNAL",
+        },
+      ),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    const json = await res.json();
+    // The user still gets the honest card, not "we could not classify this".
+    expect(json.code).toBe("SEAM_INTERNAL_FAULT");
+    expect(json.code).not.toBe("UNKNOWN");
+    // Fail-closed: no key was stored, which is what the card promises.
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+
+    // ⭐ THE HALF THAT REGRESSED. A recognised OUR-DEFECT verdict must still
+    // reach Sentry with this route's tags.
+    const { err, options } = await nextCapture();
+    expect(options.tags?.surface).toBe("strategies-create-with-key");
+    expect(options.tags?.step).toBe("unclassified-key-error");
+    expect(options.extra?.exchange).toBe("okx");
+    expect(err).toBeInstanceOf(Error);
   });
 });
 

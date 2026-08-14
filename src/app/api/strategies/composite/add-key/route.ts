@@ -24,7 +24,10 @@ import {
   VENUE_IDENTITY_CONSTRAINT,
   WIZARD_SESSION_CONSTRAINTS,
 } from "@/lib/api/pgConstraintName";
-import { classifyKeyValidationError } from "@/lib/wizardErrors";
+import {
+  classifyKeyValidationError,
+  OUR_DEFECT_KEY_ERROR_CODES,
+} from "@/lib/wizardErrors";
 import { scrubSeamError } from "@/lib/seam-redaction";
 // 140.3-13b / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
 // capture policy written out IN FULL in `src/app/api/admin/match/eval/route.ts`
@@ -667,18 +670,26 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // is byte-identical to the create-with-key catch by design.
     const { code, status } = classifyKeyValidationError(err);
 
-    // 140.3-13b / SEAMUX-08 — THE TERMINAL ARM. The shared classifier IS this
+    // 140.3-13b / SEAMUX-08 — THE OUR-DEFECT ARM. The shared classifier IS this
     // route's ladder of typed branches, so "matched no typed branch" is exactly
-    // its terminal verdict `UNKNOWN`. Everything it DID recognise is excluded
+    // its terminal verdict `UNKNOWN`. Most of what it DID recognise is excluded
     // for the policy's own reasons: `SERVICE_UNAVAILABLE_RETRY` is the breaker
     // short-circuit, `KEY_NETWORK_TIMEOUT` the timeout, and the
     // signature / auth / MT5 verdicts are caller faults.
+    //
+    // ⭐ 153.7 review WR-02 — the predicate is `OUR_DEFECT_KEY_ERROR_CODES`, not
+    // `code === "UNKNOWN"`, because 153.7-02 made "recognised" stop meaning "not
+    // ours": `INTERNAL` and `ADAPTER_INIT_FAILED` now resolve to
+    // `SEAM_INTERNAL_FAULT` and both are our own defect, where before that
+    // commit they resolved to `UNKNOWN` and paged. See the shared set's docblock
+    // in `wizardErrors.ts` for the full reasoning — it is ONE set precisely so
+    // this twin and `create-with-key` cannot drift apart on it.
     //
     // ⚠️ Placement AFTER the classify call and BEFORE the `headers` computation,
     // identical to `create-with-key`: the caught VALUE still reaches the shared
     // classifier unmodified, the status still comes from the classifier, and the
     // conditional `Retry-After` still branches on the same instanceof.
-    if (code === "UNKNOWN") {
+    if (OUR_DEFECT_KEY_ERROR_CODES.has(code)) {
       captureToSentry(err, {
         tags: {
           surface: "strategies-composite-add-key",
