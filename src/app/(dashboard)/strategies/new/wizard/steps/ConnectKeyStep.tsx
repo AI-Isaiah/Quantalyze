@@ -328,6 +328,26 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
     "SERVICE_UNREACHABLE",
     "KEY_MISSING_READ_SCOPE",
     "KEY_PERMISSION_DENIED",
+    // 153.7-02 / WIZFORM-02-CLASS — admitted HERE IN THE SAME COMMIT the shared
+    // classifier starts returning it. `VENUE_WIRE_CODE_TO_VERDICT` now answers
+    // for `MT5_GATEWAY_UNCONFIGURED`, `ADAPTER_INIT_FAILED` and `INTERNAL` with
+    // `SEAM_INTERNAL_FAULT`; omit this line and the membership check rejects the
+    // honest code, the step renders `UNKNOWN` — whose copy IS recoverable — and
+    // the user gets "Try the last action again." with a Retry control for three
+    // faults the service marked `retryable=False`. That is the same trap the
+    // `VENUE_ALREADY_CONNECTED` note above records, and the same one the 2026-08-05
+    // `SERVICE_UNREACHABLE` incident below it records.
+    //
+    // ⚠️ ITS FOUR SIBLING VERDICTS COST NOTHING HERE, and the asymmetry is worth
+    // stating rather than leaving to be rediscovered: `SERVICE_UNREACHABLE` and
+    // `KEY_PROBE_FAILED` are already members, and `SEAM_MISCONFIGURED` — which
+    // that same batch maps `EGRESS_PROXY_MISCONFIGURED`, `SERVICE_KEY_UNCONFIGURED`
+    // and `KEK_UNAVAILABLE` onto — is resolved by the TRANSLATE-FIRST hop through
+    // `SEAM_CODE_TO_WIZARD_CODE` and never reaches this set, exactly as the
+    // docblock above says. `SEAM_INTERNAL_FAULT` is deliberately absent from that
+    // table (we mint it; no service puts it on the wire), so this roster is the
+    // only thing standing for it.
+    "SEAM_INTERNAL_FAULT",
   ]);
 
 export interface ConnectKeySuccess {

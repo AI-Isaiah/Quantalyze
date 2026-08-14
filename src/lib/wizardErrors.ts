@@ -428,6 +428,55 @@ export type WizardErrorCode =
   // `recoverable: false` and `ErrorEnvelope` renders NO Retry control. The
   // absence IS the fix, on the same mechanism `COMPOSITE_TOO_MANY_MEMBERS` uses.
   | "SEAM_MISCONFIGURED"
+  // Phase 153.7-02 / WIZFORM-02-CLASS — a PERMANENT fault in our own service
+  // that stopped a key check, where the more precise `SEAM_MISCONFIGURED` above
+  // would assert something measurably false at the emitter.
+  //
+  // ⭐ IT WAS MINTED ONLY AFTER THE FOUR CANDIDATES WERE MEASURED PER EMITTER,
+  // and the rule that picked it is stated so the next author can re-run it: take
+  // the MOST SPECIFIC member every one of whose claims is true at EVERY emitter
+  // that can reach `classifyKeyValidationError`. Three wire codes have no such
+  // member:
+  //   · `INTERNAL` — `validate_key`'s generic escape from
+  //     `validate_key_permissions`. The venue probe HAD been issued, so
+  //     `SEAM_MISCONFIGURED`'s "we stopped before sending the request" is
+  //     false-by-construction; and it is `retryable=False`, so
+  //     `KEY_PROBE_FAILED`'s "a transient upstream issue" is false too — and
+  //     that member is recoverable, so it would render a Retry control against a
+  //     fault that fails identically every time.
+  //   · `ADAPTER_INIT_FAILED` — `create_exchange` raising. Nothing was sent (the
+  //     emitter measures that itself: a dict lookup, a dict build and two
+  //     attribute sets, zero network I/O), but the cause is a ccxt signature
+  //     change, a missing extra or an OOM. "Our own configuration is wrong" names
+  //     the wrong thing.
+  //   · `MT5_GATEWAY_UNCONFIGURED` — four emitters. Three fire before the gateway
+  //     is contacted at all, but the D-31 `undetermined` arm in
+  //     `_validate_mt5_key_probe` fires AFTER the terminal ran and refused to
+  //     classify, so "we stopped before sending the request" is false at one of
+  //     the four. A member that is true at three of four emitters is exactly the
+  //     shape this milestone exists to stop shipping.
+  //
+  // WHAT IT DELIBERATELY DOES NOT SAY. It makes no claim about WHERE the fault
+  // stopped us, because that is the clause that differs across the three codes.
+  // It claims only what is true at all of them: the fault is ours, the check did
+  // not complete, no key was stored, and retrying re-runs the same fault.
+  //
+  // ⚠️ NOT A DUPLICATE OF THE NEAR-MISSES:
+  //   · SEAM_MISCONFIGURED — narrower and still correct where it applies; this
+  //     phase keeps it for `EGRESS_PROXY_MISCONFIGURED`, `SERVICE_KEY_UNCONFIGURED`
+  //     and `KEK_UNAVAILABLE`, whose emitters DO fire before any outbound request
+  //     and before any state change. Do not collapse the two.
+  //   · SEAM_DEADLINE_EXCEEDED — our budget expired. Here the work FAILED; no
+  //     deadline was involved.
+  //   · UNKNOWN — "we could not classify this failure". The server classified it
+  //     precisely; rendering UNKNOWN for it is the defect being closed.
+  //
+  // NOT recoverable, deliberately: `actions` carries neither member of
+  // `RECOVERABLE_ACTIONS` (src/lib/envelope.ts), so `buildEnvelope` derives
+  // `recoverable: false` and `ErrorEnvelope` renders NO Retry control — the same
+  // mechanism `SEAM_MISCONFIGURED` and `ALLOCATION_NOT_ALLOCATABLE` use. All
+  // three wire codes it homes are `retryable=False` at their emitters.
+  | "SEAM_INTERNAL_FAULT"
   // 153.1-04 / UI-SPEC Gate A — the answer did not arrive inside the time WE
   // granted. Distinguishable client-side: our own abort fired and no transport
   // error was observed, so this is OUR deadline expiring, not the broker
@@ -2181,6 +2230,47 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["request_call", "expand_log"],
   },
 
+  // 153.7-02 / WIZFORM-02-CLASS — copy authored under the same three
+  // constraints TS-38's entry above was, plus a fourth this one adds.
+  //   1. It must not blame the venue or the user. All three wire codes it homes
+  //      say so themselves: "Nothing is wrong with your key."
+  //   2. It must not invite a retry. All three are `retryable=False` upstream,
+  //      and `actions` below carries neither member of `RECOVERABLE_ACTIONS`, so
+  //      the Retry control does not render.
+  //   3. It must claim only what is knowable. "No key was stored" is safe here
+  //      because all three emitters live inside `validate_key`, which BOTH key
+  //      routes call before `encryptKey` and before the create RPC — the same
+  //      ordering `create-with-key`'s own pre-RPC assertions pin. It is a fact
+  //      about a write that was never reached, not a guess about one whose
+  //      outcome we never learned.
+  //   4. ⭐ IT MUST NOT NAME WHERE WE STOPPED. That is the clause that made
+  //      `SEAM_MISCONFIGURED` unusable for these three (see the union member's
+  //      comment), so the sentence is written to be true whether the fault fired
+  //      before, during or after an outbound call. A future edit that adds
+  //      "before we sent anything" re-opens exactly the defect this entry was
+  //      minted to avoid.
+  //
+  // No env variable name, no route name, no status, no dependency: the reader
+  // gets the remedy and the limits, never the subsystem.
+  SEAM_INTERNAL_FAULT: {
+    title: "Something failed on our side while we checked this key.",
+    cause:
+      "The check stopped on a fault in our own service — not in your key, your exchange or your data. We never store a key we could not check, so no key was stored. Retrying will not clear it: the same fault runs again until we fix it.",
+    fix: [
+      "Email security@quantalyze.com with the correlation id below. A fault in our own service is ours to fix, and running the same action again will not clear it.",
+      "Nothing needs undoing on your side. Your key was not stored.",
+    ],
+    docsHref: "/security",
+    // ⚠️ NO `clear_and_retry` AND NO `try_another_key` — the two members of
+    // `RECOVERABLE_ACTIONS` (src/lib/envelope.ts). Their absence derives
+    // `recoverable: false` and suppresses the Retry control, and that BEHAVIOUR
+    // is half of what this entry exists to change: `KEY_PROBE_FAILED`, the
+    // nearest member by subject, IS recoverable and would offer a control that
+    // cannot work. `request_call` keeps a way out that can actually resolve it;
+    // `expand_log` opens the correlation id the first fix line asks for.
+    actions: ["request_call", "expand_log"],
+  },
+
   // 153.1-04 / UI-SPEC Gate A — copy authored from the spec's field table.
   //
   // ⛔ THE MISSING RETRY IS THE FEATURE. The 2026-08-08 panel offered Retry
@@ -2727,6 +2817,86 @@ export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   ["PERMISSION_DENIED", { code: "KEY_PERMISSION_DENIED", status: 400 }],
   ["WITHDRAW_SCOPE", { code: "KEY_HAS_WITHDRAW_PERMS", status: 400 }],
   ["TRADE_SCOPE", { code: "KEY_HAS_TRADING_PERMS", status: 400 }],
+  // ── 153.7-02 / WIZFORM-02-CLASS — the eight `service_error(...)` codes ─────
+  //
+  // ⭐ THE MEASURED FACT THAT PUT THEM HERE. Until this batch the rows above
+  // covered only the codes the `services/**` ASSIGNMENT scan could see. 153.7-01
+  // widened that scan to `analytics-service/**` and to the four call shapes, and
+  // the population went 17 → 37 with twenty codes disposed nowhere. Replayed
+  // through this very function with their REAL wire code and their REAL Python
+  // `detail=` string, all eight below answered `{ code: "UNKNOWN", status: 500 }`
+  // — "we could not classify this failure" — for faults the service had
+  // classified precisely. The other twelve render through a different classifier
+  // and take reasoned rows in `VENUE_WIRE_CODES_WITHOUT_VERDICT` instead.
+  //
+  // ⚠️ THE FAMILY IS NOT MT5-SPECIFIC. It was FOUND through the mt5-gateway
+  // incident, but `EXCHANGE_PROBE_FAILED` is a 424 with `retryable=True` and
+  // `dependency=<the caller's venue>` raised by `validate_key`'s
+  // `except ccxt.BaseError` arm on EVERY venue — the ordinary "your exchange did
+  // not finish the permission check" case, rendering as the terminal that admits
+  // knowing nothing.
+  //
+  // HOW EACH MEMBER WAS CHOSEN, because a plausible member is not a true one.
+  // Rule: take the most specific member every one of whose claims is measured
+  // TRUE at EVERY emitter that can reach this function. Two members' copy makes
+  // a "nothing was submitted" claim, and that claim is knowable only where no
+  // request was issued (the trap is written out at the transport block below and
+  // was the whole of 140.3-12) — so each candidate was read at its emitter
+  // rather than matched on its name.
+  //
+  //   MT5_GATEWAY_UNREACHABLE — 503, `retryable=True`, with a Retry-After. BOTH
+  //     emitters are the connect stage of `_connect_and_probe`: the stage
+  //     deadline firing, and the broad connect failure. The socket connect WAS
+  //     attempted and no answer came back, which is `SERVICE_UNREACHABLE`'s
+  //     sentence exactly. ⛔ NEVER `SERVICE_UNAVAILABLE_RETRY`: its copy says the
+  //     request was never sent, which is knowable for a breaker that DECLINED to
+  //     send and false-by-construction here. Status 503 rather than 502 because
+  //     the emitter's own status is 503 and it stamps a Retry-After, which is
+  //     defined for 503 — the wire answer stays the one the service chose.
+  //   EXCHANGE_PROBE_FAILED — 424, `retryable=True`, `dependency=req.exchange`.
+  //     Same fact as the incumbent `PROBE_FAILED` row three screens up (the probe
+  //     ran against the venue and did not complete), told by a different
+  //     producer, so it takes the same member and the same 503.
+  //   EGRESS_PROXY_MISCONFIGURED — 500, `retryable=False`. `_validate_sfox_key`
+  //     raises at client CONSTRUCTION, ABOVE the `get_balances()` try, so no
+  //     request left the process and no state changed. That is what makes
+  //     `SEAM_MISCONFIGURED`'s "we stopped before sending the request. Nothing
+  //     was submitted and nothing was changed" knowable here rather than assumed.
+  //   SERVICE_KEY_UNCONFIGURED — 500, `retryable=False`. `verify_service_key` is
+  //     HTTP middleware and refuses BEFORE `call_next`, so no handler ran, no
+  //     venue was contacted and no row was written. The purest case for that
+  //     copy. ⚠️ RENDERING ONLY — no gate logic is touched by this row, and the
+  //     copy names a remedy, never the secret.
+  //   KEK_UNAVAILABLE — 500, `retryable=False`. `encrypt_key`'s first statement
+  //     is `get_kek()`; its RuntimeError fires before any ciphertext exists and
+  //     before the create RPC is reached, so the same claim holds.
+  //   MT5_GATEWAY_UNCONFIGURED, ADAPTER_INIT_FAILED, INTERNAL — all 500 and all
+  //     `retryable=False`, and NONE of them can honestly take the copy above.
+  //     `INTERNAL` fires after the venue probe was issued; `ADAPTER_INIT_FAILED`
+  //     is a code fault, not a setting; `MT5_GATEWAY_UNCONFIGURED`'s D-31
+  //     `undetermined` emitter fires after the gateway terminal ran and refused
+  //     to classify, so the claim is false at one of its four emitters. They take
+  //     `SEAM_INTERNAL_FAULT`, minted in this plan for exactly that gap — see its
+  //     union-member comment for the per-emitter measurement. ⛔ Not
+  //     `KEY_PROBE_FAILED`: it is recoverable, so it would render a Retry control
+  //     against three faults that fail identically on every attempt.
+  //
+  // ROSTER COST, measured rather than assumed. `SEAM_MISCONFIGURED` needs NO
+  // roster edit at either key step: both read `recogniseSeamErrorCode` FIRST and
+  // `SEAM_CODE_TO_WIZARD_CODE` already carries the row, so the membership check
+  // is never reached — which is what `ConnectKeyStep`'s own docblock says, and
+  // adding it to the roster would contradict that file's stated design.
+  // `SEAM_INTERNAL_FAULT` is deliberately NOT in that table (it is minted by us,
+  // not put on the wire by another service), so it takes the two roster rows.
+  // `SERVICE_UNREACHABLE` and `KEY_PROBE_FAILED` are already in both.
+  ["MT5_GATEWAY_UNCONFIGURED", { code: "SEAM_INTERNAL_FAULT", status: 500 }],
+  ["MT5_GATEWAY_UNREACHABLE", { code: "SERVICE_UNREACHABLE", status: 503 }],
+  ["EGRESS_PROXY_MISCONFIGURED", { code: "SEAM_MISCONFIGURED", status: 500 }],
+  ["SERVICE_KEY_UNCONFIGURED", { code: "SEAM_MISCONFIGURED", status: 500 }],
+  ["KEK_UNAVAILABLE", { code: "SEAM_MISCONFIGURED", status: 500 }],
+  ["EXCHANGE_PROBE_FAILED", { code: "KEY_PROBE_FAILED", status: 503 }],
+  ["ADAPTER_INIT_FAILED", { code: "SEAM_INTERNAL_FAULT", status: 500 }],
+  ["INTERNAL", { code: "SEAM_INTERNAL_FAULT", status: 500 }],
 ]);
 
 /**

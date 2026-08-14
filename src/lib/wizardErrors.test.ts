@@ -1729,13 +1729,29 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * destroy the very thing the copy tells the user to go and open, for a state
    * they did not cause.
    *
+   * **76 → 77 at 153.7-02** (WIZFORM-02-CLASS), which added
+   * `SEAM_INTERNAL_FAULT` — the permanent our-side fault that homes
+   * `MT5_GATEWAY_UNCONFIGURED`, `ADAPTER_INIT_FAILED` and `INTERNAL`, three wire
+   * codes for which `SEAM_MISCONFIGURED`'s "we stopped before sending the
+   * request" is measurably false at an emitter. THIS guard's reasoning was
+   * re-run over the entry before the number moved: its `actions` are
+   * `request_call` + `expand_log` — NEITHER `start_fresh` NOR either recoverable
+   * action — so it is outside the scanned population by construction and the
+   * destructive class below is unchanged at four members.
+   *
+   * ⭐ The exclusion is load-bearing here in the same way it is for
+   * `VENUE_ALREADY_CONNECTED` above: `start_fresh` DELETEs the draft, and this
+   * entry is reached mid-key-connect on a draft the user is still building.
+   * Offering to destroy it for a fault they did not cause, and cannot clear,
+   * would be the destructive-only class in its worst form.
+   *
    * ⚠️ THIS NUMBER HAS A TWIN. The same literal is pinned in the
    * `[140.3-12 / SEAMUX-04]` describe below, and moving one without the other
    * is a silent half-fix — the shrink-detection it buys survives in one scan
    * and dies in the other. 153.1-04 added a third guard (at the end of this
    * file) that reads this source and reds when the two literals disagree.
    */
-  const EXPECTED_TABLE_SIZE = 76;
+  const EXPECTED_TABLE_SIZE = 77;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2045,11 +2061,36 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * just READ, not an inference — the refusal exists precisely because the
    * draft-scoped read found nothing and the unscoped one found a row.
    *
+   * **76 → 77 at 153.7-02** (WIZFORM-02-CLASS) — `SEAM_INTERNAL_FAULT`. Read
+   * against all four FORBIDDEN fragments by hand before the number moved. It
+   * mentions no notification, no trade fetching and no session field name. The
+   * one needing care is again "data is unchanged", because the entry DOES make a
+   * server-state claim: "We never store a key we could not check, so no key was
+   * stored", repeated as "Your key was not stored" in the second fix line.
+   *
+   * Not the banned string, and OBSERVABLE rather than asserted — and it has to
+   * hold at all THREE wire codes this member homes, which is why it was checked
+   * per emitter rather than per entry. All three (`MT5_GATEWAY_UNCONFIGURED`,
+   * `ADAPTER_INIT_FAILED`, `INTERNAL`) are raised inside `validate_key`, and BOTH
+   * key routes call `validateKey` before `encryptKey` and before the create RPC
+   * — the same ordering `create-with-key`'s `[154.1]` block pins with its
+   * `rpcMock` / `encryptKeyMock` uncalled assertions. So the write was never
+   * reached, which is the ground 140.3-15's entry stands on and the ground the
+   * CSV case lacked.
+   *
+   * ⭐ WHAT THE ENTRY DELIBERATELY DOES NOT CLAIM is the more interesting half:
+   * it never says WHERE we stopped. `SEAM_MISCONFIGURED`'s "we stopped before
+   * sending the request" is exactly the clause that is false at `INTERNAL`'s
+   * emitter (the venue probe HAD been issued) and at one of
+   * `MT5_GATEWAY_UNCONFIGURED`'s four, which is why this member exists at all. A
+   * future edit that "improves" the copy by adding that clause re-opens the
+   * defect it was minted to avoid.
+   *
    * ⚠️ THIS NUMBER HAS A TWIN in the `[140.3-10 / TRAP-4]` describe above.
    * Moving one without the other is a silent half-fix; the guard added at the
    * end of this file reds when the two literals disagree.
    */
-  const EXPECTED_TABLE_SIZE = 76;
+  const EXPECTED_TABLE_SIZE = 77;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(

@@ -319,6 +319,15 @@ const KNOWN_ADD_KEY_CODES: ReadonlySet<WizardErrorCode> =
     "SERVICE_UNREACHABLE",
     "KEY_MISSING_READ_SCOPE",
     "KEY_PERMISSION_DENIED",
+    // 153.7-02 / WIZFORM-02-CLASS — the same addition as
+    // `KNOWN_CREATE_WITH_KEY_CODES` (full reasoning there), taken together
+    // because both routes share the classifier that emits it. The two rosters
+    // stay SEPARATE per the docblock above; they agree here because the shared
+    // `classifyKeyValidationError` genuinely returns this code at both catch
+    // arms, not because one was copied from the other. Copy verified present in
+    // `WIZARD_ERROR_COPY`, and it is deliberately NOT recoverable — the three
+    // wire codes behind it are `retryable=False` at their emitters.
+    "SEAM_INTERNAL_FAULT",
   ]);
 
 /**
