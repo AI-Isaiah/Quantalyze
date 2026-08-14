@@ -2540,3 +2540,45 @@ named files are unmodified by the phase, so neither was quietly half-done.
   state disagree, and an unenforced rule teaches people to ignore the enforced ones.
   **Decide one way:** either scrub + add a CI grep, or amend the rule to name refs as non-secret
   and keep the prohibition for keys/JWTs/connection strings only. ⛔ Do NOT half-do it.
+
+### Branch & worktree adjudication, 2026-08-14 — four survivors with real unmerged work
+
+Context: 37 stale branches and 9 orphaned agent worktrees accumulated. Every one was adjudicated
+**by content** (`grep -aF` per added line against `origin/main`), not by branch age or `git cherry`
+— ⭐ patch-id is USELESS here because squash-merges give shipped work a different id, so merged
+branches read as "62 commits ahead" forever. 33 were verified shipped and deleted. **These four
+were NOT, and all four are now pushed to `origin` so they are no longer local-only:**
+
+- [ ] **`fix/scenario-empty-daily-returns` — 143 of 164 added lines absent from main.** A real bug
+  fix: resolves the lazy-returns series through the analytics column-drift resolver, across
+  `api/strategies/[id]/returns/route.ts`, `factsheet/allocator-portfolio-payload.ts` and
+  `portfolio-math-utils.ts`. Its own comment records the load-bearing fact: **the legacy
+  `daily_returns` column has NO production writer** — the real series lives in `returns_series`,
+  the `(1+r).cumprod()` wealth curve the analytics service writes (`metrics.py:775-778`).
+  ⚠️ Dated 2026-08-04 and never merged. **Decide: land it or close it with a reason.**
+
+- [ ] **`fix/sync-status-superseded-failed` — an entire MIGRATION that never landed.**
+  `supabase/migrations/20260705130000_sync_status_supersede_failed.sql` and its gate
+  `supabase/tests/test_sync_status_supersede_failed.sql` are **absent from main**.
+  ⚠️ A migration sitting unmerged for 5+ weeks is either abandoned-on-purpose or dropped by
+  accident, and the branch name does not say which. ⛔ Do NOT merge it blind — merging
+  `supabase/migrations/**` AUTO-APPLIES to PROD. Read it first; it is adjacent to Phase 144's
+  reaper-status work, so check for conflict before v1.16 Phase 144 lands.
+
+- [ ] **`ci/pytest-xdist-parallel` — 23% of its additions absent from main.** Parallelizes the
+  analytics-service Python CI (`pytest.ini`, `Makefile`, `conftest.py`, `requirements-dev.txt`,
+  `ci.yml`). Cheap, useful, never merged. ⚠️ Check it against the `-p no:randomly`/VCR-cassette
+  constraints before landing — parallel pytest plus cassettes is exactly where LIVE broker calls
+  leak in.
+
+- [ ] **`wip/v1.16-phase140-fix-archive` — 91% divergent (4,046 of 4,441 added lines absent).**
+  Highest divergence of any branch, but **no file it touches is missing from main**, so this reads
+  as a superseded WIP approach from the Phase 140 era (2026-07-25) rather than lost work. Kept
+  rather than deleted *because* 91% is too high to dismiss on a heuristic. **Decide: skim it once
+  and delete, or cherry-pick anything still true.**
+
+⭐ Also rescued: `.claude/worktrees/agent-a06a853e5acc0cdd0` held **264 uncommitted lines** across
+`SyncPreviewStep.tsx` and three of its tests. Main already carries the recomputing block so it
+looks superseded, but the diff was saved rather than assumed — session scratchpad,
+`rescued-worktree-a06a853e-uncommitted.patch`. ⚠️ Scratchpad is session-scoped; if this matters,
+move it into the repo.
