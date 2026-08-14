@@ -455,6 +455,66 @@ would read as a fix in the diff, green the coverage law, and **reach no user sur
   carrying a recognised `seamCode`, which is one edit per route and would close all five — versus
   minting per-code members, which is five copy decisions.
 
+### Phase 153.7 review + verification — findings routed onward (added 2026-08-14)
+
+The 153.7 fix round closed WR-01, WR-02, WR-03, W-153.7-1 (with a real guard, not a note),
+W-153.7-2 and W-153.7-4 in code. The three below are recorded rather than fixed, each for a
+stated reason. ⛔ Neither of the first two is a 153.7 regression — both are pre-existing and are
+listed now only because 153.7 is what made them reachable or re-read them.
+
+- [ ] **`ROSTER-DERIVE-01` — the two key-step rosters are still HAND-TYPED, and the class fix has
+  no owner until this line does.** `KNOWN_CREATE_WITH_KEY_CODES` (`ConnectKeyStep.tsx`) and
+  `KNOWN_ADD_KEY_CODES` (`MultiKeyConnectStep.tsx`) are hand-maintained allow-lists. Their own
+  docblock used to assign the derived-roster class fix to *"Phase 153 / WIZFORM-02"* — which is
+  now **ticked COMPLETE** (`REQUIREMENTS.md`), so that pointer named a closed requirement and the
+  fix was ownerless. **This item is that owner**; both docblocks now cite it by name.
+  ⭐ **WHAT CHANGED IN THE MEANTIME, so this is no longer a silent hazard.** 153.7's verifier
+  MEASURED that deleting `"SEAM_INTERNAL_FAULT",` from either roster left the whole suite green
+  while the wizard rendered `UNKNOWN` **with a Retry control** against `retryable=False` faults —
+  the 2026-08-05 `SERVICE_UNREACHABLE` incident shape. The 153.7 fix round closed that with
+  `[153.7 review W-153.7-1]` in `wizardErrors.invariant.test.ts`: the classifier-reachable
+  population is derived (cascade literals by source scan + the LIVE `VENUE_WIRE_CODE_TO_VERDICT`)
+  and checked against each roster under the translate-first admission rule. **A missing roster row
+  now reds CI by name.** So what remains is DUPLICATION, not exposure.
+  What is blocked: nothing ships wrong today. What unblocks it: deriving both rosters from the
+  route contract instead of typing them, so the guard has nothing left to catch.
+  ⚠️ **The obvious shortcut is wrong and is written down so it is not re-attempted:** merging the
+  two rosters. They are separate on purpose (`ConnectKeyStep`'s docblock argues it at length — a
+  step admits the codes ITS route emits, not the whole vocabulary), and a merged set would pass the
+  guard while admitting each route's codes at the other.
+
+- [ ] **`WR-04` (pre-existing) — `MT5_GATEWAY_UNREACHABLE`'s server-advertised `Retry-After` is
+  dropped, so the user gets a Retry control with no interval and hammers a gateway that told us how
+  long to wait.** `analytics-service/routers/exchange.py:626-634` raises it with
+  `retry_after=RETRY_AFTER_SECONDS["mt5-gateway"]`. `AnalyticsUpstreamError` carries `status`,
+  `seamCode` and `dependency` — **no retry-after field** — and both key routes stamp `Retry-After`
+  only for `err instanceof CircuitOpenError`. So `parseRetryAfterSeconds(res.headers)` in
+  `ConnectKeyStep` / `MultiKeyConnectStep` resolves `null` and the envelope renders no wait.
+  ⚠️ **Listed now, not before, because 153.7 is what makes this code render a RECOVERABLE envelope
+  for the first time** (`MT5_GATEWAY_UNREACHABLE` → `SERVICE_UNREACHABLE`, 503). The missing wait
+  is reachable rather than theoretical as of that commit. `src/__tests__/contracts/REGISTRY.md`
+  already records the parent gap as *"coverage-law row 3 and nothing guards its completeness"*.
+  What is blocked: an honest wait on the one venue that publishes one. What unblocks it: a fourth
+  optional constructor argument on `AnalyticsUpstreamError` fed from the nested envelope's
+  `retry_after`, relayed by both key-route catches exactly the way `CircuitOpenError.retryAfterS`
+  already is. ⛔ Not fixed in the 153.7 round: it is a seam-contract change across the Python
+  envelope, the TS error class and two route catches — a plan, not a review fix.
+
+- [ ] **`W-153.7-3` (pre-existing, low) — coverage-law row 1 enumerates exactly THREE Next route
+  files, which is narrower than the phase goal's wording.** `ROUTES` in
+  `wizardErrors.invariant.test.ts` still lists `create-with-key`, `composite/add-key` and
+  `finalize-wizard`, and matches only literal `NextResponse.json({ code: "X" }, { status })` sites.
+  **Six** of our own Next routes mint `code: "UNAUTHENTICATED"` in TypeScript (named in the
+  UNAUTHENTICATED exemption row) and sit outside any derived population.
+  153.7's declared scope was the PYTHON half plus the four `missing` items — all discharged — so
+  this is out of scope rather than skipped. It is recorded because it **bounds the literal claim**
+  *"every code that can reach a user-facing surface"*: that claim is true of the analytics-service
+  vocabulary and not yet of the Next-minted one.
+  What is blocked: nothing user-facing. What unblocks it: extend `ROUTES` to the Next routes that
+  mint codes, or state the boundary in the file's docblock the way `EXPECTED_EMITTED_CODES` now
+  states its exclusions — ⛔ the one thing that must not happen is the claim staying broader than
+  the mechanism.
+
 ### v1.14 Smoothed-MTM go-live blockers — FIXED in the v1.14 landing (2026-07-23)
 Surfaced by the /ship Fable red team; the safety-critical ones fixed in the landing PR so
 flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM factsheet.
