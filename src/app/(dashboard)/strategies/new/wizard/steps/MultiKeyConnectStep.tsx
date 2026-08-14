@@ -314,8 +314,16 @@ const KNOWN_ADD_KEY_CODES: ReadonlySet<WizardErrorCode> =
     // no-answer fault. The two rosters stay SEPARATE (docblock above) and
     // take the change together because both routes share the classifier that
     // emits these codes. Copy for all three verified in `WIZARD_ERROR_COPY`.
-    // CLASS fix (derive the roster from the route contract) = Phase 153 /
-    // WIZFORM-02; do not grow this list further, derive it there.
+    //
+    // ⭐ CLASS fix (derive the roster from the route contract) = `ROSTER-DERIVE-01`
+    // in `TODOS.md` — 153.7 verification W-153.7-2. This line used to point at
+    // "Phase 153 / WIZFORM-02", which is now ticked COMPLETE, leaving the fix
+    // ownerless; and its "do not grow this list further" cannot be obeyed, since
+    // every new classifier verdict must be admitted here in the same commit or
+    // the step renders UNKNOWN with a Retry control. Growing it is no longer
+    // silent: `[153.7 review W-153.7-1]` in `wizardErrors.invariant.test.ts`
+    // reds by name when this roster does not admit a classifier-reachable code.
+    // The full reasoning is at the twin line in `ConnectKeyStep.tsx`.
     "SERVICE_UNREACHABLE",
     "KEY_MISSING_READ_SCOPE",
     "KEY_PERMISSION_DENIED",

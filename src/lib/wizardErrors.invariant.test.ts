@@ -1623,6 +1623,52 @@ describe("[153.7 review W-153.7-1] every CLASSIFIER-returned code is admitted by
     expect(deriveClassifierCascadeCodes("const x = 1;\n")).toEqual([]);
   });
 
+  /**
+   * ⭐ W-153.7-2 — A CLASS FIX WITH NO OWNER IS A CLASS FIX THAT DOES NOT HAPPEN.
+   *
+   * Both rosters' docblocks assigned the derived-roster class fix to *"Phase 153
+   * / WIZFORM-02"*. That requirement is ticked **COMPLETE** in `REQUIREMENTS.md`
+   * as of 2026-08-14 — and 153.7 grew both lists anyway — so the pointer named a
+   * closed requirement and the work became nobody's. It was not in `TODOS.md`
+   * either (grepped by the verifier).
+   *
+   * ⛔ THIS IS NOT A PROSE-STYLE ASSERTION, and the distinction matters under
+   * this project's stopping rule: it is a two-sided REFERENTIAL INTEGRITY check
+   * between a comment and the single backlog file. It reds if the citation is
+   * removed from either roster (ownerless again) **or** if the `TODOS.md` item is
+   * deleted while the comments still point at it (a dangling pointer, which is
+   * the same defect wearing the other shoe). Neither side can be "fixed" by
+   * editing the other into agreement without the owner actually existing.
+   *
+   * The ID is deliberately a short stable token rather than a sentence, so a
+   * reword of either docblock cannot break this while the ownership survives.
+   */
+  it("[W-153.7-2] both rosters cite a LIVE owner for the derived-roster class fix", () => {
+    const OWNER_ID = "ROSTER-DERIVE-01";
+
+    const todos = readFileSync(join(REPO, "TODOS.md"), "utf-8");
+    expect(
+      todos.includes(OWNER_ID),
+      `TODOS.md carries no ${OWNER_ID} item, but both key-step rosters cite it ` +
+        `as the owner of the derived-roster class fix. A dangling pointer is ` +
+        `the same defect as no pointer: add the item back, or re-point both ` +
+        `docblocks at whoever really owns it.`,
+    ).toBe(true);
+
+    for (const step of CLASSIFIER_STEPS) {
+      // ⚠️ Read the RAW source, not the comment-stripped one. The citation IS a
+      // comment — `stripped()` would blank exactly what is under test.
+      const raw = readFileSync(step.rosterFile, "utf-8");
+      expect(
+        raw.includes(OWNER_ID),
+        `${step.rosterName}'s docblock no longer cites ${OWNER_ID}. That roster ` +
+          `is hand-typed and something has to own deriving it; without a live ` +
+          `citation the class fix is nobody's, which is exactly how it sat ` +
+          `pointed at a CLOSED requirement from 2026-08-06 to 2026-08-14.`,
+      ).toBe(true);
+    }
+  });
+
   it("SELF-TEST — a code the ALIAS TABLE answers needs no roster row", () => {
     // The admission rule has two limbs and only one of them is exercised by the
     // real data at HEAD in an obvious way. `SEAM_MISCONFIGURED` is the live
