@@ -2382,15 +2382,39 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   //      before, during or after an outbound call. A future edit that adds
   //      "before we sent anything" re-opens exactly the defect this entry was
   //      minted to avoid.
+  //   5. ⭐ AND IT MUST NOT PREDICT WHAT A SECOND ATTEMPT WOULD DO — 153.7 review
+  //      WR-01, and it is constraint 3 ("claim only what is knowable") applied to
+  //      the one clause that had escaped it. The entry shipped saying "Retrying
+  //      will not clear it: the same fault runs again until we fix it", which is
+  //      the SAME true-at-three-of-four defect the member was minted to avoid,
+  //      one clause down:
+  //        · `MT5_GATEWAY_UNCONFIGURED` — true. An unset env, a malformed port
+  //          and the D-31 refusal all re-run identically until an operator acts.
+  //        · `ADAPTER_INIT_FAILED` — FALSE at a third of its own declared cause
+  //          set. The emitter's comment (`routers/exchange.py`) enumerates "a
+  //          ccxt signature change, an ImportError on a missing extra or an
+  //          OOM". An OOM clears on retry.
+  //        · `INTERNAL` — UNKNOWABLE. It is `validate_key_permissions`' bare
+  //          `except Exception` residue, open by construction, so "the same
+  //          fault runs again" is not a thing anyone can assert about it. This
+  //          is exactly the shape `DRAFT_FINALIZE_FAILED` (below) was careful
+  //          NOT to claim about its own generic tail.
+  //      ⚠️ THE ABSENT RETRY CONTROL IS NOT WHAT CHANGED, and must not change.
+  //      `recoverable: false` is still correct and is still DERIVED: all three
+  //      wire codes are `retryable=False` at the emitter, and `actions` below
+  //      carries neither member of `RECOVERABLE_ACTIONS`. What was wrong was the
+  //      copy explaining that absence with a PREDICTION we cannot make. It now
+  //      explains it with what we actually know — that we cannot say whether a
+  //      second attempt would get further — which is true at all three.
   //
   // No env variable name, no route name, no status, no dependency: the reader
   // gets the remedy and the limits, never the subsystem.
   SEAM_INTERNAL_FAULT: {
     title: "Something failed on our side while we checked this key.",
     cause:
-      "The check stopped on a fault in our own service — not in your key, your exchange or your data. We never store a key we could not check, so no key was stored. Retrying will not clear it: the same fault runs again until we fix it.",
+      "The check stopped on a fault in our own service — not in your key, your exchange or your data. We never store a key we could not check, so no key was stored. We cannot tell you whether a second attempt would get further, so we are not offering one here.",
     fix: [
-      "Email security@quantalyze.com with the correlation id below. A fault in our own service is ours to fix, and running the same action again will not clear it.",
+      "Email security@quantalyze.com with the correlation id below. A fault in our own service is ours to fix, whether or not it repeats.",
       "Nothing needs undoing on your side. Your key was not stored.",
     ],
     docsHref: "/security",

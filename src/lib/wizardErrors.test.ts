@@ -1516,6 +1516,106 @@ describe("[153.7-02 / WIZFORM-02-CLASS] every code that reaches classifyKeyValid
       ).toBe(true);
     }
   });
+
+  /**
+   * ⭐ 153.7 review WR-01 — THE MEMBER'S OWN RULE, APPLIED TO ITS OWN COPY.
+   *
+   * `wizardErrors.ts`' union comment states the rule that picked this member:
+   * *take the MOST SPECIFIC member every one of whose claims is true at EVERY
+   * emitter*. `SEAM_INTERNAL_FAULT` shipped breaking it one clause down — it
+   * predicted *"Retrying will not clear it: the same fault runs again until we
+   * fix it"* across three wire codes where that is true at ONE:
+   *
+   *   · `MT5_GATEWAY_UNCONFIGURED` — true (operator faults, all four emitters).
+   *   · `ADAPTER_INIT_FAILED` — FALSE at a third of the emitter's OWN declared
+   *     cause set: `routers/exchange.py` enumerates "a ccxt signature change,
+   *     an ImportError on a missing extra or an **OOM**". An OOM clears.
+   *   · `INTERNAL` — UNKNOWABLE: `validate_key_permissions`' bare
+   *     `except Exception` residue, open by construction.
+   *
+   * ⛔ THE REMEDY IS NOT A RETRY CONTROL, and this test asserts that too. The
+   * CLASSIFICATION was right — all three are `retryable=False` upstream, and
+   * `recoverable` is DERIVED from `actions` carrying neither member of
+   * `RECOVERABLE_ACTIONS`. Only the PREDICTION was wrong. A "fix" that answered
+   * this test by adding `clear_and_retry` would re-open the 2026-08-08 defect
+   * (a control the founder clicked five times against a fault that cannot clear
+   * by itself), so the recoverable half is pinned in the same case.
+   *
+   * ⛔ AND IT IS NOT A PINNED SENTENCE. The assertion is over a hand-typed
+   * PHRASE CLASS, not over the copy we happen to ship, so a reword that keeps
+   * the honest meaning stays green and a reword that re-introduces the
+   * prediction reds. The POSITIVE CONTROL is what makes that checkable:
+   * `SEAM_MISCONFIGURED` legitimately claims permanence — its emitter really is
+   * a setting that stays wrong until we redeploy, true at every one of its
+   * emitters — so the same predicate MUST flag it. If the control ever goes
+   * quiet, the predicate stopped matching and the negative half below became
+   * vacuous.
+   */
+  it("[WR-01] SEAM_INTERNAL_FAULT never predicts that a retry cannot help — and still offers no Retry", () => {
+    // Hand-typed, lower-cased. Each is a claim about what a FUTURE attempt
+    // would do — the class of sentence no member homing an `except Exception`
+    // residue or an OOM-capable emitter may make.
+    const PERMANENCE_PREDICTIONS = [
+      "will not clear it",
+      "will not clear this",
+      "the same fault runs again",
+      "fails identically",
+      "retrying will not",
+      "trying again will not",
+      "will fail again",
+      "cannot succeed",
+    ] as const;
+
+    const phrasesIn = (code: WizardErrorCode): string[] => {
+      const copy = WIZARD_ERROR_COPY[code];
+      const haystack = [copy.title, copy.cause ?? "", ...(copy.fix ?? [])]
+        .join("   ")
+        .toLowerCase();
+      return PERMANENCE_PREDICTIONS.filter((p) => haystack.includes(p));
+    };
+
+    // POSITIVE CONTROL FIRST — the predicate is live, and the phrase list is
+    // not a list of sentences nobody writes.
+    expect(
+      phrasesIn("SEAM_MISCONFIGURED"),
+      "The permanence-prediction predicate matched NOTHING in SEAM_MISCONFIGURED, " +
+        "whose copy legitimately says 'Retrying will not clear it: the setting " +
+        "stays wrong until we fix it and redeploy.' The predicate has gone " +
+        "blind, so the assertion below is passing for the wrong reason. ⛔ Fix " +
+        "the phrase list, never delete this control.",
+    ).not.toEqual([]);
+
+    expect(
+      phrasesIn("SEAM_INTERNAL_FAULT"),
+      "SEAM_INTERNAL_FAULT's copy predicts what a second attempt would do. It " +
+        "homes THREE wire codes and the prediction is true at ONE of them: " +
+        "ADAPTER_INIT_FAILED's own emitter comment names an OOM among its " +
+        "causes (an OOM clears on retry), and INTERNAL is validate_key_" +
+        "permissions' bare `except Exception` residue, whose content is open by " +
+        "construction. That is the SAME true-at-three-of-four defect this member " +
+        "was minted to avoid. ⛔ THE REMEDY IS TO STOP PREDICTING — say the " +
+        "fault is ours and that no key was stored — NOT to add a Retry control, " +
+        "which the next assertion forbids.",
+    ).toEqual([]);
+
+    // The half that must NOT move. `recoverable` is derived, so this reds if a
+    // reader "fixes" the sentence above by making the fault retryable.
+    expect(
+      buildEnvelope("SEAM_INTERNAL_FAULT", "corr-wr-01").recoverable,
+      "All three wire codes are retryable=False at the emitter. Removing the " +
+        "false PREDICTION does not make the fault recoverable, and a Retry " +
+        "control here is the 2026-08-08 defect returning.",
+    ).toBe(false);
+
+    // And the measured half stays verbatim: the write was never reached, which
+    // both key routes' pre-RPC assertions pin.
+    expect(
+      WIZARD_ERROR_COPY.SEAM_INTERNAL_FAULT.cause,
+      "The 'no key was stored' claim is MEASURED (validateKey precedes " +
+        "encryptKey and the create RPC on both key routes) and is the only " +
+        "thing this card can promise. Do not lose it while rewording.",
+    ).toContain("no key was stored");
+  });
 });
 
 // ══════════════════════════════════════════════════════════════════════════
