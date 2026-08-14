@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.17
 milestone_name: MT5 — usable end-to-end, not merely ingested
 status: executing
-stopped_at: Phase 153.7 plan 02 complete (all 20 codes dispositioned — plan 01's designed red is GREEN)
-last_updated: "2026-08-14T07:50:00.000Z"
-last_activity: 2026-08-14 -- Phase 153.7 plan 02 executed (8 verdict rows + 12 measured exemptions; SEAM_INTERNAL_FAULT minted; neuter-proof FL-1 recorded)
+stopped_at: Phase 153.7 COMPLETE (3/3 plans — WIZFORM-02 ticked; Phase 153 parent left for the verifier)
+last_updated: "2026-08-14T08:30:00.000Z"
+last_activity: 2026-08-14 -- Phase 153.7 plan 03 executed, phase COMPLETE (three finalize rejections coded, ledger 3 → 0, twin regressions neuter-proven, WIZFORM-02 ticked)
 progress:
   total_phases: 17
-  completed_phases: 14
+  completed_phases: 15
   total_plans: 91
-  completed_plans: 90
-  percent: 83
+  completed_plans: 91
+  percent: 88
 ---
 
 # Project State — Quantalyze
@@ -55,10 +55,21 @@ are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
 
 ## Current Position
 
-Phase: 153.7 (WIZFORM-02-CLASS — every code that can reach a user is covered) — executing, branch `feat/phase-153.7-wizform-02-class`
-Plan: 2 of 3 complete (`153.7-01-SUMMARY.md`, `153.7-02-SUMMARY.md`).
-Status: ⭐ **Plan 01's designed red is GREEN, and that is the phase's red→green proof.** `seam-venue-vocabulary.invariant.test.ts` is 20/20: all **37** derived codes are dispositioned — 8 verdict rows in `VENUE_WIRE_CODE_TO_VERDICT` for the codes that reach `classifyKeyValidationError`, 12 individually-measured rows in `VENUE_WIRE_CODES_WITHOUT_VERDICT` for the ones that render through another classifier. The 8×`UNKNOWN`/500 replay red was recorded BEFORE the rows landed (commit `7122ee7e`) and is quoted verbatim in the summary. ⚠️ **One wizard copy member was MINTED** — `SEAM_INTERNAL_FAULT`, `EXPECTED_TABLE_SIZE` 76 → 77 at both declarations — because `SEAM_MISCONFIGURED`'s "we stopped before sending the request" is measurably FALSE at `INTERNAL`'s emitter and at one of `MT5_GATEWAY_UNCONFIGURED`'s four. It needed 2 roster rows; `SEAM_MISCONFIGURED` needed none (both key steps translate through `SEAM_CODE_TO_WIZARD_CODE` first — measured, and it contradicts the plan's constraint 6). ⚠️ Plan 03 still owes the three code-less finalize rejections, the twin route regressions and the TODOS.md deferral before WIZFORM-02 may be ticked.
-Last activity: 2026-08-14 -- Phase 153.7 plan 02 executed (20 dispositions landed, FL-1 neuter-proof recorded, no route file touched)
+Phase: 153.7 (WIZFORM-02-CLASS — every code that can reach a user is covered) — ✅ **COMPLETE 2026-08-14**, branch `feat/phase-153.7-wizform-02-class`
+Plan: 3 of 3 complete (`153.7-01-SUMMARY.md`, `153.7-02-SUMMARY.md`, `153.7-03-SUMMARY.md`).
+Status: ⭐⭐ **WIZFORM-02 IS TICKED — all four `missing` items from `153-VERIFICATION.md` are discharged.** Plan 03 coded the last three code-less `finalize-wizard` rejections: `KNOWN_CODELESS_FINALIZE_REJECTIONS` **3 → 0**, `expectedSites` 29 → 32, and `EXPECTED_FINALIZE_REJECTION_SITES` **never edited** at 32, so 32 − 32 = 0 is the proof nothing was invented. The ledger constant and its assertion were KEPT: at zero the assertion *is* "every rejection carries a code", which is where WIZFORM-02's criterion lands. Three copy members, one per ARM rather than per subject, because each may claim a different amount about server state — `DRAFT_LOOKUP_FAILED` (a SELECT that errored, so "nothing was changed" is observable; token REUSED from `keys/sync`, not a synonym), `DRAFT_FINALIZE_FAILED` (the generic tail also catches a transport failure that can lose the answer to a write that landed, so it may NOT say nothing was saved), `SEAM_RESPONSE_UNREADABLE` (upstream answered **2xx** — the submission was accepted and only the result is unreadable, so it may claim NEITHER outcome; non-recoverable because a retry there is *unpredictable*, not futile). `EXPECTED_TABLE_SIZE` **77 → 80** in lockstep at both declarations; 3 roster rows in `KNOWN_FINALIZE_CODES`.
+
+⚠️ **Two neuter-proofs, both recorded, both restored.** (a) Deleting the shared `MT5_GATEWAY_UNREACHABLE` verdict row reds the twin regressions on **BOTH** key routes together (503 → 500) plus the classifier replay naming `UNKNOWN` — zero production route edits in that commit, only two `.test.ts` files. (b) Neutering ONE finalize arm reds **three independent oracles** (the wire test by name, `expectedSites` 32 → 31, the ledger 0 → 1) while `EXPECTED_FINALIZE_REJECTION_SITES` stays satisfied at 32 — the two-pin division of labour demonstrated rather than asserted.
+
+⚠️ **The honesty check that could have stopped the tick was RUN, not skipped.** Six analytics-service codes still render `UNKNOWN` on their own surfaces. Five are admin/simulator terminal arms — no key, no draft, no connect step. The sixth, `KEY_UNDECRYPTABLE`, lands on `keys/[id]/permissions`, and that route **IS** reachable from a wizard surface (`SyncPreviewStep` renders `KeyPermissionBadge`). Measured: that component never builds a `wizardErrors` envelope — it renders the route's own `{ code, error }` as `"CODE: message"` text — so **no `UNKNOWN` card is rendered there**. Its defect is a remedy sentence ("try again" where the only remedy is to reconnect). Both residues are recorded as **SEPARATE** TODOS.md items under *Phase 153.7 — recorded deferrals*.
+
+📌 **Phase 153's parent checkbox is now TICKABLE and was deliberately LEFT for the verifier** — a span verdict is the verifier's to issue, and ticking that box ahead of its evidence is what produced the retroactive verification in the first place.
+
+⚠️ **One prose correction worth carrying:** `resilient-fetch.ts`'s `dependency=` census claimed completeness at **13** sites; an `ast` re-measure found **15**. Both arrivals are `500`s, so no breaker key and no counting row changed — but the pin now reads 15, and a new `503` site there is a real breaker key. The same measure found `_validate_mt5_key` was a **wrong** symbol (it still exists and encloses none of the six gateway emitters), which is why no grep would have caught it.
+
+--- Prior status, retained ---
+⭐ **Plan 01's designed red is GREEN, and that is the phase's red→green proof.** `seam-venue-vocabulary.invariant.test.ts` is 20/20: all **37** derived codes are dispositioned — 8 verdict rows in `VENUE_WIRE_CODE_TO_VERDICT` for the codes that reach `classifyKeyValidationError`, 12 individually-measured rows in `VENUE_WIRE_CODES_WITHOUT_VERDICT` for the ones that render through another classifier. The 8×`UNKNOWN`/500 replay red was recorded BEFORE the rows landed (commit `7122ee7e`) and is quoted verbatim in the summary. ⚠️ **One wizard copy member was MINTED** — `SEAM_INTERNAL_FAULT`, `EXPECTED_TABLE_SIZE` 76 → 77 at both declarations — because `SEAM_MISCONFIGURED`'s "we stopped before sending the request" is measurably FALSE at `INTERNAL`'s emitter and at one of `MT5_GATEWAY_UNCONFIGURED`'s four. It needed 2 roster rows; `SEAM_MISCONFIGURED` needed none (both key steps translate through `SEAM_CODE_TO_WIZARD_CODE` first — measured, and it contradicts the plan's constraint 6). ⚠️ Plan 03 still owes the three code-less finalize rejections, the twin route regressions and the TODOS.md deferral before WIZFORM-02 may be ticked.
+Last activity: 2026-08-14 -- Phase 153.7 plan 03 executed — PHASE COMPLETE (ledger 3 → 0 with the 32 total untouched, twin regressions neuter-proven on both key routes, prose re-cuts, two TODOS.md deferrals, WIZFORM-02 ticked)
 
 ⭐ Two receipts worth not re-deriving: the matcher's output agrees with the AST census on all four
 metrics (42 call sites, 2 literal-less, 22 distinct call-shape codes, per-file table identical) —
