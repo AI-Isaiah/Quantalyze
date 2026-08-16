@@ -42,11 +42,21 @@ from typing import Any, Final, TypedDict, cast
 
 from dotenv import load_dotenv
 
+# JOB-04 (Phase 143) — imported as a MODULE (not `from sentry_sdk import
+# capture_message`) so the reconcile-sweep capture in dispatch_tick() resolves
+# through `main_worker.sentry_sdk` and can be spied on in tests. This mirrors
+# the discipline already recorded at main.py:16-20; a from-import makes the
+# emission untestable with the repo's existing
+# `monkeypatch.setattr(module, "sentry_sdk", spy)` idiom. Importing the module
+# has no side effects — `init_sentry()` in main() is what configures it.
+import sentry_sdk
+
 # Load analytics-service/.env for local dev. In prod (Railway), env vars are
 # injected directly and no .env file exists, so load_dotenv() is a no-op.
 load_dotenv()
 
 import main_worker_healthz  # top-level module (not in services/); stdlib-only, no cycle
+from sentry_init import init_sentry
 from services.db import db_execute, get_supabase
 from services.encryption import validate_kek_on_startup
 from services.job_worker import DispatchOutcome, JobStatus, Priority, dispatch
@@ -623,6 +633,47 @@ async def dispatch_tick(worker_id: str) -> None:
         # serialization_failure — that's the expected late-mark-ignored path,
         # not a failure. INVEST-P97 §Recommendation point 2.
         claim_token = job.get("claim_token")
+
+        # JOB-04 (Phase 143): a job carrying the reconcile-sweep marker means an
+        # enqueue was DROPPED and the hourly sweep healed it by absence — the
+        # csv-finalize `after()` callback never ran, so neither the
+        # enqueue_compute_job error branch nor the failed-analytics placeholder
+        # ever executed and nothing in the request path could have reported it.
+        # Alerting HERE, on claim, is the whole alert: there is no cron->Sentry
+        # bridge in this repo (20260802120000 header) and pg_net is
+        # fire-and-forget, so a failed POST from the cron body would itself be
+        # silent.
+        #
+        # LATENCY, honestly: sweep tick -> next worker claim, so this is not
+        # instant paging. A fully-down worker emits nothing at all — that case
+        # is independently alarmed by healthz, so this adds no new blind spot,
+        # but do not read this event as a liveness signal.
+        #
+        # The event carries strategy_id (a UUID) and detected_at ONLY. No email,
+        # no CSV content, nothing user-supplied (T-143-06); init_sentry() also
+        # sets send_default_pii=False and a before_send redactor.
+        #
+        # The read is placed before the `try:` below on purpose: that try owns
+        # the _heartbeat task's try/finally, and the marker read has no business
+        # inside the heartbeat's error handling. Its own try/except is therefore
+        # load-bearing — an unwrapped raise here escapes dispatch_tick entirely
+        # and takes every remaining job in the claimed batch with it (T-143-11).
+        # Telemetry must never fail the work it observes (main.py:186-188).
+        try:
+            _meta = job.get("metadata") or {}
+            if _meta.get("source") == "reconcile-sweep":
+                with sentry_sdk.new_scope() as scope:
+                    scope.set_tag("surface", "reconcile-sweep")
+                    scope.set_tag("job_kind", job.get("kind"))
+                    scope.set_extra("strategy_id", job.get("strategy_id"))
+                    scope.set_extra("detected_at", _meta.get("detected_at"))
+                    sentry_sdk.capture_message(
+                        "Dropped compute-job enqueue healed by reconciliation sweep",
+                        level="warning",
+                    )
+        except Exception:  # noqa: BLE001
+            pass
+
         try:
             # FLIPRETRY-04: keep healthz HONEST during ONE long-but-alive
             # dispatch. A single backfill crawl can legitimately exceed
@@ -964,6 +1015,22 @@ async def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+
+    # JOB-04 (Phase 143): this worker process previously had NO Sentry client
+    # at all — main_worker.py carried zero Sentry references while main.py (the
+    # sibling FastAPI process) has had init_sentry() since Phase 16. That gap is
+    # silent by construction: sentry_sdk.capture_*() with no initialized client
+    # is a NO-OP that raises nothing and logs nothing, so the reconcile-sweep
+    # alert in dispatch_tick() below would emit into the void in production
+    # while every unit test (which spies on the SDK) stayed green. An alerting
+    # channel that fails silently is the defect class this milestone has already
+    # closed twice, and the reason the pg_net->Sentry bridge was rejected.
+    #
+    # Placed AFTER logging.basicConfig (so logging is wired before any sentry
+    # import side effects, matching main.py:60-69) and BEFORE the KEK check, so
+    # a KEK failure at boot is itself reportable. No-ops when SENTRY_DSN is
+    # unset (sentry_init.py:347-350), which keeps local dev and CI unchanged.
+    init_sentry()
 
     logger.info("Worker starting as %s", WORKER_ID)
 
