@@ -5,8 +5,8 @@ milestone_name: JOB/RATE — job-lifecycle reliability and the rate limits that 
 current_phase: 153.7
 current_phase_name: ✅ **COMPLETE 2026-08-14**, branch `feat/phase-153.7-wizform-02-class`
 status: ready_to_plan
-stopped_at: Completed 143-01-PLAN.md (worker Sentry bootstrap + reconcile-sweep alert; 4 neuter proofs observed)
-last_updated: "2026-08-16T20:49:58.711Z"
+stopped_at: Completed 143-02-PLAN.md (migration AUTHORED ONLY — not applied to TEST or PROD; Plan 04 owns application)
+last_updated: "2026-08-16T21:26:38.960Z"
 last_activity: 2026-08-14
 last_activity_desc: Phase 153.7 plan 03 executed — PHASE COMPLETE (ledger 3 → 0 with the 32 total untouched, twin regressions neuter-proven on both key routes, prose re-cuts, two TODOS.md deferrals, WIZFORM-02 ticked)
 progress:
@@ -570,6 +570,11 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 156 P02 | ~24 min | 2 tasks | 2 modified files |
 | Phase 153.7 P01 | ~22 min | 3 tasks | 1 modified file |
 | Phase 143 P01 | 22min | 2 tasks | 2 files |
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 143 P02 | ~95 min | 3 tasks | 3 created files |
 
 ## Accumulated Context
 
@@ -675,6 +680,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 156]: 156-02: CONNECT-02/03 left UNCHECKED in REQUIREMENTS.md — this plan wrote the contract as failing tests only; 156-04 makes it true
 - [Phase 143]: 143-01 (D-11 correction discharged): the analytics worker had ZERO Sentry wiring — init_sentry() now runs in main_worker.main(), so worker-side capture_* is no longer a silent no-op. The main()-calls-init_sentry pytest is the load-bearing half; the capture test mocks the SDK and stays GREEN with init removed (observed, Neuter A).
 - [Phase 143]: 143-01: reconcile-sweep marker contract, Python half — keys 'source'/'detected_at', value 'reconcile-sweep', read in the dispatch_tick claim loop BEFORE the try: that owns the heartbeat try/finally (DX-07). Emission wrapped in try/except: unwrapped, a Sentry fault escapes dispatch_tick and kills the whole claimed batch (observed, Neuter D).
+- [Phase ?]: 143-02 (MEASURED, corrects the plan): ON CONFLICT DO NOTHING is NOT what makes a sequential sweep re-run a no-op — the zero-jobs conjunct is. Tick 1's INSERT removes the strategy from the predicate, so tick 2's batch is empty and the INSERT is never reached. A gate that 'proves' ON CONFLICT by running the body twice in one session is VACUOUS (relevant to Plan 03).
+- [Phase ?]: 143-02 (MEASURED): FOR UPDATE SKIP LOCKED is the FIRST line of race defense, not just a bound helper — an INSERT into compute_jobs takes an FK KEY SHARE lock on its parent strategies row, which conflicts with the batch's FOR UPDATE, so the sweep skips a strategy the live enqueue path is mid-insert on. Removing BOTH it and ON CONFLICT is the only combination that yields 23505 at READ COMMITTED.
+- [Phase ?]: 143-02 (MEASURED): AS MATERIALIZED does not create the bound in this shape — EXPLAIN is byte-identical with and without it because Postgres does not inline a CTE carrying a locking clause, and the 26-row arm still heals 25. Keyword and gate RETAINED as shape enforcement against a future edit dropping FOR UPDATE; the bound is proven ONLY by executing the body against LIMIT+1 rows.
+- [Phase ?]: 143-02 census (read-only PostgREST, Supabase MCP unavailable): 0 candidates on TEST and PROD, both STOP rules clear. D-03 confirmed EMPIRICALLY — on PROD 4 of 4 zero-job strategies-with-dailies are excluded SOLELY by the terminal-analytics conjunct, so weakening it is a 4-row mass re-enqueue today. L-2 (cron role BYPASSRLS) is UNOBTAINABLE over PostgREST (HTTP 404 measured) and stays with Plan 04.
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1377,8 +1386,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-16T20:48:53.733Z
-**Stopped At:** Completed 143-01-PLAN.md (worker Sentry bootstrap + reconcile-sweep alert; 4 neuter proofs observed)
+**Last Date:** 2026-08-16T21:26:38.928Z
+**Stopped At:** Completed 143-02-PLAN.md (migration AUTHORED ONLY — not applied to TEST or PROD; Plan 04 owns application)
 **Resume File:** None
 **Next step:** Phase 153.6 (PARITY) is booked and NOT yet planned — run `/gsd:plan-phase 153.6`. It carries 9 findings from the `/code-review xhigh` over the whole 153→153.5 span. ⛔ Three of its four root causes are ONE-PATH-ONLY fixes (a correct remedy applied to `routers/exchange.py` while its twin in `services/ingestion/mt5.py` went untouched, with no guard asserting the two agree) — close them as a CLASS, not as N patches. ⭐ The venue-lock bypass (D) is LIVE on PROD (the migration is on `main`, and `supabase/migrations/**` auto-applies on merge) but is a SELF-targeted control bypass, not a tenant leak. ⛔ The budget correction (C) has two halves — the number AND the oracle that pins the wrong column and so cannot red on it. Phases 154 and 155 remain unplanned; 155 is human- and calendar-gated (founder at the MT5 terminal, live funded account, on a trading day).
 
