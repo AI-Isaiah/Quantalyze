@@ -1476,7 +1476,11 @@ first tick would enqueue that many jobs.
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+> All six were discharged during planning (2026-08-16). Each carries a `RESOLVED:` pointer to the
+> plan decision that adopted it. Read the pointer, not the recommendation — the recommendation is
+> what research proposed, the pointer is what the plan actually committed to.
 
 1. **Do composites get excluded, or does the sweep branch the kind?** (L-3)
    - What we know: composites write `csv_daily_returns`, are chain-terminal, and `compute_analytics_from_csv`
@@ -1486,6 +1490,7 @@ first tick would enqueue that many jobs.
      exact composite-detection predicate (A5).
    - Recommendation: **exclude**, document as a second known non-coverage alongside the wizard first-hop
      drop, and file to TODOS.md. Reconsider only if the census shows a meaningful composite population.
+   - **RESOLVED: DX-01 (143-02).** Excluded via `NOT EXISTS strategy_keys`; `api_key_id IS NULL` rejected as a discriminator because CSV single-key strategies also have it NULL. Non-coverage documented in the migration header + TODOS.md; pinned by SQL gate arm E and its neuter.
 
 2. **Does `strategies.status` gate the sweep, and if so which values?** (L-6)
    - What we know: five values; no soft-delete column; `archived` is wasted work; `draft` may be the
@@ -1493,6 +1498,7 @@ first tick would enqueue that many jobs.
    - What's unclear: the actual distribution — census query (2).
    - Recommendation: exclude `archived` only; include `draft`; decide from the census, not from reasoning,
      and put the counts in the header.
+   - **RESOLVED: DX-02 (143-02).** Exclude `archived` only; `draft` INCLUDED. Census breakdown lands in the migration header as evidence.
 
 3. **Grace anchor: `MAX(csv_daily_returns.created_at)` — is it defensible under review?** (L-4, A6)
    - What we know: it is directly writable (so the gate can backdate it), never re-stamped by a writer, and
@@ -1500,6 +1506,7 @@ first tick would enqueue that many jobs.
    - What's unclear: whether a reviewer finds a fourth candidate I did not consider.
    - Recommendation: write the full four-way rejection argument in the header (142's `:76-101` is the
      standard) and let `migration-reviewer` attack it.
+   - **RESOLVED: DX-03 (143-02).** `MAX(csv_daily_returns.created_at)` adopted, with the four-way rejection argument in the header (the Phase-106 wrong-timestamp lesson). Query driven from `strategies` with the grace conjunct LAST; no new index.
 
 4. **`LIMIT` value.** 142 uses 25 at `*/15` (100 rows/hour). At `0 * * * *` a LIMIT of 25 drains 25/hour.
    - What's unclear: the TEST candidate count (census 1). If TEST holds hundreds, the SQL gate's
@@ -1507,15 +1514,18 @@ first tick would enqueue that many jobs.
      to be larger.
    - Recommendation: pick the LIMIT from the census, and note that the gate's `n` need not equal the
      production LIMIT as long as the gate seeds `LIMIT + 1`.
+   - **RESOLVED: DX-04 (143-02).** LIMIT 25, matching 142's bound; census sanity-checks it before the migration is authored.
 
 5. **Cadence minute.** `0 * * * *` collides with `audit_log_hot_to_cold` (`0 3 * * *`) and coincides with
    the reaper's `:00` tick every hour.
    - Recommendation: `35 * * * *` — clear of every registered slot (`:00`, `:10`, `:15`, `:20`, `:30`) and
      off the reaper's quarter-hour grid. Restate the "post-threshold detection latency" honesty note either way.
+   - **RESOLVED: DX-05 (143-02).** `35 * * * *` — hourly preserved per the locked decision, minute moved off `:00` to clear 142's reaper grid and `audit_log_hot_to_cold`.
 
 6. **UNVERIFIED: `.github/workflows/migration-drift-check.yml` and `sql-function-snapshot.yml`.** I did not
    read these. `sql-function-snapshot` in particular may expect a snapshot refresh when SQL objects change —
    though this migration creates no function, so it is likely a no-op. The planner should read both.
+   - **RESOLVED: 143-02 Task 1.** Both workflows are read as an explicit planned step before the migration is authored; findings feed the drift-gate design rather than remaining an assumption.
 
 ---
 
