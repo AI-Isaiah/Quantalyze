@@ -2,16 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.19
 milestone_name: JOB/RATE — job-lifecycle reliability and the rate limits that hold
+current_phase: 153.7
+current_phase_name: ✅ **COMPLETE 2026-08-14**, branch `feat/phase-153.7-wizform-02-class`
 status: ready_to_plan
-stopped_at: v1.17 CLOSED and v1.16 CLOSED, both scope-amended (2026-08-14). v1.18 (155, 157) is founder-gated and cannot move. ⭐ ACTIVE AGENT WORK = v1.19 Phases 143→144→145→146, carried out of v1.16 with numbers unchanged. Next: /gsd-plan-phase 143.
-last_updated: "2026-08-14T08:30:00.000Z"
-last_activity: 2026-08-14 -- v1.17 shipped + closed (v0.62.0.0/.1), v1.16 closed scoped-down, v1.19 JOB/RATE opened carrying Phases 143-146, gsd-core v1.10.0 migration + onboard, 37 stale branches adjudicated by content (4 keepers pushed), 18 ADRs synthesized (4 contradict HEAD)
+stopped_at: "v1.17 CLOSED and v1.16 CLOSED, both scope-amended (2026-08-14). v1.18 (155, 157) is founder-gated and cannot move. ⭐ ACTIVE AGENT WORK = v1.19 Phases 143→144→145→146, carried out of v1.16 with numbers unchanged. Next: /gsd-plan-phase 143."
+last_updated: "2026-08-16T20:33:20.415Z"
+last_activity: 2026-08-14
+last_activity_desc: Phase 153.7 plan 03 executed — PHASE COMPLETE (ledger 3 → 0 with the 32 total untouched, twin regressions neuter-proven on both key routes, prose re-cuts, two TODOS.md deferrals, WIZFORM-02 ticked)
 progress:
-  total_phases: 17
+  total_phases: 4
   completed_phases: 15
-  total_plans: 91
+  total_plans: 4
   completed_plans: 91
-  percent: 88
+  percent: 0
 ---
 
 # Project State — Quantalyze

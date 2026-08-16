@@ -43,6 +43,7 @@ accident of sequencing.** Nothing here can be delivered by an agent. The milesto
    `sync_status='complete'` with `last_sync_at` 04:01–04:07 UTC — those are the last *successful*
    syncs, taken **before** the change.
    ⛔ **When these flip to `error`, that is EXPECTED. Do not investigate it as a code defect.**
+
 2. ⛔ **The founder physically at the MT5 terminal, on a TRADING day**, with the live funded
    account's read-only investor password. A demo account, the v1.15 soak account, or a weekend run
    does not satisfy it.
@@ -51,6 +52,7 @@ accident of sequencing.** Nothing here can be delivered by an agent. The milesto
 
 - Parity tolerance **1%, INCLUDING open P&L** (founder call 2026-08-14). Adjustable later; keep it
   a named test constant, never a hardcoded literal.
+
 - ⭐ **The measurement window MUST end before the day of the run.** `broker_dailies` anchors to
   today — initial capital is derived as `current_equity − total_pnl` — so reconstruction error
   accrues *backward into the past*. Comparing today's equity is therefore near-tautological, and a
@@ -96,9 +98,17 @@ accident of sequencing.** Nothing here can be delivered by an agent. The milesto
 **Plans:** 4 plans
 
 Plans:
+**Wave 1**
+
 - [ ] 143-01-PLAN.md — Worker alert path: init_sentry() into main_worker.main() + reconcile-sweep marker capture on claim (the D-11 correction; RED-first pytests)
 - [ ] 143-02-PLAN.md — Census (TEST+PROD, STOP rules) + the sweep migration (inline pg_cron body, MATERIALIZED LIMIT 25, hourly at :35, composite-excluded) + throwaway-Postgres end-to-end tracer proof
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 143-03-PLAN.md — CI gates: SQL gate Parts 1-4 (deployed-body oracle), TS migration-content gate, pytest cross-language marker contract; nine observed neuter REDs
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
 - [ ] 143-04-PLAN.md — [BLOCKING] Apply to TEST via Supabase MCP, sql-tests RED→GREEN, ONE real tick heals a seeded orphan (the FORCE-RLS/L-2 proof), worker SENTRY_DSN verdict, TODOS deferrals, human gate
 
 **Note**: Constrained by JOB-07 (Phase 142) — sweep runs in pg_cron, never the worker loop. The "what counts as orphaned" design pass is settled in 143-CONTEXT.md + 143-02-PLAN.md's decision map (source-agnostic dailies anchor; ANY-kind/ANY-status job conjunct; terminal-analytics safety conjunct; composites and the wizard first-hop drop excluded as documented non-coverage).
@@ -396,6 +406,7 @@ Plans:
 **Plans**: 7 plans
 
 Plans:
+
 - [x] 151-01-PLAN.md — Extract MT5 terminal-concurrency machinery into services/mt5_concurrency.py (leaf; the ONE lock registry)
 - [x] 151-02-PLAN.md — Split the book gate SSR-side: deriveStrategyLinkedKeyIds + 3 additive payload fields on both branches
 - [x] 151-03-PLAN.md — Non-ccxt venue dispatch + MT5 account-equity branch (kill switch, shared lock, honest skips, transient human copy)
@@ -426,6 +437,7 @@ Plans:
 **Plans**: 6 plans in 4 waves (planned 2026-08-07)
 
 Plans:
+
 - [x] 152-01-PLAN.md — Browse-route wire: isOwn on every row + own-only created_at/status through a two-arm H-0300 fence
 - [x] 152-02-PLAN.md — Draft-schema wire: isOwn on the NESTED addedStrategySchema, populated-fixture strip guard
 - [x] 152-03-PLAN.md — SCEN-04: header label li (WEIGHT USD MODE LEV NOTIONAL) + cause-accurate honest notional
@@ -471,6 +483,7 @@ Plans:
 **Plans**: 6 plans in 5 waves
 
 Plans:
+
 - [x] 153.1-01-PLAN.md — Wave-0 scanner + A-25 gates: hardened `deriveRoster`, per-route status predicate, interpolation-safe error body, four SELF-TESTs, derived A-25 assertion (all green at HEAD)
 - [x] 153.1-02-PLAN.md — `VENUE_CAPABILITIES` + the three predicates (fail-toward-probing on null) + `MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS`, pinned
 - [x] 153.1-03-PLAN.md — WIZFORM-03 class filter: `FixRequirement` + `fixRequires` + ONE filter in `formatKeyError`; the three venue bullets and the surface bullet tagged; three whole-table sweeps
@@ -496,11 +509,13 @@ Plans:
 **Plans**: 5 plans in 4 waves. Wave 1 runs 153.2-01 and 153.2-03 in parallel (disjoint files); waves 2-4 are forced sequential because four plans contend on `MetadataStep.tsx`. **MT5-14 + WIZFORM-04 are ONE plan (153.2-04)** per D-14, with the chip-set widening and the pin re-cut in the SAME task.
 
 Plans:
+
 - [x] 153.2-01-PLAN.md — ⛔ FLAG-3 as ONE indivisible task: the description client mirror reads `MIN_DESCRIPTION_CHARS`, becomes the `handleSubmit` predicate, the `:491` `disabled` and both stale comments go, the `:334` focus ring is upgraded — then the hint / `.title` / live-clear message states (D-11, D-13, D-23)
 - [x] 153.2-02-PLAN.md — the rest of the form: category / AUM / capacity refuse through `Field` with aria-derived borders (AUM+capacity import the SERVER's own `isValidDollar`), and submit-with-errors opens the collapsed `<details>` before focusing the first invalid control, with a visible summary line `LiveRegion` re-states (D-11, D-13)
 - [x] 153.2-03-PLAN.md — D-12: `AllocateDialog`'s money field converts from the JS ternary to `aria-[invalid=true]:border-negative` and clears live; the two rows that can tell the mechanisms apart (D-12, D-13)
 - [x] 153.2-04-PLAN.md — ⛔ MT5-14 + WIZFORM-04 in ONE ship: `WIZARD_EXCHANGE_CODES`/`WIZARD_EXCHANGES` (Option B) with the `closed-sets.mt5-flag` pin re-cut + POSITIVE assertion in the SAME task; the pinned-`<span>` detected-venue chip, its mono provenance eyebrow and a payload that cannot omit the venue; `venueSupportsScopeProbe` gating BOTH probe call sites (fail-toward-probing on `null`) and the catch-all split so a parse miss and a missing internal token stop reading as network blips (D-06, D-07, D-14a+b, D-15, D-16, D-20, D-22)
 - [x] 153.2-05-PLAN.md — a field-level server rejection routes back to the field: `FIELD_BY_CODE` + a totality assertion with a vacuity floor in `SubmitStep`, the handoff through `WizardClient`, and `MetadataStep` revealing + focusing the named field with its values intact (D-13, D-17 boundary)
+
 **UI hint**: yes
 
 - ⛔ **FLAG-3 is ONE indivisible task.** Deleting `MetadataStep.tsx:491`'s `disabled` without widening the `.trim()`-only `handleSubmit` guard at `:222-233` lets a 2-character description POST — re-shipping the very defect this phase deletes.
@@ -522,11 +537,13 @@ Plans:
 **Plans**: 6 plans in 6 waves (strictly sequential — every plan contends on `mt5_client.py` and/or `routers/exchange.py`). Wave 6 = **D-35**, the `shutdown()` class closure, added after gating: an `ast` scan measured **three** `Mt5Client.close()` callers (`routers/exchange.py`, `services/exchange.py`'s `aclose_exchange` mt5 arm, and `services/ingestion/mt5.py`'s validate `finally`) reaching exactly **two** `shutdown()` sites (`mt5_client.py:384` `close`, `:436` `restart`). Fixed at the **sink** — the teardown leaves `close()` entirely — so all three callers are fixed with zero call-site edits.
 
 Plans:
+
 - [x] 153.3-01-PLAN.md — 🔒 D-31: `terminal_info()` guard; tri-state `classify_trade_capability`; both call sites refuse what they cannot classify (SECURITY, sequenced FIRST so it is not blocked behind the refactors)
 - [x] 153.3-02-PLAN.md — D-24/D-25: bind `initialize()`'s missing `timeout=`; extend the ordering guard to EVERY timeout-carrying call with a source-derived completeness floor; per-instance chain (`MT5_REQUEST_TIMEOUT_S` byte-unchanged)
 - [x] 153.3-03-PLAN.md — D-02/D-03/D-30: ONE end-to-end deadline replacing three 35 s stages; `Mt5Client.release()` takes `shutdown()` off the request path; the `finally` survives the deadline and stays outside it (Pitfall 6)
 - [x] 153.3-04-PLAN.md — D-29: the validate path takes the terminal lease it is the one caller to skip, with a bounded acquisition wait distinct from the operation timeout (batch keeps queueing patiently; NO account cap)
 - [x] 153.3-05-PLAN.md — D-32/D-27/D-33: `stage` + `duration_ms` on every MT5 call and on the lease wait; runbook single-replica invariant, terminal trade-permission step, provisional-budget note
+
 **UI hint**: no
 
 - 🔒 **D-31 is a SECURITY fix, not a refactor.** `is_trade_capable` infers investor mode from two signals that are BOTH false for a MASTER account under the terminal's default-ON "Disable automatic trading through the external Python API". `terminal_info()` is called nowhere and does not exist on `Mt5Client` — it must be ADDED. Fail **CLOSED**: refuse what we cannot classify.
@@ -543,6 +560,7 @@ Plans:
 **Plans**: 5 plans in 3 waves
 
 Plans:
+
 - [x] 153.4-01-PLAN.md — the `validate-key-serialized` 120 000 ms row + `BREAKER_LOCK_TOMBSTONE_S` 60→90 in ONE commit, plus every pin site in `seam-constants.pin.test.ts` and the retry registry (wave 1)
 - [x] 153.4-02-PLAN.md — `budgetKeyFor(exchange)` selecting by the `serialized` capability, the three validate routes re-branched, and `seam-budgets.invariant.test.ts` re-derived (wave 2)
 - [x] 153.4-03-PLAN.md — the client-safe budget module + its equality pin, and `ValidateWaitCard` with the budget-fraction escalation ladder (wave 2)
@@ -565,6 +583,7 @@ Plans:
 **UI hint**: no
 
 Plans:
+
 - [x] 153.5-01-PLAN.md — epoch registry + Mt5SessionAbandoned + occupancy ContextVar + 6-method fence + lease bump + shared test reset (wave 1)
 - [x] 153.5-02-PLAN.md — restart's TWO checks w/ three-invariant fenced cleanup + __init__ construction fence (#5, #6) + rationale re-cuts (wave 2)
 - [x] 153.5-03-PLAN.md — ONE release point: convert the 3 raw-lock worker acquisitions to mt5_terminal_lease; re-point neuter patches; ast class pin (wave 2, parallel with 02)
@@ -609,6 +628,7 @@ held). Line hints are `as of 2026-08-11` only: **if a hint disagrees with its sy
 | A3 | `ingestion/mt5.py` (D-31 arm) | raises a bare `RuntimeError` documented PERMANENT, which escapes `Mt5Adapter.validate` into `job_worker.classify_exception`'s `("unknown", str(exc))` fall-through — **so the worker RETRIES a fault that can never clear**, re-running the whole serialized probe against the ONE shared terminal each time, queueing ahead of every other user's validate, and finally showing the user raw internal copy naming investor/master passwords. |
 
 **B — Absorption: broad `except` re-swallowing the fence (2 findings + 1 telemetry split).** D-42 made absorption structurally impossible *for the classify arms*; pre-existing catch-alls upstream reintroduced it.
+
 - B1 `routers/exchange.py` › `_read_terminal`'s `except Exception` swallows `Mt5SessionAbandoned` → an operator triaging in Railway reads a gateway materialization fault **that never happened**, and the probe continues on a "terminal unreadable" premise that is false.
 - B2 `routers/exchange.py` connect stage: the construction fence's `Mt5SessionAbandoned("connect")` is caught by the broad `except Exception as connect_err` before the dedicated D-40 arm, returning a **503 that counts toward the mt5-gateway breaker** — our own abandoned thread driving the breaker toward opening against a healthy gateway.
 - B3 `mt5_client.py` › `restart()` check 2 raises from INSIDE `_timed`, which emits an `mt5.stage restart ok=False` event for a restart that was deliberately REFUSED. (Wording corrected per 153.6 D-16: the reconnect round-trip DID happen by the time check 2 fires, so `duration_ms` is real elapsed time — the defect is that a refusal enters the D-32 recovery-latency population Phase 155 reads, under a stage name real round-trips also use; that pollution is the exact thing check 1 was deliberately placed outside `_timed` to avoid, 153.5 RESEARCH §Q-4.) The two checks disagree about the telemetry contract.
@@ -623,18 +643,19 @@ held). Line hints are `as of 2026-08-11` only: **if a hint disagrees with its sy
 **E — Retry affordance (1 finding).** A probe parse miss was moved off `KEY_NETWORK_TIMEOUT` onto `KEY_SCOPE_CHECK_UNAVAILABLE`, removing the Retry control for a condition that is **not** always permanent — a 2xx body the schema cannot read is also what a rolling analytics deploy produces. Belongs here rather than in an ad-hoc fix because touching a wizard error code ripples into 153.1's pinned code tables (`EXPECTED_TABLE_SIZE` and friends), which must be **re-cut, never deleted**.
 
 📌 **Explicitly OUT of this phase:**
+
 - **MT5 as a composite member** — the 153.4 CR-03 fix made an MT5 composite panel reachable for the first time, and `run_stitch_composite_job` has no `mt5` arm, so it `_stamp_failed`s the whole job as permanent (`venue 'mt5' is not a supported exchange`). That is a **product decision** (teach the stitch worker MT5, or block MT5 in the composite wizard), not a bug fix. Natural neighbour: Phase 155.
 - **The epoch never re-binds** (`mt5_client.py` `_assert_live` binds on first touch only), so one `Mt5Client` is usable under exactly one lease for its life. No production path does this today — all five lease blocks were ast-verified — and Phase 153.5 already pinned the constraint with a named future fix (rebind on lease entry). Latent, documented, not scheduled.
 - Two trivial findings (compare-route skeleton padding + its blind test oracle; the `as unknown as` composite-embed cast in `finalize-wizard`) were fixed unplanned in the same session.
 
 Plans:
+
 - [x] 153.6-01-PLAN.md — Cluster A + B1: extract `services/mt5_probe.py`, rewire both paths, A3 permanent classification (wave 1)
 - [x] 153.6-02-PLAN.md — Cluster C: failing-column deadline on BOTH arms + the state-quantified economic oracle (wave 1)
 - [x] 153.6-03-PLAN.md — Cluster D (DB): `attested_venue` migration, INVOKER trigger, count-pinned backfill, RPC re-bases, SQL round-trip test (wave 1)
 - [x] 153.6-04-PLAN.md — Cluster D (route): the probe gate reads the attestation, never `exchange`; class sweeps re-pointed (wave 1)
 - [x] 153.6-05-PLAN.md — Cluster B remainder (B2 connect-stage arm, B3 `_timed` suppression) + the ast parity roster (wave 2)
 - [x] 153.6-06-PLAN.md — Cluster E: `KEY_SCOPE_CHECK_UNREADABLE` recoverable code + pin re-cuts 74→75, 32 UNMOVED (wave 2)
-
 
 ### Phase 153.7: WIZFORM-02-CLASS — every code that can reach a user is covered (INSERTED)
 
@@ -660,12 +681,12 @@ Plans:
 📌 **On completion, Phase 153's parent checkbox may finally tick** — it is unticked today because the span did not meet its own goal, not because a child is outstanding.
 
 **Plans**:
+
 - [x] 153.7-01-PLAN.md — Mechanism: parameterised root + call-shape matcher (AST cross-checked) + pin re-cuts + reach/both-shapes assertions + tmpdir falsifier — ENDS RED BY DESIGN naming the 20 undisposed codes (wave 1) — ✅ 2026-08-14, `153.7-01-SUMMARY.md`. Population 17 → **37**; the file ends with **exactly one** failing test naming exactly the 20 predicted codes, and the AST cross-check earned its keep by catching a real matcher bug (a `class` definition head read as a call). ⛔ **Do NOT "fix" the red** — greening it is Plan 02's whole job.
 - [x] 153.7-02-PLAN.md — The 20 dispositions: 8 verdict rows (replay-tested through classifyKeyValidationError) + 12 individually-measured WITHOUT_VERDICT rows — greens 01's red (wave 2) — ✅ 2026-08-14, `153.7-02-SUMMARY.md`. ⭐ **01's designed red is GREEN**: the disposition assertion passes over all 37 codes, and the 8×UNKNOWN/500 replay red was recorded first. One member MINTED (`SEAM_INTERNAL_FAULT`, `EXPECTED_TABLE_SIZE` 76 → 77 in lockstep) because `SEAM_MISCONFIGURED`'s "we stopped before sending the request" is measurably FALSE at `INTERNAL`'s emitter and at one of `MT5_GATEWAY_UNCONFIGURED`'s four. Neuter-proof (FL-1) performed and recorded: deleting the `MT5_GATEWAY_UNREACHABLE` row reds BOTH the disposition assertion and its replay test, by name.
 - [x] 153.7-03-PLAN.md — Three coded finalize rejections (ledger 3→0, sites 29→32, total pinned 32) + twin regression on BOTH key routes + prose re-cuts + TODOS.md deferral (wave 3) — ✅ 2026-08-14, `153.7-03-SUMMARY.md`. ⭐ **The ledger is EMPTY and its assertion has collapsed into "every rejection carries a code"** — the constant is KEPT, because at 0 it states the property outright. `EXPECTED_FINALIZE_REJECTION_SITES` was **never edited** and the derived count agreed at every run: 32 − 32 = 0. Three copy members, one per ARM rather than per subject, because each may claim a different amount about server state — `DRAFT_LOOKUP_FAILED` (a SELECT that errored, so "nothing was changed" is observable; the token is REUSED from `keys/sync`, not a synonym), `DRAFT_FINALIZE_FAILED` (the generic tail also catches a transport failure that can lose the answer to a write that landed, so it may NOT say nothing was saved), `SEAM_RESPONSE_UNREADABLE` (upstream answered 2xx — the submission was accepted and only the result is unreadable, so it may claim NEITHER outcome, and it is non-recoverable because a retry there is unpredictable rather than futile). `EXPECTED_TABLE_SIZE` 77 → 80 in lockstep; 3 roster rows. **Twin regressions on BOTH key routes, neuter-proven**: deleting the shared `MT5_GATEWAY_UNREACHABLE` verdict row reds both (503 → 500) plus the classifier replay naming UNKNOWN — zero production route edits. A second falsifier: neutering ONE finalize arm reds three independent oracles while the 32 total holds. Prose re-cuts landed (REGISTRY ×2, the `resilient-fetch` census — where `_validate_mt5_key` was a WRONG symbol that still exists, and the completeness pin was under-counted 13 → **15**, both arrivals inert 500s — and the alias docblock whose "correctly answers UNKNOWN" premise 02 deleted). **TWO** TODOS.md deferrals recorded separately.
 
 ✅ **PHASE COMPLETE — WIZFORM-02 TICKED.** All four `missing` items from `153-VERIFICATION.md` are closed across the three plans, and the sweep is driven from EMITTING SITES (falsified three ways). ⚠️ The honesty check that could have stopped the tick was run: `keys/[id]/permissions` **is** reachable from a wizard surface (`SyncPreviewStep` → `KeyPermissionBadge`), but that component never builds a `wizardErrors` envelope — it renders the route's own `{ code, error }` as text — so no `UNKNOWN` card is rendered there. Its defect is a remedy sentence, recorded in TODOS.md as its own item. 📌 **Phase 153's parent checkbox may now tick.**
-
 
 ### Phase 154: WIZCONT/STALE — Wizard continuity, no stale screens
 
@@ -681,6 +702,7 @@ Plans:
 **Plans**: 8 plans in 3 waves
 
 Plans:
+
 - [x] 154-01-PLAN.md — STALE-01 investigation gate: Q1/Q2 PROD discriminator + T1/T2/T3 RED (wave 1)
 - [x] 154-02-PLAN.md — WIZCONT-01 plumbing: single-sourced draft query + wizard-draft route + REQUIREMENTS correction (wave 1)
 - [x] 154-03-PLAN.md — WIZCONT-02 DB: venue_account_id column, partial UNIQUE, scrub trigger, RPC re-base, TEST apply (wave 1)
@@ -689,6 +711,7 @@ Plans:
 - [x] 154-06-PLAN.md — WIZCONT-02 app: one-fence-two-keys, 23505 discrimination (TWIN-8), dedup notice (wave 2)
 - [x] 154-07-PLAN.md — STALE-01 supplier arm (CONTINGENT on 154-01 verdict): Python/SQL root-cause fix or recorded NO-OP (wave 2)
 - [x] 154-08-PLAN.md — STALE-01 honest screens: un-gated backstop, R2-5 twin, amber state, ledger closure (wave 3)
+
 **UI hint**: yes
 
 ### Phase 155: MT5-VERIFY — The numbers are true, live on a trading day
@@ -740,15 +763,18 @@ them stop resting on an assumption
      and fails loud otherwise, so the `HAS_SEED_ENV` skip predicate was false and the test really
      executed). What no test can cover: the founder is the only person who witnessed the original
      restart, so only they can say it is gone.
+
   2. **The amber `wizard-sync-recomputing` block is seen on screen.** Heading *"Recomputing this
      strategy's analytics"*; no red envelope, no metric numbers; contrast and spacing per
      `154-UI-SPEC.md`. No browser pass has ever been run on this block.
+
   3. **The four copy members Phase 153.7 minted are seen rendering in a real wizard** —
      `SEAM_INTERNAL_FAULT`, `DRAFT_LOOKUP_FAILED`, `DRAFT_FINALIZE_FAILED`,
      `SEAM_RESPONSE_UNREADABLE`. ⭐ `SEAM_INTERNAL_FAULT` must render with **NO Retry control** —
      that single check doubles as the regression catch for the classifier→roster hop
      (`W-153.7-1`), where a missing roster member leaves the whole suite green while the wizard
      offers a Retry against a permanent fault.
+
   4. **`MT5_SPIKE_INVESTOR_PASSWORD` is rotated.** It sits in plaintext in Railway env and was
      printed to a session scrollback. Founder-only: they hold the credential.
 
@@ -782,6 +808,7 @@ single-migration orderings produce a total connect-a-key outage window, so Migra
 after PR A's route is verified live on PROD). ⛔ **SC1 does not close until PR B.**
 
 Plans:
+
 - [x] 156-01-PLAN.md — Wave 0: measure A1/A2/A3/A4 against TEST (does a service-key client really reach `auth.role() = 'service_role'` with `auth.uid()` NULL?) — the whole privilege design rests on two facts RESEARCH could not settle
 - [x] 156-02-PLAN.md — [PR A] Re-cut both route test files to the post-156 contract and observe them RED (admin-client receiver, `p_user_id === user.id`, 503 `SEAM_MISCONFIGURED`) — incl. the composite twin's missing admin mock
 - [x] 156-03-PLAN.md — [PR A] Migration A: transitional two-arm role gate (branched, never unioned) + `GRANT EXECUTE … TO service_role` on both RPCs; applied to TEST, PR-Y2 renamed, snapshots regenerated
@@ -806,7 +833,6 @@ Plans:
 ⚠️ **The related class: assertions that pass for the WRONG reason.** Migration A shipped a canary that passed on precisely the stale re-base it existed to catch; `test_wizard_composite_fence.sql` Parts 3b/3c would have passed VACUOUSLY after Migration B (catching the role refusal, never reaching the cross-user condition they name) and were **re-cut rather than left reporting safety they no longer provided**; plans 08 and 09 each shipped a provably unreachable assertion and each caught it with their own mutation battery.
 
 ⛔ **`REVOKE` is not durable, and that is a CLASS.** Supabase's `pg_default_acl` re-grants `anon` and `authenticated` on any `DROP`+`CREATE`. Nothing in a migration can close this — a post-verify runs once, at apply, and the migration that reopens the door is one nobody has written yet. The durable enforcement is **assertion 5h**, armed from the function body and the live ACL rather than from a comment marker, proven on a PG16 fixture by an actual DROP+CREATE where it was the ONLY assertion that reddened.
-
 
 ## Progress
 
