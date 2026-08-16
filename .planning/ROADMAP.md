@@ -93,8 +93,15 @@ accident of sequencing.** Nothing here can be delivered by an agent. The milesto
   2. Running the sweep twice in a row produces no duplicate job (re-enqueue is idempotent via the existing partial unique index).
   3. A strategy inside the grace window, or with any existing job row, or with a terminal analytics row, is never touched by the sweep.
 
-**Plans**: TBD
-**Note**: Constrained by JOB-07 (Phase 142) — sweep runs in pg_cron, never the worker loop. Needs a short design pass on "what counts as orphaned" per strategy source (csv vs wizard vs resync) before it becomes one migration.
+**Plans:** 4 plans
+
+Plans:
+- [ ] 143-01-PLAN.md — Worker alert path: init_sentry() into main_worker.main() + reconcile-sweep marker capture on claim (the D-11 correction; RED-first pytests)
+- [ ] 143-02-PLAN.md — Census (TEST+PROD, STOP rules) + the sweep migration (inline pg_cron body, MATERIALIZED LIMIT 25, hourly at :35, composite-excluded) + throwaway-Postgres end-to-end tracer proof
+- [ ] 143-03-PLAN.md — CI gates: SQL gate Parts 1-4 (deployed-body oracle), TS migration-content gate, pytest cross-language marker contract; nine observed neuter REDs
+- [ ] 143-04-PLAN.md — [BLOCKING] Apply to TEST via Supabase MCP, sql-tests RED→GREEN, ONE real tick heals a seeded orphan (the FORCE-RLS/L-2 proof), worker SENTRY_DSN verdict, TODOS deferrals, human gate
+
+**Note**: Constrained by JOB-07 (Phase 142) — sweep runs in pg_cron, never the worker loop. The "what counts as orphaned" design pass is settled in 143-CONTEXT.md + 143-02-PLAN.md's decision map (source-agnostic dailies anchor; ANY-kind/ANY-status job conjunct; terminal-analytics safety conjunct; composites and the wizard first-hop drop excluded as documented non-coverage).
 
 ### Phase 144: JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence
 
