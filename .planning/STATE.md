@@ -5,8 +5,8 @@ milestone_name: JOB/RATE — job-lifecycle reliability and the rate limits that 
 current_phase: 153.7
 current_phase_name: ✅ **COMPLETE 2026-08-14**, branch `feat/phase-153.7-wizform-02-class`
 status: ready_to_plan
-stopped_at: "v1.17 CLOSED and v1.16 CLOSED, both scope-amended (2026-08-14). v1.18 (155, 157) is founder-gated and cannot move. ⭐ ACTIVE AGENT WORK = v1.19 Phases 143→144→145→146, carried out of v1.16 with numbers unchanged. Next: /gsd-plan-phase 143."
-last_updated: "2026-08-16T20:33:20.415Z"
+stopped_at: Completed 143-01-PLAN.md (worker Sentry bootstrap + reconcile-sweep alert; 4 neuter proofs observed)
+last_updated: "2026-08-16T20:49:58.711Z"
 last_activity: 2026-08-14
 last_activity_desc: Phase 153.7 plan 03 executed — PHASE COMPLETE (ledger 3 → 0 with the 32 total untouched, twin regressions neuter-proven on both key routes, prose re-cuts, two TODOS.md deferrals, WIZFORM-02 ticked)
 progress:
@@ -569,6 +569,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 153.4 P05 | 35min | 2 tasks | 4 files |
 | Phase 156 P02 | ~24 min | 2 tasks | 2 modified files |
 | Phase 153.7 P01 | ~22 min | 3 tasks | 1 modified file |
+| Phase 143 P01 | 22min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -672,6 +673,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase ?]: 153.4-05: the composite card's 300 ms render gate is the step's 1 s TICK, not a per-panel timer — waitElapsedMs is 0 for the whole first second, so a sub-300 ms answer cannot flash a card, and N panels do not mean N timers (T-153.4-22)
 - [Phase 156]: 156-02: the wrong-door supabase mock DELEGATES by default and its throw is ARMED per-case — an unconditional throw would red every pre-existing wizard route case for the width of the RED window (G11's noise problem, inverted)
 - [Phase 156]: 156-02: CONNECT-02/03 left UNCHECKED in REQUIREMENTS.md — this plan wrote the contract as failing tests only; 156-04 makes it true
+- [Phase 143]: 143-01 (D-11 correction discharged): the analytics worker had ZERO Sentry wiring — init_sentry() now runs in main_worker.main(), so worker-side capture_* is no longer a silent no-op. The main()-calls-init_sentry pytest is the load-bearing half; the capture test mocks the SDK and stays GREEN with init removed (observed, Neuter A).
+- [Phase 143]: 143-01: reconcile-sweep marker contract, Python half — keys 'source'/'detected_at', value 'reconcile-sweep', read in the dispatch_tick claim loop BEFORE the try: that owns the heartbeat try/finally (DX-07). Emission wrapped in try/except: unwrapped, a Sentry fault escapes dispatch_tick and kills the whole claimed batch (observed, Neuter D).
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1374,9 +1377,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-13T14:12:05.599Z
-**Stopped At:** Phase 156 plan 02 complete (PR A wave 2)
-**Resume File:** .planning/phases/156-connect-refactor-the-venue-the-server-validated-is-the-venue/156-03-PLAN.md
+**Last Date:** 2026-08-16T20:48:53.733Z
+**Stopped At:** Completed 143-01-PLAN.md (worker Sentry bootstrap + reconcile-sweep alert; 4 neuter proofs observed)
+**Resume File:** None
 **Next step:** Phase 153.6 (PARITY) is booked and NOT yet planned — run `/gsd:plan-phase 153.6`. It carries 9 findings from the `/code-review xhigh` over the whole 153→153.5 span. ⛔ Three of its four root causes are ONE-PATH-ONLY fixes (a correct remedy applied to `routers/exchange.py` while its twin in `services/ingestion/mt5.py` went untouched, with no guard asserting the two agree) — close them as a CLASS, not as N patches. ⭐ The venue-lock bypass (D) is LIVE on PROD (the migration is on `main`, and `supabase/migrations/**` auto-applies on merge) but is a SELF-targeted control bypass, not a tenant leak. ⛔ The budget correction (C) has two halves — the number AND the oracle that pins the wrong column and so cannot red on it. Phases 154 and 155 remain unplanned; 155 is human- and calendar-gated (founder at the MT5 terminal, live funded account, on a trading day).
 
 ⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in
@@ -1417,3 +1420,7 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 **Gates at `39688d69`:** pytest **4743 passed / 96 skipped / 0 failed** · `mypy --strict` **89 files clean** · `npx tsc --noEmit` **0** · full `npm run test:coverage` **8878 passed / 287 skipped / 0 failed** (697 files, all four thresholds clear) · `npm run lint` **0 errors** · **0** new `# type: ignore` across `56fb7167..HEAD` · `grep -rn MUTANT` → 0 · tree clean (only the orchestrator's `TODOS.md` and the pre-existing untracked `scripts/nautilus_factsheet.py`, neither touched).
 
 **Open items the verifier inherits (not this plan's):** the two Phase 140.1 `gaps_found` warnings (`simulator.py:92` IP-keying → PYAPI-03 is 9/9 not 10/10; the two in-handler `HTTPException(429)` sites), O-1..O-4 in the repair programme, and the 12 non-environmental pytest skips.
+
+### Blockers
+
+- 143-01 leaves SC#1's alert MUTE until SENTRY_DSN is verified on the WORKER Railway service (separate service from the FastAPI app; a DSN on the web app does not imply one on the worker). Owned by Plan 04 / RESEARCH L-1 item 3. Code is correct and emits nothing until then.

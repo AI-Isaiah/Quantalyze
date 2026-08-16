@@ -95,12 +95,12 @@ accident of sequencing.** Nothing here can be delivered by an agent. The milesto
   2. Running the sweep twice in a row produces no duplicate job (re-enqueue is idempotent via the existing partial unique index).
   3. A strategy inside the grace window, or with any existing job row, or with a terminal analytics row, is never touched by the sweep.
 
-**Plans:** 4 plans
+**Plans:** 1/4 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 143-01-PLAN.md — Worker alert path: init_sentry() into main_worker.main() + reconcile-sweep marker capture on claim (the D-11 correction; RED-first pytests)
+- [x] 143-01-PLAN.md — Worker alert path: init_sentry() into main_worker.main() + reconcile-sweep marker capture on claim (the D-11 correction; RED-first pytests)
 - [ ] 143-02-PLAN.md — Census (TEST+PROD, STOP rules) + the sweep migration (inline pg_cron body, MATERIALIZED LIMIT 25, hourly at :35, composite-excluded) + throwaway-Postgres end-to-end tracer proof
 
 **Wave 2** *(blocked on Wave 1 completion)*
