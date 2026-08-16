@@ -312,7 +312,23 @@
 --   exactly ONE row carries this jobname.
 --
 --   RE-RUN of the sweep (SC#2): running the body twice must be a provable no-op.
---   That rides the EXISTING partial unique index, and NO new index is created:
+--   ⚠️ CORRECTED BY MEASUREMENT 2026-08-16. It is natural to say this "rides the
+--   partial unique index", and the phase's own planning documents say so -- but
+--   that is not what the mechanism turns out to be, and the distinction matters
+--   for anyone editing the predicate later:
+--     * SEQUENTIAL re-run is a no-op because of the ZERO-JOBS CONJUNCT. Tick 1
+--       inserts a job row, which immediately removes the strategy from the
+--       predicate, so tick 2's batch is empty and the INSERT is never reached.
+--       Observed: with ON CONFLICT DO NOTHING deleted from the deployed body, a
+--       second sequential tick STILL raises nothing -- there is no conflict to
+--       have. Any gate that claims to prove ON CONFLICT by running the body twice
+--       in one session is therefore VACUOUS.
+--     * CONCURRENT races are handled first by FOR UPDATE SKIP LOCKED (an INSERT
+--       into compute_jobs key-share-locks its parent strategies row, so the sweep
+--       skips a strategy the live enqueue path is mid-insert on) and second by
+--       ON CONFLICT DO NOTHING. Removing BOTH is what produces 23505 and kills
+--       the tick; that is the only combination under which the RED was observed.
+--   Either way NO new index is created; the arbiter when it is reached is:
 --     compute_jobs_one_inflight_per_kind_strategy
 --       ON compute_jobs (strategy_id, kind)
 --       WHERE strategy_id IS NOT NULL
@@ -529,28 +545,51 @@ BEGIN
   -- Bounded run (NO IN-REPO PRECEDENT for a pg_cron body INSERTing into
   -- compute_jobs -- see the header; this shape is written from first principles
   -- and deserves extra review weight):
-  --   AS MATERIALIZED     -- ⚠️ THE KEYWORD IS THE FIX AND MUST NOT BE
-  --                          "SIMPLIFIED" AWAY. Since Postgres 12 a bare WITH is
-  --                          INLINED when referenced once, which turns the batch
-  --                          into the inner side of a nested loop where the LIMIT
-  --                          is re-applied per outer row and the bound does not
-  --                          exist. D-19 measured exactly that: 26 seeded rows,
-  --                          one tick, 26 of 26 processed. Do NOT rewrite to
-  --                          WHERE ... IN (SELECT ... LIMIT n) and do NOT
-  --                          "optimize" the CTE into a FROM-clause subquery --
-  --                          both were measured and both lose the bound.
+  --   AS MATERIALIZED     -- Explicit optimization fence, kept DELIBERATELY and
+  --                          not to be "simplified" away. ⚠️ BUT DO NOT BELIEVE
+  --                          IT IS WHAT CREATES THE BOUND HERE -- that was
+  --                          MEASURED and is false for this shape. Removing the
+  --                          keyword from the deployed body and re-running the
+  --                          26-candidate arm still heals 25 of 26, and EXPLAIN
+  --                          output is BYTE-IDENTICAL either way: this CTE
+  --                          carries a locking clause (FOR UPDATE), and Postgres
+  --                          does not inline a CTE that locks rows, so the fence
+  --                          is already implicit. The keyword is retained because
+  --                          explicit beats implicit and because it survives a
+  --                          future edit that drops FOR UPDATE -- at which point
+  --                          the CTE WOULD become inlinable.
+  --                          D-19's measured 26-of-26 was a DIFFERENT shape: a
+  --                          correlated WHERE ... IN (SELECT ... LIMIT n) whose
+  --                          subplan is re-executed per outer row. This body
+  --                          feeds INSERT ... SELECT FROM batch, which scans the
+  --                          CTE exactly once. Still: do NOT rewrite to the
+  --                          IN-subquery form and do NOT push the batch onto the
+  --                          inner side of a nested loop.
+  --                          ⇒ The bound is proven by EXECUTING the body against
+  --                          LIMIT+1 real rows, never by grepping for this token.
   --   ORDER BY the anchor ASC -- deterministic, oldest-orphaned first.
   --   LIMIT 25              -- drains 25/hour. Matches 142's per-tick bound. The
   --                            census puts the standing population at 0 on both
   --                            projects, so this is a blast-radius cap, not a
   --                            throughput target.
   --   FOR UPDATE SKIP LOCKED -- never block a live writer holding the row; skip
-  --                            and take it next tick. Note the batch locks
-  --                            STRATEGIES while the INSERT targets compute_jobs,
-  --                            so this serialises concurrent ticks and supports
-  --                            the bound -- it is NOT the idempotency mechanism.
-  --                            ON CONFLICT DO NOTHING against the partial unique
-  --                            index is, and that holds with or without the lock.
+  --                            and take it next tick. ⚠️ It does MORE than that,
+  --                            measured: an INSERT into compute_jobs takes an FK
+  --                            KEY SHARE lock on its parent STRATEGIES row, which
+  --                            conflicts with this FOR UPDATE. So a strategy the
+  --                            live enqueue path is mid-insert on is SKIPPED by
+  --                            the sweep entirely -- this is the FIRST line of
+  --                            race defense, not merely a bound helper.
+  --                            ON CONFLICT DO NOTHING is the SECOND line, and it
+  --                            is load-bearing: with SKIP LOCKED removed the
+  --                            sweep BLOCKS on that FK lock, meets the committed
+  --                            row on release, and ON CONFLICT absorbs it; remove
+  --                            BOTH and the tick dies on 23505. All three cases
+  --                            were observed at READ COMMITTED (pg_cron default).
+  --                            ⚠️ Neither clause is what makes a SEQUENTIAL
+  --                            re-run a no-op -- the zero-jobs conjunct is. Once
+  --                            a job row exists the strategy leaves the predicate,
+  --                            so a second tick never reaches the INSERT at all.
   --       The batch CTE is a plain SELECT FROM strategies with EXISTS/NOT EXISTS
   --       subqueries and one correlated scalar MAX. It must stay that way: FOR
   --       UPDATE is illegal on the nullable side of an outer join and with
@@ -714,9 +753,15 @@ BEGIN
   END IF;
 
   -- The D-19 fence. Exactly ONE arm here, so exactly one MATERIALIZED.
+  -- ⚠️ SHAPE gate, NOT a proof of the bound. Measured 2026-08-16: removing this
+  -- keyword changes neither the plan nor the result, because the CTE carries a
+  -- locking clause and Postgres does not inline a locking CTE. The bound is
+  -- proven ONLY by executing the body against LIMIT+1 real rows. Keep this gate
+  -- as shape enforcement and never let a green here be read as a bound proof --
+  -- every gate in phases 142/142.1 passed over a body whose bound did not exist.
   v_mat := (length(upper(v_command)) - length(replace(upper(v_command), 'AS MATERIALIZED', ''))) / length('AS MATERIALIZED');
   IF v_mat <> 1 THEN
-    RAISE EXCEPTION 'JOB-04/D-19 verification failed: the deployed body carries % MATERIALIZED batch CTEs, expected exactly 1. Without the fence a bare WITH is inlined (Postgres 12+), the LIMIT is re-applied per outer row and the bound does not exist -- D-19 measured 26 of 26 rows processed under a LIMIT 25.', v_mat;
+    RAISE EXCEPTION 'JOB-04/D-19 verification failed: the deployed body carries % MATERIALIZED batch CTEs, expected exactly 1. The explicit fence is what keeps the bound safe against a future edit that drops FOR UPDATE and makes the CTE inlinable -- at which point the LIMIT would be re-applied per outer row and the per-tick blast radius would silently become unbounded.', v_mat;
   END IF;
 
   -- ----- NEGATIVE anchors on the DEPLOYED body -----
