@@ -14,6 +14,7 @@ Plus a shutdown-signal test that verifies the SHUTDOWN event stops the loops.
 """
 
 import asyncio
+import inspect
 import json
 import pathlib
 import re
@@ -2690,3 +2691,161 @@ class TestReconcileSweepAlert:
         assert "mark_compute_job_failed" not in _rpc_names(mock_supabase), (
             "a Sentry transport failure was laundered into a job FAILURE."
         )
+
+
+# ---------------------------------------------------------------------------
+# JOB-04 / Phase 143 — the CROSS-LANGUAGE metadata marker contract.
+#
+# The sweep's pg_cron body stamps
+# metadata = {"source": "reconcile-sweep", "detected_at": now()} and
+# main_worker.dispatch_tick() reads those EXACT literals on claim to fire its
+# one warning-level Sentry event. Neither half can see the other. Rename the key
+# on the SQL side and the Python read silently never matches; rename it on the
+# Python side and the SQL keeps stamping a value nobody reads. In BOTH cases the
+# alert dies SILENTLY while every unit test on either side stays green — which
+# is precisely the defect class this milestone has spent two phases closing.
+# This gate is the only thing that pins the two halves to each other.
+#
+# ⚠️ POINTER HYGIENE (P-7, and the lesson _REAPER_MIGRATION_NAME above learned
+# the hard way, twice). _SWEEP_MIGRATION_NAME is a HAND-MAINTAINED pointer at a
+# file. A forward-only re-registration of this cron that leaves the pointer
+# behind makes this gate guard a body pg_cron no longer runs, while staying
+# green. RULE: every re-registration moves this constant AND
+# src/__tests__/reconcile-dropped-enqueue-sweep.test.ts's FIX_TS/FIX_FILENAME in
+# the SAME commit as the migration. That TS gate's forward-drift sweep is the
+# backstop that makes a violation visible.
+#
+# ⚠️ Deliberately NOT copied from TestReaperThresholdDriftGate: its SQL<->Python
+# equality assertion on an interval literal. There is no Python consumer of the
+# sweep's 1-hour grace window, so mirroring it into a Python constant here would
+# be a DECORATIVE drift gate — a number nothing executes, guarded against a
+# number nothing reads (143-RESEARCH "Don't Hand-Roll"). The marker literals ARE
+# read on both sides, which is what makes THIS contract load-bearing.
+# ---------------------------------------------------------------------------
+
+_SWEEP_MIGRATION_NAME = "20260816140000_reconcile_dropped_enqueue_sweep.sql"
+
+
+def _sweep_migration_path() -> pathlib.Path:
+    """Repo-root-relative path to the JOB-04 sweep migration.
+
+    ``parents[2]`` from ``analytics-service/tests/`` is the repo root, matching
+    the resolution in ``_reaper_migration_path()`` and ``test_migration_132.py``.
+    """
+    return (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "supabase"
+        / "migrations"
+        / _SWEEP_MIGRATION_NAME
+    )
+
+
+def _sweep_cron_body() -> str:
+    """The text BETWEEN the ``$cron$`` delimiters — i.e. exactly the body that
+    ``cron.schedule`` stores and pg_cron executes.
+
+    Scoping to the body is load-bearing, not tidiness: the migration's header
+    legitimately DISCUSSES the rejected grace-anchor columns at length while the
+    gates forbid them inside the body. Prose must neither satisfy nor trip a
+    mechanical gate.
+    """
+    path = _sweep_migration_path()
+    assert path.is_file(), (
+        f"the JOB-04 sweep migration is missing at {path}. If it was renamed, "
+        f"_SWEEP_MIGRATION_NAME here and FIX_TS/FIX_FILENAME in "
+        f"src/__tests__/reconcile-dropped-enqueue-sweep.test.ts must move in the "
+        f"SAME commit (P-7)."
+    )
+    src = path.read_text(encoding="utf-8")
+    match = re.search(r"\$cron\$(.*?)\$cron\$", src, flags=re.DOTALL)
+    assert match is not None, (
+        f"{_SWEEP_MIGRATION_NAME} has no $cron$...$cron$ block. The sweep body "
+        "must be an INLINE dollar-quoted literal passed to cron.schedule (no "
+        "named function => no SECURITY DEFINER surface and no caller-suppliable "
+        "grace interval). If the body moved into a function, this gate and the "
+        "phase's threat model both need revisiting."
+    )
+    body = match.group(1)
+    # ANTI-VACUITY GUARD (PATTERNS S-5), and it has already earned its keep:
+    # Phase 143 Plan 02 hit exactly this live. An earlier draft of the migration
+    # header wrote the cron dollar-tag three times in COMMENTS, so this
+    # non-greedy regex matched the PROSE pair and returned a span of comments
+    # containing no INSERT at all — under which every assertion below would have
+    # passed by default. An empty or wrong extraction must fail LOUDLY, never
+    # pass negatives silently.
+    assert "INSERT INTO public.compute_jobs" in body, (
+        "extracted $cron$ body does not contain the healing INSERT — the "
+        f"extraction is broken, so the assertions below prove nothing. Body was: "
+        f"{body[:200]!r}"
+    )
+    return body
+
+
+class TestReconcileSweepMarkerContract:
+    """JOB-04 / D-11. The metadata marker the pg_cron sweep STAMPS must equal the
+    marker main_worker.dispatch_tick() READS. Drift on either side silently kills
+    the SC#1 alert while both halves' own tests stay green — the SQL side keeps
+    stamping, the Python side keeps not matching, and nothing is ever reported."""
+
+    def test_cron_body_marker_matches_worker_literal(self) -> None:
+        """The three marker literals appear on BOTH sides of the contract.
+
+        Oracle independence: every literal below is declared LOCALLY in this
+        test, naming its two production sources. Nothing is imported from either
+        half — a gate that reads its expectation out of one of the artifacts it
+        compares cannot fail when that artifact drifts.
+        """
+        # Production sources:
+        #   SQL    — supabase/migrations/20260816140000_...sql, the cron body's
+        #            jsonb_build_object('source', 'reconcile-sweep', 'detected_at', now())
+        #   Python — analytics-service/main_worker.py, dispatch_tick()'s claim loop
+        marker_value = "reconcile-sweep"
+        marker_keys = ("source", "detected_at")
+
+        # ----- SQL half -------------------------------------------------
+        body = _sweep_cron_body()
+        assert "jsonb_build_object" in body, (
+            "the deployed sweep body does not build its metadata with "
+            "jsonb_build_object, so there is no marker for the worker to read "
+            "and a healed strategy is healed SILENTLY."
+        )
+        assert f"'{marker_value}'" in body, (
+            f"the sweep body does not stamp the {marker_value!r} marker VALUE. "
+            "main_worker.dispatch_tick() compares metadata['source'] against "
+            "that exact string, so without it the Sentry alert never fires and "
+            "SC#1's alert half is false in production while every unit test on "
+            "both sides stays green."
+        )
+        for key in marker_keys:
+            assert f"'{key}'" in body, (
+                f"the sweep body does not stamp the {key!r} metadata KEY. Both "
+                "keys are part of the cross-language contract; dropping "
+                "'source' kills the alert outright, dropping 'detected_at' "
+                "leaves the operator unable to tell a fresh drop from a "
+                "month-old one."
+            )
+
+        # ----- Python half ----------------------------------------------
+        # Scoped to dispatch_tick, not to the whole module: 'source' is a common
+        # token and a whole-file grep could be satisfied by an unrelated line.
+        worker_src = inspect.getsource(main_worker.dispatch_tick)
+        assert worker_src.strip(), (
+            "inspect.getsource(main_worker.dispatch_tick) returned nothing, so "
+            "the Python half of this contract was never actually inspected."
+        )
+        assert f'"{marker_value}"' in worker_src, (
+            f"main_worker.dispatch_tick() no longer compares against "
+            f"{marker_value!r}. The SQL body still stamps it, so the sweep goes "
+            "on healing dropped enqueues and NOTHING is ever reported — the "
+            "silent-alert failure this contract exists to prevent. If the marker "
+            "value legitimately changed, the migration and this test move in the "
+            "SAME commit."
+        )
+        for key in marker_keys:
+            assert f'.get("{key}")' in worker_src, (
+                f"main_worker.dispatch_tick() no longer reads the {key!r} key "
+                "off the claimed job's metadata. If the emission moved out of "
+                "dispatch_tick, move this gate with it — an unmoved gate goes on "
+                "inspecting a function that no longer carries the read, and "
+                "stays green while the alert is dead."
+            )
