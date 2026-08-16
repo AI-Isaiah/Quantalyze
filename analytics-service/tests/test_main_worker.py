@@ -2833,13 +2833,25 @@ class TestReconcileSweepMarkerContract:
             "inspect.getsource(main_worker.dispatch_tick) returned nothing, so "
             "the Python half of this contract was never actually inspected."
         )
-        assert f'"{marker_value}"' in worker_src, (
-            f"main_worker.dispatch_tick() no longer compares against "
-            f"{marker_value!r}. The SQL body still stamps it, so the sweep goes "
-            "on healing dropped enqueues and NOTHING is ever reported — the "
-            "silent-alert failure this contract exists to prevent. If the marker "
-            "value legitimately changed, the migration and this test move in the "
-            "SAME commit."
+        # ⚠️ Pin the COMPARISON, not the bare literal. A plain
+        # `f'"{marker_value}"' in worker_src` check was written here first and
+        # OBSERVED NOT TO FAIL when the comparison's literal was changed to
+        # 'reconcile_sweep': the emission also passes the same string as a Sentry
+        # TAG (`scope.set_tag("surface", "reconcile-sweep")`), which satisfied the
+        # bare-literal form all by itself. The tag is cosmetic; the comparison is
+        # what decides whether an event is emitted at all. Pinning the operator
+        # with it is the difference between a gate that can fail and one that
+        # cannot — see this repo's standing rule.
+        assert f'== "{marker_value}"' in worker_src, (
+            f"main_worker.dispatch_tick() no longer COMPARES the claimed job's "
+            f"metadata against {marker_value!r}. The SQL body still stamps that "
+            "value, so the sweep goes on healing dropped enqueues and NOTHING is "
+            "ever reported — the silent-alert failure this contract exists to "
+            "prevent. Note this assertion deliberately pins the comparison and "
+            "not the bare literal, because the same string also appears as a "
+            "Sentry tag and would satisfy a looser check. If the marker value "
+            "legitimately changed, the migration and this test move in the SAME "
+            "commit."
         )
         for key in marker_keys:
             assert f'.get("{key}")' in worker_src, (
