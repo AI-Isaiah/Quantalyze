@@ -92,7 +92,7 @@ accident of sequencing.** Nothing here can be delivered by an agent. The milesto
 **Success Criteria** (what must be TRUE):
 
   1. A strategy with persisted daily-returns data but NO `compute_jobs` row of ANY status and no terminal `strategy_analytics` row, past a grace window, is re-enqueued by a pg_cron sweep and a Sentry alert fires — the hole the in-closure `writeFailedStrategyAnalyticsPlaceholder` guard structurally cannot catch.
-  2. Running the sweep twice in a row produces no duplicate job (re-enqueue is idempotent via the existing partial unique index).
+  2. Running the sweep twice in a row produces no duplicate job. ⚠️ MECHANISM CORRECTED 2026-08-16 (Phase 143-02, falsified by an observed neuter): the operative guard is the sweep's `FOR UPDATE SKIP LOCKED` — an INSERT into `compute_jobs` key-share-locks its parent `strategies` row — NOT the partial unique index. Sequential double-execution cannot conflict at all, because tick 1's INSERT removes the strategy from the zero-jobs conjunct. The index only redeems a genuine READ COMMITTED race with `SKIP LOCKED` also removed. Corollary: a gate that runs the body twice in one session CANNOT FAIL and must not be written.
   3. A strategy inside the grace window, or with any existing job row, or with a terminal analytics row, is never touched by the sweep.
 
 **Plans:** 2/4 plans executed
