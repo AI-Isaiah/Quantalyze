@@ -5,8 +5,8 @@ milestone_name: JOB/RATE — job-lifecycle reliability and the rate limits that 
 current_phase: 153.7
 current_phase_name: ✅ **COMPLETE 2026-08-14**, branch `feat/phase-153.7-wizform-02-class`
 status: ready_to_plan
-stopped_at: Completed 143-02-PLAN.md (migration AUTHORED ONLY — not applied to TEST or PROD; Plan 04 owns application)
-last_updated: "2026-08-16T21:26:38.960Z"
+stopped_at: Completed 143-03-PLAN.md (three CI gates + 12 observed neuters; migration still UNAPPLIED — Plan 04 owns TEST apply and the live tick)
+last_updated: "2026-08-16T22:03:53.816Z"
 last_activity: 2026-08-14
 last_activity_desc: Phase 153.7 plan 03 executed — PHASE COMPLETE (ledger 3 → 0 with the 32 total untouched, twin regressions neuter-proven on both key routes, prose re-cuts, two TODOS.md deferrals, WIZFORM-02 ticked)
 progress:
@@ -575,6 +575,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 143 P02 | ~95 min | 3 tasks | 3 created files |
+| Phase 143 P03 | 26min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -684,6 +685,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase ?]: 143-02 (MEASURED): FOR UPDATE SKIP LOCKED is the FIRST line of race defense, not just a bound helper — an INSERT into compute_jobs takes an FK KEY SHARE lock on its parent strategies row, which conflicts with the batch's FOR UPDATE, so the sweep skips a strategy the live enqueue path is mid-insert on. Removing BOTH it and ON CONFLICT is the only combination that yields 23505 at READ COMMITTED.
 - [Phase ?]: 143-02 (MEASURED): AS MATERIALIZED does not create the bound in this shape — EXPLAIN is byte-identical with and without it because Postgres does not inline a CTE carrying a locking clause, and the 26-row arm still heals 25. Keyword and gate RETAINED as shape enforcement against a future edit dropping FOR UPDATE; the bound is proven ONLY by executing the body against LIMIT+1 rows.
 - [Phase ?]: 143-02 census (read-only PostgREST, Supabase MCP unavailable): 0 candidates on TEST and PROD, both STOP rules clear. D-03 confirmed EMPIRICALLY — on PROD 4 of 4 zero-job strategies-with-dailies are excluded SOLELY by the terminal-analytics conjunct, so weakening it is a 4-row mass re-enqueue today. L-2 (cron role BYPASSRLS) is UNOBTAINABLE over PostgREST (HTTP 404 measured) and stays with Plan 04.
+- [Phase 143]: 143-03: Part 3 of the SQL gate is LABELLED a double-mutation observable, not an ON CONFLICT proof — 143-02 measured that a two-tick single-session gate cannot fail; both single neuters were run to confirm the labelling
+- [Phase 143]: 143-03: the plan's neuters (6) MATERIALIZED and (7) bare-INSERT are FALSE — executed, GREEN in isolation, substitutes N6b (23505) and N7b (LIMIT removed) added and observed RED; N7b is the only real bound proof
+- [Phase 143]: 143-03: a SQL gate's Part-1 text anchors MASK its behavioural arms under ON_ERROR_STOP=1 — neuter runs must isolate the part under observation or six of eight REDs prove nothing about the arms
+- [Phase 143]: 143-03: the neuter campaign found a real vacuity in this plan's own marker-contract gate (a Sentry TAG satisfied a bare-literal check); fixed to pin the comparison operator, re-observed RED (f62c3866)
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1386,8 +1391,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-16T21:26:38.928Z
-**Stopped At:** Completed 143-02-PLAN.md (migration AUTHORED ONLY — not applied to TEST or PROD; Plan 04 owns application)
+**Last Date:** 2026-08-16T22:03:53.784Z
+**Stopped At:** Completed 143-03-PLAN.md (three CI gates + 12 observed neuters; migration still UNAPPLIED — Plan 04 owns TEST apply and the live tick)
 **Resume File:** None
 **Next step:** Phase 153.6 (PARITY) is booked and NOT yet planned — run `/gsd:plan-phase 153.6`. It carries 9 findings from the `/code-review xhigh` over the whole 153→153.5 span. ⛔ Three of its four root causes are ONE-PATH-ONLY fixes (a correct remedy applied to `routers/exchange.py` while its twin in `services/ingestion/mt5.py` went untouched, with no guard asserting the two agree) — close them as a CLASS, not as N patches. ⭐ The venue-lock bypass (D) is LIVE on PROD (the migration is on `main`, and `supabase/migrations/**` auto-applies on merge) but is a SELF-targeted control bypass, not a tenant leak. ⛔ The budget correction (C) has two halves — the number AND the oracle that pins the wrong column and so cannot red on it. Phases 154 and 155 remain unplanned; 155 is human- and calendar-gated (founder at the MT5 terminal, live funded account, on a trading day).
 
