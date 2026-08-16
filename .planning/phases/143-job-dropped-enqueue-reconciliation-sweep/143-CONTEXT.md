@@ -105,7 +105,17 @@ atomicity (Phase 145); the wizard first-hop drop (see Detection Predicate Q4).
   already applied to 142's reaper. Do not re-derive; reuse that file's shape.
 
 - **Re-enqueued kind = `compute_analytics_from_csv`**, correct for every source because the
-  handler reads `csv_daily_returns`, which the predicate already proved is populated.
+  handler reads `csv_daily_returns`, which the predicate already proved is populated —
+  **except composites, which must be EXCLUDED.** (Added 2026-08-16 from `143-RESEARCH.md`; this
+  is a live false-positive population, not a hypothetical.) `run_stitch_composite_job` writes
+  `csv_daily_returns` (`job_worker.py:6786-6803`) but `JOB_CHAIN_FOLLOW_ON["stitch_composite"]`
+  is `()` (`job_worker.py:527`), so a composite legitimately NEVER gets a
+  `compute_analytics_from_csv` job. Enqueuing one would overwrite the composite headline with
+  the single-key computation its own handler deliberately abandoned — the √252-vs-√365
+  annualization split plus a 0.0 gap-fill that "fabricated flat performance"
+  (`job_worker.py:6808-6822`). That is silent money-math corruption of a correct row, strictly
+  worse than the un-healed hole this phase exists to close. Exclude composites in the predicate
+  and record the non-coverage in the migration header and the SUMMARY.
 
 - **Idempotency (SC#2) rides the EXISTING partial unique index** —
   `compute_jobs_one_inflight_per_kind_strategy` on `(strategy_id, kind) WHERE strategy_id IS NOT
@@ -118,9 +128,24 @@ atomicity (Phase 145); the wizard first-hop drop (see Detection Predicate Q4).
 
 - **Sentry fires worker-side on claim, not from cron.** The sweep stamps
   `metadata = {source: 'reconcile-sweep', detected_at: <ts>}`; the Python worker emits a Sentry
-  event when it claims a job carrying that marker. This is a *real* Sentry event through wiring
-  that already exists in `analytics-service`, with no new infra and no DSN secret in a
-  world-readable migration. It makes SC#1 true as written.
+  event when it claims a job carrying that marker. Real Sentry event, no new infra, no DSN
+  secret in a world-readable migration. It makes SC#1 true as written.
+
+- **⛔ CORRECTION (2026-08-16, from `143-RESEARCH.md` — supersedes this decision's original
+  premise): the worker has NO Sentry wiring to hook into.** This decision was accepted on the
+  stated premise that `analytics-service` already had live Sentry the alert could reuse. Research
+  falsified that: `analytics-service/main_worker.py` is a standalone process whose `main()`
+  contains zero Sentry references, and `services/job_worker.py` mentions Sentry only in two
+  comments. **`sentry_sdk.capture_*` without a prior `init_sentry()` is a silent no-op** — which
+  would make this alert path fail exactly the way the rejected `pg_net` bridge would have, and
+  for the same reason it was rejected. The decision STANDS (it is still the cheapest correct
+  option), but it now carries a mandatory prerequisite task:
+  - **Wire `init_sentry()` into `main_worker.py::main()`** before any capture call is added, and
+  - **verify `SENTRY_DSN` is actually set on the worker's Railway service** (UNVERIFIED at
+    research time — a DSN present on the web app does not imply one on the worker).
+  - The test that the capture fires is NOT sufficient: it mocks the SDK, so it stays green with
+    `init_sentry()` removed. A separate assertion that `main()` calls `init_sentry()` is
+    load-bearing, not decorative.
   - Honest limitation to document: alert latency is sweep → next worker claim, and a fully-down
     worker means no alert. A down worker is independently alarmed, so this adds no new blind
     spot — but write that down rather than letting the reader assume instant paging.
@@ -220,6 +245,9 @@ atomicity (Phase 145); the wizard first-hop drop (see Detection Predicate Q4).
 <deferred>
 ## Deferred Ideas
 
+- **Composite strategies stranded without analytics.** Excluded from this sweep because the
+  healing action (`compute_analytics_from_csv`) is actively wrong for them; a composite needs
+  `stitch_composite` re-run, which is a different mechanism with a different predicate. → TODOS.md.
 - **Wizard/API first-hop enqueue drop** (`finalize-wizard` → `sync_trades` never enqueued;
   strategy has no dailies and no jobs). Needs its own signal and its own false-positive
   analysis. → TODOS.md.
