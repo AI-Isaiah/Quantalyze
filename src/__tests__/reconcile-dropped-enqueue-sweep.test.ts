@@ -5,9 +5,10 @@ import { describe, it, expect } from "vitest";
 // JOB-04 / Phase 143 — migration-content gate for the dropped-enqueue
 // reconciliation sweep (supabase/migrations/20260816140000_...).
 //
-// THE HOLE THIS GUARDS. POST /api/strategies/csv-finalize runs
-// finalize_csv_strategy and persist_csv_daily_returns SYNCHRONOUSLY in the
-// request and commits them, then schedules the compute_analytics_from_csv
+// THE HOLE THIS GUARDS. POST /api/strategies/csv-finalize runs the finalize
+// write SYNCHRONOUSLY in the request and commits it (since Phase 145 as ONE
+// folded finalize_csv_strategy_with_returns transaction; previously as the
+// finalize + persist RPC pair), then schedules the compute_analytics_from_csv
 // enqueue via after() (route.ts:813). If the serverless instance is torn down
 // before that callback runs, the enqueue never happens: the strategy is left
 // with persisted dailies, ZERO compute_jobs rows and NO strategy_analytics row,

@@ -2161,32 +2161,26 @@ def test_teaser_persists_no_series_row(client):
     )
 
 
-def test_process_key_csv_finalize_calls_finalize_csv_strategy_rpc(client):
-    """API-3 regression: flow_type='csv', step='finalize' lands here without
-    a strategy_id (the strategies row hasn't been created yet). Pre-fix this
-    returned 422 MISSING_STRATEGY_ID; post-fix it delegates to
-    finalize_csv_strategy RPC which atomically creates the strategies +
-    strategy_verifications rows.
+def test_process_key_csv_finalize_branch_is_dead_answers_422(client):
+    """Phase 145 (D-06 option i-b, obligation 2) — THE BRANCH IS DELETED.
+
+    The csv-finalize branch (API-3 / Phase 19.1 token forwarding / the
+    SEAMRIM-03 23505 resolve arm) was removed from this router: the Next.js
+    route now calls the folded SECURITY DEFINER
+    finalize_csv_strategy_with_returns RPC directly on its SSR user-scoped
+    client (migration 20260819120000; 145-DECISION.md). Leaving the branch
+    live would be a SECOND WRITER to strategies/csv_daily_returns — the
+    drift bomb the decision names.
+
+    This pin is the deletion's regression test: a flow_type='csv'
+    step='finalize' request — even one carrying a valid
+    X-User-Access-Token — must fall through to the API-6 422
+    MISSING_STRATEGY_ID refusal and must not write anything. If someone
+    re-adds a finalize arm here, this test goes RED before the second
+    writer ships.
     """
     fake = _build_supabase_mock(existing_row=None)
-    new_sid = "11111111-1111-1111-1111-111111111111"
-    # Phase 19.1 (2026-05-27): finalize_csv_strategy is SECURITY DEFINER and
-    # enforces auth.uid() = p_user_id, so it runs on a USER-scoped client built
-    # from the forwarded X-User-Access-Token — never the service-role client.
-    finalize_call = MagicMock()
-    finalize_call.execute.return_value = MagicMock(data=new_sid)
-    user_sb = MagicMock()
-    user_sb.rpc.return_value = finalize_call
-    # Benign default for any incidental service-role rpc (audit etc.).
-    fake.rpc.return_value = MagicMock(execute=MagicMock(return_value=MagicMock(data={})))
-
-    with patch(
-        "routers.process_key.get_supabase",
-        return_value=fake,
-    ), patch(
-        "routers.process_key.get_user_scoped_supabase",
-        return_value=user_sb,
-    ) as mock_user_client:
+    with patch("routers.process_key.get_supabase", return_value=fake):
         r = client.post(
             "/process-key",
             json={
@@ -2203,67 +2197,30 @@ def test_process_key_csv_finalize_calls_finalize_csv_strategy_rpc(client):
             headers={**_auth_headers(), "X-User-Access-Token": "user-jwt-abc"},
         )
 
-    assert r.status_code == 200, r.text
+    assert r.status_code == 422, (
+        "the deleted csv-finalize branch answered something other than the "
+        f"API-6 422 refusal — a second writer may have been re-added: {r.text}"
+    )
     body = r.json()
-    assert body["ok"] is True
-    assert body["strategy_id"] == new_sid
-    assert body["status"] == "pending_review"
-    assert body["step"] == "finalize"
-
-    # The user-scoped client was built from the forwarded token...
-    mock_user_client.assert_called_once_with("user-jwt-abc")
-    # ...and finalize_csv_strategy ran on THAT client (the auth.uid() path).
-    user_finalize = [
-        c for c in user_sb.rpc.call_args_list
-        if c.args and c.args[0] == "finalize_csv_strategy"
+    assert body.get("code") == "MISSING_STRATEGY_ID", body
+    # No finalize RPC of any name ran on the service-role client.
+    finalize_calls = [
+        c
+        for c in fake.rpc.call_args_list
+        if c.args and "finalize" in str(c.args[0])
     ]
-    assert len(user_finalize) == 1, "finalize_csv_strategy must run on the user-scoped client"
-    payload = user_finalize[0].args[1]
-    assert payload["p_user_id"] == "33333333-3333-3333-3333-333333333333"
-    assert payload["p_wizard_session_id"] == "22222222-2222-2222-2222-222222222222"
-    assert payload["p_fmt"] == "trades"
-    assert payload["p_strategy_name"] == "Test Strategy"
-    # The service-role client must NOT be used for the user-auth finalize RPC.
-    svc_finalize = [
-        c for c in fake.rpc.call_args_list
-        if c.args and c.args[0] == "finalize_csv_strategy"
-    ]
-    assert svc_finalize == [], "finalize_csv_strategy must NOT use the service-role client"
+    assert finalize_calls == [], (
+        f"the router dispatched a finalize RPC on the csv step='finalize' "
+        f"path after the Phase 145 deletion: {finalize_calls!r}"
+    )
+    # The user-scoped client wiring is GONE from this router, not just gated:
+    # the import itself was removed with the branch (D-06 obligation 2).
+    import routers.process_key as process_key_module
 
-
-def test_process_key_csv_finalize_without_user_token_returns_401(client):
-    """Phase 19.1 (2026-05-27) guard: finalize_csv_strategy is user-auth
-    (auth.uid() = p_user_id). If the Next.js route forwards no
-    X-User-Access-Token, fail with a clean 401 rather than letting the upstream
-    RPC raise 42501 'called without an auth session'. We must not even attempt
-    to build a user client or run the RPC unauthenticated.
-    """
-    fake = _build_supabase_mock(existing_row=None)
-    with patch(
-        "routers.process_key.get_supabase",
-        return_value=fake,
-    ), patch(
-        "routers.process_key.get_user_scoped_supabase",
-    ) as mock_user_client:
-        r = client.post(
-            "/process-key",
-            json={
-                "flow_type": "csv",
-                "source": "csv",
-                "context": {
-                    "wizard_session_id": "22222222-2222-2222-2222-222222222222",
-                    "user_id": "33333333-3333-3333-3333-333333333333",
-                    "fmt": "trades",
-                    "strategy_name": "Test Strategy",
-                    "step": "finalize",
-                },
-            },
-            headers=_auth_headers(),  # no X-User-Access-Token
-        )
-
-    assert r.status_code == 401, r.text
-    assert r.json().get("code") == "CSV_FINALIZE_FAILED"
-    mock_user_client.assert_not_called()
+    assert not hasattr(process_key_module, "get_user_scoped_supabase"), (
+        "routers.process_key re-imported get_user_scoped_supabase — the "
+        "deleted csv-finalize branch (or a second writer) may be back"
+    )
 
 
 def test_process_key_audit_uses_wizard_session_id_when_no_strategy_id(client):
@@ -3886,380 +3843,21 @@ def test_pyapi_09_race_winner_duplicate_carries_job_state(client):
     assert len(sb.rpc_named("enqueue_compute_job")) == 1
 
 
-def test_pyapi_09c_csv_finalize_does_not_hit_the_precheck_shortcircuit(client):
-    """PYAPI-09c (control flow) — C-20's dead end is closed.
-
-    csv-finalize posts NO strategy_id (the strategies row does not exist yet).
-    The pre-check used to run above that branch, so once finalize_csv_strategy
-    had written an SV row carrying the session id, every later call for the
-    session short-circuited into WIZARD_DUPLICATE and the finalize branch became
-    unreachable — a plain double-submit, no timeout required.
-
-    This is the DURABLE proof that the pre-check moved: the SV row below WOULD
-    short-circuit if the pre-check still ran first.
-
-    ⚠️ RENAMED in Phase 140.4 / SEAMRIM-03 (TRAP-9). It was
-    `test_pyapi_09c_csv_finalize_double_submit_reaches_finalize_branch`, and that
-    name over-claimed: `user_sb.rpc` below is a MagicMock returning a fresh id
-    UNCONDITIONALLY, so this test says NOTHING about whether the database dedups
-    a double submit — it pinned review finding C-2 GREEN for exactly that reason.
-    What it really proves is a CONTROL-FLOW property: the request reaches the
-    finalize branch instead of the moved-away WIZARD_DUPLICATE pre-check. That
-    property is still true and still worth pinning, so the assertions below are
-    UNCHANGED; only the name and this docstring moved to match them.
-
-    The dedup guarantee lives in the DB
-    (supabase/tests/test_csv_finalize_double_submit.sql, the
-    (user_id, wizard_session_id, source) partial unique index) and its route-level
-    answer is pinned by
-    `test_seamrim03_csv_finalize_23505_answers_200_with_existing_strategy` below.
-
-    It doubles as the ANTI-REGRESSION case for that work: a FIRST CSV submit is
-    unchanged — 200, step="finalize", ok=True, and no `code` key.
-    """
-    new_sid = "44444444-eeee-4eee-8eee-000000000004"
-    sb = _RecordingSupabase(
-        responses={
-            ("strategy_verifications", "select"): [
-                {
-                    "id": "ver-from-finalize",
-                    "status": "published",
-                    "trust_tier": "csv_uploaded",
-                }
-            ],
-        }
-    )
-    user_sb = MagicMock()
-    user_sb.rpc.return_value = MagicMock(
-        execute=MagicMock(return_value=MagicMock(data=new_sid))
-    )
-
-    with patch("routers.process_key.get_supabase", return_value=sb), patch(
-        "routers.process_key.get_user_scoped_supabase", return_value=user_sb
-    ):
-        r = client.post(
-            "/process-key",
-            json={
-                "flow_type": "csv",
-                "source": "csv",
-                "context": {
-                    "wizard_session_id": _SESSION_ID,
-                    "user_id": _OWNER_ID,
-                    "fmt": "trades",
-                    "strategy_name": "Test Strategy",
-                    "step": "finalize",
-                },
-            },
-            headers={**_auth_headers(), "X-User-Access-Token": "user-jwt-abc"},
-        )
-
-    assert r.status_code == 200, r.text
-    payload = r.json()
-    assert payload["step"] == "finalize", (
-        "the second submit must reach the csv-finalize branch, not the "
-        "duplicate short-circuit"
-    )
-    assert payload["ok"] is True
-    assert payload["strategy_id"] == "44444444-eeee-4eee-8eee-000000000004"
-    assert "code" not in payload
-    assert sb.selects("strategy_verifications") == [], (
-        "a strategy_id-less flow writes no SV row, so it must not consult one"
-    )
-
-
 # ==========================================================================
-# Phase 140.4 / SEAMRIM-03 — the 23505 arm on the CSV finalize path.
-#
-# Migration 20260728120000 makes a CSV double-submit raise 23505 instead of
-# silently minting a second strategy (review finding C-2). Two consequences the
-# route must absorb, or the fix trades one defect for two:
-#   1. the duplicate submit is the one the product's own copy INSTRUCTS
-#      (CSV_SUBMIT_NO_STRATEGY_ID: "Submit again."), so it must answer 200 with
-#      the EXISTING strategy id, not become a 422 dead end;
-#   2. `duplicate key value violates unique constraint "..."` must not be
-#      painted into a user-facing message — that would be a second live member
-#      of C-1's surviving class (raw internal prose into the browser), created
-#      by this very fix.
+# Phase 140.4 / SEAMRIM-03 → Phase 145: the csv-finalize 23505 arm LEFT this
+# router. The block that lived here (test_pyapi_09c control-flow pin,
+# _csv_finalize_dup_key_error/_csv_finalize_post helpers, and the six
+# SEAMRIM-03/CR-01 arm tests) exercised the deleted csv-finalize branch and
+# was retired with it (D-06 obligation 2). The guarantees moved, not died:
+#   · the double-submit 23505 + all-or-nothing rollback → the fold itself
+#     (supabase/tests/test_csv_finalize_double_submit.sql, CI);
+#   · the 23505 resolve arm + CR-01 name/range identity checks + the
+#     no-PG-text-leak discipline → csv-finalize/route.ts
+#     (resolveExistingStrategyOrRefuse), pinned by
+#     src/__tests__/csv-finalize-cross-submission-merge.test.ts;
+#   · "this router never finalizes CSV again" →
+#     test_process_key_csv_finalize_branch_is_dead_answers_422 above.
 # ==========================================================================
-
-_EXISTING_CSV_STRATEGY_ID = "55555555-ffff-4fff-8fff-000000000005"
-
-
-def _csv_finalize_dup_key_error() -> Exception:
-    """The shape supabase-py surfaces when the CSV finalize trips the fence.
-
-    Hand-built rather than imported from the route: the route's detection
-    predicate is what is under test, so the error text must be an INDEPENDENT
-    statement of what Postgres actually emits, not a re-export of whatever the
-    route happens to look for.
-    """
-    from postgrest.exceptions import APIError
-
-    return APIError(
-        {
-            "code": "23505",
-            "message": (
-                "duplicate key value violates unique constraint "
-                '"strategies_user_wizard_session_source_uniq"'
-            ),
-            "details": None,
-            "hint": None,
-        }
-    )
-
-
-def _csv_finalize_post(client, sb, user_sb):
-    """Drive one POST /process-key csv-finalize with the two clients patched in."""
-    with patch("routers.process_key.get_supabase", return_value=sb), patch(
-        "routers.process_key.get_user_scoped_supabase", return_value=user_sb
-    ):
-        return client.post(
-            "/process-key",
-            json={
-                "flow_type": "csv",
-                "source": "csv",
-                "context": {
-                    "wizard_session_id": _SESSION_ID,
-                    "user_id": _OWNER_ID,
-                    "fmt": "trades",
-                    "strategy_name": "Test Strategy",
-                    "step": "finalize",
-                },
-            },
-            headers={**_auth_headers(), "X-User-Access-Token": "user-jwt-abc"},
-        )
-
-
-def test_seamrim03_csv_finalize_23505_answers_200_with_existing_strategy(client):
-    """SEAMRIM-03 — the INSTRUCTED retry is idempotent, and leaks no PG text.
-
-    This is the sibling `test_pyapi_09c_...` could never be: its RPC returns a
-    fresh id unconditionally, so it cannot express "the database refused". Here
-    the RPC raises the real 23505 and the route must resolve it to the row that
-    already exists.
-    """
-    sb = _RecordingSupabase()
-    user_sb = _RecordingSupabase(
-        rpc_responses={"finalize_csv_strategy": [_csv_finalize_dup_key_error()]},
-        responses={
-            # CR-01: `name` is part of the real row shape now that the arm reads
-            # it to establish its precondition. Carrying the SAME name the post
-            # sends keeps this case on the true-repeat path it has always
-            # tested, instead of passing through a null-name bypass.
-            ("strategies", "select"): [
-                {
-                    "id": _EXISTING_CSV_STRATEGY_ID,
-                    "status": "pending_review",
-                    "name": "Test Strategy",
-                }
-            ]
-        },
-    )
-
-    r = _csv_finalize_post(client, sb, user_sb)
-
-    assert r.status_code == 200, r.text
-    payload = r.json()
-    assert payload["ok"] is True
-    assert payload["strategy_id"] == _EXISTING_CSV_STRATEGY_ID, (
-        "the duplicate submit must resolve to the strategy that already exists, "
-        "not mint a new one and not dead-end at 422"
-    )
-    assert payload["step"] == "finalize"
-    assert payload["status"] == "pending_review"
-    assert payload["correlation_id"]
-
-    # The ABSENCE half — a 200 alone would pass even if the envelope carried the
-    # raw constraint text somewhere. Assert against the SERIALIZED body so no
-    # nested field can smuggle it through.
-    body = r.text.lower()
-    for leak in ("duplicate key", "unique constraint", "23505", "strategies_user_wizard"):
-        assert leak not in body, f"raw Postgres text {leak!r} reached the response body"
-
-
-def test_seamrim03_csv_finalize_23505_refetch_is_tenant_and_source_scoped(client):
-    """SEAMRIM-03 / C-08 — the re-fetch must carry the SAME scope as the index.
-
-    Filtering on wizard_session_id alone would re-fetch, and echo, another
-    strategy's row — the C-08 lesson, stated at the race-winner arm in this same
-    router. `source` is in the filter for the same reason it is in the index: an
-    abandoned source='wizard' draft can hold the very same session id.
-    """
-    sb = _RecordingSupabase()
-    user_sb = _RecordingSupabase(
-        rpc_responses={"finalize_csv_strategy": [_csv_finalize_dup_key_error()]},
-        responses={
-            ("strategies", "select"): [
-                {"id": _EXISTING_CSV_STRATEGY_ID, "status": "pending_review"}
-            ]
-        },
-    )
-
-    r = _csv_finalize_post(client, sb, user_sb)
-    assert r.status_code == 200, r.text
-
-    selects = user_sb.selects("strategies")
-    assert len(selects) == 1, (
-        f"expected exactly one strategies re-fetch on the 23505 arm, got {len(selects)}"
-    )
-    assert selects[0].filters == {
-        "user_id": _OWNER_ID,
-        "wizard_session_id": _SESSION_ID,
-        "source": "csv",
-    }, (
-        "the 23505 re-fetch must be scoped by user_id AND wizard_session_id AND "
-        f"source, got {selects[0].filters}"
-    )
-
-    # It must run on the USER-scoped client, so RLS is a second fence under the
-    # explicit filters rather than a service-role read trusting body.user_id.
-    assert sb.selects("strategies") == [], (
-        "the re-fetch must not run on the service-role client"
-    )
-
-
-def test_cr01_csv_finalize_23505_refuses_a_DIFFERENT_submission(client):
-    """CR-01 — the fence must establish its precondition before asserting it.
-
-    ⚠️ THE DEFECT THIS PINS, IN ONE SENTENCE: the 23505 arm resolved the row by
-    (user_id, wizard_session_id, source) and echoed its id at 200 **without ever
-    comparing the request to the row it found**. `wizard_session_id` identifies a
-    SESSION, not a SUBMISSION, and `clearWizardState` fires only on
-    success/delete-draft/start-fresh (`localStorage.ts:390-393`, stated there as
-    load-bearing) — so a user whose first submit failed can rename, upload a
-    DIFFERENT file, and resubmit under the SAME session id.
-
-    Pre-fix the route answered `{ok: true, strategy_id: S}` and the Next.js route
-    then applied THIS request's metadata and returns to THAT strategy. Result: a
-    strategy named after file A, carrying A ∪ B returns, reported as success.
-    On a product whose value is a trustworthy verified track record that is a
-    fabricated series presented as verified.
-
-    The fence is for a REPEAT — the retry `CSV_SUBMIT_FAILED` instructs. A
-    changed submission is not a repeat and must not be resolved to the old row.
-    """
-    sb = _RecordingSupabase()
-    user_sb = _RecordingSupabase(
-        rpc_responses={"finalize_csv_strategy": [_csv_finalize_dup_key_error()]},
-        responses={
-            # The row that already exists carries the FIRST submission's name.
-            # `_csv_finalize_post` sends "Test Strategy" — a different one.
-            ("strategies", "select"): [
-                {
-                    "id": _EXISTING_CSV_STRATEGY_ID,
-                    "status": "pending_review",
-                    "name": "Alpha 2024",
-                }
-            ]
-        },
-    )
-
-    r = _csv_finalize_post(client, sb, user_sb)
-
-    assert r.status_code != 200, (
-        "a DIFFERENT submission wearing a reused session id was resolved to the "
-        "existing strategy. The caller will now apply this request's payload to "
-        "that row — a cross-submission merge, reported as success."
-    )
-    payload = r.json()
-    assert payload["ok"] is False
-    assert payload["code"] == "CSV_SESSION_REUSED", payload
-    # The id must NOT be echoed: handing it back is what lets a caller write to it.
-    assert not payload.get("strategy_id"), (
-        "the existing strategy id was echoed on a refusal — the caller can still "
-        "target it, so the refusal only moves the merge one call downstream"
-    )
-    # Same absence half every sibling case asserts.
-    body = r.text.lower()
-    for leak in ("duplicate key", "unique constraint", "23505", "strategies_user_wizard"):
-        assert leak not in body, f"raw Postgres text {leak!r} reached the response body"
-
-
-def test_cr01_csv_finalize_23505_still_resolves_a_TRUE_repeat(client):
-    """CR-01, the POSITIVE counterpart — a refuse-everything arm would be worse.
-
-    Without this, the guard above is satisfied by an arm that dead-ends EVERY
-    duplicate, which re-opens the exact defect SEAMRIM-03 closed: the retry the
-    product's own copy instructs becomes a 422 the user cannot escape.
-    """
-    sb = _RecordingSupabase()
-    user_sb = _RecordingSupabase(
-        rpc_responses={"finalize_csv_strategy": [_csv_finalize_dup_key_error()]},
-        responses={
-            ("strategies", "select"): [
-                {
-                    "id": _EXISTING_CSV_STRATEGY_ID,
-                    "status": "pending_review",
-                    # Byte-identical to what `_csv_finalize_post` sends.
-                    "name": "Test Strategy",
-                }
-            ]
-        },
-    )
-
-    r = _csv_finalize_post(client, sb, user_sb)
-
-    assert r.status_code == 200, r.text
-    assert r.json()["strategy_id"] == _EXISTING_CSV_STRATEGY_ID
-
-
-def test_seamrim03_csv_finalize_23505_refetch_miss_does_not_fabricate_success(client):
-    """SEAMRIM-03 — a TOCTOU delete / RLS hide must NOT become a fake 200.
-
-    `.maybe_single()` returns no row. The route must not None-deref, must not
-    answer a cryptic 500, and above all must not report success for a strategy it
-    could not find. It falls through to the residual arm's static 422.
-    """
-    sb = _RecordingSupabase()
-    user_sb = _RecordingSupabase(
-        rpc_responses={"finalize_csv_strategy": [_csv_finalize_dup_key_error()]},
-        responses={("strategies", "select"): [None]},
-    )
-
-    r = _csv_finalize_post(client, sb, user_sb)
-
-    assert r.status_code == 422, r.text
-    payload = r.json()
-    assert payload["ok"] is False
-    assert payload["code"] == "CSV_FINALIZE_FAILED"
-    assert "strategy_id" not in payload or not payload.get("strategy_id")
-    body = r.text.lower()
-    for leak in ("duplicate key", "unique constraint", "23505"):
-        assert leak not in body, f"raw Postgres text {leak!r} reached the response body"
-
-
-def test_seamrim03_csv_finalize_residual_error_message_is_static(client):
-    """SEAMRIM-03 / C-1's surviving class — no `str(exc)` in a human_message.
-
-    The residual arm previously returned f"finalize_csv_strategy RPC failed:
-    {exc}". Any RPC exception — not only 23505 — put raw internal prose on the
-    user's screen. The message must be STATIC, and the operator half stays in the
-    structured log.
-    """
-    sb = _RecordingSupabase()
-    user_sb = _RecordingSupabase(
-        rpc_responses={
-            "finalize_csv_strategy": [
-                RuntimeError(
-                    "connection to server at 'db.internal' (10.0.0.7), port 5432 failed"
-                )
-            ]
-        },
-    )
-
-    r = _csv_finalize_post(client, sb, user_sb)
-
-    assert r.status_code == 422, r.text
-    payload = r.json()
-    assert payload["code"] == "CSV_FINALIZE_FAILED"
-    body = r.text.lower()
-    for leak in ("db.internal", "10.0.0.7", "port 5432", "runtimeerror", "connection to server"):
-        assert leak not in body, f"raw internal text {leak!r} reached the response body"
-
-    # A non-23505 failure must NOT take the idempotent arm at all.
-    assert user_sb.selects("strategies") == [], (
-        "only a unique-violation may trigger the idempotent re-fetch"
-    )
 
 
 def test_seam06_resync_dedups_on_strategy_scoped_draft_key(client):

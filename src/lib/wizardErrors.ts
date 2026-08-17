@@ -1926,7 +1926,8 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // writes (no supabase client, no insert/upsert/update, no audit event);
   // Python's `_run_validate_only` runs `adapter.validate()` only, with no DB
   // insert, no state-machine transition and no fingerprint/encryption; and the
-  // `strategies` row is created on the CSV path only by `finalize_csv_strategy`
+  // `strategies` row is created on the CSV path only by the folded
+  // `finalize_csv_strategy_with_returns` RPC
   // at the FINALIZE step. The 401/403/429 arms short-circuit before any of it.
   // ⚠️ ONE CAVEAT, recorded so nobody has to rediscover it: a `wizard_error`
   // PostHog funnel event does fire on this path. That is TELEMETRY, not user
@@ -1969,9 +1970,10 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
 
   // 140.3-12 / SEAMUX-04 — "your data is unchanged" removed from BOTH the title
   // and the fix list. It was an assertion about server state that the browser
-  // cannot make: this code is raised on a 500 from a handler that runs
-  // `finalize_csv_strategy`, and uvicorn does not cancel a handler on client
-  // disconnect, so the write may well have landed. The old wording also STEERED
+  // cannot make: this code is raised on a timeout/500 around the finalize RPC
+  // (since Phase 145 the folded `finalize_csv_strategy_with_returns`, called
+  // from the route), and a client-side timeout does not cancel the
+  // server-side transaction, so the write may well have landed. The old wording also STEERED
   // the user straight back into a resubmit, which is the dead end the reply
   // contract has not yet fixed. The copy now states the uncertainty and puts a
   // non-destructive check FIRST, ahead of any resubmit.
@@ -2033,9 +2035,12 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     // trust this comment:
     //   1. migration 20260728120000 — the partial unique index
     //      `strategies_user_wizard_session_source_uniq` on
-    //      (user_id, wizard_session_id, source), and finalize_csv_strategy
-    //      finally writing the column that puts CSV rows inside it;
-    //   2. routers/process_key.py's 23505 arm, which turns the resulting
+    //      (user_id, wizard_session_id, source), and the finalize RPC
+    //      finally writing the column that puts CSV rows inside it (the
+    //      Phase 145 fold inherits that write verbatim);
+    //   2. the 23505 resolve arm (since Phase 145 in csv-finalize/route.ts,
+    //      resolveExistingStrategyOrRefuse; previously routers/process_key.py),
+    //      which turns the resulting
     //      violation into a 200 carrying the EXISTING strategy id, so the retry
     //      this copy instructs is not a dead end;
     //   3. the third index column, `source` — without it an abandoned API draft
@@ -2056,14 +2061,16 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     // delete-draft / start-fresh, so the id survives the very failure this copy
     // is shown for. A user who followed the old sentence could rename, pick a
     // DIFFERENT file and submit — and the 23505 arm resolved that to the FIRST
-    // strategy, whose series then became A ∪ B, because
-    // persist_csv_daily_returns is an upsert with no delete outside the
+    // strategy, whose series then became A ∪ B, because the since-dropped
+    // standalone persist RPC was an upsert with no delete outside the
     // incoming range. The old sentence was instructing the action that
     // triggered a silent cross-submission merge, reported as success.
     //
-    // Both halves are refused now — routers/process_key.py's name check, before
-    // any write, and the stale-range fence in csv-finalize/route.ts at the site
-    // of the merge — so the copy owes the user the escape those refusals imply:
+    // Both halves are refused now — since Phase 145 by the read-only 23505
+    // resolve arm in csv-finalize/route.ts (resolveExistingStrategyOrRefuse:
+    // name check, then range check against the committed dailies, BEFORE any
+    // metadata write; the fold deleted the standalone merge-writing persist)
+    // — so the copy owes the user the escape those refusals imply:
     // START A NEW STRATEGY. `wizardErrors.test.ts` asserts that escape is
     // present on BOTH resubmit entries, rather than banning a phrase: a
     // fragment ban is satisfiable by deleting the sentence, which would leave

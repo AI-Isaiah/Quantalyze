@@ -77,7 +77,8 @@ PERCENT_FORM_AUTO_NORM_UPPER = 100.0
 # double-parse. The /process-key path has no upstream row cap (unlike the TS
 # edge route), so an unbounded CSV would make pandas read_csv + the two
 # pd.to_datetime passes run on arbitrarily many rows. Matches the 5000-row
-# persistence limit (persist_csv_daily_returns); a larger file is rejected
+# persistence limit (the finalize_csv_strategy_with_returns fold's p_rows
+# cap); a larger file is rejected
 # with an actionable error rather than silently truncated or DoS-ing the pod.
 MAX_INGEST_ROWS = 5000
 

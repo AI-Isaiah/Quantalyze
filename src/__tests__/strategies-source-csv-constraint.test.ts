@@ -44,15 +44,19 @@ describe("strategies.source check constraint admits 'csv' (Phase 18 / FIX-03 reg
     expect(sql).toContain("'csv'");
   });
 
-  it("finalize_csv_strategy RPC (migration 093) inserts source='csv' (proves the constraint actually matters)", () => {
+  it("the live CSV finalize writer (Phase 145 fold) inserts source='csv' (proves the constraint actually matters)", () => {
+    // Phase 145 re-pointed this arm: the live writer is now the folded
+    // finalize_csv_strategy_with_returns (migration 20260819120000), which
+    // DROPped the original finalize_csv_strategy this test used to read.
     // If a future refactor changes the RPC to insert source='wizard' instead,
     // this test would still need to be updated — but the new behavior would
     // also need to be intentional. The contract is: whatever value the RPC
     // inserts, the strategies_source_check constraint must admit it.
-    const path = join(MIGRATIONS_DIR, "20260501055202_strategy_verifications.sql");
+    const path = join(MIGRATIONS_DIR, "20260819120000_csv_finalize_atomic_fold.sql");
     const sql = readFileSync(path, "utf8");
-    // The INSERT INTO strategies block in 093 sets source = 'csv'.
-    expect(sql).toMatch(/INSERT\s+INTO\s+strategies[\s\S]+?'pending_review',\s*'csv'/i);
+    // The fold's INSERT INTO strategies VALUES(...) sets source = 'csv'
+    // right after p_terminal_status.
+    expect(sql).toMatch(/INSERT\s+INTO\s+strategies[\s\S]+?p_terminal_status,\s*'csv'/i);
   });
 
   it("no later migration silently re-narrows the strategies_source_check constraint", () => {

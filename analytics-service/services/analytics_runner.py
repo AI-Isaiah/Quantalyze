@@ -1285,9 +1285,9 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         #
         # WR-02 (19.1-REVIEW): use paginated_select. A bare
         # .select(...).eq(...).order(...).execute() caps at PostgREST's
-        # default 1000-row response on hosted Supabase, but
-        # persist_csv_daily_returns accepts up to 5000 rows (migration
-        # 20260522111839:160). A 1001–5000-row CSV persists fine but
+        # default 1000-row response on hosted Supabase, but the CSV finalize
+        # fold accepts up to 5000 rows (finalize_csv_strategy_with_returns,
+        # migration 20260819120000). A 1001–5000-row CSV persists fine but
         # would silently truncate to the first 1000 rows here, feeding
         # compute_all_metrics a partial series. Composite order_by
         # (date asc) matches the (strategy_id, date) UNIQUE index from
@@ -1531,7 +1531,8 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
 
         # ── MT5-12 (D-15/D-16): producer 3's verdict of record ────────────────
         # The THIRD csv_daily_returns producer is the keyless CSV upload
-        # (csv-finalize/route.ts → the persist_csv_daily_returns SECDEF RPC). Its
+        # (csv-finalize/route.ts → the finalize_csv_strategy_with_returns
+        # SECDEF fold since Phase 145). Its
         # rows are written in TypeScript, so the derive seam's Python assert
         # cannot reach it; the verdict is stamped HERE instead, at the success
         # path's first analytics-side touchpoint. csv-finalize's own

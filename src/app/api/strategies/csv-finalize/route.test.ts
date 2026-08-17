@@ -3,15 +3,16 @@
  *
  * The allocator contribution overlay POSTs `entry_context: "contribution"` to
  * this route. The contribution must finalize to an owner-only status='private'
- * (never 'pending_review'), and — because the unified Python backbone calls
- * finalize_csv_strategy WITHOUT p_terminal_status (defaulting to
- * 'pending_review') and hardcodes its response status — the contribution path
- * calls finalize_csv_strategy DIRECTLY on the user-scoped client with
- * p_terminal_status='private' (W1 note, 110-01), then runs the SAME
- * post-finalize fan-out (persist daily returns + analytics enqueue).
+ * (never 'pending_review').
  *
- * The manager flow (entry_context absent / 'manager') must stay byte-identical:
- * it delegates to the unified backbone (postProcessKey), NOT a direct RPC.
+ * ⚠️ RE-POINTED BY PHASE 145 (D-06 option i-b): BOTH flows now call the
+ * folded `finalize_csv_strategy_with_returns` RPC directly on the SSR
+ * user-scoped client — the contribution with p_terminal_status='private'
+ * (the D-08 wire half this file is the gate for), the manager flow with
+ * 'pending_review'. Neither flow dispatches to /process-key any more (the
+ * Python csv-finalize branch was deleted; Phase 106 Stage B's ruling was
+ * consciously reversed — 145-DECISION.md). The dailies ride the fold's
+ * p_rows argument in the SAME transaction as the strategy row.
  */
 
 // @vitest-environment node
@@ -229,7 +230,7 @@ describe("POST /api/strategies/csv-finalize — CONTRIB-02 private-by-default co
       expect(res.headers.get("Retry-After")).toBe("60");
       expect(res.headers.get("Cache-Control")).toBe("private, no-store");
       expect(postProcessKeyMock).not.toHaveBeenCalled();
-      expect(rpcCall("finalize_csv_strategy")).toBeUndefined();
+      expect(rpcCall("finalize_csv_strategy_with_returns")).toBeUndefined();
     });
 
     it("a genuine throttle → 429 with the BYTE-IDENTICAL v0 envelope", async () => {
@@ -259,22 +260,30 @@ describe("POST /api/strategies/csv-finalize — CONTRIB-02 private-by-default co
 
       expect(res.status).not.toBe(429);
       expect(res.status).not.toBe(503);
-      expect(postProcessKeyMock).toHaveBeenCalledTimes(1);
+      // Phase 145: the side-effecting work the limiter fences is the fold.
+      expect(rpcCall("finalize_csv_strategy_with_returns")).toBeDefined();
     });
   });
 
-  it("default body (no entry_context) → unified backbone (postProcessKey), no direct finalize_csv_strategy RPC", async () => {
+  it("default body (no entry_context) → the fold DIRECTLY with p_terminal_status='pending_review', no /process-key dispatch", async () => {
     const res = await POST(makeRequest(validBody()));
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
-    // Manager flow rides the unified path.
-    expect(postProcessKeyMock).toHaveBeenCalledTimes(1);
-    // No DIRECT finalize_csv_strategy call — the Python backbone owns it.
-    expect(rpcCall("finalize_csv_strategy")).toBeUndefined();
+    expect(body.strategy_id).toBe(NEW_STRATEGY_ID);
+    expect(body.status).toBe("pending_review");
+    // Phase 145 (D-06 i-b): the manager flow no longer rides the unified
+    // backbone — a postProcessKey dispatch here would be the second-writer
+    // regression the decision file names.
+    expect(postProcessKeyMock).not.toHaveBeenCalled();
+    const finalize = rpcCall("finalize_csv_strategy_with_returns");
+    expect(finalize).toBeDefined();
+    expect(finalize![1].p_terminal_status).toBe("pending_review");
+    // The dailies ride the SAME call (one transaction — D-07).
+    expect(finalize![1].p_rows).toEqual(VALID_SERIES);
   });
 
-  it("entry_context='contribution' → calls finalize_csv_strategy directly with p_terminal_status='private' and returns status='private'", async () => {
+  it("entry_context='contribution' → calls the fold directly with p_terminal_status='private' and returns status='private'", async () => {
     const res = await POST(
       makeRequest(validBody({ entry_context: "contribution" })),
     );
@@ -284,29 +293,33 @@ describe("POST /api/strategies/csv-finalize — CONTRIB-02 private-by-default co
     expect(body.status).toBe("private");
     expect(body.strategy_id).toBe(NEW_STRATEGY_ID);
 
-    // The contribution MUST NOT ride the unified backbone (it can't write private).
+    // The contribution never rides /process-key.
     expect(postProcessKeyMock).not.toHaveBeenCalled();
-    // It calls finalize_csv_strategy DIRECTLY with the private terminal status.
-    const finalize = rpcCall("finalize_csv_strategy");
+    // SC#3 wire half (D-08): 'private' passes VERBATIM to the fold.
+    const finalize = rpcCall("finalize_csv_strategy_with_returns");
     expect(finalize).toBeDefined();
     expect(finalize![1].p_terminal_status).toBe("private");
     expect(finalize![1].p_user_id).toBe(TEST_USER_ID);
     expect(finalize![1].p_wizard_session_id).toBe(VALID_SESSION);
   });
 
-  it("contribution KEEPS the daily-series persist + analytics enqueue (dailies are canonical → the allocator needs KPIs)", async () => {
+  it("contribution KEEPS the daily-series + analytics enqueue (dailies are canonical → the allocator needs KPIs)", async () => {
     const res = await POST(
       makeRequest(validBody({ entry_context: "contribution" })),
     );
     expect(res.status).toBe(200);
-    // persist_csv_daily_returns fired (series persisted).
-    expect(rpcCall("persist_csv_daily_returns")).toBeDefined();
+    // The series persists INSIDE the fold call (p_rows — Phase 145 D-07).
+    const finalize = rpcCall("finalize_csv_strategy_with_returns");
+    expect(finalize).toBeDefined();
+    expect(finalize![1].p_rows).toEqual(VALID_SERIES);
     // The compute_analytics enqueue is scheduled via after().
     expect(afterMock).toHaveBeenCalledTimes(1);
   });
 
-  it("contribution finalize RPC error → 422 CSV_FINALIZE_FAIL, no orphaned success", async () => {
-    // finalize_csv_strategy raises (e.g. the RPC guard) — return a clean 422.
+  it("contribution fold RPC error → 500 CSV_FINALIZE_FAIL (nothing saved — the fold rolled back), no orphaned success", async () => {
+    // The fold raises (e.g. its 22023 guard) — the shared fold-failure arm
+    // answers the single 5xx (Phase 145: the pre-fold 422 arm collapsed into
+    // it; both handlers share ONE failure shape now).
     rpcMock.mockResolvedValueOnce({
       data: null,
       error: { code: "22023", message: "boom" },
@@ -315,55 +328,55 @@ describe("POST /api/strategies/csv-finalize — CONTRIB-02 private-by-default co
     const res = await POST(
       makeRequest(validBody({ entry_context: "contribution" })),
     );
-    expect(res.status).toBe(422);
+    expect(res.status).toBe(500);
     const body = await res.json();
     expect(body.ok).toBe(false);
     expect(body.code).toBe("CSV_FINALIZE_FAIL");
-    // F-OBS — the finalize RPC failure is captured to Sentry (not console.error
-    // only), so a systematic contribution-finalize outage is alertable. Mirrors
-    // this file's own L811 metadata-update convention.
+    // D-11: the copy states the TRUE transaction outcome — nothing survived.
+    expect(String(body.human_message)).toContain("Nothing was saved");
+    // D-12: the fold failure is captured with the folded step tag.
     expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
       expect.objectContaining({ code: "22023" }),
       expect.objectContaining({
         tags: expect.objectContaining({
           surface: "csv-finalize",
-          step: "finalize-rpc",
-          flow: "contribution",
+          step: "finalize-fold-fail",
         }),
       }),
     );
     consoleErr.mockRestore();
   });
 
-  it("F-OBS — contribution finalize returns a NON-UUID (contract violation) → 422 + Sentry capture", async () => {
+  it("F-OBS — fold returns a NON-UUID (contract violation) → 500 + Sentry capture, no downstream write", async () => {
     // The RPC returns 200 + a non-uuid strategy id — a return-shape contract
-    // violation. The handler must still fail closed (422, no orphaned success)
-    // AND alert: a silently drifted SQL return shape is worth a Sentry signal.
+    // violation. The handler must still fail closed AND alert: a silently
+    // drifted SQL return shape is worth a Sentry signal.
     rpcMock.mockResolvedValueOnce({ data: "not-a-uuid", error: null });
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
     const res = await POST(
       makeRequest(validBody({ entry_context: "contribution" })),
     );
-    expect(res.status).toBe(422);
+    expect(res.status).toBe(500);
     const body = await res.json();
     expect(body.code).toBe("CSV_FINALIZE_FAIL");
-    // No orphaned downstream write on the contract-violation path.
-    expect(rpcCall("persist_csv_daily_returns")).toBeUndefined();
-    // Captured with a synthesized Error (no rpc error object) + the
-    // contract_violation flag so the alert distinguishes this from a RAISE.
+    // No orphaned downstream write on the contract-violation path: the
+    // metadata UPDATE runs only after a successful outcome (Pitfall 6).
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(afterMock).not.toHaveBeenCalled();
+    // Captured with a synthesized Error (no rpc error object).
     expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
       expect.any(Error),
       expect.objectContaining({
-        tags: expect.objectContaining({ step: "finalize-rpc", flow: "contribution" }),
-        extra: expect.objectContaining({ contract_violation: true }),
+        tags: expect.objectContaining({ step: "finalize-fold-fail" }),
+        extra: expect.objectContaining({ rpc_error_code: null }),
       }),
     );
     consoleErr.mockRestore();
   });
 
-  it("invalid entry_context → 400 CSV_INVALID_FORMAT before any finalize RPC or backbone dispatch", async () => {
+  it("invalid entry_context → 400 CSV_INVALID_FORMAT before any finalize RPC", async () => {
     const res = await POST(
       makeRequest(validBody({ entry_context: "garbage" })),
     );
@@ -372,32 +385,27 @@ describe("POST /api/strategies/csv-finalize — CONTRIB-02 private-by-default co
     expect(body.ok).toBe(false);
     expect(body.code).toBe("CSV_INVALID_FORMAT");
     expect(String(body.human_message)).toContain("entry_context");
-    expect(rpcCall("finalize_csv_strategy")).toBeUndefined();
+    expect(rpcCall("finalize_csv_strategy_with_returns")).toBeUndefined();
     expect(postProcessKeyMock).not.toHaveBeenCalled();
   });
 });
 
 /**
- * Phase 140.3-02 / TS-13 + TS-14 — the unified CSV finalize decides success from
- * the envelope's `ok`, and KEEPS the `isUuid` shape guard beside it.
+ * Phase 140.3-02 / TS-13 + TS-14, re-pointed by Phase 145 — the finalize
+ * handler validates the PAYLOAD of the fold call, never just error-null.
  *
- * The two guards answer different questions and neither subsumes the other:
- *   · `ok` is the SEMANTIC verdict the service states about its own work.
- *   · `isUuid(strategy_id)` is DEFENCE IN DEPTH against drift — a 2xx whose body
- *     lost or mistyped the id. TS-13 says to keep it, and it is kept: emitting
- *     `ok: true` for a body with no usable strategy_id leaves the wizard's
- *     SyncProgress poller hitting `if (!data) return` forever, because no
- *     strategy_analytics row exists for it to find (API H-1).
- *
- * ⚠️ NOT TOUCHED BY THIS PLAN: this route's `debug_context` echo of the whole
- * upstream body and its `console.error` of the same. That is TS-24, owned jointly
- * with Phase 145, which owns this file's transaction shape. Two phases editing one
- * file in one pass is TRAP-8.
- *
- * ORACLE INDEPENDENCE: fixture keys hand-typed from the Python builder's key set
- * (`{ok, strategy_id, status, correlation_id, step}`); expected values are literals.
+ * The pre-145 version of this describe drove the upstream /process-key
+ * envelope's `ok` discriminator; that seam dissolved with the fold (the route
+ * calls the RPC directly), and TS-13's surviving discipline is the success
+ * check `(error || !isUuid(id))` on the RPC result:
+ *   · an RPC-level error must never be re-stamped as success, even when a
+ *     well-formed id rides beside it;
+ *   · `isUuid` is DEFENCE IN DEPTH against drift — a 2xx whose data lost or
+ *     mistyped the id. Emitting `ok: true` for a body with no usable
+ *     strategy_id leaves the wizard's SyncProgress poller hitting
+ *     `if (!data) return` forever (API H-1).
  */
-describe("[140.3-02 / TS-13] POST /api/strategies/csv-finalize — decides from `ok`, and isUuid survives", () => {
+describe("[140.3-02 / TS-13, re-pointed by 145] POST /api/strategies/csv-finalize — fold success check validates the payload", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
@@ -405,67 +413,42 @@ describe("[140.3-02 / TS-13] POST /api/strategies/csv-finalize — decides from 
     updateMock.mockResolvedValue({ error: null });
   });
 
-  it("a 200 carrying `ok: false` is NEVER re-stamped `ok: true`, even with a well-formed strategy_id", async () => {
-    postProcessKeyMock.mockResolvedValue({
-      ok: true,
-      status: 200,
-      body: {
-        ok: false,
-        code: "CSV_FINALIZE_FAILED",
-        human_message: "finalize_csv_strategy RPC failed.",
-        correlation_id: "11111111-2222-3333-4444-555555555555",
-        // A VALID uuid — so the isUuid guard alone cannot catch this.
-        strategy_id: NEW_STRATEGY_ID,
-      },
+  it("an RPC error is NEVER re-stamped `ok: true`, even with a well-formed strategy_id beside it", async () => {
+    rpcMock.mockResolvedValueOnce({
+      // A VALID uuid — so the isUuid guard alone cannot catch this.
+      data: NEW_STRATEGY_ID,
+      error: { code: "XX000", message: "fold failed after returning" },
     });
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const res = await POST(makeRequest(validBody()));
     const body = await res.json();
 
     expect(
       body.ok,
-      "The route strips the upstream `ok` and stamps its own `ok: true` on the " +
-        "success path. Deciding that path by `isUuid(strategy_id)` alone turns " +
-        "an upstream FAILURE that happens to carry an id into a reported " +
-        "success — TS-13.",
+      "Deciding the success path by `isUuid(strategy_id)` alone turns an RPC " +
+        "FAILURE that happens to carry an id into a reported success — TS-13.",
     ).toBe(false);
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(500);
     expect(body.code).toBe("CSV_FINALIZE_FAIL");
+    consoleErr.mockRestore();
   });
 
   it("PIN — isUuid still refuses a 2xx whose strategy_id is not a UUID (defence in depth, kept)", async () => {
-    postProcessKeyMock.mockResolvedValue({
-      ok: true,
-      status: 200,
-      body: {
-        ok: true,
-        strategy_id: "not-a-uuid",
-        status: "pending_review",
-        correlation_id: "11111111-2222-3333-4444-555555555555",
-        step: "finalize",
-      },
-    });
+    rpcMock.mockResolvedValueOnce({ data: "not-a-uuid", error: null });
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const res = await POST(makeRequest(validBody()));
     const body = await res.json();
 
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(500);
     expect(body.ok).toBe(false);
     expect(body.code).toBe("CSV_FINALIZE_FAIL");
+    consoleErr.mockRestore();
   });
 
-  it("the real finalize success (`ok: true` + a UUID) still returns 200 with the route's own ok:true", async () => {
-    postProcessKeyMock.mockResolvedValue({
-      ok: true,
-      status: 200,
-      body: {
-        ok: true,
-        strategy_id: NEW_STRATEGY_ID,
-        status: "pending_review",
-        correlation_id: "11111111-2222-3333-4444-555555555555",
-        step: "finalize",
-      },
-    });
+  it("the real finalize success (no error + a UUID) still returns 200 with the route's own ok:true", async () => {
+    rpcMock.mockResolvedValueOnce({ data: NEW_STRATEGY_ID, error: null });
 
     const res = await POST(makeRequest(validBody()));
     const body = await res.json();

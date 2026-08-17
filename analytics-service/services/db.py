@@ -80,12 +80,19 @@ def get_supabase() -> Client:
 def get_user_scoped_supabase(user_access_token: str) -> Client:
     """Build a per-request Supabase client that acts AS the end user.
 
-    SECURITY DEFINER RPCs that enforce ``auth.uid() = p_user_id`` (e.g.
-    ``finalize_csv_strategy``, migration 20260501055202) cannot be called with
-    the module service-role client: service_role has no ``auth.uid()``, so the
-    RPC raises 42501 "called without an auth session". This client carries the
-    user's Supabase access token (forwarded by the Next.js route in the
-    ``X-User-Access-Token`` header) so the RPC sees the real user.
+    SECURITY DEFINER RPCs that enforce ``auth.uid() = p_user_id`` (e.g. the
+    csv-finalize fold ``finalize_csv_strategy_with_returns``, migration
+    20260819120000) cannot be called with the module service-role client:
+    service_role has no ``auth.uid()``, so the RPC raises 42501 "called
+    without an auth session". This client carries the user's Supabase access
+    token (forwarded by a Next.js route in the ``X-User-Access-Token``
+    header) so the RPC sees the real user.
+
+    ⚠️ Phase 145: the process_key csv-finalize branch that was this client's
+    only caller was deleted (the route calls the fold directly on its SSR
+    user-scoped client). The utility and the header forwarding are KEPT per
+    the standing 140.x obligation (user-scoped pre-checks on onboard/resync)
+    — do not delete either as "unused".
 
     Construction mirrors the frontend's user client: the anon key is the
     PostgREST ``apikey`` (the API gateway requires a project key — a raw user

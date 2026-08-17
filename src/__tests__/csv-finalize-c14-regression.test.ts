@@ -500,7 +500,16 @@ describe("NEW-C14-12: trimmed strategy_name length check", () => {
  * wire shape. The `ok:false` half is kept as its own case, asserting the outcome
  * TS-13 requires.
  */
-describe("NEW-C14-07: ok:true not overwritten by upstream spread (unified path)", () => {
+// ⚠️ Phase 145 / Plan 04: SKIPPED, not deleted — Plan 05 rebuilds this file.
+// The arm this describe pins (the /process-key upstream-body spread in
+// unifiedCsvFinalizeHandler) DISSOLVED with the fold: the route now calls
+// finalize_csv_strategy_with_returns directly and builds its own envelope, so
+// there is no upstream body to strip `ok`/`error`/`code` from. The surviving
+// TS-13 discipline — the fold success check validates (error || !isUuid(id))
+// — is pinned in route.test.ts's re-pointed TS-13 describe. Plan 05 owns this
+// file (it deletes the vacuous RED-TEAM-M1 block above and rebuilds the
+// failure-arm coverage) and disposes of this block properly.
+describe.skip("NEW-C14-07: ok:true not overwritten by upstream spread (unified path — DISSOLVED by the Phase 145 fold; Plan 05 rebuilds this)", () => {
   /** Admin/persist no-ops shared by both cases. */
   function stubAdminNoOps() {
     adminFromMock.mockReturnValue({

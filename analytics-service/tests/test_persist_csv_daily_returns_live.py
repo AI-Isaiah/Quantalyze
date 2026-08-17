@@ -1,27 +1,27 @@
-"""Phase 19.1 / Plan 05 — Live-DB tests for persist_csv_daily_returns RPC.
+"""Phase 19.1 / Plan 05 — Live-DB tests for the csv_daily_returns table.
 
 Gated on TEST_SUPABASE_DB_URL. See MEMORY reference_test_supabase_project.md
 for qmnijlgmdhviwzwfyzlc setup. CI without secrets skips cleanly with a verbose
 ``reason=`` (Pitfall 4: silent skips are Rule 12 violations).
 
-What this suite pins (PR #272 hardening invariants):
+⚠️ Phase 145 (deferred-items.md #4): the ``persist_csv_daily_returns`` RPC
+this file was named for was DROPped by migration 20260819120000 — its guards
+were folded into ``finalize_csv_strategy_with_returns``. Tests 1-6 below
+(probe-oracle 42501, ON CONFLICT idempotent upsert, non-array/empty/oversized
+p_rows 22023s, the GRANT-shape 42501 pair) called the dropped RPC by name and
+were RETIRED here; their successors run in CI as SQL gates:
+``supabase/tests/test_csv_finalize_atomic_fold.sql`` (rows guards, cap,
+atomicity oracle) and ``supabase/tests/test_csv_finalize_auth_guard.sql``
+(the 42501 pair). The filename is kept because two sibling live suites import
+this module's seeding/teardown helpers.
 
-  1. probe-oracle close — missing-strategy and wrong-owner both raise an
-     indistinguishable 42501 (T-19.1-01). Splitting them lets an authenticated
-     caller enumerate which UUIDs exist by reading the error code.
-  2. ON CONFLICT idempotent upsert — re-running with the same (strategy_id,
-     date) updates daily_return rather than failing with 23505.
-  3. jsonb_typeof guard before jsonb_array_length — non-array p_rows raises a
-     descriptive 22023, not an opaque internal one.
-  4. Empty-array guard — 22023 ``p_rows is empty``.
-  5. Row-cap guard — 5001-row payload raises 22023 ``exceeds 5000 rows``.
-  6. GRANT TO authenticated load-bearing (T-19.1-02) — narrowing to service_role
-     would NULL auth.uid() and trigger 42501 on every legitimate call.
+What this suite still pins:
+
   7. anon SELECT denied (Pitfall 8) — pre-existing RLS contract, encoded so a
      future regression is caught.
   8. No redundant explicit index on csv_daily_returns — PR #272 dropped the
-     ``csv_daily_returns_strategy_date_idx`` secondary; UNIQUE/PK serves both
-     the worker SELECT (ORDER BY date) and ON CONFLICT.
+     ``csv_daily_returns_strategy_date_idx`` secondary; the dual-axis unique
+     indexes serve the worker SELECT (ORDER BY date) + upsert arbitration.
 
 W3 revision 2026-05-22 — edge-case suite (Plan 02 unit tests mock the DB and
 cannot express the persisted-table + worker contract these three encode):
@@ -255,337 +255,10 @@ def _invoke_csv_runner(strategy_id: str) -> None:
 
 
 # ===========================================================================
-# Tests 1-8 — PR #272 hardening invariants
+# Tests 7-8 — PR #272 hardening invariants that survive the Phase 145 fold
+# (Tests 1-6 were retired with the DROPped RPC — see the module docstring;
+# their successors are the CI SQL gates named there.)
 # ===========================================================================
-class TestProbeOracleClosed:
-    """Test 1 (T-19.1-01) — missing-strategy and wrong-owner both raise
-    indistinguishable 42501. The probe-oracle attack vector relies on a
-    distinguishable error code/message between the two cases."""
-
-    def test_probe_oracle_closed(
-        self, service_role_conn: psycopg.Connection
-    ) -> None:
-        owner_a = _create_test_user(service_role_conn)
-        owner_b = _create_test_user(service_role_conn)
-        strategy_b = _create_test_strategy(service_role_conn, owner_b)
-        # A UUID that is NOT in strategies — the "missing" branch.
-        strategy_missing = str(uuid.uuid4())
-
-        captured: list[tuple[str | None, str | None]] = []
-
-        try:
-            for probe_sid in (strategy_missing, strategy_b):
-                # Each probe runs in its own transaction so SET LOCAL ROLE
-                # takes effect and the failure doesn't poison the next call.
-                with service_role_conn.transaction():
-                    with service_role_conn.cursor() as cur:
-                        _set_authenticated(cur, owner_a)
-                        with pytest.raises(psycopg.errors.DatabaseError) as exc_info:
-                            cur.execute(
-                                "SELECT persist_csv_daily_returns("
-                                "  %s::uuid, %s::uuid, %s::jsonb"
-                                ")",
-                                (
-                                    owner_a,
-                                    probe_sid,
-                                    json.dumps(
-                                        [{"date": "2024-01-01", "daily_return": 0.01}]
-                                    ),
-                                ),
-                            )
-                        captured.append(
-                            (
-                                exc_info.value.sqlstate,
-                                exc_info.value.diag.message_primary,
-                            )
-                        )
-
-            sqlstates = [c[0] for c in captured]
-            messages = [c[1] for c in captured]
-
-            assert all(s == "42501" for s in sqlstates), (
-                f"probe-oracle: expected 42501 for both missing-strategy and "
-                f"wrong-owner; got {sqlstates!r}"
-            )
-            # Messages must NOT distinguish "not found" from "not owned".
-            # The migration uses the single phrase "strategy % not accessible"
-            # for both branches, so the messages should be byte-identical
-            # given the same probed strategy_id format.
-            for msg in messages:
-                assert "not accessible" in (msg or ""), (
-                    f"probe-oracle: expected 'not accessible' phrasing, got {msg!r}"
-                )
-                lower = (msg or "").lower()
-                assert "not found" not in lower, (
-                    "probe-oracle leak: message contains 'not found' — "
-                    "distinguishable from 'not owned'"
-                )
-                assert "not owned" not in lower, (
-                    "probe-oracle leak: message contains 'not owned' — "
-                    "distinguishable from 'not found'"
-                )
-        finally:
-            _cleanup(
-                service_role_conn,
-                uids=[owner_a, owner_b],
-                sids=[strategy_b],
-            )
-
-
-class TestIdempotentUpsert:
-    """Test 2 — ON CONFLICT (strategy_id, date) DO UPDATE makes the RPC
-    idempotent: re-running with the same (sid, date) updates daily_return
-    rather than raising 23505."""
-
-    def test_idempotent_upsert(
-        self, service_role_conn: psycopg.Connection
-    ) -> None:
-        owner = _create_test_user(service_role_conn)
-        sid = _create_test_strategy(service_role_conn, owner)
-        try:
-            # First call writes 0.01.
-            with service_role_conn.transaction():
-                with service_role_conn.cursor() as cur:
-                    _set_authenticated(cur, owner)
-                    cur.execute(
-                        "SELECT persist_csv_daily_returns("
-                        "  %s::uuid, %s::uuid, %s::jsonb"
-                        ") AS rc",
-                        (
-                            owner,
-                            sid,
-                            json.dumps(
-                                [{"date": "2024-01-01", "daily_return": 0.01}]
-                            ),
-                        ),
-                    )
-                    cur.fetchone()  # ignore returned row count
-
-            # Second call with the same date writes 0.02 — must succeed
-            # (no 23505) and overwrite the prior row.
-            with service_role_conn.transaction():
-                with service_role_conn.cursor() as cur:
-                    _set_authenticated(cur, owner)
-                    cur.execute(
-                        "SELECT persist_csv_daily_returns("
-                        "  %s::uuid, %s::uuid, %s::jsonb"
-                        ")",
-                        (
-                            owner,
-                            sid,
-                            json.dumps(
-                                [{"date": "2024-01-01", "daily_return": 0.02}]
-                            ),
-                        ),
-                    )
-
-            with service_role_conn.cursor() as cur:
-                cur.execute(
-                    "SELECT date::text, daily_return "
-                    "FROM public.csv_daily_returns "
-                    "WHERE strategy_id = %s",
-                    (sid,),
-                )
-                rows = cur.fetchall()
-            assert len(rows) == 1, (
-                f"idempotent upsert: expected exactly 1 row after two calls "
-                f"with same date, got {len(rows)} (rows={rows!r})"
-            )
-            assert rows[0]["date"] == "2024-01-01"
-            assert float(rows[0]["daily_return"]) == pytest.approx(0.02), (
-                "idempotent upsert: second call did not overwrite daily_return "
-                "(ON CONFLICT DO UPDATE not firing)"
-            )
-        finally:
-            _cleanup(service_role_conn, uids=[owner], sids=[sid])
-
-
-class TestNonArrayPRowsRejected:
-    """Test 3 — jsonb_typeof guard (PR #272) raises 22023 BEFORE
-    jsonb_array_length is called on a non-array value."""
-
-    def test_non_array_p_rows_rejected(
-        self, service_role_conn: psycopg.Connection
-    ) -> None:
-        owner = _create_test_user(service_role_conn)
-        sid = _create_test_strategy(service_role_conn, owner)
-        try:
-            with service_role_conn.transaction():
-                with service_role_conn.cursor() as cur:
-                    _set_authenticated(cur, owner)
-                    with pytest.raises(psycopg.errors.DatabaseError) as exc_info:
-                        cur.execute(
-                            "SELECT persist_csv_daily_returns("
-                            "  %s::uuid, %s::uuid, %s::jsonb"
-                            ")",
-                            (owner, sid, json.dumps({"not": "array"})),
-                        )
-            assert exc_info.value.sqlstate == "22023", (
-                f"non-array p_rows: expected 22023, got {exc_info.value.sqlstate!r}"
-            )
-            msg = exc_info.value.diag.message_primary or ""
-            assert "must be a JSONB array" in msg, (
-                f"non-array p_rows: expected 'must be a JSONB array' message, "
-                f"got {msg!r}"
-            )
-        finally:
-            _cleanup(service_role_conn, uids=[owner], sids=[sid])
-
-
-class TestEmptyArrayRejected:
-    """Test 4 — empty p_rows is almost always a caller bug; the RPC raises
-    22023 with a descriptive message."""
-
-    def test_empty_array_rejected(
-        self, service_role_conn: psycopg.Connection
-    ) -> None:
-        owner = _create_test_user(service_role_conn)
-        sid = _create_test_strategy(service_role_conn, owner)
-        try:
-            with service_role_conn.transaction():
-                with service_role_conn.cursor() as cur:
-                    _set_authenticated(cur, owner)
-                    with pytest.raises(psycopg.errors.DatabaseError) as exc_info:
-                        cur.execute(
-                            "SELECT persist_csv_daily_returns("
-                            "  %s::uuid, %s::uuid, %s::jsonb"
-                            ")",
-                            (owner, sid, json.dumps([])),
-                        )
-            assert exc_info.value.sqlstate == "22023", (
-                f"empty p_rows: expected 22023, got {exc_info.value.sqlstate!r}"
-            )
-            msg = exc_info.value.diag.message_primary or ""
-            assert "empty" in msg.lower(), (
-                f"empty p_rows: expected 'empty' in message, got {msg!r}"
-            )
-        finally:
-            _cleanup(service_role_conn, uids=[owner], sids=[sid])
-
-
-class TestOversizedArrayRejected:
-    """Test 5 — row-cap guard rejects 5001-row payload with 22023."""
-
-    def test_oversized_array_rejected(
-        self, service_role_conn: psycopg.Connection
-    ) -> None:
-        owner = _create_test_user(service_role_conn)
-        sid = _create_test_strategy(service_role_conn, owner)
-        # 5001 rows — one beyond the documented limit. Use a date generator
-        # that produces unique YYYY-MM-DD strings; ordering doesn't matter
-        # because the guard fires on length, not content.
-        oversized = [
-            {
-                "date": f"2024-{((i // 28) % 12) + 1:02d}-{(i % 28) + 1:02d}",
-                "daily_return": 0.001,
-            }
-            for i in range(5001)
-        ]
-        try:
-            with service_role_conn.transaction():
-                with service_role_conn.cursor() as cur:
-                    _set_authenticated(cur, owner)
-                    with pytest.raises(psycopg.errors.DatabaseError) as exc_info:
-                        cur.execute(
-                            "SELECT persist_csv_daily_returns("
-                            "  %s::uuid, %s::uuid, %s::jsonb"
-                            ")",
-                            (owner, sid, json.dumps(oversized)),
-                        )
-            assert exc_info.value.sqlstate == "22023", (
-                f"oversized p_rows: expected 22023, got {exc_info.value.sqlstate!r}"
-            )
-            msg = exc_info.value.diag.message_primary or ""
-            assert "5000" in msg, (
-                f"oversized p_rows: expected '5000' in message, got {msg!r}"
-            )
-        finally:
-            _cleanup(service_role_conn, uids=[owner], sids=[sid])
-
-
-class TestGrantShapeAuthenticatedCanExecute:
-    """Test 6 (T-19.1-02) — GRANT TO authenticated is load-bearing.
-
-    The pair below pins the contract:
-      (a) authenticated role + valid jwt claims  → RPC executes (positive case).
-      (b) service_role WITHOUT jwt claims         → auth.uid() is NULL → 42501.
-
-    The probe-oracle isn't closed by the GRANT shape — it's closed by the
-    collapsed 42501 in Guard 3. The GRANT shape exists so legitimate callers
-    (the Next.js route handler running as `authenticated`) reach the
-    auth.uid() guard with a non-NULL session.
-    """
-
-    def test_authenticated_role_executes_rpc(
-        self, service_role_conn: psycopg.Connection
-    ) -> None:
-        owner = _create_test_user(service_role_conn)
-        sid = _create_test_strategy(service_role_conn, owner)
-        try:
-            with service_role_conn.transaction():
-                with service_role_conn.cursor() as cur:
-                    _set_authenticated(cur, owner)
-                    cur.execute(
-                        "SELECT persist_csv_daily_returns("
-                        "  %s::uuid, %s::uuid, %s::jsonb"
-                        ") AS rc",
-                        (
-                            owner,
-                            sid,
-                            json.dumps(
-                                [{"date": "2024-01-01", "daily_return": 0.005}]
-                            ),
-                        ),
-                    )
-                    row = cur.fetchone()
-            assert row is not None
-            # rc is the count of rows affected — exactly 1 for a single-row insert.
-            assert row["rc"] == 1, (
-                f"authenticated RPC call: expected rc=1, got {row['rc']!r}"
-            )
-        finally:
-            _cleanup(service_role_conn, uids=[owner], sids=[sid])
-
-    def test_service_role_without_jwt_claims_raises_42501(
-        self, service_role_conn: psycopg.Connection
-    ) -> None:
-        """service_role without jwt claims set → auth.uid() = NULL → 42501.
-
-        This is the negative half of the GRANT-shape contract: if a future
-        migration narrowed the GRANT to service_role only, EVERY legitimate
-        caller would hit this 42501 because the per-request Supabase client
-        runs as `authenticated`, not `service_role`.
-        """
-        owner = _create_test_user(service_role_conn)
-        sid = _create_test_strategy(service_role_conn, owner)
-        try:
-            # No _set_authenticated call → auth.uid() returns NULL.
-            with service_role_conn.transaction():
-                with service_role_conn.cursor() as cur:
-                    with pytest.raises(psycopg.errors.DatabaseError) as exc_info:
-                        cur.execute(
-                            "SELECT persist_csv_daily_returns("
-                            "  %s::uuid, %s::uuid, %s::jsonb"
-                            ")",
-                            (
-                                owner,
-                                sid,
-                                json.dumps(
-                                    [{"date": "2024-01-01", "daily_return": 0.01}]
-                                ),
-                            ),
-                        )
-            assert exc_info.value.sqlstate == "42501", (
-                f"service_role + no jwt: expected 42501, got {exc_info.value.sqlstate!r}"
-            )
-            msg = exc_info.value.diag.message_primary or ""
-            assert "without an auth session" in msg, (
-                f"service_role + no jwt: expected auth-session phrase, got {msg!r}"
-            )
-        finally:
-            _cleanup(service_role_conn, uids=[owner], sids=[sid])
-
-
 class TestAnonRoleDeniedSelectOnCsvDailyReturns:
     """Test 7 (Pitfall 8) — anon role cannot SELECT from csv_daily_returns
     even when a row exists. RLS deny OR GRANT-layer deny both encode the
@@ -714,22 +387,25 @@ class TestEdgeCaseTerminalStates:
         owner = _create_test_user(service_role_conn)
         sid = _create_test_strategy(service_role_conn, owner)
         try:
-            # Persist 1 row via the RPC (positive ingest path).
-            with service_role_conn.transaction():
-                with service_role_conn.cursor() as cur:
-                    _set_authenticated(cur, owner)
-                    cur.execute(
-                        "SELECT persist_csv_daily_returns("
-                        "  %s::uuid, %s::uuid, %s::jsonb"
-                        ")",
-                        (
-                            owner,
-                            sid,
-                            json.dumps(
-                                [{"date": "2024-01-01", "daily_return": 0.01}]
-                            ),
+            # Seed 1 row directly (service-role). Phase 145: the standalone
+            # persist RPC this test used to seed through was DROPped (its
+            # write moved inside finalize_csv_strategy_with_returns); this
+            # test's subject is the RUNNER pipeline, not the ingest RPC, so
+            # the seed mirrors the fold's INSERT shape instead.
+            with service_role_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO public.csv_daily_returns "
+                    "(strategy_id, date, daily_return) "
+                    "SELECT %s::uuid, (e->>'date')::date, "
+                    "       (e->>'daily_return')::double precision "
+                    "FROM jsonb_array_elements(%s::jsonb) e",
+                    (
+                        sid,
+                        json.dumps(
+                            [{"date": "2024-01-01", "daily_return": 0.01}]
                         ),
-                    )
+                    ),
+                )
 
             # Drive the runner — terminal state lands synchronously.
             _invoke_csv_runner(sid)
@@ -790,15 +466,17 @@ class TestEdgeCaseTerminalStates:
                 {"date": d.strftime("%Y-%m-%d"), "daily_return": 0.0}
                 for d in pd.bdate_range("2024-01-01", periods=60)
             ]
-            with service_role_conn.transaction():
-                with service_role_conn.cursor() as cur:
-                    _set_authenticated(cur, owner)
-                    cur.execute(
-                        "SELECT persist_csv_daily_returns("
-                        "  %s::uuid, %s::uuid, %s::jsonb"
-                        ")",
-                        (owner, sid, json.dumps(payload)),
-                    )
+            # Seed directly (service-role) — see Test 9's note: the ingest
+            # RPC was folded/DROPped in Phase 145; the runner is the subject.
+            with service_role_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO public.csv_daily_returns "
+                    "(strategy_id, date, daily_return) "
+                    "SELECT %s::uuid, (e->>'date')::date, "
+                    "       (e->>'daily_return')::double precision "
+                    "FROM jsonb_array_elements(%s::jsonb) e",
+                    (sid, json.dumps(payload)),
+                )
 
             _invoke_csv_runner(sid)
             row = _poll_analytics_terminal(service_role_conn, sid, timeout_sec=90)

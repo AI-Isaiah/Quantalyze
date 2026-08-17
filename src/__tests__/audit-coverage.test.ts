@@ -206,7 +206,14 @@ const MUTATING_RPC_NAMES: readonly string[] = [
   "sanitize_user",
   "send_intro_with_decision",
   "create_wizard_strategy",
-  "finalize_csv_strategy",
+  // Phase 145: the fold replaced finalize_csv_strategy (+ the standalone
+  // persist_csv_daily_returns) — migration 20260819120000 DROPped both.
+  // The route calls the fold through a cast-through-unknown invocation
+  // (`(supabase.rpc as unknown as ...)("finalize_csv_strategy_with_returns"`,
+  // …)`) which the `\.rpc\(` anchor below cannot see; the name is listed so
+  // any future PLAIN `.rpc("finalize_csv_strategy_with_returns")` call site
+  // falls under the audit law (deferred-items.md #3).
+  "finalize_csv_strategy_with_returns",
   "commit_scenario_batch",
   "update_allocator_mandates",
   "delete_allocator_api_key",

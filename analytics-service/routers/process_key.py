@@ -42,7 +42,7 @@ from pydantic import BaseModel, ValidationInfo, field_validator, model_validator
 
 from services import exchange as exchange_svc
 from services.basis_series import derive_basis_series
-from services.db import get_supabase, get_user_scoped_supabase, one, rows
+from services.db import get_supabase, one, rows
 from services.ingestion import get_adapter
 from services.ingestion.adapter import FlowType, KeySubmissionRequest, Source, Trade
 from services.ingestion.serde import metrics_to_jsonb as _metrics_to_jsonb
@@ -337,10 +337,11 @@ def _verify_internal_token(request: Request) -> None:
 #   1. `ok` is present and is a JSON boolean.
 #   2. when `ok` is false, `code` is a non-empty string.
 #
-# Before this, three of the six 200 shapes carried no discriminator at all and
-# consumers classified replies by sniffing which fields happened to be present.
-# The shapes, by behaviour: WIZARD_DUPLICATE (`_wizard_duplicate_reply`, TWO
-# emitters), `queued:true`, validate-only success, csv-finalize success,
+# Before this, three of the then-six 200 shapes carried no discriminator at all
+# and consumers classified replies by sniffing which fields happened to be
+# present. The shapes, by behaviour: WIZARD_DUPLICATE (`_wizard_duplicate_reply`,
+# TWO emitters), `queued:true`, validate-only success, csv-finalize success
+# (branch deleted in Phase 145 — the route finalizes via the folded RPC now),
 # synchronous success, and this envelope. `job_state` (PYAPI-09) rides the
 # duplicate shape rather than existing as a parallel discriminator.
 #
@@ -434,13 +435,16 @@ def _caller_owns_strategy(
     nobody, so "no user_id" is a miss, not a bypass — otherwise the whole gate
     would be opt-out by omission. Every non-teaser production caller forwards
     ``context.user_id`` (``keys/sync/route.ts:417``,
-    ``finalize-wizard/route.ts:1310``, ``keys/validate-and-encrypt/route.ts:210``,
-    ``csv-finalize/route.ts:1183``), and the I-SEC2 warning below already flags
-    the absent case — this promotes that warning to a refusal on the one path
-    that then reads ANOTHER table by that caller-supplied id.
+    ``finalize-wizard/route.ts:1310``, ``keys/validate-and-encrypt/route.ts:210``;
+    csv-finalize left this seam in Phase 145 — the route calls the folded RPC
+    directly), and the I-SEC2 warning below already flags the absent case —
+    this promotes that warning to a refusal on the one path that then reads
+    ANOTHER table by that caller-supplied id.
 
-    Deliberately uses the service-role client: only the csv flow forwards
-    ``X-User-Access-Token`` today, so a user-scoped (RLS-enforcing) client is
+    Deliberately uses the service-role client: no flow forwards
+    ``X-User-Access-Token`` today (the csv-finalize branch that consumed it
+    was deleted in Phase 145; the client-side forwarding capability is kept
+    per the 140.x obligation), so a user-scoped (RLS-enforcing) client is
     not available on onboard/resync and the ownership predicate has to be an
     explicit filter. Forwarding that header on every authenticated flow is a
     recorded Phase 140.2 obligation.
@@ -1107,243 +1111,22 @@ async def process_key(
                 correlation_id=correlation_id,
                 started_at=started_at,
             )
-        # API-3 — csv-finalize step. The CSV wizard's finalize step (POST
-        # /api/strategies/csv-finalize) lands here AFTER validate but
-        # BEFORE the strategies row exists. We delegate to the
-        # finalize_csv_strategy RPC (migration 093 STEP 5) which atomically
-        # creates the strategies row + strategy_verifications row in a
-        # single SECURITY DEFINER transaction. Pre-fix this returned 422
-        # because the strategy_id branch only allowed step='validate'.
-        if (
-            body.flow_type == "csv"
-            and step == "finalize"
-            and body.source == "csv"
-        ):
-            user_id = body.context.get("user_id")
-            wsid = body.context.get("wizard_session_id")
-            fmt = body.context.get("fmt")
-            strategy_name = body.context.get("strategy_name")
-            # finalize_csv_strategy is SECURITY DEFINER and enforces
-            # auth.uid() = p_user_id (migration 20260501055202): a user may
-            # only finalize their OWN strategy. The module service-role client
-            # has no auth.uid(), so calling it with `supabase` raised 42501
-            # "called without an auth session" on every flag-on finalize. Call
-            # it with a user-scoped client built from the access token the
-            # Next.js csv-finalize route forwards in X-User-Access-Token; the
-            # RPC's auth.uid() = p_user_id check still runs (defense in depth).
-            # Everything else in this handler stays service-role.
-            user_token = request.headers.get("X-User-Access-Token", "")
-            if not user_token:
-                log.warning("process_key.csv_finalize_missing_user_token")
-                return JSONResponse(
-                    status_code=401,
-                    content=_envelope_error(
-                        "CSV_FINALIZE_FAILED",
-                        "finalize requires an authenticated user session.",
-                        correlation_id,
-                        None,
-                    ),
-                )
-            try:
-                user_sb = get_user_scoped_supabase(user_token)
-                rpc_result = (
-                    user_sb.rpc(
-                        "finalize_csv_strategy",
-                        {
-                            "p_user_id": user_id,
-                            "p_wizard_session_id": wsid,
-                            "p_fmt": fmt,
-                            "p_strategy_name": strategy_name,
-                        },
-                    ).execute()
-                )
-                new_strategy_id = rpc_result.data
-            except Exception as exc:  # noqa: BLE001
-                msg = str(exc)
-                # SEAMRIM-03 (review finding C-2) — the double-submit fence.
-                # Migration 20260728120000 gave `strategies` a partial unique
-                # index on (user_id, wizard_session_id, source) and made
-                # finalize_csv_strategy write the session id, so a repeat submit
-                # now raises 23505 and rolls BOTH inserts back (the RPC has no
-                # EXCEPTION block). That duplicate is the one the product's own
-                # copy INSTRUCTS — CSV_SUBMIT_NO_STRATEGY_ID says "Submit
-                # again." — so it must resolve to the existing strategy at 200,
-                # not become a 422 dead end.
-                #
-                # Same detection predicate as the race-winner arm below
-                # (`if "23505" in msg or "duplicate key" in msg.lower()`), and
-                # the same rules: maybe_single so a no-row result is a value and
-                # not a PGRST116 500, and surface the ORIGINAL failure if the
-                # re-fetch finds nothing rather than fabricating a success.
-                if "23505" in msg or "duplicate key" in msg.lower():
-                    # PYAPI-01d / C-08: the re-fetch MUST carry the same scope as
-                    # the index. Filtering on wizard_session_id alone would
-                    # re-fetch, and echo, another strategy's row. `source` is in
-                    # the filter for the same reason it is in the index: an
-                    # abandoned source='wizard' draft can hold the very same
-                    # session id (localStorage.ts:379-381 restores it across the
-                    # CSV/API boundary), and echoing THAT row would hand the user
-                    # a different strategy's id as if it were their CSV upload.
-                    #
-                    # It runs on `user_sb`, not the service-role client: RLS then
-                    # fences the read a second time, under the explicit filters,
-                    # instead of trusting the caller-supplied body.user_id.
-                    try:
-                        existing = one(
-                            user_sb.table("strategies")
-                            # CR-01: `name` is SELECTed because the arm must
-                            # compare the request to the row before it asserts
-                            # they are the same submission. See the refusal
-                            # below.
-                            .select("id, status, name")
-                            .eq("user_id", user_id)
-                            .eq("wizard_session_id", wsid)
-                            .eq("source", "csv")
-                            .maybe_single()
-                            .execute()
-                        )
-                    except Exception as refetch_exc:  # noqa: BLE001
-                        # The re-fetch is itself a network call. Letting it throw
-                        # from inside this handler would turn a well-understood
-                        # duplicate into an uncaught 500, which is the "cryptic
-                        # 500" this arm exists to avoid. Treat it as a miss and
-                        # fall through to the static residual reply.
-                        log.warning(
-                            "process_key.csv_finalize_idempotent_refetch_failed",
-                            error=str(refetch_exc)[:200],
-                        )
-                        existing = None
-                    if existing:
-                        # ⚠️ CR-01 — ESTABLISH THE PRECONDITION BEFORE ASSERTING
-                        # IDEMPOTENCY. This arm used to echo the resolved id at
-                        # 200 without ever comparing the request to the row it
-                        # found, and that is not idempotency — it is "any
-                        # submission wearing this session id gets that
-                        # strategy".
-                        #
-                        # `wizard_session_id` identifies a SESSION, not a
-                        # SUBMISSION. `clearWizardState` fires only on success /
-                        # delete-draft / start-fresh (localStorage.ts:390-393
-                        # says so, and says it is load-bearing), so after a
-                        # FAILED submit the id survives. A user who follows
-                        # `CSV_SUBMIT_FAILED`'s instruction can step back,
-                        # rename, upload a DIFFERENT file and submit — and the
-                        # arm resolved that to the first strategy. The caller
-                        # (src/app/api/strategies/csv-finalize/route.ts) then
-                        # applies THIS request's metadata and returns to THAT
-                        # id, and persist_csv_daily_returns is an upsert with no
-                        # delete outside the new range: the row ends up named
-                        # after file A, carrying A ∪ B, reported as success.
-                        #
-                        # WHY REFUSE RATHER THAN OVERWRITE. Overwriting would
-                        # need a stale-range delete, a name update, and a
-                        # re-verification — and `status` here may already be
-                        # 'published'. Silently replacing the data under a
-                        # PUBLISHED verified track record through a CREATE
-                        # endpoint is a worse failure than the one being fixed.
-                        # A changed track record is a NEW strategy.
-                        #
-                        # WHY `name` AND WHY IT IS A FLOOR, STATED HONESTLY.
-                        # `name` is the only submission-identifying field this
-                        # arm both receives and can read back: the daily-return
-                        # series never reaches this service (the Next.js route
-                        # persists it separately), and the existing row may
-                        # legitimately carry NO rows yet — that is exactly the
-                        # recovery case the fence exists for, so "compare the
-                        # series" cannot be the test HERE. The residual — same
-                        # name, different file — is closed one layer out, at the
-                        # site of the merge itself, by the stale-range fence in
-                        # persistDailyReturnsOrErrorResponse. Neither layer is
-                        # sufficient alone; both are cheap.
-                        existing_name = existing.get("name")
-                        if (
-                            isinstance(existing_name, str)
-                            and isinstance(strategy_name, str)
-                            and existing_name != strategy_name
-                        ):
-                            log.warning(
-                                "process_key.csv_finalize_session_reused_with_new_payload",
-                                strategy_id=str(existing["id"]),
-                            )
-                            return JSONResponse(
-                                status_code=409,
-                                content=_envelope_error(
-                                    "CSV_SESSION_REUSED",
-                                    # No id, no name, no file name: the refusal
-                                    # names the STATE, and the remedy is the one
-                                    # action that cannot merge anything.
-                                    "This wizard session already created a "
-                                    "strategy under a different name. Start a "
-                                    "new strategy to upload a different track "
-                                    "record.",
-                                    correlation_id,
-                                    None,
-                                    # Retrying the identical action re-raises the
-                                    # identical 23505 and lands here again.
-                                    recoverable=False,
-                                ),
-                            )
-                        # Distinguishable from a first submit in the logs, so an
-                        # operator can tell a dedup from a create. Mirrors
-                        # `process_key.idempotent_race_resolved`.
-                        log.info(
-                            "process_key.csv_finalize_idempotent_hit",
-                            strategy_id=str(existing["id"]),
-                        )
-                        # `status` is ECHOED from the row rather than hardcoded
-                        # to 'pending_review' like the first-submit reply: this
-                        # row already exists and may sit at 'private' (the
-                        # CONTRIB-02 flow). Reporting a status we did not read
-                        # would be fabricating an observation.
-                        return {
-                            "ok": True,
-                            "strategy_id": existing["id"],
-                            "status": existing.get("status") or "pending_review",
-                            "correlation_id": correlation_id,
-                            "step": "finalize",
-                        }
-                    log.warning(
-                        "process_key.csv_finalize_idempotent_refetch_missed",
-                        error=msg[:200],
-                    )
-                log.warning("process_key.csv_finalize_rpc_failed", error=msg[:200])
-                # STATIC message. The old body interpolated `exc`, so the raw
-                # `duplicate key value violates unique constraint "..."` — and
-                # every other internal error string, DSNs and hostnames included
-                # — was painted onto the user's screen. That is a live member of
-                # C-1's surviving class (raw internal prose into the browser),
-                # and this fix would have CREATED a new one. The operator half
-                # stays in the structured log above.
-                #
-                # It deliberately makes NO claim about whether the write landed:
-                # this arm catches every non-23505 failure too, and from here we
-                # cannot observe the outcome. Asserting "nothing was created"
-                # would be the same fabricated-measurement defect the phase
-                # exists to close.
-                return JSONResponse(
-                    status_code=422,
-                    content=_envelope_error(
-                        "CSV_FINALIZE_FAILED",
-                        (
-                            "We could not complete the save. Check /strategies "
-                            "before submitting again — we cannot tell from here "
-                            "whether the strategy was created."
-                        ),
-                        correlation_id,
-                        None,
-                    ),
-                )
-            log.info(
-                "process_key.csv_finalize_ok",
-                strategy_id=str(new_strategy_id),
-            )
-            return {
-                "ok": True,
-                "strategy_id": new_strategy_id,
-                "status": "pending_review",
-                "correlation_id": correlation_id,
-                "step": "finalize",
-            }
+        # ⛔ Phase 145 (D-06 option i-b, obligation 2) — the csv-finalize
+        # branch that lived here (API-3, Phase 19.1 token forwarding, the
+        # SEAMRIM-03 23505 resolve arm and its CR-01 name check) was DELETED.
+        # The Next.js route now calls the folded SECURITY DEFINER
+        # `finalize_csv_strategy_with_returns` RPC directly on its SSR
+        # user-scoped client (migration 20260819120000; the founder decision
+        # is recorded in .planning/phases/145-job-csv-finalize-atomicity/
+        # 145-DECISION.md). Leaving this branch live would have been a second
+        # writer to strategies/csv_daily_returns — a drift bomb. The 23505
+        # resolve arm and the CR-01 identity checks moved into the route
+        # (csv-finalize/route.ts, resolveExistingStrategyOrRefuse). A
+        # flow_type='csv' step='finalize' request now deliberately falls
+        # through to the API-6 422 below: this service no longer finalizes
+        # CSV strategies, and answering anything else here would silently
+        # re-open the second-writer path.
+        #
         # API-6 — Phase 17 DESIGN-05 envelope (top-level code/human_message,
         # not nested under `detail`). The wizard's error renderer reads the
         # envelope shape directly off the response body.
@@ -1394,14 +1177,15 @@ async def process_key(
     #   (a) there was no strategy_id in scope yet, so the read could only
     #       filter on the caller-supplied wizard_session_id — a platform-global
     #       key — and returned another tenant's row on any collision;
-    #   (b) it short-circuited EVERY flow, including csv-finalize. Once
-    #       finalize_csv_strategy had written an SV row carrying that session
-    #       id, every later csv call for the session hit this return instead of
-    #       the finalize branch — a plain double-submit, no timeout needed.
+    #   (b) it short-circuited EVERY flow, including the then-live csv-finalize
+    #       delegate (deleted in Phase 145). Once the finalize RPC had written
+    #       an SV row carrying that session id, every later csv call for the
+    #       session hit this return instead of the finalize branch — a plain
+    #       double-submit, no timeout needed.
     # Running it here fixes both: `strategy_id` exists (so the read key equals
-    # the DB's `UNIQUE (strategy_id, wizard_session_id)` key), and the arms that
-    # write no SV row at all — validate-only and the csv-finalize delegate —
-    # have already returned above.
+    # the DB's `UNIQUE (strategy_id, wizard_session_id)` key), and the arms
+    # that write no SV row at all — validate-only, and since Phase 145 the
+    # csv step='finalize' 422 refusal — have already returned above.
     if idempotent_by_session:
         existing = one(
             supabase.table("strategy_verifications")
