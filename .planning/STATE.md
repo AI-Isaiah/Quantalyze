@@ -5,15 +5,15 @@ milestone_name: JOB/RATE — job-lifecycle reliability and the rate limits that 
 current_phase: 153.7
 current_phase_name: JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence
 status: executing
-stopped_at: Completed 145-04-PLAN.md
-last_updated: "2026-08-17T21:26:11.773Z"
+stopped_at: Completed 145-05-PLAN.md
+last_updated: "2026-08-17T21:47:40.608Z"
 last_activity: 2026-08-17
 last_activity_desc: Phase 143 landed and deployed to PROD; Phase 144 planned (3 plans, bound re-derived 500 → 100 at plan-check) and Wave 1 executed — two-arm terminal-UPDATE migration + SAME-COMMIT rewrite of the gate that asserted DELETE, 8 neuters + 16 probes observed RED
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 13
-  completed_plans: 10
+  completed_plans: 11
   percent: 25
 ---
 
@@ -469,7 +469,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [████████░░] 77%
+Progress: [█████████░] 85%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -594,6 +594,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 143 P03 | 26min | 3 tasks | 3 files |
 | Phase 145 P03 | 24m | 3 tasks | 6 files |
 | Phase 145 P04 | 56m | 3 tasks | 34 files |
+| Phase 145 P05 | 25m | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -710,6 +711,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase ?]: 145-03: csv-finalize folded into one SECDEF transaction (finalize_csv_strategy_with_returns); both parents DROPped; atomicity oracle executed (mid-body fault -> 0/0/0 rows); 10-neuter RED matrix, zero vacuities
 - [Phase ?]: 145-04: fold-failure envelope moved to 500 CSV_FINALIZE_FAIL (retry-enabling; the frozen-button CSV_PERSIST_FAIL default would contradict the honest retry copy) — pinning tests updated in the same diff
 - [Phase ?]: 145-04: third capture step finalize-resolve-read-fail added so the fail-closed resolve-read arm (window B's successor) is not capture-less
+- [Phase ?]: 145-05: NEW-C14-07 deleted (not unskipped) — its upstream-body-spread arm dissolved with hop 0; TS-13 discipline pinned in route.test.ts
+- [Phase ?]: 145-05: window E's re-rank trigger fired at PROD=1 but attributed to the known composite (143 D-09) — entry filed mid-term with attribution recorded
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1412,8 +1415,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-17T21:25:56.770Z
-**Stopped At:** Completed 145-04-PLAN.md
+**Last Date:** 2026-08-17T21:47:40.568Z
+**Stopped At:** Completed 145-05-PLAN.md
 **Resume File:** None
 **Next step:** Phase 153.6 (PARITY) is booked and NOT yet planned — run `/gsd:plan-phase 153.6`. It carries 9 findings from the `/code-review xhigh` over the whole 153→153.5 span. ⛔ Three of its four root causes are ONE-PATH-ONLY fixes (a correct remedy applied to `routers/exchange.py` while its twin in `services/ingestion/mt5.py` went untouched, with no guard asserting the two agree) — close them as a CLASS, not as N patches. ⭐ The venue-lock bypass (D) is LIVE on PROD (the migration is on `main`, and `supabase/migrations/**` auto-applies on merge) but is a SELF-targeted control bypass, not a tenant leak. ⛔ The budget correction (C) has two halves — the number AND the oracle that pins the wrong column and so cannot red on it. Phases 154 and 155 remain unplanned; 155 is human- and calendar-gated (founder at the MT5 terminal, live funded account, on a trading day).
 

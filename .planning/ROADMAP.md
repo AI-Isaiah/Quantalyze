@@ -154,7 +154,7 @@ Plans:
   2. A fault injected between `finalize_csv_strategy`, `persist_csv_daily_returns`, and the `after()` enqueue leaves no orphan strategy row — either the steps share one SECURITY DEFINER transaction, or explicit compensating cleanup runs + Sentry alerts (the choice recorded per the reproduction outcome and the CONTRIB-02 `p_terminal_status` owner-only variant's survival).
   3. Happy-path csv-finalize behavior is unchanged — including the CONTRIB-02 owner-only private-finalize path if the RPCs are folded.
 
-**Plans**: 4/6 plans executed
+**Plans**: 5/6 plans executed
 
 Plans:
 **Wave 1**
@@ -175,7 +175,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4)*
 
-- [ ] 145-05-PLAN.md — Delete the vacuous RED-TEAM-M1 block + replacement gates that CAN fail (3 observed neuter-REDs) + three TODOS deferrals with constraints (window E, wizard first-hop, inert flag cleanup w/ 20260620120000 RAISE trap) + consolidated TS neuter-RED table
+- [x] 145-05-PLAN.md — Delete the vacuous RED-TEAM-M1 block + replacement gates that CAN fail (3 observed neuter-REDs) + three TODOS deferrals with constraints (window E, wizard first-hop, inert flag cleanup w/ 20260620120000 RAISE trap) + consolidated TS neuter-RED table
 
 **Wave 6** *(blocked on Waves 3-5; orchestrator-session-only, BLOCKING)*
 
