@@ -154,7 +154,7 @@ Plans:
   2. A fault injected between `finalize_csv_strategy`, `persist_csv_daily_returns`, and the `after()` enqueue leaves no orphan strategy row — either the steps share one SECURITY DEFINER transaction, or explicit compensating cleanup runs + Sentry alerts (the choice recorded per the reproduction outcome and the CONTRIB-02 `p_terminal_status` owner-only variant's survival).
   3. Happy-path csv-finalize behavior is unchanged — including the CONTRIB-02 owner-only private-finalize path if the RPCs are folded.
 
-**Plans**: 3/6 plans executed
+**Plans**: 4/6 plans executed
 
 Plans:
 **Wave 1**
@@ -171,7 +171,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 + the recorded decision)*
 
-- [ ] 145-04-PLAN.md — Caller wiring per 145-DECISION.md (both arms specified; exactly one executed) + read-only 23505 resolve arm with CR-01 name/range checks BEFORE metadata (fixes the 409 lie) + three honest copy sentences + finalize-fold-fail / finalize-resolve-refused Sentry captures + SAME-COMMIT re-point of the five CR-01 tests (each observed RED) + pytest/mypy --strict
+- [x] 145-04-PLAN.md — Caller wiring per 145-DECISION.md (both arms specified; exactly one executed) + read-only 23505 resolve arm with CR-01 name/range checks BEFORE metadata (fixes the 409 lie) + three honest copy sentences + finalize-fold-fail / finalize-resolve-refused Sentry captures + SAME-COMMIT re-point of the five CR-01 tests (each observed RED) + pytest/mypy --strict
 
 **Wave 5** *(blocked on Wave 4)*
 
