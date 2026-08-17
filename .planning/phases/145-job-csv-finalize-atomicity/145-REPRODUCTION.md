@@ -163,9 +163,53 @@ Collected (9): `test_process_key_csv_finalize_calls_finalize_csv_strategy_rpc`, 
 
 ---
 
-## Arm 4 — one live end-to-end finalize on TEST — **PENDING (Plan 02, orchestrator session)**
+## Arm 4 — one live end-to-end finalize on TEST — **EXECUTED 2026-08-17 19:39 UTC: GREEN**
 
-Executed by Plan 02 in the orchestrator session (Supabase MCP is stripped from subagents). **Pre-registered oracle, verbatim (from 145-RESEARCH.md §4 arm 4):**
+**Oracle observed: HTTP 200, body `ok: true`, UUID `strategy_id`, ZERO 42501 in any layer.**
+
+Topology (deviation from the pre-registered idiom, recorded): there is no deployed TEST app
+and no TEST Railway (145-MEASUREMENT.md §0), so "live" = the sanctioned e2e-seeded topology
+run locally: `next dev` (port 3102) + a ROUTERS-ONLY uvicorn app importing the real
+`routers.process_key.router` (port 8302), both env-pointed at TEST `qmnijlgmdhviwzwfyzlc`
+with prod-refusal asserted before start. Routers-only because `main.py`'s lifespan
+(`main.py:271-273`) unconditionally starts `dispatch_loop` — a job-claiming worker that
+would violate TEST's no-worker invariant (the JOB-08 argument and the CI-determinism
+analysis both rest on it). The finalize path never touches those loops, so the arm's oracle
+is unaffected. Auth: fresh minted user (`arm4-145-…@quantalyze.test`, profile
+`manager`/`verified`) → `signInWithPassword` → cookies minted by `@supabase/ssr`'s own
+chunker → fetch with an allowed Origin header (CSRF gate).
+
+Result, verbatim (10-row, fresh `wizard_session_id`):
+
+```
+FINALIZE[arm4-10row] rows=10 status=200 wall=2966ms
+  body={"strategy_id":"824b0fe8-ff94-4578-827e-cd060b8bce68","status":"pending_review",
+        "correlation_id":"524cea86-a8c9-46c6-8508-a914aa382337","step":"finalize","ok":true}
+python layer: process_key.start → process_key.csv_finalize_ok (same correlation_id, strategy_id)
+```
+
+The hop-0 delegation ran for real (Next → Python `/process-key` → `finalize_csv_strategy`
+RPC on the user-scoped client) and the Python layer logged `csv_finalize_ok` — no 42501, no
+CSV_FINALIZE_FAIL anywhere.
+
+**Row-state baseline (SC#3 measured before-state, captured immediately after via SQL):**
+
+| relation | state |
+|---|---|
+| strategies | `pending_review`, source `csv`, wizard_session `ca64b770-d3fa-49ab-8cc1-d7d8596a11c0`, created `2026-08-17 19:39:54.464061+00` |
+| strategy_verifications | status `validated`, flow_type `csv`, source `csv`, trust_tier `csv_uploaded` |
+| csv_daily_returns | count = **10** (as submitted) |
+| compute_jobs | ONE row, kind `compute_analytics_from_csv`, status `pending` (TEST has no worker — stays pending by design) |
+| strategy_analytics | **NO ROW** — created later by the job, not at finalize; part of the before-state |
+
+**Minted strategy ids for Plan 06's archive step (never delete — D-05):**
+- 10-row (arm 4): `824b0fe8-ff94-4578-827e-cd060b8bce68`
+- 5000-row (Step B): `2979d948-e55e-4a60-b5c3-698a089de676` (status 200, wall 2852 ms —
+  timing analysis in 145-MEASUREMENT.md §3)
+
+**Arm 4 verdict: GREEN — the live path is closed end-to-end.**
+
+Original pre-registered oracle retained for the record:
 
 > Passwordless idiom: service-role magic-link for a test user → `setSession` → `curl -X POST $TEST_APP_URL/api/strategies/csv-finalize` with a small `daily_returns_series` (10 rows), fresh `wizard_session_id`, `fmt='daily_returns'`, a name, minimal valid metadata. PASS = HTTP 200, body `ok: true` + UUID `strategy_id`; FAIL = any `42501` in any layer's logs, or `CSV_FINALIZE_FAIL`. Then capture the **row-state baseline** (this is also SC#3's measured before-state and §3 Step B's first run):
 >
@@ -225,6 +269,22 @@ number to TODOS). TEST's CSV population is zero everywhere.
 
 ---
 
-## Verdict
+## Verdict — FINAL (2026-08-17, all four arms executed)
 
-**PENDING arm 4 — arms 1-3 consistent with CANNOT REPRODUCE.** The final verdict is written by Plan 02 only after arm 4. When Plan 02 closes the TODOS.md:818-821 bullet, it cites this artifact and states which of the bullet's own two proposed remedies shipped: **"forward JWT" — shipped in Phase 19.1** (`route.ts:1324` / `process_key.py:1135`); "skip unified for finalize" was not taken.
+# **CANNOT REPRODUCE — the GUARD is live, the PATH is closed (D-02).**
+
+All four arms GREEN: arm 1 (positive control — the 42501 guard fires with the pinned
+messages, now a permanent CI gate), arm 2 (negative control — both call sites at HEAD are
+user-scoped, no service-role path exists), arm 3 (Python wiring gates green, mock-level,
+cited only for wiring), arm 4 (one live end-to-end finalize on TEST: 200 + UUID, zero 42501
+in any layer). The census corroborates: every one of PROD's 18 csv-orphan rows predates the
+Phase 19.1 token-forwarding fix (2026-05-07/05-21, incident-era); zero orphans in ~3 months
+of live traffic since.
+
+The D-02 split, restated so nobody deletes the wrong thing: the 42501 GUARD in
+`finalize_csv_strategy` is alive and correct (arm 1 proves it fires); the PATH that once
+drove it with a service-role client is closed (arms 2/4 prove it). The TODOS.md:818-821
+bullet closes citing this artifact: of its own two proposed remedies, **"forward JWT"
+shipped in Phase 19.1** (`route.ts:1324` forwards, `process_key.py:1135` reads); "skip
+unified for finalize" was not taken; the flag concept itself was later deleted (zero
+readers at HEAD).

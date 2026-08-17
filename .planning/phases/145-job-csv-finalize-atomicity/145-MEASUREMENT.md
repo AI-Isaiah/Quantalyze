@@ -101,10 +101,42 @@ is retired; the (i-a)/(i-b) choice is architectural.** Limiter note: the loop ra
 local harness, consuming zero live limiter budget anywhere (limits at HEAD for reference:
 tenant 100/hour, anon 30/hour, ceiling 500/hour — `process_key.py:100-114`).
 
-## §3 — Step B: 10-row vs 5000-row live finalize on TEST (also SC#1 arm 4 + SC#3 baseline)
+## §3 — Step B: 10-row vs 5000-row live finalize on TEST (2026-08-17 19:39 UTC)
 
-<!-- wall-clocks + minted strategy ids + baseline row states land here -->
+Two real finalizes through the full local stack (Next route → Python `/process-key` →
+`finalize_csv_strategy` RPC → hop-4 persist → enqueue) against TEST. Verbatim:
+
+```
+FINALIZE[arm4-10row]   rows=10   status=200 wall=2966ms  strategy_id=824b0fe8-ff94-4578-827e-cd060b8bce68
+FINALIZE[stepB-5000row] rows=5000 status=200 wall=2852ms  strategy_id=2979d948-e55e-4a60-b5c3-698a089de676
+```
+
+**5000−10 delta: −114 ms — i.e. NEGATIVE, inside noise.** (The 10-row call was the first
+hit on a fresh `next dev` and paid route compilation; the delta's sign makes the point
+regardless: a 500× larger series does not measurably move the ~2.9 s route total.) The
+full-cap hop-4 persist cost — the cost the folded call inherits under (i-b) — is bounded by
+run-to-run noise, well under 5% of the route total. Minted ids recorded in
+145-REPRODUCTION.md arm 4 for Plan 06's archive step.
 
 ## §4 — The decision table (Step C)
 
-<!-- payload bytes | upload+parse (local) | full-cap persist delta (B) | route totals (B) -->
+| Quantity | Value | Source |
+|---|---|---|
+| Series payload (5000 rows, envelope+series) | **280,260 B** | §1, re-derived |
+| (i-a) NEW seam crossings for the rows | **+1** (Next→Railway) | §0 topology |
+| (i-b) NEW seam crossings for the rows | **0** (keeps today's single Next→PostgREST hop) | §0 topology |
+| Upload+parse of the 280 KB body (HEAD model, lower bound) | **≈ 3.1 ms** | §2 |
+| Upload+parse with (i-a)-declared per-row field | **≈ 4.4 ms** | §2 |
+| (i-a) network leg (cross-provider, 280 KB) | **UNMEASURED** — no TEST Railway exists; PROD probing pre-banned | §0 |
+| Full-cap persist delta (5000 vs 10 rows, live) | **≤ noise (−114 ms on a ~2.9 s total)** | §3 |
+| Live route totals (10 / 5000 rows) | **2966 / 2852 ms** | §3 |
+
+**Conclusion (the §3-Step-C pre-registered rule applied): the latency argument is RETIRED.**
+Every measurable latency quantity is single-digit milliseconds against ~3-second route
+totals. The one unmeasured quantity (the cross-provider network leg) exists ONLY under
+(i-a) — the option that would need it to be small. The choice is therefore purely
+architectural: **(i-a)** preserves Phase 106 Stage B's sole-finalize-path ruling but keeps
+window A alive (downgraded to D, healed by 143) and grows the seam payload ~280 KB;
+**(i-b)** removes window A outright and converges both writers on one route-side caller,
+but reverses Phase 106 Stage B for this flow and obligates deleting the Python csv-finalize
+branch (a live second writer otherwise). Founder decides (D-06).

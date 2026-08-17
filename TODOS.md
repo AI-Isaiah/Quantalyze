@@ -815,10 +815,16 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   changes in the undeployed delta).
 
 ### Money-path correctness (latent / flag-gated / edge cases)
-- **Unified-backbone CSV-finalize breaks if flag on** — service-role client has no
-  `auth.uid()` → 42501 every time when `PROCESS_KEY_UNIFIED_BACKBONE=on`. Skip unified for
-  finalize or forward JWT. Make `USE_COMPUTE_JOBS_QUEUE` permanent + delete both legacy
-  finalize placeholder-write branches.
+- ~~**Unified-backbone CSV-finalize breaks if flag on**~~ — **CLOSED 2026-08-17 (Phase 145
+  SC#1, verdict CANNOT REPRODUCE)**. Of this bullet's own two remedies, **"forward JWT"
+  shipped in Phase 19.1** (2026-05-27; verified at HEAD: `route.ts:1324` forwards
+  `X-User-Access-Token`, `process_key.py:1135` reads it and builds the user-scoped client);
+  "skip unified for finalize" was not taken, and the flag concept itself was later deleted
+  (zero runtime readers at HEAD). Live confirmation + census:
+  `.planning/phases/145-job-csv-finalize-atomicity/145-REPRODUCTION.md` (four arms, all
+  GREEN; PROD's 18 csv orphans are all incident-era fossils predating the fix). The 42501
+  GUARD stays live and is now pinned by a permanent CI gate
+  (`supabase/tests/test_csv_finalize_auth_guard.sql`).
 - **Backbone-bypass parity surfaces** — `_compute_portfolio_analytics` (routers/portfolio.py:632)
   and `equity_reconstruction.py` run independent Sharpe/TWR stacks; frontend TS
   (`portfolio-stats.ts` / `scenario-blend-panels.ts` / `health-score.ts`) and matching
