@@ -693,6 +693,7 @@ DECLARE
   v_count    INTEGER;
   v_mat      INTEGER;
   v_anchor   INTEGER;
+  v_jobs     INTEGER;
 BEGIN
   SELECT count(*) INTO v_count
     FROM cron.job WHERE jobname = 'reconcile_dropped_enqueue_sweep';
@@ -721,8 +722,22 @@ BEGIN
   IF v_command NOT ILIKE '%public.csv_daily_returns%' THEN
     RAISE EXCEPTION 'JOB-04 verification failed: sweep body does not read public.csv_daily_returns, so it has no dailies conjunct at all and would enqueue analytics for strategies that have no data to compute from.';
   END IF;
-  IF v_command NOT ILIKE '%public.compute_jobs%' THEN
-    RAISE EXCEPTION 'JOB-04 verification failed: sweep body does not reference public.compute_jobs; without the zero-jobs conjunct it would re-enqueue every strategy with a healthy in-flight chain.';
+  -- The zero-jobs conjunct, pinned by OCCURRENCE COUNT -- mirroring the
+  -- MAX(DG.CREATED_AT) anchor two blocks below, and for the same reason.
+  -- ⚠️ A bare `NOT ILIKE '%public.compute_jobs%'` gate stood here and COULD NOT
+  -- FAIL. The table is named TWICE in the body -- once in the zero-jobs
+  -- NOT EXISTS conjunct and once as the INSERT target -- so deleting the very
+  -- conjunct this message names leaves the INSERT satisfying the gate all by
+  -- itself. MEASURED 2026-08-17: with the conjunct deleted from the deployed
+  -- body this block still printed "self-verify passed". Same defect class as the
+  -- marker literal a Sentry tag satisfied (143-03, f62c3866). ⚠️ If a future
+  -- edit legitimately changes how many times the body names the table, this
+  -- count and its two siblings (supabase/tests/test_reconcile_dropped_enqueue_
+  -- sweep.sql Part 1, src/__tests__/reconcile-dropped-enqueue-sweep.test.ts)
+  -- move in the SAME commit.
+  v_jobs := (length(upper(v_command)) - length(replace(upper(v_command), 'PUBLIC.COMPUTE_JOBS', ''))) / length('PUBLIC.COMPUTE_JOBS');
+  IF v_jobs <> 2 THEN
+    RAISE EXCEPTION 'JOB-04 verification failed: the deployed body names public.compute_jobs % times, expected 2 (the zero-jobs NOT EXISTS conjunct + the INSERT target). One means the zero-jobs conjunct is GONE and the INSERT target alone is satisfying this gate, so every strategy with a healthy in-flight chain would be re-enqueued -- the mass re-enqueue. Zero means the sweep no longer writes at all.', v_jobs;
   END IF;
   IF v_command NOT ILIKE '%public.strategy_analytics%' THEN
     RAISE EXCEPTION 'JOB-04 verification failed: sweep body does not reference public.strategy_analytics. That conjunct is the ONLY protection for healthy retention-aged strategies (done job rows are deleted at 30 days), so its absence is a mass re-enqueue of the historical corpus on the next tick.';

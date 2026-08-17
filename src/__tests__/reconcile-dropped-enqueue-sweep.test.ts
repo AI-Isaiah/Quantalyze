@@ -167,11 +167,29 @@ describe("JOB-04 dropped-enqueue reconciliation sweep migration content gate", (
       "the body does not read public.csv_daily_returns, so it has no dailies " +
         "conjunct and would enqueue analytics for strategies with no data",
     ).toContain("public.csv_daily_returns");
+    // ⚠️ COUNT, not toContain — mirroring the max(dg.created_at) anchor count
+    // below, and for the same reason. public.compute_jobs is named TWICE in the
+    // body: once in the zero-jobs NOT EXISTS conjunct and once as the INSERT
+    // target. A bare `toContain("public.compute_jobs")` stood here and COULD
+    // NOT FAIL — deleting the very conjunct its message named left the INSERT
+    // target satisfying it all by itself. MEASURED 2026-08-17: with the
+    // conjunct removed from the body this file still reported 11 passed. Same
+    // defect class as the marker literal a Sentry tag satisfied (143-03,
+    // f62c3866). ⚠️ If a future edit legitimately changes how many times the
+    // body names the table, this count and its two SQL siblings (the
+    // migration's STEP 2 self-verify and
+    // supabase/tests/test_reconcile_dropped_enqueue_sweep.sql Part 1) move in
+    // the SAME commit.
+    const jobRefs = [...body.matchAll(/public\.compute_jobs/gi)].length;
     expect(
-      body,
-      "the body does not reference public.compute_jobs — without the zero-jobs " +
-        "conjunct it re-enqueues every strategy with a healthy in-flight chain",
-    ).toContain("public.compute_jobs");
+      jobRefs,
+      `the body names public.compute_jobs ${jobRefs} time(s), expected 2 (the ` +
+        `zero-jobs NOT EXISTS conjunct + the INSERT target). One means the ` +
+        `zero-jobs conjunct is GONE and the INSERT target alone is satisfying ` +
+        `this gate — the sweep would re-enqueue every strategy holding a ` +
+        `healthy in-flight chain, a running derive_broker_dailies mid-chain ` +
+        `most of all. Zero means the sweep no longer writes at all.`,
+    ).toBe(2);
     expect(
       body,
       "the body does not reference public.strategy_analytics. That conjunct is " +
