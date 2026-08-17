@@ -698,15 +698,20 @@ describe("NEW-C14-12: trimmed strategy_name length check", () => {
 
 describe("RED-TEAM-L2: CSV_DUPLICATE_SESSION must not re-enable Submit (infinite retry guard)", () => {
   // The Submit-button enable/disable logic in CsvSubmitStep is:
-  //   if (data.code !== "CSV_PERSIST_FAIL" && data.code !== "CSV_DUPLICATE_SESSION") {
+  //   if (data.code !== "CSV_DUPLICATE_SESSION") {
   //     setSubmitting(false);  // re-enable
   //   }
   // We test this as a pure predicate to avoid heavy React rendering setup.
   // The invariant: CSV_DUPLICATE_SESSION must NOT re-enable Submit, because
   // re-clicking Submit triggers the same 23505 → lookup-fails → 409 loop.
+  // Phase 145 ship-review fix: CSV_PERSIST_FAIL left the fence — its sole
+  // post-fold emitter is the fail-closed resolve 503, which persists nothing
+  // and instructs "Try again shortly."; fencing it stranded the user on a
+  // dead button. RED observed: the pre-fix predicate fails the flipped
+  // expectation below.
 
   function shouldReEnableSubmit(code: string | undefined): boolean {
-    return code !== "CSV_PERSIST_FAIL" && code !== "CSV_DUPLICATE_SESSION";
+    return code !== "CSV_DUPLICATE_SESSION";
   }
 
   it("does NOT re-enable Submit for CSV_DUPLICATE_SESSION (RED-TEAM-L2)", () => {
@@ -714,8 +719,8 @@ describe("RED-TEAM-L2: CSV_DUPLICATE_SESSION must not re-enable Submit (infinite
     expect(shouldReEnableSubmit("CSV_DUPLICATE_SESSION")).toBe(false);
   });
 
-  it("does NOT re-enable Submit for CSV_PERSIST_FAIL (existing guard)", () => {
-    expect(shouldReEnableSubmit("CSV_PERSIST_FAIL")).toBe(false);
+  it("re-enables Submit for CSV_PERSIST_FAIL (post-fold: fail-closed 503, nothing persisted, retry instructed)", () => {
+    expect(shouldReEnableSubmit("CSV_PERSIST_FAIL")).toBe(true);
   });
 
   it("re-enables Submit for CSV_FINALIZE_FAIL (safe to retry)", () => {

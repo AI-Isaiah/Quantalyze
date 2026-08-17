@@ -26,7 +26,7 @@ Shape Behaviour                                     Emitter(s)
                                                      and :1181 (23505 race winner)
 2     long-fetch accepted — ``queued: true``         :1205
 3     validate-only success                          :670 (``_run_validate_only``)
-4     csv-finalize success                           :999
+4     (RETIRED, Phase 145) csv-finalize success   branch deleted; shape gone
 5     synchronous pipeline success                   :1466
 6     envelope error AT 200 — validate-only failure   :666 (``_envelope_error`` bare)
 ===== ============================================ ============================
@@ -266,35 +266,13 @@ def _reach_shape_3_validate_only_success(client):
         )
 
 
-def _reach_shape_4_csv_finalize_success(client):
-    """Shape 4 — csv-finalize, which mints the strategies row via the RPC."""
-    fake = _supabase(existing_row=None)
-    user_sb = MagicMock()
-    user_sb.rpc.return_value = MagicMock(
-        execute=MagicMock(
-            return_value=MagicMock(data="11111111-1111-1111-1111-111111111111")
-        )
-    )
-    with patch(
-        "routers.process_key.get_supabase", return_value=fake
-    ), patch(
-        "routers.process_key.get_user_scoped_supabase", return_value=user_sb
-    ):
-        return client.post(
-            "/process-key",
-            json={
-                "flow_type": "csv",
-                "source": "csv",
-                "context": {
-                    "step": "finalize",
-                    "user_id": "33333333-3333-3333-3333-333333333333",
-                    "wizard_session_id": "22222222-2222-2222-2222-222222222222",
-                    "fmt": "trades",
-                    "strategy_name": "Shape 4",
-                },
-            },
-            headers={**_auth_headers(), "X-User-Access-Token": "user-jwt-abc"},
-        )
+# Shape 4 (csv-finalize success) RETIRED in Phase 145: the (i-b) decision moved
+# csv-finalize wholly into the Next route (finalize_csv_strategy_with_returns);
+# the Python branch was deleted and this route can no longer mint that 200.
+# RED observed before this re-point: the fixture failed with
+# "does not have the attribute 'get_user_scoped_supabase'" (the deletion took
+# the import with it), and the AST fence below reported the pinned fingerprint
+# "dict:correlation_id,ok,status,step,strategy_id" with no emitter.
 
 
 def _reach_shape_5_synchronous_success(client):
@@ -373,7 +351,6 @@ _SHAPES = [
     ("1-duplicate-hit", _reach_shape_1_duplicate_hit, True),
     ("2-queued-fresh", _reach_shape_2_queued_fresh, True),
     ("3-validate-only-success", _reach_shape_3_validate_only_success, True),
-    ("4-csv-finalize-success", _reach_shape_4_csv_finalize_success, True),
     ("5-synchronous-success", _reach_shape_5_synchronous_success, True),
     ("6-envelope-error-at-200", _reach_shape_6_envelope_error_at_200, False),
 ]
@@ -474,7 +451,6 @@ _EXPECTED_200_FINGERPRINTS = frozenset(
         "verification_id",
         "dict:correlation_id,daily_returns_series,ok,preview,read_only,step,valid",
         "dict:correlation_id,ok,queued,verification_id",
-        "dict:correlation_id,ok,status,step,strategy_id",
     }
 )
 
@@ -967,16 +943,20 @@ def test_pyapi_10b_validate_only_failure_stays_200(client):
     assert body["code"] == "CSV_PARSE_FAILED"
 
 
-def test_pyapi_10b_csv_finalize_401_and_422_arms_unchanged(client):
-    """Anti-over-reach control: the route's other 4xx envelopes are untouched.
+def test_pyapi_10b_csv_finalize_tombstone_and_422_arm(client):
+    """Phase 145 tombstone pin + anti-over-reach control.
 
-    If the 403 change had been applied to ``_envelope_error`` itself rather
-    than to one return site, these two would move too.
+    The csv-finalize branch (and its 401 missing-token arm) was DELETED by the
+    (i-b) re-point: a ``flow_type=csv, step=finalize`` request now deliberately
+    falls through to the API-6 422 (``MISSING_STRATEGY_ID``) regardless of
+    token presence. Pinning that keeps the deletion honest — a resurrected
+    Python finalize arm (a second writer) reddens this test. RED observed
+    before this re-point: the old 401 assertion failed against the tombstone
+    (422 != 401). The validate-shape 422 below is the surviving
+    anti-over-reach control, unchanged.
     """
     fake = _supabase(existing_row=None)
-    with patch("routers.process_key.get_supabase", return_value=fake), patch(
-        "routers.process_key.get_user_scoped_supabase"
-    ):
+    with patch("routers.process_key.get_supabase", return_value=fake):
         no_token = client.post(
             "/process-key",
             json={
@@ -992,8 +972,8 @@ def test_pyapi_10b_csv_finalize_401_and_422_arms_unchanged(client):
             },
             headers=_auth_headers(),  # no X-User-Access-Token
         )
-    assert no_token.status_code == 401, no_token.text
-    assert no_token.json()["code"] == "CSV_FINALIZE_FAILED"
+    assert no_token.status_code == 422, no_token.text
+    assert no_token.json()["code"] == "MISSING_STRATEGY_ID"
 
     fake2 = _supabase(existing_row=None)
     with patch("routers.process_key.get_supabase", return_value=fake2):

@@ -2766,3 +2766,57 @@ citations are from `.planning/phases/145-job-csv-finalize-atomicity/145-REPRODUC
   and TEST's row ALREADY reads `'off'`, so re-applying that migration on TEST is hazardous today
   unless its `updated_by` is the seed exemption — unverified.) Cleanup order: retire or guard the
   `20260620120000:86-89` check first, then remove the row and both env vars in the same pass.
+
+## Phase 145 ship-review findings (logged 2026-08-18, /ship review army — none blocking per the blast-radius bar)
+
+Fixed at ship time (not listed): the CSV_PERSIST_FAIL retry fence (user-facing dead button)
+and the pytest discriminator-suite re-point. Everything below is deliberate deferral —
+clean up opportunistically; none is a persistent user-facing defect or data-integrity break.
+
+- [ ] **Re-point `src/__tests__/csv-finalize-rpc.test.ts` at the fold** (deferred-items #5,
+  now verifiable: TEST carries `finalize_csv_strategy_with_returns`). Live-DB-only suite,
+  never in CI; still names the DROPped `finalize_csv_strategy` so every skipIf-live case
+  42883s. Also re-point the stale cover-citation in `strategy-verifications-rls.test.ts:17`.
+- [ ] **Pin the `finalize-resolve-read-fail` capture + the two undriven fail-closed arms**
+  (`route.ts:737` refetchErr, `:749` no-committed-row): two new cases in
+  csv-finalize-cross-submission-merge.test.ts, each observed RED under a step-tag neuter.
+- [ ] **Add a fold gate Part 3d: `p_terminal_status='published'` → 22023 before any write**
+  (the whitelist guard at migration line 225 is currently unpinned by any gate).
+- [ ] **Regenerate `database.types.ts` against TEST (post-fold) + delete the rpc
+  cast-through-unknown in route.ts** so the fold call re-enters the audit-coverage law
+  (deferred-items #3 residual; the current types diff is a hand-edit no DB state produces).
+- [ ] **Copy honesty on the fold-failure arm sub-classes** (`route.ts:627`): "rolled back
+  completely" is unobservable for transport-lost / non-uuid-2xx shapes — branch the copy on
+  SQLSTATE presence. Also consider mapping `error.code === '42501'` to a 401 re-auth
+  envelope instead of the generic 500 (narrow reachability; withAuth ran ms earlier).
+- [ ] **Python tombstone envelope**: `flow_type=csv, step=finalize` now answers 422
+  `MISSING_STRATEGY_ID`, which misdirects stale/external callers — consider an explicit
+  `CSV_FINALIZE_MOVED` refusal arm (`process_key.py:~1136`).
+- [ ] **service_role default-ACL EXECUTE on the fold** contradicts the migration header's
+  "authenticated ONLY" claim (inert today: auth.uid() guard 42501s it). Either add
+  `REVOKE ... FROM service_role` + STEP 3(b)/Part 1 assertions (re-apply the REVOKE to TEST
+  manually — the file itself must NOT re-run there), or amend the header/COMMENT to document
+  the default-ACL reality (the 20260814120000 post-verify (c) treatment).
+- [ ] **Fold value guards for direct-RPC callers**: `(elem->>'daily_return')::DOUBLE PRECISION`
+  accepts NaN/Infinity/1e300 and far-future dates that the route boundary rejects — add
+  22023 pre-INSERT raises mirroring the route checks (carried over from the dropped parent,
+  not a regression; poisons only the caller's own pending_review/private strategy).
+- [ ] **fmt-blind empty-rows allowance**: direct RPC with `p_fmt='daily_returns'` +
+  `p_rows='[]'` commits a zero-dailies strategy (own-tenant). Scope the empty allowance to
+  fmt='trades' or document the acceptance in the header delta list.
+- [ ] **23505 second source**: the ERRCODE map/COMMENT attribute 23505 solely to
+  `strategies_user_wizard_session_source_uniq`, but `csv_daily_returns_strategy_date_key`
+  can also raise it (direct-RPC duplicate dates); the resolve arm keys on SQLSTATE alone —
+  discriminate on constraint name, or document.
+- [ ] **Stale-comment batch from the fold re-point** (grouped; all cosmetic): the
+  csv-validate-route.test.ts behaviors-pinned TOC items 6–8/13 still describe the persist
+  RPC; route.test.ts `rpcMock` comment names both dropped RPCs; csv-validate-route:~898
+  beforeEach comment still says "Phase 106 Stage B ... persist_csv_daily_returns"; orphaned
+  `INTERNAL_API_TOKEN` env sets in csv-finalize-cross-submission-merge.test.ts:150 and the
+  re-pointed csv-validate describes; atomic-fold gate Part 2c is belt-to-2a's-suspenders
+  (savepoint semantics) — annotate.
+- [ ] ⚠️ **Migration-timestamp coordination (self-expiring 2026-08-19 12:00 UTC)**: the fold
+  is stamped `20260819120000` (future-dated at merge). Until that instant, any OTHER
+  migration must carry a timestamp ABOVE it or it trips the backdated-migration guard.
+  Phase 146 planning: if 146 ships a migration before Aug 19 noon UTC, stamp it
+  `2026081913…`+.

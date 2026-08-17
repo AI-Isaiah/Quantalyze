@@ -258,9 +258,14 @@ describe("[140.5-05] ⛔ NEGATIVE CONTROLS — csv-finalize's own vocabulary kee
     expect(panelText()).not.toContain(FOUNDER_TITLE);
   });
 
-  it("CSV_PERSIST_FAIL still leaves Submit DISABLED (the pre-existing retry fence)", async () => {
-    // Not decoration: retrying a persist failure loops. The three-way arm must
-    // not have quietly re-enabled the button by moving the code read.
+  it("CSV_PERSIST_FAIL re-enables Submit (post-fold: fail-closed 503, nothing persisted)", async () => {
+    // Phase 145 ship-review fix: the code's pre-fold meaning ("strategy exists,
+    // series lost — retrying loops") died with persist_csv_daily_returns. Its
+    // sole remaining emitter is the fail-closed resolve arm, which wrote
+    // NOTHING and whose copy instructs "Try again shortly." — so the button
+    // must be live beside that instruction. RED observed at the flip: the old
+    // toBeDisabled assertion failed against the fixed fence (component-level
+    // proof the fence edit binds).
     fetchSpy.mockResolvedValue(
       jsonResponse(
         {
@@ -276,7 +281,7 @@ describe("[140.5-05] ⛔ NEGATIVE CONTROLS — csv-finalize's own vocabulary kee
     mountAndSubmit();
 
     await screen.findByTestId("wizard-csv-error");
-    expect(screen.getByTestId("wizard-csv-submit-cta")).toBeDisabled();
+    expect(screen.getByTestId("wizard-csv-submit-cta")).not.toBeDisabled();
   });
 
   it("CSV_SESSION_REUSED keeps the route's own sentence", async () => {
