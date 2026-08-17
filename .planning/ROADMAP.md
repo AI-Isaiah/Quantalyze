@@ -125,7 +125,21 @@ Plans:
   3. The change ships as a NEW migration layered on `20260720120000` (the shipped migration is never edited), reconciling the TEST-DELETE / PROD-reset split into ONE behavior.
   4. A committed measurement of the stale-`pending` `compute_jobs` population **on PROD** exists BEFORE any stale-`pending` sweep is scoped, and the gap is closed EITHER by adding `pending` as a fourth swept status (using SC 1's terminal-UPDATE pattern, never `DELETE`) OR by an explicit WON'T-FIX carrying that measurement — "zero on prod" is a valid, budget-saving outcome. The retention family covers `done` (jobid 4), `failed_*` (jobid 8) and orphaned `running` (jobid 11); stale `pending` is the one status an undrained enqueue cron produces and the only one nothing sweeps.
 
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 144-01-PLAN.md — The terminalizer migration (two-arm bounded terminal UPDATE, `'50 * * * *'`, 4h claimed_at arm + derived-48h NULL-claim arm) + throwaway-Postgres tracer proof + the SAME-COMMIT rewrite of test_retention_orphaned_running.sql (B1 DELETE-oracle, B2 hour-band cast, B3 next_attempt_at) + neuter-RED matrix
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 144-02-PLAN.md — TS migration-content gate (occurrence counts recalibrated for the two-arm body, word-bounded LIMIT, later-migration re-registration scan) + JOB-08 WON'T-FIX-with-measurement in REQUIREMENTS.md + three TODOS deferrals
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 144-03-PLAN.md — [BLOCKING, orchestrator-session-only] Pre-apply re-census + §3 NULL-claim confirming query + live slot check, apply to TEST via Supabase MCP, sql-tests RED→GREEN, ≥2 successive real :50 ticks observed against the live 402-row fixture proving the per-arm `LIMIT 100` bound HOLDS and PROGRESSES (exactly 100 arm-A rows per tick, oldest-first, disjoint id sets) — draining the backlog is explicitly NOT the goal and NOT a merge gate; conservation + B3 verified row-by-row; human gate before the one-way merge
+
 **Note**: The "fence flake also clears" claim is observation-only, NOT an acceptance criterion (research correction #4). Constrained by JOB-07 (pg_cron only).
 **Note (SC 4 / JOB-08, added 2026-08-03)**: routed here from `TODOS.md` § CI / test-infra ratchet — same table, same cron family this phase already edits, and SC 3's TEST-vs-PROD split is the same gap. Full evidence and the two ⛔ traps (never `DELETE` pending; never `cron.unschedule(9)`) are in `REQUIREMENTS.md` § JOB-08. ⚠️ The gap is CERTAIN on the TEST project and UNMEASURED on prod — that asymmetry is why SC 4 is measure-first rather than build-first.
 
