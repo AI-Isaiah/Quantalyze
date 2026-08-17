@@ -293,6 +293,12 @@ Costs common to both:
   row is in a limbo state nothing owns and nothing surfaces* → terminalize + alert + make it
   visible/recoverable. Reading (β) is consistent with 142/143/144's whole register; reading (α) is
   what the sentence literally says. **Do not let a plan silently pick one.**
+
+  ✅ **DECIDED — founder call, 2026-08-17 (AskUserQuestion, this session): reading (β),
+  TERMINALIZE.** Mark the orphan failed/abandoned with a reason; the user sees a real outcome, the
+  audit trail survives, retention collects it later. SC#2's "no orphan row" is LOCKED as "no
+  UNEXPLAINED row nothing owns", consistent with 144's WR-02 register. Deletion arms are OUT OF
+  SCOPE for the plan.
 - Sentry half is cheap and independently correct regardless of the choice: window C currently has
   **no** capture at all (see above), and window B has none either.
 
@@ -374,6 +380,14 @@ re-rank this from prospective hardening to a live cleanup. Measure before scopin
 - **The (i-a) vs (i-b) choice is a founder call, not Claude's discretion**, because (i-b) reverses
   Phase 106 Stage B's "unified backbone is the sole finalize path". Surface both with the costs
   above; do not let a plan quietly pick (i-b) because it is easier.
+
+  ⏳ **FOUNDER RULING, 2026-08-17 (AskUserQuestion, this session): "Decide at plan time" —
+  MEASURE FIRST.** The plan must include a task that measures the actual (i-a) forwarding cost on
+  real data — payload size and latency of shipping ~5000 daily rows across the `/process-key` seam
+  versus the direct-from-route call — and brings NUMBERS back before the choice is made. The
+  choice itself then returns to the founder (or is made on the measurement if the founder has
+  delegated it by then). ⛔ A plan that picks (i-a) or (i-b) without that measurement violates
+  this ruling.
 - ⛔ **`p_terminal_status` survives, verbatim, in whatever function is created** — SC#3 names the
   CONTRIB-02 owner-only `'private'` variant explicitly, and losing it silently promotes private
   contributions into the admin publish queue.
