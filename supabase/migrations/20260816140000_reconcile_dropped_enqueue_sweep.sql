@@ -412,9 +412,8 @@
 --     is set on the WORKER's Railway service, which is a different service from
 --     the FastAPI app. init_sentry() early-returns without it.
 --
--- (2) THE RUN LOG is the secondary surface. This body RAISE NOTICEs the healed
---     count, which pg_cron records in cron.job_run_details.return_message. To
---     inspect sweep activity:
+-- (2) THE RUN LOG is the secondary surface, and it is WEAKER than this file
+--     originally claimed. To inspect sweep activity:
 --
 --       SELECT d.start_time, d.status, d.return_message
 --         FROM cron.job_run_details d
@@ -423,15 +422,33 @@
 --        ORDER BY d.start_time DESC
 --        LIMIT 50;
 --
---     ⚠️ UNVERIFIED AT AUTHORING TIME: that a RAISE NOTICE from a plpgsql DO
---     block inside a cron body actually surfaces in return_message on this
---     Supabase build has NOT been observed. It is the documented behaviour and
---     it is what 142 relies on, but no one has looked. Plan 04's live tick
---     discharges it. Do not read the query above as a promise until then.
+--     ⛔ CORRECTED 2026-08-17 BY DIRECT OBSERVATION (Plan 04's live TEST tick).
+--     The authoring-time draft of this paragraph said the body "RAISE NOTICEs the
+--     healed count, which pg_cron records in return_message", flagged UNVERIFIED.
+--     It has now been observed and it is FALSE on this Supabase build. The first
+--     real tick returned:
 --
---     The NOTICE carries a COUNT and nothing else -- no strategy id, no user id,
---     no row data. cron.job_run_details is operator-visible and this repository
---     is public.
+--       start_time  2026-08-17 09:35:00.061575+00
+--       end_time    2026-08-17 09:35:00.186637+00
+--       status      succeeded
+--       return_message  'DO'          <-- the COMMAND TAG, not the NOTICE text
+--
+--     pg_cron stores the command tag of the last statement, not the session's
+--     NOTICE stream. So return_message tells you the tick RAN and whether it
+--     SUCCEEDED -- it does NOT tell you how many rows were healed. The RAISE
+--     NOTICE is still worth keeping (it reaches the Postgres server log, where
+--     it is retrievable), but do NOT build an operator process on reading the
+--     count out of return_message: it is not there.
+--
+--     ⇒ To count what a tick actually healed, query the rows, not the log:
+--         SELECT count(*) FROM public.compute_jobs
+--          WHERE metadata->>'source' = 'reconcile-sweep'
+--            AND created_at >= <tick start_time>;
+--       That is also the shape the worker-side Sentry alert keys on, so the two
+--       observability surfaces agree by construction.
+--
+--     Whatever DOES surface carries no strategy id, no user id and no row data.
+--     cron.job_run_details is operator-visible and this repository is public.
 --
 -- PROD-AUTO-APPLY WARNING
 -- -----------------------
