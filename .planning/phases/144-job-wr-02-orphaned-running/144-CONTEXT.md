@@ -31,13 +31,25 @@ SC#4 mandates measure-first. This is that measurement, and it also falsified two
 | status | PROD `khslejtfbuezsmvmtsdn` | TEST `qmnijlgmdhviwzwfyzlc` |
 |---|---|---|
 | `pending` | **0** | **2819** (2026-08-11 → 08-15) |
-| `running` | **0** | **6** (2026-08-03 → 08-12) |
+| `running` | **0** | **402** — 396 claimed + 6 NULL-claim (2026-08-03 → 08-14) |
 | `done` | 1545 (07-18 → 08-17) | 0 |
 | `failed_final` | 121 (05-20 → 08-17) | 0 |
 
 ### ⭐ Finding 1 — the NULL-`claimed_at` immortal orphan (NEW, drives a scope addition)
 
-All **6** TEST `running` rows have **`claimed_at IS NULL`**, `attempts = 1`, `kind = poll_positions`.
+⚠️ **CORRECTED 2026-08-17 (re-measured at plan time).** The original census line said "TEST `running` = 6"
+and "all 6 have `claimed_at IS NULL`". **That was the NULL-claim SUBSET mislabelled as the total.** Live
+re-measurement: **402** `running` rows on TEST — **396 with `claimed_at` SET** (`kind = derive_broker_dailies`,
+created 2026-08-11, all >48 h old) and **6 with `claimed_at IS NULL`** (`kind = poll_positions`, `attempts = 1`,
+created 2026-08-03 → 08-12). Every one of the 402 carries a non-NULL `claim_token` and a non-NULL
+`next_attempt_at`. PROD remains **0**.
+
+Two consequences the original number hid:
+- **Arm A (the SC#1 `claimed_at` arm) has ~396 live targets on TEST, not zero.** Bounding is therefore
+  load-bearing, not theoretical — and any argument of the form "irrelevant at this scale" is void.
+- The 396 are a far richer real-data fixture for arm A than a seeded probe would be.
+
+The NULL-claim finding below stands, but applies to **6 of 402**, not to all `running` rows:
 The deployed purge (`20260720120000:68-71`) reads:
 
 ```sql
@@ -192,8 +204,10 @@ TEST's 2819 is **not** the same finding: TEST has no worker, and cron jobid 9 fa
   MCP (never `supabase db push`) and observe a real tick before merge. ⚠️ The MCP is **stripped from
   subagents** — any apply/live-tick task must run in the orchestrator session (Phase 143 Plan 04 hit
   this exactly).
-- The 6 TEST NULL-claim rows are a **live fixture**: a correct second arm should terminalize them.
-  That is a rare chance to verify against real stuck data rather than a seeded probe.
+- TEST's stuck rows are a **live fixture for BOTH arms** (corrected count, 2026-08-17): the 6 NULL-claim
+  `poll_positions` rows exercise arm B, and the **396** claimed `derive_broker_dailies` rows exercise arm A.
+  That is a rare chance to verify against real stuck data rather than a seeded probe — and the 396 also make
+  arm A's `LIMIT` bound observable rather than hypothetical.
 
 </specifics>
 
