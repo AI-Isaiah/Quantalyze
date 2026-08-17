@@ -134,6 +134,7 @@ predicate is written.
   definition in `20260416125430_contact_request_metadata.sql:156`. **Re-base on that definition, not on the
   original `20260411144407:179`** — the original was DROPped and replaced. No new index. Running the sweep
   twice must be a provable no-op.
+- ⛔ **MECHANISM CORRECTED 2026-08-16 by an observed neuter — the heading above is WRONG as written and is kept only so this correction has an anchor.** SC#2 does NOT ride the partial unique index. SEQUENTIAL re-run is a no-op because of the **zero-jobs conjunct**: tick 1's INSERT removes the strategy from the predicate, so tick 2's batch is empty and the INSERT is never reached (confirmed live on TEST 2026-08-17, `143-CENSUS.md` part B §12). CONCURRENT races are handled first by `FOR UPDATE SKIP LOCKED` (an INSERT into `compute_jobs` key-share-locks its parent `strategies` row) and only then by `ON CONFLICT DO NOTHING`; the index is the last arbiter and is reached only when BOTH are removed. ⚠️ Corollary: any gate that "proves" `ON CONFLICT` by running the body twice in one session CANNOT FAIL. The re-base instruction below is still correct and still required.
 
 **Alerting and Observability**
 
@@ -193,7 +194,7 @@ predicate is written.
 
 | ID | Description | Research Support |
 |----|-------------|------------------|
-| JOB-04 | "A reconciliation sweep detects strategies with persisted daily-returns data but NO `compute_jobs` row of any status and no terminal `strategy_analytics` row past a grace window — the '`after()` never ran at all' hole that the in-closure placeholder guard structurally cannot catch — and idempotently re-enqueues + alerts Sentry." (`.planning/REQUIREMENTS.md:54`) | Detection: `## Verified Object Inventory` §1–§5 pins every table/column/CHECK the predicate reads. Idempotency: §2 proves the partial unique index covers the `(strategy_id, 'compute_analytics_from_csv')` conflict for all in-flight statuses. Alerting: `## Landmine L-1` establishes the Sentry gap and the exact fix. Template: `## Architecture Patterns` §Pattern 1 gives the reusable migration skeleton. |
+| JOB-04 | "A reconciliation sweep detects strategies with persisted daily-returns data but NO `compute_jobs` row of any status and no terminal `strategy_analytics` row past a grace window — the '`after()` never ran at all' hole that the in-closure placeholder guard structurally cannot catch — and idempotently re-enqueues + alerts Sentry." (`.planning/REQUIREMENTS.md:54`) | Detection: `## Verified Object Inventory` §1–§5 pins every table/column/CHECK the predicate reads. Idempotency: ⛔ CORRECTED 2026-08-16 — §2's partial unique index is NOT the operative mechanism; the zero-jobs conjunct makes a sequential re-run a no-op and `FOR UPDATE SKIP LOCKED` handles the concurrent race. The index is the last arbiter only. Alerting: `## Landmine L-1` establishes the Sentry gap and the exact fix. Template: `## Architecture Patterns` §Pattern 1 gives the reusable migration skeleton. |
 
 `.planning/REQUIREMENTS.md:1405` maps JOB-04 → Phase 143, status `Pending`.
 `.planning/REQUIREMENTS.md:58` (JOB-07, mapped to Phase 142) is the constraint: no reaper/sweep on the
@@ -207,7 +208,7 @@ worker's shared asyncio event loop — pg_cron only.
 | Capability | Primary Tier | Secondary Tier | Rationale |
 |------------|-------------|----------------|-----------|
 | Orphan detection (dailies ∧ ¬jobs ∧ ¬terminal-analytics ∧ grace) | Database (pg_cron inline body) | — | JOB-07 forbids the worker loop; the predicate is a 3-table join that belongs where the data is. Also: detection-by-absence is architecturally impossible from the route handler (the whole point of the phase). |
-| Idempotent re-enqueue | Database (partial unique index `compute_jobs_one_inflight_per_kind_strategy`) | — | The arbiter already exists (`20260416125430:156`). SC#2 is a property of the index, not of new code. |
+| Idempotent re-enqueue | Database (zero-jobs conjunct; then `FOR UPDATE SKIP LOCKED`; then `ON CONFLICT DO NOTHING`) | — | ⛔ CORRECTED 2026-08-16 by observed neuter: SC#2 is NOT a property of the partial unique index. Sequential re-run is a no-op via the zero-jobs conjunct; the index is reached only when SKIP LOCKED *and* ON CONFLICT are both removed. |
 | Blast-radius bound (`LIMIT`) | Database (MATERIALIZED CTE) | — | The D-19 lesson: the bound only exists if the batch CTE is fenced (`20260803130000:111`). |
 | Alerting on a healed orphan | Python worker (`main_worker.dispatch_tick`) | pg_cron run log (`cron.job_run_details.return_message`) | No cron→Sentry bridge exists (`20260802120000:153-155`); the worker already has the claimed row's `metadata` (`main_worker.py:87`). |
 | Sentry transport initialization | Python worker process bootstrap (`main_worker.main()`) | — | **Currently missing entirely** — see Landmine L-1. |

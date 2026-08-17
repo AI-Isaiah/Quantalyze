@@ -123,6 +123,7 @@ atomicity (Phase 145); the wizard first-hop drop (see Detection Predicate Q4).
   current definition in `20260416125430_contact_request_metadata.sql:156`. **Re-base on that
   definition, not on the original `20260411144407:179`** — the original was DROPped and
   replaced. No new index. Running the sweep twice must be a provable no-op.
+- ⛔ **MECHANISM CORRECTED 2026-08-16 by an observed neuter — the heading above is WRONG as written and is kept only so this correction has an anchor.** SC#2 does NOT ride the partial unique index. SEQUENTIAL re-run is a no-op because of the **zero-jobs conjunct**: tick 1's INSERT removes the strategy from the predicate, so tick 2's batch is empty and the INSERT is never reached (confirmed live on TEST 2026-08-17, `143-CENSUS.md` part B §12). CONCURRENT races are handled first by `FOR UPDATE SKIP LOCKED` (an INSERT into `compute_jobs` key-share-locks its parent `strategies` row) and only then by `ON CONFLICT DO NOTHING`; the index is the last arbiter and is reached only when BOTH are removed. ⚠️ Corollary: any gate that "proves" `ON CONFLICT` by running the body twice in one session CANNOT FAIL. The re-base instruction below is still correct and still required.
 
 ### Alerting and Observability
 

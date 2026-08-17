@@ -5,7 +5,7 @@ milestone_name: JOB/RATE — job-lifecycle reliability and the rate limits that 
 current_phase: 153.7
 current_phase_name: ✅ **COMPLETE 2026-08-14**, branch `feat/phase-153.7-wizform-02-class`
 status: ready_to_plan
-stopped_at: Completed 143-03-PLAN.md (three CI gates + 12 observed neuters; migration still UNAPPLIED — Plan 04 owns TEST apply and the live tick)
+stopped_at: Completed 143-04-PLAN.md — Phase 143 EXECUTION-COMPLETE. Migration APPLIED to TEST (qmnijlgmdhviwzwfyzlc); PROD untouched. ⭐ L-2/T-143-02 RESOLVED BY MEASUREMENT: the 2026-08-17 09:35:00 UTC tick inserted compute_jobs 58728527 through FORCE ROW LEVEL SECURITY. Code review 0 blockers / 3 warnings (all fixed). Verification = human_needed: the 143-04 checkpoint:human-verify is undischarged and SC#1's PROD half needs the merge. JOB-04 deliberately NOT ticked.
 last_updated: "2026-08-16T22:03:53.816Z"
 last_activity: 2026-08-14
 last_activity_desc: Phase 153.7 plan 03 executed — PHASE COMPLETE (ledger 3 → 0 with the 32 total untouched, twin regressions neuter-proven on both key routes, prose re-cuts, two TODOS.md deferrals, WIZFORM-02 ticked)
@@ -1392,7 +1392,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-08-16T22:03:53.784Z
-**Stopped At:** Completed 143-03-PLAN.md (three CI gates + 12 observed neuters; migration still UNAPPLIED — Plan 04 owns TEST apply and the live tick)
+**Stopped At:** Completed 143-04-PLAN.md — Phase 143 EXECUTION-COMPLETE. Migration APPLIED to TEST (qmnijlgmdhviwzwfyzlc); PROD untouched. ⭐ L-2/T-143-02 RESOLVED BY MEASUREMENT: the 2026-08-17 09:35:00 UTC tick inserted compute_jobs 58728527 through FORCE ROW LEVEL SECURITY. Code review 0 blockers / 3 warnings (all fixed). Verification = human_needed: the 143-04 checkpoint:human-verify is undischarged and SC#1's PROD half needs the merge. JOB-04 deliberately NOT ticked.
 **Resume File:** None
 **Next step:** Phase 153.6 (PARITY) is booked and NOT yet planned — run `/gsd:plan-phase 153.6`. It carries 9 findings from the `/code-review xhigh` over the whole 153→153.5 span. ⛔ Three of its four root causes are ONE-PATH-ONLY fixes (a correct remedy applied to `routers/exchange.py` while its twin in `services/ingestion/mt5.py` went untouched, with no guard asserting the two agree) — close them as a CLASS, not as N patches. ⭐ The venue-lock bypass (D) is LIVE on PROD (the migration is on `main`, and `supabase/migrations/**` auto-applies on merge) but is a SELF-targeted control bypass, not a tenant leak. ⛔ The budget correction (C) has two halves — the number AND the oracle that pins the wrong column and so cannot red on it. Phases 154 and 155 remain unplanned; 155 is human- and calendar-gated (founder at the MT5 terminal, live funded account, on a trading day).
 
@@ -1437,4 +1437,4 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 
 ### Blockers
 
-- 143-01 leaves SC#1's alert MUTE until SENTRY_DSN is verified on the WORKER Railway service (separate service from the FastAPI app; a DSN on the web app does not imply one on the worker). Owned by Plan 04 / RESEARCH L-1 item 3. Code is correct and emits nothing until then.
+- ~~143-01 leaves SC#1's alert MUTE until SENTRY_DSN is verified on the WORKER Railway service~~ — ⛔ PREMISE FALSE, RESOLVED 2026-08-17 (Plan 04). There is NO separate worker service and has not been since April: the loops were merged into the FastAPI process (main.py:80-86, after the 2026-04-20 'jobs queued but never processed' incident), dispatch_loop runs in the app lifespan (main.py:271), that process calls init_sentry() at import (main.py:69, since Phase 16), and SENTRY_DSN IS set on its Railway service. SC#1's alert half is TRUE in production. 143-01's init_sentry() covers the STANDALONE path only.

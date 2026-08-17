@@ -288,18 +288,29 @@
 -- therefore written FROM FIRST PRINCIPLES and deserves extra review weight, in
 -- the same register 20260802120000:485-487 used for its own bounded UPDATE.
 --
--- ⚠️ Nor can any gate that runs as the psql user prove this INSERT lands in
+-- ⚠️ No gate that runs as the psql user can prove this INSERT lands in
 -- production. compute_jobs carries FORCE ROW LEVEL SECURITY with a deny-all
 -- policy (20260516104201:209, 20260411144407:233-239); FORCE exists specifically
 -- to close the table-owner bypass. Whether the pg_cron job role writes through
 -- it is a property of THAT ROLE, and every CI gate connects as a different one.
--- The empirical precedent is strong but is inference, not measurement:
--- retention_compute_jobs_orphaned_running DELETEs from compute_jobs on a
--- schedule and is recorded as having deleted real PROD rows, which could not
--- happen if RLS blocked the cron role. The measurement is one real tick on TEST
--- inspected in cron.job_run_details, and it is a BLOCKING pre-merge item. Until
--- it is done, treat the write path as unproven and this paragraph as the
--- statement of that gap.
+--
+-- ✅ RESOLVED 2026-08-17 BY MEASUREMENT (Plan 04's live TEST tick). This
+-- paragraph previously ended "treat the write path as unproven"; that is no
+-- longer true and the sentence is removed rather than left to rot. Observed:
+--
+--   tick     2026-08-17 09:35:00.061575+00 -> .186637+00, status succeeded
+--   inserted compute_jobs 58728527-5cfc-4660-bb00-e0dfecc60bf7
+--            kind compute_analytics_from_csv, status pending,
+--            metadata {"source":"reconcile-sweep","detected_at":"...09:35:00.061076+00:00"}
+--   role     cron.job.username = postgres, rolbypassrls = TRUE
+--
+-- BYPASSRLS overrides FORCE RLS, and the sweep runs as the SAME role as
+-- retention_compute_jobs_orphaned_running, which is recorded as having deleted
+-- real PROD rows. The inference was right; it is now also measured. Full
+-- evidence: 143-CENSUS.md part B section (11). ⚠️ Still true and still worth
+-- keeping in mind: no CI gate can RE-prove this after a role or grant change,
+-- so a future change to the cron role's privileges must be re-verified by
+-- another live tick, not by a green suite.
 --
 -- Idempotency
 -- -----------
@@ -408,9 +419,20 @@
 --     either half silently kills the alert while both halves' own tests stay
 --     green. Honest latency: sweep tick -> next worker claim; a fully-down
 --     worker means no alert at all, which is independently alarmed by healthz.
---     ⚠️ Also unproven until Plan 04: the alert only reaches Sentry if SENTRY_DSN
---     is set on the WORKER's Railway service, which is a different service from
---     the FastAPI app. init_sentry() early-returns without it.
+--     ✅ RESOLVED 2026-08-17 (Plan 04). The draft of this bullet said the alert
+--     reaches Sentry only if SENTRY_DSN is set on "the WORKER's Railway service,
+--     which is a different service from the FastAPI app". THAT PREMISE IS WRONG
+--     and is corrected here rather than left standing: there is no separate
+--     worker service, and there has not been since April. The worker loops were
+--     MERGED into the FastAPI process (main.py:80-86, after the 2026-04-20 ->
+--     04-22 "jobs queued but never processed" incident); dispatch_loop runs as an
+--     asyncio task in the app lifespan (main.py:271); that process calls
+--     init_sentry() at import (main.py:69, since Phase 16); and SENTRY_DSN IS set
+--     on it (verified via Railway, presence only -- no value was read).
+--     ⇒ The alert path is live in production. init_sentry() in
+--     main_worker.main() (Phase 143 Plan 01) covers the STANDALONE invocation
+--     path only and must not be read as evidence that production was previously
+--     unalerted -- it was not.
 --
 -- (2) THE RUN LOG is the secondary surface, and it is WEAKER than this file
 --     originally claimed. To inspect sweep activity:

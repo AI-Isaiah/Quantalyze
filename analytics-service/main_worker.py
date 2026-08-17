@@ -1083,15 +1083,27 @@ async def main() -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
-    # JOB-04 (Phase 143): this worker process previously had NO Sentry client
-    # at all — main_worker.py carried zero Sentry references while main.py (the
-    # sibling FastAPI process) has had init_sentry() since Phase 16. That gap is
-    # silent by construction: sentry_sdk.capture_*() with no initialized client
-    # is a NO-OP that raises nothing and logs nothing, so the reconcile-sweep
-    # alert in dispatch_tick() below would emit into the void in production
-    # while every unit test (which spies on the SDK) stayed green. An alerting
-    # channel that fails silently is the defect class this milestone has already
-    # closed twice, and the reason the pg_net->Sentry bridge was rejected.
+    # JOB-04 (Phase 143): main_worker.py carried zero Sentry references, so this
+    # module had no Sentry client when run STANDALONE (`python -m main_worker`,
+    # `npm run worker:dev`). That gap is silent by construction:
+    # sentry_sdk.capture_*() with no initialized client is a NO-OP that raises
+    # nothing and logs nothing, so the reconcile-sweep alert in dispatch_tick()
+    # would emit into the void while every unit test (which spies on the SDK)
+    # stayed green. An alerting channel that fails silently is the defect class
+    # this milestone has already closed twice, and the reason the pg_net->Sentry
+    # bridge was rejected.
+    #
+    # ⚠️ DO NOT read this as "production was unalerted before Phase 143" — it was
+    # NOT. Verified 2026-08-17 (Phase 143 Plan 04): PRODUCTION DOES NOT RUN THIS
+    # ENTRYPOINT. There is no separate worker service and has not been since
+    # April — the loops were merged into the FastAPI process (main.py:80-86,
+    # after the 2026-04-20 -> 04-22 "jobs queued but never processed" incident),
+    # dispatch_loop runs as an asyncio task in the app lifespan (main.py:271),
+    # and that process has called init_sentry() at import since Phase 16
+    # (main.py:69) with SENTRY_DSN set on its Railway service.
+    # So the init below closes the STANDALONE path only. It is not dead code —
+    # it is what makes a re-split, or a local `python -m main_worker` run,
+    # observable — but it is not the production path.
     #
     # Placed AFTER logging.basicConfig (so logging is wired before any sentry
     # import side effects, matching main.py:60-69) and BEFORE the KEK check, so
