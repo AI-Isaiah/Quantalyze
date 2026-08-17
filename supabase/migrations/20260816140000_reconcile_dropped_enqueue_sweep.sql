@@ -146,9 +146,36 @@
 -- csv_daily_returns.created_at is the surviving candidate on the merits, not by
 -- elimination: it is stamped exactly when the dailies landed, which is precisely
 -- the event after which an enqueue should have followed; it is NOT NULL DEFAULT
--- now() so it always exists; no writer re-stamps it (the persist and derive
--- upserts touch updated_at); and it is DIRECTLY INSERT-WRITABLE, which is what
+-- now() so it always exists; and it is DIRECTLY INSERT-WRITABLE, which is what
 -- lets a test backdate a seed instead of sleeping.
+--
+-- ⚠️ CORRECTION (2026-08-17). This paragraph used to claim "no writer re-stamps
+-- it (the persist and derive upserts touch updated_at)". That is FALSE, and the
+-- argument must not rest on it. BOTH worker derive paths DELETE a span and then
+-- RE-UPSERT it -- the broker-dailies reconcile span
+-- (job_worker.py:4715-4746, `_reconcile_span_delete` then `_upsert_dailies`)
+-- and the composite full-series rewrite (:6779-6805, `_reconcile_full_delete`
+-- then `_upsert_dailies`). A DELETEd row that is re-INSERTed takes a FRESH
+-- created_at from the DEFAULT now(); only a true in-place UPDATE would leave it
+-- alone. So this column CAN advance.
+--
+-- The anchor is still correct, but for a DIFFERENT and weaker reason -- the
+-- DIRECTION of the error, not its absence. A re-stamp moves MAX(created_at)
+-- FORWARD, which makes the strategy look FRESHER and pushes it OUT of the
+-- `< now() - interval '1 hour'` grace conjunct. The failure mode is therefore
+-- "healed later, or not this tick", never "healed early" and never a duplicate
+-- enqueue racing a live writer. That is the safe direction, and it is the
+-- opposite of the updated_at hazard: there the re-stamp was universal (every
+-- refresh touches it) so the window never elapsed for actively-refreshed rows.
+--
+-- Here the re-stamp cannot strand this sweep's TARGET population, because the
+-- two writers that re-stamp are job-driven: a strategy whose span is being
+-- re-derived has a compute_jobs row in flight at that moment and is excluded by
+-- the zero-jobs conjunct anyway. The dropped-enqueue orphan this file exists to
+-- heal has, by construction, NO job and nothing re-deriving it, so its
+-- created_at stays at the original persist and the grace window does elapse.
+-- Stated explicitly so no future reader re-derives the false "never re-stamped"
+-- premise from a green gate.
 --
 -- ⚠️ NO NEW INDEX IS ADDED for it. csv_daily_returns has no index on created_at
 -- and will not get one here: that table's own DDL records a redundant secondary

@@ -99,8 +99,20 @@
 -- There are no sleeps anywhere in this file. Elapsed time is crossed by seeding
 -- csv_daily_returns.created_at a CENTURY back -- which is why DX-04 chose an
 -- anchor column that is directly INSERT-writable (NOT NULL DEFAULT now(),
--- 20260522111839:40; no writer re-stamps it -- the persist and derive upserts
--- touch updated_at).
+-- 20260522111839:40).
+--
+-- ⚠️ CORRECTION (2026-08-17). This note used to add "no writer re-stamps it --
+-- the persist and derive upserts touch updated_at". That is FALSE. BOTH worker
+-- derive paths DELETE a span and RE-UPSERT it (job_worker.py:4715-4746 and
+-- :6779-6805), and a re-INSERTed row takes a fresh created_at from the DEFAULT
+-- now(). Nothing in THIS file depends on the false half: the seeds are written
+-- by this file's own INSERTs and no worker runs against them inside these
+-- transactions, so the century-back backdate holds regardless. The reason the
+-- anchor is still sound in PRODUCTION is the DIRECTION of the re-stamp -- it
+-- moves MAX(created_at) forward, so a re-derived strategy looks FRESHER and is
+-- SKIPPED, never healed early -- which is argued in full in the migration
+-- header. Corrected here too because the same false sentence appeared in both
+-- files, and a claim that survives in one place gets re-derived from there.
 --
 -- FROZEN CLOCK: each part runs inside ONE transaction, so now() is CONSTANT for
 -- the whole part. Never assert by comparing two now()-derived values -- they are
