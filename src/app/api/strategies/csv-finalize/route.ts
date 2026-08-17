@@ -1313,7 +1313,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // present-but-invalid field (bad aum, over-cap description) is caught
   // as a clean 400 before any strategy row is created. applyCsvMetadataUpdate
   // also validates, but it runs after RPC — catching it here avoids an
-  // orphan strategy row on validation errors.
+  // orphaned `strategies` row on validation errors. (Phase 145 / D-11: this
+  // exact three-word phrase is count-asserted to ZERO occurrences in src/ —
+  // it was the search string of a deleted vacuous test; do not reintroduce it.)
   const preCreateMetadataParsed = parseCsvMetadata(metadataRaw);
   if (!preCreateMetadataParsed.ok) {
     return NextResponse.json(

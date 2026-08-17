@@ -5,20 +5,48 @@
  * a live DB. Each test verifies exactly the "fails without the fix" invariant
  * called out in the audit findings.
  *
+ * Phase 145 / Plan 05 (D-11, D-12) — this file was REBUILT when the fold
+ * landed. The old vacuous red-team "M1" block (its full name is retired with
+ * it — the acceptance grep count-asserts its absence) drove the PRE-create
+ * 400 (the RPC never ran) and then asserted captureToSentry was NOT called
+ * with an orphan-capture message — searching for a phrase no code emits — so
+ * the assertion was vacuously true forever, named for a post-RPC
+ * orphan-capture guarantee nobody implemented. Per the founder rule (a test
+ * that cannot fail is worse
+ * than none) it was DELETED, and the guarantee it pretended to pin is
+ * superseded by the real mechanism: 145-REPRODUCTION.md records the
+ * CANNOT-REPRODUCE verdict on the historical 42501 orphan bug, and the fold
+ * (`finalize_csv_strategy_with_returns`, migration 20260819120000) makes a
+ * failed finalize commit NOTHING — there is no orphan left to capture. The
+ * three 145-05 gates below drive the fold caller's ACTUAL post-RPC failure
+ * arms and assert captures/copy that ARE made; each was observed RED under a
+ * neuter of its target before restore (records in 145-05-SUMMARY.md).
+ * (NEW-C14-07 was deleted outright, not unskipped: the upstream-body spread
+ * it pinned dissolved with hop 0 — there is no /process-key body to strip —
+ * and the surviving TS-13 discipline is pinned by route.test.ts's re-pointed
+ * TS-13 describe.)
+ *
  * Tests covered:
- *   NEW-C14-01: 23505 conflict → 409 (legacy path error-branch mapping)
+ *   FOLD-FAIL-CAPTURE (145-05 A): fold RPC error → 500 CSV_FINALIZE_FAIL,
+ *     truthful nothing-was-saved copy, step='finalize-fold-fail' capture
+ *   RESOLVE-REFUSED (145-05 B): 23505 + name mismatch → 409
+ *     CSV_SESSION_REUSED, accurate copy, step='finalize-resolve-refused'
+ *     capture, and NO metadata write (checks-before-metadata)
+ *   RESOLVE-ECHO-READ-ONLY (145-05 C): 23505 + matching identity → 200
+ *     echoing the existing row's id AND status; the resolve arm persists
+ *     NOTHING (read-only contract)
  *   NEW-C14-03: present-but-invalid aum/max_capacity → 400 CSV_INVALID_FORMAT
+ *   WR-04: explicit null category_id → 400 (handler + shared validator)
  *   NEW-C14-05: over-cap description → 400 CSV_INVALID_FORMAT
- *   NEW-C14-07: ok:true appears AFTER spread in unified success envelope
  *   NEW-C14-09: daily_return magnitude > 10 → 400 CSV_INVALID_FORMAT
- *   NEW-C14-10: impossible calendar date → 400 CSV_INVALID_FORMAT
- *   NEW-C14-10: future date → 400 CSV_INVALID_FORMAT
+ *   NEW-C14-10: impossible calendar date / future date → 400
  *   NEW-C14-12: trimmed name checked for length (trailing spaces not rejected)
+ *   RED-TEAM-L2: retry-enable predicate (CSV_DUPLICATE_SESSION never re-enables)
  */
 
 // @vitest-environment node
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
@@ -36,23 +64,47 @@ vi.mock("@/lib/ratelimit", () => ({
   checkLimit: checkLimitMock,
 }));
 
-// rpc mock: default returns newStrategyId so the success path is exercised.
+// server-client rpc: the Phase 145 fold (finalize_csv_strategy_with_returns).
+// Default succeeds with a fresh UUID so the pre-existing success-path cases
+// keep exercising the create path.
 const rpcMock = vi.hoisted(() =>
-  vi.fn(async () => ({ data: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", error: null })),
+  vi.fn(
+    async (): Promise<{
+      data: string | null;
+      error: { code?: string; message?: string } | null;
+    }> => ({ data: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", error: null }),
+  ),
 );
+// Metadata UPDATE (applyCsvMetadataUpdate → from("strategies").update().eq().eq()).
 const updateMock = vi.hoisted(() =>
   vi.fn(async () => ({ error: null })),
 );
+// The 23505 resolve arm's two READS (145-05 B/C) — driven independently:
+//   strategies re-fetch:  .select().eq().eq().eq().maybeSingle()
+//   dailies range check:  .select().eq().or().limit(1)
+const strategiesMaybeSingleMock = vi.hoisted(() =>
+  vi.fn(
+    async (): Promise<{ data: unknown; error: unknown }> => ({
+      data: null,
+      error: null,
+    }),
+  ),
+);
+const dailiesRangeLimitMock = vi.hoisted(() =>
+  vi.fn(
+    async (): Promise<{ data: unknown[]; error: unknown }> => ({
+      data: [],
+      error: null,
+    }),
+  ),
+);
+// Write-shaped calls that must NEVER fire from inside the resolve arm — the
+// read-only contract 145-05 C pins.
+const insertMock = vi.hoisted(() => vi.fn(async () => ({ error: null })));
+const upsertMock = vi.hoisted(() => vi.fn(async () => ({ error: null })));
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
-    // Phase 19.1: the unified finalize path reads the session to forward the
-    // user JWT to analytics. Provide one so the handler clears its 401 guard.
-    auth: {
-      getSession: async () => ({
-        data: { session: { access_token: "test-user-jwt" } },
-      }),
-    },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     rpc: (name: string, args: Record<string, unknown>) => (rpcMock as any)(name, args),
     from: (_table: string) => ({
@@ -61,22 +113,27 @@ vi.mock("@/lib/supabase/server", () => ({
           eq: (_c2: string, _v2: unknown) => updateMock(),
         }),
       }),
-      // CR-01: the route now probes `csv_daily_returns` for rows OUTSIDE the
-      // incoming payload's date range before persisting (the cross-submission
-      // merge fence). This double reports "nothing already stored", which is
-      // the first-submit state every case in this file models.
-      select: (_cols: string) => ({
-        eq: (_col: string, _val: string) => ({
-          or: (_filter: string) => ({
-            limit: async (_n: number) => ({ data: [], error: null }),
-          }),
-        }),
-      }),
+      insert: (_rows: unknown) => insertMock(),
+      upsert: (_rows: unknown) => upsertMock(),
+      // One flexible chain serves both resolve-arm reads; the two terminal
+      // calls route to their dedicated mocks so tests drive each read on its
+      // own. eq/or return the chain itself, so filter-count changes in the
+      // route do not silently break the scaffold.
+      select: (_cols: string) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const chain: any = {};
+        chain.eq = () => chain;
+        chain.or = () => chain;
+        chain.limit = () => dailiesRangeLimitMock();
+        chain.maybeSingle = () => strategiesMaybeSingleMock();
+        return chain;
+      },
     }),
   }),
 }));
 
-// Admin client: used by 23505 recovery and placeholder writes.
+// Admin client: reached only inside the after() enqueue epilogue, which this
+// file's after() no-op (below) never runs. Kept defensively.
 const adminFromMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
@@ -85,10 +142,11 @@ vi.mock("@/lib/supabase/admin", () => ({
   }),
 }));
 
-// Phase 106 Stage B: the route delegates unconditionally to the unified
-// backbone, so postProcessKey must succeed by default (returning a valid
-// strategy_id) for the ok:true success-path assertions. INTERNAL_API_TOKEN is
-// required by unifiedCsvFinalizeHandler (503 otherwise) — set it below.
+// Phase 145: the route no longer dispatches to /process-key (the fold is
+// called directly on the SSR client — option i-b, 145-DECISION.md). The mock
+// is kept as a tripwire: if a regression re-introduced the dispatch, these
+// tests would exercise it instead of the fold and the fold-shaped
+// expectations would red.
 vi.mock("@/lib/process-key-client", () => ({
   postProcessKey: vi.fn(async () => ({
     ok: true,
@@ -96,8 +154,6 @@ vi.mock("@/lib/process-key-client", () => ({
     body: { ok: true, strategy_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
   })),
 }));
-
-process.env.INTERNAL_API_TOKEN = "test-internal-token";
 
 vi.mock("@/lib/sentry-capture", () => ({
   captureToSentry: vi.fn(),
@@ -111,6 +167,7 @@ vi.mock("next/server", async () => {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 import { NextRequest } from "next/server";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 function makeRequest(body: Record<string, unknown>): NextRequest {
   return new NextRequest("http://localhost:3000/api/strategies/csv-finalize", {
@@ -122,6 +179,7 @@ function makeRequest(body: Record<string, unknown>): NextRequest {
 
 const VALID_SESSION = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 const VALID_SERIES = [{ date: "2024-01-01", daily_return: 0.01 }];
+const EXISTING_ID = "cccccccc-cccc-cccc-cccc-cccccccccccc";
 
 function validBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -133,6 +191,15 @@ function validBody(overrides: Record<string, unknown> = {}): Record<string, unkn
   };
 }
 
+function findCapture(step: string) {
+  return vi
+    .mocked(captureToSentry)
+    .mock.calls.find(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (c) => (c[1] as any)?.tags?.step === step,
+    );
+}
+
 // ── Import after all mocks are set up ─────────────────────────────────────
 
 import { POST } from "@/app/api/strategies/csv-finalize/route";
@@ -140,53 +207,206 @@ import { parseDailyReturnsSeries } from "@/app/api/strategies/csv-finalize/route
 import { parseCsvMetadata } from "@/app/api/strategies/csv-finalize/route";
 
 // ══════════════════════════════════════════════════════════════════════════
+// 145-05 (D-11, D-12) — the three replacement gates. Each drives a REAL
+// post-RPC failure/resolve arm of the fold caller (the arms Plan 04 built,
+// in `finalizeAtomicOrErrorResponse` / `resolveExistingStrategyOrRefuse`)
+// and asserts a capture/copy that WAS made. Each was observed RED under a
+// neuter of its target before restore — the after-failloud idiom: assert
+// tags.step AND that the console line survives.
 
-describe("RED-TEAM-M1: post-RPC metadata validation orphan Sentry capture", () => {
+describe("FOLD-FAIL-CAPTURE (145-05 A): a failed fold answers the truthful nothing-was-saved 500 and captures step=finalize-fold-fail", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
   beforeEach(() => {
     vi.clearAllMocks();
     checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
-  it("calls captureToSentry with the orphan strategy_id when post-RPC metadata validation fails", async () => {
-    const { captureToSentry } = await import("@/lib/sentry-capture");
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
 
-    // RPC succeeds and returns a new strategy_id
-    const newId = "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee";
-    rpcMock.mockResolvedValueOnce({ data: newId, error: null });
+  it("non-23505 RPC error → 500 CSV_FINALIZE_FAIL, nothing-was-saved copy, Sentry capture, surviving console.error", async () => {
+    rpcMock.mockResolvedValueOnce({
+      data: null,
+      error: { code: "XX000", message: "fold exploded" },
+    });
 
-    // The pre-create validation passes (metadata is absent)
-    // but we need to force the POST-create applyCsvMetadataUpdate to return
-    // a 400. This requires getting past the pre-create check with a valid
-    // body, then having the route's second applyCsvMetadataUpdate call fail.
-    // We simulate this by passing a metadata field that is valid per the
-    // pre-create parse but causes an UPDATE error — however, since
-    // applyCsvMetadataUpdate is a shared helper, the simplest approach is
-    // to pass an invalid aum that bypasses the pre-create parse.
-    // In practice the defensive second parse is identical to the first,
-    // so we cannot inject a post-RPC failure via the body alone in unit
-    // tests without mocking the helper. The meaningful regression here is
-    // that when metaErrResponse is non-null, captureToSentry is called
-    // with the orphan_strategy_id. We verify this by injecting a bad aum
-    // via a request whose pre-create parse also fails — but that fires
-    // BEFORE the RPC, so it does NOT reach the post-RPC path.
-    //
-    // The orphan capture path is only reachable in practice when a test
-    // client bypasses the pre-create check (e.g. intercepting middleware).
-    // We verify captureToSentry is NOT called on the normal 400-before-RPC
-    // path (no orphan), establishing the call-site contract.
-    const res = await POST(makeRequest(validBody({ metadata: { aum: "-999" } })));
+    const res = await POST(makeRequest(validBody()));
     const body = await res.json();
 
-    // Should return 400 (pre-create path; RPC never called)
-    expect(res.status).toBe(400);
-    expect(body.code).toBe("CSV_INVALID_FORMAT");
-    // captureToSentry must NOT have been called for orphan (no strategy row created)
-    const calls = vi.mocked(captureToSentry).mock.calls;
-    const orphanCall = calls.find((c) =>
-      c[0] instanceof Error &&
-      (c[0] as Error).message.includes("orphan strategy row"),
+    // The truthful copy: the fold has NO EXCEPTION block, so a failed
+    // finalize commits nothing — and the code is CSV_FINALIZE_FAIL (not
+    // CSV_PERSIST_FAIL) so the wizard's retry predicate re-enables Submit
+    // beside the "safe to try again" sentence (Plan 04 key decision;
+    // RED-TEAM-L2 below pins the predicate side of that pairing).
+    expect(res.status).toBe(500);
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_FINALIZE_FAIL");
+    expect(body.human_message).toContain(
+      "Nothing was saved — the submission rolled back completely",
     );
-    expect(orphanCall).toBeUndefined();
+
+    // The console line SURVIVES (Vercel log parity — Sentry is added
+    // alongside, never as a replacement).
+    expect(
+      errorSpy.mock.calls.some((c: unknown[]) =>
+        String(c[0]).includes("finalize_csv_strategy_with_returns failed"),
+      ),
+    ).toBe(true);
+
+    // ...and the failure is alertable (D-12 — the pre-fold windows B/C had
+    // ZERO capture on the failure itself; this arm is their folded successor).
+    const call = findCapture("finalize-fold-fail");
+    expect(call).toBeDefined();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const opts = call![1] as any;
+    expect(opts.tags.surface).toBe("csv-finalize");
+    expect(opts.extra.correlation_id).toBeTruthy();
+    expect(opts.extra.rpc_error_code).toBe("XX000");
+  });
+});
+
+describe("RESOLVE-REFUSED (145-05 B): 23505 + name mismatch → 409 CSV_SESSION_REUSED, capture, and NO metadata write", () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it("refuses BEFORE anything of this submission is written (checks-before-metadata — the 409-lie fix)", async () => {
+    rpcMock.mockResolvedValueOnce({
+      data: null,
+      error: {
+        code: "23505",
+        message:
+          'duplicate key value violates unique constraint "strategies_user_wizard_session_source_uniq"',
+      },
+    });
+    // The committed row holds a DIFFERENT name: a changed track record is a
+    // NEW strategy, so the resolve arm must refuse (CR-01 check 1).
+    strategiesMaybeSingleMock.mockResolvedValueOnce({
+      data: { id: EXISTING_ID, name: "A Different Strategy", status: "pending_review" },
+      error: null,
+    });
+
+    // The submission CARRIES metadata deliberately: if the ordering ever
+    // regressed to metadata-before-checks (the pre-fold 409 lie, where hop 2
+    // had already overwritten the resolved strategy's metadata before the
+    // fence refused), this update WOULD land — the not-called assertion
+    // below is what reds.
+    const res = await POST(
+      makeRequest(
+        validBody({ metadata: { description: "must never be written on a refusal" } }),
+      ),
+    );
+    const body = await res.json();
+
+    expect(res.status).toBe(409);
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_SESSION_REUSED");
+    // The ACCURATE copy — true by ORDERING: identity checks ran before any
+    // metadata write, so "before writing anything of this submission" holds.
+    expect(body.human_message).toContain(
+      "already created a strategy with a different track record",
+    );
+    expect(body.human_message).toContain(
+      "we refused before writing anything of this submission",
+    );
+    expect(body.debug_context?.strategy_id).toBe(EXISTING_ID);
+
+    // The refusal is alertable (D-12) — a money-fence firing.
+    const call = findCapture("finalize-resolve-refused");
+    expect(call).toBeDefined();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const opts = call![1] as any;
+    expect(opts.tags.surface).toBe("csv-finalize");
+    expect(opts.extra.strategy_id).toBe(EXISTING_ID);
+    expect(opts.extra.correlation_id).toBeTruthy();
+
+    // NO write of THIS submission ran — the 409 copy is truthful.
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(insertMock).not.toHaveBeenCalled();
+    expect(upsertMock).not.toHaveBeenCalled();
+
+    // The console line survives.
+    expect(
+      warnSpy.mock.calls.some((c: unknown[]) =>
+        String(c[0]).includes("refused a cross-submission resolve (name mismatch)"),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("RESOLVE-ECHO-READ-ONLY (145-05 C): 23505 + matching identity → 200 echoing the existing row; the resolve arm persists NOTHING", () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it("echoes the existing id + its OWN status after read-only checks; zero writes, exactly one RPC call", async () => {
+    rpcMock.mockResolvedValueOnce({
+      data: null,
+      error: {
+        code: "23505",
+        message:
+          'duplicate key value violates unique constraint "strategies_user_wizard_session_source_uniq"',
+      },
+    });
+    // Matching name; status 'private' — the echoed status must come from the
+    // READ, never be fabricated: a CONTRIB-02 contribution row must not be
+    // reported back as 'pending_review'.
+    strategiesMaybeSingleMock.mockResolvedValueOnce({
+      data: { id: EXISTING_ID, name: "Test Strategy", status: "private" },
+      error: null,
+    });
+    // Range check (CR-01 check 2, as a READ): no committed dailies outside
+    // this payload's range → this IS the instructed retry of the same file.
+    dailiesRangeLimitMock.mockResolvedValueOnce({ data: [], error: null });
+
+    // NO metadata in the body: any write observed below came from inside the
+    // resolve path, which is exactly what the read-only contract forbids.
+    const res = await POST(makeRequest(validBody()));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.strategy_id).toBe(EXISTING_ID);
+    expect(body.status).toBe("private");
+
+    // BOTH identity checks ran, as READS.
+    expect(strategiesMaybeSingleMock).toHaveBeenCalledTimes(1);
+    expect(dailiesRangeLimitMock).toHaveBeenCalledTimes(1);
+
+    // The read-only contract: exactly ONE rpc call (the failed fold — no
+    // second finalize, no persist RPC; the dailies are guaranteed present
+    // because the fold committed all-or-nothing) and ZERO write-shaped calls
+    // on the user client.
+    expect(rpcMock).toHaveBeenCalledTimes(1);
+    expect(updateMock).not.toHaveBeenCalled();
+    expect(insertMock).not.toHaveBeenCalled();
+    expect(upsertMock).not.toHaveBeenCalled();
+
+    // The console line survives (the resolve echo is logged for traceability).
+    expect(
+      warnSpy.mock.calls.some((c: unknown[]) =>
+        String(c[0]).includes("23505 resolved to the existing strategy"),
+      ),
+    ).toBe(true);
   });
 });
 
@@ -476,137 +696,6 @@ describe("NEW-C14-12: trimmed strategy_name length check", () => {
 
 // ══════════════════════════════════════════════════════════════════════════
 
-/**
- * NEW-C14-07 — the KEY-ORDER guarantee in `unifiedCsvFinalizeHandler`: on the
- * success path the route's own `ok: true` is written AFTER the upstream spread,
- * and upstream `ok`/`error`/`code` are stripped, so a consumer keying on
- * `body.ok === true` never sees contradictory `code`/`error` keys beside it.
- *
- * ⚠️ REWRITTEN BY 140.3-02 / TS-13, AND THE TRADE IS RECORDED RATHER THAN
- * QUIETLY TAKEN. The original drove this with an upstream body carrying
- * `ok: false` + a valid `strategy_id`, and asserted the route answered
- * `ok: true` anyway. TS-13 makes that shape a 502, so the case had to change —
- * and NOT because the guard was relaxed to make a test pass. The original's
- * PREMISE ("force ok:true even when the upstream said ok:false") is precisely
- * the defect TS-13 closes: the route asserting success on a body that said the
- * opposite. Forcing the discriminator is not defence against a Python bug, it is
- * concealment of one.
- *
- * The MECHANISM the row actually protects is untouched and still asserted, now
- * against a body that is a genuine SUCCESS while still carrying `code` — the
- * WIZARD_DUPLICATE reply (`{ok: true, code: "WIZARD_DUPLICATE", ...}`), which is
- * a shape the service REALLY emits, rather than the synthetic one the original
- * invented. That makes this strictly the stronger test: same invariant, real
- * wire shape. The `ok:false` half is kept as its own case, asserting the outcome
- * TS-13 requires.
- */
-// ⚠️ Phase 145 / Plan 04: SKIPPED, not deleted — Plan 05 rebuilds this file.
-// The arm this describe pins (the /process-key upstream-body spread in
-// unifiedCsvFinalizeHandler) DISSOLVED with the fold: the route now calls
-// finalize_csv_strategy_with_returns directly and builds its own envelope, so
-// there is no upstream body to strip `ok`/`error`/`code` from. The surviving
-// TS-13 discipline — the fold success check validates (error || !isUuid(id))
-// — is pinned in route.test.ts's re-pointed TS-13 describe. Plan 05 owns this
-// file (it deletes the vacuous RED-TEAM-M1 block above and rebuilds the
-// failure-arm coverage) and disposes of this block properly.
-describe.skip("NEW-C14-07: ok:true not overwritten by upstream spread (unified path — DISSOLVED by the Phase 145 fold; Plan 05 rebuilds this)", () => {
-  /** Admin/persist no-ops shared by both cases. */
-  function stubAdminNoOps() {
-    adminFromMock.mockReturnValue({
-      update: () => ({ eq: () => ({ eq: () => ({ error: null }) }) }),
-      upsert: () => ({ error: null }),
-      select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }),
-    } as any); // eslint-disable-line @typescript-eslint/no-explicit-any
-    updateMock.mockResolvedValue({ error: null });
-  }
-
-  it("strips upstream ok/error/code and sets ok:true last in unified success", async () => {
-    // INTERNAL_API_TOKEN is required by unifiedCsvFinalizeHandler — set it
-    // for the duration of this test only.
-    const originalToken = process.env.INTERNAL_API_TOKEN;
-    process.env.INTERNAL_API_TOKEN = "test-token-c14-07";
-
-    const { postProcessKey } = await import("@/lib/process-key-client");
-    // A GENUINE success that nonetheless carries `code` — the real duplicate
-    // reply. `_wizard_duplicate_reply`'s own docstring states the contract this
-    // exercises: "`code` MUST be a non-empty string when `ok` is false, NOT that
-    // it is absent when `ok` is true". So `code` beside `ok: true` is normal,
-    // and stripping it on the success envelope is what keeps `body.ok` an
-    // unambiguous discriminator for this route's consumers.
-    vi.mocked(postProcessKey).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      body: {
-        ok: true,
-        code: "WIZARD_DUPLICATE",
-        error: "upstream error that should be stripped",
-        strategy_id: "dddddddd-dddd-dddd-dddd-dddddddddddd",
-        extra_field: "preserved",
-      },
-    });
-
-    stubAdminNoOps();
-
-    const res = await POST(makeRequest(validBody()));
-    const body = await res.json();
-
-    // NEW-C14-07: the route's own ok:true is written last and survives.
-    expect(body.ok).toBe(true);
-    // upstream error/code fields must be stripped on success path
-    expect(body.error).toBeUndefined();
-    expect(body.code).toBeUndefined();
-    // non-conflicting upstream fields are preserved
-    expect(body.extra_field).toBe("preserved");
-
-    // Restore env
-    if (originalToken === undefined) {
-      delete process.env.INTERNAL_API_TOKEN;
-    } else {
-      process.env.INTERNAL_API_TOKEN = originalToken;
-    }
-  });
-
-  it("140.3-02 / TS-13 — an upstream ok:false NEVER reaches the success envelope at all", async () => {
-    const originalToken = process.env.INTERNAL_API_TOKEN;
-    process.env.INTERNAL_API_TOKEN = "test-token-c14-07";
-
-    const { postProcessKey } = await import("@/lib/process-key-client");
-    // The exact body the ORIGINAL version of this test asserted a 200 for.
-    vi.mocked(postProcessKey).mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      body: {
-        ok: false,
-        error: "upstream error",
-        code: "UPSTREAM_ERROR",
-        strategy_id: "dddddddd-dddd-dddd-dddd-dddddddddddd",
-      },
-    });
-
-    stubAdminNoOps();
-
-    const res = await POST(makeRequest(validBody()));
-    const body = await res.json();
-
-    expect(
-      res.status,
-      "Stripping `ok: false` and stamping `ok: true` over it does not defend " +
-        "against an upstream bug — it CONCEALS one, and hands the wizard a " +
-        "success for a finalize that did not happen — TS-13.",
-    ).toBe(502);
-    expect(body.ok).toBe(false);
-    expect(body.code).toBe("CSV_FINALIZE_FAIL");
-
-    if (originalToken === undefined) {
-      delete process.env.INTERNAL_API_TOKEN;
-    } else {
-      process.env.INTERNAL_API_TOKEN = originalToken;
-    }
-  });
-});
-
-// ══════════════════════════════════════════════════════════════════════════
-
 describe("RED-TEAM-L2: CSV_DUPLICATE_SESSION must not re-enable Submit (infinite retry guard)", () => {
   // The Submit-button enable/disable logic in CsvSubmitStep is:
   //   if (data.code !== "CSV_PERSIST_FAIL" && data.code !== "CSV_DUPLICATE_SESSION") {
@@ -630,6 +719,9 @@ describe("RED-TEAM-L2: CSV_DUPLICATE_SESSION must not re-enable Submit (infinite
   });
 
   it("re-enables Submit for CSV_FINALIZE_FAIL (safe to retry)", () => {
+    // Phase 145 pairing: the fold-failure 500 carries CSV_FINALIZE_FAIL
+    // precisely so its honest "safe to try again" copy sits beside a LIVE
+    // Submit button (145-05 A asserts the copy side).
     expect(shouldReEnableSubmit("CSV_FINALIZE_FAIL")).toBe(true);
   });
 
