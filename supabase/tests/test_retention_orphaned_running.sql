@@ -381,6 +381,8 @@ $$;
 --   E   claimed_at NULL, created 100 years ago       -> MUST be terminalized
 --   F   claimed_at NULL, created 12h ago             -> MUST be untouched
 --   +   COUNT CONSERVATION over all six seeded ids   -> MUST still be 6
+--       (asserted FIRST, immediately after the tick -- see the note at that
+--        assertion for the measured reason the ordering is load-bearing)
 --
 -- A and B are the threshold pair: they fail in OPPOSITE directions if the 4-hour
 -- window moves. E and F are the same pair for arm B. D proves the status scope.
@@ -484,12 +486,24 @@ BEGIN
   -- ----- THE ORACLE: run the REAL deployed body -------------------------
   EXECUTE v_command;
 
-  -- ----- (A) arm-A positive, on all six observable properties ------------
-  SELECT count(*) INTO v_cnt FROM public.compute_jobs WHERE id = id_a;
-  IF v_cnt <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-05/WR-02/SC#1): my orphaned running row is GONE after one tick (count=%), expected it to SURVIVE as a terminal row. A janitor that removes the row leaves the wizard poller with no outcome to break out on, destroys the audit record of the lost claim, and on PROD discards a genuine in-flight one-shot job. This is the assertion that inverted in Phase 144: the superseded body DELETEd, and this file used to demand exactly that.', v_cnt;
+  -- ----- COUNT CONSERVATION: the behavioural half of "never remove" ------
+  -- ⚠️ ORDERING IS LOAD-BEARING, and this is a MEASURED correction, not a style
+  -- choice. This assertion originally sat at the END of the part, after every
+  -- per-arm read -- and in that position it COULD NOT FAIL. The 144-01 neuter
+  -- matrix deployed the superseded removal body and observed that the arm-A read
+  -- below fired first every time, so the one assertion that makes D-01 checkable
+  -- was never reached. Any body that removes a seeded row trips a per-arm read
+  -- before it trips a count taken at the bottom. It runs FIRST now, so the
+  -- headline invariant is the first thing observed, and every per-arm read below
+  -- can rely on its row existing. Do not move it back.
+  SELECT count(*) INTO v_cnt FROM public.compute_jobs WHERE id = ANY (v_seeded);
+  IF v_cnt <> 6 THEN
+    RAISE EXCEPTION 'TEST FAILED (2/conservation/JOB-05/WR-02/SC#1): % of my 6 seeded rows survive the tick, expected all 6. The janitor REMOVED rows. That is the shipped behaviour Phase 144 exists to replace: a removed row leaves the wizard poller with no outcome to break out on, destroys the audit record that a worker was down past its claim window, and on PROD discards a genuine in-flight one-shot job that nothing will re-enqueue. This is checked BEHAVIOURALLY rather than only by grepping the body for a removal keyword -- a rewritten removal that avoids that keyword would still be caught here.', v_cnt;
   END IF;
 
+  -- ----- (A) arm-A positive, on its five observable properties -----------
+  -- The row is known to exist (conservation above), so a NULL read below means a
+  -- column was cleared, never that the row vanished.
   SELECT status, error_kind, last_error, next_attempt_at, claimed_at
     INTO v_status, v_kind, v_err, v_next, v_claimed
     FROM public.compute_jobs WHERE id = id_a;
@@ -517,6 +531,13 @@ BEGIN
   END IF;
 
   -- ----- (C) freshly claimed row is UNTOUCHED ---------------------------
+  -- ⚠️ HONESTY: this arm is DOMINATED by arm B and was NOT independently
+  -- reddened by the 144-01 neuter matrix. For any monotone age threshold, a body
+  -- that takes a 0-second-old claim also takes the 3-hour-old one, so arm B fires
+  -- first every time; and a body that took C but not B would have to be
+  -- age-INVERTED, which fails arm A before it reaches here. It is kept as an
+  -- explicit boundary marker of what the threshold means, not as independent
+  -- evidence. Do not count it twice when reasoning about coverage.
   SELECT status INTO v_status FROM public.compute_jobs WHERE id = id_c;
   IF v_status IS DISTINCT FROM 'running' THEN
     RAISE EXCEPTION 'TEST FAILED (2/arm C/JOB-05): a row claimed THIS INSTANT is at status % after one tick, expected still running. There is no threshold left at all -- the janitor would terminalize every job the worker claims, on every tick.', v_status;
@@ -548,13 +569,12 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (2/arm F/JOB-05/D-08): a NULL-claim running row only 12 hours old is at status % after one tick, expected still running. Arm B threshold has collapsed below its derivation (24h enqueue cadence + 2.5h max batch wall-clock, rounded up to 48h), so a row that the next daily fan-out has not even had a chance to supersede is already being called orphaned.', v_status;
   END IF;
 
-  -- ----- COUNT CONSERVATION: the behavioural half of "never remove" ------
-  SELECT count(*) INTO v_cnt FROM public.compute_jobs WHERE id = ANY (v_seeded);
-  IF v_cnt <> 6 THEN
-    RAISE EXCEPTION 'TEST FAILED (2/conservation/JOB-05/WR-02/SC#1): % of my 6 seeded rows survive the tick, expected all 6. The janitor REMOVED rows. That is the shipped behaviour Phase 144 exists to replace, and it is checked here behaviourally rather than only by grepping the body for a keyword -- a rewritten removal that avoids that keyword would still be caught by this count.', v_cnt;
-  END IF;
-
   -- Whole-block invariant, identity-scoped: exactly TWO of the six move.
+  -- ⚠️ HONESTY: this is a CATCH-ALL for an arm added later without its own
+  -- assertion, and the 144-01 neuter matrix could not redden it -- every seed in
+  -- this block already has a named check that fires first. It is the same
+  -- register as 143's whole-block count and carries the same caveat: it adds
+  -- future-proofing, not present coverage.
   SELECT count(*) INTO v_cnt
     FROM public.compute_jobs
    WHERE id = ANY (v_seeded) AND status = 'failed_final';
