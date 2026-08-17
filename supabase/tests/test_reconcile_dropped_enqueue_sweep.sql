@@ -266,8 +266,15 @@ BEGIN
   END IF;
 
   -- The bound and the race clauses.
-  IF v_command NOT ILIKE '%LIMIT 25%' THEN
-    RAISE EXCEPTION 'TEST FAILED (1/JOB-04/D-08): the deployed body has lost its LIMIT 25. An unbounded sweep is exactly the blast radius the cap exists to hold: a single tick could enqueue the whole candidate population at once.';
+  -- ⚠️ WORD-BOUNDED, never a substring. This was `NOT ILIKE '%LIMIT 25%'` until
+  -- 2026-08-17. MEASURED: '... LIMIT 2500 ...' ILIKE '%LIMIT 25%' is TRUE, so a
+  -- 100x widening of the per-tick blast radius passed this gate, its migration
+  -- sibling and its vitest sibling all at once. The bound is the single clause
+  -- this suite exists to hold, so it must be pinned by a pattern that a WIDER
+  -- limit fails. ([^0-9]|$) -- the `|$` arm matters: without it a body ending
+  -- exactly at 'LIMIT 25' would false-RED.
+  IF v_command !~ 'LIMIT[[:space:]]+25([^0-9]|$)' THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-04/D-08): the deployed body does not carry a word-bounded LIMIT 25. Either the bound is gone -- an unbounded sweep is exactly the blast radius the cap exists to hold, and a single tick could enqueue the whole candidate population at once -- or it has been widened to LIMIT 25<digits>, which multiplies that blast radius while still containing the literal substring the old substring gate tested for.';
   END IF;
   IF v_command NOT ILIKE '%FOR UPDATE SKIP LOCKED%' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04): the deployed body dropped FOR UPDATE SKIP LOCKED. Measured in Plan 02 at READ COMMITTED: an INSERT into compute_jobs takes an FK KEY SHARE lock on its parent strategies row, so this clause is what makes the sweep SKIP a strategy the live enqueue path is mid-insert on. Without it the sweep BLOCKS on that lock instead.';

@@ -792,6 +792,21 @@ BEGIN
     RAISE EXCEPTION 'JOB-04 verification failed: sweep body lost the archived-status exclusion, so archived strategies would consume worker slots for analytics nobody reads.';
   END IF;
 
+  -- The per-tick BOUND itself. ⚠️ This block did not exist until 2026-08-17:
+  -- the bound was the one clause STEP 2 never checked, while all three text
+  -- gates elsewhere pinned it with a SUBSTRING test. MEASURED: '... LIMIT 2500
+  -- ...' ILIKE '%LIMIT 25%' is TRUE, so a 100x widening of the per-tick blast
+  -- radius passed every gate that claimed to hold it. The bound must therefore
+  -- be pinned by a WORD-BOUNDED match -- 'LIMIT 25' NOT followed by another
+  -- digit -- and never by a substring. Same defect class as the bare
+  -- public.compute_jobs gate above: a gate that cannot fail teaches the next
+  -- reader that the clause is protected when it is not.
+  -- The trailing ([^0-9]|$) alternation is required, not decorative: without
+  -- the `|$` arm a body ending exactly at 'LIMIT 25' would false-RED.
+  IF v_command !~ 'LIMIT[[:space:]]+25([^0-9]|$)' THEN
+    RAISE EXCEPTION 'JOB-04/D-08 verification failed: the deployed body does not carry a word-bounded LIMIT 25. Either the bound is gone entirely -- one tick could then enqueue the WHOLE candidate population and bury every other job kind behind it -- or it has been widened to LIMIT 25<digits>, which multiplies the per-tick blast radius the cap exists to hold while still containing the literal substring the old gate tested for.';
+  END IF;
+
   -- The grace anchor, pinned POSITIVELY. Both the WHERE conjunct and the
   -- ORDER BY must read the dailies MAX -- the ORDER BY is what makes the LIMIT
   -- deterministic and forward-progressing, so losing it is a real defect, not a
@@ -832,7 +847,7 @@ BEGIN
     RAISE EXCEPTION 'JOB-04 verification failed: the deployed body calls the enqueue RPC. Its race-loss arm RAISEs serialization_failure, and a RAISE inside a cron body aborts the ENTIRE tick -- the healed count is lost, the NOTICE never runs, and every remaining candidate is skipped. A direct INSERT with ON CONFLICT DO NOTHING has no such arm.';
   END IF;
 
-  RAISE NOTICE 'JOB-04: reconcile_dropped_enqueue_sweep self-verify passed (single job, 35 * * * * cadence, 1 MATERIALIZED batch, no IN-subquery LIMIT, five predicate conjuncts anchored, marker keys pinned, rejected anchor columns and the enqueue RPC absent).';
+  RAISE NOTICE 'JOB-04: reconcile_dropped_enqueue_sweep self-verify passed (single job, 35 * * * * cadence, word-bounded LIMIT 25, 1 MATERIALIZED batch, no IN-subquery LIMIT, five predicate conjuncts anchored, marker keys pinned, rejected anchor columns and the enqueue RPC absent).';
 END $$;
 
 COMMIT;

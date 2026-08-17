@@ -264,11 +264,20 @@ describe("JOB-04 dropped-enqueue reconciliation sweep migration content gate", (
   it("the body is bounded and race-guarded", () => {
     const body = cronBody(readFileSync(FIX_PATH, "utf8"));
 
+    // ⚠️ WORD-BOUNDED regex, never `.toContain("LIMIT 25")`. That substring
+    // assertion stood here until 2026-08-17 and MEASURED green against a body
+    // carrying `LIMIT 2500`, because "LIMIT 2500".includes("LIMIT 25") is true.
+    // A 100x widening of the per-tick blast radius therefore passed this gate,
+    // the pgTAP gate and the migration's own self-verify simultaneously. The
+    // negative lookahead is the whole point: it is what a WIDER limit fails.
     expect(
       body,
-      "the body lost its LIMIT 25 — a single tick could enqueue the whole " +
-        "candidate population at once.",
-    ).toContain("LIMIT 25");
+      "the body lost its word-bounded LIMIT 25. Either the bound is gone — a " +
+        "single tick could enqueue the whole candidate population at once — or " +
+        "it was widened to LIMIT 25<digits>, which multiplies the per-tick " +
+        "blast radius while still containing the literal 'LIMIT 25' substring " +
+        "the old gate tested for.",
+    ).toMatch(/LIMIT\s+25(?![0-9])/);
 
     // ⚠️ SHAPE enforcement, NOT a bound proof. Phase 143 Plan 02 MEASURED that
     // removing this keyword from THIS body changes neither the EXPLAIN output
