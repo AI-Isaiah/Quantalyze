@@ -1,191 +1,693 @@
--- Test: retention_compute_jobs_orphaned_running purge cron (WORKER-04).
+-- Test: retention_compute_jobs_orphaned_running -- the orphaned-`running`
+-- TERMINALIZER (JOB-05 / WR-02, Phase 144; WORKER-04 / RT-01 heritage).
 --
 -- Guards migration
--- 20260719120000_retention_orphaned_running_compute_jobs.sql (+ the RT-01 window
--- correction 20260720120000_retention_orphaned_running_window_4h.sql) — the
--- recurring pg_cron job that DELETEs orphaned `running` compute_jobs older than a
--- 4-hour window.
+-- 20260817120000_retention_orphaned_running_terminalize.sql: the pg_cron job
+-- retention_compute_jobs_orphaned_running, its '50 * * * *' cadence, its TWO
+-- arms (claimed_at past the UNCHANGED 4-hour window; claimed_at IS NULL past a
+-- derived 48-hour window), the four-column terminal SET list, and the per-arm
+-- LIMIT 100 bound.
 --
--- Why this cron exists (Rule 9 — the WHY, not just the WHAT)
+-- It supersedes the assertions this file carried for
+-- 20260719120000_retention_orphaned_running_compute_jobs.sql and its RT-01 window
+-- correction 20260720120000_retention_orphaned_running_window_4h.sql. Those two
+-- migrations are NOT edited and are still applied; only the DEPLOYED BODY under
+-- this jobname changed, and this file follows the body.
+--
+-- Why this cron exists (Rule 9 -- the WHY, not just the WHAT)
 -- ----------------------------------------------------------
 -- The `derive-allocator-key-dailies` cron (mig 20260717233529) re-pollutes the
--- WORKERLESS test project daily with `running` compute_jobs (a workerless
--- project never advances them past claim). Those orphaned rows collide with
--- fence-test seeds via the claim RPC's partition-dedupe arms
--- (mig 20260719073701 lines 156-179: the NOT-EXISTS guards keyed on
--- `x.status IN ('running','done_pending_children')`), reddening the `python`
--- fence tests intermittently. The derive cron CANNOT be unscheduled
--- (`test_derive_allocator_keys_fanout.sql` assertion 6 requires it registered),
--- so the only root-cause fix is a retention purge.
+-- WORKERLESS test project daily with `running` compute_jobs (a workerless project
+-- never advances them past claim). Those orphaned rows collide with fence-test
+-- seeds via the claim RPC's partition-dedupe arms (mig 20260719073701:159-179:
+-- the NOT-EXISTS guards keyed on `x.status IN ('running','done_pending_children')`),
+-- reddening the `python` fence tests intermittently. The derive cron CANNOT be
+-- unscheduled (`test_derive_allocator_keys_fanout.sql` assertion 6 requires it
+-- registered), so the only root-cause fix is a scheduled janitor.
 --
--- DELETE, never reset-to-pending: a row reset to `pending` is simply re-claimed
--- to `running` by the next CI run and the collision returns. Only removal ends
--- the daily re-pollution.
+-- ⚠️ TERMINAL UPDATE, not removal -- and this REPLACES the rationale this file
+-- used to carry. The superseded version argued "DELETE, never reset-to-pending:
+-- only removal ends the daily re-pollution", and it deferred the tradeoff to a
+-- founder decision "resolved at FLIP-01 go-live". Phase 144 IS that resolution,
+-- and the premise was too narrow: a row moved to `failed_final` ends the daily
+-- re-pollution just as removal did, because failed_final leaves BOTH the claim
+-- RPC's partition-dedupe predicate (20260719073701:159-179) and the claimable set
+-- (:204), so it can never be re-claimed. Removal also cost three things a
+-- terminal row keeps:
+--   * the wizard poller gets an OUTCOME to break out on -- failed_final is in
+--     FINISHED_JOB_STATUSES (SyncPreviewStep.tsx:207-214) and the sync-progress
+--     route projects `status` and nothing else (route.ts:284,294);
+--   * the AUDIT TRAIL survives to the 90-day retention wall;
+--   * Phase 142's reaper is UNBLOCKED -- its arms exclude any strategy holding a
+--     job in ('pending','running','done_pending_children','failed_retry')
+--     (20260803130000:118-121, :139-142), and failed_final is the only
+--     terminal-failure value outside that set.
+-- Reset-to-`pending` stays rejected: `pending` is claimable, so it re-opens the
+-- very flake this cron exists to close.
 --
--- The 4-hour window is SAFE on prod (RT-01 corrected basis): a full batch of 5
--- claimed jobs (main_worker p_batch_size=5) shares one CLAIM-time `claimed_at`
--- and dispatches SEQUENTIALLY, so job #5 on a HEALTHY worker can be legitimately
--- in-flight with `claimed_at` up to 5 x 30-min (process_key_long) = 2.5h old. A
--- 4h window clears that ceiling with margin, so a `running` row older than 4h is
--- genuinely orphaned (worker down / claim leaked), never a live batch-tail job —
--- and this does NOT depend on the watchdog firing (its silent failure was the
--- hole in the original 2h/40-min rationale). NOTE: `retention_delete_guard`
--- (mig 121) fires ONLY on audit_log / audit_log_cold, NOT compute_jobs — there is
--- no row-count ceiling on this purge. The DELETE-vs-reset-on-sustained-outage
--- tradeoff (a genuinely-orphaned interactive one-shot removed with no terminal
--- state) is the founder-deferred WR-02 decision, resolved at FLIP-01 go-live.
+-- The 4-hour window is UNCHANGED and that is deliberate (SC#2). RT-01's corrected
+-- basis: a full batch of 5 claimed jobs (main_worker p_batch_size=5) shares ONE
+-- claim-time `claimed_at` and dispatches SEQUENTIALLY, so job #5 on a HEALTHY
+-- worker can be legitimately in flight with a claim stamp up to 5 x 30 min = 2.5 h
+-- old. A 4-hour window clears that ceiling with margin, and it does NOT depend on
+-- the watchdog firing (whose silent failure was the hole in the original 2h
+-- rationale). Part 2 arm B carries that regression forward behaviourally.
 --
--- Oracle discipline: the behavioral section EXECUTEs the REAL deployed
--- cron.job.command (not a re-typed copy of the predicate) so the test pins the
--- shipped body, not the test author's transcription of it.
+-- ORACLE DISCIPLINE (the load-bearing property of this file)
+-- ---------------------------------------------------------
+-- Parts 2 and 3 read the REAL deployed body out of cron.job.command and
+-- `EXECUTE v_command` it. They NEVER re-type the predicate. A gate that
+-- re-implements the predicate passes when the DEPLOYED predicate is wrong --
+-- which is exactly how every gate in phases 142/142.1 passed over a bound that
+-- did not exist (D-19). Only executing the deployed body against real rows
+-- falsifies it.
 --
--- pgTAP is NOT installed (CLAUDE.md). Plain PL/pgSQL DO block, RAISE EXCEPTION
--- on failure. No psql meta-commands. Under psql -v ON_ERROR_STOP=1 a failed
--- assertion exits non-zero. The whole test rolls back.
+-- ANTI-GREEN-SKIP CONTRACT (read this before adding any presence gate)
+-- -------------------------------------------------------------------
+-- Part 1 is DELIBERATELY UNGATED and MUST FAIL when migration 20260817120000 is
+-- unapplied. That is this file's TDD RED, and it is designed to arrive on the
+-- PR's FIRST sql-tests run, before the migration reaches the TEST project.
+-- ⛔ This file USED to open with two presence gates that `RAISE NOTICE ... RETURN`
+-- and thereby no-op'd the ENTIRE file when the migration had not landed. Phase
+-- 143 names that shape as the anti-pattern by path and line
+-- (test_reconcile_dropped_enqueue_sweep.sql:41-44) -- and it names THIS FILE. A
+-- gate that green-skips when the object under test is absent is not evidence, so
+-- both gates are gone and must not come back.
 --
--- Test-DB lag: assertions are gated on the cron job being present (NOTICE skip
--- otherwise — RESEARCH Pitfall 6). The migration is MCP-applied to the TEST
--- project in plan 125-03 (BLOCKING there) before this is required green.
+-- Parts 2-3 skip on ONE condition only: a genuinely absent pg_cron extension
+-- (local dev). A cron job that is MISSING while pg_cron is PRESENT is an
+-- EXCEPTION, never a skip.
+--
+-- TRANSACTION FRAMING (per-part only -- do not "simplify" this)
+-- ------------------------------------------------------------
+-- Every part that writes opens its OWN `BEGIN;`, immediately sets
+-- `SET LOCAL lock_timeout = '5s'`, and closes with `ROLLBACK;`. There is NO outer
+-- whole-file transaction, and adding one would be a silent data hazard: psql's
+-- nested BEGIN emits a warning and creates NO savepoint, so the FIRST inner
+-- rollback would end the outer transaction and every later part would AUTOCOMMIT
+-- its seeds onto the SHARED test project. (This file used to use the whole-file
+-- frame; 143's per-part frame supersedes it.)
+--
+-- SHARED-TEST-DB ISOLATION (isolation by construction)
+-- ---------------------------------------------------
+-- The deployed arms are GLOBAL `ORDER BY <claim/creation time> ASC LIMIT 100`
+-- scans over public.compute_jobs. Foreign rows on the shared TEST project compete
+-- with these seeds for the 100-row budget, and unlike Phase 143's sweep that
+-- competition is REAL and MEASURED: the 2026-08-17 census found 402 `running`
+-- rows on TEST (396 claimed derive_broker_dailies + 6 NULL-claim poll_positions).
+--
+-- This file does NOT neutralize them, and must never be "fixed" to. The three
+-- cross-tenant neutralizing UPDATEs the 142 gate once carried were DELETED in
+-- Phase 142.1 (D-05 / D-18) because they wrote across every OTHER tenant's rows on
+-- a shared project. Isolation here is BY CONSTRUCTION: every row this file needs
+-- the janitor to terminalize is seeded a CENTURY back, which sorts ahead of any
+-- plausible foreign candidate under the deployed ORDER BY, so the seeds win the
+-- budget without this file touching a single row it does not own.
+--
+-- ⚠️ RESIDUAL, stated rather than hidden: because TEST really does hold hundreds
+-- of eligible foreign rows, each `EXECUTE` inside Parts 2 and 3 will also
+-- terminalize up to 100 of them and hold row locks on them until the part's
+-- ROLLBACK. Nothing is committed -- the ROLLBACK discards every one of those
+-- writes -- and the `sql-tests` CI job carries the repo-wide `shared-test-db`
+-- concurrency group, so two gate runs cannot overlap. A REAL pg_cron tick firing
+-- at :50 during a run is harmless in both directions: it holds FOR UPDATE
+-- SKIP LOCKED, so it skips whatever this file has locked and takes it next tick.
+--
+-- Every count and every status read below is SCOPED to the part's own seeded ids
+-- (`= ANY (v_seeded)`, or an identity comparison against one seeded id) -- never a
+-- global count and never a global empty state. That is this project's recorded
+-- lesson from the e2e-seeded shared-DB pollution fix: assert your OWN seed
+-- invariant.
+--
+-- BACKDATE, NEVER SLEEP; AND NEVER COMPARE TWO now()s
+-- --------------------------------------------------
+-- There are no sleeps anywhere in this file. A 4-hour or 48-hour threshold is not
+-- testable by sleeping; `claimed_at`, `created_at` and `next_attempt_at` are all
+-- directly INSERT-writable on compute_jobs, so every age is seeded.
+--
+-- FROZEN CLOCK: each part runs inside ONE transaction, so now() is CONSTANT for
+-- the whole part. Never assert by comparing two now()-derived values -- they are
+-- equal by construction and such an assertion CANNOT FAIL. The B3 assertion below
+-- therefore compares the post-tick `next_attempt_at` against the CENTURY-BACKDATED
+-- SEED value, which is a comparison that can genuinely fail.
+--
+-- ⛔ WHAT THIS FILE CANNOT PROVE -- do not let a green here be read as covering it
+-- -------------------------------------------------------------------------------
+--   THE CRON ROLE'S RLS POSTURE. public.compute_jobs carries FORCE ROW LEVEL
+--   SECURITY with a deny-all policy (20260516104201:209, 20260411144407:233-239);
+--   FORCE exists specifically to close the table-owner bypass. Whether the pg_cron
+--   JOB ROLE writes through it is a property of THAT ROLE, and the sql-tests job
+--   connects as a different one. ✅ Phase 143 already discharged this by a REAL
+--   live tick (cron.job.username = postgres, rolbypassrls = TRUE;
+--   20260816140000:367-383) and 144 INHERITS that result rather than re-litigating
+--   it -- but the inheritance is an inference about a role, not an observation of
+--   THIS job, so Phase 144 Plan 03 re-observes one real tick before merge.
+--
+-- pgTAP is NOT installed in this project (CLAUDE.md), so assertions
+-- RAISE EXCEPTION on failure and a clean run prints NOTICEs only. Under
+-- psql -v ON_ERROR_STOP=1 a failed assertion exits non-zero. Every RAISE format
+-- string is a single literal with % placeholders (no concatenation).
+--
+-- ⚠️ NO psql BACKSLASH META-COMMANDS ANYWHERE IN THIS FILE, and this paragraph
+-- deliberately does NOT spell any of them out. The sql-tests preflight
+-- (ci.yml:951-1000) greps every supabase/tests/test_*.sql for them and it scans
+-- the WHOLE FILE, comments included, so naming them here would make this gate
+-- refuse ITSELF. Read ci.yml for the list.
+--
+-- No fixed UUID literals -- every id is gen_random_uuid(), because this file runs
+-- against the SHARED test project concurrently with other PRs.
+--
+-- ⛔ DO NOT add this cron to supabase/tests/test_retention_crons_safe.sql. That
+-- file is a retention-DELETE register: its expected_jobs loop asserts every listed
+-- body matches a created_at-keyed removal shape, and this two-arm terminal UPDATE
+-- does not have one (arm A keys on claimed_at, and neither arm removes anything).
+-- Adding it would make that register look complete while pinning nothing this
+-- phase cares about, and it would red on a body that is correct.
+--
+-- ⚠️ THE COUNTS IN PART 1 ARE SIBLINGS of the migration's own STEP 2 self-verify
+-- (20260817120000) and of the file-text gate Phase 144 Plan 02 adds under
+-- src/__tests__. If a future edit legitimately changes how many times the body
+-- names a token, ALL of them move in the SAME commit. A one-file scope amendment
+-- leaves a gate guarding a superseded body while staying green.
 --
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_retention_orphaned_running.sql
+--
+-- Run order: AFTER migration 20260817120000 is applied to the project. Before
+-- that, Part 1 REDs by design.
 
-BEGIN;
-
+-- ==========================================================================
+-- Part 1 -- STRUCTURAL, UNGATED, ZERO SIDE EFFECTS. This is the part that must
+-- redden when the migration is unapplied. No transaction: it only reads catalogs.
+-- NO `RETURN` and NO skip arm appears anywhere in this block.
+--
+-- This part is an INDEPENDENT copy of the assertions the migration's own STEP 2
+-- makes. That duplication is deliberate and is not redundancy: STEP 2 runs ONCE,
+-- at apply time, and proves nothing about what is deployed today; this part runs
+-- on every CI sql-tests run against whatever body pg_cron currently holds, so an
+-- out-of-band unschedule or a hand-edited job row reddens HERE and nowhere else.
+-- ==========================================================================
 DO $$
 DECLARE
-  v_command    TEXT;
-  v_cron_hour  INT;
-  uid          UUID := gen_random_uuid();
-  key_a        UUID;  -- orphaned running (5h old) — MUST be deleted
-  key_b        UUID;  -- fresh running (now)       — MUST survive
-  key_c        UUID;  -- non-running done (5h old) — MUST survive
-  key_d        UUID;  -- RT-01: running 3h old     — MUST survive (batch-tail)
-  id_a         UUID;
-  id_b         UUID;
-  id_c         UUID;
-  id_d         UUID;
-  row_cnt      INTEGER;
+  v_command  TEXT;
+  v_schedule TEXT;
+  v_count    INTEGER;
+  v_jobs     INTEGER;
+  v_running  INTEGER;
+  v_terminal INTEGER;
+  v_next     INTEGER;
+  v_reason   INTEGER;
+  v_win_a    INTEGER;
+  v_win_b    INTEGER;
+  v_mat      INTEGER;
+  v_order    INTEGER;
+  v_limit    INTEGER;
 BEGIN
-  -- ----- PRESENCE GATE 1: pg_cron extension (local dev) ------------------
+  -- Deliberately an EXCEPTION, not a skip. Part 1's whole job is to be the
+  -- free-standing RED, and it also turns a missing `cron` schema into a legible
+  -- message instead of a bare 42P01 from the catalog read below.
   IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
-    RAISE NOTICE 'SKIP: pg_cron extension not installed here (local dev). Assertions enforce where pg_cron is present.';
-    RETURN;
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): pg_cron is NOT installed on this database, so the orphaned-running terminalizer cannot be registered and every orphaned running job stays running forever. This is deliberately an EXCEPTION and not a skip: a gate that green-skips when the object under test is absent is not evidence. Run this file against the TEST project (TEST_SUPABASE_DB_URL), not a bare local database.';
   END IF;
 
-  -- ----- PRESENCE GATE 2: cron job registered (test-DB lag) --------------
-  IF NOT EXISTS (
-    SELECT 1 FROM cron.job WHERE jobname = 'retention_compute_jobs_orphaned_running'
-  ) THEN
-    RAISE NOTICE 'SKIP: migration 20260719120000 not yet applied here (retention_compute_jobs_orphaned_running cron absent). Assertions enforce once the test DB catches up.';
-    RETURN;
-  END IF;
-
-  -- ----- ASSERTION 1: registration + predicate shape --------------------
-  SELECT command INTO v_command
+  SELECT count(*) INTO v_count
     FROM cron.job WHERE jobname = 'retention_compute_jobs_orphaned_running';
+  IF v_count = 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): pg_cron IS installed but the retention_compute_jobs_orphaned_running job is NOT registered. Until it is, an orphaned running compute_jobs row is never terminalized: the wizard poller spins forever on it, no audit record of the lost claim is ever written, and Phase 142 reaper stays blocked from writing the user-facing analytics failure.';
+  END IF;
+  IF v_count <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): expected exactly ONE cron job named retention_compute_jobs_orphaned_running, found %. Two rows would run the janitor twice an hour and double the per-tick blast radius the LIMIT exists to cap.', v_count;
+  END IF;
+
+  SELECT command, schedule
+    INTO v_command, v_schedule
+    FROM cron.job WHERE jobname = 'retention_compute_jobs_orphaned_running';
+
   IF v_command IS NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (1): retention_compute_jobs_orphaned_running cron command is NULL';
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the retention_compute_jobs_orphaned_running job row carries a NULL command. pg_cron would fire an empty tick every hour and the run log would look healthy while every orphan stayed running forever.';
   END IF;
-  IF v_command NOT ILIKE '%status = ''running''%' THEN
-    RAISE EXCEPTION 'TEST FAILED (1): cron body does not scope to status = ''running''. command was: %', v_command;
+
+  -- ⚠️ STRING equality on the WHOLE schedule, never an integer cast of one field.
+  -- This file used to split the schedule on spaces, take field 2 and cast it to
+  -- an integer to check a safe hour band. Under an hourly cadence field 2 is the
+  -- literal asterisk, and casting that raises 22P02 -- a hard, opaque CI failure
+  -- instead of a named assertion. The safe-hour band is meaningless for a job that
+  -- runs every hour anyway. Do not reintroduce a per-field cast in any form.
+  IF v_schedule IS DISTINCT FROM '50 * * * *' THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed cadence is % and not the expected 50 * * * *. Minute 50 is what keeps this janitor off 142 reaper quarter-hour grid, off 143 sweep at :35, and 10 minutes clear of the :00 stack; a daily cadence would also put post-threshold detection latency back at ~24h.', v_schedule;
   END IF;
-  IF v_command NOT ILIKE '%interval ''4 hours''%' THEN
-    RAISE EXCEPTION 'TEST FAILED (1): cron body does not use the RT-01-corrected 4-hour window (interval ''4 hours''). command was: %', v_command;
+
+  -- ----- POSITIVE anchors and occurrence COUNTS on the DEPLOYED body -----
+  -- ⚠️ Every count here is calibrated to a TWO-ARM body. Phase 143's siblings were
+  -- calibrated to a one-arm body and their numbers are NOT transferable.
+  --
+  -- 4 = arm A batch CTE + arm A UPDATE target + arm B batch CTE + arm B UPDATE
+  -- target. A bare presence test could not fail: any ONE surviving reference
+  -- satisfies it, so deleting a whole arm would pass unnoticed. That exact defect
+  -- was MEASURED in Phase 143 on this very table name.
+  v_jobs := (length(upper(v_command)) - length(replace(upper(v_command), 'PUBLIC.COMPUTE_JOBS', ''))) / length('PUBLIC.COMPUTE_JOBS');
+  IF v_jobs <> 4 THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05/D-08): the deployed body names public.compute_jobs % times, expected 4 (arm A batch + arm A UPDATE target + arm B batch + arm B UPDATE target). Two usually means a WHOLE ARM IS GONE -- if it is arm B, NULL-claim running rows become immortal again exactly as they were for 14 days on TEST; if it is arm A, no claimed orphan is ever terminalized. Zero means the janitor no longer touches the table at all.', v_jobs;
   END IF;
+
+  -- 4 = two batch predicates + two compare-and-set fences, all single-spaced.
+  v_running := (length(upper(v_command)) - length(replace(upper(v_command), 'STATUS = ''RUNNING''', ''))) / length('STATUS = ''RUNNING''');
+  IF v_running <> 4 THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body scopes to status = ''running'' % times, expected 4 (one predicate and one compare-and-set fence per arm). Losing a PREDICATE widens the janitor to every status -- it would terminalize done and pending rows. Losing a FENCE removes the protection against a real writer that terminalizes the row between the batch subselect and the UPDATE, so this janitor would overwrite a genuine outcome with a fabricated one.', v_running;
+  END IF;
+
+  -- 2 = one terminal status per arm.
+  v_terminal := (length(upper(v_command)) - length(replace(upper(v_command), '''FAILED_FINAL''', ''))) / length('''FAILED_FINAL''');
+  IF v_terminal <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body writes ''failed_final'' % times, expected 2 (one per arm). failed_final is the ONLY terminal-failure value both outside the claimable set (so the row can never be re-claimed and the CI re-pollution flake cannot return) and outside Phase 142 reaper exclusion set (so terminalizing UNBLOCKS the user-facing analytics message). Any other value moves the row without moving the outcome.', v_terminal;
+  END IF;
+
+  -- 2 = B3, one per SET list.
+  v_next := (length(upper(v_command)) - length(replace(upper(v_command), 'NEXT_ATTEMPT_AT', ''))) / length('NEXT_ATTEMPT_AT');
+  IF v_next <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05/B3): the deployed body writes next_attempt_at % times, expected 2 (one per SET list). retention_compute_jobs_failed deletes on COALESCE(next_attempt_at, created_at) older than 90 days (20260515210200:255-259) and the claim RPC never advances that column, so a status-only flip lets an old orphan be collected on the very NEXT 03:30 tick -- terminalized at 04:50, gone by 03:30, and the audit trail this cron exists to preserve lasts eleven hours instead of ninety days.', v_next;
+  END IF;
+
+  IF v_command NOT ILIKE '%error_kind%' THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body does not set error_kind. get_user_compute_jobs synthesises its user-facing message from (status, error_kind), so a terminalized row with a NULL error_kind renders the vaguer "tried multiple times without success" arm rather than the accurate permanent-failure one.';
+  END IF;
+  IF v_command NOT ILIKE '%''permanent''%' THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body does not classify the failure as permanent. permanent is the documented value for "skip retries, go directly to failed_final" (20260411144407:159-160); anything else misdescribes an orphan as retryable on the one surface that reads the pair.';
+  END IF;
+
+  -- 2 = one fixed audit literal per arm.
+  v_reason := (length(upper(v_command)) - length(replace(upper(v_command), 'ORPHANED_RUNNING_REAPED', ''))) / length('ORPHANED_RUNNING_REAPED');
+  IF v_reason <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body stamps the orphaned_running_reaped audit reason % times, expected 2 (one fixed literal per arm). last_error is the ONLY operator-visible record of why a row was terminalized -- it is hard-redacted from users at the RPC and zod layers -- so without it an operator cannot tell a reaped orphan from a genuine handler failure.', v_reason;
+  END IF;
+
+  -- 1 = arm A only. SC#2: the RT-01 window is UNCHANGED by Phase 144.
+  v_win_a := (length(upper(v_command)) - length(replace(upper(v_command), 'INTERVAL ''4 HOURS''', ''))) / length('INTERVAL ''4 HOURS''');
+  IF v_win_a <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05/RT-01): the deployed body carries the 4-hour claim window % times, expected exactly 1 (arm A). Zero means the RT-01-corrected threshold is gone: a full batch of 5 jobs shares one claim stamp and dispatches sequentially at up to 30 min each, so a HEALTHY worker legitimately holds a 2.5h-old claim and a narrower window would terminalize a live in-flight job out from under it. More than one means a second arm has imported a threshold derived for a different mechanism.', v_win_a;
+  END IF;
+
+  -- 1 = arm B only, and it must NOT be a copy of arm A's number.
+  v_win_b := (length(upper(v_command)) - length(replace(upper(v_command), 'INTERVAL ''48 HOURS''', ''))) / length('INTERVAL ''48 HOURS''');
+  IF v_win_b <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05/D-08): the deployed body carries the derived 48-hour NULL-claim window % times, expected exactly 1 (arm B). Zero means arm B is gone or has copied arm A 4-hour figure -- and 4h is a CLAIM-age bound that says nothing about a row that was never claimed. The 48h figure is the 24h enqueue cadence plus 2.5h max batch wall-clock, rounded up to the next whole cadence multiple.', v_win_b;
+  END IF;
+
   IF v_command ILIKE '%interval ''2 hours''%' THEN
-    RAISE EXCEPTION 'TEST FAILED (1): cron body still carries the OLD 2-hour window — RT-01 window widening (mig 20260720120000) not applied. command was: %', v_command;
-  END IF;
-  IF v_command NOT ILIKE '%claimed_at%' THEN
-    RAISE EXCEPTION 'TEST FAILED (1): cron body does not reference claimed_at. command was: %', v_command;
-  END IF;
-  IF v_command NOT ILIKE '%public.compute_jobs%' THEN
-    RAISE EXCEPTION 'TEST FAILED (1): cron body is not schema-qualified to public.compute_jobs. command was: %', v_command;
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05/RT-01): the deployed body carries the OLD 2-hour window that migration 20260720120000 corrected away. Under it a healthy worker batch-tail job -- legitimately in flight with a 2.5h-old claim stamp -- is terminalized while it is still running, so its side effects land against a row that has left the in-flight set and a duplicate job can be enqueued alongside it.';
   END IF;
 
-  -- ----- ASSERTION 2: schedule hour in the safe 1-22 band ---------------
-  -- Mirrors test_derive_allocator_keys_fanout.sql assertion 6: the minute is
-  -- field 1, the hour is field 2 of the cron schedule.
-  SELECT (split_part(schedule, ' ', 2))::INT INTO v_cron_hour
-    FROM cron.job WHERE jobname = 'retention_compute_jobs_orphaned_running';
-  IF v_cron_hour IS NULL OR v_cron_hour < 1 OR v_cron_hour > 22 THEN
-    RAISE EXCEPTION 'TEST FAILED (2): purge cron hour must stay in the safe 1-22 band (got %)', v_cron_hour;
+  IF v_command NOT ILIKE '%claimed_at IS NULL%' THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05/D-08): the deployed body has no claimed_at IS NULL arm. Those rows are invisible to a claimed_at threshold in BOTH directions -- the superseded body excluded them by name and NULL < x is never TRUE anyway -- so without this arm the running rows that have been stuck longest are precisely the ones nothing can ever clear. Six such rows sat untouched on TEST for up to 14 days.';
   END IF;
 
-  -- ----- SEED: one allocator + three api_keys (distinct keys avoid the ---
-  -- compute_jobs_one_inflight_per_kind_api_key partial-unique collision on
-  -- the two `running` rows).
-  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
-  VALUES (uid, '00000000-0000-0000-0000-000000000000',
-          'orphan-purge-' || uid::text || '@quantalyze.test', now(), now());
-  INSERT INTO profiles (id, display_name, email, role)
-  VALUES (uid, 'orphan-purge', 'orphan-purge-' || uid::text || '@quantalyze.test', 'allocator')
-  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
-
-  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
-  VALUES (uid, 'binance', 'orphan a', 'x', TRUE) RETURNING id INTO key_a;
-  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
-  VALUES (uid, 'binance', 'fresh b', 'x', TRUE) RETURNING id INTO key_b;
-  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
-  VALUES (uid, 'binance', 'done c', 'x', TRUE) RETURNING id INTO key_c;
-  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
-  VALUES (uid, 'binance', 'batchtail d', 'x', TRUE) RETURNING id INTO key_d;
-
-  -- (a) orphaned running, claimed 5h ago (beyond the 4h window) → MUST be deleted
-  INSERT INTO compute_jobs (api_key_id, kind, status, claimed_at)
-  VALUES (key_a, 'derive_broker_dailies', 'running', now() - interval '5 hours')
-  RETURNING id INTO id_a;
-  -- (b) fresh running, claimed now → MUST survive
-  INSERT INTO compute_jobs (api_key_id, kind, status, claimed_at)
-  VALUES (key_b, 'derive_broker_dailies', 'running', now())
-  RETURNING id INTO id_b;
-  -- (c) non-running (done), aged 5h → MUST survive (predicate is status-scoped)
-  INSERT INTO compute_jobs (api_key_id, kind, status, created_at, claimed_at)
-  VALUES (key_c, 'derive_broker_dailies', 'done', now() - interval '5 hours', now() - interval '5 hours')
-  RETURNING id INTO id_c;
-  -- (d) RT-01 boundary: running, claimed 3h ago — aged past the OLD 2h window but
-  -- WITHIN the corrected 4h window → MUST survive (a healthy worker's batch-tail
-  -- job, exactly the row the 2h window would have wrongly purged).
-  INSERT INTO compute_jobs (api_key_id, kind, status, claimed_at)
-  VALUES (key_d, 'derive_broker_dailies', 'running', now() - interval '3 hours')
-  RETURNING id INTO id_d;
-
-  RAISE NOTICE 'Seed OK: orphan_running=% fresh_running=% aged_done=% batchtail_3h=%', id_a, id_b, id_c, id_d;
-
-  -- ----- ASSERTION 3: EXECUTE the DEPLOYED cron body (the oracle) --------
-  -- Run the REAL stored command, not a re-typed predicate.
-  EXECUTE v_command;
-
-  -- (a) orphaned running row is GONE
-  SELECT count(*) INTO row_cnt FROM compute_jobs WHERE id = id_a;
-  IF row_cnt <> 0 THEN
-    RAISE EXCEPTION 'TEST FAILED (3): orphaned >4h running row survived the purge (count=%), expected 0', row_cnt;
-  END IF;
-  -- (b) fresh running row SURVIVES (younger than the 4h window)
-  SELECT count(*) INTO row_cnt FROM compute_jobs WHERE id = id_b;
-  IF row_cnt <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (3): fresh running row was deleted (count=%), expected 1 — window too aggressive', row_cnt;
-  END IF;
-  -- (c) aged non-running row SURVIVES (predicate scoped to status=''running'')
-  SELECT count(*) INTO row_cnt FROM compute_jobs WHERE id = id_c;
-  IF row_cnt <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (3): aged non-running (done) row was deleted (count=%), expected 1 — status scope broken', row_cnt;
-  END IF;
-  -- (d) RT-01: the 3h batch-tail running row SURVIVES under the 4h window. This is
-  -- the regression: against the OLD 2h window it was DELETEd (a live worker''s
-  -- in-flight job wrongly purged → double-compute). RED-proof: revert the window to
-  -- 2h and this assertion reddens.
-  SELECT count(*) INTO row_cnt FROM compute_jobs WHERE id = id_d;
-  IF row_cnt <> 1 THEN
-    RAISE EXCEPTION 'TEST FAILED (3/RT-01): 3h batch-tail running row was purged (count=%), expected 1 — window too tight, a live worker''s in-flight job would be deleted', row_cnt;
+  -- 2 = one deterministic ordering per arm.
+  v_order := (length(upper(v_command)) - length(replace(upper(v_command), 'ORDER BY', ''))) / length('ORDER BY');
+  IF v_order <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body orders its bounded batches % times, expected 2 (arm A by claimed_at ASC, arm B by created_at ASC). Without a deterministic ordering the LIMIT selects an ARBITRARY subset each tick, so the oldest orphans can be skipped indefinitely while the batch stays full -- bounded but never progressing.', v_order;
   END IF;
 
-  RAISE NOTICE 'All retention_compute_jobs_orphaned_running assertions passed (registration + 4h-window + safe-hour + DELETE behavior + RT-01 batch-tail survival).';
+  -- ⚠️ SHAPE gate, NOT a bound proof. Measured in Phase 143: removing this keyword
+  -- from a LOCKING CTE changes neither plan nor result, because Postgres does not
+  -- inline a CTE that locks rows. It is retained because it survives a future edit
+  -- that drops FOR UPDATE, at which point the CTE would become inlinable. Part 3
+  -- is the bound proof; never let a green here stand in for it.
+  v_mat := (length(upper(v_command)) - length(replace(upper(v_command), 'AS MATERIALIZED', ''))) / length('AS MATERIALIZED');
+  IF v_mat <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05/D-19): the deployed body carries % MATERIALIZED batch CTEs, expected exactly 2 (one per arm). The explicit fence is what keeps each bound safe against a future edit that drops FOR UPDATE and makes the CTE inlinable -- at which point the LIMIT would be re-applied per outer row and the per-tick blast radius would silently become unbounded. This is shape enforcement; Part 3 is the bound proof.', v_mat;
+  END IF;
 
-  -- ----- TEARDOWN (belt-and-suspenders; the outer ROLLBACK also discards) -
-  DELETE FROM auth.users WHERE id = uid;
+  IF v_command NOT ILIKE '%FOR UPDATE SKIP LOCKED%' THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body dropped FOR UPDATE SKIP LOCKED, so a batch would BLOCK on any row a live writer holds instead of skipping it and taking it next tick. Under the 5s lock_timeout that turns a contended tick into a failed tick.';
+  END IF;
+
+  -- The per-tick BOUND, WORD-BOUNDED and COUNTED.
+  -- ⚠️ Word-bounding is not decoration: '... LIMIT 1000 ...' ILIKE '%LIMIT 100%'
+  -- is TRUE, so a substring test passes over a 10x widening of the blast radius.
+  -- That defect was MEASURED in Phase 143 against LIMIT 25 / LIMIT 2500 and fixed
+  -- in all three of its gates. The trailing ([^0-9]|$) alternation is required:
+  -- without the `|$` arm a body ending exactly at the limit would false-RED.
+  -- The COUNT is the second half -- the pattern test alone is satisfied by ONE
+  -- word-bounded match, so widening only ONE arm would slip past it.
+  IF v_command !~ 'LIMIT[[:space:]]+100([^0-9]|$)' THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05/D-19): the deployed body carries no word-bounded LIMIT 100. Either the per-arm bound is gone entirely -- one tick would then terminalize the WHOLE orphan population in a single statement, holding row locks and firing the updated_at trigger across every row at once -- or it has been widened to LIMIT 100<digits>, which multiplies the per-tick blast radius while still containing the literal substring a naive substring gate tests for.';
+  END IF;
+  SELECT count(*) INTO v_limit
+    FROM regexp_matches(v_command, 'LIMIT[[:space:]]+100([^0-9]|$)', 'g');
+  IF v_limit <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05/D-19): the deployed body carries % word-bounded LIMIT 100 clauses, expected exactly 2 (one per arm). One means a single arm has been widened or unbounded while the other still satisfies the pattern test -- the per-arm cap is the whole bound, so half a bound is no bound for the arm that lost it.', v_limit;
+  END IF;
+
+  -- ----- NEGATIVE anchors on the DEPLOYED body -----
+  -- ⭐ THE assertion that makes "never remove a row" mechanically checkable at the
+  -- deployed body, and the textual half of what Part 2's count conservation proves
+  -- behaviourally. This file's superseded version asserted the OPPOSITE (that the
+  -- orphan row was gone); that assertion is what would have reddened the moment
+  -- the correct migration reached TEST.
+  IF v_command ILIKE '%DELETE%' THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05/WR-02): the deployed body contains a row-removal statement. This janitor must TERMINALIZE and never remove: a removed row gives the wizard poller no outcome to break out on, destroys the only audit record that a worker was down past its claim window, and on PROD discards a genuine in-flight one-shot job that nothing will re-enqueue.';
+  END IF;
+  -- ⚠️ The window between SELECT and LIMIT is '[^;]*', not '[^)]*'. MEASURED in
+  -- Phase 143: no realistic predicate can be written without a closing paren before
+  -- its LIMIT, so the '[^)]*' form matched nothing and the gate could not fail.
+  -- '[^;]*' still bounds the match to a SINGLE statement so it cannot smear across
+  -- the two arms and false-RED.
+  IF v_command ~* '\mIN\M[[:space:]]*\([[:space:]]*SELECT[^;]*LIMIT' THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05/D-19): the deployed body binds a bounded batch through an IN (SELECT ... LIMIT ...) subquery. That is the exact un-hashable-subplan shape whose LIMIT is re-applied per outer row, so the per-tick bound silently does not exist -- the defect 20260803130000 was written to fix.';
+  END IF;
+  IF v_command ILIKE '%failed_retry%' THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body references failed_retry. That value is CLAIMABLE (20260719073701:204), so the orphan would be re-claimed to running on the next worker tick and the daily re-pollution flake this cron exists to kill would return; and it is INSIDE Phase 142 reaper exclusion set (20260803130000:141), so the user-facing analytics message would stay blocked forever.';
+  END IF;
+  IF v_command ILIKE '%enqueue_compute_job%' THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body calls the enqueue RPC. This janitor must never create work: for cron-fanned kinds the daily fan-out re-enqueues by itself once terminalization frees the in-flight slot, so a janitor INSERT races it and can collide on the in-flight unique index -- and a RAISE inside a pg_cron body aborts the WHOLE tick, losing the terminalization too. For one-shot kinds a blind re-enqueue turns a poison job that killed the worker into an infinite loop.';
+  END IF;
+  IF v_command ILIKE '%claimed_by%' THEN
+    RAISE EXCEPTION 'TEST FAILED (1/JOB-05): the deployed body references claimed_by. That column must be PRESERVED, not written: it records which worker last held the row and is the forensic starting point for any orphan investigation. Audit M-0779 deliberately stopped mark_compute_job_failed from clearing it (20260516104201:917-928); a janitor that clears it re-opens that finding.';
+  END IF;
+
+  RAISE NOTICE 'Part 1 OK: retention_compute_jobs_orphaned_running registered exactly once at 50 * * * *, with 4 public.compute_jobs references, 4 running-status anchors, 2 failed_final writes, 2 next_attempt_at writes, 2 audit reasons, 1x 4-hour + 1x 48-hour window, a claimed_at IS NULL arm, 2 ORDER BY, 2 MATERIALIZED batches, 2 word-bounded LIMIT 100, SKIP LOCKED present, and no removal statement, IN-subquery LIMIT, failed_retry, enqueue RPC or claimed_by write.';
 END
 $$;
 
+-- ==========================================================================
+-- Part 2 -- DIRECTIONAL ARMS. Oracle is the DEPLOYED cron.job.command.
+-- Rolls back unconditionally.
+--
+--   A   claimed 5h ago (past the 4h window)          -> MUST be terminalized
+--   B   claimed 3h ago (RT-01 batch tail)            -> MUST be untouched
+--   C   claimed now                                  -> MUST be untouched
+--   D   status done, aged                            -> MUST be untouched
+--   E   claimed_at NULL, created 100 years ago       -> MUST be terminalized
+--   F   claimed_at NULL, created 12h ago             -> MUST be untouched
+--   +   COUNT CONSERVATION over all six seeded ids   -> MUST still be 6
+--
+-- A and B are the threshold pair: they fail in OPPOSITE directions if the 4-hour
+-- window moves. E and F are the same pair for arm B. D proves the status scope.
+-- The count-conservation assertion is what makes "never remove a row"
+-- BEHAVIOURALLY checkable rather than merely textual (Part 1's removal-keyword
+-- negative is the textual half; a body could remove rows without the keyword this
+-- file greps for, and this assertion would still catch it).
+--
+-- Every seed is api_key-scoped with kind derive_broker_dailies, which is the shape
+-- of the 396 real arm-A rows measured on TEST. Distinct api_keys per running row
+-- are REQUIRED: compute_jobs_one_inflight_per_kind_api_key is UNIQUE on
+-- (api_key_id, kind) while status is in flight.
+-- ==========================================================================
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+DO $$
+DECLARE
+  v_command TEXT;
+  v_user    UUID := gen_random_uuid();
+  key_a UUID; key_b UUID; key_c UUID; key_d UUID; key_e UUID; key_f UUID;
+  id_a  UUID; id_b  UUID; id_c  UUID; id_d  UUID; id_e  UUID; id_f  UUID;
+  v_seeded  UUID[];
+  v_fresh   TIMESTAMPTZ := now();
+  v_ancient TIMESTAMPTZ;
+  v_status  TEXT;
+  v_kind    TEXT;
+  v_err     TEXT;
+  v_next    TIMESTAMPTZ;
+  v_claimed TIMESTAMPTZ;
+  v_cnt     INTEGER;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+    RAISE NOTICE 'SKIP Part 2: pg_cron is not installed here, so the deployed-body oracle is unavailable (local dev only). Part 1 already reddened on this condition.';
+    RETURN;
+  END IF;
+
+  SELECT command INTO v_command
+    FROM cron.job WHERE jobname = 'retention_compute_jobs_orphaned_running';
+  IF v_command IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (2/JOB-05): the retention_compute_jobs_orphaned_running cron job is missing while pg_cron is installed. A missing janitor is a red gate, never a skip.';
+  END IF;
+
+  -- The century-back epoch: the isolation mechanism (see the file header). It
+  -- makes the positive seeds outrank every foreign candidate under the deployed
+  -- ORDER BY, so they win the 100-row budget without this file touching a row it
+  -- does not own. It is ALSO the seed for next_attempt_at, which is what lets the
+  -- B3 assertion below genuinely fail (never compare two now()s).
+  v_ancient := v_fresh - interval '100 years';
+
+  INSERT INTO auth.users (id, email)
+    VALUES (v_user, 'job05-arms-' || v_user || '@invalid.local');
+  INSERT INTO public.profiles (id, display_name)
+    VALUES (v_user, 'job05-arms') ON CONFLICT (id) DO NOTHING;
+
+  INSERT INTO public.api_keys (user_id, exchange, label, api_key_encrypted)
+    VALUES (v_user, 'binance', 'job05-arm-a', 'not-a-real-ciphertext') RETURNING id INTO key_a;
+  INSERT INTO public.api_keys (user_id, exchange, label, api_key_encrypted)
+    VALUES (v_user, 'binance', 'job05-arm-b', 'not-a-real-ciphertext') RETURNING id INTO key_b;
+  INSERT INTO public.api_keys (user_id, exchange, label, api_key_encrypted)
+    VALUES (v_user, 'binance', 'job05-arm-c', 'not-a-real-ciphertext') RETURNING id INTO key_c;
+  INSERT INTO public.api_keys (user_id, exchange, label, api_key_encrypted)
+    VALUES (v_user, 'binance', 'job05-arm-d', 'not-a-real-ciphertext') RETURNING id INTO key_d;
+  INSERT INTO public.api_keys (user_id, exchange, label, api_key_encrypted)
+    VALUES (v_user, 'binance', 'job05-arm-e', 'not-a-real-ciphertext') RETURNING id INTO key_e;
+  INSERT INTO public.api_keys (user_id, exchange, label, api_key_encrypted)
+    VALUES (v_user, 'binance', 'job05-arm-f', 'not-a-real-ciphertext') RETURNING id INTO key_f;
+
+  -- (A) arm-A POSITIVE. claimed_at is backdated a CENTURY, not five hours: five
+  -- hours is past the window but would lose the 100-row budget to the hundreds of
+  -- genuinely-stuck foreign rows on the shared TEST project. next_attempt_at is
+  -- seeded a century back TOO, which is the whole point of the B3 assertion.
+  -- claimed_by / claim_token / attempts are seeded so their PRESERVATION is
+  -- observable after the tick.
+  INSERT INTO public.compute_jobs (api_key_id, kind, status, claimed_at, claim_token, claimed_by, attempts, next_attempt_at)
+    VALUES (key_a, 'derive_broker_dailies', 'running', v_ancient, gen_random_uuid(), 'job05-seed-worker', 1, v_ancient)
+    RETURNING id INTO id_a;
+  -- (B) RT-01 batch tail: claimed 3h ago, INSIDE the 4h window.
+  INSERT INTO public.compute_jobs (api_key_id, kind, status, claimed_at, claim_token, claimed_by, attempts, next_attempt_at)
+    VALUES (key_b, 'derive_broker_dailies', 'running', v_fresh - interval '3 hours', gen_random_uuid(), 'job05-seed-worker', 1, v_ancient)
+    RETURNING id INTO id_b;
+  -- (C) claimed this instant.
+  INSERT INTO public.compute_jobs (api_key_id, kind, status, claimed_at, claim_token, claimed_by, attempts, next_attempt_at)
+    VALUES (key_c, 'derive_broker_dailies', 'running', v_fresh, gen_random_uuid(), 'job05-seed-worker', 1, v_ancient)
+    RETURNING id INTO id_c;
+  -- (D) aged NON-running row: the status scope.
+  INSERT INTO public.compute_jobs (api_key_id, kind, status, created_at, claimed_at, claim_token, next_attempt_at)
+    VALUES (key_d, 'derive_broker_dailies', 'done', v_ancient, v_ancient, gen_random_uuid(), v_ancient)
+    RETURNING id INTO id_d;
+  -- (E) arm-B POSITIVE: the invariant-violating shape. claimed_at NULL with a
+  -- NON-NULL claim_token, which is exactly how the 6 measured TEST rows look.
+  INSERT INTO public.compute_jobs (api_key_id, kind, status, created_at, claimed_at, claim_token, attempts, next_attempt_at)
+    VALUES (key_e, 'derive_broker_dailies', 'running', v_ancient, NULL, gen_random_uuid(), 1, v_ancient)
+    RETURNING id INTO id_e;
+  -- (F) arm-B NEGATIVE: same shape, only 12h old -- well inside the 48h window.
+  INSERT INTO public.compute_jobs (api_key_id, kind, status, created_at, claimed_at, claim_token, attempts, next_attempt_at)
+    VALUES (key_f, 'derive_broker_dailies', 'running', v_fresh - interval '12 hours', NULL, gen_random_uuid(), 1, v_ancient)
+    RETURNING id INTO id_f;
+
+  v_seeded := ARRAY[id_a, id_b, id_c, id_d, id_e, id_f];
+
+  -- ----- THE ORACLE: run the REAL deployed body -------------------------
+  EXECUTE v_command;
+
+  -- ----- (A) arm-A positive, on all six observable properties ------------
+  SELECT count(*) INTO v_cnt FROM public.compute_jobs WHERE id = id_a;
+  IF v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-05/WR-02/SC#1): my orphaned running row is GONE after one tick (count=%), expected it to SURVIVE as a terminal row. A janitor that removes the row leaves the wizard poller with no outcome to break out on, destroys the audit record of the lost claim, and on PROD discards a genuine in-flight one-shot job. This is the assertion that inverted in Phase 144: the superseded body DELETEd, and this file used to demand exactly that.', v_cnt;
+  END IF;
+
+  SELECT status, error_kind, last_error, next_attempt_at, claimed_at
+    INTO v_status, v_kind, v_err, v_next, v_claimed
+    FROM public.compute_jobs WHERE id = id_a;
+
+  IF v_status IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-05/SC#1): an orphan claimed past the 4-hour window sits at status % after one tick, expected failed_final. At running the poller never breaks out (isJobInFlight is true for every status outside FINISHED_JOB_STATUSES) and Phase 142 reaper stays blocked from writing the user-facing analytics failure, because failed_final is the only terminal-failure value outside its exclusion set.', v_status;
+  END IF;
+  IF v_next <= v_ancient THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-05/B3): the terminalized row next_attempt_at is still at its century-backdated seed value (%), so the janitor did not advance it. retention_compute_jobs_failed deletes failed rows on COALESCE(next_attempt_at, created_at) older than 90 days, so this row is eligible for removal on the very NEXT 03:30 tick -- the audit trail this cron promises would last hours instead of ninety days.', v_next;
+  END IF;
+  IF v_kind IS DISTINCT FROM 'permanent' THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-05): the terminalized row error_kind is % and not permanent. get_user_compute_jobs synthesises its user-facing message from (status, error_kind), so the row renders the vaguer "tried multiple times without success" arm instead of the accurate permanent-failure one.', v_kind;
+  END IF;
+  IF v_err IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-05): the terminalized row carries no last_error. That column is the ONLY operator-visible record of WHY the row was terminalized (it is hard-redacted from users at the RPC and zod layers), so without it an operator cannot tell a reaped orphan from a genuine handler failure.';
+  END IF;
+  IF v_claimed IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm A/JOB-05): the terminalized row claimed_at was CLEARED. It is the forensic timestamp of the claim that leaked and the very value the arm-A predicate matched on; clearing it also moves the row into arm B scope, where a future tick would re-terminalize it under the wrong reason.';
+  END IF;
+
+  -- ----- (B) RT-01: the 3h batch tail is UNTOUCHED (SC#2) ----------------
+  SELECT status INTO v_status FROM public.compute_jobs WHERE id = id_b;
+  IF v_status IS DISTINCT FROM 'running' THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm B/JOB-05/RT-01/SC#2): a running row claimed only 3 hours ago is at status % after one tick, expected still running. The window has been narrowed below the RT-01 basis: a full batch of 5 claimed jobs shares ONE claim stamp and dispatches sequentially at up to 30 min each, so a HEALTHY worker legitimately holds a 2.5h-old claim. Terminalizing it marks a LIVE job permanently failed, its side effects then land against a row that has left the in-flight set, and a duplicate job can be enqueued alongside it -- the exact double-compute the claim fence exists to prevent.', v_status;
+  END IF;
+
+  -- ----- (C) freshly claimed row is UNTOUCHED ---------------------------
+  SELECT status INTO v_status FROM public.compute_jobs WHERE id = id_c;
+  IF v_status IS DISTINCT FROM 'running' THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm C/JOB-05): a row claimed THIS INSTANT is at status % after one tick, expected still running. There is no threshold left at all -- the janitor would terminalize every job the worker claims, on every tick.', v_status;
+  END IF;
+
+  -- ----- (D) aged NON-running row is UNTOUCHED --------------------------
+  SELECT status INTO v_status FROM public.compute_jobs WHERE id = id_d;
+  IF v_status IS DISTINCT FROM 'done' THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm D/JOB-05): an aged DONE row is at status % after one tick, expected still done. The status scope is broken, so the janitor rewrites completed work as permanently failed -- and because it also stamps next_attempt_at, it resets those rows retention clocks at the same time.', v_status;
+  END IF;
+
+  -- ----- (E) arm-B positive: the invariant-violating shape ---------------
+  SELECT status, error_kind, last_error, next_attempt_at
+    INTO v_status, v_kind, v_err, v_next
+    FROM public.compute_jobs WHERE id = id_e;
+  IF v_status IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm E/JOB-05/D-08): a running row with claimed_at NULL, created a century ago, is at status % after one tick, expected failed_final. Arm B is gone or broken. That row shape is IMMORTAL without it: the superseded body excluded NULL claims by name, and NULL < x is never TRUE anyway, so nothing else in the system can ever clear it -- six such rows sat on TEST for up to 14 days.', v_status;
+  END IF;
+  IF v_next <= v_ancient THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm E/JOB-05/B3): the arm-B terminalized row next_attempt_at is still at its century-backdated seed value (%). Same consequence as arm A: retention_compute_jobs_failed collects it on the next nightly tick and the audit trail is voided.', v_next;
+  END IF;
+  IF v_kind IS DISTINCT FROM 'permanent' OR v_err IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm E/JOB-05): the arm-B terminalized row carries error_kind % and last_error %, expected permanent and a non-null fixed audit literal. The two arms must terminalize IDENTICALLY apart from the reason text; a divergence here means one arm writes a row an operator or the user_message synthesis cannot read.', v_kind, v_err;
+  END IF;
+
+  -- ----- (F) arm-B negative: 12h is inside the 48h window ----------------
+  SELECT status INTO v_status FROM public.compute_jobs WHERE id = id_f;
+  IF v_status IS DISTINCT FROM 'running' THEN
+    RAISE EXCEPTION 'TEST FAILED (2/arm F/JOB-05/D-08): a NULL-claim running row only 12 hours old is at status % after one tick, expected still running. Arm B threshold has collapsed below its derivation (24h enqueue cadence + 2.5h max batch wall-clock, rounded up to 48h), so a row that the next daily fan-out has not even had a chance to supersede is already being called orphaned.', v_status;
+  END IF;
+
+  -- ----- COUNT CONSERVATION: the behavioural half of "never remove" ------
+  SELECT count(*) INTO v_cnt FROM public.compute_jobs WHERE id = ANY (v_seeded);
+  IF v_cnt <> 6 THEN
+    RAISE EXCEPTION 'TEST FAILED (2/conservation/JOB-05/WR-02/SC#1): % of my 6 seeded rows survive the tick, expected all 6. The janitor REMOVED rows. That is the shipped behaviour Phase 144 exists to replace, and it is checked here behaviourally rather than only by grepping the body for a keyword -- a rewritten removal that avoids that keyword would still be caught by this count.', v_cnt;
+  END IF;
+
+  -- Whole-block invariant, identity-scoped: exactly TWO of the six move.
+  SELECT count(*) INTO v_cnt
+    FROM public.compute_jobs
+   WHERE id = ANY (v_seeded) AND status = 'failed_final';
+  IF v_cnt <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (2/whole-block/JOB-05): one tick terminalized % of my six seeded rows, expected exactly 2 (arms A and E). Every other seed is a documented false-positive guard, so any other number means a guard fell or a terminalization was lost -- and the per-arm assertions above should name which.', v_cnt;
+  END IF;
+
+  RAISE NOTICE 'Part 2 OK: the 4h-past claimed orphan and the 48h-past NULL-claim orphan were both terminalized to failed_final with next_attempt_at advanced, error_kind permanent, a fixed last_error and claimed_at preserved; the 3h batch-tail, the freshly-claimed row, the aged done row and the 12h NULL-claim row were all left running/done; and all 6 seeded rows survived the tick.';
+
+  -- Teardown, belt-and-suspenders; the ROLLBACK also discards everything.
+  DELETE FROM auth.users WHERE id = v_user;
+END
+$$;
+ROLLBACK;
+
+-- ==========================================================================
+-- Part 3 -- THE BOUND (D-19), executed. LIMIT + 1 candidates, oracle run TWICE.
+-- Rolls back unconditionally.
+--
+-- ⭐ This is the ONLY part of this file that can falsify the per-tick bound.
+-- Part 1's AS MATERIALIZED counter is SHAPE enforcement and nothing more: Phase
+-- 143 MEASURED that removing the keyword from a locking CTE changes neither the
+-- EXPLAIN output nor the result, because Postgres does not inline a CTE that locks
+-- rows. Every gate in phases 142/142.1 passed over a bound that did not exist
+-- precisely because it grepped for a token. Only executing the deployed body
+-- against LIMIT+1 real rows falsifies it.
+--
+-- The 101 seeds are staggered a century back, so under the deployed
+-- `ORDER BY claimed_at ASC LIMIT 100` the 100 OLDEST seeds are exactly the ones a
+-- correct tick must take and v_youngest (the i=1 seed, least old) is exactly the
+-- one it must leave. Asserting WHICH rows must move is strictly stronger than
+-- counting HOW MANY moved.
+--   tick 1 -> my 100 oldest seeds are ALL terminal AND v_youngest is NOT
+--   tick 2 -> v_youngest is terminal and all 101 are (bounded AND progressing)
+--
+-- 101 DISTINCT api_keys are required, not a convenience:
+-- compute_jobs_one_inflight_per_kind_api_key is UNIQUE on (api_key_id, kind) while
+-- the row is in flight, so 101 running derive_broker_dailies rows cannot share one
+-- key. A seeding shortcut here fails on the index, not in an assertion.
+-- ==========================================================================
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+DO $$
+DECLARE
+  v_command  TEXT;
+  v_user     UUID := gen_random_uuid();
+  v_key      UUID;
+  v_job      UUID;
+  v_seeded   UUID[] := ARRAY[]::UUID[];
+  v_youngest UUID;
+  v_fresh    TIMESTAMPTZ := now();
+  v_ancient  TIMESTAMPTZ;
+  v_cnt      INTEGER;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+    RAISE NOTICE 'SKIP Part 3: pg_cron is not installed here, so the deployed-body oracle is unavailable (local dev only).';
+    RETURN;
+  END IF;
+
+  SELECT command INTO v_command
+    FROM cron.job WHERE jobname = 'retention_compute_jobs_orphaned_running';
+  IF v_command IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (3/JOB-05): the retention_compute_jobs_orphaned_running cron job is missing while pg_cron is installed.';
+  END IF;
+
+  v_ancient := v_fresh - interval '100 years';
+
+  INSERT INTO auth.users (id, email)
+    VALUES (v_user, 'job05-bound-' || v_user || '@invalid.local');
+  INSERT INTO public.profiles (id, display_name)
+    VALUES (v_user, 'job05-bound') ON CONFLICT (id) DO NOTHING;
+
+  -- i = 101 is the OLDEST claim, i = 1 the youngest.
+  FOR i IN 1..101 LOOP
+    INSERT INTO public.api_keys (user_id, exchange, label, api_key_encrypted)
+      VALUES (v_user, 'binance', 'job05-bound-' || i::text, 'not-a-real-ciphertext')
+      RETURNING id INTO v_key;
+    INSERT INTO public.compute_jobs (api_key_id, kind, status, claimed_at, claim_token, claimed_by, next_attempt_at)
+      VALUES (v_key, 'derive_broker_dailies', 'running',
+              v_ancient - (i * interval '1 minute'),
+              gen_random_uuid(), 'job05-seed-worker', v_ancient)
+      RETURNING id INTO v_job;
+    v_seeded := array_append(v_seeded, v_job);
+  END LOOP;
+
+  v_youngest := v_seeded[1];
+
+  -- ----- tick 1: BOUNDED -------------------------------------------------
+  EXECUTE v_command;
+
+  SELECT count(*) INTO v_cnt
+    FROM public.compute_jobs
+   WHERE id = ANY (v_seeded)
+     AND id <> v_youngest
+     AND status = 'failed_final';
+  IF v_cnt <> 100 THEN
+    RAISE EXCEPTION 'TEST FAILED (3/JOB-05/D-19): after ONE tick only % of MY 100 oldest seeded orphans were terminalized, expected all 100. Either the janitor is not draining its batch, or a foreign row with a claim stamp older than the century-back seed epoch crowded a seed out of the 100-row budget (see the RESIDUAL note in this file header).', v_cnt;
+  END IF;
+
+  SELECT count(*) INTO v_cnt
+    FROM public.compute_jobs
+   WHERE id = v_youngest AND status = 'running';
+  IF v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (3/JOB-05/D-19): my YOUNGEST seeded orphan -- the 101st, sitting outside a 100-row budget -- was terminalized on tick 1. The per-tick LIMIT is gone, so one tick can rewrite the ENTIRE orphan population in a single statement: on TEST that is hundreds of rows at once, each firing the updated_at trigger and each holding a row lock for the duration. This is the D-19 signature, and NO amount of grepping for AS MATERIALIZED can detect it -- only this execution can.';
+  END IF;
+
+  -- ----- tick 2: PROGRESSING --------------------------------------------
+  -- The previous tick moved 100 of my seeds out of `running`, so they leave the
+  -- predicate and v_youngest is the oldest remaining candidate this block owns.
+  -- No neutralizing UPDATE is needed and none may be added.
+  EXECUTE v_command;
+
+  SELECT count(*) INTO v_cnt
+    FROM public.compute_jobs WHERE id = v_youngest AND status = 'failed_final';
+  IF v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (3/JOB-05/D-19): my youngest seeded orphan is still not terminal after a SECOND tick. The janitor is bounded but NOT progressing, so a backlog would never drain: the oldest orphans are cleared while the rest starve, and on TEST the 396-row population would sit there indefinitely.';
+  END IF;
+
+  SELECT count(*) INTO v_cnt
+    FROM public.compute_jobs WHERE id = ANY (v_seeded) AND status = 'failed_final';
+  IF v_cnt <> 101 THEN
+    RAISE EXCEPTION 'TEST FAILED (3/JOB-05/D-19): after two ticks % of my 101 seeded orphans are terminal, expected all 101.', v_cnt;
+  END IF;
+
+  -- Conservation again, over the bound population: two ticks, zero rows removed.
+  SELECT count(*) INTO v_cnt FROM public.compute_jobs WHERE id = ANY (v_seeded);
+  IF v_cnt <> 101 THEN
+    RAISE EXCEPTION 'TEST FAILED (3/conservation/JOB-05/WR-02): % of my 101 seeded rows survive two ticks, expected all 101. The janitor removed rows.', v_cnt;
+  END IF;
+
+  RAISE NOTICE 'Part 3 OK: the per-tick bound holds -- my 100 oldest seeded orphans were terminalized on tick 1 with my youngest left running, my youngest moved on tick 2 (bounded AND progressing), and all 101 rows survived both ticks.';
+
+  DELETE FROM auth.users WHERE id = v_user;
+END
+$$;
 ROLLBACK;
