@@ -281,8 +281,51 @@
 --       is pinned at both ends: the finalize-wizard route enqueues
 --       stitch_composite for any strategy with >= 1 strategy_keys member
 --       (route.ts:1363-1372), and run_stitch_composite_job loads its members
---       from strategy_keys and FAILS on zero members (job_worker.py:5472-5485),
---       so composite and single-key are mutually exclusive by construction.
+--       from strategy_keys and FAILS on zero members (job_worker.py:5472-5485).
+--
+--       ⚠️ CORRECTION (2026-08-17). This used to conclude "so composite and
+--       single-key are mutually exclusive BY CONSTRUCTION". They are not
+--       DURABLE. The discriminator is correct AT CREATION and REVOCABLE by
+--       routine user action afterwards -- both halves of it. Naming the chain,
+--       because "by construction" invites a future reader to skip re-checking:
+--
+--         (a) THE MEMBER ROWS ARE REVOCABLE. strategy_keys.api_key_id is
+--             `NOT NULL REFERENCES public.api_keys(id) ON DELETE CASCADE`
+--             (20260710120000:33), so deleting an api_key DELETES the member
+--             rows. The atomic delete guard does NOT stop it for a composite:
+--             its only linkage check is
+--             `NOT EXISTS (SELECT 1 FROM public.strategies WHERE api_key_id =
+--             p_api_key_id)` (20260602183000:188-190, the latest definition of
+--             delete_allocator_api_key), which reads strategies.api_key_id --
+--             and a composite keeps that column NULL (set_wizard_composite_
+--             members REQUIRES `api_key_id IS NULL`). So the guard cannot see
+--             composite membership at all. sanitize_user deletes api_keys
+--             WHOLESALE for a user (`DELETE FROM api_keys WHERE user_id =
+--             p_user_id`, 20260417110538:316 and its hardening successors),
+--             cascading every member row away in one statement.
+--
+--         (b) THE TERMINAL-ANALYTICS HALF IS ALSO REVOCABLE.
+--             set_wizard_composite_members resets a COMPLETED composite's
+--             analytics back to 'pending' when the member set actually changes
+--             (`SET computation_status = 'pending'` WHERE status IN
+--             ('complete','complete_with_warnings'),
+--             20260712120000:183-190) -- and 'pending' is precisely the state
+--             this sweep treats as healable.
+--
+--       A composite that loses its last member row AND holds a non-terminal
+--       analytics row therefore satisfies this sweep's predicate and can be
+--       enqueued as a single-key compute_analytics_from_csv. That is the
+--       money-math corruption described above, reached WITHOUT any code change
+--       -- by an ordinary key deletion or a GDPR sanitize.
+--
+--       This is NOT re-classified as a live incident here, and the conjunct is
+--       NOT changed: reaching it requires a composite to survive losing every
+--       member, which is itself a broken state that stitch_composite already
+--       fails on. It is recorded so the next reader treats the exclusion as a
+--       best-effort discriminator that ROUTINE USER ACTION CAN REVOKE, not as
+--       an invariant they may lean on. If this population is ever observed on
+--       PROD, the fix is a positive marker of compositeness that a cascade
+--       cannot erase, not a stronger read of strategy_keys.
 --       ⛔ strategies.api_key_id IS NULL is NOT a valid discriminator -- CSV
 --       single-key strategies also have it NULL, so it would over-exclude the
 --       exact population this sweep exists to heal. The chosen conjunct errs
