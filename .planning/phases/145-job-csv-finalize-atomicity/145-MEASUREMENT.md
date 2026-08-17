@@ -37,13 +37,69 @@ Consequences for the three steps:
   ~280 KB hop whose network leg cannot be measured without PROD noise. If anything, the
   measurement gap argues AGAINST the only option that depends on the gap being small.
 
-## §1 — Payload size (RESEARCH §3 Half 1, re-run pending)
+## §1 — Payload size (RESEARCH §3 Half 1, re-run 2026-08-17 19:03 UTC)
 
-<!-- Half-1 node one-liner re-run + figures land here -->
+RESEARCH's committed node one-liner re-run verbatim; figures reproduce exactly:
 
-## §2 — Step A: upload+parse cost, local uvicorn (5 reps control / 5 reps payload)
+```
+envelope alone: 235
+5000-row series: 280001
+envelope+series: 280260
+```
 
-<!-- verbatim size_upload/time_total lines + medians land here -->
+## §2 — Step A: upload+parse cost (zero-DB harness on the REAL model, 2026-08-17 19:04 UTC)
+
+Topology (adapted per §0): a scratchpad FastAPI harness importing the REAL
+`routers.process_key._ProcessKeyBody` (import verified side-effect-free: fields
+`context/flow_type/source`, extras ignored) and answering 401 immediately — the same
+receive→pydantic-parse→401 path as `process_key.py:1136-1146`, with zero Supabase, zero
+secrets, zero worker risk. Local uvicorn, port 8299, warmed up before timing. Two endpoints:
+
+- `/process-key` — the model AT HEAD (`daily_returns_series` is an ignored extra → the
+  measured delta is a LOWER bound: json-parse of 280 KB, no per-row validation)
+- `/process-key-ia` — the shape an (i-a) implementation would declare
+  (`daily_returns_series: list[dict] | None`) → per-row validation paid
+
+Verbatim `size_upload time_total` lines (5 reps each):
+
+```
+process-key control.json 235 0.001085
+process-key control.json 235 0.000997
+process-key control.json 235 0.001230
+process-key control.json 235 0.001574
+process-key control.json 235 0.001263
+process-key payload.json 280260 0.003734
+process-key payload.json 280260 0.004303
+process-key payload.json 280260 0.004062
+process-key payload.json 280260 0.004820
+process-key payload.json 280260 0.005071
+process-key-ia control.json 235 0.001065
+process-key-ia control.json 235 0.001013
+process-key-ia control.json 235 0.001124
+process-key-ia control.json 235 0.001086
+process-key-ia control.json 235 0.001127
+process-key-ia payload.json 280260 0.015875
+process-key-ia payload.json 280260 0.040645
+process-key-ia payload.json 280260 0.005419
+process-key-ia payload.json 280260 0.005376
+process-key-ia payload.json 280260 0.005461
+```
+
+| Variant | median(control) | median(payload) | marginal upload+parse |
+|---|---|---|---|
+| model at HEAD (extras ignored — lower bound) | 1.230 ms | 4.303 ms | **≈ 3.1 ms** |
+| (i-a)-declared field (per-row validation) | 1.086 ms | 5.461 ms | **≈ 4.4 ms** |
+
+(The two 15.9/40.6 ms `process-key-ia payload` lines are first-touch outliers; medians are
+robust to them and all raw lines are recorded above.)
+
+**Reading:** parsing the full-cap series costs single-digit milliseconds. The unmeasured
+cross-provider network leg (§0) would add transfer time for 280 KB — even generously
+bounded, tens of milliseconds on an intra-cloud hop — against route totals that run to
+seconds (§3). Per RESEARCH §3 Step C's pre-registered decision rule: **the latency argument
+is retired; the (i-a)/(i-b) choice is architectural.** Limiter note: the loop ran against a
+local harness, consuming zero live limiter budget anywhere (limits at HEAD for reference:
+tenant 100/hour, anon 30/hour, ceiling 500/hour — `process_key.py:100-114`).
 
 ## §3 — Step B: 10-row vs 5000-row live finalize on TEST (also SC#1 arm 4 + SC#3 baseline)
 
