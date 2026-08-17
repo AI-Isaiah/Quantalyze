@@ -154,20 +154,20 @@ Plans:
   2. A fault injected between `finalize_csv_strategy`, `persist_csv_daily_returns`, and the `after()` enqueue leaves no orphan strategy row — either the steps share one SECURITY DEFINER transaction, or explicit compensating cleanup runs + Sentry alerts (the choice recorded per the reproduction outcome and the CONTRIB-02 `p_terminal_status` owner-only variant's survival).
   3. Happy-path csv-finalize behavior is unchanged — including the CONTRIB-02 owner-only private-finalize path if the RPCs are folded.
 
-**Plans**: 6 plans
+**Plans**: 3/6 plans executed
 
 Plans:
 **Wave 1**
 
-- [ ] 145-01-PLAN.md — SC#1 repo-side arms: 42501 auth-guard SQL CI gate (arm 1, neuter-RED proven on throwaway Postgres against the REAL 20260728120000 body) + fresh arm-2 grep + arm-3 pytest recorded verbatim + 145-REPRODUCTION.md draft + PITFALLS/SUMMARY anchor corrections, ONE commit
+- [x] 145-01-PLAN.md — SC#1 repo-side arms: 42501 auth-guard SQL CI gate (arm 1, neuter-RED proven on throwaway Postgres against the REAL 20260728120000 body) + fresh arm-2 grep + arm-3 pytest recorded verbatim + 145-REPRODUCTION.md draft + PITFALLS/SUMMARY anchor corrections, ONE commit
 
 **Wave 2** *(blocked on Wave 1; orchestrator-session-only, BLOCKING)*
 
-- [ ] 145-02-PLAN.md — [BLOCKING] Census (4 queries × 2 projects, per-row, STOP rules pre-registered) + arm-4 live TEST finalize (doubles as SC#3 baseline) + (i-a) seam latency measurement Steps A/B/C + final CANNOT-REPRODUCE verdict + TODOS 42501 bullet closed + founder decision checkpoint (i-a)/(i-b) recorded in 145-DECISION.md
+- [x] 145-02-PLAN.md — [BLOCKING] Census (4 queries × 2 projects, per-row, STOP rules pre-registered) + arm-4 live TEST finalize (doubles as SC#3 baseline) + (i-a) seam latency measurement Steps A/B/C + final CANNOT-REPRODUCE verdict + TODOS 42501 bullet closed + founder decision checkpoint (i-a)/(i-b) recorded in 145-DECISION.md
 
 **Wave 3** *(blocked on Wave 2 — verdict committed before any SC#2 code)*
 
-- [ ] 145-03-PLAN.md — The caller-agnostic fold migration (`finalize_csv_strategy_with_returns`, ONE SECDEF transaction, no exception-handler clause, 20260624120000 table shape, guards verbatim, DROP old RPCs + re-grant) + SAME-COMMIT re-point of test_csv_finalize_double_submit.sql (Part 3 widened to 3 tables) and the auth-guard gate + new atomicity-oracle gate + throwaway-Postgres tracer proof + 8-neuter SQL RED matrix
+- [x] 145-03-PLAN.md — The caller-agnostic fold migration (`finalize_csv_strategy_with_returns`, ONE SECDEF transaction, no exception-handler clause, 20260624120000 table shape, guards verbatim, DROP old RPCs + re-grant) + SAME-COMMIT re-point of test_csv_finalize_double_submit.sql (Part 3 widened to 3 tables) and the auth-guard gate + new atomicity-oracle gate + throwaway-Postgres tracer proof + 8-neuter SQL RED matrix
 
 **Wave 4** *(blocked on Wave 3 + the recorded decision)*
 

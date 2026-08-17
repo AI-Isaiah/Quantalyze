@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.19
 milestone_name: JOB/RATE — job-lifecycle reliability and the rate limits that hold
-current_phase: 144
+current_phase: 153.7
 current_phase_name: JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence
 status: executing
-stopped_at: Phase 143 SHIPPED AND MERGED (PR #687, squash 26a3105d, 2026-08-17 12:01:14Z). Migration auto-applied to PROD by the Supabase Migrate workflow; cron.job 33 registered at '35 * * * *', deployed body md5 febf9bdd6dfc58aa101ed8c4345e3b29 == TEST == repo (1860 B, 3-way byte match). First PROD tick 12:35:00Z succeeded in 162 ms and healed 0 — expected, since the PROD candidate census is 0; that is a negative control, NOT proof that healing works. Railway SUCCESS on 26a3105d, /health git_sha exact. ⚠️ JOB-04 still NOT ticked: the mechanism is proven on TEST and live on PROD, but PROD has produced no healing evidence because it has nothing to heal. NOW EXECUTING Phase 144 on branch feat/v1.19-phase-144 — Wave 1 (144-01) complete and verified; Wave 2 (144-02) running; Wave 3 (144-03) is BLOCKING and orchestrator-session-only (Supabase MCP is stripped from subagents).
-last_updated: "2026-08-17T13:20:00.000Z"
+stopped_at: Completed 145-03-PLAN.md
+last_updated: "2026-08-17T20:16:31.010Z"
 last_activity: 2026-08-17
 last_activity_desc: Phase 143 landed and deployed to PROD; Phase 144 planned (3 plans, bound re-derived 500 → 100 at plan-check) and Wave 1 executed — two-arm terminal-UPDATE migration + SAME-COMMIT rewrite of the gate that asserted DELETE, 8 neuters + 16 probes observed RED
 progress:
-  total_phases: 21
-  completed_phases: 16
-  total_plans: 98
-  completed_plans: 96
-  percent: 76
+  total_phases: 4
+  completed_phases: 1
+  total_plans: 13
+  completed_plans: 9
+  percent: 25
 ---
 
 # Project State — Quantalyze
@@ -469,7 +469,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [██████████] 100%
+Progress: [███████░░░] 69%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -592,6 +592,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 |------|----------|-------|-------|
 | Phase 143 P02 | ~95 min | 3 tasks | 3 created files |
 | Phase 143 P03 | 26min | 3 tasks | 3 files |
+| Phase 145 P03 | 24m | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -705,6 +706,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 143]: 143-03: the plan's neuters (6) MATERIALIZED and (7) bare-INSERT are FALSE — executed, GREEN in isolation, substitutes N6b (23505) and N7b (LIMIT removed) added and observed RED; N7b is the only real bound proof
 - [Phase 143]: 143-03: a SQL gate's Part-1 text anchors MASK its behavioural arms under ON_ERROR_STOP=1 — neuter runs must isolate the part under observation or six of eight REDs prove nothing about the arms
 - [Phase 143]: 143-03: the neuter campaign found a real vacuity in this plan's own marker-contract gate (a Sentry TAG satisfied a bare-literal check); fixed to pin the comparison operator, re-observed RED (f62c3866)
+- [Phase ?]: 145-03: csv-finalize folded into one SECDEF transaction (finalize_csv_strategy_with_returns); both parents DROPped; atomicity oracle executed (mid-body fault -> 0/0/0 rows); 10-neuter RED matrix, zero vacuities
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1407,8 +1409,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-16T22:03:53.784Z
-**Stopped At:** Completed 143-04-PLAN.md — Phase 143 EXECUTION-COMPLETE. Migration APPLIED to TEST (qmnijlgmdhviwzwfyzlc); PROD untouched. ⭐ L-2/T-143-02 RESOLVED BY MEASUREMENT: the 2026-08-17 09:35:00 UTC tick inserted compute_jobs 58728527 through FORCE ROW LEVEL SECURITY. Code review 0 blockers / 3 warnings (all fixed). Verification = human_needed: the 143-04 checkpoint:human-verify is undischarged and SC#1's PROD half needs the merge. JOB-04 deliberately NOT ticked.
+**Last Date:** 2026-08-17T20:16:30.976Z
+**Stopped At:** Completed 145-03-PLAN.md
 **Resume File:** None
 **Next step:** Phase 153.6 (PARITY) is booked and NOT yet planned — run `/gsd:plan-phase 153.6`. It carries 9 findings from the `/code-review xhigh` over the whole 153→153.5 span. ⛔ Three of its four root causes are ONE-PATH-ONLY fixes (a correct remedy applied to `routers/exchange.py` while its twin in `services/ingestion/mt5.py` went untouched, with no guard asserting the two agree) — close them as a CLASS, not as N patches. ⭐ The venue-lock bypass (D) is LIVE on PROD (the migration is on `main`, and `supabase/migrations/**` auto-applies on merge) but is a SELF-targeted control bypass, not a tenant leak. ⛔ The budget correction (C) has two halves — the number AND the oracle that pins the wrong column and so cannot red on it. Phases 154 and 155 remain unplanned; 155 is human- and calendar-gated (founder at the MT5 terminal, live funded account, on a trading day).
 
