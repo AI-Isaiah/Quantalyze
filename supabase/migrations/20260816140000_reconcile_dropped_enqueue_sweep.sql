@@ -834,7 +834,16 @@ BEGIN
   END IF;
 
   -- ----- NEGATIVE anchors on the DEPLOYED body -----
-  IF v_command ~* 'IN\s*\(\s*SELECT[^)]*LIMIT' THEN
+  -- ⚠️ The window between SELECT and LIMIT was '[^)]*' until 2026-08-17, which
+  -- forbids a ')' anywhere in between. MEASURED: no realistic rewrite of this
+  -- predicate can be written without at least one EXISTS (...) or a closing
+  -- paren before the LIMIT, so the old pattern matched NOTHING and the gate
+  -- could not fail -- it guarded the D-19 shape only in its failure message.
+  -- '[^;]*' is the correct window: it still bounds the match to a SINGLE
+  -- statement (so the gate cannot smear across the body and false-RED) while
+  -- allowing the parens a real IN-subquery necessarily contains. \mIN\M keeps
+  -- the 'IN' a whole word so it cannot match the tail of an identifier.
+  IF v_command ~* '\mIN\M[[:space:]]*\([[:space:]]*SELECT[^;]*LIMIT' THEN
     RAISE EXCEPTION 'JOB-04/D-19 verification failed: the deployed body binds its bounded batch through an IN (SELECT ... LIMIT ...) subquery. That is the exact un-hashable-subplan shape whose LIMIT is re-applied per outer row, so the per-tick bound silently does not exist.';
   END IF;
   IF v_command ILIKE '%computed_at%' THEN

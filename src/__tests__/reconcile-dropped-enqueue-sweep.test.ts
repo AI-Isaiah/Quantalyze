@@ -346,11 +346,18 @@ describe("JOB-04 dropped-enqueue reconciliation sweep migration content gate", (
 
     // D-19: the un-hashable-subplan shape whose LIMIT is re-applied per outer
     // row, so the per-tick bound silently does not exist.
+    // ⚠️ The SELECT..LIMIT window was `[^)]*` until 2026-08-17, which forbids a
+    // ')' between them. MEASURED: a realistic rewrite of this predicate cannot
+    // avoid an EXISTS (...) before the LIMIT, so the old pattern matched
+    // NOTHING and this assertion could not fail. `[^;]*` still bounds the match
+    // to one statement — so it cannot smear across the body and false-RED —
+    // while allowing the parens a real IN-subquery necessarily contains. \b
+    // keeps "IN" a whole word so it cannot match the tail of an identifier.
     expect(
       body,
       "the body binds its bounded batch through an IN (SELECT ... LIMIT ...) " +
         "subquery — the exact shape whose LIMIT is re-applied per outer row.",
-    ).not.toMatch(/IN\s*\(\s*SELECT[^)]*LIMIT/i);
+    ).not.toMatch(/\bIN\s*\(\s*SELECT[^;]*LIMIT/i);
 
     for (const col of REJECTED_ANCHOR_COLUMNS) {
       expect(

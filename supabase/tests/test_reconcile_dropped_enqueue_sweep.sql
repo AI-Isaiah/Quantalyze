@@ -311,7 +311,13 @@ BEGIN
   END IF;
 
   -- ----- NEGATIVE anchors on the DEPLOYED body -----
-  IF v_command ~* 'IN\s*\(\s*SELECT[^)]*LIMIT' THEN
+  -- ⚠️ The SELECT..LIMIT window was '[^)]*' until 2026-08-17, forbidding a ')'
+  -- in between. MEASURED: the predicate cannot be rewritten without an
+  -- EXISTS (...) or some closing paren before the LIMIT, so the old pattern
+  -- matched NO realistic rewrite and the gate could not fail. '[^;]*' still
+  -- bounds the match to a single statement (so it cannot smear and false-RED)
+  -- while allowing the parens a real IN-subquery necessarily contains.
+  IF v_command ~* '\mIN\M[[:space:]]*\([[:space:]]*SELECT[^;]*LIMIT' THEN
     RAISE EXCEPTION 'TEST FAILED (1/JOB-04/D-19): the deployed body binds its bounded batch through an IN (SELECT ... LIMIT ...) subquery. That is the exact un-hashable-subplan shape whose LIMIT is re-applied per outer row, so the per-tick bound silently does not exist -- the defect D-19 was opened to fix.';
   END IF;
   IF v_command ILIKE '%computed_at%' THEN
