@@ -2558,6 +2558,13 @@ class TestReconcileSweepAlert:
                 "kind": "compute_analytics_from_csv",
                 "strategy_id": strategy_id,
                 "claim_token": "tok-sweep-1",
+                # WR-03: FIRST claim. attempts is stamped by the claim RPC
+                # (attempts = attempts + 1 over NOT NULL DEFAULT 0), so a
+                # freshly-swept row arrives here at 1. Declared EXPLICITLY
+                # rather than relying on the production `or 1` fail-open
+                # default — a fixture that leans on the default cannot
+                # distinguish "emits on first claim" from "emits always".
+                "attempts": 1,
                 "metadata": {
                     _SWEEP_MARKER_KEY: _SWEEP_MARKER_VALUE,
                     _SWEEP_DETECTED_AT_KEY: detected_at,
@@ -2661,6 +2668,7 @@ class TestReconcileSweepAlert:
                 "kind": "compute_analytics_from_csv",
                 "strategy_id": "s-boom",
                 "claim_token": "tok-boom",
+                "attempts": 1,
                 "metadata": {
                     _SWEEP_MARKER_KEY: _SWEEP_MARKER_VALUE,
                     _SWEEP_DETECTED_AT_KEY: "2026-08-16T00:00:00Z",
@@ -2691,6 +2699,126 @@ class TestReconcileSweepAlert:
         )
         assert "mark_compute_job_failed" not in _rpc_names(mock_supabase), (
             "a Sentry transport failure was laundered into a job FAILURE."
+        )
+
+    @pytest.mark.asyncio
+    async def test_reclaimed_marker_job_does_not_re_alert(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A RE-CLAIMED sweep-marked job emits nothing (WR-03).
+
+        The marker is not consumed. It lives in compute_jobs.metadata for the
+        row's whole lifetime and `claim_compute_jobs_with_priority` MERGES
+        metadata (`COALESCE(metadata,'{}') || jsonb_build_object(...)`,
+        20260719073701:190-198) rather than replacing it, so it survives every
+        re-claim: a failed_retry (up to max_attempts, default 3), a watchdog
+        `reset_stalled_compute_jobs` reclaim, a DEFERRED -> defer_compute_job ->
+        pending cycle. Unconditional emission therefore reports ONE healed
+        strategy as N events, and a flapping job becomes an alert storm on a
+        warning-level channel. The count is the signal — SC#1's alert means
+        "a dropped enqueue was healed", not "a job was claimed".
+        """
+        jobs = [
+            {
+                "id": "job-sweep-reclaimed",
+                "kind": "compute_analytics_from_csv",
+                "strategy_id": "s-reclaimed",
+                "claim_token": "tok-reclaimed",
+                # The 3rd claim of the same healed row: the claim RPC has
+                # incremented attempts twice more since the heal.
+                "attempts": 3,
+                "metadata": {
+                    _SWEEP_MARKER_KEY: _SWEEP_MARKER_VALUE,
+                    _SWEEP_DETECTED_AT_KEY: "2026-08-16T00:00:00Z",
+                },
+            }
+        ]
+        mock_supabase = _mock_supabase_for(jobs)
+        spy = _FakeSentry()
+        monkeypatch.setattr(main_worker, "sentry_sdk", spy)
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ):
+            await dispatch_tick("worker-test-sweep-reclaimed")
+
+        assert spy.captures == [], (
+            "a RE-CLAIMED reconcile-sweep job (attempts=3) produced a Sentry "
+            "capture. The marker persists on the row and the claim RPC merges "
+            "metadata, so every retry, watchdog reclaim and defer would re-fire "
+            "the alert for the SAME healed strategy — an operator counting "
+            f"events cannot read them as strategies healed:\n{spy.serialised()}"
+        )
+        # Anti-vacuity: a dispatch_tick that never entered the claim loop would
+        # also produce zero captures. Prove the job actually ran.
+        assert _rpc_names(mock_supabase).count("mark_compute_job_done") == 1, (
+            "the re-claimed job never dispatched; a zero-capture assertion over "
+            "a loop that never executed is vacuous."
+        )
+
+    @pytest.mark.asyncio
+    async def test_marker_job_without_attempts_still_alerts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The WR-03 dedupe is FAIL-OPEN: no `attempts` still emits.
+
+        `attempts` is NOT NULL DEFAULT 0 on compute_jobs and the claim RPC
+        increments it before returning the row, so a claimed row always carries
+        it in production. But the read is defensive (`job.get`), and the
+        direction of that default is a real decision: a missing/NULL/0 attempts
+        must EMIT, never suppress. Over-alerting is recoverable; a silently
+        unreported heal is the exact defect class this phase exists to close.
+
+        ⚠️ Be precise about what this test actually catches, because two
+        plausible neuters were run and did NOT redden it:
+
+          * `or 1` -> `or 0`                      -> GREEN (measured 2026-08-17)
+          * `or 1` -> `job.get("attempts", 0)`    -> GREEN (measured 2026-08-17)
+
+        Both are correct GREENs: the production gate is `<= 1`, and 0 <= 1, so
+        the default is not what carries the fail-open property — the comparison
+        is. The neuter that DOES redden this test is the realistic tidy-up to a
+        strict first-claim check:
+
+          * `job.get("attempts", 0) == 1`         -> RED (measured 2026-08-17)
+            "a sweep-marked job with NO attempts field emitted 0 events,
+             expected 1"
+
+        That is the edit this test exists to stop. Recorded here rather than in
+        a summary so the next reader does not neuter the default, see green, and
+        conclude the test is vacuous.
+        """
+        jobs = [
+            {
+                "id": "job-sweep-noattempts",
+                "kind": "compute_analytics_from_csv",
+                "strategy_id": "s-noattempts",
+                "claim_token": "tok-noattempts",
+                # `attempts` deliberately ABSENT.
+                "metadata": {
+                    _SWEEP_MARKER_KEY: _SWEEP_MARKER_VALUE,
+                    _SWEEP_DETECTED_AT_KEY: "2026-08-16T00:00:00Z",
+                },
+            }
+        ]
+        mock_supabase = _mock_supabase_for(jobs)
+        spy = _FakeSentry()
+        monkeypatch.setattr(main_worker, "sentry_sdk", spy)
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ):
+            await dispatch_tick("worker-test-sweep-noattempts")
+
+        assert len(spy.captures) == 1, (
+            "a sweep-marked job with NO attempts field emitted "
+            f"{len(spy.captures)} events, expected 1. The WR-03 first-claim "
+            "gate must fail OPEN: a defensive default is never allowed to be "
+            "what silences SC#1's alert."
         )
 
     @pytest.mark.asyncio

@@ -96,6 +96,12 @@ class _ClaimedJobOptional(TypedDict, total=False):
     claim_token: str | None
     metadata: dict[str, Any] | None
     exchange: str | None
+    # JOB-04 / WR-03: read by the reconcile-sweep emission to fire once per
+    # HEAL rather than once per CLAIM. The column is
+    # `attempts INTEGER NOT NULL DEFAULT 0` (20260411144407:121) and the claim
+    # RPC does `attempts = attempts + 1` before returning the row
+    # (20260719073701:185), so a freshly-claimed row carries 1.
+    attempts: int
 
 
 class ClaimedJob(_ClaimedJobOptional):
@@ -661,7 +667,44 @@ async def dispatch_tick(worker_id: str) -> None:
         # Telemetry must never fail the work it observes (main.py:186-188).
         try:
             _meta = job.get("metadata") or {}
-            if _meta.get("source") == "reconcile-sweep":
+            # WR-03: fire once per HEAL, not once per CLAIM. The marker lives in
+            # compute_jobs.metadata for the row's whole lifetime, and
+            # claim_compute_jobs_with_priority MERGES metadata
+            # (`metadata = COALESCE(metadata,'{}') || jsonb_build_object(...)`,
+            # 20260719073701:190-198) rather than replacing it — so the marker
+            # survives every re-claim. Unconditional emission therefore produces
+            # one event per CLAIM for a single healed strategy:
+            #   * mark_compute_job_failed with a transient/unknown error_kind ->
+            #     failed_retry -> re-claim, up to max_attempts (default 3);
+            #   * the watchdog (reset_stalled_compute_jobs) reclaiming a stalled
+            #     row — unbounded by attempts;
+            #   * DispatchOutcome.DEFERRED -> defer_compute_job -> pending ->
+            #     re-claim.
+            # An operator counting these events could not read them as
+            # "strategies healed", and a flapping job becomes an alert storm on a
+            # warning-level channel — which also contradicts the SQL gate's own
+            # framing, where one heal is one marked row.
+            #
+            # `attempts` is incremented by the claim RPC BEFORE the row is
+            # returned (20260719073701:185) over a NOT NULL DEFAULT 0 column
+            # (20260411144407:121), so the FIRST claim of a freshly-swept row
+            # carries attempts == 1.
+            #
+            # FAIL-OPEN, and be precise about WHICH token carries that: it is
+            # the `<= 1`, not the `or 1`. A missing/NULL/0 attempts must EMIT,
+            # never suppress — a defensive default is never allowed to be what
+            # silences the alert this phase exists to create; over-alerting is
+            # recoverable, a silent heal is the defect class being closed. `<= 1`
+            # admits 0 as well as 1, so the fail-open property survives even if
+            # someone swaps the default. MEASURED 2026-08-17: replacing `or 1`
+            # with `or 0` / `job.get("attempts", 0)` does NOT change behaviour
+            # and does NOT redden any test — correctly, because 0 <= 1. What
+            # WOULD close the alert is tightening `<= 1` to `== 1` over a 0
+            # default, and that IS reddened by
+            # test_marker_job_without_attempts_still_alerts (observed). `or 1`
+            # stays as an explicit statement of intent, not as the mechanism.
+            _attempts = job.get("attempts") or 1
+            if _meta.get("source") == "reconcile-sweep" and _attempts <= 1:
                 with sentry_sdk.new_scope() as scope:
                     scope.set_tag("surface", "reconcile-sweep")
                     scope.set_tag("job_kind", job.get("kind"))
