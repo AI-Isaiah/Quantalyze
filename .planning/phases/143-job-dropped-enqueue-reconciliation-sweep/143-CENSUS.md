@@ -261,7 +261,7 @@ Neither STOP fired; Task 2 proceeds.
 ## Secret-material check
 
 ```
-grep -riE "service_role|eyJ|postgres://|postgresql://|SUPABASE_SERVICE_ROLE_KEY=" 143-CENSUS.md
+grep -riE "service_role|eyJ|postgres://|postgresql://|SUPABASE_SERVICE_ROLE_KEY[=]" 143-CENSUS.md
 ```
 
 Run at authoring time; the only matches are inside this fenced code block itself (the grep pattern), which
