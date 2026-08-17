@@ -793,35 +793,77 @@ async function resolveExistingStrategyOrRefuse(
     return refuse("name mismatch");
   }
 
-  // CR-01 check 2 — RANGE, as a READ against the committed dailies. Skipped
-  // for a no-series payload (fmt='trades' has no range to compare — the
-  // pre-fold fence never ran for it either).
-  if (args.rows.length > 0) {
-    let minDate = args.rows[0].date;
-    let maxDate = args.rows[0].date;
+  // CR-01 check 2 — SERIES EQUALITY (count + boundaries), as a READ against
+  // the committed dailies.
+  //
+  // Ship-review red-team fix (2026-08-18): the pre-fold predicate here was
+  // "no committed row OUTSIDE this payload's range" — honest THEN, because
+  // the persist upsert overwrote everything inside the range, so a pass
+  // meant the outcome equalled the submitted series. The fold DELETED that
+  // overwrite (this arm persists nothing), so the carried-over predicate
+  // quietly inverted into a data-discard: a DIFFERENT file whose range
+  // CONTAINS the committed range (an appended month, a superset re-export)
+  // — or a series-bearing retry against a zero-dailies committed row (an
+  // fmt='trades' strategy, or a pre-fold window-C orphan, where the
+  // outside-range probe passes VACUOUSLY) — was echoed ok:true while the
+  // submitted series went nowhere. On a verified-track-record product a
+  // fabricated success is the worst outcome; refuse instead.
+  //
+  // The read-only contract is unchanged: READ count + boundaries, compare
+  // against the payload. Echo only when the committed series has the SAME
+  // row count and the SAME [min,max] — and for an empty payload
+  // (fmt='trades'), only when the committed series is empty too (the old
+  // fence skipped empty payloads entirely; that skip was the vacuous edge).
+  // Residual (documented, accepted): equal count and boundaries with
+  // different interior values still echoes — the identical-retry case
+  // dominates by construction; closing it needs a checksum, not two reads.
+  {
+    let minDate = "";
+    let maxDate = "";
     for (const r of args.rows) {
-      if (r.date < minDate) minDate = r.date;
-      if (r.date > maxDate) maxDate = r.date;
+      if (minDate === "" || r.date < minDate) minDate = r.date;
+      if (maxDate === "" || r.date > maxDate) maxDate = r.date;
     }
     // `date` is `YYYY-MM-DD`, regex- AND calendar-validated by
-    // `parseDailyReturnsSeries` before it can reach here, so it is safe in
-    // a PostgREST filter expression. Lexicographic and chronological order
-    // coincide for that format, which is why the min/max scan is correct.
-    const { data: staleRows, error: staleErr } = await supabase
-      .from("csv_daily_returns")
-      .select("date")
-      .eq("strategy_id", existingRow.id)
-      .or(`date.lt.${minDate},date.gt.${maxDate}`)
-      .limit(1);
-    if (staleErr) return failClosed(staleErr, "csv_daily_returns");
-    if ((staleRows?.length ?? 0) > 0) {
-      return refuse("committed dailies outside this payload's range");
+    // `parseDailyReturnsSeries`; lexicographic and chronological order
+    // coincide for that format, which is why the min/max scan and the
+    // ORDER BY date reads below are correct.
+    const { data: minRows, count: committedCount, error: minErr } =
+      await supabase
+        .from("csv_daily_returns")
+        .select("date", { count: "exact" })
+        .eq("strategy_id", existingRow.id)
+        .order("date", { ascending: true })
+        .limit(1);
+    if (minErr) return failClosed(minErr, "csv_daily_returns");
+    if ((committedCount ?? 0) !== args.rows.length) {
+      return refuse(
+        `committed series differs from this payload (committed ${committedCount ?? 0} rows, payload ${args.rows.length})`,
+      );
+    }
+    if (args.rows.length > 0) {
+      const { data: maxRows, error: maxErr } = await supabase
+        .from("csv_daily_returns")
+        .select("date")
+        .eq("strategy_id", existingRow.id)
+        .order("date", { ascending: false })
+        .limit(1);
+      if (maxErr) return failClosed(maxErr, "csv_daily_returns");
+      if (
+        minRows?.[0]?.date !== minDate ||
+        maxRows?.[0]?.date !== maxDate
+      ) {
+        return refuse(
+          "committed series boundaries differ from this payload's date range",
+        );
+      }
     }
   }
 
   // Both checks passed: this IS the instructed retry of the same submission.
-  // The dailies are guaranteed present (the fold committed all-or-nothing),
-  // so there is nothing to persist — echo the existing id. `status` is
+  // The committed series was READ to match this payload's count and
+  // boundaries (presence is proven, not assumed), so there is nothing to
+  // persist — echo the existing id. `status` is
   // ECHOED from the row rather than hardcoded: the row may sit at 'private'
   // (a CONTRIB-02 contribution); reporting a status we did not read would be
   // fabricating an observation.

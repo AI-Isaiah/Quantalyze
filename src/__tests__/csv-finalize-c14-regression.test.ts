@@ -124,6 +124,7 @@ vi.mock("@/lib/supabase/server", () => ({
         const chain: any = {};
         chain.eq = () => chain;
         chain.or = () => chain;
+        chain.order = () => chain;
         chain.limit = () => dailiesRangeLimitMock();
         chain.maybeSingle = () => strategiesMaybeSingleMock();
         return chain;
@@ -374,9 +375,19 @@ describe("RESOLVE-ECHO-READ-ONLY (145-05 C): 23505 + matching identity → 200 e
       data: { id: EXISTING_ID, name: "Test Strategy", status: "private" },
       error: null,
     });
-    // Range check (CR-01 check 2, as a READ): no committed dailies outside
-    // this payload's range → this IS the instructed retry of the same file.
-    dailiesRangeLimitMock.mockResolvedValueOnce({ data: [], error: null });
+    // Series-equality check (CR-01 check 2, as READS — red-team fix
+    // 2026-08-18): committed count and boundaries EQUAL this payload's →
+    // this IS the instructed retry of the same file. Two reads: asc
+    // (min + count), desc (max).
+    dailiesRangeLimitMock.mockResolvedValueOnce({
+      data: [{ date: "2024-01-01" }],
+      count: 1,
+      error: null,
+    });
+    dailiesRangeLimitMock.mockResolvedValueOnce({
+      data: [{ date: "2024-01-01" }],
+      error: null,
+    });
 
     // NO metadata in the body: any write observed below came from inside the
     // resolve path, which is exactly what the read-only contract forbids.
@@ -390,7 +401,7 @@ describe("RESOLVE-ECHO-READ-ONLY (145-05 C): 23505 + matching identity → 200 e
 
     // BOTH identity checks ran, as READS.
     expect(strategiesMaybeSingleMock).toHaveBeenCalledTimes(1);
-    expect(dailiesRangeLimitMock).toHaveBeenCalledTimes(1);
+    expect(dailiesRangeLimitMock).toHaveBeenCalledTimes(2);
 
     // The read-only contract: exactly ONE rpc call (the failed fold — no
     // second finalize, no persist RPC; the dailies are guaranteed present

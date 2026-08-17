@@ -2820,3 +2820,9 @@ clean up opportunistically; none is a persistent user-facing defect or data-inte
   migration must carry a timestamp ABOVE it or it trips the backdated-migration guard.
   Phase 146 planning: if 146 ships a migration before Aug 19 noon UTC, stamp it
   `2026081913…`+.
+- [ ] **Persist the burned csv-submit content signature across refresh** (red-team RT-3):
+  `WizardClient.tsx` `failedCsvSubmitSigRef` is a useRef while `wizardSessionId` IS persisted —
+  the mint-a-fresh-session-on-content-change fence evaporates on refresh/tab-restore, exactly
+  the resume path where a changed file reaches the server resolve arm. Server-side equality
+  refusal (shipped 2026-08-18) is the operative fence; persisting the signature in the signed
+  saveWizardState envelope makes the client fence defense-in-depth again.

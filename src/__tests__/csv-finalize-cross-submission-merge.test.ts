@@ -66,12 +66,18 @@ const resolveFetch = vi.hoisted(() => ({
   filters: [] as Array<Record<string, unknown>>,
 }));
 
-/** Rows the resolved strategy ALREADY holds, and the read's error, per test. */
-const staleProbe = vi.hoisted(() => ({
-  data: [] as Array<{ date: string }>,
+/** The committed series the resolved strategy ALREADY holds, per test.
+ * Red-team fix 2026-08-18: the arm now reads COUNT + BOUNDARIES (two ordered
+ * reads) instead of an outside-range probe, so the fixture models the
+ * committed series shape rather than a probe result. */
+const seriesProbe = vi.hoisted(() => ({
+  count: 0,
+  minDate: null as string | null,
+  maxDate: null as string | null,
   error: null as { code?: string; message?: string } | null,
-  /** Every (min,max) the route probed with, so the filter can be asserted. */
-  filters: [] as string[],
+  /** Every ordered read the route made ('asc' | 'desc'), so coverage of both
+   * boundary reads is assertable. */
+  reads: [] as string[],
 }));
 
 /** Metadata UPDATE recorder — the economic oracle's write vector. */
@@ -119,17 +125,29 @@ vi.mock("@/lib/supabase/server", () => ({
           };
           return chain;
         }
-        // The CR-01 range check (READ) against committed dailies.
+        // The CR-01 series-equality check (READ) against committed dailies:
+        // .select("date", {count}).eq(strategy_id).order(date, asc).limit(1)
+        // then .select("date").eq(strategy_id).order(date, desc).limit(1).
         return {
           eq: (_col: string, _val: string) => ({
-            or: (filter: string) => ({
+            order: (_ocol: string, opts: { ascending: boolean }) => ({
               limit: async (_n: number) => {
                 expect(
                   table,
-                  "the range check must read the series table, not another one",
+                  "the series check must read the series table, not another one",
                 ).toBe("csv_daily_returns");
-                staleProbe.filters.push(filter);
-                return { data: staleProbe.data, error: staleProbe.error };
+                seriesProbe.reads.push(opts.ascending ? "asc" : "desc");
+                if (seriesProbe.error) {
+                  return { data: null, count: null, error: seriesProbe.error };
+                }
+                const boundary = opts.ascending
+                  ? seriesProbe.minDate
+                  : seriesProbe.maxDate;
+                return {
+                  data: boundary === null ? [] : [{ date: boundary }],
+                  count: seriesProbe.count,
+                  error: null,
+                };
               },
             }),
           }),
@@ -218,9 +236,11 @@ beforeEach(() => {
   resolveFetch.row = null;
   resolveFetch.error = null;
   resolveFetch.filters.length = 0;
-  staleProbe.data = [];
-  staleProbe.error = null;
-  staleProbe.filters.length = 0;
+  seriesProbe.count = 0;
+  seriesProbe.minDate = null;
+  seriesProbe.maxDate = null;
+  seriesProbe.error = null;
+  seriesProbe.reads.length = 0;
   updateCalls.length = 0;
   checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
   // Default: the fold succeeds and returns a fresh id.
@@ -259,7 +279,9 @@ describe("[140.4-16 / CR-01, re-pointed by 145] the 23505 resolve arm refuses a 
     // all-or-nothing, so 23505 ⇒ S has its dailies). Same name — the range
     // check is the only fence that can see the changed FILE.
     arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
-    staleProbe.data = [{ date: "2024-01-31" }];
+    seriesProbe.count = 3;
+    seriesProbe.minDate = "2024-01-31";
+    seriesProbe.maxDate = "2024-03-29";
 
     const res = await post(SERIES_2025);
 
@@ -283,15 +305,15 @@ describe("[140.4-16 / CR-01, re-pointed by 145] the 23505 resolve arm refuses a 
     ).toEqual([]);
   });
 
-  it("probes with the payload's OWN min/max, so 'outside range' means 'outside what was submitted'", async () => {
+  it("reads BOTH committed boundaries (asc + desc) before echoing, so equality means the committed series", async () => {
     arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
-    staleProbe.data = [];
+    seriesProbe.count = 3;
+    seriesProbe.minDate = "2025-01-31";
+    seriesProbe.maxDate = "2025-03-31";
 
     await post(SERIES_2025);
 
-    expect(staleProbe.filters).toEqual([
-      "date.lt.2025-01-31,date.gt.2025-03-31",
-    ]);
+    expect(seriesProbe.reads).toEqual(["asc", "desc"]);
     // C-08: the re-fetch that precedes the range check carries the full
     // tenant scope — user_id AND wizard_session_id AND source — never the
     // session id alone.
@@ -315,7 +337,7 @@ describe("[140.4-16 / CR-01, re-pointed by 145] the 23505 resolve arm refuses a 
     expect(calls[0][1].p_rows).toEqual(SERIES_2024);
     // No resolve reads on the create path.
     expect(resolveFetch.filters).toEqual([]);
-    expect(staleProbe.filters).toEqual([]);
+    expect(seriesProbe.reads).toEqual([]);
     // The oracle CAN fire: the successful outcome applied the metadata.
     expect(updateCalls).toHaveLength(1);
   });
@@ -324,7 +346,9 @@ describe("[140.4-16 / CR-01, re-pointed by 145] the 23505 resolve arm refuses a 
     // Window A's recovery: the prior attempt fully committed this very
     // submission; the retry must echo the existing id, not dead-end.
     arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
-    staleProbe.data = [];
+    seriesProbe.count = 3;
+    seriesProbe.minDate = "2024-01-31";
+    seriesProbe.maxDate = "2024-03-29";
 
     const res = await post(SERIES_2024);
 
@@ -340,6 +364,78 @@ describe("[140.4-16 / CR-01, re-pointed by 145] the 23505 resolve arm refuses a 
     expect(updateCalls).toHaveLength(1);
   });
 
+  it("🔴 RED-TEAM RT-1: a SUPERSET file (appended month) is refused — containment is not identity", async () => {
+    // Pre-fix, the outside-range probe passed whenever the committed range
+    // sat INSIDE the payload's range — an appended-month re-export was echoed
+    // ok:true and its series silently discarded. RED observed against the
+    // pre-fix route: this test received the echo (200) instead of the 409.
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
+    seriesProbe.count = 2; // committed Jan–Feb…
+    seriesProbe.minDate = "2025-01-31";
+    seriesProbe.maxDate = "2025-02-28";
+
+    const res = await post(SERIES_2025); // …payload appends March (3 rows)
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("CSV_SESSION_REUSED");
+    expect(updateCalls).toEqual([]);
+  });
+
+  it("🔴 RED-TEAM RT-2: a series payload against a ZERO-dailies committed row is refused, never echoed", async () => {
+    // The vacuous edge: with zero committed rows, no row can be 'outside'
+    // any range, so the pre-fix probe passed and the route echoed ok:true —
+    // discarding the series AND enqueueing analytics against an empty
+    // strategy (an fmt='trades' row or a pre-fold window-C orphan under a
+    // surviving session id). RED observed against the pre-fix route.
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
+    seriesProbe.count = 0;
+    seriesProbe.minDate = null;
+    seriesProbe.maxDate = null;
+
+    const res = await post(SERIES_2024);
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("CSV_SESSION_REUSED");
+    expect(updateCalls).toEqual([]);
+  });
+
+  it("an EMPTY payload against a series-bearing committed row is refused (the old fence skipped empty payloads)", async () => {
+    // fmt='trades' retry semantics: echo only when the committed series is
+    // ALSO empty. A committed 3-row series vs an empty payload is a
+    // different file, not the instructed retry.
+    arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
+    seriesProbe.count = 3;
+    seriesProbe.minDate = "2024-01-31";
+    seriesProbe.maxDate = "2024-03-29";
+
+    // fmt='trades' — an empty daily_returns payload 400s upstream (WR-04),
+    // so the trades shape is the only one that reaches the resolve arm empty.
+    const res = await POST(
+      new NextRequest("http://localhost:3000/api/strategies/csv-finalize", {
+        method: "POST",
+        body: JSON.stringify({
+          wizard_session_id: SESSION,
+          fmt: "trades",
+          strategy_name: "Alpha",
+          daily_returns_series: [],
+          metadata: { description: "cr01 oracle marker" },
+        }),
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "http://localhost:3000",
+        },
+      }),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ) as any;
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("CSV_SESSION_REUSED");
+    expect(updateCalls).toEqual([]);
+  });
+
   it("a FAILED resolve read fails CLOSED — a read we could not make is never read as 'nothing is there'", async () => {
     // supabase-js RESOLVES on a read failure rather than throwing, so an
     // unchecked binding is `null` here and looks exactly like "no stale
@@ -347,7 +443,7 @@ describe("[140.4-16 / CR-01, re-pointed by 145] the 23505 resolve arm refuses a 
     // the moved arm must not re-open it (a fence that cannot run must
     // refuse, not pass).
     arm23505({ id: EXISTING_ID, name: "Alpha", status: "pending_review" });
-    staleProbe.error = { code: "57014", message: "statement timeout" };
+    seriesProbe.error = { code: "57014", message: "statement timeout" };
 
     const res = await post(SERIES_2025);
 
