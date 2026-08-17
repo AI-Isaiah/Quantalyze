@@ -146,6 +146,27 @@ atomicity (Phase 145); the wizard first-hop drop (see Detection Predicate Q4).
   - The test that the capture fires is NOT sufficient: it mocks the SDK, so it stays green with
     `init_sentry()` removed. A separate assertion that `main()` calls `init_sentry()` is
     load-bearing, not decorative.
+
+- **✅ RESOLVED 2026-08-17 (Phase 143-04, measured against live Railway) — and the CORRECTION
+  above was itself too pessimistic about PRODUCTION.** Both halves now have evidence:
+  - **There is no standalone worker service.** The `quantalyze-analytics` Railway project has ONE
+    service, and the worker loops were MERGED into the FastAPI process — `main.py:80-86` records
+    why ("Previously `main_worker.py` ran these as a separate Railway service; merging them
+    eliminates the *forgot to deploy the worker* failure mode (incident 2026-04-20 → 2026-04-22,
+    jobs queued but never processed)"). `dispatch_loop` runs as an asyncio task in the app
+    lifespan (`main.py:271`).
+  - **That process HAS had Sentry since Phase 16** — `main.py:69` calls `init_sentry()` at import,
+    before `app = FastAPI()`.
+  - **`SENTRY_DSN` IS set on that service** (verified via Railway CLI; value never read or copied
+    — presence and length only). `MT5_ENABLED=true` and `MT5_GATEWAY_HOST` sit on the same
+    service, independently confirming it is the worker.
+  - ⇒ **SC#1's "a Sentry alert fires" is TRUE in production.** `dispatch_tick` — where 143-01 put
+    the reconcile-sweep capture — runs inside an already-Sentry-initialized process.
+  - **143-01's `init_sentry()` in `main_worker.main()` remains correct and is NOT dead code**, but
+    be precise about what it covers: it closes the **standalone** invocation path
+    (`python -m main_worker`, `npm run worker:dev`, and any future re-split), which genuinely had
+    zero Sentry. It is not the production path. Do not let a future reader infer from it that
+    production was previously unalerted — it was not.
   - Honest limitation to document: alert latency is sweep → next worker claim, and a fully-down
     worker means no alert. A down worker is independently alarmed, so this adds no new blind
     spot — but write that down rather than letting the reader assume instant paging.
