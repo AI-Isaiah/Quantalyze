@@ -181,9 +181,47 @@ TEST only — never PROD (it mints real strategies).
 
 ---
 
-## Census — **PENDING (Plan 02, orchestrator session)**
+## Census — **TAKEN 2026-08-17 (Plan 02, orchestrator session, read-only)**
 
-The four CONTEXT census queries (145-CONTEXT.md `:310-341`) run verbatim on BOTH projects (PROD `khslejtfbuezsmvmtsdn`, TEST `qmnijlgmdhviwzwfyzlc`). Interpretation pre-registered at CONTEXT `:343-346`: zero on both = prospective hardening (ship anyway, like 143); non-zero on PROD = re-rank to live cleanup and the one-time terminalize gets a real id list. ⚠️ Query (1) minus (2) is the wizard first-hop population — it must NOT be absorbed into 145.
+The four CONTEXT census queries (145-CONTEXT.md `:310-341`) run verbatim on BOTH projects.
+Pre-registered interpretation applied; **STOP-rule row 3 FIRED: census non-zero on PROD → re-ranked
+from prospective hardening to LIVE CLEANUP.**
+
+### PROD `khslejtfbuezsmvmtsdn`
+
+| query | result |
+|---|---|
+| (1) full orphans (no dailies, no jobs, no keys, >1h) | **3** — `5454d0d5-0492…` (2026-05-07), `58786362-7e87…` (2026-05-21), `454a301c-4844…` (2026-05-21); all `source='csv'`, `pending_review`, `wizard_session_id` NULL, verification row present, analytics NULL |
+| (2) csv + no dailies (any job/key state, any age) | **18** |
+| (1) minus (2), i.e. non-csv first-hop | **0** — no wizard first-hop population on PROD |
+| (3) window E (dailies, zero jobs, analytics='failed') | **1** (the known composite; EXCLUDED from 145 per CONTEXT Deferred) |
+| (4) `process_key_unified_backbone` flag row | present, reads **`'on'`**, updated 2026-05-25 15:51 — INERT (zero runtime readers) and NOT touched (⛔ `20260620120000:86-89` RAISEs at apply time if it reads 'off'; cleanup = Plan 05 TODOS deferral) |
+
+**The 18 query-(2) rows annotated (the Plan 06 terminalize candidate list — re-verify fresh there):**
+
+- **15 × incident casualties**: `published`, job `failed_final`, `analytics='failed'`, no keys —
+  created 2026-05-07 (6 rows) and 2026-05-21 (9 rows). Published strategies with permanently-failed
+  analytics and zero data rows.
+- **3 × pure window-shape orphans** (the query-(1) set): `pending_review`, NO jobs, NO analytics,
+  verification row present — same two dates.
+
+⭐ **Every one of the 18 predates the Phase 19.1 token-forwarding fix (both dates sit in the
+v0.24.9.30-era incident window; the flag flip was 2026-05-25).** Zero orphans have been created in
+the ~3 months of live traffic since. This is the census corroborating CANNOT REPRODUCE: the orphan
+population is fossil evidence of the ORIGINAL incident, not of an ongoing defect.
+
+### TEST `qmnijlgmdhviwzwfyzlc`
+
+| query | result |
+|---|---|
+| (1) full orphans | **8107** — ALL non-csv (`q1_csv = 0`) |
+| (2) csv + no dailies | **0** |
+| (3) window E | **0** |
+| (4) flag row | present, reads **`'off'`** (⚠️ diverges from PROD's `'on'`), updated 2026-05-08 — NOT touched, same trap |
+
+The 8107 are the **wizard first-hop / e2e-seed residue class** — 143's filed non-coverage, EXCLUDED
+from 145 scope by decree (recorded here so it is never silently absorbed; Plan 05 files the census
+number to TODOS). TEST's CSV population is zero everywhere.
 
 ---
 
