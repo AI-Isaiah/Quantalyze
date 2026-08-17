@@ -203,3 +203,22 @@ byte-for-byte. The deployed body selects precisely the rows the repo's text says
 Remaining: tick 3 (17:50) should move another EXACTLY-100, disjoint set, leaving 196 — the second of
 the two required bounded-AND-progressing observations (tick 1's zero was the SC#2 negative control,
 not a bound observation). The residual ~196 drain on later ticks and are NOT a merge gate.
+
+---
+
+## §7 — TICK 3 observed, 2026-08-17 17:50 UTC: BOUNDED **AND PROGRESSING** — evidence complete
+
+| assertion | expected | observed |
+|---|---|---|
+| tick succeeded | 1 | **1** ✅ |
+| arm A moved this tick | exactly 100 | **100** ✅ |
+| arm A total across ticks | 200 | **200** ✅ (disjointness structural: one `next_attempt_at` stamp per row; tick-2 window still holds exactly 100) |
+| still `running` | 196 | **196** ✅ |
+| CONSERVATION | 402 | **402** ✅ — zero rows vanished across THREE ticks |
+| progression boundary | tick-3 oldest claim ≥ tick-2 newest | **EQUAL at `12:05:29.794561`** — tick 3 resumed at the exact microsecond tie where tick 2's LIMIT cut. Deterministic oldest-first, no skips, no re-processing. |
+
+⭐ This completes the two-successive-ticks bounded-AND-progressing observation the revised plan
+requires (tick 1's zero was the SC#2 negative control). The evidence set for 144-03 is now:
+arm B positive (tick 1) · SC#2 negative control at real scale (tick 1) · bound HOLDS with the
+pre-apply set prediction matching byte-for-byte (tick 2) · bound PROGRESSES deterministically
+(tick 3) · conservation across all three. Residual 196 drain on later ticks — NOT a merge gate.
