@@ -1,10 +1,10 @@
 ---
 schema_version: 1
-open_count: 1
+open_count: 0
 waived_count: 0
-fixed_count: 0
+fixed_count: 1
 total_count: 1
-last_updated: 2026-08-17T21:25:43.021Z
+last_updated: 2026-08-17T21:43:38.829Z
 ---
 
 # Broken Windows Ledger
@@ -15,7 +15,7 @@ last_updated: 2026-08-17T21:25:43.021Z
 
 | id | phase | kind | file | line | description | status | reason | recorded_at | resolved_at |
 |----|-------|------|------|------|-------------|--------|--------|-------------|-------------|
-| 1 | 145 | skipped-test | src/__tests__/csv-finalize-c14-regression.test.ts | 503 | NEW-C14-07 describe.skip — pins the dissolved upstream-body spread; Plan 05 rebuilds the c14 file (plan-sanctioned skip) | open |  | 2026-08-17T21:25:43.021Z |  |
+| 1 | 145 | skipped-test | src/__tests__/csv-finalize-c14-regression.test.ts | 503 | NEW-C14-07 describe.skip — pins the dissolved upstream-body spread; Plan 05 rebuilds the c14 file (plan-sanctioned skip) | fixed |  | 2026-08-17T21:25:43.021Z | 2026-08-17T21:43:38.829Z |
 
 ````json
 [
@@ -26,10 +26,10 @@ last_updated: 2026-08-17T21:25:43.021Z
     "file": "src/__tests__/csv-finalize-c14-regression.test.ts",
     "line": 503,
     "description": "NEW-C14-07 describe.skip — pins the dissolved upstream-body spread; Plan 05 rebuilds the c14 file (plan-sanctioned skip)",
-    "status": "open",
+    "status": "fixed",
     "reason": "",
     "recorded_at": "2026-08-17T21:25:43.021Z",
-    "resolved_at": null
+    "resolved_at": "2026-08-17T21:43:38.829Z"
   }
 ]
 ````

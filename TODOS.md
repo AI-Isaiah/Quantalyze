@@ -2714,3 +2714,55 @@ that migration; each is a settled plan-time call with its own reason for living 
   record and route, do not edit. ⚠️ Do NOT read this as "arm B is therefore unnecessary". Arm B
   ships as defence in depth against the CLASS (any future direct-UPDATE writer, migration or manual
   repair); that is a different claim from "the invariant is closed", which nothing here makes.
+
+## Phase 145 — recorded deferrals (logged 2026-08-17)
+
+Three DELIBERATE deferrals from the JOB-06 csv-finalize atomicity fold
+(`finalize_csv_strategy_with_returns`, migration `20260819120000`; 145-CONTEXT.md `<deferred>`).
+None is a defect in the fold; each carries the constraint that made it out-of-scope. Census
+citations are from `.planning/phases/145-job-csv-finalize-atomicity/145-REPRODUCTION.md`
+(taken 2026-08-17: PROD `khslejtfbuezsmvmtsdn`, TEST `qmnijlgmdhviwzwfyzlc`).
+
+- [ ] **(Window E) Enqueue-errored strategies are visible and alerted but never healed — nothing
+  re-enqueues them.** Shape: dailies present, the `after()` enqueue errored, `strategy_analytics`
+  = `'failed'`, no `compute_jobs` row ever created. The user's poller breaks out on `failed` and
+  Sentry fires (`step: csv-analytics-enqueue`), so it is not silent — but Phase 143's sweep
+  deliberately excludes it via the terminal-analytics conjunct (`20260816140000:737`), and the
+  Phase 145 fold leaves hop 5 (the post-response enqueue) outside the transaction by physical
+  necessity (`after()` runs post-commit), so this window survives the fold. Census query (3)
+  measured 2026-08-17: **PROD = 1, TEST = 0**. The pre-registered re-rank trigger ("non-zero PROD
+  → live cleanup") technically fired, but the single PROD row is the KNOWN composite already
+  tracked by the Phase 143 (D-09) entry above — composites are chain-terminal by design and need a
+  `stitch_composite` re-run mechanism, not a csv re-enqueue — so there is no genuine window-E
+  population today and the item stays mid-term. Any future healer must key on a signal that
+  distinguishes "enqueue errored" from "composite, legitimately job-terminal" (the D-09
+  false-positive class).
+
+- [ ] **(Wizard first-hop drop) The API/wizard first-hop enqueue drop remains uncovered — ⛔ never
+  absorb it into Phase 145's surface by widening a predicate.** Phase 143 filed it as documented
+  non-coverage (`20260816140000:259-265`; the D-05 entry above): a dropped first `sync_trades`
+  enqueue leaves "no dailies AND no jobs", byte-identical to a brand-new strategy, so no csv-side
+  predicate catches it without re-enqueueing healthy strategies forever. It is shape-identical to
+  145's pre-fold windows A–C but has an UNSOLVED distinguishing-signal problem — which is exactly
+  why 145 dissolved its own windows via the fold instead of sweeping. Census (1)-minus-(2)
+  measured 2026-08-17: **PROD = 0** (no wizard first-hop population; PROD's 18 csv no-dailies rows
+  are all 2026-05 incident-era fossils), **TEST = 8107** (all non-csv — the e2e-seed residue
+  class). Closing it needs its own signal (`api_key_id` present + no job EVER + a longer grace)
+  with its own false-positive analysis — a separate mechanism, never a second predicate bolted
+  onto `20260816140000` or onto the fold's resolve arm.
+
+- [ ] **(Inert flag cleanup) Delete the dead `feature_flags.process_key_unified_backbone` row and
+  the dead `PROCESS_KEY_UNIFIED_BACKBONE` env vars (Vercel Production + Railway
+  `quantalyze-analytics`) — respecting the apply-time RAISE trap.** Zero code readers at HEAD
+  (145-REPRODUCTION.md arm 2: the token survives only in two comments and one test constant; the
+  historical readers named in `106-RATIFICATION.md:29-30` are gone), so row and env vars are dead
+  config, not a live switch. Census (4), 2026-08-17: the row is present on BOTH projects — PROD
+  reads `'on'` (updated 2026-05-25), TEST reads `'off'` (diverges). ⛔ Constraint, verbatim from
+  145-CONTEXT.md: "Do not flip or delete it in this phase —
+  `20260620120000_verification_requests_view_shim_apply.sql:86-89` RAISEs at apply time if it
+  reads `off`, so a 'cleanup' delete could redden a future migration apply." (Precisely: the gate
+  RAISEs when `value = 'off'` AND `updated_by <> 'migration-104-seed'` — the pristine db-reset
+  seed is exempt; a DELETE leaves `v_value` NULL, which passes, but a flip to `'off'` trips it,
+  and TEST's row ALREADY reads `'off'`, so re-applying that migration on TEST is hazardous today
+  unless its `updated_by` is the seed exemption — unverified.) Cleanup order: retire or guard the
+  `20260620120000:86-89` check first, then remove the row and both env vars in the same pass.
