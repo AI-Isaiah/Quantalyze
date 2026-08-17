@@ -62,4 +62,7 @@ each SUMMARY; re-verified here by the same diff).
 
 ## Approval record
 
-<!-- Task 3 resume-signal lands here -->
+**APPROVED by the founder 2026-08-18 (AskUserQuestion, option "Approved — ship it") after
+review of the evidence set: verdict + SC#3 diff, 145-TERMINALIZE.md, 145-DECISION.md
+conformance, the neuter-RED tables, and the D-10 zero-diff check.** Proceeding to /ship;
+the merge applies 20260819120000 to PROD.
