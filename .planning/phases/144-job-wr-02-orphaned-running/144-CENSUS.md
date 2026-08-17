@@ -181,3 +181,25 @@ real scale, with a real clock.** It could not have been staged.
 
 ⇒ The claims cross 4 h at ~16:05 UTC. Arm A's bound observation therefore moves to the **16:50 tick**,
 one tick later than planned — not lost.
+
+---
+
+## §6 — TICK 2 observed, 2026-08-17 16:50 UTC: THE BOUND HOLDS, AND THE PREDICTION MATCHED
+
+| assertion | expected | observed |
+|---|---|---|
+| tick succeeded | 1 | **1** ✅ |
+| arm A moved | exactly 100 | **100** ✅ |
+| moved set | md5 `caf7fb80f21e28c85ab1a365f7f3de69` — **computed and committed BEFORE the apply** (§ pre-apply baseline: "the 100 oldest by claimed_at") | **`caf7fb80f21e28c85ab1a365f7f3de69`** ✅ byte-identical |
+| still `running` | 296 (402 − 6 − 100) | **296** ✅ |
+| CONSERVATION | 402 rows still exist | **402** ✅ |
+| B3 on the 100 | `next_attempt_at` in tick-2 window | **100/100** ✅ |
+| ordering | oldest-first | ✅ — boundary is a microsecond TIE (`12:05:29.794561` appears in both the moved and surviving sets; multiple rows share one claimed_at microsecond from the 25-second CI claim burst, and LIMIT split the tie). Deterministic enough: the assertion is on the SET, and the set matched the prediction exactly. |
+
+⭐ The moved-set checksum was PREDICTED pre-apply and survived: (1) a falsified premise (my §2 arm-A
+claim), (2) an unplanned negative control (tick 1), and (3) an hour of clock drift — and still matched
+byte-for-byte. The deployed body selects precisely the rows the repo's text says it selects.
+
+Remaining: tick 3 (17:50) should move another EXACTLY-100, disjoint set, leaving 196 — the second of
+the two required bounded-AND-progressing observations (tick 1's zero was the SC#2 negative control,
+not a bound observation). The residual ~196 drain on later ticks and are NOT a merge gate.
