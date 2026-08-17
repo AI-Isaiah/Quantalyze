@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.19
 milestone_name: JOB/RATE — job-lifecycle reliability and the rate limits that hold
-current_phase: 145
-current_phase_name: JOB — CSV-finalize atomicity (the fold) + orphan terminalize
-status: shipping
-stopped_at: Phase 145 COMPLETE ON BRANCH feat/v1.19-phase-145, founder-approved at the 145-06 human gate, /ship in progress. All six waves done; verdict CANNOT REPRODUCE (4 arms); fold migration 20260819120000 applied+exercised on TEST (gates RED→GREEN incl. the atomicity oracle on the deployed body; ledger reconciled to the filename); (i-b) wired (Python csv-finalize branch DELETED, ~20 tests re-pointed); SC#3 measured clean vs the arm-4 baseline; 18 PROD fossils terminalized UPDATE-only (post-pass census 0/0, per-row rollback anchors in 145-TERMINALIZE.md). Merge auto-applies the fold to PROD. ⚠️ The Wave-5 executor's state.update-progress wrote repo-mis-scoped counters (4/13) and current_phase 153.7 — discarded at this merge in favor of the hand-cut milestone-scoped ledger (the standing verbs-are-broken note below).
-last_updated: "2026-08-18T00:20:00.000Z"
+current_phase: 146
+current_phase_name: RATE — audit + close the two verified rate-limit gaps
+status: ready_to_plan
+stopped_at: Phase 145 SHIPPED, MERGED AND PROD-VERIFIED (PR #689, squash 9386bae5, 2026-08-18). Migration 20260819120000 auto-applied on merge — PROD ledger matches the filename (no MCP drift; workflow path), fold present as ONE SECDEF 6-arg overload, authenticated-only EXECUTE, anon shut out, BOTH parents gone. v0.65.0.0. Ship review: 9 reviewers, 3 CRITICAL fixed pre-merge (CSV_PERSIST_FAIL dead-button fence; pytest discriminator re-point; RED-TEAM resolve-arm data-discard — superset/zero-dailies retries now REFUSED on count+boundary inequality, 3 discriminating tests each observed RED pre-fix), 14 deferrals in TODOS 'Phase 145 ship-review findings'. Deploy-skew window consciously accepted and traversed at quiet hours. NEXT: Phase 146 — 146-RESEARCH.md already written (at the 145 branch tip; greps MUST re-run at plan time), founder-decision candidate flagged: withAuthLimited may already satisfy RATE-05.
+last_updated: "2026-08-18T00:10:00.000Z"
 last_activity: 2026-08-17
 last_activity_desc: Phase 144 closed end-to-end with first-PROD-tick verification; Phase 145 Waves 1-2 complete — SC#1 verdict committed, (i-b) founder decision locked, arm 4 live-verified on TEST (200 + UUID, zero 42501)
 progress:
   total_phases: 21
-  completed_phases: 18
+  completed_phases: 19
   total_plans: 104
   completed_plans: 104
-  percent: 86
+  percent: 90
 ---
 
 # Project State — Quantalyze

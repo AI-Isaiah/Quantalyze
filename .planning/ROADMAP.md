@@ -179,7 +179,7 @@ Plans:
 
 **Wave 6** *(blocked on Waves 3-5; orchestrator-session-only, BLOCKING)*
 
-- [ ] 145-06-PLAN.md — [BLOCKING] Apply fold to TEST via Supabase MCP (never db push), sql-tests observed RED→GREEN, live finalize + SC#3 measured before/after diff vs the arm-4 baseline, one-time human-reviewed TERMINALIZE of the census list (UPDATE-only: analytics 'failed'+reason then status='archived'; founder ruling β), human gate before the one-way merge
+- [x] 145-06-PLAN.md — [BLOCKING] Apply fold to TEST via Supabase MCP (never db push), sql-tests observed RED→GREEN, live finalize + SC#3 measured before/after diff vs the arm-4 baseline, one-time human-reviewed TERMINALIZE of the census list (UPDATE-only: analytics 'failed'+reason then status='archived'; founder ruling β), human gate before the one-way merge
 
 **Note**: Constrained by JOB-07 (any cleanup mechanism stays off the worker loop). Founder rulings locked 2026-08-17: (1) orphan disposition = TERMINALIZE reading (β) — deletion arms out of scope; (2) the (i-a)/(i-b) caller choice is measure-first and founder-reserved — Plan 02 executes the measurement and stops at a decision checkpoint. ⛔ 20260816140000 (143) and 20260817120000 (144) untouched by every plan.
 
