@@ -1,7 +1,17 @@
 ---
 phase: 143-job-dropped-enqueue-reconciliation-sweep
 verified: 2026-08-17T12:35:00Z
-status: human_needed
+status: passed
+status_scope: "TEST-scope. Founder decision 2026-08-17: accept TEST-scope verification and continue the run; /ship stays a separate human act."
+status_caveat: >-
+  ⚠️ SC#1's PROD half is NOT established and cannot be by anything this phase did — the migration
+  is applied to TEST only, and merging AUTO-APPLIES to PROD. What IS measured: the live TEST tick
+  of 2026-08-17 09:35:00 UTC inserted compute_jobs 58728527 through FORCE ROW LEVEL SECURITY
+  (L-2/T-143-02 resolved). The 143-04 checkpoint:human-verify remains UNDISCHARGED — no human has
+  typed "approved". Three of five human_verification items were discharged in 694444e3; the three
+  that remain all reduce to authorizing /ship. ⚠️ The first PROD tick will enqueue ZERO jobs (census
+  = 0 candidates): that is the SAFE outcome and produces NO positive evidence. Proof of function is
+  the offline harness, the CI gates and the live TEST tick — never PROD quietness.
 score: 3/3 success criteria verified (TEST scope) — 0 failed, 0 behaviour-unverified
 behavior_unverified: 0
 overrides_applied: 0
