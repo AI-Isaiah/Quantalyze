@@ -671,8 +671,32 @@ async def dispatch_tick(worker_id: str) -> None:
                         "Dropped compute-job enqueue healed by reconciliation sweep",
                         level="warning",
                     )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # LOUD, not silent (143 review WR-02). The swallow itself stays --
+            # telemetry must never fail the work it observes, and the paragraph
+            # above explains why an unwrapped raise here would take the whole
+            # claimed batch down. What must NOT stay is the silence: a swallow
+            # with no log reproduces exactly the silently-failing-alert defect
+            # class this phase REJECTED the pg_net -> Sentry bridge for, one
+            # layer in. If the emission itself ever breaks (an SDK API change
+            # removing new_scope(), a scope misuse, a metadata shape the .get()
+            # chain trips on) the alert dies and nothing anywhere says so.
+            #
+            # No unit test can observe that: every test injects a fake
+            # sentry_sdk in place of the real module, so the real emission path
+            # is never exercised. This log line is the ONLY signal that SC#1's
+            # alert did not fire for a job the sweep healed. Every other broad
+            # except in this module logs (_safe_mark, the claim-RPC fallbacks,
+            # _daily_enqueue_already_ran_today, the three loop wrappers); this
+            # one was the outlier.
+            logger.warning(
+                "reconcile-sweep Sentry emission FAILED for job %s (strategy %s): "
+                "%s. The heal itself still proceeds and the job dispatches "
+                "normally, but SC#1's alert did NOT fire for this job -- a "
+                "dropped compute-job enqueue was healed SILENTLY.",
+                job.get("id"), job.get("strategy_id"), exc,
+                extra={"event_type": "reconcile_sweep_alert_emit_failed"},
+            )
 
         try:
             # FLIPRETRY-04: keep healthz HONEST during ONE long-but-alive

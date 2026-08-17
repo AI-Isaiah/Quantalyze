@@ -16,6 +16,7 @@ Plus a shutdown-signal test that verifies the SHUTDOWN event stops the loops.
 import asyncio
 import inspect
 import json
+import logging
 import pathlib
 import re
 from contextlib import contextmanager
@@ -2690,6 +2691,101 @@ class TestReconcileSweepAlert:
         )
         assert "mark_compute_job_failed" not in _rpc_names(mock_supabase), (
             "a Sentry transport failure was laundered into a job FAILURE."
+        )
+
+    @pytest.mark.asyncio
+    async def test_capture_failure_is_logged_loudly(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A failing emission must be LOGGED, not swallowed in silence (WR-02).
+
+        The swallow is correct and stays -- telemetry must never fail the work
+        it observes. What is NOT correct is a bare `pass`: if the emission
+        itself breaks (an SDK change removing new_scope(), a scope misuse, a
+        metadata shape the .get() chain trips on) the SC#1 alert dies exactly as
+        silently as the pg_net -> Sentry bridge this phase REJECTED FOR BEING
+        SILENTLY FAILABLE. That is the milestone's own declared defect class
+        reproduced one layer in.
+
+        No test can observe the REAL emission breaking -- every test in this
+        class injects `_FakeSentry` in place of the module -- so the log line is
+        the only signal an operator ever gets. This test is what keeps it there.
+        """
+        strategy_id = "22222222-2222-4222-8222-222222222222"
+        jobs = [
+            {
+                "id": "job-sweep-loud",
+                "kind": "compute_analytics_from_csv",
+                "strategy_id": strategy_id,
+                "claim_token": "tok-loud",
+                "attempts": 1,
+                "metadata": {
+                    _SWEEP_MARKER_KEY: _SWEEP_MARKER_VALUE,
+                    _SWEEP_DETECTED_AT_KEY: "2026-08-16T00:00:00Z",
+                },
+            }
+        ]
+        mock_supabase = _mock_supabase_for(jobs)
+        boom = RuntimeError("sentry transport down")
+        spy = _FakeSentry(capture_raises=boom)
+        monkeypatch.setattr(main_worker, "sentry_sdk", spy)
+
+        with caplog.at_level(logging.WARNING, logger=main_worker.logger.name), \
+             patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ):
+            await dispatch_tick("worker-test-sweep-loud")
+
+        # Anti-vacuity: without this the test would pass against an
+        # implementation that never emits at all and therefore never fails.
+        assert len(spy.captures) == 1, (
+            "the emission was never attempted, so this test proves nothing "
+            "about what happens when it fails."
+        )
+
+        # Keyed on the structured event_type, not on prose: the message wording
+        # is free to change, the routing key is the contract.
+        emit_failures = [
+            r for r in caplog.records
+            if getattr(r, "event_type", None) == "reconcile_sweep_alert_emit_failed"
+        ]
+        assert len(emit_failures) == 1, (
+            "a raising reconcile-sweep Sentry emission produced "
+            f"{len(emit_failures)} log record(s) carrying event_type="
+            "'reconcile_sweep_alert_emit_failed', expected exactly 1. A silent "
+            "`except Exception: pass` here means a broken alert path is "
+            "INVISIBLE: the sweep goes on healing dropped enqueues, SC#1's "
+            "alert never fires, and no log, counter or Sentry event says so -- "
+            "the precise failure mode this phase rejected the pg_net bridge "
+            "for. Keep the swallow; keep it LOUD."
+        )
+        record = emit_failures[0]
+        assert record.levelno >= logging.WARNING, (
+            f"the emit-failure log landed at level {record.levelname}; a broken "
+            "alert path must be at WARNING or above or it will not be routed."
+        )
+        # Triage context: an operator must be able to find the job and the
+        # strategy whose heal went unreported, and see the cause.
+        rendered = record.getMessage()
+        assert "job-sweep-loud" in rendered, (
+            "the emit-failure log does not name the JOB id, so an operator "
+            f"cannot correlate it to anything: {rendered!r}"
+        )
+        assert strategy_id in rendered, (
+            "the emit-failure log does not name the STRATEGY id, so an "
+            f"operator cannot tell WHICH heal went unreported: {rendered!r}"
+        )
+        assert str(boom) in rendered, (
+            "the emit-failure log does not carry the underlying exception, so "
+            f"the failure cannot be triaged: {rendered!r}"
+        )
+        # ...and the job still completed. The log must not have been bought by
+        # letting the exception escape.
+        assert _rpc_names(mock_supabase).count("mark_compute_job_done") == 1, (
+            "the job did not reach its DONE mark — logging the failure must "
+            "not change the swallow's behaviour (T-143-11)."
         )
 
 
