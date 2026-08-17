@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.19
 milestone_name: JOB/RATE — job-lifecycle reliability and the rate limits that hold
-current_phase: 153.7
-current_phase_name: ✅ **COMPLETE 2026-08-14**, branch `feat/phase-153.7-wizform-02-class`
-status: ready_to_plan
-stopped_at: Completed 143-04-PLAN.md — Phase 143 EXECUTION-COMPLETE. Migration APPLIED to TEST (qmnijlgmdhviwzwfyzlc); PROD untouched. ⭐ L-2/T-143-02 RESOLVED BY MEASUREMENT: the 2026-08-17 09:35:00 UTC tick inserted compute_jobs 58728527 through FORCE ROW LEVEL SECURITY. Code review 0 blockers / 3 warnings (all fixed). Verification = human_needed: the 143-04 checkpoint:human-verify is undischarged and SC#1's PROD half needs the merge. JOB-04 deliberately NOT ticked.
-last_updated: "2026-08-16T22:03:53.816Z"
-last_activity: 2026-08-14
-last_activity_desc: Phase 153.7 plan 03 executed — PHASE COMPLETE (ledger 3 → 0 with the 32 total untouched, twin regressions neuter-proven on both key routes, prose re-cuts, two TODOS.md deferrals, WIZFORM-02 ticked)
+current_phase: 144
+current_phase_name: JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence
+status: executing
+stopped_at: Phase 143 SHIPPED AND MERGED (PR #687, squash 26a3105d, 2026-08-17 12:01:14Z). Migration auto-applied to PROD by the Supabase Migrate workflow; cron.job 33 registered at '35 * * * *', deployed body md5 febf9bdd6dfc58aa101ed8c4345e3b29 == TEST == repo (1860 B, 3-way byte match). First PROD tick 12:35:00Z succeeded in 162 ms and healed 0 — expected, since the PROD candidate census is 0; that is a negative control, NOT proof that healing works. Railway SUCCESS on 26a3105d, /health git_sha exact. ⚠️ JOB-04 still NOT ticked: the mechanism is proven on TEST and live on PROD, but PROD has produced no healing evidence because it has nothing to heal. NOW EXECUTING Phase 144 on branch feat/v1.19-phase-144 — Wave 1 (144-01) complete and verified; Wave 2 (144-02) running; Wave 3 (144-03) is BLOCKING and orchestrator-session-only (Supabase MCP is stripped from subagents).
+last_updated: "2026-08-17T13:20:00.000Z"
+last_activity: 2026-08-17
+last_activity_desc: Phase 143 landed and deployed to PROD; Phase 144 planned (3 plans, bound re-derived 500 → 100 at plan-check) and Wave 1 executed — two-arm terminal-UPDATE migration + SAME-COMMIT rewrite of the gate that asserted DELETE, 8 neuters + 16 probes observed RED
 progress:
   total_phases: 21
-  completed_phases: 15
-  total_plans: 95
-  completed_plans: 91
-  percent: 71
+  completed_phases: 16
+  total_plans: 98
+  completed_plans: 96
+  percent: 76
 ---
 
 # Project State — Quantalyze
@@ -126,6 +126,22 @@ same phase-weighted rule (14/17 = 82). ⛔ `state.advance-plan` and `state.updat
 once and **reverted**: they are pointed at Phase 156, and they overwrote the hand-written Migration-B
 warning above with "Phase complete — ready for verification" while setting `completed_phases` 14 → 13.
 That is the failure mode the ⛔ two paragraphs up predicts; it is recorded here rather than repeated.
+
+⚠️ **Re-cut 2026-08-17 (Phase 144 Wave 1), by HAND and on the same rule — stated because the numbers
+moved by more than one phase's own delta.** `completed_phases` 15 → **16** (Phase 143 is done: 4 plans,
+4 SUMMARYs, shipped as PR #687 and merged to `main` at `26a3105d`, migration live on PROD). Its four
+plans were already inside `total_plans: 95` — the baseline's 95−91 = 4 outstanding WERE 143's — so
+`completed_plans` 91 → **95** on 143, then → **96** for 144-01. `total_plans` 95 → **98** (Phase 144
+authors three). `total_phases` stays **21**. `percent` 71 → **76** on the phase-weighted rule
+(16/21 = 76), NOT plan-weighted. `completed_phases` does NOT advance for 144 — it is two plans from done.
+
+⛔ **`state.update-progress` and `state.advance-plan` were NOT run, deliberately.** Both are still
+pointed at Phase 156 and both recalculate from on-disk SUMMARY counts; a repo-wide census reads 257
+PLAN / 258 SUMMARY files against these milestone-scoped 98/96, so either verb would overwrite the
+counters with meaningless repo-wide totals and clobber the hand-written notes above — the exact
+failure recorded in the 2026-08-14 paragraph. Phase 144's Wave-1 executor independently declined to
+touch this file for the same reason (it saw `current_phase: 153.7` next to a Phase-143 `stopped_at`
+and refused to advance a counter against the wrong phase). That refusal was correct.
 
 ⚠️ **Corrected 2026-08-13:** this block read `Phase: 153.6 … EXECUTING, Plan: 1 of 6` until now.
 153.6 shipped on `main` (PR #675, commit 54a0d26d) and the position had not been advanced since.
