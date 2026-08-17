@@ -95,7 +95,7 @@ accident of sequencing.** Nothing here can be delivered by an agent. The milesto
   2. Running the sweep twice in a row produces no duplicate job. ⚠️ MECHANISM CORRECTED 2026-08-16 (Phase 143-02, falsified by an observed neuter): the operative guard is the sweep's `FOR UPDATE SKIP LOCKED` — an INSERT into `compute_jobs` key-share-locks its parent `strategies` row — NOT the partial unique index. Sequential double-execution cannot conflict at all, because tick 1's INSERT removes the strategy from the zero-jobs conjunct. The index only redeems a genuine READ COMMITTED race with `SKIP LOCKED` also removed. Corollary: a gate that runs the body twice in one session CANNOT FAIL and must not be written.
   3. A strategy inside the grace window, or with any existing job row, or with a terminal analytics row, is never touched by the sweep.
 
-**Plans:** 3/4 plans executed
+**Plans:** 4/4 plans executed
 
 Plans:
 **Wave 1**
@@ -109,7 +109,7 @@ Plans:
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 143-04-PLAN.md — [BLOCKING] Apply to TEST via Supabase MCP, sql-tests RED→GREEN, ONE real tick heals a seeded orphan (the FORCE-RLS/L-2 proof), worker SENTRY_DSN verdict, TODOS deferrals, human gate
+- [x] 143-04-PLAN.md — [BLOCKING] Apply to TEST via Supabase MCP, sql-tests RED→GREEN, ONE real tick heals a seeded orphan (the FORCE-RLS/L-2 proof), worker SENTRY_DSN verdict, TODOS deferrals, human gate
 
 **Note**: Constrained by JOB-07 (Phase 142) — sweep runs in pg_cron, never the worker loop. The "what counts as orphaned" design pass is settled in 143-CONTEXT.md + 143-02-PLAN.md's decision map (source-agnostic dailies anchor; ANY-kind/ANY-status job conjunct; terminal-analytics safety conjunct; composites and the wizard first-hop drop excluded as documented non-coverage).
 
