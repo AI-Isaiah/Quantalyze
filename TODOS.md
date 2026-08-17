@@ -2640,3 +2640,13 @@ Both have a SAFE failure direction. Recorded so the trade-off is visible, not so
   `'archived'` appears only in the teaser-anchor seed (`20260515095804:88`); there is no archive
   route and `sanitize_user` preserves status. Harmless and left in place as future-proofing — noted
   so nobody reads the conjunct as evidence that an archive flow exists.
+
+- [ ] **TEST's migration ledger disagrees with the repo filename for this migration** (logged
+  2026-08-17 at land time). Applying via Supabase MCP `apply_migration` stamps `now()`, so TEST
+  recorded `supabase_migrations.schema_migrations.version = 20260817092430`, while the repo file —
+  and therefore PROD, which got it through the normal `Supabase Migrate` workflow — is
+  `20260816140000_reconcile_dropped_enqueue_sweep.sql`. **PROD is correct and unaffected**; this is
+  TEST-only bookkeeping. Consequence: TEST still considers `20260816140000` unapplied, so a future
+  `supabase db push` at TEST would re-run it. That re-run is believed benign (`cron.schedule` is
+  upsert-by-name and the body is unchanged) but has **not** been exercised. Known trap, previously
+  seen as the PR-Y2 rename. Reconcile the TEST ledger row, or leave it and never `db push` TEST.
