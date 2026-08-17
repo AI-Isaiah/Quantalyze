@@ -413,10 +413,25 @@
 --   here to credit for it.
 --
 -- ⭐ THE JOBNAME IS UNCHANGED, ON PURPOSE. retention_compute_jobs_orphaned_running
--- keeps its deployed jobid on both projects, and supabase/tests/
--- test_retention_orphaned_running.sql keeps guarding the same name. Renaming would
--- strand both: the old job would keep running the removal body under its old name
--- while the gate followed the new one.
+-- keeps the SAME NAME, and supabase/tests/test_retention_orphaned_running.sql keeps
+-- guarding that name. Renaming would strand both: the old job would keep running the
+-- removal body under its old name while the gate followed the new one.
+--
+-- ⚠️ CORRECTED 2026-08-17 BY MEASUREMENT (this comment previously claimed the job
+-- "keeps its deployed jobid on both projects" — that is FALSE and is recorded rather
+-- than quietly deleted). `cron.unschedule` + `cron.schedule` DROPS the old row and
+-- INSERTS a new one, so pg_cron assigns a FRESH jobid. Observed on TEST at apply
+-- time: jobid 11 -> 19. PROD will likewise move off its current jobid 29 when this
+-- merges.
+--
+-- Two things follow, and neither breaks anything:
+--   1. The **jobname is the stable identifier**, not the jobid. That is exactly why
+--      the SQL gate anchors on jobname and never on a numeric id — verified: there
+--      is no `jobid` reference anywhere in test_retention_orphaned_running.sql.
+--   2. Any prose elsewhere calling this "jobid 11" is now stale for TEST and was
+--      NEVER true of PROD (which has always been jobid 29). ROADMAP.md and
+--      REQUIREMENTS.md carry that phrasing under JOB-08; it is descriptive there,
+--      not load-bearing, and is corrected in the same commit as this note.
 --
 -- Convention deviation (pre-documented so review does not re-litigate)
 -- -------------------------------------------------------------------
@@ -550,9 +565,12 @@ BEGIN
   END IF;
 
   -- Idempotent unschedule-then-schedule against the EXISTING jobname (see the
-  -- header: keeping the name is what keeps the deployed jobid and the shipped SQL
-  -- gate continuous). cron.schedule upserts by name, so the unschedule is
-  -- belt-and-braces; STEP 2 asserts exactly one row survives.
+  -- header: keeping the NAME is what keeps the shipped SQL gate continuous).
+  -- ⚠️ It does NOT keep the jobid — measured 2026-08-17, TEST went 11 -> 19 across
+  -- this apply, because unschedule DROPs the row and schedule INSERTs a new one.
+  -- Nothing depends on the id: the gate anchors on jobname.
+  -- cron.schedule upserts by name, so the unschedule is belt-and-braces;
+  -- STEP 2 asserts exactly one row survives.
   IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'retention_compute_jobs_orphaned_running') THEN
     PERFORM cron.unschedule('retention_compute_jobs_orphaned_running');
   END IF;
