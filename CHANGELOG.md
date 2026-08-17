@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.63.0.0] - 2026-08-17
+### feat: v1.19 JOB-04 — a dropped compute-job enqueue is detected by absence and healed
+
+A CSV strategy could be left with persisted daily-returns rows, **zero** `compute_jobs` rows and
+**no** `strategy_analytics` row — forever. `csv-finalize` commits the strategy and its dailies
+synchronously, then schedules the analytics enqueue via `after()`. If the serverless instance is
+torn down before that callback runs, the enqueue never happens, and the condition is
+*architecturally invisible from inside the route*: every guard — the enqueue-error branch, its
+Sentry capture, the failed-analytics placeholder — lives lexically inside the closure that never
+ran. No in-request guard can observe its own non-execution.
+
+**What ships**
+
+- `reconcile_dropped_enqueue_sweep`, an hourly pg_cron sweep (`35 * * * *`) that finds these
+  strategies **by absence** and re-enqueues `compute_analytics_from_csv`, bounded to 25 per tick.
+- A worker-side Sentry alert, fired once per heal when the job is claimed.
+- Three CI gates (SQL, migration-content, cross-language marker contract).
+
+**Safety, stated plainly.** `retention_compute_jobs_done` deletes `done` rows at 30 days, so every
+healthy 31-day-old strategy matches "dailies present + zero job rows". The terminal-`strategy_analytics`
+conjunct is the *only* thing keeping this sweep off the entire historical corpus — measured, not
+argued: on PROD 4 of 4 candidates are excluded by that conjunct alone. Composites are excluded
+because enqueuing the CSV kind on one would overwrite a correct headline with the single-key math
+its own handler abandoned.
+
+**Verified on TEST by a live tick**, not by inference: the 2026-08-17 09:35 UTC tick inserted a
+`compute_jobs` row through `FORCE ROW LEVEL SECURITY` — the one property no CI gate can establish,
+since the SQL gate connects as the psql user and never as the cron role.
+
+**Four claims this work falsified and corrected rather than carried:** SC#2's idempotency does not
+ride the partial unique index (it is the zero-jobs conjunct); `cron.job_run_details.return_message`
+carries the command tag, not the `RAISE NOTICE`; the worker is merged into the Sentry-initialized
+FastAPI process rather than being a separate DSN-less service; and `csv_daily_returns.created_at`
+*is* re-stamped by the derive paths (direction is safe, the rationale was not).
+
+The first PROD tick will enqueue **zero** jobs — the safe outcome, and no positive evidence.
+
 ## [0.62.0.1] - 2026-08-14
 ### chore: v1.17 closed — scope amended, not overclaimed
 

@@ -43,6 +43,7 @@ accident of sequencing.** Nothing here can be delivered by an agent. The milesto
    `sync_status='complete'` with `last_sync_at` 04:01–04:07 UTC — those are the last *successful*
    syncs, taken **before** the change.
    ⛔ **When these flip to `error`, that is EXPECTED. Do not investigate it as a code defect.**
+
 2. ⛔ **The founder physically at the MT5 terminal, on a TRADING day**, with the live funded
    account's read-only investor password. A demo account, the v1.15 soak account, or a weekend run
    does not satisfy it.
@@ -51,6 +52,7 @@ accident of sequencing.** Nothing here can be delivered by an agent. The milesto
 
 - Parity tolerance **1%, INCLUDING open P&L** (founder call 2026-08-14). Adjustable later; keep it
   a named test constant, never a hardcoded literal.
+
 - ⭐ **The measurement window MUST end before the day of the run.** `broker_dailies` anchors to
   today — initial capital is derived as `current_equity − total_pnl` — so reconstruction error
   accrues *backward into the past*. Comparing today's equity is therefore near-tautological, and a
@@ -59,6 +61,102 @@ accident of sequencing.** Nothing here can be delivered by an agent. The milesto
 **Requirements:** MT5-06, MT5-07, MT5-08, MT5-09, MT5-10, MT5-15, MT5-GOAL-01 (umbrella acceptance)
 
 ⛔ **Do not advertise MT5 until Phase 155 passes.** Carried verbatim from v1.17.
+
+---
+
+## Current Milestone: v1.19 JOB/RATE — job-lifecycle reliability and the rate limits that hold (Phases 143–146)
+
+**Goal:** A compute job that is dropped, orphaned, or half-written is DETECTED and terminates visibly — and every authed route that reaches the Python service carries the right limit, enforced by something a new route cannot silently bypass.
+
+⭐ **Created 2026-08-14 by carrying Phases 143–146 out of v1.16, which closed scoped-down at 15 phases.** The phase NUMBERS are unchanged on purpose: `REQUIREMENTS.md` and `TODOS.md` cite them by number in dozens of places, and renumbering would break every one of those references to buy nothing.
+
+⭐ **Why this is a milestone and not a v1.16 resumption:** GSD models ONE current milestone and v1.18 already held that slot while being entirely founder-gated. Working four phases under a header that says PARKED is the ledger-vs-reality drift that produced four blockers in the v1.17 audit. This milestone is also the one that is fully **agent-deliverable** — v1.18 cannot move without the founder at an MT5 terminal.
+
+**Requirements:** JOB-04, JOB-05, JOB-06, JOB-08, RATE-01, RATE-02, RATE-03, RATE-04, RATE-05 (9 total)
+
+⛔ **EXECUTION ORDER IS 143 → 144 → 145 → 146 AND IT IS A DECLARED DEPENDENCY CHAIN, not a preference.** 143 depends on Phase 142 (complete); 144 on 143; 145 on 144. 146 depends on nothing upstream but is sequenced LAST *because its deliverable is a fresh grep* — run earlier it audits a codebase about to change and reads as coverage it does not have. ⚠️ A risk-first reordering (145/146 first, 144 last) was proposed on 2026-08-14 and rejected for inverting 145's dependency.
+
+⚠️ **143 and 144 carry pg_cron MIGRATIONS. Merging `supabase/migrations/**` to `main` AUTO-APPLIES to PROD.** Founder call 2026-08-14: land them unattended. ⛔ **144 is the dangerous one and it runs SECOND, so it gets no long PROD soak** — the sequencing mitigation does not exist here. Its safety comes from the change itself: assert the migration writes a terminal `failed` state and issues NO `DELETE`, prove it on TEST, verify on PROD before 145 begins. A reaper that deletes rows it should have reset is **not revertible**.
+
+⭐ **Two phases are MEASURE-FIRST by design and must not be shortcut:** 144 SC4 requires a committed PROD measurement of the stale-`pending` population BEFORE any sweep is scoped ("zero on prod" is a valid, budget-saving outcome), and 145 SC1 requires a committed reproduction attempt of the 42501 claim BEFORE a fix is scoped ("could not reproduce" likewise).
+
+**Plans**: TBD — none of these four has ever been planned; no phase directory exists for any of them.
+
+---
+
+### Phase 143: JOB — Dropped-enqueue reconciliation sweep
+
+**Goal**: "`after()` never ran at all" enqueue drops — architecturally invisible from inside the route handler — are detected by absence and healed
+**Depends on**: Phase 142 (same three-table triangle; scheduled as one non-racing mechanism)
+**Requirements**: JOB-04
+**Success Criteria** (what must be TRUE):
+
+  1. A strategy with persisted daily-returns data but NO `compute_jobs` row of ANY status and no terminal `strategy_analytics` row, past a grace window, is re-enqueued by a pg_cron sweep and a Sentry alert fires — the hole the in-closure `writeFailedStrategyAnalyticsPlaceholder` guard structurally cannot catch.
+  2. Running the sweep twice in a row produces no duplicate job. ⚠️ MECHANISM CORRECTED 2026-08-16 (Phase 143-02, falsified by an observed neuter): the operative guard is the sweep's `FOR UPDATE SKIP LOCKED` — an INSERT into `compute_jobs` key-share-locks its parent `strategies` row — NOT the partial unique index. Sequential double-execution cannot conflict at all, because tick 1's INSERT removes the strategy from the zero-jobs conjunct. The index only redeems a genuine READ COMMITTED race with `SKIP LOCKED` also removed. Corollary: a gate that runs the body twice in one session CANNOT FAIL and must not be written.
+  3. A strategy inside the grace window, or with any existing job row, or with a terminal analytics row, is never touched by the sweep.
+
+**Plans:** 4/4 plans executed
+
+Plans:
+**Wave 1**
+
+- [x] 143-01-PLAN.md — Worker alert path: init_sentry() into main_worker.main() + reconcile-sweep marker capture on claim (the D-11 correction; RED-first pytests)
+- [x] 143-02-PLAN.md — Census (TEST+PROD, STOP rules) + the sweep migration (inline pg_cron body, MATERIALIZED LIMIT 25, hourly at :35, composite-excluded) + throwaway-Postgres end-to-end tracer proof
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [x] 143-03-PLAN.md — CI gates: SQL gate Parts 1-4 (deployed-body oracle), TS migration-content gate, pytest cross-language marker contract; nine observed neuter REDs
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [x] 143-04-PLAN.md — [BLOCKING] Apply to TEST via Supabase MCP, sql-tests RED→GREEN, ONE real tick heals a seeded orphan (the FORCE-RLS/L-2 proof), worker SENTRY_DSN verdict, TODOS deferrals, human gate
+
+**Note**: Constrained by JOB-07 (Phase 142) — sweep runs in pg_cron, never the worker loop. The "what counts as orphaned" design pass is settled in 143-CONTEXT.md + 143-02-PLAN.md's decision map (source-agnostic dailies anchor; ANY-kind/ANY-status job conjunct; terminal-analytics safety conjunct; composites and the wizard first-hop drop excluded as documented non-coverage).
+
+### Phase 144: JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence
+
+**Goal**: An orphaned `running` compute job terminates VISIBLY — pollers break out, the audit trail survives — resolving the founder's open WR-02 DELETE-vs-reset call
+**Depends on**: Phase 143 (JOB sequence; independent mechanism on `compute_jobs`)
+**Requirements**: JOB-05, JOB-08
+**Success Criteria** (what must be TRUE):
+
+  1. An orphaned `running` `compute_jobs` row (past the UNCHANGED 4h `claimed_at` threshold) transitions to a terminal `failed` status instead of being DELETEd — so a wizard poller sees a real outcome and the row survives for audit until the existing 30/90-day retention crons delete it.
+  2. Detection latency drops from ~24h to the tightened cadence (e.g. hourly) while a legitimate batch-tail job under 4h is never touched — the threshold, not the frequency, is what protects live jobs (the WORKER-04 2h→4h lesson).
+  3. The change ships as a NEW migration layered on `20260720120000` (the shipped migration is never edited), reconciling the TEST-DELETE / PROD-reset split into ONE behavior.
+  4. A committed measurement of the stale-`pending` `compute_jobs` population **on PROD** exists BEFORE any stale-`pending` sweep is scoped, and the gap is closed EITHER by adding `pending` as a fourth swept status (using SC 1's terminal-UPDATE pattern, never `DELETE`) OR by an explicit WON'T-FIX carrying that measurement — "zero on prod" is a valid, budget-saving outcome. The retention family covers `done` (jobid 4), `failed_*` (jobid 8) and orphaned `running` (jobid 11); stale `pending` is the one status an undrained enqueue cron produces and the only one nothing sweeps.
+
+**Plans**: TBD
+**Note**: The "fence flake also clears" claim is observation-only, NOT an acceptance criterion (research correction #4). Constrained by JOB-07 (pg_cron only).
+**Note (SC 4 / JOB-08, added 2026-08-03)**: routed here from `TODOS.md` § CI / test-infra ratchet — same table, same cron family this phase already edits, and SC 3's TEST-vs-PROD split is the same gap. Full evidence and the two ⛔ traps (never `DELETE` pending; never `cron.unschedule(9)`) are in `REQUIREMENTS.md` § JOB-08. ⚠️ The gap is CERTAIN on the TEST project and UNMEASURED on prod — that asymmetry is why SC 4 is measure-first rather than build-first.
+
+### Phase 145: JOB — csv-finalize atomicity (reproduce-first)
+
+**Goal**: A mid-request csv-finalize failure leaves no orphan strategy row — and no budget is spent re-fixing the likely-stale 42501 bug
+**Depends on**: Phase 144 (JOB sequence; order-independent within JOB — last because its scope needs the reproduction result first)
+**Requirements**: JOB-06
+**Success Criteria** (what must be TRUE):
+
+  1. A documented reproduction attempt of the 42501 / `PROCESS_KEY_UNIFIED_BACKBONE` claim against current `main` exists (committed pass/fail) BEFORE any fix is scoped — "could not reproduce" is a valid, budget-saving outcome.
+  2. A fault injected between `finalize_csv_strategy`, `persist_csv_daily_returns`, and the `after()` enqueue leaves no orphan strategy row — either the steps share one SECURITY DEFINER transaction, or explicit compensating cleanup runs + Sentry alerts (the choice recorded per the reproduction outcome and the CONTRIB-02 `p_terminal_status` owner-only variant's survival).
+  3. Happy-path csv-finalize behavior is unchanged — including the CONTRIB-02 owner-only private-finalize path if the RPCs are folded.
+
+**Plans**: TBD
+**Note**: Constrained by JOB-07 (any cleanup mechanism stays off the worker loop).
+
+### Phase 146: RATE — Audit + close the two verified gaps
+
+**Goal**: Every authed route hitting the Python service has the RIGHT rate limit — and a newly-added route can't silently ship with none
+**Depends on**: Nothing upstream (mechanical; sequenced last so its gap list comes from a fresh grep)
+**Requirements**: RATE-01, RATE-02, RATE-03, RATE-04, RATE-05
+**Success Criteria** (what must be TRUE):
+
+  1. A committed kickoff re-grep artifact lists every `src/app/api` route calling either seam client × its `checkLimit` status — the authoritative gap list, replacing the stale `TODOS.md` route list (which named seven routes that were already limited).
+  2. Burst requests to `admin/match/eval` beyond a per-`user.id` limit sized to real eval-tooling cadence receive `429` + `Retry-After`.
+  3. Requests hitting Railway's `routers/match.py` (`/recompute`, `/eval`) directly — bypassing Vercel with a leaked `X-Service-Key` — are rejected `429` by server-side slowapi limits mirroring `portfolio.py`'s pattern (defense-in-depth).
+  4. A committed audit of the seven existing limiter VALUES against real Python-side cost exists, with adjustments applied where a value was wrong — the substantive remaining RATE question.
+  5. A `withRateLimit(handler, limiter)` HOF exists and composes alongside `withAuth`/`withRole`, wired on the routes this phase touches — so the no-CI-gate hand-wiring weakness has a structural successor.
+
+**Plans**: TBD
 
 ---
 
@@ -308,6 +406,7 @@ Plans:
 **Plans**: 7 plans
 
 Plans:
+
 - [x] 151-01-PLAN.md — Extract MT5 terminal-concurrency machinery into services/mt5_concurrency.py (leaf; the ONE lock registry)
 - [x] 151-02-PLAN.md — Split the book gate SSR-side: deriveStrategyLinkedKeyIds + 3 additive payload fields on both branches
 - [x] 151-03-PLAN.md — Non-ccxt venue dispatch + MT5 account-equity branch (kill switch, shared lock, honest skips, transient human copy)
@@ -338,6 +437,7 @@ Plans:
 **Plans**: 6 plans in 4 waves (planned 2026-08-07)
 
 Plans:
+
 - [x] 152-01-PLAN.md — Browse-route wire: isOwn on every row + own-only created_at/status through a two-arm H-0300 fence
 - [x] 152-02-PLAN.md — Draft-schema wire: isOwn on the NESTED addedStrategySchema, populated-fixture strip guard
 - [x] 152-03-PLAN.md — SCEN-04: header label li (WEIGHT USD MODE LEV NOTIONAL) + cause-accurate honest notional
@@ -383,6 +483,7 @@ Plans:
 **Plans**: 6 plans in 5 waves
 
 Plans:
+
 - [x] 153.1-01-PLAN.md — Wave-0 scanner + A-25 gates: hardened `deriveRoster`, per-route status predicate, interpolation-safe error body, four SELF-TESTs, derived A-25 assertion (all green at HEAD)
 - [x] 153.1-02-PLAN.md — `VENUE_CAPABILITIES` + the three predicates (fail-toward-probing on null) + `MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS`, pinned
 - [x] 153.1-03-PLAN.md — WIZFORM-03 class filter: `FixRequirement` + `fixRequires` + ONE filter in `formatKeyError`; the three venue bullets and the surface bullet tagged; three whole-table sweeps
@@ -408,11 +509,13 @@ Plans:
 **Plans**: 5 plans in 4 waves. Wave 1 runs 153.2-01 and 153.2-03 in parallel (disjoint files); waves 2-4 are forced sequential because four plans contend on `MetadataStep.tsx`. **MT5-14 + WIZFORM-04 are ONE plan (153.2-04)** per D-14, with the chip-set widening and the pin re-cut in the SAME task.
 
 Plans:
+
 - [x] 153.2-01-PLAN.md — ⛔ FLAG-3 as ONE indivisible task: the description client mirror reads `MIN_DESCRIPTION_CHARS`, becomes the `handleSubmit` predicate, the `:491` `disabled` and both stale comments go, the `:334` focus ring is upgraded — then the hint / `.title` / live-clear message states (D-11, D-13, D-23)
 - [x] 153.2-02-PLAN.md — the rest of the form: category / AUM / capacity refuse through `Field` with aria-derived borders (AUM+capacity import the SERVER's own `isValidDollar`), and submit-with-errors opens the collapsed `<details>` before focusing the first invalid control, with a visible summary line `LiveRegion` re-states (D-11, D-13)
 - [x] 153.2-03-PLAN.md — D-12: `AllocateDialog`'s money field converts from the JS ternary to `aria-[invalid=true]:border-negative` and clears live; the two rows that can tell the mechanisms apart (D-12, D-13)
 - [x] 153.2-04-PLAN.md — ⛔ MT5-14 + WIZFORM-04 in ONE ship: `WIZARD_EXCHANGE_CODES`/`WIZARD_EXCHANGES` (Option B) with the `closed-sets.mt5-flag` pin re-cut + POSITIVE assertion in the SAME task; the pinned-`<span>` detected-venue chip, its mono provenance eyebrow and a payload that cannot omit the venue; `venueSupportsScopeProbe` gating BOTH probe call sites (fail-toward-probing on `null`) and the catch-all split so a parse miss and a missing internal token stop reading as network blips (D-06, D-07, D-14a+b, D-15, D-16, D-20, D-22)
 - [x] 153.2-05-PLAN.md — a field-level server rejection routes back to the field: `FIELD_BY_CODE` + a totality assertion with a vacuity floor in `SubmitStep`, the handoff through `WizardClient`, and `MetadataStep` revealing + focusing the named field with its values intact (D-13, D-17 boundary)
+
 **UI hint**: yes
 
 - ⛔ **FLAG-3 is ONE indivisible task.** Deleting `MetadataStep.tsx:491`'s `disabled` without widening the `.trim()`-only `handleSubmit` guard at `:222-233` lets a 2-character description POST — re-shipping the very defect this phase deletes.
@@ -434,11 +537,13 @@ Plans:
 **Plans**: 6 plans in 6 waves (strictly sequential — every plan contends on `mt5_client.py` and/or `routers/exchange.py`). Wave 6 = **D-35**, the `shutdown()` class closure, added after gating: an `ast` scan measured **three** `Mt5Client.close()` callers (`routers/exchange.py`, `services/exchange.py`'s `aclose_exchange` mt5 arm, and `services/ingestion/mt5.py`'s validate `finally`) reaching exactly **two** `shutdown()` sites (`mt5_client.py:384` `close`, `:436` `restart`). Fixed at the **sink** — the teardown leaves `close()` entirely — so all three callers are fixed with zero call-site edits.
 
 Plans:
+
 - [x] 153.3-01-PLAN.md — 🔒 D-31: `terminal_info()` guard; tri-state `classify_trade_capability`; both call sites refuse what they cannot classify (SECURITY, sequenced FIRST so it is not blocked behind the refactors)
 - [x] 153.3-02-PLAN.md — D-24/D-25: bind `initialize()`'s missing `timeout=`; extend the ordering guard to EVERY timeout-carrying call with a source-derived completeness floor; per-instance chain (`MT5_REQUEST_TIMEOUT_S` byte-unchanged)
 - [x] 153.3-03-PLAN.md — D-02/D-03/D-30: ONE end-to-end deadline replacing three 35 s stages; `Mt5Client.release()` takes `shutdown()` off the request path; the `finally` survives the deadline and stays outside it (Pitfall 6)
 - [x] 153.3-04-PLAN.md — D-29: the validate path takes the terminal lease it is the one caller to skip, with a bounded acquisition wait distinct from the operation timeout (batch keeps queueing patiently; NO account cap)
 - [x] 153.3-05-PLAN.md — D-32/D-27/D-33: `stage` + `duration_ms` on every MT5 call and on the lease wait; runbook single-replica invariant, terminal trade-permission step, provisional-budget note
+
 **UI hint**: no
 
 - 🔒 **D-31 is a SECURITY fix, not a refactor.** `is_trade_capable` infers investor mode from two signals that are BOTH false for a MASTER account under the terminal's default-ON "Disable automatic trading through the external Python API". `terminal_info()` is called nowhere and does not exist on `Mt5Client` — it must be ADDED. Fail **CLOSED**: refuse what we cannot classify.
@@ -455,6 +560,7 @@ Plans:
 **Plans**: 5 plans in 3 waves
 
 Plans:
+
 - [x] 153.4-01-PLAN.md — the `validate-key-serialized` 120 000 ms row + `BREAKER_LOCK_TOMBSTONE_S` 60→90 in ONE commit, plus every pin site in `seam-constants.pin.test.ts` and the retry registry (wave 1)
 - [x] 153.4-02-PLAN.md — `budgetKeyFor(exchange)` selecting by the `serialized` capability, the three validate routes re-branched, and `seam-budgets.invariant.test.ts` re-derived (wave 2)
 - [x] 153.4-03-PLAN.md — the client-safe budget module + its equality pin, and `ValidateWaitCard` with the budget-fraction escalation ladder (wave 2)
@@ -477,6 +583,7 @@ Plans:
 **UI hint**: no
 
 Plans:
+
 - [x] 153.5-01-PLAN.md — epoch registry + Mt5SessionAbandoned + occupancy ContextVar + 6-method fence + lease bump + shared test reset (wave 1)
 - [x] 153.5-02-PLAN.md — restart's TWO checks w/ three-invariant fenced cleanup + __init__ construction fence (#5, #6) + rationale re-cuts (wave 2)
 - [x] 153.5-03-PLAN.md — ONE release point: convert the 3 raw-lock worker acquisitions to mt5_terminal_lease; re-point neuter patches; ast class pin (wave 2, parallel with 02)
@@ -521,6 +628,7 @@ held). Line hints are `as of 2026-08-11` only: **if a hint disagrees with its sy
 | A3 | `ingestion/mt5.py` (D-31 arm) | raises a bare `RuntimeError` documented PERMANENT, which escapes `Mt5Adapter.validate` into `job_worker.classify_exception`'s `("unknown", str(exc))` fall-through — **so the worker RETRIES a fault that can never clear**, re-running the whole serialized probe against the ONE shared terminal each time, queueing ahead of every other user's validate, and finally showing the user raw internal copy naming investor/master passwords. |
 
 **B — Absorption: broad `except` re-swallowing the fence (2 findings + 1 telemetry split).** D-42 made absorption structurally impossible *for the classify arms*; pre-existing catch-alls upstream reintroduced it.
+
 - B1 `routers/exchange.py` › `_read_terminal`'s `except Exception` swallows `Mt5SessionAbandoned` → an operator triaging in Railway reads a gateway materialization fault **that never happened**, and the probe continues on a "terminal unreadable" premise that is false.
 - B2 `routers/exchange.py` connect stage: the construction fence's `Mt5SessionAbandoned("connect")` is caught by the broad `except Exception as connect_err` before the dedicated D-40 arm, returning a **503 that counts toward the mt5-gateway breaker** — our own abandoned thread driving the breaker toward opening against a healthy gateway.
 - B3 `mt5_client.py` › `restart()` check 2 raises from INSIDE `_timed`, which emits an `mt5.stage restart ok=False` event for a restart that was deliberately REFUSED. (Wording corrected per 153.6 D-16: the reconnect round-trip DID happen by the time check 2 fires, so `duration_ms` is real elapsed time — the defect is that a refusal enters the D-32 recovery-latency population Phase 155 reads, under a stage name real round-trips also use; that pollution is the exact thing check 1 was deliberately placed outside `_timed` to avoid, 153.5 RESEARCH §Q-4.) The two checks disagree about the telemetry contract.
@@ -535,18 +643,19 @@ held). Line hints are `as of 2026-08-11` only: **if a hint disagrees with its sy
 **E — Retry affordance (1 finding).** A probe parse miss was moved off `KEY_NETWORK_TIMEOUT` onto `KEY_SCOPE_CHECK_UNAVAILABLE`, removing the Retry control for a condition that is **not** always permanent — a 2xx body the schema cannot read is also what a rolling analytics deploy produces. Belongs here rather than in an ad-hoc fix because touching a wizard error code ripples into 153.1's pinned code tables (`EXPECTED_TABLE_SIZE` and friends), which must be **re-cut, never deleted**.
 
 📌 **Explicitly OUT of this phase:**
+
 - **MT5 as a composite member** — the 153.4 CR-03 fix made an MT5 composite panel reachable for the first time, and `run_stitch_composite_job` has no `mt5` arm, so it `_stamp_failed`s the whole job as permanent (`venue 'mt5' is not a supported exchange`). That is a **product decision** (teach the stitch worker MT5, or block MT5 in the composite wizard), not a bug fix. Natural neighbour: Phase 155.
 - **The epoch never re-binds** (`mt5_client.py` `_assert_live` binds on first touch only), so one `Mt5Client` is usable under exactly one lease for its life. No production path does this today — all five lease blocks were ast-verified — and Phase 153.5 already pinned the constraint with a named future fix (rebind on lease entry). Latent, documented, not scheduled.
 - Two trivial findings (compare-route skeleton padding + its blind test oracle; the `as unknown as` composite-embed cast in `finalize-wizard`) were fixed unplanned in the same session.
 
 Plans:
+
 - [x] 153.6-01-PLAN.md — Cluster A + B1: extract `services/mt5_probe.py`, rewire both paths, A3 permanent classification (wave 1)
 - [x] 153.6-02-PLAN.md — Cluster C: failing-column deadline on BOTH arms + the state-quantified economic oracle (wave 1)
 - [x] 153.6-03-PLAN.md — Cluster D (DB): `attested_venue` migration, INVOKER trigger, count-pinned backfill, RPC re-bases, SQL round-trip test (wave 1)
 - [x] 153.6-04-PLAN.md — Cluster D (route): the probe gate reads the attestation, never `exchange`; class sweeps re-pointed (wave 1)
 - [x] 153.6-05-PLAN.md — Cluster B remainder (B2 connect-stage arm, B3 `_timed` suppression) + the ast parity roster (wave 2)
 - [x] 153.6-06-PLAN.md — Cluster E: `KEY_SCOPE_CHECK_UNREADABLE` recoverable code + pin re-cuts 74→75, 32 UNMOVED (wave 2)
-
 
 ### Phase 153.7: WIZFORM-02-CLASS — every code that can reach a user is covered (INSERTED)
 
@@ -572,12 +681,12 @@ Plans:
 📌 **On completion, Phase 153's parent checkbox may finally tick** — it is unticked today because the span did not meet its own goal, not because a child is outstanding.
 
 **Plans**:
+
 - [x] 153.7-01-PLAN.md — Mechanism: parameterised root + call-shape matcher (AST cross-checked) + pin re-cuts + reach/both-shapes assertions + tmpdir falsifier — ENDS RED BY DESIGN naming the 20 undisposed codes (wave 1) — ✅ 2026-08-14, `153.7-01-SUMMARY.md`. Population 17 → **37**; the file ends with **exactly one** failing test naming exactly the 20 predicted codes, and the AST cross-check earned its keep by catching a real matcher bug (a `class` definition head read as a call). ⛔ **Do NOT "fix" the red** — greening it is Plan 02's whole job.
 - [x] 153.7-02-PLAN.md — The 20 dispositions: 8 verdict rows (replay-tested through classifyKeyValidationError) + 12 individually-measured WITHOUT_VERDICT rows — greens 01's red (wave 2) — ✅ 2026-08-14, `153.7-02-SUMMARY.md`. ⭐ **01's designed red is GREEN**: the disposition assertion passes over all 37 codes, and the 8×UNKNOWN/500 replay red was recorded first. One member MINTED (`SEAM_INTERNAL_FAULT`, `EXPECTED_TABLE_SIZE` 76 → 77 in lockstep) because `SEAM_MISCONFIGURED`'s "we stopped before sending the request" is measurably FALSE at `INTERNAL`'s emitter and at one of `MT5_GATEWAY_UNCONFIGURED`'s four. Neuter-proof (FL-1) performed and recorded: deleting the `MT5_GATEWAY_UNREACHABLE` row reds BOTH the disposition assertion and its replay test, by name.
 - [x] 153.7-03-PLAN.md — Three coded finalize rejections (ledger 3→0, sites 29→32, total pinned 32) + twin regression on BOTH key routes + prose re-cuts + TODOS.md deferral (wave 3) — ✅ 2026-08-14, `153.7-03-SUMMARY.md`. ⭐ **The ledger is EMPTY and its assertion has collapsed into "every rejection carries a code"** — the constant is KEPT, because at 0 it states the property outright. `EXPECTED_FINALIZE_REJECTION_SITES` was **never edited** and the derived count agreed at every run: 32 − 32 = 0. Three copy members, one per ARM rather than per subject, because each may claim a different amount about server state — `DRAFT_LOOKUP_FAILED` (a SELECT that errored, so "nothing was changed" is observable; the token is REUSED from `keys/sync`, not a synonym), `DRAFT_FINALIZE_FAILED` (the generic tail also catches a transport failure that can lose the answer to a write that landed, so it may NOT say nothing was saved), `SEAM_RESPONSE_UNREADABLE` (upstream answered 2xx — the submission was accepted and only the result is unreadable, so it may claim NEITHER outcome, and it is non-recoverable because a retry there is unpredictable rather than futile). `EXPECTED_TABLE_SIZE` 77 → 80 in lockstep; 3 roster rows. **Twin regressions on BOTH key routes, neuter-proven**: deleting the shared `MT5_GATEWAY_UNREACHABLE` verdict row reds both (503 → 500) plus the classifier replay naming UNKNOWN — zero production route edits. A second falsifier: neutering ONE finalize arm reds three independent oracles while the 32 total holds. Prose re-cuts landed (REGISTRY ×2, the `resilient-fetch` census — where `_validate_mt5_key` was a WRONG symbol that still exists, and the completeness pin was under-counted 13 → **15**, both arrivals inert 500s — and the alias docblock whose "correctly answers UNKNOWN" premise 02 deleted). **TWO** TODOS.md deferrals recorded separately.
 
 ✅ **PHASE COMPLETE — WIZFORM-02 TICKED.** All four `missing` items from `153-VERIFICATION.md` are closed across the three plans, and the sweep is driven from EMITTING SITES (falsified three ways). ⚠️ The honesty check that could have stopped the tick was run: `keys/[id]/permissions` **is** reachable from a wizard surface (`SyncPreviewStep` → `KeyPermissionBadge`), but that component never builds a `wizardErrors` envelope — it renders the route's own `{ code, error }` as text — so no `UNKNOWN` card is rendered there. Its defect is a remedy sentence, recorded in TODOS.md as its own item. 📌 **Phase 153's parent checkbox may now tick.**
-
 
 ### Phase 154: WIZCONT/STALE — Wizard continuity, no stale screens
 
@@ -593,6 +702,7 @@ Plans:
 **Plans**: 8 plans in 3 waves
 
 Plans:
+
 - [x] 154-01-PLAN.md — STALE-01 investigation gate: Q1/Q2 PROD discriminator + T1/T2/T3 RED (wave 1)
 - [x] 154-02-PLAN.md — WIZCONT-01 plumbing: single-sourced draft query + wizard-draft route + REQUIREMENTS correction (wave 1)
 - [x] 154-03-PLAN.md — WIZCONT-02 DB: venue_account_id column, partial UNIQUE, scrub trigger, RPC re-base, TEST apply (wave 1)
@@ -601,6 +711,7 @@ Plans:
 - [x] 154-06-PLAN.md — WIZCONT-02 app: one-fence-two-keys, 23505 discrimination (TWIN-8), dedup notice (wave 2)
 - [x] 154-07-PLAN.md — STALE-01 supplier arm (CONTINGENT on 154-01 verdict): Python/SQL root-cause fix or recorded NO-OP (wave 2)
 - [x] 154-08-PLAN.md — STALE-01 honest screens: un-gated backstop, R2-5 twin, amber state, ledger closure (wave 3)
+
 **UI hint**: yes
 
 ### Phase 155: MT5-VERIFY — The numbers are true, live on a trading day
@@ -652,15 +763,18 @@ them stop resting on an assumption
      and fails loud otherwise, so the `HAS_SEED_ENV` skip predicate was false and the test really
      executed). What no test can cover: the founder is the only person who witnessed the original
      restart, so only they can say it is gone.
+
   2. **The amber `wizard-sync-recomputing` block is seen on screen.** Heading *"Recomputing this
      strategy's analytics"*; no red envelope, no metric numbers; contrast and spacing per
      `154-UI-SPEC.md`. No browser pass has ever been run on this block.
+
   3. **The four copy members Phase 153.7 minted are seen rendering in a real wizard** —
      `SEAM_INTERNAL_FAULT`, `DRAFT_LOOKUP_FAILED`, `DRAFT_FINALIZE_FAILED`,
      `SEAM_RESPONSE_UNREADABLE`. ⭐ `SEAM_INTERNAL_FAULT` must render with **NO Retry control** —
      that single check doubles as the regression catch for the classifier→roster hop
      (`W-153.7-1`), where a missing roster member leaves the whole suite green while the wizard
      offers a Retry against a permanent fault.
+
   4. **`MT5_SPIKE_INVESTOR_PASSWORD` is rotated.** It sits in plaintext in Railway env and was
      printed to a session scrollback. Founder-only: they hold the credential.
 
@@ -694,6 +808,7 @@ single-migration orderings produce a total connect-a-key outage window, so Migra
 after PR A's route is verified live on PROD). ⛔ **SC1 does not close until PR B.**
 
 Plans:
+
 - [x] 156-01-PLAN.md — Wave 0: measure A1/A2/A3/A4 against TEST (does a service-key client really reach `auth.role() = 'service_role'` with `auth.uid()` NULL?) — the whole privilege design rests on two facts RESEARCH could not settle
 - [x] 156-02-PLAN.md — [PR A] Re-cut both route test files to the post-156 contract and observe them RED (admin-client receiver, `p_user_id === user.id`, 503 `SEAM_MISCONFIGURED`) — incl. the composite twin's missing admin mock
 - [x] 156-03-PLAN.md — [PR A] Migration A: transitional two-arm role gate (branched, never unioned) + `GRANT EXECUTE … TO service_role` on both RPCs; applied to TEST, PR-Y2 renamed, snapshots regenerated
@@ -718,7 +833,6 @@ Plans:
 ⚠️ **The related class: assertions that pass for the WRONG reason.** Migration A shipped a canary that passed on precisely the stale re-base it existed to catch; `test_wizard_composite_fence.sql` Parts 3b/3c would have passed VACUOUSLY after Migration B (catching the role refusal, never reaching the cross-user condition they name) and were **re-cut rather than left reporting safety they no longer provided**; plans 08 and 09 each shipped a provably unreachable assertion and each caught it with their own mutation battery.
 
 ⛔ **`REVOKE` is not durable, and that is a CLASS.** Supabase's `pg_default_acl` re-grants `anon` and `authenticated` on any `DROP`+`CREATE`. Nothing in a migration can close this — a post-verify runs once, at apply, and the migration that reopens the door is one nobody has written yet. The durable enforcement is **assertion 5h**, armed from the function body and the live ACL rather than from a comment marker, proven on a PG16 fixture by an actual DROP+CREATE where it was the ONLY assertion that reddened.
-
 
 ## Progress
 
@@ -779,7 +893,23 @@ split into 148/149/150; later phases renumbered +2 (149→151 … 153→155) wit
 
 ---
 
-## ⏸️ PARKED Milestone: v1.16 Production Resilience & Reliability (Phases 140–146)
+## ✅ CLOSED Milestone: v1.16 Production Resilience & Reliability (Phases 140–142) — CLOSED 2026-08-14
+
+⚠️ **SCOPE AMENDED ON CLOSE, and the amendment is dated on purpose.** This milestone ran 140–146
+and sat ⏸️ PARKED at 13/19 phases for weeks. Phases **143, 144, 145 and 146 were CARRIED to the new
+milestone v1.19 JOB/RATE** on 2026-08-14 — not dropped, not ticked, and not renumbered. With them
+went JOB-04, JOB-05, JOB-06, JOB-08 and RATE-01..05.
+
+**Why carried rather than resumed:** GSD models ONE current milestone, and v1.18 already held that
+slot. Working four phases under a header reading PARKED is precisely the ledger-vs-reality drift
+that produced four blockers in the v1.17 milestone audit. Fifteen phases that shipped weeks ago
+also should not share a milestone with four that have never been planned.
+
+⛔ **What v1.16 actually earns:** the shared resilience core and breaker, the Python service
+contract, the wizard/client seam surface, retry-with-backoff, and the stuck-computing reaper.
+⛔ **What it does NOT earn:** dropped-enqueue detection, orphaned-`running` visible termination,
+csv-finalize atomicity, or a rate limit a new route cannot bypass. Those are v1.19's, and none has
+been started.
 
 ⛔ **PARKED 2026-08-04 at 68% — NOT shipped, NOT complete.** 13/19 phases complete, 119/127
 plans (68%). Outstanding: **Phase 143** (dropped-enqueue reconciliation sweep), **Phase 144**
@@ -836,10 +966,10 @@ factsheet on a spinner that never resolves.
 - [x] **Phase 141.1: SEAMBACKOFF — Retry-After-aware backoff, breaker recalibration, and SEAM-05 evidence re-derivation** (INSERTED) - Scope from the 8-agent review campaign over 141; **zero user-facing and zero data-integrity defects found**, so no retry verdict changed and no budget row was un-flipped. 9/9 plans (completed 2026-07-31). VERIFICATION was `gaps_found` 19/20 and is now **passed** 20/20 on re-verification 2026-08-01 — all three gaps had been closed in the tree by post-verification work and the file was simply never re-run: D-06's last stale coordinate became a symbol anchor at `22332e34` (the whole self-relative-citation class is now absent from `resilient-fetch.ts`), the two deferred ledgers were reconciled so TODOS.md and `deferred-items.md` both carry all four `DEF-141.1-*` ids, and the Falsifiability Ledger closed at 20/20 observed with `nyquist_compliant: true`
 - [x] **Phase 141.2: SEAMFIX — close the 141.1 code-review findings: duplicate onboard verification write, flag-monitor denominator integrity, breaker re-arm** (INSERTED) - 25 findings from the xhigh review (30 agents) deduped to 13; outcome is **twelve remediated, one dispositioned** — finding 8's retry↔limiter amplification is ACCEPTED, not fixed, and is stated as STILL LIVE everywhere it is summarised. Closes the duplicate `strategy_verifications` write on the money path (onboard's retry is now refused unless the call carries a truthy `wizard_session_id`, decided at the single chokepoint) and the three monitoring-integrity regressions D-16 shipped (unbounded `.select()` → `head: true` count, attacker-movable dedup deleted outright, read error now a distinct `denominator_read_failed` outcome rather than zero traffic). 6/6 plans (completed 2026-08-01). VERIFICATION was `human_needed` 17/17 and is now **passed** — three of its four production probes were discharged read-only on 2026-08-01 (42 rows / 42 distinct `correlation_id` / 0 `wizard:` prefix, flow_type resync 20 · csv 20 · onboard 2; unbounded `.select()` returned exactly 1000 rows at HTTP 200 with `error: null` against 7351 total, reproducing the silent truncation; all five breaker keys ABSENT, keeping finding 10 framed as hardening). The fourth — a real Railway-edge 503 carrying a malformed `Retry-After` — stays **Manual-Only and is not a gap**: it cannot be induced, and the only contract-bound 503 emitter we own structurally cannot emit one. ⏳ On PR #656, **not yet merged**
 - [x] **Phase 142: JOB — strategy_analytics stuck-computing reaper + computing_started_at DDL** - Writer-stamped transition timestamp + pg_cron reaper to terminal `failed` + threshold-math CI invariant + WEDGE-01 regression test (completed 2026-08-02)
-- [ ] **Phase 143: JOB — Dropped-enqueue reconciliation sweep** - pg_cron sweep finds strategies with data but NO compute-job row (the "`after()` never ran" hole) and idempotently re-enqueues + alerts
-- [ ] **Phase 144: JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence** - New migration layered on 20260720120000: terminal `failed` instead of bare DELETE, tightened cadence, 4h threshold unchanged
-- [ ] **Phase 145: JOB — csv-finalize atomicity (reproduce-first)** - Reproduce the stale 42501 claim before scoping; close the real non-transactional finalize gap so a partial failure leaves no orphan strategy
-- [ ] **Phase 146: RATE — Audit + close the two verified gaps** - Kickoff re-grep gap list; limit `admin/match/eval` + Python `routers/match.py`; audit the seven existing limiter VALUES; `withRateLimit` HOF
+- [→] **Phase 143: JOB — Dropped-enqueue reconciliation sweep** — ➡️ **CARRIED to milestone v1.19 on 2026-08-14.** Never started; charter moved intact to the v1.19 section at the top of this file, number unchanged
+- [→] **Phase 144: JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence** — ➡️ **CARRIED to milestone v1.19 on 2026-08-14.** Never started; charter moved intact to the v1.19 section at the top of this file, number unchanged
+- [→] **Phase 145: JOB — csv-finalize atomicity (reproduce-first)** — ➡️ **CARRIED to milestone v1.19 on 2026-08-14.** Never started; charter moved intact to the v1.19 section at the top of this file, number unchanged
+- [→] **Phase 146: RATE — Audit + close the two verified gaps** — ➡️ **CARRIED to milestone v1.19 on 2026-08-14.** Never started; charter moved intact to the v1.19 section at the top of this file, number unchanged
 
 ## v1.16 Phase Details (PARKED)
 
@@ -1339,65 +1469,6 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 142.3 to break down)
 
-### Phase 143: JOB — Dropped-enqueue reconciliation sweep
-
-**Goal**: "`after()` never ran at all" enqueue drops — architecturally invisible from inside the route handler — are detected by absence and healed
-**Depends on**: Phase 142 (same three-table triangle; scheduled as one non-racing mechanism)
-**Requirements**: JOB-04
-**Success Criteria** (what must be TRUE):
-
-  1. A strategy with persisted daily-returns data but NO `compute_jobs` row of ANY status and no terminal `strategy_analytics` row, past a grace window, is re-enqueued by a pg_cron sweep and a Sentry alert fires — the hole the in-closure `writeFailedStrategyAnalyticsPlaceholder` guard structurally cannot catch.
-  2. Running the sweep twice in a row produces no duplicate job (re-enqueue is idempotent via the existing partial unique index).
-  3. A strategy inside the grace window, or with any existing job row, or with a terminal analytics row, is never touched by the sweep.
-
-**Plans**: TBD
-**Note**: Constrained by JOB-07 (Phase 142) — sweep runs in pg_cron, never the worker loop. Needs a short design pass on "what counts as orphaned" per strategy source (csv vs wizard vs resync) before it becomes one migration.
-
-### Phase 144: JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence
-
-**Goal**: An orphaned `running` compute job terminates VISIBLY — pollers break out, the audit trail survives — resolving the founder's open WR-02 DELETE-vs-reset call
-**Depends on**: Phase 143 (JOB sequence; independent mechanism on `compute_jobs`)
-**Requirements**: JOB-05, JOB-08
-**Success Criteria** (what must be TRUE):
-
-  1. An orphaned `running` `compute_jobs` row (past the UNCHANGED 4h `claimed_at` threshold) transitions to a terminal `failed` status instead of being DELETEd — so a wizard poller sees a real outcome and the row survives for audit until the existing 30/90-day retention crons delete it.
-  2. Detection latency drops from ~24h to the tightened cadence (e.g. hourly) while a legitimate batch-tail job under 4h is never touched — the threshold, not the frequency, is what protects live jobs (the WORKER-04 2h→4h lesson).
-  3. The change ships as a NEW migration layered on `20260720120000` (the shipped migration is never edited), reconciling the TEST-DELETE / PROD-reset split into ONE behavior.
-  4. A committed measurement of the stale-`pending` `compute_jobs` population **on PROD** exists BEFORE any stale-`pending` sweep is scoped, and the gap is closed EITHER by adding `pending` as a fourth swept status (using SC 1's terminal-UPDATE pattern, never `DELETE`) OR by an explicit WON'T-FIX carrying that measurement — "zero on prod" is a valid, budget-saving outcome. The retention family covers `done` (jobid 4), `failed_*` (jobid 8) and orphaned `running` (jobid 11); stale `pending` is the one status an undrained enqueue cron produces and the only one nothing sweeps.
-
-**Plans**: TBD
-**Note**: The "fence flake also clears" claim is observation-only, NOT an acceptance criterion (research correction #4). Constrained by JOB-07 (pg_cron only).
-**Note (SC 4 / JOB-08, added 2026-08-03)**: routed here from `TODOS.md` § CI / test-infra ratchet — same table, same cron family this phase already edits, and SC 3's TEST-vs-PROD split is the same gap. Full evidence and the two ⛔ traps (never `DELETE` pending; never `cron.unschedule(9)`) are in `REQUIREMENTS.md` § JOB-08. ⚠️ The gap is CERTAIN on the TEST project and UNMEASURED on prod — that asymmetry is why SC 4 is measure-first rather than build-first.
-
-### Phase 145: JOB — csv-finalize atomicity (reproduce-first)
-
-**Goal**: A mid-request csv-finalize failure leaves no orphan strategy row — and no budget is spent re-fixing the likely-stale 42501 bug
-**Depends on**: Phase 144 (JOB sequence; order-independent within JOB — last because its scope needs the reproduction result first)
-**Requirements**: JOB-06
-**Success Criteria** (what must be TRUE):
-
-  1. A documented reproduction attempt of the 42501 / `PROCESS_KEY_UNIFIED_BACKBONE` claim against current `main` exists (committed pass/fail) BEFORE any fix is scoped — "could not reproduce" is a valid, budget-saving outcome.
-  2. A fault injected between `finalize_csv_strategy`, `persist_csv_daily_returns`, and the `after()` enqueue leaves no orphan strategy row — either the steps share one SECURITY DEFINER transaction, or explicit compensating cleanup runs + Sentry alerts (the choice recorded per the reproduction outcome and the CONTRIB-02 `p_terminal_status` owner-only variant's survival).
-  3. Happy-path csv-finalize behavior is unchanged — including the CONTRIB-02 owner-only private-finalize path if the RPCs are folded.
-
-**Plans**: TBD
-**Note**: Constrained by JOB-07 (any cleanup mechanism stays off the worker loop).
-
-### Phase 146: RATE — Audit + close the two verified gaps
-
-**Goal**: Every authed route hitting the Python service has the RIGHT rate limit — and a newly-added route can't silently ship with none
-**Depends on**: Nothing upstream (mechanical; sequenced last so its gap list comes from a fresh grep)
-**Requirements**: RATE-01, RATE-02, RATE-03, RATE-04, RATE-05
-**Success Criteria** (what must be TRUE):
-
-  1. A committed kickoff re-grep artifact lists every `src/app/api` route calling either seam client × its `checkLimit` status — the authoritative gap list, replacing the stale `TODOS.md` route list (which named seven routes that were already limited).
-  2. Burst requests to `admin/match/eval` beyond a per-`user.id` limit sized to real eval-tooling cadence receive `429` + `Retry-After`.
-  3. Requests hitting Railway's `routers/match.py` (`/recompute`, `/eval`) directly — bypassing Vercel with a leaked `X-Service-Key` — are rejected `429` by server-side slowapi limits mirroring `portfolio.py`'s pattern (defense-in-depth).
-  4. A committed audit of the seven existing limiter VALUES against real Python-side cost exists, with adjustments applied where a value was wrong — the substantive remaining RATE question.
-  5. A `withRateLimit(handler, limiter)` HOF exists and composes alongside `withAuth`/`withRole`, wired on the routes this phase touches — so the no-CI-gate hand-wiring weakness has a structural successor.
-
-**Plans**: TBD
-
 ## v1.16 Progress (PARKED)
 
 | Phase | Plans Complete | Status | Completed |
@@ -1407,10 +1478,10 @@ Plans:
 | 140.1.1. PYAPI-FIX (INSERTED) | 7/7 | Complete    | 2026-07-26 |
 | 141. SEAM retry (audit-gated) | 4/4 | Complete    | 2026-07-31 |
 | 142. JOB reaper + DDL | 6/6 | Complete   | 2026-08-02 |
-| 143. JOB dropped-enqueue sweep | 0/? | Not started | - |
-| 144. JOB WR-02 terminal UPDATE | 0/? | Not started | - |
-| 145. JOB csv-finalize atomicity | 0/? | Not started | - |
-| 146. RATE audit + close | 0/? | Not started | - |
+| 143. JOB dropped-enqueue sweep | 0/? | ➡️ **CARRIED to v1.19** | - |
+| 144. JOB WR-02 terminal UPDATE | 0/? | ➡️ **CARRIED to v1.19** | - |
+| 145. JOB csv-finalize atomicity | 0/? | ➡️ **CARRIED to v1.19** | - |
+| 146. RATE audit + close | 0/? | ➡️ **CARRIED to v1.19** | - |
 
 ## Requirement Coverage (v1.16)
 

@@ -26,6 +26,20 @@ resurfacing in a file the amendment commit never touched* — the lesson being t
 amendment landing in one file is almost always incomplete.
 **Archive:** `milestones/v1.17-ROADMAP.md` + `v1.17-REQUIREMENTS.md`.
 
+## v1.16 — Production Resilience & Reliability (CLOSED 2026-08-14, Phases 140–142)
+
+⚠️ **Scope amended on close.** Ran 140–146 and sat ⏸️ PARKED at 13/19 for weeks. Phases **143–146
+were CARRIED to v1.19 JOB/RATE**, not dropped and not ticked, taking JOB-04/05/06/08 and
+RATE-01..05 with them. Numbers deliberately unchanged — REQUIREMENTS.md and TODOS.md cite them by
+number in dozens of places.
+
+⛔ **What it earns:** the shared resilience core + Upstash breaker, the Python service contract and
+per-tenant limiter identity, the wizard/client seam error surface, retry-with-backoff gated on an
+idempotency audit, and the stuck-computing reaper with its transition-timestamp DDL.
+⛔ **What it does NOT earn:** dropped-enqueue detection, orphaned-`running` visible termination,
+csv-finalize atomicity, or a rate limit a new route cannot silently bypass.
+**Archive:** phase detail retained in `ROADMAP.md` § v1.16 (CLOSED).
+
 ## v1.15 MetaTrader 5 — live api_verified account sync — SHIPPED + LIVE (2026-07-25)
 
 **Phases:** 134–139 (6, all complete) | **Timeline:** 2026-07-23 → 2026-07-25

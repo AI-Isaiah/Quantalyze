@@ -1227,6 +1227,8 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   intended pandas, pin the uv version used for locking, regen once, commit. (Surfaced by the
   v0.49.1.0 MT5-deps ship; the rpyc line was hand-added to avoid triggering this drift.)
 - **No `docs/architecture/` ADRs** — every decision is implicit in code; actively-inconsistent
+
+  ⛔ **FALSE AS WRITTEN — corrected 2026-08-14.** `docs/architecture/` contains **18 ADRs** (`adr-0001` … `adr-0024`), and `REQUIREMENTS.md:1001-1002` cites ADR-0001/ADR-0003 by name. This line is the same ledger-vs-reality class the v1.17 milestone audit was convened over, found by the ADR conflict synthesis. ⭐ What IS true, and is the useful residue: the ADRs are **not all current** — `.planning/INGEST-CONFLICTS.md` records 4 blockers where an ADR contradicts HEAD.
   mechanisms to codify + consolidate: multiple auth wrappers, multiple cron mechanisms
   (vercel.json vs `pg_cron`+`pg_net`), multiple admin checks. (17 existing decisions to
   document + 5 open questions per the 2026-04 architecture audit.)
@@ -2540,3 +2542,101 @@ named files are unmodified by the phase, so neither was quietly half-done.
   state disagree, and an unenforced rule teaches people to ignore the enforced ones.
   **Decide one way:** either scrub + add a CI grep, or amend the rule to name refs as non-secret
   and keep the prohibition for keys/JWTs/connection strings only. ⛔ Do NOT half-do it.
+
+### Branch & worktree adjudication, 2026-08-14 — four survivors with real unmerged work
+
+Context: 37 stale branches and 9 orphaned agent worktrees accumulated. Every one was adjudicated
+**by content** (`grep -aF` per added line against `origin/main`), not by branch age or `git cherry`
+— ⭐ patch-id is USELESS here because squash-merges give shipped work a different id, so merged
+branches read as "62 commits ahead" forever. 33 were verified shipped and deleted. **These four
+were NOT, and all four are now pushed to `origin` so they are no longer local-only:**
+
+- [ ] **`fix/scenario-empty-daily-returns` — 143 of 164 added lines absent from main.** A real bug
+  fix: resolves the lazy-returns series through the analytics column-drift resolver, across
+  `api/strategies/[id]/returns/route.ts`, `factsheet/allocator-portfolio-payload.ts` and
+  `portfolio-math-utils.ts`. Its own comment records the load-bearing fact: **the legacy
+  `daily_returns` column has NO production writer** — the real series lives in `returns_series`,
+  the `(1+r).cumprod()` wealth curve the analytics service writes (`metrics.py:775-778`).
+  ⚠️ Dated 2026-08-04 and never merged. **Decide: land it or close it with a reason.**
+
+- [ ] **`fix/sync-status-superseded-failed` — an entire MIGRATION that never landed.**
+  `supabase/migrations/20260705130000_sync_status_supersede_failed.sql` and its gate
+  `supabase/tests/test_sync_status_supersede_failed.sql` are **absent from main**.
+  ⚠️ A migration sitting unmerged for 5+ weeks is either abandoned-on-purpose or dropped by
+  accident, and the branch name does not say which. ⛔ Do NOT merge it blind — merging
+  `supabase/migrations/**` AUTO-APPLIES to PROD. Read it first; it is adjacent to Phase 144's
+  reaper-status work, so check for conflict before v1.16 Phase 144 lands.
+
+- [ ] **`ci/pytest-xdist-parallel` — 23% of its additions absent from main.** Parallelizes the
+  analytics-service Python CI (`pytest.ini`, `Makefile`, `conftest.py`, `requirements-dev.txt`,
+  `ci.yml`). Cheap, useful, never merged. ⚠️ Check it against the `-p no:randomly`/VCR-cassette
+  constraints before landing — parallel pytest plus cassettes is exactly where LIVE broker calls
+  leak in.
+
+- [ ] **`wip/v1.16-phase140-fix-archive` — 91% divergent (4,046 of 4,441 added lines absent).**
+  Highest divergence of any branch, but **no file it touches is missing from main**, so this reads
+  as a superseded WIP approach from the Phase 140 era (2026-07-25) rather than lost work. Kept
+  rather than deleted *because* 91% is too high to dismiss on a heuristic. **Decide: skim it once
+  and delete, or cherry-pick anything still true.**
+
+⭐ Also rescued: `.claude/worktrees/agent-a06a853e5acc0cdd0` held **264 uncommitted lines** across
+`SyncPreviewStep.tsx` and three of its tests. Main already carries the recomputing block so it
+looks superseded, but the diff was saved rather than assumed — session scratchpad,
+`rescued-worktree-a06a853e-uncommitted.patch`. ⚠️ Scratchpad is session-scoped; if this matters,
+move it into the repo.
+
+## Phase 143 — recorded deferrals (logged 2026-08-17)
+
+Both are DELIBERATE non-coverages of the JOB-04 dropped-enqueue sweep
+(`supabase/migrations/20260816140000_reconcile_dropped_enqueue_sweep.sql`), documented in that
+file's header and in `143-CONTEXT.md`. Neither is a bug in the sweep; each needs its own mechanism.
+
+- [ ] **(D-09) Composite strategies stranded without analytics are EXCLUDED from the sweep — they
+  need a `stitch_composite` re-run mechanism with its own predicate.** The sweep excludes any
+  strategy with a `public.strategy_keys` member row. This is **money safety, not optimization**:
+  `run_stitch_composite_job` writes `csv_daily_returns` itself (`job_worker.py:6786-6803`) but
+  `JOB_CHAIN_FOLLOW_ON["stitch_composite"]` is the empty tuple (`job_worker.py:527`), so a composite
+  is chain-terminal and legitimately never gets a `compute_analytics_from_csv` job. Enqueueing one
+  would hand the composite headline to the single-key computation its own handler deliberately
+  abandoned — a √252-vs-√365 annualization divergence plus a 0.0 gap-fill that "fabricated flat
+  performance" (`job_worker.py:6808-6822`). Silent corruption of a CORRECT row on a money surface is
+  strictly worse than the un-healed hole. ⚠️ Not hypothetical: the 143-02 census found **1 composite
+  on PROD carrying dailies**, currently protected only by a terminal analytics row — i.e. one failed
+  terminal write away from being the exact false positive this conjunct stops.
+
+- [ ] **(D-05) The wizard/API first-hop enqueue drop is NOT covered.** A `finalize-wizard` strategy
+  whose `sync_trades` enqueue dropped has **no dailies at all**, and "no dailies AND no jobs" is
+  byte-identical to a brand-new strategy that has not synced yet, and to a key whose first sync
+  legitimately returned nothing. No predicate catches the drop without also catching those, so the
+  sweep would re-enqueue healthy strategies forever. Closing it needs a different signal
+  (`api_key_id` present + no job EVER + a longer grace) with its own false-positive analysis — a
+  separate mechanism, not a second predicate bolted into this migration.
+
+- [ ] **(follow-on, from the 143-04 live tick) `cron.job_run_details.return_message` does NOT carry
+  a pg_cron body's RAISE NOTICE text on this Supabase build — it carries the command tag (`DO`).**
+  Observed 2026-08-17. This affects **142's reaper too**, whose header relies on the same premise for
+  its operator-observability section; that file was not touched by Phase 143. Either correct
+  `20260802120000`'s wording or build a real count surface. Until then, count healed rows with
+  `SELECT count(*) FROM public.compute_jobs WHERE metadata->>'source' = 'reconcile-sweep' AND
+  created_at >= <tick start>`, not by reading the run log.
+
+### Phase 143 red-team residuals (logged 2026-08-17, deliberate trade-offs)
+
+Both have a SAFE failure direction. Recorded so the trade-off is visible, not so it is forgotten.
+
+- [ ] **Sweep-alert de-dupe is in-process (bounded FIFO), not durable.** A worker restart between two
+  claims of the same heal costs ONE DUPLICATE alert. The dangerous direction — a heal whose first
+  claim died going unreported — was a real bug and is FIXED (red-team F-2). Exactly-once across
+  restarts needs a `compute_jobs.metadata` write and therefore a migration, which auto-applies to
+  PROD on merge; not worth it for a duplicate. `analytics-service/main_worker.py`.
+
+- [ ] **The D-19 IN-subquery-LIMIT gate is a TEXT gate and remains partially escapable.** Widened
+  2026-08-17 from `[^)]*` (which could not match any realistic rewrite, since the predicate needs
+  `EXISTS (...)` parens) to `[^;]*`. A rewrite placing a `;` between `IN (SELECT` and `LIMIT` still
+  escapes it. Inherent to text gates: the per-tick bound's only real proof is SQL gate Part 4
+  executing the deployed body against LIMIT+1 rows. Do not mistake a green text gate for a bound proof.
+
+- [ ] **`s.status <> 'archived'` guards a value nothing writes at runtime** (red-team F-6, INFO).
+  `'archived'` appears only in the teaser-anchor seed (`20260515095804:88`); there is no archive
+  route and `sanitize_user` preserves status. Harmless and left in place as future-proofing — noted
+  so nobody reads the conjunct as evidence that an archive flow exists.

@@ -42,11 +42,21 @@ from typing import Any, Final, TypedDict, cast
 
 from dotenv import load_dotenv
 
+# JOB-04 (Phase 143) — imported as a MODULE (not `from sentry_sdk import
+# capture_message`) so the reconcile-sweep capture in dispatch_tick() resolves
+# through `main_worker.sentry_sdk` and can be spied on in tests. This mirrors
+# the discipline already recorded at main.py:16-20; a from-import makes the
+# emission untestable with the repo's existing
+# `monkeypatch.setattr(module, "sentry_sdk", spy)` idiom. Importing the module
+# has no side effects — `init_sentry()` in main() is what configures it.
+import sentry_sdk
+
 # Load analytics-service/.env for local dev. In prod (Railway), env vars are
 # injected directly and no .env file exists, so load_dotenv() is a no-op.
 load_dotenv()
 
 import main_worker_healthz  # top-level module (not in services/); stdlib-only, no cycle
+from sentry_init import init_sentry
 from services.db import db_execute, get_supabase
 from services.encryption import validate_kek_on_startup
 from services.job_worker import DispatchOutcome, JobStatus, Priority, dispatch
@@ -86,6 +96,20 @@ class _ClaimedJobOptional(TypedDict, total=False):
     claim_token: str | None
     metadata: dict[str, Any] | None
     exchange: str | None
+    # `attempts INTEGER NOT NULL DEFAULT 0` (20260411144407:121); the claim RPC
+    # does `attempts = attempts + 1` before returning the row
+    # (20260719073701:185), so a freshly-claimed row carries 1.
+    #
+    # ⚠️ NOT a heal counter, and nothing in this module may treat it as one.
+    # The reconcile-sweep alert de-dupe read it (`attempts <= 1`) and LOST the
+    # alert: `reset_stalled_compute_jobs` — the watchdog this worker calls —
+    # resets a stalled row to 'pending' WITHOUT decrementing attempts
+    # (20260516104201:657-670, :681-694), so a heal whose first claim crashed
+    # returns at attempts=2 and was silently never reported. The de-dupe is now
+    # keyed on the heal identity instead (see _reconcile_heal_key). Declared
+    # here because it is part of the claimed-row contract, not because the
+    # alert path consumes it.
+    attempts: int
 
 
 class ClaimedJob(_ClaimedJobOptional):
@@ -315,6 +339,68 @@ _FALLBACK_CLAIM_RPC: bool = False
 #      first line.
 _FALLBACK_REPROBE_INTERVAL_S: float = 300.0  # re-probe the priority RPC every 5 min
 _FALLBACK_LATCHED_AT: float = 0.0
+
+# --------------------------------------------------------------------------
+# JOB-04 / SC#1 — reconcile-sweep alert de-dupe, keyed on the HEAL
+# --------------------------------------------------------------------------
+# The alert must fire ONCE PER HEAL, not once per CLAIM. The marker is not
+# consumed: it lives in compute_jobs.metadata for the row's whole lifetime and
+# claim_compute_jobs_with_priority MERGES metadata
+# (`metadata = COALESCE(metadata,'{}') || jsonb_build_object(...)`,
+# 20260719073701:190-198), so it survives every re-claim. Unconditional
+# emission would report ONE healed strategy as N events and turn a flapping job
+# into an alert storm on a warning-level channel.
+#
+# ⚠️ THIS MUST NOT BE KEYED ON `attempts`. It was, as `attempts <= 1`, and that
+# LOST the alert outright in the case an operator most needs paged on.
+# MEASURED 2026-08-17: the watchdog this worker actually calls is
+# reset_stalled_compute_jobs (watchdog_tick below), whose two UPDATEs set
+# status='pending' and DO NOT touch attempts (20260516104201:657-670, :681-694)
+# — unlike its sibling reclaim_stuck_compute_jobs, which decrements
+# (`attempts = GREATEST(attempts - 1, 0)`, :596). failed_retry re-claim keeps
+# the incremented count too. So: sweep heals -> the first claim dies before it
+# reaches the emission below (OOM, SIGKILL, host loss) -> the watchdog resets
+# the row -> re-claim carries attempts=2 -> `2 <= 1` is False -> the heal is
+# NEVER reported. A dropped enqueue healed after a worker crash is exactly the
+# incident SC#1 exists to surface, and `attempts` silently excluded it.
+#
+# The key is therefore the HEAL IDENTITY — the job id plus the sweep's own
+# `detected_at` stamp — which is stable across every re-claim of the same heal
+# and distinct for a genuinely new one. Re-claim of the SAME heal is
+# suppressed; a heal whose first claim never emitted is still reported.
+#
+# The entry is recorded only AFTER a successful emission (see the call site),
+# so this stays FAIL-OPEN in the same direction the rest of this path chose:
+# a crashed or raising emission leaves no entry and the next claim re-alerts.
+# Over-alerting is recoverable; a silent heal is the defect class being closed.
+#
+# Bounded FIFO, because a worker process is long-lived and this must not grow
+# without limit. Eviction can at worst cost ONE duplicate alert for a job
+# re-claimed after 4096 intervening heals — the recoverable direction again.
+# In-process (not persisted) is deliberate and sufficient: a worker restart
+# loses the set, which can only ever cause a re-alert, never a lost one.
+_RECONCILE_ALERT_DEDUPE_MAX: Final[int] = 4096
+_RECONCILE_ALERTED: dict[str, None] = {}
+
+
+def _reconcile_heal_key(job: ClaimedJob, meta: dict[str, Any]) -> str:
+    """Stable identity for ONE heal: the job row plus the sweep's detected_at.
+
+    Never includes `attempts` or any other value a re-claim mutates.
+    """
+    return f"{job.get('id')}|{meta.get('detected_at')}"
+
+
+def _reconcile_alert_already_sent(key: str) -> bool:
+    return key in _RECONCILE_ALERTED
+
+
+def _record_reconcile_alert(key: str) -> None:
+    """Record that SC#1's alert HAS been emitted for this heal (bounded FIFO)."""
+    _RECONCILE_ALERTED[key] = None
+    while len(_RECONCILE_ALERTED) > _RECONCILE_ALERT_DEDUPE_MAX:
+        # dicts preserve insertion order (3.7+), so this evicts oldest-first.
+        _RECONCILE_ALERTED.pop(next(iter(_RECONCILE_ALERTED)))
 
 
 def _is_undefined_function(exc: BaseException) -> bool:
@@ -623,6 +709,86 @@ async def dispatch_tick(worker_id: str) -> None:
         # serialization_failure — that's the expected late-mark-ignored path,
         # not a failure. INVEST-P97 §Recommendation point 2.
         claim_token = job.get("claim_token")
+
+        # JOB-04 (Phase 143): a job carrying the reconcile-sweep marker means an
+        # enqueue was DROPPED and the hourly sweep healed it by absence — the
+        # csv-finalize `after()` callback never ran, so neither the
+        # enqueue_compute_job error branch nor the failed-analytics placeholder
+        # ever executed and nothing in the request path could have reported it.
+        # Alerting HERE, on claim, is the whole alert: there is no cron->Sentry
+        # bridge in this repo (20260802120000 header) and pg_net is
+        # fire-and-forget, so a failed POST from the cron body would itself be
+        # silent.
+        #
+        # LATENCY, honestly: sweep tick -> next worker claim, so this is not
+        # instant paging. A fully-down worker emits nothing at all — that case
+        # is independently alarmed by healthz, so this adds no new blind spot,
+        # but do not read this event as a liveness signal.
+        #
+        # The event carries strategy_id (a UUID) and detected_at ONLY. No email,
+        # no CSV content, nothing user-supplied (T-143-06); init_sentry() also
+        # sets send_default_pii=False and a before_send redactor.
+        #
+        # The read is placed before the `try:` below on purpose: that try owns
+        # the _heartbeat task's try/finally, and the marker read has no business
+        # inside the heartbeat's error handling. Its own try/except is therefore
+        # load-bearing — an unwrapped raise here escapes dispatch_tick entirely
+        # and takes every remaining job in the claimed batch with it (T-143-11).
+        # Telemetry must never fail the work it observes (main.py:186-188).
+        try:
+            _meta = job.get("metadata") or {}
+            # Fire once per HEAL, not once per CLAIM — de-duped on the heal's
+            # own identity (job id + the sweep's detected_at), never on
+            # `attempts`. See _reconcile_heal_key above for the full rationale
+            # and for the MEASURED reason `attempts <= 1` was wrong: the
+            # watchdog this worker calls does not decrement attempts, so a heal
+            # whose first claim crashed came back at attempts=2 and was silently
+            # never reported.
+            #
+            # The record is written only AFTER capture_message returns, so this
+            # is FAIL-OPEN: if the emission raises (the except below logs it) or
+            # the process dies mid-emission, no entry is recorded and the next
+            # claim of the same heal re-alerts. A silent heal is the defect
+            # class being closed; a duplicate alert is recoverable.
+            _heal_key = _reconcile_heal_key(job, _meta)
+            if _meta.get("source") == "reconcile-sweep" and not _reconcile_alert_already_sent(_heal_key):
+                with sentry_sdk.new_scope() as scope:
+                    scope.set_tag("surface", "reconcile-sweep")
+                    scope.set_tag("job_kind", job.get("kind"))
+                    scope.set_extra("strategy_id", job.get("strategy_id"))
+                    scope.set_extra("detected_at", _meta.get("detected_at"))
+                    sentry_sdk.capture_message(
+                        "Dropped compute-job enqueue healed by reconciliation sweep",
+                        level="warning",
+                    )
+                _record_reconcile_alert(_heal_key)
+        except Exception as exc:  # noqa: BLE001
+            # LOUD, not silent (143 review WR-02). The swallow itself stays --
+            # telemetry must never fail the work it observes, and the paragraph
+            # above explains why an unwrapped raise here would take the whole
+            # claimed batch down. What must NOT stay is the silence: a swallow
+            # with no log reproduces exactly the silently-failing-alert defect
+            # class this phase REJECTED the pg_net -> Sentry bridge for, one
+            # layer in. If the emission itself ever breaks (an SDK API change
+            # removing new_scope(), a scope misuse, a metadata shape the .get()
+            # chain trips on) the alert dies and nothing anywhere says so.
+            #
+            # No unit test can observe that: every test injects a fake
+            # sentry_sdk in place of the real module, so the real emission path
+            # is never exercised. This log line is the ONLY signal that SC#1's
+            # alert did not fire for a job the sweep healed. Every other broad
+            # except in this module logs (_safe_mark, the claim-RPC fallbacks,
+            # _daily_enqueue_already_ran_today, the three loop wrappers); this
+            # one was the outlier.
+            logger.warning(
+                "reconcile-sweep Sentry emission FAILED for job %s (strategy %s): "
+                "%s. The heal itself still proceeds and the job dispatches "
+                "normally, but SC#1's alert did NOT fire for this job -- a "
+                "dropped compute-job enqueue was healed SILENTLY.",
+                job.get("id"), job.get("strategy_id"), exc,
+                extra={"event_type": "reconcile_sweep_alert_emit_failed"},
+            )
+
         try:
             # FLIPRETRY-04: keep healthz HONEST during ONE long-but-alive
             # dispatch. A single backfill crawl can legitimately exceed
@@ -964,6 +1130,34 @@ async def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+
+    # JOB-04 (Phase 143): main_worker.py carried zero Sentry references, so this
+    # module had no Sentry client when run STANDALONE (`python -m main_worker`,
+    # `npm run worker:dev`). That gap is silent by construction:
+    # sentry_sdk.capture_*() with no initialized client is a NO-OP that raises
+    # nothing and logs nothing, so the reconcile-sweep alert in dispatch_tick()
+    # would emit into the void while every unit test (which spies on the SDK)
+    # stayed green. An alerting channel that fails silently is the defect class
+    # this milestone has already closed twice, and the reason the pg_net->Sentry
+    # bridge was rejected.
+    #
+    # ⚠️ DO NOT read this as "production was unalerted before Phase 143" — it was
+    # NOT. Verified 2026-08-17 (Phase 143 Plan 04): PRODUCTION DOES NOT RUN THIS
+    # ENTRYPOINT. There is no separate worker service and has not been since
+    # April — the loops were merged into the FastAPI process (main.py:80-86,
+    # after the 2026-04-20 -> 04-22 "jobs queued but never processed" incident),
+    # dispatch_loop runs as an asyncio task in the app lifespan (main.py:271),
+    # and that process has called init_sentry() at import since Phase 16
+    # (main.py:69) with SENTRY_DSN set on its Railway service.
+    # So the init below closes the STANDALONE path only. It is not dead code —
+    # it is what makes a re-split, or a local `python -m main_worker` run,
+    # observable — but it is not the production path.
+    #
+    # Placed AFTER logging.basicConfig (so logging is wired before any sentry
+    # import side effects, matching main.py:60-69) and BEFORE the KEK check, so
+    # a KEK failure at boot is itself reportable. No-ops when SENTRY_DSN is
+    # unset (sentry_init.py:347-350), which keeps local dev and CI unchanged.
+    init_sentry()
 
     logger.info("Worker starting as %s", WORKER_ID)
 

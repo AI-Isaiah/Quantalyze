@@ -1,17 +1,20 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.18
-milestone_name: MT5-VERIFY & founder confirmations
-status: blocked_on_founder
-stopped_at: v1.17 CLOSED 2026-08-14 (scope amended — Phase 155 carried to v1.18). v1.18 Phases 155 + 157 both founder-gated; agent work continues on v1.16 Phases 143-146.
-last_updated: "2026-08-14T08:30:00.000Z"
-last_activity: 2026-08-14 -- Phase 153.7 plan 03 executed, phase COMPLETE (three finalize rejections coded, ledger 3 → 0, twin regressions neuter-proven, WIZFORM-02 ticked)
+milestone: v1.19
+milestone_name: JOB/RATE — job-lifecycle reliability and the rate limits that hold
+current_phase: 153.7
+current_phase_name: ✅ **COMPLETE 2026-08-14**, branch `feat/phase-153.7-wizform-02-class`
+status: ready_to_plan
+stopped_at: Completed 143-04-PLAN.md — Phase 143 EXECUTION-COMPLETE. Migration APPLIED to TEST (qmnijlgmdhviwzwfyzlc); PROD untouched. ⭐ L-2/T-143-02 RESOLVED BY MEASUREMENT: the 2026-08-17 09:35:00 UTC tick inserted compute_jobs 58728527 through FORCE ROW LEVEL SECURITY. Code review 0 blockers / 3 warnings (all fixed). Verification = human_needed: the 143-04 checkpoint:human-verify is undischarged and SC#1's PROD half needs the merge. JOB-04 deliberately NOT ticked.
+last_updated: "2026-08-16T22:03:53.816Z"
+last_activity: 2026-08-14
+last_activity_desc: Phase 153.7 plan 03 executed — PHASE COMPLETE (ledger 3 → 0 with the 32 total untouched, twin regressions neuter-proven on both key routes, prose re-cuts, two TODOS.md deferrals, WIZFORM-02 ticked)
 progress:
-  total_phases: 17
+  total_phases: 21
   completed_phases: 15
-  total_plans: 91
+  total_plans: 95
   completed_plans: 91
-  percent: 88
+  percent: 71
 ---
 
 # Project State — Quantalyze
@@ -566,6 +569,13 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 153.4 P05 | 35min | 2 tasks | 4 files |
 | Phase 156 P02 | ~24 min | 2 tasks | 2 modified files |
 | Phase 153.7 P01 | ~22 min | 3 tasks | 1 modified file |
+| Phase 143 P01 | 22min | 2 tasks | 2 files |
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 143 P02 | ~95 min | 3 tasks | 3 created files |
+| Phase 143 P03 | 26min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -669,6 +679,16 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase ?]: 153.4-05: the composite card's 300 ms render gate is the step's 1 s TICK, not a per-panel timer — waitElapsedMs is 0 for the whole first second, so a sub-300 ms answer cannot flash a card, and N panels do not mean N timers (T-153.4-22)
 - [Phase 156]: 156-02: the wrong-door supabase mock DELEGATES by default and its throw is ARMED per-case — an unconditional throw would red every pre-existing wizard route case for the width of the RED window (G11's noise problem, inverted)
 - [Phase 156]: 156-02: CONNECT-02/03 left UNCHECKED in REQUIREMENTS.md — this plan wrote the contract as failing tests only; 156-04 makes it true
+- [Phase 143]: 143-01 (D-11 correction discharged): the analytics worker had ZERO Sentry wiring — init_sentry() now runs in main_worker.main(), so worker-side capture_* is no longer a silent no-op. The main()-calls-init_sentry pytest is the load-bearing half; the capture test mocks the SDK and stays GREEN with init removed (observed, Neuter A).
+- [Phase 143]: 143-01: reconcile-sweep marker contract, Python half — keys 'source'/'detected_at', value 'reconcile-sweep', read in the dispatch_tick claim loop BEFORE the try: that owns the heartbeat try/finally (DX-07). Emission wrapped in try/except: unwrapped, a Sentry fault escapes dispatch_tick and kills the whole claimed batch (observed, Neuter D).
+- [Phase ?]: 143-02 (MEASURED, corrects the plan): ON CONFLICT DO NOTHING is NOT what makes a sequential sweep re-run a no-op — the zero-jobs conjunct is. Tick 1's INSERT removes the strategy from the predicate, so tick 2's batch is empty and the INSERT is never reached. A gate that 'proves' ON CONFLICT by running the body twice in one session is VACUOUS (relevant to Plan 03).
+- [Phase ?]: 143-02 (MEASURED): FOR UPDATE SKIP LOCKED is the FIRST line of race defense, not just a bound helper — an INSERT into compute_jobs takes an FK KEY SHARE lock on its parent strategies row, which conflicts with the batch's FOR UPDATE, so the sweep skips a strategy the live enqueue path is mid-insert on. Removing BOTH it and ON CONFLICT is the only combination that yields 23505 at READ COMMITTED.
+- [Phase ?]: 143-02 (MEASURED): AS MATERIALIZED does not create the bound in this shape — EXPLAIN is byte-identical with and without it because Postgres does not inline a CTE carrying a locking clause, and the 26-row arm still heals 25. Keyword and gate RETAINED as shape enforcement against a future edit dropping FOR UPDATE; the bound is proven ONLY by executing the body against LIMIT+1 rows.
+- [Phase ?]: 143-02 census (read-only PostgREST, Supabase MCP unavailable): 0 candidates on TEST and PROD, both STOP rules clear. D-03 confirmed EMPIRICALLY — on PROD 4 of 4 zero-job strategies-with-dailies are excluded SOLELY by the terminal-analytics conjunct, so weakening it is a 4-row mass re-enqueue today. L-2 (cron role BYPASSRLS) is UNOBTAINABLE over PostgREST (HTTP 404 measured) and stays with Plan 04.
+- [Phase 143]: 143-03: Part 3 of the SQL gate is LABELLED a double-mutation observable, not an ON CONFLICT proof — 143-02 measured that a two-tick single-session gate cannot fail; both single neuters were run to confirm the labelling
+- [Phase 143]: 143-03: the plan's neuters (6) MATERIALIZED and (7) bare-INSERT are FALSE — executed, GREEN in isolation, substitutes N6b (23505) and N7b (LIMIT removed) added and observed RED; N7b is the only real bound proof
+- [Phase 143]: 143-03: a SQL gate's Part-1 text anchors MASK its behavioural arms under ON_ERROR_STOP=1 — neuter runs must isolate the part under observation or six of eight REDs prove nothing about the arms
+- [Phase 143]: 143-03: the neuter campaign found a real vacuity in this plan's own marker-contract gate (a Sentry TAG satisfied a bare-literal check); fixed to pin the comparison operator, re-observed RED (f62c3866)
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1371,9 +1391,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-13T14:12:05.599Z
-**Stopped At:** Phase 156 plan 02 complete (PR A wave 2)
-**Resume File:** .planning/phases/156-connect-refactor-the-venue-the-server-validated-is-the-venue/156-03-PLAN.md
+**Last Date:** 2026-08-16T22:03:53.784Z
+**Stopped At:** Completed 143-04-PLAN.md — Phase 143 EXECUTION-COMPLETE. Migration APPLIED to TEST (qmnijlgmdhviwzwfyzlc); PROD untouched. ⭐ L-2/T-143-02 RESOLVED BY MEASUREMENT: the 2026-08-17 09:35:00 UTC tick inserted compute_jobs 58728527 through FORCE ROW LEVEL SECURITY. Code review 0 blockers / 3 warnings (all fixed). Verification = human_needed: the 143-04 checkpoint:human-verify is undischarged and SC#1's PROD half needs the merge. JOB-04 deliberately NOT ticked.
+**Resume File:** None
 **Next step:** Phase 153.6 (PARITY) is booked and NOT yet planned — run `/gsd:plan-phase 153.6`. It carries 9 findings from the `/code-review xhigh` over the whole 153→153.5 span. ⛔ Three of its four root causes are ONE-PATH-ONLY fixes (a correct remedy applied to `routers/exchange.py` while its twin in `services/ingestion/mt5.py` went untouched, with no guard asserting the two agree) — close them as a CLASS, not as N patches. ⭐ The venue-lock bypass (D) is LIVE on PROD (the migration is on `main`, and `supabase/migrations/**` auto-applies on merge) but is a SELF-targeted control bypass, not a tenant leak. ⛔ The budget correction (C) has two halves — the number AND the oracle that pins the wrong column and so cannot red on it. Phases 154 and 155 remain unplanned; 155 is human- and calendar-gated (founder at the MT5 terminal, live funded account, on a trading day).
 
 ⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in
@@ -1414,3 +1434,7 @@ pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel fronten
 **Gates at `39688d69`:** pytest **4743 passed / 96 skipped / 0 failed** · `mypy --strict` **89 files clean** · `npx tsc --noEmit` **0** · full `npm run test:coverage` **8878 passed / 287 skipped / 0 failed** (697 files, all four thresholds clear) · `npm run lint` **0 errors** · **0** new `# type: ignore` across `56fb7167..HEAD` · `grep -rn MUTANT` → 0 · tree clean (only the orchestrator's `TODOS.md` and the pre-existing untracked `scripts/nautilus_factsheet.py`, neither touched).
 
 **Open items the verifier inherits (not this plan's):** the two Phase 140.1 `gaps_found` warnings (`simulator.py:92` IP-keying → PYAPI-03 is 9/9 not 10/10; the two in-handler `HTTPException(429)` sites), O-1..O-4 in the repair programme, and the 12 non-environmental pytest skips.
+
+### Blockers
+
+- ~~143-01 leaves SC#1's alert MUTE until SENTRY_DSN is verified on the WORKER Railway service~~ — ⛔ PREMISE FALSE, RESOLVED 2026-08-17 (Plan 04). There is NO separate worker service and has not been since April: the loops were merged into the FastAPI process (main.py:80-86, after the 2026-04-20 'jobs queued but never processed' incident), dispatch_loop runs in the app lifespan (main.py:271), that process calls init_sentry() at import (main.py:69, since Phase 16), and SENTRY_DSN IS set on its Railway service. SC#1's alert half is TRUE in production. 143-01's init_sentry() covers the STANDALONE path only.

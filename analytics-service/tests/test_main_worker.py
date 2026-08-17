@@ -14,15 +14,25 @@ Plus a shutdown-signal test that verifies the SHUTDOWN event stops the loops.
 """
 
 import asyncio
+import inspect
 import json
+import logging
 import pathlib
 import re
+from contextlib import contextmanager
+from typing import Any, Iterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 # main_worker is a top-level module (not in services/) so it's importable
 # directly via the pythonpath=. in pytest.ini.
+#
+# JOB-04 (Phase 143): the module object itself is needed, not just its
+# functions — the Sentry tests below patch `main_worker.sentry_sdk` and
+# `main_worker.init_sentry` by attribute, which is only possible against the
+# module (see the module-vs-from import discipline recorded at main.py:16-20).
+import main_worker
 from main_worker import (
     daily_enqueue_tick,
     dispatch_tick,
@@ -2338,3 +2348,865 @@ class TestReaperThresholdDriftGate:
             "the deployed reaper body does not reference computing_started_at at "
             "all — the negative assertions above are passing vacuously."
         )
+
+
+# ---------------------------------------------------------------------------
+# JOB-04 (Phase 143) — worker-side Sentry: bootstrap + reconcile-sweep alert
+# ---------------------------------------------------------------------------
+#
+# Phase 143's pg_cron sweep heals the one enqueue-drop shape no in-request
+# guard can see (`after()` never ran at all, so the strategy has persisted
+# dailies, ZERO compute_jobs rows and no strategy_analytics row). SC#1 says the
+# heal must not be silent: "a Sentry alert fires".
+#
+# D-11 locks the mechanism: the cron stamps
+# `metadata = {"source": "reconcile-sweep", "detected_at": <ts>}` on the job it
+# re-enqueues, and the Python worker emits the Sentry event when it CLAIMS that
+# job. Its 2026-08-16 ⛔ CORRECTION is what shapes these tests: research
+# (143-RESEARCH.md L-1) found `main_worker.py` had ZERO Sentry references, and
+# `sentry_sdk.capture_*` with no initialized client is a SILENT NO-OP. So the
+# capture test alone cannot prove the alert is real — it installs a spy, so it
+# stays GREEN with `init_sentry()` deleted from `main()`. The bootstrap test
+# below is the separate, load-bearing half.
+#
+# Oracle independence (143-PATTERNS "Established Patterns"): every literal
+# below is declared HERE and names its production source, rather than being
+# imported from the code under test.
+
+# Marker contract — production source: analytics-service/main_worker.py,
+# dispatch_tick() claim loop. The SQL half (the cron body that WRITES this
+# marker) is pinned separately by Plan 03's TestReconcileSweepMarkerContract.
+_SWEEP_MARKER_KEY = "source"
+_SWEEP_MARKER_VALUE = "reconcile-sweep"
+_SWEEP_DETECTED_AT_KEY = "detected_at"
+
+# Event shape — production source: analytics-service/main_worker.py,
+# dispatch_tick() capture_message call.
+_SWEEP_ALERT_MESSAGE = "Dropped compute-job enqueue healed by reconciliation sweep"
+_SWEEP_ALERT_LEVEL = "warning"
+_SWEEP_SURFACE_TAG = "reconcile-sweep"
+
+
+class _FakeScope:
+    """Records `set_tag` / `set_extra` verbatim.
+
+    Deliberately minimal: anything the real sentry Scope exposes that
+    main_worker does NOT call must not be silently invented here — an
+    AttributeError from this fake is a genuine test failure, not a gap in the
+    double (the discipline recorded at tests/test_secret_misconfig_signal.py:88-90).
+    """
+
+    def __init__(self) -> None:
+        self.tags: dict[str, Any] = {}
+        self.extras: dict[str, Any] = {}
+
+    def set_tag(self, key: str, value: Any) -> None:
+        self.tags[key] = value
+
+    def set_extra(self, key: str, value: Any) -> None:
+        self.extras[key] = value
+
+
+class _FakeSentry:
+    """Stands in for the `sentry_sdk` MODULE in main_worker's namespace.
+
+    Exposes exactly the two surfaces the emission uses: `new_scope()` and
+    `capture_message()`.
+
+    `capture_raises` drives the transport-failure arm: the capture is recorded
+    FIRST (so the test can prove the emission was attempted) and then raises,
+    which is what a real transport fault looks like from the caller's side.
+    """
+
+    def __init__(self, capture_raises: BaseException | None = None) -> None:
+        self.captures: list[dict[str, Any]] = []
+        self.scopes: list[_FakeScope] = []
+        self._capture_raises = capture_raises
+        self._current = _FakeScope()
+
+    @contextmanager
+    def new_scope(self) -> Iterator[_FakeScope]:
+        scope = _FakeScope()
+        self._current = scope
+        self.scopes.append(scope)
+        yield scope
+
+    def capture_message(self, message: str, level: str | None = None) -> None:
+        self.captures.append(
+            {
+                "message": message,
+                "level": level,
+                "tags": dict(self._current.tags),
+                "extras": dict(self._current.extras),
+            }
+        )
+        if self._capture_raises is not None:
+            raise self._capture_raises
+
+    def serialised(self) -> str:
+        return "\n".join(
+            f"{c['message']} | {c['level']} | "
+            f"tags={sorted(c['tags'].items())} | extras={sorted(c['extras'].items())}"
+            for c in self.captures
+        )
+
+
+def _mock_supabase_for(jobs: list[dict[str, Any]]) -> MagicMock:
+    """The TestDispatchTick mocked-supabase harness (:39-110), reused verbatim.
+
+    The claim RPC returns `jobs`; every other RPC name (mark_compute_job_done /
+    _failed) resolves to an inert chain.
+    """
+    mock_supabase = MagicMock()
+    claim_chain = MagicMock()
+    claim_chain.execute.return_value = MagicMock(data=jobs)
+    mark_chain = MagicMock()
+    mark_chain.execute.return_value = MagicMock(data=None)
+
+    def _rpc_side_effect(name: str, params: dict) -> MagicMock:
+        if name == "claim_compute_jobs_with_priority":
+            return claim_chain
+        return mark_chain
+
+    mock_supabase.rpc.side_effect = _rpc_side_effect
+    return mock_supabase
+
+
+def _rpc_names(mock_supabase: MagicMock) -> list[str]:
+    return [c.args[0] for c in mock_supabase.rpc.call_args_list]
+
+
+class TestMainWorkerSentryBootstrap:
+    """`main_worker.main()` must call `init_sentry()`.
+
+    ⚠️ Written from FIRST PRINCIPLES: no existing test in this repo asserts
+    that `main_worker.main()` calls anything (143-PATTERNS "Analog C" — the
+    nearest precedent, tests/test_encryption.py:121-138, documents the wiring
+    in a DOCSTRING rather than pinning it). That prose-only convention is
+    exactly what is not good enough here.
+
+    Why this test is load-bearing and not decorative (D-11 ⛔ CORRECTION):
+    TestReconcileSweepAlert below installs a `_FakeSentry` spy, so it captures
+    events whether or not a real Sentry client was ever initialized. Delete
+    `init_sentry()` from `main()` and that class stays GREEN while production
+    emits nothing at all — `sentry_sdk.capture_*` without `sentry_sdk.init` is
+    a silent no-op (143-RESEARCH.md L-1). THIS test is the only thing standing
+    between SC#1's "a Sentry alert fires" and the silent-alerting defect class
+    the milestone has already closed twice.
+    """
+
+    @pytest.mark.asyncio
+    async def test_main_calls_init_sentry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Awaiting main() invokes init_sentry exactly once.
+
+        Everything main() does BESIDES the bootstrap is stubbed: KEK
+        validation, the three worker loops, the healthz server, and the
+        signal-handler registration. `start_healthz_server` is patched on
+        `main_worker_healthz` because main() imports it inside the function
+        body (main_worker.py:975-976), so the module attribute is what resolves
+        at call time.
+        """
+        import main_worker_healthz
+
+        # Signal handlers: main() registers SIGTERM/SIGINT on the RUNNING loop.
+        # Patch the bound method on the actual loop object rather than reaching
+        # into asyncio — narrower, and it cannot leak past this test.
+        loop = asyncio.get_running_loop()
+        monkeypatch.setattr(loop, "add_signal_handler", lambda *a, **k: None)
+
+        init_spy = MagicMock()
+
+        with patch.object(main_worker, "init_sentry", init_spy), \
+             patch.object(main_worker, "validate_kek_on_startup", MagicMock()), \
+             patch.object(main_worker, "dispatch_loop", new=AsyncMock()), \
+             patch.object(main_worker, "watchdog_loop", new=AsyncMock()), \
+             patch.object(main_worker, "daily_enqueue_loop", new=AsyncMock()), \
+             patch.object(main_worker_healthz, "start_healthz_server", new=AsyncMock()):
+            await main_worker.main()
+
+        assert init_spy.call_count == 1, (
+            "main_worker.main() did not call init_sentry() exactly once (got "
+            f"{init_spy.call_count}). Without it the worker process has NO "
+            "Sentry client, every sentry_sdk.capture_* in dispatch_tick is a "
+            "SILENT no-op, and SC#1's 'a Sentry alert fires' is false in "
+            "production while TestReconcileSweepAlert stays green (D-11 "
+            "correction / 143-RESEARCH.md L-1)."
+        )
+
+
+class TestReconcileSweepAlert:
+    """Claiming a job carrying the reconcile-sweep marker emits one Sentry event.
+
+    Read together with TestMainWorkerSentryBootstrap: that class proves the SDK
+    is initialized, this one proves the right event is emitted. Neither is
+    sufficient alone — see the D-11 correction quoted above.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_heal_dedupe(self) -> Any:
+        """Isolate the process-lifetime heal de-dupe between tests.
+
+        `main_worker._RECONCILE_ALERTED` is module-level and survives for the
+        worker's whole life by design. Without this, test order would decide
+        outcomes: whichever test emitted for a given heal key first would
+        silently suppress every later test using the same key, and the
+        suppression assertions below would pass VACUOUSLY. Cleared on the way
+        IN and on the way OUT so neither this class nor any other is affected.
+        """
+        main_worker._RECONCILE_ALERTED.clear()
+        yield
+        main_worker._RECONCILE_ALERTED.clear()
+
+    @pytest.mark.asyncio
+    async def test_marker_job_captures_sentry_event(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A claimed job whose metadata.source is the sweep marker emits exactly
+        one warning-level capture carrying strategy_id and detected_at."""
+        detected_at = "2026-08-16T00:00:00Z"
+        strategy_id = "11111111-1111-4111-8111-111111111111"
+        jobs = [
+            {
+                "id": "job-sweep-1",
+                "kind": "compute_analytics_from_csv",
+                "strategy_id": strategy_id,
+                "claim_token": "tok-sweep-1",
+                # WR-03: FIRST claim. attempts is stamped by the claim RPC
+                # (attempts = attempts + 1 over NOT NULL DEFAULT 0), so a
+                # freshly-swept row arrives here at 1. Declared EXPLICITLY
+                # rather than relying on the production `or 1` fail-open
+                # default — a fixture that leans on the default cannot
+                # distinguish "emits on first claim" from "emits always".
+                "attempts": 1,
+                "metadata": {
+                    _SWEEP_MARKER_KEY: _SWEEP_MARKER_VALUE,
+                    _SWEEP_DETECTED_AT_KEY: detected_at,
+                },
+            }
+        ]
+        mock_supabase = _mock_supabase_for(jobs)
+        spy = _FakeSentry()
+        monkeypatch.setattr(main_worker, "sentry_sdk", spy)
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ):
+            await dispatch_tick("worker-test-sweep")
+
+        assert len(spy.captures) == 1, (
+            "expected exactly ONE Sentry capture for a reconcile-sweep-marked "
+            f"job, got {len(spy.captures)}:\n{spy.serialised()}"
+        )
+        capture = spy.captures[0]
+        assert capture["message"] == _SWEEP_ALERT_MESSAGE
+        assert capture["level"] == _SWEEP_ALERT_LEVEL
+        assert capture["tags"].get("surface") == _SWEEP_SURFACE_TAG
+        assert capture["tags"].get("job_kind") == "compute_analytics_from_csv"
+        assert capture["extras"].get("strategy_id") == strategy_id
+        assert capture["extras"].get(_SWEEP_DETECTED_AT_KEY) == detected_at
+        # Anti-vacuity: the assertions above would also hold if the emission
+        # somehow ran while the job never dispatched. Pin that the job still
+        # completed its normal path.
+        assert _rpc_names(mock_supabase).count("mark_compute_job_done") == 1, (
+            "the marked job did not complete its normal mark_done path — the "
+            "capture assertions above prove nothing about a job that was "
+            "never actually dispatched."
+        )
+
+    @pytest.mark.asyncio
+    async def test_unmarked_job_does_not_capture(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No metadata at all, and a foreign metadata.source, both emit nothing.
+
+        The second arm is the one that matters: the emission must key on the
+        marker VALUE, not merely on metadata being present. Every cron-enqueued
+        job in this repo already carries metadata (correlation_id, etc.), so a
+        presence-only check would alert on routine work.
+        """
+        jobs = [
+            {
+                "id": "job-plain",
+                "kind": "sync_trades",
+                "strategy_id": "s-plain",
+                "claim_token": "tok-plain",
+                "metadata": None,
+            },
+            {
+                "id": "job-other",
+                "kind": "sync_trades",
+                "strategy_id": "s-other",
+                "claim_token": "tok-other",
+                "metadata": {_SWEEP_MARKER_KEY: "something-else"},
+            },
+        ]
+        mock_supabase = _mock_supabase_for(jobs)
+        spy = _FakeSentry()
+        monkeypatch.setattr(main_worker, "sentry_sdk", spy)
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ):
+            await dispatch_tick("worker-test-unmarked")
+
+        assert spy.captures == [], (
+            "an unmarked job produced a Sentry capture — the sweep alert would "
+            f"fire on routine work:\n{spy.serialised()}"
+        )
+        # Anti-vacuity: a dispatch_tick that blew up before the claim loop
+        # would also produce zero captures. Prove both jobs actually ran.
+        assert _rpc_names(mock_supabase).count("mark_compute_job_done") == 2, (
+            "both unmarked jobs must have dispatched; a zero-capture assertion "
+            "over a loop that never executed is vacuous."
+        )
+
+    @pytest.mark.asyncio
+    async def test_capture_failure_does_not_fail_job(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A Sentry transport failure must never fail the job being dispatched.
+
+        The emission sits in the claim loop BEFORE the `try:` that owns
+        dispatch()'s error handling (main_worker.py, DX-07 insertion point), so
+        an unwrapped raise here escapes dispatch_tick entirely and takes the
+        whole tick — every job in the claimed batch — down with it. T-143-11.
+        """
+        jobs = [
+            {
+                "id": "job-sweep-boom",
+                "kind": "compute_analytics_from_csv",
+                "strategy_id": "s-boom",
+                "claim_token": "tok-boom",
+                "attempts": 1,
+                "metadata": {
+                    _SWEEP_MARKER_KEY: _SWEEP_MARKER_VALUE,
+                    _SWEEP_DETECTED_AT_KEY: "2026-08-16T00:00:00Z",
+                },
+            }
+        ]
+        mock_supabase = _mock_supabase_for(jobs)
+        spy = _FakeSentry(capture_raises=RuntimeError("sentry transport down"))
+        monkeypatch.setattr(main_worker, "sentry_sdk", spy)
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ):
+            await dispatch_tick("worker-test-sweep-boom")
+
+        # The emission was ATTEMPTED (otherwise this test would pass vacuously
+        # against an implementation that never emits at all).
+        assert len(spy.captures) == 1, (
+            "the emission was never attempted, so this test proves nothing "
+            "about transport-failure tolerance."
+        )
+        # ...and the job still reached its DONE mark.
+        assert _rpc_names(mock_supabase).count("mark_compute_job_done") == 1, (
+            "a Sentry transport failure prevented the job from being marked "
+            "done. Telemetry must never fail the work it observes (T-143-11)."
+        )
+        assert "mark_compute_job_failed" not in _rpc_names(mock_supabase), (
+            "a Sentry transport failure was laundered into a job FAILURE."
+        )
+
+    @pytest.mark.asyncio
+    async def test_reclaimed_marker_job_does_not_re_alert(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-claiming an ALREADY-ALERTED heal emits nothing further.
+
+        The marker is not consumed. It lives in compute_jobs.metadata for the
+        row's whole lifetime and `claim_compute_jobs_with_priority` MERGES
+        metadata (`COALESCE(metadata,'{}') || jsonb_build_object(...)`,
+        20260719073701:190-198) rather than replacing it, so it survives every
+        re-claim: a failed_retry (up to max_attempts, default 3), a watchdog
+        `reset_stalled_compute_jobs` reclaim, a DEFERRED -> defer_compute_job ->
+        pending cycle. Unconditional emission therefore reports ONE healed
+        strategy as N events, and a flapping job becomes an alert storm on a
+        warning-level channel. The count is the signal — SC#1's alert means
+        "a dropped enqueue was healed", not "a job was claimed".
+
+        ⚠️ THE SUPPRESSION IS DRIVEN BY A PRIOR SUCCESSFUL EMISSION, NOT BY
+        `attempts`. This test used to seed a single job at attempts=3 and assert
+        zero captures, which encoded the very bug being fixed: it demanded
+        SILENCE for a heal that had never been reported at all. It now drives
+        the REAL sequence — claim, emit, re-claim the SAME heal — and pins the
+        total at exactly one. The `attempts` values below are deliberately
+        DIFFERENT across the two claims (1 then 3, as the watchdog leaves them)
+        to prove the de-dupe does not read that column.
+        """
+        heal = {
+            "id": "job-sweep-reclaimed",
+            "kind": "compute_analytics_from_csv",
+            "strategy_id": "s-reclaimed",
+            "claim_token": "tok-reclaimed",
+            "metadata": {
+                _SWEEP_MARKER_KEY: _SWEEP_MARKER_VALUE,
+                _SWEEP_DETECTED_AT_KEY: "2026-08-16T00:00:00Z",
+            },
+        }
+        spy = _FakeSentry()
+        monkeypatch.setattr(main_worker, "sentry_sdk", spy)
+
+        # First claim of the heal, then a re-claim of the SAME row.
+        for attempts, worker in ((1, "worker-a"), (3, "worker-b")):
+            mock_supabase = _mock_supabase_for([{**heal, "attempts": attempts}])
+            with patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch(
+                     "main_worker.dispatch",
+                     new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+                 ):
+                await dispatch_tick(worker)
+            # Anti-vacuity, per claim: a dispatch_tick that never entered the
+            # claim loop would also produce no NEW capture, making the
+            # count assertion below meaningless.
+            assert _rpc_names(mock_supabase).count("mark_compute_job_done") == 1, (
+                f"the {worker} claim never dispatched; a capture-count "
+                "assertion over a loop that never executed is vacuous."
+            )
+
+        assert len(spy.captures) == 1, (
+            "re-claiming an ALREADY-ALERTED reconcile-sweep heal produced "
+            f"{len(spy.captures)} Sentry captures, expected exactly 1. The "
+            "marker persists on the row and the claim RPC merges metadata, so "
+            "every retry, watchdog reclaim and defer would re-fire the alert "
+            "for the SAME healed strategy — an operator counting events cannot "
+            f"read them as strategies healed:\n{spy.serialised()}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_heal_whose_first_claim_died_is_still_alerted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A heal whose FIRST claim died before emitting is still reported once.
+
+        ⚠️ THIS IS THE REGRESSION TEST FOR THE LOST ALERT. The de-dupe was
+        `attempts <= 1`. MEASURED 2026-08-17: the watchdog this worker actually
+        calls is `reset_stalled_compute_jobs` (main_worker.watchdog_tick), whose
+        two UPDATEs set status='pending' and DO NOT touch `attempts`
+        (20260516104201:657-670, :681-694) — unlike the sibling
+        `reclaim_stuck_compute_jobs`, which decrements
+        (`attempts = GREATEST(attempts - 1, 0)`, :596). `failed_retry` re-claim
+        likewise keeps the incremented count.
+
+        So the sequence below is REACHABLE IN PRODUCTION: the sweep heals a
+        dropped enqueue, the first claim dies before reaching the emission (OOM,
+        SIGKILL, host loss — nothing is recorded), the watchdog resets the row,
+        and the re-claim arrives carrying attempts=2. Under `attempts <= 1` that
+        is False, so the alert was NEVER emitted for that heal — and a dropped
+        enqueue healed right after a worker crash is precisely the incident an
+        operator most needs paged on. SC#1's "a Sentry alert fires" was false
+        for exactly that case.
+
+        The first claim is modelled by dispatching and then clearing nothing:
+        the process-lifetime record is only written AFTER a successful
+        capture_message, so a claim that never reached the emission leaves no
+        record — which is what the crash leaves behind. Here the crash is
+        modelled directly: the tick is run with the marker ABSENT from the
+        emission path (dispatch raises), then the row comes back at attempts=2.
+        """
+        detected_at = "2026-08-16T00:00:00Z"
+        heal = {
+            "id": "job-sweep-crashed-first-claim",
+            "kind": "compute_analytics_from_csv",
+            "strategy_id": "s-crashed",
+            "claim_token": "tok-crashed",
+            "metadata": {
+                _SWEEP_MARKER_KEY: _SWEEP_MARKER_VALUE,
+                _SWEEP_DETECTED_AT_KEY: detected_at,
+            },
+        }
+        spy = _FakeSentry()
+        monkeypatch.setattr(main_worker, "sentry_sdk", spy)
+
+        # --- The first claim died before it could emit. -------------------
+        # Nothing was recorded for this heal: _RECONCILE_ALERTED is empty
+        # (the autouse fixture guarantees it), which is exactly the state a
+        # crashed/killed worker leaves behind.
+        assert main_worker._RECONCILE_ALERTED == {}, (
+            "the heal de-dupe was not empty at the start of this test, so the "
+            "'first claim died' precondition does not hold and the assertion "
+            "below would prove nothing."
+        )
+
+        # --- The watchdog reset the row; it comes back at attempts=2. ------
+        # reset_stalled_compute_jobs does NOT decrement attempts, so the
+        # re-claim carries 2. This is the value the old `<= 1` gate rejected.
+        mock_supabase = _mock_supabase_for([{**heal, "attempts": 2}])
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ):
+            await dispatch_tick("worker-after-crash")
+
+        assert len(spy.captures) == 1, (
+            "a heal whose FIRST claim died before emitting produced "
+            f"{len(spy.captures)} Sentry captures, expected exactly 1. The "
+            "watchdog (reset_stalled_compute_jobs) does not decrement attempts, "
+            "so this re-claim arrives at attempts=2; any de-dupe keyed on "
+            "`attempts` (the old `attempts <= 1`) drops it and the heal is "
+            "NEVER reported. That is the case SC#1 exists to page on:\n"
+            f"{spy.serialised()}"
+        )
+        assert spy.captures[0]["extras"]["detected_at"] == detected_at, (
+            "the emitted event does not carry the heal's detected_at, so an "
+            "operator cannot tie the alert back to the sweep tick that healed it."
+        )
+        # Anti-vacuity: prove the claim loop actually ran.
+        assert _rpc_names(mock_supabase).count("mark_compute_job_done") == 1, (
+            "the re-claimed job never dispatched; the capture assertion above "
+            "would be measuring a loop that never executed."
+        )
+
+        # --- And it does not then storm: a further re-claim adds nothing. ---
+        mock_supabase2 = _mock_supabase_for([{**heal, "attempts": 3}])
+        with patch("main_worker.get_supabase", return_value=mock_supabase2), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ):
+            await dispatch_tick("worker-after-crash-2")
+
+        assert len(spy.captures) == 1, (
+            "the recovered heal re-alerted on a subsequent re-claim "
+            f"({len(spy.captures)} captures total, expected 1). Fixing the lost "
+            "alert must not re-open the alert storm the de-dupe exists to "
+            f"prevent:\n{spy.serialised()}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_marker_job_without_attempts_still_alerts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The dedupe is FAIL-OPEN: a row with no `attempts` still emits.
+
+        The alert path no longer reads `attempts` AT ALL — the de-dupe is keyed
+        on the heal identity (job id + detected_at). This test therefore pins a
+        STRUCTURAL property: a claimed row missing that column still produces
+        SC#1's event. Over-alerting is recoverable; a silently unreported heal
+        is the exact defect class this phase exists to close.
+
+        ⚠️ Be precise about what this test does and does not catch, because
+        several plausible neuters were RUN and did NOT redden it:
+
+          * `attempts <= 1` re-introduced      -> GREEN (measured 2026-08-17)
+            correctly: `or 1` makes a missing attempts 1, and 1 <= 1 emits.
+            The LOST-alert bug that gate causes is caught by
+            test_heal_whose_first_claim_died_is_still_alerted, not here.
+          * `or 1` -> `or 0` / `.get("attempts", 0)` under `<= 1`
+                                               -> GREEN (measured 2026-08-17)
+            correctly: 0 <= 1.
+
+        The neuter that DOES redden this test is a strict first-claim check
+        over a 0 default:
+
+          * `job.get("attempts", 0) == 1`      -> RED (measured 2026-08-17)
+            "a sweep-marked job with NO attempts field emitted 0 events,
+             expected 1"
+
+        Recorded here rather than in a summary so the next reader does not
+        neuter a default, see green, and conclude the test is vacuous.
+        """
+        jobs = [
+            {
+                "id": "job-sweep-noattempts",
+                "kind": "compute_analytics_from_csv",
+                "strategy_id": "s-noattempts",
+                "claim_token": "tok-noattempts",
+                # `attempts` deliberately ABSENT.
+                "metadata": {
+                    _SWEEP_MARKER_KEY: _SWEEP_MARKER_VALUE,
+                    _SWEEP_DETECTED_AT_KEY: "2026-08-16T00:00:00Z",
+                },
+            }
+        ]
+        mock_supabase = _mock_supabase_for(jobs)
+        spy = _FakeSentry()
+        monkeypatch.setattr(main_worker, "sentry_sdk", spy)
+
+        with patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ):
+            await dispatch_tick("worker-test-sweep-noattempts")
+
+        assert len(spy.captures) == 1, (
+            "a sweep-marked job with NO attempts field emitted "
+            f"{len(spy.captures)} events, expected 1. The WR-03 first-claim "
+            "gate must fail OPEN: a defensive default is never allowed to be "
+            "what silences SC#1's alert."
+        )
+
+    @pytest.mark.asyncio
+    async def test_capture_failure_is_logged_loudly(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A failing emission must be LOGGED, not swallowed in silence (WR-02).
+
+        The swallow is correct and stays -- telemetry must never fail the work
+        it observes. What is NOT correct is a bare `pass`: if the emission
+        itself breaks (an SDK change removing new_scope(), a scope misuse, a
+        metadata shape the .get() chain trips on) the SC#1 alert dies exactly as
+        silently as the pg_net -> Sentry bridge this phase REJECTED FOR BEING
+        SILENTLY FAILABLE. That is the milestone's own declared defect class
+        reproduced one layer in.
+
+        No test can observe the REAL emission breaking -- every test in this
+        class injects `_FakeSentry` in place of the module -- so the log line is
+        the only signal an operator ever gets. This test is what keeps it there.
+        """
+        strategy_id = "22222222-2222-4222-8222-222222222222"
+        jobs = [
+            {
+                "id": "job-sweep-loud",
+                "kind": "compute_analytics_from_csv",
+                "strategy_id": strategy_id,
+                "claim_token": "tok-loud",
+                "attempts": 1,
+                "metadata": {
+                    _SWEEP_MARKER_KEY: _SWEEP_MARKER_VALUE,
+                    _SWEEP_DETECTED_AT_KEY: "2026-08-16T00:00:00Z",
+                },
+            }
+        ]
+        mock_supabase = _mock_supabase_for(jobs)
+        boom = RuntimeError("sentry transport down")
+        spy = _FakeSentry(capture_raises=boom)
+        monkeypatch.setattr(main_worker, "sentry_sdk", spy)
+
+        with caplog.at_level(logging.WARNING, logger=main_worker.logger.name), \
+             patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ):
+            await dispatch_tick("worker-test-sweep-loud")
+
+        # Anti-vacuity: without this the test would pass against an
+        # implementation that never emits at all and therefore never fails.
+        assert len(spy.captures) == 1, (
+            "the emission was never attempted, so this test proves nothing "
+            "about what happens when it fails."
+        )
+
+        # Keyed on the structured event_type, not on prose: the message wording
+        # is free to change, the routing key is the contract.
+        emit_failures = [
+            r for r in caplog.records
+            if getattr(r, "event_type", None) == "reconcile_sweep_alert_emit_failed"
+        ]
+        assert len(emit_failures) == 1, (
+            "a raising reconcile-sweep Sentry emission produced "
+            f"{len(emit_failures)} log record(s) carrying event_type="
+            "'reconcile_sweep_alert_emit_failed', expected exactly 1. A silent "
+            "`except Exception: pass` here means a broken alert path is "
+            "INVISIBLE: the sweep goes on healing dropped enqueues, SC#1's "
+            "alert never fires, and no log, counter or Sentry event says so -- "
+            "the precise failure mode this phase rejected the pg_net bridge "
+            "for. Keep the swallow; keep it LOUD."
+        )
+        record = emit_failures[0]
+        assert record.levelno >= logging.WARNING, (
+            f"the emit-failure log landed at level {record.levelname}; a broken "
+            "alert path must be at WARNING or above or it will not be routed."
+        )
+        # Triage context: an operator must be able to find the job and the
+        # strategy whose heal went unreported, and see the cause.
+        rendered = record.getMessage()
+        assert "job-sweep-loud" in rendered, (
+            "the emit-failure log does not name the JOB id, so an operator "
+            f"cannot correlate it to anything: {rendered!r}"
+        )
+        assert strategy_id in rendered, (
+            "the emit-failure log does not name the STRATEGY id, so an "
+            f"operator cannot tell WHICH heal went unreported: {rendered!r}"
+        )
+        assert str(boom) in rendered, (
+            "the emit-failure log does not carry the underlying exception, so "
+            f"the failure cannot be triaged: {rendered!r}"
+        )
+        # ...and the job still completed. The log must not have been bought by
+        # letting the exception escape.
+        assert _rpc_names(mock_supabase).count("mark_compute_job_done") == 1, (
+            "the job did not reach its DONE mark — logging the failure must "
+            "not change the swallow's behaviour (T-143-11)."
+        )
+
+
+# ---------------------------------------------------------------------------
+# JOB-04 / Phase 143 — the CROSS-LANGUAGE metadata marker contract.
+#
+# The sweep's pg_cron body stamps
+# metadata = {"source": "reconcile-sweep", "detected_at": now()} and
+# main_worker.dispatch_tick() reads those EXACT literals on claim to fire its
+# one warning-level Sentry event. Neither half can see the other. Rename the key
+# on the SQL side and the Python read silently never matches; rename it on the
+# Python side and the SQL keeps stamping a value nobody reads. In BOTH cases the
+# alert dies SILENTLY while every unit test on either side stays green — which
+# is precisely the defect class this milestone has spent two phases closing.
+# This gate is the only thing that pins the two halves to each other.
+#
+# ⚠️ POINTER HYGIENE (P-7, and the lesson _REAPER_MIGRATION_NAME above learned
+# the hard way, twice). _SWEEP_MIGRATION_NAME is a HAND-MAINTAINED pointer at a
+# file. A forward-only re-registration of this cron that leaves the pointer
+# behind makes this gate guard a body pg_cron no longer runs, while staying
+# green. RULE: every re-registration moves this constant AND
+# src/__tests__/reconcile-dropped-enqueue-sweep.test.ts's FIX_TS/FIX_FILENAME in
+# the SAME commit as the migration. That TS gate's forward-drift sweep is the
+# backstop that makes a violation visible.
+#
+# ⚠️ Deliberately NOT copied from TestReaperThresholdDriftGate: its SQL<->Python
+# equality assertion on an interval literal. There is no Python consumer of the
+# sweep's 1-hour grace window, so mirroring it into a Python constant here would
+# be a DECORATIVE drift gate — a number nothing executes, guarded against a
+# number nothing reads (143-RESEARCH "Don't Hand-Roll"). The marker literals ARE
+# read on both sides, which is what makes THIS contract load-bearing.
+# ---------------------------------------------------------------------------
+
+_SWEEP_MIGRATION_NAME = "20260816140000_reconcile_dropped_enqueue_sweep.sql"
+
+
+def _sweep_migration_path() -> pathlib.Path:
+    """Repo-root-relative path to the JOB-04 sweep migration.
+
+    ``parents[2]`` from ``analytics-service/tests/`` is the repo root, matching
+    the resolution in ``_reaper_migration_path()`` and ``test_migration_132.py``.
+    """
+    return (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "supabase"
+        / "migrations"
+        / _SWEEP_MIGRATION_NAME
+    )
+
+
+def _sweep_cron_body() -> str:
+    """The text BETWEEN the ``$cron$`` delimiters — i.e. exactly the body that
+    ``cron.schedule`` stores and pg_cron executes.
+
+    Scoping to the body is load-bearing, not tidiness: the migration's header
+    legitimately DISCUSSES the rejected grace-anchor columns at length while the
+    gates forbid them inside the body. Prose must neither satisfy nor trip a
+    mechanical gate.
+    """
+    path = _sweep_migration_path()
+    assert path.is_file(), (
+        f"the JOB-04 sweep migration is missing at {path}. If it was renamed, "
+        f"_SWEEP_MIGRATION_NAME here and FIX_TS/FIX_FILENAME in "
+        f"src/__tests__/reconcile-dropped-enqueue-sweep.test.ts must move in the "
+        f"SAME commit (P-7)."
+    )
+    src = path.read_text(encoding="utf-8")
+    match = re.search(r"\$cron\$(.*?)\$cron\$", src, flags=re.DOTALL)
+    assert match is not None, (
+        f"{_SWEEP_MIGRATION_NAME} has no $cron$...$cron$ block. The sweep body "
+        "must be an INLINE dollar-quoted literal passed to cron.schedule (no "
+        "named function => no SECURITY DEFINER surface and no caller-suppliable "
+        "grace interval). If the body moved into a function, this gate and the "
+        "phase's threat model both need revisiting."
+    )
+    body = match.group(1)
+    # ANTI-VACUITY GUARD (PATTERNS S-5), and it has already earned its keep:
+    # Phase 143 Plan 02 hit exactly this live. An earlier draft of the migration
+    # header wrote the cron dollar-tag three times in COMMENTS, so this
+    # non-greedy regex matched the PROSE pair and returned a span of comments
+    # containing no INSERT at all — under which every assertion below would have
+    # passed by default. An empty or wrong extraction must fail LOUDLY, never
+    # pass negatives silently.
+    assert "INSERT INTO public.compute_jobs" in body, (
+        "extracted $cron$ body does not contain the healing INSERT — the "
+        f"extraction is broken, so the assertions below prove nothing. Body was: "
+        f"{body[:200]!r}"
+    )
+    return body
+
+
+class TestReconcileSweepMarkerContract:
+    """JOB-04 / D-11. The metadata marker the pg_cron sweep STAMPS must equal the
+    marker main_worker.dispatch_tick() READS. Drift on either side silently kills
+    the SC#1 alert while both halves' own tests stay green — the SQL side keeps
+    stamping, the Python side keeps not matching, and nothing is ever reported."""
+
+    def test_cron_body_marker_matches_worker_literal(self) -> None:
+        """The three marker literals appear on BOTH sides of the contract.
+
+        Oracle independence: every literal below is declared LOCALLY in this
+        test, naming its two production sources. Nothing is imported from either
+        half — a gate that reads its expectation out of one of the artifacts it
+        compares cannot fail when that artifact drifts.
+        """
+        # Production sources:
+        #   SQL    — supabase/migrations/20260816140000_...sql, the cron body's
+        #            jsonb_build_object('source', 'reconcile-sweep', 'detected_at', now())
+        #   Python — analytics-service/main_worker.py, dispatch_tick()'s claim loop
+        marker_value = "reconcile-sweep"
+        marker_keys = ("source", "detected_at")
+
+        # ----- SQL half -------------------------------------------------
+        body = _sweep_cron_body()
+        assert "jsonb_build_object" in body, (
+            "the deployed sweep body does not build its metadata with "
+            "jsonb_build_object, so there is no marker for the worker to read "
+            "and a healed strategy is healed SILENTLY."
+        )
+        assert f"'{marker_value}'" in body, (
+            f"the sweep body does not stamp the {marker_value!r} marker VALUE. "
+            "main_worker.dispatch_tick() compares metadata['source'] against "
+            "that exact string, so without it the Sentry alert never fires and "
+            "SC#1's alert half is false in production while every unit test on "
+            "both sides stays green."
+        )
+        for key in marker_keys:
+            assert f"'{key}'" in body, (
+                f"the sweep body does not stamp the {key!r} metadata KEY. Both "
+                "keys are part of the cross-language contract; dropping "
+                "'source' kills the alert outright, dropping 'detected_at' "
+                "leaves the operator unable to tell a fresh drop from a "
+                "month-old one."
+            )
+
+        # ----- Python half ----------------------------------------------
+        # Scoped to dispatch_tick, not to the whole module: 'source' is a common
+        # token and a whole-file grep could be satisfied by an unrelated line.
+        worker_src = inspect.getsource(main_worker.dispatch_tick)
+        assert worker_src.strip(), (
+            "inspect.getsource(main_worker.dispatch_tick) returned nothing, so "
+            "the Python half of this contract was never actually inspected."
+        )
+        # ⚠️ Pin the COMPARISON, not the bare literal. A plain
+        # `f'"{marker_value}"' in worker_src` check was written here first and
+        # OBSERVED NOT TO FAIL when the comparison's literal was changed to
+        # 'reconcile_sweep': the emission also passes the same string as a Sentry
+        # TAG (`scope.set_tag("surface", "reconcile-sweep")`), which satisfied the
+        # bare-literal form all by itself. The tag is cosmetic; the comparison is
+        # what decides whether an event is emitted at all. Pinning the operator
+        # with it is the difference between a gate that can fail and one that
+        # cannot — see this repo's standing rule.
+        assert f'== "{marker_value}"' in worker_src, (
+            f"main_worker.dispatch_tick() no longer COMPARES the claimed job's "
+            f"metadata against {marker_value!r}. The SQL body still stamps that "
+            "value, so the sweep goes on healing dropped enqueues and NOTHING is "
+            "ever reported — the silent-alert failure this contract exists to "
+            "prevent. Note this assertion deliberately pins the comparison and "
+            "not the bare literal, because the same string also appears as a "
+            "Sentry tag and would satisfy a looser check. If the marker value "
+            "legitimately changed, the migration and this test move in the SAME "
+            "commit."
+        )
+        for key in marker_keys:
+            assert f'.get("{key}")' in worker_src, (
+                f"main_worker.dispatch_tick() no longer reads the {key!r} key "
+                "off the claimed job's metadata. If the emission moved out of "
+                "dispatch_tick, move this gate with it — an unmoved gate goes on "
+                "inspecting a function that no longer carries the read, and "
+                "stays green while the alert is dead."
+            )
