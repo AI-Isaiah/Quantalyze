@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.65.0.0] - 2026-08-18
+### feat: v1.19 JOB-06 — a CSV finalize is now ONE transaction; a partial failure can no longer strand a strategy (closes SC#2/SC#3)
+
+A CSV-wizard finalize used to run FIVE hops across two transactions and an HTTP boundary
+(Next → Python → two separate RPCs). Three failure windows could commit a strategy row with
+ZERO data rows behind it — the orphan class the PROD census measured: 18 rows, all from the
+2026-05 incident era. And two of the route's error messages claimed "Nothing was changed."
+on arms where hops 1–2 had already committed.
+
+**What ships**
+
+- **The fold**: `finalize_csv_strategy_with_returns` — strategies + verification + the full
+  daily-returns series written by ONE SECURITY DEFINER transaction with deliberately NO
+  exception handler: any error (the 23505 double-submit fence included) rolls back all
+  three writes. Proven live: a poisoned element 6-of-10 left 0/0/0 rows on the deployed
+  TEST body. Both parent RPCs are DROPped — one writer, no drift bomb.
+- **The route calls the fold directly** (founder decision (i-b), made on measured numbers —
+  the latency table retired the alternative's only argument). The Python csv-finalize
+  branch is deleted; hop 0's HTTP boundary no longer exists on this path, so the "response
+  lost after commit" window is gone too.
+- **Honest failure copy**: the two "Nothing was changed." lies are replaced by sentences
+  the route can actually stand behind, and the previously-invisible failure arms now
+  capture to Sentry (`finalize-fold-fail`, `finalize-resolve-refused`,
+  `finalize-resolve-read-fail`).
+- **Submit un-bricked on fail-closed errors** (ship-review fix): a `CSV_PERSIST_FAIL` 503
+  used to strand the wizard on a permanently disabled Submit button next to copy saying
+  "Try again shortly." The fence now re-enables retry — which is safe by construction: a
+  committed prior attempt resolves idempotently to the existing strategy.
+- **The 18 measured PROD orphans are explained and archived** — analytics marked `failed`
+  with the incident evidence preserved, then `status='archived'` (UPDATE-only, per-row
+  rollback anchors recorded). The PROD orphan census now reads zero, and the fold keeps it
+  there by construction.
+- **Gates**: a new deployed-body atomicity oracle, terminal-status + trades-empty + 5000-cap
+  parts, the auth-guard gate re-pointed with the parents-gone receipt, the double-submit
+  rollback widened to all three tables, and the vacuous RED-TEAM-M1 test replaced by three
+  gates each observed to fail. 15-row TS neuter-RED table + 10-row SQL matrix on record.
+
+**Deploy note**: the merge auto-applies the migration to PROD while the Vercel promotion
+builds — a bounded few-minute window in which csv-finalize errors (both orders fail before
+any write; retry after deploy is clean). Accepted consciously; merged at quiet hours.
+
 ## [0.64.0.0] - 2026-08-17
 ### feat: v1.19 JOB-05 — an orphaned running compute job terminates VISIBLY (WR-02 resolved)
 
