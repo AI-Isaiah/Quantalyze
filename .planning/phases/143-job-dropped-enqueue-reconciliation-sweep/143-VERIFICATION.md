@@ -105,14 +105,14 @@ human_verification:
       \"approved\" to authorize /ship. This is the phase's own declared remaining gate and
       143-04-SUMMARY.md:124-126 records it as owed.
     why_human: "Authorization to merge a migration that AUTO-APPLIES to PROD. No agent may self-grant it."
-  - test: "Decide whether W-1 and W-2 (falsified D-11 premise in the shipped migration header and in main_worker.py) are corrected before /ship or logged to TODOS.md."
+  - test: "[✅ DISCHARGED 2026-08-17 in commit 694444e3 — corrected, not logged] W-1 and W-2 (falsified D-11 premise in the migration header and in main_worker.py)."
     expected: >-
       Either a comment-only correction commit touching both files, or an explicit TODOS.md
       entry. The project stopping rule says prose is never blocking — but the standing
       one-file-amendment rule says the D-12 correction that touched this exact file should
       have carried D-11 with it.
     why_human: "Judgment call between two of the project's own standing rules."
-  - test: "Decide whether W-3 (SC#2 correction absent from 143-CONTEXT.md and 143-RESEARCH.md) is closed before archiving the phase."
+  - test: "[✅ DISCHARGED 2026-08-17 in commit 694444e3 — pre-execution ledgers ARE amendable; correction banners added at the anchors, plus both RESEARCH tables] W-3 (SC#2 correction absent from 143-CONTEXT.md and 143-RESEARCH.md)."
     expected: "A correction banner on 143-CONTEXT.md:120 and 143-RESEARCH.md:131/196/210, or an accepted decision that pre-execution artifacts are historical and are not amended."
     why_human: "Policy call on whether pre-execution ledgers are amendable records or frozen history."
   - test: "Inspect the PR's FIRST sql-tests CI run and confirm Parts 2-4 pass against the real TEST schema (W-5)."
