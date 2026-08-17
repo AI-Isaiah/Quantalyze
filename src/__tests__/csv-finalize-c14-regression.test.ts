@@ -92,8 +92,13 @@ const strategiesMaybeSingleMock = vi.hoisted(() =>
 );
 const dailiesRangeLimitMock = vi.hoisted(() =>
   vi.fn(
-    async (): Promise<{ data: unknown[]; error: unknown }> => ({
+    async (): Promise<{
+      data: unknown[];
+      count?: number | null;
+      error: unknown;
+    }> => ({
       data: [],
+      count: 0,
       error: null,
     }),
   ),
