@@ -2584,3 +2584,38 @@ were NOT, and all four are now pushed to `origin` so they are no longer local-on
 looks superseded, but the diff was saved rather than assumed — session scratchpad,
 `rescued-worktree-a06a853e-uncommitted.patch`. ⚠️ Scratchpad is session-scoped; if this matters,
 move it into the repo.
+
+## Phase 143 — recorded deferrals (logged 2026-08-17)
+
+Both are DELIBERATE non-coverages of the JOB-04 dropped-enqueue sweep
+(`supabase/migrations/20260816140000_reconcile_dropped_enqueue_sweep.sql`), documented in that
+file's header and in `143-CONTEXT.md`. Neither is a bug in the sweep; each needs its own mechanism.
+
+- [ ] **(D-09) Composite strategies stranded without analytics are EXCLUDED from the sweep — they
+  need a `stitch_composite` re-run mechanism with its own predicate.** The sweep excludes any
+  strategy with a `public.strategy_keys` member row. This is **money safety, not optimization**:
+  `run_stitch_composite_job` writes `csv_daily_returns` itself (`job_worker.py:6786-6803`) but
+  `JOB_CHAIN_FOLLOW_ON["stitch_composite"]` is the empty tuple (`job_worker.py:527`), so a composite
+  is chain-terminal and legitimately never gets a `compute_analytics_from_csv` job. Enqueueing one
+  would hand the composite headline to the single-key computation its own handler deliberately
+  abandoned — a √252-vs-√365 annualization divergence plus a 0.0 gap-fill that "fabricated flat
+  performance" (`job_worker.py:6808-6822`). Silent corruption of a CORRECT row on a money surface is
+  strictly worse than the un-healed hole. ⚠️ Not hypothetical: the 143-02 census found **1 composite
+  on PROD carrying dailies**, currently protected only by a terminal analytics row — i.e. one failed
+  terminal write away from being the exact false positive this conjunct stops.
+
+- [ ] **(D-05) The wizard/API first-hop enqueue drop is NOT covered.** A `finalize-wizard` strategy
+  whose `sync_trades` enqueue dropped has **no dailies at all**, and "no dailies AND no jobs" is
+  byte-identical to a brand-new strategy that has not synced yet, and to a key whose first sync
+  legitimately returned nothing. No predicate catches the drop without also catching those, so the
+  sweep would re-enqueue healthy strategies forever. Closing it needs a different signal
+  (`api_key_id` present + no job EVER + a longer grace) with its own false-positive analysis — a
+  separate mechanism, not a second predicate bolted into this migration.
+
+- [ ] **(follow-on, from the 143-04 live tick) `cron.job_run_details.return_message` does NOT carry
+  a pg_cron body's RAISE NOTICE text on this Supabase build — it carries the command tag (`DO`).**
+  Observed 2026-08-17. This affects **142's reaper too**, whose header relies on the same premise for
+  its operator-observability section; that file was not touched by Phase 143. Either correct
+  `20260802120000`'s wording or build a real count surface. Until then, count healed rows with
+  `SELECT count(*) FROM public.compute_jobs WHERE metadata->>'source' = 'reconcile-sweep' AND
+  created_at >= <tick start>`, not by reading the run log.
