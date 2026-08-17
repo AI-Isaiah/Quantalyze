@@ -58,7 +58,7 @@ IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = '<name>') THEN
 END IF;
 PERFORM cron.schedule('<name>', '<sched>', $cron$ ... $cron$);
 ```
-144 re-registers the **existing** name `retention_compute_jobs_orphaned_running` (`20260720120000:65`). Keeping the name is what makes `test_retention_orphaned_running.sql` and the deployed jobid continuous; renaming would strand both.
+144 re-registers the **existing** name `retention_compute_jobs_orphaned_running` (`20260720120000:65`). Keeping the name is what makes `test_retention_orphaned_running.sql` continuous; renaming would strand it. ⚠️ CORRECTED 2026-08-17: the deployed jobid is NOT continuous — unschedule+schedule drops and re-inserts, measured TEST 11→19 at apply. The jobname is the stable identifier.
 
 **The body: bounded terminal UPDATE** — the *only* in-repo precedent is `20260802120000:501-528`:
 ```sql

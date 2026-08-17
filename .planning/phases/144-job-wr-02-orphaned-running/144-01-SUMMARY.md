@@ -45,7 +45,7 @@ key-decisions:
   - "next_attempt_at = now() is in BOTH SET lists (B3). Without it, retention_compute_jobs_failed's COALESCE(next_attempt_at, created_at) 90-day key collects an old orphan on the very next 03:30 tick and the audit trail lasts eleven hours instead of ninety days."
   - "No re-enqueue arm, and no call to the enqueue RPC: the orphan at `running` is the thing SUPPRESSING its own replacement (the in-flight index and the enqueue probe both exclude failed_final), so terminalizing IS the recovery for every cron-fanned kind."
   - "ADDITION beyond the plan's enumerated STEP 2 list: an ORDER BY occurrence count (= 2). Losing the deterministic ordering leaves the batch bounded but not progressing, which no other assertion catches; 143 pins its own anchor for the same reason."
-  - "The jobname is unchanged (retention_compute_jobs_orphaned_running) so the deployed jobid and this SQL gate stay continuous."
+  - "The jobname is unchanged (retention_compute_jobs_orphaned_running) so this SQL gate stays continuous. ⚠️ CORRECTED 2026-08-17: the jobid does NOT survive (measured 11→19 at TEST apply); the NAME is the stable identifier."
 ---
 
 # Phase 144 Plan 01: Terminalize orphaned-running compute_jobs Summary
