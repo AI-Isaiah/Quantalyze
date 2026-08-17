@@ -269,6 +269,66 @@ number to TODOS). TEST's CSV population is zero everywhere.
 
 ---
 
+## SC#3 — TEST apply, RED→GREEN, live (i-b) exercise, before/after diff (145-06 Task 1, 2026-08-17 21:5x–22:05 UTC)
+
+### Pre-apply RED (observed verbatim, via Supabase MCP `execute_sql` — no `TEST_SUPABASE_DB_URL` psql path exists locally; mechanism recorded)
+
+1. `test_csv_finalize_atomic_fold.sql` Part 1: `P0001: TEST FAILED (Part 1): finalize_csv_strategy_with_returns does not exist - migration 20260819120000 is not applied to this database. On the shared TEST project this is the DESIGNED RED until Plan 06 applies it…`
+2. `test_csv_finalize_auth_guard.sql` Part A: `P0001: TEST FAILED (Part A): expected SQLSTATE 42501 from the no-session call, got 42883 (message: function public.finalize_csv_strategy_with_returns(…) does not exist)…`
+3. `test_csv_finalize_double_submit.sql` first fold call: raw `42883: function public.finalize_csv_strategy_with_returns(…) does not exist`
+
+### Apply
+
+`apply_migration(name=csv_finalize_atomic_fold)` — success (STEP 0 pre-flight + STEP 3
+self-verify both passed inside the transaction). Ledger drift reconciled EXPLICITLY per the
+plan (T-145-23): the MCP stamped `20260817215435`; UPDATEd to **`20260819120000`** and
+re-verified — TEST's ledger now matches the repo filename prefix.
+
+### Post-apply GREEN (all observed)
+
+| Gate | Result |
+|---|---|
+| test_csv_finalize_atomic_fold Part 1 (structural) | GREEN |
+| Part 2 — THE ATOMICITY ORACLE (mid-body class-22 fault at element 6/10 → strategies=0, verifications=0, dailies=0) | **GREEN on deployed TEST** |
+| Part 3 (private + default status, economic oracle: 2 rows, spot −0.0032 exact) | GREEN |
+| Part 4 (trades-empty succeeds, zero dailies, one verification) | GREEN |
+| Part 5 (5001 rows → 22023, nothing committed) | GREEN |
+| test_csv_finalize_auth_guard A/B/C (exact 42501 messages; both parents GONE from pg_proc) | GREEN |
+| test_csv_finalize_double_submit 1–4 (23505 fence; THREE-table rollback; cross-source control vs the real `create_wizard_strategy`) | GREEN |
+| test_wizard_session_idempotency (column, partial index, four body canaries, Migration-B detector, grants) | GREEN |
+
+### Live (i-b) exercise + SC#3 diff
+
+Topology: `next dev` from the PHASE BRANCH code (worktree; node_modules = APFS clone of the
+main checkout's — Turbopack refuses a symlink) against TEST; no Python process needed — the
+(i-b) route calls the fold directly. Result:
+
+```
+FINALIZE[arm4-10row] rows=10 status=200 wall=2425ms
+  body={"ok":true,"strategy_id":"0cc8bdb1-2c89-48bf-8f29-dcf887a71f33","status":"pending_review",…}
+```
+
+| relation | arm-4 baseline (OLD path, 824b0fe8) | after (NEW path, 0cc8bdb1) | verdict |
+|---|---|---|---|
+| strategies | pending_review / csv / wizard_session written | pending_review / csv / wizard_session written | ✓ identical |
+| strategy_verifications | validated / csv / csv / csv_uploaded | validated / csv / csv / csv_uploaded | ✓ identical |
+| csv_daily_returns | 10 | 10 | ✓ identical |
+| compute_jobs | 1 × pending compute_analytics_from_csv | 1 × pending compute_analytics_from_csv | ✓ identical |
+| strategy_analytics | NO ROW (created later by the job) | NO ROW | ✓ identical |
+
+**Zero unexplained divergences.** One EXPLAINED divergence occurred on the first (i-b) run
+(`abb052f8…`): its compute_jobs row was absent because the harness killed `next dev` before
+the post-response `after()` enqueue flushed — reproduced away by an 8 s flush wait on the
+rerun above. That is a harness artifact, not a route defect; recorded because hiding it
+would misstate the after() contract (hop 5 remains post-response BY DESIGN — window D — and
+143's sweep is its net).
+
+**Throwaway strategies ARCHIVED (never deleted, D-05):** `824b0fe8…` (arm-4 baseline),
+`2979d948…` (Step B 5000-row), `abb052f8…` ((i-b) run 1), `0cc8bdb1…` ((i-b) run 2) — all
+re-selected `status='archived'`.
+
+---
+
 ## Verdict — FINAL (2026-08-17, all four arms executed)
 
 # **CANNOT REPRODUCE — the GUARD is live, the PATH is closed (D-02).**
