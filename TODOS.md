@@ -2640,3 +2640,71 @@ Both have a SAFE failure direction. Recorded so the trade-off is visible, not so
   `'archived'` appears only in the teaser-anchor seed (`20260515095804:88`); there is no archive
   route and `sanitize_user` preserves status. Harmless and left in place as future-proofing — noted
   so nobody reads the conjunct as evidence that an archive flow exists.
+
+- [ ] **TEST's migration ledger disagrees with the repo filename for this migration** (logged
+  2026-08-17 at land time). Applying via Supabase MCP `apply_migration` stamps `now()`, so TEST
+  recorded `supabase_migrations.schema_migrations.version = 20260817092430`, while the repo file —
+  and therefore PROD, which got it through the normal `Supabase Migrate` workflow — is
+  `20260816140000_reconcile_dropped_enqueue_sweep.sql`. **PROD is correct and unaffected**; this is
+  TEST-only bookkeeping. Consequence: TEST still considers `20260816140000` unapplied, so a future
+  `supabase db push` at TEST would re-run it. That re-run is believed benign (`cron.schedule` is
+  upsert-by-name and the body is unchanged) but has **not** been exercised. Known trap, previously
+  seen as the PR-Y2 rename. Reconcile the TEST ledger row, or leave it and never `db push` TEST.
+
+## Phase 144 — recorded deferrals (logged 2026-08-17)
+
+Three DELIBERATE non-actions from the JOB-05 orphaned-`running` terminalizer
+(`supabase/migrations/20260817120000_retention_orphaned_running_terminalize.sql`). None is a bug in
+that migration; each is a settled plan-time call with its own reason for living outside the phase.
+
+- [ ] **(D-13) TEST's stale-`pending` backlog is CI hygiene and must NEVER be fixed in production
+  code.** Census 2026-08-17: TEST `qmnijlgmdhviwzwfyzlc` holds **2819** `pending` `compute_jobs`
+  rows (2026-08-11 → 08-15); PROD holds **0**. The cause is environmental, not a product defect —
+  TEST has no draining worker and cron jobid 9 (`derive-allocator-key-dailies`) fans out one job per
+  `api_key` daily, so the backlog is manufactured by the test project's own configuration. It is not
+  cosmetic: because `claim_compute_jobs_with_priority` orders by `next_attempt_at` ASC before
+  `LIMIT p_batch_size`, the backlog sits permanently at the head of the claim queue and starves live
+  claim tests — the deterministic 10-failure `python` shard on ANY branch including main. Candidate
+  fixes are a **drain** (a TEST-only worker or a one-shot script) or a **TEST-only cleanup job**.
+  ⛔ NOT a migration: `supabase/migrations/**` auto-applies to PROD, so a sweep written for TEST's
+  condition ships to a project where the condition has never existed. ⛔ NOT `cron.unschedule(9)`:
+  `supabase/tests/test_derive_allocator_keys_fanout.sql` assertion 6 requires that cron registered,
+  so unscheduling reddens the `sql-tests` gate instead. Recorded as the WON'T-FIX half of JOB-08
+  (`.planning/REQUIREMENTS.md`, JOB-08 resolution block).
+
+- [ ] **(RESEARCH §6 residual, v1.19+) A terminalized chain-mid orphan is excluded from Phase 143's
+  reconciliation sweep FOREVER — widen the zero-jobs conjunct to "no NON-TERMINAL row".** This is
+  the residual the terminalizer creates by design and it is named rather than hidden: Phase 144
+  makes an orphaned row SURVIVE as `failed_final` instead of vanishing, and Phase 143's sweep
+  requires `NOT EXISTS (… public.compute_jobs cj WHERE cj.strategy_id = s.id)` — **any** row,
+  terminal included (`20260816140000:729-732`). So the surviving row permanently excludes its
+  strategy from reconciliation. It bites a **chain-mid** orphan hardest (e.g. `derive_broker_dailies`
+  orphaned before it enqueues `compute_analytics_from_csv`, `job_worker.py:526`): Phase 142 will
+  terminalize the `strategy_analytics` row so the user is *told*, but nobody re-runs the work.
+  ⚠️ Note the interaction that makes this less visible than it looks — before Phase 144 the row was
+  DELETEd, so the strategy became sweep-eligible; the exclusion is NEW, and it is the price paid for
+  the audit trail. Candidate fix: widen that conjunct to "no NON-TERMINAL `compute_jobs` row". That
+  is a change to a **shipped** predicate and needs its own safety analysis — the header at
+  `20260816140000:72-82` argues the safety is carried by the terminal-`strategy_analytics` conjunct
+  rather than by the zero-jobs one, so the widening may be tractable — plus an explicit look at the
+  31-day retention interaction (`retention_compute_jobs_done` deletes `done` rows at 30 days, so a
+  strategy can re-enter sweep eligibility by retention alone and the two mechanisms must not race).
+  A separate phase, never a rider on the terminalizer.
+
+- [ ] **(D-09) Fixture hygiene: `test_compute_jobs_fencing.py` is the attributed producer of the
+  `running` + `claimed_at IS NULL` orphan class — stamp `claimed_at` in its two direct UPDATEs.**
+  `analytics-service/tests/test_compute_jobs_fencing.py:1138-1152` and `:1191-1205` drive a row to
+  `status='running'` by direct table UPDATE without stamping `claimed_at`, deliberately (the
+  docstring at `:1132-1136` explains the determinism reason on a shared test DB), and clean up in a
+  `finally:` that does not run if the process is killed. It is the **only in-repo producer** of that
+  row shape: there are ZERO Python and ZERO TypeScript writers of `status='running'`, every SQL
+  claim writer stamps `claimed_at = now()` in the same SET list of the same statement (twelve of
+  them, latest `20260719073701:181-184`), and no migration INSERTs `status='running'`. It matches the
+  census on five independent attributes — status, `claimed_at` NULL, `attempts = 1`, kind
+  `poll_positions`, TEST-only by construction — plus the date window (the file's most recent commit
+  is 2026-08-11, inside 2026-08-03 → 08-14). Phase 144 Plan 03 runs the live confirming query.
+  Fix is one line each (stamp `claimed_at` in the direct UPDATE). ⛔ Deliberately NOT done in Phase
+  144 (plan-time settled call): the phase's scope is the janitor, and the file is untouched by it —
+  record and route, do not edit. ⚠️ Do NOT read this as "arm B is therefore unnecessary". Arm B
+  ships as defence in depth against the CLASS (any future direct-UPDATE writer, migration or manual
+  repair); that is a different claim from "the invariant is closed", which nothing here makes.

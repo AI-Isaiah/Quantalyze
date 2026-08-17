@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.64.0.0] - 2026-08-17
+### feat: v1.19 JOB-05 — an orphaned running compute job terminates VISIBLY (WR-02 resolved)
+
+An orphaned `running` `compute_jobs` row used to be DELETEd by a daily janitor — the wizard poller
+lost its outcome, the audit trail vanished, and Phase 142's reaper stayed blocked forever. Worse,
+rows with `claimed_at IS NULL` were **immortal**: the janitor excluded them by name, and six such
+rows had sat stuck on TEST for 14 days.
+
+**What ships**
+
+- `retention_compute_jobs_orphaned_running` re-registered as a **terminalizer**: hourly at
+  `50 * * * *`, two arms, each a MATERIALIZED batch CTE with `ORDER BY … ASC LIMIT 100` and
+  `FOR UPDATE SKIP LOCKED`, feeding a terminal UPDATE — never a DELETE.
+  - **Arm A**: claimed orphans past the UNCHANGED 4-hour window (the WORKER-04 lesson: the
+    threshold, not the frequency, protects live batch-tail jobs).
+  - **Arm B**: never-stamped claims (`claimed_at IS NULL`) past a derived 48-hour `created_at`
+    window — the formerly-immortal class. The divergence from 142's "never reap a NULL stamp"
+    rule is argued in the header, not slipped in.
+- Every terminalized row keeps its forensics (`claimed_by`, `claim_token`) and gets
+  `status='failed_final'`, `error_kind='permanent'`, a fixed `orphaned_running_reaped:` audit
+  reason, and — load-bearing — **`next_attempt_at = now()`**: `retention_compute_jobs_failed`
+  collects on a 90-day `COALESCE(next_attempt_at, created_at)` key the claim RPC never advances,
+  so a status-only flip would have let an old orphan be deleted on the very next 03:30 tick.
+- `failed_final` is the one value that is simultaneously terminal, unclaimable, and OUTSIDE 142's
+  reaper exclusion set — so terminalizing also unblocks the user-facing analytics failure message.
+- The shipped SQL gate `test_retention_orphaned_running.sql` is **rewritten in the same commit**:
+  it previously asserted the orphan row is GONE (encoding DELETE) and would have gone red the
+  moment this migration reached a database; its hour-band `::INT` cast also hard-errored (22P02)
+  on any hourly schedule. A new TS migration-content gate pins the two-arm body with occurrence
+  counts recalibrated for two arms (a one-arm count is satisfiable by a body missing an arm).
+
+**Verified live on TEST across three real ticks**, not by inference: tick 1 terminalized all 6
+immortal NULL-claim rows while arm A correctly took ZERO — 396 freshly-CI-claimed rows were 3h47m
+old, inside the 4h protection (SC#2's negative control at real scale). Tick 2 moved **exactly 100**,
+byte-matching the id set predicted before the migration was applied. Tick 3 moved exactly 100 more,
+resuming at the same microsecond tie where tick 2's LIMIT cut. Conservation held at 402/402 across
+all three ticks — zero rows vanished. PROD carries zero `running` rows, so the first PROD tick is
+expected to terminalize nothing.
+
+**Also decided on measurement (JOB-08):** stale-`pending` sweep is a WON'T-FIX — PROD's population
+is zero and structurally so (nothing sweeps `pending`, so any stranded row would still be there).
+The census, the structural argument, and both standing traps are recorded in REQUIREMENTS.md.
+
 ## [0.63.0.0] - 2026-08-17
 ### feat: v1.19 JOB-04 — a dropped compute-job enqueue is detected by absence and healed
 

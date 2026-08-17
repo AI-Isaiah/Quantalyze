@@ -54,7 +54,48 @@ investor factsheet on a spinner that never resolves.
 - [ ] **JOB-04**: A reconciliation sweep detects strategies with persisted daily-returns data but NO `compute_jobs` row of any status and no terminal `strategy_analytics` row past a grace window — the "`after()` never ran at all" hole that the in-closure placeholder guard structurally cannot catch — and idempotently re-enqueues + alerts Sentry.
 - [ ] **JOB-05**: The existing orphaned-`running` `compute_jobs` purge transitions rows to a terminal `failed` status instead of bare `DELETE` (so pollers break out and the audit trail survives), at a tightened cadence with the 4h `claimed_at` threshold UNCHANGED; delivered as a NEW migration layered on `20260720120000`, reconciling the TEST-DELETE / PROD-reset split (WR-02).
 - [ ] **JOB-06**: The stale 42501 / `PROCESS_KEY_UNIFIED_BACKBONE` claim is reproduced against current `main` before any fix is scoped (documented pass/fail); the genuinely-open gap — csv-finalize's three-step RPC → RPC → `after()` sequence having no wrapping transaction — is closed by either one SECURITY DEFINER transaction or explicit compensating cleanup + Sentry, so a partial failure leaves no orphan strategy row.
-- [ ] **JOB-08**: The retention family's **stale-`pending` gap is decided on measured evidence, not skipped by default**. `retention_compute_jobs_done` (jobid 4), `retention_compute_jobs_failed` (jobid 8) and `retention_compute_jobs_orphaned_running` (jobid 11) exist; **nothing sweeps stale `pending`** — the one status an undrained enqueue cron produces. A committed measurement of the stale-`pending` population **on PROD** exists BEFORE any sweep is scoped, and the outcome is EITHER a sweep added as a fourth swept status using JOB-05's terminal-UPDATE pattern, OR an explicit WON'T-FIX carrying that measurement as evidence — **"population is zero on prod" is a valid, budget-saving outcome** (same measure-first shape as JOB-06). ⛔ The sweep, if built, transitions to a terminal status and NEVER `DELETE`s: a `DELETE` of `pending` under `supabase/migrations/**` auto-applies to PRODUCTION on merge and destroys real queued work. Evidence that the gap is real on the TEST project (where it is certain, since TEST has no draining worker): the `derive-allocator-key-dailies` cron fanned out 1,884 `derive_broker_dailies` rows on 2026-08-02, and because `claim_compute_jobs_with_priority` orders by `next_attempt_at` ASC before `LIMIT p_batch_size`, the backlog sat permanently at the head of the claim queue and starved every live claim test — 10 deterministic `python` failures on ANY branch including main, cleared only by hand. ⛔ Do NOT close this by `cron.unschedule(9)`: `supabase/tests/test_derive_allocator_keys_fanout.sql` assertion 6 requires that cron registered, so unscheduling reddens the `sql-tests` gate instead.
+- [ ] **JOB-08**: The retention family's **stale-`pending` gap is decided on measured evidence, not skipped by default**. `retention_compute_jobs_done` (jobid 4), `retention_compute_jobs_failed` (jobid 8) and `retention_compute_jobs_orphaned_running` (⚠️ jobid is per-project and NOT stable: measured 2026-08-17, TEST moved 11 → 19 on Phase 144's re-registration and PROD has always been 29 — match on JOBNAME, never on the number) exist; **nothing sweeps stale `pending`** — the one status an undrained enqueue cron produces. A committed measurement of the stale-`pending` population **on PROD** exists BEFORE any sweep is scoped, and the outcome is EITHER a sweep added as a fourth swept status using JOB-05's terminal-UPDATE pattern, OR an explicit WON'T-FIX carrying that measurement as evidence — **"population is zero on prod" is a valid, budget-saving outcome** (same measure-first shape as JOB-06). ⛔ The sweep, if built, transitions to a terminal status and NEVER `DELETE`s: a `DELETE` of `pending` under `supabase/migrations/**` auto-applies to PRODUCTION on merge and destroys real queued work. Evidence that the gap is real on the TEST project (where it is certain, since TEST has no draining worker): the `derive-allocator-key-dailies` cron fanned out 1,884 `derive_broker_dailies` rows on 2026-08-02, and because `claim_compute_jobs_with_priority` orders by `next_attempt_at` ASC before `LIMIT p_batch_size`, the backlog sat permanently at the head of the claim queue and starved every live claim test — 10 deterministic `python` failures on ANY branch including main, cleared only by hand. ⛔ Do NOT close this by `cron.unschedule(9)`: `supabase/tests/test_derive_allocator_keys_fanout.sql` assertion 6 requires that cron registered, so unscheduling reddens the `sql-tests` gate instead.
+
+  **RESOLVED 2026-08-17 (Phase 144): WON'T-FIX carrying the measurement, per SC#4's sanctioned
+  budget-saving outcome.** No stale-`pending` sweep is built. The measurement that justifies it is
+  carried here rather than cited, because a WON'T-FIX with no measurement attached is just a skip.
+
+  **The census (2026-08-17), verbatim:**
+
+  | status | PROD `khslejtfbuezsmvmtsdn` | TEST `qmnijlgmdhviwzwfyzlc` |
+  |---|---|---|
+  | `pending` | **0** | 2819 (2026-08-11 → 08-15) |
+  | `running` | **0** | **402** — 396 claimed (`derive_broker_dailies`) + 6 NULL-claim (`poll_positions`), 2026-08-03 → 08-14 ⚠️ corrected 2026-08-17; the original "6" was the NULL-claim subset |
+  | `done` | 1545 (07-18 → 08-17) | 0 |
+  | `failed_final` | 121 (05-20 → 08-17) | 0 |
+
+  **The structural argument is the load-bearing part, not the zero.** A zero snapshot of a swept
+  population would say only that the sweeper had recently run. But **nothing sweeps `pending` at
+  all** — that absence *is* the whole of JOB-08 — so nothing has ever removed a `pending` row on
+  PROD, and any row that had ever stranded there would still be sitting in that count today.
+  ⇒ **PROD `pending` = 0 is not a snapshot; it is the statement that zero rows have EVER stranded
+  on PROD.** That is what makes it decisive evidence rather than a lucky moment. Corroborated
+  in-repo at `20260816140000:82`: *"Nothing sweeps stale 'pending' at all (JOB-08)."*
+
+  **TEST's 2819 is a CI-hygiene artifact, not a product defect.** TEST has no draining worker and
+  cron jobid 9 (`derive-allocator-key-dailies`) fans out one job per api_key daily, so the backlog
+  is manufactured by the test environment's own configuration. Building production code to sweep it
+  would be shipping a migration — which auto-applies to PROD — to fix a condition that exists only
+  where no worker runs. Filed to `TODOS.md` under *Phase 144 — recorded deferrals* as CI hygiene.
+
+  **⛔ Two traps stand regardless, and are restated here so a future reader who reopens this does
+  not have to re-derive them:**
+  - **Never `DELETE` a `pending` row.** A `DELETE` of `pending` under `supabase/migrations/**`
+    auto-applies to PRODUCTION on merge and destroys real queued work. If a sweep is ever built it
+    transitions to a terminal status, using JOB-05's terminal-UPDATE pattern.
+  - **Never `cron.unschedule(9)`.** `supabase/tests/test_derive_allocator_keys_fanout.sql`
+    assertion 6 requires that cron registered, so unscheduling reddens the `sql-tests` gate instead.
+
+  **Dated-claim discipline.** The numbers above are a *dated claim*, not a fact. Phase 144 Plan 03
+  re-runs the PROD census immediately before merge, so this decision rests on a fresh measurement
+  rather than on this row's age. If that re-census returns a non-zero PROD `pending`, the structural
+  argument above is falsified — nothing sweeps `pending`, so a non-zero count means rows HAVE
+  stranded — and this WON'T-FIX must be reopened rather than re-cited.
 - [ ] **JOB-07**: No reaper or sweep runs heavy work on the worker's shared asyncio event loop; a regression test proves a large synthetic backlog does not stall `healthz` past `STALE_THRESHOLD` (the WEDGE-01 crash class the janitor exists to clean up after).
 
 ### RATE — Rate limiting (audit + close verified gaps)

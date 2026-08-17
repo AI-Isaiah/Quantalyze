@@ -123,9 +123,23 @@ Plans:
   1. An orphaned `running` `compute_jobs` row (past the UNCHANGED 4h `claimed_at` threshold) transitions to a terminal `failed` status instead of being DELETEd — so a wizard poller sees a real outcome and the row survives for audit until the existing 30/90-day retention crons delete it.
   2. Detection latency drops from ~24h to the tightened cadence (e.g. hourly) while a legitimate batch-tail job under 4h is never touched — the threshold, not the frequency, is what protects live jobs (the WORKER-04 2h→4h lesson).
   3. The change ships as a NEW migration layered on `20260720120000` (the shipped migration is never edited), reconciling the TEST-DELETE / PROD-reset split into ONE behavior.
-  4. A committed measurement of the stale-`pending` `compute_jobs` population **on PROD** exists BEFORE any stale-`pending` sweep is scoped, and the gap is closed EITHER by adding `pending` as a fourth swept status (using SC 1's terminal-UPDATE pattern, never `DELETE`) OR by an explicit WON'T-FIX carrying that measurement — "zero on prod" is a valid, budget-saving outcome. The retention family covers `done` (jobid 4), `failed_*` (jobid 8) and orphaned `running` (jobid 11); stale `pending` is the one status an undrained enqueue cron produces and the only one nothing sweeps.
+  4. A committed measurement of the stale-`pending` `compute_jobs` population **on PROD** exists BEFORE any stale-`pending` sweep is scoped, and the gap is closed EITHER by adding `pending` as a fourth swept status (using SC 1's terminal-UPDATE pattern, never `DELETE`) OR by an explicit WON'T-FIX carrying that measurement — "zero on prod" is a valid, budget-saving outcome. The retention family covers `done` (jobid 4), `failed_*` (jobid 8) and orphaned `running` (⚠️ jobids are per-project and NOT stable across a re-registration — measured 2026-08-17: TEST moved 11 → 19 when Phase 144's terminalizer applied, and PROD has always been 29, never 11. Identify these jobs by JOBNAME; that is what the SQL gates anchor on); stale `pending` is the one status an undrained enqueue cron produces and the only one nothing sweeps.
 
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 144-01-PLAN.md — The terminalizer migration (two-arm bounded terminal UPDATE, `'50 * * * *'`, 4h claimed_at arm + derived-48h NULL-claim arm) + throwaway-Postgres tracer proof + the SAME-COMMIT rewrite of test_retention_orphaned_running.sql (B1 DELETE-oracle, B2 hour-band cast, B3 next_attempt_at) + neuter-RED matrix
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 144-02-PLAN.md — TS migration-content gate (occurrence counts recalibrated for the two-arm body, word-bounded LIMIT, later-migration re-registration scan) + JOB-08 WON'T-FIX-with-measurement in REQUIREMENTS.md + three TODOS deferrals
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 144-03-PLAN.md — [BLOCKING, orchestrator-session-only] Pre-apply re-census + §3 NULL-claim confirming query + live slot check, apply to TEST via Supabase MCP, sql-tests RED→GREEN, ≥2 successive real :50 ticks observed against the live 402-row fixture proving the per-arm `LIMIT 100` bound HOLDS and PROGRESSES (exactly 100 arm-A rows per tick, oldest-first, disjoint id sets) — draining the backlog is explicitly NOT the goal and NOT a merge gate; conservation + B3 verified row-by-row; human gate before the one-way merge
+
 **Note**: The "fence flake also clears" claim is observation-only, NOT an acceptance criterion (research correction #4). Constrained by JOB-07 (pg_cron only).
 **Note (SC 4 / JOB-08, added 2026-08-03)**: routed here from `TODOS.md` § CI / test-infra ratchet — same table, same cron family this phase already edits, and SC 3's TEST-vs-PROD split is the same gap. Full evidence and the two ⛔ traps (never `DELETE` pending; never `cron.unschedule(9)`) are in `REQUIREMENTS.md` § JOB-08. ⚠️ The gap is CERTAIN on the TEST project and UNMEASURED on prod — that asymmetry is why SC 4 is measure-first rather than build-first.
 
@@ -140,8 +154,34 @@ Plans:
   2. A fault injected between `finalize_csv_strategy`, `persist_csv_daily_returns`, and the `after()` enqueue leaves no orphan strategy row — either the steps share one SECURITY DEFINER transaction, or explicit compensating cleanup runs + Sentry alerts (the choice recorded per the reproduction outcome and the CONTRIB-02 `p_terminal_status` owner-only variant's survival).
   3. Happy-path csv-finalize behavior is unchanged — including the CONTRIB-02 owner-only private-finalize path if the RPCs are folded.
 
-**Plans**: TBD
-**Note**: Constrained by JOB-07 (any cleanup mechanism stays off the worker loop).
+**Plans**: 6 plans
+
+Plans:
+**Wave 1**
+
+- [ ] 145-01-PLAN.md — SC#1 repo-side arms: 42501 auth-guard SQL CI gate (arm 1, neuter-RED proven on throwaway Postgres against the REAL 20260728120000 body) + fresh arm-2 grep + arm-3 pytest recorded verbatim + 145-REPRODUCTION.md draft + PITFALLS/SUMMARY anchor corrections, ONE commit
+
+**Wave 2** *(blocked on Wave 1; orchestrator-session-only, BLOCKING)*
+
+- [ ] 145-02-PLAN.md — [BLOCKING] Census (4 queries × 2 projects, per-row, STOP rules pre-registered) + arm-4 live TEST finalize (doubles as SC#3 baseline) + (i-a) seam latency measurement Steps A/B/C + final CANNOT-REPRODUCE verdict + TODOS 42501 bullet closed + founder decision checkpoint (i-a)/(i-b) recorded in 145-DECISION.md
+
+**Wave 3** *(blocked on Wave 2 — verdict committed before any SC#2 code)*
+
+- [ ] 145-03-PLAN.md — The caller-agnostic fold migration (`finalize_csv_strategy_with_returns`, ONE SECDEF transaction, no exception-handler clause, 20260624120000 table shape, guards verbatim, DROP old RPCs + re-grant) + SAME-COMMIT re-point of test_csv_finalize_double_submit.sql (Part 3 widened to 3 tables) and the auth-guard gate + new atomicity-oracle gate + throwaway-Postgres tracer proof + 8-neuter SQL RED matrix
+
+**Wave 4** *(blocked on Wave 3 + the recorded decision)*
+
+- [ ] 145-04-PLAN.md — Caller wiring per 145-DECISION.md (both arms specified; exactly one executed) + read-only 23505 resolve arm with CR-01 name/range checks BEFORE metadata (fixes the 409 lie) + three honest copy sentences + finalize-fold-fail / finalize-resolve-refused Sentry captures + SAME-COMMIT re-point of the five CR-01 tests (each observed RED) + pytest/mypy --strict
+
+**Wave 5** *(blocked on Wave 4)*
+
+- [ ] 145-05-PLAN.md — Delete the vacuous RED-TEAM-M1 block + replacement gates that CAN fail (3 observed neuter-REDs) + three TODOS deferrals with constraints (window E, wizard first-hop, inert flag cleanup w/ 20260620120000 RAISE trap) + consolidated TS neuter-RED table
+
+**Wave 6** *(blocked on Waves 3-5; orchestrator-session-only, BLOCKING)*
+
+- [ ] 145-06-PLAN.md — [BLOCKING] Apply fold to TEST via Supabase MCP (never db push), sql-tests observed RED→GREEN, live finalize + SC#3 measured before/after diff vs the arm-4 baseline, one-time human-reviewed TERMINALIZE of the census list (UPDATE-only: analytics 'failed'+reason then status='archived'; founder ruling β), human gate before the one-way merge
+
+**Note**: Constrained by JOB-07 (any cleanup mechanism stays off the worker loop). Founder rulings locked 2026-08-17: (1) orphan disposition = TERMINALIZE reading (β) — deletion arms out of scope; (2) the (i-a)/(i-b) caller choice is measure-first and founder-reserved — Plan 02 executes the measurement and stops at a decision checkpoint. ⛔ 20260816140000 (143) and 20260817120000 (144) untouched by every plan.
 
 ### Phase 146: RATE — Audit + close the two verified gaps
 
