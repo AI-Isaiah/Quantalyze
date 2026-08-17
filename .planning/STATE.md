@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.19
 milestone_name: JOB/RATE — job-lifecycle reliability and the rate limits that hold
-current_phase: 144
-current_phase_name: JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence
+current_phase: 145
+current_phase_name: JOB — CSV-finalize atomicity (the fold) + orphan terminalize
 status: executing
-stopped_at: Phase 143 SHIPPED AND MERGED (PR #687, squash 26a3105d, 2026-08-17 12:01:14Z). Migration auto-applied to PROD by the Supabase Migrate workflow; cron.job 33 registered at '35 * * * *', deployed body md5 febf9bdd6dfc58aa101ed8c4345e3b29 == TEST == repo (1860 B, 3-way byte match). First PROD tick 12:35:00Z succeeded in 162 ms and healed 0 — expected, since the PROD candidate census is 0; that is a negative control, NOT proof that healing works. Railway SUCCESS on 26a3105d, /health git_sha exact. ⚠️ JOB-04 still NOT ticked: the mechanism is proven on TEST and live on PROD, but PROD has produced no healing evidence because it has nothing to heal. NOW EXECUTING Phase 144 on branch feat/v1.19-phase-144 — Wave 1 (144-01) complete and verified; Wave 2 (144-02) running; Wave 3 (144-03) is BLOCKING and orchestrator-session-only (Supabase MCP is stripped from subagents).
-last_updated: "2026-08-17T13:20:00.000Z"
+stopped_at: Phase 144 SHIPPED, MERGED AND PROD-VERIFIED THROUGH ITS FIRST TICK (PR #688, squash 9e1bc3f2, 2026-08-17). Migration 20260817120000 auto-applied on merge; cron re-registered by JOBNAME — jobid 29 → 34 (per-project drift, the corrected-header behavior), '50 * * * *', body 1396 B md5 4432bc62bfa1bde8affe69204ef3b3ac == TEST == repo (3-way byte match). First PROD tick runid 5721 at 19:50:00Z succeeded in 9 ms and swept 0 — the negative control (PROD census: zero candidates in either arm); the positive proof is the three TEST ticks against 402 real rows (144-CENSUS.md §5–§7: arm B 6/6, bound HOLDS at exactly 100 matching the pre-apply byte-for-byte prediction, bound PROGRESSES at the microsecond tie, conservation 402 throughout). Main CI green after rerunning the known shared-test-db eviction of e2e-seeded; Railway SUCCESS on 9e1bc3f2. JOB-05 + JOB-08 ticked. NOW EXECUTING Phase 145 on worktree branch feat/v1.19-phase-145 — Waves 1-2 COMPLETE (verdict CANNOT REPRODUCE, all four arms GREEN; census STOP-rule 3 fired, 18 PROD incident-era fossils → Plan 06 live cleanup; founder decision (i-b) recorded in 145-DECISION.md, fed by the completed measurement — latency retired, no TEST Railway exists). Wave 3 (145-03 fold migration) executing.
+last_updated: "2026-08-17T19:55:00.000Z"
 last_activity: 2026-08-17
-last_activity_desc: Phase 143 landed and deployed to PROD; Phase 144 planned (3 plans, bound re-derived 500 → 100 at plan-check) and Wave 1 executed — two-arm terminal-UPDATE migration + SAME-COMMIT rewrite of the gate that asserted DELETE, 8 neuters + 16 probes observed RED
+last_activity_desc: Phase 144 closed end-to-end with first-PROD-tick verification; Phase 145 Waves 1-2 complete — SC#1 verdict committed, (i-b) founder decision locked, arm 4 live-verified on TEST (200 + UUID, zero 42501)
 progress:
   total_phases: 21
-  completed_phases: 16
-  total_plans: 98
-  completed_plans: 96
-  percent: 76
+  completed_phases: 17
+  total_plans: 104
+  completed_plans: 100
+  percent: 81
 ---
 
 # Project State — Quantalyze
