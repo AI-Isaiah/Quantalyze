@@ -2544,6 +2544,21 @@ class TestReconcileSweepAlert:
     sufficient alone — see the D-11 correction quoted above.
     """
 
+    @pytest.fixture(autouse=True)
+    def _clear_heal_dedupe(self) -> Any:
+        """Isolate the process-lifetime heal de-dupe between tests.
+
+        `main_worker._RECONCILE_ALERTED` is module-level and survives for the
+        worker's whole life by design. Without this, test order would decide
+        outcomes: whichever test emitted for a given heal key first would
+        silently suppress every later test using the same key, and the
+        suppression assertions below would pass VACUOUSLY. Cleared on the way
+        IN and on the way OUT so neither this class nor any other is affected.
+        """
+        main_worker._RECONCILE_ALERTED.clear()
+        yield
+        main_worker._RECONCILE_ALERTED.clear()
+
     @pytest.mark.asyncio
     async def test_marker_job_captures_sentry_event(
         self, monkeypatch: pytest.MonkeyPatch
@@ -2705,7 +2720,7 @@ class TestReconcileSweepAlert:
     async def test_reclaimed_marker_job_does_not_re_alert(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A RE-CLAIMED sweep-marked job emits nothing (WR-03).
+        """Re-claiming an ALREADY-ALERTED heal emits nothing further.
 
         The marker is not consumed. It lives in compute_jobs.metadata for the
         row's whole lifetime and `claim_compute_jobs_with_priority` MERGES
@@ -2717,78 +2732,188 @@ class TestReconcileSweepAlert:
         strategy as N events, and a flapping job becomes an alert storm on a
         warning-level channel. The count is the signal — SC#1's alert means
         "a dropped enqueue was healed", not "a job was claimed".
+
+        ⚠️ THE SUPPRESSION IS DRIVEN BY A PRIOR SUCCESSFUL EMISSION, NOT BY
+        `attempts`. This test used to seed a single job at attempts=3 and assert
+        zero captures, which encoded the very bug being fixed: it demanded
+        SILENCE for a heal that had never been reported at all. It now drives
+        the REAL sequence — claim, emit, re-claim the SAME heal — and pins the
+        total at exactly one. The `attempts` values below are deliberately
+        DIFFERENT across the two claims (1 then 3, as the watchdog leaves them)
+        to prove the de-dupe does not read that column.
         """
-        jobs = [
-            {
-                "id": "job-sweep-reclaimed",
-                "kind": "compute_analytics_from_csv",
-                "strategy_id": "s-reclaimed",
-                "claim_token": "tok-reclaimed",
-                # The 3rd claim of the same healed row: the claim RPC has
-                # incremented attempts twice more since the heal.
-                "attempts": 3,
-                "metadata": {
-                    _SWEEP_MARKER_KEY: _SWEEP_MARKER_VALUE,
-                    _SWEEP_DETECTED_AT_KEY: "2026-08-16T00:00:00Z",
-                },
-            }
-        ]
-        mock_supabase = _mock_supabase_for(jobs)
+        heal = {
+            "id": "job-sweep-reclaimed",
+            "kind": "compute_analytics_from_csv",
+            "strategy_id": "s-reclaimed",
+            "claim_token": "tok-reclaimed",
+            "metadata": {
+                _SWEEP_MARKER_KEY: _SWEEP_MARKER_VALUE,
+                _SWEEP_DETECTED_AT_KEY: "2026-08-16T00:00:00Z",
+            },
+        }
         spy = _FakeSentry()
         monkeypatch.setattr(main_worker, "sentry_sdk", spy)
 
+        # First claim of the heal, then a re-claim of the SAME row.
+        for attempts, worker in ((1, "worker-a"), (3, "worker-b")):
+            mock_supabase = _mock_supabase_for([{**heal, "attempts": attempts}])
+            with patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch(
+                     "main_worker.dispatch",
+                     new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+                 ):
+                await dispatch_tick(worker)
+            # Anti-vacuity, per claim: a dispatch_tick that never entered the
+            # claim loop would also produce no NEW capture, making the
+            # count assertion below meaningless.
+            assert _rpc_names(mock_supabase).count("mark_compute_job_done") == 1, (
+                f"the {worker} claim never dispatched; a capture-count "
+                "assertion over a loop that never executed is vacuous."
+            )
+
+        assert len(spy.captures) == 1, (
+            "re-claiming an ALREADY-ALERTED reconcile-sweep heal produced "
+            f"{len(spy.captures)} Sentry captures, expected exactly 1. The "
+            "marker persists on the row and the claim RPC merges metadata, so "
+            "every retry, watchdog reclaim and defer would re-fire the alert "
+            "for the SAME healed strategy — an operator counting events cannot "
+            f"read them as strategies healed:\n{spy.serialised()}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_heal_whose_first_claim_died_is_still_alerted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A heal whose FIRST claim died before emitting is still reported once.
+
+        ⚠️ THIS IS THE REGRESSION TEST FOR THE LOST ALERT. The de-dupe was
+        `attempts <= 1`. MEASURED 2026-08-17: the watchdog this worker actually
+        calls is `reset_stalled_compute_jobs` (main_worker.watchdog_tick), whose
+        two UPDATEs set status='pending' and DO NOT touch `attempts`
+        (20260516104201:657-670, :681-694) — unlike the sibling
+        `reclaim_stuck_compute_jobs`, which decrements
+        (`attempts = GREATEST(attempts - 1, 0)`, :596). `failed_retry` re-claim
+        likewise keeps the incremented count.
+
+        So the sequence below is REACHABLE IN PRODUCTION: the sweep heals a
+        dropped enqueue, the first claim dies before reaching the emission (OOM,
+        SIGKILL, host loss — nothing is recorded), the watchdog resets the row,
+        and the re-claim arrives carrying attempts=2. Under `attempts <= 1` that
+        is False, so the alert was NEVER emitted for that heal — and a dropped
+        enqueue healed right after a worker crash is precisely the incident an
+        operator most needs paged on. SC#1's "a Sentry alert fires" was false
+        for exactly that case.
+
+        The first claim is modelled by dispatching and then clearing nothing:
+        the process-lifetime record is only written AFTER a successful
+        capture_message, so a claim that never reached the emission leaves no
+        record — which is what the crash leaves behind. Here the crash is
+        modelled directly: the tick is run with the marker ABSENT from the
+        emission path (dispatch raises), then the row comes back at attempts=2.
+        """
+        detected_at = "2026-08-16T00:00:00Z"
+        heal = {
+            "id": "job-sweep-crashed-first-claim",
+            "kind": "compute_analytics_from_csv",
+            "strategy_id": "s-crashed",
+            "claim_token": "tok-crashed",
+            "metadata": {
+                _SWEEP_MARKER_KEY: _SWEEP_MARKER_VALUE,
+                _SWEEP_DETECTED_AT_KEY: detected_at,
+            },
+        }
+        spy = _FakeSentry()
+        monkeypatch.setattr(main_worker, "sentry_sdk", spy)
+
+        # --- The first claim died before it could emit. -------------------
+        # Nothing was recorded for this heal: _RECONCILE_ALERTED is empty
+        # (the autouse fixture guarantees it), which is exactly the state a
+        # crashed/killed worker leaves behind.
+        assert main_worker._RECONCILE_ALERTED == {}, (
+            "the heal de-dupe was not empty at the start of this test, so the "
+            "'first claim died' precondition does not hold and the assertion "
+            "below would prove nothing."
+        )
+
+        # --- The watchdog reset the row; it comes back at attempts=2. ------
+        # reset_stalled_compute_jobs does NOT decrement attempts, so the
+        # re-claim carries 2. This is the value the old `<= 1` gate rejected.
+        mock_supabase = _mock_supabase_for([{**heal, "attempts": 2}])
         with patch("main_worker.get_supabase", return_value=mock_supabase), \
              patch(
                  "main_worker.dispatch",
                  new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
              ):
-            await dispatch_tick("worker-test-sweep-reclaimed")
+            await dispatch_tick("worker-after-crash")
 
-        assert spy.captures == [], (
-            "a RE-CLAIMED reconcile-sweep job (attempts=3) produced a Sentry "
-            "capture. The marker persists on the row and the claim RPC merges "
-            "metadata, so every retry, watchdog reclaim and defer would re-fire "
-            "the alert for the SAME healed strategy — an operator counting "
-            f"events cannot read them as strategies healed:\n{spy.serialised()}"
+        assert len(spy.captures) == 1, (
+            "a heal whose FIRST claim died before emitting produced "
+            f"{len(spy.captures)} Sentry captures, expected exactly 1. The "
+            "watchdog (reset_stalled_compute_jobs) does not decrement attempts, "
+            "so this re-claim arrives at attempts=2; any de-dupe keyed on "
+            "`attempts` (the old `attempts <= 1`) drops it and the heal is "
+            "NEVER reported. That is the case SC#1 exists to page on:\n"
+            f"{spy.serialised()}"
         )
-        # Anti-vacuity: a dispatch_tick that never entered the claim loop would
-        # also produce zero captures. Prove the job actually ran.
+        assert spy.captures[0]["extras"]["detected_at"] == detected_at, (
+            "the emitted event does not carry the heal's detected_at, so an "
+            "operator cannot tie the alert back to the sweep tick that healed it."
+        )
+        # Anti-vacuity: prove the claim loop actually ran.
         assert _rpc_names(mock_supabase).count("mark_compute_job_done") == 1, (
-            "the re-claimed job never dispatched; a zero-capture assertion over "
-            "a loop that never executed is vacuous."
+            "the re-claimed job never dispatched; the capture assertion above "
+            "would be measuring a loop that never executed."
+        )
+
+        # --- And it does not then storm: a further re-claim adds nothing. ---
+        mock_supabase2 = _mock_supabase_for([{**heal, "attempts": 3}])
+        with patch("main_worker.get_supabase", return_value=mock_supabase2), \
+             patch(
+                 "main_worker.dispatch",
+                 new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+             ):
+            await dispatch_tick("worker-after-crash-2")
+
+        assert len(spy.captures) == 1, (
+            "the recovered heal re-alerted on a subsequent re-claim "
+            f"({len(spy.captures)} captures total, expected 1). Fixing the lost "
+            "alert must not re-open the alert storm the de-dupe exists to "
+            f"prevent:\n{spy.serialised()}"
         )
 
     @pytest.mark.asyncio
     async def test_marker_job_without_attempts_still_alerts(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The WR-03 dedupe is FAIL-OPEN: no `attempts` still emits.
+        """The dedupe is FAIL-OPEN: a row with no `attempts` still emits.
 
-        `attempts` is NOT NULL DEFAULT 0 on compute_jobs and the claim RPC
-        increments it before returning the row, so a claimed row always carries
-        it in production. But the read is defensive (`job.get`), and the
-        direction of that default is a real decision: a missing/NULL/0 attempts
-        must EMIT, never suppress. Over-alerting is recoverable; a silently
-        unreported heal is the exact defect class this phase exists to close.
+        The alert path no longer reads `attempts` AT ALL — the de-dupe is keyed
+        on the heal identity (job id + detected_at). This test therefore pins a
+        STRUCTURAL property: a claimed row missing that column still produces
+        SC#1's event. Over-alerting is recoverable; a silently unreported heal
+        is the exact defect class this phase exists to close.
 
-        ⚠️ Be precise about what this test actually catches, because two
-        plausible neuters were run and did NOT redden it:
+        ⚠️ Be precise about what this test does and does not catch, because
+        several plausible neuters were RUN and did NOT redden it:
 
-          * `or 1` -> `or 0`                      -> GREEN (measured 2026-08-17)
-          * `or 1` -> `job.get("attempts", 0)`    -> GREEN (measured 2026-08-17)
+          * `attempts <= 1` re-introduced      -> GREEN (measured 2026-08-17)
+            correctly: `or 1` makes a missing attempts 1, and 1 <= 1 emits.
+            The LOST-alert bug that gate causes is caught by
+            test_heal_whose_first_claim_died_is_still_alerted, not here.
+          * `or 1` -> `or 0` / `.get("attempts", 0)` under `<= 1`
+                                               -> GREEN (measured 2026-08-17)
+            correctly: 0 <= 1.
 
-        Both are correct GREENs: the production gate is `<= 1`, and 0 <= 1, so
-        the default is not what carries the fail-open property — the comparison
-        is. The neuter that DOES redden this test is the realistic tidy-up to a
-        strict first-claim check:
+        The neuter that DOES redden this test is a strict first-claim check
+        over a 0 default:
 
-          * `job.get("attempts", 0) == 1`         -> RED (measured 2026-08-17)
+          * `job.get("attempts", 0) == 1`      -> RED (measured 2026-08-17)
             "a sweep-marked job with NO attempts field emitted 0 events,
              expected 1"
 
-        That is the edit this test exists to stop. Recorded here rather than in
-        a summary so the next reader does not neuter the default, see green, and
-        conclude the test is vacuous.
+        Recorded here rather than in a summary so the next reader does not
+        neuter a default, see green, and conclude the test is vacuous.
         """
         jobs = [
             {

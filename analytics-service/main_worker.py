@@ -96,11 +96,19 @@ class _ClaimedJobOptional(TypedDict, total=False):
     claim_token: str | None
     metadata: dict[str, Any] | None
     exchange: str | None
-    # JOB-04 / WR-03: read by the reconcile-sweep emission to fire once per
-    # HEAL rather than once per CLAIM. The column is
-    # `attempts INTEGER NOT NULL DEFAULT 0` (20260411144407:121) and the claim
-    # RPC does `attempts = attempts + 1` before returning the row
+    # `attempts INTEGER NOT NULL DEFAULT 0` (20260411144407:121); the claim RPC
+    # does `attempts = attempts + 1` before returning the row
     # (20260719073701:185), so a freshly-claimed row carries 1.
+    #
+    # ⚠️ NOT a heal counter, and nothing in this module may treat it as one.
+    # The reconcile-sweep alert de-dupe read it (`attempts <= 1`) and LOST the
+    # alert: `reset_stalled_compute_jobs` — the watchdog this worker calls —
+    # resets a stalled row to 'pending' WITHOUT decrementing attempts
+    # (20260516104201:657-670, :681-694), so a heal whose first claim crashed
+    # returns at attempts=2 and was silently never reported. The de-dupe is now
+    # keyed on the heal identity instead (see _reconcile_heal_key). Declared
+    # here because it is part of the claimed-row contract, not because the
+    # alert path consumes it.
     attempts: int
 
 
@@ -331,6 +339,68 @@ _FALLBACK_CLAIM_RPC: bool = False
 #      first line.
 _FALLBACK_REPROBE_INTERVAL_S: float = 300.0  # re-probe the priority RPC every 5 min
 _FALLBACK_LATCHED_AT: float = 0.0
+
+# --------------------------------------------------------------------------
+# JOB-04 / SC#1 — reconcile-sweep alert de-dupe, keyed on the HEAL
+# --------------------------------------------------------------------------
+# The alert must fire ONCE PER HEAL, not once per CLAIM. The marker is not
+# consumed: it lives in compute_jobs.metadata for the row's whole lifetime and
+# claim_compute_jobs_with_priority MERGES metadata
+# (`metadata = COALESCE(metadata,'{}') || jsonb_build_object(...)`,
+# 20260719073701:190-198), so it survives every re-claim. Unconditional
+# emission would report ONE healed strategy as N events and turn a flapping job
+# into an alert storm on a warning-level channel.
+#
+# ⚠️ THIS MUST NOT BE KEYED ON `attempts`. It was, as `attempts <= 1`, and that
+# LOST the alert outright in the case an operator most needs paged on.
+# MEASURED 2026-08-17: the watchdog this worker actually calls is
+# reset_stalled_compute_jobs (watchdog_tick below), whose two UPDATEs set
+# status='pending' and DO NOT touch attempts (20260516104201:657-670, :681-694)
+# — unlike its sibling reclaim_stuck_compute_jobs, which decrements
+# (`attempts = GREATEST(attempts - 1, 0)`, :596). failed_retry re-claim keeps
+# the incremented count too. So: sweep heals -> the first claim dies before it
+# reaches the emission below (OOM, SIGKILL, host loss) -> the watchdog resets
+# the row -> re-claim carries attempts=2 -> `2 <= 1` is False -> the heal is
+# NEVER reported. A dropped enqueue healed after a worker crash is exactly the
+# incident SC#1 exists to surface, and `attempts` silently excluded it.
+#
+# The key is therefore the HEAL IDENTITY — the job id plus the sweep's own
+# `detected_at` stamp — which is stable across every re-claim of the same heal
+# and distinct for a genuinely new one. Re-claim of the SAME heal is
+# suppressed; a heal whose first claim never emitted is still reported.
+#
+# The entry is recorded only AFTER a successful emission (see the call site),
+# so this stays FAIL-OPEN in the same direction the rest of this path chose:
+# a crashed or raising emission leaves no entry and the next claim re-alerts.
+# Over-alerting is recoverable; a silent heal is the defect class being closed.
+#
+# Bounded FIFO, because a worker process is long-lived and this must not grow
+# without limit. Eviction can at worst cost ONE duplicate alert for a job
+# re-claimed after 4096 intervening heals — the recoverable direction again.
+# In-process (not persisted) is deliberate and sufficient: a worker restart
+# loses the set, which can only ever cause a re-alert, never a lost one.
+_RECONCILE_ALERT_DEDUPE_MAX: Final[int] = 4096
+_RECONCILE_ALERTED: dict[str, None] = {}
+
+
+def _reconcile_heal_key(job: ClaimedJob, meta: dict[str, Any]) -> str:
+    """Stable identity for ONE heal: the job row plus the sweep's detected_at.
+
+    Never includes `attempts` or any other value a re-claim mutates.
+    """
+    return f"{job.get('id')}|{meta.get('detected_at')}"
+
+
+def _reconcile_alert_already_sent(key: str) -> bool:
+    return key in _RECONCILE_ALERTED
+
+
+def _record_reconcile_alert(key: str) -> None:
+    """Record that SC#1's alert HAS been emitted for this heal (bounded FIFO)."""
+    _RECONCILE_ALERTED[key] = None
+    while len(_RECONCILE_ALERTED) > _RECONCILE_ALERT_DEDUPE_MAX:
+        # dicts preserve insertion order (3.7+), so this evicts oldest-first.
+        _RECONCILE_ALERTED.pop(next(iter(_RECONCILE_ALERTED)))
 
 
 def _is_undefined_function(exc: BaseException) -> bool:
@@ -667,44 +737,21 @@ async def dispatch_tick(worker_id: str) -> None:
         # Telemetry must never fail the work it observes (main.py:186-188).
         try:
             _meta = job.get("metadata") or {}
-            # WR-03: fire once per HEAL, not once per CLAIM. The marker lives in
-            # compute_jobs.metadata for the row's whole lifetime, and
-            # claim_compute_jobs_with_priority MERGES metadata
-            # (`metadata = COALESCE(metadata,'{}') || jsonb_build_object(...)`,
-            # 20260719073701:190-198) rather than replacing it — so the marker
-            # survives every re-claim. Unconditional emission therefore produces
-            # one event per CLAIM for a single healed strategy:
-            #   * mark_compute_job_failed with a transient/unknown error_kind ->
-            #     failed_retry -> re-claim, up to max_attempts (default 3);
-            #   * the watchdog (reset_stalled_compute_jobs) reclaiming a stalled
-            #     row — unbounded by attempts;
-            #   * DispatchOutcome.DEFERRED -> defer_compute_job -> pending ->
-            #     re-claim.
-            # An operator counting these events could not read them as
-            # "strategies healed", and a flapping job becomes an alert storm on a
-            # warning-level channel — which also contradicts the SQL gate's own
-            # framing, where one heal is one marked row.
+            # Fire once per HEAL, not once per CLAIM — de-duped on the heal's
+            # own identity (job id + the sweep's detected_at), never on
+            # `attempts`. See _reconcile_heal_key above for the full rationale
+            # and for the MEASURED reason `attempts <= 1` was wrong: the
+            # watchdog this worker calls does not decrement attempts, so a heal
+            # whose first claim crashed came back at attempts=2 and was silently
+            # never reported.
             #
-            # `attempts` is incremented by the claim RPC BEFORE the row is
-            # returned (20260719073701:185) over a NOT NULL DEFAULT 0 column
-            # (20260411144407:121), so the FIRST claim of a freshly-swept row
-            # carries attempts == 1.
-            #
-            # FAIL-OPEN, and be precise about WHICH token carries that: it is
-            # the `<= 1`, not the `or 1`. A missing/NULL/0 attempts must EMIT,
-            # never suppress — a defensive default is never allowed to be what
-            # silences the alert this phase exists to create; over-alerting is
-            # recoverable, a silent heal is the defect class being closed. `<= 1`
-            # admits 0 as well as 1, so the fail-open property survives even if
-            # someone swaps the default. MEASURED 2026-08-17: replacing `or 1`
-            # with `or 0` / `job.get("attempts", 0)` does NOT change behaviour
-            # and does NOT redden any test — correctly, because 0 <= 1. What
-            # WOULD close the alert is tightening `<= 1` to `== 1` over a 0
-            # default, and that IS reddened by
-            # test_marker_job_without_attempts_still_alerts (observed). `or 1`
-            # stays as an explicit statement of intent, not as the mechanism.
-            _attempts = job.get("attempts") or 1
-            if _meta.get("source") == "reconcile-sweep" and _attempts <= 1:
+            # The record is written only AFTER capture_message returns, so this
+            # is FAIL-OPEN: if the emission raises (the except below logs it) or
+            # the process dies mid-emission, no entry is recorded and the next
+            # claim of the same heal re-alerts. A silent heal is the defect
+            # class being closed; a duplicate alert is recoverable.
+            _heal_key = _reconcile_heal_key(job, _meta)
+            if _meta.get("source") == "reconcile-sweep" and not _reconcile_alert_already_sent(_heal_key):
                 with sentry_sdk.new_scope() as scope:
                     scope.set_tag("surface", "reconcile-sweep")
                     scope.set_tag("job_kind", job.get("kind"))
@@ -714,6 +761,7 @@ async def dispatch_tick(worker_id: str) -> None:
                         "Dropped compute-job enqueue healed by reconciliation sweep",
                         level="warning",
                     )
+                _record_reconcile_alert(_heal_key)
         except Exception as exc:  # noqa: BLE001
             # LOUD, not silent (143 review WR-02). The swallow itself stays --
             # telemetry must never fail the work it observes, and the paragraph
