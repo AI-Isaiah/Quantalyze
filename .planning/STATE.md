@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.19
 milestone_name: JOB/RATE — job-lifecycle reliability and the rate limits that hold
-current_phase: 153.7
-current_phase_name: JOB — WR-02 orphaned-running DELETE→terminal UPDATE + cadence
-status: executing
-stopped_at: Completed 145-05-PLAN.md
-last_updated: "2026-08-17T21:47:40.608Z"
+current_phase: 145
+current_phase_name: JOB — CSV-finalize atomicity (the fold) + orphan terminalize
+status: shipping
+stopped_at: Phase 145 COMPLETE ON BRANCH feat/v1.19-phase-145, founder-approved at the 145-06 human gate, /ship in progress. All six waves done; verdict CANNOT REPRODUCE (4 arms); fold migration 20260819120000 applied+exercised on TEST (gates RED→GREEN incl. the atomicity oracle on the deployed body; ledger reconciled to the filename); (i-b) wired (Python csv-finalize branch DELETED, ~20 tests re-pointed); SC#3 measured clean vs the arm-4 baseline; 18 PROD fossils terminalized UPDATE-only (post-pass census 0/0, per-row rollback anchors in 145-TERMINALIZE.md). Merge auto-applies the fold to PROD. ⚠️ The Wave-5 executor's state.update-progress wrote repo-mis-scoped counters (4/13) and current_phase 153.7 — discarded at this merge in favor of the hand-cut milestone-scoped ledger (the standing verbs-are-broken note below).
+last_updated: "2026-08-18T00:20:00.000Z"
 last_activity: 2026-08-17
-last_activity_desc: Phase 143 landed and deployed to PROD; Phase 144 planned (3 plans, bound re-derived 500 → 100 at plan-check) and Wave 1 executed — two-arm terminal-UPDATE migration + SAME-COMMIT rewrite of the gate that asserted DELETE, 8 neuters + 16 probes observed RED
+last_activity_desc: Phase 144 closed end-to-end with first-PROD-tick verification; Phase 145 Waves 1-2 complete — SC#1 verdict committed, (i-b) founder decision locked, arm 4 live-verified on TEST (200 + UUID, zero 42501)
 progress:
-  total_phases: 4
-  completed_phases: 1
-  total_plans: 13
-  completed_plans: 11
-  percent: 25
+  total_phases: 21
+  completed_phases: 18
+  total_plans: 104
+  completed_plans: 104
+  percent: 86
 ---
 
 # Project State — Quantalyze
