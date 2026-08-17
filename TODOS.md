@@ -2619,3 +2619,24 @@ file's header and in `143-CONTEXT.md`. Neither is a bug in the sweep; each needs
   `20260802120000`'s wording or build a real count surface. Until then, count healed rows with
   `SELECT count(*) FROM public.compute_jobs WHERE metadata->>'source' = 'reconcile-sweep' AND
   created_at >= <tick start>`, not by reading the run log.
+
+### Phase 143 red-team residuals (logged 2026-08-17, deliberate trade-offs)
+
+Both have a SAFE failure direction. Recorded so the trade-off is visible, not so it is forgotten.
+
+- [ ] **Sweep-alert de-dupe is in-process (bounded FIFO), not durable.** A worker restart between two
+  claims of the same heal costs ONE DUPLICATE alert. The dangerous direction — a heal whose first
+  claim died going unreported — was a real bug and is FIXED (red-team F-2). Exactly-once across
+  restarts needs a `compute_jobs.metadata` write and therefore a migration, which auto-applies to
+  PROD on merge; not worth it for a duplicate. `analytics-service/main_worker.py`.
+
+- [ ] **The D-19 IN-subquery-LIMIT gate is a TEXT gate and remains partially escapable.** Widened
+  2026-08-17 from `[^)]*` (which could not match any realistic rewrite, since the predicate needs
+  `EXISTS (...)` parens) to `[^;]*`. A rewrite placing a `;` between `IN (SELECT` and `LIMIT` still
+  escapes it. Inherent to text gates: the per-tick bound's only real proof is SQL gate Part 4
+  executing the deployed body against LIMIT+1 rows. Do not mistake a green text gate for a bound proof.
+
+- [ ] **`s.status <> 'archived'` guards a value nothing writes at runtime** (red-team F-6, INFO).
+  `'archived'` appears only in the teaser-anchor seed (`20260515095804:88`); there is no archive
+  route and `sanitize_user` preserves status. Harmless and left in place as future-proofing — noted
+  so nobody reads the conjunct as evidence that an archive flow exists.
