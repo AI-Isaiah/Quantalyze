@@ -126,8 +126,8 @@ const WIZARD_DRAFT_COLUMNS =
  *    wizard draft**: the only writers of `strategies.source='wizard'` are
  *    `create_wizard_strategy` (api_key_id NOT NULL) and
  *    `add_wizard_composite_key` (api_key_id NULL). The CSV branch finalizes into
- *    a NEW `source='csv'` row (`finalize_csv_strategy`, migration
- *    20260728120000:278-289) and autosaves `strategyId: ""` throughout, because
+ *    a NEW `source='csv'` row (`finalize_csv_strategy_with_returns`, migration
+ *    20260819120000) and autosaves `strategyId: ""` throughout, because
  *    it has no server draft at all. Every row this arm can ever see is an
  *    API-branch draft — a pre-Continue composite, or a single-key draft orphaned
  *    by `api_key_id`'s ON DELETE SET NULL.

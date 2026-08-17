@@ -21,7 +21,8 @@ import { retriesForFlow } from "@/lib/seam-retry-registry";
  * Phase 19 / M-3 — shared client for the unified `/process-key` upstream.
  *
  * Every Phase-19 thin adapter (verify-strategy, keys/sync, keys/validate-and-encrypt,
- * strategies/finalize-wizard, strategies/csv-validate, strategies/csv-finalize)
+ * strategies/finalize-wizard, strategies/csv-validate, and — until Phase 145
+ * re-pointed it at the folded finalize RPC — strategies/csv-finalize)
  * spoke this protocol locally with copy-pasted blocks:
  *
  *   1. Read `INTERNAL_API_TOKEN` env. If missing → 503 "Service unavailable".
@@ -232,9 +233,10 @@ const SEAM_MISCONFIGURED_STATUS = 500;
  *   THROWS it as `AnalyticsUpstreamError`; here the identical message goes to
  *   the operator log and the outcome is RETURNED as an `{ ok: false, response }`
  *   502 envelope — never thrown. Plan 140.2-05 widened this function's `try`
- *   specifically to keep it non-throwing for its five caller routes
- *   (strategies/csv-validate, strategies/csv-finalize, strategies/finalize-wizard,
- *   keys/sync, verify-strategy), none of which has a catch for it; closing A-27
+ *   specifically to keep it non-throwing for its caller routes
+ *   (strategies/csv-validate, strategies/finalize-wizard, keys/sync,
+ *   verify-strategy; strategies/csv-finalize until Phase 145 re-pointed it),
+ *   none of which has a catch for it; closing A-27
  *   with a throw would undo that in the same file.
  *
  * WHY THE THREE STATUSES ARE DECIDED ON THE STATUS, BEFORE ANY RESPONSE IS
@@ -344,11 +346,16 @@ export interface PostProcessKeyArgs {
   /**
    * Phase 19.1 (2026-05-27) — the END USER's Supabase access token (JWT),
    * forwarded as the `X-User-Access-Token` header so the unified router can
-   * call SECURITY DEFINER RPCs that enforce `auth.uid() = p_user_id`
-   * (finalize_csv_strategy). The analytics service's service-role client has
-   * no `auth.uid()`; without this the RPC raises 42501 "called without an
-   * auth session". Only the CSV finalize step needs it — omit for
-   * validate-only / teaser / resync flows, which never hit a user-auth RPC.
+   * call SECURITY DEFINER RPCs that enforce `auth.uid() = p_user_id`. The
+   * analytics service's service-role client has no `auth.uid()`; without
+   * this such an RPC raises 42501 "called without an auth session".
+   *
+   * ⚠️ Phase 145: the CSV finalize step — the only caller that passed this —
+   * left this seam (the route calls the folded finalize RPC directly on its
+   * SSR user client, per 145-DECISION.md). The option and the header
+   * forwarding are KEPT per the standing 140.x obligation (user-scoped
+   * pre-checks on onboard/resync need this transport) — do not delete as
+   * "unused".
    */
   userAccessToken?: string;
 }
@@ -449,12 +456,12 @@ export async function postProcessKey(
    * This client's `try` used to wrap ONLY the `resilientFetch` call, with both
    * body reads sitting after the catch — so a `SeamBodyReadError` from either
    * would have escaped `postProcessKey`, a function whose declared type is
-   * `Promise<PostProcessKeyResult>` and which has NEVER thrown, at all five
-   * caller routes (strategies/csv-validate, strategies/csv-finalize,
-   * strategies/finalize-wizard, keys/sync, verify-strategy), none of which has
-   * a catch for it. That would be five new unhandled-throw paths shipped as a
-   * side effect of a body-read fix. A later refactor that "simplifies" this try
-   * back to wrapping only the fetch re-opens all five.
+   * `Promise<PostProcessKeyResult>` and which has NEVER thrown, at any of its
+   * caller routes (strategies/csv-validate, strategies/finalize-wizard,
+   * keys/sync, verify-strategy; strategies/csv-finalize until Phase 145),
+   * none of which has a catch for it. That would be new unhandled-throw
+   * paths shipped as a side effect of a body-read fix. A later refactor that
+   * "simplifies" this try back to wrapping only the fetch re-opens them all.
    *
    * The two reads the plan enumerates as sites 4 and 5 were byte-identical
    * (`await res.json().catch(() => ({}))`) and sat on mutually exclusive
@@ -486,8 +493,9 @@ export async function postProcessKey(
         // this try.
         "X-Tenant-Claim": tenantClaim,
         // Phase 19.1 — forward the end user's access token so the unified
-        // router can call user-auth SECURITY DEFINER RPCs (finalize_csv_strategy)
-        // as the user. Only present for the CSV finalize step.
+        // router can call user-auth SECURITY DEFINER RPCs as the user. No
+        // production caller passes it since Phase 145 (csv-finalize left this
+        // seam); the transport is kept per the 140.x obligation above.
         ...(args.userAccessToken
           ? { "X-User-Access-Token": args.userAccessToken }
           : {}),
@@ -638,10 +646,12 @@ export async function postProcessKey(
     // SEAMCORE-06 / TRAP-1 — THE undici site. This is the one that actually
     // leaks: undici embeds the outgoing headers in `err.message`, and this
     // request's headers are `Authorization: Bearer <INTERNAL_API_TOKEN>`,
-    // `X-Tenant-Claim`, and on the CSV finalize flow `X-User-Access-Token` — a
-    // LIVE end-user Supabase JWT. The token comes from the leaf's env list; the
-    // JWT cannot, so it is passed explicitly. The syscall token survives, which
-    // is the whole reason the raw message is not simply dropped.
+    // `X-Tenant-Claim`, and — for any caller passing userAccessToken (none in
+    // production since Phase 145, but the transport is kept) —
+    // `X-User-Access-Token`, a LIVE end-user Supabase JWT. The token comes
+    // from the leaf's env list; the JWT cannot, so it is passed explicitly.
+    // The syscall token survives, which is the whole reason the raw message
+    // is not simply dropped.
     console.error(
       `[${tag}] /process-key upstream fetch threw:`,
       scrubSeamError(message, [args.userAccessToken]),
@@ -774,11 +784,12 @@ export async function postProcessKey(
    * extraction paths for one fact is the substring-cascade shape this milestone
    * exists to remove. Copy the string, change nothing about it.
    *
-   * ⭐ THIS IS HALF A FIX AND THE OTHER HALF IS IN THE WIZARD STEPS. Five callers
-   * pass through this arm (`csv-validate`, `csv-finalize`, `finalize-wizard`,
-   * `keys/sync`, `verify-strategy`), so one edit restores the header on all five
-   * — and reaches ZERO user-visible surfaces until each client reads it into its
-   * envelope. Neither half is useful alone.
+   * ⭐ THIS IS HALF A FIX AND THE OTHER HALF IS IN THE WIZARD STEPS. Every
+   * caller passes through this arm (`csv-validate`, `finalize-wizard`,
+   * `keys/sync`, `verify-strategy`; `csv-finalize` until Phase 145), so one
+   * edit restores the header on all of them — and reaches ZERO user-visible
+   * surfaces until each client reads it into its envelope. Neither half is
+   * useful alone.
    */
   if (!res.ok) {
     const forwarded = NextResponse.json(body, { status: res.status });

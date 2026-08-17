@@ -517,10 +517,8 @@ const EXPECTED_ROUTE_BUDGETS: Record<
     expectedMaxDurationS: 300,
     budgets: [{ key: "process-key-sync", calls: 1 }],
   },
-  "src/app/api/strategies/csv-finalize/route.ts": {
-    expectedMaxDurationS: 300,
-    budgets: [{ key: "process-key-sync", calls: 1 }],
-  },
+  // Phase 145 (D-06 i-b): csv-finalize's row deleted with the source-table
+  // twin — the route left the seam (direct fold RPC, no /process-key hop).
   "src/app/api/keys/[id]/permissions/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [{ key: "keys-permissions", calls: 1 }],
@@ -793,10 +791,13 @@ function readMaxDurationFromDisk(routePath: string): number {
 }
 
 describe("SEAM-02 — seam budget invariant (SC-4)", () => {
-  it("scans every route declared in SEAM_ROUTE_BUDGETS (15 routes)", () => {
+  it("scans every route declared in SEAM_ROUTE_BUDGETS (14 routes)", () => {
     // Guards against the table being silently emptied, which would make every
     // it.each below vacuous — zero cases is a passing suite.
-    expect(ROUTE_ENTRIES.length).toBe(15);
+    // 15 → 14 at Phase 145: strategies/csv-finalize left the seam (direct
+    // fold RPC on the SSR client; its table row was deleted deliberately with
+    // the EXPECTED twin in the same commit).
+    expect(ROUTE_ENTRIES.length).toBe(14);
   });
 
   it("SC-4d / D-10 — every route row's CONTENTS match the hand-typed map", () => {

@@ -473,9 +473,16 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
     expect(body.status).toBe("validated");
   });
 
-  it("strategies/csv-finalize unified path forwards X-User-Id=user.id (CT-4)", async () => {
+  it("strategies/csv-finalize LEFT the seam (Phase 145 / D-06 i-b): NO /process-key dispatch", async () => {
+    // Re-pointed by Phase 145: csv-finalize is no longer a thin adapter — the
+    // route calls the folded finalize_csv_strategy_with_returns RPC directly
+    // on the SSR client (145-DECISION.md; the Python csv-finalize branch was
+    // deleted). This tripwire holds the door shut: a re-introduced dispatch
+    // here would be the second-writer regression the decision names. The CT-4
+    // X-User-Id contract this case used to pin survives on the four remaining
+    // adapters, asserted in their own cases in this file.
     const { POST } = await import("@/app/api/strategies/csv-finalize/route");
-    await POST(
+    const res = await POST(
       jsonReq("/api/strategies/csv-finalize", {
         wizard_session_id: "44444444-4444-4444-4444-444444444444",
         fmt: "daily_returns",
@@ -483,11 +490,8 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
         daily_returns_series: [{ date: "2024-01-02", daily_return: 0.01 }],
       }),
     );
-    const call = findProcessKeyCall();
-    expect(call).toBeDefined();
-    expect(
-      (call!.init.headers as Record<string, string>)["X-User-Id"],
-    ).toBe(TEST_USER.id);
+    expect(res.status).toBe(200);
+    expect(findProcessKeyCall()).toBeUndefined();
   });
 
   // CT-7 (army2) — the process-key client must abort a hung upstream
@@ -716,21 +720,13 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
     expect(body!.source).toBe("csv");
   });
 
-  it("strategies/csv-finalize: flow_type=csv (re-routed from /csv/finalize)", async () => {
-    // H-1 (red-team): unified handler requires upstream to return a
-    // UUID strategy_id or it surfaces 502. Default mock omits it; override here.
-    // 140.3-02 / TS-13: it also requires `ok: true` — the semantic verdict the
-    // service states about its own work, which the real csv-finalize builder
-    // emits alongside the id. Both guards must be satisfied; neither subsumes
-    // the other.
-    mockFetch.mockImplementationOnce(async (url: string | URL, init?: RequestInit) => {
-      fetchCalls.push({ url: String(url), init: init ?? {} });
-      return new Response(
-        JSON.stringify({ ok: true, strategy_id: TEST_STRATEGY_ID, queued: true }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
-    });
-
+  it("strategies/csv-finalize: finalizes via the fold, never via a flow_type=csv dispatch (Phase 145)", async () => {
+    // Re-pointed by Phase 145 (was: "flow_type=csv re-routed from
+    // /csv/finalize"). The finalize step's flow_type=csv dispatch is GONE —
+    // the Python branch it reached was deleted (D-06 obligation 2), and a
+    // /process-key POST from this route would silently target the 422
+    // MISSING_STRATEGY_ID refusal that replaced it. csv-VALIDATE remains the
+    // only flow_type=csv emitter (pinned by its own case above).
     const { POST } = await import("@/app/api/strategies/csv-finalize/route");
     const res = await POST(
       jsonReq("/api/strategies/csv-finalize", {
@@ -742,11 +738,10 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
     );
 
     expect(res.status).toBe(200);
-    const call = findProcessKeyCall();
-    expect(call).toBeDefined();
-    const body = parseFetchBody(call);
-    expect(body!.flow_type).toBe("csv");
-    expect(body!.source).toBe("csv");
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.strategy_id).toBe(TEST_STRATEGY_ID);
+    expect(findProcessKeyCall()).toBeUndefined();
   });
 });
 
@@ -844,7 +839,11 @@ describe("thin adapters — INTERNAL_API_TOKEN missing returns 503 (I-T3)", () =
     expect(findProcessKeyCall()).toBeUndefined();
   });
 
-  it("I-T3e: strategies/csv-finalize missing token → 503 envelope, no /process-key call", async () => {
+  it("I-T3e (re-pointed by Phase 145): strategies/csv-finalize no longer needs INTERNAL_API_TOKEN — the fold succeeds without it, no /process-key call", async () => {
+    // Pre-145 this pinned the 503 refusal when the seam token was unset.
+    // The route left the seam (direct fold RPC on the SSR client), so a
+    // missing INTERNAL_API_TOKEN must no longer block a CSV finalize — and
+    // no /process-key call may be issued either way.
     delete process.env.INTERNAL_API_TOKEN;
     const { POST } = await import("@/app/api/strategies/csv-finalize/route");
     const res = await POST(
@@ -855,7 +854,7 @@ describe("thin adapters — INTERNAL_API_TOKEN missing returns 503 (I-T3)", () =
         daily_returns_series: [{ date: "2024-01-02", daily_return: 0.01 }],
       }),
     );
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(200);
     expect(findProcessKeyCall()).toBeUndefined();
   });
 });

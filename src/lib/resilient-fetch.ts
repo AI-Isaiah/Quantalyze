@@ -765,8 +765,9 @@ export const SEAM_BUDGETS: Record<
     // `analytics-service/services/error_contract.py`, whose `_validate` REFUSES
     // an unknown dependency. Adding one is a cross-language change, and this
     // phase's fence is zero Python. It is also not a one-line re-key: this row
-    // is MIXED — the authenticated `csv-validate` / `csv-finalize` paths spend
-    // it too — so containment needs keying by CALLER, not by budget row, which
+    // is MIXED — the authenticated `csv-validate` path spends it too (and
+    // `csv-finalize` did until Phase 145 moved finalize off the seam) — so
+    // containment needs keying by CALLER, not by budget row, which
     // is a change to SEAMCORE-01's keying model. Recorded for Phase 141.
     dependencies: [],
     retries: SEAM_RETRIES,
@@ -952,10 +953,12 @@ export const SEAM_ROUTE_BUDGETS: Record<
     expectedMaxDurationS: 300,
     budgets: [{ key: "process-key-sync", calls: 1 }],
   },
-  "src/app/api/strategies/csv-finalize/route.ts": {
-    expectedMaxDurationS: 300,
-    budgets: [{ key: "process-key-sync", calls: 1 }],
-  },
+  // Phase 145 (D-06 i-b): strategies/csv-finalize LEFT this table — the route
+  // no longer imports the seam (it calls the folded
+  // finalize_csv_strategy_with_returns RPC directly on the SSR Supabase
+  // client, a PostgREST call outside this core's Railway scope). Deleted
+  // deliberately with its EXPECTED_ROUTE_BUDGETS twin, per the invariant
+  // test's STALE-row instruction.
   "src/app/api/keys/[id]/permissions/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [{ key: "keys-permissions", calls: 1 }],
@@ -1913,8 +1916,10 @@ const CREDENTIAL_HEADER_NAMES: readonly string[] = [
  * "every credential undici inlined into the message".
  *
  * That was a LIVE leak, not a latent one, and it predates this plan:
- * `strategies/csv-finalize` has forwarded that JWT through this exact core since
- * Phase 19.1. The client's own log site was covered by plan 140.2-08 (it passes
+ * `strategies/csv-finalize` forwarded that JWT through this exact core from
+ * Phase 19.1 until Phase 145 moved finalize off the seam (the derived scrub
+ * below stays — any future caller of the kept userAccessToken option is
+ * covered). The client's own log site was covered by plan 140.2-08 (it passes
  * `args.userAccessToken` explicitly); THIS site was not, because its enumeration
  * was of the CLIENT's sites. Found by execution, not by reading, when 140.3-02
  * drove a token-bearing transport error through the route — recorded in that

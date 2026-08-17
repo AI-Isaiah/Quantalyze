@@ -187,7 +187,10 @@ const EXPECTED_LIMITER_ROUTES: readonly string[] = [
   "src/app/api/simulator/route.ts",
   "src/app/api/strategies/composite/add-key/route.ts",
   "src/app/api/strategies/create-with-key/route.ts",
-  "src/app/api/strategies/csv-finalize/route.ts",
+  // Phase 145 (D-06 i-b): csv-finalize left the seam import edge (direct fold
+  // RPC). Its limiter deny still routes through rateLimitDenyJson — pinned by
+  // route.test.ts's SEAMRIM-05 describe — it is simply no longer a member of
+  // this file's seam-route population.
   "src/app/api/strategies/csv-validate/route.ts",
   "src/app/api/strategies/finalize-wizard/route.ts",
   "src/app/api/verify-strategy/route.ts",
@@ -212,18 +215,20 @@ const NO_LIMITER_QUARANTINE: readonly string[] = [
 describe("[140.4-13 / SEAMRIM-05] structural — every seam limiter deny goes through the chokepoint", () => {
   it("the scan is not vacuous (a scanner that matched nothing would report agreement forever)", () => {
     // ⚠️ THE FENCE, NOT THE MEASUREMENT. Measured at plan time: 15 seam routes
-    // carrying 15 `checkLimit` sites (`keys/sync` has two). The bounds below are
+    // carrying 15 `checkLimit` sites (`keys/sync` has two); re-measured at
+    // Phase 145: 14 routes (csv-finalize left the seam — direct fold RPC).
+    // The bounds below are
     // deliberately looser than those numbers so ordinary growth does not redden
     // the file — what they exist to catch is a walker that stopped walking or a
     // needle that stopped matching, either of which makes every set equality
     // below trivially true.
     expect(
       SEAM_ROUTE_FILES.length,
-      "The seam-route walk found fewer than 15 routes. `SEAM_IMPORT_EDGE` " +
+      "The seam-route walk found fewer than 14 routes. `SEAM_IMPORT_EDGE` " +
         "stopped matching, or the walker's root moved. Every assertion in this " +
         "file is now vacuous — a guard that scans nothing agrees with " +
         "everything, forever.",
-    ).toBeGreaterThanOrEqual(15);
+    ).toBeGreaterThanOrEqual(14);
 
     const totalCheckLimitSites = SCANS.reduce(
       (n, s) => n + s.checkLimitSites,

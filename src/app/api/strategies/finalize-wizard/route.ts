@@ -1813,7 +1813,7 @@ async function runLegacyFinalize(args: {
   // 20260716130500_finalize_terminal_status_param.sql), so the typed .rpc()
   // overload would reject the extra key. Cast through unknown — the single place
   // to delete once the types regeneration lands (mirrors the
-  // persist_csv_daily_returns cast in csv-finalize/route.ts). The underlying SQL
+  // finalize_csv_strategy_with_returns cast in csv-finalize/route.ts). The underlying SQL
   // function accepts nulls for leverage_range, aum, and max_capacity (the
   // wizard's "skip optional metadata" path), so those ride through unchanged.
   const { data: finalizedId, error } = await (

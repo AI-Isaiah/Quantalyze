@@ -45,11 +45,13 @@ function failureResponse(result: Awaited<ReturnType<typeof postProcessKey>>) {
 }
 
 /**
- * Phase 19.1 (2026-05-27) — finalize_csv_strategy is a SECURITY DEFINER RPC
- * gated on auth.uid() = p_user_id. The unified router can only satisfy that if
- * the Next.js route forwards the end user's access token, which postProcessKey
+ * Phase 19.1 (2026-05-27) — user-auth SECURITY DEFINER RPCs are gated on
+ * auth.uid() = p_user_id. The unified router can only satisfy that if a
+ * Next.js route forwards the end user's access token, which postProcessKey
  * must place in the X-User-Access-Token header. These tests pin that the header
  * is present exactly when (and only when) userAccessToken is supplied.
+ * (Phase 145: csv-finalize — the historical consumer — left this seam; the
+ * transport contract is KEPT per the 140.x obligation and stays pinned here.)
  */
 describe("postProcessKey — X-User-Access-Token forwarding", () => {
   const realFetch = global.fetch;

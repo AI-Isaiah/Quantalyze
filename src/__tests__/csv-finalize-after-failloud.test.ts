@@ -16,6 +16,15 @@
  *   2. placeholder upsert threw               → step "placeholder-upsert-throw"
  *   3. enqueue_compute_job RPC returned error → step "csv-analytics-enqueue"
  *   4. enqueue side-effect threw              → step "csv-analytics-enqueue-throw"
+ *
+ * ⚠️ RE-POINTED BY PHASE 145 (the fold): paths 1/2 used to reach the
+ * placeholder writer through the persist-fail 500 arm; that arm DISSOLVED —
+ * a failed `finalize_csv_strategy_with_returns` commits NOTHING, so there is
+ * no strategy to placeholder and the wizard receives the 5xx directly. The
+ * ONLY surviving caller of writeFailedStrategyAnalyticsPlaceholder is the
+ * after() enqueue-error arm (window E — untouched by the fold), so paths 1/2
+ * now drive the placeholder failure through it. The captures under test are
+ * UNCHANGED.
  */
 
 // @vitest-environment node
@@ -40,8 +49,9 @@ vi.mock("@/lib/ratelimit", () => ({
 
 const NEW_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 
-// server-client rpc: finalize + persist. Default = both succeed; tests
-// override persist per-path.
+// server-client rpc: the Phase 145 fold (finalize_csv_strategy_with_returns).
+// Default = succeeds with NEW_ID; the after()-arm failures are driven via the
+// admin mocks below.
 const rpcMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
@@ -86,11 +96,10 @@ vi.mock("@/lib/supabase/admin", () => ({
   }),
 }));
 
-// Phase 106 Stage B: the route delegates unconditionally to the unified
-// backbone. postProcessKey must succeed (returning NEW_ID) so control reaches
-// the SHARED persistDailyReturnsOrErrorResponse + enqueueCsvAnalyticsAfter
-// helpers these D7 fail-loud tests exercise. INTERNAL_API_TOKEN is required by
-// unifiedCsvFinalizeHandler (503 otherwise) — set below.
+// Phase 145: the route no longer dispatches to /process-key (the fold is
+// called directly on the SSR client). The mock is kept as a tripwire — if a
+// regression re-introduced the dispatch, these tests would exercise it
+// instead of the fold and their fold-call expectations would red.
 vi.mock("@/lib/process-key-client", () => ({
   postProcessKey: vi.fn(async () => ({
     ok: true,
@@ -98,8 +107,6 @@ vi.mock("@/lib/process-key-client", () => ({
     body: { ok: true, strategy_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
   })),
 }));
-
-process.env.INTERNAL_API_TOKEN = "test-internal-token";
 
 vi.mock("@/lib/sentry-capture", () => ({
   captureToSentry: vi.fn(),
@@ -188,10 +195,11 @@ beforeEach(() => {
   vi.clearAllMocks();
   afterCallbacks.length = 0;
   checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
-  // Default server RPC: finalize + persist both succeed.
+  // Default server RPC: the fold succeeds.
   rpcMock.mockImplementation(async (name: string) => {
-    if (name === "finalize_csv_strategy") return { data: NEW_ID, error: null };
-    if (name === "persist_csv_daily_returns") return { data: 1, error: null };
+    if (name === "finalize_csv_strategy_with_returns") {
+      return { data: NEW_ID, error: null };
+    }
     return { data: null, error: null };
   });
   adminRpcMock.mockResolvedValue({ error: null });
@@ -206,26 +214,25 @@ afterEach(() => {
 
 describe("D7 fail-loud: placeholder upsert error is alertable (path 1)", () => {
   it("captures to Sentry (step placeholder-upsert) AND keeps the console.warn when the upsert returns an error", async () => {
-    // persist fails → writeFailedStrategyAnalyticsPlaceholder runs; select
-    // finds no complete row, then the upsert itself returns an error.
-    rpcMock.mockImplementation(async (name: string) => {
-      if (name === "finalize_csv_strategy") return { data: NEW_ID, error: null };
-      if (name === "persist_csv_daily_returns")
-        return { data: null, error: { code: "XX000", message: "persist boom" } };
-      return { data: null, error: null };
-    });
+    // Phase 145 re-point: drive the placeholder writer through its ONLY
+    // surviving caller — the after() enqueue-error arm (the dissolved
+    // persist-fail arm used to reach it in-request). enqueue fails → the
+    // placeholder write runs; select finds no complete row, then the upsert
+    // itself returns an error.
+    adminRpcMock.mockResolvedValue({ error: { message: "enqueue failed" } });
     adminFromMock.mockReturnValue(
       makeAnalyticsMock({ upsertResult: { error: { message: "upsert failed" } } }),
     );
 
     const res = await POST(makeRequest(validBody()));
-    expect(res.status).toBe(500); // CSV_PERSIST_FAIL
+    expect(res.status).toBe(200); // the enqueue arm is non-blocking (window E)
+    await runAfters();
 
     // The warn is KEPT (Vercel log parity) — assert THIS arm's warn, not any warn.
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining("placeholder upsert failed (non-blocking)"),
     );
-    // ...and the failure is now alertable.
+    // ...and the failure is alertable.
     const call = findCapture("placeholder-upsert");
     expect(call).toBeDefined();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -238,16 +245,13 @@ describe("D7 fail-loud: placeholder upsert error is alertable (path 1)", () => {
 
 describe("D7 fail-loud: placeholder upsert throw is alertable (path 2)", () => {
   it("captures to Sentry (step placeholder-upsert-throw) AND keeps the console.warn when the upsert throws", async () => {
-    rpcMock.mockImplementation(async (name: string) => {
-      if (name === "finalize_csv_strategy") return { data: NEW_ID, error: null };
-      if (name === "persist_csv_daily_returns")
-        return { data: null, error: { code: "XX000", message: "persist boom" } };
-      return { data: null, error: null };
-    });
+    // Phase 145 re-point — same driver change as path 1.
+    adminRpcMock.mockResolvedValue({ error: { message: "enqueue failed" } });
     adminFromMock.mockReturnValue(makeAnalyticsMock({ upsertThrows: true }));
 
     const res = await POST(makeRequest(validBody()));
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(200);
+    await runAfters();
 
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining("placeholder upsert threw (non-blocking)"),

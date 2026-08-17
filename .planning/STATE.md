@@ -4,17 +4,17 @@ milestone: v1.19
 milestone_name: JOB/RATE — job-lifecycle reliability and the rate limits that hold
 current_phase: 145
 current_phase_name: JOB — CSV-finalize atomicity (the fold) + orphan terminalize
-status: executing
-stopped_at: Phase 144 SHIPPED, MERGED AND PROD-VERIFIED THROUGH ITS FIRST TICK (PR #688, squash 9e1bc3f2, 2026-08-17). Migration 20260817120000 auto-applied on merge; cron re-registered by JOBNAME — jobid 29 → 34 (per-project drift, the corrected-header behavior), '50 * * * *', body 1396 B md5 4432bc62bfa1bde8affe69204ef3b3ac == TEST == repo (3-way byte match). First PROD tick runid 5721 at 19:50:00Z succeeded in 9 ms and swept 0 — the negative control (PROD census: zero candidates in either arm); the positive proof is the three TEST ticks against 402 real rows (144-CENSUS.md §5–§7: arm B 6/6, bound HOLDS at exactly 100 matching the pre-apply byte-for-byte prediction, bound PROGRESSES at the microsecond tie, conservation 402 throughout). Main CI green after rerunning the known shared-test-db eviction of e2e-seeded; Railway SUCCESS on 9e1bc3f2. JOB-05 + JOB-08 ticked. NOW EXECUTING Phase 145 on worktree branch feat/v1.19-phase-145 — Waves 1-2 COMPLETE (verdict CANNOT REPRODUCE, all four arms GREEN; census STOP-rule 3 fired, 18 PROD incident-era fossils → Plan 06 live cleanup; founder decision (i-b) recorded in 145-DECISION.md, fed by the completed measurement — latency retired, no TEST Railway exists). Wave 3 (145-03 fold migration) executing.
-last_updated: "2026-08-17T19:55:00.000Z"
+status: shipping
+stopped_at: Phase 145 COMPLETE ON BRANCH feat/v1.19-phase-145, founder-approved at the 145-06 human gate, /ship in progress. All six waves done; verdict CANNOT REPRODUCE (4 arms); fold migration 20260819120000 applied+exercised on TEST (gates RED→GREEN incl. the atomicity oracle on the deployed body; ledger reconciled to the filename); (i-b) wired (Python csv-finalize branch DELETED, ~20 tests re-pointed); SC#3 measured clean vs the arm-4 baseline; 18 PROD fossils terminalized UPDATE-only (post-pass census 0/0, per-row rollback anchors in 145-TERMINALIZE.md). Merge auto-applies the fold to PROD. ⚠️ The Wave-5 executor's state.update-progress wrote repo-mis-scoped counters (4/13) and current_phase 153.7 — discarded at this merge in favor of the hand-cut milestone-scoped ledger (the standing verbs-are-broken note below).
+last_updated: "2026-08-18T00:20:00.000Z"
 last_activity: 2026-08-17
 last_activity_desc: Phase 144 closed end-to-end with first-PROD-tick verification; Phase 145 Waves 1-2 complete — SC#1 verdict committed, (i-b) founder decision locked, arm 4 live-verified on TEST (200 + UUID, zero 42501)
 progress:
   total_phases: 21
-  completed_phases: 17
+  completed_phases: 18
   total_plans: 104
-  completed_plans: 100
-  percent: 81
+  completed_plans: 104
+  percent: 86
 ---
 
 # Project State — Quantalyze
@@ -469,7 +469,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [██████████] 100%
+Progress: [█████████░] 85%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -592,6 +592,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 |------|----------|-------|-------|
 | Phase 143 P02 | ~95 min | 3 tasks | 3 created files |
 | Phase 143 P03 | 26min | 3 tasks | 3 files |
+| Phase 145 P03 | 24m | 3 tasks | 6 files |
+| Phase 145 P04 | 56m | 3 tasks | 34 files |
+| Phase 145 P05 | 25m | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -705,6 +708,11 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - [Phase 143]: 143-03: the plan's neuters (6) MATERIALIZED and (7) bare-INSERT are FALSE — executed, GREEN in isolation, substitutes N6b (23505) and N7b (LIMIT removed) added and observed RED; N7b is the only real bound proof
 - [Phase 143]: 143-03: a SQL gate's Part-1 text anchors MASK its behavioural arms under ON_ERROR_STOP=1 — neuter runs must isolate the part under observation or six of eight REDs prove nothing about the arms
 - [Phase 143]: 143-03: the neuter campaign found a real vacuity in this plan's own marker-contract gate (a Sentry TAG satisfied a bare-literal check); fixed to pin the comparison operator, re-observed RED (f62c3866)
+- [Phase ?]: 145-03: csv-finalize folded into one SECDEF transaction (finalize_csv_strategy_with_returns); both parents DROPped; atomicity oracle executed (mid-body fault -> 0/0/0 rows); 10-neuter RED matrix, zero vacuities
+- [Phase ?]: 145-04: fold-failure envelope moved to 500 CSV_FINALIZE_FAIL (retry-enabling; the frozen-button CSV_PERSIST_FAIL default would contradict the honest retry copy) — pinning tests updated in the same diff
+- [Phase ?]: 145-04: third capture step finalize-resolve-read-fail added so the fail-closed resolve-read arm (window B's successor) is not capture-less
+- [Phase ?]: 145-05: NEW-C14-07 deleted (not unskipped) — its upstream-body-spread arm dissolved with hop 0; TS-13 discipline pinned in route.test.ts
+- [Phase ?]: 145-05: window E's re-rank trigger fired at PROD=1 but attributed to the known composite (143 D-09) — entry filed mid-term with attribution recorded
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1407,8 +1415,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-16T22:03:53.784Z
-**Stopped At:** Completed 143-04-PLAN.md — Phase 143 EXECUTION-COMPLETE. Migration APPLIED to TEST (qmnijlgmdhviwzwfyzlc); PROD untouched. ⭐ L-2/T-143-02 RESOLVED BY MEASUREMENT: the 2026-08-17 09:35:00 UTC tick inserted compute_jobs 58728527 through FORCE ROW LEVEL SECURITY. Code review 0 blockers / 3 warnings (all fixed). Verification = human_needed: the 143-04 checkpoint:human-verify is undischarged and SC#1's PROD half needs the merge. JOB-04 deliberately NOT ticked.
+**Last Date:** 2026-08-17T21:47:40.568Z
+**Stopped At:** Completed 145-05-PLAN.md
 **Resume File:** None
 **Next step:** Phase 153.6 (PARITY) is booked and NOT yet planned — run `/gsd:plan-phase 153.6`. It carries 9 findings from the `/code-review xhigh` over the whole 153→153.5 span. ⛔ Three of its four root causes are ONE-PATH-ONLY fixes (a correct remedy applied to `routers/exchange.py` while its twin in `services/ingestion/mt5.py` went untouched, with no guard asserting the two agree) — close them as a CLASS, not as N patches. ⭐ The venue-lock bypass (D) is LIVE on PROD (the migration is on `main`, and `supabase/migrations/**` auto-applies on merge) but is a SELF-targeted control bypass, not a tenant leak. ⛔ The budget correction (C) has two halves — the number AND the oracle that pins the wrong column and so cannot red on it. Phases 154 and 155 remain unplanned; 155 is human- and calendar-gated (founder at the MT5 terminal, live funded account, on a trading day).
 

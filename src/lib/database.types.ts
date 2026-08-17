@@ -3712,16 +3712,6 @@ export type Database = {
         Args: { p_panel_id: string; p_strategy_id: string }
         Returns: Json
       }
-      finalize_csv_strategy: {
-        Args: {
-          p_fmt: string
-          p_strategy_name: string
-          p_terminal_status?: string
-          p_user_id: string
-          p_wizard_session_id: string
-        }
-        Returns: string
-      }
       finalize_wizard_strategy: {
         Args: {
           p_aum: number
@@ -3939,10 +3929,6 @@ export type Database = {
           symbol: string
           venue: string
         }[]
-      }
-      persist_csv_daily_returns: {
-        Args: { p_rows: Json; p_strategy_id: string; p_user_id: string }
-        Returns: number
       }
       phase19_soak_record_day: {
         Args: {

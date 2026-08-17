@@ -345,8 +345,17 @@ export function CsvSubmitStep({
           // NEW-C14-01: re-enable Submit on errors that are safe to retry.
           // The route is now idempotent for wizard_session_id conflicts
           // (23505 → 409), so retrying after CSV_FINALIZE_FAIL is safe.
+          //
+          // Phase 145 ship-review fix: CSV_PERSIST_FAIL left this fence. Its
+          // pre-fold meaning ("strategy exists but series not saved, contact
+          // support") died with persist_csv_daily_returns — the code's SOLE
+          // remaining emitter is the fail-closed resolve arm (503), which
+          // wrote NOTHING of this submission and whose copy says "Try again
+          // shortly." A fence here left that instruction beside a permanently
+          // dead button (page-refresh was the only recovery). Retry is safe:
+          // a committed prior attempt re-raises 23505 and the resolve arm
+          // echoes the existing id.
           // Keep button disabled for:
-          //   CSV_PERSIST_FAIL — strategy exists but series not saved, contact support.
           //   CSV_DUPLICATE_SESSION — admin lookup failed after 23505; retrying will
           //     hit 23505 again and loop indefinitely. The error copy already says
           //     "Refresh the page to see your submitted strategy."
@@ -358,13 +367,10 @@ export function CsvSubmitStep({
           // LIVES ON BRANCH 1 ONLY. Both codes it names are route-minted, so
           // only this branch can carry them; leaving it below the arm would
           // have made it read as if it also governed the hop and fallback
-          // branches, where it can never fire. A regression test pins that
-          // CSV_PERSIST_FAIL still leaves Submit disabled — the pre-existing
-          // behaviour is a property, not an accident of statement order.
-          if (
-            data.code !== "CSV_PERSIST_FAIL" &&
-            data.code !== "CSV_DUPLICATE_SESSION"
-          ) {
+          // branches, where it can never fire. A regression test pins the
+          // fence's membership — the behaviour is a property, not an accident
+          // of statement order.
+          if (data.code !== "CSV_DUPLICATE_SESSION") {
             setSubmitting(false);
           }
           return;

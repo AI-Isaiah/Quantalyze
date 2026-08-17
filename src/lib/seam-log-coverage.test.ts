@@ -230,7 +230,11 @@ const EXPECTED_SEAM_FILES: readonly string[] = [
   "src/app/api/simulator/route.ts",
   "src/app/api/strategies/composite/add-key/route.ts",
   "src/app/api/strategies/create-with-key/route.ts",
-  "src/app/api/strategies/csv-finalize/route.ts",
+  // Phase 145 (D-06 i-b): strategies/csv-finalize LEFT the seam — it no
+  // longer imports process-key-client (the folded RPC is called directly on
+  // the SSR Supabase client). Deleted deliberately, per this guard's LEFT
+  // instruction; its console sites still scrub via scrubSeamError but no
+  // longer stand over seam outgoing headers.
   "src/app/api/strategies/csv-validate/route.ts",
   "src/app/api/strategies/finalize-wizard/route.ts",
   "src/app/api/verify-strategy/route.ts",
@@ -289,7 +293,8 @@ const SAFE_PROPERTIES = ["retryAfterS", "deadlineExceeded", "code"];
  * a bare `Error` — the global constructor, which carries no data at all, let
  * alone an undici header. Measured under the widened roster of `140.4-10`: the
  * false positive surfaces at exactly three sites (`keys/sync`,
- * `portfolio-optimizer`, `csv-finalize`), all of them the `instanceof` shape.
+ * `portfolio-optimizer`, and — until Phase 145 removed it from the roster —
+ * `csv-finalize`), all of them the `instanceof` shape.
  *
  * THE EXCLUSION IS NARROW, and deliberately an EXACT-NAME match rather than a
  * pattern: a binding named `readError` or `rpcErr` is still flagged. Shadowing

@@ -4641,7 +4641,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         )
 
     # Service-role upsert into csv_daily_returns. The worker has no auth.uid()
-    # session so it cannot call persist_csv_daily_returns (auth-gated); it
+    # session so it cannot call the auth-gated CSV finalize fold (the old
+    # standalone persist RPC was folded into
+    # finalize_csv_strategy_with_returns and dropped in Phase 145); it
     # writes the table directly like it does for trades. The per-axis unique
     # index (strategy_id,date) / (api_key_id,date) makes the re-derive
     # idempotent. Chunked so a long-history account can't exceed PostgREST's

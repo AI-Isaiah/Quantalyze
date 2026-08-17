@@ -6,7 +6,8 @@ the per-format pandera schema in services.csv_validator.
 
 Cross-AI revision 2026-04-30: the previously-planned POST /api/csv/finalize
 echo endpoint has been REMOVED. The Next.js layer calls the supabase
-finalize_csv_strategy RPC directly because that RPC is SECURITY DEFINER
+finalize RPC directly (since Phase 145 the folded
+finalize_csv_strategy_with_returns) because that RPC is SECURITY DEFINER
 and asserts auth.uid() = p_user_id; a service-role echo here would have
 been dead code.
 """

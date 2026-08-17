@@ -306,8 +306,8 @@ export type BridgeResponse = z.infer<typeof BridgeResponseSchema>;
 /**
  * Phase 15 / CSV-01 — Next.js /api/strategies/csv-finalize response.
  *
- * Returned by the route after a successful `finalize_csv_strategy` RPC
- * call. The `status` field is bound to the post-finalize value of the
+ * Returned by the route after a successful `finalize_csv_strategy_with_returns`
+ * RPC call. The `status` field is bound to the post-finalize value of the
  * strategy_verifications row (typically `pending_review` / `validated`).
  */
 export const CsvFinalizeResponseSchema = z.object({

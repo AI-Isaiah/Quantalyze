@@ -815,10 +815,16 @@ governs by CONTENT TYPE, and their content is prose/forms — rung 1.
   changes in the undeployed delta).
 
 ### Money-path correctness (latent / flag-gated / edge cases)
-- **Unified-backbone CSV-finalize breaks if flag on** — service-role client has no
-  `auth.uid()` → 42501 every time when `PROCESS_KEY_UNIFIED_BACKBONE=on`. Skip unified for
-  finalize or forward JWT. Make `USE_COMPUTE_JOBS_QUEUE` permanent + delete both legacy
-  finalize placeholder-write branches.
+- ~~**Unified-backbone CSV-finalize breaks if flag on**~~ — **CLOSED 2026-08-17 (Phase 145
+  SC#1, verdict CANNOT REPRODUCE)**. Of this bullet's own two remedies, **"forward JWT"
+  shipped in Phase 19.1** (2026-05-27; verified at HEAD: `route.ts:1324` forwards
+  `X-User-Access-Token`, `process_key.py:1135` reads it and builds the user-scoped client);
+  "skip unified for finalize" was not taken, and the flag concept itself was later deleted
+  (zero runtime readers at HEAD). Live confirmation + census:
+  `.planning/phases/145-job-csv-finalize-atomicity/145-REPRODUCTION.md` (four arms, all
+  GREEN; PROD's 18 csv orphans are all incident-era fossils predating the fix). The 42501
+  GUARD stays live and is now pinned by a permanent CI gate
+  (`supabase/tests/test_csv_finalize_auth_guard.sql`).
 - **Backbone-bypass parity surfaces** — `_compute_portfolio_analytics` (routers/portfolio.py:632)
   and `equity_reconstruction.py` run independent Sharpe/TWR stacks; frontend TS
   (`portfolio-stats.ts` / `scenario-blend-panels.ts` / `health-score.ts`) and matching
@@ -2708,3 +2714,115 @@ that migration; each is a settled plan-time call with its own reason for living 
   record and route, do not edit. ⚠️ Do NOT read this as "arm B is therefore unnecessary". Arm B
   ships as defence in depth against the CLASS (any future direct-UPDATE writer, migration or manual
   repair); that is a different claim from "the invariant is closed", which nothing here makes.
+
+## Phase 145 — recorded deferrals (logged 2026-08-17)
+
+Three DELIBERATE deferrals from the JOB-06 csv-finalize atomicity fold
+(`finalize_csv_strategy_with_returns`, migration `20260819120000`; 145-CONTEXT.md `<deferred>`).
+None is a defect in the fold; each carries the constraint that made it out-of-scope. Census
+citations are from `.planning/phases/145-job-csv-finalize-atomicity/145-REPRODUCTION.md`
+(taken 2026-08-17: PROD `khslejtfbuezsmvmtsdn`, TEST `qmnijlgmdhviwzwfyzlc`).
+
+- [ ] **(Window E) Enqueue-errored strategies are visible and alerted but never healed — nothing
+  re-enqueues them.** Shape: dailies present, the `after()` enqueue errored, `strategy_analytics`
+  = `'failed'`, no `compute_jobs` row ever created. The user's poller breaks out on `failed` and
+  Sentry fires (`step: csv-analytics-enqueue`), so it is not silent — but Phase 143's sweep
+  deliberately excludes it via the terminal-analytics conjunct (`20260816140000:737`), and the
+  Phase 145 fold leaves hop 5 (the post-response enqueue) outside the transaction by physical
+  necessity (`after()` runs post-commit), so this window survives the fold. Census query (3)
+  measured 2026-08-17: **PROD = 1, TEST = 0**. The pre-registered re-rank trigger ("non-zero PROD
+  → live cleanup") technically fired, but the single PROD row is the KNOWN composite already
+  tracked by the Phase 143 (D-09) entry above — composites are chain-terminal by design and need a
+  `stitch_composite` re-run mechanism, not a csv re-enqueue — so there is no genuine window-E
+  population today and the item stays mid-term. Any future healer must key on a signal that
+  distinguishes "enqueue errored" from "composite, legitimately job-terminal" (the D-09
+  false-positive class).
+
+- [ ] **(Wizard first-hop drop) The API/wizard first-hop enqueue drop remains uncovered — ⛔ never
+  absorb it into Phase 145's surface by widening a predicate.** Phase 143 filed it as documented
+  non-coverage (`20260816140000:259-265`; the D-05 entry above): a dropped first `sync_trades`
+  enqueue leaves "no dailies AND no jobs", byte-identical to a brand-new strategy, so no csv-side
+  predicate catches it without re-enqueueing healthy strategies forever. It is shape-identical to
+  145's pre-fold windows A–C but has an UNSOLVED distinguishing-signal problem — which is exactly
+  why 145 dissolved its own windows via the fold instead of sweeping. Census (1)-minus-(2)
+  measured 2026-08-17: **PROD = 0** (no wizard first-hop population; PROD's 18 csv no-dailies rows
+  are all 2026-05 incident-era fossils), **TEST = 8107** (all non-csv — the e2e-seed residue
+  class). Closing it needs its own signal (`api_key_id` present + no job EVER + a longer grace)
+  with its own false-positive analysis — a separate mechanism, never a second predicate bolted
+  onto `20260816140000` or onto the fold's resolve arm.
+
+- [ ] **(Inert flag cleanup) Delete the dead `feature_flags.process_key_unified_backbone` row and
+  the dead `PROCESS_KEY_UNIFIED_BACKBONE` env vars (Vercel Production + Railway
+  `quantalyze-analytics`) — respecting the apply-time RAISE trap.** Zero code readers at HEAD
+  (145-REPRODUCTION.md arm 2: the token survives only in two comments and one test constant; the
+  historical readers named in `106-RATIFICATION.md:29-30` are gone), so row and env vars are dead
+  config, not a live switch. Census (4), 2026-08-17: the row is present on BOTH projects — PROD
+  reads `'on'` (updated 2026-05-25), TEST reads `'off'` (diverges). ⛔ Constraint, verbatim from
+  145-CONTEXT.md: "Do not flip or delete it in this phase —
+  `20260620120000_verification_requests_view_shim_apply.sql:86-89` RAISEs at apply time if it
+  reads `off`, so a 'cleanup' delete could redden a future migration apply." (Precisely: the gate
+  RAISEs when `value = 'off'` AND `updated_by <> 'migration-104-seed'` — the pristine db-reset
+  seed is exempt; a DELETE leaves `v_value` NULL, which passes, but a flip to `'off'` trips it,
+  and TEST's row ALREADY reads `'off'`, so re-applying that migration on TEST is hazardous today
+  unless its `updated_by` is the seed exemption — unverified.) Cleanup order: retire or guard the
+  `20260620120000:86-89` check first, then remove the row and both env vars in the same pass.
+
+## Phase 145 ship-review findings (logged 2026-08-18, /ship review army — none blocking per the blast-radius bar)
+
+Fixed at ship time (not listed): the CSV_PERSIST_FAIL retry fence (user-facing dead button)
+and the pytest discriminator-suite re-point. Everything below is deliberate deferral —
+clean up opportunistically; none is a persistent user-facing defect or data-integrity break.
+
+- [ ] **Re-point `src/__tests__/csv-finalize-rpc.test.ts` at the fold** (deferred-items #5,
+  now verifiable: TEST carries `finalize_csv_strategy_with_returns`). Live-DB-only suite,
+  never in CI; still names the DROPped `finalize_csv_strategy` so every skipIf-live case
+  42883s. Also re-point the stale cover-citation in `strategy-verifications-rls.test.ts:17`.
+- [ ] **Pin the `finalize-resolve-read-fail` capture + the two undriven fail-closed arms**
+  (`route.ts:737` refetchErr, `:749` no-committed-row): two new cases in
+  csv-finalize-cross-submission-merge.test.ts, each observed RED under a step-tag neuter.
+- [ ] **Add a fold gate Part 3d: `p_terminal_status='published'` → 22023 before any write**
+  (the whitelist guard at migration line 225 is currently unpinned by any gate).
+- [ ] **Regenerate `database.types.ts` against TEST (post-fold) + delete the rpc
+  cast-through-unknown in route.ts** so the fold call re-enters the audit-coverage law
+  (deferred-items #3 residual; the current types diff is a hand-edit no DB state produces).
+- [ ] **Copy honesty on the fold-failure arm sub-classes** (`route.ts:627`): "rolled back
+  completely" is unobservable for transport-lost / non-uuid-2xx shapes — branch the copy on
+  SQLSTATE presence. Also consider mapping `error.code === '42501'` to a 401 re-auth
+  envelope instead of the generic 500 (narrow reachability; withAuth ran ms earlier).
+- [ ] **Python tombstone envelope**: `flow_type=csv, step=finalize` now answers 422
+  `MISSING_STRATEGY_ID`, which misdirects stale/external callers — consider an explicit
+  `CSV_FINALIZE_MOVED` refusal arm (`process_key.py:~1136`).
+- [ ] **service_role default-ACL EXECUTE on the fold** contradicts the migration header's
+  "authenticated ONLY" claim (inert today: auth.uid() guard 42501s it). Either add
+  `REVOKE ... FROM service_role` + STEP 3(b)/Part 1 assertions (re-apply the REVOKE to TEST
+  manually — the file itself must NOT re-run there), or amend the header/COMMENT to document
+  the default-ACL reality (the 20260814120000 post-verify (c) treatment).
+- [ ] **Fold value guards for direct-RPC callers**: `(elem->>'daily_return')::DOUBLE PRECISION`
+  accepts NaN/Infinity/1e300 and far-future dates that the route boundary rejects — add
+  22023 pre-INSERT raises mirroring the route checks (carried over from the dropped parent,
+  not a regression; poisons only the caller's own pending_review/private strategy).
+- [ ] **fmt-blind empty-rows allowance**: direct RPC with `p_fmt='daily_returns'` +
+  `p_rows='[]'` commits a zero-dailies strategy (own-tenant). Scope the empty allowance to
+  fmt='trades' or document the acceptance in the header delta list.
+- [ ] **23505 second source**: the ERRCODE map/COMMENT attribute 23505 solely to
+  `strategies_user_wizard_session_source_uniq`, but `csv_daily_returns_strategy_date_key`
+  can also raise it (direct-RPC duplicate dates); the resolve arm keys on SQLSTATE alone —
+  discriminate on constraint name, or document.
+- [ ] **Stale-comment batch from the fold re-point** (grouped; all cosmetic): the
+  csv-validate-route.test.ts behaviors-pinned TOC items 6–8/13 still describe the persist
+  RPC; route.test.ts `rpcMock` comment names both dropped RPCs; csv-validate-route:~898
+  beforeEach comment still says "Phase 106 Stage B ... persist_csv_daily_returns"; orphaned
+  `INTERNAL_API_TOKEN` env sets in csv-finalize-cross-submission-merge.test.ts:150 and the
+  re-pointed csv-validate describes; atomic-fold gate Part 2c is belt-to-2a's-suspenders
+  (savepoint semantics) — annotate.
+- [ ] ⚠️ **Migration-timestamp coordination (self-expiring 2026-08-19 12:00 UTC)**: the fold
+  is stamped `20260819120000` (future-dated at merge). Until that instant, any OTHER
+  migration must carry a timestamp ABOVE it or it trips the backdated-migration guard.
+  Phase 146 planning: if 146 ships a migration before Aug 19 noon UTC, stamp it
+  `2026081913…`+.
+- [ ] **Persist the burned csv-submit content signature across refresh** (red-team RT-3):
+  `WizardClient.tsx` `failedCsvSubmitSigRef` is a useRef while `wizardSessionId` IS persisted —
+  the mint-a-fresh-session-on-content-change fence evaporates on refresh/tab-restore, exactly
+  the resume path where a changed file reaches the server resolve arm. Server-side equality
+  refusal (shipped 2026-08-18) is the operative fence; persisting the signature in the signed
+  saveWizardState envelope makes the client fence defense-in-depth again.
