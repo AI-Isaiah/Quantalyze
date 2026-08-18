@@ -196,7 +196,7 @@ Plans:
   4. A committed audit of the seven existing limiter VALUES against real Python-side cost exists, with adjustments applied where a value was wrong — the substantive remaining RATE question. *(Disposition locked D-146-4, 146-CONTEXT.md: the audit RECORDS each mismatch with a measured-numbers recommendation (146-AUDIT.md §3, full 14-route surface); value ADJUSTMENTS are founder-queued via TODOS.md "Phase 146 — RATE-04 value-parity candidates" — retuning live limits is founder territory, zero values changed in-phase; reversal point = ship gate.)*
   5. A `withRateLimit(handler, limiter)` HOF exists and composes alongside `withAuth`/`withRole`, wired on the routes this phase touches — so the no-CI-gate hand-wiring weakness has a structural successor. *(Disposition locked D-146-1, 146-CONTEXT.md: satisfied VERIFIED-EXISTING by `withAuthLimited` + `withAdminAuth({rateLimitKey})` + the two CI gates, with a fresh-grep receipt — no second wrapper; reversal point = ship gate.)*
 
-**Plans:** 1/3 plans executed
+**Plans:** 3/3 plans executed
 
 Plans:
 **Wave 1**
@@ -205,11 +205,11 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1)*
 
-- [ ] 146-02-PLAN.md — RATE-03/TS-21 match.py slowapi limiters (5 gates same-commit, tripwire deleted) + TS-23-remainder 429→service_error w/ Retry-After preserved + TS-36 parity pytest; pytest+mypy --strict from analytics-service/
+- [x] 146-02-PLAN.md — RATE-03/TS-21 match.py slowapi limiters (5 gates same-commit, tripwire deleted) + TS-23-remainder 429→service_error w/ Retry-After preserved + TS-36 parity pytest; pytest+mypy --strict from analytics-service/
 
 **Wave 3** *(blocked on Waves 1-2)*
 
-- [ ] 146-03-PLAN.md — RATE-04/TS-22 value parity audit (fresh tables at HEAD, per-mismatch recommendations, value candidates → TODOS per D-146-4) + phase close w/ checkbox discipline
+- [x] 146-03-PLAN.md — RATE-04/TS-22 value parity audit (fresh tables at HEAD, per-mismatch recommendations, value candidates → TODOS per D-146-4) + phase close w/ checkbox discipline
 
 ---
 

@@ -5,16 +5,16 @@ milestone_name: JOB/RATE — job-lifecycle reliability and the rate limits that 
 current_phase: 153.7
 current_phase_name: RATE — audit + close the two verified rate-limit gaps
 status: ready_to_plan
-stopped_at: Completed 146-01-PLAN.md
-last_updated: "2026-08-18T02:16:02.810Z"
+stopped_at: Completed 146-03-PLAN.md (phase 146 close)
+last_updated: "2026-08-18T02:53:00.806Z"
 last_activity: 2026-08-17
 last_activity_desc: "Phase 144 closed end-to-end with first-PROD-tick verification; Phase 145 Waves 1-2 complete — SC#1 verdict committed, (i-b) founder decision locked, arm 4 live-verified on TEST (200 + UUID, zero 42501)"
 progress:
   total_phases: 4
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 16
-  completed_plans: 14
-  percent: 75
+  completed_plans: 16
+  percent: 100
 ---
 
 # Project State — Quantalyze
@@ -469,7 +469,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [█████████░] 88%
+Progress: [██████████] 100%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -596,6 +596,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 145 P04 | 56m | 3 tasks | 34 files |
 | Phase 145 P05 | 25m | 2 tasks | 5 files |
 | Phase 146-rate P01 | 11m | 3 tasks | 6 files |
+| Phase 146 P03 | ~25m | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -1417,8 +1418,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-08-18T02:16:02.770Z
-**Stopped At:** Completed 146-01-PLAN.md
+**Last Date:** 2026-08-18T02:53:00.766Z
+**Stopped At:** Completed 146-03-PLAN.md (phase 146 close)
 **Resume File:** None
 **Next step:** Phase 153.6 (PARITY) is booked and NOT yet planned — run `/gsd:plan-phase 153.6`. It carries 9 findings from the `/code-review xhigh` over the whole 153→153.5 span. ⛔ Three of its four root causes are ONE-PATH-ONLY fixes (a correct remedy applied to `routers/exchange.py` while its twin in `services/ingestion/mt5.py` went untouched, with no guard asserting the two agree) — close them as a CLASS, not as N patches. ⭐ The venue-lock bypass (D) is LIVE on PROD (the migration is on `main`, and `supabase/migrations/**` auto-applies on merge) but is a SELF-targeted control bypass, not a tenant leak. ⛔ The budget correction (C) has two halves — the number AND the oracle that pins the wrong column and so cannot red on it. Phases 154 and 155 remain unplanned; 155 is human- and calendar-gated (founder at the MT5 terminal, live funded account, on a trading day).
 
