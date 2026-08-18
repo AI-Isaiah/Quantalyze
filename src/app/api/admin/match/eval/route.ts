@@ -9,6 +9,7 @@ import {
 import { CircuitOpenError } from "@/lib/seam-errors";
 import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { assertSameOrigin } from "@/lib/csrf";
+import { adminActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 // 140.3-13a / SEAMUX-08 — the ONE lazy-Sentry helper. Scrubbing is folded INTO
 // it (SEAMCORE-06), so the caught value is passed UNMODIFIED: pre-scrubbing
@@ -148,6 +149,32 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Forbidden", code: "FORBIDDEN" }, { status: 403, headers: NO_STORE_HEADERS });
   }
 
+  // 146-01 / RATE-02 — mirror the sibling recompute: 20/min per authenticated
+  // admin (`adminActionLimiter`), keyed on `user.id`, NOT IP. B15 NO_INPUT
+  // shape: this GET has no request body, so the "burn-a-token-on-bad-input"
+  // bug cannot occur and the limiter sits directly behind the isAdminUser
+  // gate (auth → limit → handler).
+  const rl = await checkLimit(adminActionLimiter, `match-eval:${user.id}`);
+  if (!rl.success) {
+    // 140.4-13 / SEAMRIM-05 — the ADMIN auth shape. The 503-vs-429 decision is
+    // the chokepoint's; this route keeps only NO_STORE_HEADERS.
+    //
+    // 140.3-G8 / SEAMUX-03 — the builder's default deny bodies are CODELESS
+    // (ratelimit.ts), so both are overridden to carry a machine `code` while
+    // the builder-default SENTENCES stay BYTE-KEPT (keys/sync template). The
+    // builder still decides 429-vs-503; the code names which the caller got.
+    // RATE_LIMITED is OUR limiter's token (not KEY_RATE_LIMIT, the exchange
+    // family); SEAM_MISCONFIGURED is the limiter-unavailable token.
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: { error: "Too many requests", code: "RATE_LIMITED" },
+      misconfiguredBody: {
+        error: "Rate limiter unavailable",
+        code: "SEAM_MISCONFIGURED",
+      },
+    });
+  }
+
   const url = new URL(req.url);
   const lookback = url.searchParams.get("lookback_days") || "28";
   const partnerTag = url.searchParams.get("partner_tag") ?? undefined;
@@ -188,7 +215,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           status: 503,
           headers: {
             ...NO_STORE_HEADERS,
-            // Same pairing as rateLimitDenyJson (in `src/lib/ratelimit.ts`).
+            // Same pairing as rateLimitDenyJson — which, since 146-01, this
+            // route's own deny arm above actually calls (the prose here used
+            // to be the file's ONLY mention of the builder; see the
+            // comment-strip note in seam-ratelimit-posture.invariant.test.ts).
             "Retry-After": String(err.retryAfterS),
           },
         },
