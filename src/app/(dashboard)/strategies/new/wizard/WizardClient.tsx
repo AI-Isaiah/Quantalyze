@@ -27,7 +27,7 @@ import { WithdrawalWarningStrip } from "./WithdrawalWarningStrip";
 import { WizardIpAllowlistHint } from "./WizardIpAllowlistHint";
 import {
   clearWizardState,
-  csvSubmissionSignature,
+  csvSubmissionFingerprint,
   deriveWizardResumeOverrides,
   loadWizardState,
   newWizardSessionId,
@@ -341,7 +341,7 @@ export function WizardClient({
   const [csvValidationPassed, setCsvValidationPassed] = useState<boolean>(false);
   const [strategyName, setStrategyName] = useState<string>("");
   // CR-01 (140.4-REVIEW) — the durable half of the CSV double-submit fence.
-  // Holds the content signature (name + series) captured at the moment a CSV
+  // Holds the content fingerprint (name + series) captured at the moment a CSV
   // submit FAILED, or null when the live session has no burned submission. A
   // later change to the name or the series is then detectable as a DIFFERENT
   // submission, which must not reuse the session id the failed attempt already
@@ -349,6 +349,18 @@ export function WizardClient({
   // strategy the first attempt created. A ref (not state) because reading it
   // must never itself trigger a render, and the mint below is the only writer
   // of the derived session id.
+  //
+  // RT-3 (v1.19 red team, Phase 146.1-07) — this ref is now the in-session
+  // CACHE of a value that also lives in the SIGNED wizard-state envelope. It is
+  // hydrated from that envelope on mount and written through at both the set
+  // and clear sites below, so a reload no longer disarms the fence. Before
+  // RT-3, `wizardSessionId` was persisted while its burn was not — so a refresh
+  // restored the spent session id with nothing left to retire it.
+  //
+  // ⚠️ RT-3 IS DEFENSE IN DEPTH. The OPERATIVE fence is the SERVER-side
+  // equality refusal at `src/app/api/strategies/csv-finalize/route.ts:820-863`
+  // (shipped 2026-08-18), which refuses a resubmit whose committed series does
+  // not match. This ref never justifies weakening that arm.
   const failedCsvSubmitSigRef = useRef<string | null>(null);
   // QA report 2026-05-21 ISSUE-010: classification metadata captured on
   // the new csv_metadata step. Reused MetadataStep shape — same fields as
@@ -396,6 +408,12 @@ export function WizardClient({
       );
       if (overrides.wizardSessionId) {
         setWizardSessionId(overrides.wizardSessionId);
+      }
+      // RT-3 — re-seat the burn alongside the session id it retired.
+      // `deriveWizardResumeOverrides` emits the two together or not at all, so
+      // the fence can never be armed against an id the burn never applied to.
+      if (overrides.failedCsvSubmitSig) {
+        failedCsvSubmitSigRef.current = overrides.failedCsvSubmitSig;
       }
       if (overrides.step) {
         setStep(overrides.step);
@@ -555,10 +573,33 @@ export function WizardClient({
     if (source !== "csv") return;
     const burned = failedCsvSubmitSigRef.current;
     if (burned === null) return;
-    const current = csvSubmissionSignature(strategyName, csvDailyReturnsSeries);
+    // RT-3 — NOTHING TO COMPARE YET. The series is deliberately not persisted
+    // (too large for localStorage), so immediately after a reload the burn is
+    // restored while `csvDailyReturnsSeries` is still undefined. Comparing then
+    // would find a "change" that the user never made and re-mint on every
+    // refresh — which would break the case this fence must NOT touch: an
+    // IDENTICAL retry after a reload, whose whole point is to reuse the session
+    // id so the server's idempotent 200 arm echoes the committed strategy
+    // instead of creating a second one. In-session this guard is inert: the
+    // series is only ever set (never unset) by a successful upload, so it is
+    // always defined by the time a submit can fail.
+    if (csvDailyReturnsSeries === undefined) return;
+    const current = csvSubmissionFingerprint(strategyName, csvDailyReturnsSeries);
     if (current === burned) return;
     // A material change to a burned submission: retire the spent session id.
     failedCsvSubmitSigRef.current = null;
+    // RT-3 write-through: clear the PERSISTED burn too, so a legitimately
+    // different resubmit is not blocked forever by a burn that outlives the
+    // content it described. Explicit `null` — the field is sticky, so omitting
+    // it would carry the stale burn forward.
+    void saveWizardState({
+      strategyId: "",
+      wizardSessionId,
+      step,
+      source: "csv",
+      strategyName,
+      failedCsvSubmitSig: null,
+    });
     setWizardSessionId(newWizardSessionId());
     // The RETIRED session id (the one the failed submit spent) — so an operator
     // can correlate the re-mint with the earlier wizard_error on that session.
@@ -568,17 +609,34 @@ export function WizardClient({
     // wizardSessionId is read only for telemetry; the mint sets a NEW one, but
     // this effect early-returns on the resulting re-run (ref is now null), so
     // there is no loop.
-  }, [source, strategyName, csvDailyReturnsSeries, wizardSessionId]);
+  }, [source, strategyName, csvDailyReturnsSeries, wizardSessionId, step]);
 
   // CR-01 — record the content the FAILED submit was made with. The next
-  // change past this signature is what the effect above re-mints on. Stable
+  // change past this fingerprint is what the effect above re-mints on. Stable
   // identity so CsvSubmitStep's submit handler isn't re-created per render.
+  //
+  // RT-3 — the same value is written THROUGH to the signed wizard-state
+  // envelope, so the burn survives the refresh/tab-restore on which the fence
+  // previously evaporated. The ref and the envelope are set from one expression
+  // so they cannot disagree.
   const handleCsvSubmitFailed = useCallback(() => {
-    failedCsvSubmitSigRef.current = csvSubmissionSignature(
+    const fingerprint = csvSubmissionFingerprint(
       strategyName,
       csvDailyReturnsSeries,
     );
-  }, [strategyName, csvDailyReturnsSeries]);
+    failedCsvSubmitSigRef.current = fingerprint;
+    // Fire-and-forget, matching every other save on this branch (P473: the
+    // envelope is signed with async Web Crypto). The server-side equality
+    // refusal remains the operative fence if this write never lands.
+    void saveWizardState({
+      strategyId: "",
+      wizardSessionId,
+      step,
+      source: "csv",
+      strategyName,
+      failedCsvSubmitSig: fingerprint,
+    });
+  }, [strategyName, csvDailyReturnsSeries, wizardSessionId, step]);
 
   const persistPointer = useCallback(
     (nextStep: WizardStepKey, id: string | null) => {
