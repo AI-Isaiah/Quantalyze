@@ -10,6 +10,10 @@ import { canonicalizeExchangeList } from "@/lib/constants";
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError } from "@/lib/seam-redaction";
+import {
+  pgConstraintName,
+  WIZARD_SESSION_CONSTRAINTS,
+} from "@/lib/api/pgConstraintName";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 /**
@@ -579,7 +583,64 @@ async function finalizeAtomicOrErrorResponse(
   }
 
   if (error?.code === "23505") {
-    return await resolveExistingStrategyOrRefuse(supabase, args, opts);
+    /**
+     * 146.1 / B3 — A 23505 ON THIS PATH IS NOT ONE FACT.
+     *
+     * The arm below existed undiscriminated, so EVERY unique violation the
+     * fold could raise was routed to the wizard-session resolver. There are
+     * two real sources: the session fence
+     * `strategies_user_wizard_session_source_uniq` (20260728120000:167-169),
+     * which IS "a prior attempt for this session already committed", and the
+     * dailies index `csv_daily_returns_strategy_date_key`
+     * (20260624120000:55-56), which is a duplicate-date PAYLOAD defect. The
+     * fold's dailies INSERT carries no `ON CONFLICT`, so the second one is
+     * reachable. Resolving it means telling the user "try again shortly"
+     * (the resolve arm's 503) about a defect that will fail identically
+     * forever — and burying the arrival of any future constraint in silence.
+     *
+     * ⛔ `null` MUST ENTER THE RESOLVE ARM. `pgConstraintName` returns null
+     * when it could not READ a name, NOT when no constraint was violated
+     * (its own docblock states this as the caller contract). Pre-existing
+     * behaviour for UNKNOWN is any-23505 → resolve, and the resolve arm
+     * already fails CLOSED — it refuses with 503 when it cannot find a
+     * committed row, so a mis-routed non-session 23505 answers honestly
+     * rather than fabricating an echo. Tightening this to
+     * `constraint !== null && WIZARD_SESSION_CONSTRAINTS.has(constraint)`
+     * would convert that fail-closed 503 into a fail-open 500 carrying the
+     * wrong copy. This is the non-obvious half of the fix; do not "simplify"
+     * it.
+     *
+     * ⛔ The name comes from `message` and never `details` — `details`
+     * carries client-supplied key values, so reading it would let a caller
+     * steer which arm answers them. That is the leaf's decision; do not
+     * improve it here.
+     */
+    const constraint = pgConstraintName(error);
+    if (constraint === null || WIZARD_SESSION_CONSTRAINTS.has(constraint)) {
+      return await resolveExistingStrategyOrRefuse(supabase, args, opts);
+    }
+    // A NAMED constraint we do not recognise. Fall through to the
+    // fold-failure arm (nothing was persisted — the rollback is total, which
+    // is exactly what that arm's copy says), but say so first: a new unique
+    // index arriving on this path must not be indistinguishable from a
+    // generic RPC failure. Same shape as create-with-key's
+    // `draft-rpc-unknown-constraint` capture.
+    console.error(
+      `${opts.logPrefix} 23505 named an UNRECOGNISED constraint [correlation_id=${opts.correlationId}]:`,
+      constraint,
+      scrubSeamError(error),
+    );
+    captureToSentry(error, {
+      tags: {
+        surface: "csv-finalize",
+        step: "finalize-23505-unknown-constraint",
+      },
+      extra: {
+        correlation_id: opts.correlationId,
+        pg_code: error.code,
+        constraint,
+      },
+    });
   }
 
   // ── The fold-failure arm (D-07, D-11, D-12) ────────────────────────────
@@ -636,14 +697,28 @@ async function finalizeAtomicOrErrorResponse(
 /**
  * ⚠️ CR-01 — THE 23505 RESOLVE ARM. Read this before "simplifying" it away.
  *
- * Under the fold a 23505 has exactly ONE reachable meaning: a PRIOR attempt
- * for this (user, wizard_session, source='csv') FULLY committed — strategy,
- * verification AND dailies, all-or-nothing — and this attempt's own writes
- * rolled back completely. (The dailies unique index can also raise 23505 on
- * a duplicate-date payload in principle, but the route boundary 400s
- * duplicate dates before any dispatch — parseDailyReturnsSeries is the
- * load-bearing gate — and if one ever slipped through, the re-fetch below
- * finds no committed row and the arm fails CLOSED rather than echoing.)
+ * Under the fold a 23505 that REACHES THIS ARM has exactly ONE reachable
+ * meaning: a PRIOR attempt for this (user, wizard_session, source='csv')
+ * FULLY committed — strategy, verification AND dailies, all-or-nothing — and
+ * this attempt's own writes rolled back completely.
+ *
+ * ⚠️ 146.1 / B3 — "REACHES THIS ARM" IS NOW LOAD-BEARING, AND THE PARAGRAPH
+ * IT REPLACED WAS WRONG. The previous wording called the dailies unique
+ * violation hypothetical ("in principle"). It is not: the index
+ * `csv_daily_returns_strategy_date_key` is real (20260624120000:55-56) and
+ * the fold's dailies INSERT is a plain INSERT with NO `ON CONFLICT`, so a
+ * duplicate-date payload raises 23505 there for certain. What made it
+ * unreachable in practice was a single upstream gate, and "one gate holds"
+ * is not a property this arm can verify. The caller now DISCRIMINATES: only
+ * `null` (unparseable → UNKNOWN, pre-existing behaviour) or a
+ * `WIZARD_SESSION_CONSTRAINTS` member enters here; a dailies-index 23505
+ * falls through to the fold-failure arm instead of being offered a retry it
+ * can never succeed at.
+ *
+ * 146.1-01's A1 duplicate-date guard removes the one concrete payload known
+ * to reach that index. This fence is DEFENSE IN DEPTH against any future
+ * source — a second writer, a relaxed boundary, a new index — not a
+ * restatement of that guard.
  *
  * The arm is READ-ONLY. It persists nothing and it must verify identity
  * BEFORE anything of THIS submission is written — the metadata UPDATE runs

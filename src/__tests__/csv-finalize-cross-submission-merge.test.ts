@@ -177,6 +177,7 @@ vi.mock("next/server", async () => {
 });
 
 import { NextRequest } from "next/server";
+import { captureToSentry } from "@/lib/sentry-capture";
 import { POST } from "@/app/api/strategies/csv-finalize/route";
 
 const SESSION = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
@@ -455,5 +456,198 @@ describe("[140.4-16 / CR-01, re-pointed by 145] the 23505 resolve arm refuses a 
       "the route applied this submission's metadata after failing to " +
         "establish whether resolving was safe",
     ).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 146.1-04 / B3 — WHICH 23505 EARNS THE RESOLVE ARM
+// ---------------------------------------------------------------------------
+
+/**
+ * The fold's dailies INSERT is a plain INSERT with no `ON CONFLICT`, so a
+ * duplicate-date payload raises 23505 on `csv_daily_returns_strategy_date_key`
+ * (migration 20260624120000:55-56) — a SECOND, real source of this SQLSTATE on
+ * this path. Undiscriminated, it entered the resolve arm, found no committed
+ * row and answered 503 "try again shortly": a retry invitation for a permanent
+ * input defect that will fail identically forever.
+ *
+ * ⭐ THE ORACLE IS BEHAVIOURAL. Every case below asserts on whether the
+ * `strategies` re-fetch was ISSUED (`resolveFetch.filters`) and on the write
+ * vector (`updateCalls`) — never on whether the source contains a particular
+ * `if`. A test that asserts the shape of the fix cannot detect a fix that is
+ * wired to nothing.
+ */
+
+/** The dailies unique index (20260624120000:55-56) — the second 23505 source. */
+const DAILIES_DUP_KEY_ERROR = {
+  code: "23505",
+  message:
+    'duplicate key value violates unique constraint "csv_daily_returns_strategy_date_key"',
+};
+
+/** The SUPERSEDED session index (20260602190000:52), still listed by the leaf. */
+const SUPERSEDED_DUP_KEY_ERROR = {
+  code: "23505",
+  message:
+    'duplicate key value violates unique constraint "strategies_user_wizard_session_uniq"',
+};
+
+/** A 23505 carrying no parseable constraint name → `pgConstraintName` = null. */
+const UNPARSEABLE_DUP_KEY_ERROR = {
+  code: "23505",
+  message: "duplicate key value violates a unique constraint",
+};
+
+/** Drive the fold into a 23505 carrying an ARBITRARY error shape. */
+function arm23505With(
+  err: { code?: string; message?: string },
+  row: { id: string; name?: string; status?: string } | null,
+) {
+  rpcMock.mockImplementation(async (name: string) => {
+    if (name === "finalize_csv_strategy_with_returns") {
+      return { data: null, error: err };
+    }
+    return { data: null, error: null };
+  });
+  resolveFetch.row = row;
+}
+
+/** Every Sentry step tag captured during the request, in order. */
+function sentrySteps(): string[] {
+  return vi
+    .mocked(captureToSentry)
+    .mock.calls.map(
+      (c) => (c[1] as { tags?: { step?: string } } | undefined)?.tags?.step ?? "",
+    );
+}
+
+describe("[146.1-04 / B3] the 23505 branch enters the resolve arm only for a wizard-session fence", () => {
+  it("ANTI-REGRESSION: the session constraint STILL resolves — the re-fetch is issued", async () => {
+    arm23505With(DUP_KEY_ERROR, {
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+    });
+    seriesProbe.count = 3;
+    seriesProbe.minDate = "2024-01-31";
+    seriesProbe.maxDate = "2024-03-29";
+
+    const res = await post(SERIES_2024);
+
+    expect(res.status).toBe(200);
+    expect(
+      resolveFetch.filters,
+      "B3 narrowed the predicate so far that the ONE 23505 the arm exists " +
+        "for no longer reaches it — the instructed retry now dead-ends",
+    ).toHaveLength(1);
+  });
+
+  it("the SUPERSEDED session constraint name still resolves (older databases)", async () => {
+    arm23505With(SUPERSEDED_DUP_KEY_ERROR, {
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+    });
+    seriesProbe.count = 3;
+    seriesProbe.minDate = "2024-01-31";
+    seriesProbe.maxDate = "2024-03-29";
+
+    const res = await post(SERIES_2024);
+
+    expect(res.status).toBe(200);
+    expect(resolveFetch.filters).toHaveLength(1);
+  });
+
+  it("🔴 THE DAILIES-INDEX 23505 does NOT enter the resolve arm and is not answered with a retry invitation", async () => {
+    // A duplicate-date payload that slipped the route boundary raises 23505 on
+    // the dailies index. Resolving it is meaningless — there is no committed
+    // strategy this session collided with — and the arm's fail-closed 503 tells
+    // the user to "try again shortly" for a defect that is permanent.
+    arm23505With(DAILIES_DUP_KEY_ERROR, {
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+    });
+
+    const res = await post(SERIES_2024);
+
+    expect(
+      resolveFetch.filters,
+      "the strategies re-fetch was issued for a 23505 that named the DAILIES " +
+        "index — the wrong arm is deciding this request",
+    ).toEqual([]);
+    expect(seriesProbe.reads).toEqual([]);
+    expect(
+      res.status,
+      "a permanent payload defect was answered with the resolve arm's " +
+        "retryable 503 ('try again shortly')",
+    ).not.toBe(503);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(
+      body.code,
+      "the dailies-index 23505 must fall through to the fold-failure arm",
+    ).toBe("CSV_FINALIZE_FAIL");
+    expect(
+      updateCalls,
+      "this submission's metadata was written despite the fold rolling back",
+    ).toEqual([]);
+  });
+
+  it("an UNPARSEABLE 23505 STILL enters the resolve arm — null is UNKNOWN, not 'no constraint'", async () => {
+    // `pgConstraintName` returns null when it could not READ a name, not when
+    // no constraint was violated. Pre-existing behaviour for UNKNOWN is
+    // any-23505 → resolve, and the arm already fails CLOSED (503) when it finds
+    // no committed row. Making null bypass the arm converts that fail-closed
+    // 503 into a fail-open 500 carrying the wrong copy.
+    arm23505With(UNPARSEABLE_DUP_KEY_ERROR, {
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+    });
+    seriesProbe.count = 3;
+    seriesProbe.minDate = "2024-01-31";
+    seriesProbe.maxDate = "2024-03-29";
+
+    const res = await post(SERIES_2024);
+
+    expect(
+      resolveFetch.filters,
+      "an unparseable 23505 skipped the resolve arm — the leaf's UNKNOWN " +
+        "contract was 'simplified' away",
+    ).toHaveLength(1);
+    expect(res.status).toBe(200);
+  });
+
+  it("a NAMED-but-unrecognised constraint is FAIL-LOUD: a distinct Sentry step tag carries the name", async () => {
+    // Silence here would bury the arrival of a new constraint on this path
+    // inside a generic fold failure. The name is safe to tag: it comes from
+    // `message`, which Postgres composes from catalog names only.
+    arm23505With(DAILIES_DUP_KEY_ERROR, {
+      id: EXISTING_ID,
+      name: "Alpha",
+      status: "pending_review",
+    });
+
+    await post(SERIES_2024);
+
+    const steps = sentrySteps();
+    expect(
+      steps,
+      "no capture named the unrecognised constraint — the class is silent",
+    ).toContain("finalize-23505-unknown-constraint");
+    expect(steps).not.toContain("finalize-resolve-refused");
+    expect(steps).not.toContain("finalize-resolve-read-fail");
+    const named = vi
+      .mocked(captureToSentry)
+      .mock.calls.find(
+        (c) =>
+          (c[1] as { tags?: { step?: string } } | undefined)?.tags?.step ===
+          "finalize-23505-unknown-constraint",
+      );
+    const extra = (named?.[1] as { extra?: Record<string, unknown> } | undefined)
+      ?.extra;
+    expect(extra?.constraint).toBe("csv_daily_returns_strategy_date_key");
+    expect(extra?.pg_code).toBe("23505");
   });
 });
