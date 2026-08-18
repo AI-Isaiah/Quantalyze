@@ -2799,9 +2799,32 @@ Items stay open HERE until 146.1 ships; close them here when it does.
   completely" is unobservable for transport-lost / non-uuid-2xx shapes — branch the copy on
   SQLSTATE presence. Also consider mapping `error.code === '42501'` to a 401 re-auth
   envelope instead of the generic 500 (narrow reachability; withAuth ran ms earlier).
-- [ ] **Python tombstone envelope**: `flow_type=csv, step=finalize` now answers 422
-  `MISSING_STRATEGY_ID`, which misdirects stale/external callers — consider an explicit
-  `CSV_FINALIZE_MOVED` refusal arm (`process_key.py:~1136`).
+- [x] **Python tombstone envelope — MESSAGE fixed in Phase 146.1-07 (2026-08-18).**
+  `flow_type=csv, step=finalize` still answers 422 `MISSING_STRATEGY_ID` (deliberately —
+  see the gated option below), but the `human_message` no longer tells the caller to supply
+  `context.strategy_id`. It now states that CSV finalize moved to the Next.js route in
+  migration `20260819120000` and that this service is no longer a writer for that flow.
+  The default sentence is byte-identical for every other caller, pinned by
+  `test_non_csv_missing_strategy_id_message_is_byte_identical` and
+  `test_csv_non_finalize_step_keeps_the_default_message` (neuters C4-BLEED and
+  C4-FLOWONLY both observed RED).
+- [ ] ⛔ **OPTION `CSV_FINALIZE_MOVED` — a dedicated error code for the tombstone arm.
+  GATED ON WIZFORM-02 CLOSING. Do not pick this up before that gate opens.**
+  **What it is:** replace the `MISSING_STRATEGY_ID` code on the
+  `flow_type='csv' + step='finalize'` arm with a code that names the actual refusal, so a
+  caller can branch on the code rather than parse the sentence.
+  **Why it is NOT shipped:** a new code must enter the WIZFORM-02 coverage-law population,
+  and **WIZFORM-02 is recorded OPEN** — server-classified codes still render as
+  `code: UNKNOWN` at the wizard (Phase 153 span verification FAILED 2026-08-13). Minting the
+  code today ships it straight into a known-broken classification path, which is strictly
+  worse than an honest message under an existing, correctly-rendered code.
+  **Cost when the gate opens:** (1) add the code to the coverage-law population and satisfy
+  whatever the law requires of a new code; (2) add a wizard-side classification entry so it
+  does not render UNKNOWN, and a render test proving it; (3) the honest sentence shipped by
+  146.1-07 stays — the code is additive to it, not a replacement, or the message regresses
+  to naming only a code.
+  **Where:** `analytics-service/routers/process_key.py` (the tombstone branch beside the
+  API-6 envelope); the deliberate non-minting is recorded in the comment there.
 - [ ] **service_role default-ACL EXECUTE on the fold** contradicts the migration header's
   "authenticated ONLY" claim (inert today: auth.uid() guard 42501s it). Either add
   `REVOKE ... FROM service_role` + STEP 3(b)/Part 1 assertions (re-apply the REVOKE to TEST
@@ -2818,13 +2841,33 @@ Items stay open HERE until 146.1 ships; close them here when it does.
   `strategies_user_wizard_session_source_uniq`, but `csv_daily_returns_strategy_date_key`
   can also raise it (direct-RPC duplicate dates); the resolve arm keys on SQLSTATE alone —
   discriminate on constraint name, or document.
-- [ ] **Stale-comment batch from the fold re-point** (grouped; all cosmetic): the
-  csv-validate-route.test.ts behaviors-pinned TOC items 6–8/13 still describe the persist
-  RPC; route.test.ts `rpcMock` comment names both dropped RPCs; csv-validate-route:~898
-  beforeEach comment still says "Phase 106 Stage B ... persist_csv_daily_returns"; orphaned
-  `INTERNAL_API_TOKEN` env sets in csv-finalize-cross-submission-merge.test.ts:150 and the
-  re-pointed csv-validate describes; atomic-fold gate Part 2c is belt-to-2a's-suspenders
-  (savepoint semantics) — annotate.
+- [x] **Stale-comment batch from the fold re-point — DONE in Phase 146.1-07 (2026-08-18).**
+  Every claim was grep-verified at HEAD BEFORE it was touched; the ones the grep CONFIRMED
+  were left alone rather than given a fresh date. Ground truth for the batch: migration
+  `20260819120000:349-350` DROPs both `finalize_csv_strategy` and `persist_csv_daily_returns`.
+  - CORRECTED: csv-validate-route.test.ts TOC items 6 and 7 (item 6 named the dropped persist
+    RPC; item 7 named `CSV_PERSIST_FAIL`, which no test in the file pins — Test 7 pins
+    `CSV_FINALIZE_FAIL`). csv-validate-route.test.ts:~898 beforeEach ("Phase 106 Stage B ...
+    the SHARED persist_csv_daily_returns RPC"). csv-finalize/route.test.ts:~60 `rpcMock`
+    comment (named both dropped RPCs).
+  - LEFT ALONE, verified accurate: TOC item 8 — Tests 8a (runtime), 8b (source-shape) and
+    8c (arity lock) all exist and match the comment.
+  - REMOVED: the orphaned `process.env.INTERNAL_API_TOKEN` set in
+    csv-finalize-cross-submission-merge.test.ts (line 177 at HEAD, not the 150 this item
+    recorded). The route reads no such variable; the suite was re-run to confirm the
+    removal changed nothing.
+  - ANNOTATED: atomic-fold gate Part 2c — the enclosing `BEGIN ... EXCEPTION WHEN OTHERS`
+    is an implicit PL/pgSQL subtransaction, so once Part 2a establishes that the call
+    RAISED, the 0/0/0 counts follow by savepoint semantics rather than by anything the fold
+    does. Kept (it still discriminates a write that ESCAPES the subtransaction) with a note
+    saying so, so nobody reads a green 2c as independent atomicity evidence.
+- [ ] **Residual: `INTERNAL_API_TOKEN` env sets inside csv-validate-route.test.ts.** NOT
+  touched by the 146.1-07 batch, deliberately. The file mixes csv-VALIDATE describes (which
+  legitimately forward to the Python service with that token, and pin its absence at
+  `:808`/`:1883`) with csv-FINALIZE describes (which no longer need it). Separating the ~28
+  occurrences requires per-describe analysis, and a wrong removal would make a token-absence
+  arm vacuous rather than merely untidy. Cosmetic; do it as its own pass with the suite run
+  between each removal, or split the file.
 - [ ] ⚠️ **Migration-timestamp coordination (self-expiring 2026-08-19 12:00 UTC)**: the fold
   is stamped `20260819120000` (future-dated at merge). Until that instant, any OTHER
   migration must carry a timestamp ABOVE it or it trips the backdated-migration guard.

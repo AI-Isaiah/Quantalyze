@@ -1,6 +1,7 @@
 import { afterEach, describe, it, expect, beforeEach, vi } from "vitest";
 import {
   computeWizardHmac,
+  csvSubmissionFingerprint,
   deriveWizardResumeOverrides,
   formatSavedAt,
   loadWizardState,
@@ -349,6 +350,51 @@ describe("deriveWizardResumeOverrides — pure LS-derivation helper", () => {
       expect(out.strategyName).toBe("Aurora Capital");
     });
   });
+
+  /**
+   * RT-3 — the burn is restored WITH the session id it retired, or not at all.
+   * A burn without its session id would arm the re-mint against an id the burn
+   * never applied to; a session id without its burn is the pre-RT-3 hole.
+   */
+  describe("RT-3 burned csv-submit fingerprint", () => {
+    const burnedCsvDraft: WizardLocalState = {
+      strategyId: "",
+      wizardSessionId: "csv-session-id",
+      step: "csv_upload",
+      savedAt: 1_700_000_000_000,
+      source: "csv",
+      strategyName: "Aurora Capital",
+      failedCsvSubmitSig: "1k.deadbeefcafef00d",
+    };
+
+    it("restores the burn together with the CSV session id", () => {
+      const out = deriveWizardResumeOverrides(burnedCsvDraft, "csv", null);
+      expect(out.wizardSessionId).toBe("csv-session-id");
+      expect(out.failedCsvSubmitSig).toBe("1k.deadbeefcafef00d");
+    });
+
+    it("does NOT restore the burn when the session id is refused (cross-source)", () => {
+      // The CSV payload reaching the API wizard through the ONE shared storage
+      // key. The session id is already refused here; the burn must not sneak
+      // past on its own.
+      const out = deriveWizardResumeOverrides(burnedCsvDraft, "api", "draft-1");
+      expect(out.wizardSessionId).toBeUndefined();
+      expect(out.failedCsvSubmitSig).toBeUndefined();
+    });
+
+    it("does NOT emit a burn override when the payload carries none", () => {
+      const out = deriveWizardResumeOverrides(
+        { ...burnedCsvDraft, failedCsvSubmitSig: null },
+        "csv",
+        null,
+      );
+      expect(out.wizardSessionId).toBe("csv-session-id");
+      // Absence, not a falsy placeholder — WizardClient only re-seats its ref
+      // on a truthy override, and a "" would be indistinguishable from a burn
+      // of the empty submission.
+      expect("failedCsvSubmitSig" in out).toBe(false);
+    });
+  });
 });
 
 /**
@@ -595,6 +641,261 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
     const a = await computeWizardHmac("the-payload", "key-1");
     const b = await computeWizardHmac("the-payload", "key-2");
     expect(a).not.toBe(b);
+  });
+
+  /**
+   * RT-3 (v1.19 red team, Phase 146.1-07) — the burned CSV-submit fingerprint
+   * rides INSIDE the signed envelope.
+   *
+   * ⚠️ These pin the STORAGE CONTRACT only. The behavioural oracle — "after a
+   * reload, does a changed submission still re-mint?" — lives in
+   * `WizardClient.csv-burn-persistence.test.tsx`, because a field that
+   * round-trips but is read by nothing is a helper, not wiring.
+   *
+   * ⚠️ RT-3 is DEFENSE IN DEPTH. The operative fence is the server-side
+   * equality refusal at `csv-finalize/route.ts:820-863`.
+   */
+  describe("RT-3 — burned csv-submit fingerprint in the signed envelope", () => {
+    const BURN = "1k.deadbeefcafef00d";
+
+    it("round-trips the burn inside the signed payload (not a second key)", async () => {
+      await saveWizardState({
+        strategyId: "",
+        wizardSessionId: "session-burn",
+        step: "csv_submit",
+        source: "csv",
+        strategyName: "Alpha 2024",
+        failedCsvSubmitSig: BURN,
+      });
+
+      // ABSENCE assertion: exactly ONE localStorage key exists, and it is the
+      // signed envelope. A second, unsigned key would be tamperable — the whole
+      // reason the envelope is signed is that its contents steer behaviour.
+      expect(Object.keys(localStore)).toEqual(["quantalyze_wizard_state_v1"]);
+      // ...and the burn is not sitting at the envelope's top level either: it
+      // must be inside `p`, the string the HMAC actually covers.
+      const stored = JSON.parse(localStore["quantalyze_wizard_state_v1"]);
+      expect(Object.keys(stored).sort()).toEqual(["h", "p", "v"]);
+      expect(JSON.parse(stored.p).failedCsvSubmitSig).toBe(BURN);
+
+      const loaded = await loadWizardState();
+      expect(loaded?.failedCsvSubmitSig).toBe(BURN);
+    });
+
+    it("loads as null/absent when nothing was ever burned", async () => {
+      await saveWizardState({
+        strategyId: "",
+        wizardSessionId: "session-clean",
+        step: "csv_upload",
+        source: "csv",
+        strategyName: "Alpha 2024",
+      });
+      const loaded = await loadWizardState();
+      // Absence must be falsy so no downstream reader can mistake it for a burn.
+      expect(loaded?.failedCsvSubmitSig ?? null).toBeNull();
+    });
+
+    it("STICKY: a save that OMITS the field carries a live burn forward", async () => {
+      await saveWizardState({
+        strategyId: "",
+        wizardSessionId: "session-burn",
+        step: "csv_submit",
+        source: "csv",
+        strategyName: "Alpha 2024",
+        failedCsvSubmitSig: BURN,
+      });
+
+      // The shape of the eight CSV step-transition saves in WizardClient: they
+      // know nothing about the burn. Stepping back from csv_submit to change
+      // the file fires one of these — if it clobbered the burn, the fence would
+      // be disarmed by the very navigation that precedes the re-upload.
+      await saveWizardState({
+        strategyId: "",
+        wizardSessionId: "session-burn",
+        step: "csv_review",
+        source: "csv",
+        strategyName: "Alpha 2024",
+      });
+
+      const loaded = await loadWizardState();
+      expect(loaded?.step).toBe("csv_review");
+      expect(loaded?.failedCsvSubmitSig).toBe(BURN);
+    });
+
+    it("an EXPLICIT null clears the burn (a resubmit is not blocked forever)", async () => {
+      await saveWizardState({
+        strategyId: "",
+        wizardSessionId: "session-burn",
+        step: "csv_submit",
+        source: "csv",
+        strategyName: "Alpha 2024",
+        failedCsvSubmitSig: BURN,
+      });
+      await saveWizardState({
+        strategyId: "",
+        wizardSessionId: "session-fresh",
+        step: "csv_preview",
+        source: "csv",
+        strategyName: "Alpha 2025",
+        failedCsvSubmitSig: null,
+      });
+
+      const loaded = await loadWizardState();
+      expect(loaded?.failedCsvSubmitSig ?? null).toBeNull();
+    });
+
+    it("a TAMPERED burn fails verification instead of taking effect", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await saveWizardState({
+        strategyId: "",
+        wizardSessionId: "session-burn",
+        step: "csv_submit",
+        source: "csv",
+        strategyName: "Alpha 2024",
+        failedCsvSubmitSig: BURN,
+      });
+
+      // Rewrite the burn in place, keeping the original h.
+      const envelope = JSON.parse(localStore["quantalyze_wizard_state_v1"]);
+      localStore["quantalyze_wizard_state_v1"] = JSON.stringify({
+        ...envelope,
+        p: JSON.stringify({
+          ...JSON.parse(envelope.p),
+          failedCsvSubmitSig: "1k.0000000000000000",
+        }),
+      });
+
+      // Not "the tampered burn is ignored" — the WHOLE payload is refused.
+      expect(await loadWizardState()).toBeNull();
+      expect(
+        warn.mock.calls.some((args) =>
+          String(args[0]).includes("localStorage_signature_mismatch"),
+        ),
+      ).toBe(true);
+      warn.mockRestore();
+    });
+
+    it("refuses a payload whose burn exceeds the length bound", async () => {
+      // A validly-SIGNED envelope carrying an over-long burn — the shape a
+      // same-tab script could write. The bound is what keeps the megabyte-scale
+      // series (deliberately never persisted) out of this envelope.
+      const payloadJson = JSON.stringify({
+        strategyId: "",
+        wizardSessionId: "session-burn",
+        step: "csv_submit",
+        savedAt: Date.now(),
+        source: "csv",
+        failedCsvSubmitSig: "x".repeat(65),
+      });
+      const nonce = sessionStore["quantalyze_wizard_signing_nonce_v1"] ?? "n";
+      sessionStore["quantalyze_wizard_signing_nonce_v1"] = nonce.padEnd(32, "0");
+      const h = await computeWizardHmac(
+        payloadJson,
+        sessionStore["quantalyze_wizard_signing_nonce_v1"],
+      );
+      localStore["quantalyze_wizard_state_v1"] = JSON.stringify({
+        v: 2,
+        p: payloadJson,
+        h,
+      });
+
+      expect(await loadWizardState()).toBeNull();
+    });
+
+    it("a burn just inside the bound is accepted (the guard is not blanket)", async () => {
+      const payloadJson = JSON.stringify({
+        strategyId: "",
+        wizardSessionId: "session-burn",
+        step: "csv_submit",
+        savedAt: Date.now(),
+        source: "csv",
+        failedCsvSubmitSig: "x".repeat(64),
+      });
+      const nonce = sessionStore["quantalyze_wizard_signing_nonce_v1"] ?? "n";
+      sessionStore["quantalyze_wizard_signing_nonce_v1"] = nonce.padEnd(32, "0");
+      const h = await computeWizardHmac(
+        payloadJson,
+        sessionStore["quantalyze_wizard_signing_nonce_v1"],
+      );
+      localStore["quantalyze_wizard_state_v1"] = JSON.stringify({
+        v: 2,
+        p: payloadJson,
+        h,
+      });
+
+      expect((await loadWizardState())?.failedCsvSubmitSig).toBe("x".repeat(64));
+    });
+  });
+});
+
+/**
+ * RT-3 — `csvSubmissionFingerprint` is what the fence compares. It must be
+ * SENSITIVE to any real edit and INSENSITIVE to array identity, and it must
+ * stay bounded no matter how large the series is (the raw signature it digests
+ * serialises the whole return series, which this envelope must never carry).
+ */
+describe("csvSubmissionFingerprint — bounded CSV submission fingerprint", () => {
+  const SERIES_A = [
+    { date: "2024-01-01", daily_return: 0.01 },
+    { date: "2024-01-02", daily_return: -0.02 },
+  ];
+
+  it("is stable for an equal-but-new-reference series (a re-upload must not mint)", () => {
+    expect(csvSubmissionFingerprint("Alpha", SERIES_A)).toBe(
+      csvSubmissionFingerprint("Alpha", [
+        { date: "2024-01-01", daily_return: 0.01 },
+        { date: "2024-01-02", daily_return: -0.02 },
+      ]),
+    );
+  });
+
+  it("changes when the name changes", () => {
+    expect(csvSubmissionFingerprint("Alpha", SERIES_A)).not.toBe(
+      csvSubmissionFingerprint("Alpha 2025", SERIES_A),
+    );
+  });
+
+  it("changes on an INTERIOR edit that leaves count and boundary dates equal", () => {
+    // The exact case the server's boundary-only echo cannot see (C1 residual) —
+    // the client fence must at least not be blind to it as well.
+    const interiorEdit = [
+      { date: "2024-01-01", daily_return: 0.01 },
+      { date: "2024-01-02", daily_return: -0.03 },
+    ];
+    expect(csvSubmissionFingerprint("Alpha", SERIES_A)).not.toBe(
+      csvSubmissionFingerprint("Alpha", interiorEdit),
+    );
+  });
+
+  it("changes when a row is appended", () => {
+    expect(csvSubmissionFingerprint("Alpha", SERIES_A)).not.toBe(
+      csvSubmissionFingerprint("Alpha", [
+        ...SERIES_A,
+        { date: "2024-01-03", daily_return: 0.03 },
+      ]),
+    );
+  });
+
+  it("distinguishes an undefined series from an empty one only via the raw signature's shape", () => {
+    // Both serialise to the same rows string by design (`series ?? []`), so the
+    // fingerprint agreeing here is the DOCUMENTED behaviour, not a collision.
+    expect(csvSubmissionFingerprint("Alpha", undefined)).toBe(
+      csvSubmissionFingerprint("Alpha", []),
+    );
+  });
+
+  it("stays inside the persisted length bound for a 20-year daily series", () => {
+    // ~5,000 rows — a raw signature of ~130KB. The persisted field must not
+    // grow with the series; that is the whole reason a fingerprint exists.
+    const big = Array.from({ length: 5000 }, (_, i) => ({
+      date: `20${String(10 + Math.floor(i / 365)).padStart(2, "0")}-01-01`,
+      daily_return: i / 100000,
+    }));
+    const fingerprint = csvSubmissionFingerprint("Alpha", big);
+    expect(fingerprint.length).toBeLessThanOrEqual(64);
+    // And it is not vacuously constant: a one-row change still moves it.
+    const nudged = [...big.slice(0, 4999), { date: "2029-01-01", daily_return: 9.9 }];
+    expect(csvSubmissionFingerprint("Alpha", nudged)).not.toBe(fingerprint);
   });
 });
 

@@ -56,8 +56,10 @@ vi.mock("@/lib/ratelimit", async (importActual) => {
   };
 });
 
-// rpc mock records (name, args); default returns a valid strategy_id so both
-// the finalize_csv_strategy and persist_csv_daily_returns calls succeed.
+// rpc mock records (name, args); default returns a valid strategy_id so the
+// folded `finalize_csv_strategy_with_returns` call succeeds. (Was "so both the
+// finalize_csv_strategy and persist_csv_daily_returns calls succeed" —
+// migration 20260819120000:349-350 DROPped both of those; the fold is one RPC.)
 const NEW_STRATEGY_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const rpcMock = vi.hoisted(() =>
   vi.fn(

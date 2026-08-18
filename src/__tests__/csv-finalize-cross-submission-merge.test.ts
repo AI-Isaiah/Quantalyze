@@ -174,7 +174,12 @@ vi.mock("@/lib/supabase/admin", () => ({
   }),
 }));
 
-process.env.INTERNAL_API_TOKEN = "test-internal-token";
+// (Phase 146.1-07, cosmetic batch) An orphaned `process.env.INTERNAL_API_TOKEN`
+// set lived here from when csv-finalize proxied to the Python service. It was
+// removed after verifying the route reads no such variable — the only mention
+// left in `csv-finalize/route.ts` is the docblock explaining why a direct RPC
+// needs NO internal token. Removing it was checked by re-running this suite,
+// not assumed.
 
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 

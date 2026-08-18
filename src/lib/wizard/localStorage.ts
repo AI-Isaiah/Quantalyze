@@ -55,6 +55,15 @@ const NONCE_KEY = "quantalyze_wizard_signing_nonce_v1";
 const HMAC_HEX_LEN = 16;
 /** Envelope schema version. v2 = HMAC-signed. v1 was plaintext (rejected). */
 const ENVELOPE_VERSION = 2;
+/**
+ * RT-3 — upper bound on the persisted CSV-submit burn fingerprint. The
+ * fingerprint `csvSubmissionFingerprint` emits is ~22 chars (a base36 length
+ * plus 16 hex digits); 64 leaves headroom without ever admitting a payload
+ * large enough to be a serialized return series. A stored value longer than
+ * this is malformed and the whole payload is refused, exactly as an
+ * over-long `strategyName` is.
+ */
+const FINGERPRINT_MAX_LEN = 64;
 
 /**
  * Canonical ordered list of wizard step keys — the SINGLE source of truth.
@@ -119,6 +128,30 @@ export interface WizardLocalState {
    * metadata step). Bounded at 80 chars to match the UI input cap.
    */
   strategyName?: string;
+  /**
+   * RT-3 (v1.19 red team, Phase 146.1-07) — the content FINGERPRINT of the CSV
+   * submission that a failed submit burned, or absent/null when nothing is
+   * burned. See `csvSubmissionFingerprint` below for why a fingerprint and not
+   * the raw signature.
+   *
+   * ⚠️ DEFENSE IN DEPTH ONLY. The OPERATIVE fence against a changed submission
+   * being merged onto an already-committed strategy is the SERVER-side equality
+   * refusal in `src/app/api/strategies/csv-finalize/route.ts:820-863` (shipped
+   * 2026-08-18). This field only restores the CLIENT-side "a changed submission
+   * is a new submission by construction" fence across a reload — before it, the
+   * burn lived in a `useRef` that a refresh destroyed while `wizardSessionId`
+   * (the thing the burn exists to retire) was persisted. Nothing here may be
+   * read as licence to weaken the server fence.
+   *
+   * STICKY: `saveWizardState` preserves this field when a caller OMITS it, so
+   * the eight CSV step-transition saves cannot clobber a live burn. An explicit
+   * `null` clears it. See `saveWizardState` for the full contract.
+   *
+   * Bounded at FINGERPRINT_MAX_LEN chars by the load-time validator — this
+   * field must never be able to carry the megabyte-scale series that is
+   * deliberately NOT persisted.
+   */
+  failedCsvSubmitSig?: string | null;
 }
 
 /** Returns true when running in a browser with localStorage available. */
@@ -236,13 +269,67 @@ function hexEquals(a: string, b: string): boolean {
  * during SSR or when localStorage is unavailable. Writes an
  * HMAC-signed envelope (v2) tying the payload to the current tab via
  * sessionStorage nonce.
+ *
+ * RT-3 — `failedCsvSubmitSig` is the ONE STICKY field on this payload:
+ *
+ *   omitted (`undefined`) ⇒ carry the previously-stored value forward
+ *   `null`                ⇒ clear the burn
+ *   string                ⇒ set the burn
+ *
+ * WHY sticky rather than a required argument: eight CSV step-transition
+ * saves in `WizardClient.tsx` write the pointer without any knowledge of the
+ * burn, and stepping back from `csv_submit` to change the file — the exact
+ * path RT-3 exists for — fires one of them. A non-sticky field would be
+ * clobbered by the very navigation that precedes the re-upload, so the
+ * persisted burn would be gone before the reload it is supposed to survive.
+ * Sticky means the two deliberate writers (`WizardClient`'s burn and clear
+ * sites) are the only code that can change it.
+ *
+ * The carry-forward reads through `loadWizardState`, so an envelope that
+ * fails HMAC verification contributes nothing — an unverifiable burn is not
+ * carried into a freshly-signed payload.
+ *
+ * ⚠️ SAVES ARE SERIALIZED (see `saveQueue`). Sticky made write ORDER matter:
+ * an omitting save does one extra async read before it signs, so a LATER save
+ * that supplies the field explicitly used to finish FIRST and then be
+ * overwritten by the earlier save's stale carry-forward. That is exactly the
+ * upload-changed-file sequence — the step-transition save (omitting) is issued
+ * a tick before the mint effect's clear (explicit `null`) — so a clear could
+ * be silently resurrected. Queueing makes the last write the last CALL, which
+ * is the only ordering a caller can reason about.
  */
 export async function saveWizardState(
   state: Omit<WizardLocalState, "savedAt">,
 ): Promise<void> {
+  // Chain onto the previous save. `writeWizardState` never rejects, so the
+  // queue cannot be poisoned by one bad write.
+  saveQueue = saveQueue.then(() => writeWizardState(state));
+  return saveQueue;
+}
+
+/**
+ * Serialization point for `saveWizardState`. Always a settled-or-pending
+ * promise that never rejects.
+ */
+let saveQueue: Promise<void> = Promise.resolve();
+
+async function writeWizardState(
+  state: Omit<WizardLocalState, "savedAt">,
+): Promise<void> {
   if (!hasLocalStorage()) return;
   try {
-    const payload: WizardLocalState = { ...state, savedAt: Date.now() };
+    // RT-3 sticky carry-forward. Only pay for the extra read+verify when the
+    // caller did not speak to the field.
+    let burn: string | null | undefined = state.failedCsvSubmitSig;
+    if (burn === undefined) {
+      const prior = await loadWizardState();
+      burn = prior?.failedCsvSubmitSig ?? null;
+    }
+    const payload: WizardLocalState = {
+      ...state,
+      savedAt: Date.now(),
+      failedCsvSubmitSig: burn,
+    };
     const payloadJson = JSON.stringify(payload);
     const nonce = getOrCreateTabNonce();
     let envelope: string;
@@ -341,6 +428,19 @@ export async function loadWizardState(): Promise<WizardLocalState | null> {
         return null;
       }
     }
+    // RT-3: the burn fingerprint is optional and either null (explicitly
+    // cleared) or a BOUNDED string. An over-long value is malformed — the
+    // field can only ever hold `csvSubmissionFingerprint` output, and refusing
+    // here is what keeps a serialized return series from ever riding in this
+    // envelope through a tampered write.
+    if (obj.failedCsvSubmitSig !== undefined && obj.failedCsvSubmitSig !== null) {
+      if (
+        typeof obj.failedCsvSubmitSig !== "string" ||
+        (obj.failedCsvSubmitSig as string).length > FINGERPRINT_MAX_LEN
+      ) {
+        return null;
+      }
+    }
     return parsed as WizardLocalState;
   } catch {
     return null;
@@ -366,6 +466,14 @@ export interface WizardResumeOverrides {
   strategyName?: string;
   showResumeBanner?: boolean;
   wizardSessionId?: string;
+  /**
+   * RT-3 — the burned CSV-submit fingerprint to re-seat in WizardClient's
+   * in-session ref. Emitted ONLY when the session id it belongs to is also
+   * being restored: a burn identifies which submission spent THAT session id,
+   * so carrying it without its session would arm the re-mint against an id the
+   * burn never applied to.
+   */
+  failedCsvSubmitSig?: string;
 }
 
 export function deriveWizardResumeOverrides(
@@ -413,6 +521,13 @@ export function deriveWizardResumeOverrides(
   // fresh token — which is what a distinct submission should carry anyway.
   if (loaded.wizardSessionId && (loaded.source ?? "api") === source) {
     out.wizardSessionId = loaded.wizardSessionId;
+
+    // RT-3 — the burn rides with the session id it retired, never on its own.
+    // CSV-only: `csvSubmissionFingerprint` is a fingerprint of a CSV
+    // submission, and the API branch has no such content.
+    if (source === "csv" && loaded.failedCsvSubmitSig) {
+      out.failedCsvSubmitSig = loaded.failedCsvSubmitSig;
+    }
   }
 
   // strategyName is CSV-branch only.
@@ -538,5 +653,51 @@ export function csvSubmissionSignature(
 ): string {
   const rows = (series ?? []).map((r) => `${r.date}=${r.daily_return}`).join("|");
   // NUL separates the two fields so no name/series boundary is ambiguous.
+  // RT-3: callers compare `csvSubmissionFingerprint` (below), not this string.
   return `${strategyName}\u0000${rows}`;
+}
+
+/**
+ * RT-3 (v1.19 red team, Phase 146.1-07) — a BOUNDED fingerprint of
+ * `csvSubmissionSignature`, and the value the burn fence actually compares.
+ *
+ * ⚠️ WHY NOT THE RAW SIGNATURE. `csvSubmissionSignature` serialises the entire
+ * daily-return series. This module's own contract says that series is NOT
+ * persisted because "the parsed dataset can be megabytes — too large for
+ * localStorage" (`WizardClient.tsx:334-337`), and the burn now rides in the
+ * signed envelope that every wizard save rewrites. Persisting the raw
+ * signature would put a hundreds-of-kilobytes string through an HMAC sign on
+ * every debounced keystroke and would eventually hit the storage quota — at
+ * which point `saveWizardState`'s catch swallows the write and the wizard
+ * silently stops persisting its resume pointer at all. The fingerprint keeps
+ * the field at ~22 chars.
+ *
+ * BOTH sides of the comparison are fingerprinted, so in-session behaviour is
+ * unchanged except for collisions. The digest is a 64-bit two-lane FNV-1a-style
+ * hash PREFIXED WITH THE EXACT SIGNATURE LENGTH — not cryptographic, and it
+ * does not need to be: an attacker who can choose colliding inputs still meets
+ * the SERVER-side equality refusal (`csv-finalize/route.ts:820-863`), which is
+ * the operative fence. What this must resist is an ACCIDENTAL collision
+ * between two edits a user actually made, and 64 bits plus an exact length
+ * match is far past that.
+ *
+ * A collision fails in the SAFE direction for this fence's purpose: a changed
+ * submission would not re-mint, and the server arm refuses it rather than
+ * merging it.
+ */
+export function csvSubmissionFingerprint(
+  strategyName: string,
+  series: readonly { date: string; daily_return: number }[] | undefined,
+): string {
+  const raw = csvSubmissionSignature(strategyName, series);
+  let h1 = 0x811c9dc5;
+  let h2 = 0xc2b2ae35;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ c, 0x85ebca6b) >>> 0;
+  }
+  return `${raw.length.toString(36)}.${h1.toString(16).padStart(8, "0")}${h2
+    .toString(16)
+    .padStart(8, "0")}`;
 }

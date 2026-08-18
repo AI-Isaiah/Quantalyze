@@ -2223,6 +2223,127 @@ def test_process_key_csv_finalize_branch_is_dead_answers_422(client):
     )
 
 
+# The verbatim sentence every NON-csv-finalize caller has received since Phase
+# 17. It is duplicated here on purpose: a test that re-derived it from the
+# router could not tell a deliberate rewrite from an accidental one.
+_DEFAULT_MISSING_SID_MESSAGE = (
+    "context.strategy_id is required for this flow_type. "
+    "Validate-only flows must set context.step='validate'."
+)
+
+
+def test_csv_finalize_tombstone_message_says_finalize_moved(client):
+    """Phase 146.1-07 (C4) — the refusal states its ACTUAL reason.
+
+    The fall-through to MISSING_STRATEGY_ID is deliberate (pinned above), but
+    the message told a stale or external CSV finalize caller to supply
+    ``context.strategy_id`` — which is not why it was refused and would not
+    help if they did. This service stopped being a writer for that flow when
+    the fold shipped in migration 20260819120000.
+
+    ⛔ The CODE must stay MISSING_STRATEGY_ID. Minting CSV_FINALIZE_MOVED would
+    enter a NEW code into the WIZFORM-02 coverage-law population, and that
+    class is recorded OPEN — server-classified codes still render as
+    ``code: UNKNOWN`` at the wizard.
+    """
+    fake = _build_supabase_mock(existing_row=None)
+    with patch("routers.process_key.get_supabase", return_value=fake):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "csv",
+                "source": "csv",
+                "context": {
+                    "wizard_session_id": "22222222-2222-2222-2222-222222222222",
+                    "user_id": "33333333-3333-3333-3333-333333333333",
+                    "fmt": "trades",
+                    "strategy_name": "Test Strategy",
+                    "step": "finalize",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 422, r.text
+    body = r.json()
+    assert body["code"] == "MISSING_STRATEGY_ID", (
+        "a new error code was minted for the tombstone arm — WIZFORM-02 is "
+        f"OPEN and a new code ships into a known-broken renderer: {body}"
+    )
+    message = body["human_message"]
+    assert "moved" in message.lower(), message
+    assert "20260819120000" in message, message
+    # ABSENCE: the misdirecting default sentence must not survive anywhere in
+    # this arm's message — a presence-only check is satisfied by concatenating
+    # the new sentence onto the old one, which would leave the misdirection in
+    # place while the test went green.
+    assert _DEFAULT_MISSING_SID_MESSAGE not in message, message
+    assert "context.strategy_id is required" not in message, message
+
+
+def test_non_csv_missing_strategy_id_message_is_byte_identical(client):
+    """The anti-bleed control for the tombstone message above.
+
+    A copy change that leaks into unrelated 422s is a regression dressed as
+    copy. Every caller that is NOT flow_type='csv' + step='finalize' must read
+    exactly the sentence it read before Phase 146.1-07.
+    """
+    fake = _build_supabase_mock(existing_row=None)
+    with patch("routers.process_key.get_supabase", return_value=fake):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "onboard",
+                "source": "okx",
+                "context": {
+                    "wizard_session_id": "wiz-no-sid-bleed",
+                    "user_id": "u1",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 422, r.text
+    body = r.json()
+    assert body["code"] == "MISSING_STRATEGY_ID", body
+    assert body["human_message"] == _DEFAULT_MISSING_SID_MESSAGE, (
+        "the tombstone copy leaked into an unrelated 422: "
+        f"{body['human_message']!r}"
+    )
+
+
+def test_csv_non_finalize_step_keeps_the_default_message(client):
+    """The branch discriminates on BOTH fields, not just flow_type.
+
+    A csv-flow request that is missing strategy_id for some OTHER reason (no
+    step, or a step that is neither 'validate' nor 'finalize') has not hit the
+    moved-writer case, so it must keep the default sentence. Without this arm
+    the branch could be written on flow_type alone and still look correct.
+    """
+    fake = _build_supabase_mock(existing_row=None)
+    with patch("routers.process_key.get_supabase", return_value=fake):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "csv",
+                "source": "csv",
+                "context": {
+                    "wizard_session_id": "wiz-no-sid-csv-nostep",
+                    "user_id": "u1",
+                    "fmt": "trades",
+                    "raw_bytes_base64": "Y29sCjE=",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 422, r.text
+    body = r.json()
+    assert body["human_message"] == _DEFAULT_MISSING_SID_MESSAGE, body
+
+
 def test_process_key_audit_uses_wizard_session_id_when_no_strategy_id(client):
     """WR-06 regression: audit_log.entity_id is NOT NULL (migration 010)
     and log_audit_event_service raises when p_entity_id is NULL
