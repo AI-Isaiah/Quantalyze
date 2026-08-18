@@ -1960,15 +1960,17 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
     # ownership SELECT (above) so an attacker cannot poison the
     # bucket cache with forged user_ids.
     if not _check_bridge_user_rate((req.user_id or "").strip()):
-        raise HTTPException(
-            status_code=429,
+        # TS-23 (146-02, D-146-3): TS-23's owner decided — the nested
+        # service_error envelope (internal.py's worked example) is the ONE
+        # winning 429 raise-site shape; migrated per TS-23. The wait stays the
+        # window this cap actually enforces, read from the SAME constant
+        # `_check_bridge_user_rate` uses (PYAPIFIX2-04 preserved).
+        raise service_error(
+            429,
+            "RATE_LIMITED",
+            retryable=True,
+            retry_after=_BRIDGE_USER_RATE_WINDOW_SEC,
             detail="Too many bridge requests for this user. Try again later.",
-            # PYAPIFIX2-04 — advertise the window this cap actually enforces,
-            # read from the SAME constant `_check_bridge_user_rate` uses. Body
-            # shape deliberately unchanged (header-only): migrating it would
-            # mint a fourth 429 body shape, and which shape wins belongs to
-            # TS-23's owner.
-            headers={"Retry-After": str(_BRIDGE_USER_RATE_WINDOW_SEC)},
         )
 
     # Verify the underperformer is actually in this portfolio
@@ -2251,16 +2253,19 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
     # Defense-in-depth per-email rate limit (IP-only limit above is decorative
     # against rotated-IP attackers). Composed with the slowapi IP budget.
     if not _check_verify_strategy_email_rate((req.email or "").strip().lower()):
-        raise HTTPException(
-            status_code=429,
+        # TS-23 (146-02, D-146-3): migrated per TS-23 onto the nested
+        # service_error envelope — the ONE winning 429 raise-site shape. Wait
+        # from the same constant `_check_verify_strategy_email_rate` uses
+        # (PYAPIFIX2-04). ⚠️ This route has NO TS caller today (0 hits for
+        # "verify-strategy" in src/lib/analytics-client.ts), so the rationale
+        # is CLASS INTEGRITY, not user impact: a class closed at three of its
+        # four sites re-opens the moment the fourth is revived.
+        raise service_error(
+            429,
+            "RATE_LIMITED",
+            retryable=True,
+            retry_after=_VERIFY_STRATEGY_EMAIL_RATE_WINDOW_SEC,
             detail="Too many verification attempts for this email. Try again later.",
-            # PYAPIFIX2-04, from the same constant
-            # `_check_verify_strategy_email_rate` uses. ⚠️ This route has NO TS
-            # caller today (0 hits for "verify-strategy" in
-            # src/lib/analytics-client.ts), so the rationale is CLASS INTEGRITY,
-            # not user impact: a class closed at three of its four sites
-            # re-opens the moment the fourth is revived.
-            headers={"Retry-After": str(_VERIFY_STRATEGY_EMAIL_RATE_WINDOW_SEC)},
         )
 
     # Audit H-0592 — Idempotency-Key support. A flaky-client retry on the

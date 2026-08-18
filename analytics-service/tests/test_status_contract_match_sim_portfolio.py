@@ -523,11 +523,13 @@ async def test_s24_health_stale_response_is_unchanged(monkeypatch) -> None:
 # teeth: widening the window ships green under it. The value is the wire
 # contract, so the wire value is what is pinned.
 #
-# ⚠️ Header-only by design. The bodies of these three stay the bare scalar
-# ``{"detail": "<string>"}`` — migrating them would mint a FOURTH 429 body shape
-# in the same phase that deliberately minted a third (PYAPIFIX2-03 at
-# routers/internal.py). Which shape wins is TS-23's owner's call (140.2 / 146).
-# The body assertions below therefore pin the scalar shape as UNCHANGED.
+# TS-23 (146-02, D-146-3): the shape decision LANDED — the nested
+# ``service_error`` envelope (internal.py's worked example) is the ONE winning
+# 429 raise-site shape, and all three sites below migrated onto it with their
+# Retry-After values preserved. The body assertions pin the ENVELOPE now
+# (``detail.code == "RATE_LIMITED"``), and the header assertions pin the wire
+# value each site advertised BEFORE the migration — a dropped ``retry_after``
+# kwarg reds them.
 _EXPECTED_HOURLY_RETRY_AFTER = "3600"
 
 
@@ -560,9 +562,12 @@ def test_simulator_per_user_quota_429_advertises_its_window(monkeypatch) -> None
         "the per-user simulator quota must advertise its own window; sourcing "
         "the header from the 20/hour COUNT instead would promise a 20-second wait"
     )
-    # Body shape UNCHANGED — a bare scalar detail, not an envelope (see above).
-    assert isinstance(resp.json()["detail"], str)
-    assert "Simulator rate limit exceeded" in resp.json()["detail"]
+    # TS-23 (146-02): the nested service_error envelope is the one raise-site
+    # shape now — see the block comment above _EXPECTED_HOURLY_RETRY_AFTER.
+    envelope = resp.json()["detail"]
+    assert envelope["code"] == "RATE_LIMITED"
+    assert envelope["retryable"] is True
+    assert "Simulator rate limit exceeded" in envelope["detail"]
 
 
 @pytest.fixture()
@@ -616,8 +621,10 @@ def test_bridge_per_user_cap_429_advertises_its_window(
 
     assert resp.status_code == 429
     assert resp.headers["Retry-After"] == _EXPECTED_HOURLY_RETRY_AFTER
-    assert isinstance(resp.json()["detail"], str)
-    assert "Too many bridge requests for this user." in resp.json()["detail"]
+    envelope = resp.json()["detail"]  # TS-23 (146-02): the one envelope shape
+    assert envelope["code"] == "RATE_LIMITED"
+    assert envelope["retryable"] is True
+    assert "Too many bridge requests for this user." in envelope["detail"]
 
 
 def test_verify_strategy_per_email_cap_429_advertises_its_window(
@@ -651,5 +658,7 @@ def test_verify_strategy_per_email_cap_429_advertises_its_window(
 
     assert resp.status_code == 429
     assert resp.headers["Retry-After"] == _EXPECTED_HOURLY_RETRY_AFTER
-    assert isinstance(resp.json()["detail"], str)
-    assert "Too many verification attempts for this email." in resp.json()["detail"]
+    envelope = resp.json()["detail"]  # TS-23 (146-02): the one envelope shape
+    assert envelope["code"] == "RATE_LIMITED"
+    assert envelope["retryable"] is True
+    assert "Too many verification attempts for this email." in envelope["detail"]

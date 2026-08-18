@@ -1748,23 +1748,26 @@ async def recompute(request: Request, req: RecomputeRequest) -> dict[str, Any]:
             _now = time.monotonic()
             _last = _force_last_run.get(allocator_id, 0.0)
             if _now - _last < FORCE_RECOMPUTE_MIN_INTERVAL_S:
-                wait_s = int(FORCE_RECOMPUTE_MIN_INTERVAL_S - (_now - _last))
-                raise HTTPException(
-                    status_code=429,
+                # TS-23 (146-02, D-146-3): migrated onto the nested
+                # service_error envelope — internal.py's worked example, the ONE
+                # winning 429 raise-site shape. `wait_s` stays derived from the
+                # same interval the guard checks (never RETRY_AFTER_SECONDS,
+                # never a fresh literal — PYAPIFIX2-04 preserved). NOW clamped
+                # to >= 1: the contract's _validate requires a positive
+                # Retry-After, and the body interpolates the SAME clamped value
+                # so header and copy still agree (the old unclamped
+                # "Retry-After: 0" arm is traded away for the one-shape
+                # contract).
+                wait_s = max(1, int(FORCE_RECOMPUTE_MIN_INTERVAL_S - (_now - _last)))
+                raise service_error(
+                    429,
+                    "RATE_LIMITED",
+                    retryable=True,
+                    retry_after=wait_s,
                     detail=(
                         f"force recompute for {allocator_id} throttled: "
                         f"retry after {wait_s}s (min interval {FORCE_RECOMPUTE_MIN_INTERVAL_S}s)"
                     ),
-                    # PYAPIFIX2-04. `wait_s` — the SAME number the copy above
-                    # promises, and derived from the same interval the guard
-                    # checks. Never RETRY_AFTER_SECONDS (services/error_contract
-                    # is explicit that a 429's wait is a limiter WINDOW, not a
-                    # property of a dependency) and never a fresh literal.
-                    # NOT clamped with max(1, ...): int() truncation near expiry
-                    # yields 0, and "Retry-After: 0" means "retry now" — RFC
-                    # 9110 §10.2.3 — which is exactly what the body says. A
-                    # clamp would make header and body disagree.
-                    headers={"Retry-After": str(wait_s)},
                 )
             # Stamp optimistically inside the lock so concurrent requests that
             # arrive while scoring is in-flight also see the window. On scoring

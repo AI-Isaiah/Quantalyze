@@ -1727,7 +1727,10 @@ class TestS1_PerUserRateLimitIntegration:
         # decorator, which is reset fresh by the fixture).
         r_alice = _post(client, user_id="alice")
         assert r_alice.status_code == 429, r_alice.text
-        assert "rate limit" in r_alice.json()["detail"].lower()
+        # TS-23 (146-02): the site answers the nested service_error envelope.
+        envelope = r_alice.json()["detail"]
+        assert envelope["code"] == "RATE_LIMITED"
+        assert "rate limit" in envelope["detail"].lower()
 
         # Bob shares the SAME TestClient remote IP but has his own quota →
         # 200. Pre-fix (per-IP keying) bob would also be 429'd. This is the

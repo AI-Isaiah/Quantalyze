@@ -619,6 +619,12 @@ class TestClassClosure:
         app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
         app.include_router(match_mod.router)
 
+        # Unique per-run credential → a PRIVATE limiter bucket. Without it
+        # this drive exhausts the shared unverified-credential bucket and a
+        # sibling file's match POSTs (test_match_router.py drives ~23 of them)
+        # inherit a spent budget for the next 60 seconds.
+        probe_credential = f"rate03-probe-{uuid.uuid4()}"
+
         throttled = None
         with TestClient(app) as client:
             # BOUNDED-AND-DRIVEN, same rationale as _drive_until_throttled:
@@ -627,6 +633,7 @@ class TestClassClosure:
                 resp = client.post(
                     "/api/match/recompute",
                     json={"allocator_id": str(uuid.uuid4())},
+                    headers={"X-Service-Key": probe_credential},
                 )
                 if resp.status_code == 429:
                     throttled = resp
