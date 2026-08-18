@@ -3,7 +3,10 @@ import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 
 // JOB-04 / Phase 143 — migration-content gate for the dropped-enqueue
-// reconciliation sweep (supabase/migrations/20260816140000_...).
+// reconciliation sweep. Originally pointed at
+// supabase/migrations/20260816140000_...; RE-POINTED 2026-08-18 (B4, Phase
+// 146.1) at supabase/migrations/20260819130500_..., which re-registers the same
+// cron jobname at the same cadence with ONE conjunct changed.
 //
 // THE HOLE THIS GUARDS. POST /api/strategies/csv-finalize runs the finalize
 // write SYNCHRONOUSLY in the request and commits it (since Phase 145 as ONE
@@ -57,8 +60,20 @@ import { describe, it, expect } from "vitest";
 
 const REPO_ROOT = join(__dirname, "..", "..");
 const MIGRATIONS_DIR = join(REPO_ROOT, "supabase", "migrations");
-const FIX_TS = "20260816140000";
-const FIX_FILENAME = `${FIX_TS}_reconcile_dropped_enqueue_sweep.sql`;
+// ⚠️ P-7 POINTER, MOVED 2026-08-18 (B4, Phase 146.1) FROM 20260816140000.
+// These constants are a HAND-MAINTAINED pointer at whichever migration REGISTERS
+// the currently-running cron body. Migration 20260819130500 re-registers the
+// same jobname at the same cadence with one conjunct changed (the
+// terminalizer-marker exemption), so the body 20260816140000 registered is no
+// longer what pg_cron runs. Leaving the pointer behind would make every
+// assertion in this file guard a SUPERSEDED body while staying green —
+// structurally the same defect D-19 fixed one layer down. The forward-drift
+// sweep at the bottom of this file is the backstop that makes such a violation
+// visible, and it fired on exactly this change. The sibling pointer
+// analytics-service/tests/test_main_worker.py::_SWEEP_MIGRATION_NAME moves in
+// the SAME commit.
+const FIX_TS = "20260819130500";
+const FIX_FILENAME = `${FIX_TS}_reconcile_sweep_readmit_terminalized_orphans.sql`;
 const FIX_PATH = join(MIGRATIONS_DIR, FIX_FILENAME);
 
 // ORACLE INDEPENDENCE. Every literal below is declared LOCALLY and names its
@@ -181,15 +196,22 @@ describe("JOB-04 dropped-enqueue reconciliation sweep migration content gate", (
     // migration's STEP 2 self-verify and
     // supabase/tests/test_reconcile_dropped_enqueue_sweep.sql Part 1) move in
     // the SAME commit.
+    // ⚠️ B4 (Phase 146.1) did NOT move this count. The terminalizer-marker
+    // exemption adds a PREDICATE inside the existing NOT EXISTS subquery, not a
+    // second table reference — so the conjunct still names the table once and
+    // the INSERT target still names it once. COUNTED in the drafted body, not
+    // assumed. If a future edit does move it, this count and its two SQL
+    // siblings move in the SAME commit.
     const jobRefs = [...body.matchAll(/public\.compute_jobs/gi)].length;
     expect(
       jobRefs,
       `the body names public.compute_jobs ${jobRefs} time(s), expected 2 (the ` +
-        `zero-jobs NOT EXISTS conjunct + the INSERT target). One means the ` +
-        `zero-jobs conjunct is GONE and the INSERT target alone is satisfying ` +
-        `this gate — the sweep would re-enqueue every strategy holding a ` +
-        `healthy in-flight chain, a running derive_broker_dailies mid-chain ` +
-        `most of all. Zero means the sweep no longer writes at all.`,
+        `zero-jobs NOT EXISTS conjunct — which since B4 carries the ` +
+        `terminalizer-marker exemption inside it — plus the INSERT target). ` +
+        `One means the zero-jobs conjunct is GONE and the INSERT target alone ` +
+        `is satisfying this gate — the sweep would re-enqueue every strategy ` +
+        `holding a healthy in-flight chain, a running derive_broker_dailies ` +
+        `mid-chain most of all. Zero means the sweep no longer writes at all.`,
     ).toBe(2);
     expect(
       body,
@@ -237,6 +259,64 @@ describe("JOB-04 dropped-enqueue reconciliation sweep migration content gate", (
         `'computing' races Phase 142's reaper on the same row; ADDING 'pending' ` +
         `excises the dropped-enqueue population itself.`,
     ).toEqual([...EXCLUDED_STATUSES].sort());
+  });
+
+  it("the body readmits terminalizer-produced orphans, and ONLY those", () => {
+    // B4 / Phase 146.1. The third sibling of the two SQL text gates (this
+    // migration's STEP 2 and the .sql gate's Part 1). Body-scoped, and the
+    // marker count runs over a COMMENT-STRIPPED body so the neuter "delete the
+    // clause, keep its comment" REDs here instead of false-PASSing — the same
+    // failure class as the Sentry tag that satisfied a marker literal (143-03).
+    const body = cronBody(readFileSync(FIX_PATH, "utf8"));
+    const code = body.replace(/--[^\n]*/g, "");
+
+    const markerRefs = [...code.matchAll(/orphaned_running_reaped/gi)].length;
+    expect(
+      markerRefs,
+      `the body carries Phase 144's terminalizer audit marker ${markerRefs} ` +
+        `time(s) in EXECUTABLE code, expected exactly 1. Zero means the ` +
+        `exemption is gone and a chain-mid orphan the terminalizer reaped for ` +
+        `its AUDIT TRAIL once again excludes its own strategy from this sweep ` +
+        `forever — dailies present, no analytics, recovered by nobody and with ` +
+        `no user surface once the wizard's 15-minute amber backstop has passed.`,
+    ).toBe(1);
+
+    expect(
+      code,
+      "the exemption is not scoped to failed_final. Keyed on the marker alone " +
+        "it would readmit a row in ANY status carrying that text — including a " +
+        "RUNNING one, which is the healthy in-flight chain the zero-jobs " +
+        "conjunct exists to protect.",
+    ).toContain("failed_final");
+
+    // ⚠️ NULL-SAFETY, and it is load-bearing. last_error is NULLABLE and
+    // `NULL LIKE 'x%'` is NULL, not FALSE — so without the wrapper the
+    // exemption evaluates to NULL for a failed_final row with no error text,
+    // that row drops out of the NOT EXISTS subquery, and a GENUINE permanent
+    // failure is HEALED into an hourly retry loop with no attempt ceiling.
+    // MEASURED 2026-08-18 on a throwaway postgres:16 over a miniature of this
+    // conjunct. Behavioural counterpart: .sql gate Part 2 arm C2b.
+    expect(
+      code,
+      "the terminalizer-marker exemption lost its IS TRUE wrapper. NULL " +
+        "last_error then makes the whole conjunct NULL, the row drops out of " +
+        "the subquery, and a settled permanent failure carrying no error text " +
+        "is re-enqueued hourly with no attempt ceiling — the arm-C2 failure " +
+        "mode arriving through the three-valued-logic back door.",
+    ).toMatch(/IS\s+TRUE/i);
+
+    // ⛔ The BLANKET "no NON-TERMINAL row" widening, in either spelling. It
+    // reddens shipped arms C2 and C3 of the .sql gate, whose messages name the
+    // cost: re-enqueueing a settled permanent failure is an unbounded hourly
+    // retry loop, and the partial unique index does not cover failed_final or
+    // done, so nothing downstream stops it.
+    expect(
+      code,
+      "the zero-jobs conjunct was widened to a blanket status LIST. That is " +
+        "the fix this phase explicitly REFUSED: it readmits every settled " +
+        "permanent failure and every completed job, reddening .sql gate arms " +
+        "C2 and C3. Use the narrow terminalizer-marker predicate instead.",
+    ).not.toMatch(/cj\.status\s+(NOT\s+)?IN\s*\(/i);
   });
 
   it("the body carries the 1-hour grace window and its deterministic ordering anchor", () => {
