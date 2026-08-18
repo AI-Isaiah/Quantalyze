@@ -287,15 +287,24 @@ constraint-mismatched echoes, failure copy never claims rollback it cannot obser
 Python rate-limit surface has a route-enumeration gate a new route cannot silently bypass,
 and the terminalizer's failed_final rows no longer exclude their strategies from the
 reconciliation sweep — plus the v1.19-topical TODOS deferrals absorbed into one pass.
-**Requirements**: roster in `146.1-CONTEXT.md` (A1–A4 user-facing/data-integrity,
-B1–B5 structural, C1–C4 adjudication/hygiene). Four easy findings already fixed same-day
-on `fix/v1.19-review-easy`.
+**Requirements**: A1-A4, B1-B5, C1-C4 — full roster with file anchors in `146.1-CONTEXT.md`. Four easy findings already fixed and merged as v0.66.0.1 (76adf961).
 **Depends on:** Phase 146
-**Plans:** 0 plans
+**Plans:** 8 plans across 6 waves. ⛔ Sequencing is MEASURED, not stylistic: five roster items
+(B3/A2/A4/A3/C2) all edit `csv-finalize/route.ts` and run SERIAL in one agent; A1+B5+the new
+fold-gate arms all edit `test_csv_finalize_atomic_fold.sql` and share ONE plan. Only the three
+CONTEXT-named lanes are parallel (wave 1). ⚠️ Both migrations AUTO-APPLY to PROD on merge —
+`146.1-08` is a blocking pre-merge gate and cannot be delegated to a worktree agent.
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 146.1 to break down)
+- [ ] 146.1-01-PLAN.md — wave 1 · A1 fold input guards (NULL / empty-non-trades / NaN·Inf·magnitude / absurd-date / duplicate-date) as a `CREATE OR REPLACE` forward migration `20260819130000`, its self-verify, the regenerated snapshot, the new fold-gate Parts, B5's re-homed 22023 guards, C4's Part 3d and the `service_role` REVOKE
+- [ ] 146.1-02-PLAN.md — wave 1 · B1 Python route-enumeration gate over `main.app.routes` with an empty-by-equality quarantine roster — RATE-03's "a new route cannot silently bypass" made true on the Python side, zero runtime change
+- [ ] 146.1-03-PLAN.md — wave 1 · B4 sweep readmits terminalizer-produced orphans via the NARROW marker predicate (migration `20260819130500`) + new must-heal arm C4; ⛔ the roster's blanket widening is refused — it reddens shipped arms C2/C3. Plus C3 documented
+- [ ] 146.1-04-PLAN.md — wave 2 · route cluster part 1 (serial): B3 constraint-name discrimination → A2 terminal-status refusal → C1 honest echo copy, plus C4's two resolve-arm fail-closed pins
+- [ ] 146.1-05-PLAN.md — wave 3 · route cluster part 2 (serial): A4 required `fresh` discriminator gating the metadata UPDATE → A3 commit-agnostic copy on the transport / lost-id classes → C2 handler collapse with its source-shape gates rewritten, not deleted
+- [ ] 146.1-06-PLAN.md — wave 4 · B2 founder call: STOP forwarding `X-User-Access-Token` from both routes, add a zero-emitter equality gate, and AMEND the Phase 140.2 obligation repo-wide in the SAME commit
+- [ ] 146.1-07-PLAN.md — wave 5 · C4 remainder: types regen + cast-through-unknown deletion + the audit-law consequence (coupled, one commit); RT-3 burned-signature persistence in the signed envelope; Python tombstone message-only (no new code — WIZFORM-02 is OPEN); the stale-comment batch
+- [ ] 146.1-08-PLAN.md — wave 6 · ORCHESTRATOR-ONLY pre/post-merge migration gate: PROD+TEST census, TEST rehearsal of both migrations, both SQL gate files EXECUTED on TEST, 14 named neuters observed RED and restored, blocking merge checkpoint, then post-merge PROD verification including one real `cron.job_run_details` tick
 
 ### Phase 147: SCEN-01 — The scenario engine receives the real series
 
