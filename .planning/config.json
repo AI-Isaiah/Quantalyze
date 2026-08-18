@@ -48,12 +48,12 @@
   "claude_md_path": "./CLAUDE.md",
   "model_overrides": {
     "gsd-planner": "fable",
-    "gsd-roadmapper": "opus",
+    "gsd-roadmapper": "fable",
     "gsd-ui-researcher": "fable",
     "gsd-advisor-researcher": "opus",
     "gsd-assumptions-analyzer": "opus",
     "gsd-plan-checker": "fable",
-    "gsd-verifier": "opus",
+    "gsd-verifier": "fable",
     "gsd-research-synthesizer": "opus",
     "gsd-codebase-mapper": "opus",
     "gsd-project-researcher": "opus",
@@ -61,11 +61,11 @@
     "gsd-integration-checker": "opus",
     "gsd-nyquist-auditor": "opus",
     "gsd-pattern-mapper": "opus",
-    "gsd-ui-checker": "opus",
-    "gsd-ui-auditor": "opus",
+    "gsd-ui-checker": "fable",
+    "gsd-ui-auditor": "fable",
     "gsd-doc-verifier": "opus",
     "gsd-doc-classifier": "opus",
-    "gsd-phase-researcher": "opus",
+    "gsd-phase-researcher": "fable",
     "gsd-executor": "opus"
   }
 }
